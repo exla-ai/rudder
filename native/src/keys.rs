@@ -51,12 +51,12 @@ pub(crate) fn terminal_bytes_for_key(key: KeyEvent) -> Option<Vec<u8>> {
             }
         }
         KeyCode::Esc => vec![0x1b],
-        KeyCode::Left if key.modifiers.contains(KeyModifiers::ALT) => b"\x1bb".to_vec(),
-        KeyCode::Right if key.modifiers.contains(KeyModifiers::ALT) => b"\x1bf".to_vec(),
-        KeyCode::Left if key.modifiers.contains(KeyModifiers::CONTROL) => b"\x1b[1;5D".to_vec(),
-        KeyCode::Right if key.modifiers.contains(KeyModifiers::CONTROL) => b"\x1b[1;5C".to_vec(),
-        KeyCode::Left => b"\x1b[D".to_vec(),
-        KeyCode::Right => b"\x1b[C".to_vec(),
+        // Bare Alt+arrow is readline word motion; every other modifier mix goes
+        // out xterm-style so Shift survives (Codex answers questions on Shift+Left).
+        KeyCode::Left if key.modifiers == KeyModifiers::ALT => b"\x1bb".to_vec(),
+        KeyCode::Right if key.modifiers == KeyModifiers::ALT => b"\x1bf".to_vec(),
+        KeyCode::Left => modified_arrow("D", key.modifiers),
+        KeyCode::Right => modified_arrow("C", key.modifiers),
         KeyCode::Up => modified_arrow("A", key.modifiers),
         KeyCode::Down => modified_arrow("B", key.modifiers),
         // Ctrl+Home/Ctrl+End are how Claude Code's fullscreen renderer jumps to the
@@ -152,15 +152,20 @@ pub(crate) fn control_char_bytes(ch: char) -> Option<Vec<u8>> {
 }
 
 pub(crate) fn modified_arrow(final_byte: &str, modifiers: KeyModifiers) -> Vec<u8> {
-    let modifier_code = if modifiers.contains(KeyModifiers::CONTROL) {
-        Some(5)
-    } else if modifiers.contains(KeyModifiers::ALT) {
-        Some(3)
+    // xterm: parameter = 1 + Shift(1) + Alt(2) + Ctrl(4); omitted when no modifier.
+    let mut code = 1;
+    if modifiers.contains(KeyModifiers::SHIFT) {
+        code += 1;
+    }
+    if modifiers.intersects(KeyModifiers::ALT | KeyModifiers::META) {
+        code += 2;
+    }
+    if modifiers.contains(KeyModifiers::CONTROL) {
+        code += 4;
+    }
+    if code == 1 {
+        format!("\x1b[{final_byte}").into_bytes()
     } else {
-        None
-    };
-    match modifier_code {
-        Some(code) => format!("\x1b[1;{code}{final_byte}").into_bytes(),
-        None => format!("\x1b[{final_byte}").into_bytes(),
+        format!("\x1b[1;{code}{final_byte}").into_bytes()
     }
 }

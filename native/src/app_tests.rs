@@ -25559,3 +25559,22 @@ fn clicking_a_link_in_the_worker_pane_opens_it_and_dragging_does_not() {
     let opened = crate::selection::OPENED_URLS.with(|opened| opened.borrow().clone());
     assert_eq!(opened.len(), 1, "opened {opened:?}");
 }
+
+#[test]
+fn shifted_arrows_reach_the_worker_with_their_modifier() {
+    let key = |code, modifiers| terminal_bytes_for_key(KeyEvent::new(code, modifiers)).unwrap();
+    // Codex: "shift+← to answer" a queued question.
+    assert_eq!(key(KeyCode::Left, KeyModifiers::SHIFT), b"\x1b[1;2D");
+    assert_eq!(key(KeyCode::Right, KeyModifiers::SHIFT), b"\x1b[1;2C");
+    assert_eq!(key(KeyCode::Up, KeyModifiers::SHIFT), b"\x1b[1;2A");
+    assert_eq!(key(KeyCode::Down, KeyModifiers::SHIFT), b"\x1b[1;2B");
+    // Unchanged encodings.
+    assert_eq!(key(KeyCode::Left, KeyModifiers::NONE), b"\x1b[D");
+    assert_eq!(key(KeyCode::Left, KeyModifiers::ALT), b"\x1bb");
+    assert_eq!(key(KeyCode::Right, KeyModifiers::ALT), b"\x1bf");
+    assert_eq!(key(KeyCode::Left, KeyModifiers::CONTROL), b"\x1b[1;5D");
+    assert_eq!(key(KeyCode::Up, KeyModifiers::ALT), b"\x1b[1;3A");
+    // Combinations keep every modifier.
+    assert_eq!(key(KeyCode::Left, KeyModifiers::SHIFT | KeyModifiers::CONTROL), b"\x1b[1;6D");
+    assert_eq!(key(KeyCode::Right, KeyModifiers::SHIFT | KeyModifiers::ALT), b"\x1b[1;4C");
+}

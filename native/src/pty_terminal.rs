@@ -148,6 +148,11 @@ pub struct TerminalPane {
     tracked_scroll_region: Option<(u16, u16)>,
     ansi_state: AnsiTrackState,
     notification_scanner: OscNotificationScanner,
+    /// The OSC 8 link currently open: its uri and where the cursor stood.
+    open_hyperlink: Option<(String, (u16, u16))>,
+    /// Text the agent wrapped in OSC 8 links, newest last. `vt100` drops the
+    /// escapes, so this is the only record of where a link points.
+    hyperlinks: std::collections::VecDeque<TerminalHyperlink>,
     styled_lines_cache: Option<Vec<Vec<StyledTerminalCell>>>,
     output_log: String,
     output_log_limit: usize,
@@ -231,10 +236,47 @@ enum OscScanState {
 pub struct OscNotificationScanner {
     state: OscScanState,
     pending: Vec<TerminalNotification>,
+    /// The OSC 8 hyperlink edge completed by the most recent byte, handed back
+    /// by `scan` so the pane can read the cursor at exactly that point.
+    hyperlink: Option<OscHyperlink>,
 }
 
+/// One edge of an OSC 8 hyperlink (`ESC ] 8 ; params ; uri ST`): a non-empty
+/// uri opens a link, an empty one closes it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OscHyperlink {
+    Open(String),
+    Close,
+}
+
+/// Parse one OSC payload as a hyperlink edge. `None` for every other OSC.
+pub fn parse_osc_hyperlink(payload: &str) -> Option<OscHyperlink> {
+    let rest = payload.strip_prefix("8;")?;
+    let (_params, uri) = rest.split_once(';')?;
+    let uri = uri.trim();
+    if uri.is_empty() {
+        Some(OscHyperlink::Close)
+    } else {
+        Some(OscHyperlink::Open(uri.to_string()))
+    }
+}
+
+/// A run of on-screen text an agent marked as a hyperlink. Held as text rather
+/// than cell coordinates because the cells move (scrolling, scrollback, Ink
+/// repaints) while the text the user clicks on does not.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TerminalHyperlink {
+    pub text: String,
+    pub url: String,
+}
+
+/// Recent hyperlinks kept per pane. Older ones fall off first; a link that has
+/// scrolled this far away is no longer on screen to be clicked.
+const MAX_TERMINAL_HYPERLINKS: usize = 512;
+
 impl OscNotificationScanner {
-    pub fn scan(&mut self, byte: u8) {
+    /// Advance one byte. Returns the hyperlink edge this byte completed, if any.
+    pub fn scan(&mut self, byte: u8) -> Option<OscHyperlink> {
         self.state = match std::mem::take(&mut self.state) {
             OscScanState::Ground if byte == 0x1b => OscScanState::Escape,
             OscScanState::Ground => OscScanState::Ground,
@@ -259,10 +301,15 @@ impl OscNotificationScanner {
             OscScanState::OscEscape(_) if byte == 0x1b => OscScanState::Escape,
             OscScanState::OscEscape(_) => OscScanState::Ground,
         };
+        self.hyperlink.take()
     }
 
     fn complete(&mut self, bytes: Vec<u8>) {
         let payload = String::from_utf8_lossy(&bytes);
+        if let Some(edge) = parse_osc_hyperlink(&payload) {
+            self.hyperlink = Some(edge);
+            return;
+        }
         if let Some(note) = parse_osc_notification(&payload) {
             if self.pending.len() >= MAX_PENDING_NOTIFICATIONS {
                 self.pending.remove(0);
@@ -274,6 +321,77 @@ impl OscNotificationScanner {
     pub fn take(&mut self) -> Vec<TerminalNotification> {
         std::mem::take(&mut self.pending)
     }
+}
+
+/// The url under char column `col` of `line`. Agent-marked links win (newest
+/// first, since the same text can point somewhere new later); otherwise a bare
+/// `http(s)://` or `file://` url in the text itself, which is how Codex and
+/// most CLI output print links.
+pub fn hyperlink_at<'a>(
+    line: &str,
+    col: usize,
+    links: impl Iterator<Item = &'a TerminalHyperlink>,
+) -> Option<String> {
+    let chars: Vec<char> = line.chars().collect();
+    if col >= chars.len() {
+        return None;
+    }
+    for link in links {
+        let needle: Vec<char> = link.text.chars().collect();
+        if needle.is_empty() || needle.len() > chars.len() {
+            continue;
+        }
+        let first = col.saturating_sub(needle.len() - 1);
+        let last = col.min(chars.len() - needle.len());
+        if (first..=last).any(|start| chars[start..start + needle.len()] == needle[..]) {
+            return Some(link.url.clone());
+        }
+    }
+    bare_url_at(&chars, col)
+}
+
+fn bare_url_at(chars: &[char], col: usize) -> Option<String> {
+    let is_break = |c: char| c.is_whitespace() || matches!(c, '<' | '>' | '"' | '`' | '│' | '|');
+    if is_break(chars[col]) {
+        return None;
+    }
+    let mut start = col;
+    while start > 0 && !is_break(chars[start - 1]) {
+        start -= 1;
+    }
+    let mut end = col + 1;
+    while end < chars.len() && !is_break(chars[end]) {
+        end += 1;
+    }
+    let token: String = chars[start..end].iter().collect();
+    // The url may sit inside punctuation: "(see https://x.y/z)." or "[1]:https://…".
+    let offset = ["https://", "http://", "file://"]
+        .iter()
+        .filter_map(|scheme| token.find(scheme))
+        .min()?;
+    let url_start = start + token[..offset].chars().count();
+    if col < url_start {
+        return None;
+    }
+    let mut url = token[offset..].to_string();
+    // Trailing sentence punctuation is not part of the url; a closing paren is,
+    // only when the url opened one (wikipedia-style links).
+    loop {
+        let Some(last) = url.chars().last() else { break };
+        let unbalanced_paren = last == ')' && url.matches('(').count() < url.matches(')').count();
+        if matches!(last, '.' | ',' | ';' | ':' | '!' | '?' | '\'' | ']' | '}') || unbalanced_paren {
+            url.pop();
+        } else {
+            break;
+        }
+    }
+    if url.ends_with("://") {
+        return None;
+    }
+    if col >= url_start + url.chars().count() {
+        return None;
+    }
+    Some(url)
 }
 
 /// The number of bytes a single cell's grapheme cluster can occupy.
@@ -521,6 +639,8 @@ impl TerminalPane {
             tracked_scroll_region: None,
             ansi_state: AnsiTrackState::Ground,
             notification_scanner: OscNotificationScanner::default(),
+            open_hyperlink: None,
+            hyperlinks: std::collections::VecDeque::new(),
             styled_lines_cache: None,
             output_log: String::new(),
             output_log_limit: 200_000,
@@ -948,9 +1068,74 @@ impl TerminalPane {
             self.capture_top_origin_scroll_region_line_before(*byte);
             self.parser.process(&[*byte]);
             self.track_ansi_byte(*byte);
-            self.notification_scanner.scan(*byte);
+            if let Some(edge) = self.notification_scanner.scan(*byte) {
+                self.on_hyperlink_edge(edge);
+            }
         }
         self.capture_alternate_snapshot();
+    }
+
+    /// An OSC 8 edge has just been parsed, so the cursor sits exactly where the
+    /// linked text starts (open) or ends (close).
+    fn on_hyperlink_edge(&mut self, edge: OscHyperlink) {
+        let cursor = self.parser.screen().cursor_position();
+        // An open while another is open implicitly closes the first.
+        if let Some((url, start)) = self.open_hyperlink.take() {
+            self.record_hyperlink(url, start, cursor);
+        }
+        if let OscHyperlink::Open(url) = edge {
+            self.open_hyperlink = Some((url, cursor));
+        }
+    }
+
+    fn record_hyperlink(&mut self, url: String, start: (u16, u16), end: (u16, u16)) {
+        if end < start {
+            return;
+        }
+        // The cursor is in live-grid coordinates; read the live grid even if the
+        // user is scrolled back right now.
+        let scrolled = self.parser.screen().scrollback();
+        if scrolled != 0 {
+            self.parser.screen_mut().set_scrollback(0);
+        }
+        let screen = self.parser.screen();
+        let (_, cols) = screen.size();
+        let mut texts = Vec::new();
+        // One entry per screen row: a link that wrapped is clicked one row at a time.
+        for row in start.0..=end.0 {
+            let from = if row == start.0 { start.1 } else { 0 };
+            let to = if row == end.0 { end.1 } else { cols };
+            if to <= from {
+                continue;
+            }
+            let text = screen
+                .contents_between(row, from, row, to)
+                .trim()
+                .to_string();
+            if !text.is_empty() {
+                texts.push(text);
+            }
+        }
+        if scrolled != 0 {
+            self.parser.screen_mut().set_scrollback(scrolled);
+        }
+        for text in texts {
+            let link = TerminalHyperlink {
+                text,
+                url: url.clone(),
+            };
+            self.hyperlinks.retain(|existing| existing != &link);
+            if self.hyperlinks.len() >= MAX_TERMINAL_HYPERLINKS {
+                self.hyperlinks.pop_front();
+            }
+            self.hyperlinks.push_back(link);
+        }
+    }
+
+    /// The url under column `col` (a char index) of `line`, a row of this pane
+    /// as shown: an OSC 8 link the agent emitted, else a bare url in the text.
+    pub fn hyperlink_at(&self, line: &str, col: usize) -> Option<String> {
+        hyperlink_at(line, col, self.hyperlinks.iter().rev())
     }
 
     /// Drain desktop-notification OSCs (777/9) the worker emitted since the
@@ -1197,6 +1382,10 @@ fn command_builder(command: Option<TerminalCommand>, term: &str) -> Result<Comma
 
             let mut builder = CommandBuilder::new(command.program);
             builder.args(command.args);
+            // The pane reads OSC 8 links itself (click to open), so tell
+            // `supports-hyperlinks` callers like Claude Code to emit them
+            // whatever the outer terminal is. A command can still override it.
+            builder.env("FORCE_HYPERLINK", "1");
             for (key, value) in command.env {
                 if is_term_env_key(&key) {
                     continue;
@@ -1420,6 +1609,98 @@ mod tests {
         let output = pane.visible_lines_snapshot().join("\n");
         assert!(output.contains("history001"), "output was {output:?}");
         assert!(output.contains("history005"), "output was {output:?}");
+    }
+
+    #[test]
+    fn osc_hyperlink_parsing_reads_open_and_close() {
+        assert_eq!(
+            parse_osc_hyperlink("8;;https://example.com/a"),
+            Some(OscHyperlink::Open("https://example.com/a".to_string()))
+        );
+        assert_eq!(
+            parse_osc_hyperlink("8;id=7;file:///tmp/x.rs"),
+            Some(OscHyperlink::Open("file:///tmp/x.rs".to_string()))
+        );
+        assert_eq!(parse_osc_hyperlink("8;;"), Some(OscHyperlink::Close));
+        assert_eq!(parse_osc_hyperlink("0;title"), None);
+        assert_eq!(parse_osc_hyperlink("9;done"), None);
+    }
+
+    #[test]
+    fn hyperlink_at_prefers_agent_links_then_bare_urls() {
+        let links = [TerminalHyperlink {
+            text: "src/main.rs".to_string(),
+            url: "file:///repo/src/main.rs".to_string(),
+        }];
+        let line = "  Edited src/main.rs, see https://github.com/o/r/pull/12.";
+        let col = line.find("main.rs").unwrap();
+        assert_eq!(
+            hyperlink_at(line, col, links.iter()).as_deref(),
+            Some("file:///repo/src/main.rs")
+        );
+        let col = line.find("pull").unwrap();
+        assert_eq!(
+            hyperlink_at(line, col, links.iter()).as_deref(),
+            Some("https://github.com/o/r/pull/12"),
+            "trailing period is not part of the url"
+        );
+        assert_eq!(hyperlink_at(line, line.find("see").unwrap(), links.iter()), None);
+        assert_eq!(hyperlink_at(line, 0, links.iter()), None);
+        assert_eq!(hyperlink_at(line, 500, links.iter()), None);
+    }
+
+    #[test]
+    fn bare_urls_inside_punctuation_and_parens() {
+        let none = std::iter::empty();
+        let line = "(docs: https://en.wikipedia.org/wiki/Rust_(language))";
+        assert_eq!(
+            hyperlink_at(line, line.find("wiki/").unwrap(), none).as_deref(),
+            Some("https://en.wikipedia.org/wiki/Rust_(language)")
+        );
+        let line = "[link](https://x.dev/a)";
+        assert_eq!(
+            hyperlink_at(line, line.find("x.dev").unwrap(), std::iter::empty()).as_deref(),
+            Some("https://x.dev/a")
+        );
+        // Clicking the "[link](" part of the token is not the url.
+        assert_eq!(hyperlink_at(line, 1, std::iter::empty()), None);
+        assert_eq!(hyperlink_at("https:// nothing", 2, std::iter::empty()), None);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn osc8_links_are_captured_with_their_on_screen_text() {
+        let command = TerminalCommand::with_args(
+            "/bin/sh",
+            [
+                "-lc",
+                "printf 'see \\033]8;;https://example.com/pr/1\\033\\\\PR #1\\033]8;;\\033\\\\ now\\r\\n'; sleep 1",
+            ],
+        );
+        let mut pane = TerminalPane::spawn_shell_or_command(
+            Some(command),
+            TerminalPaneOptions {
+                size: TerminalSize { rows: 5, cols: 40 },
+                scrollback_lines: 100,
+                ..Default::default()
+            },
+        )
+        .expect("spawn test pty");
+        for _ in 0..40 {
+            std::thread::sleep(std::time::Duration::from_millis(25));
+            pane.drain_output();
+            if pane.visible_lines_snapshot().join("\n").contains("now") {
+                break;
+            }
+        }
+        let lines = pane.visible_lines_snapshot();
+        let line = lines.iter().find(|l| l.contains("PR #1")).expect("link row");
+        let col = line.find("#1").unwrap();
+        assert_eq!(
+            pane.hyperlink_at(line, col).as_deref(),
+            Some("https://example.com/pr/1")
+        );
+        assert_eq!(pane.hyperlink_at(line, line.find("now").unwrap()), None);
     }
 
     #[cfg(not(windows))]

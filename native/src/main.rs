@@ -6458,6 +6458,14 @@ impl App {
                 self.worker_selection = Some(selection);
                 if selection_is_empty(normalize_selection(selection)) {
                     self.worker_selection = None;
+                    // A click, not a drag: open the link under it, if any.
+                    if let Some(url) = self.selected_worker_link_at(selection.start) {
+                        match open_url_externally(&url) {
+                            Ok(()) => self.notice = Some(format!("opened {url}")),
+                            Err(error) => self.notice = Some(format!("open failed: {error}")),
+                        }
+                        self.dirty = true;
+                    }
                     return true;
                 }
                 let text = self.selected_worker_selection_text(selection);
@@ -6609,6 +6617,12 @@ impl App {
             return String::new();
         };
         selected_text_from_lines(&terminal.visible_lines_snapshot(), selection)
+    }
+
+    fn selected_worker_link_at(&self, point: SelectionPoint) -> Option<String> {
+        let terminal = self.agents.get(self.selected_agent)?.terminal.as_ref()?;
+        let lines = terminal.visible_lines_snapshot();
+        terminal.hyperlink_at(lines.get(point.row)?, point.col)
     }
 
     fn write_mouse_to_selected_worker(&mut self, mouse: MouseEvent, area: Rect) -> bool {

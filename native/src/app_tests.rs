@@ -25500,3 +25500,62 @@ fn a_run_waits_for_its_workspace_name_before_creating_the_workspace() {
     );
 
 }
+
+#[cfg(not(windows))]
+#[test]
+fn clicking_a_link_in_the_worker_pane_opens_it_and_dragging_does_not() {
+    let command = TerminalCommand::with_args(
+        "/bin/sh",
+        [
+            "-lc",
+            "printf 'PR: https://github.com/o/r/pull/9\\r\\n'; sleep 2",
+        ],
+    );
+    let mut pane = TerminalPane::spawn_shell_or_command(
+        Some(command),
+        TerminalPaneOptions {
+            size: TerminalSize { rows: 5, cols: 50 },
+            scrollback_lines: 100,
+            ..Default::default()
+        },
+    )
+    .expect("spawn test pty");
+    for _ in 0..40 {
+        std::thread::sleep(Duration::from_millis(25));
+        pane.drain_output();
+        if pane.visible_lines_snapshot().join("\n").contains("pull/9") {
+            break;
+        }
+    }
+
+    let mut app = App::new();
+    app.focus = FocusPane::Worker;
+    app.worker_area = Some(Rect { x: 0, y: 0, width: 52, height: 7 });
+    app.agents.push(test_agent_run_with_terminal(&app, pane));
+    app.selected_agent = 0;
+    crate::selection::OPENED_URLS.with(|opened| opened.borrow_mut().clear());
+
+    let click = |app: &mut App, kind, column| {
+        app.handle_mouse(MouseEvent {
+            kind,
+            column,
+            row: 1,
+            modifiers: KeyModifiers::empty(),
+        });
+    };
+    // Inner area starts at (1,1); "PR: " is 4 chars, so column 12 is inside the url.
+    click(&mut app, MouseEventKind::Down(MouseButton::Left), 12);
+    click(&mut app, MouseEventKind::Up(MouseButton::Left), 12);
+    let opened = crate::selection::OPENED_URLS.with(|opened| opened.borrow().clone());
+    assert_eq!(opened, vec!["https://github.com/o/r/pull/9".to_string()]);
+
+    // A drag across the url is a selection, never an open.
+    click(&mut app, MouseEventKind::Down(MouseButton::Left), 6);
+    click(&mut app, MouseEventKind::Drag(MouseButton::Left), 20);
+    click(&mut app, MouseEventKind::Up(MouseButton::Left), 20);
+    // A click on plain text opens nothing.
+    click(&mut app, MouseEventKind::Down(MouseButton::Left), 2);
+    click(&mut app, MouseEventKind::Up(MouseButton::Left), 2);
+    let opened = crate::selection::OPENED_URLS.with(|opened| opened.borrow().clone());
+    assert_eq!(opened.len(), 1, "opened {opened:?}");
+}

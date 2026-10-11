@@ -431,6 +431,15 @@ accent-colored key hints; the merge modal carries the auto-commit caution
 itself (no parallel notice), the conflict modal caps its file list at 8 with an
 overflow line, and the delete confirm names the agent.
 
+**Clickable links.** `vt100` drops OSC 8, so `TerminalPane` lifts the edges out
+of the byte stream (the same scanner as OSC 777/9 notifications), reads the cursor at
+each edge, and records the linked TEXT with its url (`TerminalHyperlink`): cells move
+on scroll and Ink repaints, the text does not. A plain click (no drag) in a worker
+pane opens the agent-marked link under it, else a bare `http(s)://`/`file://` url in
+the row (`hyperlink_at`), via `open`/`xdg-open`; only http, https, file and mailto
+are ever handed to the OS. Child PTYs get `FORCE_HYPERLINK=1` so Claude Code emits
+links whatever the outer terminal is.
+
 ### Keybindings (the input model in `handle_key`)
 Order of handling matters; the early returns gate everything else.
 - **Ctrl+C / q**: quit, guarded by `confirm_or_quit` when agents are still

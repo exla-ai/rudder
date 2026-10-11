@@ -259,6 +259,43 @@ fn run_platform_clipboard_command(text: &str) -> Result<()> {
     }
 }
 
+/// Schemes a click may hand to the OS. Agent output is untrusted, so anything
+/// that could launch an arbitrary app handler stays inert.
+const OPENABLE_URL_SCHEMES: &[&str] = &["https://", "http://", "file://", "mailto:"];
+
+/// Open a url the user clicked in a worker pane with the OS default handler.
+#[cfg(not(test))]
+pub(crate) fn open_url_externally(url: &str) -> Result<()> {
+    if !OPENABLE_URL_SCHEMES.iter().any(|scheme| url.starts_with(scheme)) {
+        bail!("not an http, file or mailto link: {url}");
+    }
+    let program = if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
+    std::process::Command::new(program)
+        .arg(url)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .with_context(|| format!("failed to run {program}"))?;
+    Ok(())
+}
+
+#[cfg(test)]
+thread_local! {
+    pub(crate) static OPENED_URLS: std::cell::RefCell<Vec<String>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Tests record the url instead of launching a browser.
+#[cfg(test)]
+pub(crate) fn open_url_externally(url: &str) -> Result<()> {
+    if !OPENABLE_URL_SCHEMES.iter().any(|scheme| url.starts_with(scheme)) {
+        bail!("not an http, file or mailto link: {url}");
+    }
+    OPENED_URLS.with(|opened| opened.borrow_mut().push(url.to_string()));
+    Ok(())
+}
+
 /// Emit an OSC 52 clipboard sequence (`ESC ] 52 ; c ; <base64> BEL`) to the terminal.
 /// The terminal emulator copies the payload to the system clipboard. Non-printing, so
 /// it does not disturb the rendered frame; safe to write here since event handling and

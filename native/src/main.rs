@@ -3653,6 +3653,33 @@ impl App {
             return false;
         }
 
+        // In the diff panel ⌥b / ⌥n step to the previous / next file. They claim
+        // the key before ⌥b (Claude latest message) and ⌥n (worker half page),
+        // which act on the worker pane you are not looking at. Option+b without
+        // option-as-meta types ∫; Option+n is a dead key, so it has no fallback.
+        if self.focus == FocusPane::Diff && self.diff_panel.open {
+            let alt_like = key
+                .modifiers
+                .intersects(KeyModifiers::ALT | KeyModifiers::META);
+            let forward = match key.code {
+                KeyCode::Char('n') | KeyCode::Char('N') if alt_like => Some(true),
+                KeyCode::Char('b') | KeyCode::Char('B') if alt_like => Some(false),
+                KeyCode::Char('\u{222b}') => Some(false),
+                _ => None,
+            };
+            if let Some(forward) = forward {
+                let viewport = self
+                    .diff_area
+                    .map(|area| block_inner(area).height as usize)
+                    .unwrap_or(20)
+                    .max(1);
+                if self.diff_panel.jump_file(forward, viewport) {
+                    self.dirty = true;
+                }
+                return false;
+            }
+        }
+
         // Before nav mode: see `handle_claude_message_nav` for why.
         if self.handle_claude_message_nav(key) {
             return false;
@@ -4942,7 +4969,7 @@ impl App {
             self.mark_selected_reviewed();
             self.refresh_diff_panel();
             self.notice = Some(
-                "diff panel · j/k scroll · n/p next/prev file · r refresh · ⌥d or Esc closes · ⌥h solo"
+                "diff panel · j/k scroll · n/p or ⌥n/⌥b next/prev file · r refresh · ⌥d or Esc closes · ⌥h solo"
                     .to_string(),
             );
         }

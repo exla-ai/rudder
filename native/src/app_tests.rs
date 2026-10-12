@@ -25578,3 +25578,34 @@ fn shifted_arrows_reach_the_worker_with_their_modifier() {
     assert_eq!(key(KeyCode::Left, KeyModifiers::SHIFT | KeyModifiers::CONTROL), b"\x1b[1;6D");
     assert_eq!(key(KeyCode::Right, KeyModifiers::SHIFT | KeyModifiers::ALT), b"\x1b[1;4C");
 }
+
+#[test]
+fn alt_b_and_alt_n_step_files_in_the_focused_diff_panel() {
+    use crate::diffview::DiffSource;
+    let mut app = App::new();
+    let run = test_agent_run("diff-alt", "alt keys");
+    let starts_run = test_agent_run("diff-alt", "alt keys");
+    app.agents.push(run);
+    app.selected_agent = 0;
+    app.diff_panel.open = true;
+    app.focus = FocusPane::Diff;
+    app.diff_area = Some(Rect { x: 0, y: 0, width: 80, height: 8 });
+    app.diff_panel.track("diff-alt");
+    app.diff_panel
+        .apply("diff-alt", Ok((SAMPLE_DIFF.to_string(), DiffSource::Jj, false)));
+    let starts = app.diff_panel.lines(&starts_run, 80, true).1.to_vec();
+    assert!(starts.len() >= 2);
+
+    let alt = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::ALT);
+    app.handle_key(alt('n'));
+    assert_eq!(app.diff_panel.scroll, starts[0]);
+    app.handle_key(alt('n'));
+    assert_eq!(app.diff_panel.scroll, starts[1]);
+    app.handle_key(alt('b'));
+    assert_eq!(app.diff_panel.scroll, starts[0]);
+    // Option+b without option-as-meta arrives as ∫.
+    app.handle_key(alt('n'));
+    app.handle_key(KeyEvent::new(KeyCode::Char('\u{222b}'), KeyModifiers::NONE));
+    assert_eq!(app.diff_panel.scroll, starts[0]);
+    assert_eq!(app.focus, FocusPane::Diff, "the panel keeps focus");
+}

@@ -584,9 +584,11 @@ pub(crate) fn run_attach_client(args: &[String]) -> Result<()> {
 
     let done = Arc::new(AtomicBool::new(false));
     let bye_reason: Arc<std::sync::Mutex<Option<String>>> = Arc::new(std::sync::Mutex::new(None));
+    let screen = Arc::new(std::sync::Mutex::new(AttachScreen::default()));
     {
         let done = Arc::clone(&done);
         let bye_reason = Arc::clone(&bye_reason);
+        let screen = Arc::clone(&screen);
         std::thread::spawn(move || {
             let mut line = String::new();
             let mut out = io::stdout();
@@ -615,6 +617,9 @@ pub(crate) fn run_attach_client(args: &[String]) -> Result<()> {
                         buf.push_str("\x1b[?25l");
                         if full {
                             buf.push_str("\x1b[0m\x1b[2J");
+                        }
+                        if let Ok(mut screen) = screen.lock() {
+                            screen.apply(full, &lines);
                         }
                         for (row, text) in lines {
                             if row >= term_rows {
@@ -668,7 +673,7 @@ pub(crate) fn run_attach_client(args: &[String]) -> Result<()> {
         let _ = set_terminal_title(&mut stdout, &format!("\u{25c9} {label}"));
         let _ = stdout.flush();
     }
-    let result = attach_input_loop(&mut writer, &done);
+    let result = attach_input_loop(&mut writer, &done, &screen);
     {
         let mut stdout = io::stdout();
         let _ = stdout.write_all(b"\x1b[?7h\x1b[?25h\x1b[0m");
@@ -873,8 +878,13 @@ fn pick_agent(reader: &mut BufReader<UnixStream>, writer: &mut UnixStream) -> Re
         .ok_or_else(|| anyhow!("no agent numbered {choice}"))
 }
 
-fn attach_input_loop(writer: &mut UnixStream, done: &AtomicBool) -> Result<()> {
+fn attach_input_loop(
+    writer: &mut UnixStream,
+    done: &AtomicBool,
+    screen: &std::sync::Mutex<AttachScreen>,
+) -> Result<()> {
     let mut leader = false;
+    let mut selection: Option<WorkerSelection> = None;
     while !done.load(Ordering::Acquire) {
         if !crossterm::event::poll(Duration::from_millis(100))? {
             continue;
@@ -888,7 +898,15 @@ fn attach_input_loop(writer: &mut UnixStream, done: &AtomicBool) -> Result<()> {
             Event::Mouse(mouse) => match mouse.kind {
                 MouseEventKind::ScrollUp => Some(ClientMsg::Nav { op: NavOp::Up }),
                 MouseEventKind::ScrollDown => Some(ClientMsg::Nav { op: NavOp::Down }),
-                _ => None,
+                // Mouse capture (needed for the wheel) takes selection away from the
+                // terminal, so this client selects and copies itself, like the
+                // dashboard's worker pane does.
+                _ => {
+                    if let Ok(screen) = screen.lock() {
+                        attach_selection_mouse(mouse, &mut selection, &screen);
+                    }
+                    None
+                }
             },
             Event::Key(key) if key.kind != KeyEventKind::Release => {
                 if leader {
@@ -916,6 +934,147 @@ fn attach_input_loop(writer: &mut UnixStream, done: &AtomicBool) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// What the single-pane client last drew, row by row: the styled text (to
+/// repaint a row after a selection highlight) and its plain text (to copy).
+#[derive(Debug, Default)]
+pub(crate) struct AttachScreen {
+    rows: Vec<(String, String)>,
+}
+
+impl AttachScreen {
+    pub(crate) fn apply(&mut self, full: bool, lines: &[(u16, String)]) {
+        if full {
+            self.rows.clear();
+        }
+        for (row, text) in lines {
+            let row = *row as usize;
+            if self.rows.len() <= row {
+                self.rows.resize(row + 1, (String::new(), String::new()));
+            }
+            self.rows[row] = (text.clone(), strip_ansi_for_plan(text));
+        }
+    }
+
+    pub(crate) fn plain_lines(&self) -> Vec<String> {
+        self.rows.iter().map(|(_, plain)| plain.clone()).collect()
+    }
+
+    fn styled(&self, row: usize) -> &str {
+        self.rows.get(row).map(|(styled, _)| styled.as_str()).unwrap_or("")
+    }
+}
+
+fn attach_selection_mouse(
+    mouse: MouseEvent,
+    selection: &mut Option<WorkerSelection>,
+    screen: &AttachScreen,
+) {
+    let point = SelectionPoint {
+        row: mouse.row as usize,
+        col: mouse.column as usize,
+    };
+    let mut out = io::stdout();
+    match mouse.kind {
+        MouseEventKind::Down(MouseButton::Left) => {
+            if let Some(old) = selection.take() {
+                let _ = out.write_all(attach_selection_paint(screen, old, false).as_bytes());
+            }
+            *selection = Some(WorkerSelection {
+                start: point,
+                end: point,
+            });
+        }
+        MouseEventKind::Drag(MouseButton::Left) => {
+            let Some(current) = selection.as_mut() else {
+                return;
+            };
+            let before = *current;
+            current.end = point;
+            // Clear the old highlight, then draw the new one.
+            let mut buf = attach_selection_paint(screen, before, false);
+            buf.push_str(&attach_selection_paint(screen, *current, true));
+            let _ = out.write_all(buf.as_bytes());
+        }
+        MouseEventKind::Up(MouseButton::Left) => {
+            let Some(mut current) = selection.take() else {
+                return;
+            };
+            current.end = point;
+            let _ = out.write_all(attach_selection_paint(screen, current, false).as_bytes());
+            let lines = screen.plain_lines();
+            let notice = if selection_is_empty(normalize_selection(current)) {
+                // A click: open the link under it, if there is one.
+                lines
+                    .get(point.row)
+                    .and_then(|line| rudder_native::pty_terminal::hyperlink_at(line, point.col, std::iter::empty()))
+                    .map(|url| match open_url_externally(&url) {
+                        Ok(()) => format!("opened {url}"),
+                        Err(error) => format!("open failed: {error}"),
+                    })
+            } else {
+                let text = selected_text_from_lines(&lines, current);
+                if text.trim().is_empty() {
+                    None
+                } else {
+                    // This client runs in the terminal the user is looking at, so
+                    // OSC 52 from here reaches the right clipboard (over SSH too).
+                    Some(match copy_text_to_clipboard(&text) {
+                        Ok(()) => "copied selection".to_string(),
+                        Err(error) => format!("copy failed: {error}"),
+                    })
+                }
+            };
+            if let Some(notice) = notice {
+                let rows = crossterm::terminal::size().map(|(_, rows)| rows).unwrap_or(24);
+                let _ = write!(
+                    out,
+                    "\x1b7\x1b[{rows};1H\x1b[0;7m {notice} \x1b[0m\x1b[K\x1b8"
+                );
+            }
+        }
+        _ => return,
+    }
+    let _ = out.flush();
+}
+
+/// Bytes that draw `selection` highlighted (or restore those rows as they were
+/// drawn), leaving the cursor where the pane put it.
+pub(crate) fn attach_selection_paint(
+    screen: &AttachScreen,
+    selection: WorkerSelection,
+    highlight: bool,
+) -> String {
+    use std::fmt::Write as _;
+    let selection = normalize_selection(selection);
+    let lines = screen.plain_lines();
+    let mut buf = String::from("\x1b7");
+    for row in selection.start.row..=selection.end.row {
+        if !highlight {
+            let _ = write!(buf, "\x1b[{};1H{}\x1b[0m\x1b[K", row + 1, screen.styled(row));
+            continue;
+        }
+        let line = lines.get(row).map(String::as_str).unwrap_or("");
+        let len = line.chars().count();
+        let start = if row == selection.start.row { selection.start.col.min(len) } else { 0 };
+        let end = if row == selection.end.row {
+            selection.end.col.saturating_add(1).min(len)
+        } else {
+            len
+        };
+        if end > start {
+            let _ = write!(
+                buf,
+                "\x1b[{};{}H\x1b[0;7m{}\x1b[0m",
+                row + 1,
+                start + 1,
+                slice_chars(line, start, end)
+            );
+        }
+    }
+    buf.push_str("\x1b8");
+    buf
 }
 
 #[derive(Debug, PartialEq, Eq)]

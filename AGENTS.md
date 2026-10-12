@@ -483,6 +483,10 @@ keeping:
   the attached tab would wipe the history ⌥v walks every time the selection moved.
 - **Attached panes drain every tick** like the focused one (the 500ms unfocused
   throttle is bypassed for them).
+- **The single-pane client selects and copies itself.** It captures the mouse for
+  the wheel, which takes selection away from the terminal, so it mirrors the rows
+  it drew (`AttachScreen`), highlights a drag, copies on release (OSC 52 from the
+  client reaches the terminal the user is in) and opens a url on a click.
 - A client that falls behind is not waited for: `try_send` on a bounded queue,
   and a dropped frame just marks it `needs_full`.
 

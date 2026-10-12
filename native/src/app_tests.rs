@@ -25609,3 +25609,37 @@ fn alt_b_and_alt_n_step_files_in_the_focused_diff_panel() {
     assert_eq!(app.diff_panel.scroll, starts[0]);
     assert_eq!(app.focus, FocusPane::Diff, "the panel keeps focus");
 }
+
+#[test]
+fn attach_client_selects_copies_and_restores_what_it_drew() {
+    use crate::attach::{attach_selection_paint, AttachScreen};
+    let mut screen = AttachScreen::default();
+    screen.apply(
+        true,
+        &[
+            (0, "\x1b[1mattach\x1b[0m copy target".to_string()),
+            (1, "second row".to_string()),
+        ],
+    );
+    assert_eq!(screen.plain_lines(), vec!["attach copy target", "second row"]);
+    let selection = WorkerSelection {
+        start: SelectionPoint { row: 0, col: 7 },
+        end: SelectionPoint { row: 1, col: 5 },
+    };
+    assert_eq!(
+        selected_text_from_lines(&screen.plain_lines(), selection),
+        "copy target\nsecond"
+    );
+    let lit = attach_selection_paint(&screen, selection, true);
+    assert!(lit.contains("\x1b[1;8H\x1b[0;7mcopy target"), "{lit:?}");
+    assert!(lit.contains("\x1b[2;1H\x1b[0;7msecond"), "{lit:?}");
+    assert!(lit.starts_with("\x1b7") && lit.ends_with("\x1b8"), "cursor is kept");
+    // Restoring repaints the rows exactly as the pane drew them, styles included.
+    let restored = attach_selection_paint(&screen, selection, false);
+    assert!(restored.contains("\x1b[1;1H\x1b[1mattach\x1b[0m copy target"), "{restored:?}");
+    // A partial frame replaces only its rows; a full one starts over.
+    screen.apply(false, &[(1, "changed".to_string())]);
+    assert_eq!(screen.plain_lines(), vec!["attach copy target", "changed"]);
+    screen.apply(true, &[(0, "fresh".to_string())]);
+    assert_eq!(screen.plain_lines(), vec!["fresh"]);
+}

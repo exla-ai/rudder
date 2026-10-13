@@ -16,9 +16,10 @@
 //! buffer instead of stdout, so a view gets ratatui's own cell diff and only
 //! changed cells cross the socket.
 //!
-//! A pane has one size. The view that last took input owns it (tmux's
-//! `window-size latest`); while another view owns it, this one leaves the
-//! owner's selected pane at the owner's size (`App::pane_size_hold`).
+//! A pane has one size: the smallest any view showing it asks for
+//! (`App::fit_pane`), so switching between tabs never resizes an agent.
+//! Every frame goes out as one synchronized update and a repaint overwrites
+//! cells in place rather than clearing the screen, so nothing flashes.
 
 use super::*;
 use ratatui::{TerminalOptions, Viewport};
@@ -164,17 +165,49 @@ impl DashboardView {
 
 fn view_terminal(output: &ViewOutput, rows: u16, cols: u16) -> ViewTerminal {
     let mut output_writer = output.clone();
-    // A fresh ratatui terminal diffs against a blank buffer, so the client's
-    // screen has to be blank too.
-    let _ = output_writer.write_all(b"\x1b[0m\x1b[2J");
-    Terminal::with_options(
+    let _ = output_writer.write_all(b"\x1b[0m");
+    let mut terminal = Terminal::with_options(
         CrosstermBackend::new(output.clone()),
         TerminalOptions {
             viewport: Viewport::Fixed(Rect::new(0, 0, cols.max(1), rows.max(1))),
         },
     )
-    .expect("a fixed viewport never queries the terminal")
+    .expect("a fixed viewport never queries the terminal");
+    force_full_repaint(&mut terminal);
+    terminal
 }
+
+/// Make the next frame overwrite every cell instead of clearing the screen
+/// first. A fresh ratatui terminal diffs against a blank buffer, so it skips
+/// blank cells and the client had to be wiped with `ESC[2J`: a whole blank
+/// frame on every resize or catch-up, which is the flash people saw. Marking
+/// the previous buffer with a glyph no frame ever draws makes every cell
+/// differ, so the old picture is painted over in place.
+fn force_full_repaint(terminal: &mut ViewTerminal) {
+    let buffer = terminal.current_buffer_mut();
+    for cell in buffer.content.iter_mut() {
+        cell.set_symbol(REPAINT_SENTINEL);
+    }
+    terminal.swap_buffers();
+}
+
+/// Private-use glyph: never drawn by Rudder, never produced by an agent pane.
+const REPAINT_SENTINEL: &str = "\u{f8ff}";
+
+/// Wrap a frame in DEC synchronized output (mode 2026): the terminal holds
+/// the old picture until the whole frame has arrived and swaps it in at once,
+/// so a big repaint never shows half-drawn. Terminals without the mode
+/// ignore it.
+pub(crate) fn synchronized_frame(bytes: &[u8]) -> String {
+    let mut data = String::with_capacity(bytes.len() + 16);
+    data.push_str(SYNC_BEGIN);
+    data.push_str(&String::from_utf8_lossy(bytes));
+    data.push_str(SYNC_END);
+    data
+}
+
+pub(crate) const SYNC_BEGIN: &str = "\x1b[?2026h";
+pub(crate) const SYNC_END: &str = "\x1b[?2026l";
 
 /// Which view is acting: the dashboard's own terminal, or an attach client.
 pub(crate) const LOCAL_VIEW: u64 = 0;
@@ -236,38 +269,53 @@ impl App {
         self.acting_view != LOCAL_VIEW
     }
 
-    /// Render code asks before resizing a pane: an attached single-pane
-    /// terminal owns its pane, and another view owns the pane it has selected.
-    pub(crate) fn pane_size_held(&self, run_id: &str) -> bool {
-        self.run_is_attached(run_id) || self.pane_size_hold.iter().any(|id| id == run_id)
-    }
-
-    /// Before a view renders: hold the size owner's pane unless this view is
-    /// the owner.
-    pub(crate) fn prepare_pane_sizes_for(&mut self, view: u64, local_selected: Option<String>) {
-        self.pane_size_hold.clear();
-        if view == self.pane_size_owner {
+    /// Size the pane at `index` for the view drawing it now. Every view that
+    /// shows a pane records the size it would like, and the pane takes the
+    /// smallest of them (tmux's `window-size smallest`). It used to be the
+    /// size of whichever view took input last, and two views a row apart
+    /// (one had a notice, or a longer task-bar hint) resized the agent on
+    /// every switch between them: each resize makes Claude or Codex repaint
+    /// its whole screen, and the region scrollback is dropped. An attached
+    /// single-pane terminal still owns its pane outright.
+    pub(crate) fn fit_pane(&mut self, index: usize, size: TerminalSize) {
+        let Some(run_id) = self.agents.get(index).map(|run| run.id.clone()) else {
+            return;
+        };
+        if self.run_is_attached(&run_id) {
             return;
         }
-        let owner_run = if self.pane_size_owner == LOCAL_VIEW {
-            local_selected
-        } else {
-            self.attach_clients
-                .iter()
-                .find(|client| client.id == self.pane_size_owner)
-                .and_then(|client| client.dashboard.as_ref())
-                .and_then(|view| view.selected_run.clone())
-        };
-        self.pane_size_hold.extend(owner_run);
+        self.pane_size_wants
+            .insert((self.acting_view, run_id.clone()), size);
+        let fitted = self
+            .pane_size_wants
+            .iter()
+            .filter(|((_, id), _)| *id == run_id)
+            .map(|(_, want)| *want)
+            .reduce(|a, b| TerminalSize {
+                rows: a.rows.min(b.rows),
+                cols: a.cols.min(b.cols),
+            })
+            .unwrap_or(size);
+        let run = &mut self.agents[index];
+        if run.terminal_size != Some(fitted) {
+            if let Some(terminal) = run.terminal.as_mut() {
+                if terminal.resize(fitted).is_ok() {
+                    run.terminal_size = Some(fitted);
+                }
+            }
+        }
     }
 
-    /// Input arrived from `view`: it now owns the pane sizes. The owner
-    /// changing means the panes resize on the next frames.
-    pub(crate) fn note_view_input(&mut self, view: u64) {
-        if self.pane_size_owner != view {
-            self.pane_size_owner = view;
-            self.dirty = true;
-        }
+    /// A view is about to draw: what it showed last frame no longer counts,
+    /// so a pane it stopped showing can grow back for the others.
+    pub(crate) fn begin_view_frame(&mut self, view: u64) {
+        self.pane_size_wants.retain(|(owner, _), _| *owner != view);
+    }
+
+    /// A view went away: its sizes stop holding panes small.
+    pub(crate) fn forget_view_pane_sizes(&mut self, view: u64) {
+        self.begin_view_frame(view);
+        self.dirty = true;
     }
 
     pub(crate) fn open_dashboard_view(&mut self, client_id: u64, rows: u16, cols: u16) {
@@ -300,11 +348,6 @@ impl App {
     /// Apply one terminal event from a remote view. Returns true when that
     /// view asked to close (its quit keys close the tab, never the dashboard).
     pub(crate) fn handle_view_event(&mut self, client_id: u64, event: Event) -> bool {
-        if matches!(event, Event::Key(_) | Event::Paste(_))
-            || matches!(&event, Event::Mouse(mouse) if matches!(mouse.kind, MouseEventKind::Down(_)))
-        {
-            self.note_view_input(client_id);
-        }
         let closed = self
             .with_view(client_id, |app, _| match event {
                 Event::Key(key) if key.kind == KeyEventKind::Press => app.handle_key(key),
@@ -351,9 +394,8 @@ impl App {
             return;
         }
         let dirty_before = self.dirty;
-        let local_selected = self.agents.get(self.selected_agent).map(|run| run.id.clone());
         for id in ids {
-            self.prepare_pane_sizes_for(id, local_selected.clone());
+            self.begin_view_frame(id);
             let drew = self
                 .with_view(id, |app, terminal| {
                     terminal.draw(|frame| render(frame, app)).is_ok()
@@ -371,7 +413,7 @@ impl App {
                 continue;
             }
             client.send(&ServerMsg::Screen {
-                data: String::from_utf8_lossy(&bytes).into_owned(),
+                data: synchronized_frame(&bytes),
             });
             if client.take_needs_full() {
                 // Dropped: repaint the whole screen on the next pass.
@@ -381,7 +423,6 @@ impl App {
                 }
             }
         }
-        self.pane_size_hold.clear();
         // Rendering a view is not a change the dashboard's own terminal has
         // to show.
         self.dirty = dirty_before;

@@ -3195,19 +3195,7 @@ pub(crate) fn render_interactive_orchestrator(frame: &mut Frame<'_>, area: Rect,
         return;
     }
     if let Ok(size) = TerminalSize::new(term_inner.height.max(1), term_inner.width.max(1)) {
-        let attached = app
-            .agents
-            .get(app.selected_agent)
-            .is_some_and(|run| app.pane_size_held(&run.id));
-        if let Some(run) = app.agents.get_mut(app.selected_agent) {
-            if !attached && run.terminal_size != Some(size) {
-                if let Some(terminal) = run.terminal.as_mut() {
-                    if terminal.resize(size).is_ok() {
-                        run.terminal_size = Some(size);
-                    }
-                }
-            }
-        }
+        app.fit_pane(app.selected_agent, size);
     }
     let lines = worker_lines(app, term_inner.height as usize, term_inner.width as usize);
     frame.render_widget(
@@ -3466,18 +3454,8 @@ pub(crate) fn render_worker(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
     }
 
     if let Some(size) = terminal_size {
-        let attached = app
-            .agents
-            .get(app.selected_agent)
-            .is_some_and(|run| app.pane_size_held(&run.id));
-        if let Some(run) = app.agents.get_mut(app.selected_agent) {
-            if !attached && app.worker_view == WorkerView::Terminal && run.terminal_size != Some(size) {
-                if let Some(terminal) = run.terminal.as_mut() {
-                    if terminal.resize(size).is_ok() {
-                        run.terminal_size = Some(size);
-                    }
-                }
-            }
+        if app.worker_view == WorkerView::Terminal {
+            app.fit_pane(app.selected_agent, size);
         }
     }
 
@@ -4038,19 +4016,7 @@ pub(crate) fn render_gam_split(frame: &mut Frame<'_>, area: Rect, app: &mut App)
     ] {
         let size = TerminalSize::new(half.height.max(1), half.width.max(1)).ok();
         if let Some(size) = size {
-            let attached = app
-                .agents
-                .get(index)
-                .is_some_and(|run| app.pane_size_held(&run.id));
-            if let Some(run) = app.agents.get_mut(index) {
-                if !attached && run.terminal_size != Some(size) {
-                    if let Some(terminal) = run.terminal.as_mut() {
-                        if terminal.resize(size).is_ok() {
-                            run.terminal_size = Some(size);
-                        }
-                    }
-                }
-            }
+            app.fit_pane(index, size);
         }
         let focused_half = app.focus == FocusPane::Worker && app.selected_agent == index;
         // A generator waiting on a question HALTS the whole pair: an "input"

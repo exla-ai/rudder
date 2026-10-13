@@ -501,8 +501,17 @@ all of render.rs run unchanged. Rules worth keeping:
   `view_state!` list**, or both tabs will share it (and fight over it).
 - **Selection crosses by run id**, not index: rows are inserted and removed while
   a view is stashed. Click maps are dropped when `agents.len()` moved.
-- **The view that took input last owns pane sizes** (`pane_size_owner`); the
-  resize sites ask `pane_size_held`, which also covers single-pane attachments.
+- **A shared pane takes the SMALLEST size any view showing it asks for**
+  (`App::fit_pane`, tmux's `window-size smallest`; `pane_size_wants` is keyed by
+  view and run, cleared per view at `begin_view_frame`). It used to follow the
+  view that typed last, and two views a row apart (a notice, a longer task-bar
+  hint) resized the agent on every switch between tabs: each resize makes the
+  agent repaint its whole screen, which was the flicker. A single-pane
+  attachment still owns its pane outright.
+- **No visible clears, no torn frames.** Every frame (the dashboard's own and
+  each view's) is wrapped in DEC synchronized output (`?2026h`/`?2026l`), and a
+  view's reset paints over the old picture (`force_full_repaint` marks the
+  previous buffer with a sentinel glyph) instead of sending `ESC[2J`.
 - **A view's quit keys close the view** (`confirm_or_quit` returns early when
   `acting_in_remote_view`), never the dashboard.
 - Frames are ratatui's own diff: the view's `Terminal` has a fixed viewport and a

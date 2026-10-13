@@ -1727,8 +1727,9 @@ struct App {
     /// rendering right now (`LOCAL_VIEW` = this terminal), which one owns the
     /// pane sizes, and the panes the current render must not resize.
     acting_view: u64,
-    pane_size_owner: u64,
-    pane_size_hold: Vec<String>,
+    /// The size each view last drew a pane at, by (view, run id). A shared
+    /// pane takes the smallest (view.rs `fit_pane`).
+    pane_size_wants: HashMap<(u64, String), TerminalSize>,
     /// Which drawer header the sidebar cursor sits on. `None` means the cursor is on
     /// an agent row (`selected_agent`); the two are mutually exclusive, and j/k walk
     /// agent rows first, then the drawer headers in `Bucket::DRAWERS` order.
@@ -2940,8 +2941,7 @@ impl App {
                 Some(generate_task_summary_title)
             },
             acting_view: LOCAL_VIEW,
-            pane_size_owner: LOCAL_VIEW,
-            pane_size_hold: Vec::new(),
+            pane_size_wants: HashMap::new(),
             drawer_row_map: Vec::new(),
             drawer_cursor: None,
             drawer: None,
@@ -19536,13 +19536,19 @@ fn run(terminal: &mut Tui) -> Result<()> {
         } else if app.take_dirty() {
             let draw_started = Instant::now();
             let mut render_build_us = 0_u64;
-            let local_selected = app.agents.get(app.selected_agent).map(|run| run.id.clone());
-            app.prepare_pane_sizes_for(LOCAL_VIEW, local_selected);
-            terminal.draw(|frame| {
+            app.begin_view_frame(LOCAL_VIEW);
+            // Synchronized output (view.rs): the terminal swaps the frame in
+            // whole instead of painting it as the bytes arrive.
+            let _ = terminal.backend_mut().write_all(SYNC_BEGIN.as_bytes());
+            let drawn = terminal.draw(|frame| {
                 let render_started = Instant::now();
                 render(frame, &mut app);
                 render_build_us = render_started.elapsed().as_micros() as u64;
-            })?;
+            })
+            .map(|_| ());
+            let _ = terminal.backend_mut().write_all(SYNC_END.as_bytes());
+            let _ = terminal.backend_mut().flush();
+            drawn?;
             // The frame counter gates destructive confirms (dd): a confirm
             // only counts after the confirmation notice has actually rendered.
             app.frames_drawn = app.frames_drawn.wrapping_add(1);
@@ -20188,11 +20194,6 @@ fn is_orchestrator_skill_marker(line: &str) -> bool {
 }
 
 fn handle_event(app: &mut App, event: Event) -> bool {
-    if matches!(event, Event::Key(_) | Event::Paste(_))
-        || matches!(&event, Event::Mouse(mouse) if matches!(mouse.kind, MouseEventKind::Down(_)))
-    {
-        app.note_view_input(LOCAL_VIEW);
-    }
     match event {
         Event::Key(key) if key.kind == KeyEventKind::Press => {
             app.mark_dirty();
@@ -20356,9 +20357,7 @@ impl App {
                         self.attach_clients.retain(|client| client.id != id);
                         self.dirty = true;
                     }
-                    if self.pane_size_owner == id {
-                        self.note_view_input(LOCAL_VIEW);
-                    }
+                    self.forget_view_pane_sizes(id);
                 }
                 AttachEvent::Message { id, msg } => self.handle_attach_message(id, msg),
             }
@@ -20509,9 +20508,7 @@ impl App {
             self.attach_clients.remove(pos);
             self.dirty = true;
         }
-        if self.pane_size_owner == id {
-            self.note_view_input(LOCAL_VIEW);
-        }
+        self.forget_view_pane_sizes(id);
     }
 
     fn attached_run_index(&self, pos: usize) -> Option<usize> {

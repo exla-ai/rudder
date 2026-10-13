@@ -25438,10 +25438,12 @@ fn a_second_dashboard_view_shares_the_agents_but_not_the_selection_or_draft() {
     assert!(!app.acting_in_remote_view());
 }
 
-/// A pane has one size. The view that typed last owns it; another view
-/// rendering the same agent must not resize it back and forth.
+/// A pane has one size: the smallest any view showing it asks for. Typing in
+/// one view and then the other must not resize the agent back and forth
+/// (each resize makes Claude repaint its whole screen: the flicker people saw
+/// with two tabs open).
 #[test]
-fn only_the_view_that_typed_last_resizes_the_pane_it_shows() {
+fn two_views_of_one_pane_settle_on_the_smaller_size_and_stay_there() {
     use crate::attach::AttachClient;
 
     let mut app = App::new();
@@ -25449,24 +25451,73 @@ fn only_the_view_that_typed_last_resizes_the_pane_it_shows() {
     let (tx, _rx) = std::sync::mpsc::sync_channel::<String>(256);
     app.attach_clients.push(AttachClient::new(9, tx));
     app.open_dashboard_view(9, 20, 60);
+    let big = TerminalSize::new(38, 123).unwrap();
+    let small = TerminalSize::new(37, 123).unwrap();
 
-    // The dashboard's own terminal owns sizes to begin with.
-    app.prepare_pane_sizes_for(LOCAL_VIEW, Some("run-alpha".to_string()));
-    assert!(!app.pane_size_held("run-alpha"));
-    app.prepare_pane_sizes_for(9, Some("run-alpha".to_string()));
-    assert!(app.pane_size_held("run-alpha"), "the second view leaves the owner's pane alone");
+    app.begin_view_frame(LOCAL_VIEW);
+    app.fit_pane(0, big);
+    assert_eq!(app.agents[0].terminal_size, None, "no PTY: nothing to resize");
+    app.with_view(9, |app, _| {
+        app.begin_view_frame(9);
+        app.fit_pane(0, small);
+    });
+    let wants: Vec<TerminalSize> = app.pane_size_wants.values().copied().collect();
+    assert_eq!(wants.len(), 2);
 
-    // The second view types: now it owns the size and the dashboard holds.
-    app.handle_view_event(9, Event::Key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE)));
-    app.prepare_pane_sizes_for(9, Some("run-alpha".to_string()));
-    assert!(!app.pane_size_held("run-alpha"));
-    app.prepare_pane_sizes_for(LOCAL_VIEW, Some("run-alpha".to_string()));
-    assert!(app.pane_size_held("run-alpha"));
+    // Both views redraw many times, in any order: the pane is always the
+    // smaller of the two, never the size of whoever drew last.
+    let fitted = |app: &App| {
+        app.pane_size_wants
+            .values()
+            .copied()
+            .reduce(|a, b| TerminalSize { rows: a.rows.min(b.rows), cols: a.cols.min(b.cols) })
+    };
+    for _ in 0..3 {
+        app.begin_view_frame(LOCAL_VIEW);
+        app.fit_pane(0, big);
+        assert_eq!(fitted(&app), Some(small));
+        app.with_view(9, |app, _| {
+            app.begin_view_frame(9);
+            app.fit_pane(0, small);
+        });
+        assert_eq!(fitted(&app), Some(small));
+    }
 
-    // It closes: ownership returns to the dashboard.
+    // The smaller view goes away: the pane can grow back.
     app.close_attach_client(9, "test");
-    app.prepare_pane_sizes_for(LOCAL_VIEW, Some("run-alpha".to_string()));
-    assert!(!app.pane_size_held("run-alpha"));
+    assert_eq!(fitted(&app), Some(big));
+}
+
+/// A remote view's repaint overwrites every cell instead of clearing the
+/// screen first (a clear is a visible blank frame), and every frame goes out
+/// as one synchronized update.
+#[test]
+fn a_second_view_repaints_in_place_inside_a_synchronized_update() {
+    use crate::attach::AttachClient;
+
+    let mut app = App::new();
+    let (tx, rx) = std::sync::mpsc::sync_channel::<String>(256);
+    app.attach_clients.push(AttachClient::new(9, tx));
+    app.open_dashboard_view(9, 24, 100);
+    app.render_dashboard_views(true);
+    app.resize_dashboard_view(9, 30, 110);
+    app.render_dashboard_views(true);
+
+    let frames: Vec<String> = rx
+        .try_iter()
+        .filter_map(|line| match serde_json::from_str::<ServerMsg>(&line) {
+            Ok(ServerMsg::Screen { data }) => Some(data),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(frames.len(), 2);
+    for frame in &frames {
+        assert!(frame.starts_with("\x1b[?2026h") && frame.ends_with("\x1b[?2026l"));
+        assert!(!frame.contains("\x1b[2J"), "no full-screen clear");
+    }
+    // After the resize every cell is rewritten, blank ones included: the
+    // bottom-right corner of the new size is drawn.
+    assert!(frames[1].contains("\x1b[30;"), "the last row is painted");
 }
 
 /// `/run` names its workspace from a short model-written title before the

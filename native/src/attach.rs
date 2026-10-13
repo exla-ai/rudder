@@ -604,6 +604,7 @@ pub(crate) fn run_attach_client(args: &[String]) -> Result<()> {
                 };
                 match msg {
                     ServerMsg::Frame {
+                        rows: frame_rows,
                         full,
                         lines,
                         cursor,
@@ -614,9 +615,13 @@ pub(crate) fn run_attach_client(args: &[String]) -> Result<()> {
                         }
                         let _ = term_cols;
                         let mut buf = String::new();
+                        buf.push_str(SYNC_BEGIN);
                         buf.push_str("\x1b[?25l");
                         if full {
-                            buf.push_str("\x1b[0m\x1b[2J");
+                            // Every row is rewritten and cleared to its end
+                            // below, so no `ESC[2J`: wiping first flashed a
+                            // blank screen on every full frame.
+                            buf.push_str("\x1b[0m");
                         }
                         if let Ok(mut screen) = screen.lock() {
                             screen.apply(full, &lines);
@@ -628,6 +633,10 @@ pub(crate) fn run_attach_client(args: &[String]) -> Result<()> {
                             use std::fmt::Write as _;
                             let _ = write!(buf, "\x1b[{};1H{}\x1b[0m\x1b[K", row + 1, text);
                         }
+                        if full && frame_rows < term_rows {
+                            use std::fmt::Write as _;
+                            let _ = write!(buf, "\x1b[{};1H\x1b[0m\x1b[J", frame_rows + 1);
+                        }
                         match cursor {
                             Some((row, col)) if row < term_rows => {
                                 use std::fmt::Write as _;
@@ -635,6 +644,7 @@ pub(crate) fn run_attach_client(args: &[String]) -> Result<()> {
                             }
                             _ => {}
                         }
+                        buf.push_str(SYNC_END);
                         let _ = out.write_all(buf.as_bytes());
                         let _ = out.flush();
                     }

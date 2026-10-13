@@ -599,3 +599,134 @@ test("idle sweep keeps a disconnected workspace alive while an agent is running"
   assert.equal(statuses["busy-workspace"], "running");
   assert.equal(statuses["idle-workspace"], "stopped");
 });
+
+test("delete tears a workspace and a sail down, and the sweep finishes what failed", { timeout: 30_000 }, async (t) => {
+  const port = await freePort();
+  const flyPort = await freePort();
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "rudder-cloud-delete-test-"));
+  const dbPath = path.join(dataDir, "state.sqlite");
+  const base = `http://127.0.0.1:${port}`;
+  const flyCalls = [];
+  let machineDeletesToFail = 1;
+
+  // Fly: the FIRST machine destroy fails, so the request can only report
+  // "deleting" and the reaper has to finish the job on a later sweep.
+  const fly = http.createServer((req, res) => {
+    flyCalls.push(`${req.method} ${req.url}`);
+    if (req.method === "DELETE" && /\/machines\//.test(req.url ?? "")) {
+      if (machineDeletesToFail > 0) {
+        machineDeletesToFail -= 1;
+        res.writeHead(500, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: "fly is having a moment" }));
+        return;
+      }
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ ok: true }));
+      return;
+    }
+    if (req.method === "DELETE" && /\/volumes\//.test(req.url ?? "")) {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ ok: true }));
+      return;
+    }
+    res.writeHead(404).end();
+  });
+  await new Promise((resolve, reject) => {
+    fly.once("error", reject);
+    fly.listen(flyPort, "127.0.0.1", resolve);
+  });
+
+  const child = spawn(process.execPath, [path.join(cloudDir, "dist", "server.js")], {
+    env: {
+      ...process.env,
+      PORT: String(port),
+      BETTER_AUTH_URL: base,
+      BETTER_AUTH_SECRET: "test-secret-test-secret",
+      RUDDER_CLOUD_DATA_DIR: dataDir,
+      RUDDER_CLOUD_DB: dbPath,
+      RUDDER_CLOUD_PERSIST_STATE: "0",
+      RUDDER_S3_BUCKET: "",
+      SLACK_BOT_TOKEN: "",
+      FLY_API_TOKEN: "test-fly-token",
+      RUDDER_FLY_APP_NAME: "test-rudder-cloud",
+      FLY_API_HOSTNAME: `http://127.0.0.1:${flyPort}`,
+      RUDDER_DELETE_SWEEP_MS: "1000",
+    },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  t.after(async () => {
+    child.kill("SIGKILL");
+    await new Promise((resolve) => fly.close(resolve));
+    fs.rmSync(dataDir, { recursive: true, force: true });
+  });
+  await waitFor(async () => (await fetch(`${base}/health`).catch(() => null))?.ok);
+  await waitFor(() => fs.existsSync(dbPath));
+  await sleep(150);
+
+  const cliToken = "rdr_delete_cli";
+  const workerToken = "rdrw_delete_worker";
+  const now = new Date().toISOString();
+  const db = new Database(dbPath);
+  db.prepare(
+    "insert or replace into rudder_tokens (token_hash, account_id, email, created_at, last_used_at) values (?,?,?,?,?)",
+  ).run(tokenHash(cliToken), "acct", "t@example.com", now, now);
+  db.prepare(`
+    insert into rudder_workspaces (
+      id, account_id, workspace_key, status, machine_id, machine_state, volume_id,
+      worker_token_hash, last_activity_at, last_heartbeat_at, created_at, updated_at
+    ) values (?,?,?,?,?,?,?,?,?,?,?,?)
+  `).run("ws-1", "acct", "repo-key", "running", "machine-ws", "started", "vol-ws",
+    tokenHash(workerToken), now, now, now, now);
+  db.prepare(
+    "insert into rudder_sails (id, account_id, status, runtime, worker_token_hash, created_at, updated_at) values (?,?,?,?,?,?,?)",
+  ).run("sail-byo", "acct", "running", "byo-vm", tokenHash(workerToken), now, now);
+  // Another account's workspace: must be untouchable.
+  db.prepare(`
+    insert into rudder_workspaces (id, account_id, workspace_key, status, created_at, updated_at)
+    values (?,?,?,?,?,?)
+  `).run("ws-other", "someone-else", "their-key", "running", now, now);
+  db.close();
+
+  const auth = { authorization: `Bearer ${cliToken}`, "content-type": "application/json" };
+  const readRow = (table, id) => {
+    const rdb = new Database(dbPath);
+    const row = rdb.prepare(`select * from ${table} where id = ?`).get(id);
+    rdb.close();
+    return row;
+  };
+
+  const forbidden = await fetch(`${base}/api/rudder/workspace/ws-other/delete`, { method: "POST", headers: auth });
+  assert.equal(forbidden.status, 404, "cannot delete another account's workspace");
+
+  const first = await (await fetch(`${base}/api/rudder/workspace/ws-1/delete`, {
+    method: "POST",
+    headers: auth,
+    body: "{}",
+  })).json();
+  assert.equal(first.status, "deleting", "the failed machine destroy leaves it to the sweep");
+  assert.match(first.error, /moment|500/);
+  const pending = readRow("rudder_workspaces", "ws-1");
+  assert.equal(pending.status, "deleting");
+  assert.equal(pending.workspace_key, "deleted:ws-1", "the repo's key is free for a fresh attach");
+
+  // A late worker heartbeat must not bring it back.
+  const heartbeat = await fetch(`${base}/api/rudder/workspace/ws-1/heartbeat`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${workerToken}`, "content-type": "application/json" },
+    body: JSON.stringify({ state: "running", machineId: "machine-ws", activeAgents: 2 }),
+  });
+  assert.equal(heartbeat.status, 410);
+  assert.equal(readRow("rudder_workspaces", "ws-1")?.status, "deleting");
+
+  // The sweep retries the machine, then the volume, then drops the row.
+  await waitFor(() => !readRow("rudder_workspaces", "ws-1"), { timeout: 15_000, interval: 200 });
+  assert.ok(flyCalls.filter((call) => call.startsWith("DELETE") && call.includes("machine-ws")).length >= 2);
+  assert.ok(flyCalls.some((call) => call.startsWith("DELETE") && call.includes("vol-ws")));
+  assert.ok(readRow("rudder_workspaces", "ws-other"), "the other account's row is untouched");
+
+  // A BYO VM sail has no machine of ours: the row simply goes.
+  const sail = await (await fetch(`${base}/api/rudder/sail/sail-byo`, { method: "DELETE", headers: auth })).json();
+  assert.equal(sail.status, "deleted");
+  assert.equal(readRow("rudder_sails", "sail-byo"), undefined);
+  assert.ok(!flyCalls.some((call) => call.includes("sail-byo")));
+});

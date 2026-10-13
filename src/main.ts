@@ -232,6 +232,7 @@ export async function main(): Promise<void> {
         json: parsed.flags.json,
         homePaths: parsed.flags.homePaths,
         sshHost: parsed.flags.sshHost,
+        yes: Boolean(parsed.flags.force),
       });
       return;
     case "run": {

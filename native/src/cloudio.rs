@@ -116,6 +116,52 @@ pub(crate) fn cloud_workspace_label(workspace: Option<&CloudWorkspaceStatus>) ->
     }
 }
 
+/// Run a `rudder cloud … delete --yes --json` and read the control plane's
+/// answer: Ok(true) gone, Ok(false) accepted and still being torn down (the
+/// cloud's delete sweep finishes it), Err why it was refused.
+pub(crate) fn run_cloud_delete_cli(cwd: &Path, args: &[String]) -> Result<bool, String> {
+    let rudder = locate_rudder_cli().ok_or_else(|| "the rudder CLI was not found".to_string())?;
+    let mut child = Command::new(rudder)
+        .args(args)
+        .current_dir(cwd)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("could not run the rudder CLI: {error}"))?;
+    // The control plane answers within ~20s (then leaves the rest to its
+    // sweep); anything far past that is a hung network call.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if std::time::Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err("Rudder Cloud did not answer in time".to_string());
+            }
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(100)),
+            Err(error) => return Err(error.to_string()),
+        }
+    }
+    let output = child.wait_with_output().map_err(|error| error.to_string())?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let reason = stderr
+            .lines()
+            .rev()
+            .map(str::trim)
+            .find(|line| !line.is_empty())
+            .unwrap_or("the delete command failed")
+            .trim_start_matches("rudder: ")
+            .to_string();
+        return Err(reason);
+    }
+    let value = serde_json::from_slice::<serde_json::Value>(&output.stdout)
+        .map_err(|_| "unexpected answer from the rudder CLI".to_string())?;
+    Ok(value.get("status").and_then(serde_json::Value::as_str) == Some("deleted"))
+}
+
 pub(crate) fn query_cloud_workspace_status(cwd: &Path) -> Option<CloudWorkspaceStatus> {
     // Inside the worker VM, the workspace is not something to look up — it is
     // the machine's own identity, delivered by env. The CLI query below would

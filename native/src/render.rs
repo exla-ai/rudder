@@ -4712,6 +4712,42 @@ pub(crate) fn render_merge_prompt(frame: &mut Frame<'_>, area: Rect, app: &App) 
             lines,
             ACCENT,
         )
+    } else if let Some(confirm) = &app.cloud_delete_confirm {
+        let mut lines = vec![
+            Line::from(Span::styled(
+                format!("Delete from Rudder Cloud:  {}", confirm.label),
+                app_style(),
+            )),
+            Line::from(""),
+            key_choice_line(&[("y", "delete it"), ("n", "keep it")]),
+            Line::from(""),
+        ];
+        let consequence = match &confirm.target {
+            crate::CloudDeleteTarget::Sail(id) => format!(
+                "Destroys cloud sail {id}: its machine and its snapshot. The conversation running there ends. This cannot be undone."
+            ),
+            crate::CloudDeleteTarget::Workspace => {
+                let count = confirm.run_ids.len();
+                format!(
+                    "This agent runs in this repo's shared cloud workspace, so deleting it deletes the workspace: its machine, volume and snapshot, and the {count} cloud agent{} running there. This cannot be undone.",
+                    if count == 1 { "" } else { "s" }
+                )
+            }
+        };
+        lines.push(Line::from(Span::styled(consequence, Style::default().fg(RUNNING_COLOR))));
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "If Fly is slow to let go of anything, Rudder Cloud keeps retrying until it is all gone.",
+            muted_style(true),
+        )));
+        (
+            Span::styled(
+                " Delete from Rudder Cloud? · y deletes · n keeps it ",
+                Style::default().fg(FAILED_COLOR),
+            ),
+            lines,
+            FAILED_COLOR,
+        )
     } else if let Some(prompt) = &app.conflict_prompt {
         let operation_label = if prompt.operation == ConflictOperation::Rebase {
             "Rebase"

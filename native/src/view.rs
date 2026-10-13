@@ -63,6 +63,7 @@ view_state! {
     delete_pending: Option<String> = None,
     delete_armed_frame: u64 = 0,
     merge_confirm: Option<MergeConfirmation> = None,
+    cloud_delete_confirm: Option<CloudDeleteConfirm> = None,
     conflict_prompt: Option<MergeConflictPrompt> = None,
     picker_index: usize = 0,
     picker_dismissed_input: Option<String> = None,

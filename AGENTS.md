@@ -659,6 +659,27 @@ losing sails/workspaces. Deploy config: `cloud/fly.toml` + `cloud/Dockerfile`.
   unless `RUDDER_BYOC_AUTOSTART=0`). BYOC cannot pause/resume (only stop); its state
   comes from heartbeats only.
 
+### 9.6.1 Deleting cloud things (request + reaper)
+Sails and workspaces can be DELETED, not just stopped: `rudder cloud delete <sail>`,
+`rudder cloud workspace delete [id]` (no id = this repo's), and `dd` on a cloud-owned
+row in the dashboard. Every entry point asks first: the CLI prompts `[y/N]` and refuses
+outright without a TTY unless `--yes`/`--force` is passed; the dashboard opens a yes/no
+modal (`CloudDeleteConfirm`) that names what goes. A migrated row lives in the repo's
+SHARED cloud workspace, which cannot drop one agent from the outside, so deleting it
+deletes the workspace and the modal says how many agents go with it.
+
+On the control plane a delete is a request that a reaper finishes:
+`requestDeletion` flips the row to `deleting` at once (a workspace's `workspace_key`
+becomes `deleted:<id>` so a fresh attach for the repo is never blocked), closes its
+channels, and tries the teardown for up to 20s: Fly machine (only ours; a BYO VM sail
+has none), workspace volume, snapshot object (only when no other live row boots from
+the same key; it carries repo + staged auth), then the row. Whatever fails stays
+`deleting` with the reason in `delete_error`, and `sweepDeletions`
+(`RUDDER_DELETE_SWEEP_MS`, default 30s, plus once at boot) retries it until it is gone.
+A `deleting` row is dead to everything else: heartbeats get 410 and cannot resurrect it,
+worker/attach upgrades get 410, stop/pause/resume get 409, and the admin GC skips it.
+The dashboard removes its local rows as soon as the cloud accepts the delete.
+
 ### 9.7 WebSocket streaming
 Each sail/workspace has a `Channel`: one worker WS + N client WS + a ~256KB ring buffer
 replayed on attach. The worker pipes PTY bytes as binary frames; the control plane

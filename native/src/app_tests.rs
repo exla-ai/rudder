@@ -25834,3 +25834,134 @@ fn a_codex_bulleted_reply_block_is_still_a_reply() {
     .map(str::to_string);
     assert_eq!(parse_gam_verdict(&verdict), Some(GamVerdict::Accept("ok".to_string())));
 }
+
+static CLOUD_DELETE_CALLS: std::sync::Mutex<Vec<Vec<String>>> = std::sync::Mutex::new(Vec::new());
+
+fn fake_cloud_delete_ok(_cwd: &std::path::Path, args: &[String]) -> Result<bool, String> {
+    CLOUD_DELETE_CALLS.lock().unwrap().push(args.to_vec());
+    Ok(true)
+}
+
+fn fake_cloud_delete_refused(_cwd: &std::path::Path, args: &[String]) -> Result<bool, String> {
+    CLOUD_DELETE_CALLS.lock().unwrap().push(args.to_vec());
+    Err("Not logged in to Rudder Cloud. Run `rudder login` first.".to_string())
+}
+
+fn cloud_delete_app(rows: &[(&str, &str, AgentStatus)]) -> App {
+    let mut app = App::new();
+    app.cwd = unique_test_repo("cloud-delete");
+    for (id, task, status) in rows {
+        let mut run = test_agent_run(id, task);
+        run.cwd = app.cwd.clone();
+        run.status = *status;
+        app.agents.push(run);
+    }
+    app.selected_agent = 0;
+    app.focus = FocusPane::Agents;
+    app
+}
+
+fn settle_cloud_delete(app: &mut App) {
+    let outcome = app
+        .cloud_delete_rx
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("the deletion reports back");
+    app.finish_cloud_deletion(outcome);
+}
+
+#[test]
+fn dd_on_a_cloud_sail_asks_yes_no_then_deletes_it_in_the_cloud() {
+    let _env = env_guard();
+    CLOUD_DELETE_CALLS.lock().unwrap().clear();
+    let mut app = cloud_delete_app(&[
+        ("sail-row", "cloud sail sail-9 · fix the flaky test", AgentStatus::Running),
+        ("local", "a local worker", AgentStatus::Done),
+    ]);
+    app.cloud_delete_runner = fake_cloud_delete_ok;
+
+    app.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::empty()));
+    let confirm = app.cloud_delete_confirm.clone().expect("a yes/no dialogue, not a refusal");
+    assert_eq!(confirm.target, CloudDeleteTarget::Sail("sail-9".to_string()));
+    let screen = render_screen(&mut app, 140, 40);
+    assert!(screen.contains("Delete from Rudder Cloud"), "{screen}");
+    assert!(screen.contains("cannot be undone"), "{screen}");
+    assert!(CLOUD_DELETE_CALLS.lock().unwrap().is_empty(), "nothing happens before the answer");
+
+    app.handle_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::empty()));
+    settle_cloud_delete(&mut app);
+
+    assert_eq!(
+        CLOUD_DELETE_CALLS.lock().unwrap().clone(),
+        vec![["cloud", "delete", "sail-9", "--yes", "--json"].map(str::to_string).to_vec()]
+    );
+    assert_eq!(app.agents.len(), 1, "the sail's row went with it");
+    assert_eq!(app.agents[0].id, "local", "nothing else was touched");
+    assert!(app.notice.as_deref().unwrap_or_default().contains("deleted cloud sail sail-9"));
+}
+
+#[test]
+fn n_on_the_cloud_delete_dialogue_keeps_everything() {
+    let _env = env_guard();
+    CLOUD_DELETE_CALLS.lock().unwrap().clear();
+    let mut app = cloud_delete_app(&[("sail-row", "cloud sail sail-9", AgentStatus::Running)]);
+    app.cloud_delete_runner = fake_cloud_delete_ok;
+
+    app.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::empty()));
+    // Any other key is explained, not acted on.
+    app.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::empty()));
+    assert!(app.cloud_delete_confirm.is_some(), "a stray d does not confirm");
+    app.handle_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::empty()));
+
+    assert!(app.cloud_delete_confirm.is_none());
+    assert_eq!(app.agents.len(), 1);
+    assert!(CLOUD_DELETE_CALLS.lock().unwrap().is_empty());
+    assert!(app.notice.as_deref().unwrap_or_default().contains("nothing was deleted"));
+}
+
+#[test]
+fn deleting_a_migrated_row_names_the_whole_cloud_workspace_it_takes() {
+    let _env = env_guard();
+    CLOUD_DELETE_CALLS.lock().unwrap().clear();
+    let mut app = cloud_delete_app(&[
+        ("m1", "migrated one", AgentStatus::Migrated),
+        ("m2", "migrated two", AgentStatus::Migrated),
+        ("local", "a local worker", AgentStatus::Done),
+    ]);
+    app.cloud_delete_runner = fake_cloud_delete_ok;
+
+    app.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::empty()));
+    let confirm = app.cloud_delete_confirm.clone().unwrap();
+    assert_eq!(confirm.target, CloudDeleteTarget::Workspace);
+    let screen = render_screen(&mut app, 140, 40);
+    let flat = screen.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(flat.contains("the 2 cloud"), "{screen}");
+    assert!(flat.contains("shared cloud workspace"), "{screen}");
+
+    app.handle_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::empty()));
+    settle_cloud_delete(&mut app);
+    assert_eq!(
+        CLOUD_DELETE_CALLS.lock().unwrap()[0],
+        ["cloud", "workspace", "delete", "--yes", "--json"].map(str::to_string).to_vec()
+    );
+    assert_eq!(
+        app.agents.iter().map(|run| run.id.as_str()).collect::<Vec<_>>(),
+        vec!["local"]
+    );
+}
+
+#[test]
+fn a_refused_cloud_delete_keeps_the_rows_and_says_why() {
+    let _env = env_guard();
+    CLOUD_DELETE_CALLS.lock().unwrap().clear();
+    let mut app = cloud_delete_app(&[("sail-row", "cloud sail sail-9", AgentStatus::Running)]);
+    app.cloud_delete_runner = fake_cloud_delete_refused;
+
+    app.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::empty()));
+    app.handle_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::empty()));
+    settle_cloud_delete(&mut app);
+
+    assert_eq!(app.agents.len(), 1, "a refused delete removes nothing locally");
+    let notice = app.notice.clone().unwrap_or_default();
+    assert!(notice.contains("could not delete cloud sail sail-9"), "{notice}");
+    assert!(notice.contains("rudder login"), "{notice}");
+}

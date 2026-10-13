@@ -1649,6 +1649,13 @@ struct App {
     bg_notice_tx: mpsc::Sender<String>,
     bg_notice_rx: mpsc::Receiver<String>,
     merge_confirm: Option<MergeConfirmation>,
+    /// The yes/no modal for deleting something in Rudder Cloud.
+    cloud_delete_confirm: Option<CloudDeleteConfirm>,
+    cloud_delete_tx: mpsc::Sender<CloudDeleteOutcome>,
+    cloud_delete_rx: mpsc::Receiver<CloudDeleteOutcome>,
+    /// Runs the `rudder cloud … delete` CLI. A field so tests can stand in for
+    /// the network without shelling out.
+    cloud_delete_runner: fn(&Path, &[String]) -> Result<bool, String>,
     conflict_prompt: Option<MergeConflictPrompt>,
     /// Conflicted files reported by a jj `rudder merge`/`rudder sync` shell-out.
     /// jj records conflicts in the change rather than leaving git unmerged paths,
@@ -1944,6 +1951,42 @@ struct WorkerSelection {
 struct NormalizedSelection {
     start: SelectionPoint,
     end: SelectionPoint,
+}
+
+/// What a `dd` on a cloud-owned row would destroy in Rudder Cloud.
+#[derive(Clone, Debug, PartialEq)]
+enum CloudDeleteTarget {
+    /// One cloud sail (its own machine).
+    Sail(String),
+    /// This repo's cloud workspace, which hosts every migrated agent.
+    Workspace,
+}
+
+/// The yes/no modal in front of a cloud deletion. Deleting in the cloud is not
+/// undoable, so unlike a local row (`dd`) it is a real dialogue.
+#[derive(Clone, Debug)]
+struct CloudDeleteConfirm {
+    target: CloudDeleteTarget,
+    /// What the user is deleting, in their words (the row's title).
+    label: String,
+    /// The local rows that go with it once the cloud accepts the delete.
+    run_ids: Vec<String>,
+}
+
+fn cloud_delete_target_label(target: &CloudDeleteTarget) -> String {
+    match target {
+        CloudDeleteTarget::Sail(id) => format!("cloud sail {id}"),
+        CloudDeleteTarget::Workspace => "this repo's cloud workspace".to_string(),
+    }
+}
+
+/// A finished cloud deletion, reported back from its background thread.
+struct CloudDeleteOutcome {
+    target: CloudDeleteTarget,
+    run_ids: Vec<String>,
+    /// Ok(true) gone, Ok(false) accepted and still being torn down by the
+    /// control plane's sweep, Err why it was refused.
+    result: Result<bool, String>,
 }
 
 struct MergeConfirmation {
@@ -2788,6 +2831,7 @@ impl App {
         let perf = PerfLogger::new();
         let perf_stats = PerfStats::new(perf.enabled());
         let (gam_link_tx, gam_link_rx) = std::sync::mpsc::channel();
+        let cloud_deletes = mpsc::channel();
         Self {
             gam_links: HashMap::new(),
             gam_signals: HashMap::new(),
@@ -2863,6 +2907,10 @@ impl App {
             bg_notice_tx: bg_notices.0,
             bg_notice_rx: bg_notices.1,
             merge_confirm: None,
+            cloud_delete_confirm: None,
+            cloud_delete_tx: cloud_deletes.0,
+            cloud_delete_rx: cloud_deletes.1,
+            cloud_delete_runner: run_cloud_delete_cli,
             conflict_prompt: None,
             pending_jj_conflict: None,
             picker_index: 0,
@@ -16036,16 +16084,12 @@ Files involved: {}
         // Cloud-owned rows are records of work executing in Rudder Cloud.
         // Deleting one here would silently discard the only local pointer to a
         // fleet that keeps running remotely; attach manages the real thing.
+        // Cloud-owned rows are records of work executing in Rudder Cloud, so
+        // deleting one means deleting THAT, not just the local pointer to it
+        // (which would leave a fleet running remotely with nothing pointing at
+        // it). It is not undoable, so it asks yes/no first.
         if is_cloud_owned_agent(selected) {
-            let label = if selected.task_summary.trim().is_empty() {
-                short_task(&selected.task)
-            } else {
-                truncate_chars(selected.task_summary.trim(), 40)
-            };
-            self.notice = Some(format!(
-                "{label} is cloud-owned - manage it from its Cloud session; Enter attaches"
-            ));
-            self.dirty = true;
+            self.open_cloud_delete_confirm();
             return;
         }
         // A LIVE main row used to dead-end here: the refusal said "stop it with
@@ -16195,6 +16239,119 @@ Files involved: {}
             }
         }));
         let _ = self.write_rudder_context_timed(None);
+    }
+
+    /// `dd` on a cloud-owned row: say exactly what will be destroyed and ask.
+    fn open_cloud_delete_confirm(&mut self) {
+        let Some(selected) = self.agents.get(self.selected_agent) else {
+            return;
+        };
+        let label = if selected.task_summary.trim().is_empty() {
+            short_task(&selected.task)
+        } else {
+            truncate_chars(selected.task_summary.trim(), 40)
+        };
+        let confirm = match cloud_sail_id(selected) {
+            Some(sail) => CloudDeleteConfirm {
+                target: CloudDeleteTarget::Sail(sail.to_string()),
+                label,
+                run_ids: vec![selected.id.clone()],
+            },
+            // A migrated row runs inside this repo's shared cloud workspace,
+            // which cannot lose one agent from the outside: deleting it deletes
+            // the workspace, and with it every agent migrated there. The modal
+            // says so and lists how many.
+            None => CloudDeleteConfirm {
+                target: CloudDeleteTarget::Workspace,
+                label,
+                run_ids: self
+                    .agents
+                    .iter()
+                    .filter(|run| run.status == AgentStatus::Migrated)
+                    .map(|run| run.id.clone())
+                    .collect(),
+            },
+        };
+        self.delete_pending = None;
+        self.cloud_delete_confirm = Some(confirm);
+        self.dirty = true;
+    }
+
+    /// `y` on the cloud delete modal: run the deletion off the UI thread
+    /// (it is a network round trip, and the control plane may take a while to
+    /// tear a machine down).
+    fn start_cloud_deletion(&mut self) {
+        let Some(confirm) = self.cloud_delete_confirm.take() else {
+            return;
+        };
+        let args: Vec<String> = match &confirm.target {
+            CloudDeleteTarget::Sail(id) => ["cloud", "delete", id.as_str(), "--yes", "--json"]
+                .map(str::to_string)
+                .to_vec(),
+            CloudDeleteTarget::Workspace => ["cloud", "workspace", "delete", "--yes", "--json"]
+                .map(str::to_string)
+                .to_vec(),
+        };
+        self.notice = Some(format!(
+            "deleting {} from Rudder Cloud…",
+            cloud_delete_target_label(&confirm.target)
+        ));
+        let tx = self.cloud_delete_tx.clone();
+        let cwd = self.cwd.clone();
+        let runner = self.cloud_delete_runner;
+        thread::Builder::new()
+            .name("rudder-cloud-delete".to_string())
+            .spawn(move || {
+                let result = runner(&cwd, &args);
+                let _ = tx.send(CloudDeleteOutcome {
+                    target: confirm.target,
+                    run_ids: confirm.run_ids,
+                    result,
+                });
+            })
+            .ok();
+        self.dirty = true;
+    }
+
+    /// The cloud accepted (or refused) a deletion. Accepted means the control
+    /// plane owns it now -- its delete sweep retries until the machine, volume
+    /// and snapshot are gone -- so the local rows go either way.
+    fn finish_cloud_deletion(&mut self, outcome: CloudDeleteOutcome) {
+        let what = cloud_delete_target_label(&outcome.target);
+        match outcome.result {
+            Ok(gone) => {
+                for id in &outcome.run_ids {
+                    if let Some(index) = self.agents.iter().position(|run| &run.id == id) {
+                        let run = self.agents.remove(index);
+                        let _ = remove_native_run_record(&self.cwd, &run.id);
+                        signals::cleanup_run_signals(&run.id);
+                    }
+                }
+                self.agent_row_map.clear();
+                self.selected_agent = self.selected_agent.min(self.agents.len().saturating_sub(1));
+                if outcome.target == CloudDeleteTarget::Workspace {
+                    self.cloud_workspace = None;
+                    self.last_workspace_check = None;
+                }
+                self.record_activity(format!(
+                    "cloud: deleted {what}{}",
+                    if gone { "" } else { " (Rudder Cloud is finishing the teardown)" }
+                ));
+                self.notice = Some(if gone {
+                    format!("deleted {what} from Rudder Cloud")
+                } else {
+                    format!("deleting {what}: Rudder Cloud is finishing the teardown and will keep retrying until it is gone")
+                });
+                let _ = self.write_rudder_context_timed(None);
+            }
+            Err(error) => {
+                self.notice = Some(format!(
+                    "could not delete {what}: {} · nothing was removed",
+                    truncate_chars(&error, 120)
+                ));
+            }
+        }
+        self.dirty = true;
     }
 
     /// `b` in the agents pane: BRANCH the selected agent's chat. The backend forks
@@ -16791,6 +16948,22 @@ Files involved: {}
                     self.dirty = true;
                 }
             }
+            return true;
+        }
+
+        if self.cloud_delete_confirm.is_some() {
+            match key.code {
+                KeyCode::Char('y') | KeyCode::Char('Y') => self.start_cloud_deletion(),
+                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                    self.cloud_delete_confirm = None;
+                    self.notice = Some("kept it · nothing was deleted".to_string());
+                }
+                _ => {
+                    self.notice =
+                        Some("delete prompt open — y deletes from Rudder Cloud · n or Esc keeps it".to_string());
+                }
+            }
+            self.dirty = true;
             return true;
         }
 
@@ -18235,6 +18408,9 @@ What to do\n\
         while let Ok(message) = self.bg_notice_rx.try_recv() {
             self.notice = Some(message);
             self.dirty = true;
+        }
+        while let Ok(outcome) = self.cloud_delete_rx.try_recv() {
+            self.finish_cloud_deletion(outcome);
         }
         self.emit_dashboard_opened_once();
         self.flush_pending_enters();

@@ -46,6 +46,8 @@ type CloudCommandOptions = {
   noAttach?: boolean;
   quietBanner?: boolean;
   latencyProbe?: boolean;
+  /** Skip the y/N confirmation of a destructive command (`--yes`/`--force`). */
+  yes?: boolean;
 };
 
 type LoginStartResponse = {
@@ -284,6 +286,10 @@ export async function runCloudCommand(command: string, args: string[], options: 
       return;
     case "stop":
       await mutateSail("stop", rest, options);
+      return;
+    case "delete":
+    case "rm":
+      await deleteSail(rest, options);
       return;
     case "setup-github":
       await setupOAuthProvider("github", rest, options);
@@ -2045,7 +2051,11 @@ async function workspaceCommand(args: string[], options: CloudCommandOptions): P
     await workspaceList(options);
     return;
   }
-  throw new Error("Usage: rudder cloud workspace [attach [id|owner/repo]|create <owner/repo>|share|status|pause|resume|stop|list]");
+  if (sub === "delete" || sub === "rm") {
+    await workspaceDelete(rest, options);
+    return;
+  }
+  throw new Error("Usage: rudder cloud workspace [attach [id|owner/repo]|create <owner/repo>|share|status|pause|resume|stop|delete [id]|list]");
 }
 
 const GITHUB_SLUG_RE = /^[\w.-]+\/[\w.-]+$/;
@@ -2901,6 +2911,97 @@ async function workspaceMutate(action: "pause" | "resume" | "stop", args: string
   console.log(`Workspace ${id} ${status}.`);
 }
 
+/**
+ * Strip `--yes`/`-y` out of a subcommand's args. Destructive commands confirm
+ * unless one of these (or the global `--force`) is given.
+ */
+function takeYesFlag(args: string[], options: CloudCommandOptions): { args: string[]; yes: boolean } {
+  const rest = args.filter((arg) => arg !== "--yes" && arg !== "-y");
+  return { args: rest, yes: Boolean(options.yes) || rest.length !== args.length };
+}
+
+/**
+ * Ask before destroying something in the cloud. Never assumes yes: without a
+ * terminal to ask on, the caller must pass --yes explicitly.
+ */
+async function confirmCloudDeletion(what: string, yes: boolean): Promise<boolean> {
+  if (yes) {
+    return true;
+  }
+  if (!process.stdin.isTTY || !process.stdout.isTTY) {
+    throw new Error(`Refusing to delete ${what} without confirmation; pass --yes to confirm.`);
+  }
+  const readline = await import("node:readline/promises");
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    const answer = await rl.question(`Delete ${what}? This destroys its cloud machine and data and cannot be undone. [y/N] `);
+    return /^y(es)?$/i.test(answer.trim());
+  } finally {
+    rl.close();
+  }
+}
+
+function describeDeletion(kind: string, id: string, result: JsonValue): string {
+  const record = result && typeof result === "object" && !Array.isArray(result)
+    ? result as Record<string, JsonValue>
+    : {};
+  if (record.status === "deleted") {
+    return `Deleted ${kind} ${id}.`;
+  }
+  const reason = typeof record.error === "string" ? ` (${record.error})` : "";
+  return `Deleting ${kind} ${id}: Rudder Cloud is finishing the teardown and will retry until it is gone${reason}.`;
+}
+
+async function deleteSail(args: string[], options: CloudCommandOptions): Promise<void> {
+  const { args: rest, yes } = takeYesFlag(args, options);
+  const id = rest[0];
+  if (!id) {
+    throw new Error("Usage: rudder cloud delete <sail-id> [--yes]");
+  }
+  if (!(await confirmCloudDeletion(`cloud sail ${id}`, yes))) {
+    console.log("Kept it; nothing was deleted.");
+    return;
+  }
+  const client = await cloudClient({ requireToken: true });
+  const result = await client.request<JsonValue>(`/api/rudder/sail/${encodeURIComponent(id)}/delete`, {
+    method: "POST",
+    body: {} as JsonValue,
+  });
+  if (options.json) {
+    printJson(result);
+    return;
+  }
+  console.log(describeDeletion("sail", id, result));
+}
+
+async function workspaceDelete(args: string[], options: CloudCommandOptions): Promise<void> {
+  const { args: rest, yes } = takeYesFlag(args, options);
+  // No id: this repo's workspace, the same one `workspace status` reports.
+  const workspace = rest[0] ? await lookupWorkspaceById(rest[0]) : await lookupWorkspaceForRepo(options);
+  const id = workspace && typeof workspace.id === "string" ? workspace.id : rest[0];
+  if (!workspace || !id) {
+    throw new Error(rest[0] ? `No cloud workspace ${rest[0]}.` : "No cloud workspace for this repo.");
+  }
+  const repo = typeof workspace.repoName === "string" ? ` (${workspace.repoName})` : "";
+  const agents = typeof workspace.activeAgents === "number" && workspace.activeAgents > 0
+    ? `, which has ${workspace.activeAgents} agent(s) running`
+    : "";
+  if (!(await confirmCloudDeletion(`cloud workspace ${id}${repo}${agents}`, yes))) {
+    console.log("Kept it; nothing was deleted.");
+    return;
+  }
+  const client = await cloudClient({ requireToken: true });
+  const result = await client.request<JsonValue>(`/api/rudder/workspace/${encodeURIComponent(id)}/delete`, {
+    method: "POST",
+    body: {} as JsonValue,
+  });
+  if (options.json) {
+    printJson(result);
+    return;
+  }
+  console.log(describeDeletion("workspace", id, result));
+}
+
 async function workspaceList(options: CloudCommandOptions): Promise<void> {
   const client = await cloudClient({ requireToken: true });
   const result = await client.request<JsonValue>("/api/rudder/workspace", { method: "GET" });
@@ -3557,12 +3658,15 @@ Usage:
       send a message to a running instance and show its reply
   rudder cloud output <id>
       show an instance's latest output
+  rudder cloud delete <id> [--yes]
+      destroy an instance's cloud machine and snapshot (asks first)
   rudder cloud quickstart
       print the copy/paste setup for the whole flow
   rudder cloud slack [manifest]
       print Slack setup (one thread per instance in the shared channel)
-  rudder cloud workspace [attach [id|owner/repo]|create <owner/repo>|share|status [--json]|pause <id>|resume <id>|stop <id>|list]
-      shared cloud workspace for this repo; \`create\` clones from GitHub (cloud-native, no local upload)
+  rudder cloud workspace [attach [id|owner/repo]|create <owner/repo>|share|status [--json]|pause <id>|resume <id>|stop <id>|delete [id] [--yes]|list]
+      shared cloud workspace for this repo; \`create\` clones from GitHub (cloud-native, no local upload);
+      \`delete\` destroys its machine, volume and snapshot after asking
   rudder cloud secrets [set <NAME> [value]|set --file <~/path>|list|rm <NAME>|sync]
       manage the encrypted cloud secrets vault; \`sync\` imports your local credentials once
   rudder cloud region [<fly-region>|clear]

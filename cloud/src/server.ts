@@ -8,7 +8,7 @@ import { Readable } from "node:stream";
 import { betterAuth } from "better-auth";
 import Database from "better-sqlite3";
 import { toNodeHandler } from "better-auth/node";
-import { GetObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
+import { DeleteObjectCommand, GetObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import type { Duplex } from "node:stream";
 import { WebSocket, WebSocketServer } from "ws";
@@ -44,7 +44,7 @@ type GithubBrowserLogin = {
   nextPollAt: number;
 };
 
-type SailStatus = "queued" | "running" | "paused" | "completed" | "failed";
+type SailStatus = "queued" | "running" | "paused" | "completed" | "failed" | "deleting";
 type SailRuntime = "fly" | "byo-vm";
 
 type Sail = {
@@ -64,7 +64,7 @@ type Sail = {
   bootstrapCommand?: string;
 };
 
-type WorkspaceStatus = "queued" | "running" | "paused" | "stopped" | "failed";
+type WorkspaceStatus = "queued" | "running" | "paused" | "stopped" | "failed" | "deleting";
 
 type Workspace = {
   id: string;
@@ -250,6 +250,9 @@ ensureColumn("rudder_workspaces", "git_ref", "text");
 // stop a workspace whose agents are mid-task just because nobody is attached
 // (the laptop disconnected) — that is the "sessions survive the commute" case.
 ensureColumn("rudder_workspaces", "active_agents", "integer");
+// Why the reaper could not finish deleting a row yet (see sweepDeletions).
+ensureColumn("rudder_sails", "delete_error", "text");
+ensureColumn("rudder_workspaces", "delete_error", "text");
 
 // Secrets vault: initialized lazily so a missing RUDDER_SECRETS_KEY only
 // breaks the vault endpoints, not the rest of the control plane.
@@ -307,6 +310,7 @@ const updateHeartbeat = database.prepare(`
       last_heartbeat_at = @lastHeartbeatAt,
       updated_at = @updatedAt
   where id = @id
+    and status <> 'deleting'
 `);
 const updateWorkerToken = database.prepare(`
   update rudder_sails
@@ -411,7 +415,7 @@ const updateWorkspaceHeartbeat = database.prepare(`
       last_heartbeat_at = @lastHeartbeatAt,
       updated_at = @updatedAt
   where id = @id
-    and status <> 'stopped'
+    and status not in ('stopped', 'deleting')
     and (@machineId is null or machine_id is null or machine_id = @machineId)
 `);
 const getSetting = database.prepare("select value from rudder_settings where key = ?");
@@ -609,6 +613,10 @@ function handleSailUpgrade(
     destroyUpgrade(socket, 404);
     return;
   }
+  if (String(sailRow.status) === "deleting") {
+    destroyUpgrade(socket, 410);
+    return;
+  }
   if (role === "worker") {
     try {
       requireWorkerBearer(req, sailRow);
@@ -643,6 +651,10 @@ function handleWorkspaceUpgrade(
   const workspaceRow = findWorkspaceById.get(workspaceId) as Record<string, unknown> | undefined;
   if (!workspaceRow) {
     destroyUpgrade(socket, 404);
+    return;
+  }
+  if (String(workspaceRow.status) === "deleting") {
+    destroyUpgrade(socket, 410);
     return;
   }
   if (role === "worker") {
@@ -1035,6 +1047,162 @@ if (workspaceIdleMs >= 60 * 1000 && workspaceSweepIntervalMs >= 10 * 1000) {
     void sweepIdleWorkspaces().catch(() => undefined);
   }, workspaceSweepIntervalMs);
   timer.unref?.();
+}
+
+// ---- Deletion ------------------------------------------------------------
+//
+// Deleting is a REQUEST that a reaper finishes. The row flips to `deleting`
+// at once (so heartbeats, attaches and stop/pause can no longer touch it, and
+// a workspace's key is freed for a fresh attach), then the teardown runs:
+// machine, volume, snapshot object, row. Any step that fails (Fly busy, the
+// volume still detaching, a network blip) leaves the row `deleting` with the
+// reason in `delete_error`, and sweepDeletions retries it until it is gone,
+// including across a control-plane restart.
+const markSailDeleting = database.prepare(`
+  update rudder_sails set status = 'deleting', delete_error = null, updated_at = @updatedAt
+  where id = @id and account_id = @accountId
+`);
+const markWorkspaceDeleting = database.prepare(`
+  update rudder_workspaces
+  set status = 'deleting', workspace_key = @tombstoneKey, delete_error = null, updated_at = @updatedAt
+  where id = @id and account_id = @accountId
+`);
+const listDeletingSails = database.prepare("select * from rudder_sails where status = 'deleting'");
+const listDeletingWorkspaces = database.prepare("select * from rudder_workspaces where status = 'deleting'");
+const removeSailRow = database.prepare("delete from rudder_sails where id = ? and status = 'deleting'");
+const removeWorkspaceRow = database.prepare("delete from rudder_workspaces where id = ? and status = 'deleting'");
+const recordSailDeleteError = database.prepare("update rudder_sails set delete_error = ?, updated_at = ? where id = ?");
+const recordWorkspaceDeleteError = database.prepare(
+  "update rudder_workspaces set delete_error = ?, updated_at = ? where id = ?",
+);
+const countSnapshotUsers = database.prepare(`
+  select (select count(*) from rudder_sails where snapshot_key = @key and id <> @id and status <> 'deleting')
+       + (select count(*) from rudder_workspaces where snapshot_key = @key and id <> @id and status <> 'deleting')
+    as users
+`);
+const deleteInFlight = new Set<string>();
+
+type DeletionKind = "sail" | "workspace";
+
+async function requestDeletion(
+  kind: DeletionKind,
+  id: string,
+  accountId: string,
+): Promise<{ id: string; kind: DeletionKind; status: "deleted" | "deleting"; error?: string }> {
+  const now = new Date().toISOString();
+  if (kind === "sail") {
+    markSailDeleting.run({ id, accountId, updatedAt: now });
+  } else {
+    markWorkspaceDeleting.run({ id, accountId, tombstoneKey: `deleted:${id}`, updatedAt: now });
+  }
+  closeChannel(kind, id);
+  schedulePersistDatabase();
+  // Try to finish now so the caller can say "deleted"; whatever is left is the
+  // reaper's. Bounded so a slow Fly never holds the request open.
+  const outcome = await Promise.race([
+    reapDeletion(kind, id).then((error) => error),
+    sleep(20_000).then(() => "still tearing down; the control plane will finish it"),
+  ]);
+  return outcome
+    ? { id, kind, status: "deleting", error: outcome }
+    : { id, kind, status: "deleted" };
+}
+
+function closeChannel(kind: DeletionKind, id: string): void {
+  const channels = kind === "sail" ? sailChannels : workspaceChannels;
+  const channel = channels.get(id);
+  if (!channel) {
+    return;
+  }
+  for (const ws of [channel.worker, ...channel.clients]) {
+    try {
+      ws?.close(4410, `${kind} deleted`);
+    } catch {
+      // already closed
+    }
+  }
+  channels.delete(id);
+}
+
+/** Tear one `deleting` row down. Returns the error that stopped it, if any. */
+async function reapDeletion(kind: DeletionKind, id: string): Promise<string | undefined> {
+  const key = `${kind}:${id}`;
+  if (deleteInFlight.has(key)) {
+    return "deletion already in progress";
+  }
+  deleteInFlight.add(key);
+  try {
+    const row = (kind === "sail" ? findSailById.get(id) : findWorkspaceById.get(id)) as
+      | Record<string, unknown>
+      | undefined;
+    if (!row || String(row.status) !== "deleting") {
+      return undefined;
+    }
+    const machineId = optionalString(row.machine_id);
+    const runtime = optionalString(row.runtime) ?? "fly";
+    // A BYO VM sail's machine is the user's own: there is nothing of ours to
+    // destroy, and its worker is refused from here on (heartbeat 410).
+    const ownsMachine = kind === "workspace" || runtime === "fly";
+    if (ownsMachine && machineId) {
+      if (!flyApiToken || !flyAppName) {
+        throw new Error("Fly is not configured; cannot destroy the machine");
+      }
+      await destroyFlyMachine(machineId);
+    }
+    const volumeId = kind === "workspace" ? optionalString(row.volume_id) : undefined;
+    if (volumeId) {
+      await destroyWorkspaceVolume(volumeId);
+    }
+    // The snapshot carries the repo and the auth that was staged with it, so
+    // it goes too -- unless another live row still boots from the same object.
+    const snapshotKey = optionalString(row.snapshot_key);
+    if (snapshotKey && snapshotBucket) {
+      const users = (countSnapshotUsers.get({ key: snapshotKey, id }) as { users: number }).users;
+      if (!users) {
+        await s3.send(new DeleteObjectCommand({ Bucket: snapshotBucket, Key: snapshotKey }));
+      }
+    }
+    if (kind === "sail") {
+      removeSailRow.run(id);
+    } else {
+      removeWorkspaceRow.run(id);
+    }
+    schedulePersistDatabase();
+    console.log(`deleted ${kind} ${id}`);
+    return undefined;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    const now = new Date().toISOString();
+    if (kind === "sail") {
+      recordSailDeleteError.run(message, now, id);
+    } else {
+      recordWorkspaceDeleteError.run(message, now, id);
+    }
+    schedulePersistDatabase();
+    console.warn(`delete ${kind} ${id} not finished, will retry: ${message}`);
+    return message;
+  } finally {
+    deleteInFlight.delete(key);
+  }
+}
+
+async function sweepDeletions(): Promise<void> {
+  for (const row of listDeletingSails.all() as Record<string, unknown>[]) {
+    await reapDeletion("sail", String(row.id));
+  }
+  for (const row of listDeletingWorkspaces.all() as Record<string, unknown>[]) {
+    await reapDeletion("workspace", String(row.id));
+  }
+}
+
+const deleteSweepIntervalMs = Number(process.env.RUDDER_DELETE_SWEEP_MS || 30 * 1000);
+if (deleteSweepIntervalMs >= 1000) {
+  const timer = setInterval(() => {
+    void sweepDeletions().catch(() => undefined);
+  }, deleteSweepIntervalMs);
+  timer.unref?.();
+  // Rows left `deleting` by a previous process are finished on boot.
+  setTimeout(() => void sweepDeletions().catch(() => undefined), 1000).unref?.();
 }
 
 // How stale the busy signal may be and still count: the supervisor heartbeats
@@ -1794,6 +1962,10 @@ async function handleAdminWorkspaceGc(
     const id = String(row.id);
     const status = String(row.status);
     const machineId = optionalString(row.machine_id);
+    if (status === "deleting") {
+      skipped.push({ kind: "workspace", id, reason: "being deleted (the delete sweep owns it)" });
+      continue;
+    }
     if (!machineId) {
       skipped.push({ kind: "workspace", id, reason: "no machineId" });
       continue;
@@ -1833,6 +2005,10 @@ async function handleAdminWorkspaceGc(
     const id = String(row.id);
     const status = String(row.status);
     const machineId = optionalString(row.machine_id);
+    if (status === "deleting") {
+      skipped.push({ kind: "sail", id, reason: "being deleted (the delete sweep owns it)" });
+      continue;
+    }
     if (!machineId) {
       skipped.push({ kind: "sail", id, reason: "no machineId" });
       continue;
@@ -2018,11 +2194,25 @@ async function handleSailApi(req: IncomingMessage, res: ServerResponse, url: URL
     });
     return;
   }
+  const deleteMatch = url.pathname.match(/^\/api\/rudder\/sail\/([^/]+)(?:\/delete)?$/);
+  if (deleteMatch && (req.method === "DELETE" || (req.method === "POST" && url.pathname.endsWith("/delete")))) {
+    const sail = getAccountSail(deleteMatch[1], authContext.accountId);
+    if (!sail) {
+      sendJson(res, 404, { error: "sail not found" });
+      return;
+    }
+    sendJson(res, 200, await requestDeletion("sail", sail.id, authContext.accountId));
+    return;
+  }
   const match = url.pathname.match(/^\/api\/rudder\/sail\/([^/]+)\/(pause|resume|onload|stop)$/);
   if (req.method === "POST" && match) {
     const sail = getAccountSail(match[1], authContext.accountId);
     if (!sail) {
       sendJson(res, 404, { error: "sail not found" });
+      return;
+    }
+    if (sail.status === "deleting") {
+      sendJson(res, 409, { error: "sail is being deleted" });
       return;
     }
     const next = await mutateSail(sail, authContext.accountId, match[2]);
@@ -2185,11 +2375,25 @@ async function handleWorkspaceApi(req: IncomingMessage, res: ServerResponse, url
     sendJson(res, 200, result);
     return;
   }
+  const deleteMatch = url.pathname.match(/^\/api\/rudder\/workspace\/([^/]+)(?:\/delete)?$/);
+  if (deleteMatch && (req.method === "DELETE" || (req.method === "POST" && url.pathname.endsWith("/delete")))) {
+    const workspace = getAccountWorkspace(deleteMatch[1], authContext.accountId);
+    if (!workspace) {
+      sendJson(res, 404, { error: "workspace not found" });
+      return;
+    }
+    sendJson(res, 200, await requestDeletion("workspace", workspace.id, authContext.accountId));
+    return;
+  }
   const stopMatch = url.pathname.match(/^\/api\/rudder\/workspace\/([^/]+)\/(stop|pause|resume)$/);
   if (req.method === "POST" && stopMatch) {
     const workspace = getAccountWorkspace(stopMatch[1], authContext.accountId);
     if (!workspace) {
       sendJson(res, 404, { error: "workspace not found" });
+      return;
+    }
+    if (workspace.status === "deleting") {
+      sendJson(res, 409, { error: "workspace is being deleted" });
       return;
     }
     const next = await mutateWorkspace(workspace, stopMatch[2]);
@@ -2557,6 +2761,10 @@ async function handleWorkerHeartbeat(req: IncomingMessage, res: ServerResponse, 
     return;
   }
   requireWorkerBearer(req, sailRow);
+  if (String(sailRow.status) === "deleting") {
+    sendJson(res, 410, { error: "sail deleted", status: "deleting" });
+    return;
+  }
   const body = await readJsonBody(req);
   const state = stringField(body, "state");
   const status: SailStatus = state === "completed"
@@ -3407,6 +3615,12 @@ async function handleWorkspaceHeartbeat(req: IncomingMessage, res: ServerRespons
     return;
   }
   const currentStatus = String(row.status) as WorkspaceStatus;
+  if (currentStatus === "deleting") {
+    // Gone as far as anyone is concerned: tell the worker so it can exit,
+    // and never let its heartbeat bring the row back.
+    sendJson(res, 410, { error: "workspace deleted", status: currentStatus });
+    return;
+  }
   if (currentStatus === "stopped") {
     sendJson(res, 200, { ok: true, status: currentStatus, ignored: true });
     return;

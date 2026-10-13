@@ -94,6 +94,8 @@ mod telemetry;
 
 mod signals;
 use crate::plan_stream::*;
+mod gam_link;
+use crate::gam_link::*;
 
 const TICK_RATE: Duration = Duration::from_millis(33);
 /// How long injected text sits in a live agent's input box before the deferred
@@ -1311,6 +1313,19 @@ enum GamVerdict {
     Continue(String),
 }
 
+/// A pane line as a sentinel candidate: trimmed, minus the bullet a TUI puts
+/// in front of a message's first line (Codex `• `, Claude `⏺ `). Codex printed
+/// `• RUDDER_GAM_REPLY_START`, which never matched an exact-line test, so every
+/// Codex rebuttal read as silence.
+fn gam_sentinel_line(line: &str) -> &str {
+    let trimmed = line.trim();
+    trimmed
+        .strip_prefix("• ")
+        .or_else(|| trimmed.strip_prefix("⏺ "))
+        .map(str::trim)
+        .unwrap_or(trimmed)
+}
+
 /// Strip markdown fences the model may wrap around the JSON payload.
 fn strip_code_fences(block: &str) -> String {
     let trimmed = block.trim();
@@ -1349,13 +1364,13 @@ fn parse_gam_verdict(lines: &[String]) -> Option<GamVerdict> {
     let starts: Vec<usize> = lines
         .iter()
         .enumerate()
-        .filter(|(_, line)| line.trim() == GAM_VERDICT_START)
+        .filter(|(_, line)| gam_sentinel_line(line) == GAM_VERDICT_START)
         .map(|(index, _)| index)
         .collect();
     for &start_index in starts.iter().rev() {
         let end_offset = lines[start_index + 1..]
             .iter()
-            .position(|line| line.trim() == GAM_VERDICT_END);
+            .position(|line| gam_sentinel_line(line) == GAM_VERDICT_END);
         let end_index = end_offset.map(|offset| start_index + 1 + offset);
         let body = match end_index {
             Some(end) => lines[start_index + 1..end].join("\n"),
@@ -1413,10 +1428,10 @@ fn parse_gam_verdict(lines: &[String]) -> Option<GamVerdict> {
 fn lift_gam_reply(lines: &[String]) -> Option<String> {
     let start_index = lines
         .iter()
-        .rposition(|line| line.trim() == GAM_REPLY_START)?;
+        .rposition(|line| gam_sentinel_line(line) == GAM_REPLY_START)?;
     let end_offset = lines[start_index + 1..]
         .iter()
-        .position(|line| line.trim() == GAM_REPLY_END);
+        .position(|line| gam_sentinel_line(line) == GAM_REPLY_END);
     let end_index = end_offset.map(|offset| start_index + 1 + offset)?;
     let reply = lines[start_index + 1..end_index].join("\n");
     let reply = reply.trim().to_string();
@@ -1530,6 +1545,17 @@ struct App {
     /// setting: it defaults on because the conversation is the point of a pair,
     /// and a user who wants the full terminals hides it with `^w t`.
     gam_transcript_visible: bool,
+    /// `/gam` transports (gam_link.rs), keyed by run id: a Claude channel or a
+    /// Codex app-server client per linked half. Absent = the pane fallback.
+    gam_links: HashMap<String, GamLink>,
+    /// Structured answers the links heard (verdicts, replies, turn ends), with
+    /// arrival times so the pair loop can tell this round's from last round's.
+    gam_signals: HashMap<String, Vec<(Instant, GamSignal)>>,
+    gam_link_tx: std::sync::mpsc::Sender<GamLinkEvent>,
+    gam_link_rx: std::sync::mpsc::Receiver<GamLinkEvent>,
+    /// Off under `cargo test` (fakes are not real CLIs) and with
+    /// `RUDDER_GAM_LINK=0`; tests that exercise links turn it on.
+    gam_links_enabled: bool,
     /// When true, the agents pane renders a topological dependency tree (nest view)
     /// instead of the flat main/workspaces/merged sections. Toggled with `g`.
     nest_view: bool,
@@ -2761,7 +2787,14 @@ impl App {
         let _ = signals::cleanup_old_signals(Duration::from_secs(7 * 24 * 60 * 60));
         let perf = PerfLogger::new();
         let perf_stats = PerfStats::new(perf.enabled());
+        let (gam_link_tx, gam_link_rx) = std::sync::mpsc::channel();
         Self {
+            gam_links: HashMap::new(),
+            gam_signals: HashMap::new(),
+            gam_link_tx,
+            gam_link_rx,
+            gam_links_enabled: !cfg!(test)
+                && std::env::var("RUDDER_GAM_LINK").map_or(true, |value| value != "0"),
             focus: FocusPane::Task,
             nav_mode: false,
             leader_pending: false,
@@ -8060,6 +8093,16 @@ Until the first packet arrives, reply only: \"standing by\"."
             AgentMode::GamAdversarial,
             &adversarial_id,
         );
+        // Transports (gam_link.rs): a Claude channel or a Codex app-server per
+        // half, so packets, revisions and steers are pushed into the live
+        // sessions and verdicts come back structured. Falls back to the panes.
+        self.wire_gam_link(&mut generator_command, backend, &generator_id, GamRole::Generator);
+        self.wire_gam_link(
+            &mut adversarial_command,
+            adversarial_backend,
+            &adversarial_id,
+            GamRole::Adversarial,
+        );
 
         let created_at = now_stamp();
         let mut run = AgentRun {
@@ -8308,6 +8351,8 @@ Until the first packet arrives, reply only: \"standing by\"."
             /// so the turn-boundary loop is not held behind it.
             AbandonInterim(usize),
         }
+        // Links first: their structured answers decide the routing below.
+        self.poll_gam_links();
         let mut actions: Vec<GamAction> = Vec::new();
         for index in 0..self.agents.len() {
             let Some(gam) = self.agents[index].gam.clone() else {
@@ -8361,6 +8406,12 @@ Until the first packet arrives, reply only: \"standing by\"."
                         actions.push(GamAction::ReadInterim(index));
                         continue;
                     };
+                    // A structured answer is final the moment it lands; no
+                    // need to wait for the reviewer's turn to wind down.
+                    if self.has_gam_verdict(&self.agents[peer].id, gam.awaiting_since) {
+                        actions.push(GamAction::ReadInterim(index));
+                        continue;
+                    }
                     if !matches!(
                         self.agents[peer].status,
                         AgentStatus::Done | AgentStatus::Failed | AgentStatus::Stopped
@@ -8379,7 +8430,9 @@ Until the first packet arrives, reply only: \"standing by\"."
                             .is_some_and(|at| at > awaiting_since),
                         None => true,
                     };
-                    if fresh_completion {
+                    if fresh_completion
+                        && !self.gam_link_answer_pending(peer, gam.awaiting_since)
+                    {
                         actions.push(GamAction::ReadInterim(index));
                     }
                 }
@@ -8389,6 +8442,10 @@ Until the first packet arrives, reply only: \"standing by\"."
                         actions.push(GamAction::ReadVerdict(index));
                         continue;
                     };
+                    if self.has_gam_verdict(&self.agents[peer].id, gam.awaiting_since) {
+                        actions.push(GamAction::ReadVerdict(index));
+                        continue;
+                    }
                     if !matches!(
                         self.agents[peer].status,
                         AgentStatus::Done | AgentStatus::Failed | AgentStatus::Stopped
@@ -8411,7 +8468,9 @@ Until the first packet arrives, reply only: \"standing by\"."
                         // reviewer's PTY is gone anyway, so routing escalates.
                         None => true,
                     };
-                    if fresh_completion {
+                    if fresh_completion
+                        && !self.gam_link_answer_pending(peer, gam.awaiting_since)
+                    {
                         actions.push(GamAction::ReadVerdict(index));
                     }
                 }
@@ -8508,8 +8567,11 @@ Until the first packet arrives, reply only: \"standing by\"."
             }
             return;
         }
-        let packet = gam_interim_packet(&gam, &diff, &pane_tail);
-        if !self.live_inject_at(peer_index, &packet) {
+        let packet = with_gam_answer_note(
+            gam_interim_packet(&gam, &diff, &pane_tail),
+            self.gam_links.get(&self.agents[peer_index].id),
+        );
+        if !self.gam_send(peer_index, &packet, GamSendKind::Interim) {
             // A mid-turn check is best-effort: an unreachable reviewer pane is
             // not a reason to end a turn that is still running. Back off and let
             // the turn boundary escalate if the reviewer is really gone.
@@ -8559,13 +8621,20 @@ Until the first packet arrives, reply only: \"standing by\"."
     /// one check.
     fn route_gam_interim(&mut self, generator_index: usize) {
         let peer_index = self.gam_peer_index_of(generator_index);
+        let since = self.agents[generator_index]
+            .gam
+            .as_ref()
+            .and_then(|gam| gam.awaiting_since);
         let verdict = peer_index.and_then(|peer| {
-            let lines = self.agents[peer]
-                .terminal
-                .as_ref()
-                .map(|terminal| terminal.visible_lines_snapshot())
-                .unwrap_or_default();
-            parse_gam_verdict(&lines)
+            let peer_id = self.agents[peer].id.clone();
+            self.take_gam_verdict(&peer_id, since).or_else(|| {
+                let lines = self.agents[peer]
+                    .terminal
+                    .as_ref()
+                    .map(|terminal| terminal.visible_lines_snapshot())
+                    .unwrap_or_default();
+                parse_gam_verdict(&lines)
+            })
         });
         // Whatever happens, the turn-boundary loop takes over again from here.
         for side in [Some(generator_index), peer_index].into_iter().flatten() {
@@ -8642,7 +8711,7 @@ finished work: fold it into what you are doing. If it is wrong, say why inside \
             start = GAM_REPLY_START,
             end = GAM_REPLY_END,
         );
-        if !self.live_inject_at(generator_index, &injection) {
+        if !self.gam_send(generator_index, &injection, GamSendKind::Steer) {
             self.record_activity(
                 "gam: the reviewer's mid-turn steer could not reach the generator".to_string(),
             );
@@ -8743,10 +8812,21 @@ finished work: fold it into what you are doing. If it is wrong, say why inside \
         }
         // Lift the generator's pushback FIRST — nothing has reset its buffer
         // since the turn that just completed, so this sees exactly what it said.
-        let reply = self.agents[generator_index]
-            .terminal
+        // A structured reply (a `gam_reply` call, or the block in a Codex
+        // generator's final message) beats one lifted off the screen.
+        let generator_id = self.agents[generator_index].id.clone();
+        let round_started = self.agents[generator_index]
+            .gam
             .as_ref()
-            .and_then(|terminal| lift_gam_reply(&terminal.visible_lines_snapshot()));
+            .and_then(|gam| gam.phase_since);
+        let reply = self
+            .take_gam_reply(&generator_id, round_started)
+            .or_else(|| {
+                self.agents[generator_index]
+                    .terminal
+                    .as_ref()
+                    .and_then(|terminal| lift_gam_reply(&terminal.visible_lines_snapshot()))
+            });
         let mut gam = match self.agents[generator_index].gam.as_ref() {
             Some(gam) => gam.clone(),
             None => return,
@@ -8775,8 +8855,11 @@ finished work: fold it into what you are doing. If it is wrong, say why inside \
             return;
         }
         gam.last_progress = Some(progress);
-        let packet = gam_review_packet(&gam, &diff);
-        if !self.live_inject_at(peer_index, &packet) {
+        let packet = with_gam_answer_note(
+            gam_review_packet(&gam, &diff),
+            self.gam_links.get(&self.agents[peer_index].id),
+        );
+        if !self.gam_send(peer_index, &packet, GamSendKind::Review) {
             self.settle_gam_pair(
                 generator_index,
                 GamOutcome::Escalated("could not reach the reviewer pane".to_string()),
@@ -8833,12 +8916,20 @@ finished work: fold it into what you are doing. If it is wrong, say why inside \
             );
             return;
         };
-        let lines = self.agents[peer_index]
-            .terminal
+        // The structured answer the link heard wins; the screen is the fallback.
+        let peer_id = self.agents[peer_index].id.clone();
+        let since = self.agents[generator_index]
+            .gam
             .as_ref()
-            .map(|terminal| terminal.visible_lines_snapshot())
-            .unwrap_or_default();
-        let verdict = parse_gam_verdict(&lines);
+            .and_then(|gam| gam.awaiting_since);
+        let verdict = self.take_gam_verdict(&peer_id, since).or_else(|| {
+            let lines = self.agents[peer_index]
+                .terminal
+                .as_ref()
+                .map(|terminal| terminal.visible_lines_snapshot())
+                .unwrap_or_default();
+            parse_gam_verdict(&lines)
+        });
         let reviewer_model = self.agents[peer_index].model.clone();
         let round = self.agents[generator_index]
             .gam
@@ -8921,7 +9012,7 @@ Address the objection directly. If you disagree, say why inside \
                         recorded.say(GamRole::Adversarial, kind, &revise_message);
                     }
                 }
-                let injected = self.live_inject_at(generator_index, &injection);
+                let injected = self.gam_send(generator_index, &injection, GamSendKind::Revision);
                 let reason = if capped {
                     format!(
                         "{runaway_rounds} rounds without converging; stopping so it cannot loop"
@@ -18860,6 +18951,11 @@ fn main() -> Result<()> {
     }
     if args.first().is_some_and(|arg| arg == "attach") {
         return run_attach_client(&args[1..]);
+    }
+    // The MCP server a /gam Claude half spawns (gam_link.rs). Never touches the
+    // terminal: its stdio is the MCP transport.
+    if args.first().is_some_and(|arg| arg == "gam-channel") {
+        return run_gam_channel_server(&args[1..]);
     }
 
     let mut terminal = setup_terminal()?;

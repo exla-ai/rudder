@@ -19502,6 +19502,12 @@ fn the_tab_spinner_turns_on_a_clock_not_on_frames() {
 
 #[test]
 fn gam_args_default_to_the_cross_picked_reviewer() {
+    // The default reviewer model reads the user's last-used model from the
+    // rudder config; point it at an empty home so the table default applies
+    // (it read whatever this machine last picked, and flaked on it).
+    let _env = env_guard();
+    let home = unique_test_repo("gam-args-home");
+    std::env::set_var("RUDDER_HOME", &home);
     let request =
         parse_gam_args("fix the auth bug", Backend::Claude, "sonnet").expect("plain task parses");
     assert_eq!(request.task, "fix the auth bug");
@@ -25642,4 +25648,189 @@ fn attach_client_selects_copies_and_restores_what_it_drew() {
     assert_eq!(screen.plain_lines(), vec!["attach copy target", "changed"]);
     screen.apply(true, &[(0, "fresh".to_string())]);
     assert_eq!(screen.plain_lines(), vec!["fresh"]);
+}
+
+/// A Claude link with its channel already up, rooted in `dir`.
+fn live_claude_link(dir: &std::path::Path) -> GamLink {
+    let mut command = TerminalCommand::with_args("claude", ["task".to_string()]);
+    let mut link = wire_claude_link_in(&mut command, dir.to_path_buf(), GamRole::Adversarial)
+        .expect("link");
+    if let GamLinkTransport::Claude { channel_live, .. } = &mut link.transport {
+        *channel_live = true;
+    }
+    link
+}
+
+fn inbox_messages(dir: &std::path::Path) -> Vec<serde_json::Value> {
+    let mut names = fs::read_dir(dir.join("inbox"))
+        .map(|entries| {
+            entries
+                .filter_map(Result::ok)
+                .map(|entry| entry.path())
+                .filter(|path| path.extension().is_some_and(|ext| ext == "json"))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    names.sort();
+    names
+        .iter()
+        .filter_map(|path| serde_json::from_slice(&fs::read(path).ok()?).ok())
+        .collect()
+}
+
+#[cfg(not(windows))]
+#[test]
+fn a_linked_gam_pair_pushes_the_packet_and_routes_a_tool_call_verdict() {
+    let dir = unique_test_repo("gam-link-claude");
+    let mut app = App::new();
+    app.cwd = dir.clone();
+    let (_gen, adv) = gam_test_pair(&mut app, "standing by");
+    let link_dir = dir.join("link-adv");
+    app.gam_links
+        .insert("gam-adv".to_string(), live_claude_link(&link_dir));
+
+    app.poll_gam_pairs();
+
+    assert_eq!(
+        app.agents[0].gam.as_ref().unwrap().phase,
+        GamPhase::AwaitingVerdict
+    );
+    let pushed = inbox_messages(&link_dir);
+    assert_eq!(pushed.len(), 1, "one packet on the channel: {pushed:?}");
+    let content = pushed[0]["content"].as_str().unwrap();
+    assert!(content.contains("Review round 1"), "{content}");
+    assert!(
+        content.contains("call the `gam_verdict` tool"),
+        "the packet says how to answer over the link"
+    );
+    std::thread::sleep(std::time::Duration::from_millis(150));
+    let pasted = fs::read_to_string(dir.join("reviewer.log")).unwrap_or_default();
+    assert!(
+        !pasted.contains("Review round 1"),
+        "nothing typed into the pane: {pasted:?}"
+    );
+
+    // The reviewer answers by tool call while its turn is still winding down.
+    // That is final: the pair must not wait for Done or read the screen.
+    app.agents[adv].status = AgentStatus::Running;
+    std::fs::create_dir_all(link_dir.join("outbox")).unwrap();
+    std::fs::write(
+        link_dir.join("outbox").join("00000000000000000001.json"),
+        serde_json::json!({"tool": "gam_verdict", "arguments": {"verdict": "accept", "message": "covered"}}).to_string(),
+    )
+    .unwrap();
+    app.poll_gam_pairs();
+
+    assert_eq!(
+        app.agents[0].gam.as_ref().unwrap().phase,
+        GamPhase::Settled(GamOutcome::Accepted)
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[cfg(not(windows))]
+#[test]
+fn a_linked_gam_steer_reaches_the_generator_over_its_channel() {
+    let dir = unique_test_repo("gam-link-steer");
+    let mut app = App::new();
+    app.cwd = dir.clone();
+    let (generator, _adv) = gam_test_pair(&mut app, "standing by");
+    let link_dir = dir.join("link-gen");
+    app.gam_links
+        .insert("gam-gen".to_string(), live_claude_link(&link_dir));
+    app.agents[generator].status = AgentStatus::Running;
+
+    app.apply_gam_steer(generator, "the router lives in src/net".to_string());
+
+    let pushed = inbox_messages(&link_dir);
+    assert_eq!(pushed.len(), 1, "{pushed:?}");
+    assert_eq!(pushed[0]["meta"]["kind"], "steer");
+    assert!(pushed[0]["content"]
+        .as_str()
+        .unwrap()
+        .contains("the router lives in src/net"));
+    assert_eq!(app.agents[generator].gam.as_ref().unwrap().steers, 1);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[cfg(not(windows))]
+#[test]
+fn a_codex_reviewer_verdict_waits_for_its_turn_event_not_the_screen() {
+    let dir = unique_test_repo("gam-link-codex");
+    let mut app = App::new();
+    app.cwd = dir.clone();
+    // The pane shows a schema answer with no sentinel block: reading the screen
+    // here would escalate "no verdict block".
+    let (_gen, adv) = gam_test_pair(&mut app, "{\"verdict\":\"accept\",\"message\":\"good\"}");
+    let (tx, _rx) = std::sync::mpsc::channel();
+    app.gam_links.insert(
+        "gam-adv".to_string(),
+        GamLink {
+            dir: dir.join("link-adv"),
+            nonce: "n".to_string(),
+            spawned_at: Instant::now(),
+            transport: GamLinkTransport::Codex {
+                tx,
+                ready: true,
+                closed: false,
+            },
+        },
+    );
+    for index in [0usize, 1usize] {
+        if let Some(gam) = app.agents[index].gam.as_mut() {
+            gam.phase = GamPhase::AwaitingVerdict;
+            gam.awaiting_since = Some(Instant::now());
+        }
+    }
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    // The notify hook beat the websocket: Done, but no turn event yet.
+    app.agents[adv].status = AgentStatus::Done;
+    app.agents[adv].completed_at = Some(Instant::now());
+
+    app.poll_gam_pairs();
+    assert_eq!(
+        app.agents[0].gam.as_ref().unwrap().phase,
+        GamPhase::AwaitingVerdict,
+        "held for the structured answer; notice {:?}",
+        app.notice
+    );
+
+    app.gam_link_tx
+        .send(GamLinkEvent::Signal {
+            run_id: "gam-adv".to_string(),
+            signal: GamSignal::TurnCompleted {
+                last: "{\"verdict\":\"accept\",\"message\":\"good\"}".to_string(),
+                all: "{\"verdict\":\"accept\",\"message\":\"good\"}".to_string(),
+            },
+        })
+        .unwrap();
+    app.poll_gam_pairs();
+
+    assert_eq!(
+        app.agents[0].gam.as_ref().unwrap().phase,
+        GamPhase::Settled(GamOutcome::Accepted)
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_codex_bulleted_reply_block_is_still_a_reply() {
+    let lines = [
+        "• RUDDER_GAM_REPLY_START",
+        "  Those files were there before my edits; I left them.",
+        "  RUDDER_GAM_REPLY_END",
+        "• Implemented greet.py.",
+    ]
+    .map(str::to_string);
+    assert_eq!(
+        lift_gam_reply(&lines).as_deref(),
+        Some("Those files were there before my edits; I left them.")
+    );
+    let verdict = [
+        "• RUDDER_GAM_VERDICT_START",
+        "  {\"verdict\":\"accept\",\"message\":\"ok\"}",
+        "  RUDDER_GAM_VERDICT_END",
+    ]
+    .map(str::to_string);
+    assert_eq!(parse_gam_verdict(&verdict), Some(GamVerdict::Accept("ok".to_string())));
 }

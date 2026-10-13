@@ -1633,6 +1633,40 @@ The pair renders as a SPLIT worker pane (generator left, adversarial right,
 (`^W` `t` hides it); click a half or `^W` `a` to move between them; wheel routes
 to whichever half is under the pointer.
 
+- **Transports, not typing (`native/src/gam_link.rs`, 2.14.81).** Packets,
+  revisions and steers are PUSHED into the live sessions and answers come back
+  STRUCTURED; the old bracket-paste + screen scrape is only the fallback.
+  - *Claude halves* get a per-run MCP server (`rudder-native gam-channel <dir>
+    <role> --channel`) loaded with `--mcp-config` +
+    `--dangerously-load-development-channels server:rudder_gam`. Rudder drops a
+    message in `<rudder home>/gam/<run>/inbox/`, the server pushes it as a
+    `notifications/claude/channel` event (mid-turn too), and verdicts/rebuttals
+    come back as `gam_verdict` / `gam_reply` TOOL CALLS written to `outbox/`.
+    Measured, not assumed: Claude treats channel content as untrusted and
+    IGNORED a mid-turn steer even when the user prompt vouched for it; it acts
+    once `--append-system-prompt` names the channel and a per-run nonce
+    (`claude_link_system_prompt`). Both flags are variadic, so they go at the
+    FRONT of the argv or they swallow the prompt. Rudder answers the dev-channel
+    consent dialog itself, reads the startup banner (joined across wrapped
+    lines) to decide the channel is live, and pastes if a push draws no output
+    within 20s.
+  - *Codex halves* run `codex --remote unix://…` against a private `codex
+    app-server` started by a `/bin/sh` wrapper in the pane's process group (a
+    group SIGKILL takes both). Rudder connects as a second websocket client
+    (tungstenite over the UDS; the socket path is a symlink, resolve it):
+    `turn/start` between turns (reviewer turns carry an `outputSchema`, so the
+    verdict is schema JSON), `turn/steer` with `expectedTurnId` mid-turn, and
+    the turn's agent messages from `turn/completed`. Pick the NON-ephemeral
+    loaded thread (the server titles the session in an ephemeral thread of its
+    own), retry `thread/resume` while the first rollout is still being written,
+    and let the LINK write the run's completion signal: `notify` fires for the
+    title thread too and marked a generator Done mid-turn. The link queues the
+    answer before writing `done`, and a reply block often sits in an EARLIER
+    agent message than the final one.
+  - Links are off under `cargo test` and with `RUDDER_GAM_LINK=0`, and only
+    wired when the CLI has the feature (Claude Code >= 2.1.80, `codex --help`
+    lists `--remote`). The split's half titles show `⇄ channel` / `⇄ app-server`
+    while a link carries the traffic.
 - **Grammar**: `/gam [main] [<claude|codex|opencode> [model] [effort]] <task>`.
   Bare model aliases (`/gam fable …`) resolve through `known_model_backend` —
   NEVER `backend_for_model`, which guesses Claude for any word and would eat

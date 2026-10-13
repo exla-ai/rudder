@@ -4165,7 +4165,14 @@ pub(crate) fn render_gam_split(frame: &mut Frame<'_>, area: Rect, app: &mut App)
                 } else {
                     run.task_summary.clone()
                 };
-                format!("{} · {}", truncate_chars(&label, 30), round_badge)
+                // Which road messages take: a live link, or typing into the pane.
+                let link = app
+                    .gam_links
+                    .get(&run.id)
+                    .filter(|link| link.can_send())
+                    .map(|link| format!(" · ⇄ {}", link.label()))
+                    .unwrap_or_default();
+                format!("{} · {}{link}", truncate_chars(&label, 30), round_badge)
             })
             .unwrap_or_default();
         // The split is the only place two agent panes share the screen, and

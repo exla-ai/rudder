@@ -253,10 +253,9 @@ const SLOW_SCROLL_THRESHOLD: Duration = Duration::from_millis(5);
 const SLOW_LINE_RENDER_THRESHOLD: Duration = Duration::from_millis(5);
 // The Codex-side code-review profile (Claude plans review on Opus/Medium — see
 // `review_agent_profile`). Review runs the installed `thermonuclear` skill.
-// gpt-5.5 is Codex's current default/latest; an aspirational "gpt-5.6" is NOT a
-// real model — Codex rejects it ("not supported with a ChatGPT account"). Bump
-// this when a newer Codex model actually ships and appears in models.rs.
-const REVIEW_ALL_MODEL: &str = "gpt-5.5";
+// Codex's default model (models.rs); bump both when a newer one ships AND
+// runs on ChatGPT auth (check `codex exec -m <id>` before trusting a name).
+const REVIEW_ALL_MODEL: &str = CODEX_DEFAULT_MODEL;
 const REVIEW_ALL_EFFORT: EffortLevel = EffortLevel::High;
 const TASK_SUMMARY_MODEL: &str = "claude-haiku-4-5-20251001";
 /// Default cap on how many plan-launched agents may run at once. Overridable via
@@ -5265,10 +5264,8 @@ impl App {
 
     /// Deterministic model for the code-review agent, chosen by the plan's
     /// backend: Claude plans review on Opus (medium effort), Codex plans review
-    /// on gpt-5.5 (high effort) by default. Override per backend with
-    /// `RUDDER_REVIEW_MODEL_CLAUDE` / `RUDDER_REVIEW_MODEL_CODEX` — e.g. set the
-    /// Codex one to `gpt-5.6` on workers whose Codex is authed with an API key
-    /// that can reach it (gpt-5.6 400s on ChatGPT-account Codex auth). The review
+    /// on Codex's default model (high effort). Override per backend with
+    /// `RUDDER_REVIEW_MODEL_CLAUDE` / `RUDDER_REVIEW_MODEL_CODEX`. The review
     /// itself runs the installed `thermonuclear` skill (see `review_all_prompt`).
     fn review_agent_profile(&self) -> (Backend, String, EffortLevel) {
         let env_override = |key: &str| {
@@ -7663,7 +7660,7 @@ impl App {
                 push_codex_planner_config_overrides(&mut args, effort);
                 if !model.trim().is_empty() {
                     args.push("-m".to_string());
-                    args.push(model.to_string());
+                    args.push(live_codex_model(model).to_string());
                 }
                 args.push(prompt.to_string());
                 TerminalCommand::with_args(codex_program(), args)

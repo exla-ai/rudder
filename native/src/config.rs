@@ -56,7 +56,10 @@ pub(crate) fn config_model(config: &serde_json::Value, backend: Backend) -> Opti
         .get("model")?
         .as_str()
         .filter(|model| !model.trim().is_empty())
-        .map(ToString::to_string)
+        .map(|model| match backend {
+            Backend::Codex => live_codex_model(model).to_string(),
+            _ => model.to_string(),
+        })
 }
 
 pub(crate) fn config_effort(config: &serde_json::Value, backend: Backend) -> Option<EffortLevel> {
@@ -374,10 +377,10 @@ pub(crate) fn default_config_value() -> serde_json::Value {
             },
             "codex": {
                 "profileId": "openai-codex:default",
-                "model": "gpt-5.5"
+                "model": CODEX_DEFAULT_MODEL
             },
             "acpx": {
-                "model": "gpt-5.5"
+                "model": CODEX_DEFAULT_MODEL
             }
         }
     })

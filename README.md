@@ -75,7 +75,7 @@ You can also start a task directly from the shell:
 ```bash
 rudder "fix the failing tests"
 rudder claude "fix the auth redirect bug"
-rudder codex --model gpt-5.5 "refactor the parser"
+rudder codex --model gpt-6.1-sol "refactor the parser"
 ```
 
 ## Onboarding and auth
@@ -263,7 +263,7 @@ running, Rudder also exposes matching project skills; the orchestrator can write
 | Command | Action |
 | --- | --- |
 | `/model` | Pick provider, then model, then effort |
-| `/fast` | Fast mode for new agents: flagship model at low effort (Claude opus / Codex gpt-5.5); `/model` switches back |
+| `/fast` | Fast mode for new agents: flagship model at low effort (Claude opus / Codex gpt-6.1-sol); `/model` switches back |
 | `/plan <text>` | Start the orchestrator / DAG planner |
 | `/gam [main] [<model>] <task>` | Generator + adversarial reviewer pair: split panes, the reviewer questions every round, steers the generator mid-turn, and can stop the run; only the generator edits. `^W t` shows the dialogue between them |
 | `/share <text>` | Save gitignored shared context for all agents in `RUDDER_SHARED.md` |
@@ -289,7 +289,7 @@ Merged rows show the target branch, jj/Git revision, and whether the remote cont
 Use `/model [provider] [model] [effort]` in the task input. Claude offers the
 same current aliases as Claude Code (`opus`, `fable`, `sonnet`, and `haiku`);
 the picker labels context windows such as Opus's 1M context without inventing a
-different model name. Codex offers `gpt-5.5`, `gpt-5.4-codex`, and other
+different model name. Codex offers `gpt-6.1-sol`, `gpt-5.6-sol`, and other
 discovered models. `auto` effort means Rudder passes no override.
 
 `opencode` is available as a third backend: `/model opencode <provider/model>`

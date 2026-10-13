@@ -2,10 +2,27 @@
 //! Model/effort tables, the model picker, and suggestion ranking.
 use super::*;
 
+/// Codex's default model. gpt-5.5 retired on 2026-10-14; Codex then puts up a
+/// blocking "Try new model" dialog in every pane launched on it.
+pub(crate) const CODEX_DEFAULT_MODEL: &str = "gpt-6.1-sol";
+
+/// Codex models OpenAI has retired. A saved config, a paused run or a resumed
+/// session can still name one, and launching it wedges the pane on Codex's
+/// upgrade dialog, so it is swapped for the current default at launch.
+const RETIRED_CODEX_MODELS: &[&str] = &["gpt-5.5", "gpt-5.5-pro"];
+
+pub(crate) fn live_codex_model(model: &str) -> &str {
+    if RETIRED_CODEX_MODELS.contains(&model.trim()) {
+        CODEX_DEFAULT_MODEL
+    } else {
+        model
+    }
+}
+
 pub(crate) fn default_model_for(backend: Backend) -> &'static str {
     match backend {
         Backend::Claude => "sonnet",
-        Backend::Codex => "gpt-5.5",
+        Backend::Codex => CODEX_DEFAULT_MODEL,
         // opencode is a front-end for many providers and already has a configured
         // default; an empty model means "use it" rather than Rudder guessing a
         // provider the user may not even be authenticated for.
@@ -25,7 +42,7 @@ pub(crate) fn default_model_for(backend: Backend) -> &'static str {
 pub(crate) fn fast_model_for(backend: Backend) -> &'static str {
     match backend {
         Backend::Claude => "opus",
-        Backend::Codex => "gpt-5.5",
+        Backend::Codex => CODEX_DEFAULT_MODEL,
         // No fast tier to select: opencode's speed is whatever model is configured.
         Backend::Opencode => "",
     }
@@ -543,7 +560,7 @@ pub(crate) fn command_suggestions() -> Vec<Suggestion> {
         },
         Suggestion {
             label: "/fast".to_string(),
-            detail: "fast mode for new agents: flagship model at low effort (claude opus / codex gpt-5.5)"
+            detail: "fast mode for new agents: flagship model at low effort (claude opus / codex gpt-6.1-sol)"
                 .to_string(),
             action: SuggestionAction::RunCommand("/fast".to_string()),
         },
@@ -575,7 +592,7 @@ pub(crate) fn command_suggestions() -> Vec<Suggestion> {
         },
         Suggestion {
             label: "/gam <model> <task>".to_string(),
-            detail: "pick the adversarial reviewer's model inline (e.g. /gam codex gpt-5.5 fix auth)".to_string(),
+            detail: "pick the adversarial reviewer's model inline (e.g. /gam codex gpt-6.1-sol fix auth)".to_string(),
             action: SuggestionAction::Insert("/gam ".to_string()),
         },
         Suggestion {
@@ -1011,11 +1028,11 @@ pub(crate) fn fallback_model_rows() -> Vec<(Backend, &'static str, &'static str)
         // family ships as capability tiers (sol > terra > luna, by price);
         // gpt-6-astra is API-key only; gpt-5.4 and the 5.4/5.3 codex variants
         // were retired from ChatGPT auth.
-        (Backend::Codex, "gpt-6-astra", "newest · needs API-key auth"),
-        (Backend::Codex, "gpt-5.6-sol", "flagship · works on ChatGPT auth"),
+        (Backend::Codex, "gpt-6.1-sol", "flagship · default"),
+        (Backend::Codex, "gpt-6-astra", "needs API-key auth"),
+        (Backend::Codex, "gpt-5.6-sol", "prior flagship"),
         (Backend::Codex, "gpt-5.6-terra", "balanced"),
         (Backend::Codex, "gpt-5.6-luna", "fast · cheapest"),
-        (Backend::Codex, "gpt-5.5", "prior flagship"),
         (Backend::Codex, "gpt-5.3-codex-spark", "fast coding"),
     ]
 }

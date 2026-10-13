@@ -461,7 +461,7 @@ pairs with Claude.</p>
 <span class="run">&#9612;</span> writing the jitter test&hellip;</pre>
       </div>
       <div class="pane pane-adv">
-        <div class="pane-label">adv &middot; codex gpt-5.5 &middot; objected &middot; 1 review</div>
+        <div class="pane-label">adv &middot; codex gpt-6.1-sol &middot; objected &middot; 1 review</div>
         <pre class="tty"><span class="dim">read-only &middot; cannot edit any file</span>
 
 <span class="ok">&#9679;</span> Read src/net/retry.ts
@@ -485,10 +485,10 @@ real checkout rather than an isolated workspace:</p>
   <tbody>
     <tr><td>/gam &lt;task&gt;</td><td>Reviewer picked for you, from the other provider.</td></tr>
     <tr><td>/gam codex &lt;task&gt;</td><td>Codex reviews, on its default model.</td></tr>
-    <tr><td>/gam codex gpt-5.5 &lt;task&gt;</td><td>A named provider and model.</td></tr>
+    <tr><td>/gam codex gpt-6.1-sol &lt;task&gt;</td><td>A named provider and model.</td></tr>
     <tr><td>/gam fable &lt;task&gt;</td><td>A bare model name works when Rudder recognises it.</td></tr>
     <tr><td>/gam main &lt;task&gt;</td><td>The pair runs in your checkout instead of a workspace.</td></tr>
-    <tr><td>/gam codex gpt-5.5 main &lt;task&gt;</td><td><code>main</code> works on either side of the model. The picker leaves your cursor after the model it inserted, which is where you would naturally type it.</td></tr>
+    <tr><td>/gam codex gpt-6.1-sol main &lt;task&gt;</td><td><code>main</code> works on either side of the model. The picker leaves your cursor after the model it inserted, which is where you would naturally type it.</td></tr>
   </tbody>
 </table>
 <p>Ordinary task words are never mistaken for a model. <code>/gam fix the auth
@@ -741,7 +741,7 @@ a reviewer's objection and a generator's answer attached.</p>
   <tbody>
     <tr><td>/model</td><td>Set the backend, model and reasoning effort for the next agent. Effort runs low, medium, high, xhigh, max; xhigh is the default where a model offers it, and opencode takes none. A running agent keeps what it launched with.</td></tr>
     <tr><td>/fast</td><td>Toggle faster output on supported models.</td></tr>
-    <tr><td>/gam</td><td>Start a Generative Adversarial Model (GAM) pair: a generator plus an adversarial reviewer. The reviewer defaults to the other provider; name one with <code>/gam codex gpt-5.5 &lt;task&gt;</code>, or add <code>main</code> to run the pair in your checkout.</td></tr>
+    <tr><td>/gam</td><td>Start a Generative Adversarial Model (GAM) pair: a generator plus an adversarial reviewer. The reviewer defaults to the other provider; name one with <code>/gam codex gpt-6.1-sol &lt;task&gt;</code>, or add <code>main</code> to run the pair in your checkout.</td></tr>
     <tr><td>/resume</td><td>Continue an existing Claude, Codex or opencode chat as an agent. The picker lists this repo's recent chats and says which directory each one ran in. It lands in an isolated workspace like plain text does; add <code>--here</code> to continue it in your real checkout instead.</td></tr>
     <tr><td>/restore</td><td>Reopen a specific session id in a new pane.</td></tr>
     <tr><td>/share</td><td>Durable local context every agent reads. For tokens, URLs, env details.</td></tr>

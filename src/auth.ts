@@ -23,7 +23,7 @@ import {
   runCommandSync,
   shortenHome,
 } from "./util.js";
-import { authStorePath, loadAuthStore, loadConfig, saveAuthStore, saveConfig } from "./state.js";
+import { CODEX_DEFAULT_MODEL, authStorePath, loadAuthStore, loadConfig, saveAuthStore, saveConfig } from "./state.js";
 
 const CLAUDE_KEYCHAIN_SERVICE = "Claude Code-credentials";
 const CODEX_KEYCHAIN_SERVICE = "Codex Auth";
@@ -297,7 +297,7 @@ async function configureOpenAI(
     config.backends.codex = {
       ...(config.backends.codex ?? {}),
       profileId: store.profiles["openai-codex:default"] ? "openai-codex:default" : "openai:env",
-      model: config.backends.codex?.model ?? "gpt-5.5",
+      model: config.backends.codex?.model ?? CODEX_DEFAULT_MODEL,
       reasoningEffort: "xhigh",
     };
     return store;

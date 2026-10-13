@@ -753,7 +753,7 @@ functional but less battle-tested than the local dashboard; treat it as beta.
   interactive orchestrator. Known gaps, deliberate: no token/cost accounting
   (`usage.rs` reports zero), no cloud-worker support, no `/fast` preset.
 - **`/fast` (v2.5.0, decided):** the fast preset is the FLAGSHIP model at LOW
-  effort — claude `opus(low)`, codex `gpt-5.5(low)` (`fast_model_for`,
+  effort — claude `opus(low)`, codex `gpt-6.1-sol(low)` (`fast_model_for`,
   `native/src/models.rs`) — never a downgrade to haiku/spark. This mirrors
   Claude Code's own fast mode (Opus with faster output, not a smaller model).
   The claude CLI has no flag to launch with its native fast output mode

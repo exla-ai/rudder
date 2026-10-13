@@ -50,6 +50,21 @@ let lastUsedCodexModelCache: string | undefined | null = null;
 // model", not whatever release was current when this file last shipped.
 // Cached for the life of the process — the CLI is short-lived, and a mid-run
 // /model change updates the run record itself, not these fallbacks.
+/** Codex's default model. gpt-5.5 retired on 2026-10-14; Codex then shows a
+ * blocking "Try new model" dialog in every session launched on it. Mirrors
+ * `CODEX_DEFAULT_MODEL` in native/src/models.rs. */
+export const CODEX_DEFAULT_MODEL = "gpt-6.1-sol";
+
+const RETIRED_CODEX_MODELS = new Set(["gpt-5.5", "gpt-5.5-pro"]);
+
+/** A saved config or an old run can still name a retired Codex model; launch
+ * the current default instead (native: `live_codex_model`). */
+export function liveCodexModel(model: string): string;
+export function liveCodexModel(model: string | undefined): string | undefined;
+export function liveCodexModel(model: string | undefined): string | undefined {
+  return model && RETIRED_CODEX_MODELS.has(model.trim()) ? CODEX_DEFAULT_MODEL : model;
+}
+
 export function lastUsedCodexModelSync(): string | undefined {
   if (lastUsedCodexModelCache === null) {
     let model: string | undefined;
@@ -57,7 +72,7 @@ export function lastUsedCodexModelSync(): string | undefined {
       const raw = fs.readFileSync(globalConfigPath(), "utf8");
       const parsed = JSON.parse(raw) as RudderConfig;
       const value = parsed?.backends?.codex?.model;
-      model = typeof value === "string" && value.trim() ? value.trim() : undefined;
+      model = typeof value === "string" && value.trim() ? liveCodexModel(value.trim()) : undefined;
     } catch {
       model = undefined;
     }
@@ -229,9 +244,9 @@ export function defaultConfig(): RudderConfig {
       claude: { profileId: "anthropic:claude-code", model: "sonnet" },
       codex: {
         profileId: "openai-codex:default",
-        model: "gpt-5.5",
+        model: CODEX_DEFAULT_MODEL,
       },
-      acpx: { model: "gpt-5.5" },
+      acpx: { model: CODEX_DEFAULT_MODEL },
     },
     board: { port: DEFAULT_BOARD_PORT },
     orchestrator: { maxParallel: 1000 },
@@ -266,6 +281,10 @@ function normalizeConfig(existing: RudderConfig): RudderConfig {
       ...(existing.orchestrator?.budget ? { budget: existing.orchestrator.budget } : {}),
     },
   };
+  for (const id of ["codex", "acpx"] as const) {
+    const backend = normalized.backends[id];
+    if (backend?.model) backend.model = liveCodexModel(backend.model);
+  }
   // Remove the retired merge gate instead of carrying a dead feature flag
   // forward through the top-level config spread.
   Reflect.deleteProperty(normalized, "autoMerge");

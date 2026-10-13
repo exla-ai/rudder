@@ -19512,7 +19512,7 @@ fn gam_args_default_to_the_cross_picked_reviewer() {
         parse_gam_args("fix the auth bug", Backend::Claude, "sonnet").expect("plain task parses");
     assert_eq!(request.task, "fix the auth bug");
     assert_eq!(request.adversarial_backend, Backend::Codex);
-    assert_eq!(request.adversarial_model, "gpt-5.5");
+    assert_eq!(request.adversarial_model, CODEX_DEFAULT_MODEL);
     assert!(!request.in_main);
 
     let mirrored = parse_gam_args("fix the auth bug", Backend::Codex, "gpt-5.5").expect("parses");
@@ -26015,4 +26015,27 @@ fn a_refused_cloud_delete_keeps_the_rows_and_says_why() {
     let notice = app.notice.clone().unwrap_or_default();
     assert!(notice.contains("could not delete cloud sail sail-9"), "{notice}");
     assert!(notice.contains("rudder login"), "{notice}");
+}
+
+/// gpt-5.5 retired on 2026-10-14 and Codex blocks every pane launched on it
+/// behind an upgrade dialog. A config, a paused run or a resumed session that
+/// still names it launches on the current default instead.
+#[test]
+fn a_retired_codex_model_launches_on_the_current_default() {
+    assert_eq!(default_model_for(Backend::Codex), "gpt-6.1-sol");
+    assert_eq!(live_codex_model("gpt-5.5"), CODEX_DEFAULT_MODEL);
+    assert_eq!(live_codex_model("gpt-5.6-terra"), "gpt-5.6-terra");
+
+    let config = serde_json::json!({
+        "backends": { "codex": { "model": "gpt-5.5" }, "claude": { "model": "opus" } }
+    });
+    assert_eq!(config_model(&config, Backend::Codex).as_deref(), Some(CODEX_DEFAULT_MODEL));
+    assert_eq!(config_model(&config, Backend::Claude).as_deref(), Some("opus"));
+
+    let mut run = test_agent_run("run-old", "Old codex run");
+    run.backend = Backend::Codex;
+    run.model = "gpt-5.5".to_string();
+    let command = codex_resume_command(&run, "019f7cde-6d6f-7be0-8359-67e68c2deec6");
+    assert!(command.args.iter().any(|arg| arg == CODEX_DEFAULT_MODEL), "{:?}", command.args);
+    assert!(!command.args.iter().any(|arg| arg == "gpt-5.5"));
 }

@@ -208,7 +208,7 @@ pub(crate) fn codex_fork_command(
     push_codex_worker_config_overrides(&mut args, effort);
     if !model.trim().is_empty() {
         args.push("-m".to_string());
-        args.push(model.to_string());
+        args.push(live_codex_model(model).to_string());
     }
     args.push("fork".to_string());
     args.push(session_id.to_string());
@@ -251,7 +251,7 @@ pub(crate) fn codex_resume_command(run: &AgentRun, session_id: &str) -> Terminal
     }
     if !run.model.trim().is_empty() {
         args.push("-m".to_string());
-        args.push(run.model.clone());
+        args.push(live_codex_model(&run.model).to_string());
     }
     args.push("resume".to_string());
     args.push(session_id.to_string());
@@ -316,7 +316,7 @@ pub(crate) fn rudder_plan_refine_command(
             push_codex_planner_config_overrides(&mut args, effort);
             if !model.trim().is_empty() {
                 args.push("-m".to_string());
-                args.push(model.to_string());
+                args.push(live_codex_model(model).to_string());
             }
             args.push(session_id.to_string());
             args.push(feedback_prompt.to_string());
@@ -506,7 +506,7 @@ pub(crate) fn agent_command_with_orchestrator_mode(
                 push_codex_interactive_orchestrator_args(&mut args, effort);
                 if !model.trim().is_empty() {
                     args.push("-m".to_string());
-                    args.push(model.to_string());
+                    args.push(live_codex_model(model).to_string());
                 }
                 if let Some(prompt) = prompt {
                     args.push(prompt);
@@ -526,7 +526,7 @@ pub(crate) fn agent_command_with_orchestrator_mode(
                 push_codex_planner_config_overrides(&mut args, effort);
                 if !model.trim().is_empty() {
                     args.push("-m".to_string());
-                    args.push(model.to_string());
+                    args.push(live_codex_model(model).to_string());
                 }
                 if let Some(prompt) = prompt {
                     args.push(prompt);
@@ -568,7 +568,7 @@ pub(crate) fn agent_command_with_orchestrator_mode(
             }
             if !model.trim().is_empty() {
                 args.push("-m".to_string());
-                args.push(model.to_string());
+                args.push(live_codex_model(model).to_string());
             }
             // Every mode gets its prompt as an arg.
             {
@@ -617,7 +617,7 @@ fn push_opencode_model(args: &mut Vec<String>, model: &str) {
     let model = model.trim();
     if !model.is_empty() {
         args.push("-m".to_string());
-        args.push(model.to_string());
+        args.push(live_codex_model(model).to_string());
     }
 }
 
@@ -703,7 +703,7 @@ pub(crate) fn rudder_orchestrator_resume_command(
             push_codex_interactive_orchestrator_args(&mut args, effort);
             if !model.trim().is_empty() {
                 args.push("-m".to_string());
-                args.push(model.to_string());
+                args.push(live_codex_model(model).to_string());
             }
             args.push("resume".to_string());
             args.push(session_id.to_string());

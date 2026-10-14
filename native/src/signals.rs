@@ -133,6 +133,8 @@ pub(crate) fn cleanup_run_signals(run_id: &str) {
     let _ = std::fs::remove_file(dir.join(format!("{run_id}.json")));
     let _ = std::fs::remove_file(dir.join(format!("{run_id}-claude.json")));
     let _ = std::fs::remove_file(dir.join(format!("{run_id}-notify.sh")));
+    let _ = std::fs::remove_file(dir.join(format!("{run_id}.json.session")));
+    let _ = std::fs::remove_file(dir.join(format!("{run_id}.json.turn")));
     let _ = std::fs::remove_file(dir.join(format!("{run_id}-opencode.json")));
     let _ = std::fs::remove_file(dir.join(format!("{run_id}-opencode.js")));
 }
@@ -298,9 +300,17 @@ pub(crate) fn claude_settings_json(signal: &Path, fast_mode: bool) -> String {
 /// - as a lifecycle hook (`hooks.<Event>` config overrides, see
 ///   `codex_hook_overrides`): Codex pipes the event JSON on stdin with
 ///   `hook_event_name` set. `Stop`/`Interrupt` -> done, `PermissionRequest` ->
-///   permission, `UserPromptSubmit` -> working. Before hooks were wired Codex
-///   reported turn-end and nothing else, so a Codex worker waiting on an
-///   approval could only be caught by scraping its screen.
+///   permission, `UserPromptSubmit` -> working.
+///
+/// `notify` fires for EVERY thread, not just the conversation (measured on codex
+/// 0.162): the hidden title thread Codex runs ~4s into a first turn ("Generate a
+/// concise, single-line task title"), and every subagent a turn spawns. Each one
+/// used to mark the run done mid-turn and ring "ready for review". So
+/// `SessionStart` records the conversation's id (the main thread's id IS the
+/// session id) and a `notify` for any other thread is ignored. Hook events that
+/// carry an `agent_id` come from a subagent and are ignored too (subagents report
+/// `SubagentStop`, never `Stop`, but a guard costs nothing). Before the session
+/// id is known (a Codex without hooks), `notify` keeps its old meaning.
 ///
 /// Matching on the literal `"hook_event_name":"Stop"` is deliberate: Codex writes
 /// compact JSON (verified against the installed binary), and a looser pattern
@@ -318,15 +328,36 @@ pub(crate) fn codex_notify_script(signal: &Path) -> String {
 emit() {{
   mkdir -p '{dir}' && printf '{{"state":"%s"}}' "$1" > '{path}'.$$.tmp && mv -f '{path}'.$$.tmp '{path}'
 }}
+# One `done` per turn: `Stop` and the conversation's own `notify` both report
+# the same turn ~0.6s apart, and a second `done` left unread could end the NEXT
+# turn the moment it started.
+done_once() {{
+  if [ -n "$1" ] && [ "$(cat '{path}.turn' 2>/dev/null)" = "$1" ]; then return 0; fi
+  [ -n "$1" ] && printf '%s' "$1" > '{path}.turn'
+  emit done
+}}
+field() {{
+  printf '%s' "$2" | sed -n "s/.*\"$1\": *\"\([^\"]*\)\".*/\1/p" | head -n 1
+}}
 case "$1" in
-  *agent-turn-complete*) emit done; exit 0 ;;
+  *agent-turn-complete*)
+    session=$(cat '{path}.session' 2>/dev/null)
+    thread=$(field thread-id "$1")
+    if [ -n "$session" ] && [ "$thread" != "$session" ]; then exit 0; fi
+    done_once "$(field turn-id "$1")"; exit 0 ;;
   "") ;;
   *) exit 0 ;;
 esac
 payload=$(cat)
 case "$payload" in
-  *'"hook_event_name":"Stop"'*|*'"hook_event_name": "Stop"'*) emit done ;;
-  *'"hook_event_name":"Interrupt"'*|*'"hook_event_name": "Interrupt"'*) emit done ;;
+  *'"agent_id"'*) exit 0 ;;
+esac
+case "$payload" in
+  *'"hook_event_name":"SessionStart"'*|*'"hook_event_name": "SessionStart"'*)
+    session=$(field session_id "$payload")
+    [ -n "$session" ] && printf '%s' "$session" > '{path}.session' ;;
+  *'"hook_event_name":"Stop"'*|*'"hook_event_name": "Stop"'*) done_once "$(field turn_id "$payload")" ;;
+  *'"hook_event_name":"Interrupt"'*|*'"hook_event_name": "Interrupt"'*) done_once "$(field turn_id "$payload")" ;;
   *'"hook_event_name":"PermissionRequest"'*|*'"hook_event_name": "PermissionRequest"'*) emit permission ;;
   *'"hook_event_name":"UserPromptSubmit"'*|*'"hook_event_name": "UserPromptSubmit"'*) emit working ;;
 esac
@@ -336,8 +367,14 @@ exit 0
 }
 
 /// The Codex hook events the signal script listens for, mapped onto the protocol.
-pub(crate) const CODEX_HOOK_EVENTS: [&str; 4] =
-    ["Stop", "Interrupt", "PermissionRequest", "UserPromptSubmit"];
+/// `SessionStart` maps to nothing: it records which thread is the conversation.
+pub(crate) const CODEX_HOOK_EVENTS: [&str; 5] = [
+    "SessionStart",
+    "Stop",
+    "Interrupt",
+    "PermissionRequest",
+    "UserPromptSubmit",
+];
 
 /// `-c hooks.<Event>=[...]` overrides pointing every lifecycle event Rudder cares
 /// about at the signal script, plus the flag that lets them run.

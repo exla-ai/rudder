@@ -23089,7 +23089,7 @@ fn codex_signal_script_serves_both_notify_argv_and_hook_stdin() {
         run_hook_command(
             &format!("sh '{script}'"),
             &format!(
-                r#"{{"session_id":"s","turn_id":"t","cwd":"/x","hook_event_name":"{event}","last_assistant_message":"Stop"}}"#
+                r#"{{"session_id":"s","turn_id":"turn-{event}","cwd":"/x","hook_event_name":"{event}","last_assistant_message":"Stop"}}"#
             ),
         );
         assert_eq!(read(event), expected, "{event}");
@@ -26119,4 +26119,67 @@ fn a_narrow_screen_shows_one_pane_at_a_time() {
     // Wide enough again: both, side by side.
     render_screen(&mut app, 120, 30);
     assert!(app.agents_area.is_some() && app.worker_area.is_some());
+}
+
+/// The event sequence recorded from a real codex 0.162 session whose turn spawned
+/// a subagent. `notify` fired three times (the hidden title thread ~4s in, the
+/// subagent, and the conversation itself) and each used to mark the run done and
+/// ring "ready for review". Only the conversation's own end counts.
+#[cfg(not(windows))]
+#[test]
+fn codex_done_comes_only_from_the_conversation_thread() {
+    use crate::signals::{parse_signal_state, SignalState};
+    let dir = std::env::temp_dir().join(format!("rudder-codex-thread-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("dir");
+    let signal = dir.join("run.json");
+    let script_path = dir.join("notify.sh");
+    std::fs::write(&script_path, crate::signals::codex_notify_script(&signal)).expect("script");
+    let script = script_path.display().to_string();
+    let hook = |payload: &str| run_hook_command(&format!("sh '{script}'"), payload);
+    let notify = |thread: &str, input: &str| {
+        run_hook_command(
+            &format!(
+                "sh '{script}' '{{\"type\":\"agent-turn-complete\",\"thread-id\":\"{thread}\",\"turn-id\":\"t\",\"input-messages\":[\"{input}\"]}}'"
+            ),
+            "",
+        )
+    };
+    let take = || -> Option<SignalState> {
+        let body = std::fs::read_to_string(&signal).ok()?;
+        let _ = std::fs::remove_file(&signal);
+        parse_signal_state(&body)
+    };
+
+    let main = "01a13c5a-917d-7503-94c7-8277680eb4ff";
+    hook(&format!(r#"{{"session_id":"{main}","hook_event_name":"SessionStart","source":"startup"}}"#));
+    assert_eq!(take(), None, "SessionStart only records the conversation id");
+    hook(&format!(r#"{{"session_id":"{main}","turn_id":"a","hook_event_name":"UserPromptSubmit"}}"#));
+    assert_eq!(take(), Some(SignalState::Working));
+
+    notify("01a13c5a-af1e-78b3-bcc4-39027c5ecea9", "Generate a concise, single-line task title");
+    assert_eq!(take(), None, "the title thread finishing is not the turn finishing");
+
+    let sub = "01a13c5a-bdbb-7672-b29a-0f56b7557bdb";
+    hook(&format!(
+        r#"{{"session_id":"{main}","turn_id":"b","agent_id":"{sub}","agent_type":"default","hook_event_name":"UserPromptSubmit"}}"#
+    ));
+    hook(&format!(
+        r#"{{"session_id":"{main}","turn_id":"b","hook_event_name":"SubagentStop","agent_id":"{sub}"}}"#
+    ));
+    notify(sub, "Read app.py");
+    assert_eq!(take(), None, "a subagent finishing is not the turn finishing");
+
+    hook(&format!(r#"{{"session_id":"{main}","turn_id":"a","hook_event_name":"Stop"}}"#));
+    assert_eq!(take(), Some(SignalState::Done));
+    // The conversation's own notify for the SAME turn ~0.6s later is a repeat.
+    run_hook_command(
+        &format!("sh '{script}' '{{\"type\":\"agent-turn-complete\",\"thread-id\":\"{main}\",\"turn-id\":\"a\"}}'"),
+        "",
+    );
+    assert_eq!(take(), None, "one done per turn");
+    // The next turn's end still counts.
+    hook(&format!(r#"{{"session_id":"{main}","turn_id":"c","hook_event_name":"Stop"}}"#));
+    assert_eq!(take(), Some(SignalState::Done));
+    let _ = std::fs::remove_dir_all(&dir);
 }

@@ -194,6 +194,9 @@ const TAB_SPINNER_INTERVAL: Duration = Duration::from_millis(400);
 /// several times a second while a turn runs, so this is far above any real
 /// pause; a permission or question prompt is caught earlier by its own hook.
 const IDLE_WITHOUT_SIGNAL: Duration = Duration::from_secs(60);
+/// How long after a backend-signalled completion a busy-looking screen is
+/// taken as leftover chrome rather than a new turn (see `poll_agents`).
+const BUSY_REOPEN_GRACE: Duration = Duration::from_secs(4);
 const MAX_EVENTS_PER_FRAME: usize = 64;
 /// Trackpad wheel bursts can deliver many tiny scroll events. The handler itself
 /// is cheap; the expensive part is flushing a full terminal draw. Briefly defer
@@ -18627,7 +18630,15 @@ What to do\n\
                     // done during a transient inter-step lull. A genuine idle repaint
                     // (the highlight resize) shows no spinner, so this never revives
                     // the flicker the user-input guard was added to kill.
+                    // Not in the first seconds after a completion, though: Codex
+                    // fires `Stop` while its "Working · esc to interrupt" line is
+                    // still on screen, and reading that leftover as new work
+                    // reopened the row and rang "ready for review" twice per turn.
+                    let settled = run
+                        .completed_at
+                        .is_none_or(|at| at.elapsed() >= BUSY_REOPEN_GRACE);
                     let resumed_work = !user_started_new_turn
+                        && settled
                         && recent_lines_look_busy(&terminal.visible_lines_snapshot());
                     if user_started_new_turn || resumed_work {
                         run.status = AgentStatus::Running;

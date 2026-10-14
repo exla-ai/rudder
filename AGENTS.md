@@ -1391,6 +1391,17 @@ wires this at the worker spawn sites (Execute/Main/ReviewAll/restart); headless 
 already used official signals: `claude -p --output-format stream-json` and `codex exec --json`
 (`turn.completed`) + process exit.
 
+**Codex `notify` is not per-conversation (measured on codex 0.162, 2.15.4).** It
+fires `agent-turn-complete` for EVERY thread: the hidden title thread Codex runs
+~4s into a first turn, and each subagent. Each used to mark the run Done for a
+tick (the busy-spinner check reopened it, so the row looked fine) and ring
+"ready for review". The script now records the conversation id at
+`SessionStart` (the main thread id IS the session id) and ignores `notify` for
+other threads and any hook event carrying an `agent_id`; `Stop` and the
+conversation's own `notify` report the same turn, so `done` is written once per
+turn id. And because Codex fires `Stop` while its spinner is still drawn,
+`BUSY_REOPEN_GRACE` keeps a just-completed row from being reopened by it.
+
 **The wiring INVARIANT (v2.5.0, learned the hard way):** every path that (re)spawns a
 worker process MUST call `signals::augment_worker_command`. The per-run hook config file
 persists across spawns. A relaunch that forgets the wiring is a lifecycle error, not a

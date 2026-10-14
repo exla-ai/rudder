@@ -79,7 +79,12 @@ test("the dashboard renders intact through boot, input, and resize", { timeout: 
   await session.assertIntact();
 
   // Nothing broken after a reflow — a resize is where torn borders show up.
+  // 80 columns is under the narrow threshold: one pane takes the width (the
+  // worker), and focusing the agent list swaps it in, statuses intact.
   await session.resize(80, 24);
+  await session.waitForText("worker", { timeout: 10_000 });
+  await session.press("Ctrl+W");
+  await session.press("1");
   await session.waitForText("working", { timeout: 10_000 });
   assert.deepEqual(
     await session.visualIssues(),

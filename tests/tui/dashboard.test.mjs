@@ -200,7 +200,7 @@ test("merge gate: first m shows the diff, second m merges", { timeout: 120_000 }
   // The fake agent writes DONE.txt into its workspace and exits 0. Wait for
   // the row's own done-state affordance — a bare "done" would match the
   // "Done when:" objective text while the agent is still running.
-  await session.waitForText("press m to read the d", { timeout: 60_000 });
+  await session.waitForText("press m to read the", { timeout: 60_000 });
 
   // Ctrl+W is the leader; m is its merge binding. The first press on
   // unreviewed work must open the diff and demand a second press, not merge
@@ -334,7 +334,7 @@ test("recorded work survives renaming the repo directory", { timeout: 120_000 },
 
   await session.type("write the done marker");
   await session.press("Enter");
-  await session.waitForText("press m to read the d", { timeout: 60_000 });
+  await session.waitForText("press m to read the", { timeout: 60_000 });
 
   await session.kill();
   await session.close();

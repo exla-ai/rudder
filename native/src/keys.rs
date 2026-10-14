@@ -32,6 +32,15 @@ pub(crate) fn terminal_bytes_for_key(key: KeyEvent) -> Option<Vec<u8>> {
                 ch.to_string().into_bytes()
             }
         }
+        // Ctrl+Enter is a different key from Enter to the agents (Claude Code:
+        // "send now", which sends a queued message mid-turn). As a bare `\r` it
+        // arrived as Enter and only queued, so it goes out kitty-style, with
+        // Shift/Alt kept, like Shift+Enter below.
+        KeyCode::Enter if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            let code = modified_arrow("u", key.modifiers);
+            // modified_arrow gives `ESC[1;<mods>u`; CSI-u wants the key's codepoint.
+            String::from_utf8_lossy(&code).replacen("[1;", "[13;", 1).into_bytes()
+        }
         KeyCode::Enter if key.modifiers.contains(KeyModifiers::SHIFT) => b"\x1b[13;2u".to_vec(),
         KeyCode::Enter => b"\r".to_vec(),
         KeyCode::Tab => b"\t".to_vec(),

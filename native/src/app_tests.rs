@@ -4921,6 +4921,19 @@ fn maps_page_keys_for_terminal_passthrough() {
         terminal_bytes_for_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT)),
         Some(b"\x1b[13;2u".to_vec())
     );
+    // Claude Code's "ctrl+enter to send now" (verified live: ESC[13;5u sent a
+    // queued message mid-turn, a bare CR only queued it).
+    assert_eq!(
+        terminal_bytes_for_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL)),
+        Some(b"\x1b[13;5u".to_vec())
+    );
+    assert_eq!(
+        terminal_bytes_for_key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT
+        )),
+        Some(b"\x1b[13;6u".to_vec())
+    );
     assert_eq!(
         terminal_bytes_for_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::empty())),
         Some(b"\t".to_vec())

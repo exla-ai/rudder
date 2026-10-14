@@ -3,6 +3,9 @@
 use super::*;
 use crate::plan_stream::{PlanEntry, PlanEntryKind};
 
+/// Below this many columns the sidebar and the worker stop sharing the screen.
+pub(crate) const NARROW_LAYOUT_WIDTH: u16 = 90;
+
 pub(crate) fn render(frame: &mut Frame<'_>, app: &mut App) {
     let area = frame.area();
     frame.render_widget(Clear, area);
@@ -51,6 +54,38 @@ pub(crate) fn render(frame: &mut Frame<'_>, app: &mut App) {
         ])
         .split(area);
 
+    app.task_area = Some(rows[2]);
+
+    // Narrow (zoomed in, a split, a small window): a 34-column sidebar next to
+    // the worker leaves neither readable, so one of them takes the width. The
+    // worker normally; the agent list while it has focus (Option-1 / ^W 1).
+    // The same rule the diff panel follows below.
+    if area.width < NARROW_LAYOUT_WIDTH {
+        app.diff_area = None;
+        if app.focus == FocusPane::Agents {
+            app.agents_area = Some(rows[0]);
+            app.worker_area = None;
+            render_agents(frame, rows[0], app);
+        } else if app.diff_panel.open && app.focus == FocusPane::Diff {
+            app.agents_area = None;
+            app.worker_area = None;
+            app.diff_area = Some(rows[0]);
+            render_diff_panel(frame, rows[0], app);
+        } else {
+            app.agents_area = None;
+            app.worker_area = Some(rows[0]);
+            render_worker(frame, rows[0], app);
+        }
+        render_gutter(frame, rows[1], Gutter::Horizontal);
+        render_task(frame, rows[2], app);
+        render_suggestions(frame, rows[2], app);
+        render_cloud_prompt(frame, area, app);
+        render_merge_prompt(frame, area, app);
+        render_mouse_debug(frame, area, app);
+        render_perf_hud(frame, area, app);
+        return;
+    }
+
     let main = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
@@ -61,7 +96,6 @@ pub(crate) fn render(frame: &mut Frame<'_>, app: &mut App) {
         .split(rows[0]);
 
     app.agents_area = Some(main[0]);
-    app.task_area = Some(rows[2]);
 
     render_agents(frame, main[0], app);
     render_gutter(frame, main[1], Gutter::Vertical);
@@ -100,6 +134,101 @@ pub(crate) fn render(frame: &mut Frame<'_>, app: &mut App) {
     render_merge_prompt(frame, area, app);
     render_mouse_debug(frame, area, app);
     render_perf_hud(frame, area, app);
+}
+
+/// `/Users/me/code/x` as `~/code/x`: the sidebar is narrow and the home
+/// prefix is the part nobody needs to read.
+pub(crate) fn home_relative(path: &Path) -> String {
+    match std::env::var_os("HOME").map(PathBuf::from) {
+        Some(home) if !home.as_os_str().is_empty() => match path.strip_prefix(&home) {
+            Ok(rest) if rest.as_os_str().is_empty() => "~".to_string(),
+            Ok(rest) => format!("~/{}", rest.display()),
+            Err(_) => path.display().to_string(),
+        },
+        _ => path.display().to_string(),
+    }
+}
+
+/// Split one sidebar row into rows no wider than `width`, breaking at a space
+/// when there is one. Continuations are indented two past the row's own
+/// leading space, so a wrapped title or status reads as part of its row.
+pub(crate) fn wrap_sidebar_line(line: Line<'_>, width: usize) -> Vec<Line<'_>> {
+    use unicode_width::UnicodeWidthStr;
+    if width < 8 || line.width() <= width {
+        return vec![line];
+    }
+    let leading = line
+        .spans
+        .iter()
+        .flat_map(|span| span.content.chars())
+        .take_while(|ch| *ch == ' ')
+        .count();
+    let indent = (leading + 2).min(width / 3);
+    let line_style = line.style;
+
+    // (grapheme, style) cells, so a break never splits a styled run's glyph.
+    let mut cells: Vec<(String, Style)> = Vec::new();
+    for span in &line.spans {
+        for ch in span.content.chars() {
+            cells.push((ch.to_string(), span.style));
+        }
+    }
+
+    let mut rows: Vec<Vec<(String, Style)>> = Vec::new();
+    let mut start = 0;
+    let mut first = true;
+    while start < cells.len() {
+        let room = if first { width } else { width - indent };
+        let mut used = 0;
+        let mut end = start;
+        while end < cells.len() {
+            let w = cells[end].0.width();
+            if used + w > room {
+                break;
+            }
+            used += w;
+            end += 1;
+        }
+        if end < cells.len() {
+            // Back up to the last space in this row, unless that leaves it nearly
+            // empty (a path or a long word just breaks where it must).
+            if let Some(space) = (start..end).rev().find(|&i| cells[i].0 == " ") {
+                if space > start + room / 3 {
+                    end = space + 1;
+                }
+            }
+        }
+        if end == start {
+            end = start + 1;
+        }
+        let mut row: Vec<(String, Style)> = Vec::new();
+        if !first {
+            row.push((" ".repeat(indent), Style::default()));
+        }
+        let mut piece: Vec<(String, Style)> = cells[start..end].to_vec();
+        if !first {
+            while piece.first().is_some_and(|cell| cell.0 == " ") {
+                piece.remove(0);
+            }
+        }
+        row.extend(piece);
+        rows.push(row);
+        start = end;
+        first = false;
+    }
+
+    rows.into_iter()
+        .map(|row| {
+            let mut spans: Vec<Span<'static>> = Vec::new();
+            for (text, style) in row {
+                match spans.last_mut() {
+                    Some(last) if last.style == style => last.content.to_mut().push_str(&text),
+                    _ => spans.push(Span::styled(text, style)),
+                }
+            }
+            Line::from(spans).style(line_style)
+        })
+        .collect()
 }
 
 #[derive(Clone, Copy)]
@@ -223,7 +352,7 @@ fn record_drawer_row(row: usize, bucket: Bucket) {
 /// mode (byte-for-byte unchanged output); nest mode passes jj-log connector glyphs.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn push_agent_row<'a>(
-    lines: &mut Vec<ListItem<'a>>,
+    lines: &mut Vec<Line<'a>>,
     app: &App,
     index: usize,
     agent: &AgentRun,
@@ -251,7 +380,7 @@ pub(crate) fn push_agent_row<'a>(
 /// for the faint "^dep" cross-section dependency hint).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn push_agent_row_with_trailing<'a>(
-    lines: &mut Vec<ListItem<'a>>,
+    lines: &mut Vec<Line<'a>>,
     app: &App,
     index: usize,
     agent: &AgentRun,
@@ -320,10 +449,11 @@ pub(crate) fn push_agent_row_with_trailing<'a>(
         } else {
             Span::raw("")
         },
-        Span::styled(truncate_chars(&task_label, task_width), task_style),
+        // Two rows of title (the list wraps it), not one cut short.
+        Span::styled(truncate_chars(&task_label, task_width * 2), task_style),
     ]);
     first.extend(trailing.iter().cloned());
-    lines.push(ListItem::new(Line::from(first)));
+    lines.push((Line::from(first)));
 
     let (status_label, status_style): (String, Style) =
         if agent.is_main() && agent.terminal.is_none() {
@@ -387,23 +517,23 @@ pub(crate) fn push_agent_row_with_trailing<'a>(
         let mut status_line = status_head;
         status_line.push(Span::raw("  "));
         status_line.extend(model_tail);
-        lines.push(ListItem::new(Line::from(status_line)));
+        lines.push((Line::from(status_line)));
     } else {
-        lines.push(ListItem::new(Line::from(status_head)));
+        lines.push((Line::from(status_head)));
         let mut model_line = cont_prefix.to_vec();
         model_line.push(Span::raw("    "));
         model_line.extend(model_tail);
-        lines.push(ListItem::new(Line::from(model_line)));
+        lines.push((Line::from(model_line)));
     }
     if let Some(detail) = integration_detail(agent) {
         let mut integration_line = cont_prefix.to_vec();
         integration_line.extend([Span::raw("  "), Span::styled(detail, muted_style(focused))]);
-        lines.push(ListItem::new(Line::from(integration_line)));
+        lines.push((Line::from(integration_line)));
     }
     if let Some(detail) = delivery_detail(agent) {
         let mut delivery_line = cont_prefix.to_vec();
         delivery_line.extend([Span::raw("  "), Span::styled(detail, muted_style(focused))]);
-        lines.push(ListItem::new(Line::from(delivery_line)));
+        lines.push((Line::from(delivery_line)));
     }
     if let Some(summary) = diff {
         let mut diff_line = cont_prefix.to_vec();
@@ -411,7 +541,7 @@ pub(crate) fn push_agent_row_with_trailing<'a>(
             Span::raw("  "),
             Span::styled(compact_diff_stat(&summary), muted_style(focused)),
         ]);
-        lines.push(ListItem::new(Line::from(diff_line)));
+        lines.push((Line::from(diff_line)));
     }
     record_agent_rows(row_start, lines.len(), index);
 }
@@ -825,7 +955,7 @@ fn dep_hint_span(focused: bool) -> Span<'static> {
 /// scoped to one section's adjacency, and tags out-of-section roots with a dep hint).
 #[allow(clippy::too_many_arguments)]
 fn section_walk_rows<'a>(
-    lines: &mut Vec<ListItem<'a>>,
+    lines: &mut Vec<Line<'a>>,
     app: &App,
     focused: bool,
     task_width: usize,
@@ -907,7 +1037,7 @@ fn section_walk_rows<'a>(
 /// by dependency. Returns true if anything was emitted (the section was non-empty).
 #[allow(clippy::too_many_arguments)]
 fn render_status_section<'a>(
-    lines: &mut Vec<ListItem<'a>>,
+    lines: &mut Vec<Line<'a>>,
     app: &App,
     focused: bool,
     task_width: usize,
@@ -921,7 +1051,7 @@ fn render_status_section<'a>(
         return false;
     }
     if leading_blank {
-        lines.push(ListItem::new(Line::default()));
+        lines.push((Line::default()));
     }
     if bucket_is_drawer(&app.agents, bucket) {
         // One row for the whole section. The chevron is the affordance: `›` closed,
@@ -932,7 +1062,7 @@ fn render_status_section<'a>(
         let marker = if selected { "▶ " } else { "  " };
         let chevron = if open { "⌄" } else { "›" };
         record_drawer_row(lines.len(), bucket);
-        lines.push(ListItem::new(Line::from(vec![
+        lines.push((Line::from(vec![
             Span::styled(
                 marker,
                 if selected {
@@ -954,7 +1084,7 @@ fn render_status_section<'a>(
     } else {
         bucket.label()
     };
-    lines.push(ListItem::new(Line::from(vec![
+    lines.push((Line::from(vec![
         Span::styled(header_label, header_style(focused)),
         Span::styled(format!(" {}", members.len()), muted_style(focused)),
     ])));
@@ -1009,7 +1139,7 @@ fn render_status_section<'a>(
 /// repeating it per row is noise. `prefix` carries the nest glyphs (empty for a
 /// root); `_cont_prefix` is unused now that there is no second line to bridge.
 fn push_planned_row<'a>(
-    lines: &mut Vec<ListItem<'a>>,
+    lines: &mut Vec<Line<'a>>,
     node: &PlannedNode,
     focused: bool,
     task_width: usize,
@@ -1028,7 +1158,7 @@ fn push_planned_row<'a>(
         Span::styled(BADGE, Style::default().fg(ST_PLANNED)),
         Span::raw(" "),
         Span::styled(
-            truncate_chars(&label, task_width.saturating_sub(2)),
+            truncate_chars(&label, task_width.saturating_sub(2) * 2),
             pane_text_style(focused),
         ),
     ]);
@@ -1038,7 +1168,7 @@ fn push_planned_row<'a>(
             Style::default().fg(ST_FAILED),
         ));
     }
-    lines.push(ListItem::new(Line::from(line)));
+    lines.push((Line::from(line)));
 }
 
 /// Walk the planned-node forest depth-first, nesting a node under a parent that is
@@ -1046,7 +1176,7 @@ fn push_planned_row<'a>(
 /// planned node (so its parent has already launched or never existed).
 #[allow(clippy::too_many_arguments)]
 fn planned_walk<'a>(
-    lines: &mut Vec<ListItem<'a>>,
+    lines: &mut Vec<Line<'a>>,
     nodes: &[&PlannedNode],
     children: &std::collections::HashMap<usize, Vec<(usize, EdgeType)>>,
     index: usize,
@@ -1109,7 +1239,7 @@ fn planned_walk<'a>(
 /// launches it leaves the queue and the child becomes a section root. Returns
 /// true when anything was emitted.
 fn render_planned_section<'a>(
-    lines: &mut Vec<ListItem<'a>>,
+    lines: &mut Vec<Line<'a>>,
     nodes: &[&PlannedNode],
     focused: bool,
     task_width: usize,
@@ -1122,16 +1252,16 @@ fn render_planned_section<'a>(
         return false;
     }
     if leading_blank {
-        lines.push(ListItem::new(Line::default()));
+        lines.push((Line::default()));
     }
-    lines.push(ListItem::new(Line::from(vec![
+    lines.push((Line::from(vec![
         Span::styled(Bucket::Todo.label(), header_style(focused)),
         Span::styled(format!(" {}", nodes.len()), muted_style(focused)),
     ])));
     // APPROVAL GATE hint: while the plan awaits approval nothing has launched yet;
     // the user refines in the task pane or approves with an empty Enter.
     if awaiting_approval {
-        lines.push(ListItem::new(Line::from(Span::styled(
+        lines.push((Line::from(Span::styled(
             "  type below to refine  ·  empty Enter approves",
             Style::default().fg(ACCENT),
         ))));
@@ -1346,7 +1476,7 @@ fn orchestrator_phase_label(app: &App, agent: &AgentRun) -> String {
 /// Push the pinned orchestrator row: a diamond + selection marker, the task label,
 /// then a phase line (spinner + "planning" while decomposing, or the plan summary).
 fn push_orchestrator_row<'a>(
-    lines: &mut Vec<ListItem<'a>>,
+    lines: &mut Vec<Line<'a>>,
     app: &App,
     index: usize,
     agent: &AgentRun,
@@ -1380,11 +1510,11 @@ fn push_orchestrator_row<'a>(
     } else {
         Style::default().fg(ACCENT)
     };
-    lines.push(ListItem::new(Line::from(vec![
+    lines.push((Line::from(vec![
         Span::styled(marker, marker_style),
         Span::styled(format!("{ORCH_MARK} "), label_style),
         Span::styled(
-            truncate_chars(&label, task_width.saturating_sub(2)),
+            truncate_chars(&label, task_width.saturating_sub(2) * 2),
             label_style,
         ),
     ])));
@@ -1431,7 +1561,7 @@ fn push_orchestrator_row<'a>(
     } else {
         muted_style(focused)
     };
-    lines.push(ListItem::new(Line::from(vec![
+    lines.push((Line::from(vec![
         Span::raw("  "),
         Span::styled(badge, Style::default().fg(row_accent)),
         Span::raw(" "),
@@ -1485,28 +1615,28 @@ pub(crate) fn render_agents(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
     };
     let run_count = app.agents.iter().filter(|a| !a.is_main()).count();
     let mut lines = vec![
-        ListItem::new(Line::from(Span::styled("rudder", pane_text_style(focused)))),
-        ListItem::new(Line::from(vec![
-            Span::styled(app.cwd.display().to_string(), pane_text_style(focused)),
+        (Line::from(Span::styled("rudder", pane_text_style(focused)))),
+        (Line::from(vec![
+            Span::styled(home_relative(&app.cwd), pane_text_style(focused)),
             Span::raw(" "),
             Span::styled(
                 app.branch.as_deref().unwrap_or("no-branch"),
                 muted_style(focused),
             ),
         ])),
-        ListItem::new(Line::from(vec![
+        (Line::from(vec![
             Span::styled("agents ", pane_text_style(focused)),
             Span::styled(run_count.to_string(), accent_style(focused)),
             Span::styled(" runs", pane_text_style(focused)),
             Span::styled("  ·  ", muted_style(focused)),
             Span::styled("plan integration automatic", accent_style(focused)),
         ])),
-        ListItem::new(Line::default()),
+        (Line::default()),
     ];
     if let Some((current, latest)) = read_update_notice() {
         lines.insert(
             lines.len() - 1,
-            ListItem::new(Line::from(vec![
+            (Line::from(vec![
                 Span::styled("\u{2191} ", accent_style(focused)),
                 Span::styled(
                     format!("update: {current} -> {latest}"),
@@ -1516,7 +1646,7 @@ pub(crate) fn render_agents(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
         );
         lines.insert(
             lines.len() - 1,
-            ListItem::new(Line::from(Span::styled(
+            (Line::from(Span::styled(
                 "  npm i -g @viraatdas/rudder",
                 muted_style(focused),
             ))),
@@ -1533,7 +1663,7 @@ pub(crate) fn render_agents(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
         let insert_at = lines.len().saturating_sub(1);
         lines.insert(
             insert_at,
-            ListItem::new(Line::from(vec![
+            (Line::from(vec![
                 Span::styled("☁ ", cloud_style(app.cloud_connected, focused)),
                 Span::styled(
                     if app.cloud_connected {
@@ -1548,7 +1678,7 @@ pub(crate) fn render_agents(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
         let insert_at = lines.len().saturating_sub(1);
         lines.insert(
             insert_at,
-            ListItem::new(Line::from(vec![
+            (Line::from(vec![
                 Span::styled("☁ ", cloud_style(app.cloud_connected, focused)),
                 Span::styled(
                     cloud_workspace_label(app.cloud_workspace.as_ref()),
@@ -1558,13 +1688,15 @@ pub(crate) fn render_agents(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
         );
     }
 
+    // The key list is 17 rows. Zoomed in, the pane is short as well as narrow,
+    // and the list pushed the agents themselves below the fold, so it gives
+    // way to one line when it would leave the agents less than half the pane.
+    // Decided once the rows are built (below), when it is known what fits.
+    let hint_rows = lines.len()..lines.len() + AGENT_PANE_HINTS.len();
     for hint in AGENT_PANE_HINTS {
-        lines.push(ListItem::new(Line::from(Span::styled(
-            *hint,
-            muted_style(focused),
-        ))));
+        lines.push(Line::from(Span::styled(*hint, muted_style(focused))));
     }
-    lines.push(ListItem::new(Line::default()));
+    lines.push((Line::default()));
 
     let task_width = area.width.saturating_sub(4).max(12) as usize;
 
@@ -1585,7 +1717,7 @@ pub(crate) fn render_agents(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
     // diamond row per orchestrator / plan-mode front-end showing its phase, above
     // main and every status section. There is normally one at a time.
     if orchestrator_count > 0 {
-        lines.push(ListItem::new(Line::from(Span::styled(
+        lines.push((Line::from(Span::styled(
             "orchestrator",
             header_style(focused),
         ))));
@@ -1594,7 +1726,7 @@ pub(crate) fn render_agents(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
                 push_orchestrator_row(&mut lines, app, index, agent, focused, task_width);
             }
         }
-        lines.push(ListItem::new(Line::default()));
+        lines.push((Line::default()));
     }
 
     if app.nest_view {
@@ -1602,7 +1734,7 @@ pub(crate) fn render_agents(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
         // every agent, ignoring status sections.
         render_agents_nest_into(&mut lines, app, focused, task_width, &diff_summaries);
         if main_count == 0 && run_total == 0 {
-            lines.push(ListItem::new(Line::from(Span::styled(
+            lines.push((Line::from(Span::styled(
                 "no agents yet  ·  type a task or /main",
                 muted_style(focused),
             ))));
@@ -1623,7 +1755,7 @@ pub(crate) fn render_agents(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
             } else {
                 ("main", "shared checkout")
             };
-            lines.push(ListItem::new(Line::from(vec![
+            lines.push((Line::from(vec![
                 Span::styled(section_name, header_style(focused)),
                 Span::styled(
                     format!(" {main_count} {noun} · {location}"),
@@ -1716,12 +1848,62 @@ pub(crate) fn render_agents(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
             && run_total == 0
             && app.plans.iter().all(|plan| plan.planned_nodes.is_empty())
         {
-            lines.push(ListItem::new(Line::from(Span::styled(
+            lines.push((Line::from(Span::styled(
                 "no agents yet  ·  type a task or /main",
                 muted_style(focused),
             ))));
         }
     }
+
+    // Wrap anything wider than the pane onto indented continuation rows instead
+    // of letting the list clip it: zoomed in (Cmd+), the 34-column sidebar cut
+    // titles, statuses and the repo path mid-word. Every row stays one screen
+    // row, so the recorded spans are shifted to the rows they now occupy.
+    let room = area.height.saturating_sub(2) as usize;
+    let inner = area.width.saturating_sub(2) as usize;
+    let needed: usize = lines.iter().map(|line| line.width().max(1).div_ceil(inner.max(1))).sum();
+    if needed > room {
+        let removed = hint_rows.len() - 1;
+        lines.splice(
+            hint_rows.clone(),
+            [Line::from(Span::styled(
+                "j/k move · Enter focus · ^W keys",
+                muted_style(focused),
+            ))],
+        );
+        let shift = |row: usize| if row >= hint_rows.end { row - removed } else { row };
+        AGENT_ROW_SPANS.with(|spans| {
+            for span in spans.borrow_mut().iter_mut() {
+                *span = (shift(span.0), shift(span.1), span.2);
+            }
+        });
+        DRAWER_ROW_SPANS.with(|spans| {
+            for span in spans.borrow_mut().iter_mut() {
+                span.0 = shift(span.0);
+            }
+        });
+    }
+    let lines = {
+        let mut wrapped = Vec::with_capacity(lines.len());
+        let mut starts = Vec::with_capacity(lines.len() + 1);
+        for line in lines {
+            starts.push(wrapped.len());
+            wrapped.extend(wrap_sidebar_line(line, inner));
+        }
+        starts.push(wrapped.len());
+        let moved = |row: usize| starts.get(row).copied().unwrap_or(wrapped.len());
+        AGENT_ROW_SPANS.with(|spans| {
+            for span in spans.borrow_mut().iter_mut() {
+                *span = (moved(span.0), moved(span.1), span.2);
+            }
+        });
+        DRAWER_ROW_SPANS.with(|spans| {
+            for span in spans.borrow_mut().iter_mut() {
+                span.0 = moved(span.0);
+            }
+        });
+        wrapped
+    };
 
     // Harvest the recorded row spans into the row -> agent map mouse clicks resolve
     // against. Built from what was ACTUALLY rendered this frame, so it stays correct
@@ -1802,7 +1984,9 @@ pub(crate) fn render_agents(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
 
     let mut list_state = ratatui::widgets::ListState::default().with_offset(offset);
     frame.render_stateful_widget(
-        List::new(lines).style(app_style()).block(pane_block(
+        List::new(lines.into_iter().map(ListItem::new).collect::<Vec<_>>())
+            .style(app_style())
+            .block(pane_block(
             if app.nest_view {
                 "agents · nest"
             } else {
@@ -1954,7 +2138,7 @@ fn nest_cont_prefix(lanes: &[bool], self_continues: bool, is_root: bool) -> Vec<
 
 #[allow(clippy::too_many_arguments)]
 fn nest_walk<'a>(
-    lines: &mut Vec<ListItem<'a>>,
+    lines: &mut Vec<Line<'a>>,
     app: &App,
     focused: bool,
     task_width: usize,
@@ -2042,8 +2226,8 @@ pub(crate) fn render_agents_nest(
     focused: bool,
     task_width: usize,
     diff_summaries: &[Option<String>],
-) -> Vec<ListItem<'static>> {
-    let mut lines: Vec<ListItem<'static>> = Vec::new();
+) -> Vec<Line<'static>> {
+    let mut lines: Vec<Line<'static>> = Vec::new();
     render_agents_nest_into(&mut lines, app, focused, task_width, diff_summaries);
     lines
 }
@@ -2052,7 +2236,7 @@ pub(crate) fn render_agents_nest(
 /// row-span recorder captures are absolute agents-pane rows (mouse hit-testing
 /// resolves against them).
 fn render_agents_nest_into<'a>(
-    lines: &mut Vec<ListItem<'a>>,
+    lines: &mut Vec<Line<'a>>,
     app: &App,
     focused: bool,
     task_width: usize,

@@ -7564,7 +7564,7 @@ fn nest_hint_is_listed_in_agent_pane() {
     assert!(AGENT_PANE_HINTS.contains(&"g nest"));
 }
 
-fn nest_line_text(item: &ListItem) -> String {
+fn nest_line_text(item: &Line) -> String {
     // ListItem wraps a Text (one Line per row); join its first line's spans.
     format!("{item:?}")
 }
@@ -7588,7 +7588,7 @@ fn nest_view_renders_parents_before_children_with_glyphs() {
     // Collect the task-label lines (the first span line for each node) in order.
     // Each node contributes a task line then a status line (no diffs here), so
     // task-label lines are at even offsets.
-    let label_text = |item: &ListItem| -> String {
+    let label_text = |item: &Line| -> String {
         let dbg = nest_line_text(item);
         dbg
     };
@@ -26051,4 +26051,72 @@ fn a_retired_codex_model_launches_on_the_current_default() {
     let command = codex_resume_command(&run, "019f7cde-6d6f-7be0-8359-67e68c2deec6");
     assert!(command.args.iter().any(|arg| arg == CODEX_DEFAULT_MODEL), "{:?}", command.args);
     assert!(!command.args.iter().any(|arg| arg == "gpt-5.5"));
+}
+
+/// Zoomed in (Cmd+), the sidebar used to clip anything wider than its 34
+/// columns. A long row now wraps onto indented continuation rows, keeping its
+/// text and its styles.
+#[test]
+fn a_sidebar_row_wider_than_the_pane_wraps_instead_of_clipping() {
+    let line = Line::from(vec![
+        Span::raw("  "),
+        Span::styled("done · press m to read the diff", Style::default().fg(ACCENT)),
+    ]);
+    let rows = wrap_sidebar_line(line, 16);
+    let text: Vec<String> = rows
+        .iter()
+        .map(|row| row.spans.iter().map(|span| span.content.as_ref()).collect())
+        .collect();
+    assert!(text.len() > 1, "{text:?}");
+    assert!(text.iter().all(|row| row.chars().count() <= 16), "{text:?}");
+    assert!(text[1].starts_with("    "), "continuations indent: {text:?}");
+    let joined: String = text.iter().map(|row| row.trim()).collect::<Vec<_>>().join(" ");
+    assert_eq!(joined, "done · press m to read the diff");
+    assert!(rows[1].spans.iter().any(|span| span.style.fg == Some(ACCENT)));
+}
+
+/// Wrapped rows still belong to their agent: a click on a title's second row
+/// selects that agent (the click map is built from rendered rows).
+#[test]
+fn a_click_on_a_wrapped_title_row_selects_its_agent() {
+    let mut app = App::new();
+    app.agents.push(test_agent_run("run-short", "Short"));
+    app.agents.push(test_agent_run(
+        "run-long",
+        "Refactor the billing reconciliation pipeline end to end",
+    ));
+    app.selected_agent = 0;
+    let screen = render_screen(&mut app, 120, 40);
+    assert!(screen.contains("reconciliation"), "the title's tail is on screen:\n{screen}");
+
+    let area = app.agents_area.expect("sidebar drawn");
+    let tail_row = screen
+        .lines()
+        .position(|line| line.chars().take(area.width as usize).collect::<String>().contains("reconciliation"))
+        .expect("tail row") as u16;
+    let list_row = (tail_row - area.y - 1) as usize + app.agents_scroll;
+    assert_eq!(app.agent_row_map.get(list_row).copied().flatten(), Some(1));
+}
+
+/// Narrow (zoomed in, a split): one pane takes the width beside the task bar
+/// instead of a squeezed sidebar + worker pair. The worker normally, the agent
+/// list while it has focus.
+#[test]
+fn a_narrow_screen_shows_one_pane_at_a_time() {
+    let mut app = App::new();
+    app.agents.push(test_agent_run("run-alpha", "Alpha"));
+    app.focus = FocusPane::Worker;
+    render_screen(&mut app, 80, 30);
+    assert_eq!(app.agents_area, None);
+    assert_eq!(app.worker_area.map(|area| area.width), Some(80));
+
+    app.focus = FocusPane::Agents;
+    let screen = render_screen(&mut app, 80, 30);
+    assert_eq!(app.worker_area, None);
+    assert_eq!(app.agents_area.map(|area| area.width), Some(80));
+    assert!(screen.contains("Alpha"));
+
+    // Wide enough again: both, side by side.
+    render_screen(&mut app, 120, 30);
+    assert!(app.agents_area.is_some() && app.worker_area.is_some());
 }

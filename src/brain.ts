@@ -120,11 +120,22 @@ export function renderContract(spec: SpecContract): string {
   });
 }
 
-export async function verifyRun(run: RunRecord): Promise<VerificationResult> {
+/**
+ * Judge one pass. `transcriptFrom` is the byte length `output.txt` had when
+ * this pass started: the file holds EVERY turn, and scanning all of it meant
+ * a first turn's "I didn't run any checks" failed every later check too, so
+ * the steerer re-prompted a finished, verified run until its budget ran out
+ * (seen on a cloud sail: done in 2.5 minutes, steered for 4.5 more).
+ */
+export async function verifyRun(
+  run: RunRecord,
+  options: { transcriptFrom?: number } = {},
+): Promise<VerificationResult> {
   const diff = await workspaceDiff(run);
   const changed = await runHasChanges(run);
   const outputPath = path.join(run.repoRoot, ".rudder", "runs", run.id, "output.txt");
-  const transcript = await fsp.readFile(outputPath, "utf8").catch(() => "");
+  const whole = await fsp.readFile(outputPath).catch(() => Buffer.alloc(0));
+  const transcript = whole.subarray(Math.min(options.transcriptFrom ?? 0, whole.length)).toString("utf8");
   const spec = await readJson<SpecContract>(specPath(run.repoRoot, run.id));
 
   const missing: string[] = [];

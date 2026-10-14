@@ -427,6 +427,11 @@ export async function workerRun(repoRoot: string, runId: string, attemptId?: str
   try {
     let current = run;
     while (true) {
+      // Verify this pass on what it said, not on earlier turns (verifyRun).
+      const transcriptFrom = await fsp
+        .stat(outputPath(repoRoot, runId))
+        .then((stat) => stat.size)
+        .catch(() => 0);
       const pass = await runBackendPass(current);
       current = pass.run;
       if (!(await attemptOwnsRun(repoRoot, current))) {
@@ -452,7 +457,7 @@ export async function workerRun(repoRoot: string, runId: string, attemptId?: str
 
       current.status = "verifying";
       if (!(await saveOwnedRun(current))) return;
-      const verification = await verifyRun(current);
+      const verification = await verifyRun(current, { transcriptFrom });
       if (!(await attemptOwnsRun(repoRoot, current))) return;
       current.verification = verification;
       if (!(await saveOwnedRun(current))) return;

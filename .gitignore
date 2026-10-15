@@ -19,3 +19,5 @@ tui-report.html
 # iOS build output and App Store Connect credentials
 ios/build/
 ios/fastlane/.asc.env
+ios/fastlane/README.md
+ios/fastlane/report.xml

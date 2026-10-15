@@ -54,14 +54,36 @@ export function lastAssistantText(record, { home, cache }) {
   }
   const stat = fs.statSync(file);
   if (cache && cache.file === file && cache.mtimeMs === stat.mtimeMs) {
-    return { text: cache.text, cacheEntry: cache };
+    return { text: cache.text, remoteUrl: cache.remoteUrl ?? null, cacheEntry: cache };
   }
   const { text } = readTail(file, PREVIEW_TAIL_BYTES);
-  const messages = record.backend === "codex" ? parseCodex(text.split("\n")) : parseClaude(text.split("\n"));
+  const lines = text.split("\n");
+  const messages = record.backend === "codex" ? parseCodex(lines) : parseClaude(lines);
   const last = [...messages].reverse().find((message) => message.role === "assistant" && message.text?.trim());
   const preview = last ? last.text.replace(/\s+/g, " ").trim().slice(0, 280) : null;
-  const entry = { file, mtimeMs: stat.mtimeMs, text: preview };
-  return { text: preview, cacheEntry: entry };
+  const remoteUrl = record.backend === "codex" ? null : claudeSessionUrl(lines) ?? cache?.remoteUrl ?? null;
+  const entry = { file, mtimeMs: stat.mtimeMs, text: preview, remoteUrl };
+  return { text: preview, remoteUrl, cacheEntry: entry };
+}
+
+// Claude records the session's claude.ai URL (where Remote Control shows it)
+// as an "attachment" entry. The newest one wins.
+function claudeSessionUrl(lines) {
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const line = lines[index];
+    if (!line.includes('"attachment"') || !line.includes("claude.ai/code/session_")) {
+      continue;
+    }
+    try {
+      const url = JSON.parse(line)?.attachment?.url;
+      if (typeof url === "string" && /^https:\/\/claude\.ai\/code\/session_[A-Za-z0-9_-]+$/.test(url)) {
+        return url;
+      }
+    } catch {
+      // partial line
+    }
+  }
+  return null;
 }
 
 function readRunRecord(repoDir, runId) {

@@ -489,12 +489,14 @@ function agentSummary(record) {
   const updatedAt = toMillis(record.updatedAt) ?? toMillis(record.createdAt);
   const status = phoneStatus(record);
   let lastMessage = null;
+  let remoteUrl = null;
   try {
     const cached = lastMessageCache.get(record.id);
     const text = lastAssistantText(record, { home: HOME, cache: cached });
     if (text) {
       lastMessageCache.set(record.id, text.cacheEntry);
       lastMessage = text.text;
+      remoteUrl = text.remoteUrl ?? null;
     }
   } catch {
     // a preview is a nicety
@@ -515,7 +517,7 @@ function agentSummary(record) {
     summary: typeof record.doneSummary === "string" ? record.doneSummary.slice(0, 2000) : null,
     nodeId: record.nodeId ?? null,
     planId: record.planId ?? null,
-    remoteUrl: null,
+    remoteUrl,
   };
 }
 

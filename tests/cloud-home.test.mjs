@@ -278,6 +278,7 @@ nodeTest("a Claude transcript becomes chat messages with tool calls matched to t
     ] } },
     { type: "assistant", uuid: "side", isSidechain: true, message: { role: "assistant", content: [{ type: "text", text: "subagent chatter" }] } },
     { type: "user", uuid: "u2", message: { role: "user", content: [{ type: "tool_result", tool_use_id: "t1", is_error: true, content: [{ type: "text", text: "1 failing" }] }] } },
+    { type: "attachment", attachment: { type: "remote_session", url: "https://claude.ai/code/session_01AbCdEf" } },
     { type: "assistant", uuid: "a2", message: { role: "assistant", content: [{ type: "text", text: "Fixed; tests pass." }] } },
   ];
   fs.writeFileSync(path.join(projectDir, `${sessionId}.jsonl`), `${lines.map((l) => JSON.stringify(l)).join("\n")}\n`);
@@ -293,7 +294,9 @@ nodeTest("a Claude transcript becomes chat messages with tool calls matched to t
   const tool = transcript.messages[2].tool;
   assert.deepEqual(tool, { name: "Bash", input: "npm test", output: "1 failing", isError: true });
   assert.equal(transcript.messages[0].ts, Date.parse("2026-10-15T10:00:00Z"));
-  assert.equal(lastAssistantText(record, { home }).text, "Fixed; tests pass.");
+  const preview = lastAssistantText(record, { home });
+  assert.equal(preview.text, "Fixed; tests pass.");
+  assert.equal(preview.remoteUrl, "https://claude.ai/code/session_01AbCdEf", "the Remote Control session link");
   assert.throws(() => readTranscript(repo, "../../etc", { home }), /agent not found/);
 });
 

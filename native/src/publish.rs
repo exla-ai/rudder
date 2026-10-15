@@ -1223,8 +1223,9 @@ impl App {
 
     /// Has this repo's user already agreed to Rudder pushing to this remote?
     pub(crate) fn publish_accepted(&self) -> bool {
-        self.publish_capability()
-            .is_some_and(|capability| publish_accepted_for(&self.cwd, &capability.remote_url))
+        self.publish_capability().is_some_and(|capability| {
+            cloud_worker_publishes() || publish_accepted_for(&self.cwd, &capability.remote_url)
+        })
     }
 
     /// Drain the probe result and re-arm the cadence. Detection spawns up to four
@@ -1373,6 +1374,13 @@ impl App {
             .is_some_and(|run| run.jj_change_id.is_some());
         if publishable && self.publish == PublishState::Unknown {
             return MergeRoute::Checking;
+        }
+        // In the cloud, GitHub is where work comes home: a local merge would land
+        // on a machine nobody is looking at. Publish even when the probe says it
+        // cannot, so `publish_agent_at` explains what is missing instead of
+        // quietly merging somewhere invisible.
+        if publishable && cloud_worker_publishes() {
+            return MergeRoute::Publish;
         }
         if !self.row_publishes_instead_of_merging(index) {
             return MergeRoute::LocalMerge;
@@ -1620,4 +1628,13 @@ impl App {
         let _ = save_native_run_record(&cwd, run);
         self.dirty = true;
     }
+}
+
+/// A dashboard running on a Rudder Cloud machine sends finished work back as a
+/// pushed branch and a draft PR, never as a merge into its own checkout. The
+/// consent prompt for the first push is skipped there too: the user chose the
+/// cloud, and the cloud's only road home is GitHub.
+pub(crate) fn cloud_worker_publishes() -> bool {
+    std::env::var("RUDDER_CLOUD_WORKER").ok().as_deref() == Some("1")
+        && crate::cloudio::is_cloud_worker_session()
 }

@@ -807,12 +807,10 @@ fn web_steer_running_worker_injects_and_persists_a_user_turn() {
 
 #[test]
 fn web_steer_rejects_terminal_worker_statuses() {
+    // Merged work is landed: resuming it would redo it. (Failed and Stopped rows
+    // resume with the message instead; see web_steer_resumes_a_stopped_worker.)
     let dir = unique_test_repo("web-terminal-steer");
-    for status in [
-        AgentStatus::Merged,
-        AgentStatus::Failed,
-        AgentStatus::Stopped,
-    ] {
+    for status in [AgentStatus::Merged] {
         let mut app = App::new();
         app.cwd = dir.clone();
         let mut run = test_agent_run("terminal-worker", "finished task");
@@ -886,6 +884,58 @@ fn web_steer_done_worker_regoals_the_same_row() {
             .any(|line| line.contains("re-goaled n-done: also cover malformed input")),
         "same worker row was resumed: {activity:?}"
     );
+}
+
+// A message from the phone to a worker with no process left (stopped, failed,
+// or paused by a machine restart) is the direction it resumes with, in the same
+// row and workspace.
+#[cfg(not(windows))]
+#[test]
+fn web_steer_resumes_a_stopped_worker() {
+    let _env = env_guard();
+    let dir = unique_test_repo("web-stopped-steer");
+    let fake = dir.join("fake-claude.sh");
+    write_fake_bin(&fake, "#!/bin/sh\nsleep 5\n");
+    let old_claude = std::env::var_os("RUDDER_CLAUDE_BIN");
+    let old_home = std::env::var_os("RUDDER_HOME");
+    std::env::set_var("RUDDER_CLAUDE_BIN", &fake);
+    std::env::set_var("RUDDER_HOME", dir.join("home"));
+
+    let mut results = Vec::new();
+    for status in [AgentStatus::Stopped, AgentStatus::Failed, AgentStatus::Paused] {
+        let mut app = App::new();
+        app.cwd = dir.clone();
+        let mut run = test_agent_run("web-stopped-worker", "implement parser");
+        run.cwd = dir.clone();
+        run.node_id = Some("n-stopped".to_string());
+        run.status = status;
+        run.session_id = Some("web-steer-session".to_string());
+        app.agents.push(run);
+
+        let delivery = app.deliver_steer_request("n-stopped", "pick it back up");
+        results.push((
+            status,
+            matches!(delivery, SteerDelivery::Delivered),
+            app.agents[0].status,
+            app.agents[0].turns.last().map(|turn| turn.prompt.clone()),
+        ));
+        app.agents[0].terminal = None;
+    }
+    match old_claude {
+        Some(value) => std::env::set_var("RUDDER_CLAUDE_BIN", value),
+        None => std::env::remove_var("RUDDER_CLAUDE_BIN"),
+    }
+    match old_home {
+        Some(value) => std::env::set_var("RUDDER_HOME", value),
+        None => std::env::remove_var("RUDDER_HOME"),
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+
+    for (from, delivered, status, last_prompt) in results {
+        assert!(delivered, "{from:?} worker accepted the message");
+        assert_eq!(status, AgentStatus::Running, "{from:?} worker resumed");
+        assert_eq!(last_prompt.as_deref(), Some("pick it back up"), "{from:?}");
+    }
 }
 
 #[test]

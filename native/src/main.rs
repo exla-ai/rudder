@@ -13661,7 +13661,19 @@ It will tend to agree with itself — name another with /gam <provider> <model> 
             return SteerDelivery::Failed(format!("target not found: {task_id}"));
         };
         let label = task_id.to_string();
-        match self.agents[index].status {
+        // A message for an agent sitting at its own prompt (an interactive
+        // turn that finished, or a row paused with its PTY still up) is a new
+        // turn in the same live session: type it in. Restarting would throw away
+        // a perfectly good process. Rows with no live process are resumed below.
+        let live_terminal = self.agents[index]
+            .terminal
+            .as_mut()
+            .is_some_and(|terminal| terminal.is_alive());
+        let status = match self.agents[index].status {
+            AgentStatus::Done | AgentStatus::Paused if live_terminal => AgentStatus::Running,
+            status => status,
+        };
+        match status {
             AgentStatus::Running => {
                 if self.live_inject_at(index, &instruction) {
                     // A browser steer is a real user turn, not an ephemeral PTY
@@ -13687,10 +13699,37 @@ It will tend to agree with itself — name another with /gam <provider> <model> 
                     SteerDelivery::Failed(format!("{label} has no live terminal"))
                 }
             }
-            AgentStatus::Done => {
+            AgentStatus::Done
+            | AgentStatus::Paused
+            | AgentStatus::Stopped
+            | AgentStatus::Failed
+            | AgentStatus::Orphaned
+                if self.agents[index].is_main() =>
+            {
+                // The main checkout's agent cannot be re-goaled (that path is for
+                // isolated workers); bring its session back the way Enter does,
+                // then type the message into it. This is the phone case: after the
+                // cloud machine restarts every row is Paused with no process.
+                if self.steer_resume_main(index, &instruction) {
+                    self.push_activity(format!("resumed {label} with: {instruction}"));
+                    SteerDelivery::Delivered
+                } else {
+                    self.record_activity(format!("steer: {label} could not be resumed"));
+                    SteerDelivery::Failed(format!("{label} could not be resumed"))
+                }
+            }
+            AgentStatus::Done
+            | AgentStatus::Paused
+            | AgentStatus::Stopped
+            | AgentStatus::Failed
+            | AgentStatus::Orphaned
+                if !self.agents[index].is_orchestrator() =>
+            {
                 // Completed workers keep their workspace and session. Re-goal the
                 // same row so review feedback resumes in place instead of being
-                // dropped into an idle PTY or spawning unrelated work.
+                // dropped into an idle PTY or spawning unrelated work. A paused,
+                // stopped, failed or orphaned row has no process left, so the
+                // message is the direction it resumes with.
                 if !self.regoal_agent_at(index, &instruction) {
                     self.record_activity(format!("steer: {label} could not be resumed"));
                     SteerDelivery::Failed(format!("{label} could not be resumed"))
@@ -17276,6 +17315,37 @@ Files involved: {}
     /// success. Never re-goals the main agent or the orchestrator.
     // Wired by the autonomous drift-fix (2c) and conductor chat routing (2d); the
     // stop primitive below already has a keybinding.
+    /// Resume the main-checkout agent's session (as Enter on its row does) and
+    /// send `message` as its next turn.
+    fn steer_resume_main(&mut self, index: usize, message: &str) -> bool {
+        if index >= self.agents.len() {
+            return false;
+        }
+        let run_id = self.agents[index].id.clone();
+        self.selected_agent = index;
+        self.focus_or_spawn_main();
+        let Some(index) = self.agents.iter().position(|run| run.id == run_id) else {
+            return false;
+        };
+        if !self.live_inject_at(index, message) {
+            return false;
+        }
+        let now = now_stamp();
+        let cwd = self.cwd.clone();
+        if let Some(run) = self.agents.get_mut(index) {
+            run.current_prompt = message.to_string();
+            run.turns.push(AgentTurn {
+                ts: now.clone(),
+                prompt: message.to_string(),
+                source: "user".to_string(),
+            });
+            run.last_user_input_at = now;
+            run.needs_user_input = false;
+            let _ = save_native_run_record(&cwd, run);
+        }
+        true
+    }
+
     fn regoal_agent_at(&mut self, index: usize, new_goal: &str) -> bool {
         self.restart_agent_at(index, new_goal, None)
     }

@@ -411,7 +411,8 @@ agent list while it has focus.
   delete, Alt+Left/Right word nav), and slash-command completion. Fresh plain input
   starts or continues exactly one `AgentMode::Main` end-to-end owner in the real
   checkout. `/plan` explicitly opts into the isolated DAG; `/run` starts one isolated
-  worker; `/ask` starts a separate direct one-off.
+  worker. (`/ask`, the old direct one-off, was removed; `OneOff` rows from older
+  sessions still load.)
 
 **Graceful shutdown truth.** A dashboard-owned live PTY becomes `Paused` before it is
 dropped, and native persistence removes the `process` object whenever no PTY is owned.
@@ -545,7 +546,7 @@ slash commands, plan refinements, and empty-Enter approval. When the interactive
 Claude orchestrator is running, it can also edit the DAG in `RUDDER.md` and use
 generated project skills under `.claude/skills/rudder-*` for dashboard actions
 (`model`, `main`, `goal`, `usage`, `cloud/login`, `review-all`, `merge-all`,
-`plan/run/ask`, and DAG editing/approval). Rudder consumes the
+`plan/run`, and DAG editing/approval). Rudder consumes the
 corresponding one-shot `RUDDER_*` control markers from `RUDDER.md`.
 
 ### Review and merge-all
@@ -722,6 +723,60 @@ agents (`migration.json`), spawns `rudder` (workspace) or `rudder codex --worksp
 <task>` (sail) under a `node-pty` 120x32, bridges I/O to the control-plane WS, and
 reports a final heartbeat on exit. On restart it checks `.rudder-staged.json` and
 re-fetches a fresh signed URL from the snapshot-url endpoint.
+
+### 9.8.1 The home machine (2.16.0) and the phone app
+The default shape is now ONE long-lived machine per account holding every repo,
+not a machine per repo. Decided with the user 2026-10-15: GitHub is the source of
+truth (work returns as a pushed branch + draft PR, no local<->cloud sync), Rudder's
+brain lives in the cloud, and the phone is a first-class client.
+- **Rows.** The home is a `rudder_workspaces` row with `source_kind = "home"`
+  (`workspace_key = "home"`); it owns the Fly machine (performance 4 CPU / 16 GB,
+  `RUDDER_HOME_*` env to resize) and a 50 GB volume. Each repo opened on it is a
+  `home-repo` row (`workspace_key = "home:<owner/repo>"`, `home_id` -> the home) that
+  owns NO machine or volume, shares the home's worker token hash, and keeps an
+  ordinary workspace PTY channel, so `rudder cloud` attaches exactly as before.
+  Every path that destroys machines skips rows without `machine_id`; keep it so.
+- **Control socket.** `home.mjs` (the supervisor, chosen by `RUDDER_HOME=1` in
+  `entrypoint.sh`) holds `/api/rudder/home/<id>/control`: the repo list comes down
+  (`repos`), project state goes up every 3s when changed (`state`), and the phone's
+  requests arrive as `rpc` (transcript, send, task, action, close). The server keeps
+  only the latest state in memory; the supervisor re-sends it on reconnect.
+- **The phone never touches a PTY.** Messages, new tasks, stop and merge are written
+  into the repo dashboard's steer inbox (`.rudder/steer`), the same channel as the
+  web board, and the supervisor waits for the receipt. The dashboard stays the single
+  writer. `deliver_steer_request` now types into any row with a live PTY (Done or
+  Paused included) and RESUMES rows with no process (main via `steer_resume_main`,
+  workers via re-goal): after the machine stops, every row is Paused.
+- **What survives a stop.** `$HOME` is on the ephemeral rootfs, so `~/.claude`,
+  `~/.codex`, `~/.rudder`, `~/.config` are symlinked into `/workspace/home`.
+  Vault files are rewritten every boot EXCEPT the Claude/Codex login files, where the
+  copy that expires later wins (`keepFresherLogin`): a refreshed token on disk must
+  not be replaced by the vault's older one. Repo-scoped vault files
+  (`~/code/<repo>/.env.local`) are written after the clone, never before (a
+  non-empty clone target fails).
+- **Tailscale.** userspace `tailscaled` as the non-root user, state on the volume,
+  `--hostname=rudder-home`. Listening ports (from `/proc/net/tcp*`, owner pid ->
+  cwd -> project) that are not Rudder/agent processes get `tailscale serve --https`;
+  if HTTPS certs are off on the tailnet the link falls back to plain http (userspace
+  mode forwards tailnet connections to 127.0.0.1).
+- **Remote Control.** `RUDDER_REMOTE_CONTROL=1` (set by the supervisor) makes
+  `augment_worker_command` add `--remote-control "<repo> · <id>"` to every Claude
+  worker/main pane. The one-time consent is `remoteDialogSeen: true` in
+  `~/.claude.json`, written by the supervisor with the folder-trust entries.
+- **Publishing in the cloud.** `cloud_worker_publishes()` (RUDDER_CLOUD_WORKER=1 on a
+  cloud session) makes `m` always take the Publish route and skips the first-push
+  consent modal; a local merge on a machine nobody looks at is never what you want.
+- **Failure reasons.** `failure_reason` columns on sails and workspaces, set from
+  heartbeat `reason`/`exitCode`, from any create/start that throws
+  (`recordStartFailure`), and from a project's clone/dashboard error; cleared on the
+  next good start. Shown by `rudder cloud list`, `workspace status`, `home`.
+- **Phone app.** Static files in `cloud/app/`, served at `/app` (the control-plane
+  Dockerfile copies them). `/api/app/*` accepts the better-auth session cookie OR a
+  bearer `rdr_` token. `/app/login` goes straight to Google; `?native=1` ends at
+  `/app/native-done`, which mints a bearer token and redirects to `rudder://auth?token=`
+  for the iOS shell (Google refuses OAuth inside an embedded web view).
+- `rudder cloud --snapshot` and repos without a GitHub origin keep the old
+  per-repo snapshot workspace.
 
 ### 9.9 Known limitations (current state, not action items)
 Documented so they are not rediscovered: workspace re-use ignores a newer snapshot with
@@ -1454,16 +1509,9 @@ A FRESH task (no active plan) has a deterministic ownership contract:
   path (`prepare_jj_workspace`), has no `node_id`, lands in Review when done, and
   is mergeable through selected `m` or `/merge-all` into the current integration
   checkout.
-- **`/ask <text>`** is the explicit escape hatch for one-off work. It calls
-  `start_oneoff_task`, spawning a single conversational **`AgentMode::OneOff`**
-  agent in the MAIN checkout (`create_oneoff_agent`, cwd = repo root, NO jj
-  workspace, NO `node_id`) with bypassPermissions tools and a `RUDDER_DONE_FILE`
-  sidecar keyed by run id.
-  Keys forward to its PTY. It is explicitly excluded from selected merge /
-  merge-all / review-all, and implicitly excluded from plan integration / graph-mirror /
-  scheduler by `node_id`/Execute gates; `mark_run_done` just marks it Done (no
-  merge). It lives in its own **`Bucket::OneOff`** list section (`status_bucket`
-  returns `OneOff` for it; leads `Bucket::ORDER`).
+- **`/ask` was removed.** It used to start a separate `AgentMode::OneOff` agent in the
+  main checkout. `OneOff` rows persisted before the removal still load into their own
+  `Bucket::OneOff` section and are excluded from merge, merge-all and review-all.
 
 Main and one-off `Done` rows mean direct work completed; they are not mislabeled as
 workspace review. If the task explicitly requested shipping, `DeliveryEvidence::for_task`
@@ -1806,7 +1854,7 @@ Recorded so future contributors do not relitigate them:- **Autonomy without a co
   same files rejoin at the same place every isolated worker does, the merge. The task pane
   still routes into NO plan: plain input always starts a standalone worker.
 - **Explicit isolation.** `/plan` DAG workers and `/run` workers get their own jj
-  workspace, never nested in the repo. Plain main-owner and `/ask` runs intentionally
+  workspace, never nested in the repo. Plain main-owner runs intentionally
   use the real checkout so one agent can finish repository/release/deployment steps.
   The only real cross-agent risks for isolated work are a future merge conflict (jj
   records it, the AI resolver fixes it) or interface drift (the hard edge is the guard).

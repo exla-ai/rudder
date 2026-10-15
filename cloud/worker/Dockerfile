@@ -32,6 +32,19 @@ RUN set -eux; \
     apt-get install -y --no-install-recommends gh; \
     rm -rf /var/lib/apt/lists/*
 
+# Tailscale: the home machine joins the user's tailnet so dev servers agents
+# start are reachable (as HTTPS previews) from the laptop and the phone.
+# tailscaled runs in userspace-networking mode as the non-root user.
+RUN set -eux; \
+    curl -fsSL https://pkgs.tailscale.com/stable/debian/bookworm.noarmor.gpg \
+      -o /usr/share/keyrings/tailscale-archive-keyring.gpg; \
+    curl -fsSL https://pkgs.tailscale.com/stable/debian/bookworm.tailscale-keyring.list \
+      -o /etc/apt/sources.list.d/tailscale.list; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends tailscale; \
+    rm -rf /var/lib/apt/lists/*; \
+    tailscale version
+
 # Agent CLIs are installed later, as the non-root user, into locations that
 # user can write: Claude Code through its native installer (~/.local/bin, which
 # `claude update` and its auto-updater can replace in place), the npm ones
@@ -76,6 +89,8 @@ RUN npm install --omit=dev --no-audit --no-fund \
   && npm cache clean --force
 COPY cloud/worker/supervisor.mjs ./supervisor.mjs
 COPY cloud/worker/active-runs.mjs ./active-runs.mjs
+COPY cloud/worker/home.mjs ./home.mjs
+COPY cloud/worker/transcripts.mjs ./transcripts.mjs
 
 COPY cloud/worker/entrypoint.sh /usr/local/bin/rudder-worker
 RUN chmod +x /usr/local/bin/rudder-worker

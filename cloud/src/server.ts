@@ -62,9 +62,14 @@ type Sail = {
   createdAt: string;
   updatedAt: string;
   bootstrapCommand?: string;
+  failureReason?: string;
 };
 
 type WorkspaceStatus = "queued" | "running" | "paused" | "stopped" | "failed" | "deleting";
+// snapshot / git-clone: one Fly machine per repo (the original shape).
+// home: the account's single long-lived machine that holds every repo.
+// home-repo: one repo on the home machine; owns no machine or volume itself.
+type WorkspaceSourceKind = "snapshot" | "git-clone" | "home" | "home-repo";
 
 type Workspace = {
   id: string;
@@ -78,9 +83,14 @@ type Workspace = {
   snapshotFingerprint?: string;
   region?: string;
   volumeId?: string;
-  sourceKind?: "snapshot" | "git-clone";
+  sourceKind?: WorkspaceSourceKind;
   repoUrl?: string;
   gitRef?: string;
+  // Set on "home-repo" rows: the account's home machine row this repo lives on.
+  homeId?: string;
+  // Why the row last failed (machine start, clone, worker exit). Cleared on a
+  // successful start so a stale reason never outlives the failure.
+  failureReason?: string;
   lastActivityAt?: string;
   lastHeartbeatAt?: string;
   activeAgents?: number;
@@ -253,6 +263,9 @@ ensureColumn("rudder_workspaces", "active_agents", "integer");
 // Why the reaper could not finish deleting a row yet (see sweepDeletions).
 ensureColumn("rudder_sails", "delete_error", "text");
 ensureColumn("rudder_workspaces", "delete_error", "text");
+ensureColumn("rudder_workspaces", "home_id", "text");
+ensureColumn("rudder_workspaces", "failure_reason", "text");
+ensureColumn("rudder_sails", "failure_reason", "text");
 
 // Secrets vault: initialized lazily so a missing RUDDER_SECRETS_KEY only
 // breaks the vault endpoints, not the rest of the control plane.
@@ -294,6 +307,7 @@ const updateSail = database.prepare(`
   set status = @status,
       machine_id = @machineId,
       machine_state = @machineState,
+      failure_reason = case when @status = 'failed' then coalesce(failure_reason, 'Fly machine failed') else null end,
       updated_at = @updatedAt
   where id = @id and account_id = @accountId
 `);
@@ -307,6 +321,7 @@ const updateHeartbeat = database.prepare(`
   set status = @status,
       machine_id = coalesce(@machineId, machine_id),
       machine_state = @machineState,
+      failure_reason = case when @status = 'failed' then coalesce(@failureReason, failure_reason, 'worker reported failure') else null end,
       last_heartbeat_at = @lastHeartbeatAt,
       updated_at = @updatedAt
   where id = @id
@@ -384,6 +399,7 @@ const updateWorkspaceMachine = database.prepare(`
   set status = @status,
       machine_id = @machineId,
       machine_state = @machineState,
+      failure_reason = case when @status = 'failed' then coalesce(failure_reason, 'Fly machine failed') else null end,
       updated_at = @updatedAt
   where id = @id
 `);
@@ -411,6 +427,7 @@ const updateWorkspaceHeartbeat = database.prepare(`
   set status = @status,
       machine_id = coalesce(@machineId, machine_id),
       machine_state = @machineState,
+      failure_reason = case when @status = 'failed' then coalesce(@failureReason, failure_reason, 'worker reported failure') else null end,
       active_agents = @activeAgents,
       last_heartbeat_at = @lastHeartbeatAt,
       updated_at = @updatedAt
@@ -418,6 +435,14 @@ const updateWorkspaceHeartbeat = database.prepare(`
     and status not in ('stopped', 'deleting')
     and (@machineId is null or machine_id is null or machine_id = @machineId)
 `);
+// A create/start that throws used to leave the row "queued" forever with the
+// reason only in the HTTP response and the server log. These record it.
+const markSailFailed = database.prepare(
+  "update rudder_sails set status = 'failed', failure_reason = ?, updated_at = ? where id = ? and status <> 'deleting'",
+);
+const markWorkspaceFailed = database.prepare(
+  "update rudder_workspaces set status = 'failed', failure_reason = ?, updated_at = ? where id = ? and status <> 'deleting'",
+);
 const getSetting = database.prepare("select value from rudder_settings where key = ?");
 const upsertSetting = database.prepare(`
   insert into rudder_settings (key, value, updated_at)
@@ -532,6 +557,26 @@ const server = http.createServer({ noDelay: true }, async (req, res) => {
       await handleWorkspaceApi(req, res, url);
       return;
     }
+    if (url.pathname === "/app/login") {
+      await handleAppLogin(url, res);
+      return;
+    }
+    if (url.pathname === "/app/native-done") {
+      await handleAppNativeDone(req, res);
+      return;
+    }
+    if (req.method === "GET" && (url.pathname === "/app" || url.pathname.startsWith("/app/"))) {
+      await serveAppFile(res, url.pathname);
+      return;
+    }
+    if (url.pathname.startsWith("/api/app/")) {
+      await handleAppApi(req, res, url);
+      return;
+    }
+    if (url.pathname === "/api/rudder/home" || url.pathname.startsWith("/api/rudder/home/")) {
+      await handleHomeApi(req, res, url);
+      return;
+    }
     renderHome(res);
   } catch (error) {
     const status = error && typeof error === "object" && "status" in error && typeof error.status === "number"
@@ -544,6 +589,7 @@ const server = http.createServer({ noDelay: true }, async (req, res) => {
 
 const SAIL_ATTACH_PATH_RE = /^\/api\/rudder\/sail\/([^/]+)\/(worker|attach)$/;
 const WORKSPACE_ATTACH_PATH_RE = /^\/api\/rudder\/workspace\/([^/]+)\/(worker|attach)$/;
+const HOME_CONTROL_PATH_RE = /^\/api\/rudder\/home\/([^/]+)\/control$/;
 const REPLAY_BUFFER_BYTES = 256 * 1024;
 const PENDING_INPUT_BYTES = 64 * 1024;
 const MAX_SOCKET_BUFFER_BYTES = 1024 * 1024;
@@ -588,6 +634,11 @@ server.on("upgrade", (req: IncomingMessage, socket: Duplex, head: Buffer) => {
     const sailMatch = SAIL_ATTACH_PATH_RE.exec(url.pathname);
     if (sailMatch) {
       handleSailUpgrade(req, socket, head, sailMatch[1], sailMatch[2] as "worker" | "attach");
+      return;
+    }
+    const homeControlMatch = HOME_CONTROL_PATH_RE.exec(url.pathname);
+    if (homeControlMatch) {
+      handleHomeControlUpgrade(req, socket, head, homeControlMatch[1]);
       return;
     }
     const workspaceMatch = WORKSPACE_ATTACH_PATH_RE.exec(url.pathname);
@@ -1021,6 +1072,13 @@ function touchWorkspaceActivity(workspaceId: string): void {
   try {
     const now = new Date().toISOString();
     updateWorkspaceActivity.run({ id: workspaceId, lastActivityAt: now, updatedAt: now });
+    // Typing into a repo on the home machine is activity on the home machine:
+    // that is what its idle sweep looks at.
+    const row = findWorkspaceById.get(workspaceId) as Record<string, unknown> | undefined;
+    const homeId = row ? optionalString(row.home_id) : undefined;
+    if (homeId && homeId !== workspaceId) {
+      updateWorkspaceActivity.run({ id: homeId, lastActivityAt: now, updatedAt: now });
+    }
   } catch {
     // ignore
   }
@@ -1096,6 +1154,21 @@ async function requestDeletion(
     markWorkspaceDeleting.run({ id, accountId, tombstoneKey: `deleted:${id}`, updatedAt: now });
   }
   closeChannel(kind, id);
+  if (kind === "workspace") {
+    const row = findWorkspaceById.get(id) as Record<string, unknown> | undefined;
+    const homeId = row ? optionalString(row.home_id) : undefined;
+    if (row && optionalString(row.source_kind) === "home") {
+      // Deleting the home machine deletes every repo on it.
+      for (const repo of homeRepos(id)) {
+        markWorkspaceDeleting.run({ id: repo.id, accountId, tombstoneKey: `deleted:${repo.id}`, updatedAt: now });
+        closeChannel("workspace", repo.id);
+      }
+      homeStates.delete(id);
+    } else if (homeId) {
+      void homeRpc(homeId, "close", { workspaceId: id, removeClone: true }).catch(() => null);
+      pushHomeRepos(homeId);
+    }
+  }
   schedulePersistDatabase();
   // Try to finish now so the caller can say "deleted"; whatever is left is the
   // reaper's. Bounded so a slow Fly never holds the request open.
@@ -1226,6 +1299,11 @@ async function sweepIdleWorkspaces(): Promise<void> {
     if (Array.from(workspaceChannels.get(workspace.id)?.clients ?? []).some(isOpen)) {
       continue;
     }
+    const isHome = workspace.sourceKind === "home";
+    // The home machine is idle only when nobody is attached to ANY of its repos.
+    if (isHome && homeRepos(workspace.id).some((repo) => Array.from(workspaceChannels.get(repo.id)?.clients ?? []).some(isOpen))) {
+      continue;
+    }
     // BUSY EXEMPTION: agents are actively working in this machine (reported by
     // the worker, not guessed from user activity). Stopping it would kill live
     // cloud sessions the moment the user's laptop disconnected for longer than
@@ -1238,7 +1316,7 @@ async function sweepIdleWorkspaces(): Promise<void> {
     }
     const last = workspace.lastActivityAt ?? workspace.lastHeartbeatAt ?? workspace.updatedAt;
     const lastMs = Date.parse(last);
-    if (!Number.isFinite(lastMs) || now - lastMs < workspaceIdleMs) {
+    if (!Number.isFinite(lastMs) || now - lastMs < (isHome ? homeIdleMs : workspaceIdleMs)) {
       continue;
     }
     try {
@@ -1253,6 +1331,9 @@ async function sweepIdleWorkspaces(): Promise<void> {
         machineState: "stopping",
         updatedAt: new Date().toISOString(),
       });
+      if (isHome) {
+        setHomeRepoStatus.run({ homeId: workspace.id, status: "stopped", updatedAt: new Date().toISOString() });
+      }
     } catch {
       // ignore; will retry next sweep
     }
@@ -2499,6 +2580,9 @@ async function createSail(
     workerToken,
     task,
     repoName,
+  }).catch((error) => {
+    recordStartFailure("sail", id, error);
+    throw error;
   });
   const status = flyStateToSailStatus(machine.state);
   updateSail.run({
@@ -2779,6 +2863,7 @@ async function handleWorkerHeartbeat(req: IncomingMessage, res: ServerResponse, 
     status,
     machineId: stringField(body, "machineId") ?? null,
     machineState: state || status,
+    failureReason: status === "failed" ? heartbeatFailureReason(body) : null,
     lastHeartbeatAt: now,
     updatedAt: now,
   });
@@ -2794,6 +2879,32 @@ async function handleWorkerHeartbeat(req: IncomingMessage, res: ServerResponse, 
     );
   }
   sendJson(res, 200, { ok: true, status });
+}
+
+// The worker says why it failed when it can ("git clone failed: ..."); an exit
+// code alone still beats a bare "failed".
+function heartbeatFailureReason(body: Json): string | null {
+  const reason = stringField(body, "reason")?.trim();
+  if (reason) {
+    return reason.slice(0, 2000);
+  }
+  const exitCode = numberField(body, "exitCode");
+  return exitCode === undefined ? null : `worker exited with code ${exitCode}`;
+}
+
+function recordStartFailure(kind: "sail" | "workspace", id: string, error: unknown): void {
+  const message = (error instanceof Error ? error.message : String(error)).slice(0, 2000);
+  const now = new Date().toISOString();
+  try {
+    if (kind === "sail") {
+      markSailFailed.run(message, now, id);
+    } else {
+      markWorkspaceFailed.run(message, now, id);
+    }
+    schedulePersistDatabase();
+  } catch {
+    // the original error is what the caller reports
+  }
 }
 
 async function refreshAccountSails(accountId: string): Promise<void> {
@@ -3387,7 +3498,16 @@ function workspaceStartResult(state: string | undefined): { status: WorkspaceSta
   return { status: "running", machineState: "starting" };
 }
 
-async function createFlyWorkspaceMachine(params: {
+async function createFlyWorkspaceMachine(params: CreateWorkspaceMachineParams): Promise<FlyMachine> {
+  try {
+    return await createFlyWorkspaceMachineInner(params);
+  } catch (error) {
+    recordStartFailure("workspace", params.workspaceId, error);
+    throw error;
+  }
+}
+
+type CreateWorkspaceMachineParams = {
   workspaceId: string;
   accountId: string;
   snapshotUrl?: string;
@@ -3397,7 +3517,13 @@ async function createFlyWorkspaceMachine(params: {
   volumeId?: string;
   gitRemote?: string;
   gitRef?: string;
-}): Promise<FlyMachine> {
+  // Home machines are sized and named differently and carry extra env.
+  guest?: { cpu_kind: string; cpus: number; memory_mb: number };
+  env?: Record<string, string>;
+  namePrefix?: string;
+};
+
+async function createFlyWorkspaceMachineInner(params: CreateWorkspaceMachineParams): Promise<FlyMachine> {
   ensureFlyConfigured();
   const config: JsonRecord = {
     image: flyWorkerImage,
@@ -3412,8 +3538,9 @@ async function createFlyWorkspaceMachine(params: {
       ...(params.gitRemote ? { RUDDER_GIT_REMOTE: params.gitRemote } : {}),
       ...(params.gitRef ? { RUDDER_GIT_REF: params.gitRef } : {}),
       RUDDER_REPO_NAME: params.repoName || "",
+      ...(params.env ?? {}),
     },
-    guest: {
+    guest: params.guest ?? {
       cpu_kind: flyWorkerCpuKind,
       cpus: flyWorkerCpus,
       memory_mb: flyWorkerMemoryMb,
@@ -3427,7 +3554,7 @@ async function createFlyWorkspaceMachine(params: {
   const machine = await flyRequest<FlyMachine>(`/v1/apps/${encodeURIComponent(flyAppName)}/machines`, {
     method: "POST",
     body: {
-      name: flyMachineName("rudder-ws", params.workspaceId),
+      name: flyMachineName(params.namePrefix ?? "rudder-ws", params.workspaceId),
       region: params.region || flyRegion,
       config,
     },
@@ -3473,7 +3600,7 @@ async function createWorkspaceVolume(workspaceId: string, region: string): Promi
   return await createWorkspaceVolumeNamed(workspaceVolumeName(workspaceId), region);
 }
 
-async function createWorkspaceVolumeNamed(name: string, region: string): Promise<FlyVolume> {
+async function createWorkspaceVolumeNamed(name: string, region: string, sizeGb = flyWorkspaceVolumeGb): Promise<FlyVolume> {
   ensureFlyConfigured();
   return await flyRequest<FlyVolume>(
     `/v1/apps/${encodeURIComponent(flyAppName)}/volumes`,
@@ -3482,7 +3609,7 @@ async function createWorkspaceVolumeNamed(name: string, region: string): Promise
       body: {
         name,
         region,
-        size_gb: flyWorkspaceVolumeGb,
+        size_gb: sizeGb,
       },
     },
   );
@@ -3565,6 +3692,17 @@ async function destroyWorkspaceVolume(volumeId: string): Promise<void> {
 }
 
 async function mutateWorkspace(workspace: Workspace, action: string): Promise<Workspace> {
+  if (workspace.sourceKind === "home-repo") {
+    // A repo on the home machine has no machine of its own. Resuming it starts
+    // the home machine; stopping it closes just that repo's dashboard.
+    if (action === "resume") {
+      await ensureHomeRunning(workspace.accountId);
+      pushHomeRepos(workspace.homeId ?? "");
+    } else if (workspace.homeId) {
+      await homeRpc(workspace.homeId, "close", { workspaceId: workspace.id }).catch(() => null);
+    }
+    return rowToWorkspace(findWorkspaceById.get(workspace.id));
+  }
   if (!workspace.machineId) {
     throw badRequest("workspace does not have a Fly machine yet");
   }
@@ -3628,11 +3766,15 @@ async function handleWorkspaceHeartbeat(req: IncomingMessage, res: ServerRespons
   const status: WorkspaceStatus = state === "failed" ? "failed" : "running";
   const activeAgents = numberField(body, "activeAgents");
   const now = new Date().toISOString();
+  if (optionalString(row.source_kind) === "home" && status === "running") {
+    setHomeRepoStatus.run({ homeId: workspaceId, status: "running", updatedAt: now });
+  }
   updateWorkspaceHeartbeat.run({
     id: workspaceId,
     status,
     machineId: machineId ?? null,
     machineState: state || status,
+    failureReason: status === "failed" ? heartbeatFailureReason(body) : null,
     activeAgents: activeAgents ?? 0,
     lastHeartbeatAt: now,
     updatedAt: now,
@@ -3687,9 +3829,11 @@ function rowToWorkspace(row: unknown): Workspace {
     snapshotFingerprint: optionalString(value.snapshot_fingerprint),
     region: optionalString(value.region),
     volumeId: optionalString(value.volume_id),
-    sourceKind: (optionalString(value.source_kind) as "snapshot" | "git-clone" | undefined) ?? "snapshot",
+    sourceKind: (optionalString(value.source_kind) as WorkspaceSourceKind | undefined) ?? "snapshot",
     repoUrl: optionalString(value.repo_url),
     gitRef: optionalString(value.git_ref),
+    homeId: optionalString(value.home_id),
+    failureReason: optionalString(value.failure_reason),
     lastActivityAt: optionalString(value.last_activity_at),
     lastHeartbeatAt: optionalString(value.last_heartbeat_at),
     activeAgents: Number.isFinite(Number(value.active_agents)) && value.active_agents !== null
@@ -4260,6 +4404,7 @@ function rowToSail(row: unknown): Sail {
     snapshotKey: optionalString(value.snapshot_key),
     lastHeartbeatAt: optionalString(value.last_heartbeat_at),
     slackThreadTs: optionalString(value.slack_thread_ts),
+    failureReason: optionalString(value.failure_reason),
     createdAt: String(value.created_at),
     updatedAt: String(value.updated_at),
   };
@@ -4641,4 +4786,681 @@ function requiredEnv(name: string, fallback?: string): string {
 
 function tokenHash(token: string): string {
   return createHash("sha256").update(token).digest("hex").slice(0, 32);
+}
+
+// ---------------------------------------------------------------------------
+// Home machine: one long-lived Fly machine per account holding every repo.
+//
+// The home row (source_kind "home") owns the machine and its volume. Each repo
+// opened on it is a "home-repo" row: it owns no machine, shares the home's
+// worker token, and keeps the ordinary workspace PTY channel so `rudder cloud`
+// attaches to its dashboard exactly like a per-repo workspace. The supervisor
+// on the machine holds one CONTROL socket (/api/rudder/home/<id>/control) that
+// carries the repo list down, project state up, and RPCs both ways; the phone
+// app is served from that state and those RPCs.
+// ---------------------------------------------------------------------------
+
+const HOME_WORKSPACE_KEY = "home";
+const homeCpuKind = process.env.RUDDER_HOME_CPU_KIND || "performance";
+const homeCpus = Number(process.env.RUDDER_HOME_CPUS || 4);
+const homeMemoryMb = Number(process.env.RUDDER_HOME_MEMORY_MB || 16384);
+const homeVolumeGb = Number(process.env.RUDDER_HOME_VOLUME_GB || 50);
+const homeIdleMs = Number(process.env.RUDDER_HOME_IDLE_MS || 2 * 60 * 60 * 1000);
+const HOME_RPC_TIMEOUT_MS = 20_000;
+
+type HomeAgent = JsonRecord;
+type HomeProject = {
+  workspaceId: string;
+  repo: string;
+  name: string;
+  path?: string;
+  dashboard?: string;
+  error?: string;
+  agents?: HomeAgent[];
+  ports?: JsonRecord[];
+};
+type HomeState = {
+  projects: HomeProject[];
+  tailnet?: JsonRecord;
+  updatedAt: string;
+};
+type PendingRpc = {
+  resolve: (value: Json) => void;
+  reject: (error: Error) => void;
+  timer: NodeJS.Timeout;
+};
+
+const homeControls = new Map<string, WebSocket>();
+const homeStates = new Map<string, HomeState>();
+const homeRpcs = new Map<string, PendingRpc>();
+const homeStarts = new Map<string, Promise<Workspace>>();
+
+const listHomeRepoRows = database.prepare(
+  "select * from rudder_workspaces where home_id = ? and source_kind = 'home-repo' and status <> 'deleting' order by repo_name",
+);
+const setHomeRepoStatus = database.prepare(`
+  update rudder_workspaces set status = @status, updated_at = @updatedAt
+  where home_id = @homeId and source_kind = 'home-repo' and status not in ('deleting')
+`);
+const setHomeRepoTokens = database.prepare(`
+  update rudder_workspaces set worker_token_hash = @workerTokenHash, updated_at = @updatedAt
+  where home_id = @homeId and source_kind = 'home-repo'
+`);
+const setRepoFailure = database.prepare(
+  "update rudder_workspaces set failure_reason = ?, updated_at = ? where id = ? and source_kind = 'home-repo'",
+);
+
+function findHomeRow(accountId: string): Workspace | null {
+  const row = findWorkspaceByKey.get(accountId, HOME_WORKSPACE_KEY) as Record<string, unknown> | undefined;
+  return row ? rowToWorkspace(row) : null;
+}
+
+function homeRepoKey(slug: string): string {
+  return `home:${slug.toLowerCase()}`;
+}
+
+function homeRepos(homeId: string): Workspace[] {
+  return (listHomeRepoRows.all(homeId) as Record<string, unknown>[]).map(rowToWorkspace);
+}
+
+// The home machine is the expensive thing, so starting it is single-flight per
+// account: the CLI, the phone and a second terminal can all ask at once.
+async function ensureHomeRunning(accountId: string, region?: string | null): Promise<Workspace> {
+  const inFlight = homeStarts.get(accountId);
+  if (inFlight) {
+    return await inFlight;
+  }
+  const promise = startHome(accountId, region).finally(() => homeStarts.delete(accountId));
+  homeStarts.set(accountId, promise);
+  return await promise;
+}
+
+async function startHome(accountId: string, region?: string | null): Promise<Workspace> {
+  ensureCloudRuntimeConfigured("fly");
+  const existing = findHomeRow(accountId);
+  if (!existing) {
+    return await createHome(accountId, region ?? null);
+  }
+  if (existing.status === "deleting") {
+    throw badRequest("the home machine is being deleted; try again in a minute");
+  }
+  let machine: FlyMachine | null = null;
+  if (existing.machineId) {
+    machine = await flyRequest<FlyMachine>(
+      `/v1/apps/${encodeURIComponent(flyAppName)}/machines/${encodeURIComponent(existing.machineId)}`,
+      { method: "GET" },
+    ).catch(() => null);
+  }
+  const now = new Date().toISOString();
+  if (machine && (machine.state === "started" || machine.state === "starting")) {
+    updateWorkspaceMachine.run({ id: existing.id, status: "running", machineId: existing.machineId ?? null, machineState: machine.state ?? null, updatedAt: now });
+    setHomeRepoStatus.run({ homeId: existing.id, status: "running", updatedAt: now });
+    updateWorkspaceActivity.run({ id: existing.id, lastActivityAt: now, updatedAt: now });
+    return rowToWorkspace(findWorkspaceById.get(existing.id));
+  }
+  if (machine?.id && machine.state !== "destroyed" && machine.state !== "destroying") {
+    // Wait out a machine that is mid-stop: starting it then fails.
+    for (let attempt = 0; attempt < 15 && machine?.state === "stopping"; attempt += 1) {
+      await sleep(1000);
+      machine = await flyRequest<FlyMachine>(
+        `/v1/apps/${encodeURIComponent(flyAppName)}/machines/${encodeURIComponent(machine.id!)}`,
+        { method: "GET" },
+      ).catch(() => machine);
+    }
+    try {
+      const started = await warmRestartWorkspaceMachine({ machineId: machine!.id!, snapshotKey: "" });
+      const result = workspaceStartResult(started?.state);
+      updateWorkspaceMachine.run({ id: existing.id, status: result.status, machineId: started?.id ?? machine!.id!, machineState: result.machineState, updatedAt: now });
+      setHomeRepoStatus.run({ homeId: existing.id, status: result.status, updatedAt: now });
+      updateWorkspaceActivity.run({ id: existing.id, lastActivityAt: now, updatedAt: now });
+      return rowToWorkspace(findWorkspaceById.get(existing.id));
+    } catch (error) {
+      recordStartFailure("workspace", existing.id, error);
+      throw error;
+    }
+  }
+  // The machine is gone (destroyed out of band, or never created): make a new
+  // one on the same volume. A new machine means a new worker token, which every
+  // repo row shares.
+  return await recreateHomeMachine(existing);
+}
+
+function homeMachineParams(home: { id: string; accountId: string }, workerToken: string, region: string, volumeId?: string): CreateWorkspaceMachineParams {
+  return {
+    workspaceId: home.id,
+    accountId: home.accountId,
+    workerToken,
+    repoName: "home",
+    region,
+    volumeId,
+    guest: { cpu_kind: homeCpuKind, cpus: homeCpus, memory_mb: homeMemoryMb },
+    env: { RUDDER_HOME: "1" },
+    namePrefix: "rudder-home",
+  };
+}
+
+async function createHome(accountId: string, region: string | null): Promise<Workspace> {
+  const now = new Date().toISOString();
+  const id = uniqueWorkspaceId("home");
+  const workerToken = `rdrw_${randomBytes(32).toString("base64url")}`;
+  insertWorkspace.run({
+    id,
+    accountId,
+    workspaceKey: HOME_WORKSPACE_KEY,
+    repoName: "home",
+    status: "queued",
+    machineId: null,
+    machineState: null,
+    snapshotKey: null,
+    snapshotFingerprint: null,
+    region,
+    volumeId: null,
+    workerTokenHash: tokenHash(workerToken),
+    sourceKind: "home",
+    repoUrl: null,
+    gitRef: null,
+    lastActivityAt: now,
+    lastHeartbeatAt: null,
+    createdAt: now,
+    updatedAt: now,
+  });
+  const regionToUse = region ?? flyRegion;
+  try {
+    const volume = await createWorkspaceVolumeNamed(workspaceVolumeName(id), regionToUse, homeVolumeGb);
+    updateWorkspaceVolume.run({ id, volumeId: volume.id ?? null, region: regionToUse, updatedAt: new Date().toISOString() });
+    const machine = await createFlyWorkspaceMachine(homeMachineParams({ id, accountId }, workerToken, regionToUse, volume.id));
+    const started = workspaceStartResult(machine.state);
+    updateWorkspaceMachine.run({ id, status: started.status, machineId: machine.id ?? null, machineState: started.machineState, updatedAt: new Date().toISOString() });
+  } catch (error) {
+    recordStartFailure("workspace", id, error);
+    throw error;
+  }
+  return rowToWorkspace(findWorkspaceById.get(id));
+}
+
+async function recreateHomeMachine(home: Workspace): Promise<Workspace> {
+  const now = new Date().toISOString();
+  const workerToken = `rdrw_${randomBytes(32).toString("base64url")}`;
+  const hash = tokenHash(workerToken);
+  updateWorkspaceWorkerToken.run({ id: home.id, workerTokenHash: hash, updatedAt: now });
+  setHomeRepoTokens.run({ homeId: home.id, workerTokenHash: hash, updatedAt: now });
+  const regionToUse = home.region ?? flyRegion;
+  let volumeId = home.volumeId;
+  if (!volumeId) {
+    const volume = await createWorkspaceVolumeNamed(workspaceVolumeName(home.id, String(Date.now()).slice(-6)), regionToUse, homeVolumeGb);
+    volumeId = volume.id;
+    updateWorkspaceVolume.run({ id: home.id, volumeId: volumeId ?? null, region: regionToUse, updatedAt: now });
+  }
+  const machine = await createFlyWorkspaceMachine(homeMachineParams(home, workerToken, regionToUse, volumeId));
+  const started = workspaceStartResult(machine.state);
+  updateWorkspaceMachine.run({ id: home.id, status: started.status, machineId: machine.id ?? null, machineState: started.machineState, updatedAt: new Date().toISOString() });
+  setHomeRepoStatus.run({ homeId: home.id, status: started.status, updatedAt: now });
+  updateWorkspaceActivity.run({ id: home.id, lastActivityAt: now, updatedAt: now });
+  return rowToWorkspace(findWorkspaceById.get(home.id));
+}
+
+// Directory name for a repo under ~/code on the home machine. Two repos with
+// the same name from different owners get the owner as a prefix.
+function homeRepoDirName(homeId: string, slug: string): string {
+  const [owner, name] = slug.split("/");
+  const taken = homeRepos(homeId).some((row) => row.repoName === name && row.repoUrl !== `https://github.com/${slug}.git`);
+  return taken ? `${owner}-${name}` : name;
+}
+
+function ensureHomeRepoRow(home: Workspace, slug: string, branch?: string): Workspace {
+  const key = homeRepoKey(slug);
+  const existing = findWorkspaceByKey.get(home.accountId, key) as Record<string, unknown> | undefined;
+  const now = new Date().toISOString();
+  const homeRow = findWorkspaceById.get(home.id) as Record<string, unknown>;
+  if (existing) {
+    const row = rowToWorkspace(existing);
+    if (branch && branch !== row.gitRef) {
+      database.prepare("update rudder_workspaces set git_ref = ?, updated_at = ? where id = ?").run(branch, now, row.id);
+    }
+    database.prepare("update rudder_workspaces set status = ?, worker_token_hash = ?, home_id = ?, updated_at = ? where id = ?")
+      .run(home.status, optionalString(homeRow.worker_token_hash) ?? null, home.id, now, row.id);
+    return rowToWorkspace(findWorkspaceById.get(row.id));
+  }
+  const name = homeRepoDirName(home.id, slug);
+  const id = uniqueWorkspaceId(name);
+  insertWorkspace.run({
+    id,
+    accountId: home.accountId,
+    workspaceKey: key,
+    repoName: name,
+    status: home.status,
+    machineId: null,
+    machineState: null,
+    snapshotKey: null,
+    snapshotFingerprint: null,
+    region: home.region ?? null,
+    volumeId: null,
+    workerTokenHash: optionalString(homeRow.worker_token_hash) ?? null,
+    sourceKind: "home-repo",
+    repoUrl: `https://github.com/${slug}.git`,
+    gitRef: branch ?? null,
+    lastActivityAt: now,
+    lastHeartbeatAt: null,
+    createdAt: now,
+    updatedAt: now,
+  });
+  database.prepare("update rudder_workspaces set home_id = ? where id = ?").run(home.id, id);
+  return rowToWorkspace(findWorkspaceById.get(id));
+}
+
+function repoSlugFromUrl(url: string | undefined): string {
+  const match = (url ?? "").match(/github\.com\/([\w.-]+\/[\w.-]+?)(?:\.git)?$/);
+  return match ? match[1] : "";
+}
+
+function homeRepoDescriptor(row: Workspace): JsonRecord {
+  return {
+    workspaceId: row.id,
+    name: row.repoName ?? "repo",
+    repo: repoSlugFromUrl(row.repoUrl),
+    remote: row.repoUrl ?? "",
+    ref: row.gitRef ?? null,
+  };
+}
+
+function pushHomeRepos(homeId: string): void {
+  const control = homeControls.get(homeId);
+  if (!isOpen(control)) {
+    return;
+  }
+  sendSocket(control, JSON.stringify({ type: "repos", repos: homeRepos(homeId).map(homeRepoDescriptor) }));
+}
+
+async function openRepoOnHome(accountId: string, body: Json): Promise<JsonRecord> {
+  const slug = (stringField(body, "repo") ?? "").trim().replace(/\.git$/, "");
+  if (!REPO_SLUG_RE.test(slug)) {
+    throw badRequest("repo must look like owner/name");
+  }
+  const branch = stringField(body, "branch")?.trim() || undefined;
+  const region = sanitizeRegion(stringField(body, "region"));
+  const home = await ensureHomeRunning(accountId, region);
+  const repo = ensureHomeRepoRow(home, slug, branch);
+  pushHomeRepos(home.id);
+  schedulePersistDatabase();
+  return { home: home as unknown as JsonRecord, workspace: repo as unknown as JsonRecord };
+}
+
+function handleHomeControlUpgrade(req: IncomingMessage, socket: Duplex, head: Buffer, homeId: string): void {
+  const row = findWorkspaceById.get(homeId) as Record<string, unknown> | undefined;
+  if (!row || optionalString(row.source_kind) !== "home") {
+    destroyUpgrade(socket, 404);
+    return;
+  }
+  if (String(row.status) === "deleting") {
+    destroyUpgrade(socket, 410);
+    return;
+  }
+  try {
+    requireWorkerBearer(req, row);
+  } catch {
+    destroyUpgrade(socket, 401);
+    return;
+  }
+  wss.handleUpgrade(req, socket, head, (ws) => attachHomeControl(homeId, ws));
+}
+
+function attachHomeControl(homeId: string, ws: WebSocket): void {
+  const previous = homeControls.get(homeId);
+  if (previous && previous !== ws) {
+    try { previous.close(4000, "replaced"); } catch { /* ignore */ }
+  }
+  homeControls.set(homeId, ws);
+  enableSocketLiveness(ws);
+  pushHomeRepos(homeId);
+  ws.on("message", (data) => {
+    let message: Json;
+    try {
+      message = JSON.parse(Buffer.isBuffer(data) ? data.toString("utf8") : String(data)) as Json;
+    } catch {
+      return;
+    }
+    const type = stringField(message, "type");
+    if (type === "state") {
+      const projects = (message as JsonRecord).projects;
+      homeStates.set(homeId, {
+        projects: Array.isArray(projects) ? (projects as unknown as HomeProject[]) : [],
+        tailnet: objectField(message, "tailnet"),
+        updatedAt: new Date().toISOString(),
+      });
+      for (const project of homeStates.get(homeId)!.projects) {
+        if (typeof project?.workspaceId === "string") {
+          try {
+            setRepoFailure.run(typeof project.error === "string" && project.error ? project.error.slice(0, 2000) : null, new Date().toISOString(), project.workspaceId);
+          } catch {
+            // best effort
+          }
+        }
+      }
+      return;
+    }
+    if (type === "rpc-result") {
+      const id = stringField(message, "id") ?? "";
+      const pending = homeRpcs.get(id);
+      if (!pending) {
+        return;
+      }
+      homeRpcs.delete(id);
+      clearTimeout(pending.timer);
+      const error = stringField(message, "error");
+      if (error) {
+        pending.reject(Object.assign(new Error(error), { status: 400 }));
+      } else {
+        pending.resolve((message as JsonRecord).result ?? null);
+      }
+    }
+  });
+  ws.on("close", () => {
+    if (homeControls.get(homeId) === ws) {
+      homeControls.delete(homeId);
+    }
+  });
+  ws.on("error", () => undefined);
+}
+
+async function homeRpc(homeId: string, method: string, params: JsonRecord, timeoutMs = HOME_RPC_TIMEOUT_MS): Promise<Json> {
+  const control = homeControls.get(homeId);
+  if (!isOpen(control)) {
+    throw Object.assign(new Error("the home machine is not connected yet; it may still be starting"), { status: 503 });
+  }
+  const id = randomUUID();
+  return await new Promise<Json>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      homeRpcs.delete(id);
+      reject(Object.assign(new Error(`home machine did not answer ${method} in time`), { status: 504 }));
+    }, timeoutMs);
+    homeRpcs.set(id, { resolve, reject, timer });
+    sendSocket(control, JSON.stringify({ type: "rpc", id, method, params }));
+  });
+}
+
+function homeSummary(home: Workspace | null): JsonRecord | null {
+  if (!home) {
+    return null;
+  }
+  const state = homeStates.get(home.id);
+  return {
+    id: home.id,
+    status: home.status,
+    machineState: home.machineState ?? null,
+    connected: isOpen(homeControls.get(home.id)),
+    failureReason: home.failureReason ?? null,
+    activeAgents: home.activeAgents ?? 0,
+    lastActivityAt: home.lastActivityAt ?? null,
+    tailnet: state?.tailnet ?? null,
+    stateUpdatedAt: state?.updatedAt ?? null,
+  };
+}
+
+// Repo rows merged with what the supervisor last reported for each.
+function homeProjects(home: Workspace): JsonRecord[] {
+  const live = new Map((homeStates.get(home.id)?.projects ?? []).map((project) => [project.workspaceId, project]));
+  return homeRepos(home.id).map((row) => {
+    const project = live.get(row.id);
+    return {
+      workspaceId: row.id,
+      name: row.repoName ?? "repo",
+      repo: repoSlugFromUrl(row.repoUrl),
+      ref: row.gitRef ?? null,
+      status: row.status,
+      failureReason: project?.error ?? row.failureReason ?? null,
+      dashboard: project?.dashboard ?? null,
+      agents: (project?.agents ?? []) as unknown as Json,
+      ports: (project?.ports ?? []) as unknown as Json,
+      clients: Array.from(workspaceChannels.get(row.id)?.clients ?? []).filter(isOpen).length,
+      lastActivityAt: row.lastActivityAt ?? null,
+    };
+  });
+}
+
+function requireHomeRepo(accountId: string, workspaceId: string): { home: Workspace; repo: Workspace } {
+  const repo = getAccountWorkspace(workspaceId, accountId);
+  if (!repo || repo.sourceKind !== "home-repo" || !repo.homeId) {
+    throw Object.assign(new Error("project not found"), { status: 404 });
+  }
+  const home = getAccountWorkspace(repo.homeId, accountId);
+  if (!home) {
+    throw Object.assign(new Error("home machine not found"), { status: 404 });
+  }
+  return { home, repo };
+}
+
+function touchHome(homeId: string | undefined): void {
+  if (homeId) {
+    touchWorkspaceActivity(homeId);
+  }
+}
+
+async function handleHomeApi(req: IncomingMessage, res: ServerResponse, url: URL): Promise<void> {
+  const authContext = requireBearer(req);
+  if (req.method === "GET" && url.pathname === "/api/rudder/home") {
+    const home = findHomeRow(authContext.accountId);
+    sendJson(res, 200, { home: homeSummary(home), projects: home ? homeProjects(home) : [] });
+    return;
+  }
+  if (req.method === "POST" && url.pathname === "/api/rudder/home/open") {
+    const body = await readJsonBody(req);
+    sendJson(res, 200, await openRepoOnHome(authContext.accountId, body));
+    return;
+  }
+  if (req.method === "POST" && url.pathname === "/api/rudder/home/start") {
+    const home = await ensureHomeRunning(authContext.accountId);
+    sendJson(res, 200, { home: homeSummary(home) });
+    return;
+  }
+  if (req.method === "POST" && url.pathname === "/api/rudder/home/stop") {
+    const home = findHomeRow(authContext.accountId);
+    if (!home) {
+      sendJson(res, 404, { error: "no home machine" });
+      return;
+    }
+    const next = await mutateWorkspace(home, "stop");
+    setHomeRepoStatus.run({ homeId: home.id, status: "stopped", updatedAt: new Date().toISOString() });
+    sendJson(res, 200, { home: homeSummary(next) });
+    return;
+  }
+  sendJson(res, 404, { error: "not found" });
+}
+
+// ---------------------------------------------------------------------------
+// Phone app: /app (static) + /api/app/* (JSON). The browser signs in with the
+// same Google/GitHub better-auth user the CLI's `rudder login` approves, so
+// account ids line up; a CLI bearer token works on these routes too.
+// ---------------------------------------------------------------------------
+
+const appDir = process.env.RUDDER_APP_DIR || path.join(process.cwd(), "app");
+const APP_CONTENT_TYPES: Record<string, string> = {
+  ".html": "text/html; charset=utf-8",
+  ".js": "text/javascript; charset=utf-8",
+  ".mjs": "text/javascript; charset=utf-8",
+  ".css": "text/css; charset=utf-8",
+  ".json": "application/json; charset=utf-8",
+  ".webmanifest": "application/manifest+json",
+  ".svg": "image/svg+xml",
+  ".png": "image/png",
+  ".ico": "image/x-icon",
+};
+
+async function requireAccount(req: IncomingMessage): Promise<{ accountId: string; email?: string }> {
+  const authHeader = req.headers.authorization || "";
+  if (authHeader.startsWith("Bearer ")) {
+    return requireBearer(req);
+  }
+  const session = await getBetterAuthSession(req);
+  const id = session?.user?.id;
+  if (!id) {
+    throw unauthorized();
+  }
+  return { accountId: String(id), email: typeof session?.user?.email === "string" ? session.user.email : undefined };
+}
+
+async function serveAppFile(res: ServerResponse, pathname: string): Promise<void> {
+  const relative = pathname.replace(/^\/app\/?/, "") || "index.html";
+  const resolved = path.resolve(appDir, relative);
+  const insideApp = resolved === appDir || resolved.startsWith(`${appDir}${path.sep}`);
+  let target = insideApp ? resolved : path.join(appDir, "index.html");
+  let body: Buffer;
+  try {
+    body = await fs.readFile(target);
+  } catch {
+    // Client-side routes (/app/p/<id>) fall back to the shell.
+    target = path.join(appDir, "index.html");
+    body = await fs.readFile(target);
+  }
+  const type = APP_CONTENT_TYPES[path.extname(target)] ?? "application/octet-stream";
+  res.statusCode = 200;
+  res.setHeader("content-type", type);
+  // The shell and the service worker must revalidate so a deploy shows up on
+  // the next open; hashed assets are not used, so everything revalidates.
+  res.setHeader("cache-control", "no-cache");
+  if (path.basename(target) === "sw.js") {
+    res.setHeader("service-worker-allowed", "/app/");
+  }
+  res.end(body);
+}
+
+async function handleAppLogin(url: URL, res: ServerResponse): Promise<void> {
+  const provider = url.searchParams.get("provider") === "github" ? "github" : "google";
+  const providers = configuredProviders();
+  if (!providers[provider]) {
+    sendHtml(res, renderShell({
+      title: "Sign in · Rudder",
+      body: `<section class="hero"><h1>${escapeHtml(provider)} sign-in is not configured.</h1></section>`,
+    }), 404);
+    return;
+  }
+  refreshAuthHandler();
+  const response = await auth.handler(new Request(`${authBaseURL}/sign-in/social`, {
+    method: "POST",
+    headers: { "content-type": "application/json", origin: baseURL },
+    // The iOS app signs in through ASWebAuthenticationSession and comes back
+    // via /app/native-done, which hands it a bearer token on its own scheme.
+    body: JSON.stringify({
+      provider,
+      callbackURL: url.searchParams.get("native") === "1" ? `${baseURL}/app/native-done` : `${baseURL}/app`,
+      disableRedirect: true,
+    }),
+  }));
+  const text = await response.text();
+  const parsed: Json = text ? parseJson(text) : null;
+  const redirectURL = parsed && typeof parsed === "object" && !Array.isArray(parsed) && typeof parsed.url === "string"
+    ? parsed.url
+    : undefined;
+  if (!response.ok || !redirectURL) {
+    sendHtml(res, renderShell({
+      title: "Sign in failed · Rudder",
+      body: `<section class="hero"><h1>Sign in failed.</h1><p class="lede">${escapeHtml(responseErrorMessage(parsed) ?? text ?? String(response.status))}</p></section>`,
+    }), response.ok ? 502 : response.status);
+    return;
+  }
+  const responseHeaders = response.headers as Headers & { getSetCookie?: () => string[] };
+  for (const cookie of responseHeaders.getSetCookie?.() ?? splitSetCookieHeader(response.headers.get("set-cookie"))) {
+    res.setHeader("Set-Cookie", appendHeader(res.getHeader("Set-Cookie"), cookie));
+  }
+  res.statusCode = 302;
+  res.setHeader("Location", redirectURL);
+  res.end();
+}
+
+async function handleAppApi(req: IncomingMessage, res: ServerResponse, url: URL): Promise<void> {
+  const account = await requireAccount(req);
+  const home = findHomeRow(account.accountId);
+  if (req.method === "GET" && url.pathname === "/api/app/state") {
+    if (home) {
+      touchHome(home.id);
+    }
+    sendJson(res, 200, {
+      email: account.email ?? null,
+      home: homeSummary(home),
+      projects: home ? homeProjects(home) : [],
+    });
+    return;
+  }
+  if (req.method === "POST" && url.pathname === "/api/app/wake") {
+    const next = await ensureHomeRunning(account.accountId);
+    pushHomeRepos(next.id);
+    sendJson(res, 200, { home: homeSummary(next) });
+    return;
+  }
+  if (req.method === "POST" && url.pathname === "/api/app/open") {
+    sendJson(res, 200, await openRepoOnHome(account.accountId, await readJsonBody(req)));
+    return;
+  }
+  if (!home) {
+    sendJson(res, 404, { error: "no home machine yet; run `rudder cloud` in a repo, or add a project" });
+    return;
+  }
+  touchHome(home.id);
+  if (req.method === "GET" && url.pathname === "/api/app/transcript") {
+    const { repo } = requireHomeRepo(account.accountId, url.searchParams.get("workspace") ?? "");
+    const result = await homeRpc(home.id, "transcript", {
+      workspaceId: repo.id,
+      runId: url.searchParams.get("run") ?? "",
+      limit: Math.min(800, Math.max(20, Number(url.searchParams.get("limit") || 300))),
+    });
+    sendJson(res, 200, result);
+    return;
+  }
+  if (req.method === "POST" && url.pathname === "/api/app/send") {
+    const body = await readJsonBody(req);
+    const { repo } = requireHomeRepo(account.accountId, stringField(body, "workspace") ?? "");
+    const text = (stringField(body, "text") ?? "").trim();
+    if (!text) {
+      throw badRequest("text is required");
+    }
+    sendJson(res, 200, await homeRpc(home.id, "send", {
+      workspaceId: repo.id,
+      runId: stringField(body, "run") ?? "",
+      text: text.slice(0, 16_000),
+    }));
+    return;
+  }
+  if (req.method === "POST" && url.pathname === "/api/app/task") {
+    const body = await readJsonBody(req);
+    const { repo } = requireHomeRepo(account.accountId, stringField(body, "workspace") ?? "");
+    const text = (stringField(body, "text") ?? "").trim();
+    if (!text) {
+      throw badRequest("text is required");
+    }
+    sendJson(res, 200, await homeRpc(home.id, "task", { workspaceId: repo.id, text: text.slice(0, 16_000) }));
+    return;
+  }
+  if (req.method === "POST" && url.pathname === "/api/app/action") {
+    // Dashboard actions the phone can take on one agent: stop, merge.
+    const body = await readJsonBody(req);
+    const { repo } = requireHomeRepo(account.accountId, stringField(body, "workspace") ?? "");
+    const action = stringField(body, "action") ?? "";
+    if (action !== "stop" && action !== "merge") {
+      throw badRequest("action must be stop or merge");
+    }
+    sendJson(res, 200, await homeRpc(home.id, "action", { workspaceId: repo.id, runId: stringField(body, "run") ?? "", action }));
+    return;
+  }
+  sendJson(res, 404, { error: "not found" });
+}
+
+// End of the iOS app's sign-in: the browser session just created is exchanged
+// for a Rudder bearer token, handed back on the app's own URL scheme. The token
+// is the same kind `rudder login` stores, scoped to the same account.
+async function handleAppNativeDone(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const session = await getBetterAuthSession(req);
+  if (!session?.user?.id) {
+    res.statusCode = 302;
+    res.setHeader("Location", "rudder://auth?error=signin");
+    res.end();
+    return;
+  }
+  const verifiedEmail =
+    typeof session.user.email === "string" &&
+    (session.user as { emailVerified?: unknown }).emailVerified === true
+      ? session.user.email
+      : undefined;
+  const issued = issueRudderToken(String(session.user.id), verifiedEmail);
+  res.statusCode = 302;
+  res.setHeader("Location", `rudder://auth?token=${encodeURIComponent(issued.token)}`);
+  res.end();
 }

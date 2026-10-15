@@ -607,6 +607,28 @@ fn set_executable(_path: &Path) {}
 /// trailing `-c notify=["<script>"]` that OVERRIDES the earlier `notify=[]` baked
 /// by the Codex capability profile (last `-c` wins). No-op for non-worker
 /// modes. Config-generation failure is surfaced by the poll loop.
+/// Claude's Remote Control puts a session in the Claude phone app and on
+/// claude.ai. The cloud worker turns it on for every Claude pane it hosts
+/// (`RUDDER_REMOTE_CONTROL=1`); the name tells the sessions apart in the app.
+pub(crate) fn remote_control_session_name(run_id: &str) -> Option<String> {
+    if std::env::var("RUDDER_REMOTE_CONTROL").ok().as_deref() != Some("1") {
+        return None;
+    }
+    let repo = std::env::var("RUDDER_REPO_NAME")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            std::env::current_dir()
+                .ok()
+                .and_then(|dir| dir.file_name().map(|name| name.to_string_lossy().to_string()))
+        })
+        .unwrap_or_else(|| "rudder".to_string());
+    // Run ids end in a short unique suffix ("...-main-branch-29964").
+    let short = run_id.rsplit('-').next().unwrap_or(run_id);
+    Some(format!("{repo} · {short}"))
+}
+
 pub(crate) fn augment_worker_command(
     command: &mut TerminalCommand,
     backend: Backend,
@@ -622,6 +644,10 @@ pub(crate) fn augment_worker_command(
             if let Some(path) = signals.claude_settings {
                 command.args.push("--settings".to_string());
                 command.args.push(path.display().to_string());
+            }
+            if let Some(name) = remote_control_session_name(run_id) {
+                command.args.push("--remote-control".to_string());
+                command.args.push(name);
             }
         }
         Backend::Codex => {

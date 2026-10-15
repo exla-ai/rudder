@@ -475,14 +475,42 @@ Rudder Cloud is an optional hosted worker mode. The local dashboard stays your
 control surface; you decide whether a task runs locally or is handed to the cloud.
 
 ```bash
-rudder login                 # connect this machine to Rudder Cloud
-rudder cloud                 # onload the current workspace or start a worker
+rudder login                 # sign in with Google (opens straight to the account picker)
+rudder cloud                 # open this repo on your home machine and attach to it
+rudder cloud home            # home machine status: projects, agents, previews
+rudder cloud app             # the phone app link
 rudder cloud list            # list cloud workers
 rudder cloud logs <id>       # worker status
 rudder cloud onload [runId]  # hand one agent off to the cloud (or upload the workspace)
 rudder cloud workspace attach # migrate all live isolated agents into one cloud workspace
 rudder sail <name>           # short alias for starting a cloud worker
 ```
+
+**Your home machine.** `rudder cloud` in a repo with a GitHub origin opens it on
+your one cloud machine (4 CPU / 16 GB, persistent disk), cloning it into
+`~/code/<repo>` the first time. Every repo you open lives on that same machine,
+each with its own Rudder dashboard, so agents can read your other repos at the
+paths you are used to. GitHub is the source of truth: the cloud clones from it,
+and finished work comes back as a pushed branch and a draft PR (`m` in a cloud
+dashboard publishes instead of merging locally). Before attaching, Rudder warns
+about uncommitted or unpushed work it can't see, and offers to copy the repo's
+`.env` files into the encrypted vault. The machine stops after two quiet hours
+and starts again on the next `rudder cloud` or phone visit; conversations and
+agent state live on its disk, so agents resume where they were.
+`rudder cloud --snapshot` keeps the old behavior: upload this folder to a
+machine of its own.
+
+**Phone.** Open `rudder cloud app` on your phone and sign in with the same
+Google account. You see every project and agent, read conversations as they
+happen, text any agent, start tasks, stop or merge, and open previews. Claude
+panes in the cloud also run with Remote Control, so they appear in the Claude
+app too.
+
+**Previews.** Put a Tailscale auth key in the vault
+(`rudder cloud secrets set TS_AUTHKEY`) and the home machine joins your tailnet
+as `rudder-home`. Any dev server an agent starts there shows up as an HTTPS link
+(`https://rudder-home.<tailnet>.ts.net:<port>`) in `rudder cloud home` and the
+phone app.
 
 Inside the dashboard, `/login` starts browser auth and `/cloud` toggles cloud
 mode: while it is on, tasks you type start as workers in Rudder Cloud and keep

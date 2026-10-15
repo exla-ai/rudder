@@ -58,7 +58,12 @@ if (alreadyStaged()) {
 } else if (gitRemote) {
   // Cloud-native workspace: clone straight from the git remote — full history,
   // real origin, no snapshot upload involved.
-  stageGitClone(gitRemote, gitRef);
+  try {
+    stageGitClone(gitRemote, gitRef);
+  } catch (error) {
+    await reportDone("failed", 2, `git clone failed: ${error?.message || error}`);
+    process.exit(2);
+  }
   markStaged();
 } else {
   // Fly Machines disks are ephemeral across stop+start, so the staged marker
@@ -69,6 +74,7 @@ if (alreadyStaged()) {
   const effectiveSnapshotUrl = freshUrl || snapshotUrl;
   if (!effectiveSnapshotUrl) {
     console.error("RUDDER_SNAPSHOT_URL is required for first start (and control-plane refresh failed)");
+    await reportDone("failed", 2, "no snapshot URL: the control plane could not sign one");
     process.exit(2);
   }
   if (freshUrl) {
@@ -76,7 +82,12 @@ if (alreadyStaged()) {
   } else {
     console.log("Falling back to snapshot URL from env (control-plane refresh unavailable).");
   }
-  stageSnapshot(effectiveSnapshotUrl);
+  try {
+    stageSnapshot(effectiveSnapshotUrl);
+  } catch (error) {
+    await reportDone("failed", 2, `could not restore the snapshot: ${error?.message || error}`);
+    process.exit(2);
+  }
   markStaged();
 }
 
@@ -163,7 +174,8 @@ term.onExit(({ exitCode, signal }) => {
   exited = true;
   clearInterval(heartbeatTimer);
   const state = exitCode === 0 ? "completed" : "failed";
-  reportDone(state, exitCode ?? (signal ? 128 + signal : 1));
+  const code = exitCode ?? (signal ? 128 + signal : 1);
+  reportDone(state, code, state === "failed" ? `${command} exited with code ${code}` : undefined);
   const socket = ws;
   if (socket && socket.readyState === WebSocket.OPEN) {
     socket.send(JSON.stringify({ type: "exit", code: exitCode, signal: signal ?? null }));
@@ -466,13 +478,7 @@ function stageGitClone(remote, ref) {
   process.chdir("/workspace");
   const workdir = path.join("/workspace", repoName);
   console.log(`Cloning ${remote}${ref ? ` (${ref})` : ""}...`);
-  try {
-    sh(`git clone ${ref ? `--branch ${shQuote(ref)} ` : ""}${shQuote(remote)} ${shQuote(workdir)}`);
-  } catch (error) {
-    console.error(`git clone failed: ${error?.message || error}`);
-    reportDone("failed", 2);
-    process.exit(2);
-  }
+  sh(`git clone ${ref ? `--branch ${shQuote(ref)} ` : ""}${shQuote(remote)} ${shQuote(workdir)}`);
   process.chdir(workdir);
   // Only set identity when the vault didn't already deliver a .gitconfig.
   shSoft('git config user.email >/dev/null 2>&1 || git config user.email "rudder-cloud@local"');
@@ -749,19 +755,20 @@ function reportHeartbeat() {
   }).catch(() => undefined);
 }
 
-function reportDone(state, code) {
+function reportDone(state, code, reason) {
   lastReportedState = state;
   if (!cloudUrl || !sessionId || !workerToken) {
-    return;
+    return Promise.resolve();
   }
-  // best-effort fire-and-forget; we exit shortly after
-  fetch(heartbeatUrl(), {
+  // best-effort; callers that exit right after await it
+  return fetch(heartbeatUrl(), {
     method: "POST",
     headers: {
       "content-type": "application/json",
       authorization: `Bearer ${workerToken}`,
     },
-    body: JSON.stringify({ state, exitCode: code, machineId: flyMachineId || undefined }),
+    body: JSON.stringify({ state, exitCode: code, reason, machineId: flyMachineId || undefined }),
+    signal: AbortSignal.timeout(5000),
   }).catch(() => undefined);
 }
 

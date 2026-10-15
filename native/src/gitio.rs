@@ -1225,6 +1225,9 @@ pub(crate) fn save_native_run_record(repo_root: &Path, run: &AgentRun) -> Result
         "id": run.id,
         "status": record_status,
         "lifecyclePhase": run.lifecycle_label(),
+        // What a live row is waiting on, for readers outside the dashboard (the
+        // phone app): the flags themselves are in-memory only.
+        "attention": run_attention(run),
         "vcs": if is_jj_run { "jj" } else { "git" },
         "mode": run.mode.as_str(),
         // Whether this RudderPlan row is a TRANSIENT reconcile planner (vs the pinned
@@ -3470,4 +3473,24 @@ pub(crate) fn short_hash(value: &str) -> String {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     value.hash(&mut hasher);
     format!("{:010x}", hasher.finish())[..10].to_string()
+}
+
+/// "permission" / "input" / "interrupted" / "error" while a running row waits on
+/// the user, null otherwise.
+pub(crate) fn run_attention(run: &AgentRun) -> Option<&'static str> {
+    if run.status != AgentStatus::Running {
+        return None;
+    }
+    if run.needs_permission || matches!(run.wait_signal, Some(WaitSignal::Permission)) {
+        return Some("permission");
+    }
+    match run.wait_signal {
+        Some(WaitSignal::Interrupted) => return Some("interrupted"),
+        Some(WaitSignal::Error(_)) => return Some("error"),
+        _ => {}
+    }
+    if run.needs_user_input {
+        return Some("input");
+    }
+    None
 }

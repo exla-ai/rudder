@@ -220,6 +220,7 @@ export async function main(): Promise<void> {
       await runDoctor({ json: parsed.flags.json });
       return;
     case "login":
+    case "auth":
       await runCloudCommand("cloud", ["login", ...parsed.args], {
         json: parsed.flags.json,
         homePaths: parsed.flags.homePaths,

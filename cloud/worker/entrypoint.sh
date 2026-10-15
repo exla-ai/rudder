@@ -17,4 +17,9 @@ if [ "${RUDDER_WORKER_SKIP_AGENT_UPDATE:-0}" != "1" ] && command -v claude >/dev
   (timeout 300 npm install -g @openai/codex@latest >/dev/null 2>&1 || true) &
 fi
 
+# A home machine (one per account, every repo on it) runs its own supervisor.
+if [ "${RUDDER_HOME:-0}" = "1" ]; then
+  exec node /opt/rudder-worker/home.mjs "$@"
+fi
+
 exec node /opt/rudder-worker/supervisor.mjs "$@"

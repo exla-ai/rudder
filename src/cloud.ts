@@ -219,14 +219,20 @@ export async function runCloudCommand(command: string, args: string[], options: 
   // `rudder cloud` with no further args means "open the cloud workspace for
   // this repo". Explicit subcommands (sail, launch, etc.) keep their old
   // behavior. `rudder sail` and `rudder cloud sail` still launch a sail.
-  if (command === "cloud" && subcommand === "") {
-    await workspaceCommand([], options);
+  if (command === "cloud" && (subcommand === "" || subcommand === "--snapshot")) {
+    await openOnHome(subcommand === "--snapshot", options);
     return;
   }
 
   switch (subcommand) {
     case "login":
-      await login(options);
+      await login(options, rest);
+      return;
+    case "home":
+      await homeCommand(rest, options);
+      return;
+    case "app":
+      printAppLink(options);
       return;
     case "launch":
       await launch(rest, options, "task");
@@ -335,9 +341,12 @@ export async function runCloudCommand(command: string, args: string[], options: 
   }
 }
 
-async function login(options: CloudCommandOptions): Promise<void> {
+async function login(options: CloudCommandOptions, args: string[] = []): Promise<void> {
   const client = await cloudClient({ requireToken: false });
-  const browserLogin = await tryBrowserLogin(client, options).catch((error) => {
+  // Google is the default sign-in: the browser opens straight on Google's
+  // account picker instead of a page of buttons. `--github` picks GitHub.
+  const provider = args.includes("--github") ? "github" : "google";
+  const browserLogin = await tryBrowserLogin(client, options, provider).catch((error) => {
     if (!options.json) {
       console.warn(`Browser login unavailable: ${error instanceof Error ? error.message : String(error)}`);
       console.warn("Trying local GitHub auth fallback...");
@@ -371,7 +380,11 @@ async function login(options: CloudCommandOptions): Promise<void> {
   }
 }
 
-async function tryBrowserLogin(client: CloudClient, options: CloudCommandOptions): Promise<LoginPollResponse | null> {
+async function tryBrowserLogin(
+  client: CloudClient,
+  options: CloudCommandOptions,
+  provider: "google" | "github" = "google",
+): Promise<LoginPollResponse | null> {
   const response = await client.request<LoginStartResponse>("/api/cli/login", {
     method: "POST",
     body: {
@@ -380,7 +393,9 @@ async function tryBrowserLogin(client: CloudClient, options: CloudCommandOptions
     },
   });
   const deviceCode = response.deviceCode;
-  const loginUrl = response.loginUrl ?? response.verificationUri ?? withQuery(client.baseUrl, "/cli/login", deviceCode ? { device_code: deviceCode } : {});
+  const loginUrl = deviceCode
+    ? withQuery(client.baseUrl, `/cli/oauth/${provider}/start`, { device_code: deviceCode })
+    : response.loginUrl ?? response.verificationUri ?? withQuery(client.baseUrl, "/cli/login", {});
   const pollPath = response.pollUrl ?? "/api/cli/login/poll";
   const intervalMs = Math.max(1000, (response.interval ?? DEFAULT_LOGIN_INTERVAL_MS / 1000) * 1000);
   const timeoutMs = Math.max(intervalMs, (response.expiresIn ?? DEFAULT_LOGIN_TIMEOUT_MS / 1000) * 1000);
@@ -2013,6 +2028,9 @@ function printSailList(items: JsonValue[]): void {
       sail.url,
       sail.updatedAt ?? sail.createdAt,
     ].filter(Boolean).join("  "));
+    if (sail.status === "failed" && typeof (sail as { failureReason?: unknown }).failureReason === "string") {
+      console.log(`  why: ${(sail as { failureReason?: string }).failureReason}`);
+    }
   }
 }
 
@@ -2850,6 +2868,9 @@ async function workspaceStatus(args: string[], options: CloudCommandOptions): Pr
   }
   const idlePart = idleMinutes !== null ? `  idle ${idleMinutes}m` : "";
   console.log(`workspace ${id}  ${status}  clients=${clientCount}${idlePart}`);
+  if (status === "failed" && typeof workspace.failureReason === "string" && workspace.failureReason) {
+    console.log(`why: ${workspace.failureReason}`);
+  }
   if (serverActiveAgents !== null) {
     if (serverActiveAgents > 0) {
       console.log(`${serverActiveAgents} agent(s) actively running in the cloud.`);
@@ -3640,7 +3661,15 @@ function printCloudHelp(): void {
   console.log(`rudder cloud
 
 Usage:
-  rudder cloud login
+  rudder cloud
+      open this repo on your home machine (cloned from GitHub; one machine
+      holds every repo) and attach to its dashboard. --snapshot uploads this
+      folder to its own machine instead.
+  rudder cloud home [status|start|stop|open <owner/repo>]
+  rudder cloud app
+      the phone app link (sign in with the same Google account)
+  rudder cloud login [--github]
+      signs in with Google (or GitHub)
   rudder cloud help
   rudder cloud [name or task]
   rudder cloud launch [--home-path <path>] ["task"]
@@ -3739,4 +3768,249 @@ function cloudNameFromTask(task: string): string {
     .slice(0, 36)
     .replace(/-+$/g, "");
   return slug || randomCloudName();
+}
+
+// ---------------------------------------------------------------------------
+// Home machine: `rudder cloud` in a repo opens it on the account's one cloud
+// machine (cloning from GitHub on first use) and attaches to its dashboard.
+// GitHub is the source of truth: work comes back as pushed branches and draft
+// PRs, so nothing is uploaded from this laptop except .env files you approve.
+// ---------------------------------------------------------------------------
+
+type HomeOpenResponse = {
+  home?: Record<string, JsonValue>;
+  workspace?: Record<string, JsonValue>;
+};
+
+async function openOnHome(forceSnapshot: boolean, options: CloudCommandOptions): Promise<void> {
+  if (forceSnapshot) {
+    await workspaceAttach([], options);
+    return;
+  }
+  const repoRoot = findRepoRoot();
+  const slug = await githubSlugFromOrigin(repoRoot);
+  if (!slug) {
+    if (!options.json) {
+      process.stderr.write("This repo has no GitHub origin, so it can't be cloned on the home machine; uploading a snapshot workspace instead.\n");
+    }
+    await workspaceAttach([], options);
+    return;
+  }
+  const client = await cloudClient({ requireToken: true });
+  const name = slug.split("/")[1];
+  if (!options.json) {
+    await warnLocalOnlyWork(repoRoot);
+    await offerEnvFilesToVault(client, repoRoot, name);
+    process.stderr.write(`Opening ${slug} on your home machine...\n`);
+  }
+  const branch = await pushedBranch(repoRoot);
+  const result = await client.request<HomeOpenResponse>("/api/rudder/home/open", {
+    method: "POST",
+    body: { repo: slug, ...(branch ? { branch } : {}) },
+  });
+  const workspaceId = typeof result.workspace?.id === "string" ? result.workspace.id : "";
+  if (!workspaceId) {
+    throw new Error("the control plane did not return a workspace for this repo");
+  }
+  if (options.json) {
+    printJson(result as unknown as JsonValue);
+    return;
+  }
+  if (!process.stdin.isTTY || !process.stdout.isTTY) {
+    process.stderr.write(`${slug} is open on the home machine (workspace ${workspaceId}). Run \`rudder cloud\` from a terminal to attach.\n`);
+    return;
+  }
+  if (process.env.RUDDER_CLOUD_NO_ATTACH === "1") {
+    return;
+  }
+  process.stderr.write(`Phone: ${appUrl(client.baseUrl)}\n`);
+  await runAttach({ kind: "workspace", id: workspaceId, label: `${name} on home` }, { ...options, quietBanner: false });
+}
+
+// The cloud clones from GitHub, so anything not pushed is not there. Say so
+// plainly; it is a warning, not a gate.
+async function warnLocalOnlyWork(repoRoot: string): Promise<void> {
+  const status = await runCommand("git", ["status", "--porcelain"], { cwd: repoRoot, allowFailure: true });
+  const changed = status.code === 0 ? status.stdout.split("\n").filter((line) => line.trim()).length : 0;
+  let unpushed = 0;
+  let branchMissing = "";
+  const upstream = await runCommand("git", ["rev-list", "--count", "@{u}..HEAD"], { cwd: repoRoot, allowFailure: true });
+  if (upstream.code === 0) {
+    unpushed = Number(upstream.stdout.trim()) || 0;
+  } else {
+    const branch = await runCommand("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd: repoRoot, allowFailure: true });
+    const name = branch.stdout.trim();
+    if (name && name !== "HEAD") {
+      branchMissing = name;
+    }
+  }
+  const parts: string[] = [];
+  if (changed > 0) {
+    parts.push(`${changed} uncommitted file${changed === 1 ? "" : "s"}`);
+  }
+  if (unpushed > 0) {
+    parts.push(`${unpushed} unpushed commit${unpushed === 1 ? "" : "s"}`);
+  }
+  if (branchMissing) {
+    parts.push(`branch ${branchMissing} is not on GitHub`);
+  }
+  if (parts.length > 0) {
+    process.stderr.write(`Heads up: ${parts.join(", ")}. The cloud clones from GitHub, so it won't see that. Push first, or use \`rudder cloud --snapshot\` to upload this folder instead.\n`);
+  }
+}
+
+// The current branch, if GitHub has it; otherwise the default branch is used.
+async function pushedBranch(repoRoot: string): Promise<string | undefined> {
+  const branch = (await runCommand("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd: repoRoot, allowFailure: true })).stdout.trim();
+  if (!branch || branch === "HEAD") {
+    return undefined;
+  }
+  const remote = await runCommand("git", ["ls-remote", "--heads", "origin", branch], { cwd: repoRoot, allowFailure: true });
+  return remote.code === 0 && remote.stdout.trim() ? branch : undefined;
+}
+
+// A GitHub clone has no .env files (they are gitignored). Offer to put this
+// repo's into the vault, stored at ~/code/<repo>/<path> so the home machine
+// writes them into its clone.
+async function offerEnvFilesToVault(client: CloudClient, repoRoot: string, repoName: string): Promise<void> {
+  if (!isTty()) {
+    return;
+  }
+  const listed = await runCommand("git", ["ls-files", "--others", "--ignored", "--exclude-standard", "--directory"], {
+    cwd: repoRoot,
+    allowFailure: true,
+  });
+  if (listed.code !== 0) {
+    return;
+  }
+  const envFiles = listed.stdout
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line && !line.endsWith("/"))
+    .filter((line) => /^\.env(\.[\w.-]+)?$/.test(path.basename(line)))
+    .filter((line) => !/\.(example|sample|template|dist)$/.test(line))
+    .filter((line) => !line.split("/").includes("node_modules"))
+    .slice(0, 20);
+  if (envFiles.length === 0) {
+    return;
+  }
+  const vault = await client.request<{ secrets?: { name: string; size?: number }[] }>("/api/rudder/secrets", { method: "GET" }).catch(() => null);
+  if (!vault) {
+    return;
+  }
+  const stored = new Map((vault.secrets ?? []).map((secret) => [secret.name, secret.size ?? -1]));
+  const pending: { relative: string; name: string; content: Buffer }[] = [];
+  for (const relative of envFiles) {
+    const content = await fsp.readFile(path.join(repoRoot, relative)).catch(() => null);
+    if (!content || content.length > MAX_SECRET_VALUE_BYTES) {
+      continue;
+    }
+    const name = `~/code/${repoName}/${relative}`;
+    if (stored.get(name) === content.length) {
+      continue;
+    }
+    pending.push({ relative, name, content });
+  }
+  if (pending.length === 0) {
+    return;
+  }
+  const list = pending.map((entry) => entry.relative).join(", ");
+  const verb = pending.some((entry) => stored.has(entry.name)) ? "Update" : "Copy";
+  const yes = await promptConfirm(`${verb} ${list} in the cloud vault so agents on the home machine have it?`, true);
+  if (!yes) {
+    return;
+  }
+  for (const entry of pending) {
+    await client.request<JsonValue>("/api/rudder/secrets/item", {
+      method: "PUT",
+      body: {
+        name: entry.name,
+        kind: "file",
+        filePath: entry.name,
+        valueBase64: entry.content.toString("base64"),
+        source: "rudder cloud",
+      },
+    });
+  }
+  process.stderr.write(`Stored ${pending.length} file${pending.length === 1 ? "" : "s"} in the vault.\n`);
+}
+
+function appUrl(baseUrl: string): string {
+  return `${baseUrl.replace(/\/$/, "")}/app`;
+}
+
+function printAppLink(options: CloudCommandOptions): void {
+  const baseUrl = (process.env.RUDDER_CLOUD_URL || DEFAULT_CLOUD_URL).replace(/\/$/, "");
+  if (options.json) {
+    printJson({ url: appUrl(baseUrl) });
+    return;
+  }
+  console.log(`Open on your phone and sign in with the same Google account:\n  ${appUrl(baseUrl)}`);
+}
+
+async function homeCommand(args: string[], options: CloudCommandOptions): Promise<void> {
+  const client = await cloudClient({ requireToken: true });
+  const sub = args[0] ?? "status";
+  if (sub === "start" || sub === "stop") {
+    const result = await client.request<JsonValue>(`/api/rudder/home/${sub}`, { method: "POST", body: {} });
+    if (options.json) {
+      printJson(result);
+    } else {
+      console.log(sub === "start" ? "Home machine starting." : "Home machine stopped.");
+    }
+    return;
+  }
+  if (sub === "open") {
+    const repo = args[1];
+    if (!repo || !/^[\w.-]+\/[\w.-]+$/.test(repo)) {
+      throw new Error("Usage: rudder cloud home open <owner/repo>");
+    }
+    const result = await client.request<JsonValue>("/api/rudder/home/open", { method: "POST", body: { repo } });
+    if (options.json) {
+      printJson(result);
+    } else {
+      console.log(`Opened ${repo} on the home machine.`);
+    }
+    return;
+  }
+  if (sub !== "status") {
+    throw new Error("Usage: rudder cloud home [status|start|stop|open <owner/repo>]");
+  }
+  const result = await client.request<{ home: Record<string, JsonValue> | null; projects: Record<string, JsonValue>[] }>(
+    "/api/rudder/home",
+    { method: "GET" },
+  );
+  if (options.json) {
+    printJson(result as unknown as JsonValue);
+    return;
+  }
+  if (!result.home) {
+    console.log("No home machine yet. Run `rudder cloud` in a repo with a GitHub origin to create it.");
+    return;
+  }
+  const home = result.home;
+  const tailnet = home.tailnet && typeof home.tailnet === "object" && !Array.isArray(home.tailnet)
+    ? (home.tailnet as Record<string, JsonValue>)
+    : null;
+  console.log(`home ${home.id}  ${home.status}${home.connected ? "  connected" : ""}  ${home.activeAgents ?? 0} agent(s) working`);
+  if (home.failureReason) {
+    console.log(`why: ${home.failureReason}`);
+  }
+  if (tailnet) {
+    console.log(`tailnet: ${tailnet.dnsName ?? tailnet.hostname ?? "?"}${tailnet.online ? "" : "  (offline)"}${tailnet.error ? `  ${tailnet.error}` : ""}`);
+  }
+  for (const project of result.projects) {
+    const agents = Array.isArray(project.agents) ? (project.agents as Record<string, JsonValue>[]) : [];
+    const working = agents.filter((agent) => agent.status === "working").length;
+    const waiting = agents.filter((agent) => agent.status === "waiting" || agent.status === "review").length;
+    console.log(`  ${project.name}  ${project.repo}  ${project.dashboard ?? project.status}  ${working} working, ${waiting} need you`);
+    if (project.failureReason) {
+      console.log(`    why: ${project.failureReason}`);
+    }
+    const ports = Array.isArray(project.ports) ? (project.ports as Record<string, JsonValue>[]) : [];
+    for (const port of ports) {
+      console.log(`    :${port.port} ${port.label ?? ""} ${port.url ?? ""}`);
+    }
+  }
+  console.log(`Phone: ${appUrl(client.baseUrl)}`);
 }

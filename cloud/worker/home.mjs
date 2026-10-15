@@ -663,8 +663,15 @@ function ignoredProcess(info) {
     return true;
   }
   const joined = info.cmdline.join(" ");
-  // Rudder's own processes: the CLI/board daemon and this supervisor.
-  return /\/opt\/rudder(-worker)?\//.test(joined) || /\brudder(\.js)?\s+(__|board|serve)/.test(joined);
+  // Rudder's own processes: this supervisor, and the `rudder` CLI that hosts
+  // each dashboard and its board server (`node /usr/local/bin/rudder`, or the
+  // package path behind the npm link).
+  const script = path.basename(info.cmdline[1] || "");
+  return (
+    /\/opt\/rudder(-worker)?\//.test(joined) ||
+    /@viraatdas\/rudder|\/rudder\/dist\//.test(joined) ||
+    (info.comm === "node" && (script === "rudder" || script === "rudder.js"))
+  );
 }
 
 function portLabel(comm, cmdline) {
@@ -695,20 +702,44 @@ function projectForPath(cwd) {
 }
 
 function servePort(port) {
-  const https = spawnSync("tailscale", ["--socket", TS_SOCKET, "serve", "--bg", `--https=${port}`, `http://127.0.0.1:${port}`], { encoding: "utf8", timeout: 15_000 });
-  if (https.status === 0 && tailnet.dnsName) {
-    tailnet.https = true;
-    servedPorts.set(port, { url: `https://${tailnet.dnsName}:${port}`, https: true });
+  const host = tailnet.dnsName || TS_HOSTNAME;
+  // userspace tailscaled forwards inbound tailnet connections to 127.0.0.1,
+  // so the plain address reaches even a localhost-bound dev server. It is the
+  // link until (and unless) HTTPS serving turns out to work.
+  servedPorts.set(port, { url: `http://${host}:${port}`, https: false });
+  if (tailnet.https === false || !tailnet.dnsName) {
     return;
   }
-  if (tailnet.https === null) {
-    tailnet.https = false;
-    log(`tailscale serve --https failed (${firstLine(https.stderr || https.stdout || "")}); previews use plain http`);
-  }
-  // userspace tailscaled forwards inbound tailnet connections to 127.0.0.1,
-  // so the plain address still reaches a localhost-bound dev server.
-  const host = tailnet.dnsName || TS_HOSTNAME;
-  servedPorts.set(port, { url: `http://${host}:${port}`, https: false });
+  // When Serve/HTTPS is not enabled on the tailnet, `tailscale serve` does not
+  // fail: it prints an "enable it here" link and WAITS. So it runs detached
+  // with a deadline, never on the event loop, and one refusal settles it.
+  const child = spawn("tailscale", ["--socket", TS_SOCKET, "serve", "--bg", `--https=${port}`, `http://127.0.0.1:${port}`], {
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let output = "";
+  child.stdout.on("data", (chunk) => { output += chunk; });
+  child.stderr.on("data", (chunk) => { output += chunk; });
+  const timer = setTimeout(() => child.kill("SIGKILL"), 10_000);
+  child.on("exit", (code) => {
+    clearTimeout(timer);
+    if (code === 0) {
+      tailnet.https = true;
+      if (servedPorts.has(port)) {
+        servedPorts.set(port, { url: `https://${tailnet.dnsName}:${port}`, https: true });
+        lastStateJson = "";
+      }
+      return;
+    }
+    if (tailnet.https !== false) {
+      tailnet.https = false;
+      const link = /https:\/\/login\.tailscale\.com\/\S+/.exec(output)?.[0];
+      tailnet.error = link
+        ? `HTTPS previews are off on this tailnet; enable Serve at ${link}`
+        : `HTTPS previews unavailable (${firstLine(output) || `exit ${code}`})`;
+      log(tailnet.error);
+      lastStateJson = "";
+    }
+  });
 }
 
 function unservePort(port) {

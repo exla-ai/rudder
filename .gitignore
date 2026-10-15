@@ -15,3 +15,7 @@ DECISIONS.md
 tui-report.html
 .tui-report/
 .rudder-workspaces/
+
+# iOS build output and App Store Connect credentials
+ios/build/
+ios/fastlane/.asc.env

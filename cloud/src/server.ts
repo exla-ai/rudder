@@ -5318,7 +5318,7 @@ async function serveAppFile(res: ServerResponse, pathname: string): Promise<void
   // the next open; hashed assets are not used, so everything revalidates.
   res.setHeader("cache-control", "no-cache");
   if (path.basename(target) === "sw.js") {
-    res.setHeader("service-worker-allowed", "/app/");
+    res.setHeader("service-worker-allowed", "/app");
   }
   res.end(body);
 }

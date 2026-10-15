@@ -1,0 +1,228 @@
+import SafariServices
+import SwiftUI
+import WebKit
+
+/// The Rudder app (`/app`) in a WKWebView.
+///
+/// The web app checks `window.RUDDER_NATIVE` (injected before any page script
+/// runs) to send the bearer token on its API calls, and talks back through the
+/// `rudder` message handler: `signIn` (token rejected), `signOut`,
+/// `openExternal` (links leave the app), and `badge` (agents that need you).
+struct AppWebView: UIViewRepresentable {
+    let session: Session
+    let token: String
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(session: session)
+    }
+
+    func makeUIView(context: Context) -> WKWebView {
+        let controller = WKUserContentController()
+        controller.addUserScript(WKUserScript(
+            source: nativeBootstrap(token: token),
+            injectionTime: .atDocumentStart,
+            forMainFrameOnly: true
+        ))
+        controller.add(context.coordinator, name: "rudder")
+
+        let configuration = WKWebViewConfiguration()
+        configuration.userContentController = controller
+        configuration.allowsInlineMediaPlayback = true
+        configuration.defaultWebpagePreferences.allowsContentJavaScript = true
+        configuration.applicationNameForUserAgent = "RudderiOS/\(Bundle.main.shortVersion)"
+
+        let webView = WKWebView(frame: .zero, configuration: configuration)
+        webView.navigationDelegate = context.coordinator
+        webView.uiDelegate = context.coordinator
+        webView.allowsBackForwardNavigationGestures = true
+        webView.isOpaque = false
+        webView.backgroundColor = UIColor(Theme.background)
+        webView.scrollView.backgroundColor = UIColor(Theme.background)
+        webView.scrollView.contentInsetAdjustmentBehavior = .never
+        webView.scrollView.keyboardDismissMode = .interactive
+        #if DEBUG
+        webView.isInspectable = true
+        #endif
+
+        let refresh = UIRefreshControl()
+        refresh.addTarget(context.coordinator, action: #selector(Coordinator.pullToRefresh(_:)), for: .valueChanged)
+        webView.scrollView.refreshControl = refresh
+
+        context.coordinator.webView = webView
+        context.coordinator.lastTick = session.foregroundTick
+        webView.load(URLRequest(url: session.appURL))
+        return webView
+    }
+
+    func updateUIView(_ webView: WKWebView, context: Context) {
+        // Coming back to the foreground: ask the page for fresh state instead of
+        // reloading it (which would lose scroll position and drafts).
+        if context.coordinator.lastTick != session.foregroundTick {
+            context.coordinator.lastTick = session.foregroundTick
+            webView.evaluateJavaScript("window.rudderRefresh && window.rudderRefresh()")
+        }
+    }
+
+    static func dismantleUIView(_ webView: WKWebView, coordinator: Coordinator) {
+        webView.configuration.userContentController.removeScriptMessageHandler(forName: "rudder")
+    }
+
+    private func nativeBootstrap(token: String) -> String {
+        let payload: [String: String] = [
+            "token": token,
+            "platform": "ios",
+            "version": Bundle.main.shortVersion,
+        ]
+        let json = (try? JSONSerialization.data(withJSONObject: payload))
+            .flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
+        return "window.RUDDER_NATIVE = Object.freeze(\(json));"
+    }
+
+    @MainActor
+    final class Coordinator: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUIDelegate {
+        let session: Session
+        weak var webView: WKWebView?
+        var lastTick = 0
+
+        init(session: Session) {
+            self.session = session
+        }
+
+        @objc func pullToRefresh(_ control: UIRefreshControl) {
+            webView?.evaluateJavaScript("window.rudderRefresh ? window.rudderRefresh() : location.reload()")
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+                control.endRefreshing()
+            }
+        }
+
+        func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) {
+            guard let body = message.body as? [String: Any], let type = body["type"] as? String else { return }
+            switch type {
+            case "signIn", "signOut":
+                session.signOut()
+            case "openExternal":
+                if let string = body["url"] as? String, let url = URL(string: string) {
+                    openExternally(url)
+                }
+            case "badge":
+                if let count = body["count"] as? Int {
+                    session.setBadge(count)
+                } else if let count = body["count"] as? Double {
+                    session.setBadge(Int(count))
+                }
+            case "haptic":
+                UIImpactFeedbackGenerator(style: .light).impactOccurred()
+            default:
+                break
+            }
+        }
+
+        // Navigation inside the app stays in the web view; everything else
+        // (previews, GitHub, docs) opens outside it.
+        func webView(
+            _ webView: WKWebView,
+            decidePolicyFor navigationAction: WKNavigationAction,
+            decisionHandler: @escaping @MainActor (WKNavigationActionPolicy) -> Void
+        ) {
+            guard let url = navigationAction.request.url else {
+                decisionHandler(.cancel)
+                return
+            }
+            if url.scheme == "about" || url.scheme == "blob" || url.scheme == "data" {
+                decisionHandler(.allow)
+                return
+            }
+            let sameHost = url.host == session.server.host
+            let inApp = sameHost && (url.path == "/app" || url.path.hasPrefix("/app/") || url.path.hasPrefix("/api/"))
+            if inApp && navigationAction.targetFrame != nil {
+                if url.path == "/app/login" {
+                    // The web app should not do this in the shell, but if it
+                    // does, sign in natively: Google refuses embedded views.
+                    decisionHandler(.cancel)
+                    session.signOut()
+                    return
+                }
+                decisionHandler(.allow)
+                return
+            }
+            decisionHandler(.cancel)
+            openExternally(url)
+        }
+
+        func webView(
+            _ webView: WKWebView,
+            createWebViewWith configuration: WKWebViewConfiguration,
+            for navigationAction: WKNavigationAction,
+            windowFeatures: WKWindowFeatures
+        ) -> WKWebView? {
+            if let url = navigationAction.request.url {
+                openExternally(url)
+            }
+            return nil
+        }
+
+        func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+            showOffline(webView, error: error)
+        }
+
+        func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+            showOffline(webView, error: error)
+        }
+
+        func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+            webView.reload()
+        }
+
+        private func showOffline(_ webView: WKWebView, error: Error) {
+            let nsError = error as NSError
+            if nsError.code == NSURLErrorCancelled {
+                return
+            }
+            let message = nsError.localizedDescription
+                .replacingOccurrences(of: "&", with: "&amp;")
+                .replacingOccurrences(of: "<", with: "&lt;")
+            let html = """
+            <html><head><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+            <style>body{font:17px -apple-system;display:flex;height:100vh;margin:0;align-items:center;justify-content:center;
+            text-align:center;padding:24px;box-sizing:border-box;color:#555;background:transparent}
+            @media(prefers-color-scheme:dark){body{color:#aaa}}a{color:#4a7bd8;text-decoration:none;font-weight:600}</style></head>
+            <body><div><p>Can't reach Rudder.</p><p style="font-size:14px">\(message)</p>
+            <p><a href="\(session.appURL.absoluteString)">Try again</a></p></div></body></html>
+            """
+            webView.loadHTMLString(html, baseURL: session.server)
+        }
+
+        private func openExternally(_ url: URL) {
+            guard url.scheme == "http" || url.scheme == "https" else {
+                UIApplication.shared.open(url)
+                return
+            }
+            // Universal links (GitHub, Claude) go to their apps when installed.
+            UIApplication.shared.open(url, options: [.universalLinksOnly: true]) { opened in
+                guard !opened else { return }
+                Task { @MainActor in
+                    let safari = SFSafariViewController(url: url)
+                    safari.dismissButtonStyle = .close
+                    UIApplication.shared.topViewController?.present(safari, animated: true)
+                }
+            }
+        }
+    }
+}
+
+extension Bundle {
+    var shortVersion: String {
+        (infoDictionary?["CFBundleShortVersionString"] as? String) ?? "1.0"
+    }
+}
+
+extension UIApplication {
+    var topViewController: UIViewController? {
+        let scenes = connectedScenes.compactMap { $0 as? UIWindowScene }
+        var top = scenes.flatMap(\.windows).first(where: \.isKeyWindow)?.rootViewController
+        while let presented = top?.presentedViewController {
+            top = presented
+        }
+        return top
+    }
+}

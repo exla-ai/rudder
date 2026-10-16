@@ -3986,45 +3986,71 @@ async function warnLocalOnlyWork(repoRoot: string): Promise<void> {
 
 // The cloud's AWS is whatever ~/.aws the vault holds. When this laptop's copy
 // has changed since (new keys, a new profile), offer to bring the vault level.
-async function ensureVaultAws(client: CloudClient): Promise<void> {
-  const files = ["config", "credentials"]
-    .map((name) => ({ name: `~/.aws/${name}`, absolute: path.join(os.homedir(), ".aws", name) }));
-  const present: { name: string; content: Buffer }[] = [];
-  for (const file of files) {
-    const content = await fsp.readFile(file.absolute).catch(() => null);
-    if (content && content.length > 0 && content.length <= MAX_SECRET_VALUE_BYTES) {
-      present.push({ name: file.name, content });
+// The vault's copy of the laptop's agent and AWS config must match the
+// laptop: the cloud machine rewrites these files from the vault every boot,
+// and a drifted copy means different behavior there (verbose output, another
+// default model, hooks that no longer exist). Compared by checksum; AWS is
+// asked about once, everything else that is already shared just follows.
+const LAPTOP_CONFIG_FILES = [
+  "~/.claude/settings.json",
+  "~/.claude/CLAUDE.md",
+  "~/.codex/config.toml",
+  "~/.codex/AGENTS.md",
+  "~/.codex/hooks.json",
+];
+
+async function laptopConfigFiles(): Promise<{ name: string; content: Buffer }[]> {
+  const names = [...LAPTOP_CONFIG_FILES, "~/.aws/config", "~/.aws/credentials"];
+  const hooksDir = path.join(os.homedir(), ".claude", "hooks");
+  for (const entry of await fsp.readdir(hooksDir, { withFileTypes: true }).catch(() => [])) {
+    if (entry.isFile()) {
+      names.push(`~/.claude/hooks/${entry.name}`);
     }
   }
+  const out: { name: string; content: Buffer }[] = [];
+  for (const name of names) {
+    const content = await fsp.readFile(path.join(os.homedir(), name.slice(2))).catch(() => null);
+    if (content && content.length > 0 && content.length <= MAX_SECRET_VALUE_BYTES) {
+      out.push({ name, content });
+    }
+  }
+  return out;
+}
+
+async function ensureVaultAws(client: CloudClient): Promise<void> {
+  const present = await laptopConfigFiles();
   if (present.length === 0 || !isTty()) {
     return;
   }
-  const vault = await client.request<{ secrets?: { name: string; size?: number }[] }>("/api/rudder/secrets", { method: "GET" }).catch(() => null);
+  const vault = await client.request<{ secrets?: { name: string; sha256?: string }[] }>("/api/rudder/secrets", { method: "GET" }).catch(() => null);
   if (!vault) {
     return;
   }
-  const stored = new Map((vault.secrets ?? []).map((secret) => [secret.name, secret.size ?? -1]));
-  const changed = present.filter((file) => stored.get(file.name) !== file.content.length);
+  const stored = new Map((vault.secrets ?? []).map((secret) => [secret.name, secret.sha256 ?? ""]));
+  const sha = (content: Buffer) => createHash("sha256").update(content).digest("hex").slice(0, 8);
+  const changed = present.filter((file) => stored.get(file.name) !== sha(file.content));
   if (changed.length === 0) {
     return;
   }
-  // Asked once. After AWS is in the vault, keeping it matched with this laptop
-  // is the point (rotating SSO/session credentials change it daily), so later
-  // changes are copied without a prompt on every `rudder cloud`.
-  const alreadyShared = files.some((file) => stored.has(file.name));
-  if (!alreadyShared) {
-    const yes = await promptConfirm(`Your AWS setup (${changed.map((file) => file.name).join(", ")}) differs from the cloud vault's copy. Copy it so cloud agents use the same AWS?`, true);
-    if (!yes) {
-      return;
+  const isAws = (name: string) => name.startsWith("~/.aws/");
+  const awsShared = [...stored.keys()].some(isAws);
+  let toSend = changed.filter((file) => !isAws(file.name) || awsShared);
+  const newAws = changed.filter((file) => isAws(file.name) && !awsShared);
+  if (newAws.length > 0) {
+    const yes = await promptConfirm(`Copy your AWS setup (${newAws.map((file) => file.name).join(", ")}) to the cloud vault so cloud agents use the same AWS?`, true);
+    if (yes) {
+      toSend = [...toSend, ...newAws];
     }
   }
-  for (const file of changed) {
+  for (const file of toSend) {
     await client.request<JsonValue>("/api/rudder/secrets/item", {
       method: "PUT",
       body: { name: file.name, kind: "file", filePath: file.name, valueBase64: file.content.toString("base64"), source: "rudder cloud" },
     });
   }
-  process.stderr.write("Updated ~/.aws in the cloud vault.\n");
+  if (toSend.length > 0) {
+    process.stderr.write(`Updated the cloud copy of ${toSend.map((file) => file.name).join(", ")} to match this laptop.\n`);
+  }
 }
 
 async function localGithubToken(): Promise<string | null> {

@@ -4122,6 +4122,12 @@ async function printAppLink(options: CloudCommandOptions): Promise<void> {
 async function homeCommand(args: string[], options: CloudCommandOptions): Promise<void> {
   const client = await cloudClient({ requireToken: true });
   const sub = args[0] ?? "status";
+  // An agent on the home machine stopping it would kill itself and every other
+  // agent there mid-task (and a "restart" from inside never gets to the start
+  // half). Restarts come from a laptop or the phone.
+  if (sub === "stop" && process.env.RUDDER_CLOUD_RUNTIME === "home" && !options.yes) {
+    throw new Error("refusing to stop the home machine from inside it: that ends this session and every agent on it. Run it from your laptop or the phone (or pass --force).");
+  }
   if (sub === "start" || sub === "stop") {
     const result = await client.request<JsonValue>(`/api/rudder/home/${sub}`, { method: "POST", body: {} });
     if (options.json) {

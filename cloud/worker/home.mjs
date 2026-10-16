@@ -82,6 +82,7 @@ let ports = []; // [{ port, pid, label, workspaceId|null }]
 
 connectControl();
 void checkCredentials();
+void ensureRustToolchain();
 setInterval(() => void checkCredentials(), 30 * 60 * 1000);
 setInterval(() => void publishState().catch((error) => log(`state: ${error.message}`)), STATE_INTERVAL_MS);
 setInterval(() => void scanPorts().catch((error) => log(`ports: ${error.message}`)), PORT_SCAN_INTERVAL_MS);
@@ -885,6 +886,28 @@ function capture(command, args, { env, cwd, timeoutMs }) {
 }
 
 // ---------------------------------------------------------------------------
+// Toolchains: Rust is not in the worker image (it would double its size), so
+// the home machine installs it once onto the persistent volume, in the
+// background, and every later boot finds it there.
+// ---------------------------------------------------------------------------
+
+async function ensureRustToolchain() {
+  if (process.env.RUDDER_HOME_TOOLCHAINS === "0") {
+    return;
+  }
+  if (fs.existsSync(path.join(HOME, ".cargo", "bin", "cargo"))) {
+    return;
+  }
+  log("installing the Rust toolchain onto the volume (first boot)");
+  const result = await capture("sh", ["-c", "curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --no-modify-path"], {
+    env: { ...process.env, HOME },
+    cwd: HOME,
+    timeoutMs: 15 * 60 * 1000,
+  });
+  log(result.code === 0 ? "Rust toolchain installed" : `Rust toolchain install failed: ${firstLine(result.stderr || result.stdout)}`);
+}
+
+// ---------------------------------------------------------------------------
 // Tailscale.
 // ---------------------------------------------------------------------------
 
@@ -951,7 +974,9 @@ async function startTailscale(env) {
 // every agent would come back with no memory and nothing to resume.
 function persistHomeDirs() {
   fs.mkdirSync(PERSIST_HOME, { recursive: true });
-  for (const name of [".claude", ".codex", ".rudder", ".config", ".local/share/opencode"]) {
+  // .cargo/.rustup: the Rust toolchain (installed on first boot, see
+  // ensureRustToolchain) lives on the volume too, so it survives restarts.
+  for (const name of [".claude", ".codex", ".rudder", ".config", ".local/share/opencode", ".cargo", ".rustup"]) {
     const live = path.join(HOME, name);
     const stored = path.join(PERSIST_HOME, name);
     fs.mkdirSync(stored, { recursive: true });
@@ -1161,6 +1186,9 @@ function buildChildEnv(vaultEnv) {
   const env = {
     ...process.env,
     ...vaultEnv,
+    // Rust (installed onto the volume by ensureRustToolchain) for agents
+    // building native code, Rudder's own included.
+    PATH: `${path.join(HOME, ".cargo", "bin")}:${process.env.PATH || ""}`,
     HOME,
     TERM: "xterm-256color",
     COLORTERM: "truecolor",

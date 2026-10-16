@@ -420,6 +420,7 @@ const workerReady = cloudReady && fs.existsSync(path.join(workerDir, "node_modul
         RUDDER_WORKSPACE_ID: "home-boot",
         RUDDER_WORKER_TOKEN: workerToken,
         RUDDER_HOME_VOLUME: path.join(scratch, "volume"),
+        RUDDER_HOME_TOOLCHAINS: "0",
       },
       stdio: ["ignore", "pipe", "pipe"],
     });

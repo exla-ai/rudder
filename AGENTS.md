@@ -780,6 +780,15 @@ brain lives in the cloud, and the phone is a first-class client.
   for the iOS shell (Google refuses OAuth inside an embedded web view).
 - `rudder cloud --snapshot` and repos without a GitHub origin keep the old
   per-repo snapshot workspace.
+- **Developing Rudder on the home machine.** Rust is not in the worker image; the
+  supervisor installs it once onto the volume (`~/.cargo`, `~/.rustup`, persisted
+  like `~/.claude`) in the background on first boot, and agents get
+  `~/.cargo/bin` on PATH. The dashboard there runs the installed `/opt/rudder`, so
+  editing `~/code/rudder` never breaks the session doing the editing.
+  `rudder cloud home stop` refuses to run on the home machine itself
+  (`RUDDER_CLOUD_RUNTIME=home`): it would end every agent there, the caller
+  included. Restart it from a laptop or the phone. iOS/Xcode and signing stay
+  local.
 
 ### 9.9 Known limitations (current state, not action items)
 Documented so they are not rediscovered: workspace re-use ignores a newer snapshot with

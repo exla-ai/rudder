@@ -90,6 +90,8 @@ view_state! {
     rename_cursor: usize = 0,
     rename_prefilled: bool = false,
     quit_confirm_pending: bool = false,
+    // Wheel timing is one viewer's hand on one trackpad.
+    last_wheel: Option<(Instant, bool)> = None,
 }
 
 /// A `Write` the view's ratatui backend draws into; the bytes are taken after

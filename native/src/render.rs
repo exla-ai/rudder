@@ -5359,6 +5359,44 @@ pub(crate) fn mouse_scrollback_delta(mouse: MouseEvent, viewport_height: u16) ->
     }
 }
 
+/// A wheel event this soon after the previous one starts a burst: a trackpad
+/// flick (and a fast-spun wheel) arrives every ~8-16ms, a deliberate notch
+/// much slower.
+pub(crate) const WHEEL_BURST_START_GAP: Duration = Duration::from_millis(30);
+/// A burst survives gaps up to this long, so a trackpad's momentum tail (its
+/// events thin out as it coasts) keeps moving a row at a time instead of
+/// lurching back to whole notches at the end of the gesture.
+pub(crate) const WHEEL_BURST_HOLD_GAP: Duration = Duration::from_millis(150);
+
+/// Whether a wheel event at `now` belongs to a burst, given the previous
+/// event's time and whether IT was in one.
+pub(crate) fn wheel_event_in_burst(previous: Option<(Instant, bool)>, now: Instant) -> bool {
+    let Some((at, was_burst)) = previous else {
+        return false;
+    };
+    let gap = now.saturating_duration_since(at);
+    gap < WHEEL_BURST_START_GAP || (was_burst && gap < WHEEL_BURST_HOLD_GAP)
+}
+
+/// Rows one wheel event moves. A terminal turns every trackpad step into its
+/// own wheel event, so moving a notch's worth of rows per event made a flick
+/// leap in 3-row jumps; inside a burst each event moves one row, which is how
+/// a native terminal scrolls. A lone notch still moves the configured rows,
+/// and a modifier still pages.
+pub(crate) fn burst_scrollback_delta(mouse: MouseEvent, viewport_height: u16, in_burst: bool) -> isize {
+    let paging = mouse.modifiers.intersects(
+        KeyModifiers::ALT | KeyModifiers::CONTROL | KeyModifiers::META | KeyModifiers::SUPER,
+    );
+    if !in_burst || paging {
+        return mouse_scrollback_delta(mouse, viewport_height);
+    }
+    match mouse.kind {
+        MouseEventKind::ScrollUp => 1,
+        MouseEventKind::ScrollDown => -1,
+        _ => 0,
+    }
+}
+
 pub(crate) fn wheel_scroll_rows(viewport_height: u16, modifiers: KeyModifiers) -> u16 {
     let page = viewport_height.saturating_sub(1).max(1);
     if modifiers.intersects(

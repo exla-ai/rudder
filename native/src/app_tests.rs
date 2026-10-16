@@ -2740,6 +2740,37 @@ fn worker_wheel_scroll_rows_scale_with_viewport() {
     assert_eq!(mouse_scrollback_delta(down, 30), -3);
 }
 
+#[test]
+fn wheel_burst_starts_on_rapid_events_and_holds_through_momentum() {
+    let t0 = Instant::now();
+    let ms = |n: u64| t0 + Duration::from_millis(n);
+    // The first event, and a lone notch after a pause, are not a burst.
+    assert!(!wheel_event_in_burst(None, t0));
+    assert!(!wheel_event_in_burst(Some((t0, false)), ms(80)));
+    // Trackpad-rate events start one.
+    assert!(wheel_event_in_burst(Some((t0, false)), ms(12)));
+    // A coasting tail keeps it alive; a real pause ends it.
+    assert!(wheel_event_in_burst(Some((t0, true)), ms(120)));
+    assert!(!wheel_event_in_burst(Some((t0, true)), ms(400)));
+}
+
+#[test]
+fn wheel_burst_moves_one_row_per_event_but_notches_and_paging_keep_their_size() {
+    let event = |kind, modifiers| MouseEvent {
+        kind,
+        column: 0,
+        row: 0,
+        modifiers,
+    };
+    let up = event(MouseEventKind::ScrollUp, KeyModifiers::empty());
+    let down = event(MouseEventKind::ScrollDown, KeyModifiers::empty());
+    assert_eq!(burst_scrollback_delta(up, 30, true), 1);
+    assert_eq!(burst_scrollback_delta(down, 30, true), -1);
+    assert_eq!(burst_scrollback_delta(up, 30, false), 3);
+    let paged = event(MouseEventKind::ScrollUp, KeyModifiers::CONTROL);
+    assert_eq!(burst_scrollback_delta(paged, 30, true), 29);
+}
+
 #[cfg(not(windows))]
 #[test]
 fn focused_worker_wheel_scrolls_alternate_screen_history() {

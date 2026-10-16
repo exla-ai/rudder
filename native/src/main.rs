@@ -1932,6 +1932,11 @@ struct App {
     perf_stats: PerfStats,
     scroll_draw_defer_until: Option<Instant>,
     scroll_events_since_draw: usize,
+    /// The previous wheel event and whether it was in a burst
+    /// (`wheel_event_in_burst`). Per view: see `view_state!`.
+    last_wheel: Option<(Instant, bool)>,
+    /// Whether the wheel event being handled is in a burst.
+    wheel_in_burst: bool,
 }
 
 /// A `/run` launch held until its workspace has a name.
@@ -3071,6 +3076,8 @@ impl App {
             perf_stats,
             scroll_draw_defer_until: None,
             scroll_events_since_draw: 0,
+            last_wheel: None,
+            wheel_in_burst: false,
         }
     }
 
@@ -6442,6 +6449,8 @@ impl App {
 
     fn handle_pane_scroll(&mut self, mouse: MouseEvent) -> bool {
         let started = Instant::now();
+        self.wheel_in_burst = wheel_event_in_burst(self.last_wheel, started);
+        self.last_wheel = Some((started, self.wheel_in_burst));
         // The focus-shortcut routes scrolls to the worker pane only when the
         // pointer is also over the worker pane; otherwise the regular
         // pointer-based routing below kicks in so scrolling over a different
@@ -6603,6 +6612,10 @@ impl App {
         false
     }
 
+    fn wheel_delta(&self, mouse: MouseEvent, viewport_height: u16) -> isize {
+        burst_scrollback_delta(mouse, viewport_height, self.wheel_in_burst)
+    }
+
     fn scroll_interactive_orchestrator(&mut self, mouse: MouseEvent, area: Rect) -> bool {
         let (dag_area, term_area) = interactive_orchestrator_areas(area);
         if rect_contains(dag_area, mouse.column, mouse.row) {
@@ -6615,7 +6628,7 @@ impl App {
     }
 
     fn scroll_plan_review(&mut self, mouse: MouseEvent, area: Rect) -> bool {
-        let rows = mouse_scrollback_delta(mouse, area.height);
+        let rows = self.wheel_delta(mouse, area.height);
         let before = self.plan().plan_review.scroll;
         if rows > 0 {
             self.plan_mut().plan_review.scroll =
@@ -6862,7 +6875,7 @@ impl App {
     }
 
     fn scroll_selected_worker_or_forward(&mut self, mouse: MouseEvent, area: Rect) -> bool {
-        let rows = mouse_scrollback_delta(mouse, area.height);
+        let rows = self.wheel_delta(mouse, area.height);
         let mouse_bytes = mouse_event_to_sgr(mouse, area);
         let Some(terminal) = self.selected_terminal_mut() else {
             self.set_mouse_debug(format!(
@@ -6941,7 +6954,7 @@ impl App {
     }
 
     fn scroll_gam_half(&mut self, mouse: MouseEvent, area: Rect, index: usize) -> bool {
-        let rows = mouse_scrollback_delta(mouse, area.height);
+        let rows = self.wheel_delta(mouse, area.height);
         let mouse_bytes = mouse_event_to_sgr(mouse, area);
         let Some(terminal) = self
             .agents
@@ -6979,7 +6992,7 @@ impl App {
     /// reveals earlier lines (smaller offset); ScrollDown reveals later lines. The
     /// upper bound is clamped against the rendered content in `render_orchestrator`.
     fn scroll_orchestrator_dag(&mut self, mouse: MouseEvent, area: Rect) -> bool {
-        let delta = mouse_scrollback_delta(mouse, area.height);
+        let delta = self.wheel_delta(mouse, area.height);
         if delta == 0 {
             return false;
         }

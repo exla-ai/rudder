@@ -6964,6 +6964,13 @@ impl App {
     }
 
     fn start_task_from_input(&mut self, input: &str) {
+        // `$ ls -la` / `$`: a shell, not a task. Checked before the shared-context
+        // capture so `$ export API_TOKEN=...` is not filed as shared context.
+        if let Some(command_line) = input.trim_start().strip_prefix('$') {
+            self.start_shell_pane(command_line);
+            self.dirty = true;
+            return;
+        }
         self.capture_shared_context_from_input(input);
         if self.handle_command(&input) {
             return;
@@ -10994,7 +11001,7 @@ It will tend to agree with itself — name another with /gam <provider> <model> 
             }
             Some("/help") => {
                 self.notice = Some(
-                    "plain input -> one isolated mergeable worker in its own jj workspace · /plan <task> -> an orchestrator that plans and runs a DAG · /gam [model] <task> -> generator + adversarial reviewer pair; the reviewer can steer the generator mid-turn and stop it outright (split panes, ^W a toggles sides, ^W t shows the dialogue) · /main|/m <task> -> another agent in this shared checkout · panes: Option-1/2/3/4 (4 = diff panel) or ^W · keys: j/k select · Option-[ / Option-] step agents from any pane · Enter focus · m merge · u undo a merge · M merge all · R review all · g nest · ⌥d diff panel (n/p files, j/k scroll) · o web ui · U usage dashboard · x stop · b branch chat · dd delete · cc clear merged · P model; · /handoff -> selected agent moves to Rudder Cloud and resumes there; commands: /model /fast /sound /notify /color /main /plan /gam /resume /restore /handoff /share /usage /goal /cloud /web /feedback"
+                    "plain input -> one isolated mergeable worker in its own jj workspace · /plan <task> -> an orchestrator that plans and runs a DAG · /gam [model] <task> -> generator + adversarial reviewer pair; the reviewer can steer the generator mid-turn and stop it outright (split panes, ^W a toggles sides, ^W t shows the dialogue) · /main|/m <task> -> another agent in this shared checkout · $ <command> -> a shell in this checkout running it ($ alone opens a shell) · panes: Option-1/2/3/4 (4 = diff panel) or ^W · keys: j/k select · Option-[ / Option-] step agents from any pane · Enter focus · m merge · u undo a merge · M merge all · R review all · g nest · ⌥d diff panel (n/p files, j/k scroll) · o web ui · U usage dashboard · x stop · b branch chat · dd delete · cc clear merged · P model; · /handoff -> selected agent moves to Rudder Cloud and resumes there; commands: /model /fast /sound /notify /color /main /plan /gam /resume /restore /handoff /share /usage /goal /cloud /web /feedback"
                         .to_string(),
                 );
                 true
@@ -11842,6 +11849,41 @@ It will tend to agree with itself — name another with /gam <provider> <model> 
         for (key, value) in env_overrides {
             command = command.with_env(*key, *value);
         }
+        self.start_plain_pane(&id, label, command, None);
+    }
+
+    /// `$ <command>` in the task pane: an interactive login shell in this
+    /// checkout with the command typed into it, so the pane stays a live terminal
+    /// when the command finishes. A bare `$` is just the shell. The row is a plain
+    /// process (no agent, no hooks): it is done when the shell exits.
+    fn start_shell_pane(&mut self, command_line: &str) {
+        let command_line = command_line.trim();
+        let shell = env::var("SHELL")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| {
+                if Path::new("/bin/zsh").exists() {
+                    "/bin/zsh".to_string()
+                } else {
+                    "/bin/sh".to_string()
+                }
+            });
+        let label = if command_line.is_empty() {
+            "$ shell".to_string()
+        } else {
+            format!("$ {command_line}")
+        };
+        let id = new_run_id("shell");
+        let command = TerminalCommand::with_args(shell, vec!["-l".to_string()]);
+        let typed = (!command_line.is_empty()).then(|| format!("{command_line}\r"));
+        self.start_plain_pane(&id, &label, command, typed);
+    }
+
+    /// A terminal pane that is not an agent: Rudder CLI commands and `$` shells.
+    /// `plain_process` exempts it from the lifecycle-hooks sweep (it has no
+    /// hooks by design); its completion is process exit.
+    fn start_plain_pane(&mut self, id: &str, label: &str, command: TerminalCommand, typed: Option<String>) {
+        let id = id.to_string();
         let options = TerminalPaneOptions {
             size: TerminalSize::default(),
             cwd: Some(self.cwd.clone()),
@@ -11915,6 +11957,10 @@ It will tend to agree with itself — name another with /gam <provider> <model> 
             Ok(mut terminal) => {
                 let _ = terminal.drain_output();
                 Self::attach_output_waker(&self.pty_output_waker, &terminal);
+                if let Some(text) = typed {
+                    // The tty buffers it until the shell reads its first line.
+                    let _ = terminal.write_input(text.as_bytes());
+                }
                 run.terminal = Some(terminal);
                 self.notice = Some(format!("opened {label}"));
             }

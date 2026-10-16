@@ -412,7 +412,10 @@ agent list while it has focus.
   starts or continues exactly one `AgentMode::Main` end-to-end owner in the real
   checkout. `/plan` explicitly opts into the isolated DAG; `/run` starts one isolated
   worker. (`/ask`, the old direct one-off, was removed; `OneOff` rows from older
-  sessions still load.)
+  sessions still load.) `$ <command>` opens a shell pane instead of a task
+  (`start_shell_pane`): an interactive `$SHELL -l` in the checkout with the
+  command typed in, a `plain_process` row like Rudder's own CLI panes, checked
+  before shared-context capture so `$ export X_TOKEN=..` is not filed there.
 
 **Graceful shutdown truth.** A dashboard-owned live PTY becomes `Paused` before it is
 dropped, and native persistence removes the `process` object whenever no PTY is owned.

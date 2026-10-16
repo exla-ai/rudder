@@ -6460,27 +6460,19 @@ fn cloud_fleet_migration_quiesces_only_live_isolated_workers() {
 fn slash_commands_rank_closest_matches() {
     let mut app = App::new();
 
-    app.task_input = "/as".to_string();
-    let ask_suggestions = suggestions_for(&app);
-    let ask = ask_suggestions
-        .first()
-        .expect("/ask suggestion should be present");
-    assert_eq!(ask.label.as_str(), "/ask <text>");
-    assert!(
-        ask.detail.contains("one-off"),
-        "/ask suggestion should explain one-off behavior"
-    );
-
-    app.task_input = "/ru".to_string();
-    let run_suggestions = suggestions_for(&app);
-    let run = run_suggestions
-        .first()
-        .expect("/run suggestion should be present");
-    assert_eq!(run.label.as_str(), "/run <task>");
-    assert!(
-        run.detail.contains("mergeable"),
-        "/run suggestion should explain mergeable worker behavior"
-    );
+    // /ask and /run were retired (start_task_from_input rejects them as unknown
+    // commands); the palette must not offer them.
+    for retired in ["/as", "/ru"] {
+        app.task_input = retired.to_string();
+        let offered = suggestions_for(&app);
+        assert!(
+            !offered
+                .iter()
+                .any(|s| s.label.starts_with("/ask") || s.label.starts_with("/run")),
+            "{retired} offered a retired command: {:?}",
+            offered.iter().map(|s| s.label.clone()).collect::<Vec<_>>()
+        );
+    }
 
     app.task_input = "/pl".to_string();
     let plan_suggestions = suggestions_for(&app);
@@ -26232,4 +26224,58 @@ fn codex_done_comes_only_from_the_conversation_thread() {
     hook(&format!(r#"{{"session_id":"{main}","turn_id":"c","hook_event_name":"Stop"}}"#));
     assert_eq!(take(), Some(SignalState::Done));
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+// `$ <command>` in the task pane opens a shell in the checkout with the command
+// typed in; the row is a plain process, not an agent.
+#[cfg(not(windows))]
+#[test]
+fn dollar_input_opens_a_shell_running_the_command() {
+    let _env = env_guard();
+    let dir = unique_test_repo("dollar-shell");
+    let old_shell = std::env::var_os("SHELL");
+    std::env::set_var("SHELL", "/bin/sh");
+
+    let mut app = App::new();
+    app.cwd = dir.clone();
+    app.start_task_from_input("$ echo rudder-shell-$((40 + 2))");
+    let mut seen = false;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline && !seen {
+        app.poll_agents();
+        if let Some(terminal) = app.agents.last_mut().and_then(|run| run.terminal.as_mut()) {
+            let _ = terminal.drain_output();
+            seen = terminal
+                .visible_lines_snapshot()
+                .iter()
+                .any(|line| line.contains("rudder-shell-42"));
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let run = app.agents.last().expect("a row for the shell");
+    let (label, plain, status) = (run.task.clone(), run.plain_process, run.status);
+
+    // A bare `$` is just a shell.
+    app.start_task_from_input("$");
+    let bare = app.agents.last().map(|run| run.task.clone());
+
+    // `$ export ...` runs in the shell; it is not filed as shared context.
+    app.start_task_from_input("$ export DEMO_API_TOKEN=abc123");
+    let shared = std::fs::read_to_string(dir.join("RUDDER_SHARED.md")).unwrap_or_default();
+
+    for run in &mut app.agents {
+        run.terminal = None;
+    }
+    match old_shell {
+        Some(value) => std::env::set_var("SHELL", value),
+        None => std::env::remove_var("SHELL"),
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert!(seen, "the shell ran the command (it evaluated the arithmetic)");
+    assert_eq!(label, "$ echo rudder-shell-$((40 + 2))");
+    assert!(plain, "a shell pane is a plain process, not an agent");
+    assert_eq!(status, AgentStatus::Running);
+    assert_eq!(bare.as_deref(), Some("$ shell"));
+    assert!(!shared.contains("abc123"), "shell input is not shared context: {shared}");
 }

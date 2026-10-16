@@ -272,6 +272,7 @@ running, Rudder also exposes matching project skills; the orchestrator can write
 | `/merge-all` | Merge all completed workspaces |
 | `/verify` | Re-run the final repository checks after every DAG node is integrated |
 | `/color terminal\|paper` | Choose the native dashboard color mode; `terminal` uses your terminal foreground/background, `paper` restores the white canvas |
+| `$ <command>` | Open a shell pane in this checkout running the command (`$` alone opens a shell) |
 | `/login` | Browser login for Rudder Cloud |
 | `/cloud` | Toggle cloud mode: tasks you type start in Rudder Cloud and keep running when you disconnect (`/cloud off` goes local) |
 | `/cloud list` | List cloud workers |

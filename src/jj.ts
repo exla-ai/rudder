@@ -153,7 +153,7 @@ async function jjReadInWorkspace(
  * recovery is exactly what jj's own hint says to do, and it snapshots the
  * working copy rather than discarding it, so nothing on disk is lost.
  */
-async function jjWriteWithStaleRecovery(
+export async function jjWriteWithStaleRecovery(
   cwd: string,
   args: string[],
 ): Promise<{ stdout: string; stderr: string; code: number }> {
@@ -370,7 +370,7 @@ export async function createRunJjWorkspace(params: {
   });
 }
 
-function workspaceNameFor(id: string): string {
+export function workspaceNameFor(id: string): string {
   return `rudder-${id.slice(0, 14)}-${shortHash(id).slice(0, 6)}`;
 }
 

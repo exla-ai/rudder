@@ -93,6 +93,7 @@ const store = {
 };
 
 const STATUS = {
+  starting: { label: "Starting", cls: "s-working", live: true },
   working: { label: "Working", cls: "s-working", live: true },
   waiting: { label: "Needs input", cls: "s-needs" },
   review: { label: "Ready for review", cls: "s-done" },
@@ -308,6 +309,65 @@ function openAddProject() {
     owners = data?.owners || [];
     if (owner && !owners.includes(owner)) owner = "";
     renderChips(); syncForm(); render();
+  }).catch((err) => {
+    listEl.replaceChildren(h(`<div class="repo-note err"></div>`));
+    listEl.firstChild.textContent = err.status === 401 ? "Signed out." : err.message;
+  });
+}
+
+// `/model` in a project's task box: pick which agent and model new agents
+// start on, from the same lists as the dashboard's picker. It sends the
+// dashboard `/model <agent> <model>`, exactly what typing it there does.
+function openModelPicker(ws) {
+  const dlg = h(`<dialog class="sheet add-sheet" aria-label="Model for new agents"><div class="dialog">
+    <div class="sheet-grab"></div>
+    <div class="add-head"><h3>Model for new agents</h3></div>
+    <div class="owner-chips" role="tablist" aria-label="Agent"></div>
+    <div class="repo-list" role="list"><div class="repo-note">Loading models…</div></div>
+    <button type="button" class="btn block" style="margin-top:10px;border:0;background:transparent;color:var(--muted)" data-act="close">Close</button>
+  </div></dialog>`);
+  const chipsEl = dlg.querySelector(".owner-chips");
+  const listEl = dlg.querySelector(".repo-list");
+  let data = null;
+  let backend = "claude";
+  function render() {
+    chipsEl.replaceChildren(...["claude", "codex"].map((b) => {
+      const chip = h(`<button type="button" role="tab" class="owner-chip"><span></span></button>`);
+      chip.querySelector("span").textContent = BACKEND[b];
+      chip.setAttribute("aria-selected", String(b === backend));
+      chip.addEventListener("click", () => { backend = b; render(); });
+      return chip;
+    }));
+    if (!data) return;
+    const options = (data[backend] || []).filter((o) => o.value);
+    listEl.replaceChildren();
+    for (const o of options) {
+      const current = data.current?.backend === backend && data.current?.model === o.value;
+      const b = h(`<button type="button" class="repo-row" role="listitem"><span class="rn"></span><span class="rd"></span></button>`);
+      b.querySelector(".rn").textContent = `${o.label || o.value}${current ? "  ✓" : ""}`;
+      b.querySelector(".rd").textContent = [o.value !== o.label ? o.value : null, o.detail].filter(Boolean).join(" · ");
+      b.addEventListener("click", async () => {
+        try {
+          await api("/api/app/task", { method: "POST", body: { workspace: ws, text: `/model ${backend} ${o.value}` } });
+          dlg.close();
+          toast(`New agents start on ${BACKEND[backend]} · ${o.label || o.value}`);
+        } catch (err) { if (err.status !== 401) toast(err.message, { error: true }); }
+      });
+      listEl.appendChild(b);
+    }
+    if (!options.length) listEl.appendChild(h(`<div class="repo-note">No ${BACKEND[backend]} models found on the home machine.</div>`));
+  }
+  dlg.addEventListener("click", (e) => {
+    if (e.target === dlg || e.target.closest('[data-act="close"]')) dlg.close();
+  });
+  dlg.addEventListener("close", () => dlg.remove());
+  document.body.appendChild(dlg);
+  dlg.showModal();
+  render();
+  api("/api/app/models").then((res) => {
+    data = res || {};
+    if (data.current?.backend === "codex" || data.current?.backend === "claude") backend = data.current.backend;
+    render();
   }).catch((err) => {
     listEl.replaceChildren(h(`<div class="repo-note err"></div>`));
     listEl.firstChild.textContent = err.status === 401 ? "Signed out." : err.message;
@@ -530,12 +590,81 @@ function agentRow({ showProject = false } = {}) {
         <div class="a-msg"></div>
       </div></a>`);
     el._showProject = showProject;
+    enableSwipeDelete(el);
     return el;
   };
 }
+
+// Swipe a row left to delete its agent (the same delete as dd on the
+// dashboard, which takes it off every screen). Past the threshold the red edge
+// says Delete; letting go there asks first, anywhere else snaps back.
+const SWIPE_DELETE_PX = 90;
+function enableSwipeDelete(el) {
+  let x0 = 0, y0 = 0, dx = 0, tracking = false, swiping = false;
+  el.addEventListener("touchstart", (e) => {
+    if (e.touches.length !== 1 || !el._target || el._target.a.pending) return;
+    x0 = e.touches[0].clientX; y0 = e.touches[0].clientY; dx = 0; tracking = true; swiping = false;
+  }, { passive: true });
+  el.addEventListener("touchmove", (e) => {
+    if (!tracking) return;
+    const mx = e.touches[0].clientX - x0, my = e.touches[0].clientY - y0;
+    if (!swiping) {
+      if (Math.abs(mx) < 10 && Math.abs(my) < 10) return;
+      if (Math.abs(my) > Math.abs(mx) || mx > 0) { tracking = false; return; }
+      swiping = true; el.classList.add("swiping");
+    }
+    dx = Math.max(-150, Math.min(0, mx));
+    el.style.transform = `translateX(${dx}px)`;
+    el.classList.toggle("swipe-armed", dx <= -SWIPE_DELETE_PX);
+  }, { passive: true });
+  const end = () => {
+    tracking = false;
+    if (!swiping) return;
+    swiping = false;
+    const armed = dx <= -SWIPE_DELETE_PX;
+    el._justSwiped = true;
+    setTimeout(() => { el._justSwiped = false; }, 400);
+    el.classList.remove("swiping", "swipe-armed");
+    el.style.transform = "";
+    if (armed && el._target) deleteAgent(el._target.p.workspaceId, el._target.a);
+  };
+  el.addEventListener("touchend", end);
+  el.addEventListener("touchcancel", end);
+  // The touch that swiped must not also open the agent.
+  el.addEventListener("click", (e) => {
+    if (el._justSwiped || el._target?.a.pending) { e.preventDefault(); e.stopPropagation(); }
+  }, true);
+}
+
+async function deleteAgent(ws, a, { after } = {}) {
+  const live = a.status === "working" || a.status === "waiting";
+  const ok = await confirmDialog({
+    title: "Delete this agent?",
+    body: `"${a.title || "This agent"}"${live ? " stops, and its" : "'s"} conversation and workspace are deleted from your home machine and every screen. This cannot be undone.`,
+    confirm: "Delete",
+    danger: true,
+  });
+  if (!ok) return false;
+  try {
+    await api("/api/app/action", { method: "POST", body: { workspace: ws, run: a.id, action: "delete" } });
+    // Gone now: the dashboard deleted its record, so the next state agrees.
+    const p = findProject(ws);
+    if (p?.agents) p.agents = p.agents.filter((x) => x.id !== a.id);
+    toast("Agent deleted");
+    after?.();
+    updateScreen();
+    refreshState();
+    return true;
+  } catch (err) {
+    if (err.status !== 401) toast(err.message, { error: true });
+    return false;
+  }
+}
+
 function updateAgentRow(el, { p, a }) {
   const st = statusOf(a.status);
-  el.href = agentPath(p.workspaceId, a.id);
+  el._target = { p, a };
+  if (a.pending) el.removeAttribute("href"); else el.href = agentPath(p.workspaceId, a.id);
   el.className = `row agent tap ${st.cls}`;
   el.querySelector(".dot").classList.toggle("live", !!st.live);
   setText(el.querySelector(".a-title"), a.title || a.task || "Untitled agent");
@@ -836,7 +965,7 @@ const GROUPS = [
   { id: "earlier", label: "Earlier" },
 ];
 function groupOf(a) {
-  if (a.status === "working") return "working";
+  if (a.status === "working" || a.status === "starting") return "working";
   if (needsYou(a)) return "needs";
   if (a.status === "done" && Date.now() - (a.updatedAt || 0) < 36 * 3600 * 1000) return "done";
   return "earlier";
@@ -863,13 +992,17 @@ function ProjectScreen(ws) {
   pullToRefresh(scroller, refreshState);
 
   const composer = createComposer({
-    placeholder: "Start a new task",
+    placeholder: "Start a new task, or /model",
     draftKey: `task:${ws}`,
     hint: coarse ? "" : "Enter to start · Shift+Enter for a new line",
     onSubmit: async (text) => {
+      if (/^\/model\s*$/i.test(text)) {
+        openModelPicker(ws);
+        return true;
+      }
       try {
         const res = await api("/api/app/task", { method: "POST", body: { workspace: ws, text } });
-        toast("Task started");
+        toast(text.startsWith("/") ? "Sent to the dashboard" : "Task started");
         await refreshState();
         const run = res?.run || res?.runId;
         if (run) navigate(agentPath(ws, run));
@@ -1147,10 +1280,12 @@ function AgentScreen(ws, run) {
     if (canMerge) add(`<button type="button" role="menuitem">${icon("merge")}<span>Merge into main</span></button>`, () => act("merge"));
     if (a?.remoteUrl) add(`<button type="button" role="menuitem">${icon("external")}<span>Open in Claude</span></button>`, () => openExternal(a.remoteUrl));
     add(`<button type="button" role="menuitem">${icon("refresh")}<span>Refresh</span></button>`, () => { loadTranscript(); refreshState(); });
+    menu.appendChild(h("<hr>"));
     if (canStop) {
-      menu.appendChild(h("<hr>"));
       add(`<button type="button" role="menuitem" class="danger">${icon("stop")}<span>Stop agent</span></button>`, () => act("stop"));
     }
+    add(`<button type="button" role="menuitem" class="danger">${icon("trash")}<span>Delete agent</span></button>`,
+      () => deleteAgent(ws, a || { id: run, title: store.transcripts.get(key)?.title, status }, { after: () => goBack(projectPath(ws)) }));
     menuEl.querySelector(".scrim").addEventListener("click", closeMenu);
     el.appendChild(menuEl);
     moreBtn.setAttribute("aria-expanded", "true");

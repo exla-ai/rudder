@@ -479,6 +479,7 @@ control surface; you decide whether a task runs locally or is handed to the clou
 rudder login                 # sign in with Google (opens straight to the account picker)
 rudder cloud                 # open this repo on your home machine and attach to it
 rudder cloud home            # home machine status: projects, agents, previews
+rudder cloud move            # move this repo's running agents to the home machine
 rudder cloud app             # the phone app link
 rudder cloud list            # list cloud workers
 rudder cloud logs <id>       # worker status
@@ -503,7 +504,9 @@ machine of its own.
 
 **Phone.** Open `rudder cloud app` on your phone and sign in with the same
 Google account. You see every project and agent, read conversations as they
-happen, text any agent, start tasks, stop or merge, and open previews. Claude
+happen, text any agent, start tasks (`/model` picks Claude or Codex for new ones),
+stop, merge or delete agents (swipe left), and open previews. A message that can't
+reach an agent (a menu is open in its pane) says so instead of vanishing. Claude
 panes in the cloud also run with Remote Control, so they appear in the Claude
 app too.
 
@@ -520,11 +523,16 @@ running when this laptop disconnects (`/cloud off` returns to local workers).
 selected auth/config) so the whole dashboard runs on a cloud machine. Completed
 cloud work returns through the same review and merge path as local work.
 
-Bare `/handoff` moves the **selected agent pane** to Rudder Cloud: the local
-worker is quiesced, its workspace and Claude session upload with the snapshot,
-and the pane reattaches to a cloud machine that resumes the same conversation
-(`claude --resume`) — so the work keeps going after this laptop disconnects.
-(`/handoff <session-id>` still adopts an outside CLI chat, like `/resume`.)
+**Taking agents with you.** About to close the laptop? Press `H` in the
+dashboard and every running agent moves to your home machine: its work so far
+(the jj change, including unpushed local changes it builds on) and its
+conversation go along, nothing is pushed to GitHub, and the conversation resumes
+there, so it keeps going with the laptop closed. Quitting with agents running
+offers the same thing ("3 agents are running here. Move them to the home
+machine?"), and `rudder cloud` in a repo with agents asks too. Bare `/handoff`
+moves just the selected agent. (`/handoff <session-id>` still adopts an outside
+CLI chat, like `/resume`.) Delete an agent anywhere (`dd` here, swipe left on the
+phone) and it is gone everywhere.
 
 Cloud comes in two shapes: a **sail** is an ephemeral, task-scoped worker (it goes away
 when the task is done; idle sails pause and can resume), while a **workspace** is a

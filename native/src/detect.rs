@@ -552,6 +552,39 @@ pub(crate) fn looks_like_interrupt_receipt(line: &str) -> bool {
             || lower == "interrupted")
 }
 
+/// Why text typed into this pane would NOT reach the agent as a message, if it
+/// would not: a permission prompt or a menu (Claude's `/config`, `/model`, a
+/// picker, Codex's selection lists) owns the keyboard, and typing into it
+/// filters a search box or picks an option instead. Read off the bottom rows,
+/// where every such panel keeps its key hints; the composer's own footer and a
+/// running turn's "esc to interrupt" never match. Used before a remote message
+/// (the phone, the web board) is typed into a pane.
+pub(crate) fn terminal_composer_blocked(backend: Backend, lines: &[String]) -> Option<&'static str> {
+    if terminal_needs_permission_from_lines(backend, lines) {
+        return Some("it is waiting on a permission prompt; answer that first");
+    }
+    const MENU_HINTS: [&str; 10] = [
+        "esc to close",
+        "esc to clear",
+        "esc to cancel",
+        "esc to exit",
+        "esc to go back",
+        "enter to select",
+        "enter/↓ to select",
+        "enter/space to change",
+        "enter to confirm",
+        "type to filter",
+    ];
+    let menu_open = lines
+        .iter()
+        .rev()
+        .map(|line| normalize_terminal_line(line).to_lowercase())
+        .filter(|line| !line.is_empty())
+        .take(6)
+        .any(|line| MENU_HINTS.iter().any(|hint| line.contains(hint)));
+    menu_open.then_some("a menu is open in its pane (Esc closes it)")
+}
+
 /// True when the pane's bottom rows show the backend parked at its composer:
 /// its prompt line or its idle footer, with no spinner anywhere near. The
 /// precondition for `WaitSignal::Idle` (main.rs), the backstop for a turn

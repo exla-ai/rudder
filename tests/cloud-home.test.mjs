@@ -233,7 +233,8 @@ serverTest("a home machine's repos, state and phone requests flow over its contr
   // Another account's project is not reachable, even by id.
   const foreign = await fetch(`${base}/api/app/send`, { method: "POST", headers: auth, body: JSON.stringify({ workspace: "other-test", run: "r1", text: "hi" }) });
   assert.equal(foreign.status, 404, log());
-  const badAction = await fetch(`${base}/api/app/action`, { method: "POST", headers: auth, body: JSON.stringify({ workspace: "libra-test", run: "r1", action: "delete" }) });
+  // (delete is a real action now: cloud-home-move.test.mjs covers it.)
+  const badAction = await fetch(`${base}/api/app/action`, { method: "POST", headers: auth, body: JSON.stringify({ workspace: "libra-test", run: "r1", action: "reboot" }) });
   assert.equal(badAction.status, 400);
 
   // The CLI view of the same machine.

@@ -25,9 +25,10 @@ import {
   undoToOp,
 } from "./jj.js";
 import { graphPath, mirrorPlanIntoGraph, updateGraph } from "./graph.js";
+import { adoptMovedAgents } from "./move-home.js";
 import type { MirrorPayload } from "./graph.js";
 import { buildFanoutDag, gateDecision, planTask, scaffoldPlan } from "./planner.js";
-import { backfillLlmTaskSummaries, listRuns, popUndoEntry, projectStateDir, registerProject, runsDir } from "./state.js";
+import { backfillLlmTaskSummaries, listRuns, loadConfig, popUndoEntry, projectStateDir, registerProject, runsDir } from "./state.js";
 import { discoverModelOptions } from "./models.js";
 import { resolveNativeBinaryPath } from "./native-binary.js";
 import {
@@ -200,6 +201,23 @@ export async function main(): Promise<void> {
     }
     case "__graph-mirror": {
       await runGraphMirror(parsed);
+      return;
+    }
+    case "__adopt-moved": {
+      await runAdoptMoved(parsed);
+      return;
+    }
+    case "__models": {
+      // The phone's /model picker, through the home supervisor: the same
+      // options as the dashboard's, and the backend + model new agents use.
+      const [claude, codex] = await Promise.all([
+        discoverModelOptions("claude").catch(() => []),
+        discoverModelOptions("codex").catch(() => []),
+      ]);
+      const config = await loadConfig().catch(() => null);
+      const backend = config?.lastUsedBackend ?? config?.defaultBackend ?? "claude";
+      const current = { backend, model: config?.backends?.[backend]?.model ?? null };
+      process.stdout.write(`${JSON.stringify({ current, claude, codex })}\n`);
       return;
     }
     case "__refresh-models": {
@@ -1005,6 +1023,27 @@ async function runLaunchNode(parsed: Parsed): Promise<void> {
       jjChangeId,
     })}\n`,
   );
+}
+
+/**
+ * `rudder __adopt-moved --repo <clone> <bundle.tgz>`: the home machine's half of
+ * moving agents off a laptop (see src/move-home.ts). Run by the home supervisor;
+ * prints one JSON line with what was adopted and what failed.
+ */
+async function runAdoptMoved(parsed: Parsed): Promise<void> {
+  const repoRoot = parsed.flags.repo;
+  const archive = parsed.args[0];
+  if (!repoRoot || !archive) {
+    throw new Error("__adopt-moved requires --repo <clone> <bundle.tgz>");
+  }
+  const extractDir = await fsp.mkdtemp(path.join(os.tmpdir(), "rudder-move-"));
+  try {
+    await runCommand("tar", ["-xzf", archive, "-C", extractDir]);
+    const result = await adoptMovedAgents(path.resolve(repoRoot), extractDir);
+    process.stdout.write(`${JSON.stringify(result)}\n`);
+  } finally {
+    await fsp.rm(extractDir, { recursive: true, force: true });
+  }
 }
 
 async function readStdin(): Promise<string> {

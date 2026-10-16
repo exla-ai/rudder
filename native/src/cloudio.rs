@@ -119,6 +119,55 @@ pub(crate) fn cloud_workspace_label(workspace: Option<&CloudWorkspaceStatus>) ->
 /// Run a `rudder cloud … delete --yes --json` and read the control plane's
 /// answer: Ok(true) gone, Ok(false) accepted and still being torn down (the
 /// cloud's delete sweep finishes it), Err why it was refused.
+/// Which of `run_ids` (agents this laptop moved to the home machine) still
+/// exist there. `None` when the home could not answer (asleep, offline): that
+/// is "unknown", never "deleted".
+pub(crate) fn query_home_runs(cwd: &Path, run_ids: &[String]) -> Option<Vec<String>> {
+    let rudder = locate_rudder_cli()?;
+    let mut child = Command::new(rudder)
+        .args(["cloud", "home", "runs", "--json"])
+        .args(run_ids)
+        .current_dir(cwd)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if std::time::Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(100)),
+            Err(_) => return None,
+        }
+    }
+    let output = child.wait_with_output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    parse_home_runs_answer(&String::from_utf8_lossy(&output.stdout))
+}
+
+pub(crate) fn parse_home_runs_answer(stdout: &str) -> Option<Vec<String>> {
+    let value = serde_json::from_str::<serde_json::Value>(stdout.trim()).ok()?;
+    if value.get("known").and_then(serde_json::Value::as_bool) != Some(true) {
+        return None;
+    }
+    Some(
+        value
+            .get("existing")?
+            .as_array()?
+            .iter()
+            .filter_map(|id| id.as_str().map(ToOwned::to_owned))
+            .collect(),
+    )
+}
+
 pub(crate) fn run_cloud_delete_cli(cwd: &Path, args: &[String]) -> Result<bool, String> {
     let rudder = locate_rudder_cli().ok_or_else(|| "the rudder CLI was not found".to_string())?;
     let mut child = Command::new(rudder)

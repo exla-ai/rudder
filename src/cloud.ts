@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import fsp from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -18,6 +18,7 @@ import {
   migrationSummary,
   summaryAsJson,
 } from "./migration.js";
+import { buildMoveBundle, findMoveCandidates, markRunsMovedHome, type MoveCandidate } from "./move-home.js";
 import { cloudAuthPath } from "./state.js";
 import type { CloudAuthState, CloudSail, JsonValue } from "./types.js";
 import {
@@ -284,6 +285,9 @@ export async function runCloudCommand(command: string, args: string[], options: 
       return;
     case "onload":
       await onload(rest, options);
+      return;
+    case "move":
+      await moveCommand(rest, options);
       return;
     case "bootstrap":
       await bootstrap(rest, options);
@@ -698,6 +702,9 @@ async function handoffRunToCloud(repoRoot: string, runId: string, options: Cloud
       body,
     });
     await printResult(result, options);
+    // The sail owns the conversation now. The dashboard watches this record
+    // for exactly that ("migrated") instead of assuming it at spawn time.
+    await markRunsMigrated(repoRoot, [runId]);
     await maybeAutoAttach(result, options);
     // The handoff SUCCEEDED the moment the sail launched: the cloud machine
     // owns the conversation now. An attach that drops afterwards (network
@@ -3714,6 +3721,10 @@ Usage:
       holds every repo) and attach to its dashboard. --snapshot uploads this
       folder to its own machine instead.
   rudder cloud home [status|start|stop|open <owner/repo>]
+  rudder cloud move [runId...] [--yes]
+      move this repo's unfinished agents (or just the named ones) to the
+      home machine: their jj changes and conversations go along, nothing is
+      pushed to GitHub, and they keep working with this laptop closed
   rudder cloud app
       a one-time code that signs the phone app in to this account
   rudder cloud doctor
@@ -3854,6 +3865,7 @@ async function openOnHome(forceSnapshot: boolean, options: CloudCommandOptions):
     await ensureVaultGithubToken(client, slug);
     await ensureVaultAws(client);
     await offerEnvFilesToVault(client, repoRoot, name);
+    await offerToMoveAgents(client, repoRoot, slug);
     process.stderr.write(`Opening ${slug} on your home machine...\n`);
   }
   const branch = await pushedBranch(repoRoot);
@@ -3965,7 +3977,7 @@ async function localGithubToken(): Promise<string | null> {
 // The cloud machine clones from GitHub, so a private repo needs a GitHub token
 // in the vault. gh keeps its token in the OS keychain (hosts.yml has none), so
 // it never arrived with the synced gh config; offer to put it there.
-async function ensureVaultGithubToken(client: CloudClient, slug: string): Promise<void> {
+async function ensureVaultGithubToken(client: CloudClient, slug: string, interactive = true): Promise<void> {
   const vault = await client.request<{ secrets?: { name: string }[] }>("/api/rudder/secrets", { method: "GET" }).catch(() => null);
   if (!vault || (vault.secrets ?? []).some((secret) => secret.name === "GH_TOKEN" || secret.name === "GITHUB_TOKEN")) {
     return;
@@ -3975,7 +3987,7 @@ async function ensureVaultGithubToken(client: CloudClient, slug: string): Promis
     process.stderr.write(`The cloud vault has no GitHub token, so private repos can't be cloned there. Run \`gh auth login\` here, or \`rudder cloud secrets set GH_TOKEN\`.\n`);
     return;
   }
-  if (!isTty()) {
+  if (!isTty() || !interactive) {
     process.stderr.write("The cloud vault has no GitHub token; private repos will fail to clone. Run `rudder cloud secrets sync` from a terminal.\n");
     return;
   }
@@ -3988,6 +4000,240 @@ async function ensureVaultGithubToken(client: CloudClient, slug: string): Promis
     body: { name: "GH_TOKEN", kind: "env", valueBase64: Buffer.from(token, "utf8").toString("base64"), source: "rudder cloud" },
   });
   process.stderr.write("Stored GH_TOKEN in the cloud vault.\n");
+}
+
+// ---------------------------------------------------------------------------
+// Moving agents to the home machine (src/move-home.ts has the mechanics).
+// `rudder cloud move [runId...]` is what the dashboard runs for H, the quit
+// offer and /handoff; `rudder cloud` offers it before attaching. A row moves
+// only when the home machine reports it staged: then, and only then, its
+// local run.json says "migrated", which is what the dashboard watches for.
+// ---------------------------------------------------------------------------
+
+type HomeMoveJob = {
+  move?: {
+    id?: string;
+    status?: string;
+    detail?: string | null;
+    error?: string | null;
+    result?: { adopted?: Array<{ runId: string; resumable?: boolean; alreadyAdopted?: boolean }>; failed?: Array<{ runId: string; error: string }> } | null;
+  };
+};
+
+const HOME_MOVE_POLL_MS = 1500;
+const HOME_MOVE_DEADLINE_MS = 15 * 60 * 1000;
+
+async function moveCommand(args: string[], options: CloudCommandOptions): Promise<void> {
+  const yes = options.yes || args.includes("--yes") || args.includes("-y");
+  const runIds = args.filter((arg) => !arg.startsWith("-"));
+  const repoRoot = findRepoRoot();
+  const slug = await githubSlugFromOrigin(repoRoot);
+  if (!slug) {
+    throw new Error("This repo has no GitHub origin, so the home machine can't clone it. `rudder cloud workspace attach` moves agents into a snapshot workspace instead.");
+  }
+  const candidates = await findMoveCandidates(repoRoot, runIds.length > 0 ? runIds : undefined);
+  const missing = runIds.filter((id) => !candidates.some((candidate) => candidate.runId === id));
+  if (missing.length > 0) {
+    throw new Error(`Not movable (finished, not in a workspace of its own, or unknown): ${missing.join(", ")}`);
+  }
+  if (candidates.length === 0) {
+    if (!options.json) {
+      process.stderr.write("No unfinished agents with workspaces of their own to move.\n");
+    }
+    return;
+  }
+  if (!yes && !options.json) {
+    if (!isTty()) {
+      throw new Error("Refusing to move agents without a terminal to confirm in; pass --yes.");
+    }
+    process.stderr.write(`${describeMoveCandidates(candidates)}\n`);
+    if (!(await promptConfirm(`Move ${agentCount(candidates.length)} to the home machine?`, true))) {
+      process.stderr.write("Nothing moved.\n");
+      return;
+    }
+  }
+  const client = await cloudClient({ requireToken: true });
+  if (!options.json) {
+    await ensureVaultGithubToken(client, slug, !yes);
+  }
+  const moved = await moveAgentsToHome(client, repoRoot, slug, candidates, options);
+  if (options.json) {
+    printJson(moved as unknown as JsonValue);
+  }
+  if (moved.adopted.length === 0) {
+    process.exitCode = 1;
+  }
+}
+
+function agentCount(count: number): string {
+  return `${count} agent${count === 1 ? "" : "s"}`;
+}
+
+function describeMoveCandidates(candidates: MoveCandidate[]): string {
+  return candidates
+    .map((candidate) => `  ${candidate.status.padEnd(8)} ${(candidate.taskSummary || candidate.task || candidate.runId).replace(/\s+/g, " ").slice(0, 72)}`)
+    .join("\n");
+}
+
+/** Bundle, upload, wait for the home machine to stage them, then hand the local records over. */
+export async function moveAgentsToHome(
+  client: CloudClient,
+  repoRoot: string,
+  slug: string,
+  candidates: MoveCandidate[],
+  options: CloudCommandOptions,
+): Promise<{ adopted: string[]; failed: Array<{ runId: string; error: string }> }> {
+  const say = (line: string) => {
+    if (!options.json) {
+      process.stderr.write(`${line}\n`);
+    }
+  };
+  const stageDir = await fsp.mkdtemp(path.join(os.tmpdir(), "rudder-move-stage-"));
+  const archiveDir = await fsp.mkdtemp(path.join(os.tmpdir(), "rudder-move-"));
+  let job: HomeMoveJob;
+  try {
+    say(`Packing ${agentCount(candidates.length)} (their jj changes and conversations)...`);
+    await buildMoveBundle(repoRoot, candidates, stageDir);
+    const archivePath = path.join(archiveDir, "move.tgz");
+    await runCommand("tar", ["-czf", archivePath, "-C", stageDir, "."], { cwd: stageDir });
+    const branch = await pushedBranch(repoRoot);
+    job = await client.request<HomeMoveJob>("/api/rudder/home/move", {
+      method: "POST",
+      body: {
+        repo: slug,
+        ...(branch ? { branch } : {}),
+        bundle: await fsp.readFile(archivePath, "base64"),
+      },
+    });
+  } finally {
+    await fsp.rm(stageDir, { recursive: true, force: true });
+    await fsp.rm(archiveDir, { recursive: true, force: true });
+  }
+  const moveId = job.move?.id;
+  if (!moveId) {
+    throw new Error("the control plane did not start the move");
+  }
+  const deadline = Date.now() + HOME_MOVE_DEADLINE_MS;
+  let lastDetail = "";
+  while (job.move?.status !== "done" && job.move?.status !== "failed") {
+    if (Date.now() > deadline) {
+      throw new Error("the home machine did not take the agents in time; they stay here");
+    }
+    const detail = job.move?.detail ?? "";
+    if (detail && detail !== lastDetail) {
+      say(detail);
+      lastDetail = detail;
+    }
+    await new Promise((resolve) => setTimeout(resolve, HOME_MOVE_POLL_MS));
+    job = await client.request<HomeMoveJob>(`/api/rudder/home/move/${encodeURIComponent(moveId)}`, { method: "GET" });
+  }
+  if (job.move?.status === "failed") {
+    throw new Error(`the home machine could not take the agents: ${job.move.error || "unknown error"}`);
+  }
+  const adopted = (job.move?.result?.adopted ?? []).map((entry) => entry.runId);
+  const failed = job.move?.result?.failed ?? [];
+  await markRunsMovedHome(repoRoot, adopted, slug);
+  if (adopted.length > 0) {
+    const fresh = (job.move?.result?.adopted ?? []).filter((entry) => entry.resumable === false).length;
+    say(`Moved ${agentCount(adopted.length)} to the home machine. They keep working there with this laptop closed.`);
+    if (fresh > 0) {
+      say(`${agentCount(fresh)} had no saved conversation and restart from a handoff over their diff.`);
+    }
+    say(`Watch them: \`rudder cloud\` here, or on your phone: ${appUrl(client.baseUrl)}`);
+  }
+  for (const entry of failed) {
+    say(`Could not move ${entry.runId}: ${entry.error}. It stays here.`);
+  }
+  return { adopted, failed };
+}
+
+/**
+ * `rudder cloud` in a repo with agents: offer to take them along. A live
+ * dashboard owns its agents' processes, so it does the move (it pauses them
+ * first); with no dashboard running the agents are already stopped and this
+ * process can move them itself.
+ */
+async function offerToMoveAgents(client: CloudClient, repoRoot: string, slug: string): Promise<void> {
+  if (!isTty() || process.env.RUDDER_CLOUD_RUNTIME === "home" || process.env.RUDDER_CLOUD_NO_MOVE_OFFER === "1") {
+    return;
+  }
+  const candidates = await findMoveCandidates(repoRoot).catch(() => []);
+  if (candidates.length === 0) {
+    return;
+  }
+  const dashboardLive = await dashboardServing(repoRoot);
+  const running = candidates.filter((candidate) => candidate.status === "running");
+  if (dashboardLive && running.length > 0) {
+    const yes = await promptConfirm(`${agentCount(running.length)} ${running.length === 1 ? "is" : "are"} running here. Move them to the home machine?`, true);
+    if (!yes) {
+      return;
+    }
+    const receipt = await requestDashboardMove(repoRoot);
+    process.stderr.write(receipt === "failed"
+      ? "The dashboard could not start the move; press H there to try again.\n"
+      : "The dashboard is moving them; they appear on the home machine as they land.\n");
+    return;
+  }
+  if (dashboardLive) {
+    return;
+  }
+  process.stderr.write(`${describeMoveCandidates(candidates)}\n`);
+  const yes = await promptConfirm(`${agentCount(candidates.length)} ${candidates.length === 1 ? "was" : "were"} left unfinished here. Move them to the home machine?`, true);
+  if (!yes) {
+    return;
+  }
+  try {
+    await moveAgentsToHome(client, repoRoot, slug, candidates, {});
+  } catch (error) {
+    process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
+  }
+}
+
+async function dashboardServing(repoRoot: string): Promise<boolean> {
+  let socketPath: string;
+  try {
+    socketPath = await fsp.realpath(path.join(repoRoot, ".rudder", "attach.sock"));
+  } catch {
+    return false;
+  }
+  const net = await import("node:net");
+  return await new Promise<boolean>((resolve) => {
+    const socket = net.connect(socketPath);
+    const timer = setTimeout(() => {
+      socket.destroy();
+      resolve(false);
+    }, 500);
+    socket.once("connect", () => {
+      clearTimeout(timer);
+      socket.destroy();
+      resolve(true);
+    });
+    socket.once("error", () => {
+      clearTimeout(timer);
+      resolve(false);
+    });
+  });
+}
+
+/** Ask the live dashboard (through its steer inbox) to move every agent it is running. */
+async function requestDashboardMove(repoRoot: string): Promise<"delivered" | "failed" | "queued"> {
+  const requestId = randomUUID();
+  const inbox = path.join(repoRoot, ".rudder", "steer");
+  await ensureDir(inbox);
+  const file = path.join(inbox, `${String(Date.now()).padStart(13, "0")}-move-home-${requestId}.json`);
+  const temp = `${file}.${process.pid}.tmp`;
+  await fsp.writeFile(temp, JSON.stringify({ requestId, kind: "move-home", taskId: "", instruction: "move-home", ts: nowIso() }));
+  await fsp.rename(temp, file);
+  const receiptPath = path.join(repoRoot, ".rudder", "steer-receipts", `${requestId}.json`);
+  const deadline = Date.now() + 10_000;
+  while (Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    const receipt = await readJson<{ status?: string }>(receiptPath);
+    if (receipt?.status === "delivered" || receipt?.status === "failed") {
+      return receipt.status;
+    }
+  }
+  return "queued";
 }
 
 // ---------------------------------------------------------------------------
@@ -4200,6 +4446,57 @@ async function printAppLink(options: CloudCommandOptions): Promise<void> {
   Browser:     ${pairing.url}`);
 }
 
+/**
+ * `rudder cloud home runs <runId...>`: which of these agents (moved here from a
+ * laptop) still exist on the home machine; `known: false` when it cannot
+ * answer, which callers must read as "unknown", never "deleted".
+ * `rudder cloud home delete <runId...>`: delete them there, through that repo's
+ * dashboard, which also takes them off the phone. Queued if the machine is
+ * asleep. This is what `dd` on a moved row in the laptop's dashboard runs.
+ */
+async function homeAgentsCommand(client: CloudClient, sub: "runs" | "delete", args: string[], options: CloudCommandOptions): Promise<void> {
+  const yes = options.yes || args.includes("--yes") || args.includes("-y");
+  const runIds = args.filter((arg) => !arg.startsWith("-"));
+  if (runIds.length === 0) {
+    throw new Error(`Usage: rudder cloud home ${sub} <runId...>`);
+  }
+  const repo = await githubSlugFromOrigin(findRepoRoot());
+  if (!repo) {
+    throw new Error("This repo has no GitHub origin, so none of its agents live on the home machine.");
+  }
+  if (sub === "delete" && !yes && !options.json) {
+    if (!isTty()) {
+      throw new Error("Refusing to delete agents without a terminal to confirm in; pass --yes.");
+    }
+    if (!(await promptConfirm(`Delete ${runIds.length === 1 ? "this agent" : `${runIds.length} agents`} on the home machine? This cannot be undone.`, false))) {
+      console.log("Nothing deleted.");
+      return;
+    }
+  }
+  const result = await client.request<{ known?: boolean; existing?: string[]; status?: string }>("/api/rudder/home/agents", {
+    method: "POST",
+    body: { repo, action: sub === "runs" ? "check" : "delete", runIds },
+  });
+  if (options.json) {
+    printJson(result as unknown as JsonValue);
+    return;
+  }
+  if (sub === "runs") {
+    if (!result.known) {
+      console.log("The home machine is not connected, so it can't say.");
+      return;
+    }
+    const existing = new Set(result.existing ?? []);
+    for (const id of runIds) {
+      console.log(`${existing.has(id) ? "there " : "gone  "} ${id}`);
+    }
+    return;
+  }
+  console.log(result.status === "queued"
+    ? "The home machine is asleep; it deletes them as soon as it is back."
+    : "Deleted on the home machine.");
+}
+
 async function homeCommand(args: string[], options: CloudCommandOptions): Promise<void> {
   const client = await cloudClient({ requireToken: true });
   const sub = args[0] ?? "status";
@@ -4231,8 +4528,12 @@ async function homeCommand(args: string[], options: CloudCommandOptions): Promis
     }
     return;
   }
+  if (sub === "runs" || sub === "delete") {
+    await homeAgentsCommand(client, sub, args.slice(1), options);
+    return;
+  }
   if (sub !== "status") {
-    throw new Error("Usage: rudder cloud home [status|start|stop|open <owner/repo>]");
+    throw new Error("Usage: rudder cloud home [status|start|stop|open <owner/repo>|runs <runId...>|delete <runId...>]");
   }
   const result = await client.request<{ home: Record<string, JsonValue> | null; projects: Record<string, JsonValue>[] }>(
     "/api/rudder/home",

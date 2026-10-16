@@ -5132,6 +5132,7 @@ function attachHomeControl(homeId: string, ws: WebSocket): void {
   homeControls.set(homeId, ws);
   enableSocketLiveness(ws);
   pushHomeRepos(homeId);
+  flushPendingHomeDeletes(homeId);
   ws.on("message", (data) => {
     let message: Json;
     try {
@@ -5199,6 +5200,197 @@ async function homeRpc(homeId: string, method: string, params: JsonRecord, timeo
   });
 }
 
+// ---------------------------------------------------------------------------
+// Moving laptop agents onto the home machine. The CLI uploads one bundle (see
+// src/move-home.ts); this job starts the home if needed, waits for its control
+// socket, and asks the supervisor to adopt the bundle. The supervisor pulls the
+// bytes over HTTP with its worker token instead of through the control socket,
+// whose frames stay small. Jobs live in memory: a restart mid-move loses the
+// job, the laptop's poll gets a 404, and its agents stay where they are (a
+// retried move is safe: the supervisor adopts each run at most once).
+// ---------------------------------------------------------------------------
+
+type HomeMove = {
+  id: string;
+  accountId: string;
+  homeId: string | null;
+  repo: string;
+  branch?: string;
+  status: "starting" | "waiting" | "staging" | "done" | "failed";
+  detail: string;
+  bundle: Buffer | null;
+  result: Json | null;
+  error: string | null;
+  updatedAt: number;
+};
+
+const homeMoves = new Map<string, HomeMove>();
+const HOME_MOVE_TTL_MS = 30 * 60 * 1000;
+const HOME_MOVE_CONTROL_WAIT_MS = 6 * 60 * 1000;
+const HOME_MOVE_ADOPT_TIMEOUT_MS = 12 * 60 * 1000;
+const HOME_MOVE_PATH_RE = /^\/api\/rudder\/home\/move\/([^/]+)$/;
+const HOME_MOVE_BUNDLE_RE = /^\/api\/rudder\/home\/([^/]+)\/moves\/([^/]+)\/bundle$/;
+
+function startHomeMove(accountId: string, body: Json): HomeMove {
+  const repo = (stringField(body, "repo") ?? "").trim().replace(/\.git$/, "");
+  if (!REPO_SLUG_RE.test(repo)) {
+    throw badRequest("repo must look like owner/name");
+  }
+  const bundle = Buffer.from(stringField(body, "bundle") ?? "", "base64");
+  if (bundle.length === 0) {
+    throw badRequest("bundle is required");
+  }
+  const now = Date.now();
+  for (const [id, move] of homeMoves) {
+    if (now - move.updatedAt > HOME_MOVE_TTL_MS) {
+      homeMoves.delete(id);
+    }
+  }
+  const move: HomeMove = {
+    id: randomUUID(),
+    accountId,
+    homeId: null,
+    repo,
+    branch: stringField(body, "branch")?.trim() || undefined,
+    status: "starting",
+    detail: "Starting your home machine...",
+    bundle,
+    result: null,
+    error: null,
+    updatedAt: now,
+  };
+  homeMoves.set(move.id, move);
+  void runHomeMove(move);
+  return move;
+}
+
+function setHomeMove(move: HomeMove, status: HomeMove["status"], detail: string): void {
+  move.status = status;
+  move.detail = detail;
+  move.updatedAt = Date.now();
+}
+
+async function runHomeMove(move: HomeMove): Promise<void> {
+  try {
+    const opened = await openRepoOnHome(move.accountId, { repo: move.repo, ...(move.branch ? { branch: move.branch } : {}) });
+    const home = opened.home as unknown as Workspace;
+    const repo = opened.workspace as unknown as Workspace;
+    move.homeId = home.id;
+    setHomeMove(move, "waiting", "Waiting for the home machine to come up...");
+    const deadline = Date.now() + HOME_MOVE_CONTROL_WAIT_MS;
+    while (!isOpen(homeControls.get(home.id))) {
+      if (Date.now() > deadline) {
+        throw new Error("the home machine did not come up in time");
+      }
+      await sleep(1000);
+    }
+    setHomeMove(move, "staging", `Handing the agents to ${move.repo} on the home machine...`);
+    move.result = await homeRpc(home.id, "adopt", {
+      workspaceId: repo.id,
+      moveId: move.id,
+      bundlePath: `/api/rudder/home/${encodeURIComponent(home.id)}/moves/${encodeURIComponent(move.id)}/bundle`,
+    }, HOME_MOVE_ADOPT_TIMEOUT_MS);
+    setHomeMove(move, "done", "");
+  } catch (error) {
+    move.error = error instanceof Error ? error.message : String(error);
+    setHomeMove(move, "failed", "");
+  } finally {
+    move.bundle = null;
+  }
+}
+
+// A laptop asking about agents it moved here: which still exist (so a delete
+// on the phone removes the laptop's row too), or delete them (so `dd` on the
+// laptop removes them here and from the phone). A delete for a machine that is
+// asleep is queued and sent the moment its supervisor connects; it wakes the
+// machine to do it.
+const pendingHomeDeletes = new Map<string, Array<{ workspaceId: string; runIds: string[] }>>();
+
+async function homeAgentsRequest(accountId: string, body: Json): Promise<JsonRecord> {
+  const slug = (stringField(body, "repo") ?? "").trim().replace(/\.git$/, "");
+  if (!REPO_SLUG_RE.test(slug)) {
+    throw badRequest("repo must look like owner/name");
+  }
+  const action = stringField(body, "action") ?? "";
+  const raw = (body as JsonRecord).runIds;
+  const runIds = (Array.isArray(raw) ? raw : [])
+    .filter((id): id is string => typeof id === "string" && /^[A-Za-z0-9._-]{1,128}$/.test(id))
+    .slice(0, 200);
+  if (runIds.length === 0) {
+    throw badRequest("runIds is required");
+  }
+  const home = findHomeRow(accountId);
+  const repo = home ? homeRepos(home.id).find((row) => repoSlugFromUrl(row.repoUrl)?.toLowerCase() === slug.toLowerCase()) : undefined;
+  if (action === "check") {
+    if (!home || !repo) {
+      // No home, or this repo was closed there: none of its agents exist.
+      return { known: true, existing: [] };
+    }
+    if (!isOpen(homeControls.get(home.id))) {
+      return { known: false };
+    }
+    const result = await homeRpc(home.id, "runs", { workspaceId: repo.id, runIds }) as JsonRecord;
+    if (result?.known !== true) {
+      return { known: false };
+    }
+    return { known: true, existing: Array.isArray(result.existing) ? result.existing : [] };
+  }
+  if (action !== "delete") {
+    throw badRequest("action must be check or delete");
+  }
+  if (!home || !repo) {
+    return { status: "deleted" };
+  }
+  if (isOpen(homeControls.get(home.id))) {
+    await homeRpc(home.id, "deleteRuns", { workspaceId: repo.id, runIds });
+    return { status: "deleted" };
+  }
+  const queue = pendingHomeDeletes.get(home.id) ?? [];
+  queue.push({ workspaceId: repo.id, runIds });
+  pendingHomeDeletes.set(home.id, queue);
+  void ensureHomeRunning(accountId).catch(() => undefined);
+  return { status: "queued" };
+}
+
+function flushPendingHomeDeletes(homeId: string): void {
+  const queue = pendingHomeDeletes.get(homeId);
+  if (!queue || queue.length === 0) {
+    return;
+  }
+  pendingHomeDeletes.delete(homeId);
+  for (const entry of queue) {
+    void homeRpc(homeId, "deleteRuns", { workspaceId: entry.workspaceId, runIds: entry.runIds }, HOME_MOVE_ADOPT_TIMEOUT_MS)
+      .catch((error) => console.error(`home ${homeId}: queued delete failed`, error));
+  }
+}
+
+function homeMoveView(move: HomeMove): JsonRecord {
+  return {
+    id: move.id,
+    repo: move.repo,
+    status: move.status,
+    detail: move.detail || null,
+    error: move.error,
+    result: move.result,
+  };
+}
+
+function serveHomeMoveBundle(req: IncomingMessage, res: ServerResponse, homeId: string, moveId: string): void {
+  const row = findWorkspaceById.get(homeId) as Record<string, unknown> | undefined;
+  if (!row || optionalString(row.source_kind) !== "home") {
+    sendJson(res, 404, { error: "not found" });
+    return;
+  }
+  requireWorkerBearer(req, row);
+  const move = homeMoves.get(moveId);
+  if (!move || move.homeId !== homeId || !move.bundle) {
+    sendJson(res, 404, { error: "no such move bundle" });
+    return;
+  }
+  res.writeHead(200, { "content-type": "application/gzip", "content-length": String(move.bundle.length) });
+  res.end(move.bundle);
+}
+
 function homeSummary(home: Workspace | null): JsonRecord | null {
   if (!home) {
     return null;
@@ -5258,7 +5450,35 @@ function touchHome(homeId: string | undefined): void {
 }
 
 async function handleHomeApi(req: IncomingMessage, res: ServerResponse, url: URL): Promise<void> {
+  // The supervisor fetching a move bundle authenticates as the machine, not
+  // as the user, so it is matched before the user-token check.
+  const bundleMatch = req.method === "GET" ? HOME_MOVE_BUNDLE_RE.exec(url.pathname) : null;
+  if (bundleMatch) {
+    serveHomeMoveBundle(req, res, decodeURIComponent(bundleMatch[1]), decodeURIComponent(bundleMatch[2]));
+    return;
+  }
   const authContext = requireBearer(req);
+  if (req.method === "POST" && url.pathname === "/api/rudder/home/move") {
+    const body = await readJsonBody(req, MAX_SNAPSHOT_BODY_BYTES);
+    const move = startHomeMove(authContext.accountId, body);
+    sendJson(res, 202, { move: homeMoveView(move) });
+    return;
+  }
+  if (req.method === "POST" && url.pathname === "/api/rudder/home/agents") {
+    const body = await readJsonBody(req);
+    sendJson(res, 200, await homeAgentsRequest(authContext.accountId, body));
+    return;
+  }
+  const moveMatch = req.method === "GET" ? HOME_MOVE_PATH_RE.exec(url.pathname) : null;
+  if (moveMatch) {
+    const move = homeMoves.get(decodeURIComponent(moveMatch[1]));
+    if (!move || move.accountId !== authContext.accountId) {
+      sendJson(res, 404, { error: "no such move (the control plane may have restarted; the agents stayed on the laptop)" });
+      return;
+    }
+    sendJson(res, 200, { move: homeMoveView(move) });
+    return;
+  }
   if (req.method === "GET" && url.pathname === "/api/rudder/home") {
     const home = findHomeRow(authContext.accountId);
     sendJson(res, 200, { home: homeSummary(home), projects: home ? homeProjects(home) : [] });
@@ -5415,6 +5635,13 @@ async function handleAppApi(req: IncomingMessage, res: ServerResponse, url: URL)
   // Add project: the GitHub repos the home machine's login can open, and
   // creating a new one. Both run on the home machine (it holds the GitHub
   // token), so a sleeping machine is woken first.
+  // `/model` on the phone: the models the home machine's dashboards offer, and
+  // which one new agents start on.
+  if (req.method === "GET" && url.pathname === "/api/app/models") {
+    const live = await homeWithControl(account.accountId);
+    sendJson(res, 200, await homeRpc(live.id, "models", {}, 40_000));
+    return;
+  }
   if (req.method === "GET" && url.pathname === "/api/app/repos") {
     const live = await homeWithControl(account.accountId);
     sendJson(res, 200, await homeRpc(live.id, "repos", {}, 70_000));
@@ -5488,12 +5715,12 @@ async function handleAppApi(req: IncomingMessage, res: ServerResponse, url: URL)
     return;
   }
   if (req.method === "POST" && url.pathname === "/api/app/action") {
-    // Dashboard actions the phone can take on one agent: stop, merge.
+    // Dashboard actions the phone can take on one agent: stop, merge, delete.
     const body = await readJsonBody(req);
     const { repo } = requireHomeRepo(account.accountId, stringField(body, "workspace") ?? "");
     const action = stringField(body, "action") ?? "";
-    if (action !== "stop" && action !== "merge") {
-      throw badRequest("action must be stop or merge");
+    if (action !== "stop" && action !== "merge" && action !== "delete") {
+      throw badRequest("action must be stop, merge or delete");
     }
     sendJson(res, 200, await homeRpc(home.id, "action", { workspaceId: repo.id, runId: stringField(body, "run") ?? "", action }));
     return;

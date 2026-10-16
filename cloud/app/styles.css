@@ -641,3 +641,16 @@ dialog.sheet .dialog { border-radius: 22px 22px 0 0; padding-bottom: calc(var(--
 .slash-suggest code { font: 600 14px var(--mono, ui-monospace, monospace); }
 .slash-suggest span { color: var(--muted); font-size: 13px; }
 .add-sheet .input { height: 46px; padding: 0 14px; border-radius: 12px; font: 16px/1 -apple-system, system-ui, sans-serif; box-sizing: border-box; width: 100%; }
+
+/* Swipe a row left to delete its agent. The red edge rides along at the
+   row's right side and reads "Delete" once letting go would ask to delete. */
+.row.agent { position: relative; touch-action: pan-y; }
+.row.agent.swiping { transition: none; }
+.row.agent:not(.swiping) { transition: transform 180ms cubic-bezier(.2,.7,.2,1), background 140ms; }
+.row.agent.swiping::after {
+  content: "Delete";
+  position: absolute; top: 0; bottom: 0; left: 100%; width: 150px;
+  display: flex; align-items: center; padding-left: 20px;
+  background: var(--surface-3); color: var(--muted); font-weight: 600; font-size: 14px;
+}
+.row.agent.swipe-armed::after { background: var(--failed); color: #fff; }

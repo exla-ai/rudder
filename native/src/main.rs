@@ -275,6 +275,15 @@ const WORKSPACE_CHECK_BASE_INTERVAL: Duration = Duration::from_secs(30);
 /// Held lower than the remote-state cap: a cloud workspace can start or stop
 /// without any local signal to key off, so this one has to keep looking.
 const WORKSPACE_CHECK_MAX_INTERVAL: Duration = Duration::from_secs(120);
+/// How often the laptop asks the home machine whether agents it moved there
+/// still exist (deleted on the phone means deleted here too). Backs off to the
+/// cap while nothing changes; a delete shows up within one interval.
+const HOME_RUNS_CHECK_BASE_INTERVAL: Duration = Duration::from_secs(20);
+const HOME_RUNS_CHECK_MAX_INTERVAL: Duration = Duration::from_secs(300);
+/// Task-label prefix of the CLI pane that moves agents to the home machine.
+const HOME_MOVE_LABEL_PREFIX: &str = "cloud move ";
+/// Task-label prefix of the CLI pane that deletes moved agents on the home machine.
+const HOME_DELETE_LABEL_PREFIX: &str = "cloud home delete ";
 
 /// Doubles a poll interval, capped. Used by the process-spawning background polls.
 fn backed_off_interval(current: Duration, cap: Duration) -> Duration {
@@ -1834,6 +1843,17 @@ struct App {
     workspace_check_interval: Duration,
     workspace_status_rx: Option<mpsc::Receiver<Option<CloudWorkspaceStatus>>>,
     workspace_idle_notified: bool,
+    /// This checkout's GitHub `owner/name`, asked of git once: the home machine
+    /// can only take agents from a repo it can clone. Outer None = not asked yet.
+    home_slug: Option<Option<String>>,
+    /// Which agents moved to the home machine still exist there. The home is
+    /// the authority (the phone or its own dashboard may have deleted one), so
+    /// the laptop asks instead of remembering; each ask spawns the Node CLI, so
+    /// it backs off while the answer holds still.
+    home_runs_rx: Option<mpsc::Receiver<Option<Vec<String>>>>,
+    home_runs_queried: Vec<String>,
+    last_home_runs_check: Option<Instant>,
+    home_runs_interval: Duration,
     task_summary_tx: mpsc::Sender<TaskSummaryResult>,
     task_summary_rx: mpsc::Receiver<TaskSummaryResult>,
     /// BACKSTOP channel: a finished worker that filed no report has a one-shot summarizer
@@ -1895,14 +1915,16 @@ struct App {
 
 /// A `/run` launch held until its workspace has a name.
 struct PendingNamedRun {
+    id: String,
     input: String,
     rx: mpsc::Receiver<Option<String>>,
     started: Instant,
+    queued_at: String,
 }
 
 /// How long a `/run` waits for its workspace name before falling back to the
 /// prompt's own words. The namer is a one-shot haiku call (a few seconds).
-const WORKSPACE_NAMING_TIMEOUT: Duration = Duration::from_secs(12);
+const WORKSPACE_NAMING_TIMEOUT: Duration = Duration::from_secs(8);
 
 #[derive(Clone, Debug)]
 struct MigratedAgent {
@@ -1963,6 +1985,9 @@ enum CloudDeleteTarget {
     Sail(String),
     /// This repo's cloud workspace, which hosts every migrated agent.
     Workspace,
+    /// One agent this laptop moved to the home machine (by run id). The home
+    /// machine's dashboard deletes it there, which also takes it off the phone.
+    HomeAgent(String),
 }
 
 /// The yes/no modal in front of a cloud deletion. Deleting in the cloud is not
@@ -1980,6 +2005,7 @@ fn cloud_delete_target_label(target: &CloudDeleteTarget) -> String {
     match target {
         CloudDeleteTarget::Sail(id) => format!("cloud sail {id}"),
         CloudDeleteTarget::Workspace => "this repo's cloud workspace".to_string(),
+        CloudDeleteTarget::HomeAgent(_) => "this agent on the home machine".to_string(),
     }
 }
 
@@ -2985,6 +3011,11 @@ impl App {
             workspace_check_interval: WORKSPACE_CHECK_BASE_INTERVAL,
             workspace_status_rx: None,
             workspace_idle_notified: false,
+            home_slug: None,
+            home_runs_rx: None,
+            home_runs_queried: Vec::new(),
+            last_home_runs_check: None,
+            home_runs_interval: HOME_RUNS_CHECK_BASE_INTERVAL,
             task_summary_tx,
             task_summary_rx,
             completion_summary_tx,
@@ -3395,6 +3426,15 @@ impl App {
         };
         if let Some(sail_id) = cloud_sail_id(run).map(str::to_string) {
             self.reattach_cloud_sail_at(self.selected_agent, &sail_id);
+        } else if run.status == AgentStatus::Migrated && run_moved_home(&self.cwd, &run.id) {
+            // Moved to the home machine: open this repo there (its dashboard
+            // hosts the agent now). No move offer inside this pane.
+            self.push_activity("home: opening this repo on the home machine".to_string());
+            self.start_rudder_cli_command_with_env(
+                "cloud home attach",
+                vec!["cloud".to_string()],
+                &[("RUDDER_CLOUD_NO_MOVE_OFFER", "1")],
+            );
         } else if run.status == AgentStatus::Migrated {
             self.push_activity(
                 "cloud: opening the workspace that owns a migrated agent".to_string(),
@@ -3641,19 +3681,50 @@ impl App {
         if self.acting_in_remote_view() {
             return true;
         }
+        if self.quit_confirm_pending {
+            return true;
+        }
+        // Quitting mid-move kills the CLI before the home machine has the agents.
+        let moving = self.home_moves_in_flight();
+        if moving > 0 {
+            self.quit_confirm_pending = true;
+            self.notice = Some(format!(
+                "still moving {moving} agent{} to the home machine; quitting now stops the move and they stay here paused · q again quits anyway · any other key waits",
+                if moving == 1 { "" } else { "s" }
+            ));
+            return false;
+        }
         let running = self
             .agents
             .iter()
             .filter(|a| !a.is_main() && a.terminal.is_some() && a.status == AgentStatus::Running)
             .count();
-        if running == 0 || self.quit_confirm_pending {
+        if running == 0 {
             return true;
         }
         self.quit_confirm_pending = true;
-        self.notice = Some(format!(
-            "{running} agent{} still running. press q / Ctrl+C again to quit and pause them; any other key cancels.",
-            if running == 1 { "" } else { "s" }
-        ));
+        // About to close the laptop is exactly when the home machine helps: offer
+        // to send the running agents there instead of pausing them.
+        let movable = if self.home_move_slug().is_some() {
+            self.movable_agent_ids().len()
+        } else {
+            0
+        };
+        let are = if running == 1 { "agent is" } else { "agents are" };
+        self.notice = Some(if movable > 0 {
+            let which = if movable == running {
+                "them".to_string()
+            } else {
+                format!("the {movable} in workspaces of their own")
+            };
+            format!(
+                "{running} {are} running here. Move {which} to the home machine?  H moves {which} · q quits and pauses them · any other key cancels"
+            )
+        } else {
+            format!(
+                "{running} {are} still running. press q / Ctrl+C again to quit and pause them; any other key cancels."
+            )
+        });
         false
     }
 
@@ -3673,6 +3744,16 @@ impl App {
                 return true;
             }
             self.quit_confirm_pending = false;
+            // H on the quit offer: move them instead of pausing them. The key is
+            // consumed; quitting is still one q away once the move says moved.
+            if matches!(key.code, KeyCode::Char('H') | KeyCode::Char('h'))
+                && self.home_moves_in_flight() == 0
+                && self.home_move_slug().is_some()
+                && !self.movable_agent_ids().is_empty()
+            {
+                self.request_move_all_home();
+                return false;
+            }
             self.notice = Some("quit cancelled".to_string());
             // fall through and let the key be handled normally
         }
@@ -3730,7 +3811,7 @@ impl App {
             self.leader_pending = true;
             self.nav_mode = false;
             self.notice = Some(
-                "Ctrl+W: Tab cycle  1/2/3 panes  v review  m merge  b branch chat  R review-all  M merge-all  Esc cancels"
+                "Ctrl+W: Tab cycle  1/2/3 panes  v review  m merge  b branch chat  R review-all  M merge-all  H move to home  Esc cancels"
                     .to_string(),
             );
             return false;
@@ -4167,6 +4248,7 @@ impl App {
             KeyCode::Char('m') => self.request_merge_selected_agent(),
             KeyCode::Char('R') => self.review_all_ready(),
             KeyCode::Char('M') => self.request_merge_all_ready(),
+            KeyCode::Char('H') => self.request_move_all_home(),
             KeyCode::Char('d') => self.delete_selected_agent(),
             KeyCode::Char('q') => return self.confirm_or_quit(),
             _ => {}
@@ -4324,6 +4406,7 @@ impl App {
             KeyCode::Char('r') => self.start_rename_selected_agent(),
             KeyCode::Char('R') => self.review_all_ready(),
             KeyCode::Char('M') => self.request_merge_all_ready(),
+            KeyCode::Char('H') => self.request_move_all_home(),
             KeyCode::Char('m') => self.request_merge_selected_agent(),
             KeyCode::Char('d') => {
                 // The pinned orchestrator is never deleted/discarded with `d`; the
@@ -9717,65 +9800,6 @@ Address the objection directly. If you disagree, say why inside \
         }
     }
 
-    fn restore_running_agents(&mut self) {
-        let snapshot: Vec<(usize, MigratedAgent)> = self
-            .agents
-            .iter()
-            .enumerate()
-            .filter_map(|(idx, run)| {
-                // Never resume a transient reconcile planner as a background orchestrator
-                // (load_persisted_agents already drops these; this is defense in depth).
-                if run.terminal.is_some()
-                    || run.status != AgentStatus::Running
-                    || run.reconcile_planner
-                {
-                    return None;
-                }
-                Some((
-                    idx,
-                    MigratedAgent {
-                        run_id: run.id.clone(),
-                        session_id: run.session_id.clone().unwrap_or_default(),
-                        workspace_path: run.workspace_path.clone().unwrap_or(run.cwd.clone()),
-                        fresh_prompt: None,
-                    },
-                ))
-            })
-            .collect();
-        let total = snapshot.len();
-        if total == 0 {
-            return;
-        }
-        let mut resumed = 0;
-        for (idx, entry) in snapshot {
-            if self.spawn_claude_resume_for(idx, &entry) {
-                resumed += 1;
-            }
-        }
-        if resumed > 0 {
-            self.notice = Some(format!("resumed {resumed} agent(s) from last session"));
-        }
-        let needs_manual = self
-            .agents
-            .iter()
-            .filter(|run| {
-                run.terminal.is_none()
-                    && run.status == AgentStatus::Running
-                    && !can_resume_agent(run)
-            })
-            .count();
-        if needs_manual > 0 {
-            let prefix = self
-                .notice
-                .take()
-                .map(|n| format!("{n}; "))
-                .unwrap_or_default();
-            self.notice = Some(format!(
-                "{prefix}{needs_manual} agent(s) could not be resumed"
-            ));
-        }
-    }
-
     /// Reopen a restored row's ACTUAL conversation when its pane is focused.
     ///
     /// Quitting rudder kills every PTY, and rudder keeps no transcript of its
@@ -11001,7 +11025,7 @@ It will tend to agree with itself — name another with /gam <provider> <model> 
             }
             Some("/help") => {
                 self.notice = Some(
-                    "plain input -> one isolated mergeable worker in its own jj workspace · /plan <task> -> an orchestrator that plans and runs a DAG · /gam [model] <task> -> generator + adversarial reviewer pair; the reviewer can steer the generator mid-turn and stop it outright (split panes, ^W a toggles sides, ^W t shows the dialogue) · /main|/m <task> -> another agent in this shared checkout · $ <command> -> a shell in this checkout running it ($ alone opens a shell) · panes: Option-1/2/3/4 (4 = diff panel) or ^W · keys: j/k select · Option-[ / Option-] step agents from any pane · Enter focus · m merge · u undo a merge · M merge all · R review all · g nest · ⌥d diff panel (n/p files, j/k scroll) · o web ui · U usage dashboard · x stop · b branch chat · dd delete · cc clear merged · P model; · /handoff -> selected agent moves to Rudder Cloud and resumes there; commands: /model /fast /sound /notify /color /main /plan /gam /resume /restore /handoff /share /usage /goal /cloud /web /feedback"
+                    "plain input -> one isolated mergeable worker in its own jj workspace · /plan <task> -> an orchestrator that plans and runs a DAG · /gam [model] <task> -> generator + adversarial reviewer pair; the reviewer can steer the generator mid-turn and stop it outright (split panes, ^W a toggles sides, ^W t shows the dialogue) · /main|/m <task> -> another agent in this shared checkout · $ <command> -> a shell in this checkout running it ($ alone opens a shell) · panes: Option-1/2/3/4 (4 = diff panel) or ^W · keys: j/k select · Option-[ / Option-] step agents from any pane · Enter focus · m merge · u undo a merge · M merge all · R review all · H move running agents to the home machine · g nest · ⌥d diff panel (n/p files, j/k scroll) · o web ui · U usage dashboard · x stop · b branch chat · dd delete · cc clear merged · P model; · /handoff -> the selected agent moves to the home machine and resumes there; commands: /model /fast /sound /notify /color /main /plan /gam /resume /restore /handoff /share /usage /goal /cloud /web /feedback"
                         .to_string(),
                 );
                 true
@@ -11642,6 +11666,12 @@ It will tend to agree with itself — name another with /gam <provider> <model> 
     }
 
     fn migrate_current_agents_to_cloud(&mut self) {
+        // With a home machine that can clone this repo, "take the fleet to the
+        // cloud" means to the home machine, where every repo's agents live.
+        if self.home_move_slug().is_some() {
+            self.request_move_all_home();
+            return;
+        }
         let indices = self
             .agents
             .iter()
@@ -11701,17 +11731,14 @@ It will tend to agree with itself — name another with /gam <provider> <model> 
             .last()
             .is_some_and(|run| run.task == cloud_label && run.status == AgentStatus::Failed)
         {
-            self.restore_running_agents();
+            self.reconcile_cloud_moves();
             self.notice = Some("cloud migration failed to start; local agents resumed".to_string());
             return;
         }
-        for run_id in &run_ids {
-            if let Some(run) = self.agents.iter_mut().find(|run| &run.id == run_id) {
-                run.status = AgentStatus::Migrated;
-                run.last_error = None;
-                let _ = save_native_run_record(&self.cwd, run);
-            }
-        }
+        // The rows stay "running" on disk until the CLI has migrated them: it
+        // only stages running records, and it marks each one "migrated" itself
+        // once the cloud workspace has it (reconcile_cloud_moves follows that).
+        // Flipping them here raced the CLI, which then found nothing to move.
         self.notice = Some(format!(
             "migrating {count} agent(s) to Rudder Cloud with workspaces, sessions, auth, and project environment"
         ));
@@ -11734,6 +11761,18 @@ It will tend to agree with itself — name another with /gam <provider> <model> 
             .agents
             .get(self.selected_agent)
             .is_some_and(AgentRun::is_cloud_handoff_eligible);
+        // The home machine is where agents go now: one machine for every repo,
+        // not a machine per agent. The old per-agent sail is the fallback for a
+        // repo the home cannot clone.
+        if eligible && self.home_move_slug().is_some() {
+            let id = self.agents[self.selected_agent].id.clone();
+            if self.move_in_flight_for(&id) {
+                self.notice = Some("already moving to the home machine".to_string());
+            } else {
+                self.move_agents_to_home(vec![id]);
+            }
+            return;
+        }
         if !eligible {
             self.notice = Some(
                 "/handoff moves the selected agent pane to Rudder Cloud — select a running isolated worker first (/handoff <session-id> still adopts an outside chat)"
@@ -11774,58 +11813,527 @@ It will tend to agree with itself — name another with /gam <provider> <model> 
             .last()
             .is_some_and(|run| run.task == label && run.status == AgentStatus::Failed)
         {
-            self.restore_running_agents();
+            self.reconcile_cloud_moves();
             self.notice =
                 Some("cloud handoff failed to start; the local agent resumed".to_string());
             return;
         }
-        if let Some(run) = self.agents.iter_mut().find(|run| run.id == run_id) {
-            run.status = AgentStatus::Migrated;
-            run.last_error = None;
-            let _ = save_native_run_record(&self.cwd, run);
-        }
+        // Stays "running" on disk until `cloud onload` marks it migrated (the CLI
+        // only hands off a run it can still consider live).
         self.notice = Some(format!(
             "handing off \"{summary}\" to Rudder Cloud — the pane reattaches there and the conversation resumes"
         ));
         let _ = self.write_rudder_context_timed(None);
     }
 
-    fn recover_failed_cloud_migrations(&mut self) {
-        let failed = self
+    /// Every CLI pane that is moving rows off this dashboard (`cloud move` to the
+    /// home machine, and the older `cloud migrate` / `cloud onload`) carries those
+    /// rows' ids. A row has moved when its run.json says "migrated": the CLI
+    /// writes that only once the other side has the agent, so the dashboard asks
+    /// the record instead of assuming. When the pane ends, whatever it did not
+    /// hand over is still this machine's, and resumes here.
+    fn reconcile_cloud_moves(&mut self) {
+        let panes: Vec<String> = self
             .agents
-            .iter_mut()
-            .filter(|run| {
-                run.status == AgentStatus::Failed
-                    && (run.task.starts_with("cloud migrate ")
-                        || run.task.starts_with("cloud onload "))
-                    && !run.review_source_ids.is_empty()
-            })
-            .flat_map(|run| std::mem::take(&mut run.review_source_ids))
-            .collect::<Vec<_>>();
-        if failed.is_empty() {
-            return;
-        }
-        let mut resumed = 0usize;
-        for run_id in failed {
-            let Some(index) = self.agents.iter().position(|run| run.id == run_id) else {
+            .iter()
+            .filter(|run| is_cloud_move_pane(run) && !run.review_source_ids.is_empty())
+            .map(|run| run.id.clone())
+            .collect();
+        for pane_id in panes {
+            let Some(pane) = self.agents.iter().find(|run| run.id == pane_id) else {
                 continue;
             };
-            let entry = MigratedAgent {
-                run_id: run_id.clone(),
-                session_id: self.agents[index].session_id.clone().unwrap_or_default(),
-                workspace_path: self.agents[index].cwd.clone(),
-                fresh_prompt: Some(format!(
-                    "Cloud migration failed. Continue the original task locally from the existing workspace: {}",
-                    self.agents[index].task
-                )),
+            let live = pane.terminal.is_some() && pane.status == AgentStatus::Running;
+            let to_home = pane.task.starts_with(HOME_MOVE_LABEL_PREFIX);
+            let sources = pane.review_source_ids.clone();
+            let mut landed = Vec::new();
+            for id in &sources {
+                let Some(index) = self.agents.iter().position(|run| &run.id == id) else {
+                    continue;
+                };
+                if self.agents[index].status == AgentStatus::Migrated
+                    || read_run_record_status(&self.cwd, id).as_deref() != Some("migrated")
+                {
+                    continue;
+                }
+                let run = &mut self.agents[index];
+                run.status = AgentStatus::Migrated;
+                run.terminal = None;
+                run.last_error = None;
+                landed.push(run.task_summary.clone());
+            }
+            if !landed.is_empty() {
+                let count = landed.len();
+                let s = if count == 1 { "" } else { "s" };
+                self.record_activity(format!(
+                    "{}: {count} agent{s} moved ({})",
+                    if to_home { "home" } else { "cloud" },
+                    landed.join(", ")
+                ));
+                self.notice = Some(if to_home {
+                    format!("moved {count} agent{s} to the home machine · they keep working there with this laptop closed")
+                } else {
+                    format!("{count} agent{s} now run in Rudder Cloud")
+                });
+                self.dirty = true;
+                let _ = self.write_rudder_context_timed(None);
+            }
+            if live {
+                continue;
+            }
+            if let Some(pane) = self.agents.iter_mut().find(|run| run.id == pane_id) {
+                pane.review_source_ids.clear();
+            }
+            let leftover: Vec<String> = sources
+                .into_iter()
+                .filter(|id| {
+                    self.agents.iter().any(|run| {
+                        &run.id == id && run.status == AgentStatus::Running && run.terminal.is_none()
+                    })
+                })
+                .collect();
+            if leftover.is_empty() {
+                continue;
+            }
+            let mut resumed = 0usize;
+            for run_id in &leftover {
+                let Some(index) = self.agents.iter().position(|run| &run.id == run_id) else {
+                    continue;
+                };
+                let entry = MigratedAgent {
+                    run_id: run_id.clone(),
+                    session_id: self.agents[index].session_id.clone().unwrap_or_default(),
+                    workspace_path: self.agents[index].cwd.clone(),
+                    fresh_prompt: Some(format!(
+                        "The move off this machine did not finish. Continue the original task here from the existing workspace: {}",
+                        self.agents[index].task
+                    )),
+                };
+                if self.spawn_claude_resume_for(index, &entry) {
+                    resumed += 1;
+                }
+            }
+            self.notice = Some(format!(
+                "the move did not finish; resumed {resumed} agent{} here · its pane says why",
+                if resumed == 1 { "" } else { "s" }
+            ));
+            self.dirty = true;
+        }
+    }
+
+    /// The GitHub repo the home machine would clone this checkout as, when moving
+    /// agents there can work at all: signed in to Rudder Cloud, not already ON the
+    /// home machine, and an origin it can clone. The origin is asked of git once.
+    fn home_move_slug(&mut self) -> Option<String> {
+        if is_cloud_worker_session()
+            || env::var("RUDDER_CLOUD_RUNTIME").is_ok_and(|value| value == "home")
+            || !self.cloud_connected
+        {
+            return None;
+        }
+        if self.home_slug.is_none() {
+            let slug = git_output(&self.cwd, ["remote", "get-url", "origin"])
+                .ok()
+                .and_then(|url| github_slug_from_remote(url.trim()));
+            self.home_slug = Some(slug);
+        }
+        self.home_slug.clone().flatten()
+    }
+
+    /// Rows a move can take: running isolated workers with a live process. Main
+    /// checkout agents work in this checkout's own files, so they stay.
+    fn movable_agent_ids(&self) -> Vec<String> {
+        self.agents
+            .iter()
+            .filter(|run| run.is_cloud_handoff_eligible() && run.terminal.is_some())
+            .filter(|run| !self.move_in_flight_for(&run.id))
+            .map(|run| run.id.clone())
+            .collect()
+    }
+
+    fn move_in_flight_for(&self, run_id: &str) -> bool {
+        self.agents.iter().any(|pane| {
+            is_cloud_move_pane(pane)
+                && pane.terminal.is_some()
+                && pane.status == AgentStatus::Running
+                && pane.review_source_ids.iter().any(|id| id == run_id)
+        })
+    }
+
+    /// How many rows a live `cloud move` pane is still carrying to the home machine.
+    fn home_moves_in_flight(&self) -> usize {
+        self.agents
+            .iter()
+            .filter(|pane| {
+                pane.task.starts_with(HOME_MOVE_LABEL_PREFIX)
+                    && pane.terminal.is_some()
+                    && pane.status == AgentStatus::Running
+            })
+            .flat_map(|pane| pane.review_source_ids.iter())
+            .filter(|id| {
+                self.agents
+                    .iter()
+                    .any(|run| &run.id == *id && run.status != AgentStatus::Migrated)
+            })
+            .count()
+    }
+
+    /// `H`, `^W H`, and the quit offer: every running agent goes to the home machine.
+    fn request_move_all_home(&mut self) {
+        if is_cloud_worker_session() {
+            self.notice = Some("this dashboard already runs on the home machine".to_string());
+            return;
+        }
+        if self.home_move_slug().is_none() {
+            self.notice = Some(if !self.cloud_connected {
+                "moving agents to the home machine needs Rudder Cloud: /login first".to_string()
+            } else {
+                "the home machine clones from GitHub, and this repo has no GitHub origin".to_string()
+            });
+            return;
+        }
+        let ids = self.movable_agent_ids();
+        if ids.is_empty() {
+            self.notice = Some(
+                "no running agents with workspaces of their own to move (main-checkout agents stay here)"
+                    .to_string(),
+            );
+            return;
+        }
+        self.move_agents_to_home(ids);
+    }
+
+    /// Pause these rows and hand them to `rudder cloud move`. They stay local
+    /// (Running, no process) until the CLI marks their run.json "migrated", which
+    /// it does only once the home machine has staged them; reconcile_cloud_moves
+    /// watches for that and resumes here anything the move did not take.
+    fn move_agents_to_home(&mut self, run_ids: Vec<String>) -> bool {
+        let mut moving = Vec::new();
+        let mut labels = Vec::new();
+        for id in &run_ids {
+            let Some(index) = self.agents.iter().position(|run| &run.id == id) else {
+                continue;
             };
-            if self.spawn_claude_resume_for(index, &entry) {
-                resumed += 1;
+            self.quiesce_for_move(index);
+            labels.push(
+                self.agents[index]
+                    .node_id
+                    .clone()
+                    .unwrap_or_else(|| self.agents[index].task_summary.clone()),
+            );
+            moving.push(id.clone());
+        }
+        if moving.is_empty() {
+            return false;
+        }
+        let count = moving.len();
+        let s = if count == 1 { "" } else { "s" };
+        let label = format!("{HOME_MOVE_LABEL_PREFIX}{count} agent{s} to the home machine");
+        self.push_activity(format!("home: moving {count} agent{s} ({})", labels.join(", ")));
+        let mut args = vec!["cloud".to_string(), "move".to_string(), "--yes".to_string()];
+        args.extend(moving.iter().cloned());
+        self.start_rudder_cli_command(&label, args);
+        if let Some(pane) = self.agents.last_mut() {
+            if pane.task == label {
+                pane.review_source_ids = moving.clone();
             }
         }
+        if self
+            .agents
+            .last()
+            .is_some_and(|run| run.task == label && run.status == AgentStatus::Failed)
+        {
+            self.reconcile_cloud_moves();
+            self.notice = Some("could not start the move; the agents resumed here".to_string());
+            return false;
+        }
         self.notice = Some(format!(
-            "cloud migration failed; resumed {resumed} local agent(s)"
+            "moving {count} agent{s} to the home machine… their conversations resume there; safe to close the laptop once it says moved"
         ));
+        let _ = self.write_rudder_context_timed(None);
+        true
+    }
+
+    /// Stop a row's local process so its jj change and transcript are final, and
+    /// leave its record "running" (the move CLI only takes unfinished rows).
+    fn quiesce_for_move(&mut self, index: usize) {
+        let cwd = self.cwd.clone();
+        let run = &mut self.agents[index];
+        if run.backend == Backend::Codex
+            && run
+                .session_id
+                .as_deref()
+                .is_none_or(|session| session.trim().is_empty())
+        {
+            run.session_id = latest_codex_session_id_for_cwd(&run.cwd);
+        }
+        if let Some(mut terminal) = run.terminal.take() {
+            terminal.terminate_and_wait();
+        }
+        run.needs_permission = false;
+        run.needs_user_input = false;
+        run.status = AgentStatus::Running;
+        let _ = save_native_run_record(&cwd, run);
+    }
+
+    /// Why a message typed into this row's pane would not reach the agent.
+    fn composer_blocked_at(&mut self, index: usize) -> Option<&'static str> {
+        let run = self.agents.get_mut(index)?;
+        let backend = run.backend;
+        let lines = run.terminal.as_mut()?.live_screen_lines();
+        terminal_composer_blocked(backend, &lines)
+    }
+
+    /// The home machine staged an agent a laptop moved here (`rudder __adopt-moved`
+    /// wrote its run.json and put its jj change and transcript in place): load the
+    /// row and resume its conversation. At most once: a row that is already
+    /// running is left alone, so a retried move never forks the conversation.
+    fn deliver_adopt_request(&mut self, run_id: &str) -> SteerDelivery {
+        if run_id.is_empty()
+            || !run_id
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
+        {
+            return SteerDelivery::Failed(format!("bad run id: {run_id}"));
+        }
+        let existing = self.agents.iter().position(|run| run.id == run_id);
+        if let Some(index) = existing {
+            if self.agents[index]
+                .terminal
+                .as_mut()
+                .is_some_and(|terminal| terminal.is_alive())
+            {
+                return SteerDelivery::Delivered;
+            }
+        }
+        let path = native_run_dir(&self.cwd, run_id).join("run.json");
+        let Some(mut record) = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+        else {
+            return SteerDelivery::Failed(format!("no staged record for {run_id}"));
+        };
+        heal_moved_repo_paths(&mut record, &self.cwd);
+        let migration = record.get("migration").cloned().unwrap_or_default();
+        let session_id = migration
+            .get("sessionId")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        let fresh_prompt = migration
+            .get("freshPrompt")
+            .and_then(serde_json::Value::as_str)
+            .filter(|prompt| !prompt.trim().is_empty())
+            .map(ToOwned::to_owned);
+        let Some(agent) = agent_from_run_record(&self.cwd, record) else {
+            return SteerDelivery::Failed(format!("unreadable record for {run_id}"));
+        };
+        let workspace_path = agent.workspace_path.clone().unwrap_or_else(|| agent.cwd.clone());
+        let summary = agent.task_summary.clone();
+        let index = match existing {
+            Some(index) => {
+                self.agents[index] = agent;
+                index
+            }
+            None => {
+                self.agents.push(agent);
+                self.agents.len() - 1
+            }
+        };
+        self.agent_row_map.clear();
+        let entry = MigratedAgent {
+            run_id: run_id.to_string(),
+            session_id,
+            workspace_path,
+            fresh_prompt,
+        };
+        if !self.spawn_claude_resume_for(index, &entry) {
+            return SteerDelivery::Failed(format!("could not start {summary} here"));
+        }
+        self.record_activity(format!("home: picked up \"{summary}\" from a laptop"));
+        self.notice = Some(format!("picked up \"{summary}\" from a laptop; it continues here"));
+        self.dirty = true;
+        let _ = self.write_rudder_context_timed(None);
+        SteerDelivery::Delivered
+    }
+
+    /// `rudder cloud` in another terminal of this checkout asked to take the
+    /// running agents along: do exactly what `H` does.
+    fn deliver_move_home_request(&mut self) -> SteerDelivery {
+        if self.home_move_slug().is_none() {
+            return SteerDelivery::Failed(
+                "this checkout cannot move agents to the home machine (signed in, with a GitHub origin?)"
+                    .to_string(),
+            );
+        }
+        let ids = self.movable_agent_ids();
+        if ids.is_empty() {
+            return SteerDelivery::Failed("no running agents with workspaces of their own".to_string());
+        }
+        if self.move_agents_to_home(ids) {
+            SteerDelivery::Delivered
+        } else {
+            SteerDelivery::Failed("the move could not start".to_string())
+        }
+    }
+
+    /// The phone deleted an agent: delete it here exactly as `dd` would, which is
+    /// what makes it disappear from the phone too (the phone lists run records).
+    fn deliver_delete_request(&mut self, task_id: &str) -> SteerDelivery {
+        let Some(index) = self.agent_index_for_token(task_id) else {
+            return SteerDelivery::Failed(format!("target not found: {task_id}"));
+        };
+        if is_cloud_owned_agent(&self.agents[index]) {
+            return SteerDelivery::Failed("that agent runs elsewhere; delete it where it runs".to_string());
+        }
+        let live_main = self.agents[index].is_main()
+            && self.agents[index].terminal.is_some()
+            && self.agents[index].status == AgentStatus::Running;
+        if live_main && !self.stop_agent_at(index) {
+            return SteerDelivery::Failed("could not stop it, so it was not deleted".to_string());
+        }
+        let label = self.agents[index].task_summary.clone();
+        if self.delete_pending.as_deref() == Some(self.agents[index].id.as_str()) {
+            self.delete_pending = None;
+        }
+        let notice = self.delete_agent_now(index);
+        self.record_activity(format!("deleted \"{label}\" (from the phone)"));
+        self.notice = Some(notice);
+        self.dirty = true;
+        let _ = self.write_rudder_context_timed(None);
+        SteerDelivery::Delivered
+    }
+
+    /// Agents this laptop moved to the home machine can be deleted there (the
+    /// phone, or the dashboard on the home machine). Ask the home which still
+    /// exist and drop the rows of the ones that do not, so a delete anywhere is
+    /// a delete everywhere. Each ask is a Node CLI spawn, so it backs off.
+    fn refresh_home_runs(&mut self) {
+        if is_cloud_worker_session()
+            || !self.cloud_connected
+            || env::var("RUDDER_OFFLINE").is_ok_and(|value| value == "1")
+        {
+            self.home_runs_rx = None;
+            return;
+        }
+        if let Some(rx) = self.home_runs_rx.take() {
+            match rx.try_recv() {
+                Ok(Some(existing)) => {
+                    let gone: Vec<String> = self
+                        .home_runs_queried
+                        .iter()
+                        .filter(|id| !existing.contains(id))
+                        .cloned()
+                        .collect();
+                    self.home_runs_interval = if gone.is_empty() {
+                        backed_off_interval(self.home_runs_interval, HOME_RUNS_CHECK_MAX_INTERVAL)
+                    } else {
+                        HOME_RUNS_CHECK_BASE_INTERVAL
+                    };
+                    let mut removed = Vec::new();
+                    for id in gone {
+                        let Some(index) = self.agents.iter().position(|run| run.id == id) else {
+                            continue;
+                        };
+                        if self.agents[index].status != AgentStatus::Migrated {
+                            continue;
+                        }
+                        removed.push(self.agents[index].task_summary.clone());
+                        self.delete_agent_now(index);
+                    }
+                    if !removed.is_empty() {
+                        self.record_activity(format!(
+                            "home: deleted there, removed here: {}",
+                            removed.join(", ")
+                        ));
+                        self.notice = Some(format!(
+                            "{} deleted on the home machine, so removed here too",
+                            if removed.len() == 1 {
+                                format!("\"{}\" was", removed[0])
+                            } else {
+                                format!("{} agents were", removed.len())
+                            }
+                        ));
+                        self.dirty = true;
+                        let _ = self.write_rudder_context_timed(None);
+                    }
+                }
+                Ok(None) => {
+                    self.home_runs_interval =
+                        backed_off_interval(self.home_runs_interval, HOME_RUNS_CHECK_MAX_INTERVAL);
+                }
+                Err(TryRecvError::Empty) => {
+                    self.home_runs_rx = Some(rx);
+                    return;
+                }
+                Err(TryRecvError::Disconnected) => {}
+            }
+        }
+        let due = self
+            .last_home_runs_check
+            .is_none_or(|at| at.elapsed() >= self.home_runs_interval);
+        if !due {
+            return;
+        }
+        let cwd = self.cwd.clone();
+        let ids: Vec<String> = self
+            .agents
+            .iter()
+            .filter(|run| run.status == AgentStatus::Migrated && run_moved_home(&cwd, &run.id))
+            .map(|run| run.id.clone())
+            .collect();
+        self.last_home_runs_check = Some(Instant::now());
+        if ids.is_empty() {
+            return;
+        }
+        self.home_runs_queried = ids.clone();
+        let (tx, rx) = mpsc::channel();
+        self.home_runs_rx = Some(rx);
+        thread::spawn(move || {
+            let _ = tx.send(query_home_runs(&cwd, &ids));
+        });
+    }
+
+    /// Delete a workspace directory and its jj registration off the UI thread
+    /// (remove_dir_all on a tree with node_modules takes seconds).
+    fn remove_workspace_in_background(&self, path: PathBuf, workspace_name: Option<String>) {
+        let cwd = self.cwd.clone();
+        let tx = self.bg_notice_tx.clone();
+        thread::Builder::new()
+            .name("rudder-workspace-remove".to_string())
+            .spawn(move || {
+                let error = if let Some(name) = workspace_name.as_deref() {
+                    // jj workspace: forget the registry entry AND remove the
+                    // checkout. `git worktree remove` fails on a jj workspace
+                    // and leaked both the directory and jj's workspace list.
+                    forget_jj_workspace(&cwd, name, &path)
+                        .err()
+                        .map(|error| format!("failed to remove jj workspace: {error}"))
+                } else {
+                    // Legacy git-worktree run.
+                    match Command::new("git")
+                        .args(["worktree", "remove", "--force"])
+                        .arg(&path)
+                        .current_dir(&cwd)
+                        .output()
+                    {
+                        Ok(output) if output.status.success() => None,
+                        Ok(output) => {
+                            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+                            Some(if stderr.is_empty() {
+                                "failed to remove workspace".to_string()
+                            } else {
+                                format!("failed to remove workspace: {stderr}")
+                            })
+                        }
+                        Err(error) => Some(format!("failed to remove workspace: {error}")),
+                    }
+                };
+                let _ = tx.send(
+                    error.unwrap_or_else(|| "deleted agent and removed workspace".to_string()),
+                );
+            })
+            .ok();
     }
 
     fn start_rudder_cli_command(&mut self, label: &str, args: Vec<String>) {
@@ -11997,11 +12505,14 @@ It will tend to agree with itself — name another with /gam <provider> <model> 
                     let _ = tx.send(namer(&task));
                 });
                 self.pending_named_runs.push(PendingNamedRun {
+                    id: new_run_id(input),
                     input: input.to_string(),
                     rx,
                     started: Instant::now(),
+                    queued_at: now_stamp(),
                 });
-                self.notice = Some("naming the new workspace…".to_string());
+                self.persist_pending_tasks();
+                self.notice = Some(format!("starting \"{}\" · naming its workspace…", short_task(input)));
                 self.dirty = true;
                 return;
             }
@@ -12027,9 +12538,45 @@ It will tend to agree with itself — name another with /gam <provider> <model> 
                 false
             }
         });
+        let launched = !ready.is_empty();
         for (input, title) in ready {
             self.launch_single_run_task(&input, title.as_deref());
             self.dirty = true;
+        }
+        if launched {
+            self.persist_pending_tasks();
+        }
+    }
+
+    /// A task waiting on its workspace name has no row yet, so on the phone a
+    /// task just typed looked ignored for the seconds the namer takes. List the
+    /// waiting ones beside the run records, where the home machine's supervisor
+    /// reads agents, so they show as "starting" right away.
+    fn persist_pending_tasks(&self) {
+        let path = self.cwd.join(".rudder").join("pending-tasks.json");
+        if self.pending_named_runs.is_empty() {
+            let _ = std::fs::remove_file(&path);
+            return;
+        }
+        let tasks: Vec<serde_json::Value> = self
+            .pending_named_runs
+            .iter()
+            .map(|pending| {
+                serde_json::json!({
+                    "id": pending.id,
+                    "task": pending.input,
+                    "queuedAt": pending.queued_at,
+                })
+            })
+            .collect();
+        let Ok(bytes) = serde_json::to_vec(&serde_json::json!({ "tasks": tasks })) else {
+            return;
+        };
+        let temp = path.with_extension(format!("{}.tmp", std::process::id()));
+        if std::fs::create_dir_all(path.parent().unwrap_or(&self.cwd)).is_ok()
+            && std::fs::write(&temp, bytes).is_ok()
+        {
+            let _ = std::fs::rename(&temp, &path);
         }
     }
 
@@ -13624,6 +14171,14 @@ It will tend to agree with itself — name another with /gam <provider> <model> 
                 // Raw keys for a live agent (the phone's key strip): what a
                 // picker opened by `/model` or `/resume` waits for.
                 "keys" => self.deliver_keys_request(&task_id, &instruction),
+                // The home machine staged an agent moved off a laptop: load
+                // its record and resume its conversation here.
+                "adopt" => self.deliver_adopt_request(&task_id),
+                // `rudder cloud` in another terminal: move every agent this
+                // dashboard is running to the home machine.
+                "move-home" => self.deliver_move_home_request(),
+                // The phone deleted an agent: the same as dd here.
+                "delete" => self.deliver_delete_request(&task_id),
                 _ => self.deliver_steer_request(&task_id, &instruction),
             };
             let _ = self.write_steer_receipt(&request_id, &result);
@@ -13724,6 +14279,14 @@ It will tend to agree with itself — name another with /gam <provider> <model> 
         };
         match status {
             AgentStatus::Running => {
+                // Typed into an open menu, a message is not a message: it went
+                // into Claude's /config search box once and the phone was told
+                // "delivered". Refuse with the reason instead; the phone's key
+                // strip (or the pane) closes the menu, then the text goes in.
+                if let Some(reason) = self.composer_blocked_at(index) {
+                    self.push_activity(format!("steer: {label} not typed, {reason}"));
+                    return SteerDelivery::Failed(format!("not sent: {reason}"));
+                }
                 if self.live_inject_at(index, &instruction) {
                     // A browser steer is a real user turn, not an ephemeral PTY
                     // keystroke. Persist the same conversation metadata as direct
@@ -16283,7 +16846,19 @@ Files involved: {}
             }
         }
 
-        let run = self.agents.remove(self.selected_agent);
+        let deleted = self.selected_agent;
+        let notice = self.delete_agent_now(deleted);
+        self.delete_pending = None;
+        self.notice = Some(notice);
+        let _ = self.write_rudder_context_timed(None);
+    }
+
+    /// Remove one row and everything local it owns: its record, signal files and
+    /// ledger entries, and (in the background) its workspace. The confirmed half
+    /// of `dd`, and what a delete from the phone runs. Keeps the selection on a
+    /// sensible neighbor and returns the notice to show.
+    fn delete_agent_now(&mut self, index: usize) -> String {
+        let run = self.agents.remove(index);
         // Indices shifted under the rendered rows; drop the click map so a same-tick
         // click resolves to nothing instead of a neighbor (next render rebuilds it).
         self.agent_row_map.clear();
@@ -16315,76 +16890,33 @@ Files involved: {}
         if was_ingested || was_pending {
             self.persist_ingested_runs();
         }
-        // Workspace removal runs in the BACKGROUND: remove_dir_all on a tree
-        // with node_modules takes seconds, and doing it here froze the whole
-        // UI — the freeze that buffered the key bursts this flow now guards
-        // against. The row is already gone from the board; only the disk
-        // cleanup is deferred, and its outcome lands in the notice line via
-        // the bg-notice channel.
+        // Workspace removal runs in the BACKGROUND: doing it here froze the whole
+        // UI, the freeze that buffered the key bursts dd now guards against. The
+        // row is already gone; the outcome lands in the notice line.
         if let Some(path) = run.workspace_path.clone() {
-            let cwd = self.cwd.clone();
-            let workspace_name = run.workspace_name.clone();
-            let tx = self.bg_notice_tx.clone();
-            thread::Builder::new()
-                .name("rudder-workspace-remove".to_string())
-                .spawn(move || {
-                    let error = if let Some(name) = workspace_name.as_deref() {
-                        // jj workspace: forget the registry entry AND remove the
-                        // checkout. `git worktree remove` fails on a jj workspace
-                        // and leaked both the directory and jj's workspace list.
-                        forget_jj_workspace(&cwd, name, &path)
-                            .err()
-                            .map(|error| format!("failed to remove jj workspace: {error}"))
-                    } else {
-                        // Legacy git-worktree run.
-                        match Command::new("git")
-                            .args(["worktree", "remove", "--force"])
-                            .arg(&path)
-                            .current_dir(&cwd)
-                            .output()
-                        {
-                            Ok(output) if output.status.success() => None,
-                            Ok(output) => {
-                                let stderr =
-                                    String::from_utf8_lossy(&output.stderr).trim().to_string();
-                                Some(if stderr.is_empty() {
-                                    "failed to remove workspace".to_string()
-                                } else {
-                                    format!("failed to remove workspace: {stderr}")
-                                })
-                            }
-                            Err(error) => Some(format!("failed to remove workspace: {error}")),
-                        }
-                    };
-                    let _ = tx.send(
-                        error.unwrap_or_else(|| "deleted agent and removed workspace".to_string()),
-                    );
-                })
-                .ok();
+            self.remove_workspace_in_background(path, run.workspace_name.clone());
         }
-        let workspace_error: Option<String> = None;
+        if index < self.selected_agent {
+            self.selected_agent -= 1;
+        }
         let last = self.agents.len().saturating_sub(1);
         self.selected_agent = self.selected_agent.min(last);
         if !self.agents.is_empty() {
             let visible = self.visible_agent_indices();
-            if let Some(index) = visible
+            if let Some(next) = visible
                 .iter()
                 .copied()
-                .find(|&index| index >= self.selected_agent)
+                .find(|&next| next >= self.selected_agent)
                 .or_else(|| visible.last().copied())
             {
-                self.selected_agent = index;
+                self.selected_agent = next;
             }
         }
-        self.delete_pending = None;
-        self.notice = Some(workspace_error.unwrap_or_else(|| {
-            if run.workspace_path.is_some() {
-                "deleted agent · removing workspace in background".to_string()
-            } else {
-                "deleted agent from dashboard".to_string()
-            }
-        }));
-        let _ = self.write_rudder_context_timed(None);
+        if run.workspace_path.is_some() {
+            "deleted agent · removing workspace in background".to_string()
+        } else {
+            "deleted agent from dashboard".to_string()
+        }
     }
 
     /// `dd` on a cloud-owned row: say exactly what will be destroyed and ask.
@@ -16397,7 +16929,13 @@ Files involved: {}
         } else {
             truncate_chars(selected.task_summary.trim(), 40)
         };
+        let moved_home = run_moved_home(&self.cwd, &selected.id);
         let confirm = match cloud_sail_id(selected) {
+            _ if moved_home => CloudDeleteConfirm {
+                target: CloudDeleteTarget::HomeAgent(selected.id.clone()),
+                label,
+                run_ids: vec![selected.id.clone()],
+            },
             Some(sail) => CloudDeleteConfirm {
                 target: CloudDeleteTarget::Sail(sail.to_string()),
                 label,
@@ -16437,6 +16975,9 @@ Files involved: {}
             CloudDeleteTarget::Workspace => ["cloud", "workspace", "delete", "--yes", "--json"]
                 .map(str::to_string)
                 .to_vec(),
+            CloudDeleteTarget::HomeAgent(id) => ["cloud", "home", "delete", id.as_str(), "--yes", "--json"]
+                .map(str::to_string)
+                .to_vec(),
         };
         self.notice = Some(format!(
             "deleting {} from Rudder Cloud…",
@@ -16466,8 +17007,15 @@ Files involved: {}
         let what = cloud_delete_target_label(&outcome.target);
         match outcome.result {
             Ok(gone) => {
+                let home_agent = matches!(outcome.target, CloudDeleteTarget::HomeAgent(_));
                 for id in &outcome.run_ids {
                     if let Some(index) = self.agents.iter().position(|run| &run.id == id) {
+                        if home_agent {
+                            // This laptop still holds the workspace the agent left
+                            // from; deleting the agent deletes that copy as well.
+                            self.delete_agent_now(index);
+                            continue;
+                        }
                         let run = self.agents.remove(index);
                         let _ = remove_native_run_record(&self.cwd, &run.id);
                         signals::cleanup_run_signals(&run.id);
@@ -18637,6 +19185,8 @@ What to do\n\
             self.last_steer_poll = Instant::now();
             self.drain_diff_summaries();
             self.poll_steer_inbox();
+            self.reconcile_cloud_moves();
+            self.refresh_home_runs();
             self.write_watched_screens();
             self.poll_handoff_inbox();
             self.reconcile_rows();
@@ -19105,7 +19655,6 @@ What to do\n\
             }
         }
 
-        self.recover_failed_cloud_migrations();
 
         // The INITIAL planner run is KEPT as the pinned orchestrator (no removal),
         // so its index stays stable. A RECONCILE planner is transient and removed by

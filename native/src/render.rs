@@ -4876,6 +4876,10 @@ pub(crate) fn render_merge_prompt(frame: &mut Frame<'_>, area: Rect, app: &App) 
             crate::CloudDeleteTarget::Sail(id) => format!(
                 "Destroys cloud sail {id}: its machine and its snapshot. The conversation running there ends. This cannot be undone."
             ),
+            crate::CloudDeleteTarget::HomeAgent(_) => {
+                "Deletes it on the home machine: its conversation ends there and it disappears from the phone. This laptop's copy of its workspace goes too. This cannot be undone."
+                    .to_string()
+            }
             crate::CloudDeleteTarget::Workspace => {
                 let count = confirm.run_ids.len();
                 format!(
@@ -5631,6 +5635,15 @@ pub(crate) fn cloud_sail_id(agent: &AgentRun) -> Option<&str> {
         .strip_prefix("cloud sail ")
         .and_then(|rest| rest.split_once(" · ").map(|(id, _)| id).or(Some(rest)))
         .filter(|id| !id.trim().is_empty())
+}
+
+/// A CLI pane moving rows off this dashboard (to the home machine, or the
+/// older snapshot-workspace and per-agent sail handoffs). Its
+/// `review_source_ids` are the rows it carries.
+pub(crate) fn is_cloud_move_pane(agent: &AgentRun) -> bool {
+    agent.task.starts_with(crate::HOME_MOVE_LABEL_PREFIX)
+        || agent.task.starts_with("cloud migrate ")
+        || agent.task.starts_with("cloud onload ")
 }
 
 pub(crate) fn is_cloud_owned_agent(agent: &AgentRun) -> bool {

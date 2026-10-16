@@ -113,11 +113,12 @@ static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// Every process-global var the harness injects. `EnvGuard` snapshots these on
 /// acquisition and puts them back on drop, so the list must stay a superset of what
 /// the tests set — a var missing here is a var that can leak.
-const GUARDED_ENV: [&str; 13] = [
+const GUARDED_ENV: [&str; 14] = [
     "HOME",
     "PATH",
     "RUDDER_CLAUDE_BIN",
     "RUDDER_CLI",
+    "RUDDER_CLOUD_RUNTIME",
     "RUDDER_CLOUD_TOKEN",
     "RUDDER_CODEX_BIN",
     "RUDDER_HOME",
@@ -6445,6 +6446,21 @@ fn cloud_fleet_migration_quiesces_only_live_isolated_workers() {
         worker.terminal.is_none(),
         "local PTY is frozen before snapshot"
     );
+    // Still "running" on disk: the CLI only stages running records, and flipping
+    // the row to Migrated at spawn time raced it into finding nothing to move.
+    assert_eq!(worker.status, AgentStatus::Running);
+    let record: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(native_run_dir(&repo, "worker-1").join("run.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(record.get("status").and_then(|value| value.as_str()), Some("running"));
+    // The CLI marks it migrated once the cloud workspace has it; the row follows.
+    let path = native_run_dir(&repo, "worker-1").join("run.json");
+    let mut record: serde_json::Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    record["status"] = serde_json::json!("migrated");
+    fs::write(&path, record.to_string()).unwrap();
+    app.reconcile_cloud_moves();
+    let worker = app.agents.iter().find(|run| run.id == "worker-1").unwrap();
     assert_eq!(
         worker.status,
         AgentStatus::Migrated,
@@ -15690,26 +15706,6 @@ fn retire_reconcile_planner_clears_memory_and_disk() {
 }
 
 #[test]
-fn restore_running_agents_skips_reconcile_planners() {
-    let mut app = App::new();
-    app.cwd = std::env::temp_dir();
-    // A reloaded reconcile planner (no terminal, status Running) must NOT be queued
-    // for background resume even if it slips past the load filter.
-    let mut rec = planner_run("rec-1", true);
-    rec.terminal = None;
-    rec.session_id = Some("sid".to_string());
-    app.agents.push(rec);
-    app.migration_resumes_attempted = false;
-    app.restore_running_agents();
-    // It is still present (restore does not delete) but was never resumed: it has
-    // no terminal and its status was left untouched.
-    assert!(
-        app.agents[0].terminal.is_none(),
-        "reconcile planner is not resumed"
-    );
-}
-
-#[test]
 fn auto_expand_recovers_followups_from_sidecar_file_without_a_pty() {
     // The ROBUST channel in isolation: a finished worker with NO terminal at all. The
     // only way to recover its follow-ups is the file `rudder done` dropped at
@@ -20459,7 +20455,9 @@ fn the_mid_turn_packet_shows_the_live_pane_and_its_own_contract() {
 #[cfg(not(windows))]
 #[test]
 fn the_gam_split_renders_the_dialogue_between_the_two() {
-    let dir = unique_test_repo("gam-dialogue");
+    // Not "gam-dialogue": the sidebar prints the repo path, and on a short
+    // temp dir (Linux /tmp) the word the test looks for was the path itself.
+    let dir = unique_test_repo("gam-strip");
     let mut app = App::new();
     app.cwd = dir.clone();
     let (_gen, _adv) = gam_test_pair(&mut app, "reviewer online");
@@ -25612,7 +25610,13 @@ fn a_run_waits_for_its_workspace_name_before_creating_the_workspace() {
     app.start_single_run_task("boris recently posted this, i used it and the webhook sender should retry with backoff");
     assert!(app.agents.is_empty(), "no workspace until the name is in");
     assert_eq!(app.pending_named_runs.len(), 1);
-    assert_eq!(app.notice.as_deref(), Some("naming the new workspace…"));
+    assert!(
+        app.notice.as_deref().is_some_and(|notice| notice.contains("naming its workspace")),
+        "{:?}",
+        app.notice
+    );
+    // Listed for the phone while it waits, so a task typed there shows at once.
+    assert!(app.cwd.join(".rudder").join("pending-tasks.json").is_file());
 
     // The namer's answer is what the launch is handed.
     let pending = app.pending_named_runs.pop().expect("pending run");
@@ -26345,4 +26349,427 @@ fn phone_keys_and_watched_screen_mirror() {
     assert!(matches!(delivered, SteerDelivery::Delivered), "enter reached the live pane");
     assert!(!unwatched, "nothing is mirrored while nobody watches");
     assert!(screen.contains("phone-42"), "the watched screen shows the command's output: {screen}");
+}
+
+// ---------------------------------------------------------------------------
+// Moving agents to the home machine, the phone's delete, and remote messages
+// that must not be typed into an open menu.
+// ---------------------------------------------------------------------------
+
+/// What Claude Code's `/config` panel looked like in the field when two phone
+/// messages went into its search box instead of the conversation.
+fn claude_config_panel_screen() -> Vec<String> {
+    [
+        "  Everything I ran against prod was read-only, and I changed nothing in the repo.",
+        "✻ Crunched for 4m 31s · done 9:15 AM",
+        "❯ /config",
+        "────────────────────────────────────────────────────────────",
+        "  Settings  Status   Config   Usage   Stats",
+        "  ╭──────────────────────────────────────────────────────────╮",
+        "  │ ⌕ Ok has Isabelle used stuff how is it?Hello?            │",
+        "  ╰──────────────────────────────────────────────────────────╯",
+        "  No settings match \"Ok has Isabelle used stuff how is it?Hello?\"",
+        "  Type to filter · Enter/↓ to select · ↑ to tabs · Esc to clear",
+        "",
+        "",
+    ]
+    .iter()
+    .map(|line| line.to_string())
+    .collect()
+}
+
+#[test]
+fn an_open_menu_blocks_typed_messages_but_the_composer_and_a_running_turn_do_not() {
+    assert!(terminal_composer_blocked(Backend::Claude, &claude_config_panel_screen()).is_some());
+    // The settings list after one Esc (search cleared, panel still open).
+    let list: Vec<String> = [
+        "    Verbose output                              false",
+        "    Terminal progress bar                       true",
+        "    ↓ 26 more",
+        "  Enter/Space to change · / to search · Esc to close",
+    ]
+    .iter()
+    .map(|line| line.to_string())
+    .collect();
+    assert!(terminal_composer_blocked(Backend::Claude, &list).is_some());
+    let idle: Vec<String> = [
+        "  Do you want me to fix the trace access?",
+        "──────────────────────────────────────────",
+        "❯ ",
+        "──────────────────────────────────────────",
+        "  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents      ◉ xhigh · /effort",
+        "                                                                    /rc active",
+    ]
+    .iter()
+    .map(|line| line.to_string())
+    .collect();
+    assert_eq!(terminal_composer_blocked(Backend::Claude, &idle), None);
+    let busy: Vec<String> = [
+        "✻ Crunching… (12s · ↓ 1.2k tokens · esc to interrupt)",
+        "──────────────────────────────────────────",
+        "❯ ",
+        "──────────────────────────────────────────",
+        "  ⏵⏵ bypass permissions on (shift+tab to cycle)",
+    ]
+    .iter()
+    .map(|line| line.to_string())
+    .collect();
+    assert_eq!(
+        terminal_composer_blocked(Backend::Claude, &busy),
+        None,
+        "a message to a busy agent queues in its composer, which is fine"
+    );
+}
+
+#[cfg(not(windows))]
+#[test]
+fn a_phone_message_is_refused_with_a_reason_when_the_pane_has_a_menu_open() {
+    let dir = unique_test_repo("steer-menu-open");
+    let mut app = App::new();
+    app.cwd = dir.clone();
+    let panel = claude_config_panel_screen().join("\r\n");
+    let script = dir.join("panel.sh");
+    write_fake_bin(&script, &format!("#!/bin/sh\nprintf '%s' '{}'\nexec cat >/dev/null\n", panel.replace('\'', "")));
+    let command = TerminalCommand::with_args("/bin/sh", [script.to_string_lossy().to_string()]);
+    let pane = TerminalPane::spawn_shell_or_command(
+        Some(command),
+        TerminalPaneOptions {
+            size: TerminalSize { rows: 14, cols: 90 },
+            cwd: Some(dir.clone()),
+            ..Default::default()
+        },
+    )
+    .expect("spawn fake pane");
+    let mut run = test_agent_run_with_terminal(&app, pane);
+    run.id = "isabelle".to_string();
+    app.agents.push(run);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while app.composer_blocked_at(0).is_none() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    let result = app.deliver_steer_request("isabelle", "Hello?");
+
+    match result {
+        SteerDelivery::Failed(reason) => assert!(reason.contains("menu is open"), "{reason}"),
+        SteerDelivery::Delivered => panic!("the message was typed into the menu"),
+    }
+    assert_eq!(app.agents[0].turns.len(), 1, "no phantom turn was recorded");
+    app.agents[0].terminal = None;
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// These tests are about a LAPTOP's dashboard. Run on the home machine (where
+/// Rudder itself is developed), its identity env would make every one of them
+/// correctly answer "already on the home machine".
+fn as_a_laptop() {
+    for key in ["RUDDER_WORKSPACE_ID", "RUDDER_SAIL_ID", "RUDDER_CLOUD_RUNTIME"] {
+        std::env::remove_var(key);
+    }
+}
+
+fn movable_worker(app: &App, id: &str) -> AgentRun {
+    let command = TerminalCommand::with_args("/bin/sh", ["-c", "exec cat >/dev/null"]);
+    let pane = TerminalPane::spawn_shell_or_command(
+        Some(command),
+        TerminalPaneOptions {
+            size: TerminalSize { rows: 5, cols: 40 },
+            cwd: Some(app.cwd.clone()),
+            ..Default::default()
+        },
+    )
+    .expect("spawn fake worker");
+    let mut run = test_agent_run_with_terminal(app, pane);
+    run.id = id.to_string();
+    run.task_summary = format!("task {id}");
+    run.workspace_path = Some(app.cwd.join(".rudder-workspaces").join(id));
+    run.workspace_name = Some(format!("rudder-{id}"));
+    run
+}
+
+#[cfg(not(windows))]
+#[test]
+fn quitting_with_agents_running_offers_the_home_machine_and_h_moves_them() {
+    let _env = env_guard();
+    as_a_laptop();
+    let dir = unique_test_repo("quit-offer-home");
+    // A fake CLI that records its arguments and, like the real `cloud move`,
+    // marks each moved run's record "migrated" once "the home has it".
+    let log = dir.join("cli-args.txt");
+    let cli = dir.join("rudder");
+    write_fake_bin(
+        &cli,
+        &format!(
+            "#!/bin/sh\necho \"$@\" >> '{}'\n[ \"$2\" = move ] || exit 0\nshift 3\nfor id in \"$@\"; do f='{}'/.rudder/runs/$id/run.json; sed -i 's/\"status\": *\"running\"/\"status\":\"migrated\"/' \"$f\"; done\n",
+            log.display(),
+            dir.display()
+        ),
+    );
+    std::env::set_var("RUDDER_CLI", &cli);
+    let mut app = App::new();
+    app.cwd = dir.clone();
+    app.cloud_connected = true;
+    app.home_slug = Some(Some("owner/repo".to_string()));
+    for id in ["w1", "w2"] {
+        let run = movable_worker(&app, id);
+        let _ = save_native_run_record(&dir, &run);
+        app.agents.push(run);
+    }
+
+    assert!(!app.confirm_or_quit(), "the first quit asks");
+    let notice = app.notice.clone().unwrap_or_default();
+    assert!(
+        notice.contains("2 agents are running here. Move them to the home machine?"),
+        "{notice}"
+    );
+    assert!(notice.contains("H moves them"), "{notice}");
+
+    let quit = app.handle_key(KeyEvent::new(KeyCode::Char('H'), KeyModifiers::SHIFT));
+    assert!(!quit, "H moves the agents, it does not quit");
+    assert!(app.agents[..2].iter().all(|run| run.terminal.is_none()), "local processes stopped");
+    let pane = app.agents.last().expect("the move pane");
+    assert!(pane.task.starts_with(HOME_MOVE_LABEL_PREFIX));
+    assert_eq!(pane.review_source_ids, vec!["w1".to_string(), "w2".to_string()]);
+
+    // The CLI exits once the home machine has them; the rows follow the records.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while app.agents[..2].iter().any(|run| run.status != AgentStatus::Migrated)
+        && Instant::now() < deadline
+    {
+        app.poll_agents();
+        app.reconcile_cloud_moves();
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(app.agents[..2].iter().all(|run| run.status == AgentStatus::Migrated));
+    assert!(
+        fs::read_to_string(&log)
+            .unwrap()
+            .lines()
+            .any(|line| line == "cloud move --yes w1 w2"),
+        "the move CLI got exactly the running workers"
+    );
+    assert!(app.notice.clone().unwrap_or_default().contains("moved 2 agents to the home machine"));
+    // Nothing left running here, so quitting no longer asks.
+    assert!(app.confirm_or_quit());
+    std::env::remove_var("RUDDER_CLI");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[cfg(not(windows))]
+#[test]
+fn rows_a_failed_move_did_not_take_resume_here() {
+    let _env = env_guard();
+    as_a_laptop();
+    let dir = unique_test_repo("move-failed-resume");
+    let cli = dir.join("rudder");
+    write_fake_bin(&cli, "#!/bin/sh\necho 'the home machine could not take the agents' >&2\nexit 1\n");
+    let claude = dir.join("claude");
+    write_fake_bin(&claude, "#!/bin/sh\nexec cat >/dev/null\n");
+    std::env::set_var("RUDDER_CLI", &cli);
+    std::env::set_var("RUDDER_CLAUDE_BIN", &claude);
+    let mut app = App::new();
+    app.cwd = dir.clone();
+    app.cloud_connected = true;
+    app.home_slug = Some(Some("owner/repo".to_string()));
+    let mut run = movable_worker(&app, "w1");
+    run.session_id = Some("11111111-2222-3333-4444-555555555555".to_string());
+    run.cwd = dir.clone();
+    let _ = save_native_run_record(&dir, &run);
+    app.agents.push(run);
+
+    app.request_move_all_home();
+    assert!(app.agents[0].terminal.is_none());
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while app.agents[0].terminal.is_none() && Instant::now() < deadline {
+        app.poll_agents();
+        app.reconcile_cloud_moves();
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(app.agents[0].terminal.is_some(), "the agent resumed here");
+    assert_eq!(app.agents[0].status, AgentStatus::Running);
+    assert!(app.notice.clone().unwrap_or_default().contains("the move did not finish"));
+    app.agents[0].terminal = None;
+    std::env::remove_var("RUDDER_CLI");
+    std::env::remove_var("RUDDER_CLAUDE_BIN");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn h_explains_why_there_is_nowhere_to_move_to() {
+    let _env = env_guard();
+    as_a_laptop();
+    let mut app = App::new();
+    app.cwd = std::env::temp_dir();
+    app.cloud_connected = false;
+    app.request_move_all_home();
+    assert!(app.notice.clone().unwrap_or_default().contains("/login"));
+    app.cloud_connected = true;
+    app.home_slug = Some(None);
+    app.request_move_all_home();
+    assert!(app.notice.clone().unwrap_or_default().contains("no GitHub origin"));
+    app.home_slug = Some(Some("owner/repo".to_string()));
+    app.request_move_all_home();
+    assert!(app.notice.clone().unwrap_or_default().contains("no running agents"));
+}
+
+#[cfg(not(windows))]
+#[test]
+fn the_home_machine_adopts_a_staged_agent_once_and_resumes_its_conversation() {
+    let _env = env_guard();
+    let dir = unique_test_repo("adopt-moved");
+    let claude_log = dir.join("claude-args.txt");
+    let claude = dir.join("claude");
+    write_fake_bin(
+        &claude,
+        &format!("#!/bin/sh\necho \"$@\" >> '{}'\nexec cat >/dev/null\n", claude_log.display()),
+    );
+    std::env::set_var("RUDDER_CLAUDE_BIN", &claude);
+    let workspace = dir.join(".rudder-workspaces").join("repo-1").join("fix-1");
+    fs::create_dir_all(&workspace).unwrap();
+    let run_dir = dir.join(".rudder").join("runs").join("moved-1");
+    fs::create_dir_all(&run_dir).unwrap();
+    fs::write(
+        run_dir.join("run.json"),
+        serde_json::to_string(&serde_json::json!({
+            "id": "moved-1",
+            "repoRoot": dir,
+            "task": "fix the flaky test",
+            "taskSummary": "fix flaky test",
+            "mode": "execute",
+            "backend": "claude",
+            "model": "opus",
+            "status": "paused",
+            "createdAt": "1",
+            "turns": [],
+            "vcs": "jj",
+            "workspace": { "enabled": true, "path": workspace, "workspaceName": "rudder-fix" },
+            "session": { "nativeSessionId": "11111111-2222-3333-4444-555555555555" },
+            "migration": { "origin": "laptop", "sessionId": "11111111-2222-3333-4444-555555555555", "pendingResume": true },
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let mut app = App::new();
+    app.cwd = dir.clone();
+
+    assert!(matches!(app.deliver_adopt_request("moved-1"), SteerDelivery::Delivered));
+    assert_eq!(app.agents.len(), 1);
+    assert_eq!(app.agents[0].status, AgentStatus::Running);
+    assert!(app.agents[0].terminal.is_some());
+    assert_eq!(app.agents[0].cwd, workspace);
+    // A retried move re-sends adopt: the live row is left alone.
+    assert!(matches!(app.deliver_adopt_request("moved-1"), SteerDelivery::Delivered));
+    assert_eq!(app.agents.len(), 1);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !claude_log.exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let args = fs::read_to_string(&claude_log).unwrap_or_default();
+    assert_eq!(args.lines().count(), 1, "one process: {args}");
+    assert!(args.contains("--resume 11111111-2222-3333-4444-555555555555"), "{args}");
+
+    assert!(matches!(app.deliver_adopt_request("../etc"), SteerDelivery::Failed(_)));
+    assert!(matches!(app.deliver_adopt_request("not-staged"), SteerDelivery::Failed(_)));
+    app.agents[0].terminal = None;
+    std::env::remove_var("RUDDER_CLAUDE_BIN");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_delete_from_the_phone_removes_the_row_and_its_record() {
+    let dir = unique_test_repo("phone-delete");
+    let mut app = App::new();
+    app.cwd = dir.clone();
+    for id in ["keep", "gone"] {
+        let mut run = test_agent_run(id, &format!("task {id}"));
+        run.status = AgentStatus::Done;
+        let _ = save_native_run_record(&dir, &run);
+        app.agents.push(run);
+    }
+    app.selected_agent = 0;
+
+    assert!(matches!(app.deliver_delete_request("gone"), SteerDelivery::Delivered));
+    assert_eq!(app.agents.iter().map(|run| run.id.as_str()).collect::<Vec<_>>(), vec!["keep"]);
+    assert!(!dir.join(".rudder").join("runs").join("gone").exists(), "the phone lists records, so the record goes");
+    assert!(dir.join(".rudder").join("runs").join("keep").exists());
+    assert!(matches!(app.deliver_delete_request("gone"), SteerDelivery::Failed(_)));
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn moved_rows_deleted_on_the_home_machine_are_removed_here() {
+    let _env = env_guard();
+    as_a_laptop();
+    let dir = unique_test_repo("home-deleted");
+    let mut app = App::new();
+    app.cwd = dir.clone();
+    app.cloud_connected = true;
+    for id in ["still-there", "deleted-on-phone"] {
+        let mut run = test_agent_run(id, &format!("task {id}"));
+        run.status = AgentStatus::Migrated;
+        let _ = save_native_run_record(&dir, &run);
+        let path = dir.join(".rudder").join("runs").join(id).join("run.json");
+        let mut record: serde_json::Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        record["movedTo"] = serde_json::json!({ "kind": "home", "repo": "owner/repo" });
+        fs::write(&path, record.to_string()).unwrap();
+        app.agents.push(run);
+    }
+    assert!(run_moved_home(&dir, "still-there"));
+    let (tx, rx) = mpsc::channel();
+    tx.send(Some(vec!["still-there".to_string()])).unwrap();
+    app.home_runs_rx = Some(rx);
+    app.home_runs_queried = vec!["still-there".to_string(), "deleted-on-phone".to_string()];
+    app.last_home_runs_check = Some(Instant::now());
+
+    app.refresh_home_runs();
+
+    assert_eq!(app.agents.iter().map(|run| run.id.as_str()).collect::<Vec<_>>(), vec!["still-there"]);
+    assert!(app.notice.clone().unwrap_or_default().contains("deleted on the home machine"));
+
+    // "Unknown" (the home is asleep) never deletes anything.
+    let (tx, rx) = mpsc::channel();
+    tx.send(None).unwrap();
+    app.home_runs_rx = Some(rx);
+    app.home_runs_queried = vec!["still-there".to_string()];
+    app.refresh_home_runs();
+    assert_eq!(app.agents.len(), 1);
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn home_runs_answers_are_unknown_unless_the_home_said_so() {
+    assert_eq!(
+        parse_home_runs_answer(r#"{"known":true,"existing":["a","b"]}"#),
+        Some(vec!["a".to_string(), "b".to_string()])
+    );
+    assert_eq!(parse_home_runs_answer(r#"{"known":true,"existing":[]}"#), Some(vec![]));
+    assert_eq!(parse_home_runs_answer(r#"{"known":false}"#), None);
+    assert_eq!(parse_home_runs_answer("not json"), None);
+}
+
+#[test]
+fn a_task_waiting_on_its_name_is_listed_for_the_phone_until_it_launches() {
+    let dir = unique_test_repo("pending-tasks");
+    let mut app = App::new();
+    app.cwd = dir.clone();
+    let (tx, rx) = mpsc::channel::<Option<String>>();
+    app.pending_named_runs.push(PendingNamedRun {
+        id: "pending-1".to_string(),
+        input: "add a dark mode".to_string(),
+        rx,
+        started: Instant::now(),
+        queued_at: "1792142435966".to_string(),
+    });
+    app.persist_pending_tasks();
+    let listed: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(dir.join(".rudder").join("pending-tasks.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(listed["tasks"][0]["task"], "add a dark mode");
+    drop(tx);
+    app.pending_named_runs.clear();
+    app.persist_pending_tasks();
+    assert!(!dir.join(".rudder").join("pending-tasks.json").exists());
+    let _ = fs::remove_dir_all(&dir);
 }

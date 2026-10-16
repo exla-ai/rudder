@@ -186,6 +186,11 @@ const server = http.createServer(async (req, res) => {
     if (p === "/api/app/action") {
       const t = transcriptFor(body.workspace, body.run);
       if (!t) return json(res, 404, { error: "Agent not found" });
+      if (body.action === "delete") {
+        const proj = projects.find((x) => x.agents.includes(t.a));
+        if (proj) proj.agents = proj.agents.filter((x) => x !== t.a);
+        return json(res, 200, { ok: true, status: "delivered" });
+      }
       if (body.action === "stop") { t.a.status = "stopped"; t.a.lastMessage = "Stopped by you."; }
       else if (body.action === "merge") {
         if (!["done", "review"].includes(t.a.status)) return json(res, 409, { error: "Only finished agents can be merged." });
@@ -214,6 +219,13 @@ const server = http.createServer(async (req, res) => {
     }
     if (p === "/api/app/keys") {
       return json(res, 200, { ok: true, status: "delivered" });
+    }
+    if (p === "/api/app/models") {
+      return json(res, 200, {
+        current: { backend: "claude", model: "claude-opus-5-5" },
+        claude: [{ label: "Default" }, { label: "Opus 5.5", value: "claude-opus-5-5" }, { label: "Sonnet 5.5", value: "claude-sonnet-5-5" }, { label: "Fable 5.1", value: "claude-fable-5-1" }],
+        codex: [{ label: "Default" }, { label: "GPT-6.1 Sol", value: "gpt-6.1-sol" }, { label: "GPT-5.3 Codex", value: "gpt-5.3-codex" }],
+      });
     }
     if (p === "/api/app/repos") {
       return json(res, 200, {

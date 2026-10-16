@@ -385,8 +385,38 @@ async function handleRpc(method, params) {
   if (method === "repos") {
     return await listGithubRepos();
   }
+  if (method === "models") {
+    return await listModels();
+  }
   if (method === "createRepo") {
     return await createGithubRepo(params);
+  }
+  if (method === "adopt") {
+    // Before the project lookup below: a laptop moving agents may have just
+    // opened this repo, so its project can still be cloning.
+    return await adoptMovedAgents(params);
+  }
+  if (method === "deleteRuns") {
+    // A laptop deleting agents it moved here (or a delete queued while this
+    // machine was asleep): its dashboard deletes them like dd, which also
+    // takes them off the phone. Queued, so a dashboard still starting gets it.
+    const target = await waitForClone(String(params.workspaceId || ""), 8 * 60_000);
+    const runIds = (Array.isArray(params.runIds) ? params.runIds : []).filter((id) => /^[A-Za-z0-9._-]+$/.test(String(id)));
+    for (const runId of runIds) {
+      queueSteer(target, { kind: "delete", taskId: runId, instruction: "delete" });
+    }
+    return { queued: runIds.length };
+  }
+  if (method === "runs") {
+    // Which of these runs exist here: the laptop drops its rows for the rest.
+    // Unknown (not "gone") while the project is not open, or still cloning.
+    const target = projects.get(params.workspaceId);
+    if (!target || target.status === "cloning" || !fs.existsSync(path.join(target.dir, ".git"))) {
+      return { known: false };
+    }
+    const runIds = (Array.isArray(params.runIds) ? params.runIds : []).filter((id) => /^[A-Za-z0-9._-]+$/.test(String(id)));
+    const existing = runIds.filter((id) => fs.existsSync(path.join(target.dir, ".rudder", "runs", id, "run.json")));
+    return { known: true, existing };
   }
   const project = projects.get(params.workspaceId);
   if (!project) {
@@ -408,13 +438,114 @@ async function handleRpc(method, params) {
     return readScreen(project, String(params.runId || ""));
   }
   if (method === "action") {
-    const kind = params.action === "merge" ? "merge" : params.action === "stop" ? "cancel" : null;
+    const kind = params.action === "merge" ? "merge" : params.action === "stop" ? "cancel" : params.action === "delete" ? "delete" : null;
     if (!kind) {
       throw new Error("unknown action");
     }
     return await steer(project, { kind, taskId: String(params.runId || ""), instruction: kind });
   }
   throw new Error(`unknown method ${method}`);
+}
+
+// A laptop moving its agents here (`rudder cloud move`, H in its dashboard).
+// The bundle carries each agent's jj change and conversation; `rudder
+// __adopt-moved` stages them in this repo's clone (src/move-home.ts), and the
+// repo's dashboard resumes each one when its "adopt" request reaches the steer
+// inbox. Requests are queued rather than awaited, so a dashboard that is still
+// starting picks them up on its first poll.
+async function adoptMovedAgents(params) {
+  const project = await waitForClone(String(params.workspaceId || ""), 8 * 60_000);
+  const bundlePath = String(params.bundlePath || "");
+  if (!/^\/api\/rudder\/home\/[^/]+\/moves\/[^/]+\/bundle$/.test(bundlePath)) {
+    throw new Error("bad bundle path");
+  }
+  const response = await fetch(`${cloudUrl}${bundlePath}`, { headers: { authorization: `Bearer ${workerToken}` } });
+  if (!response.ok) {
+    throw new Error(`could not fetch the moved agents (HTTP ${response.status})`);
+  }
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "rudder-move-"));
+  try {
+    const archive = path.join(dir, "move.tgz");
+    fs.writeFileSync(archive, Buffer.from(await response.arrayBuffer()));
+    const result = await captureAll("rudder", ["__adopt-moved", "--repo", project.dir, archive], {
+      env: { ...baseChildEnv },
+      cwd: project.dir,
+      timeoutMs: 5 * 60_000,
+    });
+    const line = result.stdout.trim().split("\n").reverse().find((entry) => entry.trim().startsWith("{"));
+    if (result.code !== 0 || !line) {
+      throw new Error(firstLine(result.stderr || result.stdout) || "rudder __adopt-moved failed");
+    }
+    const adopted = JSON.parse(line);
+    const agents = Array.isArray(adopted.adopted) ? adopted.adopted : [];
+    acceptClaudeDialogs(agents.map((agent) => agent.workspacePath).filter(Boolean));
+    // Every adopted run, retried ones included: the dashboard resumes a run at
+    // most once, and a retry is exactly when the first resume may not have run.
+    for (const agent of agents) {
+      queueSteer(project, { kind: "adopt", taskId: agent.runId, instruction: "adopt" });
+    }
+    lastStateJson = "";
+    log(`${project.name}: adopted ${agents.length} moved agent(s)${adopted.failed?.length ? `, ${adopted.failed.length} failed` : ""}`);
+    return adopted;
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+async function waitForClone(workspaceId, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const project = projects.get(workspaceId);
+    if (project?.status === "failed" && !project.term) {
+      throw new Error(project.error || "the project failed to start on the home machine");
+    }
+    if (project && project.status !== "cloning" && fs.existsSync(path.join(project.dir, ".git"))) {
+      return project;
+    }
+    if (Date.now() > deadline) {
+      throw new Error(project ? `the clone is still ${project.status}` : "that project is not open on the home machine");
+    }
+    await sleep(1000);
+  }
+}
+
+// Like capture, but resolves on "close", after the output streams end: the
+// caller parses stdout, and "exit" can fire before the last chunk arrives.
+function captureAll(command, args, { env, cwd, timeoutMs }) {
+  return new Promise((resolve) => {
+    let stdout = "";
+    let stderr = "";
+    let child;
+    try {
+      child = spawn(command, args, { env, cwd, stdio: ["ignore", "pipe", "pipe"] });
+    } catch (error) {
+      resolve({ code: -1, stdout: "", stderr: error.message });
+      return;
+    }
+    const timer = setTimeout(() => child.kill("SIGKILL"), timeoutMs);
+    child.stdout.on("data", (chunk) => { stdout += chunk; });
+    child.stderr.on("data", (chunk) => { stderr += chunk; });
+    child.on("error", (error) => { clearTimeout(timer); resolve({ code: -1, stdout, stderr: error.message }); });
+    child.on("close", (code) => { clearTimeout(timer); resolve({ code: code ?? -1, stdout, stderr }); });
+  });
+}
+
+// `/model` on the phone: what the dashboard's own picker would offer (the
+// models.dev and Codex caches, read by `rudder __models`), plus the current
+// default. Cached briefly: the lists move on the order of days.
+let modelsCache = null;
+async function listModels() {
+  if (modelsCache && Date.now() - modelsCache.at < 10 * 60_000) {
+    return modelsCache.value;
+  }
+  const result = await captureAll("rudder", ["__models"], { env: { ...baseChildEnv }, cwd: HOME, timeoutMs: 30_000 });
+  const line = result.stdout.trim().split("\n").reverse().find((entry) => entry.trim().startsWith("{"));
+  if (result.code !== 0 || !line) {
+    throw new Error(firstLine(result.stderr || result.stdout) || "could not list models");
+  }
+  const value = JSON.parse(line);
+  modelsCache = { at: Date.now(), value };
+  return value;
 }
 
 // "Add project" on the phone: the repos this GitHub login can open (its own,
@@ -483,6 +614,21 @@ function readScreen(project, runId) {
   }
 }
 
+// Drop one request into the dashboard's steer inbox. The dashboard consumes it
+// on its next poll, so a request queued while it is still starting is not lost.
+function queueSteer(project, { kind, taskId, instruction }) {
+  const requestId = randomUUID();
+  const inbox = path.join(project.dir, ".rudder", "steer");
+  fs.mkdirSync(inbox, { recursive: true });
+  const safeId = (taskId || "conductor").replace(/[^A-Za-z0-9_.-]/g, "-").slice(0, 64) || "conductor";
+  const name = `${String(Date.now()).padStart(13, "0")}-${String(process.hrtime.bigint()).padStart(20, "0")}-${safeId}-${requestId}.json`;
+  const file = path.join(inbox, name);
+  const tmp = `${file}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify({ requestId, kind, taskId, instruction, ts: new Date().toISOString() }));
+  fs.renameSync(tmp, file);
+  return requestId;
+}
+
 // Requests go through the dashboard's own steer inbox (.rudder/steer), the same
 // channel the web board uses: the dashboard is the single writer of its agents,
 // so the phone never touches a PTY or run.json directly. The receipt says
@@ -494,16 +640,8 @@ async function steer(project, { kind, taskId, instruction }) {
   if (!project.term) {
     throw new Error(`the ${project.name} dashboard is ${project.status}${project.error ? `: ${project.error}` : ""}`);
   }
-  const requestId = randomUUID();
-  const inbox = path.join(project.dir, ".rudder", "steer");
+  const requestId = queueSteer(project, { kind, taskId, instruction });
   const receipts = path.join(project.dir, ".rudder", "steer-receipts");
-  fs.mkdirSync(inbox, { recursive: true });
-  const safeId = (taskId || "conductor").replace(/[^A-Za-z0-9_.-]/g, "-").slice(0, 64) || "conductor";
-  const name = `${String(Date.now()).padStart(13, "0")}-${String(process.hrtime.bigint()).padStart(20, "0")}-${safeId}-${requestId}.json`;
-  const file = path.join(inbox, name);
-  const tmp = `${file}.${process.pid}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify({ requestId, kind, taskId, instruction, ts: new Date().toISOString() }));
-  fs.renameSync(tmp, file);
   const receiptPath = path.join(receipts, `${requestId}.json`);
   const deadline = Date.now() + 12_000;
   while (Date.now() < deadline) {
@@ -584,6 +722,29 @@ function readAgents(repoDir) {
       continue;
     }
     agents.push(agentSummary(record));
+  }
+  // A task typed a moment ago has no run record until its workspace is named;
+  // the dashboard lists those here so the phone shows them at once.
+  try {
+    const pending = JSON.parse(fs.readFileSync(path.join(repoDir, ".rudder", "pending-tasks.json"), "utf8"));
+    for (const task of Array.isArray(pending?.tasks) ? pending.tasks : []) {
+      if (!task || typeof task.id !== "string" || typeof task.task !== "string") {
+        continue;
+      }
+      const at = toMillis(task.queuedAt) ?? Date.now();
+      agents.push({
+        id: task.id,
+        title: userTask(task.task).slice(0, 200),
+        task: userTask(task.task).slice(0, 2000),
+        status: "starting",
+        pending: true,
+        createdAt: at,
+        updatedAt: at,
+        lastMessage: null,
+      });
+    }
+  } catch {
+    // no tasks waiting
   }
   agents.sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0));
   return agents.slice(0, 60);

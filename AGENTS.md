@@ -780,6 +780,43 @@ brain lives in the cloud, and the phone is a first-class client.
   for the iOS shell (Google refuses OAuth inside an embedded web view).
 - `rudder cloud --snapshot` and repos without a GitHub origin keep the old
   per-repo snapshot workspace.
+- **Moving a laptop's agents onto the home machine** (`src/move-home.ts`). `H` in the
+  dashboard (also `^W H`, the quit gate's "N agents are running here. Move them to
+  the home machine?", `/handoff` on one row, and `RUDDER_CLOUD_MIGRATE`) pauses the
+  running isolated workers and runs `rudder cloud move --yes <ids>`. Nothing is
+  pushed to GitHub: ONE git bundle carries every agent's jj `@` commit (minus what
+  `origin`'s default branch has, so unpushed local integration changes come along),
+  plus each run.json and its Claude transcript / Codex rollout. The control plane
+  holds it in a job (`POST /api/rudder/home/move`, polled by id) and asks the
+  supervisor to `adopt`; the supervisor pulls the bytes with its worker token
+  (`GET /api/rudder/home/<id>/moves/<move>/bundle`, never over the control socket),
+  runs `rudder __adopt-moved` (fetch into the clone, `jj workspace add` + `jj edit`
+  so the workspace's `@` IS the moved commit, transcript placed for `--resume` at the
+  new cwd, a `paused` run.json with a `migration` block), and queues a steer `adopt`
+  per run; the repo's dashboard loads the row and resumes it at most once. A row has
+  moved only when the CLI has written `migrated` (+ `movedTo: {kind: "home"}`) into
+  the LAPTOP's run.json, which it does after the home reported it staged;
+  `reconcile_cloud_moves` follows the records and resumes locally whatever a move
+  pane did not hand over. (The old paths flipped rows to Migrated at spawn time,
+  which raced the CLI into finding nothing to move; they follow the records too now.)
+- **Deletes are one fact everywhere.** The phone lists run records, so `dd` on the
+  home dashboard removes it from the phone. The phone's swipe/menu Delete is a steer
+  `delete` (`deliver_delete_request`, the same core as `dd`). For moved agents the
+  laptop asks `rudder cloud home runs <ids>` (backed off, 20s to 300s) and drops rows
+  the home no longer has; `known: false` (asleep, cloning) is never read as deleted.
+  `dd` on a moved row runs `rudder cloud home delete`, which the control plane queues
+  until a sleeping home reconnects.
+- **A remote message is never typed into a menu.** The phone once "delivered" two
+  messages into Claude's `/config` search box. `terminal_composer_blocked` (detect.rs)
+  reads a menu's or permission prompt's key hints off the bottom rows, and the steer
+  path refuses with the reason instead; the phone shows it on the failed bubble.
+- A task typed on the phone used to show nothing for the seconds the workspace namer
+  takes; `.rudder/pending-tasks.json` lists it and the supervisor shows it as
+  "starting". The namer runs `claude -p` without the user's settings, hooks, plugins,
+  MCP or tools (~2s faster), falling back to the plain call on an older CLI.
+- `/model` in the phone's task box opens a picker fed by `rudder __models` (the same
+  lists as the dashboard's) and sends `/model <agent> <model>`.
+
 - **Developing Rudder on the home machine.** Rust is not in the worker image; the
   supervisor installs it once onto the volume (`~/.cargo`, `~/.rustup`, persisted
   like `~/.claude`) in the background on first boot, and agents get

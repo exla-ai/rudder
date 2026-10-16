@@ -1579,6 +1579,31 @@ pub(crate) fn run_rudder_jj_command(
     }
 }
 
+/// The `status` a run's record has on disk right now. The move CLIs write
+/// "migrated" there once the other machine has the agent; the dashboard reads
+/// that rather than deciding success itself.
+pub(crate) fn read_run_record_status(repo_root: &Path, run_id: &str) -> Option<String> {
+    let raw = fs::read_to_string(native_run_dir(repo_root, run_id).join("run.json")).ok()?;
+    let value = serde_json::from_str::<serde_json::Value>(&raw).ok()?;
+    value.get("status")?.as_str().map(ToOwned::to_owned)
+}
+
+/// Did `rudder cloud move` hand this run to the home machine? (It records
+/// `movedTo: {kind: "home"}` in the laptop's copy of the record.)
+pub(crate) fn run_moved_home(repo_root: &Path, run_id: &str) -> bool {
+    fs::read_to_string(native_run_dir(repo_root, run_id).join("run.json"))
+        .ok()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+        .and_then(|value| {
+            value
+                .get("movedTo")
+                .and_then(|moved| moved.get("kind"))
+                .and_then(serde_json::Value::as_str)
+                .map(|kind| kind == "home")
+        })
+        .unwrap_or(false)
+}
+
 pub(crate) fn remove_native_run_record(repo_root: &Path, run_id: &str) -> Result<()> {
     let dir = native_run_dir(repo_root, run_id);
     if dir.exists() {

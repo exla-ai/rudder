@@ -1611,16 +1611,30 @@ Return exactly one JSON object and no markdown: {{\"title\":\"5-8 word imperativ
 Rules: no quotes inside the title, no trailing punctuation, do not mention Rudder unless it is the product being changed.\n\n\
 Task:\n{task}"
     );
-    let output = Command::new("claude")
-        .args(["-p", &prompt, "--model", TASK_SUMMARY_MODEL])
-        .env("CLAUDE_CODE_NO_FLICKER", "0")
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
+    // A title needs no settings, hooks, plugins, MCP servers or tools, and
+    // loading the user's (LSP plugins, hooks) cost ~2s of a ~5s call that a new
+    // task waits on before it exists. A Claude Code too old for these flags
+    // fails at once, and the plain call below still names the workspace.
+    let run = |extra: &[&str]| {
+        Command::new("claude")
+            .args(["-p", &prompt, "--model", TASK_SUMMARY_MODEL])
+            .args(extra)
+            .env("CLAUDE_CODE_NO_FLICKER", "0")
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .output()
+            .ok()
+            .filter(|output| output.status.success())
+    };
+    let output = run(&[
+        "--setting-sources",
+        "",
+        "--strict-mcp-config",
+        "--tools",
+        "",
+        "--disable-slash-commands",
+    ])
+    .or_else(|| run(&[]))?;
     let stdout = String::from_utf8_lossy(&output.stdout);
     task_title_from_summary_output(&stdout)
 }

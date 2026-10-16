@@ -679,4 +679,7 @@ implementation details, see [`AGENTS.md`](./AGENTS.md).
 
 ## License
 
-MIT
+[Elastic License 2.0](LICENSE) (ELv2). Source-available: you can use, modify and
+redistribute Rudder, but you may not offer it to others as a hosted or managed
+service. Versions published before 2.16.6 were released under MIT and remain
+available under those terms.

@@ -4835,6 +4835,7 @@ type HomeProject = {
 type HomeState = {
   projects: HomeProject[];
   tailnet?: JsonRecord;
+  credentials?: JsonRecord;
   updatedAt: string;
 };
 type PendingRpc = {
@@ -5138,6 +5139,7 @@ function attachHomeControl(homeId: string, ws: WebSocket): void {
       homeStates.set(homeId, {
         projects: Array.isArray(projects) ? (projects as unknown as HomeProject[]) : [],
         tailnet: objectField(message, "tailnet"),
+        credentials: objectField(message, "credentials"),
         updatedAt: new Date().toISOString(),
       });
       for (const project of homeStates.get(homeId)!.projects) {
@@ -5205,6 +5207,7 @@ function homeSummary(home: Workspace | null): JsonRecord | null {
     activeAgents: home.activeAgents ?? 0,
     lastActivityAt: home.lastActivityAt ?? null,
     tailnet: state?.tailnet ?? null,
+    credentials: state?.credentials ?? null,
     stateUpdatedAt: state?.updatedAt ?? null,
   };
 }

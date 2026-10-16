@@ -175,6 +175,7 @@ serverTest("a home machine's repos, state and phone requests flow over its contr
   control.send(JSON.stringify({
     type: "state",
     tailnet: { hostname: "rudder-home", dnsName: "rudder-home.tail1.ts.net", online: true, https: true },
+    credentials: { github: { ok: true, account: "me" }, claude: { ok: false, account: "me@example.com", detail: "login expired" }, checkedAt: "2026-10-16T00:00:00.000Z" },
     projects: [{
       workspaceId: "libra-test",
       name: "libra",
@@ -191,6 +192,7 @@ serverTest("a home machine's repos, state and phone requests flow over its contr
   assert.equal(state.email, "me@example.com");
   assert.equal(state.home.connected, true);
   assert.equal(state.home.tailnet.dnsName, "rudder-home.tail1.ts.net");
+  assert.deepEqual(state.home.credentials.claude, { ok: false, account: "me@example.com", detail: "login expired" }, "the phone sees which login is broken");
   assert.equal(state.projects[0].dashboard, "running");
   assert.equal(state.projects[0].agents[0].attention, "permission");
   assert.equal(state.projects[0].ports[0].url, "https://rudder-home.tail1.ts.net:3000");

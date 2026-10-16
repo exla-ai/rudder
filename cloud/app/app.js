@@ -634,8 +634,18 @@ function HomeScreen() {
         bits.push(`${home.activeAgents || 0} active ${home.activeAgents === 1 ? "agent" : "agents"}`);
         subText = bits.join(" · ");
       }
+      // A login the cloud machine can't use stops agents cold ("Login expired"):
+      // say which, and the fix, before anyone starts a task.
+      const creds = home.credentials || {};
+      const broken = home.status === "running"
+        ? ["claude", "codex", "github"].filter((tool) => creds[tool] && creds[tool].ok === false)
+        : [];
+      const credNames = { claude: "Claude", codex: "Codex", github: "GitHub" };
+      if (broken.length) {
+        subText = `${broken.map((tool) => credNames[tool]).join(", ")} can't sign in on this machine (${creds[broken[0]].detail || "not logged in"}). Run \`rudder cloud doctor\` on your laptop for the fix.`;
+      }
       setText(sub, subText);
-      sub.classList.toggle("err", home.status === "failed");
+      sub.classList.toggle("err", home.status === "failed" || broken.length > 0);
       wakeBtn.hidden = !(home.status === "stopped" || home.status === "failed");
       setText(wakeBtn.querySelector("span"), home.status === "failed" ? "Retry" : "Wake");
     } else {

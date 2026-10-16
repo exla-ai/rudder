@@ -69,6 +69,8 @@ let lastStateJson = "";
 let ports = []; // [{ port, pid, label, workspaceId|null }]
 
 connectControl();
+void checkCredentials();
+setInterval(() => void checkCredentials(), 30 * 60 * 1000);
 setInterval(() => void publishState().catch((error) => log(`state: ${error.message}`)), STATE_INTERVAL_MS);
 setInterval(() => void scanPorts().catch((error) => log(`ports: ${error.message}`)), PORT_SCAN_INTERVAL_MS);
 setInterval(reportHeartbeat, 30_000);
@@ -458,7 +460,7 @@ async function publishState() {
     // the first project rather than nowhere.
     list[0].ports.push(...unassigned.map((entry) => ({ port: entry.port, label: entry.label, url: servedPorts.get(entry.port)?.url ?? null })));
   }
-  const state = { type: "state", projects: list, tailnet: { ...tailnet } };
+  const state = { type: "state", projects: list, tailnet: { ...tailnet }, credentials };
   const json = JSON.stringify(state);
   if (json === lastStateJson) {
     return;
@@ -762,6 +764,113 @@ function unservePort(port) {
 }
 
 // ---------------------------------------------------------------------------
+// Credentials: can this machine act as the user, as the same accounts? A login
+// file existing proves nothing (an expired Claude login still has one), so each
+// tool makes one tiny real request, and reports which account it is.
+// ---------------------------------------------------------------------------
+
+let credentials = null;
+let credentialsRunning = false;
+
+async function checkCredentials() {
+  if (credentialsRunning) {
+    return;
+  }
+  credentialsRunning = true;
+  try {
+    const env = { ...baseChildEnv };
+    const [github, claude, codex] = await Promise.all([checkGithub(env), checkClaude(env), checkCodex(env)]);
+    credentials = { github, claude, codex, checkedAt: new Date().toISOString() };
+    lastStateJson = "";
+    log(`credentials: github=${github.ok ? github.account : "no"} claude=${claude.ok ? claude.account : "no"} codex=${codex.ok ? codex.account : "no"}`);
+  } catch (error) {
+    log(`credential check: ${error.message}`);
+  } finally {
+    credentialsRunning = false;
+  }
+}
+
+async function checkGithub(env) {
+  if (!env.GH_TOKEN && !env.GITHUB_TOKEN) {
+    return { ok: false, account: null, detail: "no GitHub token in the vault" };
+  }
+  const result = await capture("gh", ["api", "user", "--jq", ".login"], { env, timeoutMs: 20_000 });
+  return result.code === 0 && result.stdout.trim()
+    ? { ok: true, account: result.stdout.trim(), detail: null }
+    : { ok: false, account: null, detail: firstLine(result.stderr || result.stdout) || "GitHub rejected the token" };
+}
+
+async function checkClaude(env) {
+  const status = await capture("claude", ["auth", "status", "--json"], { env, timeoutMs: 20_000 });
+  let account = null;
+  try {
+    const parsed = JSON.parse(status.stdout);
+    account = parsed.email || null;
+    if (!parsed.loggedIn) {
+      return { ok: false, account, detail: "not logged in" };
+    }
+  } catch {
+    // fall through to the real request
+  }
+  const probe = await capture("claude", ["-p", "Reply with exactly: OK", "--model", "haiku"], { env, cwd: os.tmpdir(), timeoutMs: 90_000 });
+  const text = `${probe.stdout}\n${probe.stderr}`;
+  if (probe.code === 0 && /\bOK\b/.test(probe.stdout)) {
+    return { ok: true, account, detail: null };
+  }
+  const detail = /login expired|please run \/login|invalid.*(token|api key)|not logged in|authentication/i.test(text)
+    ? "login expired"
+    : firstLine(text) || `exit ${probe.code}`;
+  return { ok: false, account, detail };
+}
+
+async function checkCodex(env) {
+  const account = codexAccount();
+  const status = await capture("codex", ["login", "status"], { env, timeoutMs: 20_000 });
+  if (status.code !== 0) {
+    return { ok: false, account, detail: firstLine(status.stderr || status.stdout) || "not logged in" };
+  }
+  const probe = await capture("codex", ["exec", "--skip-git-repo-check", "Reply with exactly: OK"], { env, cwd: os.tmpdir(), timeoutMs: 120_000 });
+  if (probe.code === 0 && /\bOK\b/.test(probe.stdout)) {
+    return { ok: true, account, detail: null };
+  }
+  const text = `${probe.stdout}\n${probe.stderr}`;
+  const detail = /refresh token|401|unauthorized|log ?in again|expired/i.test(text) ? "login expired" : firstLine(text) || `exit ${probe.code}`;
+  return { ok: false, account, detail };
+}
+
+function codexAccount() {
+  try {
+    const auth = JSON.parse(fs.readFileSync(path.join(HOME, ".codex", "auth.json"), "utf8"));
+    const payload = String(auth?.tokens?.id_token || "").split(".")[1];
+    if (!payload) {
+      return null;
+    }
+    return JSON.parse(Buffer.from(payload, "base64url").toString("utf8")).email || null;
+  } catch {
+    return null;
+  }
+}
+
+function capture(command, args, { env, cwd, timeoutMs }) {
+  return new Promise((resolve) => {
+    let stdout = "";
+    let stderr = "";
+    let child;
+    try {
+      child = spawn(command, args, { env, cwd, stdio: ["ignore", "pipe", "pipe"] });
+    } catch (error) {
+      resolve({ code: -1, stdout: "", stderr: error.message });
+      return;
+    }
+    const timer = setTimeout(() => child.kill("SIGKILL"), timeoutMs);
+    child.stdout.on("data", (chunk) => { stdout += chunk; });
+    child.stderr.on("data", (chunk) => { stderr += chunk; });
+    child.on("error", (error) => { clearTimeout(timer); resolve({ code: -1, stdout, stderr: error.message }); });
+    child.on("exit", (code) => { clearTimeout(timer); resolve({ code: code ?? -1, stdout, stderr }); });
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Tailscale.
 // ---------------------------------------------------------------------------
 
@@ -960,6 +1069,9 @@ async function refreshVaultRepoFiles() {
   // A GitHub token added since boot takes effect now; failed clones retry when
   // the repo list is reconciled right after this.
   configureGitCredentials(fresh);
+  // Same filtering as at boot (no machine credentials reach agents).
+  Object.assign(baseChildEnv, buildChildEnv(fresh.env ?? {}));
+  void checkCredentials();
   for (const project of projects.values()) {
     if (fs.existsSync(path.join(project.dir, ".git"))) {
       writeDeferredRepoFiles(project.name, project.dir);

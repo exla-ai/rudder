@@ -231,6 +231,9 @@ export async function runCloudCommand(command: string, args: string[], options: 
     case "home":
       await homeCommand(rest, options);
       return;
+    case "doctor":
+      await cloudDoctor(options);
+      return;
     case "app":
     case "pair":
       await printAppLink(options);
@@ -3678,6 +3681,9 @@ Usage:
   rudder cloud home [status|start|stop|open <owner/repo>]
   rudder cloud app
       a one-time code that signs the phone app in to this account
+  rudder cloud doctor
+      do the cloud machine's GitHub, Claude and Codex logins work, as the same
+      accounts as this laptop? names the fix for anything that differs
   rudder cloud login [--github]
       signs in with Google (or GitHub)
   rudder cloud help
@@ -3835,6 +3841,7 @@ async function openOnHome(forceSnapshot: boolean, options: CloudCommandOptions):
     return;
   }
   process.stderr.write(`Phone: ${appUrl(client.baseUrl)}\n`);
+  await reportCredentialParity(client, { problemsOnly: true }).catch(() => undefined);
   await runAttach({ kind: "workspace", id: workspaceId, label: `${name} on home` }, { ...options, quietBanner: false });
 }
 
@@ -3905,6 +3912,106 @@ async function ensureVaultGithubToken(client: CloudClient, slug: string): Promis
     body: { name: "GH_TOKEN", kind: "env", valueBase64: Buffer.from(token, "utf8").toString("base64"), source: "rudder cloud" },
   });
   process.stderr.write("Stored GH_TOKEN in the cloud vault.\n");
+}
+
+// ---------------------------------------------------------------------------
+// Credential parity: the cloud machine should be able to act as you, as the
+// same accounts you use here. The home supervisor checks itself (one real
+// request per tool, not just "a login file exists"); this compares that with
+// this laptop and names the fix for anything that differs.
+// ---------------------------------------------------------------------------
+
+type CredentialCheck = { ok?: boolean; account?: string | null; detail?: string | null };
+type ParityRow = { tool: string; local: string | null; cloud: CredentialCheck | null; status: "match" | "missing" | "different" | "unknown"; fix?: string };
+
+async function localIdentities(): Promise<Record<string, string | null>> {
+  const [github, claude] = await Promise.all([
+    commandExists("gh")
+      ? runCommand("gh", ["api", "user", "--jq", ".login"], { allowFailure: true }).then((r) => (r.code === 0 ? r.stdout.trim() || null : null))
+      : Promise.resolve(null),
+    commandExists("claude")
+      ? runCommand("claude", ["auth", "status", "--json"], { allowFailure: true }).then((r) => {
+          try {
+            const parsed = JSON.parse(r.stdout) as { loggedIn?: boolean; email?: string };
+            return parsed.loggedIn ? parsed.email ?? "logged in" : null;
+          } catch {
+            return null;
+          }
+        })
+      : Promise.resolve(null),
+  ]);
+  let codex: string | null = null;
+  try {
+    const auth = JSON.parse(await fsp.readFile(path.join(os.homedir(), ".codex", "auth.json"), "utf8")) as { tokens?: { id_token?: string } };
+    const payload = (auth.tokens?.id_token ?? "").split(".")[1];
+    codex = payload ? (JSON.parse(Buffer.from(payload, "base64url").toString("utf8")) as { email?: string }).email ?? null : null;
+  } catch {
+    codex = null;
+  }
+  return { github, claude, codex };
+}
+
+const CREDENTIAL_FIXES: Record<string, string> = {
+  github: "run `rudder cloud` in a repo here (it offers to copy `gh auth token` into the vault)",
+  claude: "run `rudder cloud`, then `/login` in a Claude pane there (the cloud keeps its own login)",
+  codex: "run `rudder cloud`, then `$ codex login --device-auth` in the task pane there",
+};
+
+async function credentialParity(client: CloudClient): Promise<{ rows: ParityRow[]; checkedAt: string | null }> {
+  const [local, home] = await Promise.all([
+    localIdentities(),
+    client.request<{ home: { credentials?: Record<string, CredentialCheck> & { checkedAt?: string } } | null }>("/api/rudder/home", { method: "GET" }),
+  ]);
+  const cloud = home.home?.credentials ?? null;
+  const rows: ParityRow[] = (["github", "claude", "codex"] as const).map((tool) => {
+    const remote = (cloud?.[tool] as CredentialCheck | undefined) ?? null;
+    const mine = local[tool];
+    if (!remote) {
+      return { tool, local: mine, cloud: null, status: "unknown" };
+    }
+    if (!remote.ok) {
+      return { tool, local: mine, cloud: remote, status: mine ? "missing" : "unknown", fix: CREDENTIAL_FIXES[tool] };
+    }
+    if (mine && remote.account && remote.account.toLowerCase() !== mine.toLowerCase()) {
+      return { tool, local: mine, cloud: remote, status: "different", fix: CREDENTIAL_FIXES[tool] };
+    }
+    return { tool, local: mine, cloud: remote, status: "match" };
+  });
+  return { rows, checkedAt: typeof cloud?.checkedAt === "string" ? cloud.checkedAt : null };
+}
+
+async function reportCredentialParity(client: CloudClient, { problemsOnly }: { problemsOnly: boolean }): Promise<number> {
+  const { rows, checkedAt } = await credentialParity(client);
+  const problems = rows.filter((row) => row.status === "missing" || row.status === "different");
+  if (problemsOnly && problems.length === 0) {
+    return 0;
+  }
+  const label = (tool: string) => ({ github: "GitHub", claude: "Claude", codex: "Codex" })[tool] ?? tool;
+  for (const row of problemsOnly ? problems : rows) {
+    const here = row.local ?? "not logged in";
+    const there = row.cloud ? (row.cloud.ok ? row.cloud.account ?? "logged in" : `not working (${row.cloud.detail ?? "unknown"})`) : "not checked yet";
+    const mark = row.status === "match" ? "✓" : row.status === "unknown" ? "·" : row.status === "different" ? "⚠" : "✗";
+    process.stderr.write(`${mark} ${label(row.tool).padEnd(7)} here: ${here}   cloud: ${there}\n`);
+    if (row.fix) {
+      process.stderr.write(`    fix: ${row.fix}\n`);
+    }
+  }
+  if (!problemsOnly && !checkedAt) {
+    process.stderr.write("The home machine has not finished checking its logins yet; try again in a minute.\n");
+  }
+  return problems.length;
+}
+
+async function cloudDoctor(options: CloudCommandOptions): Promise<void> {
+  const client = await cloudClient({ requireToken: true });
+  if (options.json) {
+    printJson((await credentialParity(client)) as unknown as JsonValue);
+    return;
+  }
+  const problems = await reportCredentialParity(client, { problemsOnly: false });
+  if (problems > 0) {
+    process.exitCode = 1;
+  }
 }
 
 // The current branch, if GitHub has it; otherwise the default branch is used.

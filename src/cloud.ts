@@ -3970,7 +3970,11 @@ async function credentialParity(client: CloudClient): Promise<{ rows: ParityRow[
       return { tool, local: mine, cloud: null, status: "unknown" };
     }
     if (!remote.ok) {
-      return { tool, local: mine, cloud: remote, status: mine ? "missing" : "unknown", fix: CREDENTIAL_FIXES[tool] };
+      // ENOENT: the CLI was being updated when the machine checked; it rechecks.
+      const fix = /ENOENT/.test(remote.detail ?? "")
+        ? `${tool} was updating when the cloud checked; run \`rudder cloud doctor\` again in a minute`
+        : CREDENTIAL_FIXES[tool];
+      return { tool, local: mine, cloud: remote, status: mine ? "missing" : "unknown", fix };
     }
     if (mine && remote.account && remote.account.toLowerCase() !== mine.toLowerCase()) {
       return { tool, local: mine, cloud: remote, status: "different", fix: CREDENTIAL_FIXES[tool] };

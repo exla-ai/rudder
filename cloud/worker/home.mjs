@@ -790,6 +790,11 @@ async function checkCredentials() {
     const env = { ...baseChildEnv };
     const [github, claude, codex] = await Promise.all([checkGithub(env), checkClaude(env), checkCodex(env)]);
     credentials = { github, claude, codex, checkedAt: new Date().toISOString() };
+    // A CLI missing at boot is usually mid-update (entrypoint.sh), not absent:
+    // look again shortly instead of reporting a broken login for 30 minutes.
+    if ([github, claude, codex].some((check) => /ENOENT/.test(check.detail || ""))) {
+      setTimeout(() => void checkCredentials(), 60_000).unref();
+    }
     lastStateJson = "";
     log(`credentials: github=${github.ok ? github.account : "no"} claude=${claude.ok ? claude.account : "no"} codex=${codex.ok ? codex.account : "no"}`);
   } catch (error) {

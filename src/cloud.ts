@@ -3852,6 +3852,7 @@ async function openOnHome(forceSnapshot: boolean, options: CloudCommandOptions):
   if (!options.json) {
     await warnLocalOnlyWork(repoRoot);
     await ensureVaultGithubToken(client, slug);
+    await ensureVaultAws(client);
     await offerEnvFilesToVault(client, repoRoot, name);
     process.stderr.write(`Opening ${slug} on your home machine...\n`);
   }
@@ -3913,6 +3914,43 @@ async function warnLocalOnlyWork(repoRoot: string): Promise<void> {
   if (parts.length > 0) {
     process.stderr.write(`Heads up: ${parts.join(", ")}. The cloud clones from GitHub, so it won't see that. Push first, or use \`rudder cloud --snapshot\` to upload this folder instead.\n`);
   }
+}
+
+// The cloud's AWS is whatever ~/.aws the vault holds. When this laptop's copy
+// has changed since (new keys, a new profile), offer to bring the vault level.
+async function ensureVaultAws(client: CloudClient): Promise<void> {
+  const files = ["config", "credentials"]
+    .map((name) => ({ name: `~/.aws/${name}`, absolute: path.join(os.homedir(), ".aws", name) }));
+  const present: { name: string; content: Buffer }[] = [];
+  for (const file of files) {
+    const content = await fsp.readFile(file.absolute).catch(() => null);
+    if (content && content.length > 0 && content.length <= MAX_SECRET_VALUE_BYTES) {
+      present.push({ name: file.name, content });
+    }
+  }
+  if (present.length === 0 || !isTty()) {
+    return;
+  }
+  const vault = await client.request<{ secrets?: { name: string; size?: number }[] }>("/api/rudder/secrets", { method: "GET" }).catch(() => null);
+  if (!vault) {
+    return;
+  }
+  const stored = new Map((vault.secrets ?? []).map((secret) => [secret.name, secret.size ?? -1]));
+  const changed = present.filter((file) => stored.get(file.name) !== file.content.length);
+  if (changed.length === 0) {
+    return;
+  }
+  const yes = await promptConfirm(`Your AWS setup (${changed.map((file) => file.name).join(", ")}) differs from the cloud vault's copy. Copy it so cloud agents use the same AWS?`, true);
+  if (!yes) {
+    return;
+  }
+  for (const file of changed) {
+    await client.request<JsonValue>("/api/rudder/secrets/item", {
+      method: "PUT",
+      body: { name: file.name, kind: "file", filePath: file.name, valueBase64: file.content.toString("base64"), source: "rudder cloud" },
+    });
+  }
+  process.stderr.write("Updated ~/.aws in the cloud vault.\n");
 }
 
 async function localGithubToken(): Promise<string | null> {
@@ -3978,6 +4016,10 @@ async function localIdentities(): Promise<Record<string, string | null>> {
         })
       : Promise.resolve(null),
   ]);
+  const aws = commandExists("aws")
+    ? await runCommand("aws", ["sts", "get-caller-identity", "--query", "Arn", "--output", "text"], { allowFailure: true })
+        .then((r) => (r.code === 0 && r.stdout.trim().startsWith("arn:") ? r.stdout.trim() : null))
+    : null;
   let codex: string | null = null;
   try {
     const auth = JSON.parse(await fsp.readFile(path.join(os.homedir(), ".codex", "auth.json"), "utf8")) as { tokens?: { id_token?: string } };
@@ -3986,13 +4028,14 @@ async function localIdentities(): Promise<Record<string, string | null>> {
   } catch {
     codex = null;
   }
-  return { github, claude, codex };
+  return { github, claude, codex, aws };
 }
 
 const CREDENTIAL_FIXES: Record<string, string> = {
   github: "run `rudder cloud` in a repo here (it offers to copy `gh auth token` into the vault)",
   claude: "run `rudder cloud`, then `/login` in a Claude pane there (the cloud keeps its own login)",
   codex: "run `rudder cloud`, then `$ codex login --device-auth` in the task pane there",
+  aws: "run `rudder cloud` in a repo here: it offers to copy your current ~/.aws into the vault",
 };
 
 async function credentialParity(client: CloudClient): Promise<{ rows: ParityRow[]; checkedAt: string | null }> {
@@ -4001,7 +4044,7 @@ async function credentialParity(client: CloudClient): Promise<{ rows: ParityRow[
     client.request<{ home: { credentials?: Record<string, CredentialCheck> & { checkedAt?: string } } | null }>("/api/rudder/home", { method: "GET" }),
   ]);
   const cloud = home.home?.credentials ?? null;
-  const rows: ParityRow[] = (["github", "claude", "codex"] as const).map((tool) => {
+  const rows: ParityRow[] = (["github", "claude", "codex", "aws"] as const).map((tool) => {
     const remote = (cloud?.[tool] as CredentialCheck | undefined) ?? null;
     const mine = local[tool];
     if (!remote) {
@@ -4028,7 +4071,7 @@ async function reportCredentialParity(client: CloudClient, { problemsOnly }: { p
   if (problemsOnly && problems.length === 0) {
     return 0;
   }
-  const label = (tool: string) => ({ github: "GitHub", claude: "Claude", codex: "Codex" })[tool] ?? tool;
+  const label = (tool: string) => ({ github: "GitHub", claude: "Claude", codex: "Codex", aws: "AWS" })[tool] ?? tool;
   for (const row of problemsOnly ? problems : rows) {
     const here = row.local ?? "not logged in";
     const there = row.cloud ? (row.cloud.ok ? row.cloud.account ?? "logged in" : `not working (${row.cloud.detail ?? "unknown"})`) : "not checked yet";

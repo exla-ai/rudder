@@ -32,6 +32,9 @@ const flyMachineId = (process.env.FLY_MACHINE_ID || "").trim();
 // Overridable so the boot can be tested off a real machine.
 const VOLUME = process.env.RUDDER_HOME_VOLUME || "/workspace";
 const CODE_DIR = path.join(VOLUME, "code");
+// CLIs the image does not carry (AWS, SSM plugin) install here, on the volume.
+const TOOLS_DIR = path.join(VOLUME, "tools");
+const TOOLS_BIN = path.join(TOOLS_DIR, "bin");
 const PERSIST_HOME = path.join(VOLUME, "home");
 const HOME = os.homedir() || process.env.HOME || "/home/rudder";
 const TS_SOCKET = "/tmp/tailscaled.sock";
@@ -83,6 +86,7 @@ let ports = []; // [{ port, pid, label, workspaceId|null }]
 connectControl();
 void checkCredentials();
 void ensureRustToolchain();
+void ensureAwsTooling().then(() => checkCredentials());
 setInterval(() => void checkCredentials(), 30 * 60 * 1000);
 setInterval(() => void publishState().catch((error) => log(`state: ${error.message}`)), STATE_INTERVAL_MS);
 setInterval(() => void scanPorts().catch((error) => log(`ports: ${error.message}`)), PORT_SCAN_INTERVAL_MS);
@@ -789,11 +793,11 @@ async function checkCredentials() {
   credentialsRunning = true;
   try {
     const env = { ...baseChildEnv };
-    const [github, claude, codex] = await Promise.all([checkGithub(env), checkClaude(env), checkCodex(env)]);
-    credentials = { github, claude, codex, checkedAt: new Date().toISOString() };
+    const [github, claude, codex, aws] = await Promise.all([checkGithub(env), checkClaude(env), checkCodex(env), checkAws(env)]);
+    credentials = { github, claude, codex, aws, checkedAt: new Date().toISOString() };
     // A CLI missing at boot is usually mid-update (entrypoint.sh), not absent:
     // look again shortly instead of reporting a broken login for 30 minutes.
-    if ([github, claude, codex].some((check) => /ENOENT/.test(check.detail || ""))) {
+    if ([github, claude, codex, aws].some((check) => /ENOENT/.test(check.detail || ""))) {
       setTimeout(() => void checkCredentials(), 60_000).unref();
     }
     lastStateJson = "";
@@ -803,6 +807,17 @@ async function checkCredentials() {
   } finally {
     credentialsRunning = false;
   }
+}
+
+// Which AWS principal the vault's ~/.aws resolves to (default profile).
+async function checkAws(env) {
+  if (!fs.existsSync(path.join(HOME, ".aws", "credentials")) && !fs.existsSync(path.join(HOME, ".aws", "config"))) {
+    return { ok: false, account: null, detail: "no ~/.aws in the vault" };
+  }
+  const result = await capture("aws", ["sts", "get-caller-identity", "--query", "Arn", "--output", "text"], { env, timeoutMs: 30_000 });
+  return result.code === 0 && result.stdout.trim().startsWith("arn:")
+    ? { ok: true, account: result.stdout.trim(), detail: null }
+    : { ok: false, account: null, detail: firstLine(result.stderr || result.stdout) || `exit ${result.code}` };
 }
 
 async function checkGithub(env) {
@@ -905,6 +920,42 @@ async function ensureRustToolchain() {
     timeoutMs: 15 * 60 * 1000,
   });
   log(result.code === 0 ? "Rust toolchain installed" : `Rust toolchain install failed: ${firstLine(result.stderr || result.stdout)}`);
+}
+
+// AWS CLI v2 and the Session Manager plugin (SSH over SSM), so agents reach the
+// same AWS the laptop does with the credentials from the vault (~/.aws).
+async function ensureAwsTooling() {
+  if (process.env.RUDDER_HOME_TOOLCHAINS === "0") {
+    return;
+  }
+  fs.mkdirSync(TOOLS_BIN, { recursive: true });
+  const env = { ...process.env, HOME, PATH: `${TOOLS_BIN}:${process.env.PATH || ""}` };
+  if (!fs.existsSync(path.join(TOOLS_BIN, "aws"))) {
+    log("installing the AWS CLI onto the volume");
+    // No unzip in the image: python extracts, keeping the executable bits the
+    // installer needs.
+    const result = await capture("sh", ["-c", `set -e
+      dir=$(mktemp -d); cd "$dir"
+      curl -fsSL https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip -o aws.zip
+      python3 -c 'import zipfile,os,sys
+z=zipfile.ZipFile("aws.zip")
+for i in z.infolist():
+    p=z.extract(i)
+    m=(i.external_attr>>16)&0o777
+    if m: os.chmod(p,m)'
+      ./aws/install -i "${TOOLS_DIR}/aws-cli" -b "${TOOLS_BIN}" --update
+      cd /; rm -rf "$dir"`], { env, cwd: TOOLS_DIR, timeoutMs: 10 * 60 * 1000 });
+    log(result.code === 0 ? "AWS CLI installed" : `AWS CLI install failed: ${firstLine(result.stderr || result.stdout)}`);
+  }
+  if (!fs.existsSync(path.join(TOOLS_BIN, "session-manager-plugin"))) {
+    const result = await capture("sh", ["-c", `set -e
+      dir=$(mktemp -d); cd "$dir"
+      curl -fsSL https://s3.amazonaws.com/session-manager-downloads/plugin/latest/ubuntu_64bit/session-manager-plugin.deb -o ssm.deb
+      dpkg-deb -x ssm.deb "${TOOLS_DIR}/ssm"
+      ln -sf "${TOOLS_DIR}/ssm/usr/local/sessionmanagerplugin/bin/session-manager-plugin" "${TOOLS_BIN}/session-manager-plugin"
+      cd /; rm -rf "$dir"`], { env, cwd: TOOLS_DIR, timeoutMs: 5 * 60 * 1000 });
+    log(result.code === 0 ? "Session Manager plugin installed" : `Session Manager plugin install failed: ${firstLine(result.stderr || result.stdout)}`);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1188,7 +1239,7 @@ function buildChildEnv(vaultEnv) {
     ...vaultEnv,
     // Rust (installed onto the volume by ensureRustToolchain) for agents
     // building native code, Rudder's own included.
-    PATH: `${path.join(HOME, ".cargo", "bin")}:${process.env.PATH || ""}`,
+    PATH: `${TOOLS_BIN}:${path.join(HOME, ".cargo", "bin")}:${process.env.PATH || ""}`,
     HOME,
     TERM: "xterm-256color",
     COLORTERM: "truecolor",

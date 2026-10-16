@@ -785,6 +785,10 @@ brain lives in the cloud, and the phone is a first-class client.
   like `~/.claude`) in the background on first boot, and agents get
   `~/.cargo/bin` on PATH. The dashboard there runs the installed `/opt/rudder`, so
   editing `~/code/rudder` never breaks the session doing the editing.
+  The AWS CLI v2 and the Session Manager plugin install the same way
+  (`/workspace/tools/bin`, on agents' PATH), so SSH-over-SSM works with the
+  vault's `~/.aws`; `rudder cloud` offers to refresh `~/.aws` when the laptop's
+  copy changed, and the doctor compares the AWS principal (ARN) too.
   `rudder cloud home stop` refuses to run on the home machine itself
   (`RUDDER_CLOUD_RUNTIME=home`): it would end every agent there, the caller
   included. Restart it from a laptop or the phone. iOS/Xcode and signing stay

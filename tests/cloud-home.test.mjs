@@ -405,7 +405,7 @@ const workerReady = cloudReady && fs.existsSync(path.join(workerDir, "node_modul
     const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "rudder-home-boot-"));
     const bin = path.join(scratch, "bin");
     fs.mkdirSync(bin);
-    for (const tool of ["claude", "codex", "gh", "tailscaled", "tailscale"]) {
+    for (const tool of ["claude", "codex", "gh", "aws", "tailscaled", "tailscale"]) {
       fs.writeFileSync(path.join(bin, tool), "#!/bin/sh\necho '{\"loggedIn\":false}'\nexit 1\n", { mode: 0o755 });
     }
     const home = path.join(scratch, "home");

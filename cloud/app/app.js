@@ -938,7 +938,8 @@ function AgentScreen(ws, run) {
       <pre class="term-screen" aria-label="Agent terminal" aria-live="off">Loading the terminal…</pre>
       <div class="key-strip" role="toolbar" aria-label="Keys">
         <button type="button" data-key="esc">Esc</button><button type="button" data-key="up" aria-label="Up">↑</button>
-        <button type="button" data-key="down" aria-label="Down">↓</button><button type="button" data-key="enter">Enter</button>
+        <button type="button" data-key="down" aria-label="Down">↓</button><button type="button" data-key="left" aria-label="Left">←</button>
+        <button type="button" data-key="right" aria-label="Right">→</button><button type="button" data-key="enter">Enter</button>
         <button type="button" data-key="tab">Tab</button><button type="button" data-key="shift-tab" aria-label="Shift Tab">⇧Tab</button>
         <button type="button" data-key="y">y</button><button type="button" data-key="n">n</button>
         <button type="button" data-key="ctrl-c" class="danger">^C</button>

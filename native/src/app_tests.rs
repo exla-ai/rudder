@@ -26550,7 +26550,7 @@ fn quitting_with_agents_running_offers_the_home_machine_and_h_moves_them() {
             .any(|line| line == "cloud move --yes w1 w2"),
         "the move CLI got exactly the running workers"
     );
-    assert!(app.notice.clone().unwrap_or_default().contains("moved 2 agents to the home machine"));
+    assert!(app.notice.clone().unwrap_or_default().contains("moved 2 agents to the home machine"), "{:?}", app.notice);
     // Nothing left running here, so quitting no longer asks.
     assert!(app.confirm_or_quit());
     std::env::remove_var("RUDDER_CLI");

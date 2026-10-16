@@ -457,6 +457,11 @@ a { color: var(--accent); }
 .codeblock code, .tool-out pre { font-family: var(--mono); font-size: 12.5px; line-height: 1.55; color: var(--code-ink); background: none; padding: 0; border-radius: 0; white-space: pre; }
 
 /* Tool rows */
+.steps { margin: 0 0 8px; }
+.steps + .msg.assistant, .steps + .msg.user { margin-top: 14px; }
+.steps-row .t-name { font-weight: 500; color: var(--ink-2); }
+.steps.open > .steps-row .t-caret { transform: rotate(90deg); }
+.steps-list { margin: 8px 0 0 12px; padding-left: 10px; border-left: 2px solid var(--line); }
 .tool { margin: 0 0 8px; }
 .tool + .msg.assistant, .tool + .msg.user { margin-top: 14px; }
 .tool-row {

@@ -1240,6 +1240,14 @@ function AgentScreen(ws, run) {
       }
       return;
     }
+    const stepsRow = e.target.closest(".steps-row");
+    if (stepsRow) {
+      const node = stepsRow.closest(".steps");
+      const k = `${key}|${node.dataset.key}`;
+      if (store.expanded.has(k)) store.expanded.delete(k); else store.expanded.add(k);
+      paintSteps(node, node._steps);
+      return;
+    }
     const row = e.target.closest(".tool-row");
     if (row) {
       const box = row.closest(".tool");
@@ -1401,12 +1409,28 @@ function AgentScreen(ws, run) {
     const wasBottom = firstPaint || atBottom;
     const items = [];
     let lastDay = null;
+    // A run of tool calls between two things the agent SAYS is one collapsed
+    // "Worked · N steps" line: a long turn was otherwise a wall of tool rows
+    // with the actual replies lost between them.
+    let steps = null;
     for (const m of t.messages || []) {
       if (m.ts) {
         const d = new Date(m.ts).toDateString();
-        if (d !== lastDay) { items.push({ kind: "day", id: `day-${d}`, label: dayLabel(m.ts) }); lastDay = d; }
+        if (d !== lastDay) { items.push({ kind: "day", id: `day-${d}`, label: dayLabel(m.ts) }); lastDay = d; steps = null; }
       }
+      if (m.role === "tool") {
+        if (!steps) { steps = { kind: "steps", id: `steps-${m.id}`, tools: [] }; items.push(steps); }
+        steps.tools.push(m);
+        continue;
+      }
+      steps = null;
       items.push({ kind: "msg", id: m.id, m });
+    }
+    for (let i = 0; i < items.length; i += 1) {
+      if (items[i].kind === "steps" && items[i].tools.length === 1) {
+        const m = items[i].tools[0];
+        items[i] = { kind: "msg", id: m.id, m };
+      }
     }
     for (const p of store.pending.get(key) || []) items.push({ kind: "pending", id: p.id, p });
 
@@ -1435,6 +1459,10 @@ function AgentScreen(ws, run) {
     if (x.kind === "empty") return emptyState({ ic: "inbox", title: "No messages yet", body: "This agent has not said anything yet. Its conversation shows up here as it works." });
     if (x.kind === "error") return emptyState({ ic: "alert", title: "Couldn't load the conversation", body: escapeHtml(x.text) });
     if (x.kind === "pending") return h(`<div class="msg user"><div class="bubble md"></div><div class="m-foot"></div></div>`);
+    if (x.kind === "steps") {
+      return h(`<div class="steps"><button type="button" class="tool-row steps-row" aria-expanded="false">
+        <span class="t-icon"></span><span class="t-name"></span><span class="t-input"></span>${icon("chevron").replace("<svg", '<svg class="t-caret"')}</button><div class="steps-list" hidden></div></div>`);
+    }
     const role = x.m.role;
     if (role === "tool") {
       const box = h(`<div class="tool"><button type="button" class="tool-row" aria-expanded="false">
@@ -1460,11 +1488,29 @@ function AgentScreen(ws, run) {
       if (foot.dataset.h !== html) { foot.innerHTML = html; foot.dataset.h = html; }
       return;
     }
+    if (x.kind === "steps") return paintSteps(node, x);
     const m = x.m;
     if (m.role === "tool") { node._msg = m; return paintTool(node, m); }
     const md = node.querySelector(".md");
     const sig = `${m.text}|${markdownReady()}`;
     if (md.dataset.sig !== sig) { renderMarkdown(md, m.text || ""); md.dataset.sig = sig; }
+  }
+
+  function paintSteps(node, x) {
+    const open = store.expanded.has(`${key}|${x.id}`);
+    node._steps = x;
+    node.classList.toggle("open", open);
+    const row = node.querySelector(".steps-row");
+    row.setAttribute("aria-expanded", String(open));
+    const failed = x.tools.filter((m) => m.tool?.isError).length;
+    const last = x.tools[x.tools.length - 1].tool || {};
+    row.querySelector(".t-icon").innerHTML = icon(failed ? "alert" : "check");
+    setText(row.querySelector(".t-name"), `Worked · ${x.tools.length} steps${failed ? ` · ${failed} failed` : ""}`);
+    setText(row.querySelector(".t-input"), open ? "" : `${last.name || "Tool"} ${(last.input || "").replace(/\s+/g, " ").trim()}`);
+    const list = node.querySelector(".steps-list");
+    list.hidden = !open;
+    if (!open) { list.replaceChildren(); return; }
+    reconcile(list, x.tools.map((m) => ({ kind: "msg", id: m.id, m })), (y) => y.id, createItem, updateItem);
   }
 
   function paintTool(box, m) {

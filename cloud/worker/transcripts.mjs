@@ -92,13 +92,27 @@ function claudeSessionUrl(lines) {
 const RUDDER_FRAMING = /Rudder-specific context injected by Rudder|^Objective: [\s\S]*\nDone when:/;
 
 function showUserTask(messages, record) {
+  const task = userTask(record.task);
   return messages.map((message) => {
     if (message.role !== "user" || !RUDDER_FRAMING.test(message.text)) {
       return message;
     }
-    const task = String(record.task || "").trim();
     return task ? { ...message, text: task } : message;
   });
+}
+
+// What the user asked, without the framing Rudder wraps it in. A task started
+// from the task bar is stored framed: "Objective: ...\nDone when: ...\n\n<ask>".
+export function userTask(raw) {
+  let text = String(raw || "").trim();
+  text = text.replace(/^Objective: [^\n]*\nDone when: [^\n]*\n+/, "");
+  const context = text.indexOf("Rudder-specific context injected by Rudder");
+  if (context >= 0) {
+    // The ask follows the context block (its last paragraph).
+    const after = text.slice(context).split(/\n\s*\n/).slice(1).join("\n\n").trim();
+    text = after || text.slice(0, context).trim();
+  }
+  return text.trim();
 }
 
 function readRunRecord(repoDir, runId) {

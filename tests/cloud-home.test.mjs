@@ -326,7 +326,7 @@ nodeTest("a Claude transcript becomes chat messages with tool calls matched to t
     { type: "assistant", uuid: "a2", message: { role: "assistant", content: [{ type: "text", text: "Fixed; tests pass." }] } },
   ];
   fs.writeFileSync(path.join(projectDir, `${sessionId}.jsonl`), `${lines.map((l) => JSON.stringify(l)).join("\n")}\n`);
-  const record = { id: "run-1", backend: "claude", task: "fix the webhook", taskSummary: "Fix the webhook", session: { nativeSessionId: sessionId }, workspace: { path: cwd } };
+  const record = { id: "run-1", backend: "claude", task: "Objective: fix the webhook\nDone when: tests pass\n\nfix the webhook", taskSummary: "Fix the webhook", session: { nativeSessionId: sessionId }, workspace: { path: cwd } };
   const repo = fixtureRepo(record);
 
   const transcript = readTranscript(repo, "run-1", { limit: 50, home });

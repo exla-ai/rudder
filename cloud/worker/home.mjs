@@ -22,7 +22,7 @@ import { StringDecoder } from "node:string_decoder";
 import { WebSocket } from "ws";
 import pty from "node-pty";
 
-import { readTranscript, lastAssistantText } from "./transcripts.mjs";
+import { readTranscript, lastAssistantText, userTask } from "./transcripts.mjs";
 
 const cloudUrl = (process.env.RUDDER_CLOUD_URL || "").trim().replace(/\/$/, "");
 const homeId = (process.env.RUDDER_WORKSPACE_ID || "").trim();
@@ -509,8 +509,8 @@ function agentSummary(record) {
   }
   return {
     id: record.id,
-    title: (record.taskSummary || record.task || record.id || "").toString().slice(0, 200),
-    task: (record.task || "").toString().slice(0, 2000),
+    title: (record.taskSummary || userTask(record.task) || record.id || "").toString().slice(0, 200),
+    task: userTask(record.task).slice(0, 2000),
     status,
     phase: record.lifecyclePhase ?? null,
     attention: record.attention ?? null,

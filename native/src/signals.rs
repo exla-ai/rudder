@@ -135,6 +135,7 @@ pub(crate) fn cleanup_run_signals(run_id: &str) {
     let _ = std::fs::remove_file(dir.join(format!("{run_id}-notify.sh")));
     let _ = std::fs::remove_file(dir.join(format!("{run_id}.json.session")));
     let _ = std::fs::remove_file(dir.join(format!("{run_id}.json.turn")));
+    let _ = std::fs::remove_file(dir.join(format!("{run_id}.claude-session")));
     let _ = std::fs::remove_file(dir.join(format!("{run_id}-opencode.json")));
     let _ = std::fs::remove_file(dir.join(format!("{run_id}-opencode.js")));
 }
@@ -218,6 +219,31 @@ fn write_signal_command(signal: &Path, state: &str) -> String {
     )
 }
 
+/// Path of the file a Claude worker's hooks keep its CURRENT session id in.
+/// The id Rudder launched with stops being the conversation as soon as the
+/// user switches sessions inside Claude (`/resume`, `/clear`): the chat view
+/// then read an empty transcript and a reopen resumed the wrong one.
+pub(crate) fn claude_session_path(run_id: &str) -> Option<PathBuf> {
+    Some(signals_dir()?.join(format!("{run_id}.claude-session")))
+}
+
+/// The session id the run's Claude hooks last reported, if any.
+pub(crate) fn read_claude_session(run_id: &str) -> Option<String> {
+    let text = std::fs::read_to_string(claude_session_path(run_id)?).ok()?;
+    let id = text.trim().to_string();
+    (!id.is_empty()).then_some(id)
+}
+
+/// Hook command: copy `session_id` from the hook's stdin JSON into the run's
+/// session file (atomic, like the signal writes).
+fn write_claude_session_command(signal: &Path) -> String {
+    let path = signal.with_extension("claude-session");
+    let path = path.display();
+    format!(
+        "d=$(sed -n 's/.*\"session_id\": *\"\\([^\"]*\\)\".*/\\1/p' | head -n 1); [ -n \"$d\" ] && printf '%s' \"$d\" > '{path}'.$$.tmp && mv -f '{path}'.$$.tmp '{path}' || true"
+    )
+}
+
 /// Like `write_signal_command`, but the hook's stdin JSON is scanned for
 /// `"<key>":"<value>"` and the value is carried as the signal's `detail`. Plain
 /// sed so the hook stays a `sh -c` one-liner with no jq/node dependency; the
@@ -251,7 +277,10 @@ pub(crate) fn claude_settings_json(signal: &Path, fast_mode: bool) -> String {
     let mut settings = serde_json::json!({
         "hooks": {
             "Stop": [{
-                "hooks": [{ "type": "command", "command": write_signal_command(signal, "done") }]
+                "hooks": [
+                    { "type": "command", "command": write_signal_command(signal, "done") },
+                    { "type": "command", "command": write_claude_session_command(signal) }
+                ]
             }],
             "Notification": [
                 {
@@ -280,7 +309,10 @@ pub(crate) fn claude_settings_json(signal: &Path, fast_mode: bool) -> String {
             // human turn, so it costs one tiny write — unlike PreToolUse, which
             // would fire on every tool call.
             "UserPromptSubmit": [{
-                "hooks": [{ "type": "command", "command": write_signal_command(signal, "working") }]
+                "hooks": [
+                    { "type": "command", "command": write_signal_command(signal, "working") },
+                    { "type": "command", "command": write_claude_session_command(signal) }
+                ]
             }]
         }
     });

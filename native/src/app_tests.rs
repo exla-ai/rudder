@@ -26935,3 +26935,60 @@ fn home_machine_boot_reopens_an_idle_done_main_row_and_keeps_it_done() {
     assert!(!worker_live, "a done worker is left for review");
     assert!(args.contains("--resume 11111111-2222-3333-4444-666666666666"), "{args:?}");
 }
+
+#[test]
+fn claude_hooks_report_the_live_session_and_the_row_follows_it() {
+    let _env = env_guard();
+    let dir = unique_test_repo("claude-session-follow");
+    std::env::set_var("RUDDER_HOME", dir.join("home"));
+    let run_id = "follow-run";
+    let signal = signals::signal_path(run_id).expect("signal path");
+
+    // The hooks Rudder installs write the session id from the hook's stdin.
+    let settings: serde_json::Value =
+        serde_json::from_str(&signals::claude_settings_json(&signal, false)).unwrap();
+    for event in ["Stop", "UserPromptSubmit"] {
+        let commands: Vec<String> = settings["hooks"][event][0]["hooks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|hook| hook["command"].as_str().unwrap().to_string())
+            .collect();
+        let session_hook = commands
+            .iter()
+            .find(|command| command.contains("session_id"))
+            .unwrap_or_else(|| panic!("{event} reports the session: {commands:?}"));
+        fs::create_dir_all(signal.parent().unwrap()).unwrap();
+        let mut child = Command::new("/bin/sh")
+            .arg("-c")
+            .arg(session_hook)
+            .stdin(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(br#"{"session_id": "3709e163-3eb4-489f-a5a9-15353f4aa59b","hook_event_name":"Stop"}"#)
+            .unwrap();
+        assert!(child.wait().unwrap().success());
+        assert_eq!(
+            signals::read_claude_session(run_id).as_deref(),
+            Some("3709e163-3eb4-489f-a5a9-15353f4aa59b"),
+            "{event}"
+        );
+    }
+
+    let mut app = App::new();
+    app.cwd = dir.clone();
+    app.agents.clear();
+    let mut run = test_agent_run(run_id, "chat");
+    run.cwd = dir.clone();
+    run.terminal = None;
+    run.session_id = Some("a29953b9-bed6-4a56-a0c4-55be8e07188b".to_string());
+    app.agents.push(run);
+    app.adopt_reported_claude_sessions();
+    let adopted = app.agents[0].session_id.clone();
+    let _ = fs::remove_dir_all(&dir);
+    assert_eq!(adopted.as_deref(), Some("3709e163-3eb4-489f-a5a9-15353f4aa59b"));
+}

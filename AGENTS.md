@@ -760,6 +760,12 @@ brain lives in the cloud, and the phone is a first-class client.
   workspace only; Stopped/Done/Failed/Merged/Migrated, cloud-owned, orchestrators,
   shell panes, /gam pairs and merge resolvers are left alone. Capped at 12, most
   recently used first.
+- **Claude agents follow a session switch.** A Claude row's `Stop` and
+  `UserPromptSubmit` hooks also write the live `session_id` to
+  `<rudder home>/signals/<run>.claude-session`; `adopt_reported_claude_sessions`
+  (60s reconcile, and first thing in the boot reopen) moves the run record onto
+  it. Without it, `/resume` inside the pane left the phone reading an empty
+  transcript and a reboot reopening the wrong conversation.
 - **Coming back to a terminal.** The phone app calls the home the "cloud machine" (it is not the user's computer) and Remote Control sessions are named `<repo> · <id> (cloud)`. The attach client pings the relay every 5s and
   treats a missed pong (20s) or a timer that fired 15s late (the laptop slept)
   as a dropped connection, which `attachWithReconnect` reopens (waking the home

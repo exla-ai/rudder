@@ -9900,6 +9900,9 @@ Address the objection directly. If you disagree, say why inside \
         if !self.home_runtime {
             return;
         }
+        // Reopen the conversation each agent was last in, not the one it
+        // started with.
+        self.adopt_reported_claude_sessions();
         let mut candidates: Vec<(u128, String)> = self
             .agents
             .iter()
@@ -19075,6 +19078,7 @@ What to do\n\
         }
         self.last_reconcile = Some(Instant::now());
         self.ensure_session_ids_recorded();
+        self.adopt_reported_claude_sessions();
         self.verify_merged_rows();
         self.flag_missing_workspaces();
     }
@@ -19182,6 +19186,36 @@ What to do\n\
     /// Recording it while the run is alive closes that window, and running the same
     /// lookup for rows that RELOAD without an id rescues the ones already lost —
     /// the rollout is still on disk, Rudder just never wrote down which one it was.
+    /// Follow a Claude conversation the user switched to inside the pane
+    /// (`/resume`, `/clear`). Its hooks report the live session id; the run
+    /// record keeps the one Rudder launched with otherwise, so the phone's
+    /// chat view showed an empty transcript and a reopen resumed the wrong
+    /// conversation.
+    fn adopt_reported_claude_sessions(&mut self) {
+        let cwd = self.cwd.clone();
+        let mut adopted = Vec::new();
+        for run in self.agents.iter_mut() {
+            if run.backend != Backend::Claude {
+                continue;
+            }
+            let Some(reported) = signals::read_claude_session(&run.id) else {
+                continue;
+            };
+            if !valid_session_id(&reported) || run.session_id.as_deref() == Some(reported.as_str()) {
+                continue;
+            }
+            let previous = run.session_id.replace(reported.clone());
+            let _ = save_native_run_record(&cwd, run);
+            adopted.push((run.id.clone(), previous, reported));
+        }
+        for (run_id, previous, reported) in adopted {
+            self.push_activity(format!(
+                "{run_id}: now on Claude session {reported} (was {})",
+                previous.unwrap_or_else(|| "none".to_string())
+            ));
+        }
+    }
+
     fn ensure_session_ids_recorded(&mut self) {
         const RETRY_AFTER: Duration = Duration::from_secs(5);
         const MAX_ATTEMPTS: u32 = 24;

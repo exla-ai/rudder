@@ -26880,3 +26880,58 @@ fn home_machine_boot_reopens_paused_rows_without_a_new_turn() {
         "no prompt is sent: {args:?}"
     );
 }
+
+#[test]
+fn home_machine_boot_reopens_an_idle_done_main_row_and_keeps_it_done() {
+    let _env = env_guard();
+    let dir = unique_test_repo("home-boot-reopen-done");
+    let args_log = dir.join("args.log");
+    let fake = dir.join("fake-claude.sh");
+    write_fake_bin(
+        &fake,
+        &format!("#!/bin/sh\necho \"$@\" >> '{}'\nsleep 5\n", args_log.display()),
+    );
+    std::env::set_var("RUDDER_CLAUDE_BIN", &fake);
+    std::env::set_var("RUDDER_HOME", dir.join("home"));
+
+    let mut app = App::new();
+    app.cwd = dir.clone();
+    app.home_runtime = true;
+    app.agents.clear();
+    let mut main = test_agent_run(MAIN_AGENT_ID, "own the checkout");
+    main.mode = AgentMode::Main;
+    main.cwd = dir.clone();
+    main.terminal = None;
+    main.status = AgentStatus::Done;
+    main.session_id = Some("11111111-2222-3333-4444-666666666666".to_string());
+    app.agents.push(main);
+    let mut worker = test_agent_run("done-worker", "finished, awaiting merge");
+    worker.cwd = dir.clone();
+    worker.terminal = None;
+    worker.status = AgentStatus::Done;
+    worker.session_id = Some("done-worker-session".to_string());
+    app.agents.push(worker);
+
+    app.poll_agents();
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while fs::read_to_string(&args_log).map_or(true, |text| !text.contains('\n'))
+        && Instant::now() < deadline
+    {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let main_live = app.agents[0].terminal.is_some();
+    let main_status = app.agents[0].status;
+    let worker_live = app.agents[1].terminal.is_some();
+    for run in app.agents.iter_mut() {
+        if let Some(mut terminal) = run.terminal.take() {
+            terminal.terminate_and_wait();
+        }
+    }
+    let args = fs::read_to_string(&args_log).unwrap_or_default();
+    let _ = fs::remove_dir_all(&dir);
+
+    assert!(main_live, "the idle main chat is reachable again");
+    assert_eq!(main_status, AgentStatus::Done, "it ran no turn, so it is still done");
+    assert!(!worker_live, "a done worker is left for review");
+    assert!(args.contains("--resume 11111111-2222-3333-4444-666666666666"), "{args:?}");
+}

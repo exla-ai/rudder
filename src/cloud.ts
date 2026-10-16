@@ -47,6 +47,8 @@ type CloudCommandOptions = {
   noAttach?: boolean;
   quietBanner?: boolean;
   latencyProbe?: boolean;
+  /** Coming back to a repo already open on the home machine: skip the first-run offers. */
+  reattach?: boolean;
   /** Skip the y/N confirmation of a destructive command (`--yes`/`--force`). */
   yes?: boolean;
 };
@@ -3055,7 +3057,11 @@ async function workspaceList(options: CloudCommandOptions): Promise<void> {
 async function attach(args: string[], options: CloudCommandOptions): Promise<void> {
   const sailId = args[0];
   if (!sailId) {
-    throw new Error("Usage: rudder cloud attach <id>");
+    // In a repo, `rudder cloud attach` is coming back to it: open it on the
+    // home machine (waking it if needed) and attach, without the first-run
+    // offers `rudder cloud` makes.
+    await openOnHome(false, { ...options, reattach: true });
+    return;
   }
   await runAttach({ kind: "sail", id: sailId, label: sailId }, options);
 }
@@ -3065,6 +3071,10 @@ type AttachTarget = {
   id: string;
   label: string;
 };
+
+const ATTACH_PING_MS = 5_000;
+const ATTACH_PONG_TIMEOUT_MS = 20_000;
+const ATTACH_SLEEP_GAP_MS = 15_000;
 
 // "dropped": the connection ended without the user leaving (the control plane
 // redeployed, the home machine restarted). Callers reconnect.
@@ -3094,7 +3104,7 @@ async function attachWithReconnect(
 ): Promise<AttachResult> {
   let result = await runAttach(target, { ...options, quietBanner: false });
   let attempts = 0;
-  while (result === "dropped" && attempts < 40) {
+  while (result === "dropped" && attempts < 120) {
     attempts += 1;
     process.stderr.write(`\r\nLost the connection to Rudder Cloud (it may be restarting). Reconnecting${attempts > 1 ? ` (try ${attempts})` : ""}...\r\n`);
     await sleep(Math.min(15_000, 2_000 * attempts));
@@ -3239,11 +3249,36 @@ async function runAttach(target: AttachTarget, options: CloudCommandOptions): Pr
       splash?.redraw();
     };
 
+    // Liveness. A laptop that slept leaves this socket half-open: nothing
+    // errors, the screen just freezes, and the relay has meanwhile dropped us
+    // (or handed control to the next terminal). Ping the relay, and treat a
+    // missed pong or a timer that fired far too late (the machine was asleep)
+    // as a dropped connection, which attachWithReconnect reopens.
+    let lastHeard = Date.now();
+    let lastTick = Date.now();
+    socket.on("pong", () => { lastHeard = Date.now(); });
+    socket.on("message", () => { lastHeard = Date.now(); });
+    const liveness = setInterval(() => {
+      const now = Date.now();
+      const slept = now - lastTick > ATTACH_SLEEP_GAP_MS;
+      lastTick = now;
+      if (socket.readyState !== WebSocket.OPEN) {
+        return;
+      }
+      if (slept || now - lastHeard > ATTACH_PONG_TIMEOUT_MS) {
+        socket.terminate();
+        return;
+      }
+      try { socket.ping(); } catch { socket.terminate(); }
+    }, ATTACH_PING_MS);
+    liveness.unref?.();
+
     const cleanup = () => {
       if (cleaned) {
         return;
       }
       cleaned = true;
+      clearInterval(liveness);
       stdin.off("data", onStdin);
       stdout.off("resize", onResize);
       process.off("SIGINT", onSigint);
@@ -3746,7 +3781,7 @@ Usage:
       resumes its conversation there; no runId uploads the current
       Rudder workspace state
   rudder cloud logs <id>
-  rudder cloud attach <id>
+  rudder cloud attach [id]        (no id: reattach this repo on the home machine)
       stream the live cloud worker terminal into this pane
   rudder cloud talk <id> "<message>"
       send a message to a running instance and show its reply
@@ -3847,6 +3882,15 @@ type HomeOpenResponse = {
   workspace?: Record<string, JsonValue>;
 };
 
+async function repoOpenOnHome(client: CloudClient, slug: string): Promise<boolean> {
+  try {
+    const result = await client.request<{ projects?: Record<string, JsonValue>[] }>("/api/rudder/home", { method: "GET" });
+    return (result.projects ?? []).some((project) => String(project.repo ?? "").toLowerCase() === slug.toLowerCase());
+  } catch {
+    return false;
+  }
+}
+
 async function openOnHome(forceSnapshot: boolean, options: CloudCommandOptions): Promise<void> {
   if (forceSnapshot) {
     await workspaceAttach([], options);
@@ -3863,11 +3907,20 @@ async function openOnHome(forceSnapshot: boolean, options: CloudCommandOptions):
   }
   const client = await cloudClient({ requireToken: true });
   const name = slug.split("/")[1];
+  // Coming back (laptop reopened, terminal closed): a repo already open on
+  // the home machine reattaches straight away, like `rudder cloud attach`.
+  // Credentials are still compared, and running local agents still offered a
+  // move, because those are about this laptop now.
+  const reattach = options.reattach || await repoOpenOnHome(client, slug);
   if (!options.json) {
-    await warnLocalOnlyWork(repoRoot);
+    if (!reattach) {
+      await warnLocalOnlyWork(repoRoot);
+    }
     await ensureVaultGithubToken(client, slug);
     await ensureVaultAws(client);
-    await offerEnvFilesToVault(client, repoRoot, name);
+    if (!reattach) {
+      await offerEnvFilesToVault(client, repoRoot, name);
+    }
     await offerToMoveAgents(client, repoRoot, slug);
     process.stderr.write(`Opening ${slug} on your home machine...\n`);
   }
@@ -3955,9 +4008,15 @@ async function ensureVaultAws(client: CloudClient): Promise<void> {
   if (changed.length === 0) {
     return;
   }
-  const yes = await promptConfirm(`Your AWS setup (${changed.map((file) => file.name).join(", ")}) differs from the cloud vault's copy. Copy it so cloud agents use the same AWS?`, true);
-  if (!yes) {
-    return;
+  // Asked once. After AWS is in the vault, keeping it matched with this laptop
+  // is the point (rotating SSO/session credentials change it daily), so later
+  // changes are copied without a prompt on every `rudder cloud`.
+  const alreadyShared = files.some((file) => stored.has(file.name));
+  if (!alreadyShared) {
+    const yes = await promptConfirm(`Your AWS setup (${changed.map((file) => file.name).join(", ")}) differs from the cloud vault's copy. Copy it so cloud agents use the same AWS?`, true);
+    if (!yes) {
+      return;
+    }
   }
   for (const file of changed) {
     await client.request<JsonValue>("/api/rudder/secrets/item", {

@@ -760,6 +760,12 @@ brain lives in the cloud, and the phone is a first-class client.
   workspace only; Stopped/Done/Failed/Merged/Migrated, cloud-owned, orchestrators,
   shell panes, /gam pairs and merge resolvers are left alone. Capped at 12, most
   recently used first.
+- **Coming back to a terminal.** The attach client pings the relay every 5s and
+  treats a missed pong (20s) or a timer that fired 15s late (the laptop slept)
+  as a dropped connection, which `attachWithReconnect` reopens (waking the home
+  through `home/open`). Bare `rudder cloud` on a repo already open on the home,
+  and `rudder cloud attach` with no id, reattach without the first-run
+  local-work warning and .env offer.
 - **Opening the app wakes the home.** `/api/app/state` starts a sleeping or
   disconnected home in the background (`wakeHomeInBackground`, 60s cooldown after
   a failed wake). Polled reads (transcript, screen) answer `503 {waking:true}`

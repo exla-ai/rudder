@@ -9904,7 +9904,10 @@ Address the objection directly. If you disagree, say why inside \
             .agents
             .iter()
             .filter(|run| {
+                // A main agent idle between turns is saved Done with its pane
+                // still open; it is the chat people reach through Remote Control.
                 let was_live = run.status == AgentStatus::Paused
+                    || (run.status == AgentStatus::Done && run.mode == AgentMode::Main)
                     || (run.status == AgentStatus::Orphaned
                         && self.boot_orphaned_ids.contains(&run.id));
                 let workspace = run.workspace_path.as_ref().unwrap_or(&run.cwd);
@@ -9952,7 +9955,16 @@ Address the objection directly. If you disagree, say why inside \
             };
             // Back to Running, as it was before the stop: the resumed session runs
             // no turn, and the idle backstop says so ("idle at its prompt").
+            let was_done = run.status == AgentStatus::Done;
             if self.spawn_claude_resume_for(index, &entry) {
+                if was_done {
+                    // Reopened idle: it ran no turn, so it is still done.
+                    let cwd = self.cwd.clone();
+                    if let Some(run) = self.agents.get_mut(index) {
+                        run.status = AgentStatus::Done;
+                        let _ = save_native_run_record(&cwd, run);
+                    }
+                }
                 self.focus_resume_attempted.insert(run_id);
                 reopened += 1;
             }

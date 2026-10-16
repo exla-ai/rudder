@@ -199,27 +199,59 @@ async function openProjectRepo(repo, dlg) {
 
 function openAddProject() {
   const dlg = h(`<dialog class="sheet add-sheet" aria-label="Add project"><div class="dialog">
-    <div class="sheet-grab"></div><h3>Add project</h3>
-    <input class="input" type="search" placeholder="Search, or paste owner/name" aria-label="Search repositories"
+    <div class="sheet-grab"></div>
+    <div class="add-head"><h3>Add project</h3><button type="button" class="btn small new-btn">${icon("plus")}<span>New repository</span></button></div>
+    <div class="owner-chips" role="tablist" aria-label="Owner"></div>
+    <form class="new-repo-form" hidden>
+      <div class="new-under">New repository under <strong class="new-owner"></strong></div>
+      <input class="input" name="name" placeholder="repository-name" aria-label="Repository name" autocapitalize="off" autocorrect="off" spellcheck="false">
+      <label class="check"><input type="checkbox" name="private" checked> Private</label>
+      <div class="row"><button type="button" class="btn" data-act="cancel-new">Cancel</button><button type="submit" class="btn primary">Create and open</button></div>
+    </form>
+    <input class="input repo-search" type="search" placeholder="Search, or paste owner/name" aria-label="Search repositories"
       autocapitalize="off" autocorrect="off" spellcheck="false">
     <div class="repo-list" role="list"><div class="repo-note">Loading your GitHub repos…</div></div>
-    <details class="new-repo"><summary>New repository</summary>
-      <form class="new-repo-form">
-        <div class="row"><select aria-label="Owner"></select><span class="slash">/</span>
-          <input class="input" name="name" placeholder="name" aria-label="Repository name" autocapitalize="off" autocorrect="off" spellcheck="false"></div>
-        <label class="check"><input type="checkbox" name="private" checked> Private</label>
-        <button type="submit" class="btn primary block">Create and open</button>
-      </form>
-    </details>
     <button type="button" class="btn block" style="margin-top:10px;border:0;background:transparent;color:var(--muted)" data-act="close">Close</button>
   </div></dialog>`);
-  const search = dlg.querySelector('input[type="search"]');
+  const search = dlg.querySelector(".repo-search");
   const listEl = dlg.querySelector(".repo-list");
-  const ownerSel = dlg.querySelector("select");
+  const chipsEl = dlg.querySelector(".owner-chips");
+  const form = dlg.querySelector(".new-repo-form");
+  const newBtn = dlg.querySelector(".new-btn");
   let repos = [];
+  let owners = [];
+  let owner = ls.get("rudder.addOwner") || "";
+  const ownerOf = (repo) => repo.split("/")[0];
+
+  function renderChips() {
+    const all = ["", ...owners];
+    chipsEl.replaceChildren(...all.map((o) => {
+      const b = h(`<button type="button" role="tab" class="owner-chip"></button>`);
+      b.setAttribute("aria-selected", String(o === owner));
+      if (o) {
+        const img = document.createElement("img");
+        img.src = `https://github.com/${encodeURIComponent(o)}.png?size=64`;
+        img.alt = ""; img.loading = "lazy";
+        b.appendChild(img);
+      }
+      const label = document.createElement("span");
+      label.textContent = o || "All";
+      b.appendChild(label);
+      b.addEventListener("click", () => { owner = o; ls.set("rudder.addOwner", owner); renderChips(); render(); syncForm(); });
+      return b;
+    }));
+  }
+  function syncForm() {
+    const target = owner || owners[0] || "";
+    form.querySelector(".new-owner").textContent = target;
+    form.dataset.owner = target;
+  }
   function render() {
     const q = search.value.trim().toLowerCase().replace(/^https?:\/\/github\.com\//, "").replace(/\.git$/, "");
-    const shown = repos.filter((r) => !q || r.repo.toLowerCase().includes(q) || (r.description || "").toLowerCase().includes(q)).slice(0, 60);
+    const shown = repos
+      .filter((r) => !owner || ownerOf(r.repo).toLowerCase() === owner.toLowerCase())
+      .filter((r) => !q || r.repo.toLowerCase().includes(q) || (r.description || "").toLowerCase().includes(q))
+      .slice(0, 60);
     listEl.replaceChildren();
     const typed = /^[\w.-]+\/[\w.-]+$/.test(q) && !repos.some((r) => r.repo.toLowerCase() === q);
     if (typed) {
@@ -230,7 +262,7 @@ function openAddProject() {
     }
     for (const r of shown) {
       const b = h(`<button type="button" class="repo-row" role="listitem"><span class="rn"></span><span class="rd"></span></button>`);
-      b.querySelector(".rn").textContent = r.repo;
+      b.querySelector(".rn").textContent = owner ? r.repo.slice(owner.length + 1) : r.repo;
       b.querySelector(".rd").textContent = [r.open ? "on your home machine" : null, r.private ? "private" : "public", r.updatedAt ? rel(toMs(r.updatedAt)) : null, r.description].filter(Boolean).join(" · ");
       b.addEventListener("click", () => openProjectRepo(r.repo, dlg));
       listEl.appendChild(b);
@@ -239,18 +271,25 @@ function openAddProject() {
       listEl.appendChild(h(`<div class="repo-note">${repos.length ? "No matching repos." : "No repos found."}</div>`));
     }
   }
+  newBtn.addEventListener("click", () => {
+    syncForm();
+    form.hidden = false; newBtn.hidden = true;
+    form.name.focus();
+  });
+  form.querySelector('[data-act="cancel-new"]').addEventListener("click", () => { form.hidden = true; newBtn.hidden = false; });
   search.addEventListener("input", render);
-  dlg.querySelector(".new-repo-form").addEventListener("submit", async (e) => {
+  form.addEventListener("submit", async (e) => {
     e.preventDefault();
-    const form = e.currentTarget;
     const name = form.name.value.trim();
+    const target = form.dataset.owner;
+    if (!target) { toast("Pick an owner first", { error: true }); return; }
     if (!/^[A-Za-z0-9._-]+$/.test(name)) { toast("Use letters, digits, . _ - for the name", { error: true }); return; }
-    const btn = form.querySelector("button");
+    const btn = form.querySelector('button[type="submit"]');
     btn.disabled = true;
     try {
-      const res = await api("/api/app/create", { method: "POST", body: { owner: ownerSel.value, name, private: form.private.checked } });
+      const res = await api("/api/app/create", { method: "POST", body: { owner: target, name, private: form.private.checked } });
       dlg.close();
-      toast(`Created ${ownerSel.value}/${name}`);
+      toast(`Created ${target}/${name}`);
       await refreshState();
       const ws = res?.workspace?.workspaceId || res?.workspace?.id;
       if (ws) navigate(projectPath(ws));
@@ -263,10 +302,12 @@ function openAddProject() {
   dlg.addEventListener("close", () => dlg.remove());
   document.body.appendChild(dlg);
   dlg.showModal();
+  renderChips();
   api("/api/app/repos").then((data) => {
     repos = data?.repos || [];
-    ownerSel.replaceChildren(...(data?.owners || []).map((o) => { const opt = document.createElement("option"); opt.value = o; opt.textContent = o; return opt; }));
-    render();
+    owners = data?.owners || [];
+    if (owner && !owners.includes(owner)) owner = "";
+    renderChips(); syncForm(); render();
   }).catch((err) => {
     listEl.replaceChildren(h(`<div class="repo-note err"></div>`));
     listEl.firstChild.textContent = err.status === 401 ? "Signed out." : err.message;

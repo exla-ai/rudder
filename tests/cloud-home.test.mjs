@@ -217,6 +217,14 @@ serverTest("a home machine's repos, state and phone requests flow over its contr
   const createRpc = messages.find((m) => m.type === "rpc" && m.method === "createRepo");
   assert.deepEqual(createRpc.params, { owner: "exla-ai", name: "fresh", private: true, description: "" });
 
+  // The terminal view and key strip go to the supervisor too; key names are checked here.
+  const screen = await (await fetch(`${base}/api/app/screen?workspace=libra-test&run=r1`, { headers: auth })).json();
+  assert.deepEqual(screen.params, { workspaceId: "libra-test", runId: "r1" });
+  const keys = await (await fetch(`${base}/api/app/keys`, { method: "POST", headers: auth, body: JSON.stringify({ workspace: "libra-test", run: "r1", keys: "down,enter" }) })).json();
+  assert.deepEqual(keys.params, { workspaceId: "libra-test", runId: "r1", keys: "down,enter" });
+  const badKeys = await fetch(`${base}/api/app/keys`, { method: "POST", headers: auth, body: JSON.stringify({ workspace: "libra-test", run: "r1", keys: "rm -rf /" }) });
+  assert.equal(badKeys.status, 400);
+
   // A supervisor error is the phone's error message.
   const failed = await fetch(`${base}/api/app/send`, { method: "POST", headers: auth, body: JSON.stringify({ workspace: "libra-test", run: "r1", text: "boom" }) });
   assert.equal(failed.status, 400);

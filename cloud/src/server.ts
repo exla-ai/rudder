@@ -5472,6 +5472,21 @@ async function handleAppApi(req: IncomingMessage, res: ServerResponse, url: URL)
     sendJson(res, 200, await homeRpc(home.id, "task", { workspaceId: repo.id, text: text.slice(0, 16_000) }));
     return;
   }
+  if (req.method === "GET" && url.pathname === "/api/app/screen") {
+    const { repo } = requireHomeRepo(account.accountId, url.searchParams.get("workspace") ?? "");
+    sendJson(res, 200, await homeRpc(home.id, "screen", { workspaceId: repo.id, runId: url.searchParams.get("run") ?? "" }));
+    return;
+  }
+  if (req.method === "POST" && url.pathname === "/api/app/keys") {
+    const body = await readJsonBody(req);
+    const { repo } = requireHomeRepo(account.accountId, stringField(body, "workspace") ?? "");
+    const keys = (stringField(body, "keys") ?? "").trim();
+    if (!/^[a-z0-9-]+(,[a-z0-9-]+)*$/i.test(keys) || keys.length > 200) {
+      throw badRequest("keys must be names like esc,up,enter");
+    }
+    sendJson(res, 200, await homeRpc(home.id, "keys", { workspaceId: repo.id, runId: stringField(body, "run") ?? "", keys }));
+    return;
+  }
   if (req.method === "POST" && url.pathname === "/api/app/action") {
     // Dashboard actions the phone can take on one agent: stop, merge.
     const body = await readJsonBody(req);

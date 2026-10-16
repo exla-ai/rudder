@@ -931,8 +931,19 @@ function AgentScreen(ws, run) {
       <a class="icon-btn back" aria-label="Back to project">${icon("back")}</a>
       <div class="titles"><div class="title"></div>
         <div class="subtitle"><span class="dot"></span><span class="st"></span><span class="sep">·</span><span class="bk"></span></div></div>
+      <button type="button" class="icon-btn term-toggle" aria-label="Show the agent's terminal" aria-pressed="false">${icon("terminal")}</button>
       <button type="button" class="icon-btn more" aria-label="Agent actions" aria-haspopup="menu">${icon("more")}</button>
     </header>
+    <div class="term-panel" hidden>
+      <pre class="term-screen" aria-label="Agent terminal" aria-live="off">Loading the terminal…</pre>
+      <div class="key-strip" role="toolbar" aria-label="Keys">
+        <button type="button" data-key="esc">Esc</button><button type="button" data-key="up" aria-label="Up">↑</button>
+        <button type="button" data-key="down" aria-label="Down">↓</button><button type="button" data-key="enter">Enter</button>
+        <button type="button" data-key="tab">Tab</button><button type="button" data-key="shift-tab" aria-label="Shift Tab">⇧Tab</button>
+        <button type="button" data-key="y">y</button><button type="button" data-key="n">n</button>
+        <button type="button" data-key="ctrl-c" class="danger">^C</button>
+      </div>
+    </div>
     <div class="chat-wrap">
       <div class="scroller has-composer"><div class="chat" role="log" aria-label="Conversation"><div class="truncated-note" hidden>Showing the most recent messages</div><div class="msgs"></div><div class="typing" hidden aria-label="Agent is working"><i></i><i></i><i></i></div></div></div>
       <button type="button" class="new-pill">${icon("down")}<span>New messages</span></button>
@@ -954,6 +965,79 @@ function AgentScreen(ws, run) {
     onSubmit: (text) => { send(text); return true; },
   });
   el.querySelector(".chat-wrap").after(composer.el);
+
+  // `/` commands: the message is typed into the agent's own terminal, so its
+  // commands work. Suggest the common ones for this backend.
+  const slashBox = h(`<div class="slash-suggest" role="listbox" hidden></div>`);
+  composer.el.prepend(slashBox);
+  const SLASH = {
+    claude: [["/compact", "summarize and free context"], ["/clear", "start a fresh conversation"], ["/model opus", "switch model (or sonnet, haiku)"], ["/effort high", "reasoning effort"], ["/cost", "usage so far"], ["/context", "what fills the context"], ["/review", "review the changes"], ["/init", "write CLAUDE.md"], ["/resume", "pick a past session (use the terminal keys)"], ["/model", "model picker (use the terminal keys)"]],
+    codex: [["/compact", "summarize and free context"], ["/new", "start a fresh conversation"], ["/model", "model picker (use the terminal keys)"], ["/status", "session and usage"], ["/review", "review the changes"], ["/diff", "show the diff"], ["/init", "write AGENTS.md"], ["/approvals", "approval mode (use the terminal keys)"]],
+  };
+  const renderSlash = () => {
+    const value = composer.textarea.value;
+    const backend = findAgent(ws, run)?.backend === "codex" ? "codex" : "claude";
+    if (!value.startsWith("/") || value.includes("\n")) { slashBox.hidden = true; return; }
+    const q = value.toLowerCase();
+    const hits = SLASH[backend].filter(([cmd]) => cmd.startsWith(q) || (q.length > 1 && cmd.includes(q.slice(1)))).slice(0, 6);
+    slashBox.replaceChildren(...hits.map(([cmd, what]) => {
+      const b = h(`<button type="button" role="option"><code></code><span></span></button>`);
+      b.querySelector("code").textContent = cmd; b.querySelector("span").textContent = what;
+      b.addEventListener("click", () => {
+        composer.textarea.value = cmd; composer.textarea.dispatchEvent(new Event("input")); composer.textarea.focus();
+        slashBox.hidden = true;
+        if (what.includes("terminal keys")) setTerminal(true);
+      });
+      return b;
+    }));
+    slashBox.hidden = hits.length === 0;
+  };
+  composer.textarea.addEventListener("input", renderSlash);
+
+  // Live terminal: what the agent's screen shows right now (pickers, prompts),
+  // with real keys to drive it.
+  const termPanel = el.querySelector(".term-panel");
+  const termScreen = el.querySelector(".term-screen");
+  const termToggle = el.querySelector(".term-toggle");
+  let termOn = false;
+  let termTimer = null;
+  const pollScreen = async () => {
+    termTimer = null;
+    if (!termOn) return;
+    if (!document.hidden) {
+      try {
+        const res = await api(`/api/app/screen?workspace=${encodeURIComponent(ws)}&run=${encodeURIComponent(run)}`);
+        if (res?.text != null) {
+          const lines = res.text.split("\n");
+          while (lines.length && !lines[lines.length - 1].trim()) lines.pop();
+          termScreen.textContent = lines.join("\n") || " ";
+        } else if (termScreen.textContent === "Loading the terminal…") {
+          termScreen.textContent = "Waiting for the agent's screen…";
+        }
+      } catch (err) {
+        termScreen.textContent = err.status === 401 ? "Signed out." : err.message;
+      }
+    }
+    if (termOn) termTimer = setTimeout(pollScreen, 1000);
+  };
+  function setTerminal(on) {
+    termOn = on;
+    termPanel.hidden = !on;
+    termToggle.setAttribute("aria-pressed", String(on));
+    termToggle.classList.toggle("on", on);
+    clearTimeout(termTimer);
+    if (on) pollScreen();
+  }
+  termToggle.addEventListener("click", () => setTerminal(!termOn));
+  el.querySelector(".key-strip").addEventListener("click", async (e) => {
+    const b = e.target.closest("[data-key]");
+    if (!b) return;
+    postNative({ type: "haptic" });
+    try {
+      await api("/api/app/keys", { method: "POST", body: { workspace: ws, run, keys: b.dataset.key } });
+      clearTimeout(termTimer); setTimeout(pollScreen, 250);
+    } catch (err) { if (err.status !== 401) toast(err.message, { error: true }); }
+  });
 
   let atBottom = true;
   let firstPaint = true;
@@ -1243,6 +1327,7 @@ function AgentScreen(ws, run) {
     update: paint,
     destroy() {
       clearTimeout(timer); timer = -1;
+      termOn = false; clearTimeout(termTimer);
       document.removeEventListener("visibilitychange", onVis);
       ro.disconnect();
       document.title = "Rudder";

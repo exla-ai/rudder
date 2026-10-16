@@ -200,6 +200,21 @@ const server = http.createServer(async (req, res) => {
       setTimeout(() => { homeMode = "running"; }, 8000);
       return json(res, 200, { home: home() });
     }
+    if (p === "/api/app/screen") {
+      return json(res, 200, { updatedAt: Date.now(), text: [
+        " Select model",
+        " Switch between Claude models. Applies to this session.",
+        "",
+        "   1. Default (recommended)  Opus 5.5 for complex work",
+        " ❯ 2. Sonnet                  Sonnet 5.5 for daily coding",
+        "   3. Haiku                   Haiku 5.5 for quick answers",
+        "",
+        " Enter to confirm · Esc to exit",
+      ].join("\n") });
+    }
+    if (p === "/api/app/keys") {
+      return json(res, 200, { ok: true, status: "delivered" });
+    }
     if (p === "/api/app/repos") {
       return json(res, 200, {
         owners: ["viraatdas", "exla-ai"],

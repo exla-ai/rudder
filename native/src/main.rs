@@ -13621,6 +13621,9 @@ It will tend to agree with itself — name another with /gam <provider> <model> 
                 // Fleet-wide nudge: one message to every in-flight worker, with
                 // no task id. Same at-most-once ledger as a single steer.
                 "nudge-all" => self.deliver_nudge_all_request(&instruction),
+                // Raw keys for a live agent (the phone's key strip): what a
+                // picker opened by `/model` or `/resume` waits for.
+                "keys" => self.deliver_keys_request(&task_id, &instruction),
                 _ => self.deliver_steer_request(&task_id, &instruction),
             };
             let _ = self.write_steer_receipt(&request_id, &result);
@@ -13789,6 +13792,64 @@ It will tend to agree with itself — name another with /gam <provider> <model> 
                     status.as_str()
                 ));
                 SteerDelivery::Failed(format!("{label} is unavailable ({})", status.as_str()))
+            }
+        }
+    }
+
+    fn deliver_keys_request(&mut self, task_id: &str, keys: &str) -> SteerDelivery {
+        let Some(index) = self.agent_index_for_token(task_id) else {
+            return SteerDelivery::Failed(format!("target not found: {task_id}"));
+        };
+        let mut bytes = Vec::new();
+        for key in keys.split(',').map(str::trim).filter(|key| !key.is_empty()) {
+            match remote_key_bytes(key) {
+                Some(sequence) => bytes.extend_from_slice(sequence),
+                None => return SteerDelivery::Failed(format!("unknown key: {key}")),
+            }
+        }
+        if bytes.is_empty() {
+            return SteerDelivery::Failed("no keys".to_string());
+        }
+        let Some(terminal) = self.agents[index].terminal.as_mut() else {
+            return SteerDelivery::Failed(format!("{task_id} has no live terminal"));
+        };
+        if !terminal.is_alive() {
+            return SteerDelivery::Failed(format!("{task_id} has no live terminal"));
+        }
+        if terminal.write_input(&bytes).is_err() {
+            return SteerDelivery::Failed(format!("{task_id}: write failed"));
+        }
+        self.agents[index].last_worker_input_at = Some(Instant::now());
+        self.dirty = true;
+        SteerDelivery::Delivered
+    }
+
+    /// While a phone is looking at an agent's terminal it touches
+    /// `.rudder/runs/<id>/screen.watch`; the visible screen is mirrored to
+    /// `screen.txt` beside it (only when it changed, and only while watched).
+    fn write_watched_screens(&mut self) {
+        let repo = self.cwd.clone();
+        for run in &mut self.agents {
+            let dir = native_run_dir(&repo, &run.id);
+            let watched = std::fs::metadata(dir.join("screen.watch"))
+                .and_then(|meta| meta.modified())
+                .ok()
+                .and_then(|modified| modified.elapsed().ok())
+                .is_some_and(|age| age < Duration::from_secs(20));
+            if !watched {
+                continue;
+            }
+            let Some(terminal) = run.terminal.as_mut() else {
+                continue;
+            };
+            let text = terminal.visible_lines_snapshot().join("\n");
+            let target = dir.join("screen.txt");
+            if std::fs::read_to_string(&target).ok().as_deref() == Some(text.as_str()) {
+                continue;
+            }
+            let temp = dir.join(format!("screen.txt.{}.tmp", std::process::id()));
+            if std::fs::write(&temp, &text).is_ok() {
+                let _ = std::fs::rename(&temp, &target);
             }
         }
     }
@@ -18576,6 +18637,7 @@ What to do\n\
             self.last_steer_poll = Instant::now();
             self.drain_diff_summaries();
             self.poll_steer_inbox();
+            self.write_watched_screens();
             self.poll_handoff_inbox();
             self.reconcile_rows();
             self.maybe_emit_heartbeat();
@@ -20754,4 +20816,28 @@ pub(crate) fn attach_label(run: &AgentRun) -> String {
         Some(node) => format!("{node} · {title}"),
         None => title,
     }
+}
+
+/// Named keys the phone can send to an agent (`keys` steer requests).
+pub(crate) fn remote_key_bytes(key: &str) -> Option<&'static [u8]> {
+    Some(match key.to_ascii_lowercase().as_str() {
+        "esc" | "escape" => b"\x1b",
+        "enter" | "return" => b"\r",
+        "tab" => b"\t",
+        "shift-tab" | "backtab" => b"\x1b[Z",
+        "up" => b"\x1b[A",
+        "down" => b"\x1b[B",
+        "right" => b"\x1b[C",
+        "left" => b"\x1b[D",
+        "backspace" => b"\x7f",
+        "space" => b" ",
+        "ctrl-c" => b"\x03",
+        "ctrl-d" => b"\x04",
+        "y" => b"y",
+        "n" => b"n",
+        "1" => b"1",
+        "2" => b"2",
+        "3" => b"3",
+        _ => return None,
+    })
 }

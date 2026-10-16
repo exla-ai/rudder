@@ -401,6 +401,12 @@ async function handleRpc(method, params) {
   if (method === "task") {
     return await steer(project, { kind: "task", taskId: "conductor", instruction: String(params.text || "") });
   }
+  if (method === "keys") {
+    return await steer(project, { kind: "keys", taskId: String(params.runId || ""), instruction: String(params.keys || "") });
+  }
+  if (method === "screen") {
+    return readScreen(project, String(params.runId || ""));
+  }
   if (method === "action") {
     const kind = params.action === "merge" ? "merge" : params.action === "stop" ? "cancel" : null;
     if (!kind) {
@@ -452,6 +458,29 @@ async function createGithubRepo(params) {
     throw new Error(firstLine(result.stderr || result.stdout) || "GitHub refused to create the repository");
   }
   return { repo: `${owner}/${name}` };
+}
+
+// The phone's terminal view: mark the agent as watched (the dashboard mirrors
+// its visible screen to screen.txt for ~20s after each touch) and return the
+// latest mirror.
+function readScreen(project, runId) {
+  if (!/^[A-Za-z0-9._-]+$/.test(runId)) {
+    throw new Error("agent not found");
+  }
+  const dir = path.join(project.dir, ".rudder", "runs", runId);
+  if (!fs.existsSync(dir)) {
+    throw new Error("agent not found");
+  }
+  const watch = path.join(dir, "screen.watch");
+  fs.writeFileSync(watch, "");
+  const now = new Date();
+  fs.utimesSync(watch, now, now);
+  try {
+    const file = path.join(dir, "screen.txt");
+    return { text: fs.readFileSync(file, "utf8"), updatedAt: fs.statSync(file).mtimeMs };
+  } catch {
+    return { text: null, updatedAt: null };
+  }
 }
 
 // Requests go through the dashboard's own steer inbox (.rudder/steer), the same

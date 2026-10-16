@@ -26294,3 +26294,55 @@ fn dollar_input_opens_a_shell_running_the_command() {
     assert_eq!(bare.as_deref(), Some("$ shell"));
     assert!(!shared.contains("abc123"), "shell input is not shared context: {shared}");
 }
+
+// The phone's key strip and terminal view: named keys reach a live pane, and
+// its screen is mirrored to screen.txt only while something watches it.
+#[cfg(not(windows))]
+#[test]
+fn phone_keys_and_watched_screen_mirror() {
+    let _env = env_guard();
+    let dir = unique_test_repo("phone-keys");
+    let old_shell = std::env::var_os("SHELL");
+    std::env::set_var("SHELL", "/bin/sh");
+    let mut app = App::new();
+    app.cwd = dir.clone();
+    app.start_task_from_input("$");
+    let id = app.agents.last().unwrap().id.clone();
+
+    let unknown = app.deliver_keys_request(&id, "hyperspace");
+    // Type `echo phone-$((6*7))` one key at a time is not possible with named
+    // keys alone, so paste the command and press the named Enter key.
+    let _ = app.agents.last_mut().unwrap().terminal.as_mut().unwrap().write_input(b"echo phone-$((6*7))");
+    let delivered = app.deliver_keys_request(&id, "enter");
+
+    let run_dir = native_run_dir(&dir, &id);
+    std::fs::create_dir_all(&run_dir).unwrap();
+    app.write_watched_screens();
+    let unwatched = run_dir.join("screen.txt").exists();
+    std::fs::write(run_dir.join("screen.watch"), "").unwrap();
+    let mut screen = String::new();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline && !screen.contains("phone-42") {
+        app.poll_agents();
+        if let Some(terminal) = app.agents.last_mut().and_then(|run| run.terminal.as_mut()) {
+            let _ = terminal.drain_output();
+        }
+        app.write_watched_screens();
+        screen = std::fs::read_to_string(run_dir.join("screen.txt")).unwrap_or_default();
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    for run in &mut app.agents {
+        run.terminal = None;
+    }
+    match old_shell {
+        Some(value) => std::env::set_var("SHELL", value),
+        None => std::env::remove_var("SHELL"),
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert!(matches!(unknown, SteerDelivery::Failed(_)), "unknown keys are refused");
+    assert!(matches!(delivered, SteerDelivery::Delivered), "enter reached the live pane");
+    assert!(!unwatched, "nothing is mirrored while nobody watches");
+    assert!(screen.contains("phone-42"), "the watched screen shows the command's output: {screen}");
+}

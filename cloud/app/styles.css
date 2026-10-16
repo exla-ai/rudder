@@ -616,3 +616,19 @@ dialog.sheet .dialog { border-radius: 22px 22px 0 0; padding-bottom: calc(var(--
 .new-repo-form .slash { color: var(--muted); }
 .new-repo-form .row .input { flex: 1; min-width: 0; }
 .new-repo-form .check { display: flex; align-items: center; gap: 8px; font-size: 15px; }
+
+/* Agent terminal panel + key strip + slash suggestions */
+.term-toggle.on { color: var(--accent, #4a7bd8); }
+.term-panel { border-bottom: 1px solid var(--line, rgba(127,127,127,.18)); background: var(--surface-2, rgba(127,127,127,.06)); }
+.term-screen { margin: 0; padding: 10px 12px; max-height: 38vh; overflow: auto; font: 11px/1.35 var(--mono, ui-monospace, "SF Mono", Menlo, monospace);
+  white-space: pre; color: inherit; -webkit-overflow-scrolling: touch; }
+.key-strip { display: flex; gap: 6px; padding: 8px 10px 10px; overflow-x: auto; -webkit-overflow-scrolling: touch; }
+.key-strip button { flex: none; min-width: 44px; height: 36px; padding: 0 12px; border-radius: 9px; border: 1px solid var(--line, rgba(127,127,127,.25));
+  background: var(--card, transparent); color: inherit; font: 600 14px/1 var(--mono, ui-monospace, monospace); }
+.key-strip button:active { transform: scale(.96); }
+.key-strip button.danger { color: var(--red, #c0392b); }
+.slash-suggest { display: flex; flex-direction: column; padding: 4px 6px 0; max-height: 34vh; overflow-y: auto; }
+.slash-suggest button { display: flex; gap: 10px; align-items: baseline; text-align: left; padding: 9px 8px; border: 0; border-radius: 10px; background: transparent; color: inherit; font: inherit; min-height: 40px; }
+.slash-suggest button:active { background: var(--surface-2, rgba(127,127,127,.08)); }
+.slash-suggest code { font: 600 14px var(--mono, ui-monospace, monospace); }
+.slash-suggest span { color: var(--muted); font-size: 13px; }

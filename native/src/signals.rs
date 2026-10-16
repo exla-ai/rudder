@@ -626,7 +626,8 @@ pub(crate) fn remote_control_session_name(run_id: &str) -> Option<String> {
         .unwrap_or_else(|| "rudder".to_string());
     // Run ids end in a short unique suffix ("...-main-branch-29964").
     let short = run_id.rsplit('-').next().unwrap_or(run_id);
-    Some(format!("{repo} · {short}"))
+    // "(cloud)": in the Claude app these sit next to laptop sessions.
+    Some(format!("{repo} · {short} (cloud)"))
 }
 
 pub(crate) fn augment_worker_command(

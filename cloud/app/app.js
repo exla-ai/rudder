@@ -264,7 +264,7 @@ function openAddProject() {
     for (const r of shown) {
       const b = h(`<button type="button" class="repo-row" role="listitem"><span class="rn"></span><span class="rd"></span></button>`);
       b.querySelector(".rn").textContent = owner ? r.repo.slice(owner.length + 1) : r.repo;
-      b.querySelector(".rd").textContent = [r.open ? "on your home machine" : null, r.private ? "private" : "public", r.updatedAt ? rel(toMs(r.updatedAt)) : null, r.description].filter(Boolean).join(" · ");
+      b.querySelector(".rd").textContent = [r.open ? "on your cloud machine" : null, r.private ? "private" : "public", r.updatedAt ? rel(toMs(r.updatedAt)) : null, r.description].filter(Boolean).join(" · ");
       b.addEventListener("click", () => openProjectRepo(r.repo, dlg));
       listEl.appendChild(b);
     }
@@ -355,7 +355,7 @@ function openModelPicker(ws) {
       });
       listEl.appendChild(b);
     }
-    if (!options.length) listEl.appendChild(h(`<div class="repo-note">No ${BACKEND[backend]} models found on the home machine.</div>`));
+    if (!options.length) listEl.appendChild(h(`<div class="repo-note">No ${BACKEND[backend]} models found on the cloud machine.</div>`));
   }
   dlg.addEventListener("click", (e) => {
     if (e.target === dlg || e.target.closest('[data-act="close"]')) dlg.close();
@@ -379,7 +379,7 @@ function openSettings() {
   const home = s.home;
   const rows = [
     ["Account", s.email || "Signed in"],
-    ["Home machine", home ? machineLabel(home).label : "None"],
+    ["Cloud machine", home ? machineLabel(home).label : "None"],
   ];
   if (home?.tailnet?.dnsName) rows.push(["Tailnet", home.tailnet.dnsName]);
   if (NATIVE) rows.push(["App", "iOS"]);
@@ -640,7 +640,7 @@ async function deleteAgent(ws, a, { after } = {}) {
   const live = a.status === "working" || a.status === "waiting";
   const ok = await confirmDialog({
     title: "Delete this agent?",
-    body: `"${a.title || "This agent"}"${live ? " stops, and its" : "'s"} conversation and workspace are deleted from your home machine and every screen. This cannot be undone.`,
+    body: `"${a.title || "This agent"}"${live ? " stops, and its" : "'s"} conversation and workspace are deleted from your cloud machine and every screen. This cannot be undone.`,
     confirm: "Delete",
     danger: true,
   });
@@ -710,7 +710,7 @@ function SignInScreen() {
   const el = h(`<section class="screen"><div class="signin">
     <img class="logo" src="/app/icon.svg" alt="">
     <h1>Rudder</h1>
-    <p>Steer your coding agents from anywhere. Sign in to reach your home machine.</p>
+    <p>Your coding agents run on a cloud machine, around the clock, laptop open or not. Sign in to steer them from anywhere.</p>
     <div class="actions"></div></div></section>`);
   const actions = el.querySelector(".actions");
   // A paired device needs no OAuth: `rudder cloud app` on the laptop prints a
@@ -803,7 +803,7 @@ function HomeScreen() {
   // Machine card (built once)
   const machine = h(`<div class="card machine">
       <div class="m-icon">${icon("server")}</div>
-      <div class="m-body"><div class="m-title"><span>Home machine</span><span class="pill"><span class="dot"></span><span class="pl"></span></span></div>
+      <div class="m-body"><div class="m-title"><span>Cloud machine</span><span class="pill"><span class="dot"></span><span class="pl"></span></span></div>
       <div class="m-sub"></div></div>
       <button type="button" class="btn small accent wake" hidden>${icon("power")}<span>Wake</span></button>
     </div>`);
@@ -813,7 +813,7 @@ function HomeScreen() {
     try {
       const res = await api("/api/app/wake", { method: "POST", body: {} });
       if (res?.home && store.state) store.state.home = res.home;
-      toast("Waking your home machine. This can take up to a minute.");
+      toast("Waking your cloud machine. This can take up to a minute.");
       update();
     } catch (err) { if (err.status !== 401) toast(err.message, { error: true }); }
     finally { wakeBtn.disabled = false; }
@@ -865,7 +865,8 @@ function HomeScreen() {
         if (home.tailnet?.dnsName) bits.push(home.tailnet.dnsName);
         else if (home.tailnet?.hostname) bits.push(home.tailnet.hostname);
         bits.push(`${home.activeAgents || 0} active ${home.activeAgents === 1 ? "agent" : "agents"}`);
-        subText = bits.join(" · ");
+        // It is not the user's computer: say where it runs and why that matters.
+        subText = `Runs in the cloud, so agents keep going with your laptop closed · ${bits.join(" · ")}`;
       }
       // A login the cloud machine can't use stops agents cold ("Login expired"):
       // say which, and the fix, before anyone starts a task.
@@ -898,8 +899,8 @@ function HomeScreen() {
 
     if (!projects.length) {
       const body = home
-        ? "Add a GitHub repo to clone it onto your home machine, then start agents on it from here."
-        : "No home machine yet. Run <code>rudder cloud</code> in a repo on your laptop, or add a project.";
+        ? "Add a GitHub repo to clone it onto your cloud machine, then start agents on it from here."
+        : "No cloud machine yet. Run <code>rudder cloud</code> in a repo on your laptop, or add a project.";
       const key = home ? "h" : "n";
       if (!emptyEl || emptyEl.dataset.k !== key) {
         emptyEl = emptyState({ ic: home ? "folder" : "server", title: home ? "No projects yet" : "Welcome to Rudder", body });
@@ -1033,7 +1034,7 @@ function ProjectScreen(ws) {
       groupsEl.replaceChildren();
       if (!emptySlot.querySelector(".empty")) {
         const back = h(`<a class="btn" href="/app" data-link>All projects</a>`);
-        emptySlot.replaceChildren(emptyState({ ic: "folder", title: "Project not found", body: "It may still be cloning onto your home machine, or it was removed." , action: back }));
+        emptySlot.replaceChildren(emptyState({ ic: "folder", title: "Project not found", body: "It may still be cloning onto your cloud machine, or it was removed." , action: back }));
       }
       composer.el.hidden = true;
       return;
@@ -1053,7 +1054,7 @@ function ProjectScreen(ws) {
       pill.querySelector(".dot").classList.toggle("live", p.dashboard === "starting" || p.dashboard === "cloning");
       setText(pill.querySelector(".pl"), d.label);
       const sub = banner.querySelector(".m-sub");
-      setText(sub, p.failureReason || (p.dashboard === "cloning" ? `Cloning ${p.repo} onto your home machine.` : p.dashboard === "starting" ? "Starting the Rudder dashboard for this project." : "The Rudder dashboard for this project is not running."));
+      setText(sub, p.failureReason || (p.dashboard === "cloning" ? `Cloning ${p.repo} onto your cloud machine.` : p.dashboard === "starting" ? "Starting the Rudder dashboard for this project." : "The Rudder dashboard for this project is not running."));
       sub.classList.toggle("err", !!p.failureReason);
     } else statusSlot.replaceChildren();
 
@@ -1190,7 +1191,7 @@ function AgentScreen(ws, run) {
           termScreen.textContent = "Waiting for the agent's screen…";
         }
       } catch (err) {
-        termScreen.textContent = err.status === 401 ? "Signed out." : err.waking ? "Waking the home machine…" : err.message;
+        termScreen.textContent = err.status === 401 ? "Signed out." : err.waking ? "Waking the cloud machine…" : err.message;
       }
     }
     if (termOn) termTimer = setTimeout(pollScreen, 1000);
@@ -1410,7 +1411,7 @@ function AgentScreen(ws, run) {
     for (const p of store.pending.get(key) || []) items.push({ kind: "pending", id: p.id, p });
 
     if (!items.length && t.waking) {
-      items.push({ kind: "error", id: "waking", text: "Waking the home machine. Your agents reopen in about a minute." });
+      items.push({ kind: "error", id: "waking", text: "Waking the cloud machine. Your agents reopen in about a minute." });
     } else if (!items.length && !t.error) {
       items.push({ kind: "empty", id: "empty" });
     } else if (!items.length && t.error) {

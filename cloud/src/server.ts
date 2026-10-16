@@ -5187,7 +5187,7 @@ function attachHomeControl(homeId: string, ws: WebSocket): void {
 async function homeRpc(homeId: string, method: string, params: JsonRecord, timeoutMs = HOME_RPC_TIMEOUT_MS): Promise<Json> {
   const control = homeControls.get(homeId);
   if (!isOpen(control)) {
-    throw Object.assign(new Error("the home machine is not connected yet; it may still be starting"), { status: 503 });
+    throw Object.assign(new Error("the cloud machine is not connected yet; it may still be starting"), { status: 503 });
   }
   const id = randomUUID();
   return await new Promise<Json>((resolve, reject) => {
@@ -5677,7 +5677,7 @@ async function handleAppApi(req: IncomingMessage, res: ServerResponse, url: URL)
   const homeConnected = isOpen(homeControls.get(home.id));
   if (!homeConnected && req.method === "GET") {
     wakeHomeInBackground(account.accountId);
-    sendJson(res, 503, { error: "Waking the home machine…", waking: true });
+    sendJson(res, 503, { error: "Waking the cloud machine…", waking: true });
     return;
   }
   if (!homeConnected) {
@@ -5685,7 +5685,7 @@ async function handleAppApi(req: IncomingMessage, res: ServerResponse, url: URL)
       await homeWithControl(account.accountId);
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
-      throw Object.assign(new Error(`the home machine is not connected yet (${reason})`), { status: 503 });
+      throw Object.assign(new Error(`the cloud machine is not connected yet (${reason})`), { status: 503 });
     }
   }
   if (req.method === "GET" && url.pathname === "/api/app/transcript") {
@@ -5881,7 +5881,7 @@ async function homeWithControl(accountId: string): Promise<Workspace> {
   const deadline = Date.now() + 90_000;
   while (!isOpen(homeControls.get(home.id))) {
     if (Date.now() > deadline) {
-      throw Object.assign(new Error("the home machine is still starting; try again in a moment"), { status: 503 });
+      throw Object.assign(new Error("the cloud machine is still starting; try again in a moment"), { status: 503 });
     }
     await sleep(1000);
   }

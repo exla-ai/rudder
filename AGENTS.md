@@ -760,7 +760,7 @@ brain lives in the cloud, and the phone is a first-class client.
   workspace only; Stopped/Done/Failed/Merged/Migrated, cloud-owned, orchestrators,
   shell panes, /gam pairs and merge resolvers are left alone. Capped at 12, most
   recently used first.
-- **Coming back to a terminal.** The attach client pings the relay every 5s and
+- **Coming back to a terminal.** The phone app calls the home the "cloud machine" (it is not the user's computer) and Remote Control sessions are named `<repo> · <id> (cloud)`. The attach client pings the relay every 5s and
   treats a missed pong (20s) or a timer that fired 15s late (the laptop slept)
   as a dropped connection, which `attachWithReconnect` reopens (waking the home
   through `home/open`). Bare `rudder cloud` on a repo already open on the home,

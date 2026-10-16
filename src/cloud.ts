@@ -3106,7 +3106,7 @@ async function attachWithReconnect(
   let attempts = 0;
   while (result === "dropped" && attempts < 120) {
     attempts += 1;
-    process.stderr.write(`\r\nLost the connection to Rudder Cloud (it may be restarting). Reconnecting${attempts > 1 ? ` (try ${attempts})` : ""}...\r\n`);
+    process.stderr.write(`\r\nLost the connection to Rudder Cloud (laptop slept or the network dropped; your agents kept running). Reconnecting${attempts > 1 ? ` (try ${attempts})` : ""}...\r\n`);
     await sleep(Math.min(15_000, 2_000 * attempts));
     try {
       await reopen?.();

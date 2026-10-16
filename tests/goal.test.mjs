@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { DEFAULT_SUCCESS, deriveGoal, deriveSuccess, extractSuccess, formatGoalPrompt } from "../dist/goal.js";
-import { renderContract } from "../dist/brain.js";
+import { PARALLEL_WORK_RULE, renderContract } from "../dist/brain.js";
+import fs from "node:fs";
 
 // ---------------------------------------------------------------------------
 // The canonical objective-format convention: every spawned agent's launch prompt
@@ -147,4 +148,23 @@ test("renderContract derives goal/success when the spec omits them", () => {
   const contract = renderContract(spec);
   assert.equal(contract.split("\n")[0], "Objective: refactor the scheduler");
   assert.ok(contract.split("\n")[1].startsWith("Done when: "));
+});
+
+test("renderContract asks the worker to parallelize, in parity with the native prompt", () => {
+  const contract = renderContract({
+    runId: "r1",
+    task: "add a toggle",
+    goal: "",
+    success: "",
+    createdAt: "2026-01-01T00:00:00.000Z",
+    repo: { root: "/tmp/repo", branch: "main", baseCommit: "abc", status: [] },
+    instructionsFiles: [],
+    acceptanceCriteria: ["Do it."],
+    suggestedTests: [],
+  });
+  assert.ok(contract.includes(`- ${PARALLEL_WORK_RULE}`));
+  assert.ok(PARALLEL_WORK_RULE.includes("concurrent subagents"));
+  // The Rust worker context block carries the same sentence.
+  const tasksRs = fs.readFileSync(new URL("../native/src/tasks.rs", import.meta.url), "utf8");
+  assert.ok(tasksRs.includes(`"- ${PARALLEL_WORK_RULE}"`), "native parallel_work_rule! drifted from TS");
 });

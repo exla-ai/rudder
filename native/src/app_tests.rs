@@ -1150,6 +1150,21 @@ fn execution_prompt_preserves_task_inside_legacy_rudder_wrapper() {
 }
 
 #[test]
+fn every_agent_prompt_asks_for_parallel_work() {
+    // Execute workers and the main owner carry the full rule in their context block.
+    for prompt in [execution_prompt("fix the bug"), main_task_prompt("fix the bug")] {
+        assert!(prompt.contains(PARALLEL_WORK_RULE), "{prompt}");
+    }
+    assert!(PARALLEL_WORK_RULE.contains("concurrent subagents"));
+    assert!(PARALLEL_WORK_RULE.contains("Never let two subagents edit the same file"));
+    assert!(oneoff_prompt("q").contains("concurrent subagents"));
+    // Planners and orchestrators shape the DAG for parallelism.
+    assert!(rudder_plan_prompt("x").contains(PARALLEL_PLAN_RULE));
+    assert!(orchestrator_system_prompt().contains(PARALLEL_PLAN_RULE));
+    assert!(codex_orchestrator_prompt("x").contains(PARALLEL_PLAN_RULE));
+}
+
+#[test]
 fn execution_prompt_tells_the_worker_it_is_a_jj_runtime() {
     let prompt = execution_prompt("add a feature");
     assert!(prompt.contains("jj (Jujutsu)"), "names the VCS: {prompt}");

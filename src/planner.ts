@@ -59,6 +59,8 @@ const DEP_RULES = [
   "- A task that CONSUMES another task's produced code is HARD on it. Concretely: tests that import or exercise code another task writes; code that imports a module/function/type another task creates; integration or wiring that calls an API another task defines. The child can technically start, but it cannot SUCCEED (imports resolve, tests pass) until that code exists — so it must wait for the merge. Reading the parent's diff as soft context is NOT enough when the child must execute the parent's code.",
   "- soft = context-sharing (the default): the child runs in parallel and is fed the parent's diff once the parent merges. Use it when the child can succeed on its own and the parent's work is merely informative (parallel features, doc updates, sibling modules that do not import each other).",
   "- Prefer the MINIMAL hard-edge set. Default to soft for independent work, but do NOT under-classify: if the child executes or imports the parent's code, it is hard.",
+  // Mirrors PARALLEL_PLAN_RULE in native/src/tasks.rs.
+  "- Favor independent nodes joined by soft edges so workers run in parallel; add a hard edge only for a real code dependency, never as a default chain.",
   "- No cycles.",
 ].join("\n");
 

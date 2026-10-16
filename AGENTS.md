@@ -950,6 +950,15 @@ is a separate piece of work.
   `features.plugins=true` and `features.computer_use=true`. Read-only planner/conductor
   commands set both false. Keep the TS and Rust command builders in parity and retain
   `notify=[]` before `signals::augment_worker_command` installs the per-run notifier.
+- **Parallel-work prompt guidance.** Every implementing agent (Execute/DAG worker,
+  Main owner, `/ask` one-off, and the TS `renderContract` used by `rudder run`/cloud
+  sails/the daemon) is told to batch independent tool calls in one turn and fan
+  independent subtasks out to concurrent subagents, never two on the same file.
+  Text lives in `parallel_work_rule!` (`native/src/tasks.rs`) and its TS mirror
+  `PARALLEL_WORK_RULE` (`src/brain.ts`); `tests/goal.test.mjs` fails if they drift.
+  Planners/orchestrators get `PARALLEL_PLAN_RULE` (soft-edged parallel nodes over
+  needless hard chains), mirrored in `src/planner.ts` `DEP_RULES`. Cloud has no
+  separate prompt path: the worker runs the same `rudder` binaries.
 - **Style.** No em dashes in copy or UI strings. Avoid "massively parallel"
   framing in marketing copy.
 - **`dist/` is build output, not committed** (removed from git in PR #15).

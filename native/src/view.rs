@@ -183,7 +183,7 @@ fn view_terminal(output: &ViewOutput, rows: u16, cols: u16) -> ViewTerminal {
 /// frame on every resize or catch-up, which is the flash people saw. Marking
 /// the previous buffer with a glyph no frame ever draws makes every cell
 /// differ, so the old picture is painted over in place.
-fn force_full_repaint(terminal: &mut ViewTerminal) {
+pub(crate) fn force_full_repaint<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>) {
     let buffer = terminal.current_buffer_mut();
     for cell in buffer.content.iter_mut() {
         cell.set_symbol(REPAINT_SENTINEL);

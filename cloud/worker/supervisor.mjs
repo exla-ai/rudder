@@ -222,6 +222,9 @@ function connect() {
         sessionId,
       }));
       flushPendingOutput(socket);
+      // The relay starts a fresh replay buffer for this socket: begin it with
+      // a whole picture.
+      signalRepaint();
       resolve(socket);
     });
     socket.on("message", (data, isBinary) => {
@@ -303,6 +306,10 @@ function handleControl(text) {
     }
     return;
   }
+  if (payload.type === "repaint") {
+    signalRepaint();
+    return;
+  }
   if (payload.type === "probe") {
     // Latency probe: reply immediately so `rudder cloud attach --latency-probe`
     // can measure the pure transport round trip, excluding the TUI render path.
@@ -314,6 +321,21 @@ function handleControl(text) {
         // ignore
       }
     }
+  }
+}
+
+// A laptop came back and wants every cell again. SIGWINCH makes the
+// dashboard redraw the whole screen without changing its size (a same-size
+// resize never reaches it: the kernel drops it). The PTY child leads its own
+// process group, which the dashboard shares.
+function signalRepaint() {
+  if (exited || !term.pid) {
+    return;
+  }
+  try {
+    process.kill(-term.pid, "SIGWINCH");
+  } catch {
+    try { process.kill(term.pid, "SIGWINCH"); } catch { /* ignore */ }
   }
 }
 

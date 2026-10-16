@@ -718,6 +718,13 @@ and asks the promoted client for its current size. Ctrl+C is never buffered whil
 worker is absent, because replaying an old interrupt into the next worker boot kills the
 new dashboard before it can reconnect.
 
+The exception is the SAME terminal coming back. `rudder cloud` attaches with
+`?client=<id>`, one id per run, and a socket with the id of an existing client replaces
+it, control and buffered input included. A laptop that slept leaves a half-open socket
+the relay still counts as controller until a ping fails (`SOCKET_PING_MS`, now 15s), and
+before this the returning terminal sat read-only with its keys dropped. A client without
+an id, or with another id, still only watches.
+
 ### 9.8 Worker image (`cloud/worker/`)
 `Dockerfile` (base `node:22-slim`, runs as non-root `rudder`) + `entrypoint.sh` +
 `supervisor.mjs`. The supervisor installs the agent CLIs (claude-code, codex, acpx,
@@ -788,6 +795,24 @@ brain lives in the cloud, and the phone is a first-class client.
   through `home/open`). Bare `rudder cloud` on a repo already open on the home,
   and `rudder cloud attach` with no id, reattach without the first-run
   local-work warning and .env offer.
+- **A drop is a badge, not an interruption (`src/attach-session.ts`).** One
+  `AttachSession` holds the terminal for the whole attach, reconnects included:
+  alternate screen, raw keys, mouse and keyboard flags are taken once and given
+  back once. A drop used to drop you to the shell with a message, wait up to
+  15s, and repaint the dashboard into the main buffer. Now the last picture
+  stays, a badge sits top right (`⟳ Reconnecting · your agents keep running`,
+  drawn with save/restore cursor and erased by repainting its cells from the
+  predictor's screen model), keys typed in the gap are queued (64KB) and sent
+  first on the next connection, and Ctrl+C is never queued: twice within 3s
+  leaves. Retries go 250ms, 1s, 2s, 3s, then every 5s. The same badge replaces
+  the old lines printed into the picture for "worker disconnected" and
+  "read-only". Every connection sends `{type:"repaint"}`. The supervisors turn it
+  into a SIGWINCH to the dashboard's process group, and the dashboard treats a
+  resize to the same size as "draw every cell" (`repaint_all` +
+  `force_full_repaint`, painted over in place, no clear), because the relay's
+  replay is only the tail of the output. The supervisors also repaint when their
+  own socket reconnects, so the relay's fresh replay buffer starts with a whole
+  frame.
 - **Opening the app wakes the home.** `/api/app/state` starts a sleeping or
   disconnected home in the background (`wakeHomeInBackground`, 60s cooldown after
   a failed wake). Polled reads (transcript, screen) answer `503 {waking:true}`
@@ -886,7 +911,8 @@ the same fingerprint; migrated-agent fresh-prompt fallback is silent on a corrup
 (`rdrw_*`) and Rudder CLI tokens never expire/rotate; an expired presigned URL can hang
 silently if the snapshot-url endpoint is unreachable; BYOC has no crash timeout (can sit
 "running"); OAuth reconfig has no rollback; attach-during-restart replays the pre-pause
-buffer; `includeRudderState` copies all `run.json` with no pruning. The cloud path is
+buffer (a client then asks for a repaint, which a worker image older than 3.1.11 ignores);
+`includeRudderState` copies all `run.json` with no pruning. The cloud path is
 functional but less battle-tested than the local dashboard; treat it as beta.
 
 ---

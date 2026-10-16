@@ -1662,6 +1662,10 @@ struct App {
     /// after a delete), so hammering dd during a slow delete serially wiped
     /// every workspace on the board. Field report 2026-08-14.
     frames_drawn: u64,
+    /// The next frame repaints every cell (in place, no clear). Set by a
+    /// SIGWINCH: `rudder cloud` asks for one when it reconnects, because the
+    /// relay's replay is only the tail of what was drawn.
+    repaint_all: bool,
     delete_armed_frame: u64,
     /// Results from background work (workspace removal) land here; poll_agents
     /// drains them into the notice line.
@@ -2949,6 +2953,7 @@ impl App {
             cloud_mode,
             delete_pending: None,
             frames_drawn: 0,
+            repaint_all: false,
             delete_armed_frame: 0,
             bg_notice_tx: bg_notices.0,
             bg_notice_rx: bg_notices.1,
@@ -20463,6 +20468,9 @@ fn run(terminal: &mut Tui) -> Result<()> {
             let draw_started = Instant::now();
             let mut render_build_us = 0_u64;
             app.begin_view_frame(LOCAL_VIEW);
+            if std::mem::take(&mut app.repaint_all) {
+                force_full_repaint(terminal);
+            }
             // Synchronized output (view.rs): the terminal swaps the frame in
             // whole instead of painting it as the bytes arrive.
             let _ = terminal.backend_mut().write_all(SYNC_BEGIN.as_bytes());
@@ -21138,6 +21146,9 @@ fn handle_event(app: &mut App, event: Event) -> bool {
             false
         }
         Event::Resize(_, _) => {
+            // A real size change repaints anyway; a SIGWINCH with the same
+            // size is a request for the whole picture again.
+            app.repaint_all = true;
             app.mark_dirty();
             false
         }

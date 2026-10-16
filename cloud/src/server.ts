@@ -597,7 +597,8 @@ const HOME_CONTROL_PATH_RE = /^\/api\/rudder\/home\/([^/]+)\/control$/;
 const REPLAY_BUFFER_BYTES = 256 * 1024;
 const PENDING_INPUT_BYTES = 64 * 1024;
 const MAX_SOCKET_BUFFER_BYTES = 1024 * 1024;
-const SOCKET_PING_MS = 30_000;
+// A dead client socket (a laptop that slept) is noticed within two of these.
+const SOCKET_PING_MS = 15_000;
 
 type Channel = {
   worker?: WebSocket;
@@ -693,7 +694,7 @@ function handleSailUpgrade(
     destroyUpgrade(socket, 403);
     return;
   }
-  wss.handleUpgrade(req, socket, head, (ws) => attachClient("sail", sailId, ws));
+  wss.handleUpgrade(req, socket, head, (ws) => attachClient("sail", sailId, ws, attachClientId(req)));
 }
 
 function handleWorkspaceUpgrade(
@@ -741,7 +742,7 @@ function handleWorkspaceUpgrade(
     destroyUpgrade(socket, 403);
     return;
   }
-  wss.handleUpgrade(req, socket, head, (ws) => attachClient("workspace", workspaceId, ws));
+  wss.handleUpgrade(req, socket, head, (ws) => attachClient("workspace", workspaceId, ws, attachClientId(req)));
 }
 
 function destroyUpgrade(socket: Duplex, status: number): void {
@@ -837,8 +838,38 @@ function attachWorker(kind: ChannelKind, id: string, ws: WebSocket): void {
   ws.on("error", () => undefined);
 }
 
-function attachClient(kind: ChannelKind, id: string, ws: WebSocket): void {
+// Which terminal a client socket is: `rudder cloud` sends one id for its whole
+// run, reconnects included.
+const clientIds = new WeakMap<WebSocket, string>();
+
+function attachClientId(req: IncomingMessage): string | undefined {
+  try {
+    const value = new URL(req.url || "/", baseURL).searchParams.get("client") ?? "";
+    return /^[A-Za-z0-9_-]{8,64}$/.test(value) ? value : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function attachClient(kind: ChannelKind, id: string, ws: WebSocket, clientId?: string): void {
   const channel = getChannel(kind, id);
+  if (clientId) {
+    // The same terminal coming back (its laptop slept, the Wi-Fi changed):
+    // the socket it left behind is dead even if this relay has not noticed
+    // yet. Take its place, control and its buffered input included, instead
+    // of watching it read-only until a ping times out.
+    for (const previous of channel.clients) {
+      if (clientIds.get(previous) !== clientId) {
+        continue;
+      }
+      channel.clients.delete(previous);
+      if (channel.controller === previous) {
+        channel.controller = undefined;
+      }
+      try { previous.terminate(); } catch { /* ignore */ }
+    }
+    clientIds.set(ws, clientId);
+  }
   channel.clients.add(ws);
   // One terminal owns input + PTY geometry at a time. A second observer must
   // not steal control merely by connecting: doing so resized the shared PTY to

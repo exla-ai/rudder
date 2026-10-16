@@ -224,6 +224,9 @@ class Project {
         this.pending = [];
         this.pendingBytes = 0;
       }
+      // The relay starts a fresh replay buffer for this socket: begin it with
+      // a whole picture, so the next laptop to attach sees one.
+      this.repaint();
     });
     socket.on("message", (data, isBinary) => {
       if (isBinary && Buffer.isBuffer(data)) {
@@ -242,6 +245,8 @@ class Project {
         try { this.term?.resize(this.cols, this.rows); } catch { /* ignore */ }
       } else if (payload?.type === "probe") {
         socket.send(JSON.stringify({ type: "probe-reply", id: payload.id ?? null }));
+      } else if (payload?.type === "repaint") {
+        this.repaint();
       }
       // "signal" (Ctrl+C from a detaching laptop) is deliberately ignored: the
       // dashboard here outlives any one terminal attached to it.
@@ -258,6 +263,13 @@ class Project {
     socket.on("error", () => {
       try { socket.terminate(); } catch { /* ignore */ }
     });
+  }
+
+  // A laptop came back and wants every cell again. SIGWINCH makes the
+  // dashboard redraw the whole screen without changing its size (a same-size
+  // resize never reaches it: the kernel drops it).
+  repaint() {
+    signalRepaint(this.term?.pid);
   }
 
   buffer(chunk) {
@@ -283,6 +295,19 @@ class Project {
 
   agents() {
     return readAgents(this.dir);
+  }
+}
+
+// The dashboard is the PTY's session leader; its process group is the
+// rudder launcher and rudder-native (agents run in PTYs of their own).
+function signalRepaint(pid) {
+  if (!pid) {
+    return;
+  }
+  try {
+    process.kill(-pid, "SIGWINCH");
+  } catch {
+    try { process.kill(pid, "SIGWINCH"); } catch { /* ignore */ }
   }
 }
 

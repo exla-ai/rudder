@@ -26992,3 +26992,63 @@ fn claude_hooks_report_the_live_session_and_the_row_follows_it() {
     let _ = fs::remove_dir_all(&dir);
     assert_eq!(adopted.as_deref(), Some("3709e163-3eb4-489f-a5a9-15353f4aa59b"));
 }
+
+/// `rudder cloud` reconnecting sends the dashboard a SIGWINCH at the SAME size
+/// (the relay's replay is only the tail of the output, so the laptop needs the
+/// whole picture again). A same-size resize changes nothing ratatui can see, so
+/// it must force every cell out, painted over in place rather than cleared.
+#[test]
+fn a_same_size_sigwinch_repaints_every_cell_in_place() {
+    use ratatui::backend::CrosstermBackend;
+    use ratatui::layout::Rect;
+    use ratatui::widgets::Paragraph;
+    use ratatui::{Terminal, TerminalOptions, Viewport};
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Clone, Default)]
+    struct Sink(Arc<Mutex<Vec<u8>>>);
+    impl std::io::Write for Sink {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let mut app = App::new();
+    assert!(!handle_event(&mut app, Event::Resize(80, 24)));
+    assert!(app.repaint_all, "a SIGWINCH asks for the whole picture");
+
+    let sink = Sink::default();
+    let mut terminal = Terminal::with_options(
+        CrosstermBackend::new(sink.clone()),
+        TerminalOptions {
+            viewport: Viewport::Fixed(Rect::new(0, 0, 20, 3)),
+        },
+    )
+    .unwrap();
+    let draw = |terminal: &mut Terminal<CrosstermBackend<Sink>>| {
+        terminal
+            .draw(|frame| frame.render_widget(Paragraph::new("hello\nworld"), frame.area()))
+            .unwrap();
+        String::from_utf8_lossy(&std::mem::take(&mut *sink.0.lock().unwrap())).into_owned()
+    };
+    assert!(draw(&mut terminal).contains("hello"));
+    let unchanged = draw(&mut terminal);
+    assert!(
+        !unchanged.contains("hello"),
+        "an unchanged frame redraws nothing: {unchanged:?}"
+    );
+    force_full_repaint(&mut terminal);
+    let forced = draw(&mut terminal);
+    assert!(
+        forced.contains("hello") && forced.contains("world"),
+        "every cell is drawn again: {forced:?}"
+    );
+    assert!(
+        !forced.contains("\x1b[2J"),
+        "painted over in place, never cleared: {forced:?}"
+    );
+}

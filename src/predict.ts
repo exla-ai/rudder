@@ -38,6 +38,8 @@ export type PredictorOptions = {
   timeoutMs?: number;
   /** After a rollback, stop predicting for this long (ms). */
   cooldownMs?: number;
+  /** false keeps the screen model (for repaints) without predicting. */
+  predict?: boolean;
   now?: () => number;
 };
 
@@ -52,6 +54,7 @@ export class EchoPredictor {
   private readonly thresholdMs: number;
   private readonly timeoutMs: number;
   private readonly cooldownMs: number;
+  private readonly predict: boolean;
   private readonly now: () => number;
   private predictions: Prediction[] = [];
   private pendingWrites = 0;
@@ -78,7 +81,35 @@ export class EchoPredictor {
     this.thresholdMs = options.thresholdMs ?? 30;
     this.timeoutMs = options.timeoutMs ?? 1200;
     this.cooldownMs = options.cooldownMs ?? 1000;
+    this.predict = options.predict ?? true;
     this.now = options.now ?? (() => Date.now());
+  }
+
+  get cols(): number {
+    return this.model.cols;
+  }
+
+  /**
+   * Redraw cells [col, col + width) of a row exactly as the cloud last drew
+   * them, leaving the cursor where it was. Used to take an overlay (the
+   * reconnecting badge) back off the screen without asking the cloud.
+   */
+  paintRegion(row: number, col: number, width: number): string {
+    const line = this.model.buffer.active.getLine(row);
+    let start = Math.max(0, col);
+    // Starting on the right half of a wide character would split it.
+    if (start > 0 && line?.getCell(start)?.getWidth() === 0) {
+      start -= 1;
+    }
+    const end = Math.min(this.model.cols, col + width);
+    let text = `\x1b7\x1b[${row + 1};${start + 1}H`;
+    for (let c = start; c < end; c += 1) {
+      if (line?.getCell(c)?.getWidth() === 0) {
+        continue;
+      }
+      text += this.cellPaint(row, c);
+    }
+    return `${text}\x1b[0m\x1b8`;
   }
 
   /** Feed a measured round trip (ms); predictions start above the threshold. */
@@ -142,7 +173,7 @@ export class EchoPredictor {
   /** Keystrokes the user typed (already sent to the cloud). */
   onInput(data: Buffer | string): void {
     const bytes = typeof data === "string" ? Buffer.from(data, "utf8") : data;
-    if (!this.active) {
+    if (!this.predict || !this.active) {
       return;
     }
     for (const byte of bytes) {

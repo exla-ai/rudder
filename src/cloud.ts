@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { EchoPredictor } from "./predict.js";
+import { AttachSession, containsCtrlC } from "./attach-session.js";
 import fsp from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -2768,7 +2768,7 @@ async function attachToWorkspaceResult(result: JsonValue, options: CloudCommandO
   if (process.env.RUDDER_CLOUD_NO_ATTACH === "1") {
     return;
   }
-  await runAttach({ kind: "workspace", id: workspaceId, label: `workspace ${workspaceId}` }, { ...options, quietBanner: false });
+  await attachWithReconnect({ kind: "workspace", id: workspaceId, label: `workspace ${workspaceId}` }, options);
 }
 
 async function workspaceAttachById(workspaceId: string, options: CloudCommandOptions): Promise<void> {
@@ -2781,10 +2781,7 @@ async function workspaceAttachById(workspaceId: string, options: CloudCommandOpt
   if (process.env.RUDDER_CLOUD_NO_ATTACH === "1") {
     return;
   }
-  await runAttach(
-    { kind: "workspace", id: workspaceId, label: `workspace ${workspaceId}` },
-    { ...options, quietBanner: false },
-  );
+  await attachWithReconnect({ kind: "workspace", id: workspaceId, label: `workspace ${workspaceId}` }, options);
 }
 
 async function lookupWorkspaceForRepo(
@@ -3064,7 +3061,7 @@ async function attach(args: string[], options: CloudCommandOptions): Promise<voi
     await openOnHome(false, { ...options, reattach: true });
     return;
   }
-  await runAttach({ kind: "sail", id: sailId, label: sailId }, options);
+  await attachWithReconnect({ kind: "sail", id: sailId, label: sailId }, options);
 }
 
 type AttachTarget = {
@@ -3076,6 +3073,13 @@ type AttachTarget = {
 const ATTACH_PING_MS = 5_000;
 const ATTACH_PONG_TIMEOUT_MS = 20_000;
 const ATTACH_SLEEP_GAP_MS = 15_000;
+// Retry at once (a blip, a deploy), then back off; never more than 5s apart,
+// so coming back to a reachable cloud never waits long.
+const ATTACH_RETRY_DELAYS_MS = [250, 1_000, 2_000, 3_000, 5_000];
+// About half an hour of failed tries while awake (asleep, timers do not run).
+const ATTACH_MAX_RETRIES = 360;
+const ATTACH_REOPEN_TIMEOUT_MS = 20_000;
+const ATTACH_HANDSHAKE_TIMEOUT_MS = 20_000;
 
 // "dropped": the connection ended without the user leaving (the control plane
 // redeployed, the home machine restarted). Callers reconnect.
@@ -3087,40 +3091,98 @@ type AttachResult = "exited" | "failed" | "dropped";
 // it. Same class of bug as the mouse modes below. Without the protocol, macOS
 // terminals report Option+h as the character it TYPES (˙ on a US layout) rather
 // than Alt+h, so ⌥h stops hiding panes, and Alt+[ / Alt+] cannot be encoded at
-// all. Push exactly what the remote asked for: DISAMBIGUATE_ESCAPE_CODES (1) |
-// REPORT_ALTERNATE_KEYS (4). Terminals without the protocol ignore both.
-const KITTY_KEYBOARD_PUSH = "\x1b[>5u";
-const KITTY_KEYBOARD_POP = "\x1b[<u";
+// all. AttachSession.hold pushes exactly what the remote asked for:
+// DISAMBIGUATE_ESCAPE_CODES (1) | REPORT_ALTERNATE_KEYS (4). Terminals without
+// the protocol ignore it.
 
-function containsCtrlCInput(data: Buffer): boolean {
-  return data.includes(0x03) || /\x1b\[99;5(?::[123])?u/.test(data.toString("latin1"));
-}
-
-// Stay attached through a control-plane deploy or a machine restart: say what
-// happened and reconnect, instead of dropping back to the shell silently.
+// Stay attached through a dropped link, a control-plane deploy or a machine
+// restart. One AttachSession holds the terminal the whole time, so a drop is a
+// badge in the corner and a reconnect, never a trip back to the shell.
 async function attachWithReconnect(
   target: AttachTarget,
   options: CloudCommandOptions,
   reopen?: () => Promise<void>,
 ): Promise<AttachResult> {
-  let result = await runAttach(target, { ...options, quietBanner: false });
-  let attempts = 0;
-  while (result === "dropped" && attempts < 120) {
-    attempts += 1;
-    process.stderr.write(`\r\nLost the connection to Rudder Cloud (laptop slept or the network dropped; your agents kept running). Reconnecting${attempts > 1 ? ` (try ${attempts})` : ""}...\r\n`);
-    await sleep(Math.min(15_000, 2_000 * attempts));
-    try {
-      await reopen?.();
-      result = await runAttach(target, { ...options, quietBanner: true });
-      attempts = 0;
-    } catch {
-      result = "dropped";
+  if (options.latencyProbe) {
+    return await runAttach(target, options);
+  }
+  const stdin = process.stdin;
+  const stdout = process.stdout;
+  const session = new AttachSession(target.label, stdin, stdout, {
+    interactive: Boolean(stdin.isTTY && stdout.isTTY) && !options.json,
+    predict: process.env.RUDDER_PREDICT !== "0",
+  });
+  let result: AttachResult = "failed";
+  let gaveUp = false;
+  try {
+    result = await runAttach(target, { ...options, quietBanner: false }, session);
+    let attempts = 0;
+    while (result === "dropped" && !session.hasLeft) {
+      attempts += 1;
+      if (attempts > ATTACH_MAX_RETRIES) {
+        gaveUp = true;
+        break;
+      }
+      session.noteAttempt(attempts);
+      const delay = ATTACH_RETRY_DELAYS_MS[Math.min(attempts, ATTACH_RETRY_DELAYS_MS.length) - 1] ?? 5_000;
+      if (await session.wait(delay)) {
+        break;
+      }
+      try {
+        if (reopen) {
+          // Wakes the machine if it was what went away. Bounded: a hung
+          // request must not stall the retries, and Ctrl+C twice still leaves.
+          await raceLeave(session, withTimeout(reopen(), ATTACH_REOPEN_TIMEOUT_MS));
+        }
+        if (session.hasLeft) {
+          break;
+        }
+        result = await runAttach(target, { ...options, quietBanner: true }, session);
+        attempts = 0;
+      } catch {
+        result = "dropped";
+      }
     }
+    if (session.hasLeft && result === "dropped") {
+      result = "exited";
+    }
+  } finally {
+    session.release();
+  }
+  if (gaveUp) {
+    process.stderr.write(`\nCould not reach Rudder Cloud for a while. Your agents are still running there; run \`rudder cloud\` to come back.\n`);
+  } else if (session.hasLeft && result === "exited") {
+    process.stderr.write(`\nLeft ${target.label}. Your agents keep running; run \`rudder cloud\` to come back.\n`);
   }
   return result;
 }
 
-async function runAttach(target: AttachTarget, options: CloudCommandOptions): Promise<AttachResult> {
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("timed out")), ms);
+    timer.unref?.();
+    promise.then(
+      (value) => { clearTimeout(timer); resolve(value); },
+      (error: unknown) => { clearTimeout(timer); reject(error); },
+    );
+  });
+}
+
+function raceLeave<T>(session: AttachSession, promise: Promise<T>): Promise<T | undefined> {
+  return new Promise<T | undefined>((resolve, reject) => {
+    const off = session.onLeave(() => resolve(undefined));
+    promise.then(
+      (value) => { off(); resolve(value); },
+      (error: unknown) => { off(); reject(error); },
+    );
+  });
+}
+
+async function runAttach(
+  target: AttachTarget,
+  options: CloudCommandOptions,
+  sharedSession?: AttachSession,
+): Promise<AttachResult> {
   const client = await cloudClient({ requireToken: true });
   const baseUrl = client.baseUrl;
   const state = await loadCloudAuth();
@@ -3129,13 +3191,24 @@ async function runAttach(target: AttachTarget, options: CloudCommandOptions): Pr
   if (!token) {
     throw new Error("Not logged in to Rudder Cloud. Run `rudder login` first.");
   }
-  const wsUrl = baseUrl.replace(/^http/, "ws").replace(/\/$/, "")
-    + `/api/rudder/${target.kind}/${encodeURIComponent(target.id)}/attach`;
 
   const stdin = process.stdin;
   const stdout = process.stdout;
   const probeMode = Boolean(options.latencyProbe);
   const isInteractive = Boolean(stdin.isTTY && stdout.isTTY) && !probeMode;
+  // A shared session outlives this connection (attachWithReconnect); an own
+  // one is released with it.
+  const session = sharedSession ?? new AttachSession(target.label, stdin, stdout, {
+    interactive: isInteractive && !options.json,
+    predict: process.env.RUDDER_PREDICT !== "0",
+  });
+  const reconnects = Boolean(sharedSession);
+  // The dashboard is already on the screen (a reconnect, not a first attach).
+  const resuming = session.connections > 0 && session.drewFrame;
+  // The relay hands control back to this same terminal when it returns,
+  // instead of keeping its dead socket in charge until a ping times out.
+  const wsUrl = baseUrl.replace(/^http/, "ws").replace(/\/$/, "")
+    + `/api/rudder/${target.kind}/${encodeURIComponent(target.id)}/attach?client=${encodeURIComponent(session.clientId)}`;
 
   return await new Promise<AttachResult>((resolve, reject) => {
     const socket = new WebSocket(wsUrl, {
@@ -3149,6 +3222,8 @@ async function runAttach(target: AttachTarget, options: CloudCommandOptions): Pr
       // are bounded (~100KB worst-case repaint), so the bandwidth cost of
       // skipping compression is negligible next to the latency it removes.
       perMessageDeflate: false,
+      // A connect into a dead network can otherwise sit for minutes.
+      handshakeTimeout: ATTACH_HANDSHAKE_TIMEOUT_MS,
     });
     socket.binaryType = "nodebuffer";
     // Every deliberate close goes through socket.close() from this side; any
@@ -3161,20 +3236,19 @@ async function runAttach(target: AttachTarget, options: CloudCommandOptions): Pr
     }) as typeof socket.close;
     let opened = false;
     let cleaned = false;
-    let firstFrameRendered = false;
-    let workerConnected = false;
+    let firstFrameRendered = resuming;
+    // What the relay last said about the machine end: "down" only once it has
+    // said so, so a key typed before the first status still goes through.
+    let workerState: "unknown" | "up" | "down" = "unknown";
     let hasControl = true;
-    let readOnlyNoticeShown = false;
     let result: AttachResult = "failed";
 
-    const splashAllowed = isInteractive && !options.json && !options.quietBanner;
+    const splashAllowed = isInteractive && !options.json && !options.quietBanner && !resuming;
     const splash = splashAllowed ? new AttachSplash(stdout, target.label) : null;
     // Predictive local echo (src/predict.ts): typed characters appear at the
     // caret at once and the cloud's frame confirms them. RUDDER_PREDICT=0
-    // turns it off; it only engages once the round trip is worth hiding.
-    const predictor = isInteractive && process.env.RUDDER_PREDICT !== "0"
-      ? new EchoPredictor(stdout.columns ?? 120, stdout.rows ?? 32, (text) => stdout.write(text))
-      : null;
+    // turns the drawing off; the model stays, the reconnect badge uses it.
+    const predictor = session.predictor;
 
     const sendResize = () => {
       if (socket.readyState !== WebSocket.OPEN) {
@@ -3186,50 +3260,55 @@ async function runAttach(target: AttachTarget, options: CloudCommandOptions): Pr
       socket.send(JSON.stringify({ type: "resize", cols, rows }));
     };
 
+    // Ask the dashboard to draw every cell again. The replay the relay sends
+    // on attach is only the tail of its output; this makes the screen exact.
+    const requestRepaint = () => {
+      if (socket.readyState === WebSocket.OPEN && !probeMode) {
+        socket.send(JSON.stringify({ type: "repaint" }));
+      }
+    };
+
+    const finish = (value: AttachResult, message?: string) => {
+      cleanup(false);
+      if (message) {
+        process.stderr.write(message);
+      }
+      resolve(value);
+    };
+
     let lastCtrlC = 0;
     const onStdin = (chunk: Buffer | string) => {
+      const buffer = typeof chunk === "string" ? Buffer.from(chunk, "utf8") : chunk;
       if (socket.readyState !== WebSocket.OPEN) {
         return;
       }
-      const buffer = typeof chunk === "string" ? Buffer.from(chunk, "utf8") : chunk;
-      const hasCtrlC = containsCtrlCInput(buffer);
-      // Once the relay says the worker is gone, Ctrl+C means "leave this local
-      // attach". Forwarding/buffering it would kill the next dashboard as soon
-      // as the persistent machine reconnects.
-      if (hasCtrlC && !workerConnected) {
-        try { socket.close(1000, "client-cancel-disconnected"); } catch { /* ignore */ }
-        cleanup();
-        process.stderr.write("\nDetached from disconnected cloud worker.\n");
-        resolve("exited");
+      const hasCtrlC = containsCtrlC(buffer);
+      // While the loading splash is up (no remote frame has rendered yet),
+      // Ctrl+C should cancel the local attach instead of being forwarded to
+      // a remote dashboard the user can't see.
+      if (hasCtrlC && !firstFrameRendered) {
+        try { socket.close(1000, "client-cancel"); } catch { /* ignore */ }
+        finish("exited", "\nCancelled.\n");
         return;
       }
       // An observer must always be able to leave without sending an interrupt
       // into the controller's shared PTY.
       if (hasCtrlC && !hasControl) {
         try { socket.close(1000, "read-only-client-cancel"); } catch { /* ignore */ }
-        cleanup();
-        process.stderr.write("\nDetached read-only cloud attachment.\n");
-        resolve("exited");
+        finish("exited", "\nDetached read-only cloud attachment.\n");
         return;
       }
       if (!hasControl) {
-        if (!readOnlyNoticeShown) {
-          process.stderr.write("\nThis cloud attachment is read-only while another terminal controls the session.\n");
-          readOnlyNoticeShown = true;
-        }
+        session.showStatus("Read-only · another terminal has control");
         return;
       }
-      // While the loading splash is up (no remote frame has rendered yet),
-      // Ctrl+C should cancel the local attach instead of being forwarded to
-      // a remote dashboard the user can't see.
-      if (hasCtrlC && !firstFrameRendered) {
-        try { socket.close(1000, "client-cancel"); } catch { /* ignore */ }
-        cleanup();
-        if (!opened) {
-          reject(new Error("Cloud attach cancelled"));
-        } else {
-          process.stderr.write("\nCancelled.\n");
-          resolve("exited");
+      // The machine end is away (its dashboard restarting, the machine
+      // waking). Forwarding Ctrl+C would kill the next dashboard as soon as it
+      // is back, so it never goes; pressed twice it leaves this attach.
+      if (hasCtrlC && workerState === "down") {
+        if (session.ctrlCToLeave()) {
+          try { socket.close(1000, "client-cancel-disconnected"); } catch { /* ignore */ }
+          finish("exited");
         }
         return;
       }
@@ -3239,10 +3318,8 @@ async function runAttach(target: AttachTarget, options: CloudCommandOptions): Pr
       if (hasCtrlC && firstFrameRendered) {
         const now = Date.now();
         if (now - lastCtrlC < 2000) {
-          process.stderr.write("\nForce-exiting local attach (press Ctrl+C again to re-enter).\n");
           try { socket.close(1000, "client-force-quit"); } catch { /* ignore */ }
-          cleanup();
-          resolve("exited");
+          finish("exited", "\nForce-exiting local attach (press Ctrl+C again to re-enter).\n");
           return;
         }
         lastCtrlC = now;
@@ -3256,6 +3333,7 @@ async function runAttach(target: AttachTarget, options: CloudCommandOptions): Pr
         sendResize();
       }
       splash?.redraw();
+      session.noteResize();
     };
 
     // Liveness. A laptop that slept leaves this socket half-open: nothing
@@ -3294,64 +3372,41 @@ async function runAttach(target: AttachTarget, options: CloudCommandOptions): Pr
     }, ATTACH_PING_MS);
     liveness.unref?.();
 
-    const cleanup = () => {
+    // Leaving (Ctrl+C twice) while this connection is still being made.
+    const offLeave = session.onLeave(() => {
+      if (!opened && !cleaned) {
+        try { socket.terminate(); } catch { /* ignore */ }
+        cleanup(false);
+        resolve("exited");
+      }
+    });
+
+    // keepTerminal: the link dropped (or a reconnect could not open) and the
+    // caller reconnects, so the screen, raw mode and the keys stay ours.
+    const cleanup = (keepTerminal: boolean) => {
       if (cleaned) {
         return;
       }
       cleaned = true;
+      offLeave();
       clearInterval(liveness);
-      predictor?.dispose();
       stdin.off("data", onStdin);
       stdout.off("resize", onResize);
       process.off("SIGINT", onSigint);
-      splash?.dispose();
-      if (isInteractive && stdin.isTTY) {
-        // Hand the terminal back the way we found it: pop the keyboard flags we
-        // pushed, then disable local mouse capture before leaving raw mode so the
-        // user's shell prompt does not get spammed with mouse SGR bytes.
-        try {
-          stdout.write(KITTY_KEYBOARD_POP);
-        } catch {
-          // ignore
-        }
-        try {
-          stdout.write(KITTY_KEYBOARD_POP);
-          stdout.write("\x1b[?1006l\x1b[?1002l\x1b[?1000l");
-        } catch {
-          // ignore
-        }
-        // Release the tab title so the user's shell prompt can rewrite it.
-        try {
-          stdout.write("\x1b]0;\x07");
-        } catch {
-          // ignore
-        }
-        try {
-          stdin.setRawMode(false);
-        } catch {
-          // ignore
-        }
+      splash?.stop();
+      if (keepTerminal) {
+        session.enterGap();
+      } else {
+        session.release();
       }
-      if (splashAllowed) {
-        // We held the local terminal in the alt-screen buffer for the entire
-        // attach session (see AttachSplash.handoff). Restore the main buffer
-        // and cursor now so the user is dropped back to their shell prompt
-        // instead of a blank alt-screen with the dashboard frozen on it.
-        try {
-          stdout.write("\x1b[?1049l\x1b[?25h");
-        } catch {
-          // ignore
-        }
-      }
-      stdin.pause();
     };
 
     const onSigint = () => {
       // Belt-and-suspenders: if raw mode failed for any reason, Node still
       // sees SIGINT. Close cleanly so the user never gets a frozen terminal.
-      process.stderr.write("\nReceived SIGINT, closing cloud attach.\n");
       try { socket.close(1000, "sigint"); } catch { /* ignore */ }
-      cleanup();
+      cleanup(false);
+      process.stderr.write("\nReceived SIGINT, closing cloud attach.\n");
       if (!opened) {
         reject(new Error("Cloud attach cancelled"));
       } else {
@@ -3440,6 +3495,9 @@ async function runAttach(target: AttachTarget, options: CloudCommandOptions): Pr
 
     socket.on("open", () => {
       opened = true;
+      session.connections += 1;
+      // From here this connection reads the keys; the gap hands them over.
+      session.exitGap();
       // Measure the round trip at once: predictive echo waits on it.
       try {
         socket.ping();
@@ -3464,43 +3522,33 @@ async function runAttach(target: AttachTarget, options: CloudCommandOptions): Pr
       }
       // Label this terminal tab so the user can find the right rudder cloud
       // session at a glance instead of squinting at a row of "ghostty" tabs.
-      try {
-        stdout.write(`\x1b]0;Rudder cloud: ${target.label}\x07`);
-      } catch {
-        // ignore
+      if (isInteractive) {
+        try {
+          stdout.write(`\x1b]0;Rudder cloud: ${target.label}\x07`);
+        } catch {
+          // ignore
+        }
+      }
+      // The alternate screen, raw keys, local mouse capture (the remote's own
+      // enable sequences arrive as output, which the local terminal never
+      // treats as mode switches) and the kitty keyboard flags.
+      if (isInteractive) {
+        session.hold();
       }
       if (splash) {
         splash.start();
         splash.setStatus(`Booting cloud workspace · ${target.label}`);
-      } else if (!options.json && !options.quietBanner) {
+      } else if (!options.json && !options.quietBanner && !resuming) {
         const tail = isInteractive ? " (Ctrl+C sends to remote; close this pane to detach)" : "";
         process.stderr.write(`Attached to ${target.label}${tail}\n`);
       }
       sendResize();
-      if (isInteractive) {
-        try {
-          stdin.setRawMode(true);
-        } catch {
-          // ignore
-        }
-        // Enable mouse tracking on the LOCAL terminal so scroll/click events
-        // get forwarded into stdin. The remote rudder TUI also emits these
-        // enable sequences, but they arrive as PTY output bytes and the local
-        // terminal does not interpret output bytes as mode toggles. We have
-        // to enable mouse capture locally too.
-        try {
-          stdout.write("\x1b[?1000h\x1b[?1002h\x1b[?1006h");
-        } catch {
-          // ignore
-        }
-        // Ask the local terminal for the kitty keyboard protocol on the remote's
-        // behalf, so real modifiers reach the remote dashboard.
-        try {
-          stdout.write(KITTY_KEYBOARD_PUSH);
-        } catch {
-          // ignore
-        }
+      // Typed while the link was down: sent first, in order.
+      const queued = session.takeQueued();
+      if (queued) {
+        socket.send(queued, { binary: true });
       }
+      requestRepaint();
       if (!probeMode) {
         stdin.resume();
         stdin.on("data", onStdin);
@@ -3538,6 +3586,14 @@ async function runAttach(target: AttachTarget, options: CloudCommandOptions): Pr
           probeEchoWaiter?.(performance.now());
           return;
         }
+        if (!session.drewFrame) {
+          session.drewFrame = true;
+          // A link that dropped while the loading screen was up leaves its
+          // text behind; the splash wipes its own on handoff.
+          if (!splash && isInteractive) {
+            stdout.write("\x1b[2J\x1b[H");
+          }
+        }
         if (!firstFrameRendered) {
           firstFrameRendered = true;
           splash?.handoff();
@@ -3561,19 +3617,21 @@ async function runAttach(target: AttachTarget, options: CloudCommandOptions): Pr
     });
 
     socket.on("close", (code, reason) => {
-      cleanup();
+      const dropped = opened && !closedByUs && code !== 4410 && code !== 1000;
+      // A reconnect that could not open is part of the same gap.
+      cleanup(reconnects && session.connections > 0 && (dropped || !opened));
       if (!opened) {
         const reasonText = reason && reason.length ? reason.toString("utf8") : "";
         reject(new Error(`Cloud attach failed (code ${code}${reasonText ? `: ${reasonText}` : ""})`));
         return;
       }
       // 4410: the workspace was deleted; nothing to come back to.
-      resolve(!closedByUs && code !== 4410 && code !== 1000 ? "dropped" : result);
+      resolve(dropped ? "dropped" : result);
     });
 
     socket.on("error", (err) => {
       if (!opened) {
-        cleanup();
+        cleanup(reconnects && session.connections > 0);
         reject(new Error(`Cloud attach failed: ${err.message}`));
       }
     });
@@ -3603,53 +3661,65 @@ async function runAttach(target: AttachTarget, options: CloudCommandOptions): Pr
         }
         return;
       }
-      if (message.type === "status") {
-        if (message.state === "worker-connected") {
-          workerConnected = true;
-        } else if (message.state === "worker-disconnected" || message.state === "worker-waiting") {
-          workerConnected = false;
+      if (message.type !== "status") {
+        return;
+      }
+      const wasDown = workerState === "down";
+      if (message.state === "worker-connected") {
+        workerState = "up";
+      } else if (message.state === "worker-disconnected" || message.state === "worker-waiting") {
+        workerState = "down";
+      }
+      if (message.control === "read-only" || message.state === "read-only") {
+        hasControl = false;
+      } else if (message.control === "active" || message.state === "controller-promoted") {
+        const promoted = !hasControl;
+        hasControl = true;
+        if (promoted || message.state === "controller-promoted") {
+          sendResize();
         }
-        if (message.control === "read-only" || message.state === "read-only") {
-          hasControl = false;
-        } else if (message.control === "active" || message.state === "controller-promoted") {
-          const promoted = !hasControl;
-          hasControl = true;
-          if (promoted || message.state === "controller-promoted") {
-            sendResize();
-          }
+      }
+      // If the worker dies before we've ever seen a remote frame, the
+      // session is effectively dead. Don't sit on a splash spinner pretending
+      // it'll come back; bail.
+      if (message.state === "worker-disconnected" && !firstFrameRendered) {
+        try { socket.close(1000, "worker-gone"); } catch { /* ignore */ }
+        cleanup(false);
+        process.stderr.write("\nCloud worker exited before the dashboard started.\n");
+        resolve("failed");
+        return;
+      }
+      if (splash && !firstFrameRendered) {
+        if (message.state === "worker-waiting") {
+          splash.setStatus(`Waiting for cloud worker · ${target.label}`);
+        } else if (message.state === "worker-connected") {
+          splash.setStatus(`Cloud worker connected · ${target.label}`);
+          sendResize();
+          setTimeout(sendResize, 150);
+        } else if (message.state === "input-buffered") {
+          splash.setStatus(`Reconnecting cloud input · ${target.label}`);
         }
-        // If the worker dies before we've ever seen a remote frame, the
-        // session is effectively dead. Don't sit on a splash spinner pretending
-        // it'll come back; bail.
-        if (message.state === "worker-disconnected" && !firstFrameRendered) {
-          splash?.dispose();
-          try { socket.close(1000, "worker-gone"); } catch { /* ignore */ }
-          cleanup();
-          if (!opened) {
-            reject(new Error("Cloud worker exited before the dashboard started"));
-          } else {
-            process.stderr.write("\nCloud worker exited before the dashboard started.\n");
-            result = "failed";
-            resolve(result);
-          }
-          return;
+        return;
+      }
+      if (options.json || probeMode) {
+        return;
+      }
+      // Past the splash nothing is written into the dashboard's picture: the
+      // state goes in the corner badge and comes off when it is over.
+      if (!hasControl) {
+        session.showStatus("Read-only · another terminal has control");
+      } else if (workerState === "down") {
+        session.showStatus(message.state === "worker-waiting"
+          ? "Waiting for the cloud machine · your typing is kept"
+          : "Cloud machine reconnecting · your typing is kept");
+      } else if (workerState === "up" || message.state === "controller-promoted") {
+        if (session.statusText) {
+          session.clearStatus();
         }
-        if (splash && !firstFrameRendered) {
-          if (message.state === "worker-waiting") {
-            splash.setStatus(`Waiting for cloud worker · ${target.label}`);
-          } else if (message.state === "worker-connected") {
-            splash.setStatus(`Cloud worker connected · ${target.label}`);
-            sendResize();
-            setTimeout(sendResize, 150);
-          } else if (message.state === "input-buffered") {
-            splash.setStatus(`Reconnecting cloud input · ${target.label}`);
-          }
-        } else if (!options.json && !options.quietBanner) {
-          if (message.state === "worker-disconnected") {
-            process.stderr.write("\nCloud worker disconnected; waiting for reconnect...\n");
-          } else if (message.state === "worker-connected") {
-            process.stderr.write("Cloud worker connected.\n");
-          }
+        if (wasDown && workerState === "up") {
+          // A dashboard that kept running behind a relay restart shows the
+          // same picture; one that restarted paints anew. Either way, exact.
+          requestRepaint();
         }
       }
     }
@@ -3671,12 +3741,14 @@ class AttachSplash {
     this.status = `Connecting to ${label}`;
   }
 
+  // The alternate screen is AttachSession's (held for the whole attach,
+  // reconnects included); the splash only draws inside it.
   start(): void {
     if (this.active) {
       return;
     }
     this.active = true;
-    this.stdout.write("\x1b[?1049h\x1b[?25l");
+    this.stdout.write("\x1b[?25l");
     this.redraw();
     this.timer = setInterval(() => {
       this.frame = (this.frame + 1) % AttachSplash.FRAMES.length;
@@ -3718,27 +3790,15 @@ class AttachSplash {
       return;
     }
     this.stop();
-    // Stay in the alt-screen buffer for the rest of the attach session. The
-    // remote dashboard will render into this same buffer, and runAttach's
-    // cleanup() will exit the alt screen on shutdown. Wipe the splash content
-    // first so the remote's partial frames don't render on top of leftover
-    // spinner text (and so any tiny window before the remote's first frame
-    // is a clean buffer, not main-buffer scrollback).
+    // Wipe the splash content first so the remote's partial frames don't
+    // render on top of leftover spinner text.
     this.stdout.write("\x1b[2J\x1b[H\x1b[?25h");
   }
 
-  dispose(): void {
+  stop(): void {
     if (!this.active) {
       return;
     }
-    this.stop();
-    // dispose() is the abort path (worker died, user cancelled before any
-    // remote frame). Leave the alt screen so the user is dropped back to their
-    // shell prompt instead of staring at a frozen spinner buffer.
-    this.stdout.write("\x1b[?1049l\x1b[?25h");
-  }
-
-  private stop(): void {
     this.active = false;
     if (this.timer) {
       clearInterval(this.timer);
@@ -3773,7 +3833,7 @@ async function maybeAutoAttach(result: JsonValue, options: CloudCommandOptions):
     return;
   }
   try {
-    await runAttach({ kind: "sail", id: sailId, label: sailId }, { ...options, quietBanner: false });
+    await attachWithReconnect({ kind: "sail", id: sailId, label: sailId }, options);
   } catch (error) {
     console.warn(`Could not attach to ${sailId}: ${error instanceof Error ? error.message : String(error)}`);
   }

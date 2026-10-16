@@ -57,27 +57,57 @@ async function freePort() {
 async function fakeRelay() {
   const port = await freePort();
   const keystrokes = [];
+  const connections = [];
   let onConnect = () => {};
-  const wss = new WebSocketServer({ port, host: "127.0.0.1" });
+  let accepting = true;
+  let frame = "REMOTE-DASHBOARD-FRAME";
+  const wss = new WebSocketServer({
+    port,
+    host: "127.0.0.1",
+    // A relay that is down (deploying, unreachable) refuses the upgrade.
+    verifyClient: () => accepting,
+  });
   wss.on("connection", (socket, request) => {
-    if (!/\/api\/rudder\/sail\/[^/]+\/attach$/.test(request.url ?? "")) {
+    if (!/\/api\/rudder\/sail\/[^/?]+\/attach(\?|$)/.test(request.url ?? "")) {
       socket.close(1008, "unexpected path");
       return;
     }
+    const connection = {
+      url: request.url ?? "",
+      keystrokes: [],
+      texts: [],
+    };
+    connections.push(connection);
     socket.binaryType = "nodebuffer";
     socket.on("message", (data, isBinary) => {
-      if (isBinary && Buffer.isBuffer(data)) keystrokes.push(data);
+      if (isBinary && Buffer.isBuffer(data)) {
+        keystrokes.push(data);
+        connection.keystrokes.push(data);
+      } else {
+        connection.texts.push(Buffer.from(data).toString("utf8"));
+      }
     });
     socket.send(JSON.stringify({ type: "status", state: "worker-connected", control: "active" }));
     // One frame of "screen", so the client leaves the splash and reaches the
     // steady state a human would be sitting in.
-    socket.send(Buffer.from("REMOTE-DASHBOARD-FRAME\r\n", "utf8"), { binary: true });
+    socket.send(Buffer.from(`${frame}\r\n`, "utf8"), { binary: true });
     onConnect(socket);
   });
   await new Promise((resolve) => wss.once("listening", resolve));
   return {
     port,
     keystrokes,
+    connections,
+    /** The link dies under the client (Wi-Fi change, relay redeploy). */
+    drop: () => {
+      accepting = false;
+      for (const socket of wss.clients) socket.terminate();
+    },
+    /** The relay is reachable again; the next connection draws this. */
+    comeBack: (nextFrame) => {
+      frame = nextFrame;
+      accepting = true;
+    },
     /** Hang up like a worker that exited, so the client runs its cleanup path. */
     hangUp: () => new Promise((resolve) => {
       onConnect = (socket) => { socket.close(1000, "worker-exit"); resolve(); };
@@ -141,7 +171,64 @@ test("cloud attach asks the local terminal for the kitty keyboard protocol", { t
   );
 });
 
-test("Ctrl+C detaches locally while the cloud worker is disconnected", { timeout: 60_000 }, async (t) => {
+test("a dropped link keeps the dashboard up, keeps what you type and reconnects in place", { timeout: 90_000 }, async (t) => {
+  const relay = await fakeRelay();
+  t.after(() => relay.close());
+
+  const session = await launch({
+    binary: process.execPath,
+    args: [cli, "cloud", "attach", "dropped-link-test"],
+    cwd: repoRoot,
+    cols: 100,
+    rows: 30,
+    env: {
+      RUDDER_CLOUD_URL: `http://127.0.0.1:${relay.port}`,
+      RUDDER_CLOUD_TOKEN: "rdr_test_token",
+      TERM: "xterm-256color",
+    },
+  }, t);
+
+  await session.waitForText("REMOTE-DASHBOARD-FRAME", { timeout: 20_000 });
+  relay.drop();
+
+  // The picture stays, with a badge in the corner; nothing drops to the shell.
+  await session.waitForText("Reconnecting", { timeout: 20_000 });
+  const during = await session.screen();
+  assert.ok(during.includes("REMOTE-DASHBOARD-FRAME"), `the dashboard stays on screen:\n${during}`);
+  assert.ok(!during.includes("Lost the connection"), `no message is printed into the picture:\n${during}`);
+  const recording = await fsp.readFile(session.recordingPath, "utf8");
+  assert.ok(
+    !recording.includes(JSON.stringify("\x1b[?1049l").slice(1, -1)),
+    "the alternate screen is never left during the gap",
+  );
+
+  // Typing while the link is down is kept for the next connection.
+  await session.type("kept");
+  await new Promise((resolve) => setTimeout(resolve, 1_500));
+  relay.comeBack("REMOTE-AFTER-RECONNECT");
+
+  await session.waitForText("REMOTE-AFTER-RECONNECT", { timeout: 30_000 });
+  await session.waitFor((screen) => !screen.includes("Reconnecting"), { timeout: 10_000 });
+  assert.ok(relay.connections.length >= 2, "the client reconnected");
+  const [first] = relay.connections;
+  const last = relay.connections[relay.connections.length - 1];
+  const clientOf = (url) => new URL(url, "http://x").searchParams.get("client");
+  assert.ok(clientOf(first.url), "the client says which terminal it is");
+  assert.equal(clientOf(last.url), clientOf(first.url), "and it is the same terminal coming back");
+  assert.ok(
+    Buffer.concat(last.keystrokes).toString("utf8").includes("kept"),
+    "keys typed during the gap reach the cloud after the reconnect",
+  );
+  assert.ok(
+    last.texts.some((text) => text.includes('"repaint"')),
+    "the reconnect asks the dashboard for the whole picture",
+  );
+
+  await relay.hangUp();
+  await session.waitForExit({ timeout: 20_000 });
+});
+
+test("Ctrl+C twice detaches locally while the cloud worker is disconnected", { timeout: 60_000 }, async (t) => {
   const relay = await fakeRelay();
   t.after(() => relay.close());
 
@@ -160,9 +247,12 @@ test("Ctrl+C detaches locally while the cloud worker is disconnected", { timeout
 
   await session.waitForText("REMOTE-DASHBOARD-FRAME", { timeout: 20_000 });
   relay.workerDisconnected();
-  await session.waitForText("Cloud worker disconnected", { timeout: 20_000 });
+  await session.waitForText("Cloud machine reconnecting", { timeout: 20_000 });
   // Rudder enables Kitty keyboard disambiguation, where Ctrl+C is CSI 99;5u
-  // instead of the legacy one-byte ETX value.
+  // instead of the legacy one-byte ETX value. The first press only says how
+  // to leave: an interrupt typed for the agent must not end the attach.
+  await session.write("\x1b[99;5u");
+  await session.waitForText("Ctrl+C again to leave", { timeout: 20_000 });
   await session.write("\x1b[99;5u");
   await session.waitForExit({ timeout: 20_000 });
 

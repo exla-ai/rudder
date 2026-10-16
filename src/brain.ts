@@ -82,6 +82,11 @@ export async function createSpec(run: RunRecord): Promise<SpecContract> {
   return spec;
 }
 
+// Parallel-work guidance for every implementing agent. Mirrors the Rust
+// `parallel_work_rule!` in native/src/tasks.rs; keep the text in parity.
+export const PARALLEL_WORK_RULE =
+  "Parallelize independent work. Batch independent reads, searches, and commands into one turn instead of running them one at a time. For independent subtasks (broad codebase searches, separate files or modules, independent verification), spawn concurrent subagents (Claude Code: the Agent/Task tool; Codex: its subagent tools when available), give each a self-contained brief, and merge their results yourself. Never let two subagents edit the same file. Keep steps that share files or depend on earlier results sequential, and verify after merging.";
+
 export function renderContract(spec: SpecContract): string {
   const instructions = spec.instructionsFiles
     .map((file) => `### ${file.path}\n${file.content}`)
@@ -105,6 +110,7 @@ export function renderContract(spec: SpecContract): string {
     "- Preserve unrelated user changes.",
     "- Run relevant checks when practical and report any checks that could not be run.",
     "- Do not mark the task complete unless the acceptance criteria are handled.",
+    `- ${PARALLEL_WORK_RULE}`,
     ...PROPAGATION_RULES.map((rule) => `- ${rule}`),
     "",
     instructions ? `Repository instructions:\n\n${instructions}` : "",

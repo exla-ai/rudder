@@ -1221,6 +1221,11 @@ for i in z.infolist():
       cd /; rm -rf "$dir"`], { env, cwd: TOOLS_DIR, timeoutMs: 5 * 60 * 1000 });
     log(result.code === 0 ? "Session Manager plugin installed" : `Session Manager plugin install failed: ${firstLine(result.stderr || result.stdout)}`);
   }
+  // Deploy CLIs agents reach for (logins: see persistHomeDirs and the vault).
+  if (!fs.existsSync(path.join(TOOLS_BIN, "vercel")) || !fs.existsSync(path.join(TOOLS_BIN, "netlify"))) {
+    const result = await capture("npm", ["install", "-g", "--prefix", TOOLS_DIR, "vercel", "netlify-cli"], { env, cwd: TOOLS_DIR, timeoutMs: 10 * 60 * 1000 });
+    log(result.code === 0 ? "Vercel and Netlify CLIs installed" : `Vercel/Netlify CLI install failed: ${firstLine(result.stderr || result.stdout)}`);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1292,7 +1297,9 @@ function persistHomeDirs() {
   fs.mkdirSync(PERSIST_HOME, { recursive: true });
   // .cargo/.rustup: the Rust toolchain (installed on first boot, see
   // ensureRustToolchain) lives on the volume too, so it survives restarts.
-  for (const name of [".claude", ".codex", ".rudder", ".config", ".local/share/opencode", ".cargo", ".rustup"]) {
+  // com.vercel.cli: the cloud's own `vercel login` (its refresh token rotates,
+  // so it cannot be a copy of the laptop's).
+  for (const name of [".claude", ".codex", ".rudder", ".config", ".local/share/opencode", ".local/share/com.vercel.cli", ".cargo", ".rustup"]) {
     const live = path.join(HOME, name);
     const stored = path.join(PERSIST_HOME, name);
     fs.mkdirSync(stored, { recursive: true });

@@ -899,6 +899,12 @@ brain lives in the cloud, and the phone is a first-class client.
   (`/workspace/tools/bin`, on agents' PATH), so SSH-over-SSM works with the
   vault's `~/.aws`; `rudder cloud` offers to refresh `~/.aws` when the laptop's
   copy changed, and the doctor compares the AWS principal (ARN) too.
+  The Vercel and Netlify CLIs install there too. Netlify's login is the
+  laptop's (vault: `~/.config/netlify/config.json` + `NETLIFY_AUTH_TOKEN`);
+  Vercel's is the cloud's OWN device login, kept in
+  `~/.local/share/com.vercel.cli` on the volume, because Vercel rotates the
+  refresh token and a shared copy signs one side out (an OAuth CLI token
+  also cannot mint a classic token: 403). Namecheap has no API access set up.
   `rudder cloud home stop` refuses to run on the home machine itself
   (`RUDDER_CLOUD_RUNTIME=home`): it would end every agent there, the caller
   included. Restart it from a laptop or the phone. iOS/Xcode and signing stay

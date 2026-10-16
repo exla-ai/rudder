@@ -3056,7 +3056,9 @@ type AttachTarget = {
   label: string;
 };
 
-type AttachResult = "exited" | "failed";
+// "dropped": the connection ended without the user leaving (the control plane
+// redeployed, the home machine restarted). Callers reconnect.
+type AttachResult = "exited" | "failed" | "dropped";
 
 // The remote TUI pushes the kitty keyboard enhancement flags once, in its own
 // setup_terminal(), and the worker only keeps the TAIL of its output — so by the
@@ -3071,6 +3073,30 @@ const KITTY_KEYBOARD_POP = "\x1b[<u";
 
 function containsCtrlCInput(data: Buffer): boolean {
   return data.includes(0x03) || /\x1b\[99;5(?::[123])?u/.test(data.toString("latin1"));
+}
+
+// Stay attached through a control-plane deploy or a machine restart: say what
+// happened and reconnect, instead of dropping back to the shell silently.
+async function attachWithReconnect(
+  target: AttachTarget,
+  options: CloudCommandOptions,
+  reopen?: () => Promise<void>,
+): Promise<AttachResult> {
+  let result = await runAttach(target, { ...options, quietBanner: false });
+  let attempts = 0;
+  while (result === "dropped" && attempts < 40) {
+    attempts += 1;
+    process.stderr.write(`\r\nLost the connection to Rudder Cloud (it may be restarting). Reconnecting${attempts > 1 ? ` (try ${attempts})` : ""}...\r\n`);
+    await sleep(Math.min(15_000, 2_000 * attempts));
+    try {
+      await reopen?.();
+      result = await runAttach(target, { ...options, quietBanner: true });
+      attempts = 0;
+    } catch {
+      result = "dropped";
+    }
+  }
+  return result;
 }
 
 async function runAttach(target: AttachTarget, options: CloudCommandOptions): Promise<AttachResult> {
@@ -3104,6 +3130,14 @@ async function runAttach(target: AttachTarget, options: CloudCommandOptions): Pr
       perMessageDeflate: false,
     });
     socket.binaryType = "nodebuffer";
+    // Every deliberate close goes through socket.close() from this side; any
+    // other close is the far end going away.
+    let closedByUs = false;
+    const closeSocket = socket.close.bind(socket);
+    socket.close = ((code?: number, reason?: string | Buffer) => {
+      closedByUs = true;
+      closeSocket(code, reason);
+    }) as typeof socket.close;
     let opened = false;
     let cleaned = false;
     let firstFrameRendered = false;
@@ -3452,7 +3486,8 @@ async function runAttach(target: AttachTarget, options: CloudCommandOptions): Pr
         reject(new Error(`Cloud attach failed (code ${code}${reasonText ? `: ${reasonText}` : ""})`));
         return;
       }
-      resolve(result);
+      // 4410: the workspace was deleted; nothing to come back to.
+      resolve(!closedByUs && code !== 4410 && code !== 1000 ? "dropped" : result);
     });
 
     socket.on("error", (err) => {
@@ -3842,7 +3877,10 @@ async function openOnHome(forceSnapshot: boolean, options: CloudCommandOptions):
   }
   process.stderr.write(`Phone: ${appUrl(client.baseUrl)}\n`);
   await reportCredentialParity(client, { problemsOnly: true }).catch(() => undefined);
-  await runAttach({ kind: "workspace", id: workspaceId, label: `${name} on home` }, { ...options, quietBanner: false });
+  await attachWithReconnect({ kind: "workspace", id: workspaceId, label: `${name} on home` }, options, async () => {
+    // Wake the machine again if it was what went away.
+    await client.request<HomeOpenResponse>("/api/rudder/home/open", { method: "POST", body: { repo: slug, ...(branch ? { branch } : {}) } });
+  });
 }
 
 // The cloud clones from GitHub, so anything not pushed is not there. Say so

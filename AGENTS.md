@@ -760,6 +760,17 @@ brain lives in the cloud, and the phone is a first-class client.
   workspace only; Stopped/Done/Failed/Merged/Migrated, cloud-owned, orchestrators,
   shell panes, /gam pairs and merge resolvers are left alone. Capped at 12, most
   recently used first.
+- **Predictive local echo (`src/predict.ts`).** The attach client keeps an
+  xterm-headless model of the cloud screen and draws a typed printable character
+  at the caret immediately (the dashboard always parks the real cursor on the
+  input caret), between cloud frames only (never inside `?2026h..l` or a split
+  escape). The cloud's echo confirms it; a contradiction (caret moved, cell
+  drawn differently) or 1.2s without an echo repaints the cells from the model.
+  Engages once the ping RTT is >= 30ms; `RUDDER_PREDICT=0` disables,
+  `RUDDER_PREDICT_DEBUG=1` prints confirmed/rollback counts on exit. Measured:
+  first paint 0.8ms vs 115ms, 10/10 confirmed. `rudder cloud` also keeps the
+  vault's laptop config in step (Claude/Codex settings, hooks, ~/.aws,
+  ~/.kalshi) by checksum.
 - **Claude agents follow a session switch.** A Claude row's `Stop` and
   `UserPromptSubmit` hooks also write the live `session_id` to
   `<rudder home>/signals/<run>.claude-session`; `adopt_reported_claude_sessions`

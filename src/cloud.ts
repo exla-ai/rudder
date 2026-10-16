@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
+import { EchoPredictor } from "./predict.js";
 import fsp from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -3168,6 +3169,12 @@ async function runAttach(target: AttachTarget, options: CloudCommandOptions): Pr
 
     const splashAllowed = isInteractive && !options.json && !options.quietBanner;
     const splash = splashAllowed ? new AttachSplash(stdout, target.label) : null;
+    // Predictive local echo (src/predict.ts): typed characters appear at the
+    // caret at once and the cloud's frame confirms them. RUDDER_PREDICT=0
+    // turns it off; it only engages once the round trip is worth hiding.
+    const predictor = isInteractive && process.env.RUDDER_PREDICT !== "0"
+      ? new EchoPredictor(stdout.columns ?? 120, stdout.rows ?? 32, (text) => stdout.write(text))
+      : null;
 
     const sendResize = () => {
       if (socket.readyState !== WebSocket.OPEN) {
@@ -3175,6 +3182,7 @@ async function runAttach(target: AttachTarget, options: CloudCommandOptions): Pr
       }
       const cols = stdout.columns ?? 120;
       const rows = stdout.rows ?? 32;
+      predictor?.resize(cols, rows);
       socket.send(JSON.stringify({ type: "resize", cols, rows }));
     };
 
@@ -3240,6 +3248,7 @@ async function runAttach(target: AttachTarget, options: CloudCommandOptions): Pr
         lastCtrlC = now;
       }
       socket.send(buffer, { binary: true });
+      predictor?.onInput(buffer);
     };
 
     const onResize = () => {
@@ -3256,7 +3265,14 @@ async function runAttach(target: AttachTarget, options: CloudCommandOptions): Pr
     // as a dropped connection, which attachWithReconnect reopens.
     let lastHeard = Date.now();
     let lastTick = Date.now();
-    socket.on("pong", () => { lastHeard = Date.now(); });
+    let pingSentAt = 0;
+    socket.on("pong", () => {
+      lastHeard = Date.now();
+      if (pingSentAt) {
+        predictor?.noteRtt(Date.now() - pingSentAt);
+        pingSentAt = 0;
+      }
+    });
     socket.on("message", () => { lastHeard = Date.now(); });
     const liveness = setInterval(() => {
       const now = Date.now();
@@ -3269,7 +3285,12 @@ async function runAttach(target: AttachTarget, options: CloudCommandOptions): Pr
         socket.terminate();
         return;
       }
-      try { socket.ping(); } catch { socket.terminate(); }
+      try {
+        socket.ping();
+        pingSentAt = Date.now();
+      } catch {
+        socket.terminate();
+      }
     }, ATTACH_PING_MS);
     liveness.unref?.();
 
@@ -3279,6 +3300,7 @@ async function runAttach(target: AttachTarget, options: CloudCommandOptions): Pr
       }
       cleaned = true;
       clearInterval(liveness);
+      predictor?.dispose();
       stdin.off("data", onStdin);
       stdout.off("resize", onResize);
       process.off("SIGINT", onSigint);
@@ -3418,6 +3440,19 @@ async function runAttach(target: AttachTarget, options: CloudCommandOptions): Pr
 
     socket.on("open", () => {
       opened = true;
+      // Measure the round trip at once: predictive echo waits on it.
+      try {
+        socket.ping();
+        pingSentAt = Date.now();
+      } catch {
+        // the liveness timer retries
+      }
+      if (probeMode) {
+        // An idle dashboard sends nothing; a resize makes it repaint, which is
+        // the first frame the probe waits for.
+        socket.send(JSON.stringify({ type: "resize", cols: 119, rows: 32 }));
+        setTimeout(() => socket.send(JSON.stringify({ type: "resize", cols: 120, rows: 32 })), 200);
+      }
       // Disable Nagle on the underlying TCP socket so single keystrokes don't
       // sit in the send buffer waiting for piggyback ACKs (~40ms savings per
       // keypress on the WAN).
@@ -3514,6 +3549,7 @@ async function runAttach(target: AttachTarget, options: CloudCommandOptions): Pr
           setTimeout(sendResize, 150);
         }
         stdout.write(data);
+        predictor?.onServerData(data);
         return;
       }
       const text = Buffer.isBuffer(data)
@@ -3997,6 +4033,9 @@ const LAPTOP_CONFIG_FILES = [
   "~/.codex/config.toml",
   "~/.codex/AGENTS.md",
   "~/.codex/hooks.json",
+  // Service logins agents use from scripts (Kalshi signs requests with this key).
+  "~/.kalshi/config.json",
+  "~/.kalshi/private_key.pem",
 ];
 
 async function laptopConfigFiles(): Promise<{ name: string; content: Buffer }[]> {

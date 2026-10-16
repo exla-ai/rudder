@@ -58,7 +58,8 @@ class ApiError extends Error { constructor(msg, status) { super(msg); this.statu
 async function api(path, { method = "GET", body } = {}) {
   const headers = { Accept: "application/json" };
   if (body !== undefined) headers["Content-Type"] = "application/json";
-  if (NATIVE?.token) headers.Authorization = `Bearer ${NATIVE.token}`;
+  const token = NATIVE?.token || ls.get("rudder.token");
+  if (token) headers.Authorization = `Bearer ${token}`;
   let res;
   try {
     res = await fetch(path, {
@@ -217,6 +218,7 @@ function openSettings() {
 
 async function signOut() {
   if (NATIVE) { postNative({ type: "signOut" }); return; }
+  ls.set("rudder.token", null);
   try {
     await fetch("/api/auth/sign-out", { method: "POST", credentials: "same-origin", headers: { "Content-Type": "application/json" }, body: "{}" });
   } catch { /* reload anyway */ }
@@ -415,7 +417,8 @@ function updateAgentRow(el, { p, a }) {
   const model = el.querySelector(".c-model");
   setText(model, backendLabel(a)); model.hidden = el._showProject || !backendLabel(a);
   const phase = el.querySelector(".c-phase");
-  setText(phase, a.nodeId ? a.nodeId : a.phase || ""); phase.hidden = !(a.nodeId || a.phase) || el._showProject;
+  const phaseText = a.nodeId ? a.nodeId : (a.phase && a.phase !== a.status ? a.phase : "");
+  setText(phase, phaseText); phase.hidden = !phaseText || el._showProject;
   const msg = (a.lastMessage || a.summary || a.task || "").replace(/\s+/g, " ").trim();
   const m = el.querySelector(".a-msg");
   setText(m, msg); m.hidden = !msg;
@@ -452,11 +455,23 @@ function SignInScreen() {
     <p>Steer your coding agents from anywhere. Sign in to reach your home machine.</p>
     <div class="actions"></div></div></section>`);
   const actions = el.querySelector(".actions");
+  // A paired device needs no OAuth: `rudder cloud app` on the laptop prints a
+  // one-time code that signs this browser in to the same account.
+  const pair = h(`<form class="pair" autocomplete="off">
+      <label for="pair-code">Code from <code>rudder cloud app</code></label>
+      <div class="pair-row"><input id="pair-code" inputmode="text" autocapitalize="characters" spellcheck="false"
+        maxlength="9" placeholder="ABCD-EFGH" aria-label="Pairing code"><button class="btn primary" type="submit">Pair</button></div>
+      <p class="pair-error" role="alert" hidden></p></form>`);
+  pair.addEventListener("submit", (event) => {
+    event.preventDefault();
+    redeemPairCode(pair.querySelector("input").value, pair.querySelector(".pair-error"));
+  });
   if (NATIVE) {
     const b = h(`<button type="button" class="btn primary block">Sign in</button>`);
     b.addEventListener("click", () => postNative({ type: "signIn" }));
     actions.appendChild(b);
   } else {
+    actions.appendChild(pair);
     const g = h(`<button type="button" class="btn primary block">${icon("google")}<span>Continue with Google</span></button>`);
     g.addEventListener("click", () => { location.href = "/app/login"; });
     const gh = h(`<div class="alt"><button type="button">Use GitHub instead</button></div>`);
@@ -464,6 +479,26 @@ function SignInScreen() {
     actions.append(g, gh);
   }
   return { el, isSignIn: true };
+}
+
+async function redeemPairCode(code, errorEl) {
+  if (errorEl) errorEl.hidden = true;
+  try {
+    const res = await fetch("/api/app/pair/finish", {
+      method: "POST", credentials: "same-origin", cache: "no-store",
+      headers: { "Content-Type": "application/json" }, body: JSON.stringify({ code }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.token) throw new Error(data.error || "That code didn't work.");
+    ls.set("rudder.token", data.token);
+    store.signedOut = false;
+    history.replaceState({ depth: 0 }, "", "/app");
+    await refreshState();
+    mountScreen();
+  } catch (error) {
+    if (errorEl) { errorEl.textContent = error.message; errorEl.hidden = false; }
+    else toast(error.message);
+  }
 }
 
 /* ------------------------------------------------------------------ */
@@ -999,7 +1034,8 @@ function AgentScreen(ws, run) {
     const sub = el.querySelector(".subtitle");
     sub.className = `subtitle ${st.cls}`;
     sub.querySelector(".dot").classList.toggle("live", !!st.live);
-    setText(sub.querySelector(".st"), a?.phase ? `${st.label} · ${a.phase}` : st.label);
+    const phase = a?.phase && a.phase.toLowerCase() !== st.label.toLowerCase() && a.phase.toLowerCase() !== a.status ? a.phase : "";
+    setText(sub.querySelector(".st"), phase ? `${st.label} · ${phase}` : st.label);
     const bk = backendLabel(a || { backend: t?.backend });
     setText(sub.querySelector(".bk"), bk);
     sub.querySelector(".sep").hidden = !bk;
@@ -1196,7 +1232,14 @@ function restoreLastRoute() {
 }
 
 if (!history.state) history.replaceState({ depth: 0 }, "", location.pathname + location.search);
-restoreLastRoute();
+// /app/pair?code=ABCD-EFGH (the link `rudder cloud app` prints) signs in here.
+const pairFromLink = location.pathname === "/app/pair" ? new URLSearchParams(location.search).get("code") : null;
+if (pairFromLink && !NATIVE) {
+  history.replaceState({ depth: 0 }, "", "/app");
+  redeemPairCode(pairFromLink, null);
+} else {
+  restoreLastRoute();
+}
 mountScreen();
 refreshState().then(pollState);
 

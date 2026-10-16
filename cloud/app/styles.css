@@ -561,6 +561,15 @@ dialog.sheet .dialog { border-radius: 22px 22px 0 0; padding-bottom: calc(var(--
 .signin h1 { font-size: 30px; letter-spacing: -0.025em; margin: 22px 0 8px; }
 .signin p { color: var(--muted); margin: 0 0 32px; font-size: 16px; }
 .signin .btn svg { width: 19px; height: 19px; }
+.signin .pair { margin: 0 0 22px; }
+.signin .pair label { display: block; font-size: 14px; color: var(--muted); margin: 0 0 8px; }
+.signin .pair code { font-family: var(--mono, ui-monospace, monospace); font-size: 13px; }
+.signin .pair-row { display: flex; gap: 10px; }
+.signin .pair input { flex: 1; min-width: 0; height: 48px; border-radius: 12px; border: 1px solid var(--line, rgba(0,0,0,.12));
+  background: var(--card, transparent); color: inherit; font: 600 18px/1 var(--mono, ui-monospace, monospace); letter-spacing: .08em;
+  text-transform: uppercase; padding: 0 14px; }
+.signin .pair .btn { height: 48px; padding: 0 20px; }
+.signin .pair-error { color: var(--red, #c0392b); font-size: 14px; margin: 8px 0 0; }
 .signin .alt { margin-top: 12px; text-align: center; }
 .signin .alt button { border: 0; background: none; color: var(--muted); font-size: 14.5px; min-height: 44px; padding: 0 12px; font-weight: 500; }
 

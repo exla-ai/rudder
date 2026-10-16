@@ -26,6 +26,8 @@ enum Theme {
 
 struct SignInView: View {
     @Bindable var session: Session
+    @State private var code = ""
+    @FocusState private var codeFocused: Bool
 
     var body: some View {
         ZStack {
@@ -44,6 +46,39 @@ struct SignInView: View {
                     .padding(.top, 8)
                 Spacer()
                 VStack(spacing: 12) {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Code from `rudder cloud app` on your laptop")
+                            .font(.system(size: 14))
+                            .foregroundStyle(Theme.muted)
+                        HStack(spacing: 10) {
+                            TextField("ABCD-EFGH", text: $code)
+                                .font(.system(size: 20, weight: .semibold, design: .monospaced))
+                                .textInputAutocapitalization(.characters)
+                                .autocorrectionDisabled()
+                                .focused($codeFocused)
+                                .submitLabel(.go)
+                                .onSubmit { Task { await session.pair(code: code) } }
+                                .padding(.horizontal, 14)
+                                .frame(minHeight: 54)
+                                .background(Theme.card, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                                .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).stroke(Theme.hairline))
+                                .accessibilityLabel("Pairing code")
+                            Button {
+                                codeFocused = false
+                                Task { await session.pair(code: code) }
+                            } label: {
+                                Text("Pair")
+                                    .font(.system(size: 17, weight: .semibold))
+                                    .frame(minWidth: 72, minHeight: 54)
+                                    .foregroundStyle(Theme.background)
+                                    .background(Theme.ink, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                            }
+                            .buttonStyle(.plain)
+                            .disabled(session.signingIn || code.trimmingCharacters(in: .whitespaces).count < 8)
+                        }
+                    }
+                    .padding(.bottom, 6)
+
                     Button {
                         session.signIn(provider: "google")
                     } label: {
@@ -75,7 +110,7 @@ struct SignInView: View {
                             .foregroundStyle(.red)
                             .multilineTextAlignment(.center)
                     }
-                    Text("Use the account you signed in with on your laptop (`rudder login`).")
+                    Text("Or sign in with the account you use for `rudder login`.")
                         .font(.system(size: 13))
                         .foregroundStyle(Theme.muted)
                         .multilineTextAlignment(.center)

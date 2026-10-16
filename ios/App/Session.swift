@@ -39,6 +39,11 @@ final class Session {
         if let probe = UserDefaults.standard.string(forKey: "probeToken"), !probe.isEmpty {
             token = probe
         }
+        // `-pairCode ABCD-EFGH` runs the same pairing a typed code or a
+        // rudder://pair link does, so the simulator can sign in unattended.
+        if let code = UserDefaults.standard.string(forKey: "pairCode"), !code.isEmpty {
+            Task { await self.pair(code: code) }
+        }
         #endif
     }
 
@@ -87,6 +92,40 @@ final class Session {
         }
     }
 
+    /// Sign in with a one-time code from `rudder cloud app` on the laptop. The
+    /// laptop is already signed in, so the phone needs no OAuth provider.
+    func pair(code: String) async {
+        let trimmed = code.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, !signingIn else { return }
+        errorMessage = nil
+        signingIn = true
+        defer { signingIn = false }
+        var request = URLRequest(url: server.appendingPathComponent("api/app/pair/finish"))
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try? JSONSerialization.data(withJSONObject: ["code": trimmed])
+        do {
+            let (data, _) = try await URLSession.shared.data(for: request)
+            let body = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] ?? [:]
+            if let token = body["token"] as? String, token.hasPrefix("rdr_") {
+                Keychain.write(token)
+                self.token = token
+            } else {
+                errorMessage = (body["error"] as? String) ?? "That code didn't work."
+            }
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    /// rudder://pair?code=ABCD-EFGH (printed by `rudder cloud app`).
+    func handle(url: URL) {
+        guard url.scheme == "rudder", url.host == "pair",
+              let code = URLComponents(url: url, resolvingAgainstBaseURL: false)?
+                .queryItems?.first(where: { $0.name == "code" })?.value else { return }
+        Task { await pair(code: code) }
+    }
+
     func signOut() {
         Keychain.delete()
         token = nil
@@ -102,6 +141,8 @@ final class Session {
         Task {
             let settings = await center.notificationSettings()
             if settings.authorizationStatus == .notDetermined {
+                // Ask only when there is something to show, not on first launch.
+                guard count > 0 else { return }
                 _ = try? await center.requestAuthorization(options: [.badge])
             }
             try? await center.setBadgeCount(max(0, count))

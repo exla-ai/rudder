@@ -50,7 +50,15 @@ struct AppWebView: UIViewRepresentable {
 
         context.coordinator.webView = webView
         context.coordinator.lastTick = session.foregroundTick
-        webView.load(URLRequest(url: session.appURL))
+        var start = session.appURL
+        #if DEBUG
+        // `-startPath /app/p/<project>/a/<agent>` opens a screen directly (simulator tests).
+        if let path = UserDefaults.standard.string(forKey: "startPath"), path.hasPrefix("/app"),
+           let url = URL(string: path, relativeTo: session.server) {
+            start = url
+        }
+        #endif
+        webView.load(URLRequest(url: start))
         return webView
     }
 

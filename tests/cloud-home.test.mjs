@@ -229,6 +229,50 @@ serverTest("a home machine's repos, state and phone requests flow over its contr
   });
 });
 
+serverTest("a signed-in laptop pairs a phone with a one-time code", async (t) => {
+  const { base, dbPath } = await bootServer(t);
+  const cliToken = "rdr_pair_test_cli";
+  const now = new Date().toISOString();
+  const db = new Database(dbPath);
+  db.pragma("journal_mode = WAL");
+  db.prepare(
+    "insert or replace into rudder_tokens (token_hash, account_id, email, created_at, last_used_at) values (?,?,?,?,?)",
+  ).run(tokenHash(cliToken), "acct-pair", "me@example.com", now, now);
+  db.close();
+  const post = (path, body, headers = {}) => fetch(`${base}${path}`, {
+    method: "POST",
+    headers: { "content-type": "application/json", ...headers },
+    body: JSON.stringify(body ?? {}),
+  });
+
+  // Only a signed-in device can start a pairing.
+  assert.equal((await post("/api/app/pair/start")).status, 401);
+  const started = await (await post("/api/app/pair/start", {}, { authorization: `Bearer ${cliToken}` })).json();
+  assert.match(started.code, /^[A-HJ-NP-Z2-9]{4}-[A-HJ-NP-Z2-9]{4}$/);
+  assert.equal(started.link, `rudder://pair?code=${started.code}`);
+  assert.equal(started.url, `${base}/app/pair?code=${started.code}`);
+
+  // Lowercase, no dash: still the same code. It yields a token on the same account.
+  const loose = started.code.replace("-", "").toLowerCase();
+  const finished = await (await post("/api/app/pair/finish", { code: loose })).json();
+  assert.match(finished.token, /^rdr_/);
+  assert.equal(finished.email, "me@example.com");
+  const state = await (await fetch(`${base}/api/app/state`, { headers: { authorization: `Bearer ${finished.token}` } })).json();
+  assert.equal(state.email, "me@example.com");
+
+  // Single use.
+  const again = await post("/api/app/pair/finish", { code: started.code });
+  assert.equal(again.status, 400);
+  assert.match((await again.json()).error, /wrong or expired/);
+
+  // Guessing is rate limited per address.
+  let last = 0;
+  for (let attempt = 0; attempt < 11; attempt += 1) {
+    last = (await post("/api/app/pair/finish", { code: "AAAA-AAAA" })).status;
+  }
+  assert.equal(last, 429);
+});
+
 serverTest("a failed worker heartbeat records why", async (t) => {
   const { base, dbPath } = await bootServer(t);
   const workerToken = "rdrw_fail_test";
@@ -269,7 +313,7 @@ nodeTest("a Claude transcript becomes chat messages with tool calls matched to t
   const projectDir = path.join(home, ".claude", "projects", cwd.replace(/[^A-Za-z0-9-]/g, "-"));
   fs.mkdirSync(projectDir, { recursive: true });
   const lines = [
-    { type: "user", uuid: "u1", timestamp: "2026-10-15T10:00:00Z", message: { role: "user", content: "fix the webhook" } },
+    { type: "user", uuid: "u1", timestamp: "2026-10-15T10:00:00Z", message: { role: "user", content: "Objective: fix the webhook\nDone when: tests pass\n\nRudder-specific context injected by Rudder:\n- use jj\n\nfix the webhook" } },
     { type: "user", uuid: "u0", message: { role: "user", content: "<system-reminder>internal</system-reminder>" } },
     { type: "assistant", uuid: "a1", timestamp: "2026-10-15T10:00:05Z", message: { role: "assistant", content: [
       { type: "thinking", thinking: "hidden" },
@@ -282,7 +326,7 @@ nodeTest("a Claude transcript becomes chat messages with tool calls matched to t
     { type: "assistant", uuid: "a2", message: { role: "assistant", content: [{ type: "text", text: "Fixed; tests pass." }] } },
   ];
   fs.writeFileSync(path.join(projectDir, `${sessionId}.jsonl`), `${lines.map((l) => JSON.stringify(l)).join("\n")}\n`);
-  const record = { id: "run-1", backend: "claude", taskSummary: "Fix the webhook", session: { nativeSessionId: sessionId }, workspace: { path: cwd } };
+  const record = { id: "run-1", backend: "claude", task: "fix the webhook", taskSummary: "Fix the webhook", session: { nativeSessionId: sessionId }, workspace: { path: cwd } };
   const repo = fixtureRepo(record);
 
   const transcript = readTranscript(repo, "run-1", { limit: 50, home });
@@ -309,8 +353,7 @@ nodeTest("a Codex rollout becomes chat messages, including code-mode tool calls"
   const lines = [
     { type: "session_meta", payload: { id: sessionId } },
     item({ type: "message", role: "user", content: [{ type: "input_text", text: "<environment_context>cwd</environment_context>" }] }),
-    item({ type: "message", role: "user", content: [{ type: "input_text", text: "Rudder-specific context injected by Rudder: be the owner" }] }),
-    item({ type: "message", role: "user", content: [{ type: "input_text", text: "add billing" }] }),
+    item({ type: "message", role: "user", content: [{ type: "input_text", text: "Rudder-specific context injected by Rudder: be the owner\n\nadd billing" }] }),
     item({ type: "custom_tool_call", name: "exec", call_id: "c1", input: 'text(await tools.exec_command({cmd:"rg billing src"}))' }),
     item({ type: "custom_tool_call_output", call_id: "c1", output: [{ type: "input_text", text: "src/billing.ts" }] }),
     item({ type: "function_call", name: "shell", call_id: "c2", arguments: JSON.stringify({ command: ["bash", "-lc", "npm test"] }) }),

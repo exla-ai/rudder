@@ -569,6 +569,10 @@ const server = http.createServer({ noDelay: true }, async (req, res) => {
       await serveAppFile(res, url.pathname);
       return;
     }
+    if (url.pathname === "/api/app/pair/start" || url.pathname === "/api/app/pair/finish") {
+      await handleAppPairing(req, res, url);
+      return;
+    }
     if (url.pathname.startsWith("/api/app/")) {
       await handleAppApi(req, res, url);
       return;
@@ -4485,6 +4489,15 @@ function createBetterAuth() {
     secret: requiredEnv("BETTER_AUTH_SECRET"),
     database,
     socialProviders: socialProviders(),
+    // One person, several providers: a Google sign-in with the same verified
+    // email as an existing GitHub account is the SAME Rudder account (and so
+    // sees the same home machine), not a fresh empty one.
+    account: {
+      accountLinking: {
+        enabled: true,
+        trustedProviders: ["google", "github"],
+      },
+    },
   });
 }
 
@@ -5463,4 +5476,87 @@ async function handleAppNativeDone(req: IncomingMessage, res: ServerResponse): P
   res.statusCode = 302;
   res.setHeader("Location", `rudder://auth?token=${encodeURIComponent(issued.token)}`);
   res.end();
+}
+
+// ---------------------------------------------------------------------------
+// Pairing: the laptop (already signed in) vouches for the phone. `rudder cloud
+// app` asks for a short code; the phone trades it for a bearer token on the same
+// account. No OAuth provider involved, so it works whatever Google or GitHub
+// think of the phone's browser.
+// ---------------------------------------------------------------------------
+
+const PAIR_TTL_MS = 10 * 60 * 1000;
+const PAIR_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"; // no 0/O, 1/I/L
+const pairings = new Map<string, { accountId: string; email?: string; expiresAt: number }>();
+const pairFailures = new Map<string, { count: number; resetAt: number }>();
+
+function newPairCode(): string {
+  const bytes = randomBytes(8);
+  let code = "";
+  for (const byte of bytes) {
+    code += PAIR_ALPHABET[byte % PAIR_ALPHABET.length];
+  }
+  return `${code.slice(0, 4)}-${code.slice(4)}`;
+}
+
+function normalizePairCode(value: string): string {
+  const raw = value.toUpperCase().replace(/[^A-Z0-9]/g, "");
+  return raw.length === 8 ? `${raw.slice(0, 4)}-${raw.slice(4)}` : "";
+}
+
+function clientAddress(req: IncomingMessage): string {
+  const forwarded = req.headers["fly-client-ip"] ?? req.headers["x-forwarded-for"];
+  const value = Array.isArray(forwarded) ? forwarded[0] : forwarded;
+  return (value ?? req.socket.remoteAddress ?? "unknown").split(",")[0].trim();
+}
+
+async function handleAppPairing(req: IncomingMessage, res: ServerResponse, url: URL): Promise<void> {
+  if (req.method !== "POST") {
+    sendJson(res, 405, { error: "method not allowed" });
+    return;
+  }
+  const now = Date.now();
+  for (const [code, pairing] of pairings) {
+    if (pairing.expiresAt < now) {
+      pairings.delete(code);
+    }
+  }
+  if (url.pathname === "/api/app/pair/start") {
+    // Only a signed-in device can vouch for another one.
+    const account = await requireAccount(req);
+    let code = newPairCode();
+    while (pairings.has(code)) {
+      code = newPairCode();
+    }
+    pairings.set(code, { accountId: account.accountId, email: account.email, expiresAt: now + PAIR_TTL_MS });
+    sendJson(res, 200, {
+      code,
+      expiresAt: new Date(now + PAIR_TTL_MS).toISOString(),
+      link: `rudder://pair?code=${code}`,
+      url: `${baseURL}/app/pair?code=${code}`,
+    });
+    return;
+  }
+  // finish: unauthenticated by design, so it is single-use, short-lived and
+  // rate limited per address (8 characters of a 31-letter alphabet ~ 2^39).
+  const address = clientAddress(req);
+  const failures = pairFailures.get(address);
+  if (failures && failures.resetAt > now && failures.count >= 10) {
+    sendJson(res, 429, { error: "too many attempts; wait a minute" });
+    return;
+  }
+  const body = await readJsonBody(req);
+  const code = normalizePairCode(stringField(body, "code") ?? "");
+  const pairing = code ? pairings.get(code) : undefined;
+  if (!pairing || pairing.expiresAt < now) {
+    const next = failures && failures.resetAt > now ? failures : { count: 0, resetAt: now + 60_000 };
+    next.count += 1;
+    pairFailures.set(address, next);
+    sendJson(res, 400, { error: "that code is wrong or expired; run `rudder cloud app` for a new one" });
+    return;
+  }
+  pairings.delete(code);
+  const issued = issueRudderToken(pairing.accountId, pairing.email);
+  schedulePersistDatabase();
+  sendJson(res, 200, { token: issued.token, email: pairing.email ?? null });
 }

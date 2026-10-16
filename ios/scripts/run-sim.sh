@@ -4,7 +4,7 @@
 set -euo pipefail
 IOS_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 OUT="$IOS_DIR/build/sim"; APP="$OUT/Rudder.app"; BUNDLE_ID=dev.viraat.rudder
-SERVER="${1:-http://localhost:4321}"; TOKEN="${2:-rdr_simulator_test}"
+SERVER="${1:-http://localhost:4321}"; TOKEN="${2-rdr_simulator_test}"; PAIR="${3:-}"; START="${4:-}"
 rm -rf "$OUT"; mkdir -p "$APP"
 xcrun -sdk iphonesimulator swiftc -Onone -DDEBUG -swift-version 6 -target arm64-apple-ios17.0-simulator \
   -parse-as-library -module-name Rudder -emit-executable -o "$APP/Rudder" "$IOS_DIR"/App/*.swift
@@ -24,7 +24,8 @@ PY
 codesign --force --sign - "$APP"
 UDID=$(xcrun simctl list devices available -j | python3 -c 'import json,sys; d=json.load(sys.stdin)["devices"]; print(next(x["udid"] for k,v in d.items() if "iOS" in k for x in v if x["name"].startswith("iPhone")))')
 xcrun simctl bootstatus "$UDID" -b >/dev/null
-xcrun simctl install "$UDID" "$APP"
 xcrun simctl terminate "$UDID" "$BUNDLE_ID" 2>/dev/null || true
-xcrun simctl launch "$UDID" "$BUNDLE_ID" -RudderServerURL "$SERVER" -probeToken "$TOKEN" >/dev/null
+xcrun simctl uninstall "$UDID" "$BUNDLE_ID" 2>/dev/null || true   # fresh Keychain/permissions each run
+xcrun simctl install "$UDID" "$APP"
+xcrun simctl launch "$UDID" "$BUNDLE_ID" -RudderServerURL "$SERVER" -probeToken "$TOKEN" -pairCode "$PAIR" -startPath "$START" >/dev/null
 echo "$UDID"

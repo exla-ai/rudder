@@ -80,8 +80,8 @@ for (const signal of ["SIGTERM", "SIGINT"]) {
     for (const project of projects.values()) {
       project.stop();
     }
-    // Rudder dashboards persist Paused rows on SIGTERM; give them a moment.
-    setTimeout(() => process.exit(0), 3000).unref();
+    // Dashboards persist Paused rows on SIGTERM; give them a moment (Fly waits 10s).
+    setTimeout(() => process.exit(0), 5000).unref();
   });
 }
 
@@ -248,7 +248,13 @@ class Project {
 
   stop() {
     this.stopped = true;
-    try { this.term?.kill("SIGTERM"); } catch { /* ignore */ }
+    // The whole process group: the dashboard (rudder-native) pauses its live
+    // agents on SIGTERM, which turns into resumable rows after a restart.
+    try {
+      if (this.term?.pid) process.kill(-this.term.pid, "SIGTERM");
+    } catch {
+      try { this.term?.kill("SIGTERM"); } catch { /* ignore */ }
+    }
     try { this.ws?.close(1000, "closed"); } catch { /* ignore */ }
   }
 

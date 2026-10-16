@@ -19518,11 +19518,32 @@ fn restore_terminal(terminal: &mut Tui) -> Result<()> {
     Ok(())
 }
 
+/// Set by SIGTERM/SIGHUP. Without a handler those signals killed the dashboard
+/// outright: `shutdown` never ran, live rows stayed "running" on disk, and the
+/// next start loaded them as orphaned instead of paused-and-resumable. A cloud
+/// machine stopping, or a laptop terminal window closing, is exactly that.
+static TERMINATION_REQUESTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(unix)]
+extern "C" fn request_termination(_signal: libc::c_int) {
+    TERMINATION_REQUESTED.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+fn install_termination_handlers() {
+    #[cfg(unix)]
+    unsafe {
+        let handler = request_termination as extern "C" fn(libc::c_int) as libc::sighandler_t;
+        libc::signal(libc::SIGTERM, handler);
+        libc::signal(libc::SIGHUP, handler);
+    }
+}
+
 fn run(terminal: &mut Tui) -> Result<()> {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
 
     let mut app = App::new();
+    install_termination_handlers();
 
     // The main loop selects on ONE channel fed by two kinds of source:
     //   * a dedicated stdin reader thread that forwards terminal input events, and
@@ -19593,6 +19614,10 @@ fn run(terminal: &mut Tui) -> Result<()> {
         pty_output_pending.store(false, Ordering::Release);
         // poll_agents flips app.dirty when any state mutates (PTY bytes,
         // status change, cloud info, etc).
+        if TERMINATION_REQUESTED.load(Ordering::SeqCst) {
+            app.shutdown();
+            break;
+        }
         app.poll_agents();
         app.refresh_tab_title();
         app.service_attach_clients();

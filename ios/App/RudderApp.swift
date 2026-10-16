@@ -8,6 +8,7 @@ struct RudderApp: App {
     var body: some Scene {
         WindowGroup {
             RootView(session: session)
+                .onOpenURL { url in session.handle(url: url) }
                 .onChange(of: scenePhase) { _, phase in
                     if phase == .active {
                         session.didBecomeActive()

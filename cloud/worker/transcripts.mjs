@@ -39,7 +39,7 @@ export function readTranscript(repoDir, runId, { limit = 300, home }) {
   }
   const { text, truncated } = readTail(file, TAIL_BYTES);
   const lines = text.split("\n");
-  const messages = record.backend === "codex" ? parseCodex(lines) : parseClaude(lines);
+  const messages = showUserTask(record.backend === "codex" ? parseCodex(lines) : parseClaude(lines), record);
   base.truncated = truncated || messages.length > limit;
   base.messages = messages.slice(-limit);
   return base;
@@ -84,6 +84,21 @@ function claudeSessionUrl(lines) {
     }
   }
   return null;
+}
+
+// Rudder launches an agent with its own framing around the request
+// ("Objective: ...", "Rudder-specific context injected by Rudder: ..."). In the
+// chat that turn is what the user asked for, so it shows as the task itself.
+const RUDDER_FRAMING = /Rudder-specific context injected by Rudder|^Objective: [\s\S]*\nDone when:/;
+
+function showUserTask(messages, record) {
+  return messages.map((message) => {
+    if (message.role !== "user" || !RUDDER_FRAMING.test(message.text)) {
+      return message;
+    }
+    const task = String(record.task || "").trim();
+    return task ? { ...message, text: task } : message;
+  });
 }
 
 function readRunRecord(repoDir, runId) {
@@ -325,7 +340,7 @@ function parseCodex(lines) {
       }
       if (payload.role === "user") {
         const cleaned = /^<(environment_context|user_instructions|permissions|turn_aborted)/.test(text) ? "" : text;
-        if (cleaned && !text.startsWith("# AGENTS.md instructions") && !text.startsWith("Rudder-specific context injected by Rudder")) {
+        if (cleaned && !text.startsWith("# AGENTS.md instructions")) {
           messages.push({ id, role: "user", ts, text: cleaned });
         }
       } else if (payload.role === "assistant") {

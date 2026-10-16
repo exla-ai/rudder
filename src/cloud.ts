@@ -232,7 +232,8 @@ export async function runCloudCommand(command: string, args: string[], options: 
       await homeCommand(rest, options);
       return;
     case "app":
-      printAppLink(options);
+    case "pair":
+      await printAppLink(options);
       return;
     case "launch":
       await launch(rest, options, "task");
@@ -3667,7 +3668,7 @@ Usage:
       folder to its own machine instead.
   rudder cloud home [status|start|stop|open <owner/repo>]
   rudder cloud app
-      the phone app link (sign in with the same Google account)
+      a one-time code that signs the phone app in to this account
   rudder cloud login [--github]
       signs in with Google (or GitHub)
   rudder cloud help
@@ -3939,13 +3940,25 @@ function appUrl(baseUrl: string): string {
   return `${baseUrl.replace(/\/$/, "")}/app`;
 }
 
-function printAppLink(options: CloudCommandOptions): void {
-  const baseUrl = (process.env.RUDDER_CLOUD_URL || DEFAULT_CLOUD_URL).replace(/\/$/, "");
+// Sign the phone in from this (already signed-in) laptop: a short, single-use
+// code the Rudder app trades for a token on the same account. No OAuth.
+async function printAppLink(options: CloudCommandOptions): Promise<void> {
+  const client = await cloudClient({ requireToken: true });
+  const pairing = await client.request<{ code: string; expiresAt: string; link: string; url: string }>(
+    "/api/app/pair/start",
+    { method: "POST", body: {} },
+  );
   if (options.json) {
-    printJson({ url: appUrl(baseUrl) });
+    printJson({ app: appUrl(client.baseUrl), ...pairing } as unknown as JsonValue);
     return;
   }
-  console.log(`Open on your phone and sign in with the same Google account:\n  ${appUrl(baseUrl)}`);
+  console.log(`Pair your phone (code works once, for 10 minutes):
+
+  Code:  ${pairing.code}
+
+  iPhone app:  tap "Pair with this code" on the sign-in screen and type it,
+               or open ${pairing.link}
+  Browser:     ${pairing.url}`);
 }
 
 async function homeCommand(args: string[], options: CloudCommandOptions): Promise<void> {

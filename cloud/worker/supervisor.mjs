@@ -452,7 +452,10 @@ function writeVaultFiles(files) {
 function configureGitCredentials(vault) {
   const home = os.homedir() || process.env.HOME || "/root";
   const ghHosts = path.join(home, ".config", "gh", "hosts.yml");
-  if (fs.existsSync(ghHosts)) {
+  // gh usually keeps its token in the laptop's keychain, so a synced hosts.yml
+  // without one must not shadow a token in the vault.
+  const hostsHasToken = fs.existsSync(ghHosts) && /oauth_token:/.test(fs.readFileSync(ghHosts, "utf8"));
+  if (hostsHasToken && !(vault?.env?.GITHUB_TOKEN || vault?.env?.GH_TOKEN)) {
     // Wire git's credential helper through gh; also gives the agent `gh pr create`.
     shSoft("command -v gh >/dev/null 2>&1 && gh auth setup-git 2>/dev/null");
     return;

@@ -113,7 +113,10 @@ class Project {
       await this.ensureClone();
     } catch (error) {
       this.status = "failed";
-      this.error = `git clone failed: ${firstLine(error.message)}`;
+      const reason = firstLine(error.message);
+      this.error = !githubCredentials && /could not read Username|Authentication failed|Repository not found/i.test(reason)
+        ? "can't clone: the cloud vault has no GitHub token. Run `rudder cloud` in this repo on your laptop to add one."
+        : `git clone failed: ${reason}`;
       log(`${this.name}: ${this.error}`);
       return;
     }
@@ -954,6 +957,9 @@ async function refreshVaultRepoFiles() {
   }
   deferredRepoFiles.length = 0;
   writeVaultFiles(fresh.files, deferredRepoFiles);
+  // A GitHub token added since boot takes effect now; failed clones retry when
+  // the repo list is reconciled right after this.
+  configureGitCredentials(fresh);
   for (const project of projects.values()) {
     if (fs.existsSync(path.join(project.dir, ".git"))) {
       writeDeferredRepoFiles(project.name, project.dir);
@@ -976,19 +982,30 @@ function writeDeferredRepoFiles(repoName, repoDir) {
   }
 }
 
+// A token in the vault wins. A synced ~/.config/gh/hosts.yml usually has NO
+// token in it (gh keeps it in the laptop's keychain), so trusting the file made
+// every private clone die at git's username prompt.
 function configureGitCredentials(secrets) {
-  if (fs.existsSync(path.join(HOME, ".config", "gh", "hosts.yml"))) {
+  const token = secrets?.env?.GH_TOKEN || secrets?.env?.GITHUB_TOKEN || "";
+  if (token) {
+    fs.writeFileSync(path.join(HOME, ".git-credentials"), `https://x-access-token:${token}@github.com\n`, { mode: 0o600 });
+    shSoft("git config --global --unset-all credential.https://github.com.helper 2>/dev/null; git config --global credential.helper store");
+    // For the supervisor's own git/gh calls; agents get it through the vault env.
+    process.env.GH_TOKEN = token;
+    githubCredentials = "token";
+    return;
+  }
+  const hosts = path.join(HOME, ".config", "gh", "hosts.yml");
+  if (fs.existsSync(hosts) && /oauth_token:/.test(fs.readFileSync(hosts, "utf8"))) {
     shSoft("command -v gh >/dev/null 2>&1 && gh auth setup-git 2>/dev/null");
+    githubCredentials = "gh";
     return;
   }
-  const token = secrets?.env?.GITHUB_TOKEN || secrets?.env?.GH_TOKEN || "";
-  if (!token) {
-    log("no GitHub credentials in the vault; private clones and pushes will fail (run `rudder cloud secrets sync`)");
-    return;
-  }
-  fs.writeFileSync(path.join(HOME, ".git-credentials"), `https://x-access-token:${token}@github.com\n`, { mode: 0o600 });
-  shSoft("git config --global credential.helper store");
+  githubCredentials = null;
+  log("no GitHub token in the vault; private repos can't be cloned (run `rudder cloud` in a repo on your laptop)");
 }
+
+let githubCredentials = null;
 
 // Nobody is at this machine's keyboard: answer Claude's one-time questions up
 // front. Every repo here came from the user's own GitHub; Remote Control is the

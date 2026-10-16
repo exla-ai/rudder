@@ -2404,13 +2404,22 @@ async function secretsSync(options: CloudCommandOptions): Promise<void> {
     }
   }
 
-  for (const [name, value] of Object.entries(captureCloudEnv())) {
+  const capturedEnv = captureCloudEnv();
+  for (const [name, value] of Object.entries(capturedEnv)) {
     items.push({
       name,
       kind: "env",
       valueBase64: Buffer.from(value, "utf8").toString("base64"),
       source: "sync",
     });
+  }
+  // gh keeps its token in the OS keychain, not in ~/.config/gh/hosts.yml, so
+  // the synced gh config alone cannot clone a private repo in the cloud.
+  if (!capturedEnv.GH_TOKEN && !capturedEnv.GITHUB_TOKEN) {
+    const ghToken = await localGithubToken();
+    if (ghToken) {
+      items.push({ name: "GH_TOKEN", kind: "env", valueBase64: Buffer.from(ghToken, "utf8").toString("base64"), source: "sync" });
+    }
   }
 
   if (items.length === 0) {
@@ -3801,6 +3810,7 @@ async function openOnHome(forceSnapshot: boolean, options: CloudCommandOptions):
   const name = slug.split("/")[1];
   if (!options.json) {
     await warnLocalOnlyWork(repoRoot);
+    await ensureVaultGithubToken(client, slug);
     await offerEnvFilesToVault(client, repoRoot, name);
     process.stderr.write(`Opening ${slug} on your home machine...\n`);
   }
@@ -3858,6 +3868,43 @@ async function warnLocalOnlyWork(repoRoot: string): Promise<void> {
   if (parts.length > 0) {
     process.stderr.write(`Heads up: ${parts.join(", ")}. The cloud clones from GitHub, so it won't see that. Push first, or use \`rudder cloud --snapshot\` to upload this folder instead.\n`);
   }
+}
+
+async function localGithubToken(): Promise<string | null> {
+  if (!commandExists("gh")) {
+    return null;
+  }
+  const result = await runCommand("gh", ["auth", "token"], { allowFailure: true });
+  const token = result.stdout.trim();
+  return result.code === 0 && /^(gh[opsu]_|github_pat_)[A-Za-z0-9_]+$/.test(token) ? token : null;
+}
+
+// The cloud machine clones from GitHub, so a private repo needs a GitHub token
+// in the vault. gh keeps its token in the OS keychain (hosts.yml has none), so
+// it never arrived with the synced gh config; offer to put it there.
+async function ensureVaultGithubToken(client: CloudClient, slug: string): Promise<void> {
+  const vault = await client.request<{ secrets?: { name: string }[] }>("/api/rudder/secrets", { method: "GET" }).catch(() => null);
+  if (!vault || (vault.secrets ?? []).some((secret) => secret.name === "GH_TOKEN" || secret.name === "GITHUB_TOKEN")) {
+    return;
+  }
+  const token = await localGithubToken();
+  if (!token) {
+    process.stderr.write(`The cloud vault has no GitHub token, so private repos can't be cloned there. Run \`gh auth login\` here, or \`rudder cloud secrets set GH_TOKEN\`.\n`);
+    return;
+  }
+  if (!isTty()) {
+    process.stderr.write("The cloud vault has no GitHub token; private repos will fail to clone. Run `rudder cloud secrets sync` from a terminal.\n");
+    return;
+  }
+  const yes = await promptConfirm(`The cloud machine needs GitHub access to clone ${slug} (and to push branches and open PRs). Copy your GitHub CLI token into the cloud vault?`, true);
+  if (!yes) {
+    return;
+  }
+  await client.request<JsonValue>("/api/rudder/secrets/item", {
+    method: "PUT",
+    body: { name: "GH_TOKEN", kind: "env", valueBase64: Buffer.from(token, "utf8").toString("base64"), source: "rudder cloud" },
+  });
+  process.stderr.write("Stored GH_TOKEN in the cloud vault.\n");
 }
 
 // The current branch, if GitHub has it; otherwise the default branch is used.

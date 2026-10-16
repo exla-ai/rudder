@@ -29,7 +29,10 @@ async function twoWorkerDashboard(t, prefix) {
   await session.press("3");
   await session.type("beta worker");
   await session.press("Enter");
-  await session.waitForText("beta worker", { timeout: 30_000 });
+  // The row itself, not the task text (which the input line and the
+  // "starting" notice show first): a starting worker takes focus, and if that
+  // lands after the Ctrl+W 1 below, the next key goes to its terminal.
+  await waitSelected(session, "beta worker", 30_000);
   // Focus the agents list so action keys route there.
   await session.press("Ctrl+W");
   await session.press("1");

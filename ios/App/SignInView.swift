@@ -126,32 +126,14 @@ struct SignInView: View {
     }
 }
 
-/// The Rudder mark: a ship's wheel reduced to a ring and a helm line.
+/// The Rudder logo (the R mark from the site and the macOS app icon).
 struct RudderMark: View {
     var body: some View {
-        GeometryReader { geometry in
-            let size = min(geometry.size.width, geometry.size.height)
-            ZStack {
-                RoundedRectangle(cornerRadius: size * 0.24, style: .continuous)
-                    .fill(Theme.ink)
-                Circle()
-                    .stroke(Theme.background, lineWidth: size * 0.075)
-                    .frame(width: size * 0.46, height: size * 0.46)
-                ForEach(0..<4) { index in
-                    Capsule()
-                        .fill(Theme.background)
-                        .frame(width: size * 0.075, height: size * 0.66)
-                        .rotationEffect(.degrees(Double(index) * 45))
-                }
-                Circle()
-                    .fill(Theme.ink)
-                    .frame(width: size * 0.20, height: size * 0.20)
-                Circle()
-                    .fill(Color(red: 0.36, green: 0.55, blue: 0.95))
-                    .frame(width: size * 0.12, height: size * 0.12)
-            }
-            .frame(width: size, height: size)
-        }
+        Image("Logo")
+            .resizable()
+            .interpolation(.high)
+            .aspectRatio(contentMode: .fit)
+            .accessibilityHidden(true)
     }
 }
 

@@ -1,5 +1,5 @@
 app = "rudder-cloud-control"
-primary_region = "iad"
+primary_region = "sjc"
 
 [build]
   dockerfile = "Dockerfile"
@@ -12,7 +12,7 @@ primary_region = "iad"
   RUDDER_S3_BUCKET = "rudder-cloud-snapshots-597088032164-us-east-1"
   RUDDER_CLOUD_DATA_DIR = "/tmp/rudder-cloud"
   RUDDER_FLY_APP_NAME = "rudder-workers-exla"
-  RUDDER_FLY_REGION = "iad"
+  RUDDER_FLY_REGION = "sjc"
   RUDDER_WORKER_IMAGE = "registry.fly.io/rudder-workers-exla:3.1.6"
   RUDDER_IDLE_PAUSE_MS = "7200000"
   RUDDER_PUBLIC_LOGIN_URL = "https://rudder.viraat.dev/login"

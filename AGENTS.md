@@ -760,6 +760,11 @@ brain lives in the cloud, and the phone is a first-class client.
   workspace only; Stopped/Done/Failed/Merged/Migrated, cloud-owned, orchestrators,
   shell panes, /gam pairs and merge resolvers are left alone. Capped at 12, most
   recently used first.
+- **Region.** Default region is `sjc` (the user is on the US west coast; a
+  keystroke crossed to `iad` and back, ~110ms). `rudder cloud home region <code>`
+  (`POST /api/rudder/home/region`, background job, GET for progress) stops the
+  home, FORKS its volume into the new region, recreates the machine on the copy
+  and keeps the old volume as a backup; nothing is deleted.
 - **Predictive local echo (`src/predict.ts`).** The attach client keeps an
   xterm-headless model of the cloud screen and draws a typed printable character
   at the caret immediately (the dashboard always parks the real cursor on the

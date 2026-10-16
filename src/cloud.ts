@@ -4642,6 +4642,39 @@ async function homeCommand(args: string[], options: CloudCommandOptions): Promis
     }
     return;
   }
+  if (sub === "region") {
+    const region = (args[1] ?? "").trim().toLowerCase();
+    if (!region) {
+      throw new Error("Usage: rudder cloud home region <fly region, e.g. sjc>");
+    }
+    if (process.env.RUDDER_CLOUD_RUNTIME === "home") {
+      throw new Error("run this from your laptop: moving the home machine restarts it.");
+    }
+    type Move = { from: string; to: string; state: string; oldVolumeId?: string; error?: string };
+    const started = await client.request<{ move: Move }>("/api/rudder/home/region", { method: "POST", body: { region } });
+    console.log(`Moving the home machine ${started.move.from} -> ${started.move.to}. Its disk is copied; the old one is kept as a backup.`);
+    let last = "";
+    for (let i = 0; i < 400; i += 1) {
+      await sleep(3000);
+      const { move } = await client.request<{ move: Move | null }>("/api/rudder/home/region", { method: "GET" });
+      if (!move) {
+        continue;
+      }
+      if (move.state !== last) {
+        console.log(`  ${move.state}`);
+        last = move.state;
+      }
+      if (move.state === "failed") {
+        throw new Error(`the move failed: ${move.error ?? "unknown error"}`);
+      }
+      if (move.state === "done") {
+        console.log(`Done. The old disk (${move.oldVolumeId ?? "?"}) in ${move.from} is untouched; delete it once everything checks out.`);
+        return;
+      }
+    }
+    console.log("Still moving; check `rudder cloud home` in a few minutes.");
+    return;
+  }
   if (sub === "open") {
     const repo = args[1];
     if (!repo || !/^[\w.-]+\/[\w.-]+$/.test(repo)) {
@@ -4660,7 +4693,7 @@ async function homeCommand(args: string[], options: CloudCommandOptions): Promis
     return;
   }
   if (sub !== "status") {
-    throw new Error("Usage: rudder cloud home [status|start|stop|open <owner/repo>|runs <runId...>|delete <runId...>]");
+    throw new Error("Usage: rudder cloud home [status|start|stop|region <code>|open <owner/repo>|runs <runId...>|delete <runId...>]");
   }
   const result = await client.request<{ home: Record<string, JsonValue> | null; projects: Record<string, JsonValue>[] }>(
     "/api/rudder/home",

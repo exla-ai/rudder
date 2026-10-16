@@ -4998,6 +4998,87 @@ async function createHome(accountId: string, region: string | null): Promise<Wor
   return rowToWorkspace(findWorkspaceById.get(id));
 }
 
+type HomeRegionMove = {
+  from: string;
+  to: string;
+  state: "starting" | "stopping" | "copying" | "starting-machine" | "done" | "failed";
+  startedAt: string;
+  oldVolumeId?: string;
+  newVolumeId?: string;
+  error?: string;
+};
+const homeRegionMoves = new Map<string, HomeRegionMove>();
+
+async function moveHomeRegion(home: Workspace, move: HomeRegionMove): Promise<void> {
+  ensureFlyConfigured();
+  if ((home.region ?? flyRegion) === move.to) {
+    move.state = "done";
+    return;
+  }
+  if (!home.volumeId) {
+    throw new Error("the home machine has no volume to move");
+  }
+  move.oldVolumeId = home.volumeId;
+  move.state = "stopping";
+  if (home.machineId) {
+    await flyRequest(
+      `/v1/apps/${encodeURIComponent(flyAppName)}/machines/${encodeURIComponent(home.machineId)}/stop`,
+      { method: "POST", body: { signal: "SIGTERM", timeout: "20s" } },
+    ).catch(() => undefined);
+    for (let attempt = 0; attempt < 60; attempt += 1) {
+      const machine = await flyRequest<FlyMachine>(
+        `/v1/apps/${encodeURIComponent(flyAppName)}/machines/${encodeURIComponent(home.machineId)}`,
+        { method: "GET" },
+      ).catch(() => null);
+      if (!machine || machine.state === "stopped" || machine.state === "destroyed") {
+        break;
+      }
+      await sleep(2000);
+    }
+  }
+  move.state = "copying";
+  const fork = await flyRequest<FlyVolume>(`/v1/apps/${encodeURIComponent(flyAppName)}/volumes`, {
+    method: "POST",
+    body: {
+      name: workspaceVolumeName(home.id, move.to),
+      region: move.to,
+      size_gb: homeVolumeGb,
+      source_volume_id: home.volumeId,
+    },
+  });
+  move.newVolumeId = fork.id;
+  // A cross-region fork copies in the background; a machine can attach once
+  // the volume is created (Fly hydrates it), but wait for that state.
+  for (let attempt = 0; attempt < 180; attempt += 1) {
+    const volume = await flyRequest<FlyVolume & { state?: string }>(
+      `/v1/apps/${encodeURIComponent(flyAppName)}/volumes/${encodeURIComponent(fork.id ?? "")}`,
+      { method: "GET" },
+    ).catch(() => null);
+    if (volume?.state === "created") {
+      break;
+    }
+    await sleep(5000);
+  }
+  move.state = "starting-machine";
+  if (home.machineId) {
+    await destroyFlyMachine(home.machineId);
+  }
+  const now = new Date().toISOString();
+  updateWorkspaceVolume.run({ id: home.id, volumeId: fork.id ?? null, region: move.to, updatedAt: now });
+  closeHomeControl(home.id);
+  await recreateHomeMachine(rowToWorkspace(findWorkspaceById.get(home.id)));
+  move.state = "done";
+  console.log(`home ${home.id} moved ${move.from} -> ${move.to}; old volume ${move.oldVolumeId} kept as a backup`);
+}
+
+function closeHomeControl(homeId: string): void {
+  const control = homeControls.get(homeId);
+  if (control) {
+    homeControls.delete(homeId);
+    try { control.close(); } catch { /* ignore */ }
+  }
+}
+
 async function recreateHomeMachine(home: Workspace): Promise<Workspace> {
   const now = new Date().toISOString();
   const workerToken = `rdrw_${randomBytes(32).toString("base64url")}`;
@@ -5493,6 +5574,41 @@ async function handleHomeApi(req: IncomingMessage, res: ServerResponse, url: URL
     const home = await ensureHomeRunning(authContext.accountId);
     sendJson(res, 200, { home: homeSummary(home) });
     return;
+  }
+  // Move the home machine to another region (closer to the person using it).
+  // The disk is COPIED (a Fly volume fork), and the old one is kept as a
+  // backup: nothing on it is deleted here. Runs in the background; GET reports.
+  if (url.pathname === "/api/rudder/home/region") {
+    if (req.method === "GET") {
+      sendJson(res, 200, { move: homeRegionMoves.get(authContext.accountId) ?? null });
+      return;
+    }
+    if (req.method === "POST") {
+      const body = await readJsonBody(req);
+      const region = sanitizeRegion(stringField(body, "region") ?? "");
+      if (!region) {
+        throw badRequest("region must be a Fly region code like sjc or iad");
+      }
+      const home = findHomeRow(authContext.accountId);
+      if (!home) {
+        sendJson(res, 404, { error: "no home machine" });
+        return;
+      }
+      const running = homeRegionMoves.get(authContext.accountId);
+      if (running && running.state !== "done" && running.state !== "failed") {
+        sendJson(res, 409, { error: "a region move is already running", move: running });
+        return;
+      }
+      const move: HomeRegionMove = { from: home.region ?? flyRegion, to: region, state: "starting", startedAt: new Date().toISOString() };
+      homeRegionMoves.set(authContext.accountId, move);
+      void moveHomeRegion(home, move).catch((error) => {
+        move.state = "failed";
+        move.error = error instanceof Error ? error.message : String(error);
+        console.warn(`home region move failed: ${move.error}`);
+      });
+      sendJson(res, 202, { move });
+      return;
+    }
   }
   if (req.method === "POST" && url.pathname === "/api/rudder/home/stop") {
     const home = findHomeRow(authContext.accountId);

@@ -200,6 +200,19 @@ const server = http.createServer(async (req, res) => {
       setTimeout(() => { homeMode = "running"; }, 8000);
       return json(res, 200, { home: home() });
     }
+    if (p === "/api/app/repos") {
+      return json(res, 200, {
+        owners: ["viraatdas", "exla-ai"],
+        repos: [
+          { repo: "exla-ai/smol", description: "Smol models", private: true, updatedAt: new Date(Date.now() - 3600e3).toISOString(), open: true },
+          { repo: "exla-ai/vizzer", description: null, private: true, updatedAt: new Date(Date.now() - 86400e3).toISOString(), open: false },
+          { repo: "viraatdas/rudder", description: "Run coding agents in parallel", private: false, updatedAt: new Date().toISOString(), open: true },
+        ],
+      });
+    }
+    if (p === "/api/app/create") {
+      return json(res, 200, { workspace: { id: "ws-new", workspaceId: "ws-new", repo: `${body.owner}/${body.name}` } });
+    }
     if (p === "/api/app/open") {
       const repo = String(body.repo || "");
       if (!/^[\w.-]+\/[\w.-]+$/.test(repo)) return json(res, 400, { error: "Repository must look like owner/name." });

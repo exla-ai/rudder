@@ -382,6 +382,12 @@ async function handleRpc(method, params) {
     }
     return { ok: true };
   }
+  if (method === "repos") {
+    return await listGithubRepos();
+  }
+  if (method === "createRepo") {
+    return await createGithubRepo(params);
+  }
   const project = projects.get(params.workspaceId);
   if (!project) {
     throw new Error("that project is not open on the home machine");
@@ -403,6 +409,49 @@ async function handleRpc(method, params) {
     return await steer(project, { kind, taskId: String(params.runId || ""), instruction: kind });
   }
   throw new Error(`unknown method ${method}`);
+}
+
+// "Add project" on the phone: the repos this GitHub login can open (its own,
+// collaborations and its orgs'), newest first, plus where a new one can go.
+async function listGithubRepos() {
+  const env = { ...baseChildEnv };
+  const [user, orgs, repos] = await Promise.all([
+    capture("gh", ["api", "user", "--jq", ".login"], { env, timeoutMs: 20_000 }),
+    capture("gh", ["api", "user/orgs", "--jq", ".[].login"], { env, timeoutMs: 20_000 }),
+    capture("gh", ["api", "--paginate", "user/repos?per_page=100&sort=updated&affiliation=owner,collaborator,organization_member",
+      "--jq", ".[] | {repo: .full_name, description: .description, private: .private, updatedAt: .pushed_at, archived: .archived}"], { env, timeoutMs: 60_000 }),
+  ]);
+  if (user.code !== 0) {
+    throw new Error(githubCredentials ? `GitHub said: ${firstLine(user.stderr)}` : "the cloud vault has no GitHub token; run `rudder cloud` in a repo on your laptop to add one");
+  }
+  const open = new Set(Array.from(projects.values()).map((project) => project.descriptor.repo.toLowerCase()));
+  const list = repos.stdout.split("\n").filter(Boolean).map((line) => {
+    try {
+      return JSON.parse(line);
+    } catch {
+      return null;
+    }
+  }).filter((repo) => repo && !repo.archived).slice(0, 300).map((repo) => ({ ...repo, open: open.has(String(repo.repo).toLowerCase()) }));
+  const owners = [user.stdout.trim(), ...orgs.stdout.split("\n").map((line) => line.trim()).filter(Boolean)];
+  return { owners, repos: list };
+}
+
+async function createGithubRepo(params) {
+  const owner = String(params.owner || "").trim();
+  const name = String(params.name || "").trim();
+  if (!/^[A-Za-z0-9-]{1,39}$/.test(owner) || !/^[A-Za-z0-9._-]{1,100}$/.test(name)) {
+    throw new Error("use a plain repository name (letters, digits, . _ -)");
+  }
+  const args = ["repo", "create", `${owner}/${name}`, params.private === false ? "--public" : "--private", "--add-readme"];
+  const description = String(params.description || "").trim().slice(0, 300);
+  if (description) {
+    args.push("--description", description);
+  }
+  const result = await capture("gh", args, { env: { ...baseChildEnv }, timeoutMs: 60_000 });
+  if (result.code !== 0) {
+    throw new Error(firstLine(result.stderr || result.stdout) || "GitHub refused to create the repository");
+  }
+  return { repo: `${owner}/${name}` };
 }
 
 // Requests go through the dashboard's own steer inbox (.rudder/steer), the same

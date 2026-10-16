@@ -595,3 +595,24 @@ dialog.sheet .dialog { border-radius: 22px 22px 0 0; padding-bottom: calc(var(--
   .hljs-meta, .hljs-meta .hljs-keyword { color: #b3a3e6; }
   .hljs-deletion { color: #f08080; }
 }
+
+/* Add project sheet */
+.add-sheet .dialog { max-height: 86vh; display: flex; flex-direction: column; }
+.add-sheet .input[type="search"] { margin: 4px 0 10px; }
+.repo-list { overflow-y: auto; min-height: 120px; max-height: 46vh; margin: 0 -6px; -webkit-overflow-scrolling: touch; }
+.repo-row { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; width: 100%; text-align: left; padding: 11px 8px;
+  border: 0; border-radius: 12px; background: transparent; color: inherit; font: inherit; min-height: 44px; cursor: pointer; }
+.repo-row:active, .repo-row:hover { background: var(--surface-2, rgba(127,127,127,.08)); }
+.repo-row .rn { font-weight: 600; font-size: 15px; }
+.repo-row .rd { color: var(--muted); font-size: 13px; line-height: 1.35; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.repo-note { color: var(--muted); font-size: 14px; padding: 16px 8px; }
+.repo-note.err { color: var(--red, #c0392b); }
+.new-repo { margin-top: 12px; border-top: 1px solid var(--line, rgba(127,127,127,.18)); padding-top: 12px; }
+.new-repo summary { font-weight: 600; cursor: pointer; padding: 6px 0; list-style: none; }
+.new-repo summary::-webkit-details-marker { display: none; }
+.new-repo-form { display: flex; flex-direction: column; gap: 10px; margin-top: 8px; }
+.new-repo-form .row { display: flex; align-items: center; gap: 6px; }
+.new-repo-form select { height: 44px; border-radius: 10px; padding: 0 8px; font: inherit; max-width: 45%; background: var(--card, transparent); color: inherit; border: 1px solid var(--line, rgba(127,127,127,.25)); }
+.new-repo-form .slash { color: var(--muted); }
+.new-repo-form .row .input { flex: 1; min-width: 0; }
+.new-repo-form .check { display: flex; align-items: center; gap: 8px; font-size: 15px; }

@@ -164,7 +164,9 @@ serverTest("a home machine's repos, state and phone requests flow over its contr
     if (message.type === "rpc") {
       const reply = message.method === "send" && message.params.text === "boom"
         ? { type: "rpc-result", id: message.id, error: "the libra dashboard is starting" }
-        : { type: "rpc-result", id: message.id, result: { ok: true, echo: message.method, params: message.params } };
+        : message.method === "createRepo"
+          ? { type: "rpc-result", id: message.id, result: { repo: `${message.params.owner}/${message.params.name}` } }
+          : { type: "rpc-result", id: message.id, result: { ok: true, echo: message.method, params: message.params } };
       control.send(JSON.stringify(reply));
     }
   });
@@ -207,6 +209,14 @@ serverTest("a home machine's repos, state and phone requests flow over its contr
   const transcript = await (await fetch(`${base}/api/app/transcript?workspace=libra-test&run=r1&limit=5`, { headers: auth })).json();
   assert.deepEqual(transcript.params, { workspaceId: "libra-test", runId: "r1", limit: 20 });
 
+  // Add project: the repo list and creating a repo run on the home machine.
+  const repoList = await (await fetch(`${base}/api/app/repos`, { headers: auth })).json();
+  assert.equal(repoList.echo, "repos");
+  const created = await (await fetch(`${base}/api/app/create`, { method: "POST", headers: auth, body: JSON.stringify({ owner: "exla-ai", name: "fresh", private: true }) })).json();
+  assert.ok(created.workspace, `create opens the new repo on the home machine: ${JSON.stringify(created)}`);
+  const createRpc = messages.find((m) => m.type === "rpc" && m.method === "createRepo");
+  assert.deepEqual(createRpc.params, { owner: "exla-ai", name: "fresh", private: true, description: "" });
+
   // A supervisor error is the phone's error message.
   const failed = await fetch(`${base}/api/app/send`, { method: "POST", headers: auth, body: JSON.stringify({ workspace: "libra-test", run: "r1", text: "boom" }) });
   assert.equal(failed.status, 400);
@@ -221,13 +231,13 @@ serverTest("a home machine's repos, state and phone requests flow over its contr
   // The CLI view of the same machine.
   const home = await (await fetch(`${base}/api/rudder/home`, { headers: auth })).json();
   assert.equal(home.home.id, "home-test");
-  assert.equal(home.projects[0].ports[0].port, 3000);
+  assert.equal(home.projects.find((p) => p.workspaceId === "libra-test").ports[0].port, 3000);
 
   // A project error reported by the supervisor is persisted as its failure reason.
   control.send(JSON.stringify({ type: "state", projects: [{ workspaceId: "libra-test", name: "libra", dashboard: "failed", error: "git clone failed: Repository not found", agents: [], ports: [] }] }));
   await waitFor(async () => {
     const next = await (await fetch(`${base}/api/app/state`, { headers: auth })).json();
-    return next.projects[0].failureReason === "git clone failed: Repository not found";
+    return next.projects.find((p) => p.workspaceId === "libra-test")?.failureReason === "git clone failed: Repository not found";
   });
 });
 

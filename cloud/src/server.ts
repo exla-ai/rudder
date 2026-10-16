@@ -4880,6 +4880,12 @@ function homeRepos(homeId: string): Workspace[] {
 // The home machine is the expensive thing, so starting it is single-flight per
 // account: the CLI, the phone and a second terminal can all ask at once.
 async function ensureHomeRunning(accountId: string, region?: string | null): Promise<Workspace> {
+  // A supervisor holding its control socket is proof the machine is up: no
+  // need to ask Fly.
+  const known = findHomeRow(accountId);
+  if (known && known.status === "running" && isOpen(homeControls.get(known.id))) {
+    return known;
+  }
   const inFlight = homeStarts.get(accountId);
   if (inFlight) {
     return await inFlight;
@@ -5406,6 +5412,27 @@ async function handleAppApi(req: IncomingMessage, res: ServerResponse, url: URL)
     sendJson(res, 200, await openRepoOnHome(account.accountId, await readJsonBody(req)));
     return;
   }
+  // Add project: the GitHub repos the home machine's login can open, and
+  // creating a new one. Both run on the home machine (it holds the GitHub
+  // token), so a sleeping machine is woken first.
+  if (req.method === "GET" && url.pathname === "/api/app/repos") {
+    const live = await homeWithControl(account.accountId);
+    sendJson(res, 200, await homeRpc(live.id, "repos", {}, 70_000));
+    return;
+  }
+  if (req.method === "POST" && url.pathname === "/api/app/create") {
+    const body = await readJsonBody(req);
+    const live = await homeWithControl(account.accountId);
+    const created = await homeRpc(live.id, "createRepo", {
+      owner: stringField(body, "owner") ?? "",
+      name: stringField(body, "name") ?? "",
+      private: (body as JsonRecord)?.private !== false,
+      description: stringField(body, "description") ?? "",
+    }, 70_000);
+    const repo = (created as JsonRecord)?.repo;
+    sendJson(res, 200, await openRepoOnHome(account.accountId, { repo: typeof repo === "string" ? repo : "" }));
+    return;
+  }
   if (!home) {
     sendJson(res, 404, { error: "no home machine yet; run `rudder cloud` in a repo, or add a project" });
     return;
@@ -5562,4 +5589,18 @@ async function handleAppPairing(req: IncomingMessage, res: ServerResponse, url: 
   const issued = issueRudderToken(pairing.accountId, pairing.email);
   schedulePersistDatabase();
   sendJson(res, 200, { token: issued.token, email: pairing.email ?? null });
+}
+
+// The home machine, running and with its supervisor connected (woken and
+// waited for when it was asleep), for requests only it can answer.
+async function homeWithControl(accountId: string): Promise<Workspace> {
+  const home = await ensureHomeRunning(accountId);
+  const deadline = Date.now() + 90_000;
+  while (!isOpen(homeControls.get(home.id))) {
+    if (Date.now() > deadline) {
+      throw Object.assign(new Error("the home machine is still starting; try again in a moment"), { status: 503 });
+    }
+    await sleep(1000);
+  }
+  return home;
 }

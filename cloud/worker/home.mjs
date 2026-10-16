@@ -29,14 +29,26 @@ const homeId = (process.env.RUDDER_WORKSPACE_ID || "").trim();
 const workerToken = (process.env.RUDDER_WORKER_TOKEN || "").trim();
 const flyMachineId = (process.env.FLY_MACHINE_ID || "").trim();
 
-const VOLUME = "/workspace";
+// Overridable so the boot can be tested off a real machine.
+const VOLUME = process.env.RUDDER_HOME_VOLUME || "/workspace";
 const CODE_DIR = path.join(VOLUME, "code");
 const PERSIST_HOME = path.join(VOLUME, "home");
 const HOME = os.homedir() || process.env.HOME || "/home/rudder";
 const TS_SOCKET = "/tmp/tailscaled.sock";
 const TS_HOSTNAME = (process.env.RUDDER_TAILSCALE_HOSTNAME || "rudder-home").trim();
 const STATE_INTERVAL_MS = 3000;
+
+// Set by configureGitCredentials, which runs during boot: declared up here so
+// boot never reaches it uninitialized (2.16.5 crashed on exactly that).
+let githubCredentials = null;
 const PORT_SCAN_INTERVAL_MS = 5000;
+// All module state lives up here, above the boot sequence below: boot calls
+// into functions that read it, and a `let` declared further down is not
+// initialized yet when they do (a ReferenceError that kills the machine).
+let credentials = null;
+let credentialsRunning = false;
+let vaultRefreshedAt = 0;
+const lastMessageCache = new Map(); // runId -> { mtime, text }
 
 if (!homeId || !cloudUrl || !workerToken) {
   console.error("home supervisor: RUDDER_WORKSPACE_ID, RUDDER_CLOUD_URL and RUDDER_WORKER_TOKEN are required");
@@ -494,7 +506,6 @@ function readAgents(repoDir) {
   return agents.slice(0, 60);
 }
 
-const lastMessageCache = new Map(); // runId -> { mtime, text }
 
 function agentSummary(record) {
   const updatedAt = toMillis(record.updatedAt) ?? toMillis(record.createdAt);
@@ -769,8 +780,6 @@ function unservePort(port) {
 // tool makes one tiny real request, and reports which account it is.
 // ---------------------------------------------------------------------------
 
-let credentials = null;
-let credentialsRunning = false;
 
 async function checkCredentials() {
   if (credentialsRunning) {
@@ -1053,7 +1062,6 @@ function keepFresherLogin(target, file) {
   }
 }
 
-let vaultRefreshedAt = 0;
 
 async function refreshVaultRepoFiles() {
   if (Date.now() - vaultRefreshedAt < 5000) {
@@ -1117,7 +1125,6 @@ function configureGitCredentials(secrets) {
   log("no GitHub token in the vault; private repos can't be cloned (run `rudder cloud` in a repo on your laptop)");
 }
 
-let githubCredentials = null;
 
 // Nobody is at this machine's keyboard: answer Claude's one-time questions up
 // front. Every repo here came from the user's own GitHub; Remote Control is the

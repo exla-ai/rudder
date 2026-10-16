@@ -379,3 +379,68 @@ nodeTest("an agent with no session yet shows the prompts Rudder recorded", () =>
   const transcript = readTranscript(repo, "run-3", { home: os.tmpdir() });
   assert.deepEqual(transcript.messages, [{ id: "turn-0", role: "user", ts: 1789425365440, text: "start here" }]);
 });
+
+// The supervisor itself must boot. 2.16.5 shipped a home.mjs that crashed in
+// its first second (a `let` read before initialization), and every project on
+// the machine went down with it; nothing short of running it caught that.
+const workerDir = path.join(cloudDir, "worker");
+const workerReady = cloudReady && fs.existsSync(path.join(workerDir, "node_modules", "ws")) && fs.existsSync(path.join(workerDir, "node_modules", "node-pty"));
+(workerReady ? nodeTest : (name, fn) => nodeTest(name, { skip: "worker deps not installed (npm --prefix cloud/worker install)" }, fn))(
+  "the home supervisor boots, connects its control socket and reports credentials",
+  async (t) => {
+    const { base, dbPath } = await bootServer(t);
+    const cliToken = "rdr_boot_test_cli";
+    const workerToken = "rdrw_boot_test_worker";
+    const now = new Date().toISOString();
+    const db = new Database(dbPath);
+    db.pragma("journal_mode = WAL");
+    db.prepare("insert or replace into rudder_tokens (token_hash, account_id, email, created_at, last_used_at) values (?,?,?,?,?)")
+      .run(tokenHash(cliToken), "acct-boot", "me@example.com", now, now);
+    db.prepare(`insert into rudder_workspaces (id, account_id, workspace_key, repo_name, status, machine_id, worker_token_hash, source_kind, created_at, updated_at, last_activity_at)
+      values ('home-boot', 'acct-boot', 'home', 'home', 'running', 'm-boot', ?, 'home', ?, ?, ?)`).run(tokenHash(workerToken), now, now, now);
+    db.close();
+
+    // Stand-ins for the agent CLIs: logged out, so the credential check finishes
+    // fast and never touches a real account.
+    const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "rudder-home-boot-"));
+    const bin = path.join(scratch, "bin");
+    fs.mkdirSync(bin);
+    for (const tool of ["claude", "codex", "gh", "tailscaled", "tailscale"]) {
+      fs.writeFileSync(path.join(bin, tool), "#!/bin/sh\necho '{\"loggedIn\":false}'\nexit 1\n", { mode: 0o755 });
+    }
+    const home = path.join(scratch, "home");
+    fs.mkdirSync(home);
+    let log = "";
+    const child = spawn(process.execPath, [path.join(workerDir, "home.mjs")], {
+      cwd: workerDir,
+      env: {
+        PATH: `${bin}:${process.env.PATH}`,
+        HOME: home,
+        RUDDER_CLOUD_URL: base,
+        RUDDER_WORKSPACE_ID: "home-boot",
+        RUDDER_WORKER_TOKEN: workerToken,
+        RUDDER_HOME_VOLUME: path.join(scratch, "volume"),
+      },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let exited = null;
+    child.on("exit", (code) => { exited = code; });
+    child.stdout.on("data", (d) => { log += d.toString(); });
+    child.stderr.on("data", (d) => { log += d.toString(); });
+    t.after(() => {
+      child.kill("SIGKILL");
+      try { fs.rmSync(scratch, { recursive: true, force: true }); } catch { /* ignore */ }
+    });
+
+    const auth = { authorization: `Bearer ${cliToken}` };
+    const state = await waitFor(async () => {
+      if (exited !== null) throw new Error(`supervisor exited (${exited}):\n${log}`);
+      const next = await (await fetch(`${base}/api/app/state`, { headers: auth })).json();
+      return next.home?.connected && next.home?.credentials?.checkedAt ? next : null;
+    }, { timeout: 20_000 }).catch((error) => assert.fail(`${error.message}\n--- supervisor log ---\n${log}`));
+    assert.equal(state.home.credentials.claude.ok, false);
+    assert.equal(state.home.credentials.github.detail, "no GitHub token in the vault");
+    await sleep(1500);
+    assert.equal(exited, null, `the supervisor is still running:\n${log}`);
+  },
+);

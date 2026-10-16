@@ -4040,10 +4040,12 @@ const LAPTOP_CONFIG_FILES = [
 
 async function laptopConfigFiles(): Promise<{ name: string; content: Buffer }[]> {
   const names = [...LAPTOP_CONFIG_FILES, "~/.aws/config", "~/.aws/credentials"];
-  const hooksDir = path.join(os.homedir(), ".claude", "hooks");
-  for (const entry of await fsp.readdir(hooksDir, { withFileTypes: true }).catch(() => [])) {
-    if (entry.isFile()) {
-      names.push(`~/.claude/hooks/${entry.name}`);
+  // Hook scripts the settings above point at.
+  for (const dir of [".claude/hooks", ".codex/libra-hooks"]) {
+    for (const entry of await fsp.readdir(path.join(os.homedir(), dir), { withFileTypes: true }).catch(() => [])) {
+      if (entry.isFile()) {
+        names.push(`~/${dir}/${entry.name}`);
+      }
     }
   }
   const out: { name: string; content: Buffer }[] = [];

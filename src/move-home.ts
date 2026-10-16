@@ -38,6 +38,7 @@ export const MOVE_BUNDLE_VERSION = 1;
 const MOVE_REF_PREFIX = "refs/rudder-move/";
 /** Statuses a run can be in and still be worth moving: work not yet finished. */
 const MOVABLE_STATUSES = new Set(["running", "created", "steering", "verifying", "paused", "orphaned"]);
+const NAMED_MOVABLE_STATUSES = new Set(["completed", "failed", "cancelled"]);
 
 export type MoveAgent = {
   runId: string;
@@ -117,15 +118,26 @@ export async function findMoveCandidates(repoRoot: string, runIds?: string[]): P
     }
     adoptLegacyWorkspaceKey(record);
     const status = String(record.status ?? "");
+    // Named explicitly, a finished agent (an interrupted turn reads as done)
+    // can move too: the person asked for that one.
+    const named = Boolean(runIds && runIds.length > 0);
     const workspace = (record.workspace ?? {}) as Record<string, unknown>;
     const workspaceDir = typeof workspace.path === "string" ? workspace.path : "";
-    if (!MOVABLE_STATUSES.has(status) || workspace.enabled !== true || !workspaceDir) {
+    if (!(MOVABLE_STATUSES.has(status) || (named && NAMED_MOVABLE_STATUSES.has(status))) || workspace.enabled !== true || !workspaceDir) {
       continue;
     }
     if (path.resolve(workspaceDir) === path.resolve(repoRoot) || !(await pathExists(workspaceDir))) {
       continue;
     }
     const session = (record.session ?? {}) as Record<string, unknown>;
+    let sessionId = typeof session.nativeSessionId === "string" && session.nativeSessionId.trim()
+      ? session.nativeSessionId.trim()
+      : undefined;
+    // A Codex row whose id was never pinned: its conversation is the newest
+    // MAIN thread (not a subagent's) that ran in its workspace.
+    if (!sessionId && String(record.backend ?? "") === "codex") {
+      sessionId = (await findCodexMainThreadForCwd(workspaceDir)) ?? undefined;
+    }
     out.push({
       runId: name,
       task: String(record.task ?? ""),
@@ -134,12 +146,53 @@ export async function findMoveCandidates(repoRoot: string, runIds?: string[]): P
       status,
       workspacePath: workspaceDir,
       workspaceName: typeof workspace.workspaceName === "string" ? workspace.workspaceName : undefined,
-      sessionId: typeof session.nativeSessionId === "string" && session.nativeSessionId.trim()
-        ? session.nativeSessionId.trim()
-        : undefined,
+      sessionId,
     });
   }
   return out;
+}
+
+/** Newest Codex main-thread session whose rollout ran in `cwd` (subagent threads skipped). */
+export async function findCodexMainThreadForCwd(cwd: string, root = codexSessionsDir()): Promise<string | null> {
+  const target = path.resolve(cwd);
+  const files: Array<{ file: string; mtime: number }> = [];
+  async function walk(dir: string, depth: number): Promise<void> {
+    for (const entry of await fsp.readdir(dir, { withFileTypes: true }).catch(() => [])) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory() && depth < 4) {
+        await walk(full, depth + 1);
+      } else if (entry.isFile() && entry.name.startsWith("rollout-") && entry.name.endsWith(".jsonl")) {
+        const stat = await fsp.stat(full).catch(() => null);
+        if (stat && Date.now() - stat.mtimeMs < 14 * 24 * 3600 * 1000) {
+          files.push({ file: full, mtime: stat.mtimeMs });
+        }
+      }
+    }
+  }
+  await walk(root, 0);
+  files.sort((a, b) => b.mtime - a.mtime);
+  for (const { file } of files.slice(0, 400)) {
+    const head = await fsp.open(file, "r").then(async (handle) => {
+      try {
+        const buffer = Buffer.alloc(16384);
+        const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+        return buffer.subarray(0, bytesRead).toString("utf8");
+      } finally {
+        await handle.close();
+      }
+    }).catch(() => "");
+    // The session_meta line carries Codex's whole instructions, so it can be
+    // longer than what was read: pick the fields out instead of parsing it.
+    if (!head.includes('"type":"session_meta"') || !head.includes('"source":"cli"')) {
+      continue;
+    }
+    const id = /[{,]"id":"([A-Za-z0-9-]+)"/.exec(head)?.[1];
+    const rolloutCwd = /"cwd":"((?:[^"\\]|\\.)*)"/.exec(head)?.[1];
+    if (id && rolloutCwd && path.resolve(rolloutCwd) === target) {
+      return id;
+    }
+  }
+  return null;
 }
 
 /** Where `codex resume` finds a session: ~/.codex/sessions/<y>/<m>/<d>/rollout-…-<id>.jsonl. */

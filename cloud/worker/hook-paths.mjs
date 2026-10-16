@@ -41,6 +41,24 @@ export function absoluteProgram(command) {
   return token.startsWith("/") ? token : null;
 }
 
+// A path under $HOME the command runs or reads that is not on this machine
+// (`node "/home/x/.codex/libra-hooks/hook.mjs"`, `FOO=1 "/home/x/notify.sh"`).
+// A command that guards the path itself (`[ -f '<path>' ] && …`) is fine.
+export function missingHomePath(command, home, exists = fs.existsSync) {
+  if (typeof command !== "string" || !home) {
+    return null;
+  }
+  const root = home.replace(/\/+$/, "");
+  const paths = command.match(new RegExp(`${root.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/[^\\s'"\\;|&<>()]+`, "g")) ?? [];
+  for (const candidate of paths) {
+    const guarded = new RegExp(`-[fxe]\\s+['"]?${candidate.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`).test(command);
+    if (!guarded && !exists(candidate)) {
+      return candidate;
+    }
+  }
+  return null;
+}
+
 // Rewrite and prune one parsed hook config (Claude settings.json or Codex
 // hooks.json: `{ hooks: { <Event>: [{ matcher?, hooks: [{ type, command }] }] } }`).
 // Returns { config, changed, rewritten, dropped } and never mutates the input.
@@ -75,7 +93,7 @@ export function sanitizeHookConfig(config, { home, exists = fs.existsSync } = {}
         if (command !== hook.command) {
           result.rewritten.push({ event, from: hook.command, to: command });
         }
-        const program = absoluteProgram(command);
+        const program = absoluteProgram(command) ?? missingHomePath(command, home, exists);
         if (program && !exists(program)) {
           result.dropped.push({ event, command, missing: program });
           continue;

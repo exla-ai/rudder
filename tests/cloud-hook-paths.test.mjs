@@ -100,3 +100,12 @@ test("the home's settings.json and codex hooks.json are fixed on disk, and synce
     fs.rmSync(home, { recursive: true, force: true });
   }
 });
+
+test("a hook whose command reads a missing home path is dropped, a guarded one is kept", async () => {
+  const { missingHomePath } = await import("../cloud/worker/hook-paths.mjs");
+  const exists = (p) => p === "/home/rudder/ok.mjs";
+  assert.equal(missingHomePath('node "/home/rudder/.codex/libra-hooks/hook.mjs" codex', "/home/rudder", exists), "/home/rudder/.codex/libra-hooks/hook.mjs");
+  assert.equal(missingHomePath('SUPERSET_AGENT_ID=codex "/home/rudder/.superset/notify.sh"', "/home/rudder", exists), "/home/rudder/.superset/notify.sh");
+  assert.equal(missingHomePath("if [ -f '/home/rudder/x/i.js' ]; then node '/home/rudder/x/i.js'; fi", "/home/rudder", exists), null);
+  assert.equal(missingHomePath("node /home/rudder/ok.mjs", "/home/rudder", exists), null);
+});

@@ -26494,13 +26494,15 @@ fn quitting_with_agents_running_offers_the_home_machine_and_h_moves_them() {
     as_a_laptop();
     let dir = unique_test_repo("quit-offer-home");
     // A fake CLI that records its arguments and, like the real `cloud move`,
-    // marks each moved run's record "migrated" once "the home has it".
+    // marks each moved run's record "migrated" once "the home has it". No
+    // `sed -i`: BSD sed (the macOS release runner) reads its script as the
+    // backup suffix, and the record never changed there.
     let log = dir.join("cli-args.txt");
     let cli = dir.join("rudder");
     write_fake_bin(
         &cli,
         &format!(
-            "#!/bin/sh\necho \"$@\" >> '{}'\n[ \"$2\" = move ] || exit 0\nshift 3\nfor id in \"$@\"; do f='{}'/.rudder/runs/$id/run.json; sed -i 's/\"status\": *\"running\"/\"status\":\"migrated\"/' \"$f\"; done\n",
+            "#!/bin/sh\necho \"$@\" >> '{}'\n[ \"$2\" = move ] || exit 0\nshift 3\nfor id in \"$@\"; do f='{}'/.rudder/runs/$id/run.json; sed 's/\"status\": *\"running\"/\"status\":\"migrated\"/' \"$f\" > \"$f.tmp\" && mv \"$f.tmp\" \"$f\"; done\n",
             log.display(),
             dir.display()
         ),

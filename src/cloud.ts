@@ -119,6 +119,9 @@ const DEFAULT_HOME_PATHS = [
   // Agent CLIs
   "~/.claude/.credentials.json",
   "~/.claude/settings.json",
+  // Hook scripts settings.json points at; the home machine rewrites their
+  // /Users/<name> paths to its own home (cloud/worker/hook-paths.mjs).
+  "~/.claude/hooks",
   "~/.claude/CLAUDE.md",
   "~/.claude.json",
   "~/.codex/auth.json",

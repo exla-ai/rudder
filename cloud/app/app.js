@@ -49,7 +49,7 @@ function dayLabel(ms) {
   return d.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" });
 }
 
-class ApiError extends Error { constructor(msg, status) { super(msg); this.status = status; } }
+class ApiError extends Error { constructor(msg, status, waking = false) { super(msg); this.status = status; this.waking = waking; } }
 
 /* ------------------------------------------------------------------ */
 /* API                                                                 */
@@ -72,7 +72,7 @@ async function api(path, { method = "GET", body } = {}) {
   if (res.status === 401) { handleSignedOut(); throw new ApiError("Signed out", 401); }
   let data = null;
   try { data = await res.json(); } catch { /* empty body */ }
-  if (!res.ok) throw new ApiError(data?.error || `${res.status} ${res.statusText || "Request failed"}`.trim(), res.status);
+  if (!res.ok) throw new ApiError(data?.error || `${res.status} ${res.statusText || "Request failed"}`.trim(), res.status, !!data?.waking);
   return data;
 }
 
@@ -688,7 +688,7 @@ function machineLabel(home) {
   return ({
     running: { label: "Running", cls: "s-done" },
     queued: { label: "Starting", cls: "s-accent", live: true },
-    stopped: { label: "Asleep", cls: "s-idle" },
+    stopped: { label: "Waking", cls: "s-accent", live: true },
     failed: { label: "Failed", cls: "s-failed" },
     deleting: { label: "Deleting", cls: "s-idle" },
   })[home.status] || { label: home.status, cls: "s-idle" };
@@ -857,7 +857,7 @@ function HomeScreen() {
       const sub = machine.querySelector(".m-sub");
       let subText;
       if (home.status === "failed") subText = home.failureReason || "The machine failed to start.";
-      else if (home.status === "stopped") subText = "Asleep to save cost. Wake it to resume agents.";
+      else if (home.status === "stopped") subText = "Was asleep to save cost. Waking it now; agents reopen in about a minute.";
       else if (home.status === "queued") subText = "Booting. This can take up to a minute.";
       else if (home.status === "deleting") subText = "Being removed.";
       else {
@@ -1190,7 +1190,7 @@ function AgentScreen(ws, run) {
           termScreen.textContent = "Waiting for the agent's screen…";
         }
       } catch (err) {
-        termScreen.textContent = err.status === 401 ? "Signed out." : err.message;
+        termScreen.textContent = err.status === 401 ? "Signed out." : err.waking ? "Waking the home machine…" : err.message;
       }
     }
     if (termOn) termTimer = setTimeout(pollScreen, 1000);
@@ -1327,6 +1327,7 @@ function AgentScreen(ws, run) {
 
   let inflight = false;
   let lastErr = null;
+  let waking = false;
   async function loadTranscript() {
     if (inflight) return;
     inflight = true;
@@ -1334,8 +1335,16 @@ function AgentScreen(ws, run) {
       const t = await api(`/api/app/transcript?workspace=${encodeURIComponent(ws)}&run=${encodeURIComponent(run)}&limit=300`);
       store.transcripts.set(key, t);
       lastErr = null;
+      waking = false;
       reconcilePending(t);
     } catch (err) {
+      // A sleeping home is being woken by the server: say so in place, no toast.
+      if (err.waking) {
+        waking = true;
+        const prev = store.transcripts.get(key);
+        store.transcripts.set(key, { ...(prev || { messages: [] }), waking: true });
+        return;
+      }
       if (err.status !== 401 && err.message !== lastErr) { toast(err.message, { error: true }); lastErr = err.message; }
       if (!store.transcripts.has(key)) store.transcripts.set(key, { messages: [], error: err.message });
     } finally {
@@ -1400,7 +1409,9 @@ function AgentScreen(ws, run) {
     }
     for (const p of store.pending.get(key) || []) items.push({ kind: "pending", id: p.id, p });
 
-    if (!items.length && !t.error) {
+    if (!items.length && t.waking) {
+      items.push({ kind: "error", id: "waking", text: "Waking the home machine. Your agents reopen in about a minute." });
+    } else if (!items.length && !t.error) {
       items.push({ kind: "empty", id: "empty" });
     } else if (!items.length && t.error) {
       items.push({ kind: "error", id: "error", text: t.error });
@@ -1491,7 +1502,7 @@ function AgentScreen(ws, run) {
   const tick = async () => {
     timer = null;
     if (!document.hidden) await loadTranscript();
-    timer = setTimeout(tick, 2000);
+    timer = setTimeout(tick, waking ? 5000 : 2000);
   };
   const onVis = () => { if (!document.hidden) { clearTimeout(timer); tick(); } };
   document.addEventListener("visibilitychange", onVis);

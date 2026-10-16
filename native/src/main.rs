@@ -194,6 +194,14 @@ const TAB_SPINNER_INTERVAL: Duration = Duration::from_millis(400);
 /// several times a second while a turn runs, so this is far above any real
 /// pause; a permission or question prompt is caught earlier by its own hook.
 const IDLE_WITHOUT_SIGNAL: Duration = Duration::from_secs(60);
+
+/// Most rows the home machine reopens on boot (`reopen_live_rows_after_home_boot`).
+const HOME_BOOT_REOPEN_CAP: usize = 12;
+
+/// The dashboard is running on the cloud home machine.
+fn home_runtime_from_env() -> bool {
+    env::var("RUDDER_CLOUD_RUNTIME").is_ok_and(|value| value == "home")
+}
 /// How long after a backend-signalled completion a busy-looking screen is
 /// taken as leftover chrome rather than a new turn (see `poll_agents`).
 const BUSY_REOPEN_GRACE: Duration = Duration::from_secs(4);
@@ -1870,6 +1878,15 @@ struct App {
     /// Runs we already tried to reopen when their pane was focused. One attempt
     /// each: a resume that fails must not respawn on every Enter.
     focus_resume_attempted: HashSet<String>,
+    /// Running on the cloud home machine (`RUDDER_CLOUD_RUNTIME=home`), read once
+    /// at construction so a test setting the env cannot leak into another App.
+    home_runtime: bool,
+    /// The boot reopen (`reopen_live_rows_after_home_boot`) runs once per process.
+    home_boot_reopen_done: bool,
+    /// Rows `reconcile_orphaned_runs` turned from Running into Orphaned at THIS
+    /// start: they were live when the process died, unlike an orphan persisted by
+    /// an earlier session.
+    boot_orphaned_ids: HashSet<String>,
     rename_input: Option<String>,
     rename_cursor: usize,
     /// True while the rename box still holds the untouched current name as a
@@ -3027,6 +3044,9 @@ impl App {
             pending_migration_resumes,
             migration_resumes_attempted: false,
             focus_resume_attempted: HashSet::new(),
+            home_runtime: home_runtime_from_env(),
+            home_boot_reopen_done: false,
+            boot_orphaned_ids: HashSet::new(),
             rename_input: None,
             rename_cursor: 0,
             rename_prefilled: false,
@@ -9784,6 +9804,7 @@ Address the objection directly. If you disagree, say why inside \
                 run.last_error = Some(
                     "orphaned run: native PTY/controller is gone; resume explicitly".to_string(),
                 );
+                self.boot_orphaned_ids.insert(run.id.clone());
                 let _ = save_native_run_record(&self.cwd, run);
                 orphaned += 1;
             }
@@ -9858,6 +9879,97 @@ Address the objection directly. If you disagree, say why inside \
         true
     }
 
+    /// HOME MACHINE BOOT: reopen the rows that were live when the machine went
+    /// down. An idle Fly stop shuts the dashboard down, which persists every live
+    /// row as Paused (or, killed outright, leaves it Running and it loads as
+    /// Orphaned). Nothing relaunched them until someone steered, so each Claude
+    /// pane's `--remote-control` session stayed offline in the Claude app.
+    ///
+    /// Resume only: the saved backend session comes back with NO new turn (the
+    /// same `spawn_claude_resume_for` path Enter uses to reopen a row, hooks
+    /// re-wired by `augment_worker_command`). Explicit stops, finished, failed,
+    /// merged and migrated rows, orchestrators, shell panes, /gam pairs, merge
+    /// resolvers, rows without a session and rows whose workspace is gone stay
+    /// as they are. At most `HOME_BOOT_REOPEN_CAP`, most recently used first.
+    /// Off everywhere but the home runtime.
+    fn reopen_live_rows_after_home_boot(&mut self) {
+        if self.home_boot_reopen_done {
+            return;
+        }
+        self.home_boot_reopen_done = true;
+        if !self.home_runtime {
+            return;
+        }
+        let mut candidates: Vec<(u128, String)> = self
+            .agents
+            .iter()
+            .filter(|run| {
+                let was_live = run.status == AgentStatus::Paused
+                    || (run.status == AgentStatus::Orphaned
+                        && self.boot_orphaned_ids.contains(&run.id));
+                let workspace = run.workspace_path.as_ref().unwrap_or(&run.cwd);
+                was_live
+                    && run.terminal.is_none()
+                    && matches!(run.mode, AgentMode::Main | AgentMode::Execute)
+                    && !run.plain_process
+                    && !run.merge_resolver
+                    && run.gam.is_none()
+                    && !is_cloud_owned_agent(run)
+                    // Opencode has no resume here that runs no turn.
+                    && matches!(run.backend, Backend::Claude | Backend::Codex)
+                    && run
+                        .session_id
+                        .as_deref()
+                        .is_some_and(|sid| !sid.trim().is_empty())
+                    && workspace.is_dir()
+            })
+            .map(|run| {
+                let stamp = run
+                    .last_user_input_at
+                    .parse::<u128>()
+                    .ok()
+                    .or_else(|| run.created_at.parse::<u128>().ok())
+                    .unwrap_or(0);
+                (stamp, run.id.clone())
+            })
+            .collect();
+        candidates.sort_by(|a, b| b.0.cmp(&a.0));
+        candidates.truncate(HOME_BOOT_REOPEN_CAP);
+        let mut reopened = 0usize;
+        for (_, run_id) in candidates {
+            let Some(index) = self.agents.iter().position(|run| run.id == run_id) else {
+                continue;
+            };
+            let run = &self.agents[index];
+            let entry = MigratedAgent {
+                run_id: run.id.clone(),
+                session_id: run.session_id.clone().unwrap_or_default(),
+                workspace_path: run
+                    .workspace_path
+                    .clone()
+                    .unwrap_or_else(|| run.cwd.clone()),
+                fresh_prompt: None,
+            };
+            // Back to Running, as it was before the stop: the resumed session runs
+            // no turn, and the idle backstop says so ("idle at its prompt").
+            if self.spawn_claude_resume_for(index, &entry) {
+                self.focus_resume_attempted.insert(run_id);
+                reopened += 1;
+            }
+        }
+        if reopened > 0 {
+            self.push_activity(format!(
+                "home machine boot: reopened {reopened} agent session{}",
+                if reopened == 1 { "" } else { "s" }
+            ));
+            self.notice = Some(format!(
+                "reopened {reopened} agent{} that were live before the machine stopped",
+                if reopened == 1 { "" } else { "s" }
+            ));
+            self.dirty = true;
+        }
+    }
+
     fn resume_migrated_agents(&mut self) {
         if self.migration_resumes_attempted {
             return;
@@ -9928,6 +10040,13 @@ Address the objection directly. If you disagree, say why inside \
         // --settings / notify could never write it and would sit "running" forever.
         // (Same trap the conflict-resolver respawn fixed in e027f32.)
         signals::augment_worker_command(&mut command, run.backend, run.mode, &run.id);
+        // Same report channel as a fresh launch / re-goal, so `rudder done` from a
+        // resumed session still lands where the conductor reads it.
+        let report_id = run.node_id.as_deref().unwrap_or(&run.id);
+        command = command.with_env(
+            "RUDDER_DONE_FILE",
+            worker_done_file(&cwd, report_id).to_string_lossy().to_string(),
+        );
         let options = TerminalPaneOptions {
             size: run.terminal_size.unwrap_or_default(),
             cwd: Some(cwd.clone()),
@@ -19138,6 +19257,7 @@ What to do\n\
             self.finish_cloud_deletion(outcome);
         }
         self.emit_dashboard_opened_once();
+        self.reopen_live_rows_after_home_boot();
         self.flush_pending_enters();
         self.drive_claude_message_navs();
         self.maybe_start_queued_reconcile();

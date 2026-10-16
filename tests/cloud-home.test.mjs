@@ -142,6 +142,10 @@ serverTest("a home machine's repos, state and phone requests flow over its contr
   const early = await fetch(`${base}/api/app/send`, { method: "POST", headers: auth, body: JSON.stringify({ workspace: "libra-test", run: "r1", text: "hi" }) });
   assert.equal(early.status, 503);
   assert.match((await early.json()).error, /not connected/);
+  // Polled reads never surface an error: they wake the home and say so.
+  const earlyRead = await fetch(`${base}/api/app/transcript?workspace=libra-test&run=r1`, { headers: auth });
+  assert.equal(earlyRead.status, 503);
+  assert.equal((await earlyRead.json()).waking, true);
 
   // A bad worker token can't take the control socket.
   const rejected = await new Promise((resolve) => {

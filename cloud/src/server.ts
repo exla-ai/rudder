@@ -5614,6 +5614,11 @@ async function handleAppApi(req: IncomingMessage, res: ServerResponse, url: URL)
   if (req.method === "GET" && url.pathname === "/api/app/state") {
     if (home) {
       touchHome(home.id);
+      // Opening the app is the wake-up: a home that went to sleep (or lost
+      // its control socket) is started without anyone finding a Wake button.
+      if (home.status !== "deleting" && !isOpen(homeControls.get(home.id))) {
+        wakeHomeInBackground(account.accountId);
+      }
     }
     sendJson(res, 200, {
       email: account.email ?? null,
@@ -5665,6 +5670,24 @@ async function handleAppApi(req: IncomingMessage, res: ServerResponse, url: URL)
     return;
   }
   touchHome(home.id);
+  // A sleeping or still-booting home never answers with an error the user has
+  // to act on. Reads (polled every second or two) kick the wake off in the
+  // background and say so; writes wait for the machine, so a message sent to
+  // a sleeping home is delivered once it is up instead of being lost.
+  const homeConnected = isOpen(homeControls.get(home.id));
+  if (!homeConnected && req.method === "GET") {
+    wakeHomeInBackground(account.accountId);
+    sendJson(res, 503, { error: "Waking the home machine…", waking: true });
+    return;
+  }
+  if (!homeConnected) {
+    try {
+      await homeWithControl(account.accountId);
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      throw Object.assign(new Error(`the home machine is not connected yet (${reason})`), { status: 503 });
+    }
+  }
   if (req.method === "GET" && url.pathname === "/api/app/transcript") {
     const { repo } = requireHomeRepo(account.accountId, url.searchParams.get("workspace") ?? "");
     const result = await homeRpc(home.id, "transcript", {
@@ -5835,6 +5858,24 @@ async function handleAppPairing(req: IncomingMessage, res: ServerResponse, url: 
 
 // The home machine, running and with its supervisor connected (woken and
 // waited for when it was asleep), for requests only it can answer.
+// Polled reads wake the home without waiting for it. A wake that failed is
+// not retried on every poll: the next try waits out a cooldown.
+const homeWakeFailedAt = new Map<string, number>();
+function wakeHomeInBackground(accountId: string): void {
+  const failedAt = homeWakeFailedAt.get(accountId) ?? 0;
+  if (Date.now() - failedAt < 60_000) {
+    return;
+  }
+  void ensureHomeRunning(accountId)
+    .then((next) => {
+      homeWakeFailedAt.delete(accountId);
+      pushHomeRepos(next.id);
+    })
+    .catch(() => {
+      homeWakeFailedAt.set(accountId, Date.now());
+    });
+}
+
 async function homeWithControl(accountId: string): Promise<Workspace> {
   const home = await ensureHomeRunning(accountId);
   const deadline = Date.now() + 90_000;

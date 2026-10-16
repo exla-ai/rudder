@@ -23,6 +23,7 @@ import { WebSocket } from "ws";
 import pty from "node-pty";
 
 import { readTranscript, lastAssistantText, userTask } from "./transcripts.mjs";
+import { sanitizeHomeHookConfigs } from "./hook-paths.mjs";
 
 const cloudUrl = (process.env.RUDDER_CLOUD_URL || "").trim().replace(/\/$/, "");
 const homeId = (process.env.RUDDER_WORKSPACE_ID || "").trim();
@@ -1354,6 +1355,10 @@ function writeVaultFiles(files, deferred) {
       log(`vault file ${file.path}: ${error?.message || error}`);
     }
   }
+  // settings.json is rewritten from the vault every boot, so its hooks are
+  // fixed every boot too: laptop paths become this home, and hooks whose
+  // program is still missing are dropped. Last, so ~/.claude/hooks is on disk.
+  sanitizeHomeHookConfigs(HOME, log);
 }
 
 // Claude and Codex refresh their OAuth tokens in place, and a refresh can

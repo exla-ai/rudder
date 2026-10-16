@@ -26775,3 +26775,108 @@ fn a_task_waiting_on_its_name_is_listed_for_the_phone_until_it_launches() {
     assert!(!dir.join(".rudder").join("pending-tasks.json").exists());
     let _ = fs::remove_dir_all(&dir);
 }
+
+/// The home machine stops when idle, and every live row comes back Paused with
+/// no process, so its Claude Remote Control session reads offline in the app
+/// until someone steers it. On boot the home dashboard reopens those sessions
+/// itself: `--resume` with the saved session, and no new turn. A row you
+/// stopped stays stopped, and nothing of this happens off the home machine.
+#[cfg(not(windows))]
+#[test]
+fn home_machine_boot_reopens_paused_rows_without_a_new_turn() {
+    let _env = env_guard();
+    let dir = unique_test_repo("home-boot-reopen");
+    let args_log = dir.join("args.log");
+    let fake = dir.join("fake-claude.sh");
+    write_fake_bin(
+        &fake,
+        &format!("#!/bin/sh\necho \"$@\" >> '{}'\nsleep 5\n", args_log.display()),
+    );
+    std::env::set_var("RUDDER_CLAUDE_BIN", &fake);
+    std::env::set_var("RUDDER_HOME", dir.join("home"));
+
+    // The env is read once, at construction.
+    std::env::set_var("RUDDER_CLOUD_RUNTIME", "home");
+    assert!(home_runtime_from_env());
+    std::env::set_var("RUDDER_CLOUD_RUNTIME", "fly");
+    assert!(!home_runtime_from_env());
+    std::env::remove_var("RUDDER_CLOUD_RUNTIME");
+    assert!(!home_runtime_from_env());
+
+    let build = |home: bool| {
+        let mut app = App::new();
+        app.cwd = dir.clone();
+        app.home_runtime = home;
+        app.agents.clear();
+        let mut main = test_agent_run(MAIN_AGENT_ID, "own the checkout");
+        main.mode = AgentMode::Main;
+        main.cwd = dir.clone();
+        main.terminal = None;
+        main.status = AgentStatus::Paused;
+        main.session_id = Some("11111111-2222-3333-4444-555555555555".to_string());
+        app.agents.push(main);
+        let mut stopped = test_agent_run("stopped-worker", "you stopped me");
+        stopped.cwd = dir.clone();
+        stopped.terminal = None;
+        stopped.status = AgentStatus::Stopped;
+        stopped.session_id = Some("stopped-session".to_string());
+        app.agents.push(stopped);
+        let mut gone = test_agent_run("gone-worker", "workspace swept");
+        gone.cwd = dir.join("no-such-workspace");
+        gone.terminal = None;
+        gone.status = AgentStatus::Paused;
+        gone.session_id = Some("gone-session".to_string());
+        app.agents.push(gone);
+        app
+    };
+
+    // Off the home machine: nothing relaunches.
+    let mut app = build(false);
+    app.poll_agents();
+    assert!(app.agents.iter().all(|run| run.terminal.is_none()));
+    assert_eq!(app.agents[0].status, AgentStatus::Paused);
+
+    // On it: the paused main row resumes its session, once.
+    let mut app = build(true);
+    app.poll_agents();
+    app.poll_agents();
+    // Generous: macOS vets a freshly written executable on its first exec.
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while fs::read_to_string(&args_log).map_or(true, |text| !text.contains('\n'))
+        && Instant::now() < deadline
+    {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let main_live = app.agents[0].terminal.is_some();
+    let main_status = app.agents[0].status;
+    let main_turns = app.agents[0].turns.len();
+    let stopped_live = app.agents[1].terminal.is_some();
+    let gone_live = app.agents[2].terminal.is_some();
+    for run in app.agents.iter_mut() {
+        if let Some(mut terminal) = run.terminal.take() {
+            terminal.terminate_and_wait();
+        }
+    }
+    let args = fs::read_to_string(&args_log).unwrap_or_default();
+    let _ = fs::remove_dir_all(&dir);
+
+    assert!(main_live, "the paused main row is live again");
+    assert_eq!(main_status, AgentStatus::Running, "as it was before the stop");
+    assert_eq!(main_turns, 1, "no new turn was recorded");
+    assert!(!stopped_live, "an explicit stop is respected");
+    assert!(!gone_live, "a row whose workspace is gone is left alone");
+    let lines: Vec<&str> = args.lines().collect();
+    assert_eq!(lines.len(), 1, "exactly one relaunch: {args:?}");
+    assert!(
+        lines[0].contains("--resume 11111111-2222-3333-4444-555555555555"),
+        "resumes the saved session: {args:?}"
+    );
+    assert!(
+        lines[0].contains("--settings"),
+        "completion hooks are wired: {args:?}"
+    );
+    assert!(
+        !lines[0].contains("own the checkout"),
+        "no prompt is sent: {args:?}"
+    );
+}

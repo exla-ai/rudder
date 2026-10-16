@@ -750,13 +750,33 @@ brain lives in the cloud, and the phone is a first-class client.
   writer. `deliver_steer_request` now types into any row with a live PTY (Done or
   Paused included) and RESUMES rows with no process (main via `steer_resume_main`,
   workers via re-goal): after the machine stops, every row is Paused.
+- **Boot reopen.** On the home runtime only (`RUDDER_CLOUD_RUNTIME=home`, read once
+  into `App::home_runtime`), the first heartbeat runs
+  `reopen_live_rows_after_home_boot`: rows that were live when the machine went
+  down (Paused, or Running-turned-Orphaned at this start) get their saved session
+  resumed through `spawn_claude_resume_for` (hooks re-wired, NO new turn), so each
+  Claude pane's `--remote-control` session is back online in the Claude app without
+  a steer. Main and Execute rows with a Claude/Codex session id and an existing
+  workspace only; Stopped/Done/Failed/Merged/Migrated, cloud-owned, orchestrators,
+  shell panes, /gam pairs and merge resolvers are left alone. Capped at 12, most
+  recently used first.
+- **Opening the app wakes the home.** `/api/app/state` starts a sleeping or
+  disconnected home in the background (`wakeHomeInBackground`, 60s cooldown after
+  a failed wake). Polled reads (transcript, screen) answer `503 {waking:true}`
+  and the app shows "Waking" in place instead of a toast; writes (send, task,
+  keys, action) wait up to 90s for the control socket so a message sent to a
+  sleeping home is delivered, not lost.
 - **What survives a stop.** `$HOME` is on the ephemeral rootfs, so `~/.claude`,
   `~/.codex`, `~/.rudder`, `~/.config` are symlinked into `/workspace/home`.
   Vault files are rewritten every boot EXCEPT the Claude/Codex login files, where the
   copy that expires later wins (`keepFresherLogin`): a refreshed token on disk must
   not be replaced by the vault's older one. Repo-scoped vault files
   (`~/code/<repo>/.env.local`) are written after the clone, never before (a
-  non-empty clone target fails).
+  non-empty clone target fails). Hook configs (`~/.claude/settings.json`,
+  `~/.codex/hooks.json`) are fixed after every vault write (`hook-paths.mjs`):
+  laptop `/Users/<name>`/`/home/<name>` prefixes become this `$HOME`
+  (`~/.claude/hooks` is synced and chmodded +x, the vault keeps no modes), and a
+  hook whose command starts with an absolute path still missing here is dropped.
 - **Tailscale.** userspace `tailscaled` as the non-root user, state on the volume,
   `--hostname=rudder-home`. Listening ports (from `/proc/net/tcp*`, owner pid ->
   cwd -> project) that are not Rudder/agent processes get `tailscale serve --https`;

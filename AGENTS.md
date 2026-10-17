@@ -916,10 +916,18 @@ brain lives in the cloud, and the phone is a first-class client.
   ride the control socket, same as move bundles). The file lands in
   `<repo>/.rudder/uploads/<YYYYMMDD-HHMMSS>-<name>` and the message goes out with
   an `Attached files:` list of those paths, which the agent reads with its own
-  tools; the app turns that list back into chips. The iOS shell advertises
-  `RUDDER_NATIVE.attachments` from 1.0.1 (build 3), which carries the camera and
-  photo-library usage strings: without `NSCameraUsageDescription` a WKWebView file
-  input crashes the app on "Take Photo", so older shells are offered documents only.
+  tools; the app turns that list back into chips. The clip opens a menu (Photos,
+  Camera, Files) where each goes straight to its picker. WebKit's file input
+  cannot do that for Photos (anything accepting images gets WebKit's own Photo
+  Library / Take Photo / Choose Files menu first), so the iOS shell from 1.0.2
+  (build 4) answers a `pick` message with native pickers (`AttachmentPicker.swift`:
+  PHPicker, no permission, HEIC delivered as JPEG; the camera; the document
+  picker) and hands the bytes back as base64 through `window.rudderPicked`
+  (`RUDDER_NATIVE.picker`). Without it a file input stands in; on iOS Files uses
+  `accept="application/octet-stream"`, which makes WebKit skip its menu while
+  still allowing every type. Desktop skips the menu. Shells before 1.0.1 have no
+  `NSCameraUsageDescription` (a camera pick crashes them), so their menu offers
+  Files only and says to update.
 - **A compacted conversation is one marker, not a user message.**
   `transcripts.mjs` turns Claude's `compact_boundary` + `isCompactSummary` entry and
   Codex's `compacted` line into a `{role:"system", kind:"compact"}` message carrying

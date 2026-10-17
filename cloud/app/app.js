@@ -667,10 +667,70 @@ function withCompactMarkers(messages) {
 const ATTACH_MAX_BYTES = 25 * 1024 * 1024;
 const ATTACH_HEADER = "Attached files:";
 // The iOS shell before 1.0.1 has no camera permission string, and picking
-// "Take Photo" there crashes the app: offer documents only until it updates.
+// "Take Photo" there crashes the app: offer files only until it updates.
 const ATTACH_DOCS_ONLY = !!NATIVE && !NATIVE.attachments;
-const ATTACH_DOC_TYPES = ".pdf,.txt,.md,.csv,.tsv,.json,.log,.zip,.html,.xml,.yaml,.yml,.toml,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.rtf,.key,.pages,.numbers";
+const IOS = NATIVE?.platform === "ios" || /iP(hone|ad|od)/.test(navigator.userAgent)
+  || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
 const attachPreviews = new Map(); // saved path -> object URL of the image picked on this device
+
+// The clip opens a menu: Photos, Camera, Files, each going straight to its
+// picker. The iOS shell from 1.0.2 presents its own (RUDDER_NATIVE.picker),
+// because WebKit's file input puts a second menu (Photo Library, Take Photo,
+// Choose Files) in front of anything that accepts images. Elsewhere a file
+// input stands in; on iOS "application/octet-stream" is what makes WebKit skip
+// that menu for Files and still let every file type be picked.
+const ATTACH_SOURCES = [
+  { kind: "photos", icon: "image", label: "Photos", accept: "image/*" },
+  { kind: "camera", icon: "camera", label: "Camera", accept: "image/*", capture: "environment" },
+  { kind: "files", icon: "folder", label: "Files", accept: IOS ? "application/octet-stream" : "" },
+];
+const nativePicks = new Map(); // pick id -> resolve
+window.rudderPicked = (res) => {
+  const done = nativePicks.get(res?.id);
+  if (!done) return;
+  nativePicks.delete(res.id);
+  done(res);
+};
+function pickNative(kind) {
+  const id = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`;
+  return new Promise((resolve) => {
+    nativePicks.set(id, resolve);
+    postNative({ type: "pick", kind, id });
+  });
+}
+function base64File({ name, type, data }) {
+  const bytes = Uint8Array.fromBase64 ? Uint8Array.fromBase64(data) : Uint8Array.from(atob(data), (c) => c.charCodeAt(0));
+  return new File([bytes], name || "file", { type: type || "application/octet-stream" });
+}
+
+// The menu lives in the composer so it rides up with the keyboard. A tap
+// anywhere outside closes it (a scrim would be clipped to the composer, whose
+// backdrop filter contains fixed children).
+function openAttachMenu(composer, anchor, pick) {
+  const menu = h(`<div class="menu attach-menu" role="menu" aria-label="Attach"></div>`);
+  const close = () => {
+    menu.remove();
+    anchor.setAttribute("aria-expanded", "false");
+    document.removeEventListener("pointerdown", outside, true);
+    document.removeEventListener("keydown", onKey, true);
+  };
+  const outside = (e) => { if (!menu.contains(e.target) && !anchor.contains(e.target)) close(); };
+  const onKey = (e) => { if (e.key === "Escape") { close(); anchor.focus(); } };
+  for (const src of ATTACH_SOURCES) {
+    const locked = ATTACH_DOCS_ONLY && src.kind !== "files";
+    const b = h(`<button type="button" role="menuitem">${icon(src.icon)}<span class="m-label"><span></span>${locked ? "<small>Update the app in TestFlight</small>" : ""}</span></button>`);
+    b.querySelector(".m-label > span").textContent = src.label;
+    b.disabled = locked;
+    b.addEventListener("click", () => { close(); pick(src); });
+    menu.appendChild(b);
+  }
+  composer.appendChild(menu);
+  anchor.setAttribute("aria-expanded", "true");
+  document.addEventListener("pointerdown", outside, true);
+  document.addEventListener("keydown", onKey, true);
+  if (!coarse) menu.querySelector("button:not([disabled])")?.focus();
+  return close;
+}
 
 function withAttachments(text, paths) {
   if (!paths.length) return text;
@@ -721,7 +781,7 @@ async function uploadAttachment(ws, file) {
 
 function createComposer({ placeholder, draftKey, onSubmit, hint, attachments = false }) {
   const el = h(`<div class="composer"><div class="att-tray" hidden></div><form autocomplete="off">
-      ${attachments ? `<button type="button" class="attach" aria-label="Attach photos or files" title="Attach">${icon("clip")}</button><input type="file" class="file-in" multiple hidden>` : ""}
+      ${attachments ? `<button type="button" class="attach" aria-label="Attach photos or files" aria-haspopup="menu" aria-expanded="false" title="Attach">${icon("clip")}</button><input type="file" class="file-in" multiple hidden>` : ""}
       <textarea rows="1" enterkeyhint="${coarse ? "enter" : "send"}" aria-label="${escapeHtml(placeholder)}" placeholder="${escapeHtml(placeholder)}"></textarea>
       <button type="submit" class="send" aria-label="Send" disabled>${icon("send")}</button>
     </form>${hint ? `<div class="c-hint">${escapeHtml(hint)}</div>` : ""}</div>`);
@@ -760,22 +820,38 @@ function createComposer({ placeholder, draftKey, onSubmit, hint, attachments = f
   };
   if (attachments) {
     const input = el.querySelector(".file-in");
-    if (ATTACH_DOCS_ONLY) input.accept = ATTACH_DOC_TYPES;
-    el.querySelector(".attach").addEventListener("click", () => {
-      if (ATTACH_DOCS_ONLY && !ls.get("rudder.attachDocsNote")) {
-        ls.set("rudder.attachDocsNote", 1);
-        toast("Files only in this version of the app. Update Rudder from TestFlight to send photos.");
-      }
-      input.click();
-    });
-    input.addEventListener("change", () => {
-      for (const file of input.files || []) {
+    const attachBtn = el.querySelector(".attach");
+    const addFiles = (list) => {
+      for (const file of list) {
         if (file.size > ATTACH_MAX_BYTES) { toast(`${file.name} is over 25 MB`, { error: true }); continue; }
         const name = file.name || "file";
         files.push({ file, name, url: /^image\//.test(file.type) ? URL.createObjectURL(file) : null });
       }
-      input.value = "";
       paintTray(); grow();
+    };
+    // Runs inside the tap that chose the source: the browser only opens a
+    // file input from a user gesture.
+    const pick = async (src) => {
+      if (NATIVE?.picker) {
+        const res = await pickNative(src.kind);
+        for (const why of res.skipped || []) toast(why, { error: true });
+        addFiles((res.files || []).map(base64File));
+        return;
+      }
+      input.accept = src.accept;
+      if (src.capture) input.setAttribute("capture", src.capture); else input.removeAttribute("capture");
+      input.click();
+    };
+    let closeMenu = null;
+    attachBtn.addEventListener("click", () => {
+      if (closeMenu && attachBtn.getAttribute("aria-expanded") === "true") { closeMenu(); return; }
+      // A desktop file dialog already covers photos and files alike.
+      if (!coarse && !NATIVE) { pick(ATTACH_SOURCES.find((s) => s.kind === "files")); return; }
+      closeMenu = openAttachMenu(el, attachBtn, pick);
+    });
+    input.addEventListener("change", () => {
+      addFiles([...(input.files || [])]);
+      input.value = "";
       ta.focus();
     });
   }

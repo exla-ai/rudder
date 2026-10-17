@@ -7,8 +7,10 @@ import WebKit
 /// The web app checks `window.RUDDER_NATIVE` (injected before any page script
 /// runs) to send the bearer token on its API calls, and talks back through the
 /// `rudder` message handler: `signIn` (token rejected), `signOut`,
-/// `openExternal` (links leave the app), and `badge` (agents that need you).
-/// `RUDDER_NATIVE.attachments` says this build may open the camera.
+/// `openExternal` (links leave the app), `badge` (agents that need you), and
+/// `pick` (the attach menu's Photos, Camera and Files, see AttachmentPicker).
+/// `RUDDER_NATIVE.attachments` says this build may open the camera, and
+/// `RUDDER_NATIVE.picker` that it answers `pick`.
 struct AppWebView: UIViewRepresentable {
     let session: Session
     let token: String
@@ -84,6 +86,8 @@ struct AppWebView: UIViewRepresentable {
             // The camera and photo usage strings are in Info.plist, so the web
             // app may offer "Take Photo" (without them iOS kills the app).
             "attachments": "1",
+            // Photos, Camera and Files each open their native picker directly.
+            "picker": "1",
         ]
         let json = (try? JSONSerialization.data(withJSONObject: payload))
             .flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
@@ -93,11 +97,13 @@ struct AppWebView: UIViewRepresentable {
     @MainActor
     final class Coordinator: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUIDelegate {
         let session: Session
+        let attachmentPicker: AttachmentPicker
         weak var webView: WKWebView?
         var lastTick = 0
 
         init(session: Session) {
             self.session = session
+            self.attachmentPicker = AttachmentPicker()
         }
 
         @objc func pullToRefresh(_ control: UIRefreshControl) {
@@ -124,9 +130,28 @@ struct AppWebView: UIViewRepresentable {
                 }
             case "haptic":
                 UIImpactFeedbackGenerator(style: .light).impactOccurred()
+            case "pick":
+                guard let id = body["id"] as? String, let presenter = UIApplication.shared.topViewController else { return }
+                let kind = body["kind"] as? String ?? "files"
+                attachmentPicker.present(kind: kind, from: presenter) { [weak self] result in
+                    self?.deliverPicked(id: id, result: result)
+                }
             default:
                 break
             }
+        }
+
+        /// Hands picked files to the page as base64 (`window.rudderPicked`),
+        /// which turns them back into File objects for the upload path.
+        private func deliverPicked(id: String, result: PickResult) {
+            let payload: [String: Any] = [
+                "id": id,
+                "files": result.files.map { ["name": $0.name, "type": $0.type, "data": $0.data.base64EncodedString()] },
+                "skipped": result.skipped,
+            ]
+            guard let data = try? JSONSerialization.data(withJSONObject: payload),
+                  let json = String(data: data, encoding: .utf8) else { return }
+            webView?.evaluateJavaScript("window.rudderPicked && window.rudderPicked(\(json))")
         }
 
         // Navigation inside the app stays in the web view; everything else

@@ -407,6 +407,7 @@ a { color: var(--accent); }
   background: transparent; color: var(--muted); transition: transform 120ms, background 120ms;
 }
 .attach:active { transform: scale(0.92); background: var(--surface-2); }
+.attach[aria-expanded="true"] { background: var(--surface-2); color: var(--ink); }
 .attach svg { width: 20px; height: 20px; }
 .att-tray { display: flex; gap: 8px; overflow-x: auto; padding: 2px 2px 8px; scrollbar-width: none; }
 .att-tray::-webkit-scrollbar { display: none; }
@@ -574,6 +575,14 @@ a { color: var(--accent); }
 .menu svg { width: 18px; height: 18px; color: var(--muted); }
 .menu .danger, .menu .danger svg { color: var(--failed); }
 .menu hr { border: 0; border-top: 1px solid var(--line); margin: 4px 6px; }
+.menu .m-label { display: flex; flex-direction: column; min-width: 0; }
+.menu small { font-size: 12px; color: var(--faint); }
+.menu button[disabled] { color: var(--faint); }
+.menu button[disabled]:active, .menu button[disabled]:hover { background: none; }
+.composer .attach-menu {
+  top: auto; right: auto; bottom: calc(100% + 6px); left: calc(var(--sal) + 10px);
+  min-width: 200px; transform-origin: bottom left;
+}
 .scrim { position: fixed; inset: 0; z-index: 19; }
 
 dialog {

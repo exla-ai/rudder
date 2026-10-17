@@ -851,6 +851,10 @@ brain lives in the cloud, and the phone is a first-class client.
   bearer `rdr_` token. `/app/login` goes straight to Google; `?native=1` ends at
   `/app/native-done`, which mints a bearer token and redirects to `rudder://auth?token=`
   for the iOS shell (Google refuses OAuth inside an embedded web view).
+  The home screen leads with Projects, pinned ones first in the order they were
+  pinned (`pinned_at` on the home-repo row, set by `POST /api/app/pin`, so every
+  device agrees), then Needs you, then the machine card, which moves above the
+  projects only while it has failed or a login is broken.
 - `rudder cloud --snapshot` and repos without a GitHub origin keep the old
   per-repo snapshot workspace.
 - **Moving a laptop's agents onto the home machine** (`src/move-home.ts`). `H` in the

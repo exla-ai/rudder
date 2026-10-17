@@ -200,6 +200,12 @@ const server = http.createServer(async (req, res) => {
       t.msgs.push({ id: `s${now()}`, role: "system", ts: now(), text: body.action === "stop" ? "Agent stopped from the app." : "Merged into main." });
       return json(res, 200, { ok: true });
     }
+    if (p === "/api/app/pin") {
+      const proj = projects.find((x) => x.workspaceId === body.workspace);
+      if (!proj) return json(res, 404, { error: "project not found" });
+      proj.pinnedAt = body.pinned === true ? proj.pinnedAt || iso(now()) : null;
+      return json(res, 200, { workspaceId: proj.workspaceId, pinnedAt: proj.pinnedAt });
+    }
     if (p === "/api/app/wake") {
       homeMode = "queued";
       setTimeout(() => { homeMode = "running"; }, 8000);

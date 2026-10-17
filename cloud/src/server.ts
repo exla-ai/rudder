@@ -91,6 +91,8 @@ type Workspace = {
   // Why the row last failed (machine start, clone, worker exit). Cleared on a
   // successful start so a stale reason never outlives the failure.
   failureReason?: string;
+  // Set on "home-repo" rows the user pinned to the top of the phone app.
+  pinnedAt?: string;
   lastActivityAt?: string;
   lastHeartbeatAt?: string;
   activeAgents?: number;
@@ -266,6 +268,7 @@ ensureColumn("rudder_workspaces", "delete_error", "text");
 ensureColumn("rudder_workspaces", "home_id", "text");
 ensureColumn("rudder_workspaces", "failure_reason", "text");
 ensureColumn("rudder_sails", "failure_reason", "text");
+ensureColumn("rudder_workspaces", "pinned_at", "text");
 
 // Secrets vault: initialized lazily so a missing RUDDER_SECRETS_KEY only
 // breaks the vault endpoints, not the rest of the control plane.
@@ -3869,6 +3872,7 @@ function rowToWorkspace(row: unknown): Workspace {
     gitRef: optionalString(value.git_ref),
     homeId: optionalString(value.home_id),
     failureReason: optionalString(value.failure_reason),
+    pinnedAt: optionalString(value.pinned_at),
     lastActivityAt: optionalString(value.last_activity_at),
     lastHeartbeatAt: optionalString(value.last_heartbeat_at),
     activeAgents: Number.isFinite(Number(value.active_agents)) && value.active_agents !== null
@@ -4883,6 +4887,9 @@ const homeStarts = new Map<string, Promise<Workspace>>();
 const listHomeRepoRows = database.prepare(
   "select * from rudder_workspaces where home_id = ? and source_kind = 'home-repo' and status <> 'deleting' order by repo_name",
 );
+const setHomeRepoPinned = database.prepare(
+  "update rudder_workspaces set pinned_at = @pinnedAt where id = @id and account_id = @accountId",
+);
 const setHomeRepoStatus = database.prepare(`
   update rudder_workspaces set status = @status, updated_at = @updatedAt
   where home_id = @homeId and source_kind = 'home-repo' and status not in ('deleting')
@@ -5538,6 +5545,7 @@ function homeProjects(home: Workspace): JsonRecord[] {
       agents: (project?.agents ?? []) as unknown as Json,
       ports: (project?.ports ?? []) as unknown as Json,
       clients: Array.from(workspaceChannels.get(row.id)?.clients ?? []).filter(isOpen).length,
+      pinnedAt: row.pinnedAt ?? null,
       lastActivityAt: row.lastActivityAt ?? null,
     };
   });
@@ -5898,6 +5906,17 @@ async function handleAppApi(req: IncomingMessage, res: ServerResponse, url: URL)
       throw badRequest("answer is required");
     }
     sendJson(res, 200, await homeRpc(home.id, "answer", { workspaceId: repo.id, runId: stringField(body, "run") ?? "", askId: ask, answer: answer as Json }));
+    return;
+  }
+  if (req.method === "POST" && url.pathname === "/api/app/pin") {
+    // Pinned projects sit at the top of the phone's list, in the order they
+    // were pinned. Kept on the row, so every device signed in sees the same.
+    const body = await readJsonBody(req);
+    const { repo } = requireHomeRepo(account.accountId, stringField(body, "workspace") ?? "");
+    const pinned = !!body && typeof body === "object" && !Array.isArray(body) && body.pinned === true;
+    const pinnedAt = pinned ? repo.pinnedAt ?? new Date().toISOString() : null;
+    setHomeRepoPinned.run({ id: repo.id, accountId: account.accountId, pinnedAt });
+    sendJson(res, 200, { workspaceId: repo.id, pinnedAt });
     return;
   }
   if (req.method === "POST" && url.pathname === "/api/app/action") {

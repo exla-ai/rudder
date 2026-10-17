@@ -119,6 +119,7 @@ const P = {
   tool: '<path d="M14.7 6.3a4 4 0 0 0-5.4 5.2L4 16.8V20h3.2l5.3-5.3a4 4 0 0 0 5.2-5.4l-2.5 2.5-2.8-.7-.7-2.8z"/>',
   web: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18"/>',
   task: '<path d="M9 11l3 3 8-8"/><path d="M20 12v7a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1h11"/>',
+  pin: '<path d="M9 3h6"/><path d="M10 3v5.5L7 13h10l-3-4.5V3z"/><path d="M12 13v8"/>',
   folder: '<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>',
   down: '<path d="M12 5v14"/><path d="M6 13l6 6 6-6"/>',
   inbox: '<path d="M3 13l3-8h12l3 8"/><path d="M3 13v5a1 1 0 0 0 1 1h16a1 1 0 0 0 1-1v-5h-6l-1 2h-4l-1-2z"/>',

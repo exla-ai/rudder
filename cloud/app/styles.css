@@ -299,6 +299,18 @@ a { color: var(--accent); }
 .stat.zero { opacity: 0.55; }
 .project .p-time { margin-left: auto; color: var(--faint); }
 .project .p-err { margin-top: 10px; font-size: 13px; color: var(--failed); }
+/* 40px to tap, without making the name row any taller. */
+.project .p-pin {
+  flex: none; width: 40px; height: 40px; margin: -10px -12px -10px -6px;
+  display: grid; place-items: center; border: 0; border-radius: 12px; background: none;
+  color: var(--faint); -webkit-tap-highlight-color: transparent;
+}
+.project .p-pin svg { width: 18px; height: 18px; transition: transform 140ms; }
+.project .p-pin:active { background: var(--surface-2); }
+.project .p-pin:active svg { transform: scale(0.86); }
+.project.pinned .p-pin { color: var(--accent); }
+.project.pinned .p-pin svg path:nth-child(2) { fill: currentColor; }
+.project.tap:has(.p-pin:active) { transform: none; }
 
 .add-card { padding: 14px; }
 .add-card form { display: flex; gap: 8px; }

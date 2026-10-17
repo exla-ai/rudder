@@ -782,16 +782,16 @@ function HomeScreen() {
     </header>
     <div class="scroller">
       <div class="ptr">${icon("down")}</div>
-      <div class="machine-slot"></div>
-      <div class="section needs-sec" hidden>
-        <div class="section-head"><h2>Needs you</h2><span class="count"></span></div>
-        <div class="list grouped card needs"></div>
-      </div>
       <div class="section projects-sec">
         <div class="section-head"><h2>Projects</h2><span class="count"></span></div>
         <div class="projects-body"><div class="list projects"></div></div>
         <div class="add-slot" style="margin-top:10px"></div>
       </div>
+      <div class="section needs-sec" hidden>
+        <div class="section-head"><h2>Needs you</h2><span class="count"></span></div>
+        <div class="list grouped card needs"></div>
+      </div>
+      <div class="section machine-slot"></div>
     </div></section>`);
   const bar = el.querySelector(".topbar");
   const scroller = el.querySelector(".scroller");
@@ -890,7 +890,12 @@ function HomeScreen() {
         subText = `${broken.map((tool) => credNames[tool]).join(", ")} can't sign in on this machine (${creds[broken[0]].detail || "not logged in"}). Run \`rudder cloud doctor\` on your laptop for the fix.`;
       }
       setText(sub, subText);
-      sub.classList.toggle("err", home.status === "failed" || broken.length > 0);
+      const trouble = home.status === "failed" || broken.length > 0;
+      sub.classList.toggle("err", trouble);
+      // Projects lead; the machine card only comes up above them while it is
+      // the reason nothing works.
+      const anchor = trouble ? projectsSec : null;
+      if (machineSlot.nextElementSibling !== anchor) scroller.insertBefore(machineSlot, anchor);
       wakeBtn.hidden = !(home.status === "stopped" || home.status === "failed");
       setText(wakeBtn.querySelector("span"), home.status === "failed" ? "Retry" : "Wake");
     } else {
@@ -903,8 +908,14 @@ function HomeScreen() {
     setText(needsSec.querySelector(".count"), needs.length ? String(needs.length) : "");
     reconcile(needsListEl, needs, (x) => `${x.p.workspaceId}|${x.a.id}`, agentRow({ showProject: true }), updateAgentRow);
 
-    // Projects
-    const projects = (s.projects || []).slice().sort((a, b) => (toMs(b.lastActivityAt) || 0) - (toMs(a.lastActivityAt) || 0));
+    // Projects: pinned ones first, in the order they were pinned, then the
+    // rest by last activity.
+    const projects = (s.projects || []).slice().sort((a, b) => {
+      const pa = pinnedAt(a), pb = pinnedAt(b);
+      if (!!pa !== !!pb) return pa ? -1 : 1;
+      if (pa) return pa < pb ? -1 : pa > pb ? 1 : 0;
+      return (toMs(b.lastActivityAt) || 0) - (toMs(a.lastActivityAt) || 0);
+    });
     setText(projectsSec.querySelector(".count"), projects.length ? String(projects.length) : "");
     reconcile(projectsEl, projects, (p) => p.workspaceId, createProjectCard, updateProjectCard);
 
@@ -925,9 +936,37 @@ function HomeScreen() {
   return { el, update };
 }
 
+// A pin tapped on this phone wins until the server's state agrees: a poll
+// already in flight would otherwise flip the card back for a moment.
+const pinOverrides = new Map();
+function pinnedAt(p) {
+  if (pinOverrides.has(p.workspaceId)) {
+    const want = pinOverrides.get(p.workspaceId);
+    if (!!p.pinnedAt !== !!want) return want;
+    pinOverrides.delete(p.workspaceId);
+  }
+  return p.pinnedAt || null;
+}
+async function setPinned(ws, pinned) {
+  const p = findProject(ws);
+  if (!p) return;
+  pinOverrides.set(ws, pinned ? pinnedAt(p) || new Date().toISOString() : null);
+  updateScreen();
+  try {
+    const res = await api("/api/app/pin", { method: "POST", body: { workspace: ws, pinned } });
+    const cur = findProject(ws);
+    if (cur) cur.pinnedAt = res?.pinnedAt ?? null;
+  } catch (err) {
+    pinOverrides.delete(ws);
+    if (err.status !== 401) toast(err.message, { error: true });
+  }
+  updateScreen();
+}
+
 function createProjectCard() {
-  return h(`<a class="card project tap" data-link>
-    <div class="p-top"><span class="p-name"></span><span class="pill p-dash"></span><span class="dot live s-working p-live"></span></div>
+  const el = h(`<a class="card project tap" data-link>
+    <div class="p-top"><span class="p-name"></span><span class="pill p-dash"></span><span class="dot live s-working p-live"></span>
+      <button type="button" class="p-pin" aria-pressed="false">${icon("pin")}</button></div>
     <div class="p-repo"></div>
     <div class="p-stats">
       <span class="stat st-w s-working"><span class="dot"></span><b></b> working</span>
@@ -936,6 +975,13 @@ function createProjectCard() {
       <span class="p-time"></span>
     </div>
     <div class="p-err"></div></a>`);
+  el.querySelector(".p-pin").addEventListener("click", (e) => {
+    // The card is a link; the pin must not open the project.
+    e.preventDefault();
+    e.stopPropagation();
+    setPinned(el.dataset.key, !el.classList.contains("pinned"));
+  });
+  return el;
 }
 const DASH = {
   starting: { label: "Starting", cls: "s-accent" }, cloning: { label: "Cloning", cls: "s-accent" },
@@ -961,6 +1007,11 @@ function updateProjectCard(el, p) {
   dp.hidden = !dash;
   if (dash) { dp.className = `pill p-dash ${dash.cls}`; setText(dp, dash.label); }
   setText(el.querySelector(".p-time"), rel(p.lastActivityAt));
+  const pinned = !!pinnedAt(p);
+  el.classList.toggle("pinned", pinned);
+  const pin = el.querySelector(".p-pin");
+  pin.setAttribute("aria-pressed", String(pinned));
+  pin.setAttribute("aria-label", pinned ? `Unpin ${p.name || "project"}` : `Pin ${p.name || "project"} to the top`);
   const err = el.querySelector(".p-err");
   setText(err, p.failureReason || ""); err.hidden = !p.failureReason;
   el.setAttribute("aria-label", `${p.name}, ${w} working, ${n} need you, ${d} done`);

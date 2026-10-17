@@ -237,6 +237,20 @@ serverTest("a home machine's repos, state and phone requests flow over its contr
   // Another account's project is not reachable, even by id.
   const foreign = await fetch(`${base}/api/app/send`, { method: "POST", headers: auth, body: JSON.stringify({ workspace: "other-test", run: "r1", text: "hi" }) });
   assert.equal(foreign.status, 404, log());
+  // Pins live on the project row: every device sees them, pinning twice keeps
+  // the first time (the list is in pin order), and only your own projects pin.
+  const pinOf = async () => (await (await fetch(`${base}/api/app/state`, { headers: auth })).json())
+    .projects.find((p) => p.workspaceId === "libra-test").pinnedAt;
+  assert.equal(await pinOf(), null);
+  const pinBody = (pinned, workspace = "libra-test") => ({ method: "POST", headers: auth, body: JSON.stringify({ workspace, pinned }) });
+  const pinned = await (await fetch(`${base}/api/app/pin`, pinBody(true))).json();
+  assert.equal(pinned.workspaceId, "libra-test");
+  assert.ok(Date.parse(pinned.pinnedAt), `pinning stamps a time: ${JSON.stringify(pinned)}`);
+  assert.equal((await (await fetch(`${base}/api/app/pin`, pinBody(true))).json()).pinnedAt, pinned.pinnedAt);
+  assert.equal(await pinOf(), pinned.pinnedAt);
+  assert.equal((await fetch(`${base}/api/app/pin`, pinBody(true, "other-test"))).status, 404);
+  assert.equal((await (await fetch(`${base}/api/app/pin`, pinBody(false))).json()).pinnedAt, null);
+  assert.equal(await pinOf(), null);
   // (delete is a real action now: cloud-home-move.test.mjs covers it.)
   const badAction = await fetch(`${base}/api/app/action`, { method: "POST", headers: auth, body: JSON.stringify({ workspace: "libra-test", run: "r1", action: "reboot" }) });
   assert.equal(badAction.status, 400);

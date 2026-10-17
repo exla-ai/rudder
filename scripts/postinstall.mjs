@@ -1,68 +1,34 @@
 #!/usr/bin/env node
-// Ensures jj (Jujutsu) is installed. Rudder uses jj as its required internal
-// version-control substrate, so a fresh `npm install -g @viraatdas/rudder`
-// should leave the user ready to run. This runs on install and NEVER fails the
-// install: on any problem it prints guidance and exits 0.
-import { spawnSync } from "node:child_process";
+// Sets jj (Jujutsu), Rudder's workspace engine, up at install time so
+// `npm install -g @viraatdas/rudder` is the only step. When jj is not on PATH it
+// fetches jj's own prebuilt release (checksum-pinned in dist/jj-binary.js) into
+// ~/.rudder/bin; Rudder puts that on PATH itself. The first `rudder` run does
+// the same thing, so anything skipped here (no network, --ignore-scripts, npx)
+// costs a few seconds later, never a failed install. Always exits 0.
 
 const TAG = "[rudder postinstall]";
-const log = (m) => console.log(`${TAG} ${m}`);
-const warn = (m) => console.warn(`${TAG} ${m}`);
 
-function has(cmd) {
+async function main() {
+  if (process.env.RUDDER_SKIP_POSTINSTALL) return;
+  // `sudo npm install -g` runs this as root, often with the user's HOME: a
+  // root-owned ~/.rudder would lock the user's own runs out of it. The first
+  // `rudder` run sets jj up as the user instead.
+  if (process.getuid?.() === 0) return;
+  let jj;
   try {
-    const probe = process.platform === "win32" ? "where" : "which";
-    return spawnSync(probe, [cmd], { stdio: "ignore" }).status === 0;
+    jj = await import("../dist/jj-binary.js");
   } catch {
-    return false;
+    return; // a source checkout before its first build
   }
-}
-
-function run(cmd, args) {
-  log(`running: ${cmd} ${args.join(" ")}`);
-  try {
-    return spawnSync(cmd, args, { stdio: "inherit" }).status === 0;
-  } catch {
-    return false;
-  }
-}
-
-function manualHelp() {
-  warn("Could not auto-install jj. Rudder requires jj (Jujutsu).");
-  warn("Install it with one of:");
-  warn("  macOS:  brew install jj");
-  warn("  Rust:   cargo install jj-cli");
-  warn("  Other:  https://jj-vcs.github.io/jj/latest/install-and-setup/");
-  warn("Then run: rudder doctor");
-}
-
-function main() {
-  if (process.env.RUDDER_SKIP_POSTINSTALL) {
-    return;
-  }
-  if (has("jj")) {
-    log("jj already installed.");
-    return;
-  }
-  log("jj not found. Rudder requires jj (Jujutsu) as its internal substrate; attempting to install it.");
-  let ok = false;
-  if (process.platform === "darwin" && has("brew")) {
-    ok = run("brew", ["install", "jj"]);
-  } else if (has("cargo")) {
-    log("installing jj via cargo (compiles from source; this can take a few minutes)...");
-    ok = run("cargo", ["install", "jj-cli"]);
-  }
-  if (ok && has("jj")) {
-    log("jj installed. Run `rudder doctor` to verify.");
-  } else {
-    manualHelp();
+  const source = await jj.ensureJjAvailable({ onInstall: (message) => console.log(`${TAG} ${message}`) });
+  if (!source) {
+    console.warn(`${TAG} jj was not set up now (${jj.managedJjInstallError()}); rudder will retry on its first run.`);
   }
 }
 
 try {
-  main();
+  await main();
 } catch (err) {
-  warn(`jj auto-install skipped: ${err && err.message ? err.message : err}`);
-  manualHelp();
+  console.warn(`${TAG} jj setup skipped: ${err && err.message ? err.message : err}`);
 }
 process.exit(0);

@@ -15,6 +15,7 @@ import { submitFeedback } from "./feedback.js";
 import type { FeedbackContext } from "./feedback.js";
 import { dashboardRoot, runHandoff } from "./handoff.js";
 import { ensureBoardRunning } from "./daemon.js";
+import { ensureJjAvailable } from "./jj-binary.js";
 import {
   createNodeWorkspace,
   currentJjChangeId,
@@ -129,6 +130,12 @@ export async function main(): Promise<void> {
   }
   if (parsed.flags.cwd) {
     process.chdir(parsed.flags.cwd);
+  }
+  // jj comes with Rudder: a machine without it gets jj's own release fetched
+  // into ~/.rudder/bin once (the npm postinstall usually did that already), and
+  // everything started from here finds it on PATH.
+  if (!parsed.flags.help && !JJ_FREE_COMMANDS.has(parsed.command ?? "") && (parsed.command || parsed.args.length > 0 || isTty())) {
+    await ensureJjAvailable({ onInstall: (message) => process.stderr.write(`${message}\n`) });
   }
   if (!parsed.command || parsed.flags.help) {
     if (!parsed.command && parsed.args.length > 0) {
@@ -484,6 +491,9 @@ export async function main(): Promise<void> {
 export function isInternalCommand(command: string | undefined): boolean {
   return Boolean(command?.startsWith("__"));
 }
+
+// Commands that never touch a repository, so they never wait on a jj download.
+const JJ_FREE_COMMANDS = new Set(["__event", "telemetry", "feedback", "login", "logout", "help"]);
 
 function shouldAutoUpdateForCommand(command: string | undefined): boolean {
   if (command?.startsWith("__")) {

@@ -1073,8 +1073,15 @@ is a separate piece of work.
 - **jj is the required internal substrate.** Run isolation and merge run on jj
   (Jujutsu), colocated with git (`jj git init --colocate`) so the repo still
   externally looks like git and final output is normal git commits / a PR. jj is
-  hard-required (`ensureJj` throws `MissingToolError("jj")`; `doctor`/`onboard`
-  fail loudly if absent). The jj driver is `src/jj.ts` (all commands via
+  hard-required but never a separate install: `src/jj-binary.ts` fetches jj's
+  own release (pinned version + per-platform sha256) into
+  `~/.rudder/bin/jj/<version>/` from the npm postinstall (skipped as root, so a
+  `sudo npm i -g` cannot leave a root-owned `~/.rudder`) and again from `main()`
+  when jj is not on PATH, then prepends that dir to PATH so the dashboard,
+  workers and agents inherit it. A user's own jj wins. The pin stays at 0.40.0:
+  jj 0.46 `workspace add` needs git >= 2.42 and stock macOS / Debian 12 have
+  2.39. Only when that fails does `ensureJj` throw `MissingToolError("jj")`,
+  carrying the reason. The jj driver is `src/jj.ts` (all commands via
   `runCommand("jj", ...)`); `git.ts` keeps only the externally-git contract
   (root/branch/commit, status+diff for Hunk) plus the legacy git merge/sync
   helpers behind a `run.vcs === "git"` guard. New runs always record

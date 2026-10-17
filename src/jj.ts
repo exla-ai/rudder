@@ -13,6 +13,7 @@ import {
 import { ensureProjectRuntimeIgnored, saveRunRecord, workspacePath } from "./state.js";
 import { DECISIONS_HEADER } from "./surfaces.js";
 import { withIntegrationLock } from "./rudder-md.js";
+import { managedJjInstallError } from "./jj-binary.js";
 
 // Minimum jj version we are confident in. Older releases may lack flags we use
 // (e.g. `jj workspace add -r`); we warn rather than throw so an older jj still
@@ -30,9 +31,12 @@ export type MergeNodeResult = {
  */
 export function ensureJj(): void {
   if (!commandExists("jj")) {
-    throw new MissingToolError("jj");
+    const reason = managedJjInstallError();
+    throw new MissingToolError("jj", reason ? `jj is not installed, and Rudder could not set it up (${reason}). ${TOOL_JJ_FALLBACK}` : undefined);
   }
 }
+
+const TOOL_JJ_FALLBACK = "Install it yourself with `brew install jj` or `cargo install jj-cli` (https://jj-vcs.github.io), then run rudder again.";
 
 /**
  * Parse `jj --version`. Returns the version string (e.g. "0.40.0") or "".

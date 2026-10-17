@@ -37,11 +37,14 @@ auto-updates itself before running when a newer version is available. Set
 
 ## Requirements
 
-- Node.js 20 or newer
+- Node.js 22 or newer
 - Git
-- [jj (Jujutsu)](https://jj-vcs.github.io): `brew install jj` or `cargo install jj-cli`.
-  Rudder uses it for isolated workspaces and merges; your repo stays plain git.
 - Claude Code and/or Codex installed and logged in
+
+Rudder runs agents in isolated [jj (Jujutsu)](https://jj-vcs.github.io)
+workspaces; your repo stays plain git. You do not need to install jj: if it is
+not already on your PATH, Rudder sets up its own copy in `~/.rudder/bin` during
+install (or on first run). A jj you installed yourself is always used instead.
 - macOS, Linux, or another Unix-like terminal
 
 Check your setup at any time:

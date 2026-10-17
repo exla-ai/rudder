@@ -54,8 +54,8 @@ RUN set -eux; \
 # every launch kept running the root-owned npm copy the image was built with.
 
 # jj (Jujutsu) is Rudder's required internal VCS substrate. node:22-slim ships no
-# jj, and the postinstall auto-installer needs brew/cargo (absent here), so fetch
-# the prebuilt static musl binary for the build's target arch directly.
+# jj; install the prebuilt static musl binary system-wide so every user on the
+# machine has it (Rudder's own per-user copy in ~/.rudder/bin is skipped below).
 ARG TARGETARCH
 RUN set -eux; \
     case "${TARGETARCH:-amd64}" in \

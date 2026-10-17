@@ -24,6 +24,7 @@ import {
   shortenHome,
 } from "./util.js";
 import { CODEX_DEFAULT_MODEL, authStorePath, loadAuthStore, loadConfig, saveAuthStore, saveConfig } from "./state.js";
+import { ensureJjAvailable, managedJjInstallError } from "./jj-binary.js";
 
 const CLAUDE_KEYCHAIN_SERVICE = "Claude Code-credentials";
 const CODEX_KEYCHAIN_SERVICE = "Codex Auth";
@@ -36,6 +37,8 @@ type Detection = {
   npmAcpxLatest?: string;
   jjCommand: boolean;
   jjVersion?: string;
+  // jj came from ~/.rudder/bin (Rudder set it up), not from the user's PATH.
+  jjManaged?: boolean;
   anthropicEnv?: boolean;
   openaiEnv?: boolean;
   claudeCredential?: AuthProfileCredential;
@@ -60,7 +63,8 @@ export async function detectEnvironment(): Promise<Detection> {
       allowFailure: true,
     })
   ).stdout.trim();
-  const jjCommand = commandExists("jj");
+  const jjSource = await ensureJjAvailable({ onInstall: (message) => console.log(message) });
+  const jjCommand = jjSource !== null;
   const jjVersionRaw = jjCommand
     ? (await runCommand("jj", ["--version"], { allowFailure: true })).stdout.trim()
     : undefined;
@@ -76,6 +80,7 @@ export async function detectEnvironment(): Promise<Detection> {
     npmAcpxLatest,
     jjCommand,
     jjVersion,
+    jjManaged: jjSource === "managed",
     anthropicEnv: Boolean(process.env.ANTHROPIC_API_KEY?.trim()),
     openaiEnv: Boolean(process.env.OPENAI_API_KEY?.trim()),
     claudeCredential: claude?.credential,
@@ -126,6 +131,7 @@ export async function runDoctor(options?: { json?: boolean }): Promise<void> {
       acpxLatest: detection.npmAcpxLatest || null,
       jj: detection.jjCommand,
       jjVersion: detection.jjVersion || null,
+      jjManaged: Boolean(detection.jjManaged),
     },
     auth: {
       storePath: authStorePath(),
@@ -149,7 +155,7 @@ export async function runDoctor(options?: { json?: boolean }): Promise<void> {
     }${detection.npmAcpxLatest ? ` latest=${detection.npmAcpxLatest}` : ""}`,
   );
   console.log(
-    `  jj:     ${status(detection.jjCommand)}${detection.jjVersion ? ` (${detection.jjVersion})` : ""} (required internal substrate)`,
+    `  jj:     ${status(detection.jjCommand)}${detection.jjVersion ? ` (${detection.jjVersion}${detection.jjManaged ? ", set up by Rudder" : ""})` : ""}`,
   );
   console.log(`  auth:   ${shortenHome(authStorePath())}`);
   for (const [profileId, credential] of Object.entries(store.profiles).sort()) {
@@ -159,7 +165,8 @@ export async function runDoctor(options?: { json?: boolean }): Promise<void> {
     console.log("  fix:    run `npm install -g acpx@latest` or `rudder onboard`");
   }
   if (!detection.jjCommand) {
-    console.log(`  fix:    ${formatMissingToolMessage("jj")}`);
+    const reason = managedJjInstallError();
+    console.log(`  fix:    ${reason ? `Rudder could not set jj up (${reason}). ` : ""}${formatMissingToolMessage("jj")}`);
     throw new MissingToolError("jj", "jj is required but not installed. Rudder uses jj for run isolation and merge.");
   }
 }
@@ -191,7 +198,7 @@ export async function runOnboard(options?: { nonInteractive?: boolean; json?: bo
   }
 
   if (detection.jjCommand) {
-    console.log(`jj detected${detection.jjVersion ? ` (${detection.jjVersion})` : ""} - required internal substrate`);
+    console.log(`jj ready${detection.jjVersion ? ` (${detection.jjVersion}${detection.jjManaged ? ", set up by Rudder" : ""})` : ""}`);
   } else {
     console.log("jj is required but not installed. Rudder uses jj for run isolation and merge.");
     console.log(`  ${formatMissingToolMessage("jj")}`);

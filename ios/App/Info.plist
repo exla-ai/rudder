@@ -44,6 +44,12 @@
 	<array>
 		<string>UIInterfaceOrientationPortrait</string>
 	</array>
+	<key>NSCameraUsageDescription</key>
+	<string>Take a photo to send to your agents.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Record a video to send to your agents.</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>Choose photos and screenshots to send to your agents.</string>
 	<key>NSAppTransportSecurity</key>
 	<dict>
 		<key>NSAllowsLocalNetworking</key>

@@ -8,6 +8,7 @@ import WebKit
 /// runs) to send the bearer token on its API calls, and talks back through the
 /// `rudder` message handler: `signIn` (token rejected), `signOut`,
 /// `openExternal` (links leave the app), and `badge` (agents that need you).
+/// `RUDDER_NATIVE.attachments` says this build may open the camera.
 struct AppWebView: UIViewRepresentable {
     let session: Session
     let token: String
@@ -80,6 +81,9 @@ struct AppWebView: UIViewRepresentable {
             "token": token,
             "platform": "ios",
             "version": Bundle.main.shortVersion,
+            // The camera and photo usage strings are in Info.plist, so the web
+            // app may offer "Take Photo" (without them iOS kills the app).
+            "attachments": "1",
         ]
         let json = (try? JSONSerialization.data(withJSONObject: payload))
             .flatMap { String(data: $0, encoding: .utf8) } ?? "{}"

@@ -95,11 +95,15 @@ function baseTranscript(a) {
   return msgs;
 }
 
+// MOCK_TRANSCRIPT=<file>: a real /api/app/transcript response (readTranscript
+// output) shown as the first agent's conversation.
+const realTranscript = process.env.MOCK_TRANSCRIPT ? JSON.parse(fs.readFileSync(process.env.MOCK_TRANSCRIPT, "utf8")) : null;
 const transcripts = new Map();
 function transcriptFor(ws, run) {
   const p = projects.find((x) => x.workspaceId === ws);
   const a = p?.agents.find((x) => x.id === run);
   if (!a) return null;
+  if (!transcripts.has(run) && realTranscript && a === projects[0].agents[0]) transcripts.set(run, realTranscript.messages);
   if (!transcripts.has(run)) transcripts.set(run, a.fresh ? [{ id: "m1", role: "user", ts: a.createdAt, text: a.task }] : baseTranscript(a));
   return { a, msgs: transcripts.get(run) };
 }
@@ -155,6 +159,16 @@ const server = http.createServer(async (req, res) => {
       if (!t) return json(res, 404, { error: "Agent not found" });
       const limit = Number(url.searchParams.get("limit") || 300);
       return json(res, 200, { runId: t.a.id, title: t.a.title, backend: t.a.backend, status: t.a.status, truncated: t.msgs.length > limit, messages: t.msgs.slice(-limit) });
+    }
+    if (p === "/api/app/upload" && req.method === "POST") {
+      let size = 0;
+      for await (const chunk of req) size += chunk.length;
+      const name = String(url.searchParams.get("name") || "file").replace(/[^A-Za-z0-9._-]+/g, "-");
+      const proj = projects.find((x) => x.workspaceId === url.searchParams.get("workspace"));
+      if (!proj) return json(res, 404, { error: "Project not found" });
+      if (/fail/i.test(name)) return json(res, 502, { error: "could not fetch the file (HTTP 500)" });
+      await delay(700);
+      return json(res, 200, { path: `/workspace/code/${proj.name}/.rudder/uploads/20261017-013000-${name}`, name, size });
     }
     const body = req.method === "POST" ? await readBody(req) : {};
     if (p === "/api/app/send") {

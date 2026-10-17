@@ -15,11 +15,29 @@ ENV RUDDER_CLOUD_WORKER=1 \
     RUDDER_DISABLE_UPDATE_CHECK=1 \
     RUDDER_DISABLE_ONBOARD_INSTALL=1
 
+# A new project on the cloud machine should build without an agent first
+# installing tools it cannot install (no root): the everyday CLI tools, Python
+# with pip/venv, and native build deps are here; Go and Rust go onto the volume
+# on first boot (cloud/worker/home.mjs), bun/uv/pnpm below.
 RUN apt-get update \
   && apt-get install -y --no-install-recommends \
-    ca-certificates curl git openssh-client tar gzip zsh \
-    python3 build-essential \
+    ca-certificates curl wget git git-lfs openssh-client tar gzip zip unzip xz-utils bzip2 zsh \
+    python3 python3-pip python3-venv python3-dev build-essential cmake pkg-config libssl-dev \
+    jq ripgrep fd-find tree file less lsof procps htop tmux nano vim-tiny \
+    sqlite3 postgresql-client redis-tools \
+  && ln -s /usr/bin/fdfind /usr/local/bin/fd \
   && rm -rf /var/lib/apt/lists/*
+
+# Debian marks its Python as externally managed; agents run `pip install` as a
+# non-root user on a disposable machine, so let it install into ~/.local.
+ENV PIP_BREAK_SYSTEM_PACKAGES=1
+
+# bun and uv: single static binaries, installed system-wide.
+RUN set -eux; \
+    curl -fsSL https://bun.sh/install | BUN_INSTALL=/usr/local bash; \
+    bun --version; \
+    curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin INSTALLER_NO_MODIFY_PATH=1 sh; \
+    uv --version
 
 # GitHub CLI: clone-mode workspaces wire git credentials via `gh auth setup-git`
 # using the vault-delivered ~/.config/gh, and agents get `gh pr create`.
@@ -108,7 +126,7 @@ ENV NPM_CONFIG_PREFIX=/home/rudder/.npm-global \
     PATH=/home/rudder/.local/bin:/home/rudder/.npm-global/bin:${PATH}
 RUN curl -fsSL https://claude.ai/install.sh | bash \
   && claude --version \
-  && npm install -g @openai/codex@latest acpx@latest hunkdiff@latest \
+  && npm install -g @openai/codex@latest acpx@latest hunkdiff@latest pnpm@latest \
   && npm cache clean --force \
   && codex --version
 WORKDIR /workspace

@@ -83,6 +83,11 @@ jobs:
           git config --global user.name "Rudder CI"
           git config --global init.defaultBranch main
 
+      # The native and JS tests drive real jj repos. Rudder's own installer no
+      # longer puts jj on the system PATH (it keeps a private copy), so install it.
+      - name: Install jj
+        run: brew install jj
+
       - run: npm ci
 
       - name: Install + build cloud test fixtures
@@ -103,7 +108,6 @@ jobs:
       # downloaded; download-artifact does not preserve the execute bit.
       - name: TUI end-to-end tests
         run: |
-          brew install jj
           chmod +x prebuilt-native/rudder-native-darwin-arm64/rudder-native
           node node_modules/tui-integration-tests/harness/fetch-driver.mjs
           npm run test:tui:report

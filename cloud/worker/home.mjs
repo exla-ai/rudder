@@ -88,7 +88,7 @@ let ports = []; // [{ port, pid, label, workspaceId|null }]
 
 connectControl();
 void checkCredentials();
-void ensureRustToolchain();
+void ensureRustToolchain().then(() => ensureGoToolchain());
 void ensureAwsTooling().then(() => checkCredentials());
 setInterval(() => void checkCredentials(), 30 * 60 * 1000);
 setInterval(() => void publishState().catch((error) => log(`state: ${error.message}`)), STATE_INTERVAL_MS);
@@ -465,6 +465,9 @@ async function handleRpc(method, params) {
   if (method === "screen") {
     return readScreen(project, String(params.runId || ""));
   }
+  if (method === "upload") {
+    return await receiveUpload(project, params);
+  }
   if (method === "answer") {
     return await answerAsk(project, params);
   }
@@ -476,6 +479,42 @@ async function handleRpc(method, params) {
     return await steer(project, { kind, taskId: String(params.runId || ""), instruction: kind });
   }
   throw new Error(`unknown method ${method}`);
+}
+
+// A photo or file sent from the phone. The control plane holds the bytes and
+// this machine fetches them with its worker token. They land in the repo's
+// git-excluded .rudder/uploads, and the message carries the path.
+async function receiveUpload(project, params) {
+  const uploadPath = String(params.uploadPath || "");
+  if (!/^\/api\/rudder\/home\/[^/]+\/uploads\/[^/]+$/.test(uploadPath)) {
+    throw new Error("bad upload path");
+  }
+  if (!fs.existsSync(path.join(project.dir, ".git"))) {
+    throw new Error("the project is still cloning; try again in a moment");
+  }
+  const response = await fetch(`${cloudUrl}${uploadPath}`, { headers: { authorization: `Bearer ${workerToken}` } });
+  if (!response.ok) {
+    throw new Error(`could not fetch the file (HTTP ${response.status})`);
+  }
+  const bytes = Buffer.from(await response.arrayBuffer());
+  const dir = path.join(project.dir, ".rudder", "uploads");
+  fs.mkdirSync(dir, { recursive: true });
+  const name = uploadName(params.name);
+  const stamp = new Date().toISOString().slice(0, 19).replace(/[-:]/g, "").replace("T", "-");
+  let file = path.join(dir, `${stamp}-${name}`);
+  for (let n = 2; fs.existsSync(file); n += 1) {
+    file = path.join(dir, `${stamp}-${n}-${name}`);
+  }
+  fs.writeFileSync(file, bytes);
+  log(`${project.name}: saved an upload from the phone (${bytes.length} bytes)`);
+  return { path: file, name, size: bytes.length };
+}
+
+// The control plane already cleaned the name; this keeps the file inside
+// .rudder/uploads whatever arrives.
+function uploadName(raw) {
+  const cleaned = String(raw || "").split(/[\\/]/).pop().replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^[-.]+/, "").slice(0, 100);
+  return cleaned || "file";
 }
 
 // A laptop moving its agents here (`rudder cloud move`, H in its dashboard).
@@ -1233,6 +1272,35 @@ async function ensureRustToolchain() {
   log(result.code === 0 ? "Rust toolchain installed" : `Rust toolchain install failed: ${firstLine(result.stderr || result.stdout)}`);
 }
 
+// Go, the same way: a release tarball onto the volume, linked into TOOLS_BIN.
+// ~/go (modules, `go install` binaries) is persisted by persistHomeDirs.
+async function ensureGoToolchain() {
+  if (process.env.RUDDER_HOME_TOOLCHAINS === "0") {
+    return;
+  }
+  if (fs.existsSync(path.join(TOOLS_BIN, "go"))) {
+    return;
+  }
+  log("installing Go onto the volume (first boot)");
+  fs.mkdirSync(TOOLS_BIN, { recursive: true });
+  const arch = process.arch === "arm64" ? "arm64" : "amd64";
+  const result = await capture("sh", ["-c", `set -e
+    version=$(curl -fsSL "https://go.dev/VERSION?m=text" | head -1)
+    case "$version" in go1.*) ;; *) echo "unexpected Go version: $version" >&2; exit 1 ;; esac
+    dir=$(mktemp -d)
+    curl -fsSL "https://go.dev/dl/$version.linux-${arch}.tar.gz" -o "$dir/go.tgz"
+    rm -rf "${TOOLS_DIR}/go"
+    tar -xzf "$dir/go.tgz" -C "${TOOLS_DIR}"
+    rm -rf "$dir"
+    ln -sf "${TOOLS_DIR}/go/bin/go" "${TOOLS_BIN}/go"
+    ln -sf "${TOOLS_DIR}/go/bin/gofmt" "${TOOLS_BIN}/gofmt"`], {
+    env: { ...process.env, HOME },
+    cwd: TOOLS_DIR,
+    timeoutMs: 10 * 60 * 1000,
+  });
+  log(result.code === 0 ? "Go installed" : `Go install failed: ${firstLine(result.stderr || result.stdout)}`);
+}
+
 // AWS CLI v2 and the Session Manager plugin (SSH over SSM), so agents reach the
 // same AWS the laptop does with the credentials from the vault (~/.aws).
 async function ensureAwsTooling() {
@@ -1345,7 +1413,7 @@ function persistHomeDirs() {
   // ensureRustToolchain) lives on the volume too, so it survives restarts.
   // com.vercel.cli: the cloud's own `vercel login` (its refresh token rotates,
   // so it cannot be a copy of the laptop's).
-  for (const name of [".claude", ".codex", ".rudder", ".config", ".local/share/opencode", ".local/share/com.vercel.cli", ".cargo", ".rustup"]) {
+  for (const name of [".claude", ".codex", ".rudder", ".config", ".local/share/opencode", ".local/share/com.vercel.cli", ".cargo", ".rustup", "go"]) {
     const live = path.join(HOME, name);
     const stored = path.join(PERSIST_HOME, name);
     fs.mkdirSync(stored, { recursive: true });
@@ -1559,9 +1627,10 @@ function buildChildEnv(vaultEnv) {
   const env = {
     ...process.env,
     ...vaultEnv,
-    // Rust (installed onto the volume by ensureRustToolchain) for agents
-    // building native code, Rudder's own included.
-    PATH: `${TOOLS_BIN}:${path.join(HOME, ".cargo", "bin")}:${process.env.PATH || ""}`,
+    // Rust and Go (installed onto the volume on first boot) for agents
+    // building native code, Rudder's own included; ~/.local/bin for
+    // `pip install --user` and uv tools, ~/go/bin for `go install`.
+    PATH: `${TOOLS_BIN}:${path.join(HOME, ".cargo", "bin")}:${path.join(HOME, "go", "bin")}:${path.join(HOME, ".local", "bin")}:${process.env.PATH || ""}`,
     HOME,
     TERM: "xterm-256color",
     COLORTERM: "truecolor",

@@ -4073,6 +4073,10 @@ const DEFAULT_MAX_BODY_BYTES = 2 * 1024 * 1024;
 const MAX_SNAPSHOT_BODY_BYTES = 256 * 1024 * 1024;
 
 async function readRawBody(req: IncomingMessage, maxBytes = DEFAULT_MAX_BODY_BYTES): Promise<string> {
+  return (await readBodyBytes(req, maxBytes)).toString("utf8");
+}
+
+async function readBodyBytes(req: IncomingMessage, maxBytes: number): Promise<Buffer> {
   const chunks: Buffer[] = [];
   let total = 0;
   for await (const chunk of req) {
@@ -4084,7 +4088,7 @@ async function readRawBody(req: IncomingMessage, maxBytes = DEFAULT_MAX_BODY_BYT
     }
     chunks.push(buf);
   }
-  return Buffer.concat(chunks).toString("utf8");
+  return Buffer.concat(chunks);
 }
 
 async function handleSlackEvents(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -5510,6 +5514,79 @@ function serveHomeMoveBundle(req: IncomingMessage, res: ServerResponse, homeId: 
   res.end(move.bundle);
 }
 
+// Photos and files sent from the phone. The bytes wait here (in memory, for
+// one upload) while the home machine is asked to fetch them with its worker
+// token, like a move bundle: never base64 over the control socket.
+type HomeUpload = { homeId: string; bytes: Buffer; expiresAt: number };
+const homeUploads = new Map<string, HomeUpload>();
+const APP_UPLOAD_MAX_BYTES = 25 * 1024 * 1024;
+const HOME_UPLOAD_TTL_MS = 5 * 60 * 1000;
+const HOME_UPLOAD_RE = /^\/api\/rudder\/home\/([^/]+)\/uploads\/([^/]+)$/;
+
+export function uploadFileName(raw: string): string {
+  const base = String(raw || "").split(/[\\/]/).pop() ?? "";
+  const cleaned = base.normalize("NFKD").replace(/[^A-Za-z0-9._-]+/g, "-").replace(/-{2,}/g, "-").replace(/^[-.]+/, "");
+  const dot = cleaned.lastIndexOf(".");
+  const ext = dot > 0 ? cleaned.slice(dot).slice(0, 12) : "";
+  const stem = (dot > 0 ? cleaned.slice(0, dot) : cleaned).replace(/[-.]+$/, "").slice(0, 80);
+  return `${stem || "file"}${ext}`;
+}
+
+async function uploadToHome(homeId: string, workspaceId: string, rawName: string, req: IncomingMessage): Promise<JsonRecord> {
+  // Refuse on the declared length before reading: cutting the body off mid-way
+  // resets the connection, and the phone would show a network error instead.
+  if (Number(req.headers["content-length"]) > APP_UPLOAD_MAX_BYTES) {
+    throw Object.assign(new Error("that file is over 25 MB"), { status: 413 });
+  }
+  let bytes: Buffer;
+  try {
+    bytes = await readBodyBytes(req, APP_UPLOAD_MAX_BYTES);
+  } catch (error) {
+    if ((error as { status?: number }).status === 413) {
+      throw Object.assign(new Error("that file is over 25 MB"), { status: 413 });
+    }
+    throw error;
+  }
+  if (bytes.length === 0) {
+    throw badRequest("the file is empty");
+  }
+  const now = Date.now();
+  for (const [id, upload] of homeUploads) {
+    if (upload.expiresAt < now) {
+      homeUploads.delete(id);
+    }
+  }
+  const id = randomUUID();
+  homeUploads.set(id, { homeId, bytes, expiresAt: now + HOME_UPLOAD_TTL_MS });
+  try {
+    const saved = await homeRpc(homeId, "upload", {
+      workspaceId,
+      name: uploadFileName(rawName),
+      size: bytes.length,
+      uploadPath: `/api/rudder/home/${encodeURIComponent(homeId)}/uploads/${encodeURIComponent(id)}`,
+    }, 120_000);
+    return saved as JsonRecord;
+  } finally {
+    homeUploads.delete(id);
+  }
+}
+
+function serveHomeUpload(req: IncomingMessage, res: ServerResponse, homeId: string, uploadId: string): void {
+  const row = findWorkspaceById.get(homeId) as Record<string, unknown> | undefined;
+  if (!row || optionalString(row.source_kind) !== "home") {
+    sendJson(res, 404, { error: "not found" });
+    return;
+  }
+  requireWorkerBearer(req, row);
+  const upload = homeUploads.get(uploadId);
+  if (!upload || upload.homeId !== homeId) {
+    sendJson(res, 404, { error: "no such upload" });
+    return;
+  }
+  res.writeHead(200, { "content-type": "application/octet-stream", "content-length": String(upload.bytes.length) });
+  res.end(upload.bytes);
+}
+
 function homeSummary(home: Workspace | null): JsonRecord | null {
   if (!home) {
     return null;
@@ -5575,6 +5652,11 @@ async function handleHomeApi(req: IncomingMessage, res: ServerResponse, url: URL
   const bundleMatch = req.method === "GET" ? HOME_MOVE_BUNDLE_RE.exec(url.pathname) : null;
   if (bundleMatch) {
     serveHomeMoveBundle(req, res, decodeURIComponent(bundleMatch[1]), decodeURIComponent(bundleMatch[2]));
+    return;
+  }
+  const uploadMatch = req.method === "GET" ? HOME_UPLOAD_RE.exec(url.pathname) : null;
+  if (uploadMatch) {
+    serveHomeUpload(req, res, decodeURIComponent(uploadMatch[1]), decodeURIComponent(uploadMatch[2]));
     return;
   }
   const authContext = requireBearer(req);
@@ -5865,6 +5947,11 @@ async function handleAppApi(req: IncomingMessage, res: ServerResponse, url: URL)
       runId: stringField(body, "run") ?? "",
       text: text.slice(0, 16_000),
     }));
+    return;
+  }
+  if (req.method === "POST" && url.pathname === "/api/app/upload") {
+    const { repo } = requireHomeRepo(account.accountId, url.searchParams.get("workspace") ?? "");
+    sendJson(res, 200, await uploadToHome(home.id, repo.id, url.searchParams.get("name") ?? "", req));
     return;
   }
   if (req.method === "POST" && url.pathname === "/api/app/task") {

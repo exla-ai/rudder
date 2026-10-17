@@ -908,6 +908,30 @@ brain lives in the cloud, and the phone is a first-class client.
   MCP or tools (~2s faster), falling back to the plain call on an older CLI.
 - `/model` in the phone's task box opens a picker fed by `rudder __models` (the same
   lists as the dashboard's) and sends `/model <agent> <model>`.
+- **Photos and files from the phone.** `POST /api/app/upload?workspace=&name=` takes
+  the raw bytes (25 MB cap, refused on `Content-Length` before reading so the phone
+  gets a 413 and not a reset), holds them in memory for at most 5 minutes, and asks
+  the supervisor over the control socket (`upload` rpc) to pull them once from
+  `GET /api/rudder/home/<id>/uploads/<upload>` with its worker token (bytes never
+  ride the control socket, same as move bundles). The file lands in
+  `<repo>/.rudder/uploads/<YYYYMMDD-HHMMSS>-<name>` and the message goes out with
+  an `Attached files:` list of those paths, which the agent reads with its own
+  tools; the app turns that list back into chips. The iOS shell advertises
+  `RUDDER_NATIVE.attachments` from 1.0.1 (build 3), which carries the camera and
+  photo-library usage strings: without `NSCameraUsageDescription` a WKWebView file
+  input crashes the app on "Take Photo", so older shells are offered documents only.
+- **A compacted conversation is one marker, not a user message.**
+  `transcripts.mjs` turns Claude's `compact_boundary` + `isCompactSummary` entry and
+  Codex's `compacted` line into a `{role:"system", kind:"compact"}` message carrying
+  `{trigger, preTokens, summary}` (preamble and "continue from where it left off"
+  trailer stripped). The app renders it as a divider ("Context compacted · 367k
+  tokens summarized") that expands to the summary, and recognizes the old shape (a
+  user message starting "This session is being continued...") from workers that
+  predate it.
+- **Add project** is two tabs: "Open a repo" (search, owner chips, Open/Added per
+  row) and "New repo" (an owner list with your account and every org, a live
+  name check that says the exact `owner/name` it will create or that it already
+  exists, Private/Public). The last owner and filter are remembered per device.
 
 - **Developing Rudder on the home machine.** Rust is not in the worker image; the
   supervisor installs it once onto the volume (`~/.cargo`, `~/.rustup`, persisted
@@ -924,6 +948,14 @@ brain lives in the cloud, and the phone is a first-class client.
   `~/.local/share/com.vercel.cli` on the volume, because Vercel rotates the
   refresh token and a shared copy signs one side out (an OAuth CLI token
   also cannot mint a classic token: 403). Namecheap has no API access set up.
+  Go installs the same way (latest stable from go.dev into `/workspace/tools`,
+  `~/go` persisted). The IMAGE itself carries what a fresh project expects so
+  agents never stop to install basics: build-essential, cmake, pkg-config,
+  libssl-dev, python3 with pip/venv (`PIP_BREAK_SYSTEM_PACKAGES=1`), uv, bun,
+  pnpm, jq, ripgrep, fd, sqlite3, psql, redis-cli, git-lfs, zip/xz/bzip2, tmux,
+  htop, vim-tiny. Small and universal goes in the image; big or fast-moving
+  toolchains (Rust, Go, cloud CLIs) go on the volume, so they survive a stop
+  without bloating every boot. `RUDDER_HOME_TOOLCHAINS=0` skips the volume ones.
   `rudder cloud home stop` refuses to run on the home machine itself
   (`RUDDER_CLOUD_RUNTIME=home`): it would end every agent there, the caller
   included. Restart it from a laptop or the phone. iOS/Xcode and signing stay
@@ -1051,7 +1083,10 @@ git push --follow-tags     # pushes the commit and the tag; CI publishes
 `npm publish` runs in CI via `prepack` (tsc + `cargo build --release` +
 copy-native), with `--provenance` (hence the `repository` field and
 `id-token: write` permission). One-time setup: add an npm "Automation" token as
-the repo secret `NPM_TOKEN`.
+the repo secret `NPM_TOKEN`. The workflow installs jj itself (`brew install jj`)
+before `npm ci`: the native tests drive real jj, and Rudder's postinstall no
+longer puts one on the system PATH (it keeps a private copy). 3.1.17 failed to
+publish on exactly that.
 
 Do NOT run `npm publish` by hand anymore. Hand-publishing is exactly what caused
 the drift, and it also ties the bundled native binary to whatever machine you

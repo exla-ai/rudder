@@ -227,10 +227,30 @@ function parseClaude(lines) {
     } catch {
       continue;
     }
+    if (entry.type === "system" && entry.subtype === "compact_boundary") {
+      const meta = entry.compactMetadata || {};
+      messages.push(compactMessage(entry.uuid || `compact-${messages.length}`, toMillis(entry.timestamp), {
+        trigger: typeof meta.trigger === "string" ? meta.trigger : null,
+        preTokens: Number(meta.preTokens) || null,
+      }));
+      continue;
+    }
     if ((entry.type !== "user" && entry.type !== "assistant") || entry.isSidechain || entry.isMeta) {
       continue;
     }
     const ts = toMillis(entry.timestamp);
+    if (entry.isCompactSummary) {
+      // The summary Claude starts over from is not something the user said:
+      // it belongs to the compaction marker just before it.
+      const summary = compactSummaryText(entry.message?.content);
+      const last = messages[messages.length - 1];
+      if (last?.kind === "compact" && !last.compact.summary) {
+        last.compact.summary = summary;
+      } else {
+        messages.push(compactMessage(entry.uuid || `compact-${messages.length}`, ts, { summary }));
+      }
+      continue;
+    }
     const content = entry.message?.content;
     const uuid = entry.uuid || `${messages.length}`;
     if (typeof content === "string") {
@@ -271,6 +291,23 @@ function parseClaude(lines) {
     });
   }
   return messages;
+}
+
+// When an agent's context fills up, Claude Code and Codex summarize the
+// conversation and carry on from the summary. The chat shows that as one
+// marker (with the summary behind it), not as a wall of text from the user.
+function compactMessage(id, ts, { trigger = null, preTokens = null, summary = "" } = {}) {
+  return { id, role: "system", kind: "compact", ts, text: "Context compacted", compact: { trigger, preTokens, summary } };
+}
+
+const COMPACT_PREAMBLE = /^This session is being continued from a previous conversation that ran out of context\.[^\n]*\n+(?:Summary:\s*\n)?/;
+const COMPACT_TRAILER = /\n+(?:If you need specific details from before compaction|Continue the conversation from where it left off|Please continue the conversation from where we left)[\s\S]*$/;
+
+export function compactSummaryText(content) {
+  const raw = typeof content === "string"
+    ? content
+    : Array.isArray(content) ? content.map((part) => (part?.type === "text" ? part.text : "")).join("\n") : "";
+  return String(raw || "").trim().replace(COMPACT_PREAMBLE, "").replace(COMPACT_TRAILER, "").trim();
 }
 
 function cleanUserText(text) {
@@ -338,6 +375,10 @@ function parseCodex(lines) {
       continue;
     }
     index += 1;
+    if (entry.type === "compacted") {
+      messages.push(compactMessage(`c${index}`, toMillis(entry.timestamp), { summary: String(entry.payload?.message || "").trim() }));
+      continue;
+    }
     if (entry.type !== "response_item") {
       continue;
     }

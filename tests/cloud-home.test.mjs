@@ -162,9 +162,18 @@ serverTest("a home machine's repos, state and phone requests flow over its contr
     headers: { authorization: `Bearer ${workerToken}` },
   });
   t.after(() => control.close());
-  control.on("message", (data) => {
+  const uploads = [];
+  control.on("message", async (data) => {
     const message = JSON.parse(data.toString());
     messages.push(message);
+    if (message.type === "rpc" && message.method === "upload") {
+      // Like home.mjs: pull the bytes with the worker token.
+      const res = await fetch(`${base}${message.params.uploadPath}`, { headers: { authorization: `Bearer ${workerToken}` } });
+      const bytes = Buffer.from(await res.arrayBuffer());
+      uploads.push({ params: message.params, status: res.status, bytes });
+      control.send(JSON.stringify({ type: "rpc-result", id: message.id, result: { path: `/workspace/code/libra/.rudder/uploads/x-${message.params.name}`, name: message.params.name, size: bytes.length } }));
+      return;
+    }
     if (message.type === "rpc") {
       const reply = message.method === "send" && message.params.text === "boom"
         ? { type: "rpc-result", id: message.id, error: "the libra dashboard is starting" }
@@ -237,6 +246,30 @@ serverTest("a home machine's repos, state and phone requests flow over its contr
   // Another account's project is not reachable, even by id.
   const foreign = await fetch(`${base}/api/app/send`, { method: "POST", headers: auth, body: JSON.stringify({ workspace: "other-test", run: "r1", text: "hi" }) });
   assert.equal(foreign.status, 404, log());
+  // Photos and files from the phone: the bytes reach the machine through a
+  // one-time fetch with its worker token, under a cleaned-up name.
+  const photo = Buffer.from(Array.from({ length: 70_000 }, (_, i) => i % 251));
+  const uploaded = await fetch(`${base}/api/app/upload?workspace=libra-test&name=${encodeURIComponent("../My Photo (1).png")}`, {
+    method: "POST", headers: { ...auth, "Content-Type": "image/png" }, body: photo,
+  });
+  assert.equal(uploaded.status, 200, log());
+  assert.deepEqual(await uploaded.json(), { path: "/workspace/code/libra/.rudder/uploads/x-My-Photo-1.png", name: "My-Photo-1.png", size: photo.length });
+  assert.equal(uploads.length, 1);
+  assert.equal(uploads[0].status, 200);
+  assert.ok(uploads[0].bytes.equals(photo), "the machine gets the exact bytes");
+  assert.equal(uploads[0].params.workspaceId, "libra-test");
+  assert.match(uploads[0].params.uploadPath, /^\/api\/rudder\/home\/home-test\/uploads\/[0-9a-f-]+$/);
+  const again = await fetch(`${base}${uploads[0].params.uploadPath}`, { headers: { authorization: `Bearer ${workerToken}` } });
+  assert.equal(again.status, 404, "an upload is fetched once, then dropped");
+  const empty = await fetch(`${base}/api/app/upload?workspace=libra-test&name=a.txt`, { method: "POST", headers: auth, body: "" });
+  assert.equal(empty.status, 400);
+  const foreignUpload = await fetch(`${base}/api/app/upload?workspace=other-test&name=a.txt`, { method: "POST", headers: auth, body: "hi" });
+  assert.equal(foreignUpload.status, 404);
+  const huge = await fetch(`${base}/api/app/upload?workspace=libra-test&name=big.bin`, { method: "POST", headers: auth, body: Buffer.alloc(26 * 1024 * 1024) });
+  assert.equal(huge.status, 413, "a file over 25 MB gets a readable refusal, not a reset connection");
+  assert.equal((await huge.json()).error, "that file is over 25 MB");
+  assert.equal(uploads.length, 1, "nothing too large or foreign reached the machine");
+
   // Pins live on the project row: every device sees them, pinning twice keeps
   // the first time (the list is in pin order), and only your own projects pin.
   const pinOf = async () => (await (await fetch(`${base}/api/app/state`, { headers: auth })).json())
@@ -409,6 +442,46 @@ nodeTest("a Codex rollout becomes chat messages, including code-mode tool calls"
   );
   assert.equal(transcript.messages[1].tool.output, "src/billing.ts");
   assert.deepEqual([transcript.messages[2].tool.output, transcript.messages[2].tool.isError], ["boom", true]);
+});
+
+nodeTest("a compacted conversation shows one marker holding the summary, not a message from the user", () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "rudder-home-"));
+  const cwd = "/workspace/code/libra";
+  const sessionId = "22222222-2222-3333-4444-555555555555";
+  const projectDir = path.join(home, ".claude", "projects", cwd.replace(/[^A-Za-z0-9-]/g, "-"));
+  fs.mkdirSync(projectDir, { recursive: true });
+  const lines = [
+    { type: "user", uuid: "u1", message: { role: "user", content: "fix the webhook" } },
+    { type: "assistant", uuid: "a1", message: { role: "assistant", content: [{ type: "text", text: "On it." }] } },
+    { type: "system", subtype: "compact_boundary", uuid: "cb1", timestamp: "2026-10-16T11:21:00.799Z", content: "Conversation compacted", compactMetadata: { trigger: "auto", preTokens: 367082 } },
+    { type: "user", uuid: "s1", isCompactSummary: true, isVisibleInTranscriptOnly: true, message: { role: "user", content: "This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.\n\nSummary:\n1. Fix the **webhook**.\n\nIf you need specific details from before compaction (like exact code snippets), read the full transcript at: /x.jsonl\nContinue the conversation from where it left off without asking the user any further questions." } },
+    { type: "assistant", uuid: "a2", message: { role: "assistant", content: [{ type: "text", text: "Picking up the webhook fix." }] } },
+  ];
+  fs.writeFileSync(path.join(projectDir, `${sessionId}.jsonl`), `${lines.map((l) => JSON.stringify(l)).join("\n")}\n`);
+  const repo = fixtureRepo({ id: "run-4", backend: "claude", task: "fix the webhook", session: { nativeSessionId: sessionId }, workspace: { path: cwd } });
+  const transcript = readTranscript(repo, "run-4", { limit: 50, home });
+  assert.deepEqual(transcript.messages.map((m) => [m.role, m.kind ?? null, m.text]), [
+    ["user", null, "fix the webhook"],
+    ["assistant", null, "On it."],
+    ["system", "compact", "Context compacted"],
+    ["assistant", null, "Picking up the webhook fix."],
+  ]);
+  assert.deepEqual(transcript.messages[2].compact, { trigger: "auto", preTokens: 367082, summary: "1. Fix the **webhook**." });
+  assert.equal(transcript.messages[2].ts, Date.parse("2026-10-16T11:21:00.799Z"));
+
+  // Codex records its compaction as one `compacted` line.
+  const codexId = "01a13ce1-6861-7893-b4a0-9fb8e889dd58";
+  const day = path.join(home, ".codex", "sessions", "2026", "10", "16");
+  fs.mkdirSync(day, { recursive: true });
+  const codexLines = [
+    { type: "response_item", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "add billing" }] } },
+    { type: "compacted", timestamp: "2026-10-16T12:00:00Z", payload: { message: "", replacement_history: [{ type: "message", role: "user", content: [{ type: "input_text", text: "add billing" }] }] } },
+    { type: "response_item", payload: { type: "message", role: "assistant", content: [{ type: "output_text", text: "Billing is in." }] } },
+  ];
+  fs.writeFileSync(path.join(day, `rollout-2026-10-16T12-00-00-${codexId}.jsonl`), `${codexLines.map((l) => JSON.stringify(l)).join("\n")}\n`);
+  const codexRepo = fixtureRepo({ id: "run-5", backend: "codex", task: "add billing", session: { nativeSessionId: codexId } });
+  const codex = readTranscript(codexRepo, "run-5", { limit: 50, home });
+  assert.deepEqual(codex.messages.map((m) => [m.role, m.kind ?? null]), [["user", null], ["system", "compact"], ["assistant", null]]);
 });
 
 nodeTest("an agent with no session yet shows the prompts Rudder recorded", () => {

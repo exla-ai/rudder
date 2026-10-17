@@ -55,16 +55,17 @@ class ApiError extends Error { constructor(msg, status, waking = false) { super(
 /* API                                                                 */
 /* ------------------------------------------------------------------ */
 
-async function api(path, { method = "GET", body } = {}) {
+async function api(path, { method = "GET", body, raw } = {}) {
   const headers = { Accept: "application/json" };
-  if (body !== undefined) headers["Content-Type"] = "application/json";
+  if (raw) headers["Content-Type"] = raw.type || "application/octet-stream";
+  else if (body !== undefined) headers["Content-Type"] = "application/json";
   const token = NATIVE?.token || ls.get("rudder.token");
   if (token) headers.Authorization = `Bearer ${token}`;
   let res;
   try {
     res = await fetch(path, {
       method, headers, credentials: "same-origin", cache: "no-store",
-      body: body !== undefined ? JSON.stringify(body) : undefined,
+      body: raw || (body !== undefined ? JSON.stringify(body) : undefined),
     });
   } catch {
     throw new ApiError("Can't reach Rudder. Check your connection.", 0);
@@ -209,120 +210,217 @@ async function openProjectRepo(repo, dlg) {
   } catch (err) { if (err.status !== 401) toast(err.message, { error: true }); }
 }
 
+// Add project: open one of your GitHub repos, or create a new one under your
+// account or any org you belong to. The two are separate tabs because the
+// owner filter for browsing and the owner a new repo goes under are separate
+// choices.
 function openAddProject() {
   const dlg = h(`<dialog class="sheet add-sheet" aria-label="Add project"><div class="dialog">
     <div class="sheet-grab"></div>
-    <div class="add-head"><h3>Add project</h3><button type="button" class="btn small new-btn">${icon("plus")}<span>New repository</span></button></div>
-    <div class="owner-chips" role="tablist" aria-label="Owner"></div>
-    <form class="new-repo-form" hidden>
-      <div class="new-under">New repository under <strong class="new-owner"></strong></div>
-      <input class="input" name="name" placeholder="repository-name" aria-label="Repository name" autocapitalize="off" autocorrect="off" spellcheck="false">
-      <label class="check"><input type="checkbox" name="private" checked> Private</label>
-      <div class="row"><button type="button" class="btn" data-act="cancel-new">Cancel</button><button type="submit" class="btn primary">Create and open</button></div>
+    <div class="add-head"><h3>Add project</h3><button type="button" class="icon-btn" data-act="close" aria-label="Close">${icon("x")}</button></div>
+    <div class="seg modes" role="tablist" aria-label="Add project">
+      <button type="button" role="tab" data-mode="open" aria-selected="true">${icon("folder")}<span>Open a repo</span></button>
+      <button type="button" role="tab" data-mode="create" aria-selected="false">${icon("plus")}<span>New repo</span></button>
+    </div>
+    <div class="add-pane open-pane">
+      <label class="search-wrap">${icon("search")}<input class="input repo-search" type="search" placeholder="Search, or paste owner/name" aria-label="Search repositories"
+        autocapitalize="off" autocorrect="off" spellcheck="false"></label>
+      <div class="owner-chips" role="tablist" aria-label="Show repos from"></div>
+      <div class="repo-list" role="list"><div class="repo-note">Loading your GitHub repos…</div></div>
+    </div>
+    <form class="add-pane create-pane" hidden novalidate>
+      <div class="field-label" id="owner-label">Create under</div>
+      <div class="owner-list" role="radiogroup" aria-labelledby="owner-label"><div class="repo-note">Loading your GitHub accounts…</div></div>
+      <label class="field-label" for="new-repo-name">Repository name</label>
+      <input id="new-repo-name" class="input" name="name" placeholder="my-new-app" autocapitalize="off" autocorrect="off" spellcheck="false" enterkeyhint="go" maxlength="100">
+      <div class="name-hint" aria-live="polite"></div>
+      <label class="field-label" for="new-repo-desc">Description <span class="opt">optional</span></label>
+      <input id="new-repo-desc" class="input" name="description" placeholder="What it's for" maxlength="300">
+      <div class="field-label" id="vis-label">Visibility</div>
+      <div class="seg vis" role="radiogroup" aria-labelledby="vis-label">
+        <button type="button" role="radio" data-vis="private" aria-checked="true"><span>Private</span><small>Only people you add</small></button>
+        <button type="button" role="radio" data-vis="public" aria-checked="false"><span>Public</span><small>Anyone can see it</small></button>
+      </div>
+      <button type="submit" class="btn accent block create-btn" disabled>Create repository</button>
+      <div class="create-note">GitHub creates it with a README, then it opens on your cloud machine, ready for agents.</div>
     </form>
-    <input class="input repo-search" type="search" placeholder="Search, or paste owner/name" aria-label="Search repositories"
-      autocapitalize="off" autocorrect="off" spellcheck="false">
-    <div class="repo-list" role="list"><div class="repo-note">Loading your GitHub repos…</div></div>
-    <button type="button" class="btn block" style="margin-top:10px;border:0;background:transparent;color:var(--muted)" data-act="close">Close</button>
   </div></dialog>`);
   const search = dlg.querySelector(".repo-search");
   const listEl = dlg.querySelector(".repo-list");
   const chipsEl = dlg.querySelector(".owner-chips");
-  const form = dlg.querySelector(".new-repo-form");
-  const newBtn = dlg.querySelector(".new-btn");
+  const form = dlg.querySelector(".create-pane");
+  const ownerList = dlg.querySelector(".owner-list");
+  const nameIn = form.querySelector('[name="name"]');
+  const descIn = form.querySelector('[name="description"]');
+  const hint = form.querySelector(".name-hint");
+  const createBtn = form.querySelector(".create-btn");
   let repos = [];
-  let owners = [];
-  let owner = ls.get("rudder.addOwner") || "";
+  let owners = []; // [{ login, kind: "user" | "org" }]
+  let loaded = false;
+  let filter = ls.get("rudder.addFilter") || "";
+  let target = ls.get("rudder.newOwner") || "";
+  let visibility = "private";
+  let mode = "open";
   const ownerOf = (repo) => repo.split("/")[0];
+  const avatar = (login, size) => {
+    const img = document.createElement("img");
+    img.src = `https://github.com/${encodeURIComponent(login)}.png?size=${size}`;
+    img.alt = ""; img.loading = "lazy";
+    img.addEventListener("error", () => { img.style.visibility = "hidden"; });
+    return img;
+  };
 
+  function setMode(next) {
+    mode = next;
+    for (const b of dlg.querySelectorAll(".modes button")) b.setAttribute("aria-selected", String(b.dataset.mode === mode));
+    dlg.querySelector(".open-pane").hidden = mode !== "open";
+    form.hidden = mode !== "create";
+    if (mode === "create" && !coarse) nameIn.focus();
+    if (mode === "open" && !coarse) search.focus();
+  }
+
+  // Open a repo
   function renderChips() {
-    const all = ["", ...owners];
-    chipsEl.replaceChildren(...all.map((o) => {
+    chipsEl.hidden = owners.length < 2;
+    chipsEl.replaceChildren(...[{ login: "" }, ...owners].map((o) => {
       const b = h(`<button type="button" role="tab" class="owner-chip"></button>`);
-      b.setAttribute("aria-selected", String(o === owner));
-      if (o) {
-        const img = document.createElement("img");
-        img.src = `https://github.com/${encodeURIComponent(o)}.png?size=64`;
-        img.alt = ""; img.loading = "lazy";
-        b.appendChild(img);
-      }
+      b.setAttribute("aria-selected", String(o.login === filter));
+      if (o.login) b.appendChild(avatar(o.login, 48));
       const label = document.createElement("span");
-      label.textContent = o || "All";
+      label.textContent = o.login || "All";
       b.appendChild(label);
-      b.addEventListener("click", () => { owner = o; ls.set("rudder.addOwner", owner); renderChips(); render(); syncForm(); });
+      b.addEventListener("click", () => { filter = o.login; ls.set("rudder.addFilter", filter); renderChips(); render(); });
       return b;
     }));
-  }
-  function syncForm() {
-    const target = owner || owners[0] || "";
-    form.querySelector(".new-owner").textContent = target;
-    form.dataset.owner = target;
   }
   function render() {
     const q = search.value.trim().toLowerCase().replace(/^https?:\/\/github\.com\//, "").replace(/\.git$/, "");
     const shown = repos
-      .filter((r) => !owner || ownerOf(r.repo).toLowerCase() === owner.toLowerCase())
+      .filter((r) => !filter || ownerOf(r.repo).toLowerCase() === filter.toLowerCase())
       .filter((r) => !q || r.repo.toLowerCase().includes(q) || (r.description || "").toLowerCase().includes(q))
       .slice(0, 60);
     listEl.replaceChildren();
     const typed = /^[\w.-]+\/[\w.-]+$/.test(q) && !repos.some((r) => r.repo.toLowerCase() === q);
     if (typed) {
-      const b = h(`<button type="button" class="repo-row" role="listitem"><span class="rn"></span><span class="rd">Open this repo</span></button>`);
+      const b = h(`<button type="button" class="repo-row" role="listitem"><span class="r-av"></span><span class="r-text"><span class="rn"></span><span class="rd">Open this repo</span></span><span class="r-go">Open</span></button>`);
+      b.querySelector(".r-av").appendChild(avatar(ownerOf(q), 48));
       b.querySelector(".rn").textContent = q;
       b.addEventListener("click", () => openProjectRepo(q, dlg));
       listEl.appendChild(b);
     }
     for (const r of shown) {
-      const b = h(`<button type="button" class="repo-row" role="listitem"><span class="rn"></span><span class="rd"></span></button>`);
-      b.querySelector(".rn").textContent = owner ? r.repo.slice(owner.length + 1) : r.repo;
-      b.querySelector(".rd").textContent = [r.open ? "on your cloud machine" : null, r.private ? "private" : "public", r.updatedAt ? rel(toMs(r.updatedAt)) : null, r.description].filter(Boolean).join(" · ");
+      const b = h(`<button type="button" class="repo-row" role="listitem"><span class="r-av"></span><span class="r-text"><span class="rn"><span class="ro"></span><span class="rr"></span></span><span class="rd"></span></span><span class="r-go"></span></button>`);
+      b.querySelector(".r-av").appendChild(avatar(ownerOf(r.repo), 48));
+      b.querySelector(".ro").textContent = `${ownerOf(r.repo)}/`;
+      b.querySelector(".rr").textContent = r.repo.slice(ownerOf(r.repo).length + 1);
+      b.querySelector(".rd").textContent = [r.private ? "Private" : "Public", r.updatedAt ? rel(toMs(r.updatedAt)) : null, r.description].filter(Boolean).join(" · ");
+      const go = b.querySelector(".r-go");
+      go.textContent = r.open ? "Added" : "Open";
+      go.classList.toggle("added", !!r.open);
+      b.setAttribute("aria-label", `${r.repo}${r.open ? ", already on your cloud machine" : ""}. Open`);
       b.addEventListener("click", () => openProjectRepo(r.repo, dlg));
       listEl.appendChild(b);
     }
     if (!typed && !shown.length) {
-      listEl.appendChild(h(`<div class="repo-note">${repos.length ? "No matching repos." : "No repos found."}</div>`));
+      const note = h(`<div class="repo-note"></div>`);
+      note.textContent = !loaded ? "Loading your GitHub repos…" : repos.length ? "No matching repos." : "No repos yet. Create one in New repo.";
+      listEl.appendChild(note);
     }
   }
-  newBtn.addEventListener("click", () => {
-    syncForm();
-    form.hidden = false; newBtn.hidden = true;
-    form.name.focus();
-  });
-  form.querySelector('[data-act="cancel-new"]').addEventListener("click", () => { form.hidden = true; newBtn.hidden = false; });
-  search.addEventListener("input", render);
+
+  // New repo
+  function renderOwners() {
+    if (!owners.length) return;
+    if (!owners.some((o) => o.login === target)) target = owners[0].login;
+    ownerList.replaceChildren(...owners.map((o) => {
+      const b = h(`<button type="button" role="radio" class="owner-opt"><span class="o-av"></span><span class="o-text"><span class="o-name"></span><span class="o-kind"></span></span><span class="o-radio">${icon("check")}</span></button>`);
+      b.querySelector(".o-av").appendChild(avatar(o.login, 72));
+      b.querySelector(".o-name").textContent = o.login;
+      b.querySelector(".o-kind").textContent = o.kind === "user" ? "Your account" : "Organization";
+      b.setAttribute("aria-checked", String(o.login === target));
+      b.addEventListener("click", () => { target = o.login; ls.set("rudder.newOwner", target); renderOwners(); syncCreate(); });
+      return b;
+    }));
+  }
+  const cleanName = (raw) => raw.trim().replace(/[^A-Za-z0-9._-]+/g, "-").replace(/-{2,}/g, "-").replace(/^[-.]+|-+$/g, "");
+  function syncCreate() {
+    const raw = nameIn.value;
+    const name = cleanName(raw);
+    const full = target && name ? `${target}/${name}` : "";
+    const exists = full && repos.find((r) => r.repo.toLowerCase() === full.toLowerCase());
+    hint.className = "name-hint";
+    hint.replaceChildren();
+    if (!raw.trim()) {
+      hint.textContent = "Letters, numbers, dashes, dots and underscores.";
+    } else if (!name || name === "." || name === "..") {
+      hint.classList.add("err");
+      hint.textContent = "That name has nothing GitHub can use. Try letters and numbers.";
+    } else if (exists) {
+      hint.classList.add("err");
+      hint.append(`${exists.repo} already exists. `);
+      const open = h(`<button type="button" class="link">Open it</button>`);
+      open.addEventListener("click", () => openProjectRepo(exists.repo, dlg));
+      hint.appendChild(open);
+    } else {
+      hint.append(name === raw.trim() ? "Creates " : "Creates it as ");
+      const b = document.createElement("b");
+      b.textContent = full || name;
+      hint.appendChild(b);
+    }
+    createBtn.disabled = !full || !!exists || !loaded;
+    setText(createBtn, full && !exists ? `Create ${full}` : "Create repository");
+  }
+  for (const b of form.querySelectorAll(".vis button")) {
+    b.addEventListener("click", () => {
+      visibility = b.dataset.vis;
+      for (const x of form.querySelectorAll(".vis button")) x.setAttribute("aria-checked", String(x.dataset.vis === visibility));
+    });
+  }
+  nameIn.addEventListener("input", syncCreate);
   form.addEventListener("submit", async (e) => {
     e.preventDefault();
-    const name = form.name.value.trim();
-    const target = form.dataset.owner;
-    if (!target) { toast("Pick an owner first", { error: true }); return; }
-    if (!/^[A-Za-z0-9._-]+$/.test(name)) { toast("Use letters, digits, . _ - for the name", { error: true }); return; }
-    const btn = form.querySelector('button[type="submit"]');
-    btn.disabled = true;
+    const name = cleanName(nameIn.value);
+    if (createBtn.disabled || !target || !name) return;
+    const full = `${target}/${name}`;
+    createBtn.disabled = true;
+    createBtn.classList.add("busy");
+    setText(createBtn, `Creating ${full}…`);
     try {
-      const res = await api("/api/app/create", { method: "POST", body: { owner: target, name, private: form.private.checked } });
+      const res = await api("/api/app/create", { method: "POST", body: { owner: target, name, private: visibility === "private", description: descIn.value.trim() } });
       dlg.close();
-      toast(`Created ${target}/${name}`);
+      toast(`Created ${full}`);
       await refreshState();
       const ws = res?.workspace?.workspaceId || res?.workspace?.id;
       if (ws) navigate(projectPath(ws));
-    } catch (err) { if (err.status !== 401) toast(err.message, { error: true }); }
-    finally { btn.disabled = false; }
+    } catch (err) {
+      if (err.status !== 401) toast(err.message, { error: true });
+      createBtn.classList.remove("busy");
+      syncCreate();
+    }
   });
+
+  for (const b of dlg.querySelectorAll(".modes button")) b.addEventListener("click", () => setMode(b.dataset.mode));
+  search.addEventListener("input", render);
   dlg.addEventListener("click", (e) => {
     if (e.target === dlg || e.target.closest('[data-act="close"]')) dlg.close();
   });
   dlg.addEventListener("close", () => dlg.remove());
   document.body.appendChild(dlg);
   dlg.showModal();
-  renderChips();
+  syncCreate();
   api("/api/app/repos").then((data) => {
     repos = data?.repos || [];
-    owners = data?.owners || [];
-    if (owner && !owners.includes(owner)) owner = "";
-    renderChips(); syncForm(); render();
+    // The first owner is the signed-in account, the rest its orgs.
+    owners = (data?.owners || []).map((o, i) => (typeof o === "string" ? { login: o, kind: i === 0 ? "user" : "org" } : o)).filter((o) => o?.login);
+    loaded = true;
+    if (filter && !owners.some((o) => o.login === filter)) filter = "";
+    renderChips(); render(); renderOwners(); syncCreate();
   }).catch((err) => {
-    listEl.replaceChildren(h(`<div class="repo-note err"></div>`));
-    listEl.firstChild.textContent = err.status === 401 ? "Signed out." : err.message;
+    const msg = err.status === 401 ? "Signed out." : err.message;
+    for (const box of [listEl, ownerList]) {
+      box.replaceChildren(h(`<div class="repo-note err"></div>`));
+      box.firstChild.textContent = msg;
+    }
   });
 }
 
@@ -354,7 +452,7 @@ function openModelPicker(ws) {
     listEl.replaceChildren();
     for (const o of options) {
       const current = data.current?.backend === backend && data.current?.model === o.value;
-      const b = h(`<button type="button" class="repo-row" role="listitem"><span class="rn"></span><span class="rd"></span></button>`);
+      const b = h(`<button type="button" class="repo-row" role="listitem"><span class="r-text"><span class="rn"></span><span class="rd"></span></span></button>`);
       b.querySelector(".rn").textContent = `${o.label || o.value}${current ? "  ✓" : ""}`;
       b.querySelector(".rd").textContent = [o.value !== o.label ? o.value : null, o.detail].filter(Boolean).join(" · ");
       b.addEventListener("click", async () => {
@@ -553,20 +651,134 @@ function refreshButton(onRefresh) {
   return b;
 }
 
-function createComposer({ placeholder, draftKey, onSubmit, hint }) {
-  const el = h(`<div class="composer"><form autocomplete="off">
+// A home machine running an older worker sends a compacted conversation's
+// summary as a message from the user. Show it as the marker newer workers send.
+const COMPACT_SUMMARY_RE = /^This session is being continued from a previous conversation that ran out of context\.[^\n]*\n+(?:Summary:\s*\n)?/;
+function withCompactMarkers(messages) {
+  if (!messages.some((m) => m.role === "user" && COMPACT_SUMMARY_RE.test(m.text || ""))) return messages;
+  return messages.map((m) => (m.role === "user" && COMPACT_SUMMARY_RE.test(m.text || "")
+    ? { id: m.id, role: "system", kind: "compact", ts: m.ts, text: "Context compacted", compact: { summary: m.text.replace(COMPACT_SUMMARY_RE, "").replace(/\n+(?:If you need specific details from before compaction|Continue the conversation from where it left off)[\s\S]*$/, "").trim() } }
+    : m));
+}
+
+// Photos and files from the phone. Each one is uploaded to the project on the
+// cloud machine (<repo>/.rudder/uploads, git-excluded) and the message carries
+// the saved paths under "Attached files:", which the agent opens like any file.
+const ATTACH_MAX_BYTES = 25 * 1024 * 1024;
+const ATTACH_HEADER = "Attached files:";
+// The iOS shell before 1.0.1 has no camera permission string, and picking
+// "Take Photo" there crashes the app: offer documents only until it updates.
+const ATTACH_DOCS_ONLY = !!NATIVE && !NATIVE.attachments;
+const ATTACH_DOC_TYPES = ".pdf,.txt,.md,.csv,.tsv,.json,.log,.zip,.html,.xml,.yaml,.yml,.toml,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.rtf,.key,.pages,.numbers";
+const attachPreviews = new Map(); // saved path -> object URL of the image picked on this device
+
+function withAttachments(text, paths) {
+  if (!paths.length) return text;
+  const list = paths.map((p) => `- ${p}`).join("\n");
+  return text ? `${text}\n\n${ATTACH_HEADER}\n${list}` : `${ATTACH_HEADER}\n${list}`;
+}
+
+function splitAttachments(text) {
+  const m = /(?:^|\n\n)Attached files:\n((?:- [^\n]+(?:\n|$))+)\s*$/.exec(text || "");
+  if (!m) return { body: text || "", files: [] };
+  return { body: text.slice(0, m.index).trim(), files: m[1].trim().split("\n").map((line) => line.slice(2).trim()).filter(Boolean) };
+}
+
+const attachmentName = (p) => String(p).split("/").pop().replace(/^\d{8}-\d{6}-(?:\d+-)?/, "");
+const isImageName = (name) => /\.(png|jpe?g|gif|webp|heic|heif|avif|bmp)$/i.test(name);
+
+// Chips under a message: a thumbnail when this device still has the image,
+// otherwise the file's name.
+function paintAttachments(box, files) {
+  const sig = files.map((f) => `${f.path || f.name}|${f.url || ""}`).join(";");
+  if (box.dataset.sig === sig) return;
+  box.dataset.sig = sig;
+  box.hidden = !files.length;
+  box.replaceChildren(...files.map((f) => {
+    const name = f.name || attachmentName(f.path);
+    const url = f.url || (f.path && attachPreviews.get(f.path));
+    const chip = h(`<span class="att${url ? " has-img" : ""}" title=""></span>`);
+    chip.title = name;
+    if (url) {
+      const img = document.createElement("img");
+      img.src = url; img.alt = name; img.loading = "lazy";
+      chip.appendChild(img);
+    } else {
+      chip.innerHTML = `${icon("file")}<span class="att-name"></span>`;
+      chip.querySelector(".att-name").textContent = name;
+    }
+    return chip;
+  }));
+}
+
+async function uploadAttachment(ws, file) {
+  if (file.size > ATTACH_MAX_BYTES) throw new ApiError(`${file.name || "That file"} is over 25 MB`, 413);
+  const res = await api(`/api/app/upload?workspace=${encodeURIComponent(ws)}&name=${encodeURIComponent(file.name || "file")}`, { method: "POST", raw: file });
+  if (!res?.path) throw new ApiError("The cloud machine did not save the file", 502);
+  if (/^image\//.test(file.type)) attachPreviews.set(res.path, URL.createObjectURL(file));
+  return res.path;
+}
+
+function createComposer({ placeholder, draftKey, onSubmit, hint, attachments = false }) {
+  const el = h(`<div class="composer"><div class="att-tray" hidden></div><form autocomplete="off">
+      ${attachments ? `<button type="button" class="attach" aria-label="Attach photos or files" title="Attach">${icon("clip")}</button><input type="file" class="file-in" multiple hidden>` : ""}
       <textarea rows="1" enterkeyhint="${coarse ? "enter" : "send"}" aria-label="${escapeHtml(placeholder)}" placeholder="${escapeHtml(placeholder)}"></textarea>
       <button type="submit" class="send" aria-label="Send" disabled>${icon("send")}</button>
     </form>${hint ? `<div class="c-hint">${escapeHtml(hint)}</div>` : ""}</div>`);
   const form = el.querySelector("form");
+  form.classList.toggle("with-attach", attachments);
   const ta = el.querySelector("textarea");
   const btn = el.querySelector(".send");
+  const tray = el.querySelector(".att-tray");
+  let files = []; // [{ file, name, url }]
   ta.value = store.drafts[draftKey] || "";
   const grow = () => {
     ta.style.height = "auto";
     ta.style.height = `${Math.min(ta.scrollHeight, 168)}px`;
-    btn.disabled = !ta.value.trim();
+    btn.disabled = !ta.value.trim() && !files.length;
   };
+  const paintTray = () => {
+    tray.hidden = !files.length;
+    tray.replaceChildren(...files.map((f, i) => {
+      const chip = h(`<span class="att tray${f.url ? " has-img" : ""}"><button type="button" class="att-x" aria-label="Remove">${icon("x")}</button></span>`);
+      if (f.url) {
+        const img = document.createElement("img");
+        img.src = f.url; img.alt = f.name;
+        chip.prepend(img);
+      } else {
+        const label = h(`<span class="att-label">${icon("file")}<span class="att-name"></span></span>`);
+        label.querySelector(".att-name").textContent = f.name;
+        chip.prepend(label);
+      }
+      chip.querySelector(".att-x").setAttribute("aria-label", `Remove ${f.name}`);
+      chip.querySelector(".att-x").addEventListener("click", () => {
+        files.splice(i, 1);
+        paintTray(); grow();
+      });
+      return chip;
+    }));
+  };
+  if (attachments) {
+    const input = el.querySelector(".file-in");
+    if (ATTACH_DOCS_ONLY) input.accept = ATTACH_DOC_TYPES;
+    el.querySelector(".attach").addEventListener("click", () => {
+      if (ATTACH_DOCS_ONLY && !ls.get("rudder.attachDocsNote")) {
+        ls.set("rudder.attachDocsNote", 1);
+        toast("Files only in this version of the app. Update Rudder from TestFlight to send photos.");
+      }
+      input.click();
+    });
+    input.addEventListener("change", () => {
+      for (const file of input.files || []) {
+        if (file.size > ATTACH_MAX_BYTES) { toast(`${file.name} is over 25 MB`, { error: true }); continue; }
+        const name = file.name || "file";
+        files.push({ file, name, url: /^image\//.test(file.type) ? URL.createObjectURL(file) : null });
+      }
+      input.value = "";
+      paintTray(); grow();
+      ta.focus();
+    });
+  }
   const saveDraft = () => {
     if (ta.value) store.drafts[draftKey] = ta.value; else delete store.drafts[draftKey];
     ls.set("rudder.drafts", store.drafts);
@@ -574,11 +786,15 @@ function createComposer({ placeholder, draftKey, onSubmit, hint }) {
   let busy = false;
   const submit = async () => {
     const text = ta.value.trim();
-    if (!text || busy) return;
+    if ((!text && !files.length) || busy) return;
     busy = true; btn.disabled = true;
-    const ok = await onSubmit(text);
+    const picked = files;
+    const ok = await onSubmit(text, picked);
     busy = false;
-    if (ok !== false) { ta.value = ""; saveDraft(); }
+    if (ok !== false) {
+      ta.value = ""; saveDraft();
+      if (files === picked) { files = []; paintTray(); }
+    }
     grow();
   };
   ta.addEventListener("input", () => { grow(); saveDraft(); });
@@ -1059,13 +1275,20 @@ function ProjectScreen(ws) {
     placeholder: "Start a new task, or /model",
     draftKey: `task:${ws}`,
     hint: coarse ? "" : "Enter to start · Shift+Enter for a new line",
-    onSubmit: async (text) => {
-      if (/^\/model\s*$/i.test(text)) {
+    attachments: true,
+    onSubmit: async (text, files = []) => {
+      if (/^\/model\s*$/i.test(text) && !files.length) {
         openModelPicker(ws);
         return true;
       }
+      if (!text) { toast("Say what the agent should do with the files"); return false; }
       try {
-        const res = await api("/api/app/task", { method: "POST", body: { workspace: ws, text } });
+        const paths = [];
+        for (const [i, f] of files.entries()) {
+          if (files.length) toast(files.length > 1 ? `Uploading ${i + 1} of ${files.length}` : "Uploading");
+          paths.push(await uploadAttachment(ws, f.file));
+        }
+        const res = await api("/api/app/task", { method: "POST", body: { workspace: ws, text: withAttachments(text, paths) } });
         toast(text.startsWith("/") ? "Sent to the dashboard" : "Task started");
         await refreshState();
         const run = res?.run || res?.runId;
@@ -1394,7 +1617,8 @@ function AgentScreen(ws, run) {
     placeholder: "Message the agent",
     draftKey: `msg:${key}`,
     hint: coarse ? "" : "Enter to send · Shift+Enter for a new line",
-    onSubmit: (text) => { send(text); return true; },
+    attachments: true,
+    onSubmit: (text, files) => { send(text, files); return true; },
   });
   el.querySelector(".chat-wrap").after(composer.el);
 
@@ -1553,6 +1777,14 @@ function AgentScreen(ws, run) {
       }
       return;
     }
+    const compactRow = e.target.closest(".compact-row");
+    if (compactRow) {
+      const node = compactRow.closest(".compact");
+      const k = `${key}|${node.dataset.key}`;
+      if (store.expanded.has(k)) store.expanded.delete(k); else store.expanded.add(k);
+      paintCompact(node, node._msg);
+      return;
+    }
     const stepsRow = e.target.closest(".steps-row");
     if (stepsRow) {
       const node = stepsRow.closest(".steps");
@@ -1582,7 +1814,7 @@ function AgentScreen(ws, run) {
       const id = retry.closest(".msg").dataset.key;
       const list = store.pending.get(key) || [];
       const item = list.find((x) => x.id === id);
-      if (item) { store.pending.set(key, list.filter((x) => x !== item)); send(item.text); }
+      if (item) { store.pending.set(key, list.filter((x) => x !== item)); send(item.text, [], item); }
     }
   });
 
@@ -1630,14 +1862,22 @@ function AgentScreen(ws, run) {
   }
 
   let seq = 0;
-  async function send(text) {
-    const item = { id: `pending-${Date.now()}-${seq++}`, text, ts: Date.now(), state: "sending" };
+  async function send(text, files = [], retryOf = null) {
+    const item = retryOf || { id: `pending-${Date.now()}-${seq++}`, text, ts: Date.now(), files: files.map((f) => ({ ...f })) };
+    item.state = item.files?.some((f) => !f.path) ? "uploading" : "sending";
     store.pending.set(key, [...(store.pending.get(key) || []), item]);
     atBottom = true;
     paint();
     toBottom(true);
     try {
-      await api("/api/app/send", { method: "POST", body: { workspace: ws, run, text } });
+      // Files first, each once: a retry after a failed send reuses the paths.
+      for (const f of item.files || []) {
+        if (!f.path) { f.path = await uploadAttachment(ws, f.file); paint(); }
+      }
+      item.sentText = withAttachments(item.text, (item.files || []).map((f) => f.path));
+      item.state = "sending";
+      paint();
+      await api("/api/app/send", { method: "POST", body: { workspace: ws, run, text: item.sentText } });
       item.state = "sent";
       setTimeout(loadTranscript, 1200);
     } catch (err) {
@@ -1682,7 +1922,8 @@ function AgentScreen(ws, run) {
     const kept = list.filter((p) => {
       if (p.state === "failed") return true;
       if (Date.now() - p.ts > 5 * 60 * 1000) return false;
-      return !users.some((m) => (m.text || "").trim() === p.text.trim() && (m.ts == null || m.ts >= p.ts - 120000));
+      const sent = (p.sentText || p.text).trim();
+      return !users.some((m) => (m.text || "").trim() === sent && (m.ts == null || m.ts >= p.ts - 120000));
     });
     store.pending.set(key, kept);
   }
@@ -1728,7 +1969,7 @@ function AgentScreen(ws, run) {
     // "Worked · N steps" line: a long turn was otherwise a wall of tool rows
     // with the actual replies lost between them.
     let steps = null;
-    for (const m of t.messages || []) {
+    for (const m of withCompactMarkers(t.messages || [])) {
       if (m.ts) {
         const d = new Date(m.ts).toDateString();
         if (d !== lastDay) { items.push({ kind: "day", id: `day-${d}`, label: dayLabel(m.ts) }); lastDay = d; steps = null; }
@@ -1773,7 +2014,7 @@ function AgentScreen(ws, run) {
     if (x.kind === "day") return h(`<div class="day"></div>`);
     if (x.kind === "empty") return emptyState({ ic: "inbox", title: "No messages yet", body: "This agent has not said anything yet. Its conversation shows up here as it works." });
     if (x.kind === "error") return emptyState({ ic: "alert", title: "Couldn't load the conversation", body: escapeHtml(x.text) });
-    if (x.kind === "pending") return h(`<div class="msg user"><div class="bubble md"></div><div class="m-foot"></div></div>`);
+    if (x.kind === "pending") return h(`<div class="msg user"><div class="atts" hidden></div><div class="bubble md"></div><div class="m-foot"></div></div>`);
     if (x.kind === "steps") {
       return h(`<div class="steps"><button type="button" class="tool-row steps-row" aria-expanded="false">
         <span class="t-icon"></span><span class="t-name"></span><span class="t-input"></span>${icon("chevron").replace("<svg", '<svg class="t-caret"')}</button><div class="steps-list" hidden></div></div>`);
@@ -1784,7 +2025,10 @@ function AgentScreen(ws, run) {
         <span class="t-icon"></span><span class="t-name"></span><span class="t-input"></span>${icon("chevron").replace("<svg", '<svg class="t-caret"')}</button></div>`);
       return box;
     }
-    if (role === "user") return h(`<div class="msg user"><div class="bubble md"></div></div>`);
+    if (role === "user") return h(`<div class="msg user"><div class="atts" hidden></div><div class="bubble md"></div></div>`);
+    if (role === "system" && x.m.kind === "compact") {
+      return h(`<div class="compact"><button type="button" class="compact-row" aria-expanded="false"><span class="c-line"></span><span class="c-label"><span class="c-text"></span>${icon("chevron").replace("<svg", '<svg class="t-caret"')}</span><span class="c-line"></span></button><div class="compact-sum md" hidden></div></div>`);
+    }
     if (role === "system") return h(`<div class="msg system"><div class="sys md"></div></div>`);
     return h(`<div class="msg assistant"><div class="md"></div></div>`);
   }
@@ -1798,17 +2042,47 @@ function AgentScreen(ws, run) {
       const md = node.querySelector(".md");
       const sig = `${p.text}|${markdownReady()}`;
       if (md.dataset.sig !== sig) { renderMarkdown(md, p.text); md.dataset.sig = sig; }
+      md.hidden = !p.text;
+      paintAttachments(node.querySelector(".atts"), p.files || []);
+      const uploading = (p.files || []).filter((f) => !f.path).length;
+      const label = p.state === "sent" ? "Delivered" : p.state === "uploading" && uploading ? `Uploading ${p.files.length - uploading + 1} of ${p.files.length}` : "Sending";
       const foot = node.querySelector(".m-foot");
-      const html = p.state === "failed" ? `<span>Not sent</span><button type="button" class="retry">Retry</button>` : `<span>${p.state === "sent" ? "Delivered" : "Sending"}</span>`;
+      const html = p.state === "failed" ? `<span>Not sent</span><button type="button" class="retry">Retry</button>` : `<span>${label}</span>`;
       if (foot.dataset.h !== html) { foot.innerHTML = html; foot.dataset.h = html; }
       return;
     }
     if (x.kind === "steps") return paintSteps(node, x);
     const m = x.m;
     if (m.role === "tool") { node._msg = m; return paintTool(node, m); }
+    if (m.kind === "compact") { node._msg = m; return paintCompact(node, m); }
     const md = node.querySelector(".md");
-    const sig = `${m.text}|${markdownReady()}`;
-    if (md.dataset.sig !== sig) { renderMarkdown(md, m.text || ""); md.dataset.sig = sig; }
+    let text = m.text || "";
+    if (m.role === "user") {
+      const split = splitAttachments(text);
+      text = split.body;
+      md.hidden = !text;
+      paintAttachments(node.querySelector(".atts"), split.files.map((path) => ({ path })));
+    }
+    const sig = `${text}|${markdownReady()}`;
+    if (md.dataset.sig !== sig) { renderMarkdown(md, text); md.dataset.sig = sig; }
+  }
+
+  function paintCompact(node, m) {
+    const c = m.compact || {};
+    const open = store.expanded.has(`${key}|${node.dataset.key}`) && !!c.summary;
+    const row = node.querySelector(".compact-row");
+    node.classList.toggle("open", open);
+    node.classList.toggle("has-sum", !!c.summary);
+    row.disabled = !c.summary;
+    row.setAttribute("aria-expanded", String(open));
+    const tokens = c.preTokens ? ` · ${c.preTokens >= 1000 ? `${Math.round(c.preTokens / 1000)}k` : c.preTokens} tokens summarized` : "";
+    setText(row.querySelector(".c-text"), `Context compacted${tokens}`);
+    row.setAttribute("aria-label", `Context compacted${tokens}.${c.summary ? ` ${open ? "Hide" : "Show"} the summary the agent continued from.` : ""}`);
+    const sum = node.querySelector(".compact-sum");
+    sum.hidden = !open;
+    if (!open) return;
+    const sig = `${c.summary}|${markdownReady()}`;
+    if (sum.dataset.sig !== sig) { renderMarkdown(sum, c.summary); sum.dataset.sig = sig; }
   }
 
   function paintSteps(node, x) {

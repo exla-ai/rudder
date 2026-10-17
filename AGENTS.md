@@ -879,6 +879,21 @@ brain lives in the cloud, and the phone is a first-class client.
   the home no longer has; `known: false` (asleep, cloning) is never read as deleted.
   `dd` on a moved row runs `rudder cloud home delete`, which the control plane queues
   until a sleeping home reconnects.
+- **The phone answers prompts like the Claude app** (`native/src/permission_hook.mjs`,
+  `cloud/worker/asks.mjs`). On the home runtime every Claude agent's settings get a
+  `PermissionRequest` hook (timeout a day). Claude shows its own dialog WHILE the hook
+  runs and takes whichever answers first (measured on 2.1.302), so the terminal still
+  works. The hook writes `<signals>/<run>.asks/<id>.json`; the supervisor lists it as
+  the agent's `asks` (kind permission / question / plan); `POST /api/app/answer`
+  writes `<id>.answer.json`, which the hook prints as the decision. Approvals:
+  allow, allow always (`updatedPermissions` = Claude's suggestions), deny + reason.
+  Questions (AskUserQuestion, bypass mode included): allow with `updatedInput.answers`
+  keyed by question text, multi-select joined ", ". Plans (ExitPlanMode): Claude
+  IGNORES a hook allow for a plan but takes deny + message as "revise", so approve is
+  the key `1` and revise is a deny. Claude does not cancel a hook whose dialog was
+  answered in the terminal: the hook watches the transcript for the call's
+  `tool_result` (or an interrupt) and withdraws. The app's stop-square sends Esc
+  (interrupt the turn, not the agent).
 - **A remote message is never typed into a menu.** The phone once "delivered" two
   messages into Claude's `/config` search box. `terminal_composer_blocked` (detect.rs)
   reads a menu's or permission prompt's key hints off the bottom rows, and the steer

@@ -138,6 +138,62 @@ pub(crate) fn cleanup_run_signals(run_id: &str) {
     let _ = std::fs::remove_file(dir.join(format!("{run_id}.claude-session")));
     let _ = std::fs::remove_file(dir.join(format!("{run_id}-opencode.json")));
     let _ = std::fs::remove_file(dir.join(format!("{run_id}-opencode.js")));
+    let _ = std::fs::remove_dir_all(asks_dir_in(&dir, run_id));
+}
+
+/// The phone answers Claude's prompts (approvals, questions, plans) only on the
+/// cloud machine, where nobody is at the terminal. Locally the dialog is right
+/// there, and a hook that waits on it would only add a process per prompt.
+pub(crate) fn remote_asks_enabled() -> bool {
+    std::env::var("RUDDER_CLOUD_RUNTIME").ok().as_deref() == Some("home")
+}
+
+/// Where a run's pending prompts wait for an answer from the phone
+/// (`<id>.json` the request, `<id>.answer.json` the decision).
+pub(crate) fn asks_dir_in(signals: &Path, run_id: &str) -> PathBuf {
+    signals.join(format!("{run_id}.asks"))
+}
+
+pub(crate) const PERMISSION_HOOK_JS: &str = include_str!("permission_hook.mjs");
+
+/// Write the shared hook script (only when it changed) and return it with the
+/// run's asks dir.
+fn install_permission_hook(signals: &Path, run_id: &str) -> Option<(PathBuf, PathBuf)> {
+    let script = signals.join("permission-hook.mjs");
+    if std::fs::read_to_string(&script).ok().as_deref() != Some(PERMISSION_HOOK_JS) {
+        let tmp = signals.join(format!("permission-hook.mjs.{}.tmp", std::process::id()));
+        std::fs::write(&tmp, PERMISSION_HOOK_JS).ok()?;
+        std::fs::rename(&tmp, &script).ok()?;
+    }
+    Some((script, asks_dir_in(signals, run_id)))
+}
+
+/// Add the `PermissionRequest` hook (see permission_hook.mjs) to a Claude
+/// settings JSON. It may wait as long as the prompt does, so its timeout is a
+/// day rather than Claude's 10 minutes, after which the terminal still works.
+pub(crate) fn with_permission_hook(settings_json: &str, script: &Path, asks: &Path) -> String {
+    let Ok(mut settings) = serde_json::from_str::<serde_json::Value>(settings_json) else {
+        return settings_json.to_string();
+    };
+    let command = format!(
+        "node {} {}",
+        shell_quote(&script.display().to_string()),
+        shell_quote(&asks.display().to_string())
+    );
+    if let Some(hooks) = settings.get_mut("hooks").and_then(|value| value.as_object_mut()) {
+        hooks.insert(
+            "PermissionRequest".to_string(),
+            serde_json::json!([{
+                "matcher": "*",
+                "hooks": [{ "type": "command", "command": command, "timeout": 86400 }]
+            }]),
+        );
+    }
+    settings.to_string()
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 /// Remove stale signal/config files that no run deletion ever reached. Best-effort.
@@ -587,7 +643,15 @@ pub(crate) fn prepare_worker_signals(run_id: &str, backend: Backend) -> WorkerSi
                 // fast mode is a settings flag, not a launch flag, so this is how it
                 // reaches a spawned worker).
                 let fast_mode = crate::config::fast_mode_enabled();
-                if std::fs::write(&settings, claude_settings_json(&signal, fast_mode)).is_ok() {
+                let mut json = claude_settings_json(&signal, fast_mode);
+                if remote_asks_enabled() {
+                    if let Some(with_asks) = install_permission_hook(&dir, run_id)
+                        .map(|(script, asks)| with_permission_hook(&json, &script, &asks))
+                    {
+                        json = with_asks;
+                    }
+                }
+                if std::fs::write(&settings, json).is_ok() {
                     return WorkerSignals {
                         claude_settings: Some(settings),
                         ..WorkerSignals::default()

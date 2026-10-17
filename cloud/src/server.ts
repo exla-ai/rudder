@@ -5884,6 +5884,22 @@ async function handleAppApi(req: IncomingMessage, res: ServerResponse, url: URL)
     sendJson(res, 200, await homeRpc(home.id, "keys", { workspaceId: repo.id, runId: stringField(body, "run") ?? "", keys }));
     return;
   }
+  if (req.method === "POST" && url.pathname === "/api/app/answer") {
+    // The phone answering a prompt an agent is blocked on: a tool approval,
+    // Claude's questions, or a plan (cloud/worker/asks.mjs builds the decision).
+    const body = await readJsonBody(req);
+    const { repo } = requireHomeRepo(account.accountId, stringField(body, "workspace") ?? "");
+    const ask = stringField(body, "ask") ?? "";
+    if (!/^[0-9]+-[0-9a-f]{8}$/.test(ask)) {
+      throw badRequest("ask is required");
+    }
+    const answer = body && typeof body === "object" ? (body as Record<string, unknown>).answer : undefined;
+    if (!answer || typeof answer !== "object" || JSON.stringify(answer).length > 64_000) {
+      throw badRequest("answer is required");
+    }
+    sendJson(res, 200, await homeRpc(home.id, "answer", { workspaceId: repo.id, runId: stringField(body, "run") ?? "", askId: ask, answer: answer as Json }));
+    return;
+  }
   if (req.method === "POST" && url.pathname === "/api/app/action") {
     // Dashboard actions the phone can take on one agent: stop, merge, delete.
     const body = await readJsonBody(req);

@@ -27083,3 +27083,23 @@ fn a_same_size_sigwinch_repaints_every_cell_in_place() {
         "painted over in place, never cleared: {forced:?}"
     );
 }
+
+#[test]
+fn cloud_claude_settings_carry_the_phone_permission_hook() {
+    let base = crate::signals::claude_settings_json(Path::new("/tmp/sig/run.json"), false);
+    let json = crate::signals::with_permission_hook(
+        &base,
+        Path::new("/home/rudder/.rudder/signals/permission-hook.mjs"),
+        Path::new("/home/rudder/.rudder/signals/run.asks"),
+    );
+    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let hook = &value["hooks"]["PermissionRequest"][0]["hooks"][0];
+    assert_eq!(
+        hook["command"],
+        "node '/home/rudder/.rudder/signals/permission-hook.mjs' '/home/rudder/.rudder/signals/run.asks'"
+    );
+    assert_eq!(hook["timeout"], 86400);
+    // The lifecycle hooks are untouched.
+    assert!(value["hooks"]["Stop"].is_array());
+    assert!(crate::signals::PERMISSION_HOOK_JS.contains("PermissionRequest"));
+}

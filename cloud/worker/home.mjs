@@ -23,6 +23,7 @@ import { WebSocket } from "ws";
 import pty from "node-pty";
 
 import { readTranscript, lastAssistantText, userTask } from "./transcripts.mjs";
+import { readAsks, askDecision, isAskId } from "./asks.mjs";
 import { sanitizeHomeHookConfigs } from "./hook-paths.mjs";
 
 const cloudUrl = (process.env.RUDDER_CLOUD_URL || "").trim().replace(/\/$/, "");
@@ -40,7 +41,8 @@ const PERSIST_HOME = path.join(VOLUME, "home");
 const HOME = os.homedir() || process.env.HOME || "/home/rudder";
 const TS_SOCKET = "/tmp/tailscaled.sock";
 const TS_HOSTNAME = (process.env.RUDDER_TAILSCALE_HOSTNAME || "rudder-home").trim();
-const STATE_INTERVAL_MS = 3000;
+// 1.5s: a prompt an agent is blocked on should reach the phone quickly.
+const STATE_INTERVAL_MS = 1500;
 
 // Set by configureGitCredentials, which runs during boot: declared up here so
 // boot never reaches it uninitialized (2.16.5 crashed on exactly that).
@@ -463,6 +465,9 @@ async function handleRpc(method, params) {
   if (method === "screen") {
     return readScreen(project, String(params.runId || ""));
   }
+  if (method === "answer") {
+    return await answerAsk(project, params);
+  }
   if (method === "action") {
     const kind = params.action === "merge" ? "merge" : params.action === "stop" ? "cancel" : params.action === "delete" ? "delete" : null;
     if (!kind) {
@@ -728,6 +733,10 @@ async function publishState() {
   sendControl(state);
 }
 
+function scheduleStateSoon() {
+  setTimeout(() => void publishState().catch((error) => log(`state: ${error.message}`)), 150).unref();
+}
+
 function readAgents(repoDir) {
   const runsDir = path.join(repoDir, ".rudder", "runs");
   let entries = [];
@@ -810,7 +819,44 @@ function agentSummary(record) {
     nodeId: record.nodeId ?? null,
     planId: record.planId ?? null,
     remoteUrl,
+    asks: /^[A-Za-z0-9._-]+$/.test(String(record.id)) ? readAsks(asksDir(record.id)) : [],
   };
+}
+
+// ---------------------------------------------------------------------------
+// Prompts the phone answers (permission_hook.mjs, written by the dashboard into
+// the run's Claude settings). Each pending prompt is <signals>/<run>.asks/<id>.json,
+// held open by a hook process; the phone's answer becomes <id>.answer.json,
+// which the hook prints as Claude's decision.
+// ---------------------------------------------------------------------------
+function asksDir(runId) {
+  return path.join(HOME, ".rudder", "signals", `${runId}.asks`);
+}
+
+async function answerAsk(project, params) {
+  const runId = String(params.runId || "");
+  const askId = String(params.askId || "");
+  if (!/^[A-Za-z0-9._-]+$/.test(runId) || !isAskId(askId)) {
+    throw new Error("unknown prompt");
+  }
+  const dir = asksDir(runId);
+  let request;
+  try {
+    request = JSON.parse(fs.readFileSync(path.join(dir, `${askId}.json`), "utf8"));
+  } catch {
+    throw new Error("that prompt was already answered");
+  }
+  const decision = askDecision(request, params.answer);
+  if (decision.keys) {
+    // The hook withdraws the request when the plan's result lands.
+    return await steer(project, { kind: "keys", taskId: runId, instruction: decision.keys });
+  }
+  const file = path.join(dir, `${askId}.answer.json`);
+  const tmp = `${file}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, decision.output);
+  fs.renameSync(tmp, file);
+  scheduleStateSoon();
+  return { ok: true };
 }
 
 // The phone's vocabulary: working / waiting / review / done / paused / failed /

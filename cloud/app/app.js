@@ -105,7 +105,18 @@ const STATUS = {
   orphaned: { label: "Orphaned", cls: "s-idle" },
 };
 const statusOf = (s) => STATUS[s] || { label: s ? s[0].toUpperCase() + s.slice(1) : "Unknown", cls: "s-idle" };
-const needsYou = (a) => a.status === "waiting" || a.status === "review" || a.status === "failed";
+// Prompts the agent is blocked on (permission, question, plan), newest last.
+// Ones answered from this phone are hidden at once, before the state agrees.
+const answeredAsks = new Set();
+const pendingAsks = (a) => (Array.isArray(a?.asks) ? a.asks : []).filter((q) => q && !answeredAsks.has(q.id));
+const ASK_LABEL = { permission: "Needs approval", question: "Has a question", plan: "Plan ready" };
+const askLabel = (q) => ASK_LABEL[q?.kind] || "Needs approval";
+const needsYou = (a) => pendingAsks(a).length > 0 || a.status === "waiting" || a.status === "review" || a.status === "failed";
+// An agent blocked on a prompt reads as needing you, whatever its status says.
+const agentStatus = (a) => {
+  const asks = pendingAsks(a);
+  return asks.length ? { label: askLabel(asks[0]), cls: "s-needs" } : statusOf(a?.status);
+};
 const BACKEND = { claude: "Claude", codex: "Codex", opencode: "opencode" };
 const backendLabel = (a) => [BACKEND[a.backend] || a.backend, a.model].filter(Boolean).join(" · ");
 
@@ -662,7 +673,7 @@ async function deleteAgent(ws, a, { after } = {}) {
 }
 
 function updateAgentRow(el, { p, a }) {
-  const st = statusOf(a.status);
+  const st = agentStatus(a);
   el._target = { p, a };
   if (a.pending) el.removeAttribute("href"); else el.href = agentPath(p.workspaceId, a.id);
   el.className = `row agent tap ${st.cls}`;
@@ -966,6 +977,7 @@ const GROUPS = [
   { id: "earlier", label: "Earlier" },
 ];
 function groupOf(a) {
+  if (pendingAsks(a).length) return "needs";
   if (a.status === "working" || a.status === "starting") return "working";
   if (needsYou(a)) return "needs";
   if (a.status === "done" && Date.now() - (a.updatedAt || 0) < 36 * 3600 * 1000) return "done";
@@ -1097,6 +1109,199 @@ function ProjectScreen(ws) {
 /* Agent: conversation                                                 */
 /* ------------------------------------------------------------------ */
 
+/* ------------------------------------------------------------------ */
+/* Ask card: answer an agent's permission prompt, question or plan     */
+/* ------------------------------------------------------------------ */
+
+const ASK_DIFF_LINES = 40;
+const ASK_WRITE_LINES = 20;
+
+// `onAnswer(answer)` resolves true when the answer was delivered. The card
+// keeps its own selections, so it is built once per ask and never repainted.
+function createAskCard(ask, { onAnswer }) {
+  const input = ask.input && typeof ask.input === "object" ? ask.input : {};
+  const tool = ask.tool || "Tool";
+  const kind = ask.kind || "permission";
+  const title = kind === "question" ? "Question" : kind === "plan" ? "Plan ready for review" : `Allow ${tool}?`;
+  const el = h(`<section class="ask-card" role="region" aria-live="polite">
+    <div class="ask-head"><span class="ask-icon"></span><span class="ask-title"></span><span class="ask-count"></span></div>
+    <div class="ask-body"></div>
+    <div class="ask-actions"></div></section>`);
+  el.setAttribute("aria-label", kind === "question" ? "The agent has a question" : kind === "plan" ? "The agent's plan" : `Permission request: ${tool}`);
+  el.querySelector(".ask-icon").innerHTML = icon(kind === "question" ? "inbox" : kind === "plan" ? "task" : toolIcon(tool));
+  setText(el.querySelector(".ask-title"), title);
+  const body = el.querySelector(".ask-body");
+  const actions = el.querySelector(".ask-actions");
+
+  let busy = false;
+  const setBusy = (on) => {
+    busy = on;
+    el.classList.toggle("busy", on);
+    for (const b of el.querySelectorAll("button, input, textarea")) {
+      if (on) { b.dataset.wasDisabled = b.disabled ? "1" : ""; b.disabled = true; }
+      else { b.disabled = b.dataset.wasDisabled === "1"; delete b.dataset.wasDisabled; }
+    }
+  };
+  const answer = async (value) => {
+    if (busy) return;
+    setBusy(true);
+    const ok = await onAnswer(value);
+    if (!ok) { setBusy(false); refreshValidity(); }
+  };
+  let refreshValidity = () => {};
+
+  const btn = (label, cls, fn, aria) => {
+    const b = h(`<button type="button" class="btn small ${cls}"></button>`);
+    b.textContent = label;
+    if (aria) b.setAttribute("aria-label", aria);
+    b.addEventListener("click", fn);
+    return b;
+  };
+  const pre = (text, cls = "") => {
+    const x = h(`<pre class="ask-pre ${cls}"></pre>`);
+    x.textContent = text;
+    return x;
+  };
+  const note = (text, cls = "ask-desc") => {
+    const x = h(`<div class="${cls}"></div>`);
+    x.textContent = text;
+    return x;
+  };
+  // A reason box behind a button ("Deny" -> optional reason, "Revise" -> what to change).
+  const reasonFlow = ({ openLabel, openCls, placeholder, sendLabel, required, build }) => {
+    const open = btn(openLabel, openCls, () => {
+      actions.hidden = true;
+      box.hidden = false;
+      ta.focus();
+    });
+    const box = h(`<div class="ask-reason" hidden><textarea rows="3"></textarea><div class="ask-actions"></div></div>`);
+    const ta = box.querySelector("textarea");
+    ta.placeholder = placeholder;
+    ta.setAttribute("aria-label", placeholder);
+    const send = btn(sendLabel, openCls === "danger" ? "danger-fill" : "primary", () => answer(build(ta.value.trim())));
+    const cancel = btn("Cancel", "", () => { box.hidden = true; actions.hidden = false; open.focus(); });
+    const sync = () => { if (!busy) send.disabled = required && !ta.value.trim(); };
+    ta.addEventListener("input", sync);
+    sync();
+    box.querySelector(".ask-actions").append(cancel, send);
+    el.appendChild(box);
+    return open;
+  };
+
+  if (kind === "plan") {
+    const md = h(`<div class="ask-plan md"></div>`);
+    renderMarkdown(md, String(input.plan || "The agent did not include the plan text."));
+    md.dataset.sig = `${markdownReady()}`;
+    el._repaintMarkdown = () => {
+      if (md.dataset.sig === `${markdownReady()}`) return;
+      renderMarkdown(md, String(input.plan || "")); md.dataset.sig = `${markdownReady()}`;
+    };
+    body.appendChild(md);
+    actions.append(
+      reasonFlow({
+        openLabel: "Revise…", openCls: "", placeholder: "What should change in the plan?", sendLabel: "Send revision",
+        required: true, build: (message) => ({ approve: false, message }),
+      }),
+      btn("Approve", "accent", () => answer({ approve: true }), "Approve the plan"),
+    );
+    return el;
+  }
+
+  if (kind === "question") {
+    const questions = Array.isArray(input.questions) ? input.questions : [];
+    const safeId = String(ask.id || "ask").replace(/[^a-zA-Z0-9_-]/g, "");
+    const states = questions.map((q, i) => {
+      const multi = !!q.multiSelect;
+      const type = multi ? "checkbox" : "radio";
+      const name = `ask-${safeId}-${i}`;
+      const field = h(`<fieldset class="ask-q"><legend><span class="ask-q-head"></span><span class="ask-q-text"></span></legend><div class="ask-opts"></div></fieldset>`);
+      setText(field.querySelector(".ask-q-head"), q.header || "");
+      field.querySelector(".ask-q-head").hidden = !q.header;
+      setText(field.querySelector(".ask-q-text"), q.question || "");
+      const opts = field.querySelector(".ask-opts");
+      for (const o of Array.isArray(q.options) ? q.options : []) {
+        const row = h(`<label class="ask-opt"><input type="${type}" name="${name}"><span class="ask-opt-t"><b></b><small></small></span></label>`);
+        row.querySelector("input").value = o.label || "";
+        setText(row.querySelector("b"), o.label || "");
+        const d = row.querySelector("small");
+        setText(d, o.description || ""); d.hidden = !o.description;
+        opts.appendChild(row);
+      }
+      const other = h(`<label class="ask-opt ask-opt-other"><input type="${type}" name="${name}" data-other="1"><span class="ask-opt-t"><b>Other…</b></span></label>`);
+      const otherText = h(`<input type="text" class="ask-other-text" placeholder="Type something" hidden>`);
+      otherText.setAttribute("aria-label", `Your own answer to: ${q.question || "this question"}`);
+      opts.append(other, otherText);
+      body.appendChild(field);
+      const st = { q, multi, field, otherText };
+      field.addEventListener("change", () => {
+        const otherOn = other.querySelector("input").checked;
+        otherText.hidden = !otherOn;
+        if (otherOn && document.activeElement !== otherText) otherText.focus();
+        refreshValidity();
+      });
+      otherText.addEventListener("input", () => refreshValidity());
+      st.value = () => {
+        const checked = [...field.querySelectorAll("input:checked")];
+        const labels = checked.filter((x) => !x.dataset.other).map((x) => x.value);
+        const own = checked.some((x) => x.dataset.other) ? otherText.value.trim() : "";
+        if (multi) { const all = own ? [...labels, own] : labels; return all.length ? all : null; }
+        return own || labels[0] || null;
+      };
+      return st;
+    });
+    const submit = btn("Submit", "accent", () => {
+      const answers = {};
+      for (const st of states) answers[st.q.question || ""] = st.value();
+      answer({ answers });
+    }, "Submit answers");
+    refreshValidity = () => { if (!busy) submit.disabled = !states.every((st) => st.value() != null); };
+    refreshValidity();
+    actions.append(submit);
+    return el;
+  }
+
+  // Permission
+  if (tool === "Bash") {
+    if (input.description) body.appendChild(note(String(input.description)));
+    body.appendChild(pre(String(input.command || ""), "mono"));
+  } else if ((tool === "Edit" || tool === "MultiEdit") && input.file_path) {
+    body.appendChild(note(String(input.file_path), "ask-path"));
+    const edits = Array.isArray(input.edits) ? input.edits : [{ old_string: input.old_string, new_string: input.new_string }];
+    const diff = h(`<pre class="ask-pre ask-diff"></pre>`);
+    let shown = 0, extra = 0;
+    for (const e of edits) {
+      for (const [sign, text] of [["-", e.old_string], ["+", e.new_string]]) {
+        for (const line of String(text ?? "").split("\n")) {
+          if (shown >= ASK_DIFF_LINES) { extra += 1; continue; }
+          const span = document.createElement("span");
+          span.className = sign === "-" ? "del" : "add";
+          span.textContent = `${sign} ${line}\n`;
+          diff.appendChild(span); shown += 1;
+        }
+      }
+    }
+    body.appendChild(diff);
+    if (extra) body.appendChild(note(`${extra} more lines`, "ask-more"));
+  } else if (tool === "Write" && input.file_path) {
+    body.appendChild(note(String(input.file_path), "ask-path"));
+    const lines = String(input.content ?? "").split("\n");
+    body.appendChild(pre(lines.slice(0, ASK_WRITE_LINES).join("\n"), "mono"));
+    if (lines.length > ASK_WRITE_LINES) body.appendChild(note(`${lines.length - ASK_WRITE_LINES} more lines`, "ask-more"));
+  } else {
+    let json = "";
+    try { json = JSON.stringify(input, null, 2); } catch { json = String(input); }
+    body.appendChild(pre(json.length > 4000 ? `${json.slice(0, 4000)}\n…` : json, "mono"));
+  }
+  const suggestions = Array.isArray(ask.suggestions) ? ask.suggestions : [];
+  actions.append(reasonFlow({
+    openLabel: "Deny", openCls: "danger", placeholder: "Tell the agent why, or what to do instead (optional)", sendLabel: "Deny",
+    required: false, build: (message) => (message ? { behavior: "deny", message } : { behavior: "deny" }),
+  }));
+  if (suggestions.length) actions.append(btn("Allow always", "", () => answer({ behavior: "allow", always: true }), `Always allow ${tool}`));
+  actions.append(btn("Allow", "accent", () => answer({ behavior: "allow" }), `Allow ${tool}`));
+  return el;
+}
+
 const OUT_LIMIT = 2400;
 
 function AgentScreen(ws, run) {
@@ -1141,6 +1346,63 @@ function AgentScreen(ws, run) {
     onSubmit: (text) => { send(text); return true; },
   });
   el.querySelector(".chat-wrap").after(composer.el);
+
+  // Pinned above the composer: the oldest prompt the agent is blocked on.
+  const askSlot = h(`<div class="ask-slot"></div>`);
+  composer.el.before(askSlot);
+  let askCard = null;
+  function paintAsk() {
+    const asks = pendingAsks(findAgent(ws, run));
+    const ask = asks[0];
+    if (!ask) { if (askCard) { askCard.remove(); askCard = null; } return; }
+    if (askCard?._askId !== ask.id) {
+      askCard?.remove();
+      askCard = createAskCard(ask, { onAnswer: (answer) => answerAsk(ask, answer) });
+      askCard._askId = ask.id;
+      askSlot.appendChild(askCard);
+    }
+    askCard._repaintMarkdown?.();
+    setText(askCard.querySelector(".ask-count"), asks.length > 1 ? `1 of ${asks.length}` : "");
+  }
+  async function answerAsk(ask, answer) {
+    try {
+      await api("/api/app/answer", { method: "POST", body: { workspace: ws, run, ask: ask.id, answer } });
+      answeredAsks.add(ask.id);
+      postNative({ type: "haptic" });
+      paint();
+      refreshState();
+      setTimeout(loadTranscript, 800);
+      return true;
+    } catch (err) {
+      if (err.status !== 401) toast(err.message, { error: true });
+      return false;
+    }
+  }
+
+  // Interrupt: Esc into the agent's terminal, like pressing Esc at the
+  // dashboard. The agent stays alive (unlike "Stop agent" in the menu).
+  const interruptBtn = h(`<button type="button" class="interrupt" aria-label="Interrupt the agent" title="Interrupt" hidden>${icon("stop")}</button>`);
+  composer.el.querySelector(".send").before(interruptBtn);
+  interruptBtn.addEventListener("click", async () => {
+    if (interruptBtn.disabled) return;
+    interruptBtn.disabled = true;
+    postNative({ type: "haptic" });
+    try {
+      await api("/api/app/keys", { method: "POST", body: { workspace: ws, run, keys: "esc" } });
+      toast("Interrupted");
+      setTimeout(() => { loadTranscript(); refreshState(); }, 600);
+    } catch (err) {
+      if (err.status !== 401) toast(err.message, { error: true });
+    } finally {
+      interruptBtn.disabled = false;
+    }
+  });
+  const isRunning = (status) => status === "running" || !!statusOf(status).live;
+  fastStatePoll = () => {
+    const a = findAgent(ws, run);
+    return !!a && (isRunning(a.status) || pendingAsks(a).length > 0);
+  };
+  pollState();
 
   // `/` commands: the message is typed into the agent's own terminal, so its
   // commands work. Suggest the common ones for this backend.
@@ -1381,7 +1643,7 @@ function AgentScreen(ws, run) {
     setText(el.querySelector(".title"), title);
     document.title = `${title} · Rudder`;
     const status = a?.status || t?.status;
-    const st = statusOf(status);
+    const st = a ? agentStatus(a) : statusOf(status);
     const sub = el.querySelector(".subtitle");
     sub.className = `subtitle ${st.cls}`;
     sub.querySelector(".dot").classList.toggle("live", !!st.live);
@@ -1395,6 +1657,8 @@ function AgentScreen(ws, run) {
 
   function paint() {
     const status = header();
+    paintAsk();
+    interruptBtn.hidden = !isRunning(status);
     const t = store.transcripts.get(key);
     if (!t) {
       if (!msgsEl.firstElementChild) {
@@ -1563,6 +1827,7 @@ function AgentScreen(ws, run) {
     destroy() {
       clearTimeout(timer); timer = -1;
       termOn = false; clearTimeout(termTimer);
+      fastStatePoll = null;
       document.removeEventListener("visibilitychange", onVis);
       ro.disconnect();
       document.title = "Rudder";
@@ -1588,12 +1853,15 @@ window.visualViewport?.addEventListener("scroll", syncViewport);
 syncViewport();
 
 let stateTimer = null;
+// The open agent screen asks for a faster cadence while its agent is running
+// or waiting on an answer, so a new prompt shows up promptly.
+let fastStatePoll = null;
 function pollState() {
   clearTimeout(stateTimer);
   stateTimer = setTimeout(async () => {
     if (!document.hidden) await refreshState();
     pollState();
-  }, 4000);
+  }, fastStatePoll?.() ? 1500 : 4000);
 }
 document.addEventListener("visibilitychange", () => {
   if (!document.hidden) { refreshState(); pollState(); }

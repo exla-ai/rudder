@@ -1006,6 +1006,303 @@ function emptyState({ ic, title, body, action }) {
 }
 
 /* ------------------------------------------------------------------ */
+/* Agent sign-in: Claude Code and Codex on the cloud machine           */
+/* ------------------------------------------------------------------ */
+
+// The CLI's own login runs on the cloud machine (cloud/worker/logins.mjs) and
+// the phone opens its page. In the iOS app the page's redirect comes straight
+// back to the app (AgentLogin.swift), so there is nothing to copy. Without it,
+// Claude shows a code to paste here and Codex a code to type on its page.
+const AGENTS = [
+  { id: "claude", label: "Claude Code", ic: "spark", account: "Claude" },
+  { id: "codex", label: "Codex", ic: "code", account: "ChatGPT" },
+];
+const agentName = (provider) => AGENTS.find((x) => x.id === provider)?.label || provider;
+const PLAN_LABEL = { max: "Max", pro: "Pro", plus: "Plus", team: "Team", business: "Business", enterprise: "Enterprise", edu: "Edu", free: "Free", API: "API key" };
+const planLabel = (plan) => (plan ? PLAN_LABEL[plan] || plan[0].toUpperCase() + plan.slice(1) : "");
+const NATIVE_LOGIN = !!NATIVE?.login;
+const LOGIN_BUSY = new Set(["starting", "waiting", "finishing"]);
+
+const authorizeWaiters = new Map();
+window.rudderAuthorized = (res) => {
+  const done = authorizeWaiters.get(res?.id);
+  if (!done) return;
+  authorizeWaiters.delete(res.id);
+  done(res);
+};
+// Opens a sign-in page in the iOS app's system sheet (it shares Safari's
+// logins). With a callback it resolves with the redirect's query; without one
+// it resolves when the sheet closes.
+function authorizeNative(id, url, callback = null) {
+  return new Promise((resolve) => {
+    authorizeWaiters.set(id, resolve);
+    postNative({ type: "authorize", id, url, ...(callback ? { port: callback.port, path: callback.path } : {}) });
+  });
+}
+function openSignInPage(url) {
+  if (NATIVE_LOGIN) void authorizeNative(`page-${Date.now().toString(36)}`, url);
+  else openExternal(url);
+}
+
+// What a row says about one agent's login on the machine.
+function agentLoginState(home, provider) {
+  const login = home?.logins?.[provider];
+  if (login && LOGIN_BUSY.has(login.status)) {
+    return { kind: "busy", pill: "Signing in", cls: "s-accent", sub: login.status === "finishing" ? "Finishing on the machine…" : "Waiting for you to approve" };
+  }
+  const cred = home?.credentials?.[provider];
+  if (cred?.ok) {
+    const bits = [cred.account, planLabel(cred.plan)].filter(Boolean);
+    return { kind: "ok", pill: "Signed in", cls: "s-done", sub: bits.join(" · ") || "Signed in" };
+  }
+  if (cred && cred.ok === false) {
+    const detail = cred.detail || "";
+    if (/expired/i.test(detail)) return { kind: "out", sub: "Login expired. Sign in again.", err: true, expired: true };
+    if (/not logged in|not signed in/i.test(detail)) return { kind: "out", sub: "Not signed in" };
+    return { kind: "out", sub: detail, err: true };
+  }
+  if (!home?.connected) return { kind: "out", sub: "Not checked yet" };
+  return { kind: "checking", sub: "Checking…" };
+}
+
+// Agents can't run at all, or a login that worked has expired: worth putting
+// above the projects. One agent never signed in is not a problem.
+function agentLoginTrouble(home) {
+  if (!home?.credentials || home.status !== "running") return false;
+  const states = AGENTS.map((x) => agentLoginState(home, x.id));
+  return !states.some((st) => st.kind === "ok" || st.kind === "busy") || states.some((st) => st.expired);
+}
+
+function AccountsCard() {
+  const el = h(`<div class="card accounts" role="list" aria-label="Agent sign-in"></div>`);
+  const rows = new Map();
+  for (const agent of AGENTS) {
+    const row = h(`<div class="acct" role="listitem">
+      <div class="m-icon">${icon(agent.ic)}</div>
+      <div class="a-body"><div class="a-title"><span></span><span class="pill" hidden><span class="dot"></span><span class="pl"></span></span></div>
+      <div class="a-sub"></div></div>
+      <button type="button" class="btn small accent a-btn" hidden>Sign in</button>
+      <button type="button" class="icon-btn a-more" aria-label="${escapeHtml(agent.label)} account" hidden>${icon("more")}</button>
+    </div>`);
+    setText(row.querySelector(".a-title span"), agent.label);
+    row.querySelector(".a-btn").addEventListener("click", () => openAgentSignIn(agent.id));
+    row.querySelector(".a-more").addEventListener("click", async () => {
+      const cred = store.state?.home?.credentials?.[agent.id];
+      const ok = await confirmDialog({
+        title: `Switch ${agent.label} account?`,
+        body: `Agents on your cloud machine use ${cred?.account || "this account"} now. They'll use the ${agent.account} account you sign in with next.`,
+        confirm: "Sign in",
+      });
+      if (ok) openAgentSignIn(agent.id);
+    });
+    el.appendChild(row);
+    rows.set(agent.id, row);
+  }
+  function update(home) {
+    for (const agent of AGENTS) {
+      const row = rows.get(agent.id);
+      const st = agentLoginState(home, agent.id);
+      const pill = row.querySelector(".pill");
+      pill.hidden = !st.pill;
+      if (st.pill) {
+        pill.className = `pill ${st.cls}`;
+        pill.querySelector(".dot").classList.toggle("live", st.kind === "busy");
+        setText(pill.querySelector(".pl"), st.pill);
+      }
+      const sub = row.querySelector(".a-sub");
+      setText(sub, st.sub);
+      sub.classList.toggle("err", !!st.err);
+      // A sign-in left half done (the app closed mid-way) can be started
+      // over from here; the machine drops the old one.
+      row.querySelector(".a-btn").hidden = !(st.kind === "out" || st.kind === "busy");
+      row.querySelector(".a-more").hidden = st.kind !== "ok";
+    }
+  }
+  return { el, update };
+}
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// One sign-in, start to finish, in a sheet.
+function openAgentSignIn(provider) {
+  const name = agentName(provider);
+  const dlg = h(`<dialog class="sheet login-sheet" aria-label="Sign in to ${escapeHtml(name)}"><div class="dialog">
+    <div class="sheet-grab"></div>
+    <div class="add-head"><h3></h3><button type="button" class="icon-btn" data-act="close" aria-label="Close">${icon("x")}</button></div>
+    <div class="ls-body" aria-live="polite"></div>
+  </div></dialog>`);
+  setText(dlg.querySelector("h3"), `Sign in to ${name}`);
+  const body = dlg.querySelector(".ls-body");
+  let session = null;
+  let closed = false;
+  let ended = false;
+
+  const busy = (title, detail = "") => {
+    body.replaceChildren(h(`<div class="ls-wait"><span class="spin" aria-hidden="true"></span><div><div class="ls-title"></div><div class="ls-note"></div></div></div>`));
+    setText(body.querySelector(".ls-title"), title);
+    setText(body.querySelector(".ls-note"), detail);
+  };
+  const failed = (message, { retry = true } = {}) => {
+    body.replaceChildren(h(`<div class="ls-msg err"></div>`));
+    setText(body.firstChild, message);
+    const actions = h(`<div class="ls-actions"></div>`);
+    if (retry) {
+      const again = h(`<button type="button" class="btn block accent">Try again</button>`);
+      again.addEventListener("click", () => void begin());
+      actions.appendChild(again);
+    }
+    // In the iOS app the page normally hands its answer straight back; if
+    // that did not work, the code routes still do.
+    if (NATIVE_LOGIN) {
+      const alt = h(`<button type="button" class="btn block ls-alt"></button>`);
+      setText(alt, provider === "claude" ? "Use a code instead" : "Use a device code instead");
+      alt.addEventListener("click", () => void begin(provider === "claude" ? "code" : "device"));
+      actions.appendChild(alt);
+    }
+    body.appendChild(actions);
+  };
+  const succeeded = async () => {
+    ended = true;
+    body.replaceChildren(h(`<div class="ls-done"><div class="ls-check">${icon("check")}</div><div class="ls-title">Signed in</div>
+      <div class="ls-note">Agents on your cloud machine now use this ${escapeHtml(AGENTS.find((x) => x.id === provider)?.account || "")} account.</div></div>`));
+    toast(`${name} is signed in`);
+    await refreshState();
+    setTimeout(() => { if (!closed) dlg.close(); }, 1600);
+  };
+  const settle = (out) => {
+    if (closed) return;
+    if (out?.status === "done") void succeeded();
+    else failed(out?.error || "The sign-in did not finish.");
+  };
+
+  // The machine may be asleep, or not exist yet for a new account: starting
+  // the sign-in wakes or creates it, which can outlast one request.
+  async function startSession(device) {
+    const deadline = Date.now() + 5 * 60_000;
+    for (;;) {
+      const home = store.state?.home;
+      busy(
+        "Starting the sign-in on your cloud machine",
+        !home ? "Creating your cloud machine first. The first start takes a minute or two."
+          : !home.connected ? "Waking your cloud machine first. This can take a minute." : "",
+      );
+      try {
+        return await api("/api/app/login/start", { method: "POST", body: { provider, device } });
+      } catch (err) {
+        if (closed || err.status === 401) throw err;
+        if (err.status !== 503 || Date.now() > deadline) throw err;
+        await refreshState();
+        await sleep(3000);
+        if (closed) throw new Error("closed");
+      }
+    }
+  }
+
+  async function finish(payload) {
+    busy("Finishing on your cloud machine", `${name} is checking the sign-in.`);
+    try {
+      settle(await api("/api/app/login/finish", { method: "POST", body: { provider, id: session.id, ...payload } }));
+    } catch (err) {
+      if (!closed && err.status !== 401) failed(err.message);
+    }
+  }
+
+  async function begin(mode = "auto") {
+    ended = false;
+    const device = provider === "codex" && (mode === "device" || !NATIVE_LOGIN);
+    // Claude's paste-a-code page belongs to the same run as its callback, so
+    // a run still waiting is reused rather than started over.
+    const reuse = mode === "code" && session && session.codeUrl && store.state?.home?.logins?.[provider]?.id === session.id
+      && LOGIN_BUSY.has(store.state.home.logins[provider].status);
+    if (!reuse) {
+      try {
+        session = await startSession(device);
+      } catch (err) {
+        if (!closed && err.status !== 401) failed(err.message);
+        return;
+      }
+    }
+    if (closed) return;
+    if (device) return showDevice();
+    if (provider === "claude" && (mode === "code" || !NATIVE_LOGIN || !session.callback)) return showCode();
+    busy(`Approve in the ${provider === "claude" ? "Claude" : "OpenAI"} window`, "It closes by itself once you're signed in.");
+    const res = await authorizeNative(session.id, session.url, session.callback);
+    if (closed) return;
+    if (res?.callback) await finish({ callback: res.callback });
+    else if (res?.cancelled) failed("The sign-in window closed before it finished.");
+    else failed(res?.error || "The sign-in did not finish.");
+  }
+
+  function showCode() {
+    body.replaceChildren(h(`<div class="ls-steps">
+      <div class="ls-step"><span class="ls-n">1</span><div>Open the sign-in page and tap <b>Authorize</b>.</div></div>
+      <button type="button" class="btn block accent ls-open">${icon("external")}<span>Open the sign-in page</span></button>
+      <div class="ls-step"><span class="ls-n">2</span><div>Copy the code it shows, then paste it here.</div></div>
+      <form class="ls-code"><input class="input" name="code" placeholder="Paste the code" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" enterkeyhint="go">
+      <button type="submit" class="btn block primary">Connect</button></form>
+    </div>`));
+    const input = body.querySelector("input");
+    body.querySelector(".ls-open").addEventListener("click", () => {
+      openSignInPage(session.codeUrl);
+      setTimeout(() => input.focus(), 400);
+    });
+    body.querySelector("form").addEventListener("submit", (e) => {
+      e.preventDefault();
+      const code = input.value.trim();
+      if (!code) { input.focus(); return; }
+      void finish({ code });
+    });
+  }
+
+  function showDevice() {
+    body.replaceChildren(h(`<div class="ls-steps">
+      <div class="ls-step"><span class="ls-n">1</span><div>Open the sign-in page and sign in to ChatGPT.</div></div>
+      <div class="ls-step"><span class="ls-n">2</span><div>Enter this code there. Tap it to copy.</div></div>
+      <button type="button" class="ls-usercode" aria-label="Copy the code"></button>
+      <button type="button" class="btn block accent ls-open">${icon("external")}<span>Copy code and open the page</span></button>
+      <div class="ls-wait small"><span class="spin" aria-hidden="true"></span><div class="ls-note">Waiting for you to enter the code. It expires in 15 minutes.</div></div>
+    </div>`));
+    const codeBtn = body.querySelector(".ls-usercode");
+    setText(codeBtn, session.userCode || "");
+    codeBtn.addEventListener("click", async () => { if (await copyText(session.userCode)) toast("Code copied"); });
+    body.querySelector(".ls-open").addEventListener("click", async () => {
+      await copyText(session.userCode);
+      openSignInPage(session.url);
+    });
+    // The machine finishes on its own; watch it.
+    void (async () => {
+      const id = session.id;
+      while (!closed && session?.id === id) {
+        await sleep(2000);
+        if (closed || session?.id !== id) return;
+        await refreshState();
+        const login = store.state?.home?.logins?.[provider];
+        if (!login || login.id !== id || LOGIN_BUSY.has(login.status)) continue;
+        if (login.status === "done") return void succeeded();
+        if (login.status !== "cancelled") return failed(login.error || "The sign-in did not finish.");
+        return;
+      }
+    })();
+  }
+
+  dlg.addEventListener("click", (e) => {
+    if (e.target === dlg || e.target.closest("[data-act=close]")) dlg.close();
+  });
+  dlg.addEventListener("close", () => {
+    closed = true;
+    dlg.remove();
+    // Closing mid-way ends the run on the machine, so a later one starts clean.
+    if (session && !ended) {
+      void api("/api/app/login/cancel", { method: "POST", body: { provider, id: session.id } }).catch(() => {});
+    }
+    void refreshState();
+  });
+  document.body.appendChild(dlg);
+  dlg.showModal();
+  void begin();
+}
+
+/* ------------------------------------------------------------------ */
 /* Sign in                                                             */
 /* ------------------------------------------------------------------ */
 
@@ -1111,6 +1408,8 @@ function HomeScreen() {
       <button type="button" class="btn small accent wake" hidden>${icon("power")}<span>Wake</span></button>
     </div>`);
   const wakeBtn = machine.querySelector(".wake");
+  // Who Claude Code and Codex sign in as on the machine, and Sign in buttons.
+  const accounts = AccountsCard();
   wakeBtn.addEventListener("click", async () => {
     wakeBtn.disabled = true;
     try {
@@ -1151,7 +1450,8 @@ function HomeScreen() {
     // Machine
     const home = s.home;
     if (home) {
-      if (machineSlot.firstElementChild !== machine) machineSlot.replaceChildren(machine);
+      if (machineSlot.firstElementChild !== machine) machineSlot.replaceChildren(machine, accounts.el);
+      accounts.update(home);
       const ml = machineLabel(home);
       const pill = machine.querySelector(".pill");
       pill.className = `pill ${ml.cls}`;
@@ -1171,19 +1471,17 @@ function HomeScreen() {
         // It is not the user's computer: say where it runs and why that matters.
         subText = `Runs in the cloud, so agents keep going with your laptop closed · ${bits.join(" · ")}`;
       }
-      // A login the cloud machine can't use stops agents cold ("Login expired"):
-      // say which, and the fix, before anyone starts a task.
-      const creds = home.credentials || {};
-      const broken = home.status === "running"
-        ? ["claude", "codex", "github"].filter((tool) => creds[tool] && creds[tool].ok === false)
-        : [];
-      const credNames = { claude: "Claude", codex: "Codex", github: "GitHub" };
-      if (broken.length) {
-        subText = `${broken.map((tool) => credNames[tool]).join(", ")} can't sign in on this machine (${creds[broken[0]].detail || "not logged in"}). Run \`rudder cloud doctor\` on your laptop for the fix.`;
+      // A GitHub login the cloud machine can't use stops agents from cloning or
+      // pushing: say so before anyone starts a task. Claude Code and Codex have
+      // their own rows below, with a Sign in button.
+      const github = home.status === "running" ? home.credentials?.github : null;
+      const githubBroken = !!github && github.ok === false;
+      if (githubBroken) {
+        subText = `GitHub can't sign in on this machine (${github.detail || "not logged in"}). Run \`rudder cloud doctor\` on your laptop for the fix.`;
       }
       setText(sub, subText);
-      const trouble = home.status === "failed" || broken.length > 0;
-      sub.classList.toggle("err", trouble);
+      sub.classList.toggle("err", home.status === "failed" || githubBroken);
+      const trouble = home.status === "failed" || githubBroken || agentLoginTrouble(home);
       // Projects lead; the machine card only comes up above them while it is
       // the reason nothing works.
       const anchor = trouble ? projectsSec : null;
@@ -1214,10 +1512,10 @@ function HomeScreen() {
     if (!projects.length) {
       const body = home
         ? "Add a GitHub repo to clone it onto your cloud machine, then start agents on it from here."
-        : "No cloud machine yet. Run <code>rudder cloud</code> in a repo on your laptop, or add a project.";
+        : "Your agents run on your own cloud machine, so they keep going with your phone locked and your laptop closed. Create it, then sign in to Claude Code or Codex.";
       const key = home ? "h" : "n";
       if (!emptyEl || emptyEl.dataset.k !== key) {
-        emptyEl = emptyState({ ic: home ? "folder" : "server", title: home ? "No projects yet" : "Welcome to Rudder", body });
+        emptyEl = emptyState({ ic: home ? "folder" : "server", title: home ? "No projects yet" : "Welcome to Rudder", body, action: home ? null : createMachineButton() });
         emptyEl.dataset.k = key;
       }
       if (emptyEl.parentNode !== projectsBody) projectsBody.appendChild(emptyEl);
@@ -1226,6 +1524,26 @@ function HomeScreen() {
   }
 
   return { el, update };
+}
+
+// A new account has no machine: creating one is the first step, from here.
+function createMachineButton() {
+  const btn = h(`<button type="button" class="btn accent">${icon("server")}<span>Create my cloud machine</span></button>`);
+  btn.addEventListener("click", async () => {
+    btn.disabled = true;
+    setText(btn.querySelector("span"), "Creating…");
+    try {
+      const res = await api("/api/app/wake", { method: "POST", body: {} });
+      if (res?.home && store.state) store.state.home = res.home;
+      toast("Creating your cloud machine. The first start takes a minute or two.");
+    } catch (err) {
+      if (err.status !== 401) toast(err.message, { error: true });
+      btn.disabled = false;
+      setText(btn.querySelector("span"), "Create my cloud machine");
+    }
+    await refreshState();
+  });
+  return btn;
 }
 
 // A pin tapped on this phone wins until the server's state agrees: a poll

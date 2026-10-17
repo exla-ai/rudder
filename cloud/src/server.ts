@@ -4875,6 +4875,7 @@ type HomeState = {
   projects: HomeProject[];
   tailnet?: JsonRecord;
   credentials?: JsonRecord;
+  logins?: JsonRecord;
   updatedAt: string;
 };
 type PendingRpc = {
@@ -5270,6 +5271,7 @@ function attachHomeControl(homeId: string, ws: WebSocket): void {
         projects: Array.isArray(projects) ? (projects as unknown as HomeProject[]) : [],
         tailnet: objectField(message, "tailnet"),
         credentials: objectField(message, "credentials"),
+        logins: objectField(message, "logins"),
         updatedAt: new Date().toISOString(),
       });
       for (const project of homeStates.get(homeId)!.projects) {
@@ -5602,6 +5604,7 @@ function homeSummary(home: Workspace | null): JsonRecord | null {
     lastActivityAt: home.lastActivityAt ?? null,
     tailnet: state?.tailnet ?? null,
     credentials: state?.credentials ?? null,
+    logins: state?.logins ?? null,
     stateUpdatedAt: state?.updatedAt ?? null,
   };
 }
@@ -5902,6 +5905,42 @@ async function handleAppApi(req: IncomingMessage, res: ServerResponse, url: URL)
     sendJson(res, 200, await openRepoOnHome(account.accountId, { repo: typeof repo === "string" ? repo : "" }));
     return;
   }
+  // Signing Claude Code or Codex in on the cloud machine from the phone
+  // (cloud/worker/logins.mjs): the CLI's own login runs there, the phone opens
+  // its link and hands back the callback or code. Starting one wakes the
+  // machine, or creates it for a new account.
+  if (req.method === "POST" && url.pathname === "/api/app/login/start") {
+    const body = await readJsonBody(req);
+    const provider = loginProvider(body);
+    const live = await homeWithControl(account.accountId);
+    sendJson(res, 200, await homeRpc(live.id, "loginStart", { provider, device: (body as JsonRecord)?.device === true }, 60_000));
+    return;
+  }
+  if (req.method === "POST" && url.pathname === "/api/app/login/finish") {
+    const body = await readJsonBody(req);
+    const provider = loginProvider(body);
+    const callback = stringField(body, "callback") ?? "";
+    const code = stringField(body, "code") ?? "";
+    if ((!callback && !code) || callback.length > 8000 || code.length > 8000) {
+      throw badRequest("callback or code is required");
+    }
+    const live = await homeWithControl(account.accountId);
+    sendJson(res, 200, await homeRpc(live.id, "loginFinish", {
+      provider,
+      id: stringField(body, "id") ?? "",
+      ...(callback ? { callback } : { code }),
+    }, 100_000));
+    return;
+  }
+  if (req.method === "POST" && url.pathname === "/api/app/login/cancel") {
+    const body = await readJsonBody(req);
+    const provider = loginProvider(body);
+    if (home && isOpen(homeControls.get(home.id))) {
+      await homeRpc(home.id, "loginCancel", { provider, id: stringField(body, "id") ?? "" }).catch(() => null);
+    }
+    sendJson(res, 200, { ok: true });
+    return;
+  }
   if (!home) {
     sendJson(res, 404, { error: "no home machine yet; run `rudder cloud` in a repo, or add a project" });
     return;
@@ -6143,6 +6182,14 @@ function wakeHomeInBackground(accountId: string): void {
     .catch(() => {
       homeWakeFailedAt.set(accountId, Date.now());
     });
+}
+
+function loginProvider(body: Json): "claude" | "codex" {
+  const provider = stringField(body, "provider");
+  if (provider !== "claude" && provider !== "codex") {
+    throw badRequest("provider must be claude or codex");
+  }
+  return provider;
 }
 
 async function homeWithControl(accountId: string): Promise<Workspace> {

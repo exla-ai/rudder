@@ -191,6 +191,7 @@ serverTest("a home machine's repos, state and phone requests flow over its contr
     type: "state",
     tailnet: { hostname: "rudder-home", dnsName: "rudder-home.tail1.ts.net", online: true, https: true },
     credentials: { github: { ok: true, account: "me" }, claude: { ok: false, account: "me@example.com", detail: "login expired" }, checkedAt: "2026-10-16T00:00:00.000Z" },
+    logins: { claude: { id: "l1", provider: "claude", mode: "browser", status: "waiting", error: null } },
     projects: [{
       workspaceId: "libra-test",
       name: "libra",
@@ -208,6 +209,7 @@ serverTest("a home machine's repos, state and phone requests flow over its contr
   assert.equal(state.home.connected, true);
   assert.equal(state.home.tailnet.dnsName, "rudder-home.tail1.ts.net");
   assert.deepEqual(state.home.credentials.claude, { ok: false, account: "me@example.com", detail: "login expired" }, "the phone sees which login is broken");
+  assert.equal(state.home.logins.claude.status, "waiting", "and a sign-in in progress");
   assert.equal(state.projects[0].dashboard, "running");
   assert.equal(state.projects[0].agents[0].attention, "permission");
   assert.equal(state.projects[0].ports[0].url, "https://rudder-home.tail1.ts.net:3000");
@@ -229,6 +231,20 @@ serverTest("a home machine's repos, state and phone requests flow over its contr
   assert.ok(created.workspace, `create opens the new repo on the home machine: ${JSON.stringify(created)}`);
   const createRpc = messages.find((m) => m.type === "rpc" && m.method === "createRepo");
   assert.deepEqual(createRpc.params, { owner: "exla-ai", name: "fresh", private: true, description: "" });
+
+  // Signing Claude Code or Codex in from the phone: the CLI's own login runs
+  // on the machine (cloud/worker/logins.mjs); these routes only carry it.
+  const post = (route, body) => fetch(`${base}${route}`, { method: "POST", headers: auth, body: JSON.stringify(body) });
+  assert.deepEqual(await (await post("/api/app/login/start", { provider: "codex", device: true })).json(),
+    { ok: true, echo: "loginStart", params: { provider: "codex", device: true } });
+  assert.equal((await post("/api/app/login/start", { provider: "gemini" })).status, 400);
+  const finished = await (await post("/api/app/login/finish", { provider: "claude", id: "l1", callback: "code=c&state=s" })).json();
+  assert.deepEqual(finished.params, { provider: "claude", id: "l1", callback: "code=c&state=s" });
+  const pasted = await (await post("/api/app/login/finish", { provider: "claude", id: "l1", code: "abc#s" })).json();
+  assert.deepEqual(pasted.params, { provider: "claude", id: "l1", code: "abc#s" });
+  assert.equal((await post("/api/app/login/finish", { provider: "claude", id: "l1" })).status, 400, "nothing to finish with");
+  assert.deepEqual(await (await post("/api/app/login/cancel", { provider: "claude", id: "l1" })).json(), { ok: true });
+  assert.deepEqual(messages.find((m) => m.type === "rpc" && m.method === "loginCancel").params, { provider: "claude", id: "l1" });
 
   // The terminal view and key strip go to the supervisor too; key names are checked here.
   const screen = await (await fetch(`${base}/api/app/screen?workspace=libra-test&run=r1`, { headers: auth })).json();
@@ -515,9 +531,37 @@ const workerReady = cloudReady && fs.existsSync(path.join(workerDir, "node_modul
     const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "rudder-home-boot-"));
     const bin = path.join(scratch, "bin");
     fs.mkdirSync(bin);
-    for (const tool of ["claude", "codex", "gh", "aws", "tailscaled", "tailscale"]) {
+    for (const tool of ["codex", "gh", "aws", "tailscaled", "tailscale"]) {
       fs.writeFileSync(path.join(bin, tool), "#!/bin/sh\necho '{\"loggedIn\":false}'\nexit 1\n", { mode: 0o755 });
     }
+    // Claude signs in like the real CLI: `auth login` hands $BROWSER a URL
+    // whose redirect is a server it runs here, and finishes on the callback.
+    const fakeLogin = path.join(scratch, "fake-login.cjs");
+    fs.writeFileSync(fakeLogin, `
+      const http = require("node:http"), fs = require("node:fs"), path = require("node:path");
+      const { execFileSync } = require("node:child_process");
+      const state = "st" + Date.now();
+      const server = http.createServer((req, res) => {
+        const url = new URL(req.url, "http://localhost");
+        if (url.pathname !== "/callback" || url.searchParams.get("state") !== state) { res.writeHead(400); res.end(); process.exit(1); }
+        fs.writeFileSync(path.join(process.env.HOME, ".claude-ok"), "1");
+        res.writeHead(302, { location: "https://example.com/ok" }); res.end();
+        console.log("Login successful."); setTimeout(() => process.exit(0), 20);
+      });
+      server.listen(0, "127.0.0.1", () => {
+        const port = server.address().port;
+        execFileSync(process.env.BROWSER, ["https://claude.example/oauth/authorize?redirect_uri=" + encodeURIComponent("http://localhost:" + port + "/callback") + "&state=" + state]);
+        console.log("If the browser didn't open, visit: https://claude.example/oauth/authorize?code=true&redirect_uri=" + encodeURIComponent("https://platform.example/oauth/code/callback") + "&state=" + state);
+        process.stdout.write("Paste code here if prompted > ");
+      });
+    `);
+    fs.writeFileSync(path.join(bin, "claude"), `#!/bin/sh
+case "$1 $2" in
+  "auth login") exec "${process.execPath}" "${fakeLogin}" ;;
+  "auth status") if [ -f "$HOME/.claude-ok" ]; then echo '{"loggedIn":true,"authMethod":"claude.ai","email":"me@example.com","subscriptionType":"max"}'; else echo '{"loggedIn":false}'; fi ;;
+  *) if [ -f "$HOME/.claude-ok" ]; then echo OK; exit 0; fi; echo "Not logged in"; exit 1 ;;
+esac
+`, { mode: 0o755 });
     const home = path.join(scratch, "home");
     fs.mkdirSync(home);
     let log = "";
@@ -551,6 +595,29 @@ const workerReady = cloudReady && fs.existsSync(path.join(workerDir, "node_modul
     }, { timeout: 20_000 }).catch((error) => assert.fail(`${error.message}\n--- supervisor log ---\n${log}`));
     assert.equal(state.home.credentials.claude.ok, false);
     assert.equal(state.home.credentials.github.detail, "no GitHub token in the vault");
+
+    // Signing Claude Code in from the phone, through the real supervisor: the
+    // app gets the CLI's URL, and the callback the phone caught finishes it.
+    const post = async (route, body) => {
+      const res = await fetch(`${base}${route}`, { method: "POST", headers: { ...auth, "content-type": "application/json" }, body: JSON.stringify(body) });
+      const json = await res.json();
+      assert.equal(res.status, 200, `${route}: ${JSON.stringify(json)}\n${log}`);
+      return json;
+    };
+    const started = await post("/api/app/login/start", { provider: "claude" });
+    assert.equal(started.status, "waiting");
+    assert.equal(started.callback.path, "/callback");
+    assert.match(started.codeUrl, /code=true/);
+    const loginState = new URL(started.url).searchParams.get("state");
+    const finished = await post("/api/app/login/finish", { provider: "claude", id: started.id, callback: `code=abc&state=${loginState}` });
+    assert.equal(finished.status, "done", log);
+    const signedIn = await waitFor(async () => {
+      const next = await (await fetch(`${base}/api/app/state`, { headers: auth })).json();
+      return next.home?.credentials?.claude?.ok ? next : null;
+    }, { timeout: 20_000 }).catch((error) => assert.fail(`${error.message}\n--- supervisor log ---\n${log}`));
+    assert.equal(signedIn.home.credentials.claude.account, "me@example.com");
+    assert.equal(signedIn.home.credentials.claude.plan, "max");
+    assert.equal(signedIn.home.logins.claude.status, "done");
     await sleep(1500);
     assert.equal(exited, null, `the supervisor is still running:\n${log}`);
   },

@@ -2,7 +2,8 @@
 //   PORT=4321 node cloud/app/dev-mock.mjs
 // Serves /app/* from this folder and mocks /api/app/*.
 // Mock helpers: /app/__mock/signout (simulate signed out), /app/login (sign back in),
-// /app/__mock/home/<running|stopped|failed|none> (machine states).
+// /app/__mock/home/<running|stopped|failed|none> (machine states),
+// /app/__mock/creds/<out|claude|both|expired> (Claude Code / Codex sign-in).
 import http from "node:http";
 import fs from "node:fs";
 import path from "node:path";
@@ -16,6 +17,16 @@ const iso = (ms) => new Date(ms).toISOString();
 
 let signedOut = process.env.MOCK_SIGNED_OUT === "1";
 let homeMode = "running";
+// Who the machine's Claude Code and Codex sign in as, and sign-ins in flight.
+const signedIn = (provider) => ({ ok: true, account: "viraat@example.com", plan: provider === "claude" ? "max" : "pro", detail: null });
+const CREDS = {
+  out: () => ({ claude: { ok: false, account: null, detail: "not logged in" }, codex: { ok: false, account: null, detail: "not logged in" } }),
+  claude: () => ({ claude: signedIn("claude"), codex: { ok: false, account: null, detail: "not logged in" } }),
+  both: () => ({ claude: signedIn("claude"), codex: signedIn("codex") }),
+  expired: () => ({ claude: { ok: false, account: "viraat@example.com", plan: "max", detail: "login expired" }, codex: signedIn("codex") }),
+};
+let creds = CREDS.claude();
+const logins = {};
 const T0 = now();
 
 const home = () => homeMode === "none" ? null : ({
@@ -27,6 +38,8 @@ const home = () => homeMode === "none" ? null : ({
   activeAgents: projects.reduce((n, p) => n + p.agents.filter((a) => a.status === "working").length, 0),
   lastActivityAt: iso(now() - 2 * MIN),
   tailnet: { hostname: "rudder-home", dnsName: "rudder-home.tail4c2e1.ts.net", online: homeMode === "running", https: true },
+  credentials: homeMode === "running" ? { ...creds, github: { ok: true, account: "viraatdas", detail: null }, checkedAt: iso(now()) } : null,
+  logins,
 });
 
 const agent = (o) => ({
@@ -142,6 +155,12 @@ const server = http.createServer(async (req, res) => {
   if (p.startsWith("/app/login")) { signedOut = false; res.writeHead(302, { Location: "/app" }); return res.end(); }
   if (p === "/app/__mock/signout") { signedOut = true; res.writeHead(302, { Location: "/app" }); return res.end(); }
   if (p.startsWith("/app/__mock/home/")) { homeMode = p.split("/").pop(); res.writeHead(302, { Location: "/app" }); return res.end(); }
+  if (p.startsWith("/app/__mock/creds/")) {
+    creds = (CREDS[p.split("/").pop()] || CREDS.out)();
+    for (const key of Object.keys(logins)) delete logins[key];
+    res.writeHead(302, { Location: "/app" });
+    return res.end();
+  }
   if (p === "/api/auth/sign-out" && req.method === "POST") { signedOut = true; return json(res, 200, { success: true }); }
 
   if (p.startsWith("/api/app/")) {
@@ -219,6 +238,50 @@ const server = http.createServer(async (req, res) => {
       if (!proj) return json(res, 404, { error: "project not found" });
       proj.pinnedAt = body.pinned === true ? proj.pinnedAt || iso(now()) : null;
       return json(res, 200, { workspaceId: proj.workspaceId, pinnedAt: proj.pinnedAt });
+    }
+    // Sign-ins: what logins.mjs on the machine answers. A machine that does
+    // not exist yet is created first (503 until it is up, like the server).
+    if (p === "/api/app/login/start") {
+      if (homeMode !== "running") {
+        if (homeMode !== "queued") { homeMode = "queued"; setTimeout(() => { homeMode = "running"; }, 5000); }
+        return json(res, 503, { error: "the cloud machine is still starting; try again in a moment" });
+      }
+      const provider = body.provider;
+      const id = `login-${now().toString(36)}`;
+      const device = provider === "codex" && body.device === true;
+      logins[provider] = { id, provider, mode: device ? "device" : "browser", status: "waiting", error: null, startedAt: iso(now()), endedAt: null };
+      if (device) {
+        setTimeout(() => {
+          if (logins.codex?.id !== id || logins.codex.status !== "waiting") return;
+          Object.assign(logins.codex, { status: "done", endedAt: iso(now()) });
+          creds = { ...creds, codex: signedIn("codex") };
+        }, 7000);
+      }
+      return json(res, 200, {
+        ...logins[provider],
+        url: device ? "https://auth.openai.com/codex/device" : provider === "claude"
+          ? "https://claude.com/cai/oauth/authorize?code=true&redirect_uri=http%3A%2F%2Flocalhost%3A41643%2Fcallback&state=mock"
+          : "https://auth.openai.com/oauth/authorize?redirect_uri=http%3A%2F%2F127.0.0.1%3A1455%2Fauth%2Fcallback&state=mock",
+        callback: device ? null : { port: provider === "claude" ? 41643 : 1455, path: provider === "claude" ? "/callback" : "/auth/callback" },
+        codeUrl: provider === "claude" ? "https://claude.com/cai/oauth/authorize?code=true&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback&state=mock" : null,
+        userCode: device ? "1QX5-T3MAL" : null,
+      });
+    }
+    if (p === "/api/app/login/finish") {
+      const login = logins[body.provider];
+      if (!login || login.id !== body.id) return json(res, 400, { error: "That sign-in is no longer running. Start it again." });
+      await delay(900);
+      if (body.code === "bad") Object.assign(login, { status: "failed", error: "OAuth error: Invalid code", endedAt: iso(now()) });
+      else {
+        Object.assign(login, { status: "done", endedAt: iso(now()) });
+        creds = { ...creds, [body.provider]: signedIn(body.provider) };
+      }
+      return json(res, 200, login);
+    }
+    if (p === "/api/app/login/cancel") {
+      const login = logins[body.provider];
+      if (login && login.status === "waiting") Object.assign(login, { status: "cancelled", endedAt: iso(now()) });
+      return json(res, 200, { ok: true });
     }
     if (p === "/api/app/wake") {
       homeMode = "queued";

@@ -940,6 +940,29 @@ brain lives in the cloud, and the phone is a first-class client.
   row) and "New repo" (an owner list with your account and every org, a live
   name check that says the exact `owner/name` it will create or that it already
   exists, Private/Public). The last owner and filter are remembered per device.
+- **Signing Claude Code and Codex in from the phone** (`cloud/worker/logins.mjs`,
+  `ios/App/AgentLogin.swift`). The home screen has a row per agent CLI under the
+  machine card (Signed in · account · plan, Login expired, Not signed in) fed by
+  `home.credentials` (now with `plan`) and `home.logins` (the in-flight sign-ins,
+  public view only: no urls or codes). Sign in (`POST /api/app/login/start`, rpc
+  `loginStart`) runs the CLI's own login on the machine in a pty with `BROWSER`
+  pointed at a script that writes the authorize url to a file: `claude auth login
+  --claudeai` (its callback is `http://localhost:<random port>/callback`) or
+  `codex login` (`127.0.0.1:1455/auth/callback`). The iOS shell (1.0.2 build 5,
+  `RUDDER_NATIVE.login`) opens that url in ASWebAuthenticationSession (Safari's
+  cookies, so a signed-in user only taps Authorize) and listens on the PHONE's
+  loopback at the same port; the redirect lands there, the query goes back through
+  `window.rudderAuthorized` and `/api/app/login/finish`, and the machine checks the
+  `state` and replays the GET against the CLI's own server. Nothing to copy. A
+  wrong state is refused before the replay (Claude's CLI aborts on one). Without
+  the shell, or when the listener fails, Claude falls back to its paste-a-code page
+  (`code\r` typed into the pty) and Codex to `codex login --device-auth` (the app
+  shows the code and polls). `ANTHROPIC_API_KEY`/`CLAUDE_CODE_OAUTH_TOKEN` are
+  removed from the login's env so the CLI does not sign in with a key instead. An
+  account with no machine sees "Create my cloud machine" (`/api/app/wake` creates
+  one), and Sign in on a machine that is not up yet waits for it (503 retries).
+  GitHub still comes from the laptop vault, so a phone-only account can sign its
+  agents in but cannot add repos yet.
 
 - **Developing Rudder on the home machine.** Rust is not in the worker image; the
   supervisor installs it once onto the volume (`~/.cargo`, `~/.rustup`, persisted

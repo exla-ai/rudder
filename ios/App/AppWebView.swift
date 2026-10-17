@@ -8,9 +8,11 @@ import WebKit
 /// runs) to send the bearer token on its API calls, and talks back through the
 /// `rudder` message handler: `signIn` (token rejected), `signOut`,
 /// `openExternal` (links leave the app), `badge` (agents that need you), and
-/// `pick` (the attach menu's Photos, Camera and Files, see AttachmentPicker).
-/// `RUDDER_NATIVE.attachments` says this build may open the camera, and
-/// `RUDDER_NATIVE.picker` that it answers `pick`.
+/// `pick` (the attach menu's Photos, Camera and Files, see AttachmentPicker),
+/// and `authorize` (signing the cloud machine's Claude Code or Codex in, see
+/// AgentLogin). `RUDDER_NATIVE.attachments` says this build may open the
+/// camera, `RUDDER_NATIVE.picker` that it answers `pick`, and
+/// `RUDDER_NATIVE.login` that it answers `authorize`.
 struct AppWebView: UIViewRepresentable {
     let session: Session
     let token: String
@@ -88,6 +90,8 @@ struct AppWebView: UIViewRepresentable {
             "attachments": "1",
             // Photos, Camera and Files each open their native picker directly.
             "picker": "1",
+            // Agent sign-ins come back through a loopback listener, no code to paste.
+            "login": "1",
         ]
         let json = (try? JSONSerialization.data(withJSONObject: payload))
             .flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
@@ -98,12 +102,14 @@ struct AppWebView: UIViewRepresentable {
     final class Coordinator: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUIDelegate {
         let session: Session
         let attachmentPicker: AttachmentPicker
+        let agentLogin: AgentLogin
         weak var webView: WKWebView?
         var lastTick = 0
 
         init(session: Session) {
             self.session = session
             self.attachmentPicker = AttachmentPicker()
+            self.agentLogin = AgentLogin()
         }
 
         @objc func pullToRefresh(_ control: UIRefreshControl) {
@@ -136,9 +142,38 @@ struct AppWebView: UIViewRepresentable {
                 attachmentPicker.present(kind: kind, from: presenter) { [weak self] result in
                     self?.deliverPicked(id: id, result: result)
                 }
+            case "authorize":
+                guard let id = body["id"] as? String,
+                      let string = body["url"] as? String, let url = URL(string: string), url.scheme == "https" else { return }
+                // With a port and path, wait for the page's redirect on this
+                // phone's loopback; without, only show the page.
+                var port: UInt16?
+                var path: String?
+                if let number = (body["port"] as? NSNumber)?.intValue, let callbackPath = body["path"] as? String {
+                    guard (1024...65535).contains(number), callbackPath.hasPrefix("/") else { return }
+                    port = UInt16(number)
+                    path = callbackPath
+                }
+                agentLogin.start(url: url, port: port, path: path) { [weak self] outcome in
+                    self?.deliverAuthorized(id: id, outcome: outcome)
+                }
             default:
                 break
             }
+        }
+
+        /// Tells the page how an agent sign-in ended (`window.rudderAuthorized`):
+        /// the callback's query to send to the cloud machine, or why not.
+        private func deliverAuthorized(id: String, outcome: AgentLogin.Outcome) {
+            var payload: [String: Any] = ["id": id]
+            switch outcome {
+            case .callback(let query): payload["callback"] = query
+            case .cancelled: payload["cancelled"] = true
+            case .failed(let message): payload["error"] = message
+            }
+            guard let data = try? JSONSerialization.data(withJSONObject: payload),
+                  let json = String(data: data, encoding: .utf8) else { return }
+            webView?.evaluateJavaScript("window.rudderAuthorized && window.rudderAuthorized(\(json))")
         }
 
         /// Hands picked files to the page as base64 (`window.rudderPicked`),

@@ -25,6 +25,7 @@ import pty from "node-pty";
 import { readTranscript, lastAssistantText, userTask } from "./transcripts.mjs";
 import { readAsks, askDecision, isAskId } from "./asks.mjs";
 import { sanitizeHomeHookConfigs } from "./hook-paths.mjs";
+import { createLoginRunner } from "./logins.mjs";
 
 const cloudUrl = (process.env.RUDDER_CLOUD_URL || "").trim().replace(/\/$/, "");
 const homeId = (process.env.RUDDER_WORKSPACE_ID || "").trim();
@@ -53,6 +54,7 @@ const PORT_SCAN_INTERVAL_MS = 5000;
 // initialized yet when they do (a ReferenceError that kills the machine).
 let credentials = null;
 let credentialsRunning = false;
+let credentialsAgain = false;
 let vaultRefreshedAt = 0;
 const lastMessageCache = new Map(); // runId -> { mtime, text }
 
@@ -80,6 +82,22 @@ await startTailscale(vault?.env ?? {});
 
 const baseChildEnv = buildChildEnv(vault?.env ?? {});
 
+// Claude Code and Codex sign-ins started from the phone (cloud/worker/logins.mjs).
+const logins = createLoginRunner({
+  spawnPty: pty.spawn,
+  env: baseChildEnv,
+  dir: path.join(os.tmpdir(), "rudder-logins"),
+  cwd: HOME,
+  log,
+  onChange: (provider, session) => {
+    lastStateJson = "";
+    scheduleStateSoon();
+    if (session.status === "done") {
+      void credentialsAfterLogin(provider);
+    }
+  },
+});
+
 /** @type {Map<string, Project>} */
 const projects = new Map();
 let controlSocket = null;
@@ -99,6 +117,7 @@ reportHeartbeat();
 for (const signal of ["SIGTERM", "SIGINT"]) {
   process.on(signal, () => {
     log(`received ${signal}; stopping dashboards`);
+    logins.dispose();
     for (const project of projects.values()) {
       project.stop();
     }
@@ -446,6 +465,18 @@ async function handleRpc(method, params) {
     const existing = runIds.filter((id) => fs.existsSync(path.join(target.dir, ".rudder", "runs", id, "run.json")));
     return { known: true, existing };
   }
+  if (method === "loginStart") {
+    return await logins.start(String(params.provider || ""), { device: params.device === true });
+  }
+  if (method === "loginFinish") {
+    return await logins.finish(String(params.provider || ""), String(params.id || ""), {
+      callback: typeof params.callback === "string" ? params.callback : undefined,
+      code: typeof params.code === "string" ? params.code : undefined,
+    });
+  }
+  if (method === "loginCancel") {
+    return logins.cancel(String(params.provider || ""), String(params.id || "")) ?? { ok: true };
+  }
   const project = projects.get(params.workspaceId);
   if (!project) {
     throw new Error("that project is not open on the home machine");
@@ -763,7 +794,7 @@ async function publishState() {
     // the first project rather than nowhere.
     list[0].ports.push(...unassigned.map((entry) => ({ port: entry.port, label: entry.label, url: servedPorts.get(entry.port)?.url ?? null })));
   }
-  const state = { type: "state", projects: list, tailnet: { ...tailnet }, credentials };
+  const state = { type: "state", projects: list, tailnet: { ...tailnet }, credentials, logins: logins.snapshot() };
   const json = JSON.stringify(state);
   if (json === lastStateJson) {
     return;
@@ -1138,9 +1169,13 @@ function unservePort(port) {
 
 async function checkCredentials() {
   if (credentialsRunning) {
+    // A login just finished mid-check: look again once this one is done, or
+    // the app keeps showing the old answer for half an hour.
+    credentialsAgain = true;
     return;
   }
   credentialsRunning = true;
+  credentialsAgain = false;
   try {
     const env = { ...baseChildEnv };
     const [github, claude, codex, aws] = await Promise.all([checkGithub(env), checkClaude(env), checkCodex(env), checkAws(env)]);
@@ -1156,7 +1191,52 @@ async function checkCredentials() {
     log(`credential check: ${error.message}`);
   } finally {
     credentialsRunning = false;
+    if (credentialsAgain) {
+      void checkCredentials();
+    }
   }
+}
+
+// A sign-in from the phone just finished: say so at once (from the CLI's own
+// status, which needs no model call), then run the full check, which proves
+// the login works with one real request.
+async function credentialsAfterLogin(provider) {
+  const env = { ...baseChildEnv };
+  const quick = provider === "claude" ? await claudeStatus(env) : await codexStatus(env);
+  if (quick.loggedIn) {
+    credentials = {
+      ...(credentials ?? {}),
+      [provider]: { ok: true, account: quick.account, plan: quick.plan, detail: null, checking: true },
+      checkedAt: new Date().toISOString(),
+    };
+    lastStateJson = "";
+    scheduleStateSoon();
+  }
+  await checkCredentials();
+}
+
+async function claudeStatus(env) {
+  const status = await capture("claude", ["auth", "status", "--json"], { env, timeoutMs: 20_000 });
+  try {
+    const parsed = JSON.parse(status.stdout);
+    return { loggedIn: Boolean(parsed.loggedIn), account: parsed.email || null, plan: claudePlan(parsed) };
+  } catch {
+    return { loggedIn: false, account: null, plan: null };
+  }
+}
+
+async function codexStatus(env) {
+  const status = await capture("codex", ["login", "status"], { env, timeoutMs: 20_000 });
+  const { account, plan } = codexAccount();
+  return { loggedIn: status.code === 0, account, plan };
+}
+
+// "max", "pro", ... for a subscription; "API" for a Console login.
+function claudePlan(status) {
+  if (typeof status.subscriptionType === "string" && status.subscriptionType) {
+    return status.subscriptionType;
+  }
+  return status.authMethod && status.authMethod !== "claude.ai" ? "API" : null;
 }
 
 // Which AWS principal the vault's ~/.aws resolves to (default profile).
@@ -1183,11 +1263,13 @@ async function checkGithub(env) {
 async function checkClaude(env) {
   const status = await capture("claude", ["auth", "status", "--json"], { env, timeoutMs: 20_000 });
   let account = null;
+  let plan = null;
   try {
     const parsed = JSON.parse(status.stdout);
     account = parsed.email || null;
+    plan = claudePlan(parsed);
     if (!parsed.loggedIn) {
-      return { ok: false, account, detail: "not logged in" };
+      return { ok: false, account, plan, detail: "not logged in" };
     }
   } catch {
     // fall through to the real request
@@ -1195,39 +1277,42 @@ async function checkClaude(env) {
   const probe = await capture("claude", ["-p", "Reply with exactly: OK", "--model", "haiku"], { env, cwd: os.tmpdir(), timeoutMs: 90_000 });
   const text = `${probe.stdout}\n${probe.stderr}`;
   if (probe.code === 0 && /\bOK\b/.test(probe.stdout)) {
-    return { ok: true, account, detail: null };
+    return { ok: true, account, plan, detail: null };
   }
   const detail = /login expired|please run \/login|invalid.*(token|api key)|not logged in|authentication/i.test(text)
     ? "login expired"
     : firstLine(text) || `exit ${probe.code}`;
-  return { ok: false, account, detail };
+  return { ok: false, account, plan, detail };
 }
 
 async function checkCodex(env) {
-  const account = codexAccount();
+  const { account, plan } = codexAccount();
   const status = await capture("codex", ["login", "status"], { env, timeoutMs: 20_000 });
   if (status.code !== 0) {
-    return { ok: false, account, detail: firstLine(status.stderr || status.stdout) || "not logged in" };
+    return { ok: false, account, plan, detail: firstLine(status.stderr || status.stdout) || "not logged in" };
   }
   const probe = await capture("codex", ["exec", "--skip-git-repo-check", "Reply with exactly: OK"], { env, cwd: os.tmpdir(), timeoutMs: 120_000 });
   if (probe.code === 0 && /\bOK\b/.test(probe.stdout)) {
-    return { ok: true, account, detail: null };
+    return { ok: true, account, plan, detail: null };
   }
   const text = `${probe.stdout}\n${probe.stderr}`;
   const detail = /refresh token|401|unauthorized|log ?in again|expired/i.test(text) ? "login expired" : firstLine(text) || `exit ${probe.code}`;
-  return { ok: false, account, detail };
+  return { ok: false, account, plan, detail };
 }
 
+// The email and ChatGPT plan ("plus", "pro") from Codex's id token; an API
+// key login has neither.
 function codexAccount() {
   try {
     const auth = JSON.parse(fs.readFileSync(path.join(HOME, ".codex", "auth.json"), "utf8"));
     const payload = String(auth?.tokens?.id_token || "").split(".")[1];
     if (!payload) {
-      return null;
+      return { account: null, plan: auth?.OPENAI_API_KEY ? "API" : null };
     }
-    return JSON.parse(Buffer.from(payload, "base64url").toString("utf8")).email || null;
+    const claims = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
+    return { account: claims.email || null, plan: claims["https://api.openai.com/auth"]?.chatgpt_plan_type || null };
   } catch {
-    return null;
+    return { account: null, plan: null };
   }
 }
 

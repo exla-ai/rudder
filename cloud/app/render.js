@@ -124,6 +124,8 @@ const P = {
   pin: '<path d="M9 3h6"/><path d="M10 3v5.5L7 13h10l-3-4.5V3z"/><path d="M12 13v8"/>',
   folder: '<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>',
   image: '<rect x="3" y="4" width="18" height="16" rx="2.5"/><circle cx="9" cy="10" r="1.8"/><path d="M21 15.5l-5-5L5.5 20"/>',
+  spark: '<path d="M12 3v18M3 12h18M5.6 5.6l12.8 12.8M18.4 5.6L5.6 18.4"/>',
+  code: '<path d="M8.5 7.5L4 12l4.5 4.5M15.5 7.5L20 12l-4.5 4.5M13.5 5l-3 14"/>',
   camera: '<path d="M4 9a2 2 0 0 1 2-2h1.8l1.5-2.2h5.4L16.2 7H18a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2z"/><circle cx="12" cy="13" r="3.5"/>',
   down: '<path d="M12 5v14"/><path d="M6 13l6 6 6-6"/>',
   inbox: '<path d="M3 13l3-8h12l3 8"/><path d="M3 13v5a1 1 0 0 0 1 1h16a1 1 0 0 0 1-1v-5h-6l-1 2h-4l-1-2z"/>',

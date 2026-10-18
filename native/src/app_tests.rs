@@ -27946,3 +27946,46 @@ done
     assert!(models.contains(&(Backend::Codex, "gpt-6.1-sol".to_string())), "{models:?}");
     let _ = fs::remove_dir_all(&dir);
 }
+
+#[cfg(not(windows))]
+#[test]
+fn a_failed_command_pane_says_what_the_command_printed() {
+    // `/sync` on the cloud machine ran `rudder cloud sync`, which printed "Not
+    // logged in to Rudder Cloud" and exited 1; the row only said "agent process
+    // exited (exit 1)", naming an agent that never existed and hiding the reason.
+    let dir = unique_test_repo("plain-pane-exit");
+    let mut app = App::new();
+    app.cwd = dir.clone();
+    let command = TerminalCommand::with_args(
+        "/bin/sh",
+        ["-c", "echo 'rudder: Not logged in to Rudder Cloud.'; exit 1"],
+    );
+    let pane = TerminalPane::spawn_shell_or_command(
+        Some(command),
+        TerminalPaneOptions {
+            size: TerminalSize { rows: 5, cols: 60 },
+            cwd: Some(dir.clone()),
+            ..Default::default()
+        },
+    )
+    .expect("spawn command pane");
+    let mut run = test_agent_run_with_terminal(&app, pane);
+    run.id = "cloud-sync-pane".to_string();
+    run.task = "cloud sync".to_string();
+    run.plain_process = true;
+    app.agents.push(run);
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while app.agents[0].status != AgentStatus::Failed && Instant::now() < deadline {
+        app.poll_agents();
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let run = &app.agents[0];
+    assert_eq!(run.status, AgentStatus::Failed);
+    let error = run.last_error.clone().unwrap_or_default();
+    assert!(error.starts_with("cloud sync exited (exit 1)"), "{error}");
+    assert!(error.contains("Not logged in to Rudder Cloud"), "{error}");
+    assert!(!error.contains("agent process"), "{error}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

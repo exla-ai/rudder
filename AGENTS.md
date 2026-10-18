@@ -904,6 +904,11 @@ brain lives in the cloud, and the phone is a first-class client.
   nothing below it is unpushed. Uncommitted or unpushed work on either side is reported,
   never pushed, rebased or overwritten. It also brings the vault's copy of the laptop's
   config level (`ensureVaultAws`). `/sync all` / `--all` covers every repo on the home.
+  Typed ON the home (`RUDDER_CLOUD_RUNTIME=home`) it is local only (`homeMachineSync`):
+  the home has no CLI login (`~/.rudder/cloud.json`) and the laptop path would sync it
+  with itself, so it just pulls the newest default branch into its own clone(s) when
+  safe; `/sync move` there is a notice. A failed plain pane (`plain_process`) reports
+  `<label> exited (exit N): <its last line>`, never "agent process exited".
 - **Work travels too, without GitHub (3.2.1).** Each side's work GitHub lacks (the jj
   working copy and unpushed changes below it) is a git bundle (`exportWork`): the
   laptop's rides in the sync request, the home's is PUT back to the control plane

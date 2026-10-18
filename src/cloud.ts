@@ -4655,6 +4655,10 @@ async function reportCredentialParity(client: CloudClient, { problemsOnly }: { p
 // is reported, never pushed or overwritten. `--all` syncs every repo open on
 // the home machine.
 async function cloudSync(args: string[], options: CloudCommandOptions): Promise<void> {
+  if (process.env.RUDDER_CLOUD_RUNTIME === "home") {
+    await homeMachineSync(args, options);
+    return;
+  }
   const client = await cloudClient({ requireToken: true });
   const all = args.includes("--all");
   const named = args.find((arg) => !arg.startsWith("-"));
@@ -4750,6 +4754,40 @@ async function cloudSync(args: string[], options: CloudCommandOptions): Promise<
     }
   }
   console.log(lines.filter(Boolean).join("\n"));
+}
+
+// `/sync` typed on the cloud machine itself. The laptop path needs a CLI login
+// the home never has and would sync the machine with itself; here the useful
+// half is this machine's clone(s) taking the newest default branch from GitHub
+// when nothing would be lost. Work travels between devices from the laptop side.
+async function homeMachineSync(args: string[], options: CloudCommandOptions): Promise<void> {
+  const root = findRepoRoot();
+  const roots = [root];
+  if (args.includes("--all")) {
+    const parent = path.dirname(root);
+    for (const entry of await fsp.readdir(parent, { withFileTypes: true }).catch(() => [])) {
+      const dir = path.join(parent, entry.name);
+      if (entry.isDirectory() && dir !== root && (await pathExists(path.join(dir, ".git")))) {
+        roots.push(dir);
+      }
+    }
+  }
+  const results: { repo: string; report?: CheckoutSyncReport; error?: string }[] = [];
+  for (const dir of roots) {
+    const repo = (await githubSlugFromOrigin(dir)) ?? path.basename(dir);
+    try {
+      results.push({ repo, report: await syncCheckout(dir) });
+    } catch (error) {
+      results.push({ repo, error: error instanceof Error ? error.message : String(error) });
+    }
+  }
+  if (options.json) {
+    printJson({ local: null, cloud: results } as unknown as JsonValue);
+    return;
+  }
+  const lines = results.map((result) => (result.report ? describeSync(`cloud machine (${result.repo})`, result.report) : `cloud machine (${result.repo}): ${result.error}`));
+  lines.push("To bring a laptop's work here (or this machine's work to a laptop), run /sync on the laptop.");
+  console.log(lines.join("\n"));
 }
 
 // `rudder cloud sync <name>`: the laptop's clone of a repo open on the cloud

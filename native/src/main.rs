@@ -11987,6 +11987,12 @@ Address the objection directly. If you disagree, say why inside \
                     Some("all") => args.push("--all".to_string()),
                     // `/sync move`: also hand this laptop's running agents to the
                     // home machine, through the same pause-then-move path as H.
+                    Some("move") if self.home_runtime => {
+                        self.notice = Some(
+                            "these agents are already on the cloud machine; /sync move is for a laptop".to_string(),
+                        );
+                        return true;
+                    }
                     Some("move") => self.request_move_all_home(),
                     _ => {}
                 }
@@ -20364,10 +20370,27 @@ What to do\n\
                             // nothing about the death. A signal exit now names the
                             // signal instead of surfacing a bare 143.
                             if run.last_error.is_none() {
-                                run.last_error = Some(format!(
-                                    "agent process {}",
-                                    describe_exit_code(status.exit_code())
-                                ));
+                                // A plain pane (`rudder cloud sync`, a shell) is
+                                // not an agent, and its own last line ("Not logged
+                                // in to Rudder Cloud...") says more than any code.
+                                run.last_error = Some(if run.plain_process {
+                                    let last = terminal
+                                        .visible_lines_snapshot()
+                                        .into_iter()
+                                        .rev()
+                                        .map(|line| line.trim().to_string())
+                                        .find(|line| !line.is_empty());
+                                    let code = describe_exit_code(status.exit_code());
+                                    match last {
+                                        Some(line) => format!("{} exited ({code}): {line}", run.task),
+                                        None => format!("{} exited ({code})", run.task),
+                                    }
+                                } else {
+                                    format!(
+                                        "agent process {}",
+                                        describe_exit_code(status.exit_code())
+                                    )
+                                });
                             }
                             run.needs_permission = false;
                             run.needs_user_input = false;

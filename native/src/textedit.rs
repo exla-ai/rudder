@@ -414,6 +414,27 @@ pub(crate) fn apply_task_paste(
 /// in the input line, and `expand_pasted_chips` swaps it on submit for an
 /// instruction pointing the worker at the saved file, so the agent opens the
 /// screenshot with its Read tool.
+/// A paste that is exactly one existing image file (quoted or with escaped
+/// spaces, as terminals write a dropped file).
+pub(crate) fn pasted_image_path(text: &str) -> Option<PathBuf> {
+    let trimmed = text.trim();
+    let unquoted = trimmed
+        .strip_prefix('\'')
+        .and_then(|rest| rest.strip_suffix('\''))
+        .or_else(|| trimmed.strip_prefix('"').and_then(|rest| rest.strip_suffix('"')))
+        .map(str::to_string)
+        .unwrap_or_else(|| trimmed.replace("\\ ", " "));
+    if unquoted.contains('\n') || !unquoted.starts_with('/') {
+        return None;
+    }
+    let path = PathBuf::from(unquoted);
+    let ext = path.extension()?.to_string_lossy().to_ascii_lowercase();
+    if !matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "gif" | "webp" | "heic") {
+        return None;
+    }
+    path.is_file().then_some(path)
+}
+
 pub(crate) fn apply_task_image_paste(
     input: &mut String,
     cursor: &mut usize,

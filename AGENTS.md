@@ -976,6 +976,18 @@ brain lives in the cloud, and the phone is a first-class client.
   still allowing every type. Desktop skips the menu. Shells before 1.0.1 have no
   `NSCameraUsageDescription` (a camera pick crashes them), so their menu offers
   Files only and says to update.
+- **Pasting from the laptop into a cloud agent (`src/paste-bridge.ts`, 3.3.1).** An agent
+  on the home reads the HOME's clipboard and disk, so Claude Code's Ctrl+V found nothing
+  (xclip, no clipboard) and a dropped screenshot was a `/Users/...` path that does not
+  exist there. The `rudder cloud` client looks at each input chunk before it goes up:
+  Ctrl+V (0x16 or kitty `\x1b[118;5u`) with files or an image on the LOCAL clipboard
+  (JXA over NSPasteboard: Finder files first, then an image as PNG, ~60ms), or a paste
+  made ONLY of existing local files (quoted, backslash-escaped, `file://`), is uploaded
+  through `/api/app/upload` into `<repo>/.rudder/uploads` and replaced by a bracketed
+  paste of the cloud paths. Claude Code turns a pasted image path into `[Image #N]`
+  (checked on 2.1.302), and the dashboard's task box does too (`pasted_image_path`).
+  Anything else passes through unbuffered; keys typed during an upload wait behind it
+  so order holds; a failed upload sends the original bytes and shows the reason.
 - **A compacted conversation is one marker, not a user message.**
   `transcripts.mjs` turns Claude's `compact_boundary` + `isCompactSummary` entry and
   Codex's `compacted` line into a `{role:"system", kind:"compact"}` message carrying

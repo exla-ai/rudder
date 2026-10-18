@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { AttachSession, containsCtrlC } from "./attach-session.js";
+import { PasteBridge, readLocalClipboard } from "./paste-bridge.js";
 import fsp from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -3191,6 +3192,23 @@ function raceLeave<T>(session: AttachSession, promise: Promise<T>): Promise<T | 
   });
 }
 
+// One pasted file up to the home machine, through the phone's upload route.
+async function uploadPastedFile(baseUrl: string, token: string, workspaceId: string, file: string, name: string): Promise<string> {
+  const bytes = await fsp.readFile(file);
+  const url = `${baseUrl.replace(/\/$/, "")}/api/app/upload?workspace=${encodeURIComponent(workspaceId)}&name=${encodeURIComponent(name)}`;
+  const response = await fetch(url, {
+    method: "POST",
+    headers: { authorization: `Bearer ${token}`, "content-type": "application/octet-stream" },
+    body: bytes,
+    signal: AbortSignal.timeout(90_000),
+  });
+  const body = await response.json().catch(() => ({})) as { path?: string; error?: string };
+  if (!response.ok || typeof body.path !== "string") {
+    throw new Error(body.error || `HTTP ${response.status}`);
+  }
+  return body.path;
+}
+
 async function runAttach(
   target: AttachTarget,
   options: CloudCommandOptions,
@@ -3289,6 +3307,23 @@ async function runAttach(
       resolve(value);
     };
 
+    // Files and clipboard images from this computer reach the cloud machine
+    // as uploads (src/paste-bridge.ts); only the home's repo rows take them.
+    const paste = new PasteBridge({
+      send: (data) => {
+        if (socket.readyState === WebSocket.OPEN) {
+          socket.send(data, { binary: true });
+          predictor?.onInput(data);
+        }
+      },
+      upload: (file, name) => uploadPastedFile(baseUrl, token, target.id, file, name),
+      readClipboard: target.kind === "workspace" && isInteractive ? readLocalClipboard : undefined,
+      status: (text) => (text ? session.showStatus(text) : session.clearStatus()),
+    });
+    if (target.kind !== "workspace") {
+      paste.disabled = true;
+    }
+
     let lastCtrlC = 0;
     const onStdin = (chunk: Buffer | string) => {
       const buffer = typeof chunk === "string" ? Buffer.from(chunk, "utf8") : chunk;
@@ -3337,8 +3372,7 @@ async function runAttach(
         }
         lastCtrlC = now;
       }
-      socket.send(buffer, { binary: true });
-      predictor?.onInput(buffer);
+      paste.forward(buffer);
     };
 
     const onResize = () => {

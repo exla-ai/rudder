@@ -16468,6 +16468,26 @@ fn handle_paste_into_task_pane_creates_a_chip_and_toggles() {
     );
 }
 
+#[test]
+fn pasting_an_image_path_into_the_task_pane_attaches_the_image() {
+    let dir = unique_test_repo("paste-image-path");
+    let shot = dir.join("Screen Shot.png");
+    std::fs::write(&shot, b"\x89PNG\r\n").unwrap();
+    let mut app = App::new();
+    app.focus = FocusPane::Task;
+    app.handle_paste(format!("'{}' ", shot.display()));
+    assert_eq!(app.task_input, "[Image #1]");
+    assert!(expand_pasted_chips(&app.task_input, &app.pasted_chunks).contains(&shot.display().to_string()));
+    // Escaped spaces (a drop in Terminal.app) read the same.
+    app.task_input.clear();
+    app.handle_paste(shot.display().to_string().replace(' ', "\\ "));
+    assert_eq!(app.task_input, "[Image #1]");
+    // A path that is not an image file stays text.
+    app.task_input.clear();
+    app.handle_paste(dir.join("missing.png").display().to_string());
+    assert!(app.task_input.ends_with("missing.png"), "{:?}", app.task_input);
+}
+
 // ---- Model switch retires a still-planning planner ----
 
 #[test]

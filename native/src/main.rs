@@ -6219,6 +6219,19 @@ impl App {
             FocusPane::Diff => {}
             FocusPane::Task => {
                 self.reset_task_history_navigation();
+                // A dropped screenshot, or one the `rudder cloud` client uploaded
+                // for a Ctrl+V (src/paste-bridge.ts), arrives as a path to an
+                // image: it becomes the same [Image #N] chip as a local Ctrl+V.
+                if let Some(image) = pasted_image_path(&text) {
+                    apply_task_image_paste(
+                        &mut self.task_input,
+                        &mut self.task_cursor,
+                        &mut self.pasted_chunks,
+                        &image,
+                    );
+                    self.clamp_picker_index();
+                    return;
+                }
                 // Collapse a large paste into a "[Pasted #N …]" chip; re-pasting the
                 // same content toggles it open/closed (expand_pasted_chips restores the
                 // real text on submit).

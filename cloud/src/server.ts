@@ -6393,6 +6393,16 @@ async function handleAppPairing(req: IncomingMessage, res: ServerResponse, url: 
   }
   const body = await readJsonBody(req);
   const code = normalizePairCode(stringField(body, "code") ?? "");
+  // App Review's demo login: a standing code (a Fly secret, never in git) that
+  // signs into one dedicated review account, so Apple's reviewers can use the
+  // app without a Google or GitHub account of ours.
+  const reviewCode = normalizePairCode(process.env.RUDDER_REVIEW_PAIR_CODE ?? "");
+  if (code && reviewCode && timingSafeEqualString(code, reviewCode)) {
+    const issued = issueRudderToken(REVIEW_ACCOUNT_ID, REVIEW_ACCOUNT_EMAIL);
+    schedulePersistDatabase();
+    sendJson(res, 200, { token: issued.token, email: REVIEW_ACCOUNT_EMAIL });
+    return;
+  }
   const pairing = code ? pairings.get(code) : undefined;
   if (!pairing || pairing.expiresAt < now) {
     const next = failures && failures.resetAt > now ? failures : { count: 0, resetAt: now + 60_000 };
@@ -6415,6 +6425,9 @@ async function handleAppPairing(req: IncomingMessage, res: ServerResponse, url: 
 // account. The code is only usable by a signed-in user, single use, five
 // minutes long, and guesses are rate limited per account and per address.
 // ---------------------------------------------------------------------------
+
+const REVIEW_ACCOUNT_ID = "review:app-store";
+const REVIEW_ACCOUNT_EMAIL = "app-review@rudder.exla.ai";
 
 const CLI_LOGIN_TTL_MS = Number(process.env.RUDDER_CLI_LOGIN_TTL_MS) || 5 * 60 * 1000;
 const cliUserCodes = new Map<string, string>(); // user code -> device code

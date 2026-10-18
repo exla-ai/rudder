@@ -62,6 +62,14 @@
   --z-nav: 200;
   --z-dialog: 300;
 
+  /* A device bezel is black in either theme: phones are not themed. */
+  --bezel: oklch(17% 0.006 250);
+  --st-needs: oklch(56% 0.135 55);
+  --glow: oklch(47.5% 0.078 202 / 0.10);
+  --lift: 0 1px 0 oklch(20% 0.01 250 / 0.04),
+    0 24px 48px -24px oklch(20% 0.02 250 / 0.28);
+
+  color-scheme: light dark;
   color: var(--ink);
   background: var(--stock);
   font-family: var(--font-form);
@@ -69,6 +77,40 @@
   font-synthesis-weight: none;
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
+}
+
+/* Dark: the same sheet printed in negative. Ink and stock swap, the rules stay
+ * hairlines, and the working teal lifts in lightness so it still reads as ink
+ * rather than as a glow. State colors lift with it and keep their hues. */
+@media (prefers-color-scheme: dark) {
+  :root {
+    --stock: oklch(16.5% 0.007 245);
+    --stock-band: oklch(19.5% 0.008 245);
+    --stock-sink: oklch(22.5% 0.009 245);
+    --stock-fill: oklch(25.5% 0.010 245);
+
+    --ink: oklch(94.5% 0.004 240);
+    --ink-2: oklch(80% 0.008 240);
+    --ink-3: oklch(68% 0.010 240);
+
+    --rule: oklch(29% 0.010 245);
+    --rule-mid: oklch(37% 0.011 245);
+    --rule-strong: oklch(62% 0.010 245);
+
+    --work: oklch(76% 0.095 200);
+    --work-deep: oklch(84% 0.080 200);
+    --work-wash: oklch(25% 0.035 202);
+
+    --st-running: oklch(76% 0.095 210);
+    --st-review: oklch(80% 0.120 80);
+    --st-merged: oklch(76% 0.130 150);
+    --st-conflict: oklch(72% 0.150 20);
+    --st-idle: oklch(68% 0.010 240);
+    --st-needs: oklch(78% 0.140 60);
+
+    --glow: oklch(76% 0.095 200 / 0.10);
+    --lift: 0 1px 0 oklch(0% 0 0 / 0.2), 0 28px 56px -24px oklch(0% 0 0 / 0.7);
+  }
 }
 
 * {
@@ -223,6 +265,9 @@ svg {
 .state--idle {
   --state-ink: var(--st-idle);
 }
+.state--needs {
+  --state-ink: var(--st-needs);
+}
 
 /* Merged is the resolved state, so its mark reads as a completed cross. */
 .state--merged::before {
@@ -290,6 +335,35 @@ kbd {
   gap: 18px;
   height: 62px;
   border-bottom: var(--hair) solid var(--rule);
+}
+
+/* The landing page's header stays with you. It is tinted out to both edges of
+ * the viewport rather than only the page column: the box-shadow paints the
+ * band, the clip-path keeps it a band. (Docs keep their own sticky sidebar, so
+ * this is opt-in.) */
+.site-head--float {
+  position: sticky;
+  top: 0;
+  z-index: var(--z-sticky);
+  background: color-mix(in oklch, var(--stock) 84%, transparent);
+  box-shadow: 0 0 0 100vmax color-mix(in oklch, var(--stock) 84%, transparent);
+  clip-path: inset(0 -100vmax);
+  -webkit-backdrop-filter: saturate(1.4) blur(14px);
+  backdrop-filter: saturate(1.4) blur(14px);
+}
+
+.nav-install {
+  font-family: var(--font-mono);
+  font-size: 0.74rem;
+  padding: 6px 11px;
+  border: var(--hair) solid var(--rule-strong);
+  border-radius: 999px;
+  color: var(--ink) !important;
+}
+
+.nav-install:hover {
+  border-color: var(--work);
+  color: var(--work) !important;
 }
 
 .brand {

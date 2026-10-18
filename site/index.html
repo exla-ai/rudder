@@ -3,19 +3,20 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Rudder: several changes to one repo, at once, that never touch</title>
+    <title>Rudder: coding agents in parallel, steered from your phone</title>
     <meta
       name="description"
-      content="Rudder runs coding agents in parallel on one repository. Every agent works in its own jj workspace, so changes in flight cannot collide, and you review and merge them from one dashboard."
+      content="Rudder runs Claude Code, Codex and opencode in parallel on one repository, each in its own jj workspace. Start them from the terminal or your phone, approve their prompts anywhere, and they keep working on your cloud machine with the laptop closed."
     />
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
     <meta property="og:title" content="Rudder" />
     <meta
       property="og:description"
-      content="Several changes to one repo, at the same time, that never touch each other until you merge them."
+      content="Many agents, one repo, none of them colliding. Steered from your terminal or your phone."
     />
     <meta property="og:image" content="/screenshot.svg" />
-    <meta name="theme-color" content="#ffffff" />
+    <meta name="theme-color" content="#fdfdfd" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#111417" media="(prefers-color-scheme: dark)" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
@@ -27,49 +28,51 @@
   <body>
     <!--
       THESIS: Rudder's page is a studio track sheet. One ruled row per agent,
-      each captured in isolation, nothing summed until the mixdown. It refuses
-      the two arrangements this category always ships: the dark terminal hero
-      with a typing animation, and the white SaaS page of icon-heading-text cards.
-      OWN-WORLD: True white stock at chroma 0 (never cream), cool near-black ink,
-      hairline rules doing the work borders would. Archivo for the form's printed
-      lettering, JetBrains Mono for anything the machine says. Teal #0c6a72 is the
-      working ink; other color is state only, always paired with a word.
-      STORY: A developer with three changes in flight sees them logged side by
-      side on one sheet, understands each is isolated, and installs.
-      FIRST VIEWPORT: Title block and install in a single left column at a
-      deliberate measure, then the dashboard itself: a mode rail on the left and
-      the real three panes beside it, agents list and live worker. (Earlier drafts
-      opened on an abstract ruled track sheet. Once the real panes were drawn, the
-      two read as the same table twice, so the abstraction went and the product
-      stayed.)
-      FORM: studio track sheet; candidate 4 of the ordered list; seed 9b5209e6.
-      FINISH: unreviewed and undocumented is unfinished; this build ends with the finish review, the verdict, and DESIGN.md
+      each captured in isolation, nothing summed until the mixdown. Paper and
+      ink, hairline rules, teal as the working ink, other color is state only and
+      always paired with a word.
+      REFRESH (2026-10): the product now has two surfaces, the terminal and the
+      phone, so the first viewport shows both: the dashboard live on a laptop
+      with the phone app in front of it. The phone gets the second section,
+      because it is where a user starts, approves and walks away. Real phone
+      captures (cloud/app dev mock, light + dark) sit in a drawn bezel. Motion is
+      one idea, "the sheet is live": running rows tick, the worker streams, the
+      grid's focus moves. Everything is complete with no script and at reduced
+      motion.
     -->
     <a class="skip-link" href="#main">Skip to content</a>
     <div class="page">
-      <header class="site-head">
+      <header class="site-head site-head--float">
         <a class="brand" href="/">
           <img src="/favicon.svg" alt="" />
           <span>Rudder</span>
         </a>
         <nav class="site-nav" aria-label="Primary">
+          <a href="#phone">Phone</a>
           <a href="/docs">Docs</a>
           <a href="https://github.com/exla-ai/rudder">GitHub</a>
-          <a href="https://www.npmjs.com/package/@exla/rudder">npm</a>
           <a href="/login">Sign in</a>
+          <a class="nav-install" href="#install">Install</a>
         </nav>
       </header>
 
       <main id="main">
-        <section class="titleblock" aria-labelledby="title">
-          <div class="titleblock-main">
-            <h1 id="title">Three changes to one repo. None of them touching.</h1>
+        <section class="hero" aria-labelledby="title">
+          <div class="hero-copy">
+            <a class="hero-tag" href="#phone">
+              <span class="hero-tag-dot" aria-hidden="true"></span>
+              New: your agents, on your phone
+              <span aria-hidden="true">→</span>
+            </a>
+            <h1 id="title">Many agents. <span class="nw">One repo.</span> <span class="h1-accent">Steered from your phone.</span></h1>
             <p class="lede">
-              Run Claude Code, Codex and opencode in parallel on one repo. Each
-              gets <strong>its own workspace</strong>, so they cannot touch each
-              other's work, or yours.
+              Run Claude Code, Codex and opencode side by side. Each gets
+              <strong>its own workspace</strong>, so none of them can touch the
+              others' work, or yours. Start them from the terminal or your phone,
+              approve their prompts from anywhere, and they keep working on your
+              cloud machine with the laptop closed.
             </p>
-            <div class="install">
+            <div class="install" id="install">
               <code id="install-command"
                 ><span class="prompt">$ </span
                 >npm install -g @exla/rudder@latest</code
@@ -86,13 +89,207 @@
             <p class="actions-row">
               <a href="/docs">Read the docs</a>
               <a href="https://github.com/exla-ai/rudder">View source</a>
+              <span class="actions-note">macOS and Linux · Node 22+</span>
             </p>
           </div>
 
+          <div class="stage" aria-label="The Rudder dashboard in a terminal, and the Rudder phone app in front of it">
+            <div class="stage-glow" aria-hidden="true"></div>
+            <div class="laptop" aria-hidden="true">
+              <div class="laptop-chrome">
+                <span class="dots"><i></i><i></i><i></i></span>
+                <span class="mono">rudder</span>
+                <span class="mono laptop-cwd">~/code/api</span>
+              </div>
+              <div class="laptop-body">
+                <div class="mini-list">
+                  <div class="mini-label">agents</div>
+                  <div class="mini-group">/main</div>
+                  <div class="mini-row"><span class="mini-task">tag the release</span><span class="state state--running">working</span></div>
+                  <div class="mini-group">workspaces</div>
+                  <div class="mini-row is-selected"><span class="mini-task">rate-limit the public API</span><span class="state state--running">working</span></div>
+                  <div class="mini-row"><span class="mini-task">fix the flaky chord test</span><span class="state state--needs">needs you</span></div>
+                  <div class="mini-row"><span class="mini-task">port the settings screen</span><span class="state state--review">done</span></div>
+                  <div class="mini-row"><span class="mini-task">drop the legacy session table</span><span class="state state--merged">merged</span></div>
+                </div>
+                <div class="mini-worker">
+                  <div class="mini-label">worker · rate-limit the public API</div>
+                  <pre class="tty" data-stream><span class="dim">jj workspace · rate-limit</span>
+<span class="ok">●</span> Read middleware.ts
+<span class="ok">●</span> Edit rate-limit.ts <span class="add">+64</span>
+<span class="ok">●</span> Bash npm test <span class="dim">· 41 passed</span>
+<span class="ok">●</span> Edit rate-limit.test.ts <span class="add">+38</span>
+<span class="ok">●</span> Bash npm test <span class="dim">· 44 passed</span>
+<span class="run"><span data-spin>✻</span> Writing the burst test…</span></pre>
+                </div>
+              </div>
+              <div class="laptop-task">
+                <span class="dim">›</span> <span data-type>/plan ship billing v2</span><span class="caret"></span>
+              </div>
+            </div>
+
+            <figure class="phone phone--hero">
+              <picture>
+                <source srcset="/img/phone-home-dark.webp" media="(prefers-color-scheme: dark)" />
+                <img
+                  src="/img/phone-home-light.webp"
+                  width="640"
+                  height="1388"
+                  alt="The Rudder phone app: three projects with their working, needs you and done counts, then a Needs you list with an agent asking for approval"
+                  fetchpriority="high"
+                />
+              </picture>
+            </figure>
+          </div>
+        </section>
+
+        <ul class="facts" aria-label="At a glance">
+          <li><span class="fact-k">agents</span><span class="fact-v">Claude Code, Codex, opencode</span></li>
+          <li><span class="fact-k">isolation</span><span class="fact-v">one jj workspace each</span></li>
+          <li><span class="fact-k">your phone</span><span class="fact-v">start, approve, merge</span></li>
+          <li><span class="fact-k">cloud machine</span><span class="fact-v">4 CPU · 16 GB · keeps its disk</span></li>
+        </ul>
+
+        <section class="section phone-section" id="phone" aria-labelledby="phone-title">
+          <div class="section-head" data-reveal>
+            <h2 id="phone-title">Close the laptop. The agents keep going.</h2>
+            <p>
+              They run on your own cloud machine, and your phone is the remote.
+              Start work from the coffee line, answer the prompt that would have
+              stalled it, and ship the result as a draft PR without opening the
+              laptop.
+            </p>
+          </div>
+
+          <ol class="phones">
+            <li class="phone-step" data-reveal>
+              <figure class="phone">
+                <picture>
+                  <source srcset="/img/phone-project-dark.webp" media="(prefers-color-scheme: dark)" />
+                  <img
+                    src="/img/phone-project-light.webp"
+                    width="640"
+                    height="1388"
+                    loading="lazy"
+                    alt="A project in the phone app: live preview links, a working agent, two that need you, and a box at the bottom to start a new task"
+                  />
+                </picture>
+              </figure>
+              <div class="step-text">
+                <span class="step-no">01</span>
+                <h3>Start agents from the phone</h3>
+                <p>
+                  Type a task into any project. <code class="mono">/model</code>
+                  picks Claude or Codex. Dev servers an agent starts show up as
+                  links you can open right there.
+                </p>
+              </div>
+            </li>
+            <li class="phone-step" data-reveal>
+              <figure class="phone">
+                <picture>
+                  <source srcset="/img/phone-ask-dark.webp" media="(prefers-color-scheme: dark)" />
+                  <img
+                    src="/img/phone-ask-light.webp"
+                    width="640"
+                    height="1388"
+                    loading="lazy"
+                    alt="An agent's conversation on the phone with a permission card pinned above the composer: Allow Bash? cargo test --release, with Deny and Allow buttons"
+                  />
+                </picture>
+              </figure>
+              <div class="step-text">
+                <span class="step-no">02</span>
+                <h3>Approve prompts as they come</h3>
+                <p>
+                  Permission requests, questions and plans land on your phone.
+                  Allow, deny with a reason, answer, or text the agent anything
+                  mid-turn. The terminal still works too; whichever answers first wins.
+                </p>
+              </div>
+            </li>
+            <li class="phone-step" data-reveal>
+              <figure class="phone">
+                <picture>
+                  <source srcset="/img/phone-approve-dark.webp" media="(prefers-color-scheme: dark)" />
+                  <img
+                    src="/img/phone-approve-light.webp"
+                    width="640"
+                    height="1388"
+                    loading="lazy"
+                    alt="The Sign in a computer sheet on the phone: Sign in MacBook-Pro.local? Code K7P-4QX, with Approve and Deny"
+                  />
+                </picture>
+              </figure>
+              <div class="step-text">
+                <span class="step-no">03</span>
+                <h3>Pick up on any computer</h3>
+                <p>
+                  <code class="mono">rudder login</code> prints a short code.
+                  Approve it on your phone and that terminal is signed in, with
+                  every project and agent where you left it.
+                </p>
+              </div>
+            </li>
+          </ol>
+
+          <div class="handoff" data-reveal>
+            <div class="screen screen--term">
+              <div class="screen-chrome">
+                <span class="dots"><i></i><i></i><i></i></span>
+                <span class="mono">zsh</span>
+              </div>
+              <pre class="tty tty--pad"><span class="dim">$</span> rudder login
+
+Sign this computer in from your phone: open Rudder,
+tap "Sign in a computer" and enter
+
+    <span class="code-big">K7P-4QX</span>
+
+<span class="dim">(or scan the QR code with the phone's camera)</span>
+
+<span class="ok">Logged in to rudder-cloud-control.fly.dev</span>
+<span class="ok">as you@example.com via your phone.</span>
+
+<span class="dim">$</span> rudder cloud <span class="caret"></span></pre>
+            </div>
+            <ul class="handoff-notes">
+              <li>
+                <h3>One machine, every repo</h3>
+                <p>
+                  <code class="mono">rudder cloud</code> opens the repo on your
+                  cloud machine, 4 CPU and 16 GB with a persistent disk. Every
+                  repo lives there side by side, each with its own dashboard.
+                </p>
+              </li>
+              <li>
+                <h3>Leaving? Press <kbd>H</kbd></h3>
+                <p>
+                  The laptop's running agents move to the cloud machine with
+                  their work and their conversations, and resume there.
+                </p>
+              </li>
+              <li>
+                <h3>It sleeps when you do</h3>
+                <p>
+                  After two quiet hours it stops. Opening the app or
+                  <code class="mono">rudder cloud</code> wakes it, and the agents
+                  come back where they were.
+                </p>
+              </li>
+              <li>
+                <h3>GitHub stays the source of truth</h3>
+                <p>
+                  Finished cloud work comes back as a pushed branch and a draft
+                  PR. Nothing merges into your main by itself.
+                </p>
+              </li>
+            </ul>
+          </div>
         </section>
 
         <section class="section showcase" aria-labelledby="desk-title">
-          <div class="section-head">
+          <div class="section-head" data-reveal>
             <h2 id="desk-title">Everything on one screen.</h2>
             <p>Every agent, what it is doing, and what it changed.</p>
           </div>
@@ -257,6 +454,133 @@
             </div>
           </div>
         </section>
+        <section class="section" aria-labelledby="gods-title">
+          <div class="section-head" data-reveal>
+            <h2 id="gods-title">Every agent, one glance.</h2>
+            <p>
+              Press <kbd>⌥g</kbd> and the screen becomes a grid: one tile per live
+              agent, showing the bottom of its terminal with its task, model and
+              whether it is working, needs you, or done. Arrows move,
+              <kbd>Enter</kbd> opens one. Agents are never resized for it, so
+              their scrollback is untouched.
+            </p>
+          </div>
+
+          <div class="screen gods" data-reveal data-gods>
+            <div class="screen-chrome">
+              <span class="dots" aria-hidden="true"><i></i><i></i><i></i></span>
+              <span class="mono gods-head">god's view · 6 agents · arrows or h/j/k/l move · Enter or click focuses · Esc or ⌥g closes</span>
+            </div>
+            <div class="gods-grid">
+              <div class="tile is-hot">
+                <div class="tile-title"><span class="tile-name">n1 · stripe client</span><span class="tile-model">claude/opus</span><span class="state state--running">working</span></div>
+                <pre class="tty"><span class="ok">●</span> Read src/billing/stripe.ts
+<span class="ok">●</span> Edit src/billing/stripe.ts <span class="add">+112</span> <span class="del">−9</span>
+<span class="ok">●</span> Bash npm test -- billing <span class="dim">· 18 passed</span>
+<span class="run"><span data-spin>✻</span> Retrying idempotent charges… <span class="dim">(41s · esc to interrupt)</span></span></pre>
+              </div>
+              <div class="tile">
+                <div class="tile-title"><span class="tile-name">fix the flaky chord test</span><span class="tile-model">codex/gpt-6.1-sol</span><span class="state state--needs">needs you</span></div>
+                <pre class="tty">Would you like to run the following command?
+
+  <span class="dim">$</span> cargo test --release -- chord
+
+<span class="run">›</span> 1. Yes, proceed
+  2. No, and tell Codex what to do</pre>
+              </div>
+              <div class="tile">
+                <div class="tile-title"><span class="tile-name">rate-limit the public API</span><span class="tile-model">claude/sonnet</span><span class="state state--running">working</span></div>
+                <pre class="tty"><span class="ok">●</span> Edit src/server/rate-limit.ts <span class="add">+18</span> <span class="del">−4</span>
+<span class="dim">  keyed on the API key, IP for anonymous</span>
+<span class="ok">●</span> Bash npm test <span class="dim">· 44 passed</span>
+<span class="run"><span data-spin>✻</span> Writing the burst-window test… <span class="dim">(12s)</span></span></pre>
+              </div>
+              <div class="tile">
+                <div class="tile-title"><span class="tile-name">port the settings screen</span><span class="tile-model">claude/opus</span><span class="state state--review">done</span></div>
+                <pre class="tty"><span class="ok">●</span> Bash npm run check <span class="dim">· ok</span>
+
+Ported Form.tsx to useForm. Dirty state now
+comes from formState, so the save button and
+the unsaved-changes guard agree.
+
+<span class="dim">›</span> </pre>
+              </div>
+              <div class="tile">
+                <div class="tile-title"><span class="tile-name">n3 · billing settings</span><span class="tile-model">codex/gpt-6.1-sol</span><span class="state state--running">working</span></div>
+                <pre class="tty"><span class="ok">•</span> Explored
+  <span class="dim">└</span> Read Settings.tsx, plans.ts
+<span class="ok">•</span> Edited src/settings/Billing.tsx <span class="add">(+84 −0)</span>
+<span class="run"><span data-spin>✻</span> Working <span class="dim">(8s • esc to interrupt)</span></span></pre>
+              </div>
+              <div class="tile">
+                <div class="tile-title"><span class="tile-name">n0 · schema migration</span><span class="tile-model">claude/sonnet</span><span class="state state--merged">merged</span></div>
+                <pre class="tty"><span class="ok">●</span> Bash npm run migrate:check <span class="dim">· clean</span>
+
+Added invoices and payouts tables with
+foreign keys to accounts. Down migration
+tested against a copy of staging.
+
+<span class="dim">›</span> </pre>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="section" aria-labelledby="sync-title">
+          <div class="section-head" data-reveal>
+            <h2 id="sync-title">Same repo on the laptop and in the cloud.</h2>
+            <p>
+              <code class="mono">/sync</code> brings this checkout and your cloud
+              machine's clone up to the newest main, and carries the work GitHub
+              does not have yet, uncommitted edits included, straight from one
+              side to the other. Nothing is pushed to your repo.
+            </p>
+          </div>
+
+          <div class="sync" data-reveal>
+            <div class="screen screen--term">
+              <div class="screen-chrome">
+                <span class="dots" aria-hidden="true"><i></i><i></i><i></i></span>
+                <span class="mono">rudder</span>
+                <span class="mono screen-cwd">~/code/rudder</span>
+              </div>
+              <pre class="tty tty--pad" data-lines><span class="run">›</span> /sync
+<span>this laptop (exla-ai/rudder): up to date with main;</span>
+<span>  uncommitted edits in the working copy</span>
+<span><span class="dim">  sent:</span> 2 change(s) not on GitHub yet</span>
+<span>cloud (exla-ai/rudder): moved to the newest main</span>
+<span>  (3 new commit(s))</span>
+<span><span class="dim">  received:</span> <span class="ok">picked up the work from laptop</span></span>
+<span>cloud agents (exla-ai/rudder): 3</span>
+<span>  <span class="needs">needs you </span> Fix flaky Ctrl+W chord test</span>
+<span>  <span class="run">working   </span> Phone app for agent control</span>
+<span>  <span class="rev">review    </span> Tailnet HTTPS for previews</span></pre>
+            </div>
+            <ul class="sync-notes">
+              <li>
+                <h3>It never loses work</h3>
+                <p>
+                  A side moves to the newest main only when nothing would be lost.
+                  When both have their own edits, both stay, and the other side's
+                  version waits as a bookmark you can diff.
+                </p>
+              </li>
+              <li>
+                <h3>Secrets stay put</h3>
+                <p>Gitignored files such as <code class="mono">.env</code> never travel.</p>
+              </li>
+              <li>
+                <h3><code class="mono">/sync move</code></h3>
+                <p>Hands this laptop's running agents to the cloud machine.</p>
+              </li>
+              <li>
+                <h3><code class="mono">/sync all</code></h3>
+                <p>Does the same for every repo on the cloud machine.</p>
+              </li>
+            </ul>
+          </div>
+        </section>
+
         <section class="section" aria-labelledby="type-title">
           <div class="section-head">
             <h2 id="type-title">Four things you can type.</h2>
@@ -434,15 +758,15 @@
               <p>Your machine, or not.</p>
               <ul class="option-list">
                 <li><span>local</span><em>your hardware</em></li>
-                <li><span>cloud</span><em>Rudder Cloud</em></li>
+                <li><span>cloud</span><em>your cloud machine</em></li>
               </ul>
             </div>
           </div>
         </section>
 
-        <section class="close" aria-labelledby="close-title">
-          <h2 id="close-title">Put four things in flight.</h2>
-          <p>Type four tasks. Watch four workspaces fill up.</p>
+        <section class="close" aria-labelledby="close-title" data-reveal>
+          <h2 id="close-title">Put four things in flight. Then go outside.</h2>
+          <p>Type four tasks, watch four workspaces fill up, and answer them from your phone.</p>
           <div class="install">
             <code id="install-command-2"
               ><span class="prompt">$ </span
@@ -460,6 +784,7 @@
           <p class="actions-row">
             <a href="/docs">Read the docs</a>
             <a href="https://github.com/exla-ai/rudder">View source</a>
+            <a href="/login">Sign in to Rudder Cloud</a>
           </p>
         </section>
       </main>

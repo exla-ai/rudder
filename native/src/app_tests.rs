@@ -27103,3 +27103,13 @@ fn cloud_claude_settings_carry_the_phone_permission_hook() {
     assert!(value["hooks"]["Stop"].is_array());
     assert!(crate::signals::PERMISSION_HOOK_JS.contains("PermissionRequest"));
 }
+
+#[test]
+fn sync_is_suggested_with_its_move_and_all_forms() {
+    let mut app = App::new();
+    app.task_input = "/syn".to_string();
+    let labels: Vec<String> = suggestions_for(&app).into_iter().map(|s| s.label).collect();
+    assert_eq!(labels.first().map(String::as_str), Some("/sync"));
+    assert!(labels.iter().any(|l| l == "/sync move"));
+    assert!(labels.iter().any(|l| l == "/sync all"));
+}

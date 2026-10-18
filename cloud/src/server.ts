@@ -5122,6 +5122,87 @@ function closeHomeControl(homeId: string): void {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Update when idle. A release pins a new worker image, but the home machine
+// keeps the image it booted with, and restarting it cuts off any agent mid-turn.
+// So the control plane waits for a quiet moment: nothing working or waiting on
+// a prompt (a restart would drop the hook holding it), and nobody typing, for
+// HOME_IDLE_UPDATE_MS. Then the machine is updated in place (same volume and
+// config, new image); the boot reopen brings every agent back where it was.
+// ---------------------------------------------------------------------------
+const HOME_IDLE_UPDATE_MS = Number(process.env.RUDDER_HOME_IDLE_UPDATE_MS || 5 * 60 * 1000);
+const homeBusyAt = new Map<string, number>();
+const homeImageChecked = new Map<string, { at: number; image: string | null }>();
+const homeUpdating = new Map<string, number>();
+const listHomeRows = database.prepare("select * from rudder_workspaces where source_kind = 'home' and status <> 'deleting'");
+
+function homeAgentsBusy(projects: HomeProject[]): boolean {
+  return projects.some((project) => (project.agents ?? []).some((agent) => {
+    const status = typeof agent.status === "string" ? agent.status : "";
+    const asks = Array.isArray(agent.asks) ? agent.asks.length : 0;
+    return status === "working" || status === "starting" || asks > 0;
+  }));
+}
+
+function noteHomeBusy(homeId: string, projects: HomeProject[]): void {
+  if (homeAgentsBusy(projects) || !homeBusyAt.has(homeId)) {
+    homeBusyAt.set(homeId, Date.now());
+  }
+}
+
+async function homeMachineImage(machineId: string): Promise<{ image: string | null; config: JsonRecord | null }> {
+  const machine = await flyRequest<FlyMachine & { config?: JsonRecord }>(
+    `/v1/apps/${encodeURIComponent(flyAppName)}/machines/${encodeURIComponent(machineId)}`,
+    { method: "GET" },
+  );
+  const config = machine?.config && typeof machine.config === "object" ? machine.config : null;
+  return { image: typeof config?.image === "string" ? config.image : null, config };
+}
+
+async function sweepIdleHomeUpdates(): Promise<void> {
+  if (!flyApiToken || !flyAppName) {
+    return;
+  }
+  const now = Date.now();
+  for (const raw of listHomeRows.all() as Record<string, unknown>[]) {
+    const home = rowToWorkspace(raw);
+    if (!home.machineId || !isOpen(homeControls.get(home.id))) {
+      continue;
+    }
+    const state = homeStates.get(home.id);
+    const fresh = state && now - Date.parse(state.updatedAt) < 60_000;
+    const quietSince = Math.max(homeBusyAt.get(home.id) ?? now, Date.parse(home.lastActivityAt ?? "") || 0);
+    if (!fresh || now - quietSince < HOME_IDLE_UPDATE_MS || now - (homeUpdating.get(home.id) ?? 0) < 15 * 60_000) {
+      continue;
+    }
+    const checked = homeImageChecked.get(home.id);
+    if (checked && now - checked.at < 5 * 60_000 && checked.image === flyWorkerImage) {
+      continue;
+    }
+    try {
+      const { image, config } = await homeMachineImage(home.machineId);
+      homeImageChecked.set(home.id, { at: now, image });
+      if (!config || !image || image === flyWorkerImage) {
+        continue;
+      }
+      homeUpdating.set(home.id, now);
+      console.log(`[home] ${home.id} idle on ${image}; updating to ${flyWorkerImage}`);
+      await flyRequest<FlyMachine>(
+        `/v1/apps/${encodeURIComponent(flyAppName)}/machines/${encodeURIComponent(home.machineId)}`,
+        { method: "POST", body: { config: { ...config, image: flyWorkerImage } } },
+      );
+      homeImageChecked.set(home.id, { at: now, image: flyWorkerImage });
+    } catch (error) {
+      console.log(`[home] ${home.id} idle update failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+}
+
+const homeUpdateSweepMs = Number(process.env.RUDDER_HOME_UPDATE_SWEEP_MS || 60 * 1000);
+if (homeUpdateSweepMs >= 1000) {
+  setInterval(() => void sweepIdleHomeUpdates().catch(() => undefined), homeUpdateSweepMs).unref?.();
+}
+
 async function recreateHomeMachine(home: Workspace): Promise<Workspace> {
   const now = new Date().toISOString();
   const workerToken = `rdrw_${randomBytes(32).toString("base64url")}`;
@@ -5267,6 +5348,7 @@ function attachHomeControl(homeId: string, ws: WebSocket): void {
     const type = stringField(message, "type");
     if (type === "state") {
       const projects = (message as JsonRecord).projects;
+      noteHomeBusy(homeId, Array.isArray(projects) ? (projects as unknown as HomeProject[]) : []);
       homeStates.set(homeId, {
         projects: Array.isArray(projects) ? (projects as unknown as HomeProject[]) : [],
         tailnet: objectField(message, "tailnet"),

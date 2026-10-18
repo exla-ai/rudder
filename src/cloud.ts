@@ -4566,11 +4566,42 @@ async function cloudSync(args: string[], options: CloudCommandOptions): Promise<
   if (slug && results.length === 0) {
     lines.push(`cloud: ${slug} is not open on the cloud machine (\`rudder cloud\` opens it there)`);
   }
+  // The agents, on each side. Cloud ones are listed from what the home machine
+  // last reported; laptop ones that are still running are what /sync move (or H
+  // in the dashboard) would hand over.
+  const homeView = await client.request<{ projects?: { repo?: string; agents?: { title?: string; status?: string; asks?: unknown[] }[] }[] }>("/api/rudder/home", { method: "GET" }).catch(() => null);
+  for (const project of homeView?.projects ?? []) {
+    if (!project.repo || !results.some((result) => result.repo.toLowerCase() === project.repo!.toLowerCase())) {
+      continue;
+    }
+    lines.push(...describeCloudAgents(project.repo, project.agents ?? []));
+  }
+  if (slug) {
+    const running = await findMoveCandidates(root).catch(() => []);
+    if (running.length > 0) {
+      lines.push(`${running.length} agent(s) still running on this laptop: ${running.slice(0, 4).map((run) => `"${(run.taskSummary || run.task).slice(0, 50)}"`).join(", ")}${running.length > 4 ? ", ..." : ""}. They stop when the laptop sleeps; \`/sync move\` (or H) moves them to the cloud machine.`);
+    }
+  }
   const unpushed = [local, ...results.map((result) => result.report)].filter((report): report is CheckoutSyncReport => !!report && report.ahead > 0);
   if (unpushed.length > 0) {
     lines.push("Unpushed work stays where it is: push it (or merge its PR) and run /sync again to bring the other side up.");
   }
   console.log(lines.join("\n"));
+}
+
+function describeCloudAgents(repo: string, agents: { title?: string; status?: string; asks?: unknown[] }[]): string[] {
+  const live = agents.filter((agent) => !["merged", "stopped", "deleted"].includes(String(agent.status)));
+  if (live.length === 0) {
+    return [`cloud agents (${repo}): none running`];
+  }
+  const label = (agent: { status?: string; asks?: unknown[] }) => (Array.isArray(agent.asks) && agent.asks.length > 0 ? "needs you" : String(agent.status || "?"));
+  const order = ["needs you", "waiting", "working", "starting", "review", "paused", "done", "failed"];
+  const sorted = [...live].sort((a, b) => (order.indexOf(label(a)) + 1 || 99) - (order.indexOf(label(b)) + 1 || 99));
+  return [
+    `cloud agents (${repo}): ${live.length}`,
+    ...sorted.slice(0, 8).map((agent) => `  ${label(agent).padEnd(10)} ${(agent.title || "").slice(0, 70)}`),
+    ...(sorted.length > 8 ? [`  ... and ${sorted.length - 8} more (\`rudder cloud\` to open them)`] : []),
+  ];
 }
 
 async function cloudDoctor(options: CloudCommandOptions): Promise<void> {

@@ -671,6 +671,11 @@ pub(crate) fn command_suggestions() -> Vec<Suggestion> {
             action: SuggestionAction::RunCommand("/sync".to_string()),
         },
         Suggestion {
+            label: "/sync move".to_string(),
+            detail: "sync, and move the agents running here to the cloud machine".to_string(),
+            action: SuggestionAction::RunCommand("/sync move".to_string()),
+        },
+        Suggestion {
             label: "/sync all".to_string(),
             detail: "sync every repo on the cloud machine".to_string(),
             action: SuggestionAction::RunCommand("/sync all".to_string()),

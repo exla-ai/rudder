@@ -892,6 +892,19 @@ brain lives in the cloud, and the phone is a first-class client.
   nothing below it is unpushed. Uncommitted or unpushed work on either side is reported,
   never pushed, rebased or overwritten. It also brings the vault's copy of the laptop's
   config level (`ensureVaultAws`). `/sync all` / `--all` covers every repo on the home.
+- **Update when idle (`sweepIdleHomeUpdates`, server.ts).** A release pins a new
+  `RUDDER_WORKER_IMAGE`, but the home keeps the image it booted with, and restarting
+  cuts off agents mid-turn. Every minute the control plane checks each connected home:
+  when its machine image differs from the pinned one and NO agent has been `working`
+  / `starting` or holding a prompt (`asks`) for `RUDDER_HOME_IDLE_UPDATE_MS` (5 min),
+  and nobody has touched it for as long (`last_activity_at`), it updates the machine
+  IN PLACE (`POST machines/<id>` with the current config and the new image: same
+  volume, env, mounts). The boot reopen brings the agents back. At most one attempt
+  per 15 min. So after a release, you never restart the home by hand.
+- **`/sync` also shows the agents.** After syncing it lists the cloud's agents for
+  the repo (needs you / working / done, from the home's last state) and the laptop's
+  still-running movable agents; `/sync move` hands those over through the same
+  pause-then-move path as `H` (`request_move_all_home`).
 - **The phone answers prompts like the Claude app** (`native/src/permission_hook.mjs`,
   `cloud/worker/asks.mjs`). On the home runtime every Claude agent's settings get a
   `PermissionRequest` hook (timeout a day). Claude shows its own dialog WHILE the hook

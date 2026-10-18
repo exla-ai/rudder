@@ -58,7 +58,7 @@ async function waitFor(fn, { timeout = 8000, interval = 50 } = {}) {
   }
 }
 
-async function bootServer(t) {
+async function bootServer(t, extraEnv = {}) {
   const port = await freePort();
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "rudder-home-test-"));
   const dbPath = path.join(dataDir, "state.sqlite");
@@ -76,6 +76,7 @@ async function bootServer(t) {
       RUDDER_S3_BUCKET: "",
       SLACK_BOT_TOKEN: "",
       FLY_API_TOKEN: "",
+      ...extraEnv,
     },
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -622,3 +623,68 @@ esac
     assert.equal(exited, null, `the supervisor is still running:\n${log}`);
   },
 );
+
+
+serverTest("a home on an old image is updated in place once its agents are idle, never mid-turn", async (t) => {
+  // A fake Fly API: the home machine runs img:old.
+  const flyCalls = [];
+  let image = "registry.fly.io/workers:old";
+  const fly = (await import("node:http")).createServer(async (req, res) => {
+    let body = "";
+    for await (const chunk of req) body += chunk;
+    flyCalls.push({ method: req.method, url: req.url, body: body ? JSON.parse(body) : null });
+    if (req.url === "/v1/apps/workers/machines/m-home" && req.method === "GET") {
+      res.end(JSON.stringify({ id: "m-home", state: "started", config: { image, env: { A: "1" }, mounts: [{ volume: "vol_1", path: "/workspace" }] } }));
+      return;
+    }
+    if (req.url === "/v1/apps/workers/machines/m-home" && req.method === "POST") {
+      image = JSON.parse(body).config.image;
+      res.end(JSON.stringify({ id: "m-home", state: "replacing" }));
+      return;
+    }
+    res.statusCode = 404;
+    res.end("{}");
+  });
+  await new Promise((resolve) => fly.listen(0, "127.0.0.1", resolve));
+  t.after(() => fly.close());
+  const { port, dbPath, log } = await bootServer(t, {
+    FLY_API_TOKEN: "fly-test",
+    FLY_API_HOSTNAME: `http://127.0.0.1:${fly.address().port}`,
+    RUDDER_FLY_APP_NAME: "workers",
+    RUDDER_WORKER_IMAGE: "registry.fly.io/workers:new",
+    RUDDER_HOME_IDLE_UPDATE_MS: "1500",
+    RUDDER_HOME_UPDATE_SWEEP_MS: "1000",
+  });
+  const workerToken = "rdrw_idle_update";
+  const old = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+  const db = new Database(dbPath);
+  db.prepare(`
+    insert into rudder_workspaces (id, account_id, workspace_key, repo_name, status, machine_id, worker_token_hash,
+      source_kind, repo_url, home_id, created_at, updated_at, last_activity_at)
+    values ('home-idle', 'acct-idle', 'home', 'home', 'running', 'm-home', ?, 'home', null, null, ?, ?, ?)
+  `).run(tokenHash(workerToken), old, old, old);
+  db.close();
+  const control = new WebSocket(`ws://127.0.0.1:${port}/api/rudder/home/home-idle/control`, { headers: { authorization: `Bearer ${workerToken}` } });
+  t.after(() => control.close());
+  await new Promise((resolve) => control.on("open", resolve));
+  const publish = (agents) => control.send(JSON.stringify({ type: "state", projects: [{ workspaceId: "r", repo: "a/b", name: "b", agents }] }));
+
+  // Busy: one agent working, another waiting on a question. Keep reporting it.
+  const busy = [{ id: "1", status: "working", asks: [] }, { id: "2", status: "done", asks: [{ id: "x" }] }];
+  publish(busy);
+  const busyTimer = setInterval(() => publish(busy), 300);
+  await sleep(3500);
+  clearInterval(busyTimer);
+  assert.ok(!flyCalls.some((call) => call.method === "POST"), `updated mid-turn: ${JSON.stringify(flyCalls)}\n${log()}`);
+
+  // Idle: everything done. Within idle time + a sweep, the machine gets the new image, same config.
+  const idleTimer = setInterval(() => publish([{ id: "1", status: "done", asks: [] }]), 300);
+  t.after(() => clearInterval(idleTimer));
+  const update = await waitFor(() => flyCalls.find((call) => call.method === "POST"), { timeout: 8000 });
+  assert.equal(update.body.config.image, "registry.fly.io/workers:new");
+  assert.deepEqual(update.body.config.mounts, [{ volume: "vol_1", path: "/workspace" }]);
+  assert.deepEqual(update.body.config.env, { A: "1" });
+  // Once is enough.
+  await sleep(2500);
+  assert.equal(flyCalls.filter((call) => call.method === "POST").length, 1);
+});

@@ -11302,8 +11302,12 @@ It will tend to agree with itself — name another with /gam <provider> <model> 
                     return true;
                 }
                 let mut args = vec!["cloud".to_string(), "sync".to_string()];
-                if parts.next() == Some("all") {
-                    args.push("--all".to_string());
+                match parts.next() {
+                    Some("all") => args.push("--all".to_string()),
+                    // `/sync move`: also hand this laptop's running agents to the
+                    // home machine, through the same pause-then-move path as H.
+                    Some("move") => self.request_move_all_home(),
+                    _ => {}
                 }
                 self.start_rudder_cli_command("cloud sync", args);
                 true

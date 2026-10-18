@@ -669,17 +669,16 @@ serverTest("a home on an old image is updated in place once its agents are idle,
   await new Promise((resolve) => control.on("open", resolve));
   const publish = (agents) => control.send(JSON.stringify({ type: "state", projects: [{ workspaceId: "r", repo: "a/b", name: "b", agents }] }));
 
-  // Busy: one agent working, another waiting on a question. Keep reporting it.
-  const busy = [{ id: "1", status: "working", asks: [] }, { id: "2", status: "done", asks: [{ id: "x" }] }];
-  publish(busy);
-  const busyTimer = setInterval(() => publish(busy), 300);
-  await sleep(3500);
-  clearInterval(busyTimer);
+  // Busy: one agent working, another waiting on a question. Reported ONCE, the
+  // way the supervisor does (it sends state only when it changes): a long
+  // steady turn must still count as busy.
+  publish([{ id: "1", status: "working", asks: [] }, { id: "2", status: "done", asks: [{ id: "x" }] }]);
+  await sleep(4000);
   assert.ok(!flyCalls.some((call) => call.method === "POST"), `updated mid-turn: ${JSON.stringify(flyCalls)}\n${log()}`);
 
-  // Idle: everything done. Within idle time + a sweep, the machine gets the new image, same config.
-  const idleTimer = setInterval(() => publish([{ id: "1", status: "done", asks: [] }]), 300);
-  t.after(() => clearInterval(idleTimer));
+  // Idle: everything done, also reported once and then silence. Within idle
+  // time + a sweep, the machine gets the new image, same config.
+  publish([{ id: "1", status: "done", asks: [] }]);
   const update = await waitFor(() => flyCalls.find((call) => call.method === "POST"), { timeout: 8000 });
   assert.equal(update.body.config.image, "registry.fly.io/workers:new");
   assert.deepEqual(update.body.config.mounts, [{ volume: "vol_1", path: "/workspace" }]);

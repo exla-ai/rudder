@@ -5131,7 +5131,12 @@ function closeHomeControl(homeId: string): void {
 // config, new image); the boot reopen brings every agent back where it was.
 // ---------------------------------------------------------------------------
 const HOME_IDLE_UPDATE_MS = Number(process.env.RUDDER_HOME_IDLE_UPDATE_MS || 5 * 60 * 1000);
+// The supervisor sends state only when it CHANGES, so a quiet home sends
+// nothing: what counts is the latest state, however old. Busy in the latest
+// state means busy now (an agent working steadily may not change its state for
+// minutes); idle since the state that last said busy.
 const homeBusyAt = new Map<string, number>();
+const homeBusyNow = new Map<string, boolean>();
 const homeImageChecked = new Map<string, { at: number; image: string | null }>();
 const homeUpdating = new Map<string, number>();
 const listHomeRows = database.prepare("select * from rudder_workspaces where source_kind = 'home' and status <> 'deleting'");
@@ -5145,7 +5150,9 @@ function homeAgentsBusy(projects: HomeProject[]): boolean {
 }
 
 function noteHomeBusy(homeId: string, projects: HomeProject[]): void {
-  if (homeAgentsBusy(projects) || !homeBusyAt.has(homeId)) {
+  const busy = homeAgentsBusy(projects);
+  homeBusyNow.set(homeId, busy);
+  if (busy || !homeBusyAt.has(homeId)) {
     homeBusyAt.set(homeId, Date.now());
   }
 }
@@ -5169,10 +5176,11 @@ async function sweepIdleHomeUpdates(): Promise<void> {
     if (!home.machineId || !isOpen(homeControls.get(home.id))) {
       continue;
     }
-    const state = homeStates.get(home.id);
-    const fresh = state && now - Date.parse(state.updatedAt) < 60_000;
+    if (!homeStates.has(home.id) || homeBusyNow.get(home.id) !== false) {
+      continue;
+    }
     const quietSince = Math.max(homeBusyAt.get(home.id) ?? now, Date.parse(home.lastActivityAt ?? "") || 0);
-    if (!fresh || now - quietSince < HOME_IDLE_UPDATE_MS || now - (homeUpdating.get(home.id) ?? 0) < 15 * 60_000) {
+    if (now - quietSince < HOME_IDLE_UPDATE_MS || now - (homeUpdating.get(home.id) ?? 0) < 15 * 60_000) {
       continue;
     }
     const checked = homeImageChecked.get(home.id);

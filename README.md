@@ -1,15 +1,15 @@
 # rudder
 
 <p>
-  <a href="https://rudder.viraat.dev">
-    <img src="https://rudder.viraat.dev/favicon.svg" width="36" height="36" alt="Rudder logo" />
+  <a href="https://rudder.exla.ai">
+    <img src="https://rudder.exla.ai/favicon.svg" width="36" height="36" alt="Rudder logo" />
   </a>
 </p>
 
-[![TUI e2e](https://github.com/viraatdas/rudder/actions/workflows/tui.yml/badge.svg)](https://github.com/viraatdas/rudder/actions/workflows/tui.yml)
-[![npm version](https://img.shields.io/npm/v/@viraatdas/rudder.svg)](https://www.npmjs.com/package/@viraatdas/rudder)
-[![Node >=20](https://img.shields.io/badge/node-%3E%3D20-43853d.svg)](https://nodejs.org/)
-[![Website](https://img.shields.io/badge/site-rudder.viraat.dev-111111.svg)](https://rudder.viraat.dev)
+[![TUI e2e](https://github.com/exla-ai/rudder/actions/workflows/tui.yml/badge.svg)](https://github.com/exla-ai/rudder/actions/workflows/tui.yml)
+[![npm version](https://img.shields.io/npm/v/@exla-ai/rudder.svg)](https://www.npmjs.com/package/@exla-ai/rudder)
+[![Node >=22](https://img.shields.io/badge/node-%3E%3D22-43853d.svg)](https://nodejs.org/)
+[![Website](https://img.shields.io/badge/site-rudder.exla.ai-111111.svg)](https://rudder.exla.ai)
 
 Rudder is a TUI for managing coding agents. Run Claude Code, Codex and opencode
 side by side in one native dashboard: every task you type gets its own isolated
@@ -26,26 +26,30 @@ key. `/main` puts an agent in the main checkout when you want one there, and
 ## Install
 
 ```bash
-npm install -g @viraatdas/rudder@latest
+npm install -g @exla-ai/rudder@latest
 rudder
 ```
 
 After the global install, every user-facing `rudder` launch checks npm and
 auto-updates itself before running when a newer version is available. Set
 `RUDDER_DISABLE_AUTO_UPDATE=1` to opt out. Run without a global install using
-`npx @viraatdas/rudder@latest`.
+`npx @exla-ai/rudder@latest`.
+
+Rudder used to be published as `@viraatdas/rudder`. Existing installs move
+themselves to `@exla-ai/rudder` on their next update; nothing to do by hand.
 
 ## Requirements
 
 - Node.js 22 or newer
 - Git
 - Claude Code and/or Codex installed and logged in
+- macOS (Apple Silicon or Intel) or Linux x64; the dashboard binary for each
+  ships in the package
 
 Rudder runs agents in isolated [jj (Jujutsu)](https://jj-vcs.github.io)
 workspaces; your repo stays plain git. You do not need to install jj: if it is
 not already on your PATH, Rudder sets up its own copy in `~/.rudder/bin` during
 install (or on first run). A jj you installed yourself is always used instead.
-- macOS, Linux, or another Unix-like terminal
 
 Check your setup at any time:
 
@@ -145,6 +149,16 @@ between files, `r` refreshes, `Esc` or `⌥d` closes it, and `⌥h` solos it lik
 any other pane. On a narrow terminal it takes the worker's place instead of
 squeezing both. `v` opens the same panel.
 
+### God's view
+
+Press `⌥g` (also `^W g`) to see every running agent at once: the screen turns
+into a grid with one tile per agent showing the bottom of its terminal, titled
+with its id, task, model and whether it is working, needs you, or is done.
+Arrows or `h`/`j`/`k`/`l` move the highlight, `Enter` or a click opens that
+agent in the worker pane, and `⌥g` or `Esc` closes the grid. Agents are never
+resized for it, so their scrollback is untouched. With more agents than fit,
+the grid pages.
+
 ### Web board
 
 Press `o` in the agents pane (or type `/web`) to open the live project board in
@@ -168,6 +182,9 @@ through Review before it can merge.
 | `Option-1` / `Option-2` / `Option-3` | Focus the agents, worker, or task pane |
 | `Option-[` / `Option-]` | Step to the previous / next agent, staying in the pane you are in |
 | `Option-h` | Full screen: the focused pane takes the whole terminal; press again to bring the panes back |
+| `Option-g` | God's view: every agent tiled on one screen; press again to close |
+| `Option-d` | Diff panel for the selected agent |
+| `Ctrl-V` | Paste a screenshot or copied files into an agent (works in `rudder cloud` too) |
 | `Option-v` / `Option-b` | Previous question in the selected worker / back to its latest message (Claude Code and Codex) |
 | `Cmd-C` | Copy the active Rudder selection |
 | `Ctrl-C` | Quit (asks to confirm if agents are still running) |
@@ -483,6 +500,7 @@ rudder login                 # sign in with Google (opens straight to the accoun
 rudder cloud                 # open this repo on your home machine and attach to it
 rudder cloud home            # home machine status: projects, agents, previews
 rudder cloud move            # move this repo's running agents to the home machine
+rudder cloud sync [repo]     # bring this checkout and the cloud's clone level (/sync)
 rudder cloud app             # the phone app link
 rudder cloud list            # list cloud workers
 rudder cloud logs <id>       # worker status
@@ -504,6 +522,26 @@ and starts again on the next `rudder cloud` or phone visit; conversations and
 agent state live on its disk, so agents resume where they were.
 `rudder cloud --snapshot` keeps the old behavior: upload this folder to a
 machine of its own.
+
+**Same repo on the laptop and the cloud (`/sync`).** `/sync` in the dashboard
+(or `rudder cloud sync`) brings this checkout and the cloud machine's clone of
+it up to the newest default branch, and carries the work GitHub does not have
+yet, uncommitted edits included, from one side to the other directly. Nothing is
+pushed to your repo, and gitignored files such as `.env` never travel. The side
+receiving work only takes it when nothing of its own would be lost; when both
+sides changed, both versions are kept and the other one waits as the jj bookmark
+`rudder-sync/cloud` (or `rudder-sync/laptop`). `rudder cloud sync <repo>` with a
+name clones a repo that so far exists only on the cloud into `~/code/<repo>`.
+`/sync all` covers every repo, and `/sync move` hands this laptop's running
+agents to the cloud.
+
+**Screenshots and files.** In `rudder cloud`, `Ctrl-V` with a screenshot or
+files copied in Finder, or dragging a file into the terminal, uploads it to the
+cloud machine and gives the agent its path there: Claude Code attaches an image
+as `[Image #1]` exactly as it does locally. Up to 25 MB per file.
+
+**Updates.** After a release the cloud machine updates itself once its agents
+have been idle for five minutes, so you never restart it by hand.
 
 **Phone.** Open `rudder cloud app` on your phone and sign in with the same
 Google account. You see every project and agent, read conversations as they
@@ -678,7 +716,7 @@ usage event, and a GitHub issue when `gh` is installed and authenticated. Add
 ## Building from source
 
 ```bash
-git clone https://github.com/viraatdas/rudder.git
+git clone https://github.com/exla-ai/rudder.git
 cd rudder
 ./setup.sh
 ```

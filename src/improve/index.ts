@@ -414,11 +414,11 @@ async function printReport(date?: string): Promise<void> {
 /**
  * Find the rudder checkout to improve: an explicit config path wins; else the
  * current repo when it is a rudder checkout; else a registered project whose
- * package.json says @viraatdas/rudder.
+ * package.json says @exla-ai/rudder.
  */
 async function resolveRudderRepo(): Promise<string> {
   const isRudder = async (dir: string) =>
-    (await readJson<{ name?: string }>(path.join(dir, "package.json")))?.name === "@viraatdas/rudder";
+    (await readJson<{ name?: string }>(path.join(dir, "package.json")))?.name === "@exla-ai/rudder";
   const root = findRepoRoot(process.cwd());
   if (root && (await isRudder(root))) return root;
   for (const project of await loadProjects()) {

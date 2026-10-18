@@ -20,7 +20,7 @@ workflow around those agents: a three-pane dashboard, pane focus, scrollback,
 task summaries, live review, and merge back to the base branch. Rudder Cloud is
 an optional hosted worker mode that keeps the same local control surface.
 
-It ships as the npm package `@viraatdas/rudder`, binary `rudder`
+It ships as the npm package `@exla-ai/rudder`, binary `rudder`
 (`dist/index.js`).
 
 Release rule for pushes: when pushing Rudder product changes to `origin/main`,
@@ -28,7 +28,7 @@ ship them as an npm versioned release unless the user explicitly asks for a
 non-release push. Run the relevant tests, commit the change, run `npm version
 patch`/`minor`/`major` as appropriate, then push `main` and the created tag.
 After pushing, verify the GitHub release workflow and `npm view
-@viraatdas/rudder version` so the user knows which version contains the fix.
+@exla-ai/rudder version` so the user knows which version contains the fix.
 
 Two big pieces, one product:
 
@@ -74,7 +74,7 @@ plus a worker image, used only when a task is handed off to the cloud.
 ├── cloud/                Rudder Cloud control plane (Node http server) + worker image
 │   ├── src/server.ts      auth, CLI login, sail (workers), workspace (snapshots)
 │   └── worker/            the cloud worker container (entrypoint + supervisor)
-├── site/                 Marketing site (static, deployed to rudder.viraat.dev)
+├── site/                 Marketing site (static, deployed to rudder.exla.ai on Vercel)
 ├── tests/                Node integration tests (*.test.mjs against dist/)
 ├── dist/                 Build output (JS + copied native binary). Not tracked; built on publish.
 ├── assets/               Static assets bundled into the npm package
@@ -139,7 +139,7 @@ process spawns, not a socket.
   `--non-interactive`, `--cwd`, `--repo`, `--run`, `--backend`, and `--model`.
 - `main()` flow:
   - Before user-facing command dispatch, `autoUpdateAndRerunIfNeeded` checks npm
-    and runs `npm install -g @viraatdas/rudder@<latest>` when this global install
+    and runs `npm install -g @exla-ai/rudder@<latest>` when this global install
     is stale, then re-runs the original command with `RUDDER_SKIP_AUTO_UPDATE=1`.
     Internal `__*` commands, `rudder done` worker callbacks, local source checkouts,
     CI, npx temp installs, and `RUDDER_DISABLE_AUTO_UPDATE`/
@@ -1183,14 +1183,22 @@ Do NOT run `npm publish` by hand anymore. Hand-publishing is exactly what caused
 the drift, and it also ties the bundled native binary to whatever machine you
 publish from.
 
-Cross-platform caveat (pre-existing, not solved by this workflow): the package
-ships a single `dist/native/rudder-native` built for one platform. The release
-runs on `macos-14`, so the published binary is macOS (arm64), matching what was
-shipped before. Linux and Intel-mac users get a binary that will not exec; the
-dashboard should fall back, but the native path is effectively macOS-arm64 only.
-Fixing that properly means a per-platform build matrix publishing
-`@viraatdas/rudder-<os>-<arch>` optional packages (the esbuild/swc model), which
-is a separate piece of work.
+Platforms: the release builds `rudder-native` on darwin-arm64, darwin-x64 and
+linux-x64 runners (`native-artifacts` matrix) and `copy-native` folds all three
+into `dist/native/<platform>-<arch>/`, so one package serves Apple Silicon,
+Intel Macs and Linux x64. Windows and linux-arm64 are not built.
+
+**Two package names (3.4.0).** The project moved from `viraatdas/rudder` to
+`exla-ai/rudder` (GitHub redirects the old URLs) and the npm package from
+`@viraatdas/rudder` to `@exla-ai/rudder`. Every release publishes the SAME build
+under both names (the workflow rewrites `name` and publishes again), so an old
+install auto-updates under its old name to a build whose `moveToRenamedPackage`
+(src/version-check.ts) uninstalls `@viraatdas/rudder` and installs
+`@exla-ai/rudder` (both own the `rudder` bin, so npm refuses EEXIST otherwise),
+putting the old version back if the new one will not install. Keep both
+publishes until old installs have drained; then `npm deprecate` the old name.
+The site moved to rudder.exla.ai (Vercel; DNS in Netlify's exla.ai zone);
+rudder.viraat.dev 308-redirects there (site/vercel.json).
 
 ---
 
@@ -2207,7 +2215,7 @@ cargo test/npm test) → judge panel (refute-first, fails closed)
   PR-only design): `improve.autonomy` is `observe | propose | ship(default)`. `ship`
   rebases onto origin/main, re-typechecks, `npm version patch`, and pushes main + tag
   in one non-forced push (`src/improve/ship.ts`). Guardrails: origin must match
-  `improve.allowedRemote` (viraatdas/rudder), the proposing agent may never touch
+  `improve.allowedRemote` (exla-ai/rudder), the proposing agent may never touch
   versions/tags, a failed push deletes the local tag, and a moved main wins (recorded
   as push-conflict, retried next cycle). `propose` pushes branch `improve/<id>` only.
 - **Advisor pattern for judgment calls** (user decision, 2026-07-07, to conserve

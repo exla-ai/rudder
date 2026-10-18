@@ -10,6 +10,12 @@ const AUTO_UPDATE_TIMEOUT_MS = 1000;
 
 const moduleDir = path.dirname(fileURLToPath(import.meta.url));
 
+export const PACKAGE_NAME = "@exla-ai/rudder";
+// Rudder was published as @viraatdas/rudder until the move to the exla-ai org
+// (3.4.0). Releases still publish that name too, so an old install updates to a
+// build that knows the new one and then moves itself across.
+export const LEGACY_PACKAGE_NAME = "@viraatdas/rudder";
+
 function cachePath(): string {
   const base = process.env.XDG_CACHE_HOME?.trim() || path.join(os.homedir(), ".cache");
   return path.join(base, "rudder", "update-check.json");
@@ -31,7 +37,7 @@ export function compareSemver(a: string, b: string): number {
   return 0;
 }
 
-async function readPackageInfo(): Promise<{ root: string; version: string } | null> {
+async function readPackageInfo(): Promise<{ root: string; version: string; name: string } | null> {
   // Try package.json relative to compiled dist/, then to source src/.
   const candidates = [
     path.join(moduleDir, "..", "package.json"),
@@ -41,8 +47,8 @@ async function readPackageInfo(): Promise<{ root: string; version: string } | nu
     try {
       const raw = await fsp.readFile(candidate, "utf8");
       const parsed = JSON.parse(raw) as { version?: unknown; name?: unknown };
-      if (parsed?.name === "@viraatdas/rudder" && typeof parsed.version === "string") {
-        return { root: path.dirname(candidate), version: parsed.version };
+      if ((parsed?.name === PACKAGE_NAME || parsed?.name === LEGACY_PACKAGE_NAME) && typeof parsed.version === "string") {
+        return { root: path.dirname(candidate), version: parsed.version, name: parsed.name };
       }
     } catch {
       // ignore
@@ -82,7 +88,7 @@ async function fetchLatest(timeoutMs = 1500): Promise<string | null> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const res = await fetch("https://registry.npmjs.org/@viraatdas/rudder/latest", {
+    const res = await fetch(`https://registry.npmjs.org/${PACKAGE_NAME}/latest`, {
       signal: controller.signal,
       headers: { accept: "application/json" },
     });
@@ -134,7 +140,7 @@ export function shouldAutoUpdateFromPackageRoot(packageRoot: string): boolean {
   if (fs.existsSync(path.join(root, ".git")) || fs.existsSync(path.join(root, "src", "main.ts"))) {
     return false;
   }
-  // `npx @viraatdas/rudder@...` is already an ephemeral install; turning that into
+  // `npx @exla-ai/rudder@...` is already an ephemeral install; turning that into
   // a global install is surprising and can fail under temp-directory permissions.
   const normalized = root.split(path.sep).join("/");
   if (normalized.includes("/_npx/") || normalized.includes("/.npm/_npx/")) {
@@ -149,6 +155,9 @@ export async function autoUpdateAndRerunIfNeeded(argv: string[]): Promise<boolea
     return false;
   }
   const latest = await fetchLatest(AUTO_UPDATE_TIMEOUT_MS);
+  if (latest && info.name === LEGACY_PACKAGE_NAME) {
+    return await moveToRenamedPackage(info.version, latest, argv);
+  }
   if (!latest || compareSemver(info.version, latest) >= 0) {
     if (latest) {
       await writeCache(latest);
@@ -185,8 +194,30 @@ export async function autoUpdateAndRerunIfNeeded(argv: string[]): Promise<boolea
 
 type InstallResult = { ok: boolean; output: string };
 
+// Both packages install the same `rudder` bin, so the old one has to go first
+// or npm refuses with EEXIST. When the new one will not install, the old
+// version goes back so nobody is left without a `rudder`.
+async function moveToRenamedPackage(current: string, latest: string, argv: string[]): Promise<boolean> {
+  console.error(`rudder: the package moved to ${PACKAGE_NAME}; switching this install over (${current} -> ${latest})...`);
+  await spawnCaptured("npm", ["uninstall", "-g", LEGACY_PACKAGE_NAME], { RUDDER_SKIP_AUTO_UPDATE: "1" });
+  const installed = await installLatest(latest);
+  if (!installed.ok) {
+    await spawnCaptured("npm", ["install", "-g", `${LEGACY_PACKAGE_NAME}@${current}`], { RUDDER_SKIP_AUTO_UPDATE: "1" });
+    console.error(`rudder: could not install ${PACKAGE_NAME}; staying on ${LEGACY_PACKAGE_NAME}@${current}`);
+    const detail = installed.output.trim();
+    if (detail) {
+      console.error(detail);
+    }
+    return false;
+  }
+  await writeCache(latest);
+  console.error(`rudder: now on ${PACKAGE_NAME}@${latest}; restarting command...`);
+  process.exitCode = await spawnExitCode("rudder", argv, { RUDDER_SKIP_AUTO_UPDATE: "1" });
+  return true;
+}
+
 async function installLatest(version: string): Promise<InstallResult> {
-  const result = await spawnCaptured("npm", ["install", "-g", `@viraatdas/rudder@${version}`], {
+  const result = await spawnCaptured("npm", ["install", "-g", `${PACKAGE_NAME}@${version}`], {
     RUDDER_SKIP_AUTO_UPDATE: "1",
   });
   return { ok: result.code === 0, output: result.output };

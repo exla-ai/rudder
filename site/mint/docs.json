@@ -11,7 +11,7 @@
   "logo": {
     "light": "/logo.svg",
     "dark": "/logo.svg",
-    "href": "https://rudder.viraat.dev"
+    "href": "https://rudder.exla.ai"
   },
   "favicon": "/logo.svg",
   "navigation": {
@@ -45,22 +45,22 @@
     "links": [
       {
         "label": "GitHub",
-        "href": "https://github.com/viraatdas/rudder"
+        "href": "https://github.com/exla-ai/rudder"
       },
       {
         "label": "npm",
-        "href": "https://www.npmjs.com/package/@viraatdas/rudder"
+        "href": "https://www.npmjs.com/package/@exla-ai/rudder"
       }
     ],
     "primary": {
       "type": "button",
       "label": "Website",
-      "href": "https://rudder.viraat.dev"
+      "href": "https://rudder.exla.ai"
     }
   },
   "footer": {
     "socials": {
-      "github": "https://github.com/viraatdas/rudder"
+      "github": "https://github.com/exla-ai/rudder"
     }
   }
 }

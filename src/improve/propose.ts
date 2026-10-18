@@ -42,7 +42,7 @@ export async function prepareWorktree(
 ): Promise<{ worktree: string; branch: string; baseRef: string }> {
   const repo = settings.repoPath;
   const pkg = await readJson<{ name?: string }>(path.join(repo, "package.json"));
-  if (pkg?.name !== "@viraatdas/rudder") {
+  if (pkg?.name !== "@exla-ai/rudder") {
     throw new Error(`improve.repoPath ${repo} is not a rudder checkout (package name ${pkg?.name ?? "missing"})`);
   }
 

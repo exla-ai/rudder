@@ -26,7 +26,7 @@ import { capture, projectHash } from "./analytics.js";
 import { dashboardRoot } from "./handoff.js";
 import { commandExists, runCommand, runCommandSync } from "./util.js";
 
-const DEFAULT_FEEDBACK_REPO = "viraatdas/rudder";
+const DEFAULT_FEEDBACK_REPO = "exla-ai/rudder";
 
 export interface FeedbackContext {
   /** Backend/model/effort the dashboard would use for a new agent. */

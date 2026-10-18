@@ -139,7 +139,7 @@ test("an unknown internal command is inert, not a task", () => {
 });
 
 test("feedbackRepo: a fork files its own issues", () => {
-  assert.equal(parseGithubSlug("https://github.com/viraatdas/rudder.git"), "viraatdas/rudder");
+  assert.equal(parseGithubSlug("https://github.com/exla-ai/rudder.git"), "exla-ai/rudder");
   assert.equal(parseGithubSlug("git@github.com:someone/fork.git"), "someone/fork");
   assert.equal(parseGithubSlug("https://gitlab.com/someone/thing.git"), undefined);
 });

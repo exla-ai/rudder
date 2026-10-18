@@ -119,7 +119,7 @@ const flyApiToken = process.env.FLY_API_TOKEN || "";
 const flyApiBase = (process.env.FLY_API_HOSTNAME || "https://api.machines.dev").replace(/\/$/, "");
 const flyAppName = (process.env.RUDDER_FLY_APP_NAME || process.env.FLY_APP_NAME || "").trim();
 const flyRegion = (process.env.RUDDER_FLY_REGION || process.env.FLY_REGION || "iad").trim();
-const flyWorkerImage = process.env.RUDDER_WORKER_IMAGE || "ghcr.io/viraatdas/rudder-worker:latest";
+const flyWorkerImage = process.env.RUDDER_WORKER_IMAGE || "ghcr.io/exla-ai/rudder-worker:latest";
 const flyWorkerMemoryMb = Number(process.env.RUDDER_WORKER_MEMORY_MB || 1024);
 const flyWorkerCpus = Number(process.env.RUDDER_WORKER_CPUS || 1);
 const flyWorkerCpuKind = process.env.RUDDER_WORKER_CPU_KIND || "shared";
@@ -1663,7 +1663,7 @@ function renderShell(options: { title: string; body: string; footer?: string }):
     <meta name="viewport" content="width=device-width,initial-scale=1">
     <meta name="theme-color" content="#ffffff">
     <title>${escapeHtml(options.title)}</title>
-    <link rel="icon" href="https://rudder.viraat.dev/favicon.svg" type="image/svg+xml">
+    <link rel="icon" href="https://rudder.exla.ai/favicon.svg" type="image/svg+xml">
     <style>
       :root { color:#111; background:#fff; font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; font-weight:300; }
       * { box-sizing: border-box; }
@@ -1704,10 +1704,10 @@ function renderShell(options: { title: string; body: string; footer?: string }):
   <body>
     <div class="page">
       <header>
-        <a class="brand" href="https://rudder.viraat.dev">${BRAND_SVG}<span>Rudder Cloud</span></a>
+        <a class="brand" href="https://rudder.exla.ai">${BRAND_SVG}<span>Rudder Cloud</span></a>
         <nav>
-          <a href="https://rudder.viraat.dev">rudder.viraat.dev</a>
-          <a href="https://github.com/viraatdas/rudder">GitHub</a>
+          <a href="https://rudder.exla.ai">rudder.exla.ai</a>
+          <a href="https://github.com/exla-ai/rudder">GitHub</a>
         </nav>
       </header>
       <main>${options.body}</main>
@@ -1725,7 +1725,7 @@ function renderGithubAppSetup(url: URL, res: ServerResponse): void {
     : `https://github.com/settings/apps/new?state=${encodeURIComponent(state)}`;
   const manifest = {
     name: org ? `Rudder Cloud (${org})` : "Rudder Cloud",
-    url: "https://rudder.viraat.dev",
+    url: "https://rudder.exla.ai",
     hook_attributes: {
       url: `${baseURL}/api/github/events`,
       active: false,

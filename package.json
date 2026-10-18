@@ -1,5 +1,5 @@
 {
-  "name": "@viraatdas/rudder",
+  "name": "@exla-ai/rudder",
   "version": "3.3.1",
   "description": "A TUI for managing coding agents: run Claude Code, Codex and opencode side by side, each in its own isolated jj workspace.",
   "keywords": [
@@ -14,10 +14,10 @@
     "cli"
   ],
   "license": "Elastic-2.0",
-  "homepage": "https://rudder.viraat.dev",
+  "homepage": "https://rudder.exla.ai",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/viraatdas/rudder.git"
+    "url": "git+https://github.com/exla-ai/rudder.git"
   },
   "type": "module",
   "bin": {

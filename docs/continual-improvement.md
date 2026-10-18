@@ -254,7 +254,7 @@ A judged survivor ships itself, following the repo release rule end to end
    (`release.yml`) validates tag == package.json version and publishes to npm.
 
 Guardrails on the unattended push: the ship stage refuses to run unless
-`origin` matches `improve.allowedRemote` (default `viraatdas/rudder`); the
+`origin` matches `improve.allowedRemote` (default `exla-ai/rudder`); the
 proposing agent is forbidden from touching versions/tags itself; a failed
 push deletes the local tag so retries never collide.
 

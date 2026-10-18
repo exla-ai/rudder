@@ -874,7 +874,7 @@
     padding-top: 36px;
   }
   /* The install command is the page's one primary action; clipping it mid-scope
-   * at `@viraatdas/rudder@` with no scroll affordance hid what you are running. */
+   * at `@exla-ai/rudder@` with no scroll affordance hid what you are running. */
   .install code {
     white-space: normal;
     overflow-wrap: anywhere;

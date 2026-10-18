@@ -77,7 +77,7 @@ export const IMPROVE_DEFAULTS = {
   autonomy: "propose" as ImproveAutonomy,
   budgetUsd: 5,
   maxFindings: 3,
-  allowedRemote: "viraatdas/rudder",
+  allowedRemote: "exla-ai/rudder",
   minerModel: "claude-sonnet-4-6",
   judgeModel: "claude-sonnet-4-6",
   advisorModel: "claude-fable-5",

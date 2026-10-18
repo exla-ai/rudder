@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Bootstrap a local development environment for @viraatdas/rudder.
+# Bootstrap a local development environment for @exla-ai/rudder.
 # Checks prerequisites, installs dependencies, builds the TypeScript + Rust
 # native binary, type-checks, and smoke-tests the built CLI.
 #

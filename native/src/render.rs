@@ -1660,7 +1660,7 @@ pub(crate) fn render_agents(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
         lines.insert(
             lines.len() - 1,
             (Line::from(Span::styled(
-                "  npm i -g @viraatdas/rudder",
+                "  npm i -g @exla-ai/rudder",
                 muted_style(focused),
             ))),
         );

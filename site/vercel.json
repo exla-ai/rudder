@@ -3,6 +3,17 @@
   "trailingSlash": false,
   "redirects": [
     {
+      "source": "/:path*",
+      "has": [
+        {
+          "type": "host",
+          "value": "rudder.viraat.dev"
+        }
+      ],
+      "destination": "https://rudder.exla.ai/:path*",
+      "permanent": true
+    },
+    {
       "source": "/login",
       "destination": "https://rudder-cloud-control.fly.dev/cli/login",
       "permanent": false

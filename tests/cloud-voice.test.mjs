@@ -181,6 +181,28 @@ unitTest("tool calls do on the home machine what the app's buttons do", async ()
   assert.equal((await voice.runVoiceTool(failing, "start_task", JSON.stringify({ project: "libra", text: "x" }))).output, "That did not work: the libra dashboard is starting");
 });
 
+unitTest("while a conversation is open, a finished, failed or blocked agent becomes news, once", () => {
+  const list = projects();
+  const first = voice.voiceUpdates(list, null);
+  assert.deepEqual(first.updates, [], "the first poll only starts the watch");
+  assert.deepEqual(voice.voiceUpdates(list, first.seen).updates, [], "nothing changed, nothing said");
+
+  list[0].agents[0].status = "review";
+  list[0].agents[0].lastMessage = "Fixed the redirect.\nAll tests pass.";
+  list[1].agents[1].status = "failed";
+  list[0].agents.push({ id: "run-new", title: "Write the changelog", status: "working" });
+  list[0].agents[1].asks = [permissionAsk, { ...permissionAsk, id: "1700000000009-dddddddd", input: { command: "rm -rf dist" } }];
+  const next = voice.voiceUpdates(list, first.seen);
+  assert.deepEqual(next.updates, [
+    "\"Fix login redirect\" in libra finished and is ready to review and merge. Its last message: Fixed the redirect. All tests pass.",
+    "\"Billing page polish\" in libra needs the user: permission to use Bash: rm -rf dist",
+    "\"Write the changelog\" in libra started.",
+    "\"Checkout plan\" in shop failed.",
+  ]);
+  assert.deepEqual(voice.voiceUpdates(list, next.seen).updates, [], "said once");
+  assert.match(voice.voiceUpdateMessage(next.updates), /^Live update from Rudder \(not from the user\)/);
+});
+
 // ---------------------------------------------------------------------------
 
 const tokenHash = (token) => createHash("sha256").update(token).digest("hex").slice(0, 32);

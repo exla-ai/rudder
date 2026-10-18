@@ -13,7 +13,7 @@ import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import type { Duplex } from "node:stream";
 import { WebSocket, WebSocketServer } from "ws";
 import { createSecretsVault, SecretsVaultError, type SecretItemInput, type SecretsVault } from "./secrets.js";
-import { runVoiceTool, voiceGreeting, voiceInstructions, voiceSessionConfig, type VoiceContext, type VoiceProject } from "./voice.js";
+import { runVoiceTool, voiceGreeting, voiceInstructions, voiceSessionConfig, voiceUpdateMessage, voiceUpdates, type VoiceContext, type VoiceProject } from "./voice.js";
 import {
   formatOutputForSlack,
   parseSlackCommand,
@@ -6200,6 +6200,17 @@ async function handleAppApi(req: IncomingMessage, res: ServerResponse, url: URL)
       touchHome(home.id);
     }
     sendJson(res, 200, await runVoiceTool(voiceContext(account.accountId), name, args ?? null));
+    return;
+  }
+  if (req.method === "POST" && url.pathname === "/api/app/voice/updates") {
+    // Polled every few seconds during a conversation; null `seen` starts the watch.
+    const body = await readJsonBody(req);
+    const raw = body && typeof body === "object" && !Array.isArray(body) ? body.seen : null;
+    const seen = raw && typeof raw === "object" && !Array.isArray(raw)
+      ? Object.fromEntries(Object.entries(raw).filter(([, value]) => typeof value === "string").slice(0, 2000)) as Record<string, string>
+      : null;
+    const result = voiceUpdates(voiceProjects(account.accountId), seen);
+    sendJson(res, 200, { ...result, message: result.updates.length ? voiceUpdateMessage(result.updates) : null });
     return;
   }
   if (!home) {

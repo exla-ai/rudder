@@ -435,6 +435,71 @@ async function findRepos(ctx: VoiceContext, args: Record<string, unknown>): Prom
 }
 
 // ---------------------------------------------------------------------------
+// News while a conversation is open: an agent finished, failed or needs you.
+// The phone polls with what it last saw and speaks what changed, so the user
+// hears it without asking. Keyed by "<workspace>/<run>", valued by a short
+// fingerprint of the facts worth announcing.
+// ---------------------------------------------------------------------------
+
+export type VoiceSeen = Record<string, string>;
+
+function fingerprint(agent: VoiceAgent): string {
+  return `${agent.status ?? ""}|${(agent.asks ?? []).map((ask) => ask.id).join(",")}`;
+}
+
+export function voiceUpdates(projects: VoiceProject[], seen: VoiceSeen | null): { updates: string[]; seen: VoiceSeen } {
+  const next: VoiceSeen = {};
+  const updates: string[] = [];
+  for (const project of projects) {
+    for (const agent of project.agents) {
+      const key = `${project.workspaceId}/${agent.id}`;
+      next[key] = fingerprint(agent);
+      if (!seen) {
+        continue;
+      }
+      const before = seen[key];
+      if (before === next[key]) {
+        continue;
+      }
+      const [oldStatus = "", oldAsks = ""] = (before ?? "").split("|");
+      const known = new Set(oldAsks.split(",").filter(Boolean));
+      const fresh = (agent.asks ?? []).filter((ask) => !known.has(ask.id));
+      const name = `"${shortTitle(agent)}" in ${project.name}`;
+      if (fresh.length) {
+        updates.push(`${name} needs the user: ${describeAsk(fresh[0])}`);
+      } else if (agent.status !== oldStatus) {
+        const said = agent.lastMessage || agent.summary;
+        const tail = said ? ` Its last message: ${clip(oneLine(said), 300)}` : "";
+        if (before === undefined) {
+          if (agent.status === "working" || agent.status === "starting") {
+            updates.push(`${name} started.`);
+          }
+        } else if (agent.status === "review") {
+          updates.push(`${name} finished and is ready to review and merge.${tail}`);
+        } else if (agent.status === "done") {
+          updates.push(`${name} finished.${tail}`);
+        } else if (agent.status === "merged") {
+          updates.push(`${name} was merged.`);
+        } else if (agent.status === "failed") {
+          updates.push(`${name} failed.${tail}`);
+        } else if (agent.status === "waiting") {
+          updates.push(`${name} is waiting for the user.${tail}`);
+        }
+      }
+    }
+  }
+  return { updates, seen: next };
+}
+
+/** The message the phone adds to the conversation so the model says the news. */
+export function voiceUpdateMessage(updates: string[]): string {
+  return [
+    "Live update from Rudder (not from the user). Tell the user right away, in one or two short spoken sentences, then stop and listen:",
+    ...updates.slice(0, 6).map((update) => `- ${update}`),
+  ].join("\n");
+}
+
+// ---------------------------------------------------------------------------
 // Words to projects and agents.
 // ---------------------------------------------------------------------------
 

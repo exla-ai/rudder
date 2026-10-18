@@ -1058,6 +1058,31 @@ brain lives in the cloud, and the phone is a first-class client.
   (`rudder.setupDone`); a never-connected GitHub is a setup step there, not a red
   machine-card error.
 
+- **Talking to Rudder (phone and CarPlay, `cloud/src/voice.ts`).** The phone holds
+  the audio and speaks to OpenAI's realtime model directly over a WebSocket
+  (`VoiceAssistant.swift`: AVAudioEngine with voice processing for echo
+  cancellation, pcm16 24 kHz both ways, barge-in truncates the playing item), with a
+  10-minute client secret from `POST /api/app/voice/session`. That route configures
+  the WHOLE session (instructions with a snapshot of the account's projects and
+  agents, semantic VAD, far-field noise reduction, input transcription for
+  captions, the tools), so the app sends no config of its own and the prompt and
+  tools change with a control-plane deploy, not an App Store build. A 400 from the
+  mint is retried without the extras (noise reduction, transcription). Every tool
+  call is relayed to `POST /api/app/voice/tool` and run here against the home
+  machine with the same RPCs as the app's buttons (overview, agent detail with its
+  transcript tail, message, task, answer a permission / questions / plan,
+  interrupt = Esc, stop / merge / delete, find and open repos, end). Spoken names
+  resolve by word overlap (`resolveProject` / `resolveAgent`); no name means the
+  one that needs you; ambiguity goes back to the model as a question. Decided with
+  the user: act without spoken confirmation. Env: `OPENAI_API_KEY` (or
+  `RUDDER_OPENAI_API_KEY`, 503 without), `RUDDER_VOICE_MODEL` (default
+  `gpt-realtime-2.1`), `RUDDER_VOICE` (`marin`), `RUDDER_VOICE_TRANSCRIBE_MODEL`
+  (`""` turns captions off). CarPlay (`CarPlaySceneDelegate.swift`) is a list
+  (Talk to Rudder, then what needs you) that presents `CPVoiceControlTemplate`
+  while a conversation runs; it only appears once Apple grants the
+  `com.apple.developer.carplay-voice-based-conversation` entitlement (iOS 26.4+)
+  and the App Store profile carries it, since signing takes entitlements from
+  the profile.
 - **Developing Rudder on the home machine.** Rust is not in the worker image; the
   supervisor installs it once onto the volume (`~/.cargo`, `~/.rustup`, persisted
   like `~/.claude`) in the background on first boot, and agents get

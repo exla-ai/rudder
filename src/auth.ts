@@ -164,6 +164,11 @@ export async function runDoctor(options?: { json?: boolean }): Promise<void> {
   if (!detection.acpxCommand) {
     console.log("  fix:    run `npm install -g acpx@latest` or `rudder onboard`");
   }
+  // On a terminal: offer Claude Code / Codex when missing, and list the repos
+  // already on the cloud machine when this computer is signed in.
+  const { runLaptopOnboarding } = await import("./onboarding.js");
+  const { cloudRepoSummaries } = await import("./cloud.js");
+  await runLaptopOnboarding({ json: options?.json, cloudRepos: cloudRepoSummaries });
   if (!detection.jjCommand) {
     const reason = managedJjInstallError();
     console.log(`  fix:    ${reason ? `Rudder could not set jj up (${reason}). ` : ""}${formatMissingToolMessage("jj")}`);

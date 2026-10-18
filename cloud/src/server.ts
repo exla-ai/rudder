@@ -5694,6 +5694,28 @@ async function handleHomeApi(req: IncomingMessage, res: ServerResponse, url: URL
     sendJson(res, 200, await openRepoOnHome(authContext.accountId, body));
     return;
   }
+  if (req.method === "POST" && url.pathname === "/api/rudder/home/sync") {
+    // `rudder cloud sync`: each named repo (default: every repo open there)
+    // fetches and moves to its newest default branch on the home machine.
+    const body = await readJsonBody(req);
+    const raw = (body as JsonRecord).repos;
+    const wanted = (Array.isArray(raw) ? raw : [])
+      .filter((slug): slug is string => typeof slug === "string" && REPO_SLUG_RE.test(slug))
+      .map((slug) => slug.toLowerCase());
+    const home = await homeWithControl(authContext.accountId);
+    const repos = homeRepos(home.id).filter((row) => wanted.length === 0 || wanted.includes(repoSlugFromUrl(row.repoUrl).toLowerCase()));
+    const results: JsonRecord[] = [];
+    for (const repo of repos) {
+      const slug = repoSlugFromUrl(repo.repoUrl);
+      try {
+        results.push({ repo: slug, report: await homeRpc(home.id, "sync", { workspaceId: repo.id }, 120_000) });
+      } catch (error) {
+        results.push({ repo: slug, error: error instanceof Error ? error.message : String(error) });
+      }
+    }
+    sendJson(res, 200, { results });
+    return;
+  }
   if (req.method === "POST" && url.pathname === "/api/rudder/home/start") {
     const home = await ensureHomeRunning(authContext.accountId);
     sendJson(res, 200, { home: homeSummary(home) });

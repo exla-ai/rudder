@@ -883,6 +883,15 @@ brain lives in the cloud, and the phone is a first-class client.
   the home no longer has; `known: false` (asleep, cloning) is never read as deleted.
   `dd` on a moved row runs `rudder cloud home delete`, which the control plane queues
   until a sleeping home reconnects.
+- **`/sync` (`rudder cloud sync`, `src/checkout-sync.ts`).** GitHub is the meeting
+  point between devices, so sync is: this checkout and the home machine's clone
+  (`rudder __sync-checkout`, run by the supervisor's `sync` RPC behind
+  `POST /api/rudder/home/sync`, which wakes the home) each fetch and move to the newest
+  default branch ONLY when nothing would be lost or tangled: git fast-forwards a clean
+  checkout on the default branch; jj runs `jj new main@origin` when `@` is empty and
+  nothing below it is unpushed. Uncommitted or unpushed work on either side is reported,
+  never pushed, rebased or overwritten. It also brings the vault's copy of the laptop's
+  config level (`ensureVaultAws`). `/sync all` / `--all` covers every repo on the home.
 - **The phone answers prompts like the Claude app** (`native/src/permission_hook.mjs`,
   `cloud/worker/asks.mjs`). On the home runtime every Claude agent's settings get a
   `PermissionRequest` hook (timeout a day). Claude shows its own dialog WHILE the hook

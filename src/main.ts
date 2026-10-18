@@ -210,6 +210,12 @@ export async function main(): Promise<void> {
       await runGraphMirror(parsed);
       return;
     }
+    case "__sync-checkout": {
+      // The home machine's half of `rudder cloud sync`, run in its clone.
+      const { syncCheckout } = await import("./checkout-sync.js");
+      console.log(JSON.stringify(await syncCheckout(findRepoRoot())));
+      return;
+    }
     case "__adopt-moved": {
       await runAdoptMoved(parsed);
       return;

@@ -21,6 +21,7 @@ import {
 } from "./migration.js";
 import { buildMoveBundle, findMoveCandidates, markRunsMovedHome, type MoveCandidate } from "./move-home.js";
 import { cloudAuthPath } from "./state.js";
+import { describeSync, syncCheckout, type CheckoutSyncReport } from "./checkout-sync.js";
 import type { CloudAuthState, CloudSail, JsonValue } from "./types.js";
 import {
   ensureDir,
@@ -240,6 +241,9 @@ export async function runCloudCommand(command: string, args: string[], options: 
       return;
     case "doctor":
       await cloudDoctor(options);
+      return;
+    case "sync":
+      await cloudSync(rest, options);
       return;
     case "app":
     case "pair":
@@ -4520,6 +4524,53 @@ async function reportCredentialParity(client: CloudClient, { problemsOnly }: { p
     process.stderr.write("The home machine has not finished checking its logins yet; try again in a minute.\n");
   }
   return problems.length;
+}
+
+// `rudder cloud sync` (and `/sync` in the dashboard): GitHub is the meeting
+// point, so this checkout and the home machine's clone each fetch and move to
+// the newest default branch when that is safe, and the vault's copy of this
+// laptop's config is brought level. Unpushed or uncommitted work on either side
+// is reported, never pushed or overwritten. `--all` syncs every repo open on
+// the home machine.
+async function cloudSync(args: string[], options: CloudCommandOptions): Promise<void> {
+  const client = await cloudClient({ requireToken: true });
+  const all = args.includes("--all");
+  const root = findRepoRoot();
+  const slug = await githubSlugFromOrigin(root);
+  const lines: string[] = [];
+  let local: CheckoutSyncReport | null = null;
+  if (slug) {
+    local = await syncCheckout(root);
+    lines.push(describeSync(`this laptop (${slug})`, local));
+  } else if (!all) {
+    throw new Error("This repo has no GitHub origin, so there is nothing on the home machine to sync it with. `rudder cloud sync --all` syncs every repo there.");
+  }
+  await ensureVaultAws(client).catch((error: unknown) => {
+    lines.push(`config: could not update the vault (${error instanceof Error ? error.message : String(error)})`);
+  });
+  if (!options.json) {
+    process.stderr.write("Asking the cloud machine (waking it if it is asleep)...\n");
+  }
+  const cloud = await client.request<{ results?: { repo: string; report?: CheckoutSyncReport; error?: string }[] }>("/api/rudder/home/sync", {
+    method: "POST",
+    body: all || !slug ? {} : { repos: [slug] },
+  });
+  const results = cloud.results ?? [];
+  if (options.json) {
+    printJson({ local, cloud: results } as unknown as JsonValue);
+    return;
+  }
+  for (const result of results) {
+    lines.push(result.report ? describeSync(`cloud (${result.repo})`, result.report) : `cloud (${result.repo}): ${result.error ?? "no answer"}`);
+  }
+  if (slug && results.length === 0) {
+    lines.push(`cloud: ${slug} is not open on the cloud machine (\`rudder cloud\` opens it there)`);
+  }
+  const unpushed = [local, ...results.map((result) => result.report)].filter((report): report is CheckoutSyncReport => !!report && report.ahead > 0);
+  if (unpushed.length > 0) {
+    lines.push("Unpushed work stays where it is: push it (or merge its PR) and run /sync again to bring the other side up.");
+  }
+  console.log(lines.join("\n"));
 }
 
 async function cloudDoctor(options: CloudCommandOptions): Promise<void> {

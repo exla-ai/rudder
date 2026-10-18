@@ -666,6 +666,16 @@ pub(crate) fn command_suggestions() -> Vec<Suggestion> {
             action: SuggestionAction::RunCommand("/cloud".to_string()),
         },
         Suggestion {
+            label: "/sync".to_string(),
+            detail: "pull the latest here and on the cloud machine, and sync config".to_string(),
+            action: SuggestionAction::RunCommand("/sync".to_string()),
+        },
+        Suggestion {
+            label: "/sync all".to_string(),
+            detail: "sync every repo on the cloud machine".to_string(),
+            action: SuggestionAction::RunCommand("/sync all".to_string()),
+        },
+        Suggestion {
             label: "/cloud off".to_string(),
             detail: "return plain task input to local workers".to_string(),
             action: SuggestionAction::RunCommand("/cloud off".to_string()),

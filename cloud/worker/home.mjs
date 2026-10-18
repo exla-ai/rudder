@@ -502,6 +502,19 @@ async function handleRpc(method, params) {
   if (method === "answer") {
     return await answerAsk(project, params);
   }
+  if (method === "sync") {
+    // `rudder cloud sync`: the same checkout sync the laptop runs, in this clone.
+    if (project.status === "cloning" || !fs.existsSync(path.join(project.dir, ".git"))) {
+      throw new Error("still cloning");
+    }
+    const result = await captureAll("rudder", ["__sync-checkout"], { env: { ...baseChildEnv }, cwd: project.dir, timeoutMs: 110_000 });
+    const line = result.stdout.trim().split("\n").reverse().find((entry) => entry.trim().startsWith("{")) || "";
+    try {
+      return JSON.parse(line);
+    } catch {
+      throw new Error(firstLine(result.stderr || result.stdout) || `sync exited ${result.code}`);
+    }
+  }
   if (method === "action") {
     const kind = params.action === "merge" ? "merge" : params.action === "stop" ? "cancel" : params.action === "delete" ? "delete" : null;
     if (!kind) {

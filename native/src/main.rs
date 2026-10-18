@@ -11177,7 +11177,7 @@ It will tend to agree with itself — name another with /gam <provider> <model> 
             }
             Some("/help") => {
                 self.notice = Some(
-                    "plain input -> one isolated mergeable worker in its own jj workspace · /plan <task> -> an orchestrator that plans and runs a DAG · /gam [model] <task> -> generator + adversarial reviewer pair; the reviewer can steer the generator mid-turn and stop it outright (split panes, ^W a toggles sides, ^W t shows the dialogue) · /main|/m <task> -> another agent in this shared checkout · $ <command> -> a shell in this checkout running it ($ alone opens a shell) · panes: Option-1/2/3/4 (4 = diff panel) or ^W · keys: j/k select · Option-[ / Option-] step agents from any pane · Enter focus · m merge · u undo a merge · M merge all · R review all · H move running agents to the home machine · g nest · ⌥d diff panel (n/p files, j/k scroll) · o web ui · U usage dashboard · x stop · b branch chat · dd delete · cc clear merged · P model; · /handoff -> the selected agent moves to the home machine and resumes there; commands: /model /fast /sound /notify /color /main /plan /gam /resume /restore /handoff /share /usage /goal /cloud /web /feedback"
+                    "plain input -> one isolated mergeable worker in its own jj workspace · /plan <task> -> an orchestrator that plans and runs a DAG · /gam [model] <task> -> generator + adversarial reviewer pair; the reviewer can steer the generator mid-turn and stop it outright (split panes, ^W a toggles sides, ^W t shows the dialogue) · /main|/m <task> -> another agent in this shared checkout · $ <command> -> a shell in this checkout running it ($ alone opens a shell) · panes: Option-1/2/3/4 (4 = diff panel) or ^W · keys: j/k select · Option-[ / Option-] step agents from any pane · Enter focus · m merge · u undo a merge · M merge all · R review all · H move running agents to the home machine · g nest · ⌥d diff panel (n/p files, j/k scroll) · o web ui · U usage dashboard · x stop · b branch chat · dd delete · cc clear merged · P model; · /handoff -> the selected agent moves to the home machine and resumes there; commands: /model /fast /sound /notify /color /main /plan /gam /resume /restore /handoff /share /usage /goal /cloud /sync /web /feedback"
                         .to_string(),
                 );
                 true
@@ -11293,11 +11293,19 @@ It will tend to agree with itself — name another with /gam <provider> <model> 
                 true
             }
             Some("/sync") => {
-                // Retired: jj keeps node workspaces current automatically, so manual
-                // workspace sync no longer fits the orchestrator paradigm.
-                self.notice = Some(
-                    "sync is retired; jj keeps node workspaces current automatically".to_string(),
-                );
+                // Laptop <-> cloud through GitHub: this checkout and the home
+                // machine's clone each pull the newest default branch when safe,
+                // and the vault's copy of this laptop's config is brought level
+                // (`rudder cloud sync`). `/sync all` does every repo on the home.
+                if !rudder_cloud_authenticated() {
+                    self.notice = Some("not logged in to Rudder Cloud; run /login first".to_string());
+                    return true;
+                }
+                let mut args = vec!["cloud".to_string(), "sync".to_string()];
+                if parts.next() == Some("all") {
+                    args.push("--all".to_string());
+                }
+                self.start_rudder_cli_command("cloud sync", args);
                 true
             }
             Some("/review-all") => {

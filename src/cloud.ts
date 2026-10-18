@@ -22,6 +22,8 @@ import {
 } from "./migration.js";
 import { buildMoveBundle, findMoveCandidates, markRunsMovedHome, type MoveCandidate } from "./move-home.js";
 import { cloudAuthPath } from "./state.js";
+import { runLaptopOnboarding, type CloudRepoSummary } from "./onboarding.js";
+import { renderQrForTerminal } from "./qr.js";
 import { describeSync, exportWork, importWork, syncCheckout, type CheckoutSyncReport } from "./checkout-sync.js";
 import type { CloudAuthState, CloudSail, JsonValue } from "./types.js";
 import {
@@ -61,12 +63,18 @@ type LoginStartResponse = {
   verificationUri?: string;
   pollUrl?: string;
   deviceCode?: string;
+  /** The short code a signed-in phone approves, and the page it does it on. */
+  userCode?: string;
+  approveUrl?: string;
   interval?: number;
   expiresIn?: number;
 };
 
 type LoginPollResponse = {
   pending?: boolean;
+  denied?: boolean;
+  /** "phone" when a signed-in phone approved this login. */
+  via?: string;
   token?: string;
   accessToken?: string;
   accountId?: string;
@@ -367,6 +375,10 @@ async function login(options: CloudCommandOptions, args: string[] = []): Promise
   // account picker instead of a page of buttons. `--github` picks GitHub.
   const provider = args.includes("--github") ? "github" : "google";
   const browserLogin = await tryBrowserLogin(client, options, provider).catch((error) => {
+    // A no on the phone is an answer: never sign in some other way behind it.
+    if (error instanceof LoginDeniedError) {
+      throw error;
+    }
     if (!options.json) {
       console.warn(`Browser login unavailable: ${error instanceof Error ? error.message : String(error)}`);
       console.warn("Trying local GitHub auth fallback...");
@@ -376,7 +388,7 @@ async function login(options: CloudCommandOptions, args: string[] = []): Promise
   if (browserLogin?.token || browserLogin?.accessToken) {
     const token = browserLogin.token ?? browserLogin.accessToken;
     if (token) {
-      await saveCloudLogin(client, browserLogin, token, options, "browser");
+      await saveCloudLogin(client, browserLogin, token, options, browserLogin.via ?? "browser");
       return;
     }
   }
@@ -404,7 +416,7 @@ async function tryBrowserLogin(
   client: CloudClient,
   options: CloudCommandOptions,
   provider: "google" | "github" = "google",
-): Promise<LoginPollResponse | null> {
+): Promise<(LoginPollResponse & { via?: string }) | null> {
   const response = await client.request<LoginStartResponse>("/api/cli/login", {
     method: "POST",
     body: {
@@ -420,25 +432,77 @@ async function tryBrowserLogin(
   const intervalMs = Math.max(1000, (response.interval ?? DEFAULT_LOGIN_INTERVAL_MS / 1000) * 1000);
   const timeoutMs = Math.max(intervalMs, (response.expiresIn ?? DEFAULT_LOGIN_TIMEOUT_MS / 1000) * 1000);
 
-  console.log(`Opening ${loginUrl}`);
-  if (!options.json) {
-    openBrowser(loginUrl);
+  // A phone already signed in to Rudder can approve this computer: show the
+  // code and a QR of the approve page, and open the browser only on Enter.
+  // Without a terminal to press Enter in, the browser opens as before.
+  const interactive = !options.json && Boolean(process.stdin.isTTY && process.stdout.isTTY);
+  let browserOpened = false;
+  const openLoginBrowser = () => {
+    if (browserOpened) {
+      return;
+    }
+    browserOpened = true;
+    console.log(`Opening ${loginUrl}`);
+    if (!options.json) {
+      openBrowser(loginUrl);
+    }
+    console.log("Waiting for browser login to complete...");
+  };
+  let enterListener: import("node:readline").Interface | null = null;
+  if (response.userCode && response.approveUrl && !options.json) {
+    console.log("");
+    console.log("Sign this computer in from your phone: open Rudder, tap \"Sign in a computer\" and enter");
+    console.log("");
+    console.log(`    ${response.userCode}`);
+    console.log("");
+    if (process.stdout.isTTY) {
+      try {
+        console.log("or scan this with the phone's camera:");
+        console.log(renderQrForTerminal(response.approveUrl, { indent: "    " }));
+      } catch {
+        // A url too long for the encoder: the code above still works.
+      }
+    }
+    console.log(`(${response.approveUrl})`);
+    console.log("");
+    if (interactive) {
+      console.log("Press Enter to sign in in the browser instead.");
+      const readline = await import("node:readline");
+      enterListener = readline.createInterface({ input: process.stdin });
+      enterListener.on("line", openLoginBrowser);
+    } else {
+      openLoginBrowser();
+    }
+  } else {
+    openLoginBrowser();
   }
-  console.log("Waiting for browser login to complete...");
 
-  const startedAt = Date.now();
-  while (Date.now() - startedAt < timeoutMs) {
-    await sleep(intervalMs);
-    const poll = await pollLogin(client, pollPath, deviceCode);
-    const token = poll.token ?? poll.accessToken;
-    if (token) {
-      return poll;
+  try {
+    const startedAt = Date.now();
+    while (Date.now() - startedAt < timeoutMs) {
+      await sleep(intervalMs);
+      const poll = await pollLogin(client, pollPath, deviceCode);
+      const token = poll.token ?? poll.accessToken;
+      if (token) {
+        return { ...poll, via: poll.via === "phone" ? "your phone" : "browser" };
+      }
+      if (poll.denied) {
+        throw new LoginDeniedError();
+      }
+      if (poll.pending === false) {
+        throw new Error("Cloud login was not approved.");
+      }
     }
-    if (poll.pending === false) {
-      throw new Error("Cloud login was not approved.");
-    }
+    throw new Error("Timed out waiting for cloud login.");
+  } finally {
+    enterListener?.close();
   }
-  throw new Error("Timed out waiting for cloud login.");
+}
+
+class LoginDeniedError extends Error {
+  constructor() {
+    super("The sign-in was denied on your phone. Run `rudder login` again to retry.");
+  }
 }
 
 async function tryGithubCliLogin(client: CloudClient): Promise<LoginPollResponse | null> {
@@ -564,6 +628,21 @@ async function saveCloudLogin(
     printJson(result);
   } else {
     console.log(`Logged in to ${client.baseUrl}${login.email ? ` as ${login.email}` : ""} via ${source}.`);
+    // First run on this computer: agent CLIs, then what is in the cloud.
+    await runLaptopOnboarding({ json: options.json, cloudRepos: cloudRepoSummaries });
+  }
+}
+
+/** The repos open on this account's cloud machine, for onboarding; null when signed out or unreachable. */
+export async function cloudRepoSummaries(): Promise<CloudRepoSummary[] | null> {
+  try {
+    const client = await cloudClient({ requireToken: true });
+    const view = await client.request<{ projects?: { repo?: string; agents?: unknown[] }[] }>("/api/rudder/home", { method: "GET" });
+    return (view.projects ?? [])
+      .filter((project) => typeof project.repo === "string" && project.repo)
+      .map((project) => ({ repo: String(project.repo), agents: Array.isArray(project.agents) ? project.agents.length : 0 }));
+  } catch {
+    return null;
   }
 }
 

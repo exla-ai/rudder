@@ -139,6 +139,7 @@ test("a signed-in phone approves `rudder login` with a short code", async (t) =>
   assert.match(done.token, /^rdr_/);
   assert.equal(done.accountId, "acct-phone");
   assert.equal(done.email, "me@example.com");
+  assert.equal(done.via, "phone");
   const state = await (await fetch(`${base}/api/app/state`, { headers: { authorization: `Bearer ${done.token}` } })).json();
   assert.equal(state.email, "me@example.com");
   // Picked up once.
@@ -191,6 +192,48 @@ test("an approve code expires with its login", async (t) => {
   const late = await post("/api/app/computer/approve", { code: started.userCode, approve: true }, { authorization: "Bearer rdr_phone_late" });
   assert.equal(late.status, 400);
   assert.equal((await post("/api/cli/login/poll", { deviceCode: started.deviceCode })).status, 404);
+});
+
+test("`rudder login` prints the code, and a phone approval signs the CLI in", async (t) => {
+  const { base, dbPath } = await bootServer(t);
+  addToken(dbPath, "rdr_phone_cli", "acct-cli", "me@example.com");
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "rudder-login-cli-"));
+  // No terminal here, so the browser opens as it always did: a fake `open`
+  // records it instead of showing a page.
+  const bin = path.join(home, "bin");
+  fs.mkdirSync(bin);
+  for (const name of ["open", "xdg-open"]) {
+    fs.writeFileSync(path.join(bin, name), `#!/bin/sh\necho "$@" >> "${path.join(home, "opened.txt")}"\n`, { mode: 0o755 });
+  }
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  const child = spawn(process.execPath, [path.join(here, "..", "dist", "index.js"), "login"], {
+    env: {
+      ...process.env,
+      PATH: `${bin}:${process.env.PATH}`,
+      RUDDER_HOME: home,
+      RUDDER_CLOUD_URL: base,
+      RUDDER_CLOUD_TOKEN: "",
+      RUDDER_DISABLE_AUTO_UPDATE: "1",
+      RUDDER_TELEMETRY: "0",
+      RUDDER_SKIP_GH_CLI: "1",
+    },
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  let out = "";
+  child.stdout.on("data", (d) => { out += d.toString(); });
+  child.stderr.on("data", (d) => { out += d.toString(); });
+  const exited = new Promise((resolve) => child.on("exit", resolve));
+  t.after(() => child.kill("SIGKILL"));
+  const code = (await waitFor(() => /\n {4}([A-HJ-NP-Z2-9]{3}-[A-HJ-NP-Z2-9]{3})\n/.exec(out), { timeout: 15000 }))[1];
+  assert.match(out, new RegExp(`/app/approve\\?code=${code}`));
+  assert.doesNotMatch(out, /\x1b\[30;47m/, "no QR drawn into a pipe");
+  const approved = await client(base)("/api/app/computer/approve", { code, approve: true }, { authorization: "Bearer rdr_phone_cli" });
+  assert.equal(approved.status, 200);
+  assert.equal(await exited, 0, out);
+  assert.match(out, /Logged in to .* as me@example\.com via your phone\./);
+  const saved = JSON.parse(fs.readFileSync(path.join(home, "cloud.json"), "utf8"));
+  assert.match(saved.token, /^rdr_/);
+  assert.equal(saved.accountId, "acct-cli");
 });
 
 test("GitHub connected from the phone lands in the vault the home machine reads", async (t) => {

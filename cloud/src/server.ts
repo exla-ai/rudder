@@ -38,6 +38,7 @@ type DeviceLogin = {
   deviceName?: string;
   /** The phone said no: the CLI's next poll stops waiting. */
   denied?: boolean;
+  approvedOnPhone?: boolean;
 };
 
 type GithubBrowserLogin = {
@@ -1531,6 +1532,9 @@ async function handleCliLoginPoll(req: IncomingMessage, res: ServerResponse): Pr
   }
   if (login.email) {
     responseBody.email = login.email;
+  }
+  if (login.approvedOnPhone) {
+    responseBody.via = "phone";
   }
   sendJson(res, 200, responseBody);
 }
@@ -6517,6 +6521,7 @@ async function handleComputerApproval(
   login.token = issued.token;
   login.accountId = issued.accountId;
   login.email = issued.email;
+  login.approvedOnPhone = true;
   schedulePersistDatabase();
   sendJson(res, 200, { ok: true, approved: true, deviceName: login.deviceName ?? null });
 }

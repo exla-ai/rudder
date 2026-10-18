@@ -491,10 +491,16 @@ function openSettings() {
     ["Cloud machine", home ? machineLabel(home).label : "None"],
   ];
   if (home?.tailnet?.dnsName) rows.push(["Tailnet", home.tailnet.dnsName]);
+  const github = githubState(s);
+  rows.push(["GitHub", github.kind === "ok" ? github.sub.replace(/^Connected as /, "") : "Not connected"]);
   if (NATIVE) rows.push(["App", "iOS"]);
   const dlg = h(`<dialog class="sheet" aria-label="Settings"><div class="dialog">
     <div class="sheet-grab"></div><h3>Settings</h3>
     <div class="kvs" style="margin:6px 0 20px"></div>
+    <div class="ls-actions" style="margin-bottom:10px">
+      <button type="button" class="btn block" data-act="computer">${icon("terminal")}<span>Sign in a computer</span></button>
+      <button type="button" class="btn block" data-act="github">${icon("github")}<span>${github.kind === "ok" ? "Reconnect GitHub" : "Connect GitHub"}</span></button>
+    </div>
     <button type="button" class="btn block danger" data-act="signout">Sign out</button>
     <button type="button" class="btn block" style="margin-top:10px;border:0;background:transparent;color:var(--muted)" data-act="close">Close</button>
   </div></dialog>`);
@@ -508,6 +514,8 @@ function openSettings() {
     const act = e.target.closest("[data-act]")?.dataset.act;
     if (e.target === dlg || act === "close") dlg.close();
     if (act === "signout") { dlg.close(); await signOut(); }
+    if (act === "computer") { dlg.close(); openComputerSignIn(); }
+    if (act === "github") { dlg.close(); openGithubConnect(); }
   });
   dlg.addEventListener("close", () => dlg.remove());
   document.body.appendChild(dlg);
@@ -1303,6 +1311,308 @@ function openAgentSignIn(provider) {
 }
 
 /* ------------------------------------------------------------------ */
+/* GitHub, computers, first-run setup                                  */
+/* ------------------------------------------------------------------ */
+
+// GitHub as the cloud machine will see it: the machine's own check when it
+// has one, else whether the vault holds a token (it may be asleep).
+function githubState(s) {
+  const cred = s?.home?.status === "running" ? s.home.credentials?.github : null;
+  if (cred?.ok) return { kind: "ok", sub: cred.account ? `Connected as ${cred.account}` : "Connected" };
+  if (cred && cred.ok === false && s?.github?.connected) return { kind: "out", err: true, sub: `GitHub rejected the token (${cred.detail || "not signed in"}). Connect again.` };
+  if (s?.github?.connected) return { kind: "ok", sub: "Connected" };
+  return { kind: "out", sub: "So the machine can clone and push your repos" };
+}
+
+// GitHub's device flow, run by Rudder: the phone shows the code and opens
+// github.com/login/device; the token goes to your cloud machine, not here.
+function openGithubConnect() {
+  const dlg = h(`<dialog class="sheet login-sheet" aria-label="Connect GitHub"><div class="dialog">
+    <div class="sheet-grab"></div>
+    <div class="add-head"><h3>Connect GitHub</h3><button type="button" class="icon-btn" data-act="close" aria-label="Close">${icon("x")}</button></div>
+    <div class="ls-body" aria-live="polite"></div>
+  </div></dialog>`);
+  const body = dlg.querySelector(".ls-body");
+  let closed = false;
+  let done = false;
+  let flow = null;
+
+  const failed = (message) => {
+    body.replaceChildren(h(`<div class="ls-msg err"></div>`));
+    setText(body.firstChild, message);
+    const again = h(`<div class="ls-actions"><button type="button" class="btn block accent">Try again</button></div>`);
+    again.querySelector("button").addEventListener("click", () => void begin());
+    body.appendChild(again);
+  };
+
+  async function begin() {
+    body.replaceChildren(h(`<div class="ls-wait"><span class="spin" aria-hidden="true"></span><div><div class="ls-title">Asking GitHub for a code</div></div></div>`));
+    try {
+      flow = await api("/api/app/github/start", { method: "POST", body: {} });
+    } catch (err) {
+      if (!closed && err.status !== 401) failed(err.message);
+      return;
+    }
+    if (closed) return;
+    body.replaceChildren(h(`<div class="ls-steps">
+      <div class="ls-step"><span class="ls-n">1</span><div>Open GitHub and sign in if it asks.</div></div>
+      <div class="ls-step"><span class="ls-n">2</span><div>Enter this code there, then tap <b>Authorize</b>. Tap the code to copy it.</div></div>
+      <button type="button" class="ls-usercode" aria-label="Copy the code"></button>
+      <button type="button" class="btn block accent ls-open">${icon("external")}<span>Copy code and open GitHub</span></button>
+      <div class="ls-wait small"><span class="spin" aria-hidden="true"></span><div class="ls-note">Waiting for GitHub. Agents on your cloud machine will use this login to clone and push.</div></div>
+    </div>`));
+    const codeBtn = body.querySelector(".ls-usercode");
+    setText(codeBtn, flow.userCode);
+    codeBtn.addEventListener("click", async () => { if (await copyText(flow.userCode)) toast("Code copied"); });
+    body.querySelector(".ls-open").addEventListener("click", async () => {
+      await copyText(flow.userCode);
+      openSignInPage(flow.verificationUri);
+    });
+    const mine = flow;
+    while (!closed && flow === mine) {
+      await sleep(2500);
+      if (closed || flow !== mine) return;
+      let res;
+      try {
+        res = await api("/api/app/github/poll", { method: "POST", body: {} });
+      } catch (err) {
+        if (err.status === 401) return;
+        continue; // a dropped poll is retried; GitHub keeps the code
+      }
+      if (closed || flow !== mine) return;
+      if (res.status === "done") {
+        done = true;
+        body.replaceChildren(h(`<div class="ls-done"><div class="ls-check">${icon("check")}</div><div class="ls-title">GitHub is connected</div><div class="ls-note"></div></div>`));
+        setText(body.querySelector(".ls-note"), `Your cloud machine now signs in to GitHub as ${res.account}.`);
+        toast("GitHub is connected");
+        await refreshState();
+        setTimeout(() => { if (!closed) dlg.close(); }, 1600);
+        return;
+      }
+      if (res.status === "failed") return failed(res.error || "GitHub did not finish the sign-in.");
+    }
+  }
+
+  dlg.addEventListener("click", (e) => {
+    if (e.target === dlg || e.target.closest("[data-act=close]")) dlg.close();
+  });
+  dlg.addEventListener("close", () => {
+    closed = true;
+    dlg.remove();
+    if (flow && !done) void api("/api/app/github/cancel", { method: "POST", body: {} }).catch(() => {});
+  });
+  document.body.appendChild(dlg);
+  dlg.showModal();
+  void begin();
+}
+
+const COMPUTER_CODE_RE = /^[A-Z0-9]{3}-?[A-Z0-9]{3}$/i;
+const formatComputerCode = (value) => {
+  const raw = String(value || "").toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 6);
+  return raw.length > 3 ? `${raw.slice(0, 3)}-${raw.slice(3)}` : raw;
+};
+
+// `rudder login` on a computer shows a code (and a QR of /app/approve); this
+// phone, already signed in, says yes or no to that computer.
+function openComputerSignIn(prefill = "") {
+  const dlg = h(`<dialog class="sheet login-sheet" aria-label="Sign in a computer"><div class="dialog">
+    <div class="sheet-grab"></div>
+    <div class="add-head"><h3>Sign in a computer</h3><button type="button" class="icon-btn" data-act="close" aria-label="Close">${icon("x")}</button></div>
+    <div class="ls-body" aria-live="polite"></div>
+  </div></dialog>`);
+  const body = dlg.querySelector(".ls-body");
+  let closed = false;
+
+  function askCode(value = "", error = "") {
+    body.replaceChildren(h(`<div class="ls-steps">
+      <div class="ls-step"><span class="ls-n">1</span><div>On the computer, run <code>rudder login</code>.</div></div>
+      <div class="ls-step"><span class="ls-n">2</span><div>Enter the code it shows.</div></div>
+      <form class="ls-code"><input class="input computer-code" name="code" placeholder="K7P-4QX" maxlength="7" autocomplete="off"
+        autocapitalize="characters" autocorrect="off" spellcheck="false" enterkeyhint="go" aria-label="Code from rudder login">
+      <div class="ls-msg err" hidden></div>
+      <button type="submit" class="btn block primary">Continue</button></form>
+    </div>`));
+    const input = body.querySelector("input");
+    const errEl = body.querySelector(".ls-msg");
+    input.value = formatComputerCode(value);
+    if (error) { setText(errEl, error); errEl.hidden = false; }
+    input.addEventListener("input", () => { input.value = formatComputerCode(input.value); });
+    body.querySelector("form").addEventListener("submit", (e) => {
+      e.preventDefault();
+      if (!COMPUTER_CODE_RE.test(input.value)) { setText(errEl, "The code is 6 letters and numbers, like K7P-4QX."); errEl.hidden = false; input.focus(); return; }
+      void lookup(input.value);
+    });
+    setTimeout(() => { if (!closed && !input.value) input.focus(); }, 300);
+  }
+
+  async function lookup(code) {
+    body.replaceChildren(h(`<div class="ls-wait"><span class="spin" aria-hidden="true"></span><div><div class="ls-title">Checking the code</div></div></div>`));
+    let found;
+    try {
+      found = await api("/api/app/computer/lookup", { method: "POST", body: { code } });
+    } catch (err) {
+      if (!closed && err.status !== 401) askCode(code, err.message);
+      return;
+    }
+    if (closed) return;
+    const name = found.deviceName || "this computer";
+    body.replaceChildren(h(`<div class="ls-steps">
+      <div class="ls-title computer-ask"></div>
+      <div class="ls-note computer-note"></div>
+      <div class="ls-actions">
+        <button type="button" class="btn block accent" data-v="1">Approve</button>
+        <button type="button" class="btn block danger" data-v="0">Deny</button>
+      </div>
+    </div>`));
+    setText(body.querySelector(".computer-ask"), `Sign in ${name}?`);
+    setText(body.querySelector(".computer-note"),
+      `Code ${found.code}. It gets your Rudder account${store.state?.email ? ` (${store.state.email})` : ""}: your cloud machine, projects and agents. Only approve a computer you are using right now.`);
+    body.querySelectorAll("[data-v]").forEach((b) => b.addEventListener("click", () => void answer(found.code, name, b.dataset.v === "1")));
+  }
+
+  async function answer(code, name, approve) {
+    body.querySelectorAll("button").forEach((b) => { b.disabled = true; });
+    try {
+      await api("/api/app/computer/approve", { method: "POST", body: { code, approve } });
+    } catch (err) {
+      if (!closed && err.status !== 401) askCode("", err.message);
+      return;
+    }
+    if (closed) return;
+    if (!approve) {
+      body.replaceChildren(h(`<div class="ls-done"><div class="ls-title">Denied</div><div class="ls-note">That computer was not signed in, and the code no longer works.</div></div>`));
+      setTimeout(() => { if (!closed) dlg.close(); }, 1600);
+      return;
+    }
+    body.replaceChildren(h(`<div class="ls-done"><div class="ls-check">${icon("check")}</div><div class="ls-title"></div>
+      <div class="ls-note">Go back to its terminal. <code>rudder cloud</code> in a repo there opens it on your cloud machine.</div></div>`));
+    setText(body.querySelector(".ls-title"), `${name} is signed in`);
+    toast(`${name} is signed in`);
+  }
+
+  dlg.addEventListener("click", (e) => {
+    if (e.target === dlg || e.target.closest("[data-act=close]")) dlg.close();
+  });
+  dlg.addEventListener("close", () => { closed = true; dlg.remove(); });
+  document.body.appendChild(dlg);
+  dlg.showModal();
+  if (prefill && COMPUTER_CODE_RE.test(prefill)) void lookup(prefill);
+  else askCode(prefill);
+}
+
+// The QR `rudder login` prints lands on /app/approve?code=...; a signed-out
+// phone signs in first, so the code waits here (it lives 5 minutes anyway).
+const APPROVE_KEY = "rudder.approveCode";
+function takePendingApprove() {
+  const pending = ls.get(APPROVE_KEY);
+  ls.set(APPROVE_KEY, null);
+  return pending && Date.now() - pending.at < 5 * 60_000 ? pending.code : null;
+}
+
+const INSTALL_LINE = "npm i -g @exla/rudder && rudder login";
+function ComputerCard() {
+  const el = h(`<div class="card computer">
+    <div class="c-head"><div class="m-icon">${icon("terminal")}</div><div><div class="c-title">Use Rudder on your computer</div>
+      <div class="c-sub">Same projects and agents, from a terminal. Install it, then sign in:</div></div></div>
+    <button type="button" class="c-cmd" aria-label="Copy the install command"><code></code>${icon("copy")}</button>
+    <div class="c-foot"><span><code>rudder login</code> shows a code. Approve it here.</span>
+      <button type="button" class="btn small accent c-enter">Enter code</button></div>
+  </div>`);
+  setText(el.querySelector(".c-cmd code"), INSTALL_LINE);
+  el.querySelector(".c-cmd").addEventListener("click", async () => { if (await copyText(INSTALL_LINE)) toast("Copied"); });
+  el.querySelector(".c-enter").addEventListener("click", () => openComputerSignIn());
+  return { el };
+}
+
+// A fresh account's three steps. Each row is done or not; the card goes away
+// once all three are done (and stays away, so a sleeping machine's unknown
+// logins never bring it back).
+const SETUP_DONE_KEY = "rudder.setupDone";
+function SetupCard() {
+  const el = h(`<div class="section setup-sec">
+    <div class="section-head"><h2>Get set up</h2><span class="count"></span></div>
+    <div class="card accounts setup" role="list" aria-label="Setup steps"></div></div>`);
+  const list = el.querySelector(".setup");
+  const STEPS = [
+    { id: "github", ic: "github", title: "Connect GitHub", action: "Connect", run: () => openGithubConnect() },
+    { id: "agent", ic: "spark", title: "Sign in Claude Code or Codex", action: "Sign in", run: () => openAgentChooser() },
+    { id: "repo", ic: "folder", title: "Pick or create a repo", action: "Add", run: () => openAddProject() },
+  ];
+  const rows = new Map();
+  for (const step of STEPS) {
+    const row = h(`<div class="acct" role="listitem">
+      <div class="m-icon">${icon(step.ic)}</div>
+      <div class="a-body"><div class="a-title"><span></span></div><div class="a-sub"></div></div>
+      <span class="setup-check" hidden>${icon("check")}</span>
+      <button type="button" class="btn small accent a-btn"></button>
+    </div>`);
+    setText(row.querySelector(".a-title span"), step.title);
+    setText(row.querySelector(".a-btn"), step.action);
+    row.querySelector(".a-btn").addEventListener("click", step.run);
+    list.appendChild(row);
+    rows.set(step.id, row);
+  }
+  function states(s) {
+    const home = s?.home;
+    const agents = AGENTS.map((x) => agentLoginState(home, x.id));
+    const signedIn = agents.findIndex((st) => st.kind === "ok");
+    let agent;
+    if (signedIn >= 0) agent = { kind: "ok", sub: `${AGENTS[signedIn].label} · ${agents[signedIn].sub}` };
+    else if (agents.some((st) => st.kind === "busy")) agent = { kind: "busy", sub: "Signing in…" };
+    else if (home && !home.credentials) agent = { kind: "unknown", sub: home.connected ? "Checking…" : "Checked when your cloud machine is up" };
+    else agent = { kind: "out", sub: "Agents run with your own subscription or API key" };
+    const projects = s?.projects || [];
+    const repo = projects.length
+      ? { kind: "ok", sub: projects.length === 1 ? projects[0].repo || projects[0].name : `${projects.length} projects` }
+      : { kind: "out", sub: "It's cloned onto your cloud machine" };
+    return { github: githubState(s), agent, repo };
+  }
+  function update(s) {
+    if (ls.get(SETUP_DONE_KEY)) { el.hidden = true; return; }
+    const st = states(s);
+    const all = Object.values(st);
+    if (all.every((x) => x.kind === "ok")) { ls.set(SETUP_DONE_KEY, true); el.hidden = true; return; }
+    // Nothing known to be missing (a sleeping machine): nothing to show.
+    el.hidden = !all.some((x) => x.kind === "out");
+    const doneCount = all.filter((x) => x.kind === "ok").length;
+    setText(el.querySelector(".count"), `${doneCount} of ${all.length}`);
+    for (const [id, row] of rows) {
+      const x = st[id];
+      const sub = row.querySelector(".a-sub");
+      setText(sub, x.sub);
+      sub.classList.toggle("err", !!x.err);
+      row.classList.toggle("done", x.kind === "ok");
+      row.querySelector(".setup-check").hidden = x.kind !== "ok";
+      row.querySelector(".a-btn").hidden = x.kind === "ok" || x.kind === "unknown";
+    }
+  }
+  return { el, update };
+}
+
+// Claude Code or Codex: whichever the user pays for.
+function openAgentChooser() {
+  const dlg = h(`<dialog class="sheet" aria-label="Sign in an agent"><div class="dialog">
+    <div class="sheet-grab"></div>
+    <div class="add-head"><h3>Which agent do you use?</h3><button type="button" class="icon-btn" data-act="close" aria-label="Close">${icon("x")}</button></div>
+    <div class="ls-actions"></div>
+    <p class="hint">You can sign in the other one later from the machine card.</p>
+  </div></dialog>`);
+  const actions = dlg.querySelector(".ls-actions");
+  for (const agent of AGENTS) {
+    const b = h(`<button type="button" class="btn block">${icon(agent.ic)}<span></span></button>`);
+    setText(b.querySelector("span"), `${agent.label} (${agent.account} account)`);
+    b.addEventListener("click", () => { dlg.close(); openAgentSignIn(agent.id); });
+    actions.appendChild(b);
+  }
+  dlg.addEventListener("click", (e) => {
+    if (e.target === dlg || e.target.closest("[data-act=close]")) dlg.close();
+  });
+  dlg.addEventListener("close", () => dlg.remove());
+  document.body.appendChild(dlg);
+  dlg.showModal();
+}
+
+/* ------------------------------------------------------------------ */
 /* Sign in                                                             */
 /* ------------------------------------------------------------------ */
 
@@ -1313,6 +1623,13 @@ function SignInScreen() {
     <p>Your coding agents run on a cloud machine, around the clock, laptop open or not. Sign in to steer them from anywhere.</p>
     <div class="actions"></div></div></section>`);
   const actions = el.querySelector(".actions");
+  // Arrived from the QR `rudder login` printed: say why signing in comes first.
+  const waiting = ls.get(APPROVE_KEY);
+  if (waiting?.code && Date.now() - waiting.at < 5 * 60_000) {
+    const note = h(`<p class="approve-note"></p>`);
+    setText(note, `Sign in to approve your computer (code ${waiting.code}).`);
+    el.querySelector(".signin p").after(note);
+  }
   // A paired device needs no OAuth: `rudder cloud app` on the laptop prints a
   // one-time code that signs this browser in to the same account.
   const pair = h(`<form class="pair" autocomplete="off">
@@ -1353,6 +1670,7 @@ async function redeemPairCode(code, errorEl) {
     history.replaceState({ depth: 0 }, "", "/app");
     await refreshState();
     mountScreen();
+    approvePendingComputer();
   } catch (error) {
     if (errorEl) { errorEl.textContent = error.message; errorEl.hidden = false; }
     else toast(error.message);
@@ -1381,6 +1699,7 @@ function HomeScreen() {
         <div class="list grouped card needs"></div>
       </div>
       <div class="section machine-slot"></div>
+      <div class="section computer-slot"></div>
     </div></section>`);
   const bar = el.querySelector(".topbar");
   const scroller = el.querySelector(".scroller");
@@ -1399,6 +1718,12 @@ function HomeScreen() {
   const projectsEl = el.querySelector(".projects");
   const projectsBody = el.querySelector(".projects-body");
   const addSlot = el.querySelector(".add-slot");
+  // First run: the three steps lead, above the projects.
+  const setup = SetupCard();
+  setup.el.hidden = true;
+  scroller.insertBefore(setup.el, projectsSec);
+  const computerSlot = el.querySelector(".computer-slot");
+  computerSlot.appendChild(ComputerCard().el);
 
   // Machine card (built once)
   const machine = h(`<div class="card machine">
@@ -1446,6 +1771,7 @@ function HomeScreen() {
     }
     delete projectsEl.dataset.err;
     projectsEl.querySelectorAll(".sk, .empty").forEach((n) => n.remove());
+    setup.update(s);
 
     // Machine
     const home = s.home;
@@ -1475,16 +1801,17 @@ function HomeScreen() {
       // pushing: say so before anyone starts a task. Claude Code and Codex have
       // their own rows below, with a Sign in button.
       const github = home.status === "running" ? home.credentials?.github : null;
-      const githubBroken = !!github && github.ok === false;
+      // Never connected at all is a setup step (the Get set up card), not a fault.
+      const githubBroken = !!github && github.ok === false && s.github?.connected !== false;
       if (githubBroken) {
-        subText = `GitHub can't sign in on this machine (${github.detail || "not logged in"}). Run \`rudder cloud doctor\` on your laptop for the fix.`;
+        subText = `GitHub can't sign in on this machine (${github.detail || "not logged in"}). Connect it again from Settings.`;
       }
       setText(sub, subText);
       sub.classList.toggle("err", home.status === "failed" || githubBroken);
       const trouble = home.status === "failed" || githubBroken || agentLoginTrouble(home);
       // Projects lead; the machine card only comes up above them while it is
       // the reason nothing works.
-      const anchor = trouble ? projectsSec : null;
+      const anchor = trouble ? projectsSec : computerSlot;
       if (machineSlot.nextElementSibling !== anchor) scroller.insertBefore(machineSlot, anchor);
       wakeBtn.hidden = !(home.status === "stopped" || home.status === "failed");
       setText(wakeBtn.querySelector("span"), home.status === "failed" ? "Retry" : "Wake");
@@ -2591,8 +2918,14 @@ setInterval(() => { if (!document.hidden) screen?.update?.(); }, 30000);
 window.rudderRefresh = () => {
   nativeSignInRequested = false;
   if (NATIVE && window.RUDDER_NATIVE?.token) NATIVE.token = window.RUDDER_NATIVE.token;
-  return refreshState();
+  return refreshState().then(approvePendingComputer);
 };
+// A computer's approve code that waited for this phone to sign in.
+function approvePendingComputer() {
+  if (store.signedOut || !store.state) return;
+  const code = takePendingApprove();
+  if (code) openComputerSignIn(code);
+}
 
 onMarkdownReady(() => { /* agent screen repaints itself */ });
 loadMarkdown();
@@ -2613,14 +2946,24 @@ function restoreLastRoute() {
 if (!history.state) history.replaceState({ depth: 0 }, "", location.pathname + location.search);
 // /app/pair?code=ABCD-EFGH (the link `rudder cloud app` prints) signs in here.
 const pairFromLink = location.pathname === "/app/pair" ? new URLSearchParams(location.search).get("code") : null;
+// /app/approve?code=K7P-4QX (the QR `rudder login` prints) approves a computer
+// once this phone is signed in.
+const approveFromLink = location.pathname === "/app/approve" ? new URLSearchParams(location.search).get("code") : null;
+if (approveFromLink) {
+  ls.set(APPROVE_KEY, { code: formatComputerCode(approveFromLink), at: Date.now() });
+  history.replaceState({ depth: 0 }, "", "/app");
+}
 if (pairFromLink && !NATIVE) {
   history.replaceState({ depth: 0 }, "", "/app");
   redeemPairCode(pairFromLink, null);
-} else {
+} else if (!approveFromLink) {
   restoreLastRoute();
 }
 mountScreen();
-refreshState().then(pollState);
+refreshState().then(() => {
+  pollState();
+  approvePendingComputer();
+});
 
 if (!NATIVE && "serviceWorker" in navigator && (location.protocol === "https:" || location.hostname === "localhost")) {
   window.addEventListener("load", () => {

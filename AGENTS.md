@@ -1021,8 +1021,37 @@ brain lives in the cloud, and the phone is a first-class client.
   removed from the login's env so the CLI does not sign in with a key instead. An
   account with no machine sees "Create my cloud machine" (`/api/app/wake` creates
   one), and Sign in on a machine that is not up yet waits for it (503 retries).
-  GitHub still comes from the laptop vault, so a phone-only account can sign its
-  agents in but cannot add repos yet.
+  GitHub comes from the vault: the laptop's, or the phone's own Connect GitHub
+  (next bullet).
+- **Phone and laptop, one sign-in (new-user onboarding).** `rudder login`'s device
+  login now carries a single-use `userCode` (`K7P-4QX`, the pairing alphabet, dies
+  with the 5 min login) and an `approveUrl` (`/app/approve?code=`). On a terminal
+  the CLI prints the code and a QR of that url (`src/qr.ts`, a dependency-free
+  encoder checked against libqrencode in `tests/qr.test.mjs`) and opens the
+  browser only on Enter; without a terminal it opens the browser as before. The
+  phone's "Sign in a computer" (Settings, the "Use Rudder on your computer" card,
+  or the QR, which waits in localStorage through a sign-in) calls
+  `/api/app/computer/lookup` (shows the hostname the CLI sent) then `/approve`,
+  which issues the CLI token on the PHONE's account (verified email only, like
+  `/cli/approve`). Any answer burns the code; a deny makes the poll return
+  `denied` and the CLI then stops instead of falling back to `gh auth token`.
+  Wrong codes: 10 per minute per account and per address. After login (and from
+  `rudder doctor`), on a TTY only, `src/onboarding.ts` offers to install Claude
+  Code / Codex when neither is present and runs their own login, offers the
+  login when installed but signed out, and lists the cloud repos with the
+  `rudder cloud sync <name>` hint. It never copies agent logins from the vault
+  (refresh-token rotation signs one side out). **Connect GitHub from the phone**
+  runs GitHub's device flow on the control plane (`/api/app/github/start|poll|
+  cancel`, scope `repo read:org workflow`, the same `RUDDER_GITHUB_DEVICE_CLIENT_ID`
+  as the CLI fallback, which today is the GitHub CLI's public OAuth app) and
+  stores `GH_TOKEN` (source `phone`) in the vault, then re-sends the home's repo
+  list so the supervisor re-reads the vault and re-checks credentials. Needs
+  `RUDDER_SECRETS_KEY`; without it the route says so (503). `/api/app/state`
+  carries `github: {connected, source}` from the vault so the app knows even
+  while the machine sleeps. The home screen's "Get set up" card (GitHub, an agent
+  login, a repo) hides once all three are done and stays hidden
+  (`rudder.setupDone`); a never-connected GitHub is a setup step there, not a red
+  machine-card error.
 
 - **Developing Rudder on the home machine.** Rust is not in the worker image; the
   supervisor installs it once onto the volume (`~/.cargo`, `~/.rustup`, persisted

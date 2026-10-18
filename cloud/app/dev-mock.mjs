@@ -3,7 +3,9 @@
 // Serves /app/* from this folder and mocks /api/app/*.
 // Mock helpers: /app/__mock/signout (simulate signed out), /app/login (sign back in),
 // /app/__mock/home/<running|stopped|failed|none> (machine states),
-// /app/__mock/creds/<out|claude|both|expired> (Claude Code / Codex sign-in).
+// /app/__mock/creds/<out|claude|both|expired> (Claude Code / Codex sign-in),
+// /app/__mock/fresh (a brand new account: no GitHub, no agent login, no repos),
+// /app/__mock/computer (prints a code to approve, as `rudder login` would).
 import http from "node:http";
 import fs from "node:fs";
 import path from "node:path";
@@ -27,6 +29,12 @@ const CREDS = {
 };
 let creds = CREDS.claude();
 const logins = {};
+// GitHub in the vault, and the device flow the phone runs (approves itself after a few polls).
+let githubConnected = true;
+let githubFlow = null;
+// Computers waiting on `rudder login`: code -> { deviceName, expiresAt }.
+const computers = new Map();
+let freshProjects = null;
 const T0 = now();
 
 const home = () => homeMode === "none" ? null : ({
@@ -38,7 +46,7 @@ const home = () => homeMode === "none" ? null : ({
   activeAgents: projects.reduce((n, p) => n + p.agents.filter((a) => a.status === "working").length, 0),
   lastActivityAt: iso(now() - 2 * MIN),
   tailnet: { hostname: "rudder-home", dnsName: "rudder-home.tail4c2e1.ts.net", online: homeMode === "running", https: true },
-  credentials: homeMode === "running" ? { ...creds, github: { ok: true, account: "viraatdas", detail: null }, checkedAt: iso(now()) } : null,
+  credentials: homeMode === "running" ? { ...creds, github: githubConnected ? { ok: true, account: "viraatdas", detail: null } : { ok: false, account: null, detail: "no GitHub token in the vault" }, checkedAt: iso(now()) } : null,
   logins,
 });
 
@@ -161,6 +169,19 @@ const server = http.createServer(async (req, res) => {
     res.writeHead(302, { Location: "/app" });
     return res.end();
   }
+  if (p === "/app/__mock/fresh") {
+    creds = CREDS.out();
+    githubConnected = false;
+    freshProjects = [];
+    res.writeHead(302, { Location: "/app" });
+    return res.end();
+  }
+  if (p === "/app/__mock/computer") {
+    const code = `K${Math.floor(Math.random() * 8) + 2}P-${Math.random().toString(36).slice(2, 5).toUpperCase().replace(/[01OIL]/g, "X")}`;
+    computers.set(code, { deviceName: "Viraats-MacBook-Pro.local", expiresAt: now() + 5 * MIN });
+    res.writeHead(200, { "Content-Type": "text/plain" });
+    return res.end(`code: ${code}\napprove: /app/approve?code=${code}\n`);
+  }
   if (p === "/api/auth/sign-out" && req.method === "POST") { signedOut = true; return json(res, 200, { success: true }); }
 
   if (p.startsWith("/api/app/")) {
@@ -171,7 +192,11 @@ const server = http.createServer(async (req, res) => {
       // Living data: the working agent's message ticks forward.
       const a1 = projects[0].agents[0];
       a1.updatedAt = now() - 20_000;
-      return json(res, 200, { email: "viraat@example.com", home: home(), projects: homeMode === "none" ? [] : projects });
+      return json(res, 200, {
+        email: "viraat@example.com", home: home(),
+        projects: homeMode === "none" ? [] : freshProjects ?? projects,
+        github: { connected: githubConnected, source: githubConnected ? "sync" : null, updatedAt: null },
+      });
     }
     if (p === "/api/app/transcript" && req.method === "GET") {
       const t = transcriptFor(url.searchParams.get("workspace"), url.searchParams.get("run"));
@@ -283,6 +308,30 @@ const server = http.createServer(async (req, res) => {
       if (login && login.status === "waiting") Object.assign(login, { status: "cancelled", endedAt: iso(now()) });
       return json(res, 200, { ok: true });
     }
+    if (p === "/api/app/computer/lookup" || p === "/api/app/computer/approve") {
+      const code = String(body.code || "").toUpperCase().replace(/[^A-Z0-9]/g, "").replace(/^(.{3})(.{3})$/, "$1-$2");
+      const computer = computers.get(code);
+      if (!computer || computer.expiresAt < now()) return json(res, 400, { error: "that code is wrong or expired; run `rudder login` again for a new one" });
+      if (p.endsWith("/lookup")) return json(res, 200, { code, deviceName: computer.deviceName, expiresAt: iso(computer.expiresAt) });
+      computers.delete(code);
+      return json(res, 200, { ok: true, approved: body.approve === true, deviceName: computer.deviceName });
+    }
+    if (p === "/api/app/github/start") {
+      githubFlow = githubFlow || { userCode: "WDJB-MJHT", polls: 0 };
+      return json(res, 200, { status: "waiting", userCode: githubFlow.userCode, verificationUri: "https://github.com/login/device", expiresAt: iso(now() + 15 * MIN), interval: 5 });
+    }
+    if (p === "/api/app/github/poll") {
+      if (!githubFlow) return json(res, 200, { status: "failed", error: "The code expired. Start again." });
+      githubFlow.polls += 1;
+      if (githubFlow.polls < 3) return json(res, 200, { status: "waiting", userCode: githubFlow.userCode, verificationUri: "https://github.com/login/device", interval: 5 });
+      githubFlow = null;
+      githubConnected = true;
+      return json(res, 200, { status: "done", account: "viraatdas" });
+    }
+    if (p === "/api/app/github/cancel") {
+      githubFlow = null;
+      return json(res, 200, { ok: true });
+    }
     if (p === "/api/app/wake") {
       homeMode = "queued";
       setTimeout(() => { homeMode = "running"; }, 8000);
@@ -327,9 +376,10 @@ const server = http.createServer(async (req, res) => {
       const repo = String(body.repo || "");
       if (!/^[\w.-]+\/[\w.-]+$/.test(repo)) return json(res, 400, { error: "Repository must look like owner/name." });
       const ws = `wsp_${repo.replace(/[^\w]/g, "_")}`;
-      if (!projects.find((x) => x.workspaceId === ws)) {
-        projects.push({ workspaceId: ws, name: repo.split("/")[1], repo, ref: null, status: "queued", failureReason: null, dashboard: "cloning", clients: 0, lastActivityAt: iso(now()), agents: [], ports: [] });
-        setTimeout(() => { const x = projects.find((q) => q.workspaceId === ws); if (x) { x.dashboard = "running"; x.status = "running"; } }, 10000);
+      const list = freshProjects ?? projects;
+      if (!list.find((x) => x.workspaceId === ws)) {
+        list.push({ workspaceId: ws, name: repo.split("/")[1], repo, ref: null, status: "queued", failureReason: null, dashboard: "cloning", clients: 0, lastActivityAt: iso(now()), agents: [], ports: [] });
+        setTimeout(() => { const x = list.find((q) => q.workspaceId === ws); if (x) { x.dashboard = "running"; x.status = "running"; } }, 10000);
       }
       if (homeMode === "none" || homeMode === "stopped") homeMode = "queued", setTimeout(() => { homeMode = "running"; }, 6000);
       return json(res, 200, { home: home(), workspace: { workspaceId: ws } });

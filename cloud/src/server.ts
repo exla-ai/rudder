@@ -13,6 +13,7 @@ import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import type { Duplex } from "node:stream";
 import { WebSocket, WebSocketServer } from "ws";
 import { createSecretsVault, SecretsVaultError, type SecretItemInput, type SecretsVault } from "./secrets.js";
+import { runVoiceTool, voiceGreeting, voiceInstructions, voiceSessionConfig, type VoiceContext, type VoiceProject } from "./voice.js";
 import {
   formatOutputForSlack,
   parseSlackCommand,
@@ -6184,6 +6185,23 @@ async function handleAppApi(req: IncomingMessage, res: ServerResponse, url: URL)
     sendJson(res, 200, { ok: true });
     return;
   }
+  // Talking to Rudder (phone and CarPlay, cloud/src/voice.ts). Both work with
+  // a sleeping home: the session mints at once and wakes it, and a tool call
+  // waits for it like any other write.
+  if (req.method === "POST" && url.pathname === "/api/app/voice/session") {
+    await handleVoiceSession(res, account, home, await readJsonBody(req));
+    return;
+  }
+  if (req.method === "POST" && url.pathname === "/api/app/voice/tool") {
+    const body = await readJsonBody(req);
+    const name = stringField(body, "name") ?? "";
+    const args = body && typeof body === "object" && !Array.isArray(body) ? body.arguments : undefined;
+    if (home) {
+      touchHome(home.id);
+    }
+    sendJson(res, 200, await runVoiceTool(voiceContext(account.accountId), name, args ?? null));
+    return;
+  }
   if (!home) {
     sendJson(res, 404, { error: "no home machine yet; run `rudder cloud` in a repo, or add a project" });
     return;
@@ -6715,6 +6733,90 @@ function loginProvider(body: Json): "claude" | "codex" {
     throw badRequest("provider must be claude or codex");
   }
   return provider;
+}
+
+// ---------------------------------------------------------------------------
+// Voice: OpenAI realtime sessions for the phone and CarPlay (cloud/src/voice.ts).
+// ---------------------------------------------------------------------------
+
+const OPENAI_BASE_URL = (process.env.RUDDER_OPENAI_BASE_URL || "https://api.openai.com").replace(/\/+$/, "");
+const VOICE_MODEL = process.env.RUDDER_VOICE_MODEL || "gpt-realtime-2.1";
+const VOICE_NAME = process.env.RUDDER_VOICE || "marin";
+// Captions on the phone come from input transcription; "" turns it off.
+const VOICE_TRANSCRIBE_MODEL = process.env.RUDDER_VOICE_TRANSCRIBE_MODEL ?? "gpt-4o-mini-transcribe";
+
+function openAiApiKey(): string {
+  return (process.env.RUDDER_OPENAI_API_KEY || process.env.OPENAI_API_KEY || "").trim();
+}
+
+function voiceProjects(accountId: string): VoiceProject[] {
+  const home = findHomeRow(accountId);
+  return home ? (homeProjects(home) as unknown as VoiceProject[]) : [];
+}
+
+function voiceContext(accountId: string): VoiceContext {
+  return {
+    projects: () => voiceProjects(accountId),
+    rpc: async (method, params, timeoutMs) => {
+      const home = findHomeRow(accountId);
+      const live = home && isOpen(homeControls.get(home.id)) ? home : await homeWithControl(accountId);
+      return homeRpc(live.id, method, params as JsonRecord, timeoutMs);
+    },
+    openRepo: (repo) => openRepoOnHome(accountId, { repo }),
+  };
+}
+
+async function handleVoiceSession(res: ServerResponse, account: { accountId: string }, home: Workspace | null, body: Json): Promise<void> {
+  const apiKey = openAiApiKey();
+  if (!apiKey) {
+    sendJson(res, 503, { error: "voice is not set up on this server (OPENAI_API_KEY is missing)" });
+    return;
+  }
+  const surface = stringField(body, "surface") === "carplay" ? "carplay" : "phone";
+  const focus = (stringField(body, "focus") ?? "").trim().slice(0, 300) || undefined;
+  if (home && home.status !== "deleting") {
+    touchHome(home.id);
+    if (!isOpen(homeControls.get(home.id))) {
+      // The first question is usually "what's going on", so be awake for it.
+      wakeHomeInBackground(account.accountId);
+    }
+  }
+  const projects = voiceProjects(account.accountId);
+  const instructions = voiceInstructions(projects, surface, focus);
+  const mint = async (minimal: boolean) => fetch(`${OPENAI_BASE_URL}/v1/realtime/client_secrets`, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${apiKey}`,
+      "content-type": "application/json",
+      "openai-safety-identifier": createHash("sha256").update(account.accountId).digest("hex").slice(0, 32),
+    },
+    body: JSON.stringify({
+      expires_after: { anchor: "created_at", seconds: 600 },
+      session: voiceSessionConfig({ model: VOICE_MODEL, voice: VOICE_NAME, instructions, transcribeModel: VOICE_TRANSCRIBE_MODEL, minimal }),
+    }),
+    signal: AbortSignal.timeout(20_000),
+  });
+  let response = await mint(false);
+  if (response.status === 400) {
+    // An option this model does not take (noise reduction, the transcription
+    // model) should cost captions, not the conversation.
+    console.warn(`voice: session refused (${(await response.text()).slice(0, 300)}); retrying without extras`);
+    response = await mint(true);
+  }
+  const minted = (await response.json().catch(() => null)) as { value?: unknown; expires_at?: unknown; error?: { message?: unknown } } | null;
+  if (!response.ok || typeof minted?.value !== "string") {
+    const reason = typeof minted?.error?.message === "string" ? minted.error.message : `OpenAI answered ${response.status}`;
+    sendJson(res, 502, { error: `could not start a voice session: ${reason}` });
+    return;
+  }
+  sendJson(res, 200, {
+    url: `${OPENAI_BASE_URL.replace(/^http/, "ws")}/v1/realtime?model=${encodeURIComponent(VOICE_MODEL)}`,
+    clientSecret: minted.value,
+    model: VOICE_MODEL,
+    voice: VOICE_NAME,
+    expiresAt: typeof minted.expires_at === "number" ? minted.expires_at : null,
+    greeting: voiceGreeting(projects, focus),
+  });
 }
 
 async function homeWithControl(accountId: string): Promise<Workspace> {

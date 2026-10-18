@@ -1,0 +1,750 @@
+// Talking to Rudder (the phone's voice screen and CarPlay).
+//
+// The phone holds the audio: it speaks to OpenAI's realtime model directly
+// over a WebSocket with a short-lived client secret minted here, so no audio
+// passes through the control plane. Everything the model may DO is a tool
+// call the phone relays to /api/app/voice/tool, which runs it here against
+// the account's home machine with the same RPCs the app's buttons use. So
+// the model only knows and changes what the account can, and the session's
+// instructions and tools live in one place (this file), not in the app.
+//
+// Pure apart from the VoiceContext it is handed, so tests drive it with fakes.
+
+export type VoiceAsk = {
+  id: string;
+  tool?: string;
+  kind?: string;
+  input?: unknown;
+  suggestions?: unknown[];
+};
+
+export type VoiceAgent = {
+  id: string;
+  title?: string | null;
+  task?: string | null;
+  status?: string | null;
+  phase?: string | null;
+  backend?: string | null;
+  model?: string | null;
+  updatedAt?: number | null;
+  lastMessage?: string | null;
+  summary?: string | null;
+  asks?: VoiceAsk[];
+};
+
+export type VoiceProject = {
+  workspaceId: string;
+  name: string;
+  repo?: string | null;
+  status?: string | null;
+  dashboard?: string | null;
+  failureReason?: string | null;
+  agents: VoiceAgent[];
+};
+
+export type VoiceContext = {
+  /** The account's projects as the app sees them right now. */
+  projects(): VoiceProject[];
+  /** One RPC to the home machine (woken first when asleep). */
+  rpc(method: string, params: Record<string, unknown>, timeoutMs?: number): Promise<unknown>;
+  /** Clone a GitHub repo onto the home machine and open it. */
+  openRepo(repo: string): Promise<unknown>;
+};
+
+export type VoiceToolResult = { output: string; end?: boolean };
+
+export type VoiceSurface = "carplay" | "phone";
+
+type ToolDef = {
+  type: "function";
+  name: string;
+  description: string;
+  parameters: Record<string, unknown>;
+};
+
+const projectParam = {
+  type: "string",
+  description: "Project name or repo (for example \"libra\" or \"exla-ai/libra\"). Leave out when there is only one project.",
+};
+const agentParam = {
+  type: "string",
+  description: "Which agent: words from its title or task, or its id. Leave out to mean the one that needs the user (or the only one).",
+};
+
+export const VOICE_TOOLS: ToolDef[] = [
+  {
+    type: "function",
+    name: "get_overview",
+    description: "Fresh status of every project and agent: what each is doing, which need the user and why, and the cloud machine. Call this before answering anything about current state.",
+    parameters: { type: "object", properties: {}, additionalProperties: false },
+  },
+  {
+    type: "function",
+    name: "get_agent",
+    description: "One agent in detail: its task, status, the prompt it is waiting on (with options), and its latest messages and tool calls. Use it to explain what an agent did or is stuck on.",
+    parameters: {
+      type: "object",
+      properties: { project: projectParam, agent: agentParam },
+      additionalProperties: false,
+    },
+  },
+  {
+    type: "function",
+    name: "send_message",
+    description: "Send a message to a running or finished agent, exactly as if the user typed it to that agent. Use for instructions, follow-ups and corrections to existing work.",
+    parameters: {
+      type: "object",
+      properties: {
+        project: projectParam,
+        agent: agentParam,
+        text: { type: "string", description: "The message, written out clearly as the user would type it (fix speech-to-text slips)." },
+      },
+      required: ["text"],
+      additionalProperties: false,
+    },
+  },
+  {
+    type: "function",
+    name: "start_task",
+    description: "Start new work in a project. Rudder's main agent for that project picks it up.",
+    parameters: {
+      type: "object",
+      properties: {
+        project: projectParam,
+        text: { type: "string", description: "The task, written out clearly with everything the user said about it." },
+      },
+      required: ["text"],
+      additionalProperties: false,
+    },
+  },
+  {
+    type: "function",
+    name: "answer_prompt",
+    description: "Answer what an agent is waiting on: a permission request, its questions, or a plan to approve.",
+    parameters: {
+      type: "object",
+      properties: {
+        project: projectParam,
+        agent: agentParam,
+        decision: {
+          type: "string",
+          enum: ["allow", "allow_always", "deny", "approve_plan", "revise_plan", "answer_questions"],
+          description: "allow / allow_always / deny for a permission; approve_plan / revise_plan for a plan; answer_questions for questions.",
+        },
+        message: { type: "string", description: "For deny or revise_plan: what to do instead." },
+        answers: {
+          type: "array",
+          items: { type: "string" },
+          description: "For answer_questions: one answer per question, in order (an option label or free text).",
+        },
+      },
+      required: ["decision"],
+      additionalProperties: false,
+    },
+  },
+  {
+    type: "function",
+    name: "agent_action",
+    description: "stop: stop the agent. interrupt: interrupt its current turn (like Esc) but keep it. merge: merge or publish its finished work. delete: remove the agent.",
+    parameters: {
+      type: "object",
+      properties: {
+        project: projectParam,
+        agent: agentParam,
+        action: { type: "string", enum: ["stop", "interrupt", "merge", "delete"] },
+      },
+      required: ["action"],
+      additionalProperties: false,
+    },
+  },
+  {
+    type: "function",
+    name: "find_repos",
+    description: "Search the user's GitHub repos that can be opened as a project on the cloud machine.",
+    parameters: {
+      type: "object",
+      properties: { query: { type: "string", description: "Words from the repo name or owner." } },
+      additionalProperties: false,
+    },
+  },
+  {
+    type: "function",
+    name: "open_project",
+    description: "Open a GitHub repo as a project on the cloud machine (it is cloned there).",
+    parameters: {
+      type: "object",
+      properties: { repo: { type: "string", description: "owner/name, from find_repos." } },
+      required: ["repo"],
+      additionalProperties: false,
+    },
+  },
+  {
+    type: "function",
+    name: "end_conversation",
+    description: "End the voice session when the user is done (says bye, thanks that's all, stop listening).",
+    parameters: { type: "object", properties: {}, additionalProperties: false },
+  },
+];
+
+// ---------------------------------------------------------------------------
+// What the model is told.
+// ---------------------------------------------------------------------------
+
+export function voiceInstructions(projects: VoiceProject[], surface: VoiceSurface, focus?: string): string {
+  const driving = surface === "carplay";
+  const lines = [
+    "You are Rudder, a voice assistant for a developer's coding agents. Rudder runs Claude Code and Codex agents on the user's cloud machine, one dashboard per GitHub project. You can see every project and agent, explain what they are doing, and act for the user: message an agent, start a task, answer an agent's permission request, questions or plan, interrupt, stop, merge or delete an agent, and open a new project.",
+    driving
+      ? "The user is DRIVING and talking to you through CarPlay. Keep every reply short (one to three spoken sentences), never read out code, file paths, long ids or URLs, and never ask them to look at a screen."
+      : "The user is talking to you on their phone. Keep replies short and spoken; never read out code, file paths, long ids or URLs.",
+    "Speak naturally, like a sharp colleague giving a status update. Summarize; lead with what needs the user. Say agent names by their short title, never their id.",
+    "Always call get_overview or get_agent before describing current state; the snapshot below may be stale. Do what the user asks right away without asking for confirmation, then say in a few words what you did. If a request is ambiguous between agents or projects, ask one short question.",
+    "When the user dictates a message or task, pass it on faithfully, cleaned of filler words and speech-to-text slips, in the user's words, not a rewrite. Reply in the user's language.",
+    "When the user is done, say a brief goodbye and call end_conversation.",
+    "",
+    "Snapshot when this conversation started:",
+    overviewText(projects),
+  ];
+  if (focus) {
+    lines.push("", `The user opened Rudder on: ${clip(focus, 300)}. Start with that.`);
+  }
+  return lines.join("\n");
+}
+
+/** The realtime session, minted with the client secret so the phone sends no config of its own. */
+export function voiceSessionConfig(options: {
+  model: string;
+  voice: string;
+  instructions: string;
+  transcribeModel?: string | null;
+  minimal?: boolean;
+}): Record<string, unknown> {
+  const input: Record<string, unknown> = {
+    format: { type: "audio/pcm", rate: 24000 },
+    turn_detection: { type: "semantic_vad" },
+  };
+  if (!options.minimal) {
+    // A car is a far-field microphone; transcripts feed the phone's captions.
+    input.noise_reduction = { type: "far_field" };
+    if (options.transcribeModel) {
+      input.transcription = { model: options.transcribeModel };
+    }
+  }
+  return {
+    type: "realtime",
+    model: options.model,
+    instructions: options.instructions,
+    output_modalities: ["audio"],
+    audio: {
+      input,
+      output: { format: { type: "audio/pcm", rate: 24000 }, voice: options.voice },
+    },
+    tools: VOICE_TOOLS,
+    tool_choice: "auto",
+  };
+}
+
+/** A one-line greeting the phone asks the model to open with. */
+export function voiceGreeting(projects: VoiceProject[], focus?: string): string {
+  if (focus) {
+    return `Tell the user in one sentence what ${clip(focus, 200)} needs, then ask what to do.`;
+  }
+  const waiting = projects.flatMap((project) => project.agents.filter(needsUser));
+  if (waiting.length === 0) {
+    return "Say hi in a few words and ask what they want to do. Do not list anything yet.";
+  }
+  return `Say hi and tell them in one sentence that ${waiting.length === 1 ? "one agent needs" : `${waiting.length} agents need`} them, naming ${waiting.length === 1 ? "it" : "the first"} briefly, then ask what to do.`;
+}
+
+// ---------------------------------------------------------------------------
+// Running a tool call.
+// ---------------------------------------------------------------------------
+
+export async function runVoiceTool(ctx: VoiceContext, name: string, rawArgs: unknown): Promise<VoiceToolResult> {
+  let args: Record<string, unknown>;
+  try {
+    args = parseArgs(rawArgs);
+  } catch {
+    return { output: "Those tool arguments were not valid JSON. Try again." };
+  }
+  try {
+    switch (name) {
+      case "get_overview":
+        return { output: overviewText(ctx.projects()) };
+      case "get_agent":
+        return await getAgent(ctx, args);
+      case "send_message":
+        return await sendMessage(ctx, args);
+      case "start_task":
+        return await startTask(ctx, args);
+      case "answer_prompt":
+        return await answerPrompt(ctx, args);
+      case "agent_action":
+        return await agentAction(ctx, args);
+      case "find_repos":
+        return await findRepos(ctx, args);
+      case "open_project": {
+        const repo = str(args.repo).replace(/^https:\/\/github\.com\//, "").replace(/\.git$/, "");
+        await ctx.openRepo(repo);
+        return { output: `Opening ${repo} on the cloud machine. It is being cloned; its agents can take tasks in a minute.` };
+      }
+      case "end_conversation":
+        return { output: "Ending the conversation.", end: true };
+      default:
+        return { output: `There is no tool called ${name}.` };
+    }
+  } catch (error) {
+    if (error instanceof Resolution) {
+      return { output: error.message };
+    }
+    const reason = error instanceof Error ? error.message : String(error);
+    return { output: `That did not work: ${clip(reason, 300)}` };
+  }
+}
+
+async function getAgent(ctx: VoiceContext, args: Record<string, unknown>): Promise<VoiceToolResult> {
+  const project = resolveProject(ctx.projects(), str(args.project));
+  const agent = resolveAgent(project, str(args.agent));
+  const lines = [`${agentLine(agent)} in ${project.name}.`];
+  if (agent.task && agent.task !== agent.title) {
+    lines.push(`Task: ${clip(agent.task, 600)}`);
+  }
+  for (const ask of agent.asks ?? []) {
+    lines.push(`Waiting on: ${describeAsk(ask)}`);
+  }
+  if (agent.summary) {
+    lines.push(`Its report: ${clip(agent.summary, 800)}`);
+  }
+  try {
+    const transcript = (await ctx.rpc("transcript", { workspaceId: project.workspaceId, runId: agent.id, limit: 40 }, 20_000)) as {
+      messages?: Array<{ role?: string; text?: string; tool?: { name?: string; input?: unknown } }>;
+    };
+    const recent = (transcript?.messages ?? []).slice(-14).map(transcriptLine).filter(Boolean);
+    if (recent.length) {
+      lines.push("Latest activity, oldest first:", ...recent);
+    }
+  } catch (error) {
+    if (agent.lastMessage) {
+      lines.push(`Its last message: ${clip(agent.lastMessage, 800)}`);
+    }
+    lines.push(`(The full transcript could not be read: ${clip(error instanceof Error ? error.message : String(error), 120)})`);
+  }
+  return { output: lines.join("\n") };
+}
+
+async function sendMessage(ctx: VoiceContext, args: Record<string, unknown>): Promise<VoiceToolResult> {
+  const text = str(args.text).trim();
+  if (!text) {
+    return { output: "What should the message say?" };
+  }
+  const project = resolveProject(ctx.projects(), str(args.project));
+  const agent = resolveAgent(project, str(args.agent));
+  await ctx.rpc("send", { workspaceId: project.workspaceId, runId: agent.id, text: text.slice(0, 16_000) });
+  return { output: `Sent to ${shortTitle(agent)} in ${project.name}.` };
+}
+
+async function startTask(ctx: VoiceContext, args: Record<string, unknown>): Promise<VoiceToolResult> {
+  const text = str(args.text).trim();
+  if (!text) {
+    return { output: "What is the task?" };
+  }
+  const project = resolveProject(ctx.projects(), str(args.project));
+  await ctx.rpc("task", { workspaceId: project.workspaceId, text: text.slice(0, 16_000) });
+  return { output: `Started in ${project.name}.` };
+}
+
+async function answerPrompt(ctx: VoiceContext, args: Record<string, unknown>): Promise<VoiceToolResult> {
+  const projects = ctx.projects();
+  const decision = str(args.decision);
+  // "Allow it" with no names means the one prompt that is waiting, wherever it is.
+  const target = str(args.project) || str(args.agent)
+    ? (() => {
+      const project = resolveProject(projects, str(args.project));
+      return { project, agent: resolveAgent(project, str(args.agent), (agent) => (agent.asks ?? []).length > 0) };
+    })()
+    : onlyWaiting(projects);
+  const { project, agent } = target;
+  const ask = (agent.asks ?? [])[0];
+  if (!ask) {
+    return { output: `${shortTitle(agent)} is not waiting on anything right now.` };
+  }
+  const kind = ask.kind ?? askKind(ask.tool);
+  const message = str(args.message).trim();
+  let answer: Record<string, unknown>;
+  if (kind === "plan") {
+    if (decision !== "approve_plan" && decision !== "revise_plan" && decision !== "allow" && decision !== "deny") {
+      return { output: "That prompt is a plan: approve it or say what to change." };
+    }
+    answer = decision === "approve_plan" || decision === "allow" ? { approve: true } : { message: message || "Revise the plan." };
+  } else if (kind === "question") {
+    const questions = askQuestions(ask);
+    const given = Array.isArray(args.answers) ? args.answers.map((value) => str(value).trim()) : [];
+    if (decision !== "answer_questions" || given.length < questions.length || given.some((value) => !value)) {
+      return { output: `It is asking ${questions.length === 1 ? "a question" : `${questions.length} questions`}: ${questions.map((q, i) => `${i + 1}. ${describeQuestion(q)}`).join(" ")} Answer each one.` };
+    }
+    answer = { answers: Object.fromEntries(questions.map((question, index) => [question.question, matchOption(question, given[index])])) };
+  } else {
+    if (decision === "allow" || decision === "approve_plan") {
+      answer = { behavior: "allow" };
+    } else if (decision === "allow_always") {
+      answer = { behavior: "allow", always: true };
+    } else if (decision === "deny" || decision === "revise_plan") {
+      answer = { behavior: "deny", message: message || "The user denied this by voice." };
+    } else {
+      return { output: "That prompt is a permission request: allow, allow always, or deny." };
+    }
+  }
+  await ctx.rpc("answer", { workspaceId: project.workspaceId, runId: agent.id, askId: ask.id, answer });
+  const remaining = (agent.asks ?? []).length - 1;
+  return { output: `Answered ${shortTitle(agent)}.${remaining > 0 ? ` It has ${remaining} more waiting.` : ""}` };
+}
+
+async function agentAction(ctx: VoiceContext, args: Record<string, unknown>): Promise<VoiceToolResult> {
+  const action = str(args.action);
+  const project = resolveProject(ctx.projects(), str(args.project));
+  const agent = resolveAgent(project, str(args.agent));
+  if (action === "interrupt") {
+    await ctx.rpc("keys", { workspaceId: project.workspaceId, runId: agent.id, keys: "esc" });
+    return { output: `Interrupted ${shortTitle(agent)}.` };
+  }
+  if (action !== "stop" && action !== "merge" && action !== "delete") {
+    return { output: "The action must be stop, interrupt, merge or delete." };
+  }
+  await ctx.rpc("action", { workspaceId: project.workspaceId, runId: agent.id, action });
+  const done = action === "stop" ? "Stopped" : action === "merge" ? "Merging" : "Deleted";
+  return { output: `${done} ${shortTitle(agent)} in ${project.name}.` };
+}
+
+async function findRepos(ctx: VoiceContext, args: Record<string, unknown>): Promise<VoiceToolResult> {
+  const result = (await ctx.rpc("repos", {}, 70_000)) as { repos?: Array<{ repo?: string; description?: string | null; open?: boolean }> };
+  const words = tokens(str(args.query));
+  const repos = (result?.repos ?? []).filter((repo) => typeof repo.repo === "string");
+  const scored = repos
+    .map((repo) => ({ repo, score: words.length ? overlap(words, tokens(`${repo.repo} ${repo.description ?? ""}`)) : 1 }))
+    .filter((entry) => entry.score > 0)
+    .slice(0, 8);
+  if (!scored.length) {
+    return { output: words.length ? "No repo matches that." : "No repos found." };
+  }
+  scored.sort((a, b) => b.score - a.score);
+  return {
+    output: scored
+      .map(({ repo }) => `${repo.repo}${repo.open ? " (already a project)" : ""}${repo.description ? `: ${clip(repo.description, 100)}` : ""}`)
+      .join("\n"),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Words to projects and agents.
+// ---------------------------------------------------------------------------
+
+/** A name the model could not pin down. Its message goes back to the model to ask about. */
+class Resolution extends Error {}
+
+export function resolveProject(projects: VoiceProject[], query: string): VoiceProject {
+  if (!projects.length) {
+    throw new Resolution("There are no projects on the cloud machine yet. Use find_repos and open_project to add one.");
+  }
+  const q = query.trim().toLowerCase();
+  if (!q) {
+    if (projects.length === 1) {
+      return projects[0];
+    }
+    const waiting = projects.filter((project) => project.agents.some(needsUser));
+    if (waiting.length === 1) {
+      return waiting[0];
+    }
+    throw new Resolution(`Which project? ${listNames(projects.map((project) => project.name))}.`);
+  }
+  const exact = projects.find((project) =>
+    project.workspaceId === query || project.name.toLowerCase() === q || (project.repo ?? "").toLowerCase() === q);
+  if (exact) {
+    return exact;
+  }
+  const best = bestMatches(projects, tokens(q), (project) => tokens(`${project.name} ${project.repo ?? ""}`));
+  if (best.length === 1) {
+    return best[0];
+  }
+  throw new Resolution(best.length
+    ? `Did they mean ${listNames(best.map((project) => project.name), "or")}?`
+    : `No project called "${query}". The projects are ${listNames(projects.map((project) => project.name))}.`);
+}
+
+export function resolveAgent(project: VoiceProject, query: string, prefer: (agent: VoiceAgent) => boolean = needsUser): VoiceAgent {
+  const agents = project.agents;
+  if (!agents.length) {
+    throw new Resolution(`${project.name} has no agents yet. Use start_task to give it work.`);
+  }
+  const q = query.trim();
+  if (!q) {
+    if (agents.length === 1) {
+      return agents[0];
+    }
+    const preferred = agents.filter(prefer);
+    if (preferred.length === 1) {
+      return preferred[0];
+    }
+    const pool = preferred.length ? preferred : agents;
+    throw new Resolution(`Which agent in ${project.name}? ${listNames(pool.slice(0, 6).map(shortTitle))}.`);
+  }
+  const byId = agents.find((agent) => agent.id === q);
+  if (byId) {
+    return byId;
+  }
+  const lower = q.toLowerCase();
+  if (/^(the )?(latest|newest|last|most recent)( one| agent)?$/.test(lower)) {
+    return [...agents].sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0))[0];
+  }
+  const best = bestMatches(agents, tokens(lower), (agent) => tokens(`${agent.title ?? ""} ${agent.task ?? ""}`));
+  if (best.length === 1) {
+    return best[0];
+  }
+  // Two equally good matches: the one that needs the user is almost always meant.
+  const preferred = best.filter(prefer);
+  if (preferred.length === 1) {
+    return preferred[0];
+  }
+  throw new Resolution(best.length
+    ? `Which one: ${listNames(best.slice(0, 5).map(shortTitle), "or")}?`
+    : `No agent in ${project.name} matches "${query}". Its agents: ${listNames(agents.slice(0, 6).map(shortTitle))}.`);
+}
+
+function onlyWaiting(projects: VoiceProject[]): { project: VoiceProject; agent: VoiceAgent } {
+  const waiting = projects.flatMap((project) =>
+    project.agents.filter((agent) => (agent.asks ?? []).length > 0).map((agent) => ({ project, agent })));
+  if (waiting.length === 1) {
+    return waiting[0];
+  }
+  if (!waiting.length) {
+    throw new Resolution("No agent is waiting on a prompt right now.");
+  }
+  throw new Resolution(`${waiting.length} agents are waiting: ${listNames(waiting.map(({ project, agent }) => `${shortTitle(agent)} in ${project.name}`))}. Which one?`);
+}
+
+function bestMatches<T>(items: T[], query: string[], words: (item: T) => string[]): T[] {
+  if (!query.length) {
+    return [];
+  }
+  let best: T[] = [];
+  let top = 0;
+  for (const item of items) {
+    const score = overlap(query, words(item));
+    if (score > top) {
+      top = score;
+      best = [item];
+    } else if (score === top && score > 0) {
+      best.push(item);
+    }
+  }
+  // Half the spoken words must land, so "the login one" can find "Fix login redirect".
+  return top >= Math.max(1, Math.ceil(query.length / 2)) ? best : [];
+}
+
+const STOP_WORDS = new Set(["the", "a", "an", "one", "agent", "project", "repo", "that", "this", "on", "in", "for", "to", "of", "and", "is", "it", "about", "with", "my"]);
+
+function tokens(text: string): string[] {
+  return text
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter((word) => word.length > 1 && !STOP_WORDS.has(word))
+    .map(stem);
+}
+
+function stem(word: string): string {
+  return word.length > 4 ? word.replace(/(ing|ed|es|s)$/, "") : word;
+}
+
+function overlap(query: string[], words: string[]): number {
+  const have = new Set(words);
+  let score = 0;
+  for (const word of new Set(query)) {
+    if (have.has(word) || words.some((candidate) => candidate.length > 3 && word.length > 3 && (candidate.startsWith(word) || word.startsWith(candidate)))) {
+      score += 1;
+    }
+  }
+  return score;
+}
+
+// ---------------------------------------------------------------------------
+// State as text the model reads.
+// ---------------------------------------------------------------------------
+
+const ACTIVE = new Set(["working", "waiting", "review", "paused", "failed", "starting"]);
+
+export function needsUser(agent: VoiceAgent): boolean {
+  return (agent.asks ?? []).length > 0 || agent.status === "waiting" || agent.status === "review" || agent.status === "failed";
+}
+
+export function overviewText(projects: VoiceProject[]): string {
+  if (!projects.length) {
+    return "No projects on the cloud machine yet.";
+  }
+  const out: string[] = [];
+  for (const project of projects) {
+    const header = [`Project ${project.name}${project.repo && project.repo !== project.name ? ` (${project.repo})` : ""}`];
+    if (project.failureReason) {
+      header.push(`problem: ${clip(project.failureReason, 160)}`);
+    } else if (project.dashboard && project.dashboard !== "running") {
+      header.push(`dashboard ${project.dashboard}`);
+    }
+    out.push(`${header.join(", ")}:`);
+    const agents = [...project.agents].sort((a, b) => rank(a) - rank(b) || (b.updatedAt ?? 0) - (a.updatedAt ?? 0));
+    const shown = agents.filter((agent) => ACTIVE.has(agent.status ?? "") || needsUser(agent)).slice(0, 12);
+    const quiet = agents.length - shown.length;
+    if (!agents.length) {
+      out.push("  no agents.");
+    }
+    for (const agent of shown) {
+      out.push(`  - ${agentLine(agent)}`);
+      for (const ask of agent.asks ?? []) {
+        out.push(`    waiting on: ${describeAsk(ask)}`);
+      }
+      const last = agent.lastMessage || agent.summary;
+      if (last) {
+        out.push(`    last said: ${clip(oneLine(last), 220)}`);
+      }
+    }
+    if (quiet > 0) {
+      out.push(`  plus ${quiet} finished or stopped ${quiet === 1 ? "agent" : "agents"} (${listNames(agents.filter((agent) => !shown.includes(agent)).slice(0, 5).map(shortTitle))}).`);
+    }
+  }
+  return out.join("\n");
+}
+
+function rank(agent: VoiceAgent): number {
+  if ((agent.asks ?? []).length) return 0;
+  if (agent.status === "waiting" || agent.status === "failed") return 1;
+  if (agent.status === "review") return 2;
+  if (agent.status === "working" || agent.status === "starting") return 3;
+  return 4;
+}
+
+function agentLine(agent: VoiceAgent): string {
+  const status = (agent.asks ?? []).length ? "needs the user" : STATUS_WORDS[agent.status ?? ""] ?? agent.status ?? "unknown";
+  const who = [agent.backend, agent.model].filter(Boolean).join(" ");
+  return `"${shortTitle(agent)}": ${status}${who ? ` (${who})` : ""}`;
+}
+
+const STATUS_WORDS: Record<string, string> = {
+  working: "working",
+  starting: "starting",
+  waiting: "waiting for the user",
+  review: "finished, ready to review and merge",
+  done: "done",
+  merged: "merged",
+  stopped: "stopped",
+  paused: "paused",
+  failed: "failed",
+  orphaned: "lost its process",
+};
+
+function shortTitle(agent: VoiceAgent): string {
+  return clip(oneLine(agent.title || agent.task || agent.id), 80);
+}
+
+function askKind(tool: string | undefined): string {
+  return tool === "AskUserQuestion" ? "question" : tool === "ExitPlanMode" ? "plan" : "permission";
+}
+
+type Question = { question: string; options: string[]; multiSelect: boolean };
+
+function askQuestions(ask: VoiceAsk): Question[] {
+  const input = (ask.input ?? {}) as { questions?: unknown };
+  const list = Array.isArray(input.questions) ? input.questions : [];
+  return list
+    .map((raw) => {
+      const q = (raw ?? {}) as { question?: unknown; options?: unknown; multiSelect?: unknown };
+      const options = Array.isArray(q.options)
+        ? q.options.map((option) => (typeof option === "string" ? option : str((option as { label?: unknown })?.label))).filter(Boolean)
+        : [];
+      return { question: str(q.question), options, multiSelect: q.multiSelect === true };
+    })
+    .filter((q) => q.question);
+}
+
+function describeQuestion(question: Question): string {
+  return `${question.question}${question.options.length ? ` Options: ${question.options.join("; ")}.` : ""}`;
+}
+
+/** A spoken answer lands on the option it names, or goes through as free text. */
+function matchOption(question: Question, spoken: string): string {
+  const said = tokens(spoken);
+  if (!question.options.length || !said.length) {
+    return spoken;
+  }
+  const exact = question.options.find((option) => option.toLowerCase() === spoken.toLowerCase());
+  if (exact) {
+    return exact;
+  }
+  const ordinal = /^(option )?(\d)$/.exec(spoken.trim().toLowerCase());
+  if (ordinal && question.options[Number(ordinal[2]) - 1]) {
+    return question.options[Number(ordinal[2]) - 1];
+  }
+  const best = bestMatches(question.options, said, tokens);
+  return best.length === 1 ? best[0] : spoken;
+}
+
+function describeAsk(ask: VoiceAsk): string {
+  const kind = ask.kind ?? askKind(ask.tool);
+  const input = (ask.input ?? {}) as Record<string, unknown>;
+  if (kind === "plan") {
+    return `approval of its plan: ${clip(oneLine(str(input.plan)), 500)}`;
+  }
+  if (kind === "question") {
+    const questions = askQuestions(ask);
+    return `${questions.length === 1 ? "a question" : `${questions.length} questions`}: ${questions.map((q, i) => `${i + 1}. ${describeQuestion(q)}`).join(" ")}`;
+  }
+  const detail = str(input.command) || str(input.description) || str(input.file_path) || str(input.url) || str(input.pattern) || jsonish(input);
+  return `permission to use ${ask.tool || "a tool"}: ${clip(oneLine(detail), 240)}`;
+}
+
+function transcriptLine(message: { role?: string; text?: string; tool?: { name?: string; input?: unknown } }): string {
+  if (message.role === "tool") {
+    const input = message.tool?.input;
+    const detail = typeof input === "string" ? input : jsonish(input);
+    return `  [${message.tool?.name ?? "tool"}] ${clip(oneLine(detail), 120)}`;
+  }
+  const text = oneLine(str(message.text));
+  if (!text) {
+    return "";
+  }
+  return `  ${message.role === "user" ? "User" : message.role === "assistant" ? "Agent" : "Note"}: ${clip(text, message.role === "assistant" ? 600 : 300)}`;
+}
+
+// ---------------------------------------------------------------------------
+
+function parseArgs(raw: unknown): Record<string, unknown> {
+  if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+    return raw as Record<string, unknown>;
+  }
+  if (typeof raw !== "string" || !raw.trim()) {
+    return {};
+  }
+  const parsed = JSON.parse(raw);
+  return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+}
+
+function str(value: unknown): string {
+  return typeof value === "string" ? value : typeof value === "number" ? String(value) : "";
+}
+
+function jsonish(value: unknown): string {
+  try {
+    return value === undefined ? "" : JSON.stringify(value);
+  } catch {
+    return "";
+  }
+}
+
+function oneLine(text: string): string {
+  return text.replace(/\s+/g, " ").trim();
+}
+
+function clip(text: string, max: number): string {
+  return text.length > max ? `${text.slice(0, max - 1)}…` : text;
+}
+
+function listNames(names: string[], joiner = "and"): string {
+  const quoted = names.map((name) => `"${name}"`);
+  return quoted.length <= 1 ? quoted.join("") : `${quoted.slice(0, -1).join(", ")} ${joiner} ${quoted[quoted.length - 1]}`;
+}

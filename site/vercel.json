@@ -17,6 +17,11 @@
       "source": "/login",
       "destination": "https://rudder-cloud-control.fly.dev/cli/login",
       "permanent": false
+    },
+    {
+      "source": "/setup",
+      "destination": "/docs/setup",
+      "permanent": false
     }
   ],
   "rewrites": [

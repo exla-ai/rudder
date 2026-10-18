@@ -21,6 +21,7 @@ const NAV = [
     title: "get started",
     items: [
       ["", "Overview"],
+      ["setup", "Set up (phone first)"],
       ["install", "Install"],
       ["first-agent", "Your first agent"],
     ],
@@ -148,6 +149,80 @@ stays exactly where you left it the whole time.</p>
 </ul>
 <p>Next: <a href="/docs/first-agent">walk through your first agent</a>, or read
 <a href="/docs/workspaces">how the isolation works</a>.</p>
+`,
+  },
+
+  setup: {
+    title: "Set up Rudder",
+    lede: "From the invite to agents running, about five minutes. Start on your phone; the laptop is optional.",
+    toc: [
+      ["app", "1. Get the app"],
+      ["sign-in", "2. Sign in"],
+      ["checklist", "3. Get set up"],
+      ["first-task", "4. Your first task"],
+      ["laptop", "5. Your laptop (optional)"],
+      ["help", "Stuck?"],
+    ],
+    body: `
+<h2 id="app">1. Get the app</h2>
+<p>Rudder for iPhone is in beta on TestFlight. Open the invite email from
+TestFlight on your phone, tap <strong>View in TestFlight</strong>, install TestFlight
+if it asks, then install <strong>Rudder</strong>. No iPhone? Everything below also
+works in your phone's browser at
+<a href="https://rudder-cloud-control.fly.dev/app">rudder-cloud-control.fly.dev/app</a>.</p>
+
+<h2 id="sign-in">2. Sign in</h2>
+<p>Sign in with Google or GitHub. That is your Rudder account, the same one on
+every device. If the app shows <strong>Create my cloud machine</strong>, tap it: that
+is one machine of your own that holds all your repos and keeps your agents running
+while your phone is locked and your laptop is closed. It takes about a minute to
+start the first time.</p>
+
+<h2 id="checklist">3. Get set up</h2>
+<p>The home screen shows a short checklist. Each step is one tap:</p>
+<ol>
+  <li><strong>Connect GitHub.</strong> The app shows a short code and a button to
+  github.com/login/device. Enter the code there and approve. This is how the cloud
+  machine clones your repos and opens pull requests.</li>
+  <li><strong>Sign in Claude Code or Codex.</strong> Rudder runs your own Claude or
+  ChatGPT subscription; tap Sign in and approve in the page that opens. Rudder
+  never charges for model usage.</li>
+  <li><strong>Pick a repo.</strong> Choose one of yours under <strong>Open a
+  repo</strong>, or make a fresh one under <strong>New repo</strong>. The first one
+  takes a minute while the machine starts and clones it.</li>
+</ol>
+
+<h2 id="first-task">4. Your first task</h2>
+<p>Open the project and type what you want done, like you would to a colleague:
+<em>"add a dark mode toggle to the settings page"</em>. An agent starts on the cloud
+machine in its own workspace. From the phone you can:</p>
+<ul>
+  <li>read the conversation as it happens and send a message at any point;</li>
+  <li>answer when it asks for permission or has a question, or approve its plan;</li>
+  <li>attach a screenshot or a file with the paperclip;</li>
+  <li>open a preview link when it starts a dev server.</li>
+</ul>
+<p>When it is done, merge from the agent's menu: on the cloud machine that pushes a
+branch and opens a draft pull request on GitHub.</p>
+
+<h2 id="laptop">5. Your laptop (optional)</h2>
+<p>Want the full dashboard on a Mac or Linux machine? You need Node.js 22 or newer.</p>
+<pre><code><span class="prompt">$ </span>npm install -g @exla/rudder@latest
+<span class="prompt">$ </span>rudder login</code></pre>
+<p><code>rudder login</code> shows a short code and a QR code. Scan it with your phone
+(or open <strong>Settings → Sign in a computer</strong> in the app and type the code)
+and tap <strong>Approve</strong>. If Claude Code or Codex is not on the laptop yet,
+Rudder offers to install it and sign it in.</p>
+<p>Then bring a repo from the cloud machine down, with the work its agents have done:</p>
+<pre><code><span class="prompt">$ </span>rudder cloud sync your-repo
+<span class="prompt">$ </span>cd ~/code/your-repo &amp;&amp; rudder</code></pre>
+<p>From then on, <code>/sync</code> in the dashboard keeps the laptop and the cloud in
+step, and <code>H</code> hands running agents back to the cloud before you close the
+lid.</p>
+
+<h2 id="help">Stuck?</h2>
+<p>Run <code>rudder doctor</code> on the laptop to check your setup, or tell us in
+<a href="https://github.com/exla-ai/rudder/issues">GitHub issues</a>.</p>
 `,
   },
 

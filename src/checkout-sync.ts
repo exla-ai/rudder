@@ -49,9 +49,17 @@ function count(text: string): number {
 
 export async function syncCheckout(root: string): Promise<CheckoutSyncReport> {
   const vcs = fs.existsSync(path.join(root, ".jj")) ? "jj" : "git";
-  const fetch = vcs === "jj"
+  let fetch = vcs === "jj"
     ? await run(root, "jj", ["git", "fetch"])
     : await run(root, "git", ["fetch", "--prune", "origin"]);
+  if (vcs === "jj" && fetch.code !== 0) {
+    // jj's fetch needs git >= 2.41 (the cloud image's Debian git is older):
+    // fetch with git, then let jj import the moved refs.
+    fetch = await run(root, "git", ["fetch", "--prune", "origin"]);
+    if (fetch.code === 0) {
+      await run(root, "jj", ["git", "import"]);
+    }
+  }
   const fetched = fetch.code === 0;
   const fetchError = fetched ? undefined : (fetch.stderr || fetch.stdout).trim().split("\n").pop();
   const branch = await defaultBranch(root);

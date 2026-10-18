@@ -1,0 +1,654 @@
+/* The 2026-10 refresh: the hero stage (laptop + phone), the phone section,
+ * god's view and /sync. Same stock, ink and hairlines as the rest of the sheet;
+ * the only new material is the phone, which is a physical object and so is the
+ * one thing on the page allowed a shadow. */
+
+/* ---------- hero ---------- */
+
+.hero {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.08fr);
+  gap: clamp(28px, 4.5vw, 64px);
+  align-items: center;
+  padding: clamp(40px, 6.5vw, 88px) 0 clamp(36px, 5vw, 64px);
+}
+
+/* A faint ruled ground behind the hero: the sheet's own rules, fading out. */
+.hero::before {
+  content: "";
+  position: absolute;
+  inset: 0 calc(-1 * clamp(18px, 4.5vw, 52px));
+  z-index: -1;
+  background-image: linear-gradient(to bottom, var(--rule) 1px, transparent 1px);
+  background-size: 100% 34px;
+  -webkit-mask-image: radial-gradient(120% 90% at 70% 40%, #000 0%, transparent 72%);
+  mask-image: radial-gradient(120% 90% at 70% 40%, #000 0%, transparent 72%);
+  opacity: 0.55;
+  pointer-events: none;
+}
+
+.hero-copy h1 {
+  max-width: 15ch;
+  font-size: clamp(2.35rem, 4.5vw, 3.8rem);
+}
+
+.h1-accent {
+  color: var(--work);
+}
+
+.nw {
+  white-space: nowrap;
+}
+
+.hero-copy .lede {
+  font-size: clamp(1rem, 1.3vw, 1.12rem);
+  color: var(--ink-2);
+  max-width: 46ch;
+  margin-top: 20px;
+}
+
+.hero-copy .lede strong {
+  color: var(--ink);
+  font-weight: 500;
+}
+
+.hero-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  margin-bottom: 22px;
+  padding: 5px 12px 5px 10px;
+  border: var(--hair) solid var(--rule-mid);
+  border-radius: 999px;
+  background: var(--stock);
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  color: var(--ink-2);
+  text-decoration: none;
+}
+
+.hero-tag:hover {
+  border-color: var(--work);
+}
+
+.hero-tag-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--work);
+  box-shadow: 0 0 0 3px color-mix(in oklch, var(--work) 22%, transparent);
+}
+
+.actions-note {
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  color: var(--ink-3);
+}
+
+/* ---------- the stage: laptop dashboard with the phone in front ---------- */
+
+.stage {
+  position: relative;
+  padding: 0 0 56px;
+  min-width: 0;
+}
+
+.stage-glow {
+  position: absolute;
+  inset: -12% 0 4% 6%;
+  z-index: -1;
+  background: radial-gradient(closest-side, var(--glow), transparent);
+  pointer-events: none;
+}
+
+.dots {
+  display: inline-flex;
+  gap: 5px;
+  margin-right: 4px;
+  align-self: center;
+}
+
+.dots i {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--rule-mid);
+}
+
+.laptop {
+  width: calc(100% - 92px);
+  border: var(--hair) solid var(--rule-strong);
+  border-radius: 8px;
+  background: var(--stock);
+  overflow: hidden;
+  box-shadow: var(--lift);
+}
+
+.laptop-chrome {
+  display: flex;
+  gap: 12px;
+  align-items: baseline;
+  padding: 8px 12px;
+  border-bottom: var(--hair) solid var(--rule);
+  background: var(--stock-band);
+  font-size: 0.72rem;
+  color: var(--ink-3);
+}
+
+.laptop-body {
+  display: grid;
+  grid-template-columns: minmax(0, 0.74fr) minmax(0, 1.3fr);
+  min-height: 19rem;
+}
+
+.mini-list {
+  padding: 9px 10px 12px;
+  border-right: var(--hair) solid var(--rule);
+  background: var(--stock-band);
+  min-width: 0;
+}
+
+.mini-label {
+  font-family: var(--font-mono);
+  font-size: 0.6rem;
+  letter-spacing: 0.04em;
+  color: var(--ink-3);
+  padding-bottom: 7px;
+  margin-bottom: 4px;
+  border-bottom: var(--hair) solid var(--rule);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.mini-group {
+  font-family: var(--font-mono);
+  font-size: 0.6rem;
+  color: var(--ink-3);
+  margin: 9px 0 3px;
+}
+
+.mini-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px;
+  padding: 4px 5px 4px 7px;
+  font-size: 0.72rem;
+  color: var(--ink-2);
+}
+
+.mini-row.is-selected {
+  background: var(--stock);
+  box-shadow: inset 2px 0 0 var(--work);
+  color: var(--ink);
+  font-weight: 500;
+}
+
+.mini-task {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mini-row .state {
+  font-size: 0.58rem;
+  flex: none;
+}
+
+.mini-worker {
+  padding: 9px 12px 12px;
+  min-width: 0;
+}
+
+/* On a wide stage the phone stands over the worker's right edge; its lines
+ * wrap short of the phone rather than running under it. */
+@media (min-width: 1001px) {
+  .mini-worker {
+    padding-right: 90px;
+  }
+}
+
+.mini-worker .tty {
+  font-size: 0.68rem;
+  line-height: 1.85;
+  overflow: hidden;
+}
+
+.laptop-task {
+  padding: 8px 12px;
+  border-top: var(--hair) solid var(--rule);
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  color: var(--ink-2);
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.laptop-task .dim {
+  color: var(--ink-3);
+}
+
+/* ---------- the phone ---------- */
+
+.phone {
+  margin: 0;
+  padding: 7px;
+  border-radius: 38px;
+  background: var(--bezel);
+  box-shadow: var(--lift), inset 0 0 0 1px oklch(40% 0.01 250 / 0.6);
+}
+
+.phone img {
+  width: 100%;
+  height: auto;
+  border-radius: 31px;
+  background: var(--stock-band);
+}
+
+.phone--hero {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  width: min(34%, 212px);
+  transform: rotate(var(--tilt, 2.2deg));
+  transform-origin: bottom right;
+}
+
+/* ---------- facts strip ---------- */
+
+.facts {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  border-top: var(--hair) solid var(--rule-strong);
+  border-bottom: var(--hair) solid var(--rule);
+}
+
+.facts li {
+  display: grid;
+  gap: 3px;
+  padding: 14px 16px 15px 0;
+}
+
+.facts li + li {
+  padding-left: 16px;
+  border-left: var(--hair) solid var(--rule);
+}
+
+.fact-k {
+  font-family: var(--font-mono);
+  font-size: 0.66rem;
+  letter-spacing: 0.04em;
+  color: var(--ink-3);
+}
+
+.fact-v {
+  font-size: 0.92rem;
+  font-weight: 500;
+  color: var(--ink);
+}
+
+/* ---------- the phone section ---------- */
+
+/* The phone section sits on its own band, out to both viewport edges, so it
+ * reads as the page's centre of gravity rather than one more ruled block. */
+.phone-section {
+  margin-top: clamp(54px, 7.5vw, 96px);
+  padding-bottom: clamp(54px, 7vw, 90px);
+  background: var(--stock-band);
+  box-shadow: 0 0 0 100vmax var(--stock-band);
+  clip-path: inset(0 -100vmax);
+  border-top: var(--hair) solid var(--rule);
+}
+
+.phones {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: clamp(20px, 3.4vw, 48px);
+}
+
+.phone-step .phone {
+  max-width: 290px;
+}
+
+.step-text {
+  margin-top: 22px;
+  max-width: 34ch;
+}
+
+.step-no {
+  display: block;
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  color: var(--work);
+  padding-bottom: 8px;
+  margin-bottom: 10px;
+  border-bottom: var(--hair) solid var(--rule-strong);
+  width: 2.4rem;
+}
+
+.step-text h3 {
+  font-size: 1.12rem;
+}
+
+.step-text p {
+  margin-top: 6px;
+  color: var(--ink-2);
+  font-size: 0.93rem;
+}
+
+/* The middle phone sits lower, so the three read as a sequence, not a row of
+ * identical cards. */
+@media (min-width: 901px) {
+  .phone-step:nth-child(2) {
+    margin-top: 48px;
+  }
+  .phone-step:nth-child(3) {
+    margin-top: 96px;
+  }
+}
+
+.handoff,
+.sync {
+  display: grid;
+  grid-template-columns: minmax(0, 1.05fr) minmax(0, 1fr);
+  gap: clamp(24px, 4vw, 56px);
+  align-items: start;
+  margin-top: clamp(48px, 6vw, 80px);
+}
+
+.sync {
+  margin-top: 0;
+}
+
+.screen--term {
+  border-radius: 8px;
+  box-shadow: var(--lift);
+}
+
+.screen .dots {
+  margin-right: 2px;
+}
+
+.tty--pad {
+  padding: 14px 16px 18px;
+  font-size: 0.78rem;
+  line-height: 1.7;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.code-big {
+  font-size: 1.45em;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  color: var(--work);
+}
+
+.tty .needs {
+  color: var(--st-needs);
+}
+
+.tty .rev {
+  color: var(--st-review);
+}
+
+.handoff-notes,
+.sync-notes {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  border-top: var(--hair) solid var(--rule-strong);
+}
+
+.handoff-notes li,
+.sync-notes li {
+  padding: 14px 0 15px;
+  border-bottom: var(--hair) solid var(--rule);
+}
+
+.handoff-notes h3,
+.sync-notes h3 {
+  font-size: 1rem;
+}
+
+.handoff-notes h3 .mono,
+.sync-notes h3 .mono {
+  font-size: 0.92em;
+  color: var(--work-deep);
+}
+
+.handoff-notes p,
+.sync-notes p {
+  margin-top: 4px;
+  color: var(--ink-2);
+  font-size: 0.92rem;
+}
+
+/* ---------- god's view ---------- */
+
+.gods {
+  border-radius: 8px;
+  box-shadow: var(--lift);
+}
+
+.gods-head {
+  color: var(--work);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+
+.gods-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+  padding: 6px;
+  background: var(--stock);
+}
+
+.tile {
+  min-width: 0;
+  border: var(--hair) solid var(--rule-mid);
+  border-radius: 3px;
+  padding: 0 10px 10px;
+  transition: border-color 260ms var(--ease-quint), box-shadow 260ms var(--ease-quint);
+}
+
+/* The highlighted tile: the thick accent border god's view draws. */
+.tile.is-hot {
+  border-color: var(--work);
+  box-shadow: inset 0 0 0 1px var(--work);
+}
+
+.tile-title {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin: 0 -10px 8px;
+  padding: 6px 10px;
+  border-bottom: var(--hair) solid var(--rule);
+  font-family: var(--font-mono);
+  font-size: 0.64rem;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+.tile-name {
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+  flex: 0 1 auto;
+  transition: color 260ms var(--ease-quint);
+}
+
+.tile.is-hot .tile-name {
+  color: var(--work);
+  font-weight: 500;
+}
+
+.tile-model {
+  color: var(--ink-3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.tile-title .state {
+  font-size: 0.62rem;
+  flex: none;
+  margin-left: auto;
+}
+
+.tile .tty {
+  font-size: 0.68rem;
+  line-height: 1.7;
+  min-height: 9.4em;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* ---------- responsive ---------- */
+
+@media (max-width: 1000px) {
+  .hero {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .hero-copy h1 {
+    max-width: 16ch;
+  }
+  .gods-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 900px) {
+  .handoff,
+  .sync {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .facts {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .facts li:nth-child(3) {
+    padding-left: 0;
+    border-left: 0;
+  }
+  .facts li:nth-child(n + 3) {
+    border-top: var(--hair) solid var(--rule);
+  }
+
+  /* Three phones become a swipeable row: each one big enough to read, the next
+   * peeking in at the edge. The row scrolls, the page does not. */
+  .phones {
+    grid-template-columns: none;
+    grid-auto-flow: column;
+    grid-auto-columns: 68%;
+    overflow-x: auto;
+    scroll-snap-type: x mandatory;
+    scrollbar-width: none;
+    margin-inline: calc(-1 * clamp(18px, 4.5vw, 52px));
+    padding-inline: clamp(18px, 4.5vw, 52px);
+    scroll-padding-inline: clamp(18px, 4.5vw, 52px);
+    padding-bottom: 8px;
+  }
+  .phones::-webkit-scrollbar {
+    display: none;
+  }
+  .phone-step {
+    scroll-snap-align: start;
+  }
+  .phone-step .phone {
+    max-width: none;
+  }
+}
+
+@media (max-width: 640px) {
+  .page {
+    padding-inline: 16px;
+  }
+  .hero::before {
+    inset: 0 -16px;
+  }
+  .phones {
+    margin-inline: -16px;
+    padding-inline: 16px;
+    scroll-padding-inline: 16px;
+    grid-auto-columns: 76%;
+  }
+  .stage {
+    padding-bottom: 40px;
+  }
+  .laptop {
+    width: 100%;
+  }
+  .laptop-body {
+    grid-template-columns: minmax(0, 1fr);
+    min-height: 0;
+  }
+  .mini-list {
+    border-right: 0;
+    border-bottom: var(--hair) solid var(--rule);
+  }
+  .mini-worker {
+    padding-right: 38%;
+  }
+  .mini-worker .tty {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+  .phone--hero {
+    width: 36%;
+    right: 0;
+    --tilt: 0deg;
+    padding: 5px;
+    border-radius: 26px;
+  }
+  .phone--hero img {
+    border-radius: 21px;
+  }
+  .gods-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .gods-grid .tile:nth-child(n + 5) {
+    display: none;
+  }
+  .facts {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .facts li,
+  .facts li + li {
+    padding: 11px 0;
+    border-left: 0;
+    grid-template-columns: 7.5rem minmax(0, 1fr);
+    align-items: baseline;
+  }
+  .facts li + li {
+    border-top: var(--hair) solid var(--rule);
+  }
+  .site-nav .nav-install,
+  .site-nav a[href="#phone"] {
+    display: none;
+  }
+  /* Three links fit beside the brand, so the header stays one row. */
+  .site-head--float {
+    flex-wrap: nowrap;
+    height: 56px;
+    padding: 0;
+  }
+  .site-head--float .site-nav {
+    width: auto;
+    justify-content: flex-end;
+    gap: 16px;
+  }
+}

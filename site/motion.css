@@ -1,19 +1,21 @@
-/* One authored moment, not scattered effects.
+/* Motion: one idea, "the sheet is live".
  *
- * The sheet's native motion is being filled in: a form is written a row at a
- * time, and the ink lands. On load the track rows ink in with a short stagger
- * and the sum-bus rule draws left to right, once. Nothing else on the page
- * animates on scroll.
+ * On load the hero's lines ink in, the laptop settles and the phone rises in
+ * front of it. Below the fold each block inks in once as it arrives. Inside the
+ * pictures, the things that are live in the product move: running rows breathe,
+ * the worker streams, spinners turn, god's view's focus walks the grid, /sync
+ * prints its report a line at a time.
  *
- * Content is visible by default. The animation runs FROM the final state, so a
- * headless render, a background tab, or a failed script still ships a complete
- * page rather than a blank one.
+ * Content is visible by default. Hiding-before-reveal only applies under
+ * `html.motion`, which site.js sets when scripting runs AND the visitor has not
+ * asked for reduced motion, so a headless render, a failed script or a reduced
+ * motion preference all ship the complete, still page.
  */
 
 @keyframes ink-in {
   from {
     opacity: 0;
-    transform: translateY(3px);
+    transform: translateY(10px);
   }
   to {
     opacity: 1;
@@ -21,56 +23,89 @@
   }
 }
 
-@keyframes rule-draw {
+@keyframes rise {
   from {
-    transform: scaleX(0);
+    opacity: 0;
+    transform: translateY(36px) rotate(calc(var(--tilt, 2.2deg) * 2));
   }
   to {
-    transform: scaleX(1);
+    opacity: 1;
+    transform: rotate(var(--tilt, 2.2deg));
+  }
+}
+
+@keyframes settle {
+  from {
+    opacity: 0;
+    transform: translateY(16px) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: none;
   }
 }
 
 @media (prefers-reduced-motion: no-preference) {
-  .tracks tbody tr {
-    animation: ink-in 520ms var(--ease-expo) both;
+  .hero-copy > * {
+    animation: ink-in 640ms var(--ease-expo) both;
   }
-
-  .tracks tbody tr:nth-child(1) {
-    animation-delay: 60ms;
+  .hero-copy > :nth-child(2) {
+    animation-delay: 70ms;
   }
-  .tracks tbody tr:nth-child(2) {
+  .hero-copy > :nth-child(3) {
     animation-delay: 140ms;
   }
-  .tracks tbody tr:nth-child(3) {
-    animation-delay: 220ms;
+  .hero-copy > :nth-child(4) {
+    animation-delay: 210ms;
   }
-  .tracks tbody tr:nth-child(4) {
-    animation-delay: 300ms;
-  }
-
-  .bus {
-    position: relative;
-    /* The static border would sit under the drawn rule in the same colour and
-     * hide the animation entirely; the ::before IS the rule while it draws. */
-    border-top-color: transparent;
+  .hero-copy > :nth-child(5) {
+    animation-delay: 260ms;
   }
 
-  /* The bus rule draws itself once, after the last row has landed. */
-  .bus::before {
-    content: "";
-    position: absolute;
-    inset-inline: 0;
-    top: -2px;
-    height: 2px;
-    background: var(--rule-strong);
-    transform-origin: left center;
-    animation: rule-draw 620ms var(--ease-expo) 340ms both;
+  .laptop {
+    animation: settle 820ms var(--ease-expo) 160ms both;
   }
-}
 
-/* The state stamp for a running track breathes, because that row is live.
- * This is the only looping motion on the page and it stops at reduced motion. */
-@media (prefers-reduced-motion: no-preference) {
+  .phone--hero {
+    animation: rise 1000ms var(--ease-expo) 420ms both;
+  }
+
+  /* Scroll reveal, opted into by site.js. */
+  html.motion [data-reveal] {
+    transition: opacity 700ms var(--ease-expo), transform 700ms var(--ease-expo);
+  }
+  html.motion [data-reveal]:not(.is-in) {
+    opacity: 0;
+    transform: translateY(18px);
+  }
+  html.motion .phone-step[data-reveal]:nth-child(2) {
+    transition-delay: 90ms;
+  }
+  html.motion .phone-step[data-reveal]:nth-child(3) {
+    transition-delay: 180ms;
+  }
+
+  /* /sync prints its report a line at a time once it is on screen. */
+  html.motion [data-lines] > span {
+    transition: opacity 260ms var(--ease-quint);
+    transition-delay: calc(var(--i, 0) * 110ms + 300ms);
+  }
+  html.motion [data-lines]:not(.is-printed) > span {
+    opacity: 0;
+  }
+
+  /* The worker's newest line inks in as it streams. */
+  .stream-line {
+    animation: ink-in 360ms var(--ease-expo) both;
+  }
+
+  .phone-step .phone {
+    transition: transform 420ms var(--ease-expo);
+  }
+  .phone-step:hover .phone {
+    transform: translateY(-6px);
+  }
+
   @keyframes pulse-mark {
     0%,
     100% {
@@ -81,7 +116,13 @@
     }
   }
 
-  .state--running::before {
+  /* Running and needs-you rows breathe, because those rows are live. */
+  .state--running::before,
+  .state--needs::before {
     animation: pulse-mark 2.1s var(--ease-quint) infinite;
+  }
+
+  .hero-tag-dot {
+    animation: pulse-mark 2.4s var(--ease-quint) infinite;
   }
 }

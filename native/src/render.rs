@@ -13,6 +13,19 @@ pub(crate) fn render(frame: &mut Frame<'_>, app: &mut App) {
     // untouched; in paper mode it paints the previous white canvas.
     frame.render_widget(Block::default().style(app_style()), area);
 
+    // GOD'S VIEW (⌥g): every live agent tiled over the whole screen. The panes
+    // underneath are not drawn, so none of them keeps a hit-test rect.
+    if app.gods_view {
+        app.agents_area = None;
+        app.worker_area = None;
+        app.diff_area = None;
+        app.task_area = None;
+        render_gods_view(frame, area, app);
+        render_cloud_prompt(frame, area, app);
+        render_merge_prompt(frame, area, app);
+        return;
+    }
+
     let task_height = task_pane_height(app, area.width);
 
     // SOLO: the focused pane takes the whole screen and the others are not drawn.
@@ -5689,3 +5702,219 @@ pub(crate) fn is_cloud_owned_agent(agent: &AgentRun) -> bool {
 }
 
 // status_color now lives in theme.rs (re-exported via the crate root).
+
+/// Smallest tile god's view draws: below this a tile is a title bar and
+/// nothing you can read, so extra agents go to the next page instead.
+pub(crate) const GODS_VIEW_MIN_TILE_WIDTH: u16 = 28;
+pub(crate) const GODS_VIEW_MIN_TILE_HEIGHT: u16 = 7;
+
+/// Columns and rows for `count` tiles in `width` x `height`. Picks the
+/// layout whose tiles are closest to square on screen (a cell is about twice
+/// as tall as it is wide) among those that fit every tile at the minimum size;
+/// when none does, the most tiles that fit, and the rest are paged.
+pub(crate) fn gods_view_grid(count: usize, width: u16, height: u16) -> (usize, usize) {
+    let count = count.max(1);
+    let max_cols = ((width / GODS_VIEW_MIN_TILE_WIDTH) as usize).max(1);
+    let max_rows = ((height / GODS_VIEW_MIN_TILE_HEIGHT) as usize).max(1);
+    let mut best: Option<(f64, usize, usize)> = None;
+    for cols in 1..=max_cols.min(count) {
+        let rows = count.div_ceil(cols);
+        if rows > max_rows {
+            continue;
+        }
+        let tile_w = width as f64 / cols as f64;
+        let tile_h = height as f64 / rows as f64;
+        let skew = (tile_w / (2.0 * tile_h)).ln().abs();
+        // Empty slots are wasted screen: 4 agents tile 2x2, not 3x2 with a hole.
+        let empty = (cols * rows - count) as f64 / (cols * rows) as f64;
+        let score = skew + 1.5 * empty;
+        if best.is_none_or(|(best_score, _, _)| score < best_score) {
+            best = Some((score, cols, rows));
+        }
+    }
+    match best {
+        Some((_, cols, rows)) => (cols, rows),
+        None => (max_cols, max_rows),
+    }
+}
+
+/// The short status a tile carries, in the agents list's words.
+fn gods_view_status(agent: &AgentRun) -> &'static str {
+    if agent.needs_permission
+        || agent.needs_user_input
+        || matches!(
+            agent.wait_signal,
+            Some(WaitSignal::Idle) | Some(WaitSignal::Interrupted)
+        )
+    {
+        "needs you"
+    } else if agent.turn_error().is_some() {
+        "turn failed"
+    } else {
+        match agent.status {
+            AgentStatus::Running => "working",
+            AgentStatus::Done => "done",
+            AgentStatus::Paused => "paused",
+            other => other.as_str(),
+        }
+    }
+}
+
+pub(crate) fn render_gods_view(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
+    let tiles = app.gods_view_agents();
+    app.gods_view_tile_map.clear();
+    if area.height < 2 || area.width < 4 {
+        return;
+    }
+    let header_area = Rect { height: 1, ..area };
+    let grid_area = Rect {
+        y: area.y + 1,
+        height: area.height - 1,
+        ..area
+    };
+    let (cols, rows) = gods_view_grid(tiles.len(), grid_area.width, grid_area.height);
+    let per_page = (cols * rows).max(1);
+    app.gods_view_cols = cols;
+    app.gods_view_per_page = per_page;
+    if !tiles.is_empty() {
+        app.gods_view_cursor = app.gods_view_cursor.min(tiles.len() - 1);
+    }
+    let page = app.gods_view_cursor / per_page;
+    let pages = tiles.len().div_ceil(per_page).max(1);
+
+    let mut header = format!(
+        " god's view · {} agent{}",
+        tiles.len(),
+        if tiles.len() == 1 { "" } else { "s" }
+    );
+    if pages > 1 {
+        header.push_str(&format!(" · page {}/{}", page + 1, pages));
+    }
+    header.push_str(" · arrows or h/j/k/l move · Enter or click focuses · Esc or ⌥g closes");
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(header, accent_style(true)))).style(app_style()),
+        header_area,
+    );
+
+    if tiles.is_empty() {
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled("No live agents.", muted_style(true))))
+                .style(app_style()),
+            grid_area,
+        );
+        return;
+    }
+
+    let row_rects = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(vec![Constraint::Ratio(1, rows as u32); rows])
+        .split(grid_area);
+    let page_tiles: Vec<usize> = tiles
+        .iter()
+        .copied()
+        .skip(page * per_page)
+        .take(per_page)
+        .collect();
+    for (slot, &agent_index) in page_tiles.iter().enumerate() {
+        let row = slot / cols;
+        let col = slot % cols;
+        let Some(&row_rect) = row_rects.get(row) else {
+            break;
+        };
+        let col_rects = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints(vec![Constraint::Ratio(1, cols as u32); cols])
+            .split(row_rect);
+        let Some(&tile) = col_rects.get(col) else {
+            break;
+        };
+        let highlighted = page * per_page + slot == app.gods_view_cursor;
+        render_gods_view_tile(frame, tile, app, agent_index, highlighted);
+        app.gods_view_tile_map.push((tile, agent_index));
+    }
+}
+
+fn render_gods_view_tile(
+    frame: &mut Frame<'_>,
+    tile: Rect,
+    app: &mut App,
+    index: usize,
+    highlighted: bool,
+) {
+    let Some(run) = app.agents.get(index) else {
+        return;
+    };
+    let id = worker_title_id(app, run);
+    let label = if run.task_summary.trim().is_empty() {
+        summarize_task(&run.task)
+    } else {
+        run.task_summary.clone()
+    };
+    let model = if run.model.trim().is_empty() {
+        run.backend.as_str().to_string()
+    } else {
+        format!("{}/{}", run.backend.as_str(), run.model)
+    };
+    let status = gods_view_status(run);
+    let status_style = agent_status_style(run);
+    // Room for the label once the fixed parts and the border corners are paid.
+    let fixed = id.chars().count() + model.chars().count() + status.chars().count() + 12;
+    let room = (tile.width as usize).saturating_sub(fixed).max(6);
+    let title_style = if highlighted {
+        Style::default().fg(PAPER).bg(FOCUS_COLOR)
+    } else {
+        pane_text_style(true)
+    };
+    let title = Line::from(vec![
+        Span::styled(
+            format!(" {id} · {} ", truncate_chars(&label, room)),
+            title_style,
+        ),
+        Span::styled(format!("{model} "), model_style(true)),
+        Span::styled(format!("· {status} "), status_style),
+    ]);
+    let block = Block::default()
+        .title(title)
+        .borders(Borders::ALL)
+        .border_type(if highlighted {
+            ratatui::widgets::BorderType::Thick
+        } else {
+            ratatui::widgets::BorderType::Plain
+        })
+        .border_style(Style::default().fg(if highlighted {
+            FOCUS_COLOR
+        } else {
+            INACTIVE_COLOR
+        }))
+        .style(app_style());
+    let inner = block.inner(tile);
+    let height = inner.height as usize;
+    let width = inner.width as usize;
+
+    // A cropped window of the pane exactly as the agent drew it. The PTY is
+    // never resized to the tile: that makes the agent repaint and drops the
+    // region scrollback (AGENTS.md §7).
+    let terminal = app
+        .agents
+        .get_mut(index)
+        .and_then(|run| run.terminal.as_mut());
+    let lines: Vec<Line<'static>> = match terminal {
+        Some(terminal) => terminal
+            .styled_tail_window_snapshot(height)
+            .into_iter()
+            .map(|mut cells| {
+                cells.truncate(width);
+                styled_terminal_line(cells, None, None)
+            })
+            .collect(),
+        None => {
+            let note = app
+                .agents
+                .get(index)
+                .and_then(|run| run.worker_exit_note.clone())
+                .unwrap_or_else(|| "No live terminal yet.".to_string());
+            vec![Line::from(Span::styled(note, muted_style(true)))]
+        }
+    };
+    frame.render_widget(Paragraph::new(lines).style(app_style()).block(block), tile);
+}

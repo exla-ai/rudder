@@ -324,7 +324,7 @@ const AGENT_PANE_HINTS: &[&str] = &[
     "⌥[/] agents",
     "Enter focus",
     "r rename",
-    "⌥d diff",
+    "⌥d diff · ⌥g god's view",
     "g nest",
     "R review all",
     "m merge",
@@ -1578,6 +1578,17 @@ struct App {
     /// When true, the agents pane renders a topological dependency tree (nest view)
     /// instead of the flat main/workspaces/merged sections. Toggled with `g`.
     nest_view: bool,
+    /// God's view (⌥g): every live agent's terminal tiled over the whole
+    /// screen. Per view, like the rest of what a viewer is looking at.
+    gods_view: bool,
+    /// The highlighted tile, an index into `gods_view_agents()`.
+    gods_view_cursor: usize,
+    /// Grid columns and tiles per page from the last god's-view frame, so
+    /// Up/Down and PageUp/PageDown move by what is actually on screen.
+    gods_view_cols: usize,
+    gods_view_per_page: usize,
+    /// Tile rect -> agent index, recorded from the rendered frame for clicks.
+    gods_view_tile_map: Vec<(Rect, usize)>,
     /// Waker installed on every PTY pane so child output wakes the main event loop
     /// immediately (see `run`). `None` until `run` builds it; panes spawned while it
     /// is `None` (e.g. during construction) fall back to the tick cadence.
@@ -2900,6 +2911,11 @@ impl App {
             worker_view: WorkerView::Terminal,
             gam_transcript_visible: true,
             nest_view: false,
+            gods_view: false,
+            gods_view_cursor: 0,
+            gods_view_cols: 1,
+            gods_view_per_page: 1,
+            gods_view_tile_map: Vec::new(),
             pty_output_waker: None,
             pending_enters: Vec::new(),
             claude_message_navs: Vec::new(),
@@ -3796,6 +3812,13 @@ impl App {
             self.notice = None;
         }
 
+        // God's view is a full-screen overlay: while it is open it owns the
+        // keyboard (only Ctrl+C, handled above, gets past it).
+        if self.gods_view {
+            self.handle_gods_view_key(key);
+            return false;
+        }
+
         // One-shot leader: Ctrl+W arms it (below) and the next keypress is
         // routed here as a dashboard command instead of going to the pane.
         if self.leader_pending {
@@ -3828,7 +3851,7 @@ impl App {
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('g') {
             self.nav_mode = !self.nav_mode;
             self.notice = Some(if self.nav_mode {
-                "nav mode: 1 agents  2 worker  3 task  v review  b branch chat  R review-all  M merge-all  Esc exits"
+                "nav mode: 1 agents  2 worker  3 task  v review  b branch chat  g god's view  R review-all  M merge-all  Esc exits"
                     .to_string()
             } else {
                 "worker input restored".to_string()
@@ -3843,7 +3866,7 @@ impl App {
             self.leader_pending = true;
             self.nav_mode = false;
             self.notice = Some(
-                "Ctrl+W: Tab cycle  1/2/3 panes  v review  m merge  b branch chat  R review-all  M merge-all  H move to home  Esc cancels"
+                "Ctrl+W: Tab cycle  1/2/3 panes  v review  m merge  b branch chat  g god's view  R review-all  M merge-all  H move to home  Esc cancels"
                     .to_string(),
             );
             return false;
@@ -3957,6 +3980,16 @@ impl App {
             }
             KeyCode::Char('\u{2202}') => {
                 self.toggle_diff_panel();
+                return false;
+            }
+            // ⌥g: god's view, every live agent tiled on one screen. Option+g
+            // without option-as-meta types ©.
+            KeyCode::Char('g') | KeyCode::Char('G') if alt_like => {
+                self.toggle_gods_view();
+                return false;
+            }
+            KeyCode::Char('\u{00a9}') => {
+                self.toggle_gods_view();
                 return false;
             }
             _ => {}
@@ -4281,6 +4314,7 @@ impl App {
             KeyCode::Char('R') => self.review_all_ready(),
             KeyCode::Char('M') => self.request_merge_all_ready(),
             KeyCode::Char('H') => self.request_move_all_home(),
+            KeyCode::Char('g') | KeyCode::Char('\u{00a9}') => self.toggle_gods_view(),
             KeyCode::Char('d') => self.delete_selected_agent(),
             KeyCode::Char('q') => return self.confirm_or_quit(),
             _ => {}
@@ -4327,6 +4361,7 @@ impl App {
                 self.focus_diff_panel();
             }
             KeyCode::Char('v') | KeyCode::Char('\u{221a}') => self.toggle_worker_view(),
+            KeyCode::Char('g') | KeyCode::Char('\u{00a9}') => self.toggle_gods_view(),
             // 'a' toggles between the two halves of a /gam pair (generator left,
             // adversarial right) without leaving the worker pane.
             KeyCode::Char('a') => {
@@ -4476,6 +4511,116 @@ impl App {
     fn toggle_nest_view(&mut self) {
         self.nest_view = !self.nest_view;
         self.dirty = true;
+    }
+
+    /// The agents god's view tiles, in sidebar order: every row with a live
+    /// PTY, plus running or paused rows whose pane is not up yet.
+    fn gods_view_agents(&self) -> Vec<usize> {
+        self.agents
+            .iter()
+            .enumerate()
+            .filter(|(_, run)| {
+                run.terminal.is_some()
+                    || matches!(run.status, AgentStatus::Running | AgentStatus::Paused)
+            })
+            .map(|(index, _)| index)
+            .collect()
+    }
+
+    /// ⌥g: open god's view on the selected agent's tile, or close it.
+    fn toggle_gods_view(&mut self) {
+        if self.gods_view {
+            self.close_gods_view();
+            return;
+        }
+        let tiles = self.gods_view_agents();
+        if tiles.is_empty() {
+            self.notice = Some("god's view: no live agents".to_string());
+            return;
+        }
+        self.gods_view = true;
+        self.gods_view_cursor = tiles
+            .iter()
+            .position(|&index| index == self.selected_agent)
+            .unwrap_or(0);
+        self.gods_view_tile_map.clear();
+        self.dirty = true;
+    }
+
+    fn close_gods_view(&mut self) {
+        self.gods_view = false;
+        self.gods_view_tile_map.clear();
+        self.dirty = true;
+    }
+
+    /// Focus agent `index` in the normal worker pane and leave god's view.
+    fn focus_from_gods_view(&mut self, index: usize) {
+        if index < self.agents.len() {
+            self.selected_agent = index;
+            self.focus = FocusPane::Worker;
+        }
+        self.close_gods_view();
+    }
+
+    fn move_gods_view_cursor(&mut self, delta: isize) {
+        let count = self.gods_view_agents().len();
+        if count == 0 {
+            return;
+        }
+        let current = self.gods_view_cursor.min(count - 1) as isize;
+        self.gods_view_cursor = (current + delta).clamp(0, count as isize - 1) as usize;
+        self.dirty = true;
+    }
+
+    fn handle_gods_view_key(&mut self, key: KeyEvent) {
+        let alt_like = key
+            .modifiers
+            .intersects(KeyModifiers::ALT | KeyModifiers::META);
+        let cols = self.gods_view_cols.max(1) as isize;
+        let page = self.gods_view_per_page.max(1) as isize;
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('\u{00a9}') => self.close_gods_view(),
+            KeyCode::Char('g') | KeyCode::Char('G') if alt_like => self.close_gods_view(),
+            KeyCode::Left | KeyCode::Char('h') => self.move_gods_view_cursor(-1),
+            KeyCode::Right | KeyCode::Char('l') => self.move_gods_view_cursor(1),
+            KeyCode::Up | KeyCode::Char('k') => self.move_gods_view_cursor(-cols),
+            KeyCode::Down | KeyCode::Char('j') => self.move_gods_view_cursor(cols),
+            KeyCode::PageUp => self.move_gods_view_cursor(-page),
+            KeyCode::PageDown => self.move_gods_view_cursor(page),
+            KeyCode::Enter => {
+                let tiles = self.gods_view_agents();
+                match tiles.get(self.gods_view_cursor.min(tiles.len().saturating_sub(1))) {
+                    Some(&index) => self.focus_from_gods_view(index),
+                    None => self.close_gods_view(),
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Mouse while god's view is open: a click on a tile focuses that agent,
+    /// the wheel moves the highlight a row at a time. Nothing reaches the
+    /// panes underneath, which are not on screen.
+    fn handle_gods_view_mouse(&mut self, mouse: MouseEvent) {
+        match mouse.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                let hit = self
+                    .gods_view_tile_map
+                    .iter()
+                    .find(|(rect, _)| rect_contains(*rect, mouse.column, mouse.row))
+                    .map(|(_, index)| *index);
+                if let Some(index) = hit {
+                    self.focus_from_gods_view(index);
+                }
+            }
+            MouseEventKind::ScrollUp => {
+                self.move_gods_view_cursor(-(self.gods_view_cols.max(1) as isize))
+            }
+            MouseEventKind::ScrollDown => {
+                self.move_gods_view_cursor(self.gods_view_cols.max(1) as isize)
+            }
+            _ => {}
+        }
     }
 
     /// Rotate pane focus between Agents and Worker. Used by the Ctrl+W leader
@@ -6257,6 +6402,13 @@ impl App {
     }
 
     fn handle_mouse(&mut self, mouse: MouseEvent) -> bool {
+        if self.gods_view {
+            if matches!(mouse.kind, MouseEventKind::Down(_)) {
+                self.note_user_activity();
+            }
+            self.handle_gods_view_mouse(mouse);
+            return true;
+        }
         if is_scroll_mouse_event(mouse.kind) {
             return self.handle_pane_scroll(mouse);
         }
@@ -11177,7 +11329,7 @@ It will tend to agree with itself — name another with /gam <provider> <model> 
             }
             Some("/help") => {
                 self.notice = Some(
-                    "plain input -> one isolated mergeable worker in its own jj workspace · /plan <task> -> an orchestrator that plans and runs a DAG · /gam [model] <task> -> generator + adversarial reviewer pair; the reviewer can steer the generator mid-turn and stop it outright (split panes, ^W a toggles sides, ^W t shows the dialogue) · /main|/m <task> -> another agent in this shared checkout · $ <command> -> a shell in this checkout running it ($ alone opens a shell) · panes: Option-1/2/3/4 (4 = diff panel) or ^W · keys: j/k select · Option-[ / Option-] step agents from any pane · Enter focus · m merge · u undo a merge · M merge all · R review all · H move running agents to the home machine · g nest · ⌥d diff panel (n/p files, j/k scroll) · o web ui · U usage dashboard · x stop · b branch chat · dd delete · cc clear merged · P model; · /handoff -> the selected agent moves to the home machine and resumes there; commands: /model /fast /sound /notify /color /main /plan /gam /resume /restore /handoff /share /usage /goal /cloud /sync /web /feedback"
+                    "plain input -> one isolated mergeable worker in its own jj workspace · /plan <task> -> an orchestrator that plans and runs a DAG · /gam [model] <task> -> generator + adversarial reviewer pair; the reviewer can steer the generator mid-turn and stop it outright (split panes, ^W a toggles sides, ^W t shows the dialogue) · /main|/m <task> -> another agent in this shared checkout · $ <command> -> a shell in this checkout running it ($ alone opens a shell) · panes: Option-1/2/3/4 (4 = diff panel) or ^W · keys: j/k select · Option-[ / Option-] step agents from any pane · Enter focus · m merge · u undo a merge · M merge all · R review all · H move running agents to the home machine · g nest · ⌥d diff panel (n/p files, j/k scroll) · ⌥g god's view (every agent tiled; arrows move, Enter focuses) · o web ui · U usage dashboard · x stop · b branch chat · dd delete · cc clear merged · P model; · /handoff -> the selected agent moves to the home machine and resumes there; commands: /model /fast /sound /notify /color /main /plan /gam /resume /restore /handoff /share /usage /goal /cloud /sync /web /feedback"
                         .to_string(),
                 );
                 true

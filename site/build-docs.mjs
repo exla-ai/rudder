@@ -164,6 +164,8 @@ stays exactly where you left it the whole time.</p>
       ["help", "Stuck?"],
     ],
     body: `
+<video class="setup-video" controls playsinline preload="metadata" poster="/media/setup-poster.jpg" src="/media/setup.mp4" style="width:100%;height:auto;border-radius:12px;margin:0 0 1.5rem;background:#000" aria-label="Setting up Rudder, start to finish (2 minutes)"></video>
+
 <h2 id="app">1. Get the app</h2>
 <p>Rudder for iPhone is in beta on TestFlight. Open the invite email from
 TestFlight on your phone, tap <strong>View in TestFlight</strong>, install TestFlight

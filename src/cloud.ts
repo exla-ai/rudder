@@ -4575,6 +4575,9 @@ async function cloudSync(args: string[], options: CloudCommandOptions): Promise<
   const cloud = await client.request<{ results?: { repo: string; report?: CheckoutSyncReport; error?: string }[] }>("/api/rudder/home/sync", {
     method: "POST",
     body: all || !slug ? {} : { repos: [slug], ...(work ? { work } : {}) },
+  }).catch((error: unknown) => {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(message === "fetch failed" ? "the cloud machine did not answer in time (it may be restarting); run /sync again in a minute" : message);
   }).finally(() => fsp.rm(scratch, { recursive: true, force: true }).catch(() => undefined));
   const results = cloud.results ?? [];
   // And the cloud's work comes back here.
@@ -4590,6 +4593,18 @@ async function cloudSync(args: string[], options: CloudCommandOptions): Promise<
       local.work = { ...local.work, received: { from: "cloud", head: incoming.head, outcome: "failed", note: `could not take the cloud's work (${error instanceof Error ? error.message : String(error)})` } };
     } finally {
       await fsp.rm(dir, { recursive: true, force: true }).catch(() => undefined);
+    }
+  }
+  // Work the other side already had was not news: report only what moved.
+  if (local?.work?.sent && mine?.report?.work?.received?.outcome === "have") {
+    delete local.work.sent;
+  }
+  if (mine?.report?.work?.sent && local?.work?.received?.outcome === "have") {
+    delete mine.report.work.sent;
+  }
+  for (const side of [local?.work, mine?.report?.work]) {
+    if (side?.received?.outcome === "have") {
+      delete side.received;
     }
   }
   if (local) {

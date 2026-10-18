@@ -5873,7 +5873,7 @@ async function handleHomeApi(req: IncomingMessage, res: ServerResponse, url: URL
         }
         const outId = newHomeSyncBlob(authContext.accountId, home.id, "out", null);
         params.uploadPath = `/api/rudder/home/${encodeURIComponent(home.id)}/syncs/${outId}`;
-        const report = await homeRpc(home.id, "sync", params, 300_000) as JsonRecord;
+        const report = await homeRpc(home.id, "sync", params, 150_000) as JsonRecord;
         const sent = (report.work as JsonRecord | undefined)?.sent as JsonRecord | undefined;
         if (sent && homeSyncBlobs.get(outId)?.bytes) {
           sent.download = `/api/rudder/home/syncs/${outId}`;

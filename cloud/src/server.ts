@@ -32,6 +32,12 @@ type DeviceLogin = {
   accountId?: string;
   email?: string;
   expiresAt: number;
+  /** The short code a signed-in phone approves (`K7P-4QX`); single use. */
+  userCode?: string;
+  /** What the CLI called the computer (its hostname), shown on the phone. */
+  deviceName?: string;
+  /** The phone said no: the CLI's next poll stops waiting. */
+  denied?: boolean;
 };
 
 type GithubBrowserLogin = {
@@ -505,7 +511,7 @@ const server = http.createServer({ noDelay: true }, async (req, res) => {
       return;
     }
     if (req.method === "POST" && url.pathname === "/api/cli/login") {
-      await handleCliLoginStart(res);
+      await handleCliLoginStart(req, res);
       return;
     }
     if (req.method === "POST" && url.pathname === "/api/cli/login/github-token") {
@@ -1472,18 +1478,28 @@ async function streamToBuffer(body: unknown): Promise<Buffer> {
   throw new Error("unsupported S3 body type");
 }
 
-async function handleCliLoginStart(res: ServerResponse): Promise<void> {
+async function handleCliLoginStart(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const body = await readJsonBody(req, 16 * 1024).catch(() => ({}));
+  pruneDeviceLogins();
   const deviceCode = randomUUID();
-  const expiresAt = Date.now() + 5 * 60 * 1000;
-  deviceLogins.set(deviceCode, { deviceCode, expiresAt });
+  const expiresAt = Date.now() + CLI_LOGIN_TTL_MS;
+  let userCode = newCliUserCode();
+  while (cliUserCodes.has(userCode)) {
+    userCode = newCliUserCode();
+  }
+  deviceLogins.set(deviceCode, { deviceCode, expiresAt, userCode, deviceName: cleanDeviceName(stringField(body, "deviceName")) });
+  cliUserCodes.set(userCode, deviceCode);
   const loginBase = publicLoginUrl || `${baseURL}/cli/login`;
   const separator = loginBase.includes("?") ? "&" : "?";
   sendJson(res, 200, {
     deviceCode,
     loginUrl: `${loginBase}${separator}device_code=${encodeURIComponent(deviceCode)}`,
     pollUrl: "/api/cli/login/poll",
+    // A signed-in phone can approve this login instead of a browser here.
+    userCode,
+    approveUrl: `${baseURL}/app/approve?code=${userCode}`,
     interval: 2,
-    expiresIn: 300,
+    expiresIn: CLI_LOGIN_TTL_MS / 1000,
   });
 }
 
@@ -1496,11 +1512,16 @@ async function handleCliLoginPoll(req: IncomingMessage, res: ServerResponse): Pr
     sendJson(res, 404, { error: "login expired" });
     return;
   }
+  if (login.denied) {
+    forgetDeviceLogin(login);
+    sendJson(res, 200, { pending: false, denied: true, error: "the sign-in was denied on your phone" });
+    return;
+  }
   if (!login.token) {
     sendJson(res, 200, { pending: true });
     return;
   }
-  deviceLogins.delete(deviceCode);
+  forgetDeviceLogin(login);
   const responseBody: JsonRecord = {
     pending: false,
     token: login.token,
@@ -6071,6 +6092,7 @@ async function handleAppApi(req: IncomingMessage, res: ServerResponse, url: URL)
       email: account.email ?? null,
       home: homeSummary(home),
       projects: home ? homeProjects(home) : [],
+      github: vaultGithubStatus(account.accountId),
     });
     return;
   }
@@ -6137,6 +6159,16 @@ async function handleAppApi(req: IncomingMessage, res: ServerResponse, url: URL)
       id: stringField(body, "id") ?? "",
       ...(callback ? { callback } : { code }),
     }, 100_000));
+    return;
+  }
+  // Signing a computer in: the code `rudder login` printed, approved here.
+  if (req.method === "POST" && (url.pathname === "/api/app/computer/lookup" || url.pathname === "/api/app/computer/approve")) {
+    await handleComputerApproval(req, res, url, account);
+    return;
+  }
+  // Connecting GitHub from the phone, for an account with no laptop yet.
+  if (req.method === "POST" && url.pathname.startsWith("/api/app/github/")) {
+    await handlePhoneGithub(req, res, url, account.accountId);
     return;
   }
   if (req.method === "POST" && url.pathname === "/api/app/login/cancel") {
@@ -6369,6 +6401,274 @@ async function handleAppPairing(req: IncomingMessage, res: ServerResponse, url: 
   const issued = issueRudderToken(pairing.accountId, pairing.email);
   schedulePersistDatabase();
   sendJson(res, 200, { token: issued.token, email: pairing.email ?? null });
+}
+
+// ---------------------------------------------------------------------------
+// Signing a computer in from the phone: the reverse of pairing. `rudder login`
+// gets a short code (and a QR of /app/approve?code=...) with its device login;
+// a phone that is already signed in looks the code up, sees which computer is
+// asking, and approves it. The CLI's poll then picks up a token on the PHONE's
+// account. The code is only usable by a signed-in user, single use, five
+// minutes long, and guesses are rate limited per account and per address.
+// ---------------------------------------------------------------------------
+
+const CLI_LOGIN_TTL_MS = Number(process.env.RUDDER_CLI_LOGIN_TTL_MS) || 5 * 60 * 1000;
+const cliUserCodes = new Map<string, string>(); // user code -> device code
+const computerCodeFailures = new Map<string, { count: number; resetAt: number }>();
+
+function newCliUserCode(): string {
+  const bytes = randomBytes(6);
+  let code = "";
+  for (const byte of bytes) {
+    code += PAIR_ALPHABET[byte % PAIR_ALPHABET.length];
+  }
+  return `${code.slice(0, 3)}-${code.slice(3)}`;
+}
+
+function normalizeCliUserCode(value: string): string {
+  const raw = value.toUpperCase().replace(/[^A-Z0-9]/g, "");
+  return raw.length === 6 ? `${raw.slice(0, 3)}-${raw.slice(3)}` : "";
+}
+
+// A hostname, shown back to the user: printable, short.
+function cleanDeviceName(value: string | undefined): string | undefined {
+  const cleaned = (value ?? "").replace(/[^\p{L}\p{N} ._'()-]/gu, "").trim().slice(0, 64);
+  return cleaned || undefined;
+}
+
+function forgetDeviceLogin(login: DeviceLogin): void {
+  deviceLogins.delete(login.deviceCode);
+  if (login.userCode && cliUserCodes.get(login.userCode) === login.deviceCode) {
+    cliUserCodes.delete(login.userCode);
+  }
+}
+
+function pruneDeviceLogins(): void {
+  const now = Date.now();
+  for (const login of deviceLogins.values()) {
+    if (login.expiresAt < now) {
+      forgetDeviceLogin(login);
+      githubBrowserLogins.delete(login.deviceCode);
+    }
+  }
+}
+
+// The account a new token is issued for, with the email only when it is
+// verified (handleCliApprove's rule); a bearer's email was checked when that
+// token was made.
+async function accountForNewToken(req: IncomingMessage): Promise<{ accountId: string; email?: string }> {
+  if ((req.headers.authorization || "").startsWith("Bearer ")) {
+    return requireBearer(req);
+  }
+  const session = await getBetterAuthSession(req);
+  if (!session?.user?.id) {
+    throw unauthorized();
+  }
+  const verified = typeof session.user.email === "string" &&
+    (session.user as { emailVerified?: unknown }).emailVerified === true;
+  return { accountId: String(session.user.id), email: verified ? String(session.user.email) : undefined };
+}
+
+async function handleComputerApproval(
+  req: IncomingMessage,
+  res: ServerResponse,
+  url: URL,
+  account: { accountId: string },
+): Promise<void> {
+  const now = Date.now();
+  pruneDeviceLogins();
+  for (const [key, entry] of computerCodeFailures) {
+    if (entry.resetAt < now) {
+      computerCodeFailures.delete(key);
+    }
+  }
+  const keys = [`account:${account.accountId}`, `address:${clientAddress(req)}`];
+  if (keys.some((key) => (computerCodeFailures.get(key)?.count ?? 0) >= 10)) {
+    sendJson(res, 429, { error: "too many wrong codes; wait a minute" });
+    return;
+  }
+  const body = await readJsonBody(req);
+  const code = normalizeCliUserCode(stringField(body, "code") ?? "");
+  const deviceCode = code ? cliUserCodes.get(code) : undefined;
+  const login = deviceCode ? deviceLogins.get(deviceCode) : undefined;
+  if (!login || login.expiresAt < now || login.token || login.denied) {
+    for (const key of keys) {
+      const entry = computerCodeFailures.get(key) ?? { count: 0, resetAt: now + 60_000 };
+      entry.count += 1;
+      computerCodeFailures.set(key, entry);
+    }
+    sendJson(res, 400, { error: "that code is wrong or expired; run `rudder login` again for a new one" });
+    return;
+  }
+  if (url.pathname === "/api/app/computer/lookup") {
+    sendJson(res, 200, { code, deviceName: login.deviceName ?? null, expiresAt: new Date(login.expiresAt).toISOString() });
+    return;
+  }
+  const approve = !!body && typeof body === "object" && !Array.isArray(body) && body.approve === true;
+  // Single use either way: the code stops working the moment it is answered.
+  cliUserCodes.delete(code);
+  if (!approve) {
+    login.denied = true;
+    sendJson(res, 200, { ok: true, approved: false });
+    return;
+  }
+  const issuer = await accountForNewToken(req);
+  const issued = issueRudderToken(issuer.accountId, issuer.email);
+  login.token = issued.token;
+  login.accountId = issued.accountId;
+  login.email = issued.email;
+  schedulePersistDatabase();
+  sendJson(res, 200, { ok: true, approved: true, deviceName: login.deviceName ?? null });
+}
+
+// ---------------------------------------------------------------------------
+// Connecting GitHub from the phone: GitHub's OAuth device flow, run by the
+// control plane, with the token stored as GH_TOKEN in the account's vault.
+// That is where the home machine already reads GitHub from (home.mjs
+// configureGitCredentials), so a phone-only account can list, clone and push
+// repos. Uses the same OAuth client as the CLI's device fallback
+// (RUDDER_GITHUB_DEVICE_CLIENT_ID); device flow must be enabled on it.
+// ---------------------------------------------------------------------------
+
+const githubWebBase = (process.env.RUDDER_GITHUB_WEB_URL || "https://github.com").replace(/\/$/, "");
+const githubApiBase = (process.env.RUDDER_GITHUB_API_URL || "https://api.github.com").replace(/\/$/, "");
+// What agents on the home machine do with it: clone and push private repos
+// (repo), see org repos (read:org), and push workflow files (workflow).
+const PHONE_GITHUB_SCOPE = "repo read:org workflow";
+
+type PhoneGithubLogin = {
+  githubDeviceCode: string;
+  userCode: string;
+  verificationUri: string;
+  expiresAt: number;
+  intervalMs: number;
+  nextPollAt: number;
+};
+const phoneGithubLogins = new Map<string, PhoneGithubLogin>(); // account id -> flow
+
+function vaultGithubStatus(accountId: string): JsonRecord | null {
+  if (!secretsKeyBase64) {
+    return null;
+  }
+  try {
+    const secret = secretsVault().list(accountId).secrets
+      .find((item) => item.kind === "env" && (item.name === "GH_TOKEN" || item.name === "GITHUB_TOKEN"));
+    return { connected: !!secret, source: secret?.source ?? null, updatedAt: secret?.updatedAt ?? null };
+  } catch {
+    return null;
+  }
+}
+
+function phoneGithubView(flow: PhoneGithubLogin): JsonRecord {
+  return {
+    status: "waiting",
+    userCode: flow.userCode,
+    verificationUri: flow.verificationUri,
+    expiresAt: new Date(flow.expiresAt).toISOString(),
+    interval: Math.round(flow.intervalMs / 1000),
+  };
+}
+
+async function handlePhoneGithub(req: IncomingMessage, res: ServerResponse, url: URL, accountId: string): Promise<void> {
+  const action = url.pathname.slice("/api/app/github/".length);
+  if (action === "cancel") {
+    phoneGithubLogins.delete(accountId);
+    sendJson(res, 200, { ok: true });
+    return;
+  }
+  if (!secretsKeyBase64) {
+    // Without the vault there is nowhere the machine reads a token from.
+    sendJson(res, 503, { error: "this control plane has no secrets vault (RUDDER_SECRETS_KEY), so it can't keep a GitHub login" });
+    return;
+  }
+  const now = Date.now();
+  if (action === "start") {
+    const existing = phoneGithubLogins.get(accountId);
+    if (existing && existing.expiresAt - now > 60_000) {
+      sendJson(res, 200, phoneGithubView(existing));
+      return;
+    }
+    const start = await githubOAuthRequest<{
+      device_code?: string;
+      user_code?: string;
+      verification_uri?: string;
+      expires_in?: number;
+      interval?: number;
+      error?: string;
+      error_description?: string;
+    }>(`${githubWebBase}/login/device/code`, { client_id: githubDeviceClientId, scope: PHONE_GITHUB_SCOPE });
+    if (!start.device_code || !start.user_code || !start.verification_uri) {
+      // device_flow_disabled lands here when the OAuth app does not allow it.
+      throw Object.assign(new Error(`GitHub refused to start: ${start.error_description || start.error || "no device code"}`), { status: 502 });
+    }
+    const flow: PhoneGithubLogin = {
+      githubDeviceCode: start.device_code,
+      userCode: start.user_code,
+      verificationUri: start.verification_uri,
+      expiresAt: now + (start.expires_in ?? 900) * 1000,
+      intervalMs: Math.max(1000, (start.interval ?? 5) * 1000),
+      nextPollAt: now + Math.max(1000, (start.interval ?? 5) * 1000),
+    };
+    phoneGithubLogins.set(accountId, flow);
+    sendJson(res, 200, phoneGithubView(flow));
+    return;
+  }
+  if (action !== "poll") {
+    sendJson(res, 404, { error: "not found" });
+    return;
+  }
+  const flow = phoneGithubLogins.get(accountId);
+  if (!flow || flow.expiresAt < now) {
+    phoneGithubLogins.delete(accountId);
+    sendJson(res, 200, { status: "failed", error: "The code expired. Start again." });
+    return;
+  }
+  // The phone polls every couple of seconds; GitHub is asked no faster than
+  // the interval it set.
+  if (now < flow.nextPollAt) {
+    sendJson(res, 200, phoneGithubView(flow));
+    return;
+  }
+  flow.nextPollAt = now + flow.intervalMs;
+  const poll = await githubOAuthRequest<{ access_token?: string; error?: string; error_description?: string; interval?: number }>(
+    `${githubWebBase}/login/oauth/access_token`,
+    { client_id: githubDeviceClientId, device_code: flow.githubDeviceCode, grant_type: "urn:ietf:params:oauth:grant-type:device_code" },
+  );
+  if (!poll.access_token) {
+    if (poll.error === "slow_down") {
+      flow.intervalMs = Math.max(flow.intervalMs + 5000, (poll.interval ?? 5) * 1000);
+      flow.nextPollAt = now + flow.intervalMs;
+    } else if (poll.error && poll.error !== "authorization_pending") {
+      phoneGithubLogins.delete(accountId);
+      const message = poll.error === "access_denied"
+        ? "You cancelled on GitHub."
+        : poll.error === "expired_token" ? "The code expired. Start again." : poll.error_description || poll.error;
+      sendJson(res, 200, { status: "failed", error: message });
+      return;
+    }
+    sendJson(res, 200, phoneGithubView(flow));
+    return;
+  }
+  const user = await fetch(`${githubApiBase}/user`, {
+    headers: { Authorization: `Bearer ${poll.access_token}`, Accept: "application/vnd.github+json", "User-Agent": "rudder-cloud" },
+  });
+  const profile: Json = user.ok ? parseJson(await user.text()) : null;
+  const login = profile && typeof profile === "object" && !Array.isArray(profile) && typeof profile.login === "string" ? profile.login : null;
+  if (!login) {
+    phoneGithubLogins.delete(accountId);
+    sendJson(res, 200, { status: "failed", error: `GitHub did not accept the new token (HTTP ${user.status})` });
+    return;
+  }
+  secretsVault().put(accountId, { name: "GH_TOKEN", kind: "env", value: Buffer.from(poll.access_token, "utf8"), source: "phone" });
+  phoneGithubLogins.delete(accountId);
+  await persistDatabaseToS3();
+  // A running home re-reads the vault when its repo list is re-sent, which
+  // also re-runs its credential check, so the app shows the login at once.
+  const home = findHomeRow(accountId);
+  if (home) {
+    pushHomeRepos(home.id);
+  }
+  sendJson(res, 200, { status: "done", account: login });
 }
 
 // The home machine, running and with its supervisor connected (woken and

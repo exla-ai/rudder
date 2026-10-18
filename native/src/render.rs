@@ -4033,6 +4033,341 @@ pub(crate) fn gam_split_halves(inner: Rect) -> (Rect, Rect) {
     (columns[0], columns[1])
 }
 
+/// The one-row status bar over a `/gam` split, and what is left under it.
+/// `None` on a pane too short to spare the row; the halves' own titles still
+/// carry the per-side stage there.
+pub(crate) fn gam_split_bar(
+    area: Rect,
+    app: &App,
+    generator_index: usize,
+) -> Option<(Rect, Rect)> {
+    if area.height < 12 {
+        return None;
+    }
+    // A settled pair's outcome and next step may take a second row rather than
+    // be cut off: it is the one thing on the screen you need to act on.
+    let rows = app
+        .gam_peer_index_of(generator_index)
+        .map(|peer| {
+            gam_status_bar_lines(
+                app,
+                generator_index,
+                peer,
+                area.width.saturating_sub(2) as usize,
+                2,
+            )
+            .len()
+            .max(1) as u16
+        })
+        .unwrap_or(1);
+    Some((
+        Rect {
+            height: rows,
+            ..area
+        },
+        Rect {
+            y: area.y + rows,
+            height: area.height - rows,
+            ..area
+        },
+    ))
+}
+
+/// The bar as up to `max_rows` lines: the one-row form, or for a settled
+/// pair whose outcome does not fit, the outcome wrapped onto a second row.
+pub(crate) fn gam_status_bar_lines(
+    app: &App,
+    generator_index: usize,
+    adversarial_index: usize,
+    width: usize,
+    max_rows: usize,
+) -> Vec<Line<'static>> {
+    let line = gam_status_bar_line(app, generator_index, adversarial_index, width);
+    let text = flatten_spans(&line);
+    let settled = app
+        .agents
+        .get(generator_index)
+        .and_then(|run| run.gam.as_ref())
+        .is_some_and(|gam| matches!(gam.phase, crate::GamPhase::Settled(_)));
+    if max_rows < 2 || !settled || !text.trim_end().ends_with("...") {
+        return vec![line];
+    }
+    // Rebuild without truncation, wrapped to two rows.
+    let wide = gam_status_bar_line(app, generator_index, adversarial_index, usize::MAX / 4);
+    let lead_style = wide.spans.first().map(|span| span.style).unwrap_or_default();
+    let lead = wide
+        .spans
+        .first()
+        .map(|span| span.content.to_string())
+        .unwrap_or_default();
+    let sentence = wide
+        .spans
+        .get(2)
+        .map(|span| span.content.to_string())
+        .unwrap_or_default();
+    let first_room = width.saturating_sub(lead.chars().count() + 3).max(8);
+    let mut words = sentence.split(' ').peekable();
+    let mut first = String::new();
+    while let Some(word) = words.peek() {
+        let next_len = first.chars().count() + usize::from(!first.is_empty()) + word.chars().count();
+        if next_len > first_room {
+            break;
+        }
+        if !first.is_empty() {
+            first.push(' ');
+        }
+        first.push_str(word);
+        words.next();
+    }
+    let second = truncate_chars(&words.collect::<Vec<_>>().join(" "), width.max(8));
+    vec![
+        Line::from(vec![
+            Span::styled(lead, lead_style),
+            Span::styled(" · ", muted_style(true)),
+            Span::styled(first, pane_text_style(true)),
+        ]),
+        Line::from(Span::styled(second, pane_text_style(true))),
+    ]
+}
+
+fn flatten_spans(line: &Line<'_>) -> String {
+    line.spans.iter().map(|span| span.content.as_ref()).collect()
+}
+
+/// What the pair is doing, in one sentence, plus what to press. The halves'
+/// titles each describe ONE side ("under review", "reviewing · #2"); this is
+/// the pair as a whole: which round, who has the ball, the last thing said,
+/// and once it settles, how it ended and what to do next.
+pub(crate) fn gam_status_bar_line(
+    app: &App,
+    generator_index: usize,
+    adversarial_index: usize,
+    width: usize,
+) -> Line<'static> {
+    let Some(gam) = app
+        .agents
+        .get(generator_index)
+        .and_then(|run| run.gam.as_ref())
+    else {
+        return Line::from("");
+    };
+    let who = |index: usize| {
+        app.agents
+            .get(index)
+            .map(|run| {
+                let model = run.model.trim();
+                if model.is_empty() {
+                    run.backend.as_str().to_string()
+                } else {
+                    model.to_string()
+                }
+            })
+            .unwrap_or_else(|| "the reviewer".to_string())
+    };
+    let generator = who(generator_index);
+    let reviewer = who(adversarial_index);
+    let blocked = app
+        .agents
+        .get(generator_index)
+        .is_some_and(|run| run.needs_user_input || run.needs_permission);
+    let in_main = app
+        .agents
+        .get(generator_index)
+        .is_some_and(|run| run.workspace_path.is_none());
+    let rounds = |count: u32| format!("{count} round{}", if count == 1 { "" } else { "s" });
+
+    let (lead, lead_style, sentence, hints): (String, Style, String, Vec<(&str, &str)>) =
+        match &gam.phase {
+            crate::GamPhase::Settled(outcome) => {
+                let reviews = gam.round + 1;
+                let (lead, style, sentence) = match outcome {
+                    crate::GamOutcome::Accepted => {
+                        let said = gam
+                            .transcript
+                            .iter()
+                            .rev()
+                            .find(|message| message.kind == crate::GamMessageKind::Accept)
+                            .map(|message| format!(": {}", message.text.trim().replace('\n', " ")))
+                            .unwrap_or_default();
+                        let next = if in_main {
+                            "the changes are in this checkout · /gam again reruns"
+                        } else {
+                            "next: m merges it · /gam again reruns"
+                        };
+                        (
+                            "✓ accepted".to_string(),
+                            accent_style(true),
+                            format!("after {}{said} · {next}", rounds(reviews)),
+                        )
+                    }
+                    crate::GamOutcome::Escalated(reason) => (
+                        "needs you".to_string(),
+                        Style::default().fg(RUNNING_COLOR),
+                        format!(
+                            "{} · answer in either pane, or /gam again",
+                            if reason.trim().is_empty() {
+                                "the pair ended without agreeing".to_string()
+                            } else {
+                                reason.trim().to_string()
+                            }
+                        ),
+                    ),
+                    crate::GamOutcome::Halted(reason) => (
+                        "✗ the reviewer stopped it".to_string(),
+                        error_style(),
+                        format!(
+                            "{} · ask it why in its pane · /gam again reruns",
+                            if reason.trim().is_empty() {
+                                "no reason recorded".to_string()
+                            } else {
+                                reason.trim().to_string()
+                            }
+                        ),
+                    ),
+                    crate::GamOutcome::Stalled(reason) => (
+                        "stalled".to_string(),
+                        Style::default().fg(RUNNING_COLOR),
+                        format!(
+                            "{} · nudge the generator yourself, or /gam again with another pair",
+                            if reason.trim().is_empty() {
+                                "the generator stopped making progress".to_string()
+                            } else {
+                                reason.trim().to_string()
+                            }
+                        ),
+                    ),
+                    crate::GamOutcome::StoppedByUser => (
+                        "stopped".to_string(),
+                        muted_style(true),
+                        format!(
+                            "you ended the loop after {} · both panes stay live · {}",
+                            rounds(gam.round),
+                            if in_main {
+                                "/gam again reruns"
+                            } else {
+                                "m merges what is there"
+                            }
+                        ),
+                    ),
+                };
+                (
+                    lead,
+                    style,
+                    sentence,
+                    vec![("a", "swap"), ("t", "dialogue"), ("i", "tell reviewer")],
+                )
+            }
+            phase => {
+                let round = gam.round + 1;
+                let doing = if blocked {
+                    format!("{generator} needs you: a question or permission in its pane")
+                } else {
+                    match phase {
+                        crate::GamPhase::GeneratorWorking if gam.round == 0 => {
+                            format!("{generator} is writing the first draft")
+                        }
+                        crate::GamPhase::GeneratorWorking => {
+                            format!("{generator} is answering objection {}", gam.round)
+                        }
+                        crate::GamPhase::AwaitingVerdict => {
+                            format!("{reviewer} is reviewing turn {round}")
+                        }
+                        crate::GamPhase::AwaitingInterim => format!(
+                            "{reviewer} is checking in while {generator} keeps writing"
+                        ),
+                        crate::GamPhase::Settled(_) => String::new(),
+                    }
+                };
+                let mut sentence = doing;
+                if gam.steers > 0 {
+                    sentence.push_str(&format!(
+                        " · {} steer{}",
+                        gam.steers,
+                        if gam.steers == 1 { "" } else { "s" }
+                    ));
+                }
+                if !gam.user_notes.is_empty() {
+                    sentence.push_str(&format!(
+                        " · {} note{} queued for the reviewer",
+                        gam.user_notes.len(),
+                        if gam.user_notes.len() == 1 { "" } else { "s" }
+                    ));
+                }
+                if let Some(last) = gam
+                    .transcript
+                    .iter()
+                    .rev()
+                    .find(|message| message.kind != crate::GamMessageKind::Note)
+                {
+                    let verb = match last.kind {
+                        crate::GamMessageKind::Objection => "last verdict: revise",
+                        crate::GamMessageKind::Reply => "generator replied",
+                        crate::GamMessageKind::Steer => "last steer",
+                        crate::GamMessageKind::Accept => "last verdict: accept",
+                        crate::GamMessageKind::Escalate => "last verdict: escalate",
+                        crate::GamMessageKind::Stop => "last verdict: stop",
+                        crate::GamMessageKind::Note => "",
+                    };
+                    sentence.push_str(&format!(
+                        " · {verb}: {}",
+                        last.text.trim().replace('\n', " ")
+                    ));
+                }
+                (
+                    format!("gam · round {round}"),
+                    accent_style(true),
+                    sentence,
+                    vec![
+                        ("a", "swap"),
+                        ("t", "dialogue"),
+                        ("i", "brief"),
+                        ("x", "stop"),
+                    ],
+                )
+            }
+        };
+
+    let settled = matches!(gam.phase, crate::GamPhase::Settled(_));
+    // `^w a swap · t dialogue · i brief · x stop`: one leader, its letters.
+    let hint_width = 3
+        + hints
+            .iter()
+            .map(|(key, label)| key.chars().count() + label.chars().count() + 1)
+            .sum::<usize>()
+        + 3 * hints.len().saturating_sub(1);
+    let lead_width = lead.chars().count();
+    let sentence_width = sentence.chars().count();
+    // What happened outranks how to change it. A settled pair's sentence is
+    // the outcome and the next step, so it never gives up room to the keys; a
+    // running pair keeps its keys while the sentence still gets a fair share.
+    let fits_whole = lead_width + 3 + sentence_width + 2 + hint_width <= width;
+    let show_hints = fits_whole || (!settled && width >= lead_width + 3 + 32 + 2 + hint_width);
+    let sentence_room = width
+        .saturating_sub(lead_width + 3)
+        .saturating_sub(if show_hints { hint_width + 2 } else { 0 })
+        .max(8);
+    let sentence = truncate_chars(&sentence, sentence_room);
+    let mut spans = vec![
+        Span::styled(lead.clone(), lead_style),
+        Span::styled(" · ", muted_style(true)),
+        Span::styled(sentence.clone(), pane_text_style(true)),
+    ];
+    if show_hints {
+        let used = lead_width + 3 + sentence.chars().count();
+        let pad = width.saturating_sub(used + hint_width);
+        spans.push(Span::raw(" ".repeat(pad.clamp(2, 400))));
+        spans.push(Span::styled("^w ", accent_style(true)));
+        for (index, (key, label)) in hints.iter().enumerate() {
+            if index > 0 {
+                spans.push(Span::styled(" · ", muted_style(true)));
+            }
+            spans.push(Span::styled((*key).to_string(), accent_style(true)));
+            spans.push(Span::styled(format!(" {label}"), muted_style(true)));
+        }
+    }
+    Line::from(spans)
+}
+
 /// Split the worker area into (the two conversation panes, the dialogue strip).
 ///
 /// The strip only appears once the two models have actually said something to
@@ -4043,6 +4378,7 @@ pub(crate) fn gam_split_rows(
     app: &App,
     generator_index: usize,
 ) -> (Rect, Option<Rect>) {
+    let area = gam_split_bar(area, app, generator_index).map_or(area, |(_, rest)| rest);
     if !app.gam_transcript_visible {
         return (area, None);
     }
@@ -4202,6 +4538,22 @@ pub(crate) fn render_gam_split(frame: &mut Frame<'_>, area: Rect, app: &mut App)
     let Some((generator_index, adversarial_index)) = app.gam_pair_indices_for_selected() else {
         return;
     };
+    if let Some((bar, _)) = gam_split_bar(area, app, generator_index) {
+        // Inset to line up with the text inside the halves' borders.
+        let bar = Rect {
+            x: bar.x + 1,
+            width: bar.width.saturating_sub(2),
+            ..bar
+        };
+        let lines = gam_status_bar_lines(
+            app,
+            generator_index,
+            adversarial_index,
+            bar.width as usize,
+            bar.height as usize,
+        );
+        frame.render_widget(Paragraph::new(lines).style(app_style()), bar);
+    }
     let (panes, transcript) = gam_split_rows(area, app, generator_index);
     if let Some(strip) = transcript {
         render_gam_transcript(frame, strip, app, generator_index);
@@ -4211,7 +4563,11 @@ pub(crate) fn render_gam_split(frame: &mut Frame<'_>, area: Rect, app: &mut App)
         (left, generator_index, "gen"),
         (right, adversarial_index, "adv"),
     ] {
-        let size = TerminalSize::new(half.height.max(1), half.width.max(1)).ok();
+        // The PTY gets the half's INSIDE: sized to the outer rect, every full-width
+        // line of agent output was two columns too wide and wrapped its tail onto
+        // a line of its own.
+        let half_inner_size = block_inner(half);
+        let size = TerminalSize::new(half_inner_size.height.max(1), half_inner_size.width.max(1)).ok();
         if let Some(size) = size {
             app.fit_pane(index, size);
         }
@@ -4304,6 +4660,10 @@ pub(crate) fn render_gam_split(frame: &mut Frame<'_>, area: Rect, app: &mut App)
                             "stopped by reviewer".to_string()
                         }
                     }
+                    crate::GamPhase::Settled(crate::GamOutcome::Stalled(_)) => "stalled".to_string(),
+                    crate::GamPhase::Settled(crate::GamOutcome::StoppedByUser) => {
+                        "stopped by you".to_string()
+                    }
                 }
             })
             .unwrap_or_default();
@@ -4316,17 +4676,11 @@ pub(crate) fn render_gam_split(frame: &mut Frame<'_>, area: Rect, app: &mut App)
                 // it shares with the generator. Its task_summary already carries
                 // an "adv · " label for the agents list, and this line adds the
                 // role prefix itself, so reusing it rendered "adv · adv · codex".
-                let label = if run.is_gam_adversary() {
-                    let model = run.model.trim();
-                    if model.is_empty() {
-                        run.backend.as_str().to_string()
-                    } else {
-                        format!("{} {}", run.backend.as_str(), model)
-                    }
-                } else if run.task_summary.trim().is_empty() {
-                    summarize_task(&run.task)
+                let model = run.model.trim();
+                let who = if model.is_empty() {
+                    run.backend.as_str().to_string()
                 } else {
-                    run.task_summary.clone()
+                    format!("{} {}", run.backend.as_str(), model)
                 };
                 // Which road messages take: a live link, or typing into the pane.
                 let link = app
@@ -4335,7 +4689,33 @@ pub(crate) fn render_gam_split(frame: &mut Frame<'_>, area: Rect, app: &mut App)
                     .filter(|link| link.can_send())
                     .map(|link| format!(" · ⇄ {}", link.label()))
                     .unwrap_or_default();
-                format!("{} · {}{link}", truncate_chars(&label, 30), round_badge)
+                if run.is_gam_adversary() {
+                    format!("{} · {}{link}", truncate_chars(&who, 30), round_badge)
+                } else {
+                    // The generator names its model too: with `gen` the pair
+                    // can be any two models, and "which one wrote this" was
+                    // only answerable from the sidebar.
+                    let summary = if run.task_summary.trim().is_empty() {
+                        summarize_task(&run.task)
+                    } else {
+                        run.task_summary.clone()
+                    };
+                    // The task rides along only when it fits readably; the
+                    // sidebar row and the status bar already carry it.
+                    let room = (half.width as usize).saturating_sub(
+                        who.chars().count().min(24) + round_badge.chars().count() + link.chars().count() + 22,
+                    );
+                    if room >= 16 {
+                        format!(
+                            "{} · {} · {}{link}",
+                            truncate_chars(&who, 24),
+                            truncate_chars(&summary, room),
+                            round_badge
+                        )
+                    } else {
+                        format!("{} · {}{link}", truncate_chars(&who, 24), round_badge)
+                    }
+                }
             })
             .unwrap_or_default();
         // The split is the only place two agent panes share the screen, and
@@ -4346,7 +4726,12 @@ pub(crate) fn render_gam_split(frame: &mut Frame<'_>, area: Rect, app: &mut App)
         } else {
             format!("{role_label} · {identity}")
         };
-        let lines = worker_lines_at(app, index, half.height as usize, half.width as usize);
+        let lines = worker_lines_at(
+            app,
+            index,
+            half_inner_size.height as usize,
+            half_inner_size.width as usize,
+        );
         let paragraph = Paragraph::new(lines)
             .style(app_style())
             .block(pane_block(&title, focused_half, app.nav_mode))
@@ -4510,7 +4895,17 @@ pub(crate) fn force_worker_cursor(backend: Backend) -> bool {
 /// so render_task, task_pane_height, and selection's height/hit-test calc all wrap
 /// the SAME string: if these drift, the pane height and mouse selection bounds
 /// disagree and clicks on valid input rows get rejected.
-pub(crate) fn task_default_hint(app: &App) -> &'static str {
+pub(crate) fn task_default_hint(app: &App) -> String {
+    // A `/gam` line previews the pair it will start: who writes, who reviews,
+    // at what effort, and where. Every one of those has a default, and seeing
+    // the defaults before Enter is what makes it safe to skip the picker.
+    if let Some(preview) = gam_line_preview(app, &app.task_input) {
+        return preview;
+    }
+    task_default_hint_static(app).to_string()
+}
+
+fn task_default_hint_static(app: &App) -> &'static str {
     // The moment a draft has two lines, "will Enter send this or add a line?" is
     // the only question worth answering, and it outranks every hint below.
     if app.task_input.contains('\n') {
@@ -4587,7 +4982,7 @@ pub(crate) fn task_pane_title(app: &App) -> String {
 pub(crate) fn render_task(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let focused = app.focus == FocusPane::Task;
     let default_hint = task_default_hint(app);
-    let hint = app.notice.as_deref().unwrap_or(default_hint);
+    let hint = app.notice.as_deref().unwrap_or(&default_hint);
     let inner_width = area.width.saturating_sub(2).max(1);
     let input_lines = task_input_lines(&app.task_input, app.task_cursor, inner_width);
     let (cursor_line, cursor_column) =
@@ -4689,7 +5084,7 @@ pub(crate) fn render_task(frame: &mut Frame<'_>, area: Rect, app: &App) {
 
 pub(crate) fn task_pane_height(app: &App, width: u16) -> u16 {
     let default_hint = task_default_hint(app);
-    let hint = app.notice.as_deref().unwrap_or(default_hint);
+    let hint = app.notice.as_deref().unwrap_or(&default_hint);
     let inner_width = width.saturating_sub(2).max(1);
     let input_lines = task_input_lines(&app.task_input, app.task_cursor, inner_width)
         .len()
@@ -5538,6 +5933,8 @@ pub(crate) fn agent_status_label(agent: &AgentRun) -> &'static str {
         // overloaded). It is not Failed — the process is fine — but it is not
         // working either, and "running" was a lie that hid every rate limit.
         "turn failed \u{b7} retry"
+    } else if let Some(label) = gam_row_status_label(agent) {
+        label
     } else if matches!(agent.mode, AgentMode::Plan | AgentMode::RudderPlan)
         && agent.status == AgentStatus::Running
     {
@@ -5583,6 +5980,49 @@ pub(crate) fn agent_status_label(agent: &AgentRun) -> &'static str {
     } else {
         agent.lifecycle_label()
     }
+}
+
+/// What a `/gam` row is doing, in the sidebar's words. A generator whose turn
+/// ended reads Done, and the generic label for that ("done · press m to read
+/// the diff") told you to merge work the reviewer was still judging; a reviewer
+/// between packets read "completed" as if the pair were over.
+fn gam_row_status_label(agent: &AgentRun) -> Option<&'static str> {
+    let gam = agent.gam.as_ref()?;
+    let adversarial = gam.role == crate::GamRole::Adversarial;
+    if agent.status == AgentStatus::Running {
+        return None;
+    }
+    Some(match &gam.phase {
+        crate::GamPhase::Settled(crate::GamOutcome::Accepted) => {
+            if adversarial {
+                "reviewer \u{b7} accepted"
+            } else {
+                // Accepted work is ordinary finished work: the merge hint is
+                // exactly right for it.
+                return None;
+            }
+        }
+        crate::GamPhase::Settled(crate::GamOutcome::Escalated(_)) => "gam \u{b7} needs you",
+        crate::GamPhase::Settled(crate::GamOutcome::Stalled(_)) => "gam \u{b7} stalled",
+        crate::GamPhase::Settled(crate::GamOutcome::Halted(_)) => {
+            if adversarial {
+                "reviewer \u{b7} stopped it"
+            } else {
+                "stopped by reviewer"
+            }
+        }
+        crate::GamPhase::Settled(crate::GamOutcome::StoppedByUser) => {
+            if adversarial {
+                "reviewer \u{b7} idle"
+            } else {
+                return None;
+            }
+        }
+        _ if agent.status != AgentStatus::Done => return None,
+        crate::GamPhase::AwaitingVerdict if !adversarial => "gam \u{b7} under review",
+        _ if adversarial => "reviewer \u{b7} standing by",
+        _ => return None,
+    })
 }
 
 fn integration_detail(agent: &AgentRun) -> Option<String> {

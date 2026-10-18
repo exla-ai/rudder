@@ -500,6 +500,7 @@ what is happening.</p>
     lede: "GAM puts two models on one task: a generator that writes the code, and an adversarial reviewer from a different provider that can only argue with it. The reviewer cannot edit a single file. You start one with /gam.",
     toc: [
       ["start", "Starting a pair"],
+      ["watching", "Watching and driving a pair"],
       ["steering", "How the reviewer steers the work"],
       ["pipeline", "How the two halves talk"],
       ["compliance", "Checking the generator complied"],
@@ -517,10 +518,13 @@ what is happening.</p>
 directly beneath its generator, hooked to it with a <code>&#8627;</code>, and the two
 move between sections together rather than drifting apart as their statuses diverge.</p>
 <p>Two panes open side by side. The left half is the generator, running your current
-model. The right half is the adversarial reviewer, which defaults to a
-<strong>different provider</strong> so it is not the same model marking its own
-homework: a Claude generator pairs with Codex, and a Codex or opencode generator
-pairs with Claude.</p>
+model. The right half is the adversarial reviewer, which defaults to the
+<strong>other provider's flagship</strong> so it is not the same model marking its own
+homework: a Claude generator pairs with Codex <code>gpt-6.1-sol</code>, and a Codex or
+opencode generator pairs with Claude <code>opus</code>.</p>
+<p>Before you press Enter, the task bar spells out the pair you are about to start,
+for example <code>gam &middot; claude sonnet(xhigh) writes &middot; codex
+gpt-6.1-sol(xhigh) reviews (read-only) &middot; isolated workspace</code>.</p>
 
 <figure class="docs-shot">
   <div class="screen">
@@ -553,22 +557,60 @@ pairs with Claude.</p>
   </figcaption>
 </figure>
 
-<p>You can name the reviewer instead of taking the default, and run the pair in your
-real checkout rather than an isolated workspace:</p>
+<p>Type <code>/gam</code> and a picker opens, in the same style as
+<code>/model</code>. Its first row is the default pair, so Enter (or just typing the
+task) takes it. Otherwise pick the reviewer's provider, then its model, then
+optionally <code>gen</code> and the generator's provider and model, then type the
+task. Each row shows backend, model and effort. The model lists are the same ones
+<code>/model</code> shows.</p>
+<p>The picker only writes text onto the task line, so everything it builds can also be
+typed directly:</p>
 <table class="docs-table">
   <thead><tr><th>you type</th><th>what you get</th></tr></thead>
   <tbody>
-    <tr><td>/gam &lt;task&gt;</td><td>Reviewer picked for you, from the other provider.</td></tr>
-    <tr><td>/gam codex &lt;task&gt;</td><td>Codex reviews, on its default model.</td></tr>
-    <tr><td>/gam codex gpt-6.1-sol &lt;task&gt;</td><td>A named provider and model.</td></tr>
+    <tr><td>/gam &lt;task&gt;</td><td>Your model writes; the other provider's flagship reviews.</td></tr>
+    <tr><td>/gam codex &lt;task&gt;</td><td>Codex reviews, on its flagship.</td></tr>
+    <tr><td>/gam codex gpt-6.1-sol high &lt;task&gt;</td><td>A named provider, model and effort.</td></tr>
     <tr><td>/gam fable &lt;task&gt;</td><td>A bare model name works when Rudder recognises it.</td></tr>
-    <tr><td>/gam main &lt;task&gt;</td><td>The pair runs in your checkout instead of a workspace.</td></tr>
-    <tr><td>/gam codex gpt-6.1-sol main &lt;task&gt;</td><td><code>main</code> works on either side of the model. The picker leaves your cursor after the model it inserted, which is where you would naturally type it.</td></tr>
+    <tr><td>/gam claude gen codex gpt-6.1-sol &lt;task&gt;</td><td><code>gen</code> names the generator too. Without it, the dashboard's current model writes.</td></tr>
+    <tr><td>/gam gen codex &lt;task&gt;</td><td>Codex writes; the reviewer defaults across from it, so Claude reviews.</td></tr>
+    <tr><td>/gam main &lt;task&gt;</td><td>The pair runs in your checkout instead of a workspace. <code>main</code> can go anywhere before the task.</td></tr>
+    <tr><td>/gam again</td><td>Rerun your last pair on its task. The picker also offers the last pair as a row, to put it back on the line with a new task.</td></tr>
   </tbody>
 </table>
 <p>Ordinary task words are never mistaken for a model. <code>/gam fix the auth
-bug</code> keeps every one of those words as the task, because <code>fix</code> is
-not a model name.</p>
+bug</code> keeps every one of those words as the task, and so does <code>/gam claude
+fix the auth bug</code>: a provider on its own gets its flagship, and <code>fix</code>
+is not a model name. opencode can write but cannot review, because it has no
+read-only mode, so the reviewer picker only offers Claude and Codex.</p>
+<p>The last pair is remembered across sessions, under <code>gam.last</code> in
+<code>~/.rudder/config.json</code>.</p>
+
+<h2 id="watching">Watching and driving a pair</h2>
+<p>A bar above the two halves says what the pair is doing as a whole: the round, who
+has the ball, the steers so far, and the last verdict.</p>
+<pre><code>gam · round 2 · sonnet is answering objection 1 · last verdict: revise: the jitter path has no test
+                                                   ^w a swap · t dialogue · i brief · x stop</code></pre>
+<p>Once the pair ends, the same bar says how it ended, why, and what to do next:</p>
+<pre><code>✓ accepted · after 2 rounds: covers the jitter path · next: m merges it · /gam again reruns</code></pre>
+<table class="docs-table">
+  <thead><tr><th>keys</th><th>what they do</th></tr></thead>
+  <tbody>
+    <tr><td><kbd>^W</kbd> <kbd>a</kbd></td><td>Move between the generator and reviewer halves. Clicking a half works too.</td></tr>
+    <tr><td><kbd>^W</kbd> <kbd>t</kbd></td><td>Hide or show the dialogue strip under the split.</td></tr>
+    <tr><td><kbd>^W</kbd> <kbd>i</kbd></td><td>Put <code>/tell </code> on the task line to brief the reviewer.</td></tr>
+    <tr><td><kbd>^W</kbd> <kbd>x</kbd></td><td>Stop the loop. Any turn in flight is interrupted with Esc, never killed, and both panes stay live for you to drive.</td></tr>
+  </tbody>
+</table>
+<p>The same keys work in nav mode (<kbd>^G</kbd>) without the <kbd>^W</kbd>.</p>
+<p><code>/tell &lt;note&gt;</code> sends the reviewer a note from you, such as
+<code>/tell the retry budget is per request, not global</code>. While the loop
+runs, the note waits for the reviewer's next review and arrives in that packet,
+marked as coming from you. Typing it in straight away could end the reviewer's turn
+without a verdict. After the pair has ended, there is no next packet, so the note goes
+straight into the reviewer's session. Notes also show in the dialogue.</p>
+<p><kbd>m</kbd> on the reviewer's row merges its generator, because the reviewer has
+no work of its own to merge.</p>
 
 <h2 id="steering">How the reviewer steers the work</h2>
 <p>The reviewer is not a gate at the end. It reads the diff after every turn the
@@ -738,6 +780,7 @@ mid-sentence and let an unproductive one run to the same number anyway.</p>
     <tr><td>accepted</td><td>The reviewer could not find a blocking defect to demonstrate.</td></tr>
     <tr><td>escalated</td><td>The reviewer asked for you: a scope dispute, two irreconcilable approaches, or a correct objection the generator keeps ignoring.</td></tr>
     <tr><td>stalled</td><td>The generator handed back the same diff AND the same rebuttal as the round before. It did nothing with the objection, so another round would ask the identical question and get the identical answer. A NEW argument counts as progress even with no code change: refusing to edit while explaining why is a legitimate move.</td></tr>
+    <tr><td>stopped</td><td>You stopped it with <kbd>^W</kbd> <kbd>x</kbd>, or stopped the generator's row. The work stays where it is.</td></tr>
     <tr><td>no verdict</td><td>The reviewer produced no readable verdict block at all.</td></tr>
     <tr><td>the reviewer can no longer answer</td><td>It failed, you stopped it, you deleted its row, or its pane is gone. Each of these used to leave the pair spinning in silence with the generator parked and nothing on screen to explain it; the pair now ends and names the reason.</td></tr>
   </tbody>
@@ -816,7 +859,8 @@ a reviewer's objection and a generator's answer attached.</p>
   <tbody>
     <tr><td>/model</td><td>Set the backend, model and reasoning effort for the next agent. Effort runs low, medium, high, xhigh, max; xhigh is the default where a model offers it, and opencode takes none. A running agent keeps what it launched with.</td></tr>
     <tr><td>/fast</td><td>Toggle faster output on supported models.</td></tr>
-    <tr><td>/gam</td><td>Start a Generative Adversarial Model (GAM) pair: a generator plus an adversarial reviewer. The reviewer defaults to the other provider; name one with <code>/gam codex gpt-6.1-sol &lt;task&gt;</code>, or add <code>main</code> to run the pair in your checkout.</td></tr>
+    <tr><td>/gam</td><td>Start a Generative Adversarial Model (GAM) pair: a generator plus an adversarial reviewer. A picker offers the reviewer and, after <code>gen</code>, the generator; the reviewer defaults to the other provider's flagship. Name one with <code>/gam codex gpt-6.1-sol &lt;task&gt;</code>, add <code>main</code> to run the pair in your checkout, or <code>/gam again</code> to rerun your last pair.</td></tr>
+    <tr><td>/tell</td><td>Brief the running <code>/gam</code> reviewer. The note goes with its next review.</td></tr>
     <tr><td>/resume</td><td>Continue an existing Claude, Codex or opencode chat as an agent. The picker lists this repo's recent chats and says which directory each one ran in. It lands in an isolated workspace like plain text does; add <code>--here</code> to continue it in your real checkout instead.</td></tr>
     <tr><td>/restore</td><td>Reopen a specific session id in a new pane.</td></tr>
     <tr><td>/share</td><td>Durable local context every agent reads. For tokens, URLs, env details.</td></tr>

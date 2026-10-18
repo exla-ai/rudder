@@ -79,6 +79,93 @@ pub(crate) fn config_effort(config: &serde_json::Value, backend: Backend) -> Opt
     })
 }
 
+fn gam_side_from_json(value: &serde_json::Value) -> Option<GamSide> {
+    let backend = value
+        .get("backend")
+        .and_then(serde_json::Value::as_str)
+        .and_then(provider_backend)?;
+    let model = value
+        .get("model")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let model = match backend {
+        Backend::Codex => live_codex_model(&model).to_string(),
+        _ => model,
+    };
+    let effort = value
+        .get("effort")
+        .and_then(serde_json::Value::as_str)
+        .and_then(EffortLevel::parse);
+    Some(GamSide {
+        backend,
+        model,
+        effort,
+    })
+}
+
+fn gam_side_to_json(side: &GamSide) -> serde_json::Value {
+    serde_json::json!({
+        "backend": side.backend.as_str(),
+        "model": side.model,
+        "effort": side.effort.map(EffortLevel::as_str),
+    })
+}
+
+/// The last `/gam` pair, stored as `gam.last` in config.json.
+pub(crate) fn config_gam_last_pair(config: &serde_json::Value) -> Option<GamLastPair> {
+    let last = config.get("gam")?.get("last")?;
+    Some(GamLastPair {
+        generator: gam_side_from_json(last.get("generator")?)?,
+        reviewer: gam_side_from_json(last.get("reviewer")?)?,
+        in_main: last
+            .get("inMain")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
+        task: last
+            .get("task")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+    })
+}
+
+/// Remember the pair a `/gam` just launched, so the picker can offer it again
+/// and `/gam again` can rerun it in the next session too.
+pub(crate) fn save_gam_last_pair(pair: &GamLastPair) -> Result<()> {
+    // Tests drive real launches; they must never write the user's own config.
+    if cfg!(test) && std::env::var_os("RUDDER_HOME").is_none() {
+        return Ok(());
+    }
+    let path = rudder_config_path().context("could not determine Rudder config path")?;
+    let mut config = load_config_for_write(&path);
+    if !config.is_object() {
+        config = default_config_value();
+    }
+    ensure_config_defaults(&mut config);
+    let root = config
+        .as_object_mut()
+        .context("Rudder config root is not an object")?;
+    let gam = root
+        .entry("gam".to_string())
+        .or_insert_with(|| serde_json::json!({}));
+    if !gam.is_object() {
+        *gam = serde_json::json!({});
+    }
+    if let Some(gam) = gam.as_object_mut() {
+        gam.insert(
+            "last".to_string(),
+            serde_json::json!({
+                "generator": gam_side_to_json(&pair.generator),
+                "reviewer": gam_side_to_json(&pair.reviewer),
+                "inMain": pair.in_main,
+                "task": pair.task,
+            }),
+        );
+    }
+    write_config_atomically(&path, &config)
+}
+
 /// Whether Claude Code's native fast mode is on for new agents. Stored at the
 /// config root as `fastMode` (the same key Claude Code's own settings use), so it
 /// survives a restart and so we can inject it into a worker's `--settings`. Fast

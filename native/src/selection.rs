@@ -208,11 +208,30 @@ pub(crate) fn slice_chars(value: &str, start: usize, end: usize) -> String {
         .collect()
 }
 
+#[cfg(test)]
+thread_local! {
+    pub(crate) static COPIED_TEXTS: std::cell::RefCell<Vec<String>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
 pub(crate) fn copy_text_to_clipboard(text: &str) -> Result<()> {
     if text.is_empty() {
         return Ok(());
     }
+    // Tests record the text instead of touching a real clipboard.
+    #[cfg(test)]
+    {
+        COPIED_TEXTS.with(|copied| copied.borrow_mut().push(text.to_string()));
+        Ok(())
+    }
+    #[cfg(not(test))]
+    {
+        copy_text_through_every_channel(text)
+    }
+}
 
+#[cfg(not(test))]
+fn copy_text_through_every_channel(text: &str) -> Result<()> {
     // Two channels, because no single one works everywhere:
     //
     // 1) OSC 52 asks the TERMINAL EMULATOR to set its own clipboard. This is the only
@@ -232,6 +251,7 @@ pub(crate) fn copy_text_to_clipboard(text: &str) -> Result<()> {
     }
 }
 
+#[cfg_attr(test, allow(dead_code))]
 fn run_platform_clipboard_command(text: &str) -> Result<()> {
     #[cfg(target_os = "macos")]
     {
@@ -300,6 +320,7 @@ pub(crate) fn open_url_externally(url: &str) -> Result<()> {
 /// The terminal emulator copies the payload to the system clipboard. Non-printing, so
 /// it does not disturb the rendered frame; safe to write here since event handling and
 /// drawing share one thread (no interleaving with a draw).
+#[cfg_attr(test, allow(dead_code))]
 pub(crate) fn emit_osc52_clipboard(text: &str) -> Result<()> {
     let encoded = base64_encode(text.as_bytes());
     // Many terminals (and tmux) silently drop oversized OSC 52 payloads; the local
@@ -341,6 +362,7 @@ pub(crate) fn base64_encode(input: &[u8]) -> String {
     out
 }
 
+#[cfg_attr(test, allow(dead_code))]
 pub(crate) fn run_clipboard_command(command: &str, args: &[&str], text: &str) -> Result<()> {
     let mut child = Command::new(command)
         .args(args)

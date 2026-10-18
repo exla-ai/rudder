@@ -1035,6 +1035,89 @@ impl TerminalPane {
         }
     }
 
+    /// Where the view's first row sits in the pane's whole history, counted
+    /// from the oldest line kept: region scrollback, then the parser's own
+    /// scrollback, then the live screen (the same order `scrollback_by` walks).
+    ///
+    /// A mouse selection is anchored to these line numbers, not to screen
+    /// rows, so it stays on the same text while the view scrolls under it (a
+    /// drag past the pane's edge, the wheel, new output while scrolled back)
+    /// and can reach rows that are no longer on screen. Counting from the top
+    /// keeps a line's number fixed as output arrives below it.
+    ///
+    /// The alternate screen keeps whole-frame history instead of lines, and a
+    /// live-only pane has none, so both answer 0: there the screen rows ARE
+    /// the line numbers.
+    pub fn view_top_line(&mut self) -> usize {
+        if self.live_screen_only || self.parser.screen().alternate_screen() {
+            return 0;
+        }
+        let history = self.region_scrollback.len() + self.parser_scrollback_len();
+        history.saturating_sub(self.scrollback())
+    }
+
+    /// Plain text of history lines `start..=end` (see `view_top_line`), one
+    /// entry per line; a line that is gone (trimmed off the far end of the
+    /// history) comes back empty. The parser's scrollback is only readable
+    /// through its view, so the view is moved to each stretch and put back.
+    pub fn history_lines(&mut self, start: usize, end: usize) -> Vec<String> {
+        if end < start {
+            return Vec::new();
+        }
+        if self.live_screen_only || self.parser.screen().alternate_screen() {
+            let visible = self.visible_lines_snapshot();
+            return (start..=end)
+                .map(|index| visible.get(index).cloned().unwrap_or_default())
+                .collect();
+        }
+        let region = self.region_scrollback.len();
+        let history = self.parser_scrollback_len();
+        let rows = self.size.rows as usize;
+        let saved = self.parser.screen().scrollback();
+        let mut lines = Vec::with_capacity(end - start + 1);
+        let mut index = start;
+        while index <= end {
+            if index < region {
+                lines.push(styled_cells_to_plain(&self.region_scrollback[index]));
+                index += 1;
+                continue;
+            }
+            let line = index - region;
+            if line >= history + rows {
+                break;
+            }
+            // Put `line` at the top of the view (or as high as it can go).
+            let offset = history.saturating_sub(line);
+            self.parser.screen_mut().set_scrollback(offset);
+            let top = history - offset;
+            for text in self
+                .current_visible_lines_snapshot()
+                .into_iter()
+                .skip(line - top)
+            {
+                if index > end {
+                    break;
+                }
+                lines.push(text);
+                index += 1;
+            }
+        }
+        self.parser.screen_mut().set_scrollback(saved);
+        lines.resize(end - start + 1, String::new());
+        lines
+    }
+
+    /// How many lines the parser holds above its screen. vt100 has no getter
+    /// for it, but clamps an over-large offset to exactly that.
+    fn parser_scrollback_len(&mut self) -> usize {
+        let screen = self.parser.screen_mut();
+        let saved = screen.scrollback();
+        screen.set_scrollback(usize::MAX);
+        let len = screen.scrollback();
+        screen.set_scrollback(saved);
+        len
+    }
+
     pub fn cursor(&self) -> TerminalCursor {
         let (row, col) = self.parser.screen().cursor_position();
         TerminalCursor {

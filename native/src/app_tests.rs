@@ -4775,6 +4775,177 @@ fn worker_drag_selection_above_pane_autoscrolls() {
         .is_some_and(|terminal| terminal.scrollback() > 0));
 }
 
+/// A pane that printed `line001`..`line040`, fully drained.
+#[cfg(not(windows))]
+fn numbered_lines_pane(rows: u16) -> TerminalPane {
+    let command = TerminalCommand::with_args(
+        "/bin/sh",
+        [
+            "-lc",
+            "i=1; while [ $i -le 40 ]; do printf 'line%03d\\r\\n' $i; i=$((i+1)); done; sleep 5",
+        ],
+    );
+    let mut pane = TerminalPane::spawn_shell_or_command(
+        Some(command),
+        TerminalPaneOptions {
+            size: TerminalSize { rows, cols: 20 },
+            scrollback_lines: 100,
+            ..Default::default()
+        },
+    )
+    .expect("spawn test pty");
+    for _ in 0..80 {
+        std::thread::sleep(Duration::from_millis(25));
+        pane.drain_output();
+        if pane.visible_lines_snapshot().join("\n").contains("line040") {
+            break;
+        }
+    }
+    pane
+}
+
+/// An app focused on one worker pane at (0,0) whose inner area is 20 x
+/// `height`, starting at (1,1).
+#[cfg(not(windows))]
+fn app_with_worker_pane(pane: TerminalPane, height: u16) -> App {
+    let mut app = App::new();
+    app.focus = FocusPane::Worker;
+    app.worker_area = Some(Rect {
+        x: 0,
+        y: 0,
+        width: 22,
+        height: height + 2,
+    });
+    app.agents.push(test_agent_run_with_terminal(&app, pane));
+    app.selected_agent = 0;
+    app
+}
+
+#[cfg(not(windows))]
+fn worker_mouse(app: &mut App, kind: MouseEventKind, column: u16, row: u16) {
+    app.handle_mouse(MouseEvent {
+        kind,
+        column,
+        row,
+        modifiers: KeyModifiers::empty(),
+    });
+}
+
+/// The text the worker pane currently draws with the selection highlight,
+/// row by row (rows with no highlight left out).
+#[cfg(not(windows))]
+fn highlighted_worker_text(app: &mut App, height: usize) -> String {
+    crate::render::worker_lines(app, height, 20)
+        .iter()
+        .filter_map(|line| {
+            let text: String = line
+                .spans
+                .iter()
+                .filter(|span| span.style.bg == Some(SURFACE_SEL))
+                .map(|span| span.content.as_ref())
+                .collect();
+            (!text.is_empty()).then(|| text.trim_end().to_string())
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[cfg(not(windows))]
+fn last_copied() -> Option<String> {
+    crate::selection::COPIED_TEXTS.with(|copied| copied.borrow().last().cloned())
+}
+
+#[cfg(not(windows))]
+#[test]
+fn worker_drag_in_scrollback_copies_exactly_the_highlighted_rows() {
+    // The pty is taller than the pane (an attached terminal owns the size),
+    // so the pane shows the BOTTOM 5 of its 8 rows, scrolled back 10 lines.
+    let mut pane = numbered_lines_pane(8);
+    pane.scrollback_by(10);
+    let mut app = app_with_worker_pane(pane, 5);
+    let shown: Vec<String> = {
+        let terminal = app.selected_terminal_mut().unwrap();
+        let (_, rows) = terminal.styled_line_window_snapshot(5);
+        rows.iter()
+            .map(|cells| cells.iter().map(|cell| cell.contents.as_str()).collect::<String>())
+            .map(|text| text.trim_end().to_string())
+            .collect()
+    };
+    assert_eq!(shown.len(), 5);
+
+    // Drag from the middle of inner row 1 to the end of inner row 3.
+    worker_mouse(&mut app, MouseEventKind::Down(MouseButton::Left), 1 + 4, 1 + 1);
+    worker_mouse(&mut app, MouseEventKind::Drag(MouseButton::Left), 1 + 6, 1 + 3);
+    let expected = format!("{}\n{}\n{}", &shown[1][4..], shown[2], shown[3]);
+    assert_eq!(highlighted_worker_text(&mut app, 5), expected, "highlight");
+    worker_mouse(&mut app, MouseEventKind::Up(MouseButton::Left), 1 + 6, 1 + 3);
+    assert_eq!(last_copied().as_deref(), Some(expected.as_str()), "copied");
+}
+
+#[cfg(not(windows))]
+#[test]
+fn worker_drag_past_the_pane_top_extends_the_selection_into_scrollback() {
+    let mut pane = numbered_lines_pane(5);
+    pane.scrollback_by(10);
+    let mut app = app_with_worker_pane(pane, 5);
+    let shown = app.selected_terminal_mut().unwrap().visible_lines_snapshot();
+    let anchor: usize = shown[2][4..7].parse().expect("numbered row");
+
+    // Start on inner row 2, then drag above the pane (row 0 is the border)
+    // three times: each one scrolls the view a row further back.
+    worker_mouse(&mut app, MouseEventKind::Down(MouseButton::Left), 1 + 6, 1 + 2);
+    for _ in 0..3 {
+        worker_mouse(&mut app, MouseEventKind::Drag(MouseButton::Left), 1, 0);
+    }
+    // The selection began two rows below the top and the view moved three,
+    // so it covers five rows above the anchor and the anchor itself. The
+    // anchor is now one row below the pane; the rest is on screen, lit.
+    let expected: Vec<String> = (anchor - 5..=anchor)
+        .map(|n| format!("line{n:03}"))
+        .collect();
+    let on_screen = expected[..5].join("\n");
+    assert_eq!(highlighted_worker_text(&mut app, 5), on_screen, "highlight follows the text");
+    worker_mouse(&mut app, MouseEventKind::Up(MouseButton::Left), 1, 0);
+    assert_eq!(last_copied().unwrap_or_default(), expected.join("\n"));
+}
+
+#[cfg(not(windows))]
+#[test]
+fn worker_drag_from_scrollback_past_the_pane_bottom_copies_rows_scrolled_away() {
+    let mut pane = numbered_lines_pane(5);
+    pane.scrollback_by(10);
+    let mut app = app_with_worker_pane(pane, 5);
+    let shown = app.selected_terminal_mut().unwrap().visible_lines_snapshot();
+    let first: usize = shown[0][4..7].parse().expect("numbered row");
+
+    // From the top row, drag below the pane (row 6 is the bottom border) four
+    // times, then let go there: the top row scrolled off but stays selected.
+    worker_mouse(&mut app, MouseEventKind::Down(MouseButton::Left), 1, 1);
+    for _ in 0..4 {
+        worker_mouse(&mut app, MouseEventKind::Drag(MouseButton::Left), 1 + 19, 6);
+    }
+    worker_mouse(&mut app, MouseEventKind::Up(MouseButton::Left), 1 + 19, 6);
+    let expected: Vec<String> = (first..=first + 8).map(|n| format!("line{n:03}")).collect();
+    assert_eq!(last_copied().unwrap_or_default(), expected.join("\n"));
+}
+
+#[cfg(not(windows))]
+#[test]
+fn worker_selection_stays_on_its_text_when_the_wheel_scrolls_the_view() {
+    let mut pane = numbered_lines_pane(5);
+    pane.scrollback_by(10);
+    let mut app = app_with_worker_pane(pane, 5);
+    let shown = app.selected_terminal_mut().unwrap().visible_lines_snapshot();
+    worker_mouse(&mut app, MouseEventKind::Down(MouseButton::Left), 1, 1 + 3);
+    worker_mouse(&mut app, MouseEventKind::Drag(MouseButton::Left), 1 + 6, 1 + 4);
+    let before = highlighted_worker_text(&mut app, 5);
+    assert_eq!(before, format!("{}\n{}", shown[3], shown[4]));
+    // Scrolling forward a row moves the text up the pane; the highlight
+    // goes with it instead of staying on the same screen rows.
+    app.selected_terminal_mut().unwrap().scrollback_by(-1);
+    assert_eq!(highlighted_worker_text(&mut app, 5), before);
+}
+
 #[test]
 fn extracts_selected_worker_text_across_visible_lines() {
     let lines = vec![
@@ -25846,38 +26017,132 @@ fn alt_b_and_alt_n_step_files_in_the_focused_diff_panel() {
     assert_eq!(app.focus, FocusPane::Diff, "the panel keeps focus");
 }
 
+fn attach_mouse(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
+    MouseEvent {
+        kind,
+        column,
+        row,
+        modifiers: KeyModifiers::empty(),
+    }
+}
+
+/// Rows `line<top+1>`.. as a full attach frame of `rows` rows.
+fn attach_numbered_frame(top: usize, rows: usize) -> Vec<(u16, String)> {
+    (0..rows)
+        .map(|row| (row as u16, format!("line{:03}", top + row + 1)))
+        .collect()
+}
+
 #[test]
 fn attach_client_selects_copies_and_restores_what_it_drew() {
-    use crate::attach::{attach_selection_paint, AttachScreen};
+    use crate::attach::{AttachScreen, AttachSelectionDone};
     let mut screen = AttachScreen::default();
     screen.apply(
         true,
         &[
             (0, "\x1b[1mattach\x1b[0m copy target".to_string()),
             (1, "second row".to_string()),
+            (2, "third row".to_string()),
         ],
+        0,
     );
-    assert_eq!(screen.plain_lines(), vec!["attach copy target", "second row"]);
-    let selection = WorkerSelection {
-        start: SelectionPoint { row: 0, col: 7 },
-        end: SelectionPoint { row: 1, col: 5 },
-    };
     assert_eq!(
-        selected_text_from_lines(&screen.plain_lines(), selection),
-        "copy target\nsecond"
+        screen.plain_lines(),
+        vec!["attach copy target", "second row", "third row"]
     );
-    let lit = attach_selection_paint(&screen, selection, true);
+    screen.selection_mouse(attach_mouse(MouseEventKind::Down(MouseButton::Left), 7, 0));
+    let step = screen.selection_mouse(attach_mouse(MouseEventKind::Drag(MouseButton::Left), 5, 1));
+    let lit = step.paint;
     assert!(lit.contains("\x1b[1;8H\x1b[0;7mcopy target"), "{lit:?}");
     assert!(lit.contains("\x1b[2;1H\x1b[0;7msecond"), "{lit:?}");
     assert!(lit.starts_with("\x1b7") && lit.ends_with("\x1b8"), "cursor is kept");
+    assert_eq!(step.scroll, None, "a drag inside the screen does not scroll");
     // Restoring repaints the rows exactly as the pane drew them, styles included.
-    let restored = attach_selection_paint(&screen, selection, false);
-    assert!(restored.contains("\x1b[1;1H\x1b[1mattach\x1b[0m copy target"), "{restored:?}");
+    let step = screen.selection_mouse(attach_mouse(MouseEventKind::Up(MouseButton::Left), 5, 1));
+    assert!(step.paint.contains("\x1b[1;1H\x1b[1mattach\x1b[0m copy target"), "{:?}", step.paint);
+    assert!(!step.paint.contains("\x1b[0;7m"), "the highlight is gone");
+    assert_eq!(step.done, Some(AttachSelectionDone::Copy("copy target\nsecond".to_string())));
     // A partial frame replaces only its rows; a full one starts over.
-    screen.apply(false, &[(1, "changed".to_string())]);
-    assert_eq!(screen.plain_lines(), vec!["attach copy target", "changed"]);
-    screen.apply(true, &[(0, "fresh".to_string())]);
+    screen.apply(false, &[(1, "changed".to_string())], 0);
+    assert_eq!(
+        screen.plain_lines(),
+        vec!["attach copy target", "changed", "third row"]
+    );
+    screen.apply(true, &[(0, "fresh".to_string())], 0);
     assert_eq!(screen.plain_lines(), vec!["fresh"]);
+}
+
+#[test]
+fn attach_client_drag_at_the_top_row_scrolls_and_copies_rows_that_scrolled_off() {
+    use crate::attach::{AttachScreen, AttachSelectionDone, NavOp};
+    // Scrolled back: the client shows lines 21..25 of the history.
+    let mut screen = AttachScreen::default();
+    screen.apply(true, &attach_numbered_frame(20, 5), 20);
+    // Select from the end of line023 (row 2) up to the top row: the drag
+    // asks the dashboard to scroll back a row, three times.
+    screen.selection_mouse(attach_mouse(MouseEventKind::Down(MouseButton::Left), 6, 2));
+    for scrolled in 1..=3 {
+        let step = screen.selection_mouse(attach_mouse(MouseEventKind::Drag(MouseButton::Left), 0, 0));
+        assert_eq!(step.scroll, Some(NavOp::SelectUp));
+        assert_eq!(screen.drag_scroll(), Some(NavOp::SelectUp), "holding still keeps scrolling");
+        // The dashboard answers with the view a row further back.
+        let top = 20 - scrolled;
+        screen.apply(true, &attach_numbered_frame(top, 5), top);
+    }
+    // The highlight follows the text: lines 18..22 are lit on rows 0..4,
+    // and line023 (now below the screen) stays selected.
+    let lit = screen.paint(true);
+    assert!(lit.contains("\x1b[1;1H\x1b[0;7mline018"), "{lit:?}");
+    assert!(lit.contains("\x1b[5;1H\x1b[0;7mline022"), "{lit:?}");
+    let step = screen.selection_mouse(attach_mouse(MouseEventKind::Up(MouseButton::Left), 0, 0));
+    let expected = (18..=23).map(|n| format!("line{n:03}")).collect::<Vec<_>>().join("\n");
+    assert_eq!(step.done, Some(AttachSelectionDone::Copy(expected)));
+    assert_eq!(screen.drag_scroll(), None, "letting go stops the scroll");
+}
+
+#[test]
+fn attach_client_selection_stays_on_its_text_when_the_view_scrolls() {
+    use crate::attach::{AttachScreen, AttachSelectionDone};
+    let mut screen = AttachScreen::default();
+    screen.apply(true, &attach_numbered_frame(20, 5), 20);
+    screen.selection_mouse(attach_mouse(MouseEventKind::Down(MouseButton::Left), 0, 1));
+    screen.selection_mouse(attach_mouse(MouseEventKind::Drag(MouseButton::Left), 6, 2));
+    // The wheel scrolls back two rows mid-drag: line022..023 move to rows 3..4.
+    screen.apply(true, &attach_numbered_frame(18, 5), 18);
+    let lit = screen.paint(true);
+    assert!(lit.contains("\x1b[4;1H\x1b[0;7mline022"), "{lit:?}");
+    assert!(lit.contains("\x1b[5;1H\x1b[0;7mline023"), "{lit:?}");
+    assert!(!lit.contains("\x1b[2;1H\x1b[0;7m"), "the old rows are dark: {lit:?}");
+    let step = screen.selection_mouse(attach_mouse(MouseEventKind::Up(MouseButton::Left), 6, 4));
+    assert_eq!(
+        step.done,
+        Some(AttachSelectionDone::Copy("line022\nline023".to_string()))
+    );
+}
+
+#[cfg(not(windows))]
+#[test]
+fn attach_frames_carry_the_history_line_of_their_top_row() {
+    use crate::attach::{AttachClient, ServerMsg};
+    let mut pane = numbered_lines_pane(5);
+    let (tx, rx) = std::sync::mpsc::sync_channel(8);
+    let mut client = AttachClient::new(1, tx);
+    client.rows = 5;
+    client.cols = 20;
+    let top_of = |line: String| -> usize {
+        match serde_json::from_str::<ServerMsg>(&line).expect("frame") {
+            ServerMsg::Frame { top, .. } => top,
+            other => panic!("not a frame: {other:?}"),
+        }
+    };
+    client.push_frame(&mut pane);
+    let live = top_of(rx.try_recv().expect("first frame"));
+    // 40 lines and a trailing newline: lines 1..36 are history above the screen.
+    assert_eq!(live, 36);
+    pane.scrollback_by(10);
+    client.push_frame(&mut pane);
+    assert_eq!(top_of(rx.try_recv().expect("scrolled frame")), 26);
+    assert_eq!(pane.history_lines(26, 27), vec!["line027", "line028"]);
 }
 
 /// A Claude link with its channel already up, rooted in `dir`.

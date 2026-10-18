@@ -74,6 +74,7 @@ view_state! {
     picker_index: usize = 0,
     picker_dismissed_input: Option<String> = None,
     worker_selection: Option<WorkerSelection> = None,
+    worker_drag_edge: Option<(MouseEvent, Rect, Instant)> = None,
     task_selection: Option<WorkerSelection> = None,
     orch_selection: Option<WorkerSelection> = None,
     orch_visible_rows: Vec<String> = Vec::new(),

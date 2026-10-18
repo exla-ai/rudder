@@ -82,6 +82,9 @@ pub(crate) enum NavOp {
     /// Scroll the view by `ATTACH_WHEEL_ROWS` (wheel, ⌥k/⌥j).
     Up,
     Down,
+    /// Scroll one row: a selection drag holding at the top or bottom row.
+    SelectUp,
+    SelectDown,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -113,6 +116,11 @@ pub(crate) enum ServerMsg {
         full: bool,
         lines: Vec<(u16, String)>,
         cursor: Option<(u16, u16)>,
+        /// The history line number of row 0 (`TerminalPane::view_top_line`),
+        /// so the client can keep a selection on its text while the view
+        /// scrolls and copy rows that scrolled off.
+        #[serde(default)]
+        top: usize,
     },
     Notice {
         text: String,
@@ -298,6 +306,7 @@ pub(crate) struct AttachClient {
     /// The rows this client currently shows, so only changed ones are sent.
     last_lines: Vec<String>,
     last_cursor: Option<(u16, u16)>,
+    last_top: usize,
     last_generation: Option<u64>,
     needs_full: bool,
     gone: bool,
@@ -316,6 +325,7 @@ impl AttachClient {
             cols: 0,
             last_lines: Vec::new(),
             last_cursor: None,
+            last_top: 0,
             last_generation: None,
             needs_full: true,
             gone: false,
@@ -367,6 +377,7 @@ impl AttachClient {
             return;
         }
         let (start, rows) = terminal.styled_line_window_snapshot(self.rows as usize);
+        let top = terminal.view_top_line() + start;
         let mut lines: Vec<String> = rows.iter().map(|row| styled_row_to_ansi(row)).collect();
         lines.resize(self.rows as usize, String::new());
         let cursor = terminal.cursor();
@@ -382,7 +393,7 @@ impl AttachClient {
             .filter(|(index, line)| full || self.last_lines.get(*index) != Some(line))
             .map(|(index, line)| (index as u16, line.clone()))
             .collect();
-        if !full && changed.is_empty() && cursor == self.last_cursor {
+        if !full && changed.is_empty() && cursor == self.last_cursor && top == self.last_top {
             self.last_generation = Some(generation);
             return;
         }
@@ -394,6 +405,7 @@ impl AttachClient {
             full,
             lines: changed,
             cursor,
+            top,
         });
         if self.needs_full {
             // The send found the queue full; keep the old picture so the next
@@ -403,6 +415,7 @@ impl AttachClient {
         }
         self.last_lines = lines;
         self.last_cursor = cursor;
+        self.last_top = top;
         self.last_generation = Some(generation);
     }
 }
@@ -608,6 +621,7 @@ pub(crate) fn run_attach_client(args: &[String]) -> Result<()> {
                         full,
                         lines,
                         cursor,
+                        top,
                         ..
                     } => {
                         if let Ok(size) = crossterm::terminal::size() {
@@ -623,8 +637,14 @@ pub(crate) fn run_attach_client(args: &[String]) -> Result<()> {
                             // blank screen on every full frame.
                             buf.push_str("\x1b[0m");
                         }
+                        // The highlight is drawn over the rows, so a frame that
+                        // redraws them draws it again (where the scroll put it).
+                        let mut highlight = None;
                         if let Ok(mut screen) = screen.lock() {
-                            screen.apply(full, &lines);
+                            screen.apply(full, &lines, top);
+                            if screen.selecting() {
+                                highlight = Some(screen.paint(true));
+                            }
                         }
                         for (row, text) in lines {
                             if row >= term_rows {
@@ -636,6 +656,9 @@ pub(crate) fn run_attach_client(args: &[String]) -> Result<()> {
                         if full && frame_rows < term_rows {
                             use std::fmt::Write as _;
                             let _ = write!(buf, "\x1b[{};1H\x1b[0m\x1b[J", frame_rows + 1);
+                        }
+                        if let Some(highlight) = highlight {
+                            buf.push_str(&highlight);
                         }
                         match cursor {
                             Some((row, col)) if row < term_rows => {
@@ -894,9 +917,14 @@ fn attach_input_loop(
     screen: &std::sync::Mutex<AttachScreen>,
 ) -> Result<()> {
     let mut leader = false;
-    let mut selection: Option<WorkerSelection> = None;
     while !done.load(Ordering::Acquire) {
         if !crossterm::event::poll(Duration::from_millis(100))? {
+            // A selection drag holding at the top or bottom row keeps
+            // scrolling, as in a terminal, with no mouse event to drive it.
+            let scroll = screen.lock().ok().and_then(|screen| screen.drag_scroll());
+            if let Some(op) = scroll {
+                send_client(writer, &ClientMsg::Nav { op })?;
+            }
             continue;
         }
         let event = crossterm::event::read()?;
@@ -912,10 +940,15 @@ fn attach_input_loop(
                 // terminal, so this client selects and copies itself, like the
                 // dashboard's worker pane does.
                 _ => {
-                    if let Ok(screen) = screen.lock() {
-                        attach_selection_mouse(mouse, &mut selection, &screen);
-                    }
-                    None
+                    let step = screen
+                        .lock()
+                        .ok()
+                        .map(|mut screen| screen.selection_mouse(mouse));
+                    step.and_then(|step| {
+                        let scroll = step.scroll;
+                        attach_selection_effects(step);
+                        scroll.map(|op| ClientMsg::Nav { op })
+                    })
                 }
             },
             Event::Key(key) if key.kind != KeyEventKind::Release => {
@@ -947,14 +980,46 @@ fn attach_input_loop(
 }
 
 /// What the single-pane client last drew, row by row: the styled text (to
-/// repaint a row after a selection highlight) and its plain text (to copy).
+/// repaint a row after a selection highlight) and its plain text (to copy),
+/// plus the selection this client is making over it.
+///
+/// A selection is held in history line numbers (`top` + screen row, see
+/// `TerminalPane::view_top_line`), never screen rows: the view scrolls under
+/// a drag that reaches the top or bottom row, and the selection has to stay
+/// on its text and keep the rows that scrolled off. Every row shown while a
+/// selection is open is remembered in `seen`, which is what gets copied.
 #[derive(Debug, Default)]
 pub(crate) struct AttachScreen {
     rows: Vec<(String, String)>,
+    top: usize,
+    selection: Option<WorkerSelection>,
+    seen: std::collections::BTreeMap<usize, String>,
+    /// A drag holding at the top (`SelectUp`) or bottom row, and the column
+    /// it holds at: each scroll re-anchors the selection's end there.
+    drag_edge: Option<(NavOp, usize)>,
+}
+
+/// How a selection gesture ended.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum AttachSelectionDone {
+    /// A drag: the text to copy.
+    Copy(String),
+    /// A click: the plain line under it and the column, for a link.
+    Click { line: String, col: usize },
+}
+
+/// What the client does after a selection mouse event.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct AttachSelectionStep {
+    /// Bytes for the terminal: the rows repainted with the new highlight.
+    pub(crate) paint: String,
+    /// Scroll the pane a row (the drag reached the top or bottom row).
+    pub(crate) scroll: Option<NavOp>,
+    pub(crate) done: Option<AttachSelectionDone>,
 }
 
 impl AttachScreen {
-    pub(crate) fn apply(&mut self, full: bool, lines: &[(u16, String)]) {
+    pub(crate) fn apply(&mut self, full: bool, lines: &[(u16, String)], top: usize) {
         if full {
             self.rows.clear();
         }
@@ -965,126 +1030,201 @@ impl AttachScreen {
             }
             self.rows[row] = (text.clone(), strip_ansi_for_plan(text));
         }
+        self.top = top;
+        if self.selection.is_none() {
+            return;
+        }
+        self.remember_rows();
+        // A drag holding at an edge stays at the edge row as the view moves.
+        if let Some((op, col)) = self.drag_edge {
+            let row = if op == NavOp::SelectUp {
+                0
+            } else {
+                self.rows.len().saturating_sub(1)
+            };
+            if let Some(selection) = self.selection.as_mut() {
+                selection.end = SelectionPoint {
+                    row: top + row,
+                    col,
+                };
+            }
+        }
     }
 
+    #[cfg(test)]
     pub(crate) fn plain_lines(&self) -> Vec<String> {
         self.rows.iter().map(|(_, plain)| plain.clone()).collect()
     }
 
-    fn styled(&self, row: usize) -> &str {
-        self.rows.get(row).map(|(styled, _)| styled.as_str()).unwrap_or("")
+    pub(crate) fn selecting(&self) -> bool {
+        self.selection.is_some()
     }
-}
 
-fn attach_selection_mouse(
-    mouse: MouseEvent,
-    selection: &mut Option<WorkerSelection>,
-    screen: &AttachScreen,
-) {
-    let point = SelectionPoint {
-        row: mouse.row as usize,
-        col: mouse.column as usize,
-    };
-    let mut out = io::stdout();
-    match mouse.kind {
-        MouseEventKind::Down(MouseButton::Left) => {
-            if let Some(old) = selection.take() {
-                let _ = out.write_all(attach_selection_paint(screen, old, false).as_bytes());
+    fn remember_rows(&mut self) {
+        for (row, (_, plain)) in self.rows.iter().enumerate() {
+            self.seen.insert(self.top + row, plain.clone());
+        }
+    }
+
+    fn point(&self, mouse: MouseEvent) -> SelectionPoint {
+        let row = (mouse.row as usize).min(self.rows.len().saturating_sub(1));
+        SelectionPoint {
+            row: self.top + row,
+            col: mouse.column as usize,
+        }
+    }
+
+    /// The scroll a selection drag holding still at an edge wants next.
+    pub(crate) fn drag_scroll(&self) -> Option<NavOp> {
+        self.selection.and(self.drag_edge).map(|(op, _)| op)
+    }
+
+    /// Advance the selection for one mouse event. Pure: the caller writes the
+    /// paint, sends the scroll and copies or opens what is done.
+    pub(crate) fn selection_mouse(&mut self, mouse: MouseEvent) -> AttachSelectionStep {
+        let mut step = AttachSelectionStep::default();
+        match mouse.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                let point = self.point(mouse);
+                self.seen.clear();
+                self.drag_edge = None;
+                self.selection = Some(WorkerSelection {
+                    start: point,
+                    end: point,
+                });
+                self.remember_rows();
+                step.paint = self.paint(false);
             }
-            *selection = Some(WorkerSelection {
-                start: point,
-                end: point,
-            });
-        }
-        MouseEventKind::Drag(MouseButton::Left) => {
-            let Some(current) = selection.as_mut() else {
-                return;
-            };
-            let before = *current;
-            current.end = point;
-            // Clear the old highlight, then draw the new one.
-            let mut buf = attach_selection_paint(screen, before, false);
-            buf.push_str(&attach_selection_paint(screen, *current, true));
-            let _ = out.write_all(buf.as_bytes());
-        }
-        MouseEventKind::Up(MouseButton::Left) => {
-            let Some(mut current) = selection.take() else {
-                return;
-            };
-            current.end = point;
-            let _ = out.write_all(attach_selection_paint(screen, current, false).as_bytes());
-            let lines = screen.plain_lines();
-            let notice = if selection_is_empty(normalize_selection(current)) {
-                // A click: open the link under it, if there is one.
-                lines
-                    .get(point.row)
-                    .and_then(|line| rudder_native::pty_terminal::hyperlink_at(line, point.col, std::iter::empty()))
-                    .map(|url| match open_url_externally(&url) {
-                        Ok(()) => format!("opened {url}"),
-                        Err(error) => format!("open failed: {error}"),
-                    })
-            } else {
-                let text = selected_text_from_lines(&lines, current);
-                if text.trim().is_empty() {
-                    None
-                } else {
-                    // This client runs in the terminal the user is looking at, so
-                    // OSC 52 from here reaches the right clipboard (over SSH too).
-                    Some(match copy_text_to_clipboard(&text) {
-                        Ok(()) => "copied selection".to_string(),
-                        Err(error) => format!("copy failed: {error}"),
-                    })
+            MouseEventKind::Drag(MouseButton::Left) => {
+                if self.selection.is_none() {
+                    return step;
                 }
+                let point = self.point(mouse);
+                let last = self.rows.len().saturating_sub(1);
+                self.drag_edge = if mouse.row == 0 {
+                    Some((NavOp::SelectUp, point.col))
+                } else if mouse.row as usize >= last && last > 0 {
+                    Some((NavOp::SelectDown, point.col))
+                } else {
+                    None
+                };
+                step.scroll = self.drag_edge.map(|(op, _)| op);
+                if let Some(selection) = self.selection.as_mut() {
+                    selection.end = point;
+                }
+                step.paint = self.paint(true);
+            }
+            MouseEventKind::Up(MouseButton::Left) => {
+                let Some(mut selection) = self.selection.take() else {
+                    return step;
+                };
+                self.drag_edge = None;
+                selection.end = self.point(mouse);
+                step.paint = self.paint(false);
+                let normalized = normalize_selection(selection);
+                step.done = Some(if selection_is_empty(normalized) {
+                    AttachSelectionDone::Click {
+                        line: self.seen.get(&selection.start.row).cloned().unwrap_or_default(),
+                        col: selection.start.col,
+                    }
+                } else {
+                    AttachSelectionDone::Copy(self.selected_text(selection))
+                });
+                self.seen.clear();
+            }
+            _ => {}
+        }
+        step
+    }
+
+    /// The text of `selection`, from every row seen while it was open.
+    pub(crate) fn selected_text(&self, selection: WorkerSelection) -> String {
+        let normalized = normalize_selection(selection);
+        let lines: Vec<String> = (normalized.start.row..=normalized.end.row)
+            .map(|row| self.seen.get(&row).cloned().unwrap_or_default())
+            .collect();
+        selected_text_from_lines(
+            &lines,
+            WorkerSelection {
+                start: SelectionPoint {
+                    row: 0,
+                    col: normalized.start.col,
+                },
+                end: SelectionPoint {
+                    row: normalized.end.row - normalized.start.row,
+                    col: normalized.end.col,
+                },
+            },
+        )
+    }
+
+    /// Bytes that redraw every row as the pane drew it and, when `lit`, the
+    /// part of each that is selected highlighted over it, leaving the cursor
+    /// where the pane put it. Every row, not just the selected ones: a scroll
+    /// moves the selection to other rows, and the old ones must go dark.
+    pub(crate) fn paint(&self, lit: bool) -> String {
+        use std::fmt::Write as _;
+        let selection = self
+            .selection
+            .filter(|_| lit)
+            .map(normalize_selection)
+            .filter(|selection| !selection_is_empty(*selection));
+        let mut buf = String::from("\x1b7");
+        for (row, (styled, plain)) in self.rows.iter().enumerate() {
+            let _ = write!(buf, "\x1b[{};1H{}\x1b[0m\x1b[K", row + 1, styled);
+            let Some((start, end)) = selection_for_row(selection, self.top + row) else {
+                continue;
             };
-            if let Some(notice) = notice {
-                let rows = crossterm::terminal::size().map(|(_, rows)| rows).unwrap_or(24);
+            let len = plain.chars().count();
+            let start = start.min(len);
+            let end = end.saturating_add(1).min(len);
+            if end > start {
                 let _ = write!(
-                    out,
-                    "\x1b7\x1b[{rows};1H\x1b[0;7m {notice} \x1b[0m\x1b[K\x1b8"
+                    buf,
+                    "\x1b[{};{}H\x1b[0;7m{}\x1b[0m",
+                    row + 1,
+                    start + 1,
+                    slice_chars(plain, start, end)
                 );
             }
         }
-        _ => return,
+        buf.push_str("\x1b8");
+        buf
     }
-    let _ = out.flush();
 }
 
-/// Bytes that draw `selection` highlighted (or restore those rows as they were
-/// drawn), leaving the cursor where the pane put it.
-pub(crate) fn attach_selection_paint(
-    screen: &AttachScreen,
-    selection: WorkerSelection,
-    highlight: bool,
-) -> String {
-    use std::fmt::Write as _;
-    let selection = normalize_selection(selection);
-    let lines = screen.plain_lines();
-    let mut buf = String::from("\x1b7");
-    for row in selection.start.row..=selection.end.row {
-        if !highlight {
-            let _ = write!(buf, "\x1b[{};1H{}\x1b[0m\x1b[K", row + 1, screen.styled(row));
-            continue;
+/// Write a selection step's bytes, then copy or open what it finished.
+fn attach_selection_effects(step: AttachSelectionStep) {
+    let mut out = io::stdout();
+    let _ = out.write_all(step.paint.as_bytes());
+    let notice = match step.done {
+        // A click: open the link under it, if there is one.
+        Some(AttachSelectionDone::Click { line, col }) => {
+            rudder_native::pty_terminal::hyperlink_at(&line, col, std::iter::empty()).map(
+                |url| match open_url_externally(&url) {
+                    Ok(()) => format!("opened {url}"),
+                    Err(error) => format!("open failed: {error}"),
+                },
+            )
         }
-        let line = lines.get(row).map(String::as_str).unwrap_or("");
-        let len = line.chars().count();
-        let start = if row == selection.start.row { selection.start.col.min(len) } else { 0 };
-        let end = if row == selection.end.row {
-            selection.end.col.saturating_add(1).min(len)
-        } else {
-            len
-        };
-        if end > start {
-            let _ = write!(
-                buf,
-                "\x1b[{};{}H\x1b[0;7m{}\x1b[0m",
-                row + 1,
-                start + 1,
-                slice_chars(line, start, end)
-            );
+        Some(AttachSelectionDone::Copy(text)) if !text.trim().is_empty() => {
+            // This client runs in the terminal the user is looking at, so
+            // OSC 52 from here reaches the right clipboard (over SSH too).
+            Some(match copy_text_to_clipboard(&text) {
+                Ok(()) => "copied selection".to_string(),
+                Err(error) => format!("copy failed: {error}"),
+            })
         }
+        _ => None,
+    };
+    if let Some(notice) = notice {
+        let rows = crossterm::terminal::size().map(|(_, rows)| rows).unwrap_or(24);
+        let _ = write!(
+            out,
+            "\x1b7\x1b[{rows};1H\x1b[0;7m {notice} \x1b[0m\x1b[K\x1b8"
+        );
     }
-    buf.push_str("\x1b8");
-    buf
+    let _ = out.flush();
 }
 
 #[derive(Debug, PartialEq, Eq)]

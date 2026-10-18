@@ -215,6 +215,10 @@ const READY_EVAL_LULL: Duration = Duration::from_millis(900);
 // Dashboard colors now live in `theme.rs` (FOCUS_COLOR, INACTIVE_COLOR, ...),
 // re-exported above so call sites are unchanged.
 const DEFAULT_WHEEL_SCROLL_ROWS: u16 = 3;
+/// A selection drag held past the worker pane's edge scrolls this often...
+const WORKER_DRAG_SCROLL_REPEAT: Duration = Duration::from_millis(60);
+/// ...by at most this many rows per step, however far out the pointer is.
+const WORKER_DRAG_SCROLL_MAX: isize = 5;
 const TASK_HISTORY_LIMIT: usize = 100;
 
 /// Where the task box's up-arrow history lives. Per PROJECT, not per machine:
@@ -1944,6 +1948,9 @@ struct App {
     session_id_attempts: HashMap<String, u32>,
     session_id_last_try: HashMap<String, Instant>,
     worker_selection: Option<WorkerSelection>,
+    /// A selection drag that left the worker pane: the event, the pane's inner
+    /// area and when it last scrolled (see `continue_worker_drag_autoscroll`).
+    worker_drag_edge: Option<(MouseEvent, Rect, Instant)>,
     task_selection: Option<WorkerSelection>,
     /// Mouse text selection over the orchestrator pane. That pane composes Lines
     /// (transcript + DAG), not the planner PTY, so it cannot reuse the worker PTY
@@ -3229,6 +3236,7 @@ impl App {
             session_id_attempts: HashMap::new(),
             session_id_last_try: HashMap::new(),
             worker_selection: None,
+            worker_drag_edge: None,
             task_selection: None,
             orch_selection: None,
             orch_visible_rows: Vec::new(),
@@ -7111,26 +7119,31 @@ impl App {
 
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
+                let point = self.worker_selection_point(mouse, area);
                 self.worker_selection = Some(WorkerSelection {
-                    start: selection_point_from_mouse(mouse, area),
-                    end: selection_point_from_mouse(mouse, area),
+                    start: point,
+                    end: point,
                 });
                 true
             }
             MouseEventKind::Drag(MouseButton::Left) => {
-                self.autoscroll_worker_selection(mouse, area);
-                if let Some(selection) = self.worker_selection.as_mut() {
-                    selection.end = selection_point_from_mouse(mouse, area);
-                    true
-                } else {
-                    false
+                if self.worker_selection.is_none() {
+                    return false;
                 }
+                self.autoscroll_worker_selection(mouse, area);
+                let point = self.worker_selection_point(mouse, area);
+                if let Some(selection) = self.worker_selection.as_mut() {
+                    selection.end = point;
+                }
+                self.dirty = true;
+                true
             }
             MouseEventKind::Up(MouseButton::Left) => {
+                self.worker_drag_edge = None;
                 let Some(mut selection) = self.worker_selection else {
                     return false;
                 };
-                selection.end = selection_point_from_mouse(mouse, area);
+                selection.end = self.worker_selection_point(mouse, area);
                 self.worker_selection = Some(selection);
                 if selection_is_empty(normalize_selection(selection)) {
                     self.worker_selection = None;
@@ -7210,20 +7223,61 @@ impl App {
         }
     }
 
+    /// Where a mouse event lands in the selected pane's history: the row is a
+    /// line number from `TerminalPane::view_top_line`, not a screen row, so the
+    /// selection keeps to its text while the view scrolls and can run past what
+    /// is on screen. The pane draws the BOTTOM `area.height` rows of the pty
+    /// (`styled_line_window_snapshot`), which matters when an attached terminal
+    /// made the pty taller than this pane.
+    fn worker_selection_point(&mut self, mouse: MouseEvent, area: Rect) -> SelectionPoint {
+        let point = selection_point_from_mouse(mouse, area);
+        let Some(terminal) = self.selected_terminal_mut() else {
+            return point;
+        };
+        let window_start = (terminal.size().rows as usize).saturating_sub(area.height as usize);
+        SelectionPoint {
+            row: terminal.view_top_line() + window_start + point.row,
+            col: point.col,
+        }
+    }
+
+    /// A drag above or below the pane scrolls the view toward the pointer,
+    /// further the further out it is, so the selection can grow past what was
+    /// on screen. Holding still out there keeps scrolling: the drag is
+    /// remembered and replayed by `continue_worker_drag_autoscroll`.
     fn autoscroll_worker_selection(&mut self, mouse: MouseEvent, area: Rect) {
         let rows = if mouse.row < area.y {
-            1
+            (area.y - mouse.row) as isize
         } else if mouse.row >= area.bottom() {
-            -1
+            -((mouse.row - area.bottom()) as isize + 1)
         } else {
             0
         };
         if rows == 0 {
+            self.worker_drag_edge = None;
             return;
         }
+        self.worker_drag_edge = Some((mouse, area, Instant::now()));
         if let Some(terminal) = self.selected_terminal_mut() {
-            terminal.scrollback_by(rows);
+            terminal.scrollback_by(rows.clamp(-WORKER_DRAG_SCROLL_MAX, WORKER_DRAG_SCROLL_MAX));
         }
+    }
+
+    /// Terminals keep scrolling while a selection drag holds still past the
+    /// pane's edge, and no mouse event arrives then, so the heartbeat replays
+    /// the last one.
+    fn continue_worker_drag_autoscroll(&mut self) {
+        let Some((mouse, area, at)) = self.worker_drag_edge else {
+            return;
+        };
+        if self.worker_selection.is_none() {
+            self.worker_drag_edge = None;
+            return;
+        }
+        if at.elapsed() < WORKER_DRAG_SCROLL_REPEAT {
+            return;
+        }
+        self.handle_worker_selection_mouse(mouse, area);
     }
 
     fn handle_task_selection_mouse(&mut self, mouse: MouseEvent, area: Rect) -> bool {
@@ -7285,20 +7339,31 @@ impl App {
         }
     }
 
-    fn selected_worker_selection_text(&self, selection: WorkerSelection) -> String {
-        let Some(run) = self.agents.get(self.selected_agent) else {
+    /// The selection's text, read from the pane's history rather than its
+    /// screen, so rows the drag scrolled out of view are copied too.
+    fn selected_worker_selection_text(&mut self, selection: WorkerSelection) -> String {
+        let Some(terminal) = self.selected_terminal_mut() else {
             return String::new();
         };
-        let Some(terminal) = run.terminal.as_ref() else {
-            return String::new();
+        let normalized = normalize_selection(selection);
+        let lines = terminal.history_lines(normalized.start.row, normalized.end.row);
+        let rebased = WorkerSelection {
+            start: SelectionPoint {
+                row: 0,
+                col: normalized.start.col,
+            },
+            end: SelectionPoint {
+                row: normalized.end.row - normalized.start.row,
+                col: normalized.end.col,
+            },
         };
-        selected_text_from_lines(&terminal.visible_lines_snapshot(), selection)
+        selected_text_from_lines(&lines, rebased)
     }
 
-    fn selected_worker_link_at(&self, point: SelectionPoint) -> Option<String> {
-        let terminal = self.agents.get(self.selected_agent)?.terminal.as_ref()?;
-        let lines = terminal.visible_lines_snapshot();
-        terminal.hyperlink_at(lines.get(point.row)?, point.col)
+    fn selected_worker_link_at(&mut self, point: SelectionPoint) -> Option<String> {
+        let terminal = self.selected_terminal_mut()?;
+        let line = terminal.history_lines(point.row, point.row).pop()?;
+        terminal.hyperlink_at(&line, point.col)
     }
 
     fn write_mouse_to_selected_worker(&mut self, mouse: MouseEvent, area: Rect) -> bool {
@@ -20031,6 +20096,7 @@ What to do\n\
             self.finish_cloud_deletion(outcome);
         }
         self.emit_dashboard_opened_once();
+        self.continue_worker_drag_autoscroll();
         self.reopen_live_rows_after_home_boot();
         self.flush_pending_enters();
         self.drive_claude_message_navs();
@@ -22156,11 +22222,12 @@ impl App {
                 let notice = match op {
                     NavOp::PreviousQuestion => self.nav_claude_messages(&run_id, false),
                     NavOp::Latest => self.nav_claude_messages(&run_id, true),
-                    NavOp::Up | NavOp::Down => {
-                        let rows = if op == NavOp::Up {
-                            ATTACH_WHEEL_ROWS
-                        } else {
-                            -ATTACH_WHEEL_ROWS
+                    NavOp::Up | NavOp::Down | NavOp::SelectUp | NavOp::SelectDown => {
+                        let rows = match op {
+                            NavOp::Up => ATTACH_WHEEL_ROWS,
+                            NavOp::Down => -ATTACH_WHEEL_ROWS,
+                            NavOp::SelectUp => 1,
+                            _ => -1,
                         };
                         if let Some(terminal) = self.agents[index].terminal.as_mut() {
                             terminal.scrollback_by(rows);

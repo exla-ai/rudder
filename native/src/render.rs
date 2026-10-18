@@ -4515,6 +4515,8 @@ fn worker_lines_at(app: &mut App, index: usize, height: usize, width: usize) -> 
         .filter(|selection| !selection_is_empty(*selection));
     let (start_row, styled_rows) = terminal.styled_line_window_snapshot(height);
     let cursor = worker_render_cursor(run.backend, terminal, focused, height, width, start_row);
+    // Selection rows are history line numbers (see `worker_selection_point`).
+    let history_top = terminal.view_top_line();
     let lines = styled_rows
         .into_iter()
         .enumerate()
@@ -4522,7 +4524,7 @@ fn worker_lines_at(app: &mut App, index: usize, height: usize, width: usize) -> 
             let row = start_row + offset;
             styled_terminal_line(
                 cells,
-                selection_for_row(selection, row),
+                selection_for_row(selection, history_top + row),
                 cursor
                     .filter(|cursor| cursor.row as usize == row)
                     .map(|cursor| cursor.col as usize),
@@ -4833,6 +4835,8 @@ pub(crate) fn worker_lines(app: &mut App, height: usize, width: usize) -> Vec<Li
     let (start_row, styled_rows) = terminal.styled_line_window_snapshot(height);
     let cursor = worker_render_cursor(backend, terminal, focused, height, width, start_row);
     let row_count = styled_rows.len();
+    // Selection rows are history line numbers (see `worker_selection_point`).
+    let history_top = terminal.view_top_line();
     let lines = styled_rows
         .into_iter()
         .enumerate()
@@ -4840,7 +4844,7 @@ pub(crate) fn worker_lines(app: &mut App, height: usize, width: usize) -> Vec<Li
             let row = start_row + offset;
             styled_terminal_line(
                 cells,
-                selection_for_row(selection, row),
+                selection_for_row(selection, history_top + row),
                 cursor
                     .filter(|cursor| cursor.row as usize == row)
                     .map(|cursor| cursor.col as usize),

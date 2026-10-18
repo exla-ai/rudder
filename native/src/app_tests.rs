@@ -27113,3 +27113,159 @@ fn sync_is_suggested_with_its_move_and_all_forms() {
     assert!(labels.iter().any(|l| l == "/sync move"));
     assert!(labels.iter().any(|l| l == "/sync all"));
 }
+
+fn gods_view_app(count: usize) -> App {
+    let mut app = App::new();
+    for index in 0..count {
+        let mut run = test_agent_run(&format!("run-{index}"), &format!("tile task {index}"));
+        run.task_summary = format!("tile task {index}");
+        run.status = AgentStatus::Running;
+        app.agents.push(run);
+    }
+    app
+}
+
+#[test]
+fn alt_g_opens_and_closes_gods_view() {
+    let mut app = gods_view_app(2);
+    app.focus = FocusPane::Task;
+    app.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::ALT));
+    assert!(app.gods_view, "Alt+G opens god's view");
+    app.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::ALT));
+    assert!(!app.gods_view, "Alt+G again closes it");
+    assert!(app.task_input.is_empty(), "the chord never types into the task bar");
+}
+
+#[test]
+fn option_g_copyright_char_toggles_gods_view() {
+    let mut app = gods_view_app(2);
+    app.focus = FocusPane::Worker;
+    app.handle_key(KeyEvent::new(KeyCode::Char('\u{00a9}'), KeyModifiers::NONE));
+    assert!(app.gods_view);
+    app.handle_key(KeyEvent::new(KeyCode::Char('\u{00a9}'), KeyModifiers::NONE));
+    assert!(!app.gods_view);
+}
+
+#[test]
+fn esc_closes_gods_view_and_leader_and_nav_mode_open_it() {
+    let mut app = gods_view_app(2);
+    app.focus = FocusPane::Agents;
+    app.handle_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL));
+    app.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE));
+    assert!(app.gods_view, "^W g opens god's view");
+    app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert!(!app.gods_view, "Esc closes it");
+
+    app.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL));
+    assert!(app.nav_mode);
+    app.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE));
+    assert!(app.gods_view, "nav mode g opens god's view");
+}
+
+#[test]
+fn gods_view_does_not_open_without_live_agents() {
+    let mut app = App::new();
+    app.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::ALT));
+    assert!(!app.gods_view);
+}
+
+#[test]
+fn gods_view_renders_a_tile_per_agent_with_its_title() {
+    for count in 2..=4 {
+        let mut app = gods_view_app(count);
+        app.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::ALT));
+        let screen = render_screen(&mut app, 160, 48);
+        assert!(screen.contains("god's view"), "header:\n{screen}");
+        for index in 0..count {
+            assert!(
+                screen.contains(&format!("tile task {index}")),
+                "tile {index} of {count} should show its title:\n{screen}"
+            );
+        }
+        assert!(screen.contains("claude/sonnet"), "backend/model in the title:\n{screen}");
+        assert!(screen.contains("working"), "status in the title:\n{screen}");
+        assert_eq!(app.gods_view_tile_map.len(), count, "one tile per agent");
+        assert!(
+            !screen.contains("Type a task to plan and run"),
+            "god's view replaces the normal panes:\n{screen}"
+        );
+    }
+}
+
+#[test]
+fn gods_view_grid_is_roughly_square_and_pages_when_full() {
+    assert_eq!(gods_view_grid(1, 160, 47), (1, 1));
+    assert_eq!(gods_view_grid(4, 160, 47), (2, 2));
+    // Too many to fit at the minimum tile size: fill the screen and page.
+    let (cols, rows) = gods_view_grid(200, 100, 30);
+    assert!(cols * rows < 200);
+    assert_eq!(cols, (100 / GODS_VIEW_MIN_TILE_WIDTH) as usize);
+}
+
+#[test]
+fn enter_on_a_gods_view_tile_focuses_that_agent() {
+    let mut app = gods_view_app(4);
+    app.focus = FocusPane::Task;
+    app.selected_agent = 0;
+    app.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::ALT));
+    let _ = render_screen(&mut app, 160, 48);
+    assert_eq!(app.gods_view_cols, 2);
+    app.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+    app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+    assert_eq!(app.gods_view_cursor, 3);
+    app.handle_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE));
+    assert_eq!(app.gods_view_cursor, 2);
+    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert!(!app.gods_view, "Enter closes god's view");
+    assert_eq!(app.selected_agent, 2);
+    assert_eq!(app.focus, FocusPane::Worker);
+}
+
+#[test]
+fn clicking_a_gods_view_tile_focuses_that_agent() {
+    let mut app = gods_view_app(3);
+    app.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::ALT));
+    let _ = render_screen(&mut app, 160, 48);
+    let (rect, index) = app.gods_view_tile_map[1];
+    app.handle_mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: rect.x + 2,
+        row: rect.y + 2,
+        modifiers: KeyModifiers::NONE,
+    });
+    assert!(!app.gods_view);
+    assert_eq!(app.selected_agent, index);
+    assert_eq!(app.focus, FocusPane::Worker);
+}
+
+#[cfg(not(windows))]
+#[test]
+fn gods_view_tile_shows_the_live_pty_without_resizing_it() {
+    let command = TerminalCommand::with_args(
+        "/bin/sh",
+        ["-lc", "printf 'hello from the tile\\r\\n'; sleep 2"],
+    );
+    let mut pane = TerminalPane::spawn_shell_or_command(
+        Some(command),
+        TerminalPaneOptions {
+            size: TerminalSize { rows: 40, cols: 120 },
+            scrollback_lines: 100,
+            ..Default::default()
+        },
+    )
+    .expect("spawn test pty");
+    for _ in 0..40 {
+        std::thread::sleep(Duration::from_millis(25));
+        pane.drain_output();
+        if pane.visible_lines_snapshot().join("\n").contains("hello from the tile") {
+            break;
+        }
+    }
+    let mut app = gods_view_app(2);
+    app.agents[0].terminal = Some(pane);
+    app.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::ALT));
+    let screen = render_screen(&mut app, 120, 30);
+    assert!(screen.contains("hello from the tile"), "tile shows the pane:\n{screen}");
+    let size = app.agents[0].terminal.as_ref().unwrap().size();
+    assert_eq!((size.rows, size.cols), (40, 120), "the PTY keeps its own size");
+}

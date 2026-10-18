@@ -454,6 +454,18 @@ the row (`hyperlink_at`), via `open`/`xdg-open`; only http, https, file and mail
 are ever handed to the OS. Child PTYs get `FORCE_HYPERLINK=1` so Claude Code emits
 links whatever the outer terminal is.
 
+**God's view (⌥g).** `⌥g` (Option+g's `©` too, and `g` under `^W` / nav mode; bare
+`g` in the agents list is still nest view) replaces the whole screen with every
+live agent's terminal tiled as a grid (`render_gods_view`, `gods_view_grid`: near-
+square tiles, at least 28x7, paged when they do not fit). Each tile is the bottom of
+that pane's styled cells (`styled_tail_window_snapshot`, ending at the last
+non-blank or cursor row) cropped to the tile, NEVER a resize of the PTY: resizing
+repaints the agent and drops scrollback. Titles carry id, task summary,
+backend/model and working / needs you / done / paused in the agents-list colors.
+Arrows or h/j/k/l move the highlight, Enter or a click focuses that agent in the
+worker pane, and Esc or ⌥g closes it. While open it owns the keyboard and mouse
+(Ctrl+C still quits). All its state is in `view_state!`.
+
 ### Keybindings (the input model in `handle_key`)
 Order of handling matters; the early returns gate everything else.
 - **Ctrl+C / q**: quit, guarded by `confirm_or_quit` when agents are still

@@ -815,6 +815,36 @@ impl TerminalPane {
         (start, rows[start..].iter().take(height).cloned().collect())
     }
 
+    /// The last `height` rows that have anything on them, ending at the
+    /// lowest non-blank row (or the cursor row, whichever is lower), for a
+    /// thumbnail of the pane. A screen taller than its content keeps its
+    /// output and composer at the top, so the plain bottom window would be
+    /// blank. Reuses the render cache; cells are `Copy`, nothing per cell
+    /// allocates.
+    pub fn styled_tail_window_snapshot(&mut self, height: usize) -> Vec<Vec<StyledTerminalCell>> {
+        if self.styled_lines_cache.is_none() {
+            self.styled_lines_cache = Some(self.compute_styled_lines_snapshot());
+        }
+        let Some(rows) = self.styled_lines_cache.as_ref() else {
+            return Vec::new();
+        };
+        let content_end = rows
+            .iter()
+            .rposition(|row| row.iter().any(|cell| cell.contents.as_str().trim() != ""))
+            .map(|last| last + 1)
+            .unwrap_or(0);
+        // The cursor row counts as content only on the live screen (no
+        // scrollback offset), where screen rows and cache rows line up.
+        let cursor_end = if rows.len() == self.size.rows as usize {
+            (self.parser.screen().cursor_position().0 as usize + 1).min(rows.len())
+        } else {
+            0
+        };
+        let end = content_end.max(cursor_end);
+        let start = end.saturating_sub(height);
+        rows[start..end].to_vec()
+    }
+
     fn compute_styled_lines_snapshot(&self) -> Vec<Vec<StyledTerminalCell>> {
         // Plan-mode front-end: always the live screen, no scrollback (see the field doc).
         if self.live_screen_only {

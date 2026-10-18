@@ -924,7 +924,7 @@ async function quickstart(options: CloudCommandOptions): Promise<void> {
     "Rudder Cloud — copy/paste quickstart",
     "",
     "1. Install Rudder:",
-    "   npm install -g @exla-ai/rudder@latest",
+    "   npm install -g @exla/rudder@latest",
     "",
     "2. Log in to the cloud control plane:",
     "   rudder login",

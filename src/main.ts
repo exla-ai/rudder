@@ -124,7 +124,7 @@ export async function main(): Promise<void> {
       console.log(
         `update available: ${update.latest} (current ${current})`,
       );
-      console.log("  npm i -g @exla-ai/rudder");
+      console.log("  npm i -g @exla/rudder");
     }
     return;
   }

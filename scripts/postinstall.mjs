@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Sets jj (Jujutsu), Rudder's workspace engine, up at install time so
-// `npm install -g @exla-ai/rudder` is the only step. When jj is not on PATH it
+// `npm install -g @exla/rudder` is the only step. When jj is not on PATH it
 // fetches jj's own prebuilt release (checksum-pinned in dist/jj-binary.js) into
 // ~/.rudder/bin; Rudder puts that on PATH itself. The first `rudder` run does
 // the same thing, so anything skipped here (no network, --ignore-scripts, npx)

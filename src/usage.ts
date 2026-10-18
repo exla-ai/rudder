@@ -845,7 +845,7 @@ export function classifyCommand(command: string): ProcessKind {
   let exe = (argv[0] ?? "").toLowerCase();
   if (/(^|\/)(node|bun|deno)(\d+)?$/.test(exe) && argv[1]) exe = argv[1].toLowerCase();
   const base = exe.split("/").pop() ?? "";
-  if (base === "rudder-native" || base === "rudder" || exe.includes("/rudder/dist/") || exe.includes("@exla-ai/rudder/") || exe.includes("@viraatdas/rudder/")) {
+  if (base === "rudder-native" || base === "rudder" || exe.includes("/rudder/dist/") || exe.includes("@exla/rudder/") || exe.includes("@viraatdas/rudder/")) {
     return "rudder";
   }
   if (base === "claude" || exe.includes("/claude/versions/") || exe.includes("@anthropic-ai/claude-code")) return "claude";

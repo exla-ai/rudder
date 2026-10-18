@@ -1,6 +1,6 @@
 name: Release
 
-# Publishes @exla-ai/rudder to npm when a vX.Y.Z tag is pushed, so the
+# Publishes @exla/rudder to npm when a vX.Y.Z tag is pushed, so the
 # published version is always pinned to a committed git tag. No more repo vs
 # registry drift.
 #
@@ -150,5 +150,5 @@ jobs:
       - name: Fail when the new name did not publish
         if: steps.publish.outcome != 'success'
         run: |
-          echo "::error::npm publish of @exla-ai/rudder failed (does the exla-ai npm org exist, and can NPM_TOKEN publish to it?)"
+          echo "::error::npm publish of @exla/rudder failed (is viraatdas a publisher in the exla npm org, and can NPM_TOKEN publish to it?)"
           exit 1

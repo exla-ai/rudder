@@ -10,7 +10,7 @@ const AUTO_UPDATE_TIMEOUT_MS = 1000;
 
 const moduleDir = path.dirname(fileURLToPath(import.meta.url));
 
-export const PACKAGE_NAME = "@exla-ai/rudder";
+export const PACKAGE_NAME = "@exla/rudder";
 // Rudder was published as @viraatdas/rudder until the move to the exla-ai org
 // (3.4.0). Releases still publish that name too, so an old install updates to a
 // build that knows the new one and then moves itself across.
@@ -140,7 +140,7 @@ export function shouldAutoUpdateFromPackageRoot(packageRoot: string): boolean {
   if (fs.existsSync(path.join(root, ".git")) || fs.existsSync(path.join(root, "src", "main.ts"))) {
     return false;
   }
-  // `npx @exla-ai/rudder@...` is already an ephemeral install; turning that into
+  // `npx @exla/rudder@...` is already an ephemeral install; turning that into
   // a global install is surprising and can fail under temp-directory permissions.
   const normalized = root.split(path.sep).join("/");
   if (normalized.includes("/_npx/") || normalized.includes("/.npm/_npx/")) {

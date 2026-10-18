@@ -9,7 +9,7 @@ local dashboard.
 ## Quickstart (copy/paste)
 
 ```bash
-npm install -g @exla-ai/rudder@latest
+npm install -g @exla/rudder@latest
 rudder login                                  # opens the cloud login
 rudder cloud "fix the failing tests"          # launches a fresh cloud instance
 rudder cloud list                             # see every instance on your account

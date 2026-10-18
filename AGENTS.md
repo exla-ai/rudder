@@ -20,7 +20,7 @@ workflow around those agents: a three-pane dashboard, pane focus, scrollback,
 task summaries, live review, and merge back to the base branch. Rudder Cloud is
 an optional hosted worker mode that keeps the same local control surface.
 
-It ships as the npm package `@exla-ai/rudder`, binary `rudder`
+It ships as the npm package `@exla/rudder`, binary `rudder`
 (`dist/index.js`).
 
 Release rule for pushes: when pushing Rudder product changes to `origin/main`,
@@ -28,7 +28,7 @@ ship them as an npm versioned release unless the user explicitly asks for a
 non-release push. Run the relevant tests, commit the change, run `npm version
 patch`/`minor`/`major` as appropriate, then push `main` and the created tag.
 After pushing, verify the GitHub release workflow and `npm view
-@exla-ai/rudder version` so the user knows which version contains the fix.
+@exla/rudder version` so the user knows which version contains the fix.
 
 Two big pieces, one product:
 
@@ -139,7 +139,7 @@ process spawns, not a socket.
   `--non-interactive`, `--cwd`, `--repo`, `--run`, `--backend`, and `--model`.
 - `main()` flow:
   - Before user-facing command dispatch, `autoUpdateAndRerunIfNeeded` checks npm
-    and runs `npm install -g @exla-ai/rudder@<latest>` when this global install
+    and runs `npm install -g @exla/rudder@<latest>` when this global install
     is stale, then re-runs the original command with `RUDDER_SKIP_AUTO_UPDATE=1`.
     Internal `__*` commands, `rudder done` worker callbacks, local source checkouts,
     CI, npx temp installs, and `RUDDER_DISABLE_AUTO_UPDATE`/
@@ -1190,11 +1190,11 @@ Intel Macs and Linux x64. Windows and linux-arm64 are not built.
 
 **Two package names (3.4.0).** The project moved from `viraatdas/rudder` to
 `exla-ai/rudder` (GitHub redirects the old URLs) and the npm package from
-`@viraatdas/rudder` to `@exla-ai/rudder`. Every release publishes the SAME build
+`@viraatdas/rudder` to `@exla/rudder`. Every release publishes the SAME build
 under both names (the workflow rewrites `name` and publishes again), so an old
 install auto-updates under its old name to a build whose `moveToRenamedPackage`
 (src/version-check.ts) uninstalls `@viraatdas/rudder` and installs
-`@exla-ai/rudder` (both own the `rudder` bin, so npm refuses EEXIST otherwise),
+`@exla/rudder` (both own the `rudder` bin, so npm refuses EEXIST otherwise),
 putting the old version back if the new one will not install. Keep both
 publishes until old installs have drained; then `npm deprecate` the old name.
 The site moved to rudder.exla.ai (Vercel; DNS in Netlify's exla.ai zone);

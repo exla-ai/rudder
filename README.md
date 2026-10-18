@@ -7,7 +7,7 @@
 </p>
 
 [![TUI e2e](https://github.com/exla-ai/rudder/actions/workflows/tui.yml/badge.svg)](https://github.com/exla-ai/rudder/actions/workflows/tui.yml)
-[![npm version](https://img.shields.io/npm/v/@exla-ai/rudder.svg)](https://www.npmjs.com/package/@exla-ai/rudder)
+[![npm version](https://img.shields.io/npm/v/@exla/rudder.svg)](https://www.npmjs.com/package/@exla/rudder)
 [![Node >=22](https://img.shields.io/badge/node-%3E%3D22-43853d.svg)](https://nodejs.org/)
 [![Website](https://img.shields.io/badge/site-rudder.exla.ai-111111.svg)](https://rudder.exla.ai)
 
@@ -26,17 +26,17 @@ key. `/main` puts an agent in the main checkout when you want one there, and
 ## Install
 
 ```bash
-npm install -g @exla-ai/rudder@latest
+npm install -g @exla/rudder@latest
 rudder
 ```
 
 After the global install, every user-facing `rudder` launch checks npm and
 auto-updates itself before running when a newer version is available. Set
 `RUDDER_DISABLE_AUTO_UPDATE=1` to opt out. Run without a global install using
-`npx @exla-ai/rudder@latest`.
+`npx @exla/rudder@latest`.
 
 Rudder used to be published as `@viraatdas/rudder`. Existing installs move
-themselves to `@exla-ai/rudder` on their next update; nothing to do by hand.
+themselves to `@exla/rudder` on their next update; nothing to do by hand.
 
 ## Requirements
 

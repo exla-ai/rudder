@@ -345,7 +345,7 @@ test("ps output is reduced to agent processes, classified and sorted by cpu", ()
   // The executable decides, never the argv: a Claude worker launched by rudder
   // carries rudder paths in its arguments and was filed under rudder.
   assert.equal(classifyCommand("claude --permission-mode bypassPermissions --settings /Users/x/.rudder/signals/run-claude.json"), "claude");
-  assert.equal(classifyCommand("node /Users/x/.local/lib/node_modules/@exla-ai/rudder/dist/index.js --cwd /Users/x/code/claude"), "rudder");
+  assert.equal(classifyCommand("node /Users/x/.local/lib/node_modules/@exla/rudder/dist/index.js --cwd /Users/x/code/claude"), "rudder");
   assert.equal(classifyCommand("/Users/x/code/rudder/dist/native/rudder-native"), "rudder");
   assert.equal(classifyCommand("/Applications/Safari.app/Contents/MacOS/Safari https://rudder.exla.ai"), "other");
 });

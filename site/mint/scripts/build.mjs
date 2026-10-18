@@ -43,7 +43,7 @@ console.log(`patched ${patched} search call site(s)`);
 // Page content must be in the bundle. An unauthenticated export renders only
 // the chrome; catch that here instead of on the live site.
 const probe = fs.readFileSync(path.join(out, "install", "index.html"), "utf8");
-if (!/npm install -g @exla-ai\/rudder/.test(probe)) {
+if (!/npm install -g @exla\/rudder/.test(probe)) {
   throw new Error("exported pages carry no content: run `mint login` and export again");
 }
 

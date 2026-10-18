@@ -57,7 +57,7 @@ const PAGES = {
     ],
     body: `
 <h2 id="start">Start in 60 seconds</h2>
-<pre><code><span class="prompt">$ </span>npm install -g @exla-ai/rudder@latest
+<pre><code><span class="prompt">$ </span>npm install -g @exla/rudder@latest
 <span class="prompt">$ </span>cd ~/code/your-project
 <span class="prompt">$ </span>rudder</code></pre>
 <p>Type a task into the box at the bottom and press Enter:</p>
@@ -162,7 +162,7 @@ stays exactly where you left it the whole time.</p>
     ],
     body: `
 <h2 id="install-it">Install it</h2>
-<pre><code><span class="prompt">$ </span>npm install -g @exla-ai/rudder@latest</code></pre>
+<pre><code><span class="prompt">$ </span>npm install -g @exla/rudder@latest</code></pre>
 <p>Then, from inside any git repository:</p>
 <pre><code><span class="prompt">$ </span>cd ~/code/your-project
 <span class="prompt">$ </span>rudder</code></pre>
@@ -191,7 +191,7 @@ whichever you want to use:</p>
 <p>You do not need all three. Rudder detects what is present and offers only those.</p>
 
 <h2 id="update">Updating</h2>
-<pre><code><span class="prompt">$ </span>npm install -g @exla-ai/rudder@latest</code></pre>
+<pre><code><span class="prompt">$ </span>npm install -g @exla/rudder@latest</code></pre>
 <p>Rudder tells you in the dashboard when a newer version is published.</p>
 `,
   },
@@ -931,7 +931,7 @@ function render(slug, page) {
         <nav class="site-nav" aria-label="Primary">
           <a href="/docs" aria-current="page">Docs</a>
           <a href="https://github.com/exla-ai/rudder">GitHub</a>
-          <a href="https://www.npmjs.com/package/@exla-ai/rudder">npm</a>
+          <a href="https://www.npmjs.com/package/@exla/rudder">npm</a>
           <a href="/login">Sign in</a>
         </nav>
       </header>
@@ -950,7 +950,7 @@ ${pagerHtml(slug)}
         <div class="docs-foot">
           <a href="/">Rudder home</a>
           <a href="https://github.com/exla-ai/rudder">GitHub</a>
-          <a href="https://www.npmjs.com/package/@exla-ai/rudder">npm</a>
+          <a href="https://www.npmjs.com/package/@exla/rudder">npm</a>
           <a href="https://github.com/exla-ai/rudder/issues">Report an issue</a>
         </div>
       </main>

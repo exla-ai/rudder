@@ -1136,7 +1136,7 @@ function ignoredProcess(info) {
   const script = path.basename(info.cmdline[1] || "");
   return (
     /\/opt\/rudder(-worker)?\//.test(joined) ||
-    /@(exla-ai|viraatdas)\/rudder|\/rudder\/dist\//.test(joined) ||
+    /@(exla|viraatdas)\/rudder|\/rudder\/dist\//.test(joined) ||
     (info.comm === "node" && (script === "rudder" || script === "rudder.js"))
   );
 }

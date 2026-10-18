@@ -28,11 +28,7 @@ final class Session {
     private let presenter = PresentationAnchor()
 
     init() {
-        if let override = UserDefaults.standard.string(forKey: "RudderServerURL"), let url = URL(string: override) {
-            server = url
-        } else {
-            server = Session.defaultServer
-        }
+        server = Session.resolvedServer()
         token = Keychain.read()
         #if DEBUG
         // Simulator runs can be scripted: `-probeToken rdr_...` signs in directly.
@@ -45,6 +41,16 @@ final class Session {
             Task { await self.pair(code: code) }
         }
         #endif
+    }
+
+    /// The control plane: the default, or a `RudderServerURL` override. A
+    /// function so the voice assistant and CarPlay, which can run without
+    /// this object, resolve it the same way.
+    static func resolvedServer() -> URL {
+        if let override = UserDefaults.standard.string(forKey: "RudderServerURL"), let url = URL(string: override) {
+            return url
+        }
+        return defaultServer
     }
 
     var appURL: URL { server.appendingPathComponent("app") }

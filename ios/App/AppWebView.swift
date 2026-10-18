@@ -9,10 +9,12 @@ import WebKit
 /// `rudder` message handler: `signIn` (token rejected), `signOut`,
 /// `openExternal` (links leave the app), `badge` (agents that need you), and
 /// `pick` (the attach menu's Photos, Camera and Files, see AttachmentPicker),
-/// and `authorize` (signing the cloud machine's Claude Code or Codex in, see
-/// AgentLogin). `RUDDER_NATIVE.attachments` says this build may open the
-/// camera, `RUDDER_NATIVE.picker` that it answers `pick`, and
-/// `RUDDER_NATIVE.login` that it answers `authorize`.
+/// `authorize` (signing the cloud machine's Claude Code or Codex in, see
+/// AgentLogin), and `voice` (the full-screen "Talk to Rudder" conversation,
+/// see VoiceAssistant). `RUDDER_NATIVE.attachments` says this build may open
+/// the camera, `RUDDER_NATIVE.picker` that it answers `pick`,
+/// `RUDDER_NATIVE.login` that it answers `authorize`, and
+/// `RUDDER_NATIVE.voice` that it answers `voice`.
 struct AppWebView: UIViewRepresentable {
     let session: Session
     let token: String
@@ -92,6 +94,8 @@ struct AppWebView: UIViewRepresentable {
             "picker": "1",
             // Agent sign-ins come back through a loopback listener, no code to paste.
             "login": "1",
+            // The mic button opens the native voice assistant.
+            "voice": "1",
         ]
         let json = (try? JSONSerialization.data(withJSONObject: payload))
             .flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
@@ -157,9 +161,24 @@ struct AppWebView: UIViewRepresentable {
                 agentLogin.start(url: url, port: port, path: path) { [weak self] outcome in
                     self?.deliverAuthorized(id: id, outcome: outcome)
                 }
+            case "voice":
+                presentVoice()
             default:
                 break
             }
+        }
+
+        /// Opens "Talk to Rudder" over the app, once.
+        private func presentVoice() {
+            guard let presenter = UIApplication.shared.topViewController,
+                  !(presenter is UIHostingController<VoiceView>) else { return }
+            let host = UIHostingController(rootView: VoiceView(onClose: {}))
+            host.rootView = VoiceView(onClose: { [weak host] in
+                host?.dismiss(animated: true)
+            })
+            host.modalPresentationStyle = .fullScreen
+            host.view.backgroundColor = .black
+            presenter.present(host, animated: true)
         }
 
         /// Tells the page how an agent sign-in ended (`window.rudderAuthorized`):

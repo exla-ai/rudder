@@ -47,7 +47,7 @@
 	<key>NSCameraUsageDescription</key>
 	<string>Take a photo to send to your agents.</string>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>Record a video to send to your agents.</string>
+	<string>Talk to Rudder and record videos to send to your agents.</string>
 	<key>NSPhotoLibraryUsageDescription</key>
 	<string>Choose photos and screenshots to send to your agents.</string>
 	<key>NSAppTransportSecurity</key>
@@ -57,5 +57,28 @@
 	</dict>
 	<key>UIApplicationSupportsIndirectInputEvents</key>
 	<true/>
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>audio</string>
+	</array>
+	<key>UIApplicationSceneManifest</key>
+	<dict>
+		<key>UIApplicationSupportsMultipleScenes</key>
+		<true/>
+		<key>UISceneConfigurations</key>
+		<dict>
+			<key>CPTemplateApplicationSceneSessionRoleApplication</key>
+			<array>
+				<dict>
+					<key>UISceneClassName</key>
+					<string>CPTemplateApplicationScene</string>
+					<key>UISceneConfigurationName</key>
+					<string>CarPlay</string>
+					<key>UISceneDelegateClassName</key>
+					<string>CarPlaySceneDelegate</string>
+				</dict>
+			</array>
+		</dict>
+	</dict>
 </dict>
 </plist>

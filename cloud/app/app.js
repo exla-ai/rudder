@@ -1704,6 +1704,13 @@ function HomeScreen() {
   const bar = el.querySelector(".topbar");
   const scroller = el.querySelector(".scroller");
   const acts = el.querySelector(".tb-actions");
+  // Talk to Rudder: the iOS shell (RUDDER_NATIVE.voice) runs the voice
+  // assistant natively, so the button only exists there.
+  if (NATIVE?.voice) {
+    const micBtn = h(`<button type="button" class="icon-btn" aria-label="Talk to Rudder"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0"/><path d="M12 18v3"/></svg></button>`);
+    micBtn.addEventListener("click", () => postNative({ type: "voice" }));
+    acts.appendChild(micBtn);
+  }
   acts.appendChild(refreshButton(refreshState));
   const avatarBtn = h(`<button type="button" class="icon-btn" aria-label="Settings"><span class="avatar"></span></button>`);
   avatarBtn.addEventListener("click", openSettings);

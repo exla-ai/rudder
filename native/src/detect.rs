@@ -330,6 +330,14 @@ pub(crate) fn terminal_needs_permission_from_lines(backend: Backend, lines: &[St
         return true;
     }
     let text = recent.iter().rev().cloned().collect::<Vec<_>>().join("\n");
+    // Claude's folder-trust dialog ("❯ No, exit / Yes, I trust this folder") has
+    // no numbers and no permission word. On the cloud machine nobody was there
+    // to answer it, and the row read "working" for a day, which also held back
+    // the machine's update-when-idle.
+    let lower = text.to_ascii_lowercase();
+    if lower.contains("trust this folder") || lower.contains("trust the files in this folder") {
+        return true;
+    }
 
     permission_text_needs_attention(&text)
 }

@@ -35,6 +35,13 @@ const flyMachineId = (process.env.FLY_MACHINE_ID || "").trim();
 // Overridable so the boot can be tested off a real machine.
 const VOLUME = process.env.RUDDER_HOME_VOLUME || "/workspace";
 const CODE_DIR = path.join(VOLUME, "code");
+
+// Every path ever trusted here, re-applied on each call: the vault carries the
+// laptop's ~/.claude.json and rewriting it (boot, and every vault refresh) used
+// to drop this machine's trust entries, so a resumed agent sat on Claude's
+// "Do you trust this folder?" dialog with nobody to answer it.
+const trustedPaths = new Set();
+
 // CLIs the image does not carry (AWS, SSM plugin) install here, on the volume.
 const TOOLS_DIR = path.join(VOLUME, "tools");
 const TOOLS_BIN = path.join(TOOLS_DIR, "bin");
@@ -1687,6 +1694,7 @@ async function refreshVaultRepoFiles() {
   }
   deferredRepoFiles.length = 0;
   writeVaultFiles(fresh.files, deferredRepoFiles);
+  acceptClaudeDialogs([]);
   // A GitHub token added since boot takes effect now; failed clones retry when
   // the repo list is reconciled right after this.
   configureGitCredentials(fresh);
@@ -1743,6 +1751,9 @@ function configureGitCredentials(secrets) {
 // front. Every repo here came from the user's own GitHub; Remote Control is the
 // point of the machine.
 function acceptClaudeDialogs(paths) {
+  for (const projectPath of paths) {
+    trustedPaths.add(projectPath);
+  }
   const configPath = path.join(HOME, ".claude.json");
   let config = {};
   try {
@@ -1755,7 +1766,7 @@ function acceptClaudeDialogs(paths) {
   if (!config.projects || typeof config.projects !== "object") {
     config.projects = {};
   }
-  for (const projectPath of [CODE_DIR, ...paths]) {
+  for (const projectPath of [CODE_DIR, ...trustedPaths]) {
     config.projects[projectPath] = { ...(config.projects[projectPath] || {}), hasTrustDialogAccepted: true };
   }
   try {

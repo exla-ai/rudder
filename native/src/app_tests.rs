@@ -27989,3 +27989,27 @@ fn a_failed_command_pane_says_what_the_command_printed() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn claude_folder_trust_dialog_is_a_wait_not_work() {
+    // Seen on the cloud machine: a resumed Claude pane sat on this dialog for a
+    // day reading "working", which also blocked the home's update-when-idle.
+    let lines: Vec<String> = [
+        "Make rudder a car play app",
+        " Accessing workspace:",
+        " /workspace/code/rudder/.rudder-workspaces/rudder-bf5f6ea09d/ready-b418478f",
+        " Quick safety check: Is this a project you created or one you trust? (Like your",
+        " own code, a well-known open source project, or work from your team). If not,",
+        " take a moment to review what's in this folder first.",
+        " Claude Code'll be able to read, edit, and execute files here.",
+        " Security guide",
+        " ❯ No, exit",
+        "   Yes, I trust this folder",
+        " Enter to confirm · Esc to cancel",
+        "",
+    ]
+    .iter()
+    .map(|line| line.to_string())
+    .collect();
+    assert!(terminal_needs_permission_from_lines(Backend::Claude, &lines));
+}

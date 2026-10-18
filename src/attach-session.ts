@@ -46,6 +46,14 @@ const ALT_SCREEN_ON = "\x1b[?1049h";
 const ALT_SCREEN_OFF = "\x1b[?1049l\x1b[?25h";
 const MOUSE_ON = "\x1b[?1000h\x1b[?1002h\x1b[?1006h";
 const MOUSE_OFF = "\x1b[?1006l\x1b[?1002l\x1b[?1000l";
+// Bracketed paste on the LOCAL terminal. The remote dashboard enables it once at
+// startup, long gone from the bounded replay by the time a terminal attaches, so
+// without this a paste arrives as raw keystrokes: Ghostty/iTerm ask "paste
+// contains newlines?", each newline lands as Enter, and the dashboard never sees
+// a paste to fold into a "[Pasted #N ...]" chip. (Rescued from an agent's
+// unpushed change on the cloud machine's old viraatdas/rudder clone.)
+const BRACKETED_PASTE_ON = "\x1b[?2004h";
+const BRACKETED_PASTE_OFF = "\x1b[?2004l";
 const SYNC_BEGIN = "\x1b[?2026h";
 const SYNC_END = "\x1b[?2026l";
 // CAN aborts an escape sequence the cloud's last bytes left open, so an
@@ -115,6 +123,7 @@ export class AttachSession {
     // which the local terminal never treats as mode switches.
     this.output.write(MOUSE_ON);
     this.output.write(KITTY_KEYBOARD_PUSH);
+    this.output.write(BRACKETED_PASTE_ON);
   }
 
   /** Give the terminal back exactly once, whatever state it is in. */
@@ -126,6 +135,7 @@ export class AttachSession {
     this.stopGapInput();
     if (this.held) {
       this.output.write(KITTY_KEYBOARD_POP);
+      this.output.write(BRACKETED_PASTE_OFF);
       this.output.write(MOUSE_OFF);
       // Release the tab title so the shell prompt can rewrite it.
       this.output.write("\x1b]0;\x07");

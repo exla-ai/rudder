@@ -306,6 +306,7 @@
 }
 
 .phones {
+  align-items: start;
   list-style: none;
   margin: 0;
   padding: 0;
@@ -344,16 +345,6 @@
   font-size: 0.93rem;
 }
 
-/* The middle phone sits lower, so the three read as a sequence, not a row of
- * identical cards. */
-@media (min-width: 901px) {
-  .phone-step:nth-child(2) {
-    margin-top: 48px;
-  }
-  .phone-step:nth-child(3) {
-    margin-top: 96px;
-  }
-}
 
 .handoff,
 .sync {

@@ -67,11 +67,9 @@
             </a>
             <h1 id="title">Many agents. <span class="nw">One repo.</span> <span class="h1-accent">Steered from your phone.</span></h1>
             <p class="lede">
-              Run Claude Code, Codex and opencode side by side. Each gets
-              <strong>its own workspace</strong>, so none of them can touch the
-              others' work, or yours. Start them from the terminal or your phone,
-              approve their prompts from anywhere, and they keep working on your
-              cloud machine with the laptop closed.
+              Run Claude Code, Codex and opencode side by side, each in
+              <strong>its own workspace</strong>, on your cloud machine. Start
+              them, answer them and merge their work from your phone.
             </p>
             <div class="install" id="install">
               <code id="install-command"
@@ -145,12 +143,15 @@
           </div>
         </section>
 
-        <ul class="facts" aria-label="At a glance">
-          <li><span class="fact-k">agents</span><span class="fact-v">Claude Code, Codex, opencode</span></li>
-          <li><span class="fact-k">isolation</span><span class="fact-v">one jj workspace each</span></li>
-          <li><span class="fact-k">your phone</span><span class="fact-v">start, approve, merge</span></li>
-          <li><span class="fact-k">cloud machine</span><span class="fact-v">4 CPU · 16 GB · keeps its disk</span></li>
-        </ul>
+        <section class="section launch-section" id="watch" aria-labelledby="watch-title">
+          <div class="section-head" data-reveal>
+            <h2 id="watch-title">Rudder in 36 seconds.</h2>
+          </div>
+          <div class="setup-video-wrap" data-reveal>
+            <video controls playsinline preload="metadata" poster="/media/launch-poster.jpg"
+              src="/media/launch.mp4" aria-label="Rudder in 36 seconds"></video>
+          </div>
+        </section>
 
         <section class="section phone-section" id="phone" aria-labelledby="phone-title">
           <div class="section-head" data-reveal>
@@ -235,73 +236,6 @@
             </li>
           </ol>
 
-          <div class="handoff" data-reveal>
-            <div class="screen screen--term">
-              <div class="screen-chrome">
-                <span class="dots"><i></i><i></i><i></i></span>
-                <span class="mono">zsh</span>
-              </div>
-              <pre class="tty tty--pad"><span class="dim">$</span> rudder login
-
-Sign this computer in from your phone: open Rudder,
-tap "Sign in a computer" and enter
-
-    <span class="code-big">K7P-4QX</span>
-
-<span class="dim">(or scan the QR code with the phone's camera)</span>
-
-<span class="ok">Logged in to rudder-cloud-control.fly.dev</span>
-<span class="ok">as you@example.com via your phone.</span>
-
-<span class="dim">$</span> rudder cloud <span class="caret"></span></pre>
-            </div>
-            <ul class="handoff-notes">
-              <li>
-                <h3>One machine, every repo</h3>
-                <p>
-                  <code class="mono">rudder cloud</code> opens the repo on your
-                  cloud machine, 4 CPU and 16 GB with a persistent disk. Every
-                  repo lives there side by side, each with its own dashboard.
-                </p>
-              </li>
-              <li>
-                <h3>Leaving? Press <kbd>H</kbd></h3>
-                <p>
-                  The laptop's running agents move to the cloud machine with
-                  their work and their conversations, and resume there.
-                </p>
-              </li>
-              <li>
-                <h3>It sleeps when you do</h3>
-                <p>
-                  After two quiet hours it stops. Opening the app or
-                  <code class="mono">rudder cloud</code> wakes it, and the agents
-                  come back where they were.
-                </p>
-              </li>
-              <li>
-                <h3>GitHub stays the source of truth</h3>
-                <p>
-                  Finished cloud work comes back as a pushed branch and a draft
-                  PR. Nothing merges into your main by itself.
-                </p>
-              </li>
-            </ul>
-          </div>
-        </section>
-
-        <section class="section setup-section" id="setup" aria-labelledby="setup-title">
-          <div class="section-head" data-reveal>
-            <h2 id="setup-title">Set up in five minutes.</h2>
-            <p>
-              Start on your phone: sign in, connect GitHub, sign your agent in,
-              pick a repo. The laptop is optional. <a href="/setup">Read the guide</a>.
-            </p>
-          </div>
-          <div class="setup-video-wrap" data-reveal>
-            <video controls playsinline preload="metadata" poster="/media/setup-poster.jpg"
-              src="/media/setup.mp4" aria-label="Setting up Rudder, start to finish"></video>
-          </div>
         </section>
 
         <section class="section showcase" aria-labelledby="desk-title">
@@ -470,313 +404,18 @@ tap "Sign in a computer" and enter
             </div>
           </div>
         </section>
-        <section class="section" aria-labelledby="gods-title">
+
+        <section class="section setup-section" id="setup" aria-labelledby="setup-title">
           <div class="section-head" data-reveal>
-            <h2 id="gods-title">Every agent, one glance.</h2>
+            <h2 id="setup-title">Set up in five minutes.</h2>
             <p>
-              Press <kbd>⌥g</kbd> and the screen becomes a grid: one tile per live
-              agent, showing the bottom of its terminal with its task, model and
-              whether it is working, needs you, or done. Arrows move,
-              <kbd>Enter</kbd> opens one. Agents are never resized for it, so
-              their scrollback is untouched.
+              Start on your phone: sign in, connect GitHub, sign your agent in,
+              pick a repo. The laptop is optional. <a href="/setup">Read the guide</a>.
             </p>
           </div>
-
-          <div class="screen gods" data-reveal data-gods>
-            <div class="screen-chrome">
-              <span class="dots" aria-hidden="true"><i></i><i></i><i></i></span>
-              <span class="mono gods-head">god's view · 6 agents · arrows or h/j/k/l move · Enter or click focuses · Esc or ⌥g closes</span>
-            </div>
-            <div class="gods-grid">
-              <div class="tile is-hot">
-                <div class="tile-title"><span class="tile-name">n1 · stripe client</span><span class="tile-model">claude/opus</span><span class="state state--running">working</span></div>
-                <pre class="tty"><span class="ok">●</span> Read src/billing/stripe.ts
-<span class="ok">●</span> Edit src/billing/stripe.ts <span class="add">+112</span> <span class="del">−9</span>
-<span class="ok">●</span> Bash npm test -- billing <span class="dim">· 18 passed</span>
-<span class="run"><span data-spin>✻</span> Retrying idempotent charges… <span class="dim">(41s · esc to interrupt)</span></span></pre>
-              </div>
-              <div class="tile">
-                <div class="tile-title"><span class="tile-name">fix the flaky chord test</span><span class="tile-model">codex/gpt-6.1-sol</span><span class="state state--needs">needs you</span></div>
-                <pre class="tty">Would you like to run the following command?
-
-  <span class="dim">$</span> cargo test --release -- chord
-
-<span class="run">›</span> 1. Yes, proceed
-  2. No, and tell Codex what to do</pre>
-              </div>
-              <div class="tile">
-                <div class="tile-title"><span class="tile-name">rate-limit the public API</span><span class="tile-model">claude/sonnet</span><span class="state state--running">working</span></div>
-                <pre class="tty"><span class="ok">●</span> Edit src/server/rate-limit.ts <span class="add">+18</span> <span class="del">−4</span>
-<span class="dim">  keyed on the API key, IP for anonymous</span>
-<span class="ok">●</span> Bash npm test <span class="dim">· 44 passed</span>
-<span class="run"><span data-spin>✻</span> Writing the burst-window test… <span class="dim">(12s)</span></span></pre>
-              </div>
-              <div class="tile">
-                <div class="tile-title"><span class="tile-name">port the settings screen</span><span class="tile-model">claude/opus</span><span class="state state--review">done</span></div>
-                <pre class="tty"><span class="ok">●</span> Bash npm run check <span class="dim">· ok</span>
-
-Ported Form.tsx to useForm. Dirty state now
-comes from formState, so the save button and
-the unsaved-changes guard agree.
-
-<span class="dim">›</span> </pre>
-              </div>
-              <div class="tile">
-                <div class="tile-title"><span class="tile-name">n3 · billing settings</span><span class="tile-model">codex/gpt-6.1-sol</span><span class="state state--running">working</span></div>
-                <pre class="tty"><span class="ok">•</span> Explored
-  <span class="dim">└</span> Read Settings.tsx, plans.ts
-<span class="ok">•</span> Edited src/settings/Billing.tsx <span class="add">(+84 −0)</span>
-<span class="run"><span data-spin>✻</span> Working <span class="dim">(8s • esc to interrupt)</span></span></pre>
-              </div>
-              <div class="tile">
-                <div class="tile-title"><span class="tile-name">n0 · schema migration</span><span class="tile-model">claude/sonnet</span><span class="state state--merged">merged</span></div>
-                <pre class="tty"><span class="ok">●</span> Bash npm run migrate:check <span class="dim">· clean</span>
-
-Added invoices and payouts tables with
-foreign keys to accounts. Down migration
-tested against a copy of staging.
-
-<span class="dim">›</span> </pre>
-              </div>
-            </div>
-          </div>
-        </section>
-
-        <section class="section" aria-labelledby="sync-title">
-          <div class="section-head" data-reveal>
-            <h2 id="sync-title">Same repo on the laptop and in the cloud.</h2>
-            <p>
-              <code class="mono">/sync</code> brings this checkout and your cloud
-              machine's clone up to the newest main, and carries the work GitHub
-              does not have yet, uncommitted edits included, straight from one
-              side to the other. Nothing is pushed to your repo.
-            </p>
-          </div>
-
-          <div class="sync" data-reveal>
-            <div class="screen screen--term">
-              <div class="screen-chrome">
-                <span class="dots" aria-hidden="true"><i></i><i></i><i></i></span>
-                <span class="mono">rudder</span>
-                <span class="mono screen-cwd">~/code/rudder</span>
-              </div>
-              <pre class="tty tty--pad" data-lines><span class="run">›</span> /sync
-<span>this laptop (exla-ai/rudder): up to date with main;</span>
-<span>  uncommitted edits in the working copy</span>
-<span><span class="dim">  sent:</span> 2 change(s) not on GitHub yet</span>
-<span>cloud (exla-ai/rudder): moved to the newest main</span>
-<span>  (3 new commit(s))</span>
-<span><span class="dim">  received:</span> <span class="ok">picked up the work from laptop</span></span>
-<span>cloud agents (exla-ai/rudder): 3</span>
-<span>  <span class="needs">needs you </span> Fix flaky Ctrl+W chord test</span>
-<span>  <span class="run">working   </span> Phone app for agent control</span>
-<span>  <span class="rev">review    </span> Tailnet HTTPS for previews</span></pre>
-            </div>
-            <ul class="sync-notes">
-              <li>
-                <h3>It never loses work</h3>
-                <p>
-                  A side moves to the newest main only when nothing would be lost.
-                  When both have their own edits, both stay, and the other side's
-                  version waits as a bookmark you can diff.
-                </p>
-              </li>
-              <li>
-                <h3>Secrets stay put</h3>
-                <p>Gitignored files such as <code class="mono">.env</code> never travel.</p>
-              </li>
-              <li>
-                <h3><code class="mono">/sync move</code></h3>
-                <p>Hands this laptop's running agents to the cloud machine.</p>
-              </li>
-              <li>
-                <h3><code class="mono">/sync all</code></h3>
-                <p>Does the same for every repo on the cloud machine.</p>
-              </li>
-            </ul>
-          </div>
-        </section>
-
-        <section class="section" aria-labelledby="type-title">
-          <div class="section-head">
-            <h2 id="type-title">Four things you can type.</h2>
-            <p>What you type decides where the work lands.</p>
-          </div>
-          <div class="table-wrap">
-            <table class="commands">
-              <thead>
-                <tr>
-                  <th scope="col">you type</th>
-                  <th scope="col">what happens</th>
-                  <th scope="col">where it works</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr>
-                  <td class="c-in" data-label="you type">fix the login redirect</td>
-                  <td class="c-what" data-label="what happens">
-                    One isolated agent
-                    <span
-                      >Never touches your checkout.</span
-                    >
-                  </td>
-                  <td class="c-where" data-label="where it works">its own workspace</td>
-                </tr>
-                <tr>
-                  <td class="c-in" data-label="you type">/plan ship billing v2</td>
-                  <td class="c-what" data-label="what happens">
-                    An orchestrator
-                    <span
-                      >A task graph you can edit before it runs. Several plans
-                      can run side by side.</span
-                    >
-                  </td>
-                  <td class="c-where" data-label="where it works">one workspace per node</td>
-                </tr>
-                <tr>
-                  <td class="c-in" data-label="you type">/gam rewrite the retry logic</td>
-                  <td class="c-what" data-label="what happens">
-                    A Generative Adversarial Model pair
-                    <span
-                      >One implements. A second one, from the other provider,
-                      reviews it and cannot edit anything.</span
-                    >
-                  </td>
-                  <td class="c-where" data-label="where it works">one workspace, split pane</td>
-                </tr>
-                <tr>
-                  <td class="c-in" data-label="you type">/main tag the release</td>
-                  <td class="c-what" data-label="what happens">
-                    An agent in your checkout
-                    <span
-                      >For jobs that are about your tree. Nothing to merge.</span
-                    >
-                  </td>
-                  <td class="c-where" data-label="where it works">your real checkout</td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
-        </section>
-
-
-        <section class="section" aria-labelledby="argue-title">
-          <div class="section-head">
-            <h2 id="argue-title">A model reviewing its own work agrees with itself.</h2>
-            <p>
-              So <code class="mono">/gam</code> runs two of them, and only one
-              is allowed to type.
-            </p>
-          </div>
-          <p class="prose">
-            <strong>GAM</strong> is a <strong>Generative Adversarial Model</strong>:
-            one model generates, a second is adversarial to it, and the pressure
-            between them is the point. The reviewer is not a gate at the end. It
-            reads the diff after every turn, while the work is still moving, and
-            what it sends back becomes the generator's next instruction.
-          </p>
-          <p class="prose">
-            What carries over is the part that matters: a critic that is
-            genuinely separate from the thing it is criticising, and that gains
-            nothing by being agreeable. The reviewer comes from the other
-            provider by default, so it has nothing to be loyal to. The two never
-            share a conversation. It is handed the original task, the diff, and
-            whatever the generator wrote back to it, and never the reasoning
-            that produced any of it, because a model that has read its own
-            argument is no longer a second opinion.
-          </p>
-          <div class="table-wrap">
-            <table class="commands commands--roles">
-              <thead>
-                <tr>
-                  <th scope="col">half</th>
-                  <th scope="col">what it does</th>
-                  <th scope="col">permission</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr>
-                  <td class="c-in" data-label="half">generator</td>
-                  <td class="c-what" data-label="what it does">
-                    Implements the task
-                    <span
-                      >Your model and provider. It answers each objection
-                      directly, and is told to say why it disagrees rather than
-                      silently comply.</span
-                    >
-                  </td>
-                  <td class="c-where" data-label="permission">writes the code</td>
-                </tr>
-                <tr>
-                  <td class="c-in" data-label="half">adversarial reviewer</td>
-                  <td class="c-what" data-label="what it does">
-                    Tries to refute it
-                    <span
-                      >Reads the diff, runs the checks itself rather than
-                      trusting the transcript, and returns accept, revise or
-                      escalate.</span
-                    >
-                  </td>
-                  <td class="c-where" data-label="permission">cannot edit a file</td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
-          <p class="prose">
-            Every round is anchored on the task you typed, never on the last
-            thing the reviewer happened to ask for, so a long argument cannot
-            drift away from what you wanted. There is no round limit: it runs
-            for as long as the argument is getting somewhere, and stops when the
-            reviewer accepts, when it asks for you, or when the generator hands
-            back the same diff and the same answer as the round before. Both
-            panes stay open and Rudder tells you which it was.
-          </p>
-          <p class="prose">
-            The failures worth catching are the quiet ones: a subset delivered
-            as the whole thing, a check described as run, a refusal dressed up
-            as a completion. All three read identically to a summary, and all
-            three are caught by reading the diff. A pair argues them out before
-            they reach you. <a href="/docs/gam">How it works</a>.
-          </p>
-        </section>
-
-        <section class="section" aria-labelledby="options-title">
-          <div class="section-head">
-            <h2 id="options-title">Set once. The next agent picks it up.</h2>
-            <p>
-              <code class="mono">/model</code> sets these and remembers them. A
-              running agent keeps what it launched with.
-            </p>
-          </div>
-          <div class="options">
-            <div class="option-group">
-              <h3>Backend</h3>
-              <p>Which CLI actually runs.</p>
-              <ul class="option-list">
-                <li><span>claude</span><em>Claude Code</em></li>
-                <li><span>codex</span><em>OpenAI Codex</em></li>
-                <li><span>opencode</span><em>opencode</em></li>
-              </ul>
-            </div>
-            <div class="option-group">
-              <h3>Effort</h3>
-              <p>How long it thinks before it writes.</p>
-              <ul class="option-list">
-                <li><span>low</span><em>mechanical edits</em></li>
-                <li><span>medium</span><em>balanced</em></li>
-                <li><span>high</span><em>design and debugging</em></li>
-                <li><span>xhigh</span><em>the default</em></li>
-                <li><span>max</span><em>where it is offered</em></li>
-              </ul>
-            </div>
-            <div class="option-group">
-              <h3>Where it runs</h3>
-              <p>Your machine, or not.</p>
-              <ul class="option-list">
-                <li><span>local</span><em>your hardware</em></li>
-                <li><span>cloud</span><em>your cloud machine</em></li>
-              </ul>
-            </div>
+          <div class="setup-video-wrap" data-reveal>
+            <video controls playsinline preload="metadata" poster="/media/setup-poster.jpg"
+              src="/media/setup.mp4" aria-label="Setting up Rudder, start to finish"></video>
           </div>
         </section>
 

@@ -1106,6 +1106,8 @@ functional but less battle-tested than the local dashboard; treat it as beta.
 - `native/src/models.rs` mirrors the same discovery for the dashboard picker. Codex
   rows read `~/.codex/models_cache.json` before models.dev so new account-specific
   families (for example GPT-5.6 Sol/Terra/Luna) appear immediately in Codex's own order.
+  The models.dev cache (~6MB) is parsed once per (path, mtime, size), not on every
+  frame the palette is open (`cached_models_dev_rows`; the memo is off under tests).
 - `src/effort.ts`: `EffortLevel = low | medium | high | xhigh | max` and the
   per-backend mapping (Claude uses `effort`, Codex uses `reasoningEffort`).
   opencode gets `undefined`: it has no effort flag, and passing one it would
@@ -2059,9 +2061,9 @@ Claude Bash call can write), Codex via `--sandbox read-only` (runtime-enforced).
 The reviewer is read-only over the FILES, not powerless over the RUN: Rudder
 acts on its verdicts, so it can revise, steer the generator mid-turn, or stop it.
 The pair renders as a SPLIT worker pane (generator left, adversarial right,
-`render_gam_split`) over a dialogue strip carrying the exchange between them
-(`^W` `t` hides it); click a half or `^W` `a` to move between them; wheel routes
-to whichever half is under the pointer.
+`render_gam_split`) under a status bar and over a dialogue strip carrying the
+exchange between them (`^W` `t` hides it); click a half or `^W` `a` to move
+between them; wheel routes to whichever half is under the pointer.
 
 - **Transports, not typing (`native/src/gam_link.rs`, 2.14.81).** Packets,
   revisions and steers are PUSHED into the live sessions and answers come back
@@ -2097,10 +2099,58 @@ to whichever half is under the pointer.
     wired when the CLI has the feature (Claude Code >= 2.1.80, `codex --help`
     lists `--remote`). The split's half titles show `⇄ channel` / `⇄ app-server`
     while a link carries the traffic.
-- **Grammar**: `/gam [main] [<claude|codex|opencode> [model] [effort]] <task>`.
-  Bare model aliases (`/gam fable …`) resolve through `known_model_backend` —
-  NEVER `backend_for_model`, which guesses Claude for any word and would eat
-  task verbs. No spec at all cross-picks the OTHER backend's default model.
+- **Grammar** (`parse_gam_args`): `/gam [main] [<reviewer>] [gen <generator>]
+  <task>`, each side `<claude|codex|opencode> [model] [effort]` or a bare model
+  alias; `main` and the two sides go in any order before the task. Bare aliases
+  (`/gam fable …`) resolve through `known_model_backend`, NEVER
+  `backend_for_model`, which guesses Claude for any word and would eat task
+  verbs. After a provider, a word is a model only if that backend knows it or it
+  is id-shaped (`gam_token_is_model_for`): "/gam claude fix the bug" used to run
+  a model called "fix". A provider alone gets its flagship
+  (`flagship_model_for`, the same table as `/fast`), a model alone its default
+  effort, and a typed effort is honored (it used to be dropped). No reviewer spec
+  means `default_gam_reviewer`: the OTHER provider's flagship, across from the
+  GENERATOR's backend (so `gen codex` gets a Claude reviewer). No `gen` means the
+  dashboard model writes. opencode can generate but never review.
+- **Picker** (`gam_suggestions`, models.rs): a state machine over the typed
+  words. Bare `/gam`: first row is "/gam <task>" naming the default pair (the
+  default selection never rewrites the line), then "same pair" + "/gam again"
+  when a pair is remembered, then the reviewer providers (claude, codex). Then
+  the reviewer's models, then an OPTIONAL generator step (first row keeps the
+  line, then `gen <provider>` rows), then the generator's models. Model rows are
+  `model_suggestions_for`, never a duplicated list. The Enter-capture window
+  covers the four gam chooser actions only; task words empty the palette.
+  `gam_line_preview` feeds the task-bar hint ("gam · X writes · Y reviews
+  (read-only) · isolated workspace"), with same-model and opencode warnings.
+- **Last pair** (`GamLastPair`): saved after every successful launch as
+  `gam.last {generator, reviewer, inMain, task}` in config.json
+  (`save_gam_last_pair`; a no-op under `cfg!(test)` without RUDDER_HOME), loaded
+  into `App::gam_last`. `GamLastPair::spec_line` puts it back on the line as
+  grammar that parses to the SAME pair (effort always spelled, "auto"
+  included). `/gam again` reruns it on its task.
+- **Status bar** (`gam_status_bar_lines`, render.rs): one or two rows above the
+  split (none under 12 rows) with round, who has the ball (writing the first
+  draft / answering objection N / reviewing turn N / checking in), steers,
+  queued notes and the last verdict, plus key hints. A settled pair states its
+  outcome, reason and next step, wrapping to two rows rather than cutting the
+  next step. Sidebar labels come from `gam_row_status_label` ("gam · under
+  review", never "done · press m" while a verdict is pending). Each PTY is sized
+  to its half's INNER rect (it used to be the outer, so lines wrapped 2 columns
+  late), and mouse hit-testing uses the same outer `worker_area` render does.
+- **Outcomes**: Accepted, Escalated, Halted (reviewer `stop`), Stalled (same diff
+  and same reply two rounds running; was an Escalated), StoppedByUser (`^W x`,
+  or the generator's row stopped/failed mid-turn, which used to leave the pair
+  "writing" forever). Reasons persist as `outcomeReason`.
+- **Keys**: `^W a` swap halves, `^W t` dialogue, `^W i` brief the reviewer
+  (`/tell ` on the task line), `^W x` stop the loop (Esc to any running half,
+  never a kill; both panes stay live). Nav mode takes the same letters bare.
+  `m` on a reviewer row merges its generator.
+- **`/tell <note>`**: queued in `GamState::user_notes` (persisted as
+  `pendingNotes`) and delivered in the NEXT review or interim packet under a
+  "FROM THE USER" section, sentinel-neutralized, then cleared. Typing it into the
+  reviewer at once could end its turn without a verdict. A settled pair has no
+  next packet, so the note goes straight in via `live_inject_at`. Notes show in
+  the dialogue as `GamMessageKind::Note`.
 - **Round loop** (`poll_gam_pairs`, runs every heartbeat after status updates):
   generator turn Done → lift its optional `{GAM_REPLY_START..END}` reply note →
   packet (original task + earlier dialogue + last objection/reply + `jj_diff_text`

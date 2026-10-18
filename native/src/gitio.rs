@@ -958,15 +958,38 @@ pub(crate) fn gam_state_from_record(record: &serde_json::Value) -> Option<crate:
     let phase = match gam.get("phase").and_then(serde_json::Value::as_str) {
         Some("verdict") => GamPhase::AwaitingVerdict,
         Some("accepted") => GamPhase::Settled(GamOutcome::Accepted),
-        // An escalation reason is not persisted (it lives in the activity log);
-        // a reloaded escalated pair still reads as ended-without-agreement.
+        // The reason rides in `outcomeReason` (records older than it reload
+        // with an empty one and still read as ended-without-agreement).
         Some("escalated") => GamPhase::Settled(GamOutcome::Escalated(String::new())),
         Some("halted") => GamPhase::Settled(GamOutcome::Halted(String::new())),
+        Some("stalled") => GamPhase::Settled(GamOutcome::Stalled(String::new())),
+        Some("stopped") => GamPhase::Settled(GamOutcome::StoppedByUser),
         // A mid-turn check cannot survive a restart: the generator turn it was
         // watching is gone with its PTY. It reloads as an ordinary working turn,
         // which is the state the pair would have been in either way.
         _ => GamPhase::GeneratorWorking,
     };
+    let phase = match (
+        &phase,
+        gam.get("outcomeReason").and_then(serde_json::Value::as_str),
+    ) {
+        (GamPhase::Settled(outcome), Some(reason)) if !reason.trim().is_empty() => {
+            GamPhase::Settled(outcome.with_reason(reason.to_string()))
+        }
+        _ => phase,
+    };
+    let user_notes = gam
+        .get("pendingNotes")
+        .and_then(serde_json::Value::as_array)
+        .map(|notes| {
+            notes
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .filter(|note| !note.trim().is_empty())
+                .map(ToOwned::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
     let transcript = gam
         .get("transcript")
         .and_then(serde_json::Value::as_array)
@@ -1046,6 +1069,7 @@ pub(crate) fn gam_state_from_record(record: &serde_json::Value) -> Option<crate:
         next_interim_at: None,
         last_interim_progress: None,
         awaiting_since: None,
+        user_notes,
     })
 }
 
@@ -1058,6 +1082,12 @@ pub(crate) fn gam_state_to_json(gam: &crate::GamState) -> serde_json::Value {
         "round": gam.round,
         "runawayRounds": gam.runaway_rounds,
         "phase": gam.phase.as_str(),
+        // Why a settled pair ended, so a reloaded "needs you" can still say why.
+        "outcomeReason": match &gam.phase {
+            crate::GamPhase::Settled(outcome) => outcome.reason().to_string(),
+            _ => String::new(),
+        },
+        "pendingNotes": gam.user_notes,
         "task": gam.task,
         "lastObjection": gam.last_objection,
         "lastReply": gam.last_reply,

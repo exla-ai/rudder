@@ -19626,30 +19626,30 @@ fn gam_args_default_to_the_cross_picked_reviewer() {
     let home = unique_test_repo("gam-args-home");
     std::env::set_var("RUDDER_HOME", &home);
     let request =
-        parse_gam_args("fix the auth bug", Backend::Claude, "sonnet").expect("plain task parses");
+        parse_gam_args("fix the auth bug", Backend::Claude).expect("plain task parses");
     assert_eq!(request.task, "fix the auth bug");
     assert_eq!(request.adversarial_backend, Backend::Codex);
     assert_eq!(request.adversarial_model, CODEX_DEFAULT_MODEL);
     assert!(!request.in_main);
 
-    let mirrored = parse_gam_args("fix the auth bug", Backend::Codex, "gpt-5.5").expect("parses");
+    let mirrored = parse_gam_args("fix the auth bug", Backend::Codex).expect("parses");
     assert_eq!(mirrored.adversarial_backend, Backend::Claude);
 }
 
 #[test]
 fn gam_args_honor_main_and_explicit_model_specs() {
-    let main = parse_gam_args("main refactor the parser", Backend::Claude, "sonnet").expect("main");
+    let main = parse_gam_args("main refactor the parser", Backend::Claude).expect("main");
     assert!(main.in_main);
     assert_eq!(main.task, "refactor the parser");
 
     let bare_model =
-        parse_gam_args("fable rewrite the docs", Backend::Codex, "gpt-5.5").expect("alias model");
+        parse_gam_args("fable rewrite the docs", Backend::Codex).expect("alias model");
     assert_eq!(bare_model.adversarial_backend, Backend::Claude);
     assert_eq!(bare_model.adversarial_model, "fable");
     assert_eq!(bare_model.task, "rewrite the docs");
 
     // Task words that merely look like verbs are never eaten as models.
-    let plain = parse_gam_args("high performance caching", Backend::Claude, "sonnet")
+    let plain = parse_gam_args("high performance caching", Backend::Claude)
         .expect("no model spec");
     assert_eq!(plain.task, "high performance caching");
     assert_eq!(plain.adversarial_backend, Backend::Codex);
@@ -19657,22 +19657,22 @@ fn gam_args_honor_main_and_explicit_model_specs() {
 
 #[test]
 fn gam_args_consume_one_effort_word_after_a_model_spec() {
-    let effort = parse_gam_args("claude opus high perf tuning", Backend::Codex, "gpt-5.5")
+    let effort = parse_gam_args("claude opus high perf tuning", Backend::Codex)
         .expect("provider + model + effort");
     assert_eq!(effort.adversarial_backend, Backend::Claude);
     assert_eq!(effort.adversarial_model, "opus");
     assert_eq!(effort.task, "perf tuning");
     // Without a preceding model spec, "high" stays part of the ask.
-    let mid_task = parse_gam_args("keep the high latency path fast", Backend::Claude, "sonnet")
+    let mid_task = parse_gam_args("keep the high latency path fast", Backend::Claude)
         .expect("task keeps its words");
     assert_eq!(mid_task.task, "keep the high latency path fast");
 }
 
 #[test]
 fn gam_args_require_a_task() {
-    assert!(parse_gam_args("", Backend::Claude, "sonnet").is_err());
-    assert!(parse_gam_args("main", Backend::Claude, "sonnet").is_err());
-    assert!(parse_gam_args("claude opus high", Backend::Codex, "gpt-5.5").is_err());
+    assert!(parse_gam_args("", Backend::Claude).is_err());
+    assert!(parse_gam_args("main", Backend::Claude).is_err());
+    assert!(parse_gam_args("claude opus high", Backend::Codex).is_err());
 }
 
 #[test]
@@ -20515,7 +20515,7 @@ fn the_gam_split_renders_the_dialogue_between_the_two() {
     app.focus = FocusPane::Worker;
     // Nothing said yet: no empty box explaining that nobody has spoken.
     assert!(
-        !render_screen(&mut app, 140, 40).contains("dialogue"),
+        !render_screen(&mut app, 140, 40).contains("^w t hides"),
         "the strip stays away until there is a conversation to show"
     );
 
@@ -20533,7 +20533,7 @@ fn the_gam_split_renders_the_dialogue_between_the_two() {
         );
     }
     let screen = render_screen(&mut app, 140, 40);
-    assert!(screen.contains("dialogue"), "the strip is titled: {screen}");
+    assert!(screen.contains("dialogue · ^w t hides"), "the strip is titled: {screen}");
     assert!(screen.contains("reviewer: the burst window has no test"));
     assert!(screen.contains("generator: per-key by design"));
 
@@ -20626,7 +20626,7 @@ fn gam_stops_when_the_generator_repeats_itself() {
     assert!(
         matches!(
             app.agents[0].gam.as_ref().unwrap().phase,
-            GamPhase::Settled(GamOutcome::Escalated(_))
+            GamPhase::Settled(GamOutcome::Stalled(_))
         ),
         "a repeated round is a stall: {:?}",
         app.agents[0].gam.as_ref().unwrap().phase
@@ -20757,6 +20757,9 @@ fn gam_suggestions_drill_down_like_the_model_picker() {
     // from under the row-by-row comparison below.
     let _env = env_guard();
     let mut app = App::new();
+    app.backend = Backend::Claude;
+    app.model = "sonnet".to_string();
+    app.gam_last = None;
     // Bare "/gam" offers the reviewer picker, but the FIRST row is the
     // do-nothing path so the default selection never rewrites the line.
     app.task_input = "/gam".to_string();
@@ -20766,24 +20769,23 @@ fn gam_suggestions_drill_down_like_the_model_picker() {
         "the default row must keep the line, got {:?}",
         bare.first().map(|s| s.label.clone())
     );
+    // It names the default PAIR, so skipping the picker is an informed choice:
+    // your model writes, the other provider's flagship reviews.
+    let default_detail = bare.first().map(|s| s.detail.clone()).unwrap_or_default();
     assert!(
-        bare.first()
-            .is_some_and(|s| s.detail.contains("reviews it by default")),
-        "the default row must name who reviews when you skip the picker"
+        default_detail.contains("claude sonnet") && default_detail.contains("codex gpt-6.1-sol"),
+        "the default row must name both halves of the default pair: {default_detail}"
     );
-    // Three providers, not the flattened catalogue: 19 rows mixing three
-    // vendors' naming schemes into one column is not a legible choice.
+    // Reviewer providers only, not the flattened catalogue. opencode cannot
+    // review (no read-only sandbox), so offering it was a row that could only
+    // fail.
     assert_eq!(
         bare[1..]
             .iter()
             .map(|s| s.label.clone())
             .collect::<Vec<_>>(),
-        vec![
-            "claude".to_string(),
-            "codex".to_string(),
-            "opencode".to_string()
-        ],
-        "bare /gam offers the three providers"
+        vec!["claude".to_string(), "codex".to_string()],
+        "bare /gam offers the reviewer providers"
     );
     assert!(
         bare[1..]
@@ -20835,8 +20837,58 @@ fn gam_suggestions_drill_down_like_the_model_picker() {
         "every model row inserts into /gam, not defaults"
     );
 
-    // Once a model is chosen the rest of the line is task text.
+    // The SAME list /model shows, never a hardcoded duplicate.
+    assert_eq!(
+        models.iter().map(|s| s.label.clone()).collect::<Vec<_>>(),
+        model_suggestions_for(Backend::Codex, "")
+            .iter()
+            .map(|s| s.label.clone())
+            .collect::<Vec<_>>(),
+    );
+    assert!(gam_picker_title("/gam codex gpt-6.1-sol ", 1, 4).contains("pick the generator"));
+    assert!(gam_picker_title("/gam codex gpt-6.1-sol gen claude ", 1, 4)
+        .contains("pick the generator model · claude"));
+
+    // Reviewer chosen: the optional generator step. Its first row keeps the
+    // line (Enter means "now I type the task") and says who writes by default.
     app.task_input = "/gam codex gpt-5.5 ".to_string();
+    let step = suggestions_for(&app);
+    assert!(
+        matches!(step.first().map(|s| &s.action), Some(SuggestionAction::Insert(line)) if line == "/gam codex gpt-5.5 "),
+        "the generator step's first row keeps the line: {:?}",
+        step.first().map(|s| s.label.clone())
+    );
+    assert!(step[0].detail.contains("claude sonnet"), "{}", step[0].detail);
+    assert_eq!(
+        step[1..].iter().map(|s| s.label.clone()).collect::<Vec<_>>(),
+        vec!["gen claude", "gen codex", "gen opencode"],
+    );
+    // A task word ends the picker: the rest of the line is the task.
+    app.task_input = "/gam codex gpt-5.5 fix ".to_string();
+    assert!(suggestions_for(&app).is_empty());
+    app.task_input = "/gam codex gpt-5.5 fix the bug".to_string();
+    assert!(suggestions_for(&app).is_empty());
+
+    // `gen <provider> ` drills into the generator's models, from the same tables.
+    app.task_input = "/gam codex gpt-5.5 gen claude ".to_string();
+    let gen_models = suggestions_for(&app);
+    assert!(!gen_models.is_empty());
+    assert!(gen_models.iter().all(|s| matches!(
+        s.action,
+        SuggestionAction::ChooseGamGeneratorModel {
+            backend: Backend::Claude,
+            ..
+        }
+    )));
+    assert_eq!(
+        gen_models.iter().map(|s| s.label.clone()).collect::<Vec<_>>(),
+        model_suggestions_for(Backend::Claude, "")
+            .iter()
+            .map(|s| s.label.clone())
+            .collect::<Vec<_>>(),
+    );
+    // Once the generator's model is chosen, the line is the task's.
+    app.task_input = "/gam codex gpt-5.5 gen claude opus ".to_string();
     assert!(suggestions_for(&app).is_empty());
 }
 
@@ -21284,7 +21336,7 @@ fn the_gam_split_shows_how_to_reach_the_other_half() {
     // On the half you are NOT in: that is the one the chord takes you to.
     let hinted_line = screen
         .lines()
-        .find(|line| line.contains("^w a"))
+        .find(|line| line.contains("^w a") && line.contains("adv ·"))
         .unwrap_or_default();
     assert!(
         hinted_line.contains("adv ·"),
@@ -21470,6 +21522,8 @@ done
         task: "rewrite the retry logic".to_string(),
         adversarial_backend: Backend::Codex,
         adversarial_model: "gpt-5.5".to_string(),
+        adversarial_effort: None,
+        generator: None,
         in_main: true,
     });
 
@@ -21674,7 +21728,7 @@ fn a_generator_that_stops_making_progress_ends_the_pair() {
 
     let phase = app.agents[generator].gam.as_ref().unwrap().phase.clone();
     match phase {
-        GamPhase::Settled(GamOutcome::Escalated(reason)) => assert!(
+        GamPhase::Settled(GamOutcome::Stalled(reason)) => assert!(
             reason.contains("stopped making progress"),
             "the reason must name the stall: {reason}"
         ),
@@ -21683,7 +21737,7 @@ fn a_generator_that_stops_making_progress_ends_the_pair() {
     assert!(
         app.notice
             .as_deref()
-            .is_some_and(|n| n.contains("gam needs you")),
+            .is_some_and(|n| n.contains("gam stalled") && n.contains("/gam again")),
         "and it must ask the human: {:?}",
         app.notice
     );
@@ -21991,7 +22045,7 @@ fn gam_main_is_accepted_after_the_model_spec() {
         "main fix the auth bug",
     ];
     for rest in cases {
-        let request = parse_gam_args(rest, Backend::Codex, "gpt-5.5").expect("parses");
+        let request = parse_gam_args(rest, Backend::Codex).expect("parses");
         assert!(request.in_main, "[{rest}] should run in the main checkout");
         assert_eq!(
             request.task, "fix the auth bug",
@@ -22000,10 +22054,10 @@ fn gam_main_is_accepted_after_the_model_spec() {
     }
 
     // Not in main, and "main" as an ordinary task word is left alone.
-    let plain = parse_gam_args("claude opus fix the auth bug", Backend::Codex, "gpt-5.5").unwrap();
+    let plain = parse_gam_args("claude opus fix the auth bug", Backend::Codex).unwrap();
     assert!(!plain.in_main);
     let filename =
-        parse_gam_args("claude opus main.ts is broken", Backend::Codex, "gpt-5.5").unwrap();
+        parse_gam_args("claude opus main.ts is broken", Backend::Codex).unwrap();
     assert!(!filename.in_main, "main.ts is a path, not the keyword");
     assert_eq!(filename.task, "main.ts is broken");
 }
@@ -27288,4 +27342,607 @@ fn gods_view_tile_shows_the_live_pty_without_resizing_it() {
     assert!(screen.contains("hello from the tile"), "tile shows the pane:\n{screen}");
     let size = app.agents[0].terminal.as_ref().unwrap().size();
     assert_eq!((size.rows, size.cols), (40, 120), "the PTY keeps its own size");
+}
+
+// ---------------------------------------------------------------------------
+// /gam: picker, default pairing, remembered pair, status bar, /tell, keys
+// ---------------------------------------------------------------------------
+
+fn gam_bar_text(app: &App, width: usize) -> String {
+    gam_status_bar_line(app, 0, 1, width)
+        .spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect()
+}
+
+fn gam_set_phase(app: &mut App, phase: GamPhase) {
+    for index in [0usize, 1usize] {
+        app.agents[index].gam.as_mut().unwrap().phase = phase.clone();
+    }
+}
+
+/// With nothing named, the reviewer is the OTHER provider's flagship: a
+/// reviewer from the generator's own family shares its blind spots.
+#[test]
+fn gam_default_reviewer_is_the_other_providers_flagship() {
+    let from_claude = default_gam_reviewer(Backend::Claude);
+    assert_eq!(from_claude.backend, Backend::Codex);
+    assert_eq!(from_claude.model, flagship_model_for(Backend::Codex));
+    let from_codex = default_gam_reviewer(Backend::Codex);
+    assert_eq!(from_codex.backend, Backend::Claude);
+    assert_eq!(from_codex.model, flagship_model_for(Backend::Claude));
+    // opencode generators get a Claude reviewer: opencode cannot review.
+    assert_eq!(default_gam_reviewer(Backend::Opencode).backend, Backend::Claude);
+
+    let request = parse_gam_args("fix the auth bug", Backend::Claude).expect("parses");
+    assert_eq!(request.adversarial_model, flagship_model_for(Backend::Codex));
+    assert_eq!(request.adversarial_effort, from_claude.effort);
+    assert!(request.generator.is_none(), "no gen: the dashboard model writes");
+}
+
+/// "/gam claude fix the bug" used to run a reviewer on a model named "fix".
+#[test]
+fn gam_provider_alone_takes_its_flagship_and_leaves_the_task_alone() {
+    let request = parse_gam_args("claude fix the bug", Backend::Codex).expect("parses");
+    assert_eq!(request.adversarial_backend, Backend::Claude);
+    assert_eq!(request.adversarial_model, flagship_model_for(Backend::Claude));
+    assert_eq!(request.task, "fix the bug");
+
+    let codex = parse_gam_args("codex make the retries bounded", Backend::Claude).expect("parses");
+    assert_eq!(codex.adversarial_backend, Backend::Codex);
+    assert_eq!(codex.adversarial_model, flagship_model_for(Backend::Codex));
+    assert_eq!(codex.task, "make the retries bounded");
+}
+
+/// A typed effort used to be consumed and then dropped on the floor.
+#[test]
+fn gam_typed_effort_reaches_the_reviewer() {
+    let request = parse_gam_args("codex gpt-6.1-sol low tidy the logs", Backend::Claude)
+        .expect("parses");
+    assert_eq!(request.adversarial_model, "gpt-6.1-sol");
+    assert_eq!(request.adversarial_effort, Some(EffortLevel::Low));
+    assert_eq!(request.task, "tidy the logs");
+}
+
+/// `gen` names the generator; the reviewer then defaults across from IT, not
+/// from the dashboard's model.
+#[test]
+fn gam_gen_names_the_generator_and_main_goes_anywhere() {
+    let request = parse_gam_args("gen codex gpt-6.1-sol main port the parser", Backend::Claude)
+        .expect("parses");
+    let generator = request.generator.expect("gen side");
+    assert_eq!(generator.backend, Backend::Codex);
+    assert_eq!(generator.model, "gpt-6.1-sol");
+    assert!(request.in_main, "main after gen still counts");
+    assert_eq!(request.task, "port the parser");
+    assert_eq!(
+        request.adversarial_backend,
+        Backend::Claude,
+        "a Codex generator gets a Claude reviewer even on a Claude dashboard"
+    );
+
+    let both = parse_gam_args("fable gen claude sonnet high write the docs", Backend::Codex)
+        .expect("parses");
+    assert_eq!(both.adversarial_backend, Backend::Claude);
+    assert_eq!(both.adversarial_model, "fable", "a bare alias names the reviewer");
+    let generator = both.generator.expect("gen side");
+    assert_eq!(
+        (generator.backend, generator.model.as_str(), generator.effort),
+        (Backend::Claude, "sonnet", Some(EffortLevel::High))
+    );
+    assert_eq!(both.task, "write the docs");
+
+    // "gen" with nothing after it that names a side is just a task word.
+    let word = parse_gam_args("gen the fixtures again", Backend::Claude).expect("parses");
+    assert!(word.generator.is_none());
+    assert_eq!(word.task, "gen the fixtures again");
+}
+
+/// A remembered pair goes back on the task line as grammar; parsed again it
+/// must be exactly the pair that ran, effort "auto" included.
+#[test]
+fn gam_remembered_pair_round_trips_through_the_grammar() {
+    let pair = GamLastPair {
+        generator: GamSide {
+            backend: Backend::Claude,
+            model: "sonnet".to_string(),
+            effort: None,
+        },
+        reviewer: GamSide {
+            backend: Backend::Codex,
+            model: "gpt-6.1-sol".to_string(),
+            effort: Some(EffortLevel::XHigh),
+        },
+        in_main: true,
+        task: "old task".to_string(),
+    };
+    let line = pair.spec_line();
+    assert_eq!(line, "/gam main codex gpt-6.1-sol xhigh gen claude sonnet auto ");
+    let request = parse_gam_args(
+        &format!("{}tighten the cache", line.strip_prefix("/gam").unwrap()),
+        Backend::Codex,
+    )
+    .expect("parses");
+    assert!(request.in_main);
+    assert_eq!(request.task, "tighten the cache");
+    assert_eq!(
+        GamSide {
+            backend: request.adversarial_backend,
+            model: request.adversarial_model.clone(),
+            effort: request.adversarial_effort,
+        },
+        pair.reviewer
+    );
+    assert_eq!(request.generator.as_ref(), Some(&pair.generator));
+    assert_eq!(pair.reviewer.label(), "codex gpt-6.1-sol(xhigh)");
+}
+
+/// The picker builds the line one step at a time, the way /model does, and
+/// the line it builds parses into the pair that was picked.
+#[test]
+fn gam_picker_builds_a_pair_step_by_step() {
+    let _env = env_guard();
+    let home = unique_test_repo("gam-picker-home");
+    std::env::set_var("RUDDER_HOME", &home);
+    let mut app = App::new();
+    app.backend = Backend::Claude;
+    app.model = "sonnet".to_string();
+    app.gam_last = None;
+    app.focus = FocusPane::Task;
+
+    let pick = |app: &mut App, want: &dyn Fn(&SuggestionAction) -> bool| {
+        let suggestion = suggestions_for(app)
+            .into_iter()
+            .find(|s| want(&s.action))
+            .unwrap_or_else(|| panic!("no matching row for {:?}", app.task_input));
+        app.apply_suggestion(suggestion);
+        app.task_input.clone()
+    };
+
+    app.task_input = "/gam main".to_string();
+    app.task_cursor = app.task_input.len();
+    let line = pick(&mut app, &|a| {
+        matches!(a, SuggestionAction::ChooseGamProvider(Backend::Codex))
+    });
+    assert_eq!(line, "/gam main codex ", "the provider pick keeps `main`");
+    let line = pick(&mut app, &|a| {
+        matches!(a, SuggestionAction::ChooseGamModel { model, .. } if model == "gpt-6.1-sol")
+    });
+    assert!(line.starts_with("/gam main codex gpt-6.1-sol"), "{line}");
+    let line = pick(&mut app, &|a| {
+        matches!(a, SuggestionAction::ChooseGamGeneratorProvider(Backend::Claude))
+    });
+    assert!(line.ends_with(" gen claude "), "{line}");
+    let line = pick(&mut app, &|a| {
+        matches!(a, SuggestionAction::ChooseGamGeneratorModel { model, .. } if model == "opus")
+    });
+    assert!(line.ends_with(" gen claude opus "), "{line}");
+
+    // Model picked on both sides: the palette gets out of the way of the task.
+    app.task_input = format!("{line}fix the flaky test");
+    app.task_cursor = app.task_input.len();
+    assert!(
+        suggestions_for(&app).is_empty(),
+        "task words must not keep a picker open"
+    );
+    let request = parse_gam_args(app.task_input.strip_prefix("/gam").unwrap(), Backend::Claude)
+        .expect("the built line parses");
+    assert!(request.in_main);
+    assert_eq!(request.adversarial_backend, Backend::Codex);
+    assert_eq!(request.adversarial_model, "gpt-6.1-sol");
+    let generator = request.generator.expect("gen side");
+    assert_eq!((generator.backend, generator.model.as_str()), (Backend::Claude, "opus"));
+    assert_eq!(request.task, "fix the flaky test");
+
+    // The task bar previews the pair before Enter.
+    let preview = gam_line_preview(&app, &app.task_input).expect("preview");
+    assert!(
+        preview.contains("claude opus") && preview.contains("codex gpt-6.1-sol"),
+        "{preview}"
+    );
+    assert!(preview.contains("in this checkout"), "{preview}");
+    let _ = fs::remove_dir_all(&home);
+}
+
+/// A remembered pair is offered on bare /gam: put back on the line, or rerun
+/// outright.
+#[test]
+fn gam_picker_offers_the_last_pair() {
+    let _env = env_guard();
+    let home = unique_test_repo("gam-last-home");
+    std::env::set_var("RUDDER_HOME", &home);
+    let mut app = App::new();
+    app.backend = Backend::Claude;
+    app.model = "sonnet".to_string();
+    let pair = GamLastPair {
+        generator: GamSide {
+            backend: Backend::Claude,
+            model: "sonnet".to_string(),
+            effort: Some(EffortLevel::High),
+        },
+        reviewer: GamSide {
+            backend: Backend::Codex,
+            model: "gpt-6.1-sol".to_string(),
+            effort: Some(EffortLevel::XHigh),
+        },
+        in_main: false,
+        task: "harden the retry loop".to_string(),
+    };
+    app.gam_last = Some(pair.clone());
+    app.task_input = "/gam".to_string();
+    let rows = suggestions_for(&app);
+    assert!(
+        rows.iter()
+            .any(|s| matches!(&s.action, SuggestionAction::Insert(line) if *line == pair.spec_line())),
+        "the same pair goes back on the line: {:?}",
+        rows.iter().map(|s| s.label.clone()).collect::<Vec<_>>()
+    );
+    assert!(
+        rows.iter()
+            .any(|s| matches!(&s.action, SuggestionAction::RunCommand(cmd) if cmd == "/gam again")),
+        "/gam again reruns it"
+    );
+    let preview = gam_line_preview(&app, "/gam again").expect("preview");
+    assert!(preview.contains("harden the retry loop") || preview.contains("codex gpt-6.1-sol"), "{preview}");
+    let _ = fs::remove_dir_all(&home);
+}
+
+#[test]
+fn gam_again_without_a_pair_says_how_to_start_one() {
+    let mut app = App::new();
+    app.gam_last = None;
+    app.start_task_from_input("/gam again");
+    assert!(app.agents.is_empty(), "nothing launches");
+    let notice = app.notice.clone().unwrap_or_default();
+    assert!(notice.contains("no earlier pair"), "{notice}");
+}
+
+/// `gam.last` in config.json survives a save and a reload.
+#[test]
+fn gam_last_pair_round_trips_through_the_config() {
+    let _env = env_guard();
+    let home = unique_test_repo("gam-config-home");
+    std::env::set_var("RUDDER_HOME", &home);
+    let pair = GamLastPair {
+        generator: GamSide {
+            backend: Backend::Codex,
+            model: "gpt-6.1-sol".to_string(),
+            effort: None,
+        },
+        reviewer: GamSide {
+            backend: Backend::Claude,
+            model: "opus".to_string(),
+            effort: Some(EffortLevel::Max),
+        },
+        in_main: true,
+        task: "split the parser".to_string(),
+    };
+    save_gam_last_pair(&pair).expect("saves");
+    let path = rudder_config_path().expect("config path");
+    let config: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&path).expect("written")).expect("json");
+    assert_eq!(config_gam_last_pair(&config), Some(pair));
+    let _ = fs::remove_dir_all(&home);
+}
+
+/// Every way a pair can end says how it ended, why, and what to do next.
+#[cfg(not(windows))]
+#[test]
+fn gam_status_bar_states_each_outcome_and_the_next_step() {
+    let dir = unique_test_repo("gam-outcomes");
+    let mut app = App::new();
+    app.cwd = dir.clone();
+    gam_test_pair(&mut app, "standing by");
+
+    // Running: round, who has the ball, what to press.
+    let running = gam_bar_text(&app, 200);
+    assert!(running.contains("round 1"), "{running}");
+    assert!(running.contains("first draft"), "{running}");
+    assert!(running.contains("x stop"), "{running}");
+
+    for (index, side) in [(0usize, GamRole::Generator), (1usize, GamRole::Adversarial)] {
+        let gam = app.agents[index].gam.as_mut().unwrap();
+        let _ = side;
+        gam.say(GamRole::Adversarial, GamMessageKind::Accept, "satisfies the task");
+    }
+    gam_set_phase(&mut app, GamPhase::Settled(GamOutcome::Accepted));
+    let accepted = gam_bar_text(&app, 200);
+    assert!(accepted.contains("✓ accepted"), "{accepted}");
+    assert!(accepted.contains("satisfies the task"), "{accepted}");
+    assert!(accepted.contains("/gam again"), "{accepted}");
+
+    gam_set_phase(
+        &mut app,
+        GamPhase::Settled(GamOutcome::Escalated("the schema change needs a decision".to_string())),
+    );
+    let escalated = gam_bar_text(&app, 200);
+    assert!(escalated.contains("needs you"), "{escalated}");
+    assert!(escalated.contains("the schema change needs a decision"), "{escalated}");
+    assert!(escalated.contains("answer in either pane"), "{escalated}");
+
+    gam_set_phase(
+        &mut app,
+        GamPhase::Settled(GamOutcome::Halted("kept editing the wrong module".to_string())),
+    );
+    let halted = gam_bar_text(&app, 200);
+    assert!(halted.contains("the reviewer stopped it"), "{halted}");
+    assert!(halted.contains("kept editing the wrong module"), "{halted}");
+    assert!(halted.contains("ask it why"), "{halted}");
+
+    gam_set_phase(
+        &mut app,
+        GamPhase::Settled(GamOutcome::Stalled("same diff two rounds running".to_string())),
+    );
+    let stalled = gam_bar_text(&app, 200);
+    assert!(stalled.starts_with("stalled"), "{stalled}");
+    assert!(stalled.contains("same diff two rounds running"), "{stalled}");
+    assert!(stalled.contains("nudge the generator"), "{stalled}");
+
+    gam_set_phase(&mut app, GamPhase::Settled(GamOutcome::StoppedByUser));
+    let stopped = gam_bar_text(&app, 200);
+    assert!(stopped.contains("you ended the loop"), "{stopped}");
+
+    // Narrow: a settled sentence wraps to a second row instead of losing the
+    // next step to an ellipsis.
+    gam_set_phase(
+        &mut app,
+        GamPhase::Settled(GamOutcome::Escalated("the schema change needs a decision".to_string())),
+    );
+    let rows = gam_status_bar_lines(&app, 0, 1, 60, 2);
+    assert_eq!(rows.len(), 2, "wrapped onto two rows");
+    let joined: String = rows
+        .iter()
+        .flat_map(|line| line.spans.iter().map(|span| span.content.to_string()))
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(joined.contains("/gam again"), "{joined}");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// The sidebar must not say "done · press m" while the work is under review.
+#[cfg(not(windows))]
+#[test]
+fn gam_sidebar_labels_follow_the_pair() {
+    let dir = unique_test_repo("gam-labels");
+    let mut app = App::new();
+    app.cwd = dir.clone();
+    gam_test_pair(&mut app, "standing by");
+    gam_set_phase(&mut app, GamPhase::AwaitingVerdict);
+    assert_eq!(agent_status_label(&app.agents[0]), "gam \u{b7} under review");
+    assert_eq!(agent_status_label(&app.agents[1]), "reviewer \u{b7} standing by");
+    gam_set_phase(&mut app, GamPhase::Settled(GamOutcome::Accepted));
+    assert_eq!(agent_status_label(&app.agents[1]), "reviewer \u{b7} accepted");
+    gam_set_phase(&mut app, GamPhase::Settled(GamOutcome::Stalled(String::new())));
+    assert_eq!(agent_status_label(&app.agents[0]), "gam \u{b7} stalled");
+    gam_set_phase(&mut app, GamPhase::Settled(GamOutcome::Halted(String::new())));
+    assert_eq!(agent_status_label(&app.agents[0]), "stopped by reviewer");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn gam_new_outcomes_and_queued_notes_survive_a_reload() {
+    let mut gam = GamState::new(
+        GamRole::Generator,
+        "peer".to_string(),
+        "swap the router".to_string(),
+    );
+    gam.phase = GamPhase::Settled(GamOutcome::Stalled("same diff twice".to_string()));
+    gam.user_notes = vec!["the router tests are flaky on CI".to_string()];
+    let record = serde_json::json!({ "gam": gitio::gam_state_to_json(&gam) });
+    let loaded = gitio::gam_state_from_record(&record).expect("reloads");
+    assert_eq!(loaded.phase, gam.phase);
+    assert_eq!(loaded.user_notes, gam.user_notes);
+
+    gam.phase = GamPhase::Settled(GamOutcome::StoppedByUser);
+    let record = serde_json::json!({ "gam": gitio::gam_state_to_json(&gam) });
+    assert_eq!(
+        gitio::gam_state_from_record(&record).expect("reloads").phase,
+        GamPhase::Settled(GamOutcome::StoppedByUser)
+    );
+}
+
+/// `/tell` queues a note for the reviewer's next packet, where it arrives
+/// labelled as yours, and is cleared once delivered.
+#[cfg(not(windows))]
+#[test]
+fn gam_tell_rides_along_with_the_next_review() {
+    let dir = unique_test_repo("gam-tell");
+    let mut app = App::new();
+    app.cwd = dir.clone();
+    gam_test_pair(&mut app, "standing by");
+    app.start_task_from_input("/tell check the migration rollback path");
+    assert_eq!(
+        app.agents[0].gam.as_ref().unwrap().user_notes,
+        vec!["check the migration rollback path".to_string()]
+    );
+    assert!(
+        app.notice.clone().unwrap_or_default().contains("next review"),
+        "{:?}",
+        app.notice
+    );
+    assert!(gam_bar_text(&app, 200).contains("1 note queued"));
+    let packet = gam_review_packet(app.agents[0].gam.as_ref().unwrap(), "diff");
+    assert!(packet.contains("FROM THE USER"), "{packet}");
+    assert!(packet.contains("check the migration rollback path"));
+
+    app.poll_gam_pairs();
+    let log = wait_for_log(&dir, "reviewer.log", "check the migration rollback path");
+    assert!(log.contains("FROM THE USER"), "delivered with the packet: {log:?}");
+    assert!(
+        app.agents[0].gam.as_ref().unwrap().user_notes.is_empty(),
+        "a delivered note is not sent twice"
+    );
+    // It stays in the dialogue, attributed to you.
+    assert!(app.agents[0]
+        .gam
+        .as_ref()
+        .unwrap()
+        .transcript
+        .iter()
+        .any(|m| m.kind == GamMessageKind::Note));
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// `^W x` ends the loop by hand; `^W i` starts a note to the reviewer.
+#[cfg(not(windows))]
+#[test]
+fn gam_leader_keys_stop_and_brief() {
+    let dir = unique_test_repo("gam-keys");
+    let mut app = App::new();
+    app.cwd = dir.clone();
+    gam_test_pair(&mut app, "standing by");
+    app.focus = FocusPane::Worker;
+
+    app.handle_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL));
+    app.handle_key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE));
+    assert_eq!(app.task_input, "/tell ");
+    assert_eq!(app.focus, FocusPane::Task);
+
+    app.focus = FocusPane::Worker;
+    app.handle_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL));
+    app.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+    assert_eq!(
+        app.agents[0].gam.as_ref().unwrap().phase,
+        GamPhase::Settled(GamOutcome::StoppedByUser)
+    );
+    assert_eq!(
+        app.agents[1].gam.as_ref().unwrap().phase,
+        GamPhase::Settled(GamOutcome::StoppedByUser)
+    );
+    assert!(app.agents[0].terminal.is_some(), "both panes stay live");
+    // A second stop says the pair is already over rather than doing it again.
+    app.handle_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL));
+    app.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+    assert!(app.notice.clone().unwrap_or_default().contains("already ended"));
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// Stopping the generator from its row (`x`) used to leave the pair
+/// "writing the first draft" forever.
+#[cfg(not(windows))]
+#[test]
+fn gam_a_stopped_generator_settles_the_pair() {
+    let dir = unique_test_repo("gam-gen-gone");
+    let mut app = App::new();
+    app.cwd = dir.clone();
+    gam_test_pair(&mut app, "standing by");
+    app.agents[0].status = AgentStatus::Stopped;
+    app.agents[0].terminal = None;
+    app.poll_gam_pairs();
+    assert_eq!(
+        app.agents[0].gam.as_ref().unwrap().phase,
+        GamPhase::Settled(GamOutcome::StoppedByUser)
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// End to end through the real launch path with fake CLIs: a typed pair runs
+/// to an accepted verdict, the bar says so, and the pair is remembered so
+/// `/gam again` reruns it.
+#[cfg(not(windows))]
+#[test]
+fn gam_pair_runs_to_acceptance_and_is_remembered() {
+    let _env = env_guard();
+    let dir = unique_test_repo("gam-e2e-accept");
+    fs::create_dir_all(&dir).expect("repo dir");
+    std::env::set_var("RUDDER_HOME", dir.join("home"));
+    let gen_log = dir.join("gen.log");
+    let fake_claude = dir.join("fake-claude.sh");
+    write_fake_bin(&fake_claude, &format!(r#"#!/bin/sh
+settings=""
+prev=""
+for a in "$@"; do
+  [ "$prev" = "--settings" ] && settings="$a"
+  prev="$a"
+done
+printf 'generator: implementing\n'
+sleep 1
+if [ -n "$settings" ]; then
+  sig=$(grep -o "/[^']*/signals/[^']*\.json" "$settings" | head -1)
+  if [ -n "$sig" ]; then
+    mkdir -p "$(dirname "$sig")"
+    printf '{{"state":"done"}}' > "$sig"
+  fi
+fi
+cat >> {log}
+"#, log = shell_single_quote(&gen_log.to_string_lossy())));
+    let adv_log = dir.join("adv.log");
+    let fake_codex = dir.join("fake-codex.sh");
+    write_fake_bin(&fake_codex, &format!(r#"#!/bin/sh
+notify=""
+for a in "$@"; do
+  case "$a" in
+    notify=*) notify=$(printf '%s' "$a" | sed 's/^notify=\["//; s/"\]$//') ;;
+  esac
+done
+fire() {{ [ -n "$notify" ] && sh "$notify" '{{"type":"agent-turn-complete"}}' >/dev/null 2>&1; }}
+printf 'standing by\n'
+fire
+while IFS= read -r line; do
+  printf '%s\n' "$line" >> {log}
+  case "$line" in
+    *"pages the human"*)
+      sleep 1
+      printf 'RUDDER_GAM_VERDICT_START\n'
+      printf '{{"verdict":"accept","message":"satisfies the task"}}\n'
+      printf 'RUDDER_GAM_VERDICT_END\n'
+      fire
+      ;;
+  esac
+done
+"#, log = shell_single_quote(&adv_log.to_string_lossy())));
+    std::env::set_var("RUDDER_CLAUDE_BIN", &fake_claude);
+    std::env::set_var("RUDDER_CODEX_BIN", &fake_codex);
+    let mut app = App::new();
+    app.cwd = dir.clone();
+    app.backend = Backend::Claude;
+    app.model = "sonnet".to_string();
+    app.gam_last = None;
+    app.start_task_from_input("/gam main codex gpt-6.1-sol high rewrite the retry logic");
+    assert_eq!(app.agents.len(), 2, "notice: {:?}", app.notice);
+    assert!(
+        app.notice.clone().unwrap_or_default().contains("gam started"),
+        "the launch says who writes and who reviews: {:?}",
+        app.notice
+    );
+    let mut settled = None;
+    for _ in 0..300 {
+        app.poll_agents();
+        app.poll_gam_pairs();
+        if let Some(GamPhase::Settled(outcome)) = app.agents[0].gam.as_ref().map(|g| g.phase.clone()) {
+            settled = Some(outcome);
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert_eq!(settled, Some(GamOutcome::Accepted), "notice: {:?}", app.notice);
+    app.selected_agent = 0;
+    app.focus = FocusPane::Worker;
+    let screen = render_screen(&mut app, 140, 40);
+    assert!(screen.contains("✓ accepted"), "{screen}");
+    assert!(screen.contains("satisfies the task"), "{screen}");
+
+    // Remembered, in memory and on disk.
+    let remembered = app.gam_last.clone().expect("the pair is remembered");
+    assert_eq!(remembered.task, "rewrite the retry logic");
+    assert_eq!(remembered.reviewer.effort, Some(EffortLevel::High));
+    assert_eq!(remembered.generator.model, "sonnet");
+    assert!(remembered.in_main);
+    let config: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(rudder_config_path().expect("path")).expect("config written"),
+    )
+    .expect("json");
+    assert_eq!(config_gam_last_pair(&config), Some(remembered.clone()));
+
+    // `/gam again` launches the same pair on the same task.
+    app.start_task_from_input("/gam again");
+    assert_eq!(app.agents.len(), 4, "notice: {:?}", app.notice);
+    let models = app.agents[2..]
+        .iter()
+        .map(|run| (run.backend, run.model.clone()))
+        .collect::<Vec<_>>();
+    assert!(models.contains(&(Backend::Claude, "sonnet".to_string())), "{models:?}");
+    assert!(models.contains(&(Backend::Codex, "gpt-6.1-sol".to_string())), "{models:?}");
+    let _ = fs::remove_dir_all(&dir);
 }

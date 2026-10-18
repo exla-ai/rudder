@@ -48,6 +48,13 @@ pub(crate) fn fast_model_for(backend: Backend) -> &'static str {
     }
 }
 
+/// Each provider's flagship: what `/gam` reviews with when you do not pick a
+/// model, and what a bare provider name ("/gam claude ...") means. The same
+/// models `/fast` selects, because both mean "the best this provider has".
+pub(crate) fn flagship_model_for(backend: Backend) -> &'static str {
+    fast_model_for(backend)
+}
+
 pub(crate) fn default_effort_for(backend: Backend, model: &str) -> Option<EffortLevel> {
     let options = effort_options_for(backend, model);
     if options.contains(&Some(EffortLevel::XHigh)) {
@@ -242,36 +249,13 @@ pub(crate) fn suggestions_for(app: &App) -> Vec<Suggestion> {
         // Past that, /gam is a task command. The picker stays open only while
         // the first word is still a partial PROVIDER name, matched by strict
         // prefix, so an ordinary ask never turns back into a model chooser.
-        let rest = input.strip_prefix("/gam").unwrap_or_default().trim_start();
+        let rest = input.strip_prefix("/gam").unwrap_or_default();
+        // "/gamble" is not /gam.
+        if !rest.is_empty() && !rest.starts_with(char::is_whitespace) {
+            return rank_suggestions(command_suggestions(), input.trim_start_matches('/'));
+        }
         maybe_refresh_models_dev_cache();
-        if rest.is_empty() {
-            return gam_reviewer_suggestions(app.backend);
-        }
-        {
-            let trailing_space = rest.ends_with(char::is_whitespace);
-            let parts = rest.split_whitespace().collect::<Vec<_>>();
-            return match parts
-                .first()
-                .and_then(|provider| provider_backend(provider))
-            {
-                // A named provider: offer its models, still filtering while the
-                // model token is being typed. A trailing space after the model
-                // means the rest of the line is task text, so the palette goes
-                // away.
-                Some(backend) => match parts.as_slice() {
-                    [_provider] => gam_model_suggestions(backend, ""),
-                    [_provider, model] if !trailing_space => gam_model_suggestions(backend, model),
-                    _ => Vec::new(),
-                },
-                // Not a provider. Only a lone, still-being-typed first word can
-                // be a provider the user has not finished spelling; a second
-                // word proves the line is task text ("/gam clean up auth").
-                None => match parts.as_slice() {
-                    [candidate] if !trailing_space => gam_provider_prefix_suggestions(candidate),
-                    _ => Vec::new(),
-                },
-            };
-        }
+        return gam_suggestions(app, rest.trim_start());
     }
     rank_suggestions(command_suggestions(), input.trim_start_matches('/'))
 }
@@ -571,13 +555,23 @@ pub(crate) fn command_suggestions() -> Vec<Suggestion> {
         },
         Suggestion {
             label: "/gam <task>".to_string(),
-            detail: "generator + adversarial reviewer pair: reviewer questions every round, only the generator edits".to_string(),
+            detail: "two models on one task: one writes, the other (read-only) reviews every turn until it accepts".to_string(),
             action: SuggestionAction::Insert("/gam ".to_string()),
         },
         Suggestion {
-            label: "/gam <model> <task>".to_string(),
-            detail: "pick the adversarial reviewer's model inline (e.g. /gam codex gpt-6.1-sol fix auth)".to_string(),
+            label: "/gam <reviewer> [gen <generator>] <task>".to_string(),
+            detail: "pick the models inline, e.g. /gam codex gpt-6.1-sol gen claude opus fix auth".to_string(),
             action: SuggestionAction::Insert("/gam ".to_string()),
+        },
+        Suggestion {
+            label: "/gam again".to_string(),
+            detail: "rerun your last /gam pair on its last task".to_string(),
+            action: SuggestionAction::RunCommand("/gam again".to_string()),
+        },
+        Suggestion {
+            label: "/tell <note>".to_string(),
+            detail: "brief the /gam reviewer; the note rides along with its next review".to_string(),
+            action: SuggestionAction::Insert("/tell ".to_string()),
         },
         Suggestion {
             label: "/resume".to_string(),
@@ -799,70 +793,231 @@ pub(crate) fn provider_suggestions(query: &str) -> Vec<Suggestion> {
     rank_suggestions(suggestions, query)
 }
 
-/// The three provider rows of the `/gam` picker. Every label says what the
-/// choice is FOR: this picks the model that argues with the generator, it does
-/// not touch the dashboard's own backend or model.
+/// The reviewer providers `/gam` can run. opencode is left out on purpose: it
+/// has no read-only sandbox, so `start_gam_task` refuses it as a reviewer, and
+/// offering a row that can only fail was a trap.
+const GAM_REVIEWER_BACKENDS: [(Backend, &str); 2] =
+    [(Backend::Claude, "Claude Code"), (Backend::Codex, "Codex")];
+
+/// Every provider can WRITE the code.
+const GAM_GENERATOR_BACKENDS: [(Backend, &str); 3] = [
+    (Backend::Claude, "Claude Code"),
+    (Backend::Codex, "Codex"),
+    (Backend::Opencode, "opencode"),
+];
+
+/// The reviewer provider rows. Each says what the choice is FOR (this picks
+/// the model that argues with the generator; it does not touch the dashboard's
+/// own model) and what you get if you stop at the provider: its flagship.
 fn gam_provider_rows() -> impl Iterator<Item = Suggestion> {
-    [
-        (Backend::Claude, "Claude Code"),
-        (Backend::Codex, "Codex"),
-        (Backend::Opencode, "opencode"),
-    ]
-    .into_iter()
-    .map(|(backend, name)| Suggestion {
-        label: backend.as_str().to_string(),
-        detail: format!("review with {name} · pick its model next"),
-        action: SuggestionAction::ChooseGamProvider(backend),
-    })
+    GAM_REVIEWER_BACKENDS
+        .into_iter()
+        .map(|(backend, name)| Suggestion {
+            label: backend.as_str().to_string(),
+            detail: format!(
+                "review with {name} · pick its model next (flagship: {})",
+                flagship_model_for(backend)
+            ),
+            action: SuggestionAction::ChooseGamProvider(backend),
+        })
 }
 
-/// What bare `/gam` shows: the three providers a reviewer can run on, then its
-/// models once one is named.
+fn gam_generator_provider_rows() -> impl Iterator<Item = Suggestion> {
+    GAM_GENERATOR_BACKENDS
+        .into_iter()
+        .map(|(backend, name)| Suggestion {
+            label: format!("gen {}", backend.as_str()),
+            detail: format!("write it with {name} instead · pick its model next"),
+            action: SuggestionAction::ChooseGamGeneratorProvider(backend),
+        })
+}
+
+/// The generator a `/gam` line would run with when it does not say `gen`: the
+/// dashboard's own model.
+pub(crate) fn dashboard_gam_generator(app: &App) -> GamSide {
+    GamSide {
+        backend: app.backend,
+        model: app.model.clone(),
+        effort: app.effort,
+    }
+}
+
+/// What bare `/gam` shows.
 ///
-/// Providers rather than every model at once. Flattening the catalogue put 19
-/// rows on screen and mixed three vendors' naming schemes into one column; the
-/// two-step read is what makes the choice legible.
+/// 1. `/gam <task>`: the do-nothing path, FIRST so the default selection under
+///    the cursor keeps whatever the user is typing rather than rewriting the
+///    line. Its detail names the pair you get by default, so skipping the
+///    picker is an informed choice.
+/// 2. The last pair you ran (if any), to reuse with a new task, and `/gam
+///    again` to rerun it on the same task.
+/// 3. The reviewer providers, which drill into their models.
 ///
-/// This appears ONLY on the bare command. The moment a character follows
-/// `/gam `, the strict rules take over, so a task word can never pull the picker
-/// back up mid-sentence.
+/// Providers rather than every model at once: flattening the catalogue put 19
+/// rows on screen and mixed three vendors' naming schemes into one column.
 ///
-/// The FIRST row is the do-nothing path, so the default selection under the
-/// cursor keeps whatever the user is typing rather than rewriting the line.
-pub(crate) fn gam_reviewer_suggestions(default_backend: Backend) -> Vec<Suggestion> {
-    let auto = cross_gam_backend(default_backend);
+/// This appears ONLY on the bare command. The moment a word follows `/gam `,
+/// the strict rules in `gam_suggestions` take over, so a task word can never
+/// pull the picker back up mid-sentence.
+pub(crate) fn gam_reviewer_suggestions(app: &App) -> Vec<Suggestion> {
+    let generator = dashboard_gam_generator(app);
+    let reviewer = default_gam_reviewer(generator.backend);
     let mut rows = vec![Suggestion {
         label: "/gam <task>".to_string(),
         detail: format!(
-            "just type the task · {} reviews it by default",
-            auto.as_str()
+            "just type the task · {} writes, {} reviews",
+            generator.label(),
+            reviewer.label()
         ),
         action: SuggestionAction::Insert("/gam ".to_string()),
     }];
+    if let Some(last) = app.gam_last.as_ref() {
+        rows.push(Suggestion {
+            label: "same pair".to_string(),
+            detail: format!(
+                "{} writes, {} reviews · then type a new task",
+                last.generator.label(),
+                last.reviewer.label()
+            ),
+            action: SuggestionAction::Insert(last.spec_line()),
+        });
+        if !last.task.trim().is_empty() {
+            rows.push(Suggestion {
+                label: "/gam again".to_string(),
+                detail: format!(
+                    "rerun the last pair on \"{}\"",
+                    truncate_chars(last.task.trim(), 48)
+                ),
+                action: SuggestionAction::RunCommand("/gam again".to_string()),
+            });
+        }
+    }
     rows.extend(gam_provider_rows());
     rows
 }
 
+/// The reviewer is chosen; offer the optional generator step. The first row
+/// keeps the line (so Enter just means "now I type the task") and says who
+/// writes the code if you do.
+fn gam_generator_step_suggestions(app: &App, line: &str) -> Vec<Suggestion> {
+    let generator = dashboard_gam_generator(app);
+    let mut rows = vec![Suggestion {
+        label: "<task>".to_string(),
+        detail: format!(
+            "type the task · {} writes it (your model)",
+            generator.label()
+        ),
+        action: SuggestionAction::Insert(line.to_string()),
+    }];
+    rows.extend(gam_generator_provider_rows());
+    rows
+}
+
+/// The `/gam` palette for the text after the command.
+///
+/// A small state machine over the words typed so far, and STRICT: a row shows
+/// only while every word is part of a model spec being picked (a provider name
+/// being spelled, its model, `gen`, the generator's provider and model). The
+/// first word that is not a spec word means the line is task text and the
+/// palette goes away, so an ordinary ask never turns into a model chooser.
+pub(crate) fn gam_suggestions(app: &App, rest: &str) -> Vec<Suggestion> {
+    if rest.trim().is_empty() {
+        return gam_reviewer_suggestions(app);
+    }
+    let trailing = rest.ends_with(char::is_whitespace);
+    let all = rest.split_whitespace().collect::<Vec<_>>();
+    // A leading `main` only changes where the pair works.
+    let words = match all.first() {
+        Some(&"main") => &all[1..],
+        _ => &all[..],
+    };
+    let line = format!("/gam {}", rest);
+    match words.iter().position(|word| *word == "gen") {
+        None => match words {
+            [] => gam_provider_rows().collect(),
+            [candidate] if !trailing => gam_provider_prefix_suggestions(candidate),
+            [provider] => match provider_backend(provider) {
+                Some(backend) if GAM_REVIEWER_BACKENDS.iter().any(|(b, _)| *b == backend) => {
+                    gam_model_suggestions(backend, "")
+                }
+                _ => Vec::new(),
+            },
+            [provider, model] if !trailing => match provider_backend(provider) {
+                Some(backend) if GAM_REVIEWER_BACKENDS.iter().any(|(b, _)| *b == backend) => {
+                    gam_model_suggestions(backend, model)
+                }
+                _ => Vec::new(),
+            },
+            // Reviewer picked (optionally with an effort word): the generator
+            // step, which you can skip by just typing.
+            [provider, _model] | [provider, _model, _] if trailing => {
+                let effort_ok = words
+                    .get(2)
+                    .is_none_or(|word| word.eq_ignore_ascii_case("auto") || parse_effort_arg(word).is_some());
+                if provider_backend(provider).is_some() && effort_ok {
+                    gam_generator_step_suggestions(app, &line)
+                } else {
+                    Vec::new()
+                }
+            }
+            _ => Vec::new(),
+        },
+        Some(gen_at) => match &words[gen_at + 1..] {
+            [] if trailing => gam_generator_provider_rows().collect(),
+            [candidate] if !trailing => gam_generator_provider_rows()
+                .filter(|row| {
+                    row.label
+                        .strip_prefix("gen ")
+                        .is_some_and(|name| name.starts_with(&candidate.to_ascii_lowercase()))
+                })
+                .collect(),
+            [provider] => provider_backend(provider)
+                .map(|backend| gam_generator_model_suggestions(backend, ""))
+                .unwrap_or_default(),
+            [provider, model] if !trailing => provider_backend(provider)
+                .map(|backend| gam_generator_model_suggestions(backend, model))
+                .unwrap_or_default(),
+            _ => Vec::new(),
+        },
+    }
+}
+
 /// Palette title for the `/gam` picker. The rows are model names, which on
 /// their own look exactly like the `/model` picker and read as "this is about
-/// to change my model" — the title is what says whose model it is.
+/// to change my model"; the title is what says whose model it is.
 pub(crate) fn gam_picker_title(input: &str, selected: usize, total: usize) -> String {
     let rest = input
         .trim_start()
         .strip_prefix("/gam")
-        .unwrap_or_default()
-        .trim();
-    let step = match rest.split_whitespace().next() {
-        Some(provider) if provider_backend(provider).is_some() => {
-            format!("pick the adversarial model · {provider}")
+        .unwrap_or_default();
+    let words = rest
+        .split_whitespace()
+        .filter(|word| *word != "main")
+        .collect::<Vec<_>>();
+    let trailing = rest.ends_with(char::is_whitespace);
+    let step = if let Some(gen_at) = words.iter().position(|word| *word == "gen") {
+        match words.get(gen_at + 1) {
+            Some(provider) if provider_backend(provider).is_some() => {
+                format!("pick the generator model · {provider}")
+            }
+            _ => "pick the generator (who writes the code)".to_string(),
         }
-        Some(_) => "pick the adversarial reviewer".to_string(),
-        None => "pick the adversarial model".to_string(),
+    } else {
+        match words.as_slice() {
+            [] => "pick the adversarial model".to_string(),
+            [provider] if provider_backend(provider).is_some() => {
+                format!("pick the adversarial model · {provider}")
+            }
+            [provider, _] if !trailing && provider_backend(provider).is_some() => {
+                format!("pick the adversarial model · {provider}")
+            }
+            [_, _] | [_, _, _] => "optional: pick the generator, or just type the task".to_string(),
+            _ => "pick the adversarial reviewer".to_string(),
+        }
     };
     format!(" {step} · {selected}/{total} ")
 }
 
-/// Provider rows filtered by what has been typed so far.
+/// Reviewer provider rows filtered by what has been typed so far.
 ///
 /// STRICT prefix match, deliberately not the fuzzy ranker every other palette
 /// uses. Fuzzy matching surfaced "codex" for "code" and a provider row for any
@@ -887,8 +1042,9 @@ pub(crate) fn gam_provider_prefix_suggestions(query: &str) -> Vec<Suggestion> {
 /// nineteen rows repeated what the title already said and pushed the actual
 /// model description off the end of the line.
 ///
-/// Effort is intentionally not offered here: it is derived from the chosen
-/// model, and the rest of the line belongs to the task text.
+/// Effort is not a picker step: it defaults from the model (shown in the
+/// task bar's preview of the pair), and an effort word typed after the model
+/// overrides it.
 pub(crate) fn gam_model_suggestions(backend_filter: Backend, query: &str) -> Vec<Suggestion> {
     model_suggestions_for(backend_filter, query)
         .into_iter()
@@ -900,6 +1056,72 @@ pub(crate) fn gam_model_suggestions(backend_filter: Backend, query: &str) -> Vec
             _ => suggestion,
         })
         .collect()
+}
+
+/// The generator's model rows, from the same tables.
+pub(crate) fn gam_generator_model_suggestions(
+    backend_filter: Backend,
+    query: &str,
+) -> Vec<Suggestion> {
+    model_suggestions_for(backend_filter, query)
+        .into_iter()
+        .map(|suggestion| match suggestion.action {
+            SuggestionAction::ChooseModel { backend, model } => Suggestion {
+                action: SuggestionAction::ChooseGamGeneratorModel { backend, model },
+                ..suggestion
+            },
+            _ => suggestion,
+        })
+        .collect()
+}
+
+/// The pair a `/gam` line would start, for the task bar to show while you
+/// type it. `None` when the line is not a launchable `/gam` yet.
+pub(crate) fn gam_line_preview(app: &App, input: &str) -> Option<String> {
+    let rest = input.trim_start().strip_prefix("/gam")?;
+    if !rest.is_empty() && !rest.starts_with(char::is_whitespace) {
+        return None;
+    }
+    let rest = rest.trim();
+    if rest == "again" {
+        return Some(match app.gam_last.as_ref() {
+            Some(last) => format!(
+                "Enter reruns {} writing, {} reviewing, on \"{}\"",
+                last.generator.label(),
+                last.reviewer.label(),
+                truncate_chars(last.task.trim(), 40)
+            ),
+            None => "no earlier pair to rerun yet".to_string(),
+        });
+    }
+    // Parse as if a task followed, so a half-typed line still previews.
+    let request = parse_gam_args(&format!("{rest} \u{2026}"), app.backend).ok()?;
+    let generator = request
+        .generator
+        .clone()
+        .unwrap_or_else(|| dashboard_gam_generator(app));
+    let reviewer = GamSide {
+        backend: request.adversarial_backend,
+        model: request.adversarial_model.clone(),
+        effort: request.adversarial_effort,
+    };
+    let mut preview = format!(
+        "gam · {} writes · {} reviews (read-only) · {}",
+        generator.label(),
+        reviewer.label(),
+        if request.in_main {
+            "in this checkout"
+        } else {
+            "isolated workspace"
+        }
+    );
+    if reviewer.backend == Backend::Opencode {
+        preview = "gam: the reviewer must be claude or codex (opencode has no read-only sandbox)"
+            .to_string();
+    } else if generator.backend == reviewer.backend && generator.model.trim() == reviewer.model.trim() {
+        preview.push_str(" · same model on both sides: it will tend to agree with itself");
+    }
+    Some(preview)
 }
 
 pub(crate) fn model_suggestions_for(backend_filter: Backend, query: &str) -> Vec<Suggestion> {
@@ -1058,11 +1280,32 @@ pub(crate) fn push_model_suggestion(
     });
 }
 
+/// The models.dev rows, parsed once per version of the cache file.
+///
+/// The palette asks for these on EVERY frame while a model picker or a `/gam`
+/// preview is up, and the cache is a ~6 MB JSON document: re-reading and
+/// re-parsing it per frame cost far more than drawing the frame. Keyed by
+/// (path, mtime, length), so a refreshed cache is picked up on the next call.
 pub(crate) fn cached_models_dev_rows() -> Vec<(Backend, String, String)> {
+    type Memo = Option<(PathBuf, Option<SystemTime>, u64, Vec<(Backend, String, String)>)>;
+    static MEMO: std::sync::Mutex<Memo> = std::sync::Mutex::new(None);
     let Some(cache_path) = models_dev_cache_path() else {
         return Vec::new();
     };
-    let Ok(raw) = fs::read_to_string(cache_path) else {
+    let Ok(meta) = fs::metadata(&cache_path) else {
+        return Vec::new();
+    };
+    let stamp = (meta.modified().ok(), meta.len());
+    // Tests rewrite caches faster than mtime resolution; they parse every time.
+    let use_memo = !cfg!(test);
+    if let Some(memo) = MEMO.lock().ok().filter(|_| use_memo) {
+        if let Some((path, modified, len, rows)) = memo.as_ref() {
+            if *path == cache_path && (*modified, *len) == stamp {
+                return rows.clone();
+            }
+        }
+    }
+    let Ok(raw) = fs::read_to_string(&cache_path) else {
         return Vec::new();
     };
     let Ok(data) = serde_json::from_str::<serde_json::Value>(&raw) else {
@@ -1072,6 +1315,9 @@ pub(crate) fn cached_models_dev_rows() -> Vec<(Backend, String, String)> {
     let mut rows = Vec::new();
     collect_provider_models(&data, "anthropic", Backend::Claude, &mut rows);
     collect_provider_models(&data, "openai", Backend::Codex, &mut rows);
+    if let Some(mut memo) = MEMO.lock().ok().filter(|_| use_memo) {
+        *memo = Some((cache_path, stamp.0, stamp.1, rows.clone()));
+    }
     rows
 }
 

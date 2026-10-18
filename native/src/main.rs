@@ -710,6 +710,8 @@ impl GamPhase {
             Self::Settled(GamOutcome::Accepted) => "accepted",
             Self::Settled(GamOutcome::Escalated(_)) => "escalated",
             Self::Settled(GamOutcome::Halted(_)) => "halted",
+            Self::Settled(GamOutcome::Stalled(_)) => "stalled",
+            Self::Settled(GamOutcome::StoppedByUser) => "stopped",
         }
     }
 }
@@ -727,6 +729,33 @@ enum GamOutcome {
     /// `Escalated`, where the generator is merely left idle: here its process is
     /// gone and the workspace is frozen where the reviewer stopped it.
     Halted(String),
+    /// The generator stopped making progress: same diff AND same rebuttal two
+    /// rounds running. Not the reviewer asking for a human, and the advice is
+    /// different (nudge it yourself, or rerun with another pair), so it gets its
+    /// own name instead of hiding inside `Escalated`.
+    Stalled(String),
+    /// You ended the loop (`^W x`). Both panes stay live.
+    StoppedByUser,
+}
+
+impl GamOutcome {
+    /// Why the loop ended, when there is a reason worth printing.
+    pub(crate) fn reason(&self) -> &str {
+        match self {
+            Self::Escalated(reason) | Self::Halted(reason) | Self::Stalled(reason) => reason,
+            Self::Accepted | Self::StoppedByUser => "",
+        }
+    }
+
+    /// The same outcome carrying `reason` (used when a record is reloaded).
+    pub(crate) fn with_reason(&self, reason: String) -> Self {
+        match self {
+            Self::Escalated(_) => Self::Escalated(reason),
+            Self::Halted(_) => Self::Halted(reason),
+            Self::Stalled(_) => Self::Stalled(reason),
+            other => other.clone(),
+        }
+    }
 }
 
 /// One generator/adversarial pair ("gam"). Mirrored on BOTH rows so either pane
@@ -794,6 +823,11 @@ struct GamState {
     /// satisfy the wait — only a completion that happened after we asked. This
     /// closes the race where delivery and routing fired on consecutive frames.
     awaiting_since: Option<Instant>,
+    /// Notes YOU sent the reviewer (`/tell`, `^W i`) while the loop runs. They
+    /// ride in the next packet rather than being typed into the reviewer's
+    /// session at once: a message landing mid-review would end its turn without
+    /// a verdict, and the pair would escalate on your own note.
+    user_notes: Vec<String>,
 }
 
 /// One line of the generator/reviewer dialogue.
@@ -823,6 +857,8 @@ enum GamMessageKind {
     Escalate,
     /// The reviewer stopped the generator.
     Stop,
+    /// A note YOU sent the reviewer.
+    Note,
 }
 
 impl GamMessageKind {
@@ -834,6 +870,7 @@ impl GamMessageKind {
             Self::Accept => "accept",
             Self::Escalate => "escalate",
             Self::Stop => "stop",
+            Self::Note => "note",
         }
     }
 
@@ -845,6 +882,7 @@ impl GamMessageKind {
             "accept" => Some(Self::Accept),
             "escalate" => Some(Self::Escalate),
             "stop" => Some(Self::Stop),
+            "note" => Some(Self::Note),
             _ => None,
         }
     }
@@ -853,6 +891,7 @@ impl GamMessageKind {
     /// reviewer, so each line says who is talking and in what capacity.
     fn label(self, speaker: GamRole) -> &'static str {
         match (speaker, self) {
+            (_, Self::Note) => "you (to the reviewer)",
             (GamRole::Generator, _) => "generator",
             (GamRole::Adversarial, Self::Steer) => "reviewer (steering)",
             (GamRole::Adversarial, Self::Accept) => "reviewer (accepted)",
@@ -885,6 +924,7 @@ impl GamState {
             next_interim_at: Some(Instant::now() + GAM_INTERIM_INTERVAL),
             last_interim_progress: None,
             awaiting_since: None,
+            user_notes: Vec::new(),
         }
     }
 
@@ -965,7 +1005,68 @@ const GAM_INTERIM_TIMEOUT: Duration = Duration::from_secs(300);
 /// unchanged, the progress gate would read it as a stall and end the pair.
 /// Bounded in time so a dead PTY that never answers cannot wedge the loop shut.
 const GAM_TURN_START_GRACE: Duration = Duration::from_secs(15);
-const GAM_USAGE: &str = "usage: /gam [main] [<claude|codex|opencode> [model]] <task> — start a generator + adversarial reviewer pair (reviewer model defaults to the other provider; 'main' runs in the shared checkout instead of an isolated workspace)";
+const GAM_USAGE: &str = "usage: /gam [main] [<reviewer>] [gen <generator>] <task>, where each side is `<claude|codex> [model] [effort]` or a bare model name (fable, gpt-6.1-sol). The reviewer defaults to the other provider's flagship, `/gam again` reruns your last pair, and `main` works in this checkout instead of an isolated workspace";
+
+/// One half of a `/gam` pair: which CLI, which model, which effort.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct GamSide {
+    pub(crate) backend: Backend,
+    pub(crate) model: String,
+    pub(crate) effort: Option<EffortLevel>,
+}
+
+impl GamSide {
+    /// `codex gpt-6.1-sol(xhigh)`: the same shape the task pane title uses for
+    /// the dashboard's own model, so a pair reads like two of those.
+    pub(crate) fn label(&self) -> String {
+        let model = self.model.trim();
+        if model.is_empty() {
+            return self.backend.as_str().to_string();
+        }
+        format!(
+            "{} {model}({})",
+            self.backend.as_str(),
+            effort_label(self.effort)
+        )
+    }
+
+    /// The side as `/gam` grammar, so a remembered pair can be put back on the
+    /// task line, edited, and parsed into exactly the same side. Effort is
+    /// always spelled out ("auto" included) because leaving it off would let
+    /// the parser pick the model's default instead of what actually ran.
+    pub(crate) fn spec(&self) -> String {
+        let mut parts = vec![self.backend.as_str().to_string()];
+        let model = self.model.trim();
+        if !model.is_empty() {
+            parts.push(model.to_string());
+            parts.push(effort_label(self.effort).to_string());
+        }
+        parts.join(" ")
+    }
+}
+
+/// The last pair `/gam` launched, remembered in ~/.rudder/config.json so the
+/// picker can offer it again and `/gam again` can rerun it.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct GamLastPair {
+    pub(crate) generator: GamSide,
+    pub(crate) reviewer: GamSide,
+    pub(crate) in_main: bool,
+    pub(crate) task: String,
+}
+
+impl GamLastPair {
+    /// `/gam [main] <reviewer> gen <generator> `: the pair as a line you can
+    /// finish with a new task.
+    pub(crate) fn spec_line(&self) -> String {
+        format!(
+            "/gam {}{} gen {} ",
+            if self.in_main { "main " } else { "" },
+            self.reviewer.spec(),
+            self.generator.spec(),
+        )
+    }
+}
 
 /// A parsed `/gam` invocation.
 #[derive(Clone, Debug)]
@@ -973,6 +1074,9 @@ struct GamRequest {
     task: String,
     adversarial_backend: Backend,
     adversarial_model: String,
+    adversarial_effort: Option<EffortLevel>,
+    /// `None` means the dashboard's current model writes the code.
+    generator: Option<GamSide>,
     in_main: bool,
 }
 
@@ -985,110 +1089,189 @@ fn cross_gam_backend(default_backend: Backend) -> Backend {
     }
 }
 
-/// Parse the argument tail of a `/gam` invocation.
-///
-/// Grammar: `[main] [<provider> [model] [effort]] [main] <task>`, or the same
-/// with a bare `[<model> [effort]]` in place of the provider pair.
-///
-/// `main` is accepted on EITHER side of the model spec. The picker inserts
-/// "/gam claude opus " and leaves the cursor after it, so the natural place to
-/// type `main` is exactly where the leading-only form used to swallow it into
-/// the task.
-///
-/// Deliberately greedy ONLY where the token vocabulary is closed: `main`, the
-/// three provider keywords, and effort words are consumed by exact match; a
-/// bare model name is taken from the first token only when the model tables
-/// recognize it (so "/gam fix the auth bug" keeps ALL its words as the task,
-/// while "/gam fable fix the auth bug" pairs sonnet-default claude with fable).
-/// An explicit provider consumes the next token as its model unconditionally —
-/// the picker inserts that form, so mis-typing shows up immediately in the
-/// launch notice naming the chosen reviewer model.
-fn parse_gam_args(
-    rest: &str,
-    default_backend: Backend,
-    default_model: &str,
-) -> Result<GamRequest, String> {
-    let mut tokens = rest.split_whitespace().peekable();
-    let mut in_main = false;
-    if tokens.peek().is_some_and(|token| *token == "main") {
-        in_main = true;
-        tokens.next();
+/// The reviewer you get when you do not name one: the OTHER provider's
+/// flagship at its default effort. A reviewer from the same family tends to
+/// share the generator's blind spots, and the point of the pair is a second
+/// opinion that does not.
+pub(crate) fn default_gam_reviewer(generator_backend: Backend) -> GamSide {
+    let backend = cross_gam_backend(generator_backend);
+    let model = flagship_model_for(backend).to_string();
+    let effort = default_effort_for(backend, &model);
+    GamSide {
+        backend,
+        model,
+        effort,
     }
+}
 
-    let mut adversarial_backend: Option<Backend> = None;
-    let mut adversarial_model: Option<String> = None;
+/// Whether `token` can be the model in `<provider> <model>`.
+///
+/// It used to be taken unconditionally, so "/gam claude fix the auth bug" ran
+/// a reviewer on a model called "fix". Now a word counts only when the model
+/// tables know it for THAT provider, or when it is shaped like a model id (ids
+/// carry digits, dashes, dots, slashes or a `[1m]` suffix; task words do not),
+/// which keeps a model released last week usable before the tables learn it.
+fn gam_token_is_model_for(backend: Backend, token: &str) -> bool {
+    if matches!(token, "gen" | "main")
+        || token.eq_ignore_ascii_case("auto")
+        || parse_effort_arg(token).is_some()
+        || provider_backend(token).is_some()
+    {
+        return false;
+    }
+    if let Some(known) = known_model_backend(token) {
+        return known == backend;
+    }
+    token
+        .chars()
+        .any(|c| c.is_ascii_digit() || matches!(c, '-' | '.' | '/' | '['))
+}
 
-    if let Some(provider) = tokens.peek().and_then(|token| provider_backend(token)) {
-        adversarial_backend = Some(provider);
-        tokens.next();
-        // An explicit provider consumes the next token as its model
-        // unconditionally: the picker inserts exactly this shape, and a mis-taken
-        // word shows up immediately in the launch notice naming the reviewer.
-        adversarial_model = tokens.next().map(str::to_string);
-    } else if let Some(first) = tokens.peek() {
-        // A bare model alias/id ("fable", "gpt-5.5", …): recognized through the
-        // same tables /model offers, and its backend comes with it. Task words
-        // ("fix", "refactor") are NOT model ids, so they stay in the ask.
-        let candidate = (*first).to_string();
-        if let Some(backend) = known_model_backend(&candidate) {
-            adversarial_backend = Some(backend);
-            adversarial_model = Some(candidate);
-            tokens.next();
+/// A side as typed: `(backend, model?, effort?)`, where effort is
+/// `Some(None)` for an explicit "auto".
+type GamSideSpec = (Backend, Option<String>, Option<Option<EffortLevel>>);
+
+/// Read `<provider> [model] [effort]` or `<model> [effort]` at `tokens[*at]`,
+/// advancing `at` past it. `None` (and `at` untouched) when the word there is
+/// not a model spec, which is what keeps task words in the task.
+fn parse_gam_side(tokens: &[&str], at: &mut usize) -> Option<GamSideSpec> {
+    let first = *tokens.get(*at)?;
+    let mut next = *at;
+    let (backend, model) = if let Some(backend) = provider_backend(first) {
+        next += 1;
+        let model = tokens
+            .get(next)
+            .filter(|token| gam_token_is_model_for(backend, token))
+            .map(|token| token.to_string());
+        if model.is_some() {
+            next += 1;
         }
+        (backend, model)
+    } else if let Some(backend) = known_model_backend(first) {
+        // A bare alias or id ("fable", "gpt-6.1-sol"), recognized through the
+        // same tables /model offers. Never `backend_for_model`, which guesses a
+        // backend for ANY word and would eat the first word of the task.
+        next += 1;
+        (backend, Some(first.to_string()))
+    } else {
+        return None;
+    };
+    let effort = tokens.get(next).and_then(|token| {
+        if token.eq_ignore_ascii_case("auto") {
+            Some(None)
+        } else {
+            parse_effort_arg(token).map(Some)
+        }
+    });
+    if effort.is_some() {
+        next += 1;
     }
+    *at = next;
+    Some((backend, model, effort))
+}
 
-    let explicit_spec = adversarial_backend.is_some() || adversarial_model.is_some();
-    let adversarial_backend =
-        adversarial_backend.unwrap_or_else(|| cross_gam_backend(default_backend));
-    let adversarial_model = adversarial_model
+/// Fill in what a typed side left out: a provider alone gets its flagship, a
+/// model alone gets its default effort.
+fn resolve_gam_side((backend, model, effort): GamSideSpec) -> GamSide {
+    let model = model
         .map(|model| model.trim().to_string())
         .filter(|model| !model.is_empty())
-        // Last-used before hardcoded: the reviewer defaults to whatever the
-        // user last picked for that backend (saved by every /model choice),
-        // falling back to the static table only on a fresh config.
-        .unwrap_or_else(|| {
-            load_rudder_config()
-                .as_ref()
-                .and_then(|config| config_model(config, adversarial_backend))
-                .unwrap_or_else(|| default_model_for(adversarial_backend).trim().to_string())
-        });
-    // A recognized model spec may be followed by ONE effort word. Never consumed
-    // mid-task: without a preceding model spec, "high" stays part of the ask.
-    if explicit_spec {
-        if let Some(effort_token) = tokens.peek() {
-            if parse_effort_arg(effort_token).is_some() || effort_token.eq_ignore_ascii_case("auto")
-            {
-                tokens.next();
-                // The effort itself is derived from the model below; the token is
-                // consumed only to keep it out of the task text.
+        .unwrap_or_else(|| flagship_model_for(backend).to_string());
+    let effort = effort.unwrap_or_else(|| default_effort_for(backend, &model));
+    GamSide {
+        backend,
+        model,
+        effort,
+    }
+}
+
+/// Parse the argument tail of a `/gam` invocation.
+///
+/// Grammar: `[main] [<reviewer>] [gen <generator>] <task>`, each side being
+/// `<provider> [model] [effort]` or a bare `<model> [effort]`. The keywords may
+/// come in any order before the task (`main` after the model spec is where the
+/// picker leaves the cursor, so it has to work there).
+///
+/// Deliberately greedy ONLY where the vocabulary is closed: `main`, `gen`, the
+/// provider keywords and effort words match exactly; a bare model is taken only
+/// when the model tables recognize it, so "/gam fix the auth bug" keeps every
+/// word as the task while "/gam fable fix the auth bug" picks a fable reviewer.
+/// `gen` is consumed only when a model spec follows it.
+///
+/// No reviewer named means the OTHER provider's flagship (relative to the
+/// generator, which is the dashboard's model unless `gen` names one).
+fn parse_gam_args(rest: &str, default_backend: Backend) -> Result<GamRequest, String> {
+    let tokens = rest.split_whitespace().collect::<Vec<_>>();
+    let mut at = 0;
+    let mut in_main = false;
+    let mut reviewer: Option<GamSideSpec> = None;
+    let mut generator: Option<GamSideSpec> = None;
+    loop {
+        match tokens.get(at).copied() {
+            Some("main") if !in_main => {
+                in_main = true;
+                at += 1;
             }
+            Some("gen") if generator.is_none() => {
+                let mut probe = at + 1;
+                match parse_gam_side(&tokens, &mut probe) {
+                    Some(side) => {
+                        generator = Some(side);
+                        at = probe;
+                    }
+                    None => break,
+                }
+            }
+            Some(_) if reviewer.is_none() => match parse_gam_side(&tokens, &mut at) {
+                Some(side) => reviewer = Some(side),
+                None => break,
+            },
+            _ => break,
         }
     }
 
-    // Second chance at `main`, AFTER the whole model spec including effort. The
-    // picker inserts "/gam claude opus " and leaves the cursor past it, so the
-    // natural place to type `main` is exactly where the leading-only form used
-    // to swallow it into the task.
-    if !in_main && tokens.peek().is_some_and(|token| *token == "main") {
-        in_main = true;
-        tokens.next();
-    }
-
-    let task = tokens.collect::<Vec<_>>().join(" ");
-    let task = task.trim().to_string();
+    let task = tokens[at..].join(" ").trim().to_string();
     if task.is_empty() {
         return Err(GAM_USAGE.to_string());
     }
+    let generator = generator.map(resolve_gam_side);
+    let generator_backend = generator
+        .as_ref()
+        .map(|side| side.backend)
+        .unwrap_or(default_backend);
+    let reviewer = reviewer
+        .map(resolve_gam_side)
+        .unwrap_or_else(|| default_gam_reviewer(generator_backend));
     Ok(GamRequest {
         task,
-        adversarial_backend,
-        adversarial_model: if adversarial_model.is_empty() {
-            default_model.to_string()
-        } else {
-            adversarial_model
-        },
+        adversarial_backend: reviewer.backend,
+        adversarial_model: reviewer.model,
+        adversarial_effort: reviewer.effort,
+        generator,
         in_main,
     })
+}
+
+/// `"main "` when a `/gam` line starts with the `main` keyword, so a picker
+/// step that rewrites the line keeps it.
+fn gam_line_main_prefix(input: &str) -> &'static str {
+    let rest = input.trim_start().strip_prefix("/gam").unwrap_or_default();
+    if rest.split_whitespace().next() == Some("main") {
+        "main "
+    } else {
+        ""
+    }
+}
+
+/// A `/gam` line up to (not including) its `gen` keyword, trimmed: what a
+/// generator pick is appended to.
+fn gam_line_before_gen(input: &str) -> String {
+    let words = input.split_whitespace().collect::<Vec<_>>();
+    let end = words
+        .iter()
+        .position(|word| *word == "gen")
+        .unwrap_or(words.len());
+    words[..end].join(" ")
 }
 
 /// Appended to the generator's launch prompt so it knows revisions will arrive
@@ -1211,6 +1394,7 @@ your objection was addressed.)\n\n",
             ));
         }
     }
+    push_gam_user_notes(&mut packet, &gam.user_notes);
     push_gam_diff_section(&mut packet, diff);
     packet.push_str(
         "REVIEW CONTRACT\n\
@@ -1240,6 +1424,32 @@ Rudder parses that block mechanically; a missing or malformed block stops the \
 pair and pages the human.",
     );
     packet
+}
+
+/// Notes the user sent the reviewer since the last packet (`/tell`, `^W i`).
+/// They come from the person the pair works for, so they are labelled as such
+/// and weigh more than either model's opinion. Sentinels are neutralized like
+/// any other relayed text: a note quoting the protocol must not read as a
+/// verdict when the reviewer's pane echoes it.
+fn push_gam_user_notes(packet: &mut String, notes: &[String]) {
+    let notes = notes
+        .iter()
+        .map(|note| note.trim())
+        .filter(|note| !note.is_empty())
+        .collect::<Vec<_>>();
+    if notes.is_empty() {
+        return;
+    }
+    packet.push_str(
+        "FROM THE USER (the person this pair works for; weigh it above both models' opinions)\n",
+    );
+    for note in notes {
+        packet.push_str(&format!(
+            "- {}\n",
+            neutralize_gam_sentinels(&truncate_chars(note, GAM_MESSAGE_BUDGET_CHARS))
+        ));
+    }
+    packet.push('\n');
 }
 
 /// The diff section, shared by both packet kinds so a truncation is announced
@@ -1284,6 +1494,7 @@ ORIGINAL TASK\n{task}\n\n",
             truncate_chars(gam.last_objection.trim(), GAM_MESSAGE_BUDGET_CHARS)
         ));
     }
+    push_gam_user_notes(&mut packet, &gam.user_notes);
     push_gam_diff_section(&mut packet, diff);
     let pane_tail = neutralize_gam_sentinels(pane_tail.trim());
     if !pane_tail.is_empty() {
@@ -1564,6 +1775,10 @@ struct App {
     /// setting: it defaults on because the conversation is the point of a pair,
     /// and a user who wants the full terminals hides it with `^w t`.
     gam_transcript_visible: bool,
+    /// The last `/gam` pair launched (this session or a previous one, read from
+    /// config.json): what the picker offers as "same pair" and `/gam again`
+    /// reruns.
+    gam_last: Option<GamLastPair>,
     /// `/gam` transports (gam_link.rs), keyed by run id: a Claude channel or a
     /// Codex app-server client per linked half. Absent = the pane fallback.
     gam_links: HashMap<String, GamLink>,
@@ -2513,6 +2728,13 @@ enum SuggestionAction {
         backend: Backend,
         model: String,
     },
+    /// /gam drill-down, optional second step: the GENERATOR's provider/model,
+    /// written after `gen` on the line.
+    ChooseGamGeneratorProvider(Backend),
+    ChooseGamGeneratorModel {
+        backend: Backend,
+        model: String,
+    },
     ShowHelp,
 }
 
@@ -2910,6 +3132,15 @@ impl App {
             leader_pending: false,
             worker_view: WorkerView::Terminal,
             gam_transcript_visible: true,
+            // Tests never read the user's own pair (it would change what the
+            // picker offers from one machine to the next).
+            gam_last: if cfg!(test) && std::env::var_os("RUDDER_HOME").is_none() {
+                None
+            } else {
+                load_rudder_config()
+                    .as_ref()
+                    .and_then(config_gam_last_pair)
+            },
             nest_view: false,
             gods_view: false,
             gods_view_cursor: 0,
@@ -3851,8 +4082,13 @@ impl App {
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('g') {
             self.nav_mode = !self.nav_mode;
             self.notice = Some(if self.nav_mode {
-                "nav mode: 1 agents  2 worker  3 task  v review  b branch chat  g god's view  R review-all  M merge-all  Esc exits"
-                    .to_string()
+                if self.gam_pair_indices_for_selected().is_some() {
+                    "nav mode: gam: a swap half  t dialogue  i brief reviewer  x stop pair  ·  1/2/3 panes  m merge  Esc exits"
+                        .to_string()
+                } else {
+                    "nav mode: 1 agents  2 worker  3 task  v review  b branch chat  g god's view  R review-all  M merge-all  Esc exits"
+                        .to_string()
+                }
             } else {
                 "worker input restored".to_string()
             });
@@ -3865,10 +4101,15 @@ impl App {
         {
             self.leader_pending = true;
             self.nav_mode = false;
-            self.notice = Some(
+            // On a /gam pair the pair's own chords lead: they are what you
+            // reach for from inside the split.
+            self.notice = Some(if self.gam_pair_indices_for_selected().is_some() {
+                "Ctrl+W: gam: a swap half  t dialogue  i brief reviewer  x stop pair  ·  1/2/3 panes  m merge  g god's view  Esc cancels"
+                    .to_string()
+            } else {
                 "Ctrl+W: Tab cycle  1/2/3 panes  v review  m merge  b branch chat  g god's view  R review-all  M merge-all  H move to home  Esc cancels"
-                    .to_string(),
-            );
+                    .to_string()
+            });
             return false;
         }
 
@@ -4317,9 +4558,44 @@ impl App {
             KeyCode::Char('g') | KeyCode::Char('\u{00a9}') => self.toggle_gods_view(),
             KeyCode::Char('d') => self.delete_selected_agent(),
             KeyCode::Char('q') => return self.confirm_or_quit(),
+            // The /gam chords, same letters as under ^W.
+            KeyCode::Char('a') => self.swap_gam_half(),
+            KeyCode::Char('t') => self.toggle_gam_dialogue(),
+            KeyCode::Char('x') => self.stop_gam_pair_by_user(),
+            KeyCode::Char('i') => {
+                self.nav_mode = false;
+                self.begin_gam_note();
+            }
             _ => {}
         }
         false
+    }
+
+    /// Move between the two halves of the selected `/gam` pair (generator
+    /// left, reviewer right) without leaving the worker pane.
+    fn swap_gam_half(&mut self) {
+        if let Some((generator_index, adversarial_index)) = self.gam_pair_indices_for_selected() {
+            self.selected_agent = if self.selected_agent == generator_index {
+                adversarial_index
+            } else {
+                generator_index
+            };
+            self.focus = FocusPane::Worker;
+            self.dirty = true;
+        }
+    }
+
+    /// Show or hide the `/gam` dialogue strip.
+    fn toggle_gam_dialogue(&mut self) {
+        if self.gam_pair_indices_for_selected().is_some() {
+            self.gam_transcript_visible = !self.gam_transcript_visible;
+            self.notice = Some(if self.gam_transcript_visible {
+                "gam dialogue shown".to_string()
+            } else {
+                "gam dialogue hidden · ^w t shows it".to_string()
+            });
+            self.dirty = true;
+        }
     }
 
     /// Runs a single dashboard command after the Ctrl+W leader is armed, then
@@ -4364,34 +4640,19 @@ impl App {
             KeyCode::Char('g') | KeyCode::Char('\u{00a9}') => self.toggle_gods_view(),
             // 'a' toggles between the two halves of a /gam pair (generator left,
             // adversarial right) without leaving the worker pane.
-            KeyCode::Char('a') => {
-                if let Some((generator_index, adversarial_index)) =
-                    self.gam_pair_indices_for_selected()
-                {
-                    let target = if self.selected_agent == generator_index {
-                        adversarial_index
-                    } else {
-                        generator_index
-                    };
-                    self.selected_agent = target;
-                    self.focus = FocusPane::Worker;
-                    self.dirty = true;
-                }
-            }
+            KeyCode::Char('a') => self.swap_gam_half(),
             // 't' shows or hides the /gam dialogue strip. On the leader chord
             // rather than a bare key because the worker pane forwards bare keys
             // to the PTY, and the split is only ever seen from inside it.
-            KeyCode::Char('t') => {
-                if self.gam_pair_indices_for_selected().is_some() {
-                    self.gam_transcript_visible = !self.gam_transcript_visible;
-                    self.notice = Some(if self.gam_transcript_visible {
-                        "gam dialogue shown".to_string()
-                    } else {
-                        "gam dialogue hidden · ^w t shows it".to_string()
-                    });
-                    self.dirty = true;
-                }
-            }
+            KeyCode::Char('t') => self.toggle_gam_dialogue(),
+            // 'x' ends a /gam pair's automatic loop, 'i' briefs its reviewer.
+            // Leader-only for the same reason as 't': the split forwards bare
+            // keys to the agent you are looking at.
+            KeyCode::Char('x') => self.stop_gam_pair_by_user(),
+            KeyCode::Char('i') => self.begin_gam_note(),
+            // Advertised in the leader's own hint line; it used to fall through
+            // to "unknown key".
+            KeyCode::Char('H') => self.request_move_all_home(),
             KeyCode::Char('r') => self.start_rename_selected_agent(),
             KeyCode::Char('b') => self.branch_selected_agent(),
             KeyCode::Char('u') => self.undo_selected_merge(),
@@ -5981,17 +6242,20 @@ impl App {
                 // command rows, `typing_command_name` already covers it, and
                 // capturing there is what made the "m" keystroke hand the line
                 // to a model picker.
-                let gam_tokens = trimmed.split_whitespace().count();
-                let showing = |variant: fn(&SuggestionAction) -> bool| {
-                    suggestions.first().is_some_and(|s| variant(&s.action))
-                };
-                let showing_providers =
-                    showing(|action| matches!(action, SuggestionAction::ChooseGamProvider(_)));
-                let showing_models =
-                    showing(|action| matches!(action, SuggestionAction::ChooseGamModel { .. }));
-                let gam_drilldown = trimmed.starts_with("/gam")
-                    && ((gam_tokens == 2 && (showing_models || showing_providers))
-                        || (gam_tokens == 3 && showing_models));
+                // `gam_suggestions` only returns chooser rows while every word
+                // on the line is part of a model spec being picked, so "a gam
+                // chooser row is showing" IS the window: the moment a task word
+                // appears the rows go away and Enter submits.
+                let gam_drilldown = trimmed.starts_with("/gam ")
+                    && suggestions.iter().any(|s| {
+                        matches!(
+                            s.action,
+                            SuggestionAction::ChooseGamProvider(_)
+                                | SuggestionAction::ChooseGamModel { .. }
+                                | SuggestionAction::ChooseGamGeneratorProvider(_)
+                                | SuggestionAction::ChooseGamGeneratorModel { .. }
+                        )
+                    });
                 if !(typing_command_name
                     || trimmed.starts_with("/model")
                     || gam_drilldown
@@ -6034,16 +6298,34 @@ impl App {
                 self.notice = Some(format!("pick a {} model", backend.as_str()));
             }
             SuggestionAction::ChooseGamProvider(backend) => {
-                self.replace_task_input(format!("/gam {} ", backend.as_str()));
+                let main = gam_line_main_prefix(&self.task_input);
+                self.replace_task_input(format!("/gam {main}{} ", backend.as_str()));
                 self.notice = Some(format!(
-                    "pick the ADVERSARIAL {} reviewer, then type the task",
+                    "pick the {} model that REVIEWS the work",
                     backend.as_str()
                 ));
             }
             SuggestionAction::ChooseGamModel { backend, model } => {
-                self.replace_task_input(format!("/gam {} {} ", backend.as_str(), model));
+                let main = gam_line_main_prefix(&self.task_input);
+                self.replace_task_input(format!("/gam {main}{} {} ", backend.as_str(), model));
                 self.notice = Some(format!(
-                    "adversarial: {} {model} — now type the task",
+                    "reviewer: {} {model} · type the task, or pick who writes it",
+                    backend.as_str()
+                ));
+            }
+            SuggestionAction::ChooseGamGeneratorProvider(backend) => {
+                let head = gam_line_before_gen(&self.task_input);
+                self.replace_task_input(format!("{head} gen {} ", backend.as_str()));
+                self.notice = Some(format!(
+                    "pick the {} model that WRITES the code",
+                    backend.as_str()
+                ));
+            }
+            SuggestionAction::ChooseGamGeneratorModel { backend, model } => {
+                let head = gam_line_before_gen(&self.task_input);
+                self.replace_task_input(format!("{head} gen {} {model} ", backend.as_str()));
+                self.notice = Some(format!(
+                    "generator: {} {model} · now type the task",
                     backend.as_str()
                 ));
             }
@@ -6532,7 +6814,7 @@ impl App {
             else {
                 return false;
             };
-            let (panes, _) = gam_split_rows(inner, self, generator_index);
+            let (panes, _) = gam_split_rows(worker_area, self, generator_index);
             let (left, right) = gam_split_halves(panes);
             let target = if rect_contains(left, mouse.column, mouse.row) {
                 Some(generator_index)
@@ -6638,7 +6920,7 @@ impl App {
                 } else if self.selected_headless_orchestrator_rendered_view_active() {
                     self.scroll_orchestrator_dag(mouse, inner)
                 } else if self.gam_pair_indices_for_selected().is_some() {
-                    self.scroll_gam_split(mouse, inner)
+                    self.scroll_gam_split(mouse, area)
                 } else {
                     self.scroll_selected_worker_or_forward(mouse, inner)
                 };
@@ -8335,16 +8617,43 @@ impl App {
             task,
             adversarial_backend,
             adversarial_model,
+            adversarial_effort,
+            generator,
             in_main,
         } = request;
         if adversarial_backend == Backend::Opencode {
             self.notice = Some(
-                "gam adversarial supports claude and codex reviewers; opencode has no read-only sandbox yet"
+                "gam: the reviewer must be claude or codex (opencode has no read-only sandbox yet); opencode can still generate with `gen opencode`"
                     .to_string(),
             );
             return;
         }
         self.notice = None;
+        // The generator is the dashboard's current model unless the line named
+        // one with `gen`.
+        let generator = generator.unwrap_or_else(|| GamSide {
+            backend: self.backend,
+            model: self.model.clone(),
+            effort: self.effort,
+        });
+        let reviewer_side = GamSide {
+            backend: adversarial_backend,
+            model: adversarial_model.clone(),
+            effort: adversarial_effort,
+        };
+        // Spawn each half at the size it will be drawn at. The default 80
+        // columns made the first screenful of each pane (the reviewer's whole
+        // bootstrap) wrap twice once the split halved it.
+        let half_size = self
+            .worker_area
+            .map(|area| {
+                let (left, _) = crate::render::gam_split_halves(area);
+                TerminalSize {
+                    rows: left.height.saturating_sub(3).max(8),
+                    cols: left.width.saturating_sub(2).max(20),
+                }
+            })
+            .unwrap_or_default();
 
         // ---- GENERATOR ------------------------------------------------------
         let workspace_label =
@@ -8365,10 +8674,9 @@ impl App {
             self.notice = Some(format!("context warning: {error}"));
         }
 
-        // The generator uses the dashboard's CURRENT default model, whatever it is.
-        let backend = self.backend;
-        let model = self.model.clone();
-        let effort = self.effort;
+        let backend = generator.backend;
+        let model = generator.model.clone();
+        let effort = generator.effort;
         let session_id = mint_session_id_for(backend);
         let goal_prompt = manual_goal_prompt(&task);
         let launch_prompt = format!("{}{}", goal_prompt, gam_generator_protocol_note());
@@ -8377,7 +8685,6 @@ impl App {
         // ---- ADVERSARIAL REVIEWER -------------------------------------------
         // Spawned immediately so its pane is visible from t0; it opens with a
         // bootstrap prompt and waits for Rudder to deliver the first packet.
-        let adversarial_effort = default_effort_for(adversarial_backend, &adversarial_model);
         let adversarial_id = new_run_id("gam-review");
         let adversarial_summary = format!(
             "adv · {}{}",
@@ -8511,12 +8818,12 @@ Until the first packet arrives, reply only: \"standing by\"."
             gam: Some(GamState::new(
                 GamRole::Generator,
                 adversarial_id.clone(),
-                task,
+                task.clone(),
             )),
         };
 
         let generator_options = TerminalPaneOptions {
-            size: TerminalSize::default(),
+            size: half_size,
             cwd: Some(workspace.path.clone()),
             ..TerminalPaneOptions::default()
         };
@@ -8606,7 +8913,7 @@ Until the first packet arrives, reply only: \"standing by\"."
             )),
         };
         let adversarial_options = TerminalPaneOptions {
-            size: TerminalSize::default(),
+            size: half_size,
             cwd: Some(workspace.path.clone()),
             ..TerminalPaneOptions::default()
         };
@@ -8645,11 +8952,49 @@ Until the first packet arrives, reply only: \"standing by\"."
         );
         self.record_activity(format!(
             "gam: paired {} generator with {} adversarial reviewer ({})",
-            backend.as_str(),
-            adversarial_backend.as_str(),
+            generator.label(),
+            reviewer_side.label(),
             truncate_chars(&self.agents[self.agents.len() - 2].task_summary, 48),
         ));
         let _ = self.write_rudder_context_timed(None);
+        if !spawned_generator {
+            // The failure notice set above is the one that matters.
+            return;
+        }
+
+        // Remember the pair for the picker and for `/gam again`.
+        let last = GamLastPair {
+            generator: generator.clone(),
+            reviewer: reviewer_side.clone(),
+            in_main,
+            task,
+        };
+        let _ = save_gam_last_pair(&last);
+        self.gam_last = Some(last);
+
+        // The whole premise is that the critic is not the thing it is
+        // criticising. Same provider AND same model is the degenerate pair: it
+        // has already decided the approach was reasonable, so it reviews its own
+        // judgement and agrees. Say so rather than letting it look normal.
+        if self.notice.is_none() {
+            self.notice = Some(
+                if generator.backend == reviewer_side.backend
+                    && generator.model.trim() == reviewer_side.model.trim()
+                {
+                    format!(
+                        "gam: the reviewer is the SAME model as the generator ({}); it will tend to agree with itself · pick another with /gam <provider> <model> <task>",
+                        generator.label(),
+                    )
+                } else {
+                    format!(
+                        "gam started · {} writes, {} reviews{} · ^w a swaps halves, ^w i briefs the reviewer, ^w x stops",
+                        generator.label(),
+                        reviewer_side.label(),
+                        if in_main { " in this checkout" } else { "" },
+                    )
+                },
+            );
+        }
     }
 
     fn gam_peer_index_of(&self, index: usize) -> Option<usize> {
@@ -8691,6 +9036,10 @@ Until the first packet arrives, reply only: \"standing by\"."
             /// The mid-turn check went unanswered for too long: drop it unread
             /// so the turn-boundary loop is not held behind it.
             AbandonInterim(usize),
+            /// The generator's process is gone (stopped with `x`, or it died)
+            /// while the loop still waited on its turn: nothing will ever end
+            /// that turn, so the pair ends here and says why.
+            GeneratorGone(usize),
         }
         // Links first: their structured answers decide the routing below.
         self.poll_gam_links();
@@ -8713,7 +9062,13 @@ Until the first packet arrives, reply only: \"standing by\"."
                     // ends the pair with a reason instead. The MID-TURN check
                     // below does need a live peer, so it asks separately.
                     let peer = self.gam_peer_index_of(index);
-                    if self.agents[index].status == AgentStatus::Done {
+                    if matches!(
+                        self.agents[index].status,
+                        AgentStatus::Stopped | AgentStatus::Failed
+                    ) && self.agents[index].terminal.is_none()
+                    {
+                        actions.push(GamAction::GeneratorGone(index));
+                    } else if self.agents[index].status == AgentStatus::Done {
                         // Not while a turn is starting: something was just typed
                         // into this generator (our own revision or steer, or the
                         // user), and its diff is still last round's.
@@ -8825,6 +9180,19 @@ Until the first packet arrives, reply only: \"standing by\"."
                 GamAction::DeliverInterim(index) => self.deliver_gam_interim(index),
                 GamAction::ReadInterim(index) => self.route_gam_interim(index),
                 GamAction::AbandonInterim(index) => self.abandon_gam_interim(index),
+                GamAction::GeneratorGone(index) => {
+                    if self.agents[index].status == AgentStatus::Stopped {
+                        self.record_activity(
+                            "gam: the generator was stopped, so the loop ended".to_string(),
+                        );
+                        self.settle_gam_pair(index, GamOutcome::StoppedByUser);
+                    } else {
+                        self.settle_gam_pair_with_notice(
+                            index,
+                            "the generator's process exited before finishing its turn",
+                        );
+                    }
+                }
             }
         }
     }
@@ -8939,6 +9307,8 @@ Until the first packet arrives, reply only: \"standing by\"."
                 recorded.awaiting_since = gam.awaiting_since;
                 recorded.last_interim_progress = gam.last_interim_progress;
                 recorded.next_interim_at = rearm;
+                // Delivered with this check.
+                recorded.user_notes.clear();
             }
         }
         for side in [generator_index, peer_index] {
@@ -9113,7 +9483,7 @@ finished work: fold it into what you are doing. If it is wrong, say why inside \
     /// which is indistinguishable from Rudder having forgotten about it.
     fn settle_gam_pair_with_notice(&mut self, generator_index: usize, reason: &str) {
         self.record_activity(format!("gam: stopped — {reason}"));
-        self.notice = Some(format!("gam needs you: {reason}. Both panes stay live."));
+        self.notice = Some(format!("gam needs you: {reason}. Both panes stay live: answer in either one (^w a swaps), or /gam again."));
         self.settle_gam_pair(generator_index, GamOutcome::Escalated(reason.to_string()));
     }
 
@@ -9189,10 +9559,13 @@ finished work: fold it into what you are doing. If it is wrong, say why inside \
             hasher.finish()
         };
         if gam.round > 0 && gam.last_progress == Some(progress) {
-            self.settle_gam_pair_with_notice(
-                generator_index,
-                "the generator stopped making progress: same diff and same reply as the last round",
-            );
+            let reason =
+                "the generator stopped making progress: same diff and same reply as the last round";
+            self.record_activity(format!("gam: stalled · {reason}"));
+            self.notice = Some(format!(
+                "gam stalled: {reason}. Nudge the generator yourself (^w a), or /gam again with another pair."
+            ));
+            self.settle_gam_pair(generator_index, GamOutcome::Stalled(reason.to_string()));
             return;
         }
         gam.last_progress = Some(progress);
@@ -9226,6 +9599,8 @@ finished work: fold it into what you are doing. If it is wrong, say why inside \
                 // rearms when the next one starts.
                 recorded.next_interim_at = None;
                 recorded.last_interim_progress = None;
+                // Delivered with this packet.
+                recorded.user_notes.clear();
                 recorded.say(GamRole::Generator, GamMessageKind::Reply, &rebuttal);
             }
         }
@@ -9313,8 +9688,17 @@ finished work: fold it into what you are doing. If it is wrong, say why inside \
                         format!(" — {}", truncate_chars(&message, 120))
                     },
                 ));
-                self.notice =
-                    Some("gam: adversarial reviewer accepted the work".to_string());
+                let in_main = self.agents[generator_index].workspace_path.is_none();
+                self.notice = Some(format!(
+                    "gam: the reviewer accepted the work after {} round{} · {}",
+                    round + 1,
+                    if round == 0 { "" } else { "s" },
+                    if in_main {
+                        "the changes are in this checkout"
+                    } else {
+                        "m merges it · /gam again reruns the pair"
+                    }
+                ));
                 for side in [generator_index, peer_index] {
                     if let Some(recorded) = self.agents[side].gam.as_mut() {
                         recorded.say(GamRole::Adversarial, GamMessageKind::Accept, &message);
@@ -9374,7 +9758,7 @@ Address the objection directly. If you disagree, say why inside \
                     "gam: stopped after {next_round} round(s) — {reason}"
                 ));
                 self.notice =
-                    Some(format!("gam needs you: {reason}. Both panes stay live."));
+                    Some(format!("gam needs you: {reason}. Both panes stay live: answer in either one (^w a swaps), or /gam again."));
                 self.settle_gam_pair(generator_index, GamOutcome::Escalated(reason));
             }
             None => {
@@ -9452,6 +9836,137 @@ Address the objection directly. If you disagree, say why inside \
             }
         }
         self.dirty = true;
+    }
+
+    /// The pair a `/tell` or `^W` chord acts on: the selected row's, else the
+    /// newest pair still running (so `/tell` from the task bar works without
+    /// first clicking into the split). Returned as (generator, adversarial).
+    fn gam_pair_for_command(&self) -> Option<(usize, usize)> {
+        if let Some(pair) = self.gam_pair_indices_for_selected() {
+            return Some(pair);
+        }
+        self.agents
+            .iter()
+            .enumerate()
+            .rev()
+            .filter(|(_, run)| {
+                run.gam.as_ref().is_some_and(|gam| {
+                    gam.role == GamRole::Generator && !matches!(gam.phase, GamPhase::Settled(_))
+                })
+            })
+            .find_map(|(index, _)| {
+                self.gam_peer_index_of(index)
+                    .map(|peer| (index, peer))
+            })
+    }
+
+    /// `^W x`: end the automatic loop by hand. Whichever half is mid-turn gets
+    /// an Esc (the same interrupt you would type), never a kill: both panes stay
+    /// live so you can keep driving either conversation, and the generator's
+    /// work stays where it is.
+    fn stop_gam_pair_by_user(&mut self) {
+        let Some((generator_index, adversarial_index)) = self.gam_pair_for_command() else {
+            self.notice = Some("gam: no pair selected".to_string());
+            return;
+        };
+        if let Some(GamPhase::Settled(outcome)) = self.agents[generator_index]
+            .gam
+            .as_ref()
+            .map(|gam| gam.phase.clone())
+        {
+            self.notice = Some(format!(
+                "gam: this pair already ended ({}) · both panes are yours to drive",
+                GamPhase::Settled(outcome).as_str()
+            ));
+            return;
+        }
+        for index in [generator_index, adversarial_index] {
+            let running = self.agents[index].status == AgentStatus::Running;
+            if let Some(terminal) = self.agents[index].terminal.as_mut().filter(|_| running) {
+                let _ = terminal.write_input(b"\x1b");
+            }
+        }
+        self.record_activity(format!(
+            "gam: you stopped the loop after {} round(s)",
+            self.agents[generator_index]
+                .gam
+                .as_ref()
+                .map_or(0, |gam| gam.round)
+        ));
+        self.settle_gam_pair(generator_index, GamOutcome::StoppedByUser);
+        self.notice = Some(
+            "gam stopped · any turn in flight was interrupted · both panes stay live for you to drive"
+                .to_string(),
+        );
+    }
+
+    /// `/tell <note>` (and `^W i`): a note from you to the reviewer.
+    ///
+    /// While the loop runs it is queued for the NEXT packet (review or mid-turn
+    /// check) instead of being typed in at once: a message landing while the
+    /// reviewer works on a verdict would end that turn without one, and the pair
+    /// would escalate on your own note. Once the pair has settled there is no
+    /// packet coming, so it goes straight into the reviewer's session.
+    fn tell_gam_reviewer(&mut self, note: &str) {
+        let note = note.trim();
+        if note.is_empty() {
+            self.notice = Some(
+                "usage: /tell <note>: brief the /gam reviewer (rides along with its next review)"
+                    .to_string(),
+            );
+            return;
+        }
+        let Some((generator_index, adversarial_index)) = self.gam_pair_for_command() else {
+            self.notice =
+                Some("gam: no pair to tell · /tell briefs a /gam reviewer".to_string());
+            return;
+        };
+        let settled = self.agents[generator_index]
+            .gam
+            .as_ref()
+            .is_some_and(|gam| matches!(gam.phase, GamPhase::Settled(_)));
+        if settled {
+            let message = format!("[from the user] {note}");
+            if !self.live_inject_at(adversarial_index, &message) {
+                self.notice = Some(
+                    "gam: the reviewer has no live pane to tell · Enter on its row resumes it"
+                        .to_string(),
+                );
+                return;
+            }
+        }
+        for side in [generator_index, adversarial_index] {
+            if let Some(gam) = self.agents[side].gam.as_mut() {
+                if !settled {
+                    gam.user_notes.push(note.to_string());
+                }
+                gam.say(GamRole::Adversarial, GamMessageKind::Note, note);
+            }
+            if let Some(run) = self.agents.get(side) {
+                let _ = save_native_run_record(&self.cwd, run);
+            }
+        }
+        self.record_activity(format!("gam: you told the reviewer: {}", truncate_chars(note, 120)));
+        self.notice = Some(if settled {
+            "gam: sent to the reviewer's session".to_string()
+        } else {
+            "gam: noted · the reviewer gets it with its next review".to_string()
+        });
+        self.dirty = true;
+    }
+
+    /// `^W i`: put `/tell ` on the task line and focus it.
+    fn begin_gam_note(&mut self) {
+        if self.gam_pair_for_command().is_none() {
+            self.notice = Some("gam: no pair selected".to_string());
+            return;
+        }
+        self.replace_task_input("/tell ".to_string());
+        self.focus = FocusPane::Task;
+        self.notice = Some(
+            "brief the reviewer: type a note and press Enter (Esc clears) · it rides along with the next review"
+                .to_string(),
+        );
     }
 
     fn start_rudder_plan_task(&mut self, input: &str) {
@@ -11133,6 +11648,11 @@ Address the objection directly. If you disagree, say why inside \
                 }
                 true
             }
+            Some("/tell") => {
+                let rest = command_rest(input, "/tell").trim();
+                self.tell_gam_reviewer(rest);
+                true
+            }
             Some("/plan") => {
                 // Explicit multi-agent route: hand the task to the DAG orchestrator.
                 let rest = command_rest(input, "/plan").trim();
@@ -11150,33 +11670,29 @@ Address the objection directly. If you disagree, say why inside \
                 // Generator + adversarial reviewer pair: one implements in an
                 // isolated workspace (or `main`), the other read-only questions it.
                 let rest = command_rest(input, "/gam").trim();
-                match parse_gam_args(rest, self.backend, &self.model) {
-                    Ok(request) => {
-                        self.notice = Some(format!(
-                            "gam pair starting · adversarial: {} {} · generator: {} {}{} · the reviewer reviews each turn, can steer mid-turn, and can stop the run",
-                            request.adversarial_backend.as_str(),
-                            truncate_chars(&request.adversarial_model, 28),
-                            self.backend.as_str(),
-                            truncate_chars(&self.model, 28),
-                            if request.in_main { " · main checkout" } else { "" },
-                        ));
-                        // The whole premise is that the critic is not the thing
-                        // it is criticising. Same provider AND same model is the
-                        // degenerate pair: it has already decided the approach
-                        // was reasonable, so it reviews its own judgement and
-                        // agrees. Say so rather than letting it look normal.
-                        if request.adversarial_backend == self.backend
-                            && request.adversarial_model.trim() == self.model.trim()
-                        {
-                            self.notice = Some(format!(
-                                "gam: reviewer is the SAME model as the generator ({} {}). \
-It will tend to agree with itself — name another with /gam <provider> <model> <task>.",
-                                self.backend.as_str(),
-                                truncate_chars(&self.model, 24),
-                            ));
+                // `/gam again`: the last pair on the last task, no retyping.
+                if rest == "again" {
+                    match self.gam_last.clone() {
+                        Some(last) if !last.task.trim().is_empty() => {
+                            self.start_gam_task(GamRequest {
+                                task: last.task,
+                                adversarial_backend: last.reviewer.backend,
+                                adversarial_model: last.reviewer.model,
+                                adversarial_effort: last.reviewer.effort,
+                                generator: Some(last.generator),
+                                in_main: last.in_main,
+                            });
                         }
-                        self.start_gam_task(request);
+                        _ => {
+                            self.notice = Some(
+                                "gam: no earlier pair to rerun yet · /gam <task> starts one".to_string(),
+                            );
+                        }
                     }
+                    return true;
+                }
+                match parse_gam_args(rest, self.backend) {
+                    Ok(request) => self.start_gam_task(request),
                     Err(usage) => {
                         self.notice = Some(usage);
                     }
@@ -17780,6 +18296,17 @@ Files involved: {}
     }
 
     fn request_merge_selected_agent(&mut self) {
+        // A /gam reviewer has no workspace of its own; `m` on it means the work
+        // it reviewed, which is its generator's.
+        if self
+            .agents
+            .get(self.selected_agent)
+            .is_some_and(AgentRun::is_gam_adversary)
+        {
+            if let Some((generator_index, _)) = self.gam_pair_indices_for_selected() {
+                self.selected_agent = generator_index;
+            }
+        }
         if self.selected_is_main() {
             self.notice = Some("main agent: merge disabled".to_string());
             return;

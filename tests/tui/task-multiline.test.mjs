@@ -125,9 +125,13 @@ test("arrows walk a multi-line draft before they reach task history", { timeout:
   // bare Esc (draft cleared) and an Enter, which failed this test on CI twice.
   await session.write(CHORDS["Shift+Enter (kitty)"]);
   await session.type("line two");
+  // Read nothing until the draft is on screen: a snapshot taken right after
+  // typing can predate the frame that draws it (flaked on CI and locally).
+  await session.waitForText("line two", { timeout: 10_000 });
 
   // Up belongs to the draft here. Before this fix it swapped in "an older task".
   await session.press("Up");
+  await new Promise((resolve) => setTimeout(resolve, 300));
   const afterUp = await session.screen();
   assert.ok(
     afterUp.includes("line one") && afterUp.includes("line two"),

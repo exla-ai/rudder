@@ -1062,7 +1062,7 @@ brain lives in the cloud, and the phone is a first-class client.
   the audio and speaks to OpenAI's realtime model directly over a WebSocket
   (`VoiceAssistant.swift`: AVAudioEngine with voice processing for echo
   cancellation, pcm16 24 kHz both ways, barge-in truncates the playing item), with a
-  10-minute client secret from `POST /api/app/voice/session`. That route configures
+  2-minute client secret (40 an hour per account, `RUDDER_VOICE_MINTS_PER_HOUR`) from `POST /api/app/voice/session`. That route configures
   the WHOLE session (instructions with a snapshot of the account's projects and
   agents, semantic VAD, far-field noise reduction, input transcription for
   captions, the tools), so the app sends no config of its own and the prompt and

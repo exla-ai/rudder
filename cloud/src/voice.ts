@@ -132,10 +132,11 @@ export const VOICE_TOOLS: ToolDef[] = [
           description: "allow / allow_always / deny for a permission; approve_plan / revise_plan for a plan; answer_questions for questions.",
         },
         message: { type: "string", description: "For deny or revise_plan: what to do instead." },
+        prompt_id: { type: "string", description: "The prompt_id of the exact prompt, from an update or get_agent. Leave out when the agent has only one." },
         answers: {
           type: "array",
           items: { type: "string" },
-          description: "For answer_questions: one answer per question, in order (an option label or free text).",
+          description: "For answer_questions: one answer per question, in order. Use the option's exact label when the user picks one; otherwise their words.",
         },
       },
       required: ["decision"],
@@ -356,17 +357,26 @@ async function startTask(ctx: VoiceContext, args: Record<string, unknown>): Prom
 async function answerPrompt(ctx: VoiceContext, args: Record<string, unknown>): Promise<VoiceToolResult> {
   const projects = ctx.projects();
   const decision = str(args.decision);
-  // "Allow it" with no names means the one prompt that is waiting, wherever it is.
-  const target = str(args.project) || str(args.agent)
+  const promptId = str(args.prompt_id).trim();
+  // A prompt id names the exact prompt (the one just announced); "allow it"
+  // with no names means the one prompt that is waiting, wherever it is.
+  const byId = promptId ? findPrompt(projects, promptId) : null;
+  if (promptId && !byId) {
+    return { output: "That prompt is no longer waiting (it was answered or withdrawn)." };
+  }
+  const target = byId ?? (str(args.project) || str(args.agent)
     ? (() => {
       const project = resolveProject(projects, str(args.project));
       return { project, agent: resolveAgent(project, str(args.agent), (agent) => (agent.asks ?? []).length > 0) };
     })()
-    : onlyWaiting(projects);
+    : onlyWaiting(projects));
   const { project, agent } = target;
-  const ask = (agent.asks ?? [])[0];
+  const asks = agent.asks ?? [];
+  const ask = byId?.ask ?? (asks.length === 1 ? asks[0] : undefined);
   if (!ask) {
-    return { output: `${shortTitle(agent)} is not waiting on anything right now.` };
+    return { output: asks.length
+      ? `${shortTitle(agent)} has ${asks.length} prompts waiting: ${asks.map((a) => `${describeAsk(a)}`).join(" ")} Call again with the prompt_id of the one the user means.`
+      : `${shortTitle(agent)} is not waiting on anything right now.` };
   }
   const kind = ask.kind ?? askKind(ask.tool);
   const message = str(args.message).trim();
@@ -395,7 +405,7 @@ async function answerPrompt(ctx: VoiceContext, args: Record<string, unknown>): P
     }
   }
   await ctx.rpc("answer", { workspaceId: project.workspaceId, runId: agent.id, askId: ask.id, answer });
-  const remaining = (agent.asks ?? []).length - 1;
+  const remaining = asks.length - 1;
   return { output: `Answered ${shortTitle(agent)}.${remaining > 0 ? ` It has ${remaining} more waiting.` : ""}` };
 }
 
@@ -411,8 +421,12 @@ async function agentAction(ctx: VoiceContext, args: Record<string, unknown>): Pr
     return { output: "The action must be stop, interrupt, merge or delete." };
   }
   await ctx.rpc("action", { workspaceId: project.workspaceId, runId: agent.id, action });
-  const done = action === "stop" ? "Stopped" : action === "merge" ? "Merging" : "Deleted";
-  return { output: `${done} ${shortTitle(agent)} in ${project.name}.` };
+  if (action === "merge") {
+    // The dashboard merges in the background (on the cloud machine: a pull
+    // request); say it started, not that it is done. Its result is an update.
+    return { output: `Merge started for ${shortTitle(agent)} in ${project.name}. On the cloud machine this opens a pull request; it is not finished yet, so say it is merging.` };
+  }
+  return { output: `${action === "stop" ? "Stopped" : "Deleted"} ${shortTitle(agent)} in ${project.name}.` };
 }
 
 async function findRepos(ctx: VoiceContext, args: Record<string, unknown>): Promise<VoiceToolResult> {
@@ -422,11 +436,11 @@ async function findRepos(ctx: VoiceContext, args: Record<string, unknown>): Prom
   const scored = repos
     .map((repo) => ({ repo, score: words.length ? overlap(words, tokens(`${repo.repo} ${repo.description ?? ""}`)) : 1 }))
     .filter((entry) => entry.score > 0)
+    .sort((a, b) => b.score - a.score)
     .slice(0, 8);
   if (!scored.length) {
     return { output: words.length ? "No repo matches that." : "No repos found." };
   }
-  scored.sort((a, b) => b.score - a.score);
   return {
     output: scored
       .map(({ repo }) => `${repo.repo}${repo.open ? " (already a project)" : ""}${repo.description ? `: ${clip(repo.description, 100)}` : ""}`)
@@ -443,8 +457,23 @@ async function findRepos(ctx: VoiceContext, args: Record<string, unknown>): Prom
 
 export type VoiceSeen = Record<string, string>;
 
-function fingerprint(agent: VoiceAgent): string {
-  return `${agent.status ?? ""}|${(agent.asks ?? []).map((ask) => ask.id).join(",")}`;
+/** At most this many items per announcement; the rest wait for the next poll. */
+const UPDATES_PER_POLL = 4;
+
+// What was last seen of an agent: "<status>|<ask ids>|<last announced>". The
+// last part keeps an agent flapping between working and waiting (each new
+// turn) from being announced again until it says something new.
+function seenEntry(agent: VoiceAgent, announced: string): string {
+  return `${agent.status ?? ""}|${(agent.asks ?? []).map((ask) => ask.id).join(",")}|${announced}`;
+}
+
+function messageMark(agent: VoiceAgent): string {
+  const text = agent.lastMessage || agent.summary || "";
+  let hash = 0;
+  for (let i = 0; i < text.length; i++) {
+    hash = (hash * 31 + text.charCodeAt(i)) | 0;
+  }
+  return `${agent.status ?? ""}:${(hash >>> 0).toString(36)}`;
 }
 
 export function voiceUpdates(projects: VoiceProject[], seen: VoiceSeen | null): { updates: string[]; seen: VoiceSeen } {
@@ -453,42 +482,64 @@ export function voiceUpdates(projects: VoiceProject[], seen: VoiceSeen | null): 
   for (const project of projects) {
     for (const agent of project.agents) {
       const key = `${project.workspaceId}/${agent.id}`;
-      next[key] = fingerprint(agent);
+      const before = seen?.[key];
+      const [oldStatus = "", oldAsks = "", announced = ""] = (before ?? "").split("|");
       if (!seen) {
+        // The first poll starts the watch: what is already there is old news.
+        next[key] = seenEntry(agent, messageMark(agent));
         continue;
       }
-      const before = seen[key];
-      if (before === next[key]) {
-        continue;
-      }
-      const [oldStatus = "", oldAsks = ""] = (before ?? "").split("|");
-      const known = new Set(oldAsks.split(",").filter(Boolean));
-      const fresh = (agent.asks ?? []).filter((ask) => !known.has(ask.id));
-      const name = `"${shortTitle(agent)}" in ${project.name}`;
-      if (fresh.length) {
-        updates.push(`${name} needs the user: ${describeAsk(fresh[0])}`);
-      } else if (agent.status !== oldStatus) {
-        const said = agent.lastMessage || agent.summary;
-        const tail = said ? ` Its last message: ${clip(oneLine(said), 300)}` : "";
-        if (before === undefined) {
-          if (agent.status === "working" || agent.status === "starting") {
-            updates.push(`${name} started.`);
-          }
-        } else if (agent.status === "review") {
-          updates.push(`${name} finished and is ready to review and merge.${tail}`);
-        } else if (agent.status === "done") {
-          updates.push(`${name} finished.${tail}`);
-        } else if (agent.status === "merged") {
-          updates.push(`${name} was merged.`);
-        } else if (agent.status === "failed") {
-          updates.push(`${name} failed.${tail}`);
-        } else if (agent.status === "waiting") {
-          updates.push(`${name} is waiting for the user.${tail}`);
+      const news = agentNews(project, agent, before === undefined ? null : { status: oldStatus, asks: oldAsks, announced });
+      if (news && updates.length >= UPDATES_PER_POLL) {
+        // Not said yet: keep the old entry so the next poll says it.
+        if (before !== undefined) {
+          next[key] = before;
         }
+        continue;
       }
+      if (news) {
+        updates.push(news);
+      }
+      next[key] = seenEntry(agent, news ? messageMark(agent) : announced);
     }
   }
   return { updates, seen: next };
+}
+
+function agentNews(project: VoiceProject, agent: VoiceAgent, before: { status: string; asks: string; announced: string } | null): string | null {
+  const name = `"${shortTitle(agent)}" in ${project.name}`;
+  const known = new Set((before?.asks ?? "").split(",").filter(Boolean));
+  const fresh = (agent.asks ?? []).filter((ask) => !known.has(ask.id));
+  if (fresh.length) {
+    return `${name} needs the user: ${describeAsk(fresh[fresh.length - 1])}`;
+  }
+  const status = agent.status ?? "";
+  if (before && status === before.status) {
+    return null;
+  }
+  const said = agent.lastMessage || agent.summary;
+  const tail = said ? ` Its last message: ${clip(oneLine(said), 300)}` : "";
+  // Something new that already got somewhere (finished between two polls) is
+  // still news; something new that is merely working is announced as started.
+  switch (status) {
+    case "working":
+    case "starting":
+      return before ? null : `${name} started.`;
+    case "review":
+      return `${name} finished and is ready to review and merge.${tail}`;
+    case "done":
+      return `${name} finished.${tail}`;
+    case "merged":
+      return before ? `${name} was merged.` : null;
+    case "failed":
+      return `${name} failed.${tail}`;
+    case "waiting":
+      // Each turn that ends on a question flips working to waiting; only a
+      // new message is worth interrupting the user for.
+      return before && before.announced === messageMark(agent) ? null : `${name} is waiting for the user.${tail}`;
+    default:
+      return null;
+  }
 }
 
 /** The message the phone adds to the conversation so the model says the news. */
@@ -560,18 +611,31 @@ export function resolveAgent(project: VoiceProject, query: string, prefer: (agen
   if (/^(the )?(latest|newest|last|most recent)( one| agent)?$/.test(lower)) {
     return [...agents].sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0))[0];
   }
+  const exact = agents.filter((agent) => normalized(agent.title ?? "") === normalized(lower));
+  if (exact.length === 1) {
+    return exact[0];
+  }
   const best = bestMatches(agents, tokens(lower), (agent) => tokens(`${agent.title ?? ""} ${agent.task ?? ""}`));
   if (best.length === 1) {
     return best[0];
   }
-  // Two equally good matches: the one that needs the user is almost always meant.
-  const preferred = best.filter(prefer);
-  if (preferred.length === 1) {
-    return preferred[0];
-  }
+  // Equally good matches are a question for the user, never a guess: the
+  // action could be a delete.
   throw new Resolution(best.length
     ? `Which one: ${listNames(best.slice(0, 5).map(shortTitle), "or")}?`
     : `No agent in ${project.name} matches "${query}". Its agents: ${listNames(agents.slice(0, 6).map(shortTitle))}.`);
+}
+
+function findPrompt(projects: VoiceProject[], id: string): { project: VoiceProject; agent: VoiceAgent; ask: VoiceAsk } | null {
+  for (const project of projects) {
+    for (const agent of project.agents) {
+      const ask = (agent.asks ?? []).find((candidate) => candidate.id === id);
+      if (ask) {
+        return { project, agent, ask };
+      }
+    }
+  }
+  return null;
 }
 
 function onlyWaiting(projects: VoiceProject[]): { project: VoiceProject; agent: VoiceAgent } {
@@ -584,6 +648,10 @@ function onlyWaiting(projects: VoiceProject[]): { project: VoiceProject; agent: 
     throw new Resolution("No agent is waiting on a prompt right now.");
   }
   throw new Resolution(`${waiting.length} agents are waiting: ${listNames(waiting.map(({ project, agent }) => `${shortTitle(agent)} in ${project.name}`))}. Which one?`);
+}
+
+function normalized(text: string): string {
+  return text.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
 }
 
 function bestMatches<T>(items: T[], query: string[], words: (item: T) => string[]): T[] {
@@ -731,7 +799,7 @@ function describeQuestion(question: Question): string {
   return `${question.question}${question.options.length ? ` Options: ${question.options.join("; ")}.` : ""}`;
 }
 
-/** A spoken answer lands on the option it names, or goes through as free text. */
+/** A spoken answer lands on the option it names exactly (or by number), or goes through as free text. */
 function matchOption(question: Question, spoken: string): string {
   const said = tokens(spoken);
   if (!question.options.length || !said.length) {
@@ -745,11 +813,16 @@ function matchOption(question: Question, spoken: string): string {
   if (ordinal && question.options[Number(ordinal[2]) - 1]) {
     return question.options[Number(ordinal[2]) - 1];
   }
-  const best = bestMatches(question.options, said, tokens);
-  return best.length === 1 ? best[0] : spoken;
+  // Anything else goes through as said: "not SQLite" must not become "SQLite".
+  const loose = question.options.find((option) => normalized(option) === normalized(spoken));
+  return loose ?? spoken;
 }
 
 function describeAsk(ask: VoiceAsk): string {
+  return `${describeAskBody(ask)} [prompt_id ${ask.id}]`;
+}
+
+function describeAskBody(ask: VoiceAsk): string {
   const kind = ask.kind ?? askKind(ask.tool);
   const input = (ask.input ?? {}) as Record<string, unknown>;
   if (kind === "plan") {

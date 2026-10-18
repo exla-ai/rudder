@@ -126,7 +126,9 @@ function wav(pcm) {
 
 const session = await post("/api/app/voice/session", { surface: "carplay" });
 log("session:", session.model, session.voice, "secret", session.clientSecret.slice(0, 6) + "…", "greeting:", session.greeting);
-const ws = new WebSocket(session.url, ["realtime", `openai-insecure-api-key.${session.clientSecret}`], { headers: { authorization: `Bearer ${session.clientSecret}` } });
+// Exactly like the phone: the client secret as a bearer token, no subprotocol
+// (OpenAI refuses a socket that carries both).
+const ws = new WebSocket(session.url, { headers: { authorization: `Bearer ${session.clientSecret}` } });
 await new Promise((resolve, reject) => { ws.on("open", resolve); ws.on("error", reject); ws.on("unexpected-response", (_q, r) => reject(new Error(`realtime refused: ${r.statusCode}`))); });
 log("connected to realtime");
 
@@ -139,6 +141,7 @@ ws.on("message", async (data) => {
   const event = JSON.parse(data.toString());
   switch (event.type) {
     case "response.created":
+      if (process.env.VOICE_DEBUG) log("response.created");
       current = { audio: [], text: "", tools: [] };
       break;
     case "response.output_audio.delta":
@@ -149,6 +152,12 @@ ws.on("message", async (data) => {
       break;
     case "conversation.item.input_audio_transcription.completed":
       log("user said:", JSON.stringify(event.transcript.trim()));
+      break;
+    case "input_audio_buffer.speech_started":
+    case "input_audio_buffer.speech_stopped":
+    case "input_audio_buffer.committed":
+    case "input_audio_buffer.timeout_triggered":
+      if (process.env.VOICE_DEBUG) log("vad:", event.type.split(".").pop());
       break;
     case "error":
       errors.push(event.error);
@@ -165,7 +174,7 @@ ws.on("message", async (data) => {
         log("tool output:", JSON.stringify(result.output).slice(0, 300));
         ws.send(JSON.stringify({ type: "conversation.item.create", item: { type: "function_call_output", call_id: call.call_id, output: result.output } }));
       }
-      if (calls.length) {
+      if (calls.length && !calls.some((call) => call.name === "end_conversation")) {
         ws.send(JSON.stringify({ type: "response.create" }));
         break;
       }
@@ -189,20 +198,48 @@ const spoken = (timeoutMs = 45_000) => new Promise((resolve, reject) => {
   waiters.push(() => { clearTimeout(timer); resolve(); });
 });
 
+// A live microphone: 100 ms of audio every 100 ms, whether anyone talks or not,
+// with a little noise like a real room (pure zeros are not what a phone sends).
+// Turn detection needs this: it decides a turn ended by hearing the silence after it.
+const micQueue = [];
+const roomNoise = () => {
+  const chunk = Buffer.alloc(4800);
+  for (let i = 0; i < chunk.length; i += 2) chunk.writeInt16LE(Math.round((Math.random() - 0.5) * 60), i);
+  return chunk;
+};
+const mic = setInterval(() => {
+  if (ws.readyState !== 1) return;
+  const chunk = micQueue.shift() ?? roomNoise();
+  ws.send(JSON.stringify({ type: "input_audio_buffer.append", audio: chunk.toString("base64") }));
+}, 100);
+
 async function say(text) {
   log("user:", JSON.stringify(text));
-  const pcm = Buffer.concat([await speak(text), Buffer.alloc(48000 * 2)]); // + 2 s of silence for the turn to end
-  for (let i = 0; i < pcm.length; i += 4800) { // 100 ms chunks, in real time
-    ws.send(JSON.stringify({ type: "input_audio_buffer.append", audio: pcm.subarray(i, i + 4800).toString("base64") }));
-    await sleep(100);
+  const pcm = await speak(text);
+  const reply = spoken();
+  for (let i = 0; i < pcm.length; i += 4800) {
+    const chunk = Buffer.alloc(4800);
+    pcm.copy(chunk, 0, i, Math.min(i + 4800, pcm.length));
+    micQueue.push(chunk);
   }
-  await spoken();
+  await reply;
 }
 
+// A reply can come before the action it describes lands (the model talks while
+// a later turn runs the tool), so actions are waited for, not sampled.
+const eventually = async (test, ms = 20_000) => {
+  for (const start = Date.now(); Date.now() - start < ms; await sleep(200)) {
+    if (test()) return true;
+  }
+  return false;
+};
 const check = (ok, what) => { if (!ok) { console.error(`FAILED: ${what}`); process.exitCode = 1; } else log(`ok: ${what}`); };
 
-ws.send(JSON.stringify({ type: "response.create", response: { instructions: `Greet the user briefly: ${session.greeting}` } }));
-await spoken();
+// The greeting goes in as a system item (response.instructions would replace the persona).
+const greeted = spoken();
+ws.send(JSON.stringify({ type: "conversation.item.create", item: { type: "message", role: "system", content: [{ type: "input_text", text: session.greeting }] } }));
+ws.send(JSON.stringify({ type: "response.create" }));
+await greeted;
 check(replies.length === 1 && replies[0].seconds > 0.5, "it speaks first");
 
 let seen = (await post("/api/app/voice/updates", { seen: null })).seen;
@@ -223,13 +260,41 @@ await sleep(500);
 const update = await post("/api/app/voice/updates", { seen });
 seen = update.seen;
 check(!!update.message, "the finished agent is news");
+const announced = spoken();
 ws.send(JSON.stringify({ type: "conversation.item.create", item: { type: "message", role: "system", content: [{ type: "input_text", text: update.message }] } }));
 ws.send(JSON.stringify({ type: "response.create" }));
-await spoken();
+await announced;
 check(/checkout|stripe/i.test(replies.at(-1).text), "it announces the finished agent unprompted");
 
 await say("Nice. Merge it.");
-check(rpcs.some((rpc) => rpc.method === "action" && rpc.params.action === "merge" && rpc.params.runId === "run-checkout"), "the merge went to the home machine");
+check(await eventually(() => rpcs.some((rpc) => rpc.method === "action" && rpc.params.action === "merge" && rpc.params.runId === "run-checkout")), "the merge went to the home machine");
+
+await say("Start a task in shop to add a dark mode toggle to the settings page.");
+check(await eventually(() => rpcs.some((rpc) => rpc.method === "task" && /dark mode/i.test(rpc.params.text))), "a spoken task starts on the home machine");
+
+await say("Tell the search agent to use Postgres full text search instead of meilisearch.");
+check(await eventually(() => rpcs.some((rpc) => rpc.method === "send" && rpc.params.runId === "run-search" && /postgres/i.test(rpc.params.text))), "a spoken message reaches the right agent");
+
+// Two things happen at once while driving: search asks a question, the new task fails.
+agents[1].status = "waiting";
+agents[1].asks = [{ id: "1760000000001-bbbbbbbb", tool: "AskUserQuestion", kind: "question", input: { questions: [{ question: "Keep the meilisearch index as a fallback?", options: [{ label: "Yes" }, { label: "No" }], multiSelect: false }] } }];
+agents.push({ id: "run-dark", title: "Dark mode toggle", status: "failed", lastMessage: "The settings page uses a CSS framework I could not find in package.json." });
+publish();
+await sleep(500);
+const second = await post("/api/app/voice/updates", { seen });
+seen = second.seen;
+check(second.updates.length === 2, "both events are news");
+const announcedTwo = spoken();
+ws.send(JSON.stringify({ type: "conversation.item.create", item: { type: "message", role: "system", content: [{ type: "input_text", text: second.message }] } }));
+ws.send(JSON.stringify({ type: "response.create" }));
+await announcedTwo;
+check(/dark/i.test(replies.at(-1).text) && /(search|fallback|meili)/i.test(replies.at(-1).text), "it announces both");
+
+await say("No, drop meilisearch completely.");
+check(await eventually(() => rpcs.some((rpc) => rpc.method === "answer" && rpc.params.askId === "1760000000001-bbbbbbbb")), "the question was answered");
+
+await say("Why did the dark mode one fail?");
+check(/css|framework|package/i.test(replies.at(-1).text), "it explains a failure from the agent's own words");
 
 await say("Thanks, that's all.");
 check(toolCalls.includes("end_conversation"), "it ends the conversation when told");
@@ -237,6 +302,7 @@ check(toolCalls.includes("end_conversation"), "it ends the conversation when tol
 check(errors.length === 0, "no realtime errors");
 fs.writeFileSync(path.join(outDir, "transcript.txt"), replies.map((r, i) => `${i + 1}. (${r.seconds.toFixed(1)}s) ${r.text}`).join("\n") + "\n");
 log("replies saved in", outDir);
+clearInterval(mic);
 ws.close();
 control.close();
 process.exit();

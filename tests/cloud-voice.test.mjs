@@ -143,8 +143,10 @@ unitTest("tool calls do on the home machine what the app's buttons do", async ()
   result = await voice.runVoiceTool(ctx, "answer_prompt", JSON.stringify({ project: "shop", agent: "database", decision: "answer_questions", answers: ["sqlite please"] }));
   assert.match(result.output, /2 questions/, "every question needs an answer");
   assert.equal(calls.length, 0);
-  await voice.runVoiceTool(ctx, "answer_prompt", JSON.stringify({ project: "shop", agent: "database", decision: "answer_questions", answers: ["sqlite please", "orders"] }));
+  await voice.runVoiceTool(ctx, "answer_prompt", JSON.stringify({ project: "shop", agent: "database", decision: "answer_questions", answers: ["sqlite", "orders"] }));
   assert.deepEqual(calls.pop().params.answer, { answers: { "Which database?": "SQLite", "Name of the table?": "orders" } });
+  await voice.runVoiceTool(ctx, "answer_prompt", JSON.stringify({ project: "shop", agent: "database", decision: "answer_questions", answers: ["not SQLite", "2"] }));
+  assert.deepEqual(calls.pop().params.answer, { answers: { "Which database?": "not SQLite", "Name of the table?": "2" } }, "free text is never bent onto an option");
 
   await voice.runVoiceTool(ctx, "answer_prompt", JSON.stringify({ project: "shop", agent: "checkout", decision: "approve_plan" }));
   assert.deepEqual(calls.pop().params.answer, { approve: true });
@@ -158,7 +160,7 @@ unitTest("tool calls do on the home machine what the app's buttons do", async ()
   await voice.runVoiceTool(ctx, "agent_action", JSON.stringify({ project: "libra", agent: "login", action: "interrupt" }));
   assert.deepEqual(calls.pop(), { method: "keys", params: { workspaceId: "ws-libra", runId: "run-login", keys: "esc" } });
   result = await voice.runVoiceTool(ctx, "agent_action", JSON.stringify({ project: "libra", agent: "billing", action: "merge" }));
-  assert.equal(result.output, "Merging Billing page polish in libra.");
+  assert.match(result.output, /^Merge started for Billing page polish in libra\./);
   assert.deepEqual(calls.pop(), { method: "action", params: { workspaceId: "ws-libra", runId: "run-billing", action: "merge" } });
 
   result = await voice.runVoiceTool(ctx, "get_agent", JSON.stringify({ project: "libra", agent: "login" }));
@@ -195,12 +197,55 @@ unitTest("while a conversation is open, a finished, failed or blocked agent beco
   const next = voice.voiceUpdates(list, first.seen);
   assert.deepEqual(next.updates, [
     "\"Fix login redirect\" in libra finished and is ready to review and merge. Its last message: Fixed the redirect. All tests pass.",
-    "\"Billing page polish\" in libra needs the user: permission to use Bash: rm -rf dist",
+    "\"Billing page polish\" in libra needs the user: permission to use Bash: rm -rf dist [prompt_id 1700000000009-dddddddd]",
     "\"Write the changelog\" in libra started.",
     "\"Checkout plan\" in shop failed.",
   ]);
   assert.deepEqual(voice.voiceUpdates(list, next.seen).updates, [], "said once");
   assert.match(voice.voiceUpdateMessage(next.updates), /^Live update from Rudder \(not from the user\)/);
+
+  // A new turn that ends on a question again is news only when it says something new.
+  list[0].agents[0].status = "working";
+  let seen = voice.voiceUpdates(list, next.seen).seen;
+  list[0].agents[0].status = "waiting";
+  seen = voice.voiceUpdates(list, seen).seen;
+  list[0].agents[0].status = "working";
+  seen = voice.voiceUpdates(list, seen).seen;
+  list[0].agents[0].status = "waiting";
+  assert.deepEqual(voice.voiceUpdates(list, seen).updates, [], "same message, no repeat");
+  list[0].agents[0].lastMessage = "Should I also fix the logout redirect?";
+  assert.deepEqual(voice.voiceUpdates(list, seen).updates, ["\"Fix login redirect\" in libra is waiting for the user. Its last message: Should I also fix the logout redirect?"]);
+});
+
+unitTest("updates beyond one announcement wait for the next poll, and work finished between polls is still news", () => {
+  const many = [{ workspaceId: "w", name: "big", agents: Array.from({ length: 6 }, (_, i) => ({ id: `r${i}`, title: `Task ${i}`, status: "working" })) }];
+  let { seen } = voice.voiceUpdates(many, null);
+  many[0].agents.forEach((agent) => { agent.status = "failed"; });
+  many[0].agents.push({ id: "quick", title: "Quick fix", status: "review" });
+  const first = voice.voiceUpdates(many, seen);
+  assert.equal(first.updates.length, 4);
+  const second = voice.voiceUpdates(many, first.seen);
+  assert.deepEqual(second.updates, ["\"Task 4\" in big failed.", "\"Task 5\" in big failed.", "\"Quick fix\" in big finished and is ready to review and merge."]);
+  assert.deepEqual(voice.voiceUpdates(many, second.seen).updates, []);
+});
+
+unitTest("an exact title wins, a tie is a question, and a prompt id answers that exact prompt", async () => {
+  const list = [{ workspaceId: "w", name: "app", agents: [
+    { id: "a", title: "Fix login", status: "working" },
+    { id: "b", title: "Fix login redirect", status: "waiting", asks: [permissionAsk, { ...permissionAsk, id: "1700000000005-eeeeeeee", input: { command: "git push" } }] },
+    { id: "c", title: "Docs pass", status: "done" },
+    { id: "d", title: "Docs pass", status: "working" },
+  ] }];
+  assert.equal(voice.resolveAgent(list[0], "fix login").id, "a", "exact title, even though the other one needs the user");
+  assert.throws(() => voice.resolveAgent(list[0], "docs"), /Which one: "Docs pass" or "Docs pass"\?/);
+  const { ctx, calls } = fakeContext(list);
+  let result = await voice.runVoiceTool(ctx, "answer_prompt", JSON.stringify({ agent: "redirect", decision: "allow" }));
+  assert.match(result.output, /has 2 prompts waiting/);
+  assert.equal(calls.length, 0);
+  result = await voice.runVoiceTool(ctx, "answer_prompt", JSON.stringify({ prompt_id: "1700000000005-eeeeeeee", decision: "deny", message: "not yet" }));
+  assert.deepEqual(calls.pop().params, { workspaceId: "w", runId: "b", askId: "1700000000005-eeeeeeee", answer: { behavior: "deny", message: "not yet" } });
+  result = await voice.runVoiceTool(ctx, "answer_prompt", JSON.stringify({ prompt_id: "1700000000099-ffffffff", decision: "allow" }));
+  assert.match(result.output, /no longer waiting/);
 });
 
 // ---------------------------------------------------------------------------

@@ -6756,6 +6756,9 @@ const VOICE_NAME = process.env.RUDDER_VOICE || "marin";
 // Captions on the phone come from input transcription; "" turns it off.
 const VOICE_TRANSCRIBE_MODEL = process.env.RUDDER_VOICE_TRANSCRIBE_MODEL ?? "gpt-4o-mini-transcribe";
 
+const VOICE_MINTS_PER_HOUR = Number(process.env.RUDDER_VOICE_MINTS_PER_HOUR) || 40;
+const voiceMints = new Map<string, number[]>();
+
 function openAiApiKey(): string {
   return (process.env.RUDDER_OPENAI_API_KEY || process.env.OPENAI_API_KEY || "").trim();
 }
@@ -6783,14 +6786,24 @@ async function handleVoiceSession(res: ServerResponse, account: { accountId: str
     sendJson(res, 503, { error: "voice is not set up on this server (OPENAI_API_KEY is missing)" });
     return;
   }
+  if (!home || home.status === "deleting") {
+    sendJson(res, 404, { error: "you need a cloud machine first: add a project in the app" });
+    return;
+  }
+  // Each session is billed to us; a phone opens a handful an hour.
+  const recent = (voiceMints.get(account.accountId) ?? []).filter((at) => Date.now() - at < 3_600_000);
+  if (recent.length >= VOICE_MINTS_PER_HOUR) {
+    sendJson(res, 429, { error: "too many voice sessions this hour; try again later" });
+    return;
+  }
+  recent.push(Date.now());
+  voiceMints.set(account.accountId, recent);
   const surface = stringField(body, "surface") === "carplay" ? "carplay" : "phone";
   const focus = (stringField(body, "focus") ?? "").trim().slice(0, 300) || undefined;
-  if (home && home.status !== "deleting") {
-    touchHome(home.id);
-    if (!isOpen(homeControls.get(home.id))) {
-      // The first question is usually "what's going on", so be awake for it.
-      wakeHomeInBackground(account.accountId);
-    }
+  touchHome(home.id);
+  if (!isOpen(homeControls.get(home.id))) {
+    // The first question is usually "what's going on", so be awake for it.
+    wakeHomeInBackground(account.accountId);
   }
   const projects = voiceProjects(account.accountId);
   const instructions = voiceInstructions(projects, surface, focus);
@@ -6802,7 +6815,8 @@ async function handleVoiceSession(res: ServerResponse, account: { accountId: str
       "openai-safety-identifier": createHash("sha256").update(account.accountId).digest("hex").slice(0, 32),
     },
     body: JSON.stringify({
-      expires_after: { anchor: "created_at", seconds: 600 },
+      // Only needed to open the socket; a connected session keeps going.
+      expires_after: { anchor: "created_at", seconds: 120 },
       session: voiceSessionConfig({ model: VOICE_MODEL, voice: VOICE_NAME, instructions, transcribeModel: VOICE_TRANSCRIBE_MODEL, minimal }),
     }),
     signal: AbortSignal.timeout(20_000),

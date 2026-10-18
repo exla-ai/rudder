@@ -892,6 +892,20 @@ brain lives in the cloud, and the phone is a first-class client.
   nothing below it is unpushed. Uncommitted or unpushed work on either side is reported,
   never pushed, rebased or overwritten. It also brings the vault's copy of the laptop's
   config level (`ensureVaultAws`). `/sync all` / `--all` covers every repo on the home.
+- **Work travels too, without GitHub (3.2.1).** Each side's work GitHub lacks (the jj
+  working copy and unpushed changes below it) is a git bundle (`exportWork`): the
+  laptop's rides in the sync request, the home's is PUT back to the control plane
+  (`/api/rudder/home/<id>/syncs/<blob>`, worker token; the laptop fetches
+  `/api/rudder/home/syncs/<blob>`; in memory, 15 min). Not a pushed WIP branch: jj
+  tracks every non-ignored file, so a stray secret would reach GitHub. The receiver
+  (`importWork`) moves onto it (`jj new <head>`) only when nothing is lost: it has no
+  work of its own, its work is already in the incoming history, or its edits read the
+  same there (Rudder's .gitignore lines in a fresh clone). Otherwise both stay and the
+  incoming one is bookmark `rudder-sync/<from>`. The SENDER checkpoints a working copy
+  with edits (`jj new`) so its next edits are a child of what was sent, or every second
+  sync would read as diverged. `rudder cloud sync <name>` clones a repo that is only on
+  the home into `~/code/<name>` first. Agents and their workspaces do not travel (that
+  is `/sync move`), only the main checkout.
 - **Update when idle (`sweepIdleHomeUpdates`, server.ts).** A release pins a new
   `RUDDER_WORKER_IMAGE`, but the home keeps the image it booted with, and restarting
   cuts off agents mid-turn. Every minute the control plane checks each connected home:

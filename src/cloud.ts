@@ -21,7 +21,7 @@ import {
 } from "./migration.js";
 import { buildMoveBundle, findMoveCandidates, markRunsMovedHome, type MoveCandidate } from "./move-home.js";
 import { cloudAuthPath } from "./state.js";
-import { describeSync, syncCheckout, type CheckoutSyncReport } from "./checkout-sync.js";
+import { describeSync, exportWork, importWork, syncCheckout, type CheckoutSyncReport } from "./checkout-sync.js";
 import type { CloudAuthState, CloudSail, JsonValue } from "./types.js";
 import {
   ensureDir,
@@ -110,6 +110,7 @@ type SnapshotOptions = {
 type CloudClient = {
   baseUrl: string;
   request<T>(pathOrUrl: string, init: { method: string; body?: JsonValue }): Promise<T>;
+  download(pathname: string): Promise<Buffer>;
 };
 
 type CloudRuntime = "fly" | "byo-vm";
@@ -1329,6 +1330,14 @@ async function cloudClient(options: { requireToken: boolean }): Promise<CloudCli
         throw new Error(`Rudder Cloud request failed: ${message}`);
       }
       return parsed as T;
+    },
+    async download(pathname: string) {
+      const response = await fetch(new URL(pathname, `${baseUrl}/`).toString(), { headers: token ? { Authorization: `Bearer ${token}` } : {} });
+      if (!response.ok) {
+        const text = await response.text();
+        throw new Error(`Rudder Cloud request failed: ${responseErrorMessage(text ? parseJson(text) : null) || `${response.status} ${response.statusText}`}`);
+      }
+      return Buffer.from(await response.arrayBuffer());
     },
   };
 }
@@ -4535,13 +4544,25 @@ async function reportCredentialParity(client: CloudClient, { problemsOnly }: { p
 async function cloudSync(args: string[], options: CloudCommandOptions): Promise<void> {
   const client = await cloudClient({ requireToken: true });
   const all = args.includes("--all");
-  const root = findRepoRoot();
+  const named = args.find((arg) => !arg.startsWith("-"));
+  const root = named ? await localCheckoutFor(client, named, options) : findRepoRoot();
   const slug = await githubSlugFromOrigin(root);
   const lines: string[] = [];
   let local: CheckoutSyncReport | null = null;
+  let work: { bundle: string; head: string } | undefined;
+  const scratch = await fsp.mkdtemp(path.join(os.tmpdir(), "rudder-sync-"));
   if (slug) {
     local = await syncCheckout(root);
-    lines.push(describeSync(`this laptop (${slug})`, local));
+    lines.push("");
+    // This laptop's work GitHub lacks goes to the cloud machine directly.
+    const sent = await exportWork(root, path.join(scratch, "out.bundle")).catch((error: unknown) => {
+      lines.push(`work: could not bundle this laptop's work (${error instanceof Error ? error.message : String(error)})`);
+      return null;
+    });
+    if (sent) {
+      local.work = { sent };
+      work = { bundle: (await fsp.readFile(path.join(scratch, "out.bundle"))).toString("base64"), head: sent.head };
+    }
   } else if (!all) {
     throw new Error("This repo has no GitHub origin, so there is nothing on the home machine to sync it with. `rudder cloud sync --all` syncs every repo there.");
   }
@@ -4553,9 +4574,27 @@ async function cloudSync(args: string[], options: CloudCommandOptions): Promise<
   }
   const cloud = await client.request<{ results?: { repo: string; report?: CheckoutSyncReport; error?: string }[] }>("/api/rudder/home/sync", {
     method: "POST",
-    body: all || !slug ? {} : { repos: [slug] },
-  });
+    body: all || !slug ? {} : { repos: [slug], ...(work ? { work } : {}) },
+  }).finally(() => fsp.rm(scratch, { recursive: true, force: true }).catch(() => undefined));
   const results = cloud.results ?? [];
+  // And the cloud's work comes back here.
+  const mine = slug ? results.find((result) => result.repo.toLowerCase() === slug.toLowerCase()) : undefined;
+  const incoming = mine?.report?.work?.sent as { head: string; download?: string } | undefined;
+  if (local && incoming?.download) {
+    const dir = await fsp.mkdtemp(path.join(os.tmpdir(), "rudder-sync-in-"));
+    try {
+      const file = path.join(dir, "in.bundle");
+      await fsp.writeFile(file, await client.download(incoming.download));
+      local.work = { ...local.work, received: await importWork(root, file, incoming.head, "cloud") };
+    } catch (error) {
+      local.work = { ...local.work, received: { from: "cloud", head: incoming.head, outcome: "failed", note: `could not take the cloud's work (${error instanceof Error ? error.message : String(error)})` } };
+    } finally {
+      await fsp.rm(dir, { recursive: true, force: true }).catch(() => undefined);
+    }
+  }
+  if (local) {
+    lines[0] = describeSync(`this laptop (${slug})`, local);
+  }
   if (options.json) {
     printJson({ local, cloud: results } as unknown as JsonValue);
     return;
@@ -4582,11 +4621,40 @@ async function cloudSync(args: string[], options: CloudCommandOptions): Promise<
       lines.push(`${running.length} agent(s) still running on this laptop: ${running.slice(0, 4).map((run) => `"${(run.taskSummary || run.task).slice(0, 50)}"`).join(", ")}${running.length > 4 ? ", ..." : ""}. They stop when the laptop sleeps; \`/sync move\` (or H) moves them to the cloud machine.`);
     }
   }
-  const unpushed = [local, ...results.map((result) => result.report)].filter((report): report is CheckoutSyncReport => !!report && report.ahead > 0);
-  if (unpushed.length > 0) {
-    lines.push("Unpushed work stays where it is: push it (or merge its PR) and run /sync again to bring the other side up.");
+  console.log(lines.filter(Boolean).join("\n"));
+}
+
+// `rudder cloud sync <name>`: the laptop's clone of a repo open on the cloud
+// machine, cloned from GitHub into ~/code/<name> the first time.
+async function localCheckoutFor(client: CloudClient, name: string, options: CloudCommandOptions): Promise<string> {
+  const view = await client.request<{ projects?: { repo?: string }[] }>("/api/rudder/home", { method: "GET" });
+  const wanted = name.replace(/\.git$/, "").toLowerCase();
+  const slug = (view.projects ?? []).map((project) => project.repo ?? "").find((repo) => repo.toLowerCase() === wanted || repo.split("/").pop()?.toLowerCase() === wanted);
+  if (!slug) {
+    throw new Error(`${name} is not open on the cloud machine.`);
   }
-  console.log(lines.join("\n"));
+  const dir = path.join(os.homedir(), "code", slug.split("/").pop()!);
+  if (await pathExists(path.join(dir, ".git"))) {
+    const existing = await githubSlugFromOrigin(dir);
+    if (existing?.toLowerCase() !== slug.toLowerCase()) {
+      throw new Error(`${shortenHome(dir)} already exists and is not a clone of ${slug}.`);
+    }
+    return dir;
+  }
+  if (await pathExists(dir)) {
+    throw new Error(`${shortenHome(dir)} already exists and is not a git checkout.`);
+  }
+  if (!options.json) {
+    process.stderr.write(`Cloning ${slug} into ${shortenHome(dir)}...\n`);
+  }
+  await fsp.mkdir(path.dirname(dir), { recursive: true });
+  const cloned = commandExists("gh")
+    ? await runCommand("gh", ["repo", "clone", slug, dir], { allowFailure: true })
+    : await runCommand("git", ["clone", `https://github.com/${slug}.git`, dir], { allowFailure: true });
+  if (cloned.code !== 0) {
+    throw new Error(`could not clone ${slug}: ${(cloned.stderr || cloned.stdout).trim().split("\n").pop()}`);
+  }
+  return dir;
 }
 
 function describeCloudAgents(repo: string, agents: { title?: string; status?: string; asks?: unknown[] }[]): string[] {

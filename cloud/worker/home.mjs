@@ -507,13 +507,7 @@ async function handleRpc(method, params) {
     if (project.status === "cloning" || !fs.existsSync(path.join(project.dir, ".git"))) {
       throw new Error("still cloning");
     }
-    const result = await captureAll("rudder", ["__sync-checkout"], { env: { ...baseChildEnv }, cwd: project.dir, timeoutMs: 110_000 });
-    const line = result.stdout.trim().split("\n").reverse().find((entry) => entry.trim().startsWith("{")) || "";
-    try {
-      return JSON.parse(line);
-    } catch {
-      throw new Error(firstLine(result.stderr || result.stdout) || `sync exited ${result.code}`);
-    }
+    return await syncProject(project, params);
   }
   if (method === "action") {
     const kind = params.action === "merge" ? "merge" : params.action === "stop" ? "cancel" : params.action === "delete" ? "delete" : null;
@@ -559,6 +553,56 @@ async function receiveUpload(project, params) {
 function uploadName(raw) {
   const cleaned = String(raw || "").split(/[\\/]/).pop().replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^[-.]+/, "").slice(0, 100);
   return cleaned || "file";
+}
+
+// `rudder cloud sync` in this clone. Work the laptop sent (a bundle waiting on
+// the control plane, see src/checkout-sync.ts) is taken first, and this side's
+// own unpushed work is bundled and uploaded for the laptop to take.
+const SYNC_PATH_RE = /^\/api\/rudder\/home\/[^/]+\/syncs\/[^/]+$/;
+async function syncProject(project, params) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "rudder-sync-"));
+  try {
+    const env = { ...baseChildEnv };
+    const incoming = params.incoming && typeof params.incoming === "object" ? params.incoming : null;
+    if (incoming) {
+      if (!SYNC_PATH_RE.test(String(incoming.path || ""))) {
+        throw new Error("bad sync path");
+      }
+      const response = await fetch(`${cloudUrl}${incoming.path}`, { headers: { authorization: `Bearer ${workerToken}` } });
+      if (!response.ok) {
+        throw new Error(`could not fetch the laptop's work (HTTP ${response.status})`);
+      }
+      const file = path.join(dir, "in.bundle");
+      fs.writeFileSync(file, Buffer.from(await response.arrayBuffer()));
+      Object.assign(env, { RUDDER_SYNC_IN: file, RUDDER_SYNC_IN_HEAD: String(incoming.head || ""), RUDDER_SYNC_FROM: "laptop" });
+    }
+    const uploadPath = String(params.uploadPath || "");
+    const out = path.join(dir, "out.bundle");
+    if (SYNC_PATH_RE.test(uploadPath)) {
+      env.RUDDER_SYNC_OUT = out;
+    }
+    const result = await captureAll("rudder", ["__sync-checkout"], { env, cwd: project.dir, timeoutMs: 110_000 });
+    const line = result.stdout.trim().split("\n").reverse().find((entry) => entry.trim().startsWith("{")) || "";
+    let report;
+    try {
+      report = JSON.parse(line);
+    } catch {
+      throw new Error(firstLine(result.stderr || result.stdout) || `sync exited ${result.code}`);
+    }
+    if (report.work?.sent && fs.existsSync(out)) {
+      const response = await fetch(`${cloudUrl}${uploadPath}`, {
+        method: "PUT",
+        headers: { authorization: `Bearer ${workerToken}`, "content-type": "application/octet-stream" },
+        body: fs.readFileSync(out),
+      });
+      if (!response.ok) {
+        report.work.sent.error = `upload failed (HTTP ${response.status})`;
+      }
+    }
+    return report;
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 }
 
 // A laptop moving its agents here (`rudder cloud move`, H in its dashboard).

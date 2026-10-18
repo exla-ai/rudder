@@ -5606,6 +5606,66 @@ function serveHomeMoveBundle(req: IncomingMessage, res: ServerResponse, homeId: 
   res.end(move.bundle);
 }
 
+// `rudder cloud sync` work bundles (src/checkout-sync.ts). The laptop's work
+// rides in the sync request and waits here for the home machine to fetch with
+// its worker token; the home machine's work is PUT back here and the laptop
+// fetches it with its own token. In memory, for minutes: a sync that loses its
+// bundle to a restart just carries the work on the next /sync.
+type HomeSyncBlob = { accountId: string; homeId: string; direction: "in" | "out"; bytes: Buffer | null; expiresAt: number };
+const homeSyncBlobs = new Map<string, HomeSyncBlob>();
+const HOME_SYNC_TTL_MS = 15 * 60 * 1000;
+const HOME_SYNC_RE = /^\/api\/rudder\/home\/([^/]+)\/syncs\/([^/]+)$/;
+const HOME_SYNC_DOWNLOAD_RE = /^\/api\/rudder\/home\/syncs\/([^/]+)$/;
+
+function newHomeSyncBlob(accountId: string, homeId: string, direction: "in" | "out", bytes: Buffer | null): string {
+  const now = Date.now();
+  for (const [id, blob] of homeSyncBlobs) {
+    if (blob.expiresAt < now) {
+      homeSyncBlobs.delete(id);
+    }
+  }
+  const id = randomUUID();
+  homeSyncBlobs.set(id, { accountId, homeId, direction, bytes, expiresAt: now + HOME_SYNC_TTL_MS });
+  return id;
+}
+
+async function serveHomeSyncWorker(req: IncomingMessage, res: ServerResponse, homeId: string, blobId: string): Promise<void> {
+  const row = findWorkspaceById.get(homeId) as Record<string, unknown> | undefined;
+  if (!row || optionalString(row.source_kind) !== "home") {
+    sendJson(res, 404, { error: "not found" });
+    return;
+  }
+  requireWorkerBearer(req, row);
+  const blob = homeSyncBlobs.get(blobId);
+  if (!blob || blob.homeId !== homeId || blob.expiresAt < Date.now()) {
+    sendJson(res, 404, { error: "no such sync bundle" });
+    return;
+  }
+  if (req.method === "GET" && blob.direction === "in" && blob.bytes) {
+    res.writeHead(200, { "content-type": "application/octet-stream", "content-length": String(blob.bytes.length) });
+    res.end(blob.bytes);
+    blob.bytes = null;
+    return;
+  }
+  if (req.method === "PUT" && blob.direction === "out" && !blob.bytes) {
+    const chunks: Buffer[] = [];
+    let total = 0;
+    for await (const chunk of req) {
+      const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      total += buf.length;
+      if (total > MAX_SNAPSHOT_BODY_BYTES) {
+        req.destroy();
+        throw payloadTooLarge();
+      }
+      chunks.push(buf);
+    }
+    blob.bytes = Buffer.concat(chunks);
+    sendJson(res, 200, { ok: true });
+    return;
+  }
+  sendJson(res, 409, { error: "sync bundle already used" });
+}
+
 // Photos and files sent from the phone. The bytes wait here (in memory, for
 // one upload) while the home machine is asked to fetch them with its worker
 // token, like a move bundle: never base64 over the control socket.
@@ -5747,6 +5807,11 @@ async function handleHomeApi(req: IncomingMessage, res: ServerResponse, url: URL
     serveHomeMoveBundle(req, res, decodeURIComponent(bundleMatch[1]), decodeURIComponent(bundleMatch[2]));
     return;
   }
+  const syncMatch = req.method === "GET" || req.method === "PUT" ? HOME_SYNC_RE.exec(url.pathname) : null;
+  if (syncMatch) {
+    await serveHomeSyncWorker(req, res, decodeURIComponent(syncMatch[1]), decodeURIComponent(syncMatch[2]));
+    return;
+  }
   const uploadMatch = req.method === "GET" ? HOME_UPLOAD_RE.exec(url.pathname) : null;
   if (uploadMatch) {
     serveHomeUpload(req, res, decodeURIComponent(uploadMatch[1]), decodeURIComponent(uploadMatch[2]));
@@ -5787,7 +5852,7 @@ async function handleHomeApi(req: IncomingMessage, res: ServerResponse, url: URL
   if (req.method === "POST" && url.pathname === "/api/rudder/home/sync") {
     // `rudder cloud sync`: each named repo (default: every repo open there)
     // fetches and moves to its newest default branch on the home machine.
-    const body = await readJsonBody(req);
+    const body = await readJsonBody(req, MAX_SNAPSHOT_BODY_BYTES);
     const raw = (body as JsonRecord).repos;
     const wanted = (Array.isArray(raw) ? raw : [])
       .filter((slug): slug is string => typeof slug === "string" && REPO_SLUG_RE.test(slug))
@@ -5798,12 +5863,42 @@ async function handleHomeApi(req: IncomingMessage, res: ServerResponse, url: URL
     for (const repo of repos) {
       const slug = repoSlugFromUrl(repo.repoUrl);
       try {
-        results.push({ repo: slug, report: await homeRpc(home.id, "sync", { workspaceId: repo.id }, 120_000) });
+        // Work travels only when one repo is named: the bundle is that repo's.
+        const work = wanted.length === 1 ? (body as JsonRecord).work as JsonRecord | undefined : undefined;
+        const bundle = work && typeof work.bundle === "string" ? Buffer.from(work.bundle, "base64") : null;
+        const params: JsonRecord = { workspaceId: repo.id };
+        if (bundle && bundle.length > 0 && typeof work?.head === "string") {
+          const inId = newHomeSyncBlob(authContext.accountId, home.id, "in", bundle);
+          params.incoming = { path: `/api/rudder/home/${encodeURIComponent(home.id)}/syncs/${inId}`, head: work.head };
+        }
+        const outId = newHomeSyncBlob(authContext.accountId, home.id, "out", null);
+        params.uploadPath = `/api/rudder/home/${encodeURIComponent(home.id)}/syncs/${outId}`;
+        const report = await homeRpc(home.id, "sync", params, 300_000) as JsonRecord;
+        const sent = (report.work as JsonRecord | undefined)?.sent as JsonRecord | undefined;
+        if (sent && homeSyncBlobs.get(outId)?.bytes) {
+          sent.download = `/api/rudder/home/syncs/${outId}`;
+        } else {
+          homeSyncBlobs.delete(outId);
+        }
+        results.push({ repo: slug, report });
       } catch (error) {
         results.push({ repo: slug, error: error instanceof Error ? error.message : String(error) });
       }
     }
     sendJson(res, 200, { results });
+    return;
+  }
+  const syncDownload = req.method === "GET" ? HOME_SYNC_DOWNLOAD_RE.exec(url.pathname) : null;
+  if (syncDownload) {
+    const id = decodeURIComponent(syncDownload[1]);
+    const blob = homeSyncBlobs.get(id);
+    if (!blob || blob.accountId !== authContext.accountId || blob.direction !== "out" || !blob.bytes || blob.expiresAt < Date.now()) {
+      sendJson(res, 404, { error: "no such sync bundle (it lasts 15 minutes; run /sync again)" });
+      return;
+    }
+    homeSyncBlobs.delete(id);
+    res.writeHead(200, { "content-type": "application/octet-stream", "content-length": String(blob.bytes.length) });
+    res.end(blob.bytes);
     return;
   }
   if (req.method === "POST" && url.pathname === "/api/rudder/home/start") {

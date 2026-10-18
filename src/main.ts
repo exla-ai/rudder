@@ -212,8 +212,22 @@ export async function main(): Promise<void> {
     }
     case "__sync-checkout": {
       // The home machine's half of `rudder cloud sync`, run in its clone.
-      const { syncCheckout } = await import("./checkout-sync.js");
-      console.log(JSON.stringify(await syncCheckout(findRepoRoot())));
+      // RUDDER_SYNC_IN (+ _HEAD, _FROM): the other side's work to take first;
+      // RUDDER_SYNC_OUT: where to bundle this side's work for the way back.
+      const { syncCheckout, importWork, exportWork } = await import("./checkout-sync.js");
+      const root = findRepoRoot();
+      const report = await syncCheckout(root);
+      const work: NonNullable<typeof report.work> = {};
+      if (process.env.RUDDER_SYNC_IN) {
+        work.received = await importWork(root, process.env.RUDDER_SYNC_IN, process.env.RUDDER_SYNC_IN_HEAD ?? "", process.env.RUDDER_SYNC_FROM ?? "laptop");
+      }
+      if (process.env.RUDDER_SYNC_OUT) {
+        work.sent = (await exportWork(root, process.env.RUDDER_SYNC_OUT)) ?? undefined;
+      }
+      if (work.received || work.sent) {
+        report.work = work;
+      }
+      console.log(JSON.stringify(report));
       return;
     }
     case "__adopt-moved": {

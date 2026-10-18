@@ -21,6 +21,7 @@ targets:
   Rudder:
     type: application
     platform: iOS
+    scheme: {}
     sources:
       - path: App
     settings:

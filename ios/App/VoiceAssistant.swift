@@ -662,7 +662,7 @@ final class VoiceAssistant {
 
     // MARK: - Helpers
 
-    private static func storedToken() -> String? {
+    static func storedToken() -> String? {
         if let token = Keychain.read(), !token.isEmpty {
             return token
         }

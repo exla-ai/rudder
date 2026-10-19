@@ -215,7 +215,7 @@ final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegat
     /// the same rule as the web app's `needsYou`: an open prompt, or waiting,
     /// ready for review, or failed.
     private func fetchNeeds() async -> Needs {
-        guard let token = Keychain.read(), !token.isEmpty else { return .signedOut }
+        guard let token = VoiceAssistant.storedToken() else { return .signedOut }
         var request = URLRequest(url: Session.resolvedServer().appendingPathComponent("api/app/state"), timeoutInterval: 20)
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")

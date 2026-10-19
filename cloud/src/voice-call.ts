@@ -258,6 +258,7 @@ export async function runVoiceCall(options: VoiceCallOptions): Promise<void> {
               }));
           pendingTools = Math.max(0, pendingTools - 1);
           lastActivity = Date.now();
+          log(`tool ${call.name}(${clip(call.arguments, 120)}) -> ${clip(reply.output, 160)}`);
           send({ type: "conversation.item.create", item: { type: "function_call_output", call_id: call.callId, output: reply.output } });
           end ||= Boolean(reply.end);
         }
@@ -282,6 +283,10 @@ export async function runVoiceCall(options: VoiceCallOptions): Promise<void> {
     // Only finished calls of a finished response run: a cancelled call can
     // carry half its arguments.
     const output = status === "completed" && Array.isArray(response?.output) ? response.output as Record<string, unknown>[] : [];
+    const said = spokenText(response);
+    if (said) {
+      log(`rudder: ${clip(said, 400)}`);
+    }
     const calls: ToolCall[] = output
       .filter((item) => item.type === "function_call" && item.status === "completed" && typeof item.name === "string" && typeof item.call_id === "string")
       .map((item) => ({ name: item.name as string, arguments: typeof item.arguments === "string" ? item.arguments : "{}", callId: item.call_id as string }));
@@ -306,7 +311,7 @@ export async function runVoiceCall(options: VoiceCallOptions): Promise<void> {
   });
 
   socket.on("message", (data) => {
-    let event: { type?: string; response?: Record<string, unknown>; error?: { message?: string } };
+    let event: { type?: string; response?: Record<string, unknown>; error?: { message?: string }; transcript?: string };
     try {
       event = JSON.parse(data.toString());
     } catch {
@@ -329,6 +334,11 @@ export async function runVoiceCall(options: VoiceCallOptions): Promise<void> {
         break;
       case "response.done":
         responseDone(event.response);
+        break;
+      case "conversation.item.input_audio_transcription.completed":
+        if (event.transcript?.trim()) {
+          log(`caller: ${clip(event.transcript, 400)}`);
+        }
         break;
       case "output_audio_buffer.started":
         playing = true;
@@ -395,4 +405,19 @@ export async function runVoiceCall(options: VoiceCallOptions): Promise<void> {
   clearInterval(watch);
   clearTimeout(goodbyeTimer);
   log("ended");
+}
+
+function clip(text: string, max: number): string {
+  const flat = text.replace(/\s+/g, " ").trim();
+  return flat.length > max ? `${flat.slice(0, max)}...` : flat;
+}
+
+// What the model said in a response, from the transcript of its audio parts.
+function spokenText(response: Record<string, unknown> | undefined): string {
+  const output = Array.isArray(response?.output) ? response.output as Record<string, unknown>[] : [];
+  return output
+    .flatMap((item) => Array.isArray(item.content) ? item.content as Record<string, unknown>[] : [])
+    .map((part) => typeof part.transcript === "string" ? part.transcript : typeof part.text === "string" ? part.text : "")
+    .filter(Boolean)
+    .join(" ");
 }

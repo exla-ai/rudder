@@ -6937,8 +6937,9 @@ async function answerVoiceCall(call: IncomingCall): Promise<void> {
   const projects = voiceProjects(accountId);
   const instructions = voiceInstructions(projects, "call");
   const session = (minimal: boolean) =>
-    voiceSessionConfig({ model: VOICE_MODEL, voice: VOICE_NAME, instructions, transcribeModel: null, minimal, sip: true });
-  console.log(`voice call ${tag}: answering`);
+    voiceSessionConfig({ model: VOICE_MODEL, voice: VOICE_NAME, instructions, transcribeModel: VOICE_TRANSCRIBE_MODEL, minimal, sip: true });
+  const agents = projects.reduce((sum, project) => sum + (project.agents?.length ?? 0), 0);
+  console.log(`voice call ${tag}: answering (${projects.length} projects, ${agents} agents${isOpen(homeControls.get(home.id)) ? "" : ", home not connected"})`);
   await runVoiceCall({
     callId: call.callId,
     apiKey,

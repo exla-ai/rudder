@@ -53,7 +53,8 @@ export type VoiceContext = {
 
 export type VoiceToolResult = { output: string; end?: boolean };
 
-export type VoiceSurface = "carplay" | "phone";
+// "call": a phone call to Rudder's number (cloud/src/voice-call.ts), usually from a car.
+export type VoiceSurface = "carplay" | "phone" | "call";
 
 type ToolDef = {
   type: "function";
@@ -192,12 +193,13 @@ export const VOICE_TOOLS: ToolDef[] = [
 // ---------------------------------------------------------------------------
 
 export function voiceInstructions(projects: VoiceProject[], surface: VoiceSurface, focus?: string): string {
-  const driving = surface === "carplay";
   const lines = [
     "You are Rudder, a voice assistant for a developer's coding agents. Rudder runs Claude Code and Codex agents on the user's cloud machine, one dashboard per GitHub project. You can see every project and agent, explain what they are doing, and act for the user: message an agent, start a task, answer an agent's permission request, questions or plan, interrupt, stop, merge or delete an agent, and open a new project.",
-    driving
+    surface === "carplay"
       ? "The user is DRIVING and talking to you through CarPlay. Keep every reply short (one to three spoken sentences), never read out code, file paths, long ids or URLs, and never ask them to look at a screen."
-      : "The user is talking to you on their phone. Keep replies short and spoken; never read out code, file paths, long ids or URLs.",
+      : surface === "call"
+        ? "The user PHONED you, most likely while DRIVING. Keep every reply short (one to three spoken sentences), never read out code, file paths, long ids or URLs, and never ask them to look at a screen. Ending the conversation hangs up the call."
+        : "The user is talking to you on their phone. Keep replies short and spoken; never read out code, file paths, long ids or URLs.",
     "Speak naturally, like a sharp colleague giving a status update. Summarize; lead with what needs the user. Say agent names by their short title, never their id.",
     "Always call get_overview or get_agent before describing current state; the snapshot below may be stale. Do what the user asks right away without asking for confirmation, then say in a few words what you did. If a request is ambiguous between agents or projects, ask one short question.",
     "When the user dictates a message or task, pass it on faithfully, cleaned of filler words and speech-to-text slips, in the user's words, not a rewrite. Reply in the user's language.",
@@ -219,11 +221,17 @@ export function voiceSessionConfig(options: {
   instructions: string;
   transcribeModel?: string | null;
   minimal?: boolean;
+  /** A phone call: SIP negotiates the audio format, so none is named. */
+  sip?: boolean;
 }): Record<string, unknown> {
   const input: Record<string, unknown> = {
-    format: { type: "audio/pcm", rate: 24000 },
     turn_detection: { type: "semantic_vad" },
   };
+  const output: Record<string, unknown> = { voice: options.voice };
+  if (!options.sip) {
+    input.format = { type: "audio/pcm", rate: 24000 };
+    output.format = { type: "audio/pcm", rate: 24000 };
+  }
   if (!options.minimal) {
     // A car is a far-field microphone; transcripts feed the phone's captions.
     input.noise_reduction = { type: "far_field" };
@@ -238,7 +246,7 @@ export function voiceSessionConfig(options: {
     output_modalities: ["audio"],
     audio: {
       input,
-      output: { format: { type: "audio/pcm", rate: 24000 }, voice: options.voice },
+      output,
     },
     tools: VOICE_TOOLS,
     tool_choice: "auto",

@@ -13,6 +13,7 @@ import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import type { Duplex } from "node:stream";
 import { WebSocket, WebSocketServer } from "ws";
 import { createSecretsVault, SecretsVaultError, type SecretItemInput, type SecretsVault } from "./secrets.js";
+import { callerIdTrusted, callerNumber, incomingCall, parseVoicePhones, runVoiceCall, verifyOpenAiWebhook, type IncomingCall } from "./voice-call.js";
 import { runVoiceTool, voiceGreeting, voiceInstructions, voiceSessionConfig, voiceUpdateMessage, voiceUpdates, type VoiceContext, type VoiceProject } from "./voice.js";
 import {
   formatOutputForSlack,
@@ -550,6 +551,10 @@ const server = http.createServer({ noDelay: true }, async (req, res) => {
     }
     if (req.method === "POST" && url.pathname === "/api/admin/workspace/gc") {
       await handleAdminWorkspaceGc(req, res, url);
+      return;
+    }
+    if (req.method === "POST" && url.pathname === "/api/voice/call") {
+      await handleVoiceCallWebhook(req, res);
       return;
     }
     if (req.method === "POST" && url.pathname === "/api/slack/events") {
@@ -6841,6 +6846,110 @@ async function handleVoiceSession(res: ServerResponse, account: { accountId: str
     voice: VOICE_NAME,
     expiresAt: typeof minted.expires_at === "number" ? minted.expires_at : null,
     greeting: voiceGreeting(projects, focus),
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Calling Rudder (cloud/src/voice-call.ts): a phone number, through Twilio's
+// SIP trunk to OpenAI, whose incoming-call webhook lands here.
+// ---------------------------------------------------------------------------
+
+// Who may call: "+14255550100=<account id>,...". A caller id can be spoofed,
+// which is why a call that carries a failed STIR/SHAKEN verdict is refused too.
+const VOICE_PHONES = parseVoicePhones(process.env.RUDDER_VOICE_PHONES);
+const VOICE_CALL_WEBHOOK_SECRET = (process.env.RUDDER_VOICE_CALL_WEBHOOK_SECRET || "").trim();
+
+async function handleVoiceCallWebhook(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const raw = await readRawBody(req, 256 * 1024);
+  // Fail closed, like Slack: no secret means no calls, never open calls.
+  if (!VOICE_CALL_WEBHOOK_SECRET) {
+    sendJson(res, 503, { error: "calls are not set up on this server" });
+    return;
+  }
+  const ok = verifyOpenAiWebhook(VOICE_CALL_WEBHOOK_SECRET, {
+    id: req.headers["webhook-id"] as string | undefined,
+    timestamp: req.headers["webhook-timestamp"] as string | undefined,
+    signature: req.headers["webhook-signature"] as string | undefined,
+  }, raw);
+  if (!ok) {
+    sendJson(res, 401, { error: "bad signature" });
+    return;
+  }
+  let event: unknown;
+  try {
+    event = JSON.parse(raw);
+  } catch {
+    sendJson(res, 400, { error: "invalid json" });
+    return;
+  }
+  const call = incomingCall(event);
+  // Answer the webhook at once; accepting the call is a separate request.
+  sendJson(res, 200, { ok: true });
+  if (call) {
+    void answerVoiceCall(call).catch((error) => {
+      console.warn(`voice call ${call.callId.slice(-8)}: ${error instanceof Error ? error.message : String(error)}`);
+    });
+  }
+}
+
+async function answerVoiceCall(call: IncomingCall): Promise<void> {
+  const tag = call.callId.slice(-8);
+  const apiKey = openAiApiKey();
+  const reject = async (why: string, statusCode: number) => {
+    console.warn(`voice call ${tag}: refused (${why})`);
+    await fetch(`${OPENAI_BASE_URL}/v1/realtime/calls/${encodeURIComponent(call.callId)}/reject`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${apiKey}`, "content-type": "application/json" },
+      body: JSON.stringify({ status_code: statusCode }),
+      signal: AbortSignal.timeout(15_000),
+    }).catch(() => {});
+  };
+  if (!apiKey) {
+    console.warn(`voice call ${tag}: OPENAI_API_KEY is missing`);
+    return;
+  }
+  const number = callerNumber(call.headers);
+  const accountId = number ? VOICE_PHONES.get(number) : undefined;
+  if (!accountId) {
+    await reject(`unknown caller ${number ? `...${number.slice(-4)}` : "(none)"}`, 603);
+    return;
+  }
+  if (!callerIdTrusted(call.headers)) {
+    await reject("caller id failed verification", 603);
+    return;
+  }
+  const home = findHomeRow(accountId);
+  if (!home || home.status === "deleting") {
+    await reject("no cloud machine", 480);
+    return;
+  }
+  const recent = (voiceMints.get(accountId) ?? []).filter((at) => Date.now() - at < 3_600_000);
+  if (recent.length >= VOICE_MINTS_PER_HOUR) {
+    await reject("too many sessions this hour", 486);
+    return;
+  }
+  recent.push(Date.now());
+  voiceMints.set(accountId, recent);
+  touchHome(home.id);
+  if (!isOpen(homeControls.get(home.id))) {
+    wakeHomeInBackground(accountId);
+  }
+  const projects = voiceProjects(accountId);
+  const instructions = voiceInstructions(projects, "call");
+  const session = (minimal: boolean) =>
+    voiceSessionConfig({ model: VOICE_MODEL, voice: VOICE_NAME, instructions, transcribeModel: null, minimal, sip: true });
+  console.log(`voice call ${tag}: answering`);
+  await runVoiceCall({
+    callId: call.callId,
+    apiKey,
+    baseUrl: OPENAI_BASE_URL,
+    session: session(false),
+    fallbackSession: session(true),
+    greeting: voiceGreeting(projects),
+    ctx: voiceContext(accountId),
+    safetyIdentifier: createHash("sha256").update(accountId).digest("hex").slice(0, 32),
+    log: (message) => console.log(`voice call ${tag}: ${message}`),
+    updateMs: Number(process.env.RUDDER_VOICE_CALL_UPDATE_MS) || undefined,
   });
 }
 

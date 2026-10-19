@@ -1083,6 +1083,22 @@ brain lives in the cloud, and the phone is a first-class client.
   `com.apple.developer.carplay-voice-based-conversation` entitlement (iOS 26.4+)
   and the App Store profile carries it, since signing takes entitlements from
   the profile.
+- **Calling Rudder (`cloud/src/voice-call.ts`).** A phone number for the same
+  assistant, because a phone call works through CarPlay in any car today while the
+  CarPlay voice template waits on Apple. Twilio number -> Elastic SIP trunk whose
+  origination URI is `sip:<openai project id>@sip.api.openai.com;transport=tls` ->
+  OpenAI posts a signed `realtime.call.incoming` webhook to `POST /api/voice/call`.
+  The server checks the Standard Webhooks signature (`RUDDER_VOICE_CALL_WEBHOOK_SECRET`,
+  the `whsec_` from the OpenAI project's webhook; unset = 503, fail closed), maps the
+  `From` number to an account (`RUDDER_VOICE_PHONES="+14255550100=<account id>,..."`),
+  refuses a call whose `X-Twilio-VerStat` is present and not `TN-Validation-Passed-A`
+  (caller id can be spoofed), counts it against the voice rate limit, and accepts with
+  `voiceSessionConfig({sip: true})` (no audio formats, SIP negotiates them) and the
+  `call` surface's instructions. It then drives the call over
+  `wss://.../v1/realtime?call_id=` exactly like the phone's loop (one response at a
+  time, never over the user, tool batches in order, live updates in quiet moments) and
+  hangs up after the goodbye (`output_audio_buffer.stopped`, 6s cap), after 3 idle
+  minutes, or at 30 minutes. Audio never touches the control plane.
 - **Developing Rudder on the home machine.** Rust is not in the worker image; the
   supervisor installs it once onto the volume (`~/.cargo`, `~/.rustup`, persisted
   like `~/.claude`) in the background on first boot, and agents get

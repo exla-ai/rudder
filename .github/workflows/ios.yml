@@ -5,6 +5,10 @@
 # Signing is Xcode's cloud-managed automatic signing driven by an App Store
 # Connect API key (Admin role), so no certificate or profile is stored here.
 # Secrets: ASC_KEY_ID, ASC_ISSUER_ID, ASC_KEY_P8 (the .p8 file's text).
+#
+# From the cloud machine (or anywhere with gh): bump CURRENT_PROJECT_VERSION in
+# ios/project.yml, push, then `gh workflow run ios.yml -f testflight=true` and
+# `gh run watch`. The last step hands the build to the external testers.
 name: iOS
 
 on:
@@ -121,6 +125,16 @@ jobs:
             -allowProvisioningUpdates \
             -authenticationKeyPath ~/.appstoreconnect/private_keys/AuthKey_$ASC_KEY_ID.p8 \
             -authenticationKeyID "$ASC_KEY_ID" -authenticationKeyIssuerID "$ASC_ISSUER_ID"
+      - name: Give it to the testers
+        # Internal testers get it once processed; this adds it to the external
+        # group (public link) and submits it for beta review.
+        env:
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          BUILD_NUMBER: ${{ inputs.build_number }}
+        run: |
+          [ -n "$BUILD_NUMBER" ] || BUILD_NUMBER=$(sed -n 's/^ *CURRENT_PROJECT_VERSION: *"\{0,1\}\([0-9]*\)"\{0,1\}$/\1/p' ios/project.yml | head -1)
+          ASC_KEY_PATH=~/.appstoreconnect/private_keys/AuthKey_$ASC_KEY_ID.p8 BUILD_NUMBER="$BUILD_NUMBER" node ios/scripts/distribute.mjs
       - name: Logs
         if: always()
         uses: actions/upload-artifact@v4

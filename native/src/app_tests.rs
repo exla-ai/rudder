@@ -28278,3 +28278,46 @@ fn claude_folder_trust_dialog_is_a_wait_not_work() {
     .collect();
     assert!(terminal_needs_permission_from_lines(Backend::Claude, &lines));
 }
+
+#[test]
+fn an_agent_talking_about_a_permission_is_not_on_a_permission_prompt() {
+    // Seen on the cloud machine: the phone's message was refused with "it is
+    // waiting on a permission prompt" while Claude sat at its composer, because
+    // its reply explained Apple's CarPlay permission.
+    let lines: Vec<String> = [
+        "     I'll then start the upload, and build 7 lands in",
+        "     TestFlight about 20 minutes later. From then on you can",
+        "     talk to Rudder on the phone with the mic button, including",
+        "     in the car through Bluetooth.",
+        "  2. The CarPlay screen itself needs Apple's approval. Apple",
+        "     has to grant the \"voice-based conversation\" CarPlay",
+        "     permission, which you request from Apple. Until they do,",
+        "     iOS won't show Rudder on the car's display. After approval",
+        "     it needs one more build, with no code changes.",
+        "",
+        "✻ Cooked for 13s · done 12:47 AM · 1 monitor still running",
+        "",
+        "───────────────────────────────────────────────────────────────",
+        "❯ ok",
+        "───────────────────────────────────────────────────────────────",
+        "  ⏵⏵ bypass permissions on · 1 monitor             /rc active",
+    ]
+    .iter()
+    .map(|line| line.to_string())
+    .collect();
+    assert_eq!(terminal_composer_blocked(Backend::Claude, &lines), None);
+
+    // A real permission menu still blocks.
+    let prompt: Vec<String> = [
+        " Bash command",
+        "   rm -rf build",
+        " Do you want to proceed?",
+        " ❯ 1. Yes",
+        "   2. Yes, and don't ask again for rm commands",
+        "   3. No, and tell Claude what to do differently (esc)",
+    ]
+    .iter()
+    .map(|line| line.to_string())
+    .collect();
+    assert!(terminal_composer_blocked(Backend::Claude, &prompt).is_some());
+}

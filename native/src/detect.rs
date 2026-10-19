@@ -568,7 +568,21 @@ pub(crate) fn looks_like_interrupt_receipt(line: &str) -> bool {
 /// running turn's "esc to interrupt" never match. Used before a remote message
 /// (the phone, the web board) is typed into a pane.
 pub(crate) fn terminal_composer_blocked(backend: Backend, lines: &[String]) -> Option<&'static str> {
-    if terminal_needs_permission_from_lines(backend, lines) {
+    // A permission prompt REPLACES the composer, so a pane parked at its
+    // composer is not on one, whatever its last reply said: an agent explaining
+    // that "Apple has to grant the CarPlay permission, which you request" read
+    // as a prompt and the phone's messages were refused.
+    // The footer ("bypass permissions on", "shift+tab to cycle") is drawn under
+    // the composer only; a menu's "❯ 1. Yes" looks like a composer line, so the
+    // footer is the test.
+    let footer_showing = lines
+        .iter()
+        .rev()
+        .map(|line| normalize_terminal_line(line))
+        .filter(|line| !line.is_empty())
+        .take(3)
+        .any(|line| looks_like_idle_chrome(backend, &line));
+    if !footer_showing && terminal_needs_permission_from_lines(backend, lines) {
         return Some("it is waiting on a permission prompt; answer that first");
     }
     const MENU_HINTS: [&str; 10] = [

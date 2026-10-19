@@ -27,4 +27,7 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: dev.viraat.rudder
+        # iPhone only, as build-ipa.sh always shipped it (UIDeviceFamily [1]); an
+        # iPad target must allow every orientation or App Store validation fails.
+        TARGETED_DEVICE_FAMILY: "1"
         INFOPLIST_FILE: App/Info.plist

@@ -134,9 +134,15 @@ export function matchRudderCall(call: TwilioCall, records: RudderCallRecord[], t
  * What a finished call says about the line, in words. "ok" is the only
  * verdict that is not worth a look.
  */
-export function callVerdict(call: TwilioCall, rudder: RudderCallRecord | null): string {
+export function callVerdict(call: TwilioCall, rudder: RudderCallRecord | null, serverStartedAt?: number): string {
   if (!FINISHED.has(call.status)) {
     return "in progress";
+  }
+  // Rudder's records are in memory: a call that began before this process
+  // did may have been answered by the one before it. Twilio's times are whole
+  // seconds, so a call in the boot second is not "before".
+  if (!rudder && serverStartedAt !== undefined && call.startedAt !== null && call.startedAt + 1000 <= serverStartedAt) {
+    return `${call.status}, began before the server restarted (Rudder's side was cut off; see the Fly log)`;
   }
   if (!rudder) {
     return call.status === "completed"
@@ -173,6 +179,7 @@ export type TwilioWatchOptions = {
 
 export class TwilioWatch {
   private readonly options: TwilioWatchOptions;
+  private readonly startedAt = Date.now();
   private readonly calls = new Map<string, TwilioCall>();
   /** Finished calls already logged, and the Rudder tag each was joined to. */
   private readonly reported = new Map<string, string | null>();
@@ -241,7 +248,7 @@ export class TwilioWatch {
         }
         const rudder = matchRudderCall(call, records, this.takenTags());
         this.reported.set(call.sid, rudder?.tag ?? null);
-        const verdict = callVerdict(call, rudder);
+        const verdict = callVerdict(call, rudder, this.startedAt);
         const line = `twilio call ${call.sid.slice(-8)}: ${call.status} from ${maskNumber(call.from)}, ${call.durationSeconds ?? "?"}s, rudder ${rudder ? rudder.tag : "-"}: ${verdict}`;
         (verdict === "ok" ? this.options.log : this.options.warn)(line);
       } else if (before?.status !== call.status) {
@@ -285,7 +292,7 @@ export class TwilioWatch {
         const rudder = tag ? records.find((record) => record.tag === tag) ?? null
           : tag === null ? null
           : matchRudderCall(call, records, this.takenTags());
-        return { ...call, from: maskNumber(call.from), rudder, verdict: callVerdict(call, rudder) };
+        return { ...call, from: maskNumber(call.from), rudder, verdict: callVerdict(call, rudder, this.startedAt) };
       });
     const alerts = [...this.alerts.values()].sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0));
     return {

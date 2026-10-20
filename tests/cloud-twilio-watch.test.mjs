@@ -61,6 +61,9 @@ test("a finished call joins the nearest Rudder call and gets a verdict", () => {
   assert.match(watch.callVerdict(call, { ...answered, outcome: "refused", detail: "unknown caller ...0100" }), /refused by Rudder \(unknown caller/);
   assert.match(watch.callVerdict({ ...call, durationSeconds: 2 }, answered), /under 5s/);
   assert.equal(watch.callVerdict({ ...call, status: "in-progress" }, null), "in progress");
+  // A call the previous server process answered, cut off by a deploy.
+  assert.match(watch.callVerdict(call, null, T0 + 60_000), /began before the server restarted/);
+  assert.match(watch.callVerdict(call, null, T0 - 60_000), /never reached Rudder/);
 });
 
 function fakeTwilio() {

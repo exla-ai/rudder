@@ -3,6 +3,9 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "scripts": {
+    "postinstall": "node -e \"const fs=require('fs'),p=require('path');const d=p.join('node_modules','node-pty','prebuilds');for(const a of fs.existsSync(d)?fs.readdirSync(d):[]){const f=p.join(d,a,'spawn-helper');if(fs.existsSync(f))fs.chmodSync(f,0o755)}\""
+  },
   "dependencies": {
     "node-pty": "^1.0.0",
     "ws": "^8.18.0"

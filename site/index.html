@@ -6,7 +6,7 @@
     <title>Rudder: coding agents in parallel, steered from your phone</title>
     <meta
       name="description"
-      content="Rudder runs Claude Code, Codex and opencode in parallel on one repository, each in its own jj workspace. Start them from the terminal or your phone, approve their prompts anywhere, and they keep working on your cloud machine with the laptop closed."
+      content="Rudder runs Claude Code, Codex and opencode in parallel on one repository, each in its own jj workspace. Start them from the terminal or your phone, approve their prompts anywhere, and they keep working on your cloud machine with the laptop closed. Use it from the terminal, the Mac app or the iPhone app."
     />
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
     <meta property="og:title" content="Rudder" />
@@ -39,6 +39,9 @@
       one idea, "the sheet is live": running rows tick, the worker streams, the
       grid's focus moves. Everything is complete with no script and at reduced
       motion.
+      REFRESH (2026-10-20): three surfaces now (terminal, Mac app, iPhone), so
+      a "three ways" ruled form sits right under the hero with each surface's
+      real call to action.
     -->
     <a class="skip-link" href="#main">Skip to content</a>
     <div class="page">
@@ -60,16 +63,17 @@
       <main id="main">
         <section class="hero" aria-labelledby="title">
           <div class="hero-copy">
-            <a class="hero-tag" href="#phone">
+            <a class="hero-tag" href="#ways">
               <span class="hero-tag-dot" aria-hidden="true"></span>
-              New: your agents, on your phone
+              New: the Mac app, and voice on iPhone
               <span aria-hidden="true">→</span>
             </a>
             <h1 id="title">Many agents. <span class="nw">One repo.</span> <span class="h1-accent">Steered from your phone.</span></h1>
             <p class="lede">
               Run Claude Code, Codex and opencode side by side, each in
-              <strong>its own workspace</strong>, on your cloud machine. Start
-              them, answer them and merge their work from your phone.
+              <strong>its own workspace</strong>, on your cloud machine. Drive
+              them from <strong>your terminal</strong>, <strong>the Mac
+              app</strong> or <strong>your phone</strong>.
             </p>
             <div class="install" id="install">
               <code id="install-command"
@@ -86,10 +90,10 @@
               </button>
             </div>
             <p class="actions-row">
+              <a href="/download/mac">Download for Mac</a>
+              <a href="https://testflight.apple.com/join/JV4dwM6E">Get the iPhone app</a>
               <a href="/setup">Set up in 5 minutes</a>
-              <a href="/docs">Read the docs</a>
-              <a href="https://github.com/exla-ai/rudder">View source</a>
-              <span class="actions-note">macOS and Linux · Node 22+</span>
+              <span class="actions-note">CLI: macOS and Linux · Node 22+</span>
             </p>
           </div>
 
@@ -141,6 +145,73 @@
               </picture>
             </figure>
           </div>
+        </section>
+
+        <!-- Three ways in. One ruled form with three columns, not a card grid:
+             each column is a surface, its one-line pitch, and the real way to
+             get it. Stacks to ruled rows on a phone. -->
+        <section class="section ways-section" id="ways" aria-labelledby="ways-title">
+          <div class="section-head" data-reveal>
+            <h2 id="ways-title">Three ways to run it. One set of agents.</h2>
+            <p>
+              Sign in once and every surface sees the same projects and the same
+              agents. Start a task in the terminal, keep an eye on it from the
+              Mac, answer it from your phone.
+            </p>
+          </div>
+
+          <ol class="ways" data-reveal>
+            <li class="way">
+              <span class="way-no">01 · terminal</span>
+              <h3>The dashboard, in your terminal</h3>
+              <p>
+                Every agent in its own pane, with its diff and the merge a key
+                away. <code class="mono">rudder cloud</code> runs the same
+                dashboard on your cloud machine.
+              </p>
+              <div class="way-cta">
+                <div class="install">
+                  <code id="install-command-ways"
+                    ><span class="prompt">$ </span
+                    >npm i -g @exla/rudder</code
+                  >
+                  <button
+                    class="copy"
+                    type="button"
+                    data-copy="install-command-ways"
+                    data-copy-value="npm i -g @exla/rudder"
+                  >
+                    Copy
+                  </button>
+                </div>
+                <span class="way-note">then run <code class="mono">rudder</code> · macOS and Linux · Node 22+</span>
+              </div>
+            </li>
+            <li class="way">
+              <span class="way-no">02 · mac app</span>
+              <h3>Rudder for Mac</h3>
+              <p>
+                The Rudder app in its own window, a menu bar count of what needs
+                you, and one click to pull a cloud agent onto your Mac.
+              </p>
+              <div class="way-cta">
+                <a class="way-btn" href="/download/mac">Download for Mac</a>
+                <span class="way-note">Signed and notarized · or <a href="/app">open it in any browser</a></span>
+              </div>
+            </li>
+            <li class="way">
+              <span class="way-no">03 · phone</span>
+              <h3>Rudder on your iPhone</h3>
+              <p>
+                Start tasks, answer prompts and send photos or files. Or just
+                talk to your agents out loud. CarPlay is coming.
+              </p>
+              <div class="way-cta">
+                <a class="way-btn" href="https://testflight.apple.com/join/JV4dwM6E">Get the iPhone app</a>
+                <span class="way-note">Beta on TestFlight · <a href="/setup">setup guide</a></span>
+              </div>
+            </li>
+          </ol>
         </section>
 
         <section class="section launch-section" id="watch" aria-labelledby="watch-title">
@@ -437,9 +508,10 @@
             </button>
           </div>
           <p class="actions-row">
-            <a href="/docs">Read the docs</a>
-            <a href="https://github.com/exla-ai/rudder">View source</a>
+            <a href="/download/mac">Download for Mac</a>
+            <a href="https://testflight.apple.com/join/JV4dwM6E">Get the iPhone app</a>
             <a href="/app">Open Rudder on the web</a>
+            <a href="/docs">Read the docs</a>
           </p>
         </section>
       </main>
@@ -448,6 +520,7 @@
         <span>Rudder, a terminal orchestrator for coding agents.</span>
         <nav aria-label="Footer">
           <a href="/docs">Docs</a>
+          <a href="/download/mac">Mac app</a>
           <a href="https://github.com/exla-ai/rudder">GitHub</a>
           <a href="https://www.npmjs.com/package/@exla/rudder">npm</a>
           <a href="/login">Sign in</a>

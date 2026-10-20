@@ -4,9 +4,13 @@
 # app, wraps it in Rudder.dmg (notarized and stapled too) and publishes it as
 # the latest GitHub release, which https://rudder.exla.ai/download/mac serves.
 #
-# Signing is Xcode's cloud-managed automatic signing driven by the same App
-# Store Connect API key (Admin role) as ios.yml, and notarytool uses that key
-# too, so no certificate or password is stored here. Bump MARKETING_VERSION /
+# Signing: when the MAC_DEVELOPER_ID_P12 (base64 of an exported "Developer ID
+# Application" certificate + key) and MAC_DEVELOPER_ID_PASSWORD secrets are set,
+# that certificate goes into a throwaway keychain and Xcode signs with it.
+# Without them it falls back to Xcode's cloud-managed Developer ID, which Apple
+# only allows when the account holder has given the API key's role access to
+# cloud-managed Developer ID certificates. notarytool always uses the same App
+# Store Connect API key as ios.yml. Bump MARKETING_VERSION /
 # CURRENT_PROJECT_VERSION in mac/project.yml, push, then
 # `gh workflow run mac.yml -f release=true` and `gh run watch`.
 name: Mac
@@ -68,6 +72,24 @@ jobs:
           test -n "$ASC_KEY_ID" && test -n "$ASC_KEY_P8" || { echo "::error::ASC_KEY_ID / ASC_ISSUER_ID / ASC_KEY_P8 secrets are not set"; exit 1; }
           mkdir -p ~/.appstoreconnect/private_keys
           printf '%s\n' "$ASC_KEY_P8" > ~/.appstoreconnect/private_keys/AuthKey_$ASC_KEY_ID.p8
+      - name: Developer ID certificate
+        if: inputs.release
+        env:
+          P12: ${{ secrets.MAC_DEVELOPER_ID_P12 }}
+          P12_PASSWORD: ${{ secrets.MAC_DEVELOPER_ID_PASSWORD }}
+        run: |
+          if [ -z "$P12" ]; then echo "no MAC_DEVELOPER_ID_P12: using cloud-managed signing"; exit 0; fi
+          KC="$RUNNER_TEMP/signing.keychain-db"
+          KC_PASS=$(uuidgen)
+          printf '%s' "$P12" | base64 --decode > "$RUNNER_TEMP/devid.p12"
+          security create-keychain -p "$KC_PASS" "$KC"
+          security set-keychain-settings -lut 21600 "$KC"
+          security unlock-keychain -p "$KC_PASS" "$KC"
+          security import "$RUNNER_TEMP/devid.p12" -k "$KC" -P "$P12_PASSWORD" -T /usr/bin/codesign -T /usr/bin/security
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$KC_PASS" "$KC" >/dev/null
+          security list-keychains -d user -s "$KC" $(security list-keychains -d user | tr -d '"')
+          rm "$RUNNER_TEMP/devid.p12"
+          security find-identity -v -p codesigning "$KC" | grep "Developer ID Application"
       - name: Archive and sign with Developer ID
         if: inputs.release
         env:

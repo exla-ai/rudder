@@ -1691,7 +1691,6 @@ function SignInScreen() {
     b.addEventListener("click", () => postNative({ type: "signIn" }));
     actions.appendChild(b);
   } else {
-    actions.appendChild(pair);
     const g = h(`<button type="button" class="btn primary block">${icon("google")}<span>Continue with Google</span></button>`);
     // An invite or Slack link comes back after sign-in (?next=, plus the
     // localStorage copy for servers that ignore it).
@@ -1700,7 +1699,14 @@ function SignInScreen() {
     g.addEventListener("click", () => { location.href = loginUrl({}); });
     const gh = h(`<div class="alt"><button type="button">Use GitHub instead</button></div>`);
     gh.querySelector("button").addEventListener("click", () => { location.href = loginUrl({ provider: "github" }); });
-    actions.append(g, gh);
+    // Signing in needs only Google or GitHub; a code from `rudder cloud app`
+    // is the optional shortcut, so it waits behind a link.
+    const have = h(`<div class="alt"><button type="button">Have a code from <code>rudder cloud app</code>?</button></div>`);
+    have.querySelector("button").addEventListener("click", () => {
+      have.replaceWith(pair);
+      pair.querySelector("input").focus();
+    });
+    actions.append(g, gh, have);
   }
   return { el, isSignIn: true };
 }

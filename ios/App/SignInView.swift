@@ -28,6 +28,7 @@ struct SignInView: View {
     @Bindable var session: Session
     @State private var code = ""
     @FocusState private var codeFocused: Bool
+    @State private var showCode = false
 
     var body: some View {
         ZStack {
@@ -46,39 +47,6 @@ struct SignInView: View {
                     .padding(.top, 8)
                 Spacer()
                 VStack(spacing: 12) {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("Code from `rudder cloud app` on your laptop")
-                            .font(.system(size: 14))
-                            .foregroundStyle(Theme.muted)
-                        HStack(spacing: 10) {
-                            TextField("ABCD-EFGH", text: $code)
-                                .font(.system(size: 20, weight: .semibold, design: .monospaced))
-                                .textInputAutocapitalization(.characters)
-                                .autocorrectionDisabled()
-                                .focused($codeFocused)
-                                .submitLabel(.go)
-                                .onSubmit { Task { await session.pair(code: code) } }
-                                .padding(.horizontal, 14)
-                                .frame(minHeight: 54)
-                                .background(Theme.card, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-                                .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).stroke(Theme.hairline))
-                                .accessibilityLabel("Pairing code")
-                            Button {
-                                codeFocused = false
-                                Task { await session.pair(code: code) }
-                            } label: {
-                                Text("Pair")
-                                    .font(.system(size: 17, weight: .semibold))
-                                    .frame(minWidth: 72, minHeight: 54)
-                                    .foregroundStyle(Theme.background)
-                                    .background(Theme.ink, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-                            }
-                            .buttonStyle(.plain)
-                            .disabled(session.signingIn || code.trimmingCharacters(in: .whitespaces).count < 8)
-                        }
-                    }
-                    .padding(.bottom, 6)
-
                     Button {
                         session.signIn(provider: "google")
                     } label: {
@@ -104,17 +72,55 @@ struct SignInView: View {
                     .frame(minHeight: 44)
                     .disabled(session.signingIn)
 
+                    if showCode {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("Code from `rudder cloud app` on your laptop")
+                                .font(.system(size: 14))
+                                .foregroundStyle(Theme.muted)
+                            HStack(spacing: 10) {
+                                TextField("ABCD-EFGH", text: $code)
+                                    .font(.system(size: 20, weight: .semibold, design: .monospaced))
+                                    .textInputAutocapitalization(.characters)
+                                    .autocorrectionDisabled()
+                                    .focused($codeFocused)
+                                    .submitLabel(.go)
+                                    .onSubmit { Task { await session.pair(code: code) } }
+                                    .padding(.horizontal, 14)
+                                    .frame(minHeight: 54)
+                                    .background(Theme.card, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                                    .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).stroke(Theme.hairline))
+                                    .accessibilityLabel("Pairing code")
+                                Button {
+                                    codeFocused = false
+                                    Task { await session.pair(code: code) }
+                                } label: {
+                                    Text("Pair")
+                                        .font(.system(size: 17, weight: .semibold))
+                                        .frame(minWidth: 72, minHeight: 54)
+                                        .foregroundStyle(Theme.background)
+                                        .background(Theme.ink, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                                }
+                                .buttonStyle(.plain)
+                                .disabled(session.signingIn || code.trimmingCharacters(in: .whitespaces).count < 8)
+                            }
+                        }
+                        .padding(.top, 6)
+                    } else {
+                        Button("Have a code from rudder cloud app?") {
+                            showCode = true
+                            codeFocused = true
+                        }
+                        .font(.system(size: 14))
+                        .foregroundStyle(Theme.muted)
+                        .frame(minHeight: 36)
+                    }
+
                     if let error = session.errorMessage {
                         Text(error)
                             .font(.system(size: 14))
                             .foregroundStyle(.red)
                             .multilineTextAlignment(.center)
                     }
-                    Text("Or sign in with the account you use for `rudder login`.")
-                        .font(.system(size: 13))
-                        .foregroundStyle(Theme.muted)
-                        .multilineTextAlignment(.center)
-                        .padding(.top, 6)
                 }
                 .padding(.horizontal, 24)
                 .padding(.bottom, 28)

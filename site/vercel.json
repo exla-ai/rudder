@@ -15,6 +15,12 @@
     },
     {
       "source": "/login",
+      "has": [{ "type": "query", "key": "device_code" }],
+      "destination": "https://rudder-cloud-control.fly.dev/cli/login",
+      "permanent": false
+    },
+    {
+      "source": "/login",
       "destination": "https://rudder-cloud-control.fly.dev/app",
       "permanent": false
     },

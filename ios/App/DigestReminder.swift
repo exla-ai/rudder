@@ -12,7 +12,7 @@ import UserNotifications
 @MainActor
 final class DigestReminder: NSObject, UNUserNotificationCenterDelegate {
     static let shared = DigestReminder()
-    static let identifier = "rudder.digest"
+    nonisolated static let identifier = "rudder.digest"
 
     /// Set by the app at launch; a tap on the notification opens the digest there.
     weak var session: Session?

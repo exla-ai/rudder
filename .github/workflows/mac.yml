@@ -1,0 +1,153 @@
+# The Mac app on GitHub's Macs: every change under mac/ is compiled and its
+# core tested (the Linux home machine cannot), and a manual run with
+# `release: true` archives, signs with Developer ID, notarizes and staples the
+# app, wraps it in Rudder.dmg (notarized and stapled too) and publishes it as
+# the latest GitHub release, which https://rudder.exla.ai/download/mac serves.
+#
+# Signing is Xcode's cloud-managed automatic signing driven by the same App
+# Store Connect API key (Admin role) as ios.yml, and notarytool uses that key
+# too, so no certificate or password is stored here. Bump MARKETING_VERSION /
+# CURRENT_PROJECT_VERSION in mac/project.yml, push, then
+# `gh workflow run mac.yml -f release=true` and `gh run watch`.
+name: Mac
+
+on:
+  push:
+    paths:
+      - "mac/**"
+      - ".github/workflows/mac.yml"
+  workflow_dispatch:
+    inputs:
+      release:
+        description: "Sign, notarize and publish Rudder.dmg"
+        type: boolean
+        default: false
+
+concurrency:
+  group: mac-${{ github.ref }}-${{ inputs.release || false }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Xcode
+        run: |
+          sudo xcode-select -s "$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -1 || echo /Applications/Xcode.app)"
+          xcodebuild -version
+      - name: Generate the project
+        run: |
+          brew install xcodegen
+          cd mac && xcodegen generate
+      - name: Test the core
+        run: |
+          cd mac
+          set -o pipefail
+          xcodebuild test -project Rudder.xcodeproj -scheme RudderCoreTests -destination 'platform=macOS' \
+            CODE_SIGNING_ALLOWED=NO 2>&1 | tee test.log | grep -E "error:|Executed [0-9]+ tests|TEST (SUCCEEDED|FAILED)" || true
+          grep -q "TEST SUCCEEDED" test.log
+      - name: Build the app
+        run: |
+          cd mac
+          set -o pipefail
+          xcodebuild -project Rudder.xcodeproj -scheme Rudder -configuration Debug -destination 'generic/platform=macOS' \
+            CODE_SIGNING_ALLOWED=NO build 2>&1 | tee build.log | grep -E "error:|BUILD (SUCCEEDED|FAILED)" || true
+          grep -q "BUILD SUCCEEDED" build.log
+
+      - name: App Store Connect key
+        if: inputs.release
+        env:
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_KEY_P8: ${{ secrets.ASC_KEY_P8 }}
+        run: |
+          test -n "$ASC_KEY_ID" && test -n "$ASC_KEY_P8" || { echo "::error::ASC_KEY_ID / ASC_ISSUER_ID / ASC_KEY_P8 secrets are not set"; exit 1; }
+          mkdir -p ~/.appstoreconnect/private_keys
+          printf '%s\n' "$ASC_KEY_P8" > ~/.appstoreconnect/private_keys/AuthKey_$ASC_KEY_ID.p8
+      - name: Archive and sign with Developer ID
+        if: inputs.release
+        env:
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+        run: |
+          cd mac
+          set -o pipefail
+          KEY=~/.appstoreconnect/private_keys/AuthKey_$ASC_KEY_ID.p8
+          xcodebuild -project Rudder.xcodeproj -scheme Rudder -configuration Release \
+            -destination 'generic/platform=macOS' -archivePath build/Rudder.xcarchive \
+            -allowProvisioningUpdates \
+            -authenticationKeyPath "$KEY" -authenticationKeyID "$ASC_KEY_ID" -authenticationKeyIssuerID "$ASC_ISSUER_ID" \
+            DEVELOPMENT_TEAM=3C4383262W CODE_SIGN_STYLE=Automatic ARCHS="arm64 x86_64" ONLY_ACTIVE_ARCH=NO \
+            archive 2>&1 | tee archive.log | grep -E "error:|ARCHIVE (SUCCEEDED|FAILED)" || true
+          grep -q "ARCHIVE SUCCEEDED" archive.log
+          cat > build/ExportOptions.plist <<'PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>method</key><string>developer-id</string>
+            <key>signingStyle</key><string>automatic</string>
+            <key>teamID</key><string>3C4383262W</string>
+          </dict>
+          </plist>
+          PLIST
+          xcodebuild -exportArchive -archivePath build/Rudder.xcarchive \
+            -exportOptionsPlist build/ExportOptions.plist -exportPath build/export \
+            -allowProvisioningUpdates \
+            -authenticationKeyPath "$KEY" -authenticationKeyID "$ASC_KEY_ID" -authenticationKeyIssuerID "$ASC_ISSUER_ID"
+          codesign --verify --deep --strict --verbose=2 build/export/Rudder.app
+          codesign -dv --verbose=2 build/export/Rudder.app 2>&1 | tee sign.log
+          grep -q "Authority=Developer ID Application" sign.log
+          grep -q "flags=.*runtime" sign.log
+      - name: Notarize, staple, DMG
+        if: inputs.release
+        env:
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+        run: |
+          cd mac/build
+          KEY=~/.appstoreconnect/private_keys/AuthKey_$ASC_KEY_ID.p8
+          notarize() {
+            xcrun notarytool submit "$1" --key "$KEY" --key-id "$ASC_KEY_ID" --issuer "$ASC_ISSUER_ID" \
+              --wait --timeout 45m --output-format json | tee notary.json
+            id=$(python3 -c 'import json;print(json.load(open("notary.json"))["id"])')
+            xcrun notarytool log "$id" --key "$KEY" --key-id "$ASC_KEY_ID" --issuer "$ASC_ISSUER_ID" || true
+            python3 -c 'import json,sys;sys.exit(0 if json.load(open("notary.json"))["status"]=="Accepted" else 1)'
+          }
+          ditto -c -k --keepParent export/Rudder.app Rudder-notarize.zip
+          notarize Rudder-notarize.zip
+          xcrun stapler staple export/Rudder.app
+          spctl --assess --type execute --verbose=2 export/Rudder.app
+          mkdir dmg && ditto export/Rudder.app dmg/Rudder.app && ln -s /Applications dmg/Applications
+          hdiutil create -volname Rudder -srcfolder dmg -ov -format UDZO Rudder.dmg
+          notarize Rudder.dmg
+          xcrun stapler staple Rudder.dmg
+          shasum -a 256 Rudder.dmg
+      - name: Publish the release
+        if: inputs.release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' mac/build/export/Rudder.app/Contents/Info.plist)
+          BUILD=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' mac/build/export/Rudder.app/Contents/Info.plist)
+          TAG="mac-v$VERSION-$BUILD"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" mac/build/Rudder.dmg --clobber
+          else
+            gh release create "$TAG" mac/build/Rudder.dmg --latest --target "$GITHUB_SHA" \
+              --title "Rudder for Mac $VERSION ($BUILD)" \
+              --notes "Rudder for macOS $VERSION, signed with Developer ID and notarized. Download: https://rudder.exla.ai/download/mac"
+          fi
+      - name: Logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mac-logs
+          path: |
+            mac/*.log
+            mac/build/*.json
+          if-no-files-found: ignore

@@ -897,19 +897,19 @@
   box-shadow: 0 20px 60px rgba(0, 0, 0, 0.18);
 }
 
-/* ---------- three ways in ----------
+/* ---------- four ways in ----------
  *
- * Terminal, Mac app, iPhone. One ruled form with three columns divided by
- * hairlines, not three cards: each column is a surface, a one-line pitch and
- * the real way to get it, with the CTA held to the column's foot so the three
- * actions sit on one line. On a phone the columns become ruled rows. */
+ * Terminal, web, Mac app, iPhone. One ruled form with four columns divided by
+ * hairlines, not four cards: each column is a surface, a one-line pitch and
+ * the real way to get it, with the CTA held to the column's foot so the
+ * actions sit on one line. Two by two on a tablet; ruled rows on a phone. */
 
 .ways {
   list-style: none;
   margin: 0;
   padding: 0;
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   border-top: var(--hair) solid var(--rule-strong);
   border-bottom: var(--hair) solid var(--rule);
 }
@@ -991,6 +991,22 @@
 
 .way-note a {
   color: var(--ink-2);
+}
+
+@media (max-width: 1100px) and (min-width: 861px) {
+  .ways {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .way:nth-child(odd) {
+    border-left: 0;
+    padding-left: 0;
+  }
+  .way:nth-child(even) {
+    padding-right: 0;
+  }
+  .way:nth-child(n + 3) {
+    border-top: var(--hair) solid var(--rule);
+  }
 }
 
 @media (max-width: 860px) {

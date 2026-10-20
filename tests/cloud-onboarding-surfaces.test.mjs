@@ -216,6 +216,10 @@ test("handleEventApi answers 204 for known events and 400 for unknown ones", asy
   assert.deepEqual([res.status, res.body], [400, { error: "unknown event" }]);
 
   res = fakeRes();
+  await pa.handleEventApi(req("POST", { name: "voice_call_started" }), res, url("/api/app/event"), account, deps);
+  assert.equal(res.status, 400, "a client cannot post an event the server counts itself");
+
+  res = fakeRes();
   await pa.handleEventApi(req("POST", "BAD"), res, url("/api/app/event"), account, deps);
   assert.equal(res.status, 400);
 
@@ -232,5 +236,10 @@ test("every contract event name is whitelisted", () => {
     "integration_connected", "integration_disconnected", "model_picked", "agent_panel_opened", "plan_panel_opened",
     "task_started", "download_mac_clicked", "install_cli_copied", "phone_link_opened", "linear_issue_started",
   ];
-  assert.deepEqual([...analytics.PRODUCT_EVENTS].sort(), [...names].sort());
+  const serverOnly = [
+    "app_active", "app_error", "message_sent", "prompt_answered", "agent_action", "plan_approved",
+    "agent_pulled", "voice_session_started", "voice_tool_used", "voice_call_started", "voice_call_ended",
+  ];
+  assert.deepEqual([...analytics.PRODUCT_EVENTS].sort(), [...names, ...serverOnly].sort());
+  assert.deepEqual([...analytics.SERVER_ONLY_EVENTS].sort(), [...serverOnly].sort());
 });

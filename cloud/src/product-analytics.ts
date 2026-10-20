@@ -33,11 +33,29 @@ export const PRODUCT_EVENTS = [
   "install_cli_copied",
   "phone_link_opened",
   "linear_issue_started",
+  // Captured by the server itself (server.ts), whichever client acted:
+  "app_active",
+  "app_error",
+  "message_sent",
+  "prompt_answered",
+  "agent_action",
+  "plan_approved",
+  "agent_pulled",
+  "voice_session_started",
+  "voice_tool_used",
+  "voice_call_started",
+  "voice_call_ended",
 ] as const;
 
 export type ProductEventName = (typeof PRODUCT_EVENTS)[number];
 
 const EVENT_SET = new Set<string>(PRODUCT_EVENTS);
+// Counted by the server where the thing happens. A client posting one would
+// only double-count it (or fake it), so /api/app/event refuses these.
+export const SERVER_ONLY_EVENTS: ReadonlySet<string> = new Set([
+  "app_active", "app_error", "message_sent", "prompt_answered", "agent_action", "plan_approved",
+  "agent_pulled", "voice_session_started", "voice_tool_used", "voice_call_started", "voice_call_ended",
+]);
 // Same project as the CLI (src/analytics.ts): a write-only project token.
 const POSTHOG_HOST = "https://us.i.posthog.com";
 const POSTHOG_PROJECT_KEY = "phc_2KfOzM4nSxjAgPDfgEikP7Kp7JVcU5aJ0kAyEQykkmn";
@@ -180,7 +198,7 @@ export function createProductAnalytics(options: { env?: Env; fetch?: FetchLike }
       return true;
     }
     const record = body && typeof body === "object" && !Array.isArray(body) ? (body as Record<string, unknown>) : {};
-    if (!isProductEvent(record.name)) {
+    if (!isProductEvent(record.name) || SERVER_ONLY_EVENTS.has(record.name)) {
       deps.sendJson(res, 400, { error: "unknown event" });
       return true;
     }

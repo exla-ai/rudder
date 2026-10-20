@@ -500,3 +500,17 @@ unitTest("a Rudder plan waiting for approval is in the overview, is news once, a
   running[1].plan = { nodes: [{ id: "n0", title: "a", status: "merged" }, { id: "n1", title: "b", status: "running" }], awaitingApproval: false, plans: [] };
   assert.match(voice.overviewText(running), /plan: 1 of 2 tasks merged, 1 running\./);
 });
+
+unitTest("every tool call is reported to onTool, failed ones as not ok", async () => {
+  const { ctx } = fakeContext();
+  const seen = [];
+  ctx.onTool = (name, ok) => seen.push([name, ok]);
+  await voice.runVoiceTool(ctx, "get_overview", "{}");
+  ctx.rpc = async () => { throw new Error("machine asleep"); };
+  const failed = await voice.runVoiceTool(ctx, "send_message", JSON.stringify({ project: "libra", agent: "login", text: "hi" }));
+  assert.match(failed.output, /did not work/);
+  ctx.onTool = () => { throw new Error("analytics down"); };
+  const still = await voice.runVoiceTool(ctx, "get_overview", "{}");
+  assert.ok(still.output, "a throwing onTool never breaks the conversation");
+  assert.deepEqual(seen, [["get_overview", true], ["send_message", false]]);
+});

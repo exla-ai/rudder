@@ -65,6 +65,8 @@ export type VoiceContext = {
   log?: (line: string) => void;
   /** How long to wait for a just-started agent's run to appear (tests shorten it). */
   startWaitMs?: number;
+  /** Told about every tool call (product analytics); ok is false when it threw. */
+  onTool?: (name: string, ok: boolean) => void;
 };
 
 export type VoiceMemory = {
@@ -315,6 +317,19 @@ export function voiceGreeting(projects: VoiceProject[], focus?: string): string 
 // ---------------------------------------------------------------------------
 
 export async function runVoiceTool(ctx: VoiceContext, name: string, rawArgs: unknown): Promise<VoiceToolResult> {
+  let ok = true;
+  try {
+    return await runTool(ctx, name, rawArgs, () => { ok = false; });
+  } finally {
+    try {
+      ctx.onTool?.(name, ok);
+    } catch {
+      // Analytics never breaks a conversation.
+    }
+  }
+}
+
+async function runTool(ctx: VoiceContext, name: string, rawArgs: unknown, failed: () => void): Promise<VoiceToolResult> {
   let args: Record<string, unknown>;
   try {
     args = parseArgs(rawArgs);
@@ -353,6 +368,7 @@ export async function runVoiceTool(ctx: VoiceContext, name: string, rawArgs: unk
     if (error instanceof Resolution) {
       return { output: error.message };
     }
+    failed();
     const reason = error instanceof Error ? error.message : String(error);
     return { output: `That did not work: ${clip(reason, 300)}` };
   }

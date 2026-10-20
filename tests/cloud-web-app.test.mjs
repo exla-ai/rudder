@@ -12,6 +12,7 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import fs from "node:fs";
+import http from "node:http";
 import { fileURLToPath } from "node:url";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -61,6 +62,18 @@ test("web app routes: picker, orgs, invites, analytics, integrations, pull", asy
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "rudder-cloud-web-"));
   const dbPath = path.join(dataDir, "state.sqlite");
   const base = `http://127.0.0.1:${port}`;
+  // A stand-in PostHog: product events the server sends land here.
+  const events = [];
+  const sink = http.createServer((req, res) => {
+    let body = "";
+    req.on("data", (d) => { body += d; });
+    req.on("end", () => {
+      try { events.push(JSON.parse(body)); } catch { /* ignore */ }
+      res.end("{}");
+    });
+  });
+  await new Promise((r) => sink.listen(0, "127.0.0.1", r));
+  t.after(() => sink.close());
   const child = spawn(process.execPath, [path.join(cloudDir, "dist", "server.js")], {
     env: {
       ...process.env,
@@ -77,6 +90,8 @@ test("web app routes: picker, orgs, invites, analytics, integrations, pull", asy
       RUDDER_LINEAR_CLIENT_ID: "",
       SLACK_BOT_TOKEN: "",
       RUDDER_DIGEST: "0",
+      RUDDER_ANALYTICS_URL: `http://127.0.0.1:${sink.address().port}`,
+      RUDDER_TELEMETRY: "",
     },
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -102,7 +117,7 @@ test("web app routes: picker, orgs, invites, analytics, integrations, pull", asy
   const call = async (who, method, pathname, body) => {
     const res = await fetch(`${base}${pathname}`, {
       method,
-      headers: { authorization: `Bearer rdr_${who}`, "content-type": "application/json" },
+      headers: { authorization: `Bearer rdr_${who}`, "content-type": "application/json", "x-rudder-platform": "mac" },
       body: body === undefined ? undefined : JSON.stringify(body),
     });
     const text = await res.text();
@@ -118,6 +133,17 @@ test("web app routes: picker, orgs, invites, analytics, integrations, pull", asy
 
   // Unauthenticated app calls are refused.
   assert.equal((await fetch(`${base}/api/app/orgs`)).status, 401);
+
+  // Opening the app counts as active once a day per platform, never by a
+  // passive poll, under an anonymous id.
+  await ok("bob", "GET", "/api/app/state?passive=1");
+  await ok("alice", "GET", "/api/app/state");
+  await ok("alice", "GET", "/api/app/state");
+  const active = await waitFor(() => events.filter((e) => e.event === "app_active").length ? events.filter((e) => e.event === "app_active") : null);
+  await sleep(200);
+  assert.equal(events.filter((e) => e.event === "app_active").length, 1, "once per day, not per poll");
+  assert.equal(active[0].properties.platform, "mac");
+  assert.doesNotMatch(JSON.stringify(active[0]), /alice|acct-/);
 
   // Surface picker: starts empty, saves a multi-select, completes once.
   let state = await ok("alice", "GET", "/api/app/state");

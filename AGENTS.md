@@ -1196,7 +1196,18 @@ on the user's own Claude Code / Codex subscription.
   whitelist (`PRODUCT_EVENTS`), the same PostHog project as `src/analytics.ts`,
   anonymous (sha256 of the account id), props sanitized. Server-side events
   (org_*, onboarding_completed, integration_*, linear_issue_started) are captured
-  by the modules themselves; the client must not resend them.
+  by the modules themselves; the client must not resend them. The server also
+  counts what every client does at the route, so web, Mac, phone and voice are
+  covered at once (`SERVER_ONLY_EVENTS`, which `/api/app/event` refuses):
+  `app_active` (once per account, UTC day and platform, never from a passive
+  poll), `message_sent`, `prompt_answered`, `agent_action` {action},
+  `plan_approved` {via app|voice}, `agent_pulled`, `voice_session_started`
+  {surface}, `voice_tool_used` {tool, ok, surface: phone|carplay|call} (the
+  `onTool` hook on `VoiceContext`), `voice_call_started` / `voice_call_ended`
+  {duration_s}, and `app_error` {route with ids replaced, status} for a 5xx on
+  `/api/app/*`. The client sends `X-Rudder-Platform` (browser, mac, ios) on every
+  call and `track()` stamps `platform` itself. PostHog's `source` property is
+  always "app", so event props use `via`.
 - **Slack + Linear** (`cloud/src/integrations.ts`, `slack-app.ts`, `linear.ts`):
   per org (admins connect) or personal. OAuth tokens sealed with AES-256-GCM under
   a key derived from `RUDDER_SECRETS_KEY` (no key: connect is 503). Slack posts to

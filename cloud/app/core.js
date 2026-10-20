@@ -53,6 +53,8 @@ function authHeaders() {
   if (token) headers.Authorization = `Bearer ${token}`;
   // The morning digest arrives at 9:01 on this phone's clock.
   if (TIME_ZONE) headers["X-Rudder-Timezone"] = TIME_ZONE;
+  // Which client this is (web, mac, ios), for the server's product events.
+  headers["X-Rudder-Platform"] = PLATFORM || "browser";
   return headers;
 }
 
@@ -91,7 +93,7 @@ export function track(name, props) {
     headers["Content-Type"] = "application/json";
     fetch("/api/app/event", {
       method: "POST", headers, credentials: "same-origin", cache: "no-store", keepalive: true,
-      body: JSON.stringify(props ? { name, props } : { name }),
+      body: JSON.stringify({ name, props: { platform: PLATFORM || "browser", ...(props || {}) } }),
     }).catch(() => {});
   } catch { /* never throws */ }
 }

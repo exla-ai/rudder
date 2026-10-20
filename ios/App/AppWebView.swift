@@ -154,7 +154,8 @@ struct AppWebView: UIViewRepresentable {
                 Task { @MainActor in
                     let result = await DigestReminder.shared.set(enabled: enabled)
                     self.webView?.evaluateJavaScript(
-                        "window.rudderDigestReminder && window.rudderDigestReminder({enabled: \(result.enabled), denied: \(result.denied)})"
+                        "window.rudderDigestReminder && window.rudderDigestReminder({enabled: \(result.enabled), denied: \(result.denied)})",
+                        completionHandler: nil
                     )
                 }
             case "haptic":

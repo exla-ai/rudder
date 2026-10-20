@@ -320,6 +320,26 @@ const productAnalytics = createProductAnalytics();
 const captureProductEvent = (accountId: string, name: string, props?: Record<string, unknown>): void => {
   void productAnalytics.capture(accountId, name, props);
 };
+// The client an app request came from (core.js sends it), for event props.
+const requestPlatform = (req: IncomingMessage): string => {
+  const raw = String(req.headers["x-rudder-platform"] ?? "").toLowerCase();
+  return /^[a-z]{1,12}$/.test(raw) ? raw : "unknown";
+};
+// app_active once per account per UTC day per platform: a daily-active count
+// without an event for every 3s poll. In memory, so a restart may count twice.
+const appActiveSeen = new Map<string, string>();
+function noteAppActive(accountId: string, platform: string): void {
+  const day = new Date().toISOString().slice(0, 10);
+  const key = `${accountId}|${platform}`;
+  if (appActiveSeen.get(key) === day) {
+    return;
+  }
+  if (appActiveSeen.size > 50_000) {
+    appActiveSeen.clear();
+  }
+  appActiveSeen.set(key, day);
+  captureProductEvent(accountId, "app_active", { platform });
+}
 // Slack and Linear, per org or per person. Its dependencies are functions
 // declared further down (hoisted), so the module never imports server.ts.
 const integrations = createIntegrations({
@@ -673,6 +693,11 @@ const server = http.createServer({ noDelay: true }, async (req, res) => {
       ? error.status
       : 500;
     console.error(`request error ${req.method} ${req.url} -> ${status}`, error);
+    if (status >= 500 && req.url?.startsWith("/api/app/")) {
+      // Only the route's shape goes out: ids and query strings stay here.
+      const route = new URL(req.url, "http://x").pathname.replace(/\/[^/]*[0-9][^/]*/g, "/:id");
+      captureProductEvent("server", "app_error", { route, status, platform: requestPlatform(req) });
+    }
     sendJson(res, status, { error: error instanceof Error ? error.message : String(error) });
   }
 });
@@ -6211,6 +6236,7 @@ async function handleHomeApi(req: IncomingMessage, res: ServerResponse, url: URL
       sendJson(res, 502, { error: "the cloud machine did not upload the agent's work" });
       return;
     }
+    captureProductEvent(authContext.accountId, "agent_pulled", { platform: requestPlatform(req) });
     sendJson(res, 200, { ...report, repo: repoSlugFromUrl(repo.repoUrl), download: `/api/rudder/home/syncs/${outId}` });
     return;
   }
@@ -6411,6 +6437,9 @@ async function handleAppApi(req: IncomingMessage, res: ServerResponse, url: URL)
     // someone opening the app: it must not wake the machine or hold off its
     // idle stop (and with it the idle image update).
     const passive = url.searchParams.get("passive") === "1" || req.headers["x-rudder-passive"] === "1";
+    if (!passive) {
+      noteAppActive(account.accountId, requestPlatform(req));
+    }
     if (home && !passive) {
       touchHome(home.id);
       // Opening the app is the wake-up: a home that went to sleep (or lost
@@ -6560,7 +6589,8 @@ async function handleAppApi(req: IncomingMessage, res: ServerResponse, url: URL)
     if (home) {
       touchHome(home.id);
     }
-    sendJson(res, 200, await runVoiceTool(voiceContext(account.accountId), name, args ?? null));
+    const surface = stringField(body, "surface") === "carplay" ? "carplay" : "phone";
+    sendJson(res, 200, await runVoiceTool(voiceContext(account.accountId, surface), name, args ?? null));
     return;
   }
   if (req.method === "POST" && url.pathname === "/api/app/voice/updates") {
@@ -6614,11 +6644,13 @@ async function handleAppApi(req: IncomingMessage, res: ServerResponse, url: URL)
     if (!text) {
       throw badRequest("text is required");
     }
-    sendJson(res, 200, await homeRpc(home.id, "send", {
+    const sent = await homeRpc(home.id, "send", {
       workspaceId: repo.id,
       runId: stringField(body, "run") ?? "",
       text: text.slice(0, 16_000),
-    }));
+    });
+    captureProductEvent(account.accountId, "message_sent", { platform: requestPlatform(req) });
+    sendJson(res, 200, sent);
     return;
   }
   if (req.method === "POST" && url.pathname === "/api/app/upload") {
@@ -6664,7 +6696,9 @@ async function handleAppApi(req: IncomingMessage, res: ServerResponse, url: URL)
     if (!answer || typeof answer !== "object" || JSON.stringify(answer).length > 64_000) {
       throw badRequest("answer is required");
     }
-    sendJson(res, 200, await homeRpc(home.id, "answer", { workspaceId: repo.id, runId: stringField(body, "run") ?? "", askId: ask, answer: answer as Json }));
+    const answered = await homeRpc(home.id, "answer", { workspaceId: repo.id, runId: stringField(body, "run") ?? "", askId: ask, answer: answer as Json });
+    captureProductEvent(account.accountId, "prompt_answered", { platform: requestPlatform(req) });
+    sendJson(res, 200, answered);
     return;
   }
   if (req.method === "POST" && url.pathname === "/api/app/pin") {
@@ -6694,7 +6728,13 @@ async function handleAppApi(req: IncomingMessage, res: ServerResponse, url: URL)
     const params: JsonRecord = action === "approve"
       ? { workspaceId: repo.id, planId, action }
       : { workspaceId: repo.id, runId: stringField(body, "run") ?? "", action };
-    sendJson(res, 200, await homeRpc(home.id, "action", params));
+    const done = await homeRpc(home.id, "action", params);
+    if (action === "approve") {
+      captureProductEvent(account.accountId, "plan_approved", { platform: requestPlatform(req), via: "app" });
+    } else {
+      captureProductEvent(account.accountId, "agent_action", { action, platform: requestPlatform(req), via: "app" });
+    }
+    sendJson(res, 200, done);
     return;
   }
   sendJson(res, 404, { error: "not found" });
@@ -7143,7 +7183,9 @@ function voiceProjects(accountId: string): VoiceProject[] {
 // agent whether it came over a call or the app's voice screen.
 const voiceMemories = new Map<string, VoiceMemory>();
 
-function voiceContext(accountId: string): VoiceContext {
+// `surface` is where the conversation happens (phone app, CarPlay or a phone
+// call); every tool the assistant uses is counted under it.
+function voiceContext(accountId: string, surface: "phone" | "carplay" | "call" = "phone"): VoiceContext {
   let memory = voiceMemories.get(accountId);
   if (!memory) {
     memory = {};
@@ -7159,6 +7201,12 @@ function voiceContext(accountId: string): VoiceContext {
       return homeRpc(live.id, method, params as JsonRecord, timeoutMs);
     },
     openRepo: (repo) => openRepoOnHome(accountId, { repo }),
+    onTool: (tool, ok) => {
+      captureProductEvent(accountId, "voice_tool_used", { tool, ok, surface });
+      if (ok && tool === "launch_plan") {
+        captureProductEvent(accountId, "plan_approved", { via: "voice", surface });
+      }
+    },
   };
 }
 
@@ -7181,6 +7229,7 @@ async function handleVoiceSession(res: ServerResponse, account: { accountId: str
   recent.push(Date.now());
   voiceMints.set(account.accountId, recent);
   const surface = stringField(body, "surface") === "carplay" ? "carplay" : "phone";
+  captureProductEvent(account.accountId, "voice_session_started", { surface });
   const focus = (stringField(body, "focus") ?? "").trim().slice(0, 300) || undefined;
   touchHome(home.id);
   if (!isOpen(homeControls.get(home.id))) {
@@ -7350,6 +7399,9 @@ async function driveVoiceCall(
   insertVoiceCall.run(callId, accountId, startedAt);
   schedulePersistDatabase();
   liveVoiceCalls.set(callId, null);
+  if (!how.resume) {
+    captureProductEvent(accountId, "voice_call_started", {});
+  }
   try {
     await runVoiceCall({
       callId,
@@ -7361,11 +7413,12 @@ async function driveVoiceCall(
       resume: how.resume,
       onControl: (control) => liveVoiceCalls.set(callId, control),
       maxMs: Math.max(60_000, VOICE_CALL_MAX_MS - (Date.now() - startedAt)),
-      ctx: voiceContext(accountId),
+      ctx: voiceContext(accountId, "call"),
       safetyIdentifier: createHash("sha256").update(accountId).digest("hex").slice(0, 32),
       log: (message) => {
         if (message === "ended") {
           noteVoiceCall(tag, "ended");
+          captureProductEvent(accountId, "voice_call_ended", { duration_s: Math.round((Date.now() - startedAt) / 1000) });
         }
         console.log(`voice call ${tag}: ${message}`);
       },

@@ -1099,6 +1099,20 @@ brain lives in the cloud, and the phone is a first-class client.
   time, never over the user, tool batches in order, live updates in quiet moments) and
   hangs up after the goodbye (`output_audio_buffer.stopped`, 6s cap), after 3 idle
   minutes, or at 30 minutes. Audio never touches the control plane.
+- **Twilio's side of the phone line (`cloud/src/twilio-watch.ts`).** Rudder only hears
+  about a call once OpenAI's webhook arrives, so a call Twilio failed to route, or one
+  OpenAI never handed over, used to leave no trace. With `TWILIO_ACCOUNT_SID` +
+  `TWILIO_AUTH_TOKEN` (or `TWILIO_API_KEY` + `TWILIO_API_SECRET`) set as Fly secrets,
+  the control plane polls Twilio's Calls and Monitor Alerts every
+  `RUDDER_TWILIO_WATCH_MS` (30s) and logs `twilio call <sid tail>: <status> ... rudder
+  <tag>: <verdict>` and `twilio alert <code> ...` into the same stream as the
+  `voice call` lines (`flyctl logs -a rudder-cloud-control | grep -E "voice call|twilio"`).
+  Each finished Twilio call is joined one-to-one with the nearest Rudder call record
+  (`noteVoiceCall`, 45s window) and gets a verdict; anything but `ok` (never reached
+  Rudder, refused, failed, under 5s) is a warning. The first poll is a baseline, never
+  news; caller numbers are masked to their last four digits. `GET
+  /api/admin/voice/calls` (admin only) returns the joined list. In memory only: a
+  restart forgets the joins, the Fly log keeps the history.
 - **Developing Rudder on the home machine.** Rust is not in the worker image; the
   supervisor installs it once onto the volume (`~/.cargo`, `~/.rustup`, persisted
   like `~/.claude`) in the background on first boot, and agents get

@@ -14,6 +14,7 @@ import type { Duplex } from "node:stream";
 import { WebSocket, WebSocketServer } from "ws";
 import { createSecretsVault, SecretsVaultError, type SecretItemInput, type SecretsVault } from "./secrets.js";
 import { callerIdTrusted, callerNumber, incomingCall, parseVoicePhones, runVoiceCall, verifyOpenAiWebhook, type IncomingCall } from "./voice-call.js";
+import { TwilioWatch, type RudderCallRecord } from "./twilio-watch.js";
 import { runVoiceTool, voiceGreeting, voiceInstructions, voiceSessionConfig, voiceUpdateMessage, voiceUpdates, type VoiceContext, type VoiceProject } from "./voice.js";
 import {
   formatOutputForSlack,
@@ -551,6 +552,11 @@ const server = http.createServer({ noDelay: true }, async (req, res) => {
     }
     if (req.method === "POST" && url.pathname === "/api/admin/workspace/gc") {
       await handleAdminWorkspaceGc(req, res, url);
+      return;
+    }
+    if (req.method === "GET" && url.pathname === "/api/admin/voice/calls") {
+      await requireAdminRequest(req);
+      sendJson(res, 200, voiceCallsReport());
       return;
     }
     if (req.method === "POST" && url.pathname === "/api/voice/call") {
@@ -6887,7 +6893,9 @@ async function handleVoiceCallWebhook(req: IncomingMessage, res: ServerResponse)
   sendJson(res, 200, { ok: true });
   if (call) {
     void answerVoiceCall(call).catch((error) => {
-      console.warn(`voice call ${call.callId.slice(-8)}: ${error instanceof Error ? error.message : String(error)}`);
+      const message = error instanceof Error ? error.message : String(error);
+      noteVoiceCall(call.callId.slice(-8), "failed", message);
+      console.warn(`voice call ${call.callId.slice(-8)}: ${message}`);
     });
   }
 }
@@ -6896,6 +6904,7 @@ async function answerVoiceCall(call: IncomingCall): Promise<void> {
   const tag = call.callId.slice(-8);
   const apiKey = openAiApiKey();
   const reject = async (why: string, statusCode: number) => {
+    noteVoiceCall(tag, "refused", why);
     console.warn(`voice call ${tag}: refused (${why})`);
     await fetch(`${OPENAI_BASE_URL}/v1/realtime/calls/${encodeURIComponent(call.callId)}/reject`, {
       method: "POST",
@@ -6905,6 +6914,7 @@ async function answerVoiceCall(call: IncomingCall): Promise<void> {
     }).catch(() => {});
   };
   if (!apiKey) {
+    noteVoiceCall(tag, "failed", "OPENAI_API_KEY is missing");
     console.warn(`voice call ${tag}: OPENAI_API_KEY is missing`);
     return;
   }
@@ -6939,6 +6949,7 @@ async function answerVoiceCall(call: IncomingCall): Promise<void> {
   const session = (minimal: boolean) =>
     voiceSessionConfig({ model: VOICE_MODEL, voice: VOICE_NAME, instructions, transcribeModel: VOICE_TRANSCRIBE_MODEL, minimal, sip: true });
   const agents = projects.reduce((sum, project) => sum + (project.agents?.length ?? 0), 0);
+  noteVoiceCall(tag, "answering");
   console.log(`voice call ${tag}: answering (${projects.length} projects, ${agents} agents${isOpen(homeControls.get(home.id)) ? "" : ", home not connected"})`);
   await runVoiceCall({
     callId: call.callId,
@@ -6949,9 +6960,64 @@ async function answerVoiceCall(call: IncomingCall): Promise<void> {
     greeting: voiceGreeting(projects),
     ctx: voiceContext(accountId),
     safetyIdentifier: createHash("sha256").update(accountId).digest("hex").slice(0, 32),
-    log: (message) => console.log(`voice call ${tag}: ${message}`),
+    log: (message) => {
+      if (message === "ended") {
+        noteVoiceCall(tag, "ended");
+      }
+      console.log(`voice call ${tag}: ${message}`);
+    },
     updateMs: Number(process.env.RUDDER_VOICE_CALL_UPDATE_MS) || undefined,
   });
+}
+
+// Rudder's side of each call, for joining with Twilio's (cloud/src/twilio-watch.ts).
+// In memory: a restart forgets them, and the Fly log keeps the long history.
+const voiceCallRecords: RudderCallRecord[] = [];
+
+function noteVoiceCall(tag: string, outcome: RudderCallRecord["outcome"], detail?: string): void {
+  const record = voiceCallRecords.find((entry) => entry.tag === tag);
+  if (record) {
+    // "ended" never hides why a call was refused or failed.
+    if (record.outcome === "answering" || outcome !== "ended") {
+      record.outcome = outcome;
+      record.detail = detail;
+    }
+    return;
+  }
+  voiceCallRecords.push({ tag, at: Date.now(), outcome, detail });
+  if (voiceCallRecords.length > 200) {
+    voiceCallRecords.shift();
+  }
+}
+
+const twilioWatch = (() => {
+  const accountSid = (process.env.TWILIO_ACCOUNT_SID || "").trim();
+  const apiKey = (process.env.TWILIO_API_KEY || "").trim();
+  const password = (apiKey ? process.env.TWILIO_API_SECRET : process.env.TWILIO_AUTH_TOKEN || "")?.trim() || "";
+  if (!accountSid || !password) {
+    return null;
+  }
+  return new TwilioWatch({
+    accountSid,
+    username: apiKey || accountSid,
+    password,
+    rudderCalls: () => voiceCallRecords,
+    log: (line) => console.log(line),
+    warn: (line) => console.warn(line),
+  });
+})();
+
+const twilioWatchMs = Number(process.env.RUDDER_TWILIO_WATCH_MS || 30 * 1000);
+if (twilioWatch && twilioWatchMs >= 5000) {
+  void twilioWatch.poll();
+  setInterval(() => void twilioWatch.poll().catch(() => undefined), twilioWatchMs).unref?.();
+}
+
+function voiceCallsReport(): Json {
+  return {
+    twilio: twilioWatch ? twilioWatch.snapshot() : { off: "TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN are not set" },
+    rudder: [...voiceCallRecords].reverse().map((record) => ({ ...record, at: new Date(record.at).toISOString() })),
+  };
 }
 
 async function homeWithControl(accountId: string): Promise<Workspace> {

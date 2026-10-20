@@ -14,10 +14,13 @@ struct RudderMacApp: App {
     var body: some Scene {
         Window("Rudder", id: Self.mainWindowID) {
             RootView(model: model)
-                .frame(minWidth: 640, minHeight: 480)
+                .frame(minWidth: 720, minHeight: 520)
                 .onOpenURL { url in model.session.handle(url: url) }
         }
+        .windowStyle(.hiddenTitleBar)
+        .windowResizability(.contentMinSize)
         .defaultSize(width: 1180, height: 820)
+        .defaultPosition(.center)
         .commands {
             CommandGroup(replacing: .appSettings) {
                 Button("Settings…") { model.openSettings() }
@@ -50,6 +53,14 @@ struct RudderMacApp: App {
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillFinishLaunching(_ notification: Notification) {
+        #if DEBUG
+        // RUDDER_APPEARANCE=light|dark pins the appearance for screenshots.
+        switch ProcessInfo.processInfo.environment["RUDDER_APPEARANCE"] {
+        case "dark": NSApp.appearance = NSAppearance(named: .darkAqua)
+        case "light": NSApp.appearance = NSAppearance(named: .aqua)
+        default: break
+        }
+        #endif
         // Before launch finishes, so a click on a notification that launched the app is delivered.
         Notifier.shared.install()
     }
@@ -69,22 +80,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
-/// Signed out: the native sign-in screen. Signed in: the Rudder app.
+/// Signed out: the native sign-in screen. Signed in: the Rudder app, behind a
+/// native loading screen until its first page has drawn.
 struct RootView: View {
     @Bindable var model: AppModel
     @Environment(\.openWindow) private var openWindow
 
     var body: some View {
-        Group {
+        ZStack {
+            Theme.canvas.ignoresSafeArea()
             if let token = model.session.token {
-                // A new token is a new page: RUDDER_NATIVE is fixed per document.
-                AppWebView(model: model, token: token)
-                    .id(token)
+                SignedInView(model: model, token: token)
+                    .transition(.opacity)
             } else {
-                SignInView(session: model.session)
+                signedOut
+                    .transition(.opacity)
             }
         }
-        .background(Color("AccentColor"))
+        .animation(.easeInOut(duration: 0.35), value: model.session.token == nil)
+        .background(WindowConfigurator())
         .onAppear {
             model.openMainWindow = { openWindow(id: RudderMacApp.mainWindowID) }
         }
@@ -92,78 +106,53 @@ struct RootView: View {
             if token != nil { model.pollNow() }
         }
     }
+
+    @ViewBuilder private var signedOut: some View {
+        #if DEBUG
+        // Screenshots of the loading and retry screens without signing in:
+        // RUDDER_PREVIEW_STATE=loading|failed (Debug builds only).
+        switch ProcessInfo.processInfo.environment["RUDDER_PREVIEW_STATE"] {
+        case "loading": LoadingView()
+        case "failed": FailedView(message: "The Internet connection appears to be offline.", retry: {})
+        case "web": SignedInView(model: model, token: "rdr_preview")
+        default: SignInView(session: model.session)
+        }
+        #else
+        SignInView(session: model.session)
+        #endif
+    }
 }
 
-struct SignInView: View {
-    @Bindable var session: Session
-    @State private var code = ""
+/// The web app under a titlebar strip of its own background, with the loading
+/// and retry screens crossfaded over it.
+struct SignedInView: View {
+    @Bindable var model: AppModel
+    let token: String
 
     var body: some View {
-        VStack(spacing: 0) {
-            Spacer()
-            Image("Logo")
-                .resizable()
-                .interpolation(.high)
-                .aspectRatio(contentMode: .fit)
-                .frame(width: 72, height: 72)
-                .accessibilityHidden(true)
-                .padding(.bottom, 22)
-            Text("Rudder")
-                .font(.system(size: 30, weight: .semibold))
-            Text("Your agents, wherever you are.")
-                .font(.system(size: 15))
-                .foregroundStyle(.secondary)
-                .padding(.top, 6)
-
-            VStack(spacing: 10) {
-                Button {
-                    session.signIn(provider: "google")
-                } label: {
-                    Text("Continue with Google")
-                        .font(.system(size: 14, weight: .semibold))
-                        .frame(maxWidth: .infinity, minHeight: 30)
-                }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.large)
-                .keyboardShortcut(.defaultAction)
-
-                Button("Use GitHub instead") {
-                    session.signIn(provider: "github")
-                }
-                .buttonStyle(.link)
-
-                HStack(spacing: 8) {
-                    TextField("Pairing code", text: $code)
-                        .textFieldStyle(.roundedBorder)
-                        .font(.system(size: 14, design: .monospaced))
-                        .onSubmit { Task { await session.pair(code: code) } }
-                    Button("Pair") {
-                        Task { await session.pair(code: code) }
-                    }
-                    .disabled(code.trimmingCharacters(in: .whitespaces).count < 8)
-                }
-                .padding(.top, 14)
-                Text("Or a code from `rudder cloud app` on another computer.")
-                    .font(.system(size: 12))
-                    .foregroundStyle(.secondary)
-
-                if let error = session.errorMessage {
-                    Text(error)
-                        .font(.system(size: 12))
-                        .foregroundStyle(.red)
-                        .multilineTextAlignment(.center)
-                }
+        ZStack {
+            VStack(spacing: 0) {
+                // The traffic lights sit here, over the app's own color, and the
+                // strip drags the window; the page starts below it.
+                Theme.canvas.frame(height: Theme.titlebarHeight)
+                // A new token is a new page: RUDDER_NATIVE is fixed per document.
+                AppWebView(model: model, token: token)
+                    .id(token)
+                    .opacity(model.webState == .ready ? 1 : 0)
             }
-            .frame(width: 300)
-            .padding(.top, 30)
-            .disabled(session.signingIn)
-            Spacer()
-            if session.signingIn {
-                ProgressView().controlSize(.small).padding(.bottom, 20)
+            .ignoresSafeArea()
+
+            switch model.webState {
+            case .loading:
+                LoadingView().transition(.opacity)
+            case .failed(let message):
+                FailedView(message: message) { model.retryLoad() }
+                    .transition(.opacity)
+            case .ready:
+                EmptyView()
             }
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .padding(24)
+        .animation(.easeInOut(duration: 0.4), value: model.webState)
     }
 }
 

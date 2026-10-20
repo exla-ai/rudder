@@ -47,7 +47,10 @@ struct AppWebView: NSViewRepresentable {
         webView.uiDelegate = context.coordinator
         webView.allowsBackForwardNavigationGestures = true
         webView.allowsMagnification = true
-        if let background = NSColor(named: "AccentColor") {
+        // The app's own background behind and under the page, never white:
+        // the view stays hidden behind the loading screen until it has drawn.
+        webView.setValue(false, forKey: "drawsBackground")
+        if let background = NSColor(named: "Canvas") {
             webView.underPageBackgroundColor = background
         }
         #if DEBUG
@@ -71,6 +74,7 @@ struct AppWebView: NSViewRepresentable {
         let model: AppModel
         weak var webView: WKWebView?
         private var urlObservation: NSKeyValueObservation?
+        private var revealTask: Task<Void, Never>?
 
         init(model: AppModel) {
             self.model = model
@@ -96,6 +100,7 @@ struct AppWebView: NSViewRepresentable {
         }
 
         func detach() {
+            revealTask?.cancel()
             urlObservation = nil
             if model.webView === webView { model.webView = nil }
         }
@@ -229,6 +234,28 @@ struct AppWebView: NSViewRepresentable {
             }
         }
 
+        func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
+            // A page whose last subresource never settles still shows up.
+            guard model.webState == .loading else { return }
+            revealTask?.cancel()
+            revealTask = Task { [weak self] in
+                try? await Task.sleep(for: .seconds(4))
+                guard !Task.isCancelled, let self, self.model.webState == .loading else { return }
+                self.model.webState = .ready
+            }
+        }
+
+        func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+            revealTask?.cancel()
+            guard model.webState != .ready else { return }
+            // One beat for the first paint, so the crossfade never reveals an empty frame.
+            Task { [weak self] in
+                try? await Task.sleep(for: .milliseconds(120))
+                guard let self, self.model.webState == .loading else { return }
+                self.model.webState = .ready
+            }
+        }
+
         func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
             showOffline(webView, error: error)
         }
@@ -238,6 +265,7 @@ struct AppWebView: NSViewRepresentable {
         }
 
         func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+            model.webState = .loading
             webView.reload()
         }
 
@@ -247,18 +275,9 @@ struct AppWebView: NSViewRepresentable {
             if nsError.code == NSURLErrorCancelled || nsError.domain == "WebKitErrorDomain" && nsError.code == 102 {
                 return
             }
-            let message = nsError.localizedDescription
-                .replacingOccurrences(of: "&", with: "&amp;")
-                .replacingOccurrences(of: "<", with: "&lt;")
-            let html = """
-            <html><head><meta name="viewport" content="width=device-width,initial-scale=1">
-            <style>body{font:15px -apple-system;display:flex;height:100vh;margin:0;align-items:center;justify-content:center;
-            text-align:center;padding:24px;box-sizing:border-box;color:#555;background:transparent}
-            @media(prefers-color-scheme:dark){body{color:#aaa}}a{color:#4a7bd8;text-decoration:none;font-weight:600}</style></head>
-            <body><div><p>Can't reach Rudder.</p><p style="font-size:13px">\(message)</p>
-            <p><a href="\(model.session.appURL.absoluteString)">Try again</a></p></div></body></html>
-            """
-            webView.loadHTMLString(html, baseURL: model.session.server)
+            revealTask?.cancel()
+            model.failedURL = (nsError.userInfo[NSURLErrorFailingURLErrorKey] as? URL) ?? webView.url
+            model.webState = .failed(nsError.localizedDescription)
         }
 
         private func openExternally(_ url: URL) {

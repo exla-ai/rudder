@@ -14,6 +14,11 @@ final class AppModel {
     let session = Session()
     private(set) var needs: [NeedsYouItem] = []
     private(set) var lastPollFailed = false
+    /// The web view's first load: a native loading screen covers it until the
+    /// page has drawn, and a failed load shows a retry screen instead of a blank window.
+    var webState: WebLoadState = .loading
+
+    @ObservationIgnored var failedURL: URL?
 
     @ObservationIgnored weak var webView: WKWebView?
     /// A page to open once the web view exists (a notification clicked while
@@ -62,8 +67,18 @@ final class AppModel {
     }
 
     func reload() {
+        if case .failed = webState { return retryLoad() }
         guard let webView else { return }
         if webView.url == nil { webView.load(URLRequest(url: session.appURL)) } else { webView.reload() }
+    }
+
+    /// Tries the page that failed again (or the start page), behind the loading screen.
+    func retryLoad() {
+        guard let webView else { return }
+        let url = failedURL ?? webView.url ?? startURL()
+        failedURL = nil
+        webState = .loading
+        webView.load(URLRequest(url: url))
     }
 
     func goBack() { webView?.goBack() }
@@ -75,6 +90,8 @@ final class AppModel {
     }
 
     func signOut() {
+        webState = .loading
+        failedURL = nil
         session.signOut()
         needs = []
         seen = nil
@@ -144,6 +161,12 @@ final class AppModel {
             Notifier.shared.post(title: "\(fresh.count) agents need you", body: fresh.map(\.title).prefix(3).joined(separator: ", "), path: "/app")
         }
     }
+}
+
+enum WebLoadState: Equatable {
+    case loading
+    case ready
+    case failed(String)
 }
 
 /// Local notifications: the page's `notify` and the menu bar's "needs you".

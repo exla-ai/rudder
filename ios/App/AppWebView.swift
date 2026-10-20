@@ -13,8 +13,10 @@ import WebKit
 /// AgentLogin), and `voice` (the full-screen "Talk to Rudder" conversation,
 /// see VoiceAssistant). `RUDDER_NATIVE.attachments` says this build may open
 /// the camera, `RUDDER_NATIVE.picker` that it answers `pick`,
-/// `RUDDER_NATIVE.login` that it answers `authorize`, and
-/// `RUDDER_NATIVE.voice` that it answers `voice`.
+/// `RUDDER_NATIVE.login` that it answers `authorize`,
+/// `RUDDER_NATIVE.voice` that it answers `voice`, and
+/// `RUDDER_NATIVE.digest` that it answers `digestReminder` (the 9:01
+/// notification, see DigestReminder).
 struct AppWebView: UIViewRepresentable {
     let session: Session
     let token: String
@@ -57,7 +59,9 @@ struct AppWebView: UIViewRepresentable {
 
         context.coordinator.webView = webView
         context.coordinator.lastTick = session.foregroundTick
-        var start = session.appURL
+        context.coordinator.lastDigestTick = session.openDigestTick
+        // Launched by tapping the digest notification: open on the digest.
+        var start = session.openDigestTick > 0 ? session.appURL.appendingPathComponent("digest") : session.appURL
         #if DEBUG
         // `-startPath /app/p/<project>/a/<agent>` opens a screen directly (simulator tests).
         if let path = UserDefaults.standard.string(forKey: "startPath"), path.hasPrefix("/app"),
@@ -75,6 +79,10 @@ struct AppWebView: UIViewRepresentable {
         if context.coordinator.lastTick != session.foregroundTick {
             context.coordinator.lastTick = session.foregroundTick
             webView.evaluateJavaScript("window.rudderRefresh && window.rudderRefresh()")
+        }
+        if context.coordinator.lastDigestTick != session.openDigestTick {
+            context.coordinator.lastDigestTick = session.openDigestTick
+            webView.evaluateJavaScript("window.rudderOpenDigest ? window.rudderOpenDigest() : location.assign('/app/digest')")
         }
     }
 
@@ -96,6 +104,8 @@ struct AppWebView: UIViewRepresentable {
             "login": "1",
             // The mic button opens the native voice assistant.
             "voice": "1",
+            // The digest's 9:01 local notification.
+            "digest": "1",
         ]
         let json = (try? JSONSerialization.data(withJSONObject: payload))
             .flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
@@ -109,6 +119,7 @@ struct AppWebView: UIViewRepresentable {
         let agentLogin: AgentLogin
         weak var webView: WKWebView?
         var lastTick = 0
+        var lastDigestTick = 0
 
         init(session: Session) {
             self.session = session
@@ -137,6 +148,14 @@ struct AppWebView: UIViewRepresentable {
                     session.setBadge(count)
                 } else if let count = body["count"] as? Double {
                     session.setBadge(Int(count))
+                }
+            case "digestReminder":
+                let enabled = body["enabled"] as? Bool ?? true
+                Task { @MainActor in
+                    let result = await DigestReminder.shared.set(enabled: enabled)
+                    self.webView?.evaluateJavaScript(
+                        "window.rudderDigestReminder && window.rudderDigestReminder({enabled: \(result.enabled), denied: \(result.denied)})"
+                    )
                 }
             case "haptic":
                 UIImpactFeedbackGenerator(style: .light).impactOccurred()

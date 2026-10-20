@@ -6,10 +6,12 @@
 // /app/__mock/creds/<out|claude|both|expired> (Claude Code / Codex sign-in),
 // /app/__mock/fresh (a brand new account: no GitHub, no agent login, no repos),
 // /app/__mock/computer (prints a code to approve, as `rudder login` would).
+// The digest uses the real worker/digest.mjs and cloud/dist/digest.js (build cloud first).
 import http from "node:http";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { digestRun } from "../worker/digest.mjs";
 
 const DIR = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT || 4321);
@@ -89,6 +91,47 @@ const projects = [
     ports: [],
   },
 ];
+
+
+// Morning digests: run records as the dashboard writes them, through the real
+// worker reader and the control plane's composer.
+const digestLib = await import("../dist/digest.js").catch(() => null);
+const HOUR = 60 * MIN;
+const digestRecords = (end) => ({
+  wsp_rudder: [
+    { id: "run_a1", taskSummary: "Phone app for agent control", task: "Build the phone-first web app under cloud/app", status: "running", backend: "claude", model: "opus", createdAt: end - 14 * HOUR, updatedAt: end - 20 * MIN,
+      turns: [{ prompt: "Build the phone-first web app", ts: end - 14 * HOUR }, { prompt: "make the transcript sticky at the bottom", ts: end - 9 * HOUR }, { prompt: "also show tool calls collapsed", ts: end - 3 * HOUR }] },
+    { id: "run_a3", taskSummary: "Tailnet HTTPS for previews", task: "Expose dev servers over tailnet https", status: "completed", lifecyclePhase: "review", backend: "claude", model: "sonnet", nodeId: "n2", createdAt: end - 11 * HOUR, updatedAt: end - 7 * HOUR,
+      doneSummary: "Listening ports on the home machine get `tailscale serve --https`; falls back to plain http when tailnet certs are off.", publish: { url: "https://github.com/exla-ai/rudder/pull/212", number: 212 }, turns: [] },
+    { id: "run_a4", taskSummary: "Delete cloud workspaces safely", task: "Request + reaper for deletes", status: "completed", lifecyclePhase: "deployed", backend: "claude", model: "opus", createdAt: end - 20 * HOUR, updatedAt: end - 12 * HOUR,
+      doneSummary: "Added the deletion reaper with a 30s sweep; dead rows answer 410 to heartbeats.", delivery: { status: "deployed", target: "rudder-cloud-control (Fly)", verifiedAt: iso(end - 12 * HOUR + 5 * MIN) }, turns: [] },
+    { id: "run_a5", taskSummary: "Bump jj to 0.40 flags", task: "jj rebase -o", status: "merged", backend: "codex", model: "gpt-6.1-sol", createdAt: end - 6 * HOUR, updatedAt: end - 5 * HOUR,
+      doneSummary: "Switched rebase to -o/--onto with a fallback for older jj.", merge: { status: "merged", pushed: true, pushedAt: end - 5 * HOUR + 2 * MIN, targetBranch: "main" }, turns: [] },
+  ],
+  wsp_wager: [
+    { id: "run_b2", taskSummary: "Stripe payout webhook", task: "Handle payout.failed", status: "failed", backend: "codex", model: "gpt-6.1-sol", createdAt: end - 4 * HOUR, updatedAt: end - 3.5 * HOUR, turns: [] },
+    { id: "run_b3", taskSummary: "Leaderboard query perf", task: "Speed up leaderboard", status: "completed", backend: "claude", model: "sonnet", createdAt: end - 10 * HOUR, updatedAt: end - 8 * HOUR,
+      doneSummary: "Leaderboard p95 went from 840ms to 62ms with a covering index on (season, points).", turns: [] },
+    { id: "run_b4", taskSummary: "Ask before placing a bet", task: "Confirm step for bets", status: "running", attention: "permission", backend: "claude", model: "opus", createdAt: end - 50 * MIN, updatedAt: end - 30 * MIN, turns: [] },
+  ],
+});
+function mockDigest(day, end, live = false) {
+  if (!digestLib) return null;
+  const since = end - 24 * HOUR;
+  const records = digestRecords(end);
+  const raw = projects.filter((p) => records[p.workspaceId]).map((p) => ({
+    workspaceId: p.workspaceId, name: p.name, repo: p.repo,
+    runs: records[p.workspaceId].map((r) => digestRun(r, { since, until: end })).filter(Boolean),
+  }));
+  return digestLib.composeDigest(raw, { day, timeZone: "America/Los_Angeles", since, until: end, generatedAt: end });
+}
+const digestDay = (ms) => new Date(ms - 7 * HOUR).toISOString().slice(0, 10);
+const morning = (() => { const d = new Date(); d.setHours(9, 1, 0, 0); return d.getTime() > now() ? d.getTime() - 24 * HOUR : d.getTime(); })();
+const digestStore = [0, 1, 2].map((k) => {
+  const end = morning - k * 24 * HOUR;
+  return { id: `dg_${k}`, readAt: k ? iso(end + HOUR) : null, createdAt: iso(end), body: mockDigest(digestDay(end), end) };
+}).filter((d) => d.body);
+const digestPreviewOf = (d) => d && ({ id: d.id, readAt: d.readAt, createdAt: d.createdAt, since: d.body.since, until: d.body.until, ...digestLib.digestPreview(d.body) });
 
 const LONG_OUTPUT = Array.from({ length: 140 }, (_, i) => `test app_tests::case_${String(i).padStart(3, "0")}_${["scroll", "merge", "leader", "render", "signals"][i % 5]} ... ok`).join("\n") + "\n\ntest result: ok. 528 passed; 0 failed; 1 ignored; finished in 41.82s";
 
@@ -196,7 +239,25 @@ const server = http.createServer(async (req, res) => {
         email: "viraat@example.com", home: home(),
         projects: homeMode === "none" ? [] : freshProjects ?? projects,
         github: { connected: githubConnected, source: githubConnected ? "sync" : null, updatedAt: null },
+        digest: digestPreviewOf(digestStore[0]) ?? null,
       });
+    }
+    if (p === "/api/app/digests" && req.method === "GET") {
+      return json(res, 200, { digests: digestStore.map(digestPreviewOf), timeZone: "America/Los_Angeles" });
+    }
+    if (p === "/api/app/digest" && req.method === "GET") {
+      if (url.searchParams.get("live")) {
+        const live = mockDigest(digestDay(now()), now(), true);
+        return live ? json(res, 200, { id: null, live: true, ...live, since: morning }) : json(res, 404, { error: "build cloud first" });
+      }
+      const d = digestStore.find((x) => x.id === url.searchParams.get("id")) ?? (url.searchParams.get("id") ? null : digestStore[0]);
+      return d ? json(res, 200, { id: d.id, readAt: d.readAt, createdAt: d.createdAt, ...d.body }) : json(res, 404, { error: "no digest yet" });
+    }
+    if (p === "/api/app/digest/read" && req.method === "POST") {
+      const body = await readBody(req);
+      const d = digestStore.find((x) => x.id === body.id);
+      if (d && !d.readAt) d.readAt = iso(now());
+      return json(res, 200, { ok: true });
     }
     if (p === "/api/app/transcript" && req.method === "GET") {
       const t = transcriptFor(url.searchParams.get("workspace"), url.searchParams.get("run"));

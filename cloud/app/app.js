@@ -49,6 +49,8 @@ function dayLabel(ms) {
   return d.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" });
 }
 
+const TIME_ZONE = (() => { try { return Intl.DateTimeFormat().resolvedOptions().timeZone || ""; } catch { return ""; } })();
+
 class ApiError extends Error { constructor(msg, status, waking = false) { super(msg); this.status = status; this.waking = waking; } }
 
 /* ------------------------------------------------------------------ */
@@ -61,6 +63,8 @@ async function api(path, { method = "GET", body, raw } = {}) {
   else if (body !== undefined) headers["Content-Type"] = "application/json";
   const token = NATIVE?.token || ls.get("rudder.token");
   if (token) headers.Authorization = `Bearer ${token}`;
+  // The morning digest arrives at 9:01 on this phone's clock.
+  if (TIME_ZONE) headers["X-Rudder-Timezone"] = TIME_ZONE;
   let res;
   try {
     res = await fetch(path, {
@@ -539,6 +543,7 @@ async function signOut() {
 function parseRoute(path) {
   const parts = path.replace(/\/+$/, "").split("/").filter(Boolean); // ["app","p",ws,"a",run]
   if (parts[0] !== "app") return { name: "home", path: "/app" };
+  if (parts[1] === "digest") return { name: "digest", id: parts[2] ? decodeURIComponent(parts[2]) : null, path };
   if (parts[1] === "p" && parts[2]) {
     const ws = decodeURIComponent(parts[2]);
     if (parts[3] === "a" && parts[4]) return { name: "agent", ws, run: decodeURIComponent(parts[4]), path };
@@ -548,6 +553,7 @@ function parseRoute(path) {
 }
 const projectPath = (ws) => `/app/p/${encodeURIComponent(ws)}`;
 const agentPath = (ws, run) => `${projectPath(ws)}/a/${encodeURIComponent(run)}`;
+const digestPath = (id) => (id ? `/app/digest/${encodeURIComponent(id)}` : "/app/digest");
 
 let depth = history.state?.depth || 0;
 function navigate(path, { replace = false } = {}) {
@@ -598,6 +604,7 @@ function mountScreen(dir = "forward") {
     ls.set("rudder.lastRoute", { path: route.path, at: Date.now() });
     if (route.name === "project") screen = ProjectScreen(route.ws);
     else if (route.name === "agent") screen = AgentScreen(route.ws, route.run);
+    else if (route.name === "digest") screen = DigestScreen(route.id);
     else screen = HomeScreen();
   }
   if (dir === "back") screen.el.classList.add("back-nav");
@@ -1689,6 +1696,7 @@ function HomeScreen() {
     </header>
     <div class="scroller">
       <div class="ptr">${icon("down")}</div>
+      <div class="section digest-slot"></div>
       <div class="section projects-sec">
         <div class="section-head"><h2>Projects</h2><span class="count"></span></div>
         <div class="projects-body"><div class="list projects"></div></div>
@@ -1731,6 +1739,8 @@ function HomeScreen() {
   scroller.insertBefore(setup.el, projectsSec);
   const computerSlot = el.querySelector(".computer-slot");
   computerSlot.appendChild(ComputerCard().el);
+  const digestCard = DigestCard();
+  el.querySelector(".digest-slot").appendChild(digestCard.el);
 
   // Machine card (built once)
   const machine = h(`<div class="card machine">
@@ -1779,6 +1789,7 @@ function HomeScreen() {
     delete projectsEl.dataset.err;
     projectsEl.querySelectorAll(".sk, .empty").forEach((n) => n.remove());
     setup.update(s);
+    digestCard.update(s);
 
     // Machine
     const home = s.home;
@@ -1959,6 +1970,258 @@ function updateProjectCard(el, p) {
   const err = el.querySelector(".p-err");
   setText(err, p.failureReason || ""); err.hidden = !p.failureReason;
   el.setAttribute("aria-label", `${p.name}, ${w} working, ${n} need you, ${d} done`);
+}
+
+/* ------------------------------------------------------------------ */
+/* Morning digest: what the agents did since the last one, by project  */
+/* ------------------------------------------------------------------ */
+
+const clockTime = (ms) => new Date(ms).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+function digestDayLabel(day) {
+  // `day` is the account's local YYYY-MM-DD; noon keeps it on the same date here.
+  const ms = Date.parse(`${day}T12:00:00`);
+  return Number.isFinite(ms) ? dayLabel(ms) : day;
+}
+function digestSpan(d) {
+  if (!d?.since) return "";
+  return `${dayLabel(d.since)} ${clockTime(d.since)} to ${dayLabel(d.until) === dayLabel(d.since) ? "" : `${dayLabel(d.until)} `}${clockTime(d.until)}`;
+}
+const DIGEST_EVENT = {
+  started: "Started",
+  message: "You asked",
+  finished: "Finished",
+  merged: "Merged",
+  pushed: "Pushed",
+  deployed: "Deployed",
+  failed: "Failed",
+  stopped: "Stopped",
+  conflict: "Hit a merge conflict",
+  working: "Working",
+  updated: "Active",
+};
+const DIGEST_EVENT_CLS = { finished: "s-done", merged: "s-accent", pushed: "s-accent", deployed: "s-done", failed: "s-failed", conflict: "s-needs", message: "s-idle" };
+const DIGEST_STATUS = { ...STATUS, deployed: { label: "Deployed", cls: "s-done" } };
+
+function digestStats(t) {
+  const out = [];
+  if (t.finished) out.push(["s-done", t.finished, "finished"]);
+  if (t.merged) out.push(["s-accent", t.merged, "merged"]);
+  if (t.deployed) out.push(["s-done", t.deployed, "deployed"]);
+  if (t.prs) out.push(["s-accent", t.prs, t.prs === 1 ? "PR" : "PRs"]);
+  if (t.needsYou) out.push(["s-needs", t.needsYou, t.needsYou === 1 ? "needs you" : "need you"]);
+  if (t.working) out.push(["s-working", t.working, "working"]);
+  if (t.failed) out.push(["s-failed", t.failed, "failed"]);
+  return out.map(([cls, n, label]) => `<span class="stat ${cls}"><span class="dot"></span><b>${n}</b> ${escapeHtml(label)}</span>`).join("");
+}
+
+// First thing on the home screen: the newest digest, or when the first one comes.
+function DigestCard() {
+  const el = h(`<a class="card digest-card tap" data-link href="/app/digest">
+      <div class="d-top"><span class="d-icon">${icon("sun")}</span><span class="d-kicker"></span><span class="dot d-unread s-accent"></span><span class="d-chev">${icon("chevron")}</span></div>
+      <div class="d-head"></div>
+      <div class="d-sub"></div>
+      <div class="p-stats d-stats"></div>
+    </a>`);
+  function update(s) {
+    const d = s?.digest;
+    el.hidden = !s?.home && !d;
+    if (!d) {
+      setText(el.querySelector(".d-kicker"), "Morning digest");
+      setText(el.querySelector(".d-head"), "Your first digest arrives at 9:01 AM.");
+      setText(el.querySelector(".d-sub"), "Tap to see what your agents have done so far.");
+      el.querySelector(".d-stats").innerHTML = "";
+      el.querySelector(".d-unread").hidden = true;
+      return;
+    }
+    setText(el.querySelector(".d-kicker"), `Morning digest · ${digestDayLabel(d.day)}`);
+    setText(el.querySelector(".d-head"), d.headline);
+    const projects = (d.projects || []).join(" · ");
+    setText(el.querySelector(".d-sub"), [projects, ...(d.lines || [])].filter(Boolean).join("  ·  "));
+    el.querySelector(".d-stats").innerHTML = digestStats(d.totals || {});
+    el.querySelector(".d-unread").hidden = !!d.readAt;
+    el.setAttribute("aria-label", `Morning digest, ${digestDayLabel(d.day)}: ${d.headline}`);
+  }
+  return { el, update };
+}
+
+// `id`: a kept digest, null for the newest one, "live" for since the last one.
+function DigestScreen(id) {
+  const el = h(`<section class="screen">
+    <header class="topbar">
+      <a class="icon-btn back" href="/app" aria-label="Back to projects">${icon("back")}</a>
+      <div class="titles"><div class="title">Digest</div><div class="subtitle"><span class="span"></span></div></div>
+    </header>
+    <div class="scroller digest">
+      <div class="ptr">${icon("down")}</div>
+      <div class="d-days"></div>
+      <div class="d-body"></div>
+    </div></section>`);
+  const bar = el.querySelector(".topbar");
+  const scroller = el.querySelector(".scroller");
+  const body = el.querySelector(".d-body");
+  const daysEl = el.querySelector(".d-days");
+  el.querySelector(".back").addEventListener("click", (e) => { e.preventDefault(); goBack("/app"); });
+  let destroyed = false;
+  let current = null;
+  let days = [];
+  body.innerHTML = `<div class="sk sk-card" style="height:120px"></div><div class="sk sk-card" style="height:180px"></div><div class="sk sk-card" style="height:180px;opacity:.6"></div>`;
+
+  async function load() {
+    try {
+      const [list, digest] = await Promise.all([
+        api("/api/app/digests").catch(() => ({ digests: [] })),
+        id === "live" ? api("/api/app/digest?live=1") : api(id ? `/api/app/digest?id=${encodeURIComponent(id)}` : "/api/app/digest").catch((err) => {
+          // No digest kept yet: show what has happened so far instead.
+          if (err.status === 404) return api("/api/app/digest?live=1");
+          throw err;
+        }),
+      ]);
+      if (destroyed) return;
+      days = list?.digests || [];
+      current = digest;
+      paint();
+      if (digest?.id && !digest.readAt) {
+        api("/api/app/digest/read", { method: "POST", body: { id: digest.id } }).then(() => {
+          if (store.state?.digest?.id === digest.id) { store.state.digest.readAt = new Date().toISOString(); }
+        }).catch(() => {});
+      }
+    } catch (err) {
+      if (destroyed || err.status === 401) return;
+      if (err.waking) {
+        body.replaceChildren(emptyState({ ic: "server", title: "Waking your cloud machine", body: "The digest is read from your agents' records there. This takes about a minute." }));
+        setTimeout(() => { if (!destroyed) load(); }, 5000);
+        return;
+      }
+      body.replaceChildren(emptyState({ ic: "alert", title: "Can't load the digest", body: escapeHtml(err.message) }));
+    }
+  }
+
+  function paintDays() {
+    const items = [{ id: "live", label: "So far today" }, ...days.map((d) => ({ id: d.id, label: digestDayLabel(d.day), unread: !d.readAt }))];
+    const active = current?.live ? "live" : current?.id;
+    reconcile(daysEl, items, (x) => x.id,
+      () => h(`<a class="chip d-day tap" data-link></a>`),
+      (a, x) => {
+        a.href = digestPath(x.id);
+        a.classList.toggle("on", x.id === active);
+        a.classList.toggle("unread", !!x.unread && x.id !== active);
+        setText(a, x.label);
+      });
+  }
+
+  function paint() {
+    const d = current;
+    paintDays();
+    setText(el.querySelector(".title"), d.live ? "So far today" : `Digest · ${digestDayLabel(d.day)}`);
+    setText(el.querySelector(".span"), digestSpan(d));
+    const hero = h(`<div class="card d-hero">
+        <div class="d-top"><span class="d-icon">${icon("sun")}</span><span class="d-kicker"></span></div>
+        <div class="d-head"></div><div class="d-lines"></div><div class="p-stats d-stats"></div></div>`);
+    setText(hero.querySelector(".d-kicker"), d.live ? "Since the last digest" : `Delivered ${clockTime(d.generatedAt || d.until)}`);
+    setText(hero.querySelector(".d-head"), d.headline);
+    hero.querySelector(".d-lines").innerHTML = (d.lines || []).map((l) => `<div>${escapeHtml(l)}</div>`).join("");
+    hero.querySelector(".d-stats").innerHTML = digestStats(d.totals || {});
+    const parts = [hero];
+    const reminder = digestReminderCard();
+    if (reminder) parts.push(reminder);
+    for (const p of d.projects || []) parts.push(digestProjectSection(p));
+    if (!(d.projects || []).length) {
+      parts.push(emptyState({ ic: "sun", title: "Nothing ran", body: "No agent did anything in this window. Start a task in a project and it shows up here tomorrow morning." }));
+    }
+    body.replaceChildren(...parts);
+  }
+
+  topbarScrollShadow(scroller, bar);
+  pullToRefresh(scroller, load);
+  load();
+  return { el, update() { if (current) paintDays(); }, destroy() { destroyed = true; } };
+}
+
+// The iOS shell can remind at 9:01 (a local notification, DigestReminder.swift).
+const REMINDER_KEY = "rudder.digestReminder";
+function digestReminderCard() {
+  if (!NATIVE?.digest || ls.get(REMINDER_KEY) === "on") return null;
+  const denied = ls.get(REMINDER_KEY) === "denied";
+  const el = h(`<div class="card machine d-remind">
+      <div class="m-icon">${icon("sun")}</div>
+      <div class="m-body"><div class="m-title"><span>Get this at 9:01 every morning</span></div>
+      <div class="m-sub"></div></div>
+      <button type="button" class="btn small accent">Turn on</button></div>`);
+  setText(el.querySelector(".m-sub"), denied
+    ? "Notifications are off for Rudder. Turn them on in Settings, then tap again."
+    : "A notification when your digest is ready.");
+  el.querySelector("button").addEventListener("click", () => postNative({ type: "digestReminder", enabled: true }));
+  return el;
+}
+window.rudderDigestReminder = ({ enabled, denied } = {}) => {
+  ls.set(REMINDER_KEY, enabled ? "on" : denied ? "denied" : null);
+  toast(enabled ? "You'll get your digest at 9:01 every morning" : denied ? "Notifications are off for Rudder in Settings" : "Couldn't schedule the reminder", { error: !enabled });
+  document.querySelector(".d-remind")?.remove();
+  if (!enabled) { const card = digestReminderCard(); if (card) document.querySelector(".d-hero")?.after(card); }
+};
+
+function digestProjectSection(p) {
+  const sec = h(`<div class="section d-proj">
+      <a class="section-head d-proj-head tap" data-link><h2></h2><span class="count"></span>${icon("chevron")}</a>
+      <div class="d-repo"></div>
+      <div class="list grouped card d-runs"></div>
+      <details class="d-tl"><summary>Timeline</summary><ol class="d-events"></ol></details>
+    </div>`);
+  const head = sec.querySelector(".d-proj-head");
+  head.href = projectPath(p.workspaceId);
+  setText(sec.querySelector("h2"), p.name);
+  setText(sec.querySelector(".count"), `${p.totals.agents} ${p.totals.agents === 1 ? "agent" : "agents"}`);
+  setText(sec.querySelector(".d-repo"), p.repo || "");
+  const runsEl = sec.querySelector(".d-runs");
+  for (const r of p.runs || []) runsEl.appendChild(digestRunRow(p, r));
+  // Over time: every event in this project, oldest first, a day header when the date turns.
+  const ol = sec.querySelector(".d-events");
+  let lastDay = null;
+  for (const e of p.timeline || []) {
+    const day = dayLabel(e.at);
+    if (day !== lastDay) { ol.appendChild(h(`<li class="d-ev-day">${escapeHtml(day)}</li>`)); lastDay = day; }
+    const li = h(`<li class="d-ev ${DIGEST_EVENT_CLS[e.kind] || "s-working"}"><span class="d-ev-time"></span><span class="dot"></span><a class="d-ev-body" data-link><b></b> <span class="d-ev-title"></span><span class="d-ev-text"></span></a></li>`);
+    setText(li.querySelector(".d-ev-time"), clockTime(e.at));
+    setText(li.querySelector("b"), DIGEST_EVENT[e.kind] || e.kind);
+    setText(li.querySelector(".d-ev-title"), e.title);
+    setText(li.querySelector(".d-ev-text"), e.text ? (e.kind === "message" ? `"${e.text}"` : e.text) : "");
+    li.querySelector(".d-ev-body").href = agentPath(p.workspaceId, e.runId);
+    ol.appendChild(li);
+  }
+  // A short timeline reads at a glance; a long one waits to be opened.
+  if ((p.timeline || []).length <= 8) sec.querySelector(".d-tl").open = true;
+  return sec;
+}
+
+function digestRunRow(p, r) {
+  const st = DIGEST_STATUS[r.status] || statusOf(r.status);
+  const el = h(`<a class="row agent tap d-run ${st.cls}" data-link>
+      <span class="a-dot"><span class="dot"></span></span>
+      <div class="a-body">
+        <div class="a-top"><span class="a-title"></span><span class="a-time"></span></div>
+        <div class="a-meta"><span class="status-text"></span><span class="chip c-model"></span></div>
+        <div class="a-msg d-did"></div>
+        <div class="d-badges"></div>
+      </div></a>`);
+  el.href = agentPath(p.workspaceId, r.id);
+  el.querySelector(".dot").classList.toggle("live", r.status === "working");
+  setText(el.querySelector(".a-title"), r.title || r.task || "Untitled agent");
+  setText(el.querySelector(".a-time"), r.firstAt === r.lastAt ? clockTime(r.lastAt) : `${clockTime(r.firstAt)} to ${clockTime(r.lastAt)}`);
+  setText(el.querySelector(".status-text"), st.label);
+  const model = [BACKEND[r.backend] || r.backend, r.model].filter(Boolean).join(" · ");
+  const chip = el.querySelector(".c-model");
+  setText(chip, model); chip.hidden = !model;
+  const did = el.querySelector(".d-did");
+  setText(did, r.summary || r.task || ""); did.hidden = !(r.summary || r.task);
+  const badges = [];
+  if (r.merged) badges.push(`<span class="chip s-accent">${icon("merge")} ${r.pushed ? "Merged and pushed" : "Merged"}</span>`);
+  if (r.pr?.url) badges.push(`<button type="button" class="chip s-accent d-pr" data-url="${escapeHtml(r.pr.url)}">${icon("github")} PR${r.pr.number ? ` #${r.pr.number}` : ""}</button>`);
+  if (r.delivery) badges.push(`<span class="chip s-done">${icon("check")} Deployed${r.delivery.target ? ` to ${escapeHtml(r.delivery.target)}` : ""}</span>`);
+  const b = el.querySelector(".d-badges");
+  b.innerHTML = badges.join("");
+  b.hidden = !badges.length;
+  b.querySelector(".d-pr")?.addEventListener("click", (e) => { e.preventDefault(); e.stopPropagation(); openExternal(e.currentTarget.dataset.url); });
+  return el;
 }
 
 /* ------------------------------------------------------------------ */
@@ -2922,6 +3185,9 @@ document.addEventListener("visibilitychange", () => {
 // Re-render relative times every 30s even when data holds still.
 setInterval(() => { if (!document.hidden) screen?.update?.(); }, 30000);
 
+// The iOS shell's 9:01 notification, tapped: open the newest digest.
+window.rudderOpenDigest = () => { if (!store.signedOut) navigate(digestPath(null)); };
+
 window.rudderRefresh = () => {
   nativeSignInRequested = false;
   if (NATIVE && window.RUDDER_NATIVE?.token) NATIVE.token = window.RUDDER_NATIVE.token;
@@ -2943,7 +3209,7 @@ function restoreLastRoute() {
   const last = ls.get("rudder.lastRoute");
   if (!last || Date.now() - last.at > 24 * 3600 * 1000) return;
   const r = parseRoute(last.path || "");
-  if (r.name === "home") return;
+  if (r.name !== "project" && r.name !== "agent") return;
   history.replaceState({ depth: 0 }, "", "/app");
   depth = 1;
   history.pushState({ depth }, "", projectPath(r.ws));

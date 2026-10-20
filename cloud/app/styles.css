@@ -890,3 +890,52 @@ dialog.sheet .dialog { border-radius: 22px 22px 0 0; padding-bottom: calc(var(--
 .interrupt:active { transform: scale(0.92); }
 .interrupt[disabled] { opacity: 0.5; }
 .interrupt svg { width: 16px; height: 16px; fill: currentColor; }
+
+/* Morning digest */
+.digest-slot { margin-top: 6px; }
+.digest-slot:empty, .digest-card[hidden] { display: none; }
+.digest-card, .d-hero { padding: 15px 16px 14px; }
+.digest-card { background: linear-gradient(135deg, var(--accent-soft), transparent 70%), var(--surface); }
+.d-top { display: flex; align-items: center; gap: 8px; }
+.d-icon { width: 28px; height: 28px; border-radius: 9px; display: grid; place-items: center; background: var(--accent-soft); color: var(--accent); flex: none; }
+.d-icon svg { width: 17px; height: 17px; }
+.d-kicker { font-size: 12px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; color: var(--accent); flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.d-unread[hidden] { display: none; }
+.d-chev { color: var(--faint); display: grid; place-items: center; }
+.d-chev svg { width: 16px; height: 16px; }
+.d-head { font-weight: 650; font-size: 17px; letter-spacing: -0.01em; margin-top: 10px; line-height: 1.3; }
+.d-sub { font-size: 13px; color: var(--muted); margin-top: 4px; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+.d-sub:empty, .d-stats:empty, .d-lines:empty { display: none; }
+.d-stats { margin-top: 10px; }
+.d-lines { font-size: 14px; color: var(--ink-2); margin-top: 6px; }
+.d-days { display: flex; gap: 8px; overflow-x: auto; margin: 6px -16px 0; padding: 2px 16px 4px; scrollbar-width: none; }
+.d-days::-webkit-scrollbar { display: none; }
+.d-day { flex: none; height: 30px; padding: 0 12px; display: inline-flex; align-items: center; border-radius: 999px; font-size: 13px; font-weight: 600; color: var(--ink-2); background: var(--surface); border: 1px solid var(--line); text-decoration: none; }
+.d-day.on { background: var(--ink); color: var(--bg); border-color: transparent; }
+.d-day.unread::after { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--accent); margin-left: 6px; }
+.d-body > .card:first-child { margin-top: 12px; }
+.d-proj-head { text-decoration: none; color: inherit; align-items: center; justify-content: flex-start; gap: 8px; margin-bottom: 2px; }
+.d-proj-head .count { margin-left: auto; }
+.d-proj-head svg { width: 14px; height: 14px; color: var(--faint); }
+.d-repo { font-size: 12px; color: var(--faint); font-family: var(--mono); margin: 0 4px 8px; }
+.d-repo:empty { display: none; }
+.d-run .d-did { -webkit-line-clamp: 4; }
+.d-badges { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.d-badges[hidden] { display: none; }
+.d-badges .chip { display: inline-flex; align-items: center; gap: 4px; background: var(--cs); color: var(--c); border: 0; font: inherit; font-size: 12px; font-weight: 600; }
+.d-badges .chip svg { width: 13px; height: 13px; }
+.d-tl { margin: 10px 4px 0; }
+.d-tl summary { font-size: 13px; font-weight: 600; color: var(--muted); cursor: pointer; list-style: none; padding: 4px 0; }
+.d-tl summary::-webkit-details-marker { display: none; }
+.d-tl summary::before { content: "▸ "; }
+.d-tl[open] summary::before { content: "▾ "; }
+.d-events { list-style: none; margin: 4px 0 0; padding: 0; }
+.d-ev-day { font-size: 12px; font-weight: 600; color: var(--faint); text-transform: uppercase; letter-spacing: 0.04em; padding: 10px 0 4px; }
+.d-ev { display: grid; grid-template-columns: 64px 14px 1fr; align-items: baseline; padding: 4px 0; font-size: 14px; }
+.d-ev-time { color: var(--faint); font-size: 12px; font-variant-numeric: tabular-nums; }
+.d-ev .dot { width: 7px; height: 7px; align-self: center; }
+.d-ev-body { color: var(--ink-2); text-decoration: none; min-width: 0; overflow-wrap: anywhere; }
+.d-ev-body b { color: var(--c, var(--ink)); font-weight: 600; }
+.d-ev-text { color: var(--muted); }
+.d-ev-text:not(:empty)::before { content: " · "; }
+.d-remind { margin-top: 12px; }

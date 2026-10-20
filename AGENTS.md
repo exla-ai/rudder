@@ -1058,6 +1058,20 @@ brain lives in the cloud, and the phone is a first-class client.
   (`rudder.setupDone`); a never-connected GitHub is a setup step there, not a red
   machine-card error.
 
+- **The morning digest (`cloud/src/digest.ts`, `cloud/worker/digest.mjs`).** At 9:01
+  in the account's time zone (the app sends `X-Rudder-Timezone` on every state poll,
+  kept in `rudder_account_prefs`; default America/Los_Angeles) `sweepDigests` (every
+  `RUDDER_DIGEST_SWEEP_MS`, 60s; `RUDDER_DIGEST=0` off) asks the home machine's
+  `digest` rpc what every open project's agents did since the previous digest (run.json
+  records: started, your messages, finished, merged, pushed, PR, deployed), groups it
+  by project with a timeline, and stores one row per local day in `rudder_digests`
+  (about two months kept). A sleeping home is woken for it until noon; after that the
+  app's `GET /api/app/digest?live=1` finishes it. The app leads with the newest digest
+  (`state.digest`), `/app/digest[/<id>]` shows it by project, and "So far today" is the
+  live, unstored window. The iOS shell schedules a repeating 9:01 local notification
+  (`DigestReminder.swift`, turned on from the digest screen, `RUDDER_NATIVE.digest`);
+  tapping it opens `/app/digest`. Its text is fixed: a local notification cannot carry
+  the day's headline.
 - **Talking to Rudder (phone and CarPlay, `cloud/src/voice.ts`).** The phone holds
   the audio and speaks to OpenAI's realtime model directly over a WebSocket
   (`VoiceAssistant.swift`: AVAudioEngine with voice processing for echo

@@ -26,6 +26,7 @@ import { readTranscript, lastAssistantText, userTask } from "./transcripts.mjs";
 import { readAsks, askDecision, isAskId } from "./asks.mjs";
 import { sanitizeHomeHookConfigs } from "./hook-paths.mjs";
 import { createLoginRunner } from "./logins.mjs";
+import { collectDigestRuns } from "./digest.mjs";
 
 const cloudUrl = (process.env.RUDDER_CLOUD_URL || "").trim().replace(/\/$/, "");
 const homeId = (process.env.RUDDER_WORKSPACE_ID || "").trim();
@@ -471,6 +472,24 @@ async function handleRpc(method, params) {
     const runIds = (Array.isArray(params.runIds) ? params.runIds : []).filter((id) => /^[A-Za-z0-9._-]+$/.test(String(id)));
     const existing = runIds.filter((id) => fs.existsSync(path.join(target.dir, ".rudder", "runs", id, "run.json")));
     return { known: true, existing };
+  }
+  if (method === "digest") {
+    // The morning digest: what each open project's agents did in the window.
+    const until = Number(params.until) || Date.now();
+    const since = Number(params.since) || until - 24 * 3600_000;
+    const list = [];
+    for (const project of projects.values()) {
+      if (project.status === "cloning") {
+        continue;
+      }
+      list.push({
+        workspaceId: project.workspaceId,
+        name: project.name,
+        repo: project.descriptor.repo,
+        runs: collectDigestRuns(project.dir, { since, until }),
+      });
+    }
+    return { since, until, projects: list };
   }
   if (method === "loginStart") {
     return await logins.start(String(params.provider || ""), { device: params.device === true });

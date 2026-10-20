@@ -22,6 +22,8 @@ final class Session {
     var errorMessage: String?
     /// Bumped when the app comes to the foreground so the web view refreshes.
     private(set) var foregroundTick = 0
+    /// Bumped when the 9:01 digest notification is tapped (DigestReminder).
+    private(set) var openDigestTick = 0
 
     let server: URL
     private var authSession: ASWebAuthenticationSession?
@@ -140,6 +142,10 @@ final class Session {
 
     func didBecomeActive() {
         foregroundTick += 1
+    }
+
+    func openDigest() {
+        openDigestTick += 1
     }
 
     func setBadge(_ count: Int) {

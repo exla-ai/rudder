@@ -15,6 +15,7 @@ import { WebSocket, WebSocketServer } from "ws";
 import { createSecretsVault, SecretsVaultError, type SecretItemInput, type SecretsVault } from "./secrets.js";
 import { callerIdTrusted, callerNumber, incomingCall, parseVoicePhones, runVoiceCall, verifyOpenAiWebhook, type IncomingCall } from "./voice-call.js";
 import { TwilioWatch, type RudderCallRecord } from "./twilio-watch.js";
+import { composeDigest, DEFAULT_DIGEST_TIME_ZONE, digestDueDay, digestPreview, digestWindow, validTimeZone, zonedClock, type Digest, type DigestRawProject } from "./digest.js";
 import { runVoiceTool, voiceGreeting, voiceInstructions, voiceSessionConfig, voiceUpdateMessage, voiceUpdates, type VoiceContext, type VoiceProject } from "./voice.js";
 import {
   formatOutputForSlack,
@@ -279,6 +280,26 @@ ensureColumn("rudder_workspaces", "home_id", "text");
 ensureColumn("rudder_workspaces", "failure_reason", "text");
 ensureColumn("rudder_sails", "failure_reason", "text");
 ensureColumn("rudder_workspaces", "pinned_at", "text");
+// The morning digest (cloud/src/digest.ts): one row per account per local day,
+// and the time zone the phone last reported, which decides when 9:01 is.
+database.exec(`
+  create table if not exists rudder_digests (
+    id text primary key,
+    account_id text not null,
+    day text not null,
+    since_ms integer not null,
+    until_ms integer not null,
+    created_at text not null,
+    read_at text,
+    digest_json text not null,
+    unique(account_id, day)
+  );
+  create table if not exists rudder_account_prefs (
+    account_id text primary key,
+    time_zone text,
+    updated_at text not null
+  );
+`);
 
 // Secrets vault: initialized lazily so a missing RUDDER_SECRETS_KEY only
 // breaks the vault endpoints, not the rest of the control plane.
@@ -5248,6 +5269,173 @@ if (homeUpdateSweepMs >= 1000) {
   setInterval(() => void sweepIdleHomeUpdates().catch(() => undefined), homeUpdateSweepMs).unref?.();
 }
 
+// ---------------------------------------------------------------------------
+// The morning digest. Every minute: any account whose clock has passed 9:01
+// with no digest for today gets one, built from its home machine's run
+// records. A sleeping machine is woken for it until noon local time; after
+// that the next app open finishes it (see liveDigest).
+// ---------------------------------------------------------------------------
+
+type DigestRow = {
+  id: string;
+  account_id: string;
+  day: string;
+  since_ms: number;
+  until_ms: number;
+  created_at: string;
+  read_at: string | null;
+  digest_json: string;
+};
+
+const insertDigest = database.prepare(`
+  insert or ignore into rudder_digests (id, account_id, day, since_ms, until_ms, created_at, read_at, digest_json)
+  values (@id, @accountId, @day, @since, @until, @createdAt, null, @json)
+`);
+const latestDigest = database.prepare("select * from rudder_digests where account_id = ? order by day desc limit 1");
+const findDigest = database.prepare("select * from rudder_digests where id = ? and account_id = ?");
+const listDigests = database.prepare("select * from rudder_digests where account_id = ? order by day desc limit 30");
+const markDigestRead = database.prepare("update rudder_digests set read_at = coalesce(read_at, @readAt) where id = @id and account_id = @accountId");
+const pruneDigests = database.prepare("delete from rudder_digests where account_id = ? and day < ?");
+const getAccountPrefs = database.prepare("select time_zone from rudder_account_prefs where account_id = ?");
+const upsertAccountTimeZone = database.prepare(`
+  insert into rudder_account_prefs (account_id, time_zone, updated_at) values (@accountId, @timeZone, @updatedAt)
+  on conflict(account_id) do update set time_zone = excluded.time_zone, updated_at = excluded.updated_at
+`);
+const digestInflight = new Set<string>();
+const digestWakeAt = new Map<string, number>();
+
+function accountTimeZone(accountId: string): string {
+  const row = getAccountPrefs.get(accountId) as { time_zone?: string | null } | undefined;
+  return validTimeZone(row?.time_zone) ?? validTimeZone(process.env.RUDDER_DIGEST_TIME_ZONE) ?? DEFAULT_DIGEST_TIME_ZONE;
+}
+
+function rememberTimeZone(accountId: string, raw: unknown): void {
+  const timeZone = validTimeZone(Array.isArray(raw) ? raw[0] : raw);
+  if (!timeZone) {
+    return;
+  }
+  const row = getAccountPrefs.get(accountId) as { time_zone?: string | null } | undefined;
+  if (row?.time_zone === timeZone) {
+    return;
+  }
+  upsertAccountTimeZone.run({ accountId, timeZone, updatedAt: new Date().toISOString() });
+  schedulePersistDatabase();
+}
+
+function digestRowJson(row: DigestRow): JsonRecord {
+  const digest = JSON.parse(row.digest_json) as Digest;
+  return { id: row.id, readAt: row.read_at, createdAt: row.created_at, ...(digest as unknown as JsonRecord) };
+}
+
+function digestRowPreview(row: DigestRow): JsonRecord {
+  const digest = JSON.parse(row.digest_json) as Digest;
+  return { id: row.id, readAt: row.read_at, createdAt: row.created_at, since: row.since_ms, until: row.until_ms, ...(digestPreview(digest) as unknown as JsonRecord) };
+}
+
+function latestDigestPreview(accountId: string): JsonRecord | null {
+  const row = latestDigest.get(accountId) as DigestRow | undefined;
+  return row ? digestRowPreview(row) : null;
+}
+
+function listDigestPreviews(accountId: string): JsonRecord[] {
+  return (listDigests.all(accountId) as DigestRow[]).map(digestRowPreview);
+}
+
+async function fetchDigestProjects(home: Workspace, since: number, until: number): Promise<DigestRawProject[]> {
+  const result = await homeRpc(home.id, "digest", { since, until }, 60_000) as JsonRecord | null;
+  const raw = Array.isArray(result?.projects) ? result.projects as unknown as DigestRawProject[] : [];
+  // Names come from the control plane's rows, which the phone already shows.
+  const rows = new Map(homeRepos(home.id).map((row) => [row.id, row]));
+  return raw.map((project) => {
+    const row = rows.get(project.workspaceId);
+    return { ...project, name: row?.repoName ?? project.name, repo: row ? repoSlugFromUrl(row.repoUrl) : project.repo ?? null };
+  });
+}
+
+async function generateDigest(accountId: string, home: Workspace, day: string, now = Date.now()): Promise<boolean> {
+  if (digestInflight.has(accountId)) {
+    return false;
+  }
+  digestInflight.add(accountId);
+  try {
+    const previous = latestDigest.get(accountId) as DigestRow | undefined;
+    const { since, until } = digestWindow(now, previous ? Number(previous.until_ms) : null);
+    const timeZone = accountTimeZone(accountId);
+    const digest = composeDigest(await fetchDigestProjects(home, since, until), { day, timeZone, since, until, generatedAt: now });
+    insertDigest.run({
+      id: `dg_${randomBytes(9).toString("base64url")}`,
+      accountId,
+      day,
+      since,
+      until,
+      createdAt: new Date(now).toISOString(),
+      json: JSON.stringify(digest),
+    });
+    // Keep about two months.
+    pruneDigests.run(accountId, zonedClock(now - 60 * 24 * 3600_000, timeZone).day);
+    schedulePersistDatabase();
+    console.log(`[digest] ${accountId} ${day}: ${digest.headline}`);
+    return true;
+  } finally {
+    digestInflight.delete(accountId);
+  }
+}
+
+// What has happened since the last kept digest, not stored: the phone's
+// "So far today". It also finishes a morning digest the sweep could not
+// (the machine slept through the wake window).
+async function liveDigest(accountId: string): Promise<JsonRecord | null> {
+  const home = findHomeRow(accountId);
+  const timeZone = accountTimeZone(accountId);
+  const now = Date.now();
+  if (!home || !isOpen(homeControls.get(home.id))) {
+    if (home && home.status !== "deleting") {
+      wakeHomeInBackground(accountId);
+    }
+    return null;
+  }
+  const previous = latestDigest.get(accountId) as DigestRow | undefined;
+  const due = digestDueDay(now, timeZone, previous?.day ?? null);
+  if (due) {
+    await generateDigest(accountId, home, due, now).catch(() => false);
+  }
+  const last = latestDigest.get(accountId) as DigestRow | undefined;
+  const { since, until } = digestWindow(now, last ? Number(last.until_ms) : null);
+  const digest = composeDigest(await fetchDigestProjects(home, since, until), { day: zonedClock(now, timeZone).day, timeZone, since, until, generatedAt: now });
+  return { id: null, live: true, ...(digest as unknown as JsonRecord) };
+}
+
+async function sweepDigests(now = Date.now()): Promise<void> {
+  for (const raw of listHomeRows.all() as Record<string, unknown>[]) {
+    const home = rowToWorkspace(raw);
+    const accountId = home.accountId;
+    const timeZone = accountTimeZone(accountId);
+    const previous = latestDigest.get(accountId) as DigestRow | undefined;
+    const day = digestDueDay(now, timeZone, previous?.day ?? null);
+    if (!day) {
+      continue;
+    }
+    if (isOpen(homeControls.get(home.id))) {
+      await generateDigest(accountId, home, day, now).catch((error) => {
+        console.log(`[digest] ${accountId} ${day} failed: ${error instanceof Error ? error.message : String(error)}`);
+      });
+      continue;
+    }
+    // Asleep: wake it (every ten minutes at most), but only in the morning
+    // window, so a machine nobody uses is not woken all day.
+    const clock = zonedClock(now, timeZone);
+    if (clock.hour < 12 && now - (digestWakeAt.get(accountId) ?? 0) > 10 * 60_000) {
+      digestWakeAt.set(accountId, now);
+      wakeHomeInBackground(accountId);
+    }
+  }
+}
+
+const digestSweepMs = Number(process.env.RUDDER_DIGEST_SWEEP_MS || 60 * 1000);
+if (digestSweepMs >= 1000 && process.env.RUDDER_DIGEST !== "0") {
+  setInterval(() => void sweepDigests().catch(() => undefined), digestSweepMs).unref?.();
+}
+
 async function recreateHomeMachine(home: Workspace): Promise<Workspace> {
   const now = new Date().toISOString();
   const workerToken = `rdrw_${randomBytes(32).toString("base64url")}`;
@@ -6096,6 +6284,7 @@ async function handleAppApi(req: IncomingMessage, res: ServerResponse, url: URL)
   const account = await requireAccount(req);
   const home = findHomeRow(account.accountId);
   if (req.method === "GET" && url.pathname === "/api/app/state") {
+    rememberTimeZone(account.accountId, req.headers["x-rudder-timezone"] ?? url.searchParams.get("tz"));
     if (home) {
       touchHome(home.id);
       // Opening the app is the wake-up: a home that went to sleep (or lost
@@ -6109,7 +6298,40 @@ async function handleAppApi(req: IncomingMessage, res: ServerResponse, url: URL)
       home: homeSummary(home),
       projects: home ? homeProjects(home) : [],
       github: vaultGithubStatus(account.accountId),
+      digest: latestDigestPreview(account.accountId),
     });
+    return;
+  }
+  if (req.method === "GET" && url.pathname === "/api/app/digests") {
+    sendJson(res, 200, { digests: listDigestPreviews(account.accountId), timeZone: accountTimeZone(account.accountId) });
+    return;
+  }
+  if (req.method === "GET" && url.pathname === "/api/app/digest") {
+    // `?id=` a kept digest, `?live=1` what has happened since the last one.
+    if (url.searchParams.get("live")) {
+      const live = await liveDigest(account.accountId);
+      if (live) {
+        sendJson(res, 200, live);
+      } else {
+        sendJson(res, 503, { error: "Waking the cloud machine…", waking: true });
+      }
+      return;
+    }
+    const id = url.searchParams.get("id") || "";
+    const row = (id ? findDigest.get(id, account.accountId) : latestDigest.get(account.accountId)) as DigestRow | undefined;
+    if (!row) {
+      sendJson(res, 404, { error: "no digest yet" });
+      return;
+    }
+    sendJson(res, 200, digestRowJson(row));
+    return;
+  }
+  if (req.method === "POST" && url.pathname === "/api/app/digest/read") {
+    const body = await readJsonBody(req);
+    const id = typeof (body as JsonRecord)?.id === "string" ? String((body as JsonRecord).id) : "";
+    markDigestRead.run({ id, accountId: account.accountId, readAt: new Date().toISOString() });
+    schedulePersistDatabase();
+    sendJson(res, 200, { ok: true });
     return;
   }
   if (req.method === "POST" && url.pathname === "/api/app/wake") {

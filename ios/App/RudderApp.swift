@@ -2,8 +2,16 @@ import SwiftUI
 
 @main
 struct RudderApp: App {
-    @State private var session = Session()
+    @State private var session: Session
     @Environment(\.scenePhase) private var scenePhase
+
+    init() {
+        let session = Session()
+        _session = State(initialValue: session)
+        // Before launch finishes, so a tap that launched the app is delivered.
+        DigestReminder.shared.session = session
+        DigestReminder.shared.install()
+    }
 
     var body: some Scene {
         WindowGroup {

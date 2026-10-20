@@ -15095,6 +15095,9 @@ Address the objection directly. If you disagree, say why inside \
                 "move-home" => self.deliver_move_home_request(),
                 // The phone deleted an agent: the same as dd here.
                 "delete" => self.deliver_delete_request(&task_id),
+                // The web/phone Approve button on a plan waiting for its
+                // go-ahead: the same as empty-Enter in its orchestrator pane.
+                "approve" => self.deliver_approve_request(&task_id),
                 _ => self.deliver_steer_request(&task_id, &instruction),
             };
             let _ = self.write_steer_receipt(&request_id, &result);
@@ -15357,6 +15360,48 @@ Address the objection directly. If you disagree, say why inside \
         }
         self.nudge_all_workers(instruction);
         SteerDelivery::Delivered
+    }
+
+    /// Approve a plan from outside the dashboard. `plan_id` names the plan; empty
+    /// means the one plan waiting for approval, and is refused when several are,
+    /// because approving the wrong fleet is not undoable by a second click.
+    fn deliver_approve_request(&mut self, plan_id: &str) -> SteerDelivery {
+        let plan_id = plan_id.trim();
+        let waiting: Vec<usize> = (0..self.plans.len())
+            .filter(|&index| self.plans[index].awaiting_approval)
+            .collect();
+        let target = if plan_id.is_empty() {
+            match waiting.as_slice() {
+                [only] => *only,
+                [] => return SteerDelivery::Failed("no plan is waiting for approval".to_string()),
+                _ => {
+                    return SteerDelivery::Failed(
+                        "several plans are waiting; say which one".to_string(),
+                    )
+                }
+            }
+        } else {
+            match self.plans.iter().position(|plan| plan.id == plan_id) {
+                Some(index) => index,
+                None => return SteerDelivery::Failed(format!("plan not found: {plan_id}")),
+            }
+        };
+        if !self.plans[target].awaiting_approval {
+            // Already approved (a second click, or the dashboard got there first).
+            return SteerDelivery::Delivered;
+        }
+        self.notice = None;
+        self.approve_planned_queue_for(target);
+        if self.plans[target].awaiting_approval {
+            SteerDelivery::Failed(
+                self.notice
+                    .clone()
+                    .unwrap_or_else(|| "the plan could not be approved yet".to_string()),
+            )
+        } else {
+            self.record_activity(format!("approved plan {} from the web", self.plans[target].id));
+            SteerDelivery::Delivered
+        }
     }
 
     fn deliver_merge_request(&mut self, task_id: &str) -> SteerDelivery {

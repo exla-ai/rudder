@@ -4,42 +4,15 @@ import {
   markdownReady, copyText, escapeHtml,
 } from "/app/render.js";
 
-/* ------------------------------------------------------------------ */
-/* Native shell bridge                                                 */
-/* ------------------------------------------------------------------ */
+import {
+  app, NATIVE, PLATFORM, postNative, openExternal, ls, coarse, toMs, rel, ApiError, api, toast, confirmDialog, track, showError,
+} from "/app/core.js";
+import { PlanView, planOf } from "/app/plan.js";
+import { openModelPicker, modelChip } from "/app/model-picker.js";
+import { SettingsScreen, JoinScreen, SlackLinkScreen, openLinearIssues, linearAvailable, rememberPendingLink, takePendingLink } from "/app/org.js";
+import { OnboardingScreen, onboardingDue } from "/app/onboarding.js";
+import { canOpenOnMac, openCopyOnMac, MAC_ICON } from "/app/mac-local.js";
 
-const NATIVE = window.RUDDER_NATIVE || null;
-function postNative(msg) {
-  try { window.webkit?.messageHandlers?.rudder?.postMessage(msg); } catch { /* not in the shell */ }
-}
-function openExternal(url) {
-  if (!url) return;
-  if (NATIVE) postNative({ type: "openExternal", url });
-  else window.open(url, "_blank", "noopener,noreferrer");
-}
-
-/* ------------------------------------------------------------------ */
-/* Small utilities                                                     */
-/* ------------------------------------------------------------------ */
-
-const ls = {
-  get(k, d = null) { try { const v = localStorage.getItem(k); return v == null ? d : JSON.parse(v); } catch { return d; } },
-  set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch { /* private mode */ } },
-};
-const coarse = matchMedia("(pointer: coarse)").matches;
-const toMs = (t) => (t == null ? null : typeof t === "number" ? t : Date.parse(t) || null);
-
-function rel(t) {
-  const ms = toMs(t);
-  if (!ms) return "";
-  const s = Math.max(0, (Date.now() - ms) / 1000);
-  if (s < 45) return "now";
-  if (s < 3600) return `${Math.round(s / 60)}m`;
-  if (s < 86400) return `${Math.round(s / 3600)}h`;
-  if (s < 2 * 86400) return "Yesterday";
-  if (s < 7 * 86400) return `${Math.round(s / 86400)}d`;
-  return new Date(ms).toLocaleDateString(undefined, { month: "short", day: "numeric" });
-}
 function dayLabel(ms) {
   const d = new Date(ms), now = new Date();
   const start = (x) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
@@ -47,38 +20,6 @@ function dayLabel(ms) {
   if (diff === 0) return "Today";
   if (diff === 1) return "Yesterday";
   return d.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" });
-}
-
-const TIME_ZONE = (() => { try { return Intl.DateTimeFormat().resolvedOptions().timeZone || ""; } catch { return ""; } })();
-
-class ApiError extends Error { constructor(msg, status, waking = false) { super(msg); this.status = status; this.waking = waking; } }
-
-/* ------------------------------------------------------------------ */
-/* API                                                                 */
-/* ------------------------------------------------------------------ */
-
-async function api(path, { method = "GET", body, raw } = {}) {
-  const headers = { Accept: "application/json" };
-  if (raw) headers["Content-Type"] = raw.type || "application/octet-stream";
-  else if (body !== undefined) headers["Content-Type"] = "application/json";
-  const token = NATIVE?.token || ls.get("rudder.token");
-  if (token) headers.Authorization = `Bearer ${token}`;
-  // The morning digest arrives at 9:01 on this phone's clock.
-  if (TIME_ZONE) headers["X-Rudder-Timezone"] = TIME_ZONE;
-  let res;
-  try {
-    res = await fetch(path, {
-      method, headers, credentials: "same-origin", cache: "no-store",
-      body: raw || (body !== undefined ? JSON.stringify(body) : undefined),
-    });
-  } catch {
-    throw new ApiError("Can't reach Rudder. Check your connection.", 0);
-  }
-  if (res.status === 401) { handleSignedOut(); throw new ApiError("Signed out", 401); }
-  let data = null;
-  try { data = await res.json(); } catch { /* empty body */ }
-  if (!res.ok) throw new ApiError(data?.error || `${res.status} ${res.statusText || "Request failed"}`.trim(), res.status, !!data?.waking);
-  return data;
 }
 
 /* ------------------------------------------------------------------ */
@@ -134,6 +75,35 @@ function needsList() {
   return out;
 }
 
+// The feature modules (org.js, onboarding.js, model-picker.js, plan.js)
+// reach the router and store through `app`.
+Object.assign(app, {
+  store, navigate: (...a) => navigate(...a), goBack: (...a) => goBack(...a), refreshState: () => refreshState(),
+  updateScreen: () => updateScreen(), onSignedOut: () => handleSignedOut(), signOut: () => signOut(),
+  openComputerSignIn: (c) => openComputerSignIn(c), openGithubConnect: () => openGithubConnect(),
+  githubState: (st) => githubState(st), machineLabel: (hm) => machineLabel(hm), isDesktop: () => isDesktop(),
+});
+
+// The Mac shell posts a notification when an agent newly needs you (the
+// same rows as the Needs you list). The first state is the baseline.
+let notifiedNeeds = null;
+function notifyNewNeeds(needs) {
+  if (PLATFORM !== "mac" || !NATIVE?.notifications) return;
+  const keys = new Set(needs.map(({ p, a }) => `${p.workspaceId}|${a.id}`));
+  if (notifiedNeeds) {
+    for (const { p, a } of needs) {
+      const key = `${p.workspaceId}|${a.id}`;
+      if (notifiedNeeds.has(key)) continue;
+      const path = `/app/p/${encodeURIComponent(p.workspaceId)}/a/${encodeURIComponent(a.id)}`;
+      // Already looking at it: no need to be told.
+      if (document.hasFocus() && location.pathname === path) continue;
+      const body = String(a.lastMessage || "Waiting for you").replace(/\s+/g, " ").slice(0, 160);
+      postNative({ type: "notify", title: `${a.title || "An agent"} needs you · ${p.name || p.repo || ""}`.replace(/ · $/, ""), body, path });
+    }
+  }
+  notifiedNeeds = keys;
+}
+
 let stateInflight = null;
 async function refreshState() {
   if (store.signedOut && !NATIVE) return;
@@ -143,8 +113,16 @@ async function refreshState() {
       store.state = await api("/api/app/state");
       store.stateError = null;
       store.signedOut = false;
-      const count = needsList().length;
+      // An invite or Slack link opened while signed out reopens once signed in.
+      if (!store.pendingChecked) {
+        store.pendingChecked = true;
+        const pending = takePendingLink();
+        if (pending && pending !== location.pathname) setTimeout(() => navigate(pending), 0);
+      }
+      const needs = needsList();
+      const count = needs.length;
       if (count !== store.badge) { store.badge = count; postNative({ type: "badge", count }); }
+      notifyNewNeeds(needs);
     } catch (err) {
       if (err.status !== 401) {
         if (!store.stateError || store.stateError !== err.message) toast(err.message, { error: true });
@@ -169,38 +147,6 @@ function handleSignedOut() {
 /* ------------------------------------------------------------------ */
 /* Toasts + dialogs                                                    */
 /* ------------------------------------------------------------------ */
-
-const toastBox = document.getElementById("toasts");
-let lastToast = { text: "", at: 0 };
-function toast(text, { error = false } = {}) {
-  if (text === lastToast.text && Date.now() - lastToast.at < 2500) return;
-  lastToast = { text, at: Date.now() };
-  const el = h(`<div class="toast${error ? " error" : ""}"></div>`);
-  el.textContent = text;
-  toastBox.appendChild(el);
-  setTimeout(() => { el.classList.add("out"); setTimeout(() => el.remove(), 220); }, error ? 4200 : 2800);
-}
-
-function confirmDialog({ title, body, confirm = "Confirm", danger = false }) {
-  return new Promise((resolve) => {
-    const dlg = h(`<dialog aria-labelledby="dlg-t"><div class="dialog">
-      <h3 id="dlg-t"></h3><p></p>
-      <div class="d-actions"><button type="button" class="btn" data-v="0">Cancel</button>
-      <button type="button" class="btn ${danger ? "confirm-danger" : "primary"}" data-v="1"></button></div></div></dialog>`);
-    dlg.querySelector("h3").textContent = title;
-    dlg.querySelector("p").textContent = body;
-    dlg.querySelector('[data-v="1"]').textContent = confirm;
-    let result = false;
-    dlg.addEventListener("click", (e) => {
-      const b = e.target.closest("[data-v]");
-      if (b) { result = b.dataset.v === "1"; dlg.close(); }
-      else if (e.target === dlg) dlg.close();
-    });
-    dlg.addEventListener("close", () => { dlg.remove(); resolve(result); });
-    document.body.appendChild(dlg);
-    dlg.showModal();
-  });
-}
 
 async function openProjectRepo(repo, dlg) {
   try {
@@ -428,103 +374,9 @@ function openAddProject() {
   });
 }
 
-// `/model` in a project's task box: pick which agent and model new agents
-// start on, from the same lists as the dashboard's picker. It sends the
-// dashboard `/model <agent> <model>`, exactly what typing it there does.
-function openModelPicker(ws) {
-  const dlg = h(`<dialog class="sheet add-sheet" aria-label="Model for new agents"><div class="dialog">
-    <div class="sheet-grab"></div>
-    <div class="add-head"><h3>Model for new agents</h3></div>
-    <div class="owner-chips" role="tablist" aria-label="Agent"></div>
-    <div class="repo-list" role="list"><div class="repo-note">Loading models…</div></div>
-    <button type="button" class="btn block" style="margin-top:10px;border:0;background:transparent;color:var(--muted)" data-act="close">Close</button>
-  </div></dialog>`);
-  const chipsEl = dlg.querySelector(".owner-chips");
-  const listEl = dlg.querySelector(".repo-list");
-  let data = null;
-  let backend = "claude";
-  function render() {
-    chipsEl.replaceChildren(...["claude", "codex"].map((b) => {
-      const chip = h(`<button type="button" role="tab" class="owner-chip"><span></span></button>`);
-      chip.querySelector("span").textContent = BACKEND[b];
-      chip.setAttribute("aria-selected", String(b === backend));
-      chip.addEventListener("click", () => { backend = b; render(); });
-      return chip;
-    }));
-    if (!data) return;
-    const options = (data[backend] || []).filter((o) => o.value);
-    listEl.replaceChildren();
-    for (const o of options) {
-      const current = data.current?.backend === backend && data.current?.model === o.value;
-      const b = h(`<button type="button" class="repo-row" role="listitem"><span class="r-text"><span class="rn"></span><span class="rd"></span></span></button>`);
-      b.querySelector(".rn").textContent = `${o.label || o.value}${current ? "  ✓" : ""}`;
-      b.querySelector(".rd").textContent = [o.value !== o.label ? o.value : null, o.detail].filter(Boolean).join(" · ");
-      b.addEventListener("click", async () => {
-        try {
-          await api("/api/app/task", { method: "POST", body: { workspace: ws, text: `/model ${backend} ${o.value}` } });
-          dlg.close();
-          toast(`New agents start on ${BACKEND[backend]} · ${o.label || o.value}`);
-        } catch (err) { if (err.status !== 401) toast(err.message, { error: true }); }
-      });
-      listEl.appendChild(b);
-    }
-    if (!options.length) listEl.appendChild(h(`<div class="repo-note">No ${BACKEND[backend]} models found on the cloud machine.</div>`));
-  }
-  dlg.addEventListener("click", (e) => {
-    if (e.target === dlg || e.target.closest('[data-act="close"]')) dlg.close();
-  });
-  dlg.addEventListener("close", () => dlg.remove());
-  document.body.appendChild(dlg);
-  dlg.showModal();
-  render();
-  api("/api/app/models").then((res) => {
-    data = res || {};
-    if (data.current?.backend === "codex" || data.current?.backend === "claude") backend = data.current.backend;
-    render();
-  }).catch((err) => {
-    listEl.replaceChildren(h(`<div class="repo-note err"></div>`));
-    listEl.firstChild.textContent = err.status === 401 ? "Signed out." : err.message;
-  });
-}
-
-function openSettings() {
-  const s = store.state || {};
-  const home = s.home;
-  const rows = [
-    ["Account", s.email || "Signed in"],
-    ["Cloud machine", home ? machineLabel(home).label : "None"],
-  ];
-  if (home?.tailnet?.dnsName) rows.push(["Tailnet", home.tailnet.dnsName]);
-  const github = githubState(s);
-  rows.push(["GitHub", github.kind === "ok" ? github.sub.replace(/^Connected as /, "") : "Not connected"]);
-  if (NATIVE) rows.push(["App", "iOS"]);
-  const dlg = h(`<dialog class="sheet" aria-label="Settings"><div class="dialog">
-    <div class="sheet-grab"></div><h3>Settings</h3>
-    <div class="kvs" style="margin:6px 0 20px"></div>
-    <div class="ls-actions" style="margin-bottom:10px">
-      <button type="button" class="btn block" data-act="computer">${icon("terminal")}<span>Sign in a computer</span></button>
-      <button type="button" class="btn block" data-act="github">${icon("github")}<span>${github.kind === "ok" ? "Reconnect GitHub" : "Connect GitHub"}</span></button>
-    </div>
-    <button type="button" class="btn block danger" data-act="signout">Sign out</button>
-    <button type="button" class="btn block" style="margin-top:10px;border:0;background:transparent;color:var(--muted)" data-act="close">Close</button>
-  </div></dialog>`);
-  const kvs = dlg.querySelector(".kvs");
-  for (const [k, v] of rows) {
-    const r = h(`<div class="kv"><span></span><span></span></div>`);
-    r.children[0].textContent = k; r.children[1].textContent = v;
-    kvs.appendChild(r);
-  }
-  dlg.addEventListener("click", async (e) => {
-    const act = e.target.closest("[data-act]")?.dataset.act;
-    if (e.target === dlg || act === "close") dlg.close();
-    if (act === "signout") { dlg.close(); await signOut(); }
-    if (act === "computer") { dlg.close(); openComputerSignIn(); }
-    if (act === "github") { dlg.close(); openGithubConnect(); }
-  });
-  dlg.addEventListener("close", () => dlg.remove());
-  document.body.appendChild(dlg);
-  dlg.showModal();
-}
+// Settings is a screen (/app/settings) so the Slack and Linear OAuth
+// round trips can land back on it.
+function openSettings() { navigate("/app/settings"); }
 
 async function signOut() {
   if (NATIVE) { postNative({ type: "signOut" }); return; }
@@ -544,6 +396,10 @@ function parseRoute(path) {
   const parts = path.replace(/\/+$/, "").split("/").filter(Boolean); // ["app","p",ws,"a",run]
   if (parts[0] !== "app") return { name: "home", path: "/app" };
   if (parts[1] === "digest") return { name: "digest", id: parts[2] ? decodeURIComponent(parts[2]) : null, path };
+  if (parts[1] === "settings") return { name: "settings", path: "/app/settings" };
+  if (parts[1] === "welcome") return { name: "welcome", path: "/app/welcome" };
+  if (parts[1] === "join" && parts[2]) return { name: "join", token: decodeURIComponent(parts[2]), path, needsAccount: true };
+  if (parts[1] === "link" && parts[2] === "slack" && parts[3]) return { name: "slack-link", code: decodeURIComponent(parts[3]), path, needsAccount: true };
   if (parts[1] === "p" && parts[2]) {
     const ws = decodeURIComponent(parts[2]);
     if (parts[3] === "a" && parts[4]) return { name: "agent", ws, run: decodeURIComponent(parts[4]), path };
@@ -595,26 +451,188 @@ document.addEventListener("click", (e) => {
 const viewEl = document.getElementById("view");
 let screen = null;
 
+// Desktop (a wide browser, the Mac app): a sidebar of projects and agents,
+// the screen in the middle, and the project's plan beside it. Phones keep the
+// stacked screens.
+const DESKTOP_MQ = matchMedia("(min-width: 1024px)");
+let desktop = null;
+app.onScopeChange = () => desktop?.update();
+const isDesktop = () => !!desktop;
+// Full-page screens (no sidebar), on desktop too.
+const FULL_PAGE = new Set(["join", "slack-link", "welcome", "onboarding"]);
+
+function buildScreen(route) {
+  if (route.name === "project") return ProjectScreen(route.ws);
+  if (route.name === "agent") return AgentScreen(route.ws, route.run);
+  if (route.name === "digest") return DigestScreen(route.id);
+  if (route.name === "settings") return SettingsScreen();
+  if (route.name === "welcome") return OnboardingScreen({ again: !onboardingDue(store.state) });
+  if (route.name === "join") return JoinScreen(route.token);
+  if (route.name === "slack-link") return SlackLinkScreen(route.code);
+  if (route.name === "onboarding") return OnboardingScreen();
+  return HomeScreen();
+}
+
 function mountScreen(dir = "forward") {
   if (screen) { screen.destroy?.(); screen = null; }
-  viewEl.textContent = "";
-  if (store.signedOut) { screen = SignInScreen(); }
-  else {
-    const route = parseRoute(location.pathname);
-    ls.set("rudder.lastRoute", { path: route.path, at: Date.now() });
-    if (route.name === "project") screen = ProjectScreen(route.ws);
-    else if (route.name === "agent") screen = AgentScreen(route.ws, route.run);
-    else if (route.name === "digest") screen = DigestScreen(route.id);
-    else screen = HomeScreen();
+  let route = null;
+  if (!store.signedOut) {
+    route = parseRoute(location.pathname);
+    // First run: pick how you use Rudder before anything else.
+    if (route.name === "home" && onboardingDue(store.state)) route = { name: "onboarding", path: "/app" };
+    if (!route.needsAccount && route.name !== "onboarding") ls.set("rudder.lastRoute", { path: route.path, at: Date.now() });
   }
-  if (dir === "back") screen.el.classList.add("back-nav");
-  viewEl.appendChild(screen.el);
+  const wantDesktop = DESKTOP_MQ.matches && !!route && !FULL_PAGE.has(route.name);
+  document.body.classList.toggle("desktop", wantDesktop);
+  if (wantDesktop && !desktop) {
+    viewEl.textContent = "";
+    desktop = DesktopShell();
+    viewEl.appendChild(desktop.el);
+  } else if (!wantDesktop && desktop) {
+    desktop.destroy(); desktop = null;
+    viewEl.textContent = "";
+  }
+  const target = desktop ? desktop.main : viewEl;
+  target.textContent = "";
+  screen = store.signedOut ? SignInScreen() : buildScreen(route);
+  if (dir === "back" && !desktop) screen.el.classList.add("back-nav");
+  target.appendChild(screen.el);
   screen.update?.();
+  desktop?.update(route);
 }
 function updateScreen() {
   if (store.signedOut && !(screen?.isSignIn)) return mountScreen();
   if (!store.signedOut && screen?.isSignIn) return mountScreen();
+  // The state that says onboarding is due (or done) arrives after the first paint.
+  if (!store.signedOut && parseRoute(location.pathname).name === "home" && !!screen?.isOnboarding !== onboardingDue(store.state)) return mountScreen();
   screen?.update?.();
+  desktop?.update(parseRoute(location.pathname));
+}
+DESKTOP_MQ.addEventListener?.("change", () => mountScreen());
+
+function DesktopShell() {
+  const el = h(`<div class="dsk">
+    <nav class="dsk-side" aria-label="Projects and agents">
+      <div class="ds-top"><a class="brand ds-brand" href="/app" data-link><img src="/app/icon.svg" alt=""><span>Rudder</span></a></div>
+      <div class="ds-scroll">
+        <div class="ds-sec ds-needs" hidden><div class="ds-h"><span>Needs you</span><span class="ds-c"></span></div><div class="ds-list ds-needs-list"></div></div>
+        <div class="ds-sec"><div class="ds-h"><span>Projects</span><button type="button" class="ds-add" aria-label="Add project" title="Add project">${icon("plus")}</button></div><div class="ds-projects"></div></div>
+      </div>
+      <div class="ds-foot">
+        <a class="ds-link ds-digest" href="/app/digest" data-link>${icon("sun")}<span>Digest</span></a>
+        <a class="ds-link ds-settings" href="/app/settings" data-link><span class="avatar"></span><span class="ds-who"><span class="ds-email"></span><span class="ds-org"></span></span>${icon("settings")}</a>
+      </div>
+    </nav>
+    <div class="dsk-main"></div>
+    <aside class="dsk-plan" hidden aria-label="Plan"></aside>
+  </div>`);
+  const main = el.querySelector(".dsk-main");
+  const planCol = el.querySelector(".dsk-plan");
+  const projectsEl = el.querySelector(".ds-projects");
+  const needsSec = el.querySelector(".ds-needs");
+  const needsEl = el.querySelector(".ds-needs-list");
+  el.querySelector(".ds-add").addEventListener("click", () => openAddProject());
+  const openSet = new Set(ls.get("rudder.sideOpen", []));
+  const saveOpen = () => ls.set("rudder.sideOpen", [...openSet]);
+  let planView = null;
+  let route = null;
+
+  const sideAgent = (x) => {
+    const a = h(`<a class="ds-agent" data-link><span class="dot"></span><span class="ds-at"><span class="ds-an"></span><span class="ds-as"></span></span></a>`);
+    return a;
+  };
+  const paintAgent = (a, { p, a: ag, showProject }) => {
+    const st = agentStatus(ag);
+    a.className = `ds-agent ${st.cls}`;
+    a.querySelector(".dot").classList.toggle("live", !!st.live);
+    if (ag.pending) a.removeAttribute("href"); else a.href = agentPath(p.workspaceId, ag.id);
+    setText(a.querySelector(".ds-an"), ag.title || ag.task || "Untitled agent");
+    setText(a.querySelector(".ds-as"), showProject ? `${p.name} · ${st.label}` : st.label);
+    const here = route?.name === "agent" && route.ws === p.workspaceId && route.run === ag.id;
+    a.classList.toggle("on", here);
+    if (here) a.setAttribute("aria-current", "page"); else a.removeAttribute("aria-current");
+    a.setAttribute("aria-label", `${ag.title || "Agent"}, ${st.label}${showProject ? `, ${p.name}` : ""}`);
+  };
+
+  function update(r) {
+    if (r) route = r;
+    const s = store.state;
+    setText(el.querySelector(".avatar"), (s?.email || "?").slice(0, 1));
+    setText(el.querySelector(".ds-email"), s?.email || "Settings");
+    const orgId = ls.get("rudder.org") || "";
+    const org = (s?.orgs || []).find((o) => o.id === orgId);
+    setText(el.querySelector(".ds-org"), org ? org.name : "Personal");
+    el.querySelector(".ds-settings").classList.toggle("on", route?.name === "settings");
+    el.querySelector(".ds-digest").classList.toggle("on", route?.name === "digest");
+
+    const needs = needsList();
+    needsSec.hidden = !needs.length;
+    setText(needsSec.querySelector(".ds-c"), needs.length ? String(needs.length) : "");
+    reconcile(needsEl, needs.slice(0, 8), (x) => `${x.p.workspaceId}|${x.a.id}`, sideAgent, (a, x) => paintAgent(a, { ...x, showProject: true }));
+
+    const projects = (s?.projects || []).slice().sort((a, b) => {
+      const pa = pinnedAt(a), pb = pinnedAt(b);
+      if (!!pa !== !!pb) return pa ? -1 : 1;
+      if (pa) return pa < pb ? -1 : pa > pb ? 1 : 0;
+      return (toMs(b.lastActivityAt) || 0) - (toMs(a.lastActivityAt) || 0);
+    });
+    const here = route?.ws;
+    if (here && !openSet.has(here)) { openSet.add(here); saveOpen(); }
+    reconcile(projectsEl, projects, (p) => p.workspaceId,
+      () => h(`<div class="ds-proj"><div class="ds-prow"><button type="button" class="ds-tw" aria-expanded="false">${icon("chevron")}</button><a class="ds-pn" data-link><span class="ds-pname"></span><span class="ds-pc"></span></a></div><div class="ds-agents" role="list"></div></div>`),
+      (pEl, p) => {
+        const ws = p.workspaceId;
+        const open = openSet.has(ws);
+        const tw = pEl.querySelector(".ds-tw");
+        tw.setAttribute("aria-expanded", String(open));
+        tw.setAttribute("aria-label", `${open ? "Collapse" : "Expand"} ${p.name}`);
+        tw.onclick = () => { if (openSet.has(ws)) openSet.delete(ws); else openSet.add(ws); saveOpen(); update(); };
+        const link = pEl.querySelector(".ds-pn");
+        link.href = projectPath(ws);
+        setText(pEl.querySelector(".ds-pname"), p.name || p.repo);
+        const n = (p.agents || []).filter(needsYou).length;
+        const live = (p.agents || []).filter((a) => a.status === "working" || a.status === "starting").length;
+        const pc = pEl.querySelector(".ds-pc");
+        setText(pc, n ? String(n) : live ? String(live) : "");
+        pc.className = `ds-pc ${n ? "s-needs" : live ? "s-working" : ""}`;
+        pc.title = n ? `${n} need you` : live ? `${live} working` : "";
+        const onProject = route?.name === "project" && route.ws === ws;
+        pEl.classList.toggle("on", onProject);
+        if (onProject) link.setAttribute("aria-current", "page"); else link.removeAttribute("aria-current");
+        const list = pEl.querySelector(".ds-agents");
+        list.hidden = !open;
+        if (!open) { list.replaceChildren(); return; }
+        // Live and recent agents; the project screen has the rest.
+        const agents = (p.agents || []).filter((a) => groupOf(a) !== "earlier" || (route?.run === a.id))
+          .sort((x, y) => (y.updatedAt || 0) - (x.updatedAt || 0)).slice(0, 12);
+        reconcile(list, agents, (a) => a.id, sideAgent, (a, ag) => paintAgent(a, { p, a: ag }));
+        const hidden = (p.agents || []).length - agents.length;
+        let moreEl = pEl.querySelector(".ds-more");
+        if (hidden > 0) {
+          if (!moreEl) { moreEl = h(`<a class="ds-more" data-link></a>`); pEl.appendChild(moreEl); }
+          moreEl.href = projectPath(ws);
+          setText(moreEl, `${hidden} earlier`);
+        } else moreEl?.remove();
+        if (!agents.length && !hidden) list.replaceChildren(h(`<div class="ds-none">No agents yet</div>`));
+      });
+    if (!projects.length) projectsEl.replaceChildren(h(`<div class="ds-none">${s ? "No projects yet" : "Loading…"}</div>`));
+
+    // The plan beside the screen, for the project on screen.
+    const p = route?.ws ? findProject(route.ws) : null;
+    const showPlan = !!planOf(p);
+    planCol.hidden = !showPlan;
+    el.classList.toggle("with-plan", showPlan);
+    if (!showPlan) { if (planView) { planView.el.remove(); planView = null; } return; }
+    if (!planView || planView.ws !== p.workspaceId) {
+      planView?.el.remove();
+      planView = PlanView({ ws: p.workspaceId, hrefFor: (run) => agentPath(p.workspaceId, run), variant: "panel" });
+      planView.ws = p.workspaceId;
+      planCol.replaceChildren(planView.el);
+    }
+    planView.update(p);
+    for (const n of planCol.querySelectorAll(".pv-node")) n.classList.toggle("on", !!route?.run && n.getAttribute("href") === agentPath(p.workspaceId, route.run));
+  }
+  return { el, main, update, destroy() { el.remove(); document.body.classList.remove("desktop"); } };
 }
 
 /* Shared pieces ------------------------------------------------------ */
@@ -1526,7 +1544,9 @@ function ComputerCard() {
       <button type="button" class="btn small accent c-enter">Enter code</button></div>
   </div>`);
   setText(el.querySelector(".c-cmd code"), INSTALL_LINE);
-  el.querySelector(".c-cmd").addEventListener("click", async () => { if (await copyText(INSTALL_LINE)) toast("Copied"); });
+  el.querySelector(".c-cmd").addEventListener("click", async () => {
+    if (await copyText(INSTALL_LINE)) { toast("Copied"); track("install_cli_copied", { from: "home" }); }
+  });
   el.querySelector(".c-enter").addEventListener("click", () => openComputerSignIn());
   return { el };
 }
@@ -1655,9 +1675,13 @@ function SignInScreen() {
   } else {
     actions.appendChild(pair);
     const g = h(`<button type="button" class="btn primary block">${icon("google")}<span>Continue with Google</span></button>`);
-    g.addEventListener("click", () => { location.href = "/app/login"; });
+    // An invite or Slack link comes back after sign-in (?next=, plus the
+    // localStorage copy for servers that ignore it).
+    const next = parseRoute(location.pathname).needsAccount ? location.pathname : "";
+    const loginUrl = (q) => { const u = new URLSearchParams(q); if (next) u.set("next", next); const s = u.toString(); return `/app/login${s ? `?${s}` : ""}`; };
+    g.addEventListener("click", () => { location.href = loginUrl({}); });
     const gh = h(`<div class="alt"><button type="button">Use GitHub instead</button></div>`);
-    gh.querySelector("button").addEventListener("click", () => { location.href = "/app/login?provider=github"; });
+    gh.querySelector("button").addEventListener("click", () => { location.href = loginUrl({ provider: "github" }); });
     actions.append(g, gh);
   }
   return { el, isSignIn: true };
@@ -2046,7 +2070,7 @@ function DigestCard() {
 
 // `id`: a kept digest, null for the newest one, "live" for since the last one.
 function DigestScreen(id) {
-  const el = h(`<section class="screen">
+  const el = h(`<section class="screen digest-screen">
     <header class="topbar">
       <a class="icon-btn back" href="/app" aria-label="Back to projects">${icon("back")}</a>
       <div class="titles"><div class="title">Digest</div><div class="subtitle"><span class="span"></span></div></div>
@@ -2243,7 +2267,7 @@ function groupOf(a) {
 }
 
 function ProjectScreen(ws) {
-  const el = h(`<section class="screen">
+  const el = h(`<section class="screen project-screen">
     <header class="topbar">
       <a class="icon-btn back" href="/app" aria-label="Back to projects">${icon("back")}</a>
       <div class="titles"><div class="title"></div><div class="subtitle"><span class="repo"></span></div></div>
@@ -2251,6 +2275,7 @@ function ProjectScreen(ws) {
     <div class="scroller has-composer">
       <div class="ptr">${icon("down")}</div>
       <div class="status-slot"></div>
+      <div class="plan-slot"></div>
       <div class="section ports-sec" hidden><div class="section-head"><h2>Previews</h2></div><div class="ports"></div></div>
       <div class="groups"></div>
       <div class="p-empty"></div>
@@ -2258,18 +2283,22 @@ function ProjectScreen(ws) {
   const bar = el.querySelector(".topbar");
   const scroller = el.querySelector(".scroller");
   el.querySelector(".back").addEventListener("click", (e) => { e.preventDefault(); goBack("/app"); });
+  // The model new agents start on, in the header too (the task box has its chip).
+  const headModel = modelChip(ws, { compact: true });
+  headModel.el.classList.add("head-model");
+  bar.appendChild(headModel.el);
   bar.appendChild(refreshButton(refreshState));
   topbarScrollShadow(scroller, bar);
   pullToRefresh(scroller, refreshState);
 
   const composer = createComposer({
-    placeholder: "Start a new task, or /model",
+    placeholder: "Start a new task",
     draftKey: `task:${ws}`,
     hint: coarse ? "" : "Enter to start · Shift+Enter for a new line",
     attachments: true,
     onSubmit: async (text, files = []) => {
       if (/^\/model\s*$/i.test(text) && !files.length) {
-        openModelPicker(ws);
+        openModelPicker(ws, { onPicked: syncModel });
         return true;
       }
       if (!text) { toast("Say what the agent should do with the files"); return false; }
@@ -2281,6 +2310,8 @@ function ProjectScreen(ws) {
         }
         const res = await api("/api/app/task", { method: "POST", body: { workspace: ws, text: withAttachments(text, paths) } });
         toast(text.startsWith("/") ? "Sent to the dashboard" : "Task started");
+        if (!text.startsWith("/")) track("task_started", { source: "app", files: files.length });
+        else if (/^\/model\s/i.test(text)) syncModel();
         await refreshState();
         const run = res?.run || res?.runId;
         if (run) navigate(agentPath(ws, run));
@@ -2289,6 +2320,21 @@ function ProjectScreen(ws) {
     },
   });
   el.appendChild(composer.el);
+  // Above the task box: the model new agents start on, and Linear issues
+  // when Linear is connected.
+  const tools = h(`<div class="c-tools"></div>`);
+  const taskModel = modelChip(ws);
+  const syncModel = () => { taskModel.refresh(); headModel.refresh(); };
+  tools.appendChild(taskModel.el);
+  const linearBtn = h(`<button type="button" class="tool-chip" hidden><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><path d="M5 14.5l4.5 4.5M4 10.5L13.5 20M6 7.5L16.5 18M8.5 5L19 15.5"/></svg><span>From Linear</span></button>`);
+  linearBtn.addEventListener("click", () => openLinearIssues(ws, { onStarted: () => refreshState() }));
+  tools.appendChild(linearBtn);
+  linearAvailable().then((ok) => { linearBtn.hidden = !ok; });
+  composer.el.querySelector("form").before(tools);
+  // On a phone the plan is a section of this screen; on desktop it has a column.
+  const planSlot = el.querySelector(".plan-slot");
+  const planCard = PlanView({ ws, hrefFor: (run) => agentPath(ws, run), variant: "card" });
+  planSlot.appendChild(planCard.el);
 
   const groupsEl = el.querySelector(".groups");
   const portsSec = el.querySelector(".ports-sec");
@@ -2334,6 +2380,9 @@ function ProjectScreen(ws) {
       setText(sub, p.failureReason || (p.dashboard === "cloning" ? `Cloning ${p.repo} onto your cloud machine.` : p.dashboard === "starting" ? "Starting the Rudder dashboard for this project." : "The Rudder dashboard for this project is not running."));
       sub.classList.toggle("err", !!p.failureReason);
     } else statusSlot.replaceChildren();
+
+    planSlot.hidden = isDesktop();
+    if (!isDesktop()) planCard.update(p);
 
     // Ports
     const ports = p.ports || [];
@@ -2571,11 +2620,13 @@ const OUT_LIMIT = 2400;
 
 function AgentScreen(ws, run) {
   const key = `${ws}|${run}`;
+  track("agent_panel_opened", { layout: isDesktop() ? "desktop" : "phone" });
   const el = h(`<section class="screen">
     <header class="topbar">
       <a class="icon-btn back" aria-label="Back to project">${icon("back")}</a>
       <div class="titles"><div class="title"></div>
         <div class="subtitle"><span class="dot"></span><span class="st"></span><span class="sep">·</span><span class="bk"></span></div></div>
+      ${canOpenOnMac() ? `<button type="button" class="icon-btn mac-copy" aria-label="Open a copy on this Mac" title="Open a copy on this Mac">${MAC_ICON}</button>` : ""}
       <button type="button" class="icon-btn term-toggle" aria-label="Show the agent's terminal" aria-pressed="false">${icon("terminal")}</button>
       <button type="button" class="icon-btn more" aria-label="Agent actions" aria-haspopup="menu">${icon("more")}</button>
     </header>
@@ -2809,6 +2860,14 @@ function AgentScreen(ws, run) {
     }
   });
 
+  // Mac app: pull a copy of this agent into the local clone.
+  const copyHere = () => {
+    const p = findProject(ws);
+    const a = findAgent(ws, run);
+    openCopyOnMac({ runId: run, repo: p?.repo || null, title: a?.title || store.transcripts.get(key)?.title || null });
+  };
+  el.querySelector(".mac-copy")?.addEventListener("click", copyHere);
+
   // Overflow menu
   const moreBtn = el.querySelector(".more");
   let menuEl = null;
@@ -2824,6 +2883,7 @@ function AgentScreen(ws, run) {
     const add = (html, fn) => { const b = h(html); b.addEventListener("click", () => { closeMenu(); fn(); }); menu.appendChild(b); };
     if (canMerge) add(`<button type="button" role="menuitem">${icon("merge")}<span>Merge into main</span></button>`, () => act("merge"));
     if (a?.remoteUrl) add(`<button type="button" role="menuitem">${icon("external")}<span>Open in Claude</span></button>`, () => openExternal(a.remoteUrl));
+    if (canOpenOnMac() && findProject(ws)?.repo) add(`<button type="button" role="menuitem">${MAC_ICON}<span>Open a copy on this Mac</span></button>`, copyHere);
     add(`<button type="button" role="menuitem">${icon("refresh")}<span>Refresh</span></button>`, () => { loadTranscript(); refreshState(); });
     menu.appendChild(h("<hr>"));
     if (canStop) {
@@ -3217,6 +3277,9 @@ function restoreLastRoute() {
 }
 
 if (!history.state) history.replaceState({ depth: 0 }, "", location.pathname + location.search);
+// /app/join/<token> and /app/link/slack/<code> need an account: if signing in
+// comes first, the link is waiting afterwards.
+if (parseRoute(location.pathname).needsAccount) rememberPendingLink(location.pathname);
 // /app/pair?code=ABCD-EFGH (the link `rudder cloud app` prints) signs in here.
 const pairFromLink = location.pathname === "/app/pair" ? new URLSearchParams(location.search).get("code") : null;
 // /app/approve?code=K7P-4QX (the QR `rudder login` prints) approves a computer

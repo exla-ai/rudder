@@ -27,6 +27,7 @@ import { readAsks, askDecision, isAskId } from "./asks.mjs";
 import { sanitizeHomeHookConfigs } from "./hook-paths.mjs";
 import { createLoginRunner } from "./logins.mjs";
 import { collectDigestRuns } from "./digest.mjs";
+import { readProjectPlan } from "./plan.mjs";
 
 const cloudUrl = (process.env.RUDDER_CLOUD_URL || "").trim().replace(/\/$/, "");
 const homeId = (process.env.RUDDER_WORKSPACE_ID || "").trim();
@@ -535,12 +536,22 @@ async function handleRpc(method, params) {
     }
     return await syncProject(project, params);
   }
+  if (method === "pull") {
+    // `rudder cloud pull`: one agent's work comes back to a laptop.
+    if (project.status === "cloning" || !fs.existsSync(path.join(project.dir, ".git"))) {
+      throw new Error("still cloning");
+    }
+    return await pullRun(project, params);
+  }
   if (method === "action") {
-    const kind = params.action === "merge" ? "merge" : params.action === "stop" ? "cancel" : params.action === "delete" ? "delete" : null;
+    const kind = params.action === "merge" ? "merge" : params.action === "stop" ? "cancel" : params.action === "delete" ? "delete" : params.action === "approve" ? "approve" : null;
     if (!kind) {
       throw new Error("unknown action");
     }
-    return await steer(project, { kind, taskId: String(params.runId || ""), instruction: kind });
+    // Approve names a plan, not a run: the web's Approve button on a plan
+    // waiting for its go-ahead (empty = the one plan waiting).
+    const taskId = kind === "approve" ? String(params.planId || "") : String(params.runId || "");
+    return await steer(project, { kind, taskId, instruction: kind });
   }
   throw new Error(`unknown method ${method}`);
 }
@@ -626,6 +637,50 @@ async function syncProject(project, params) {
       }
     }
     return report;
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+// `rudder cloud pull <run>` on a laptop: bundle one agent's jj change (its
+// working copy included, minus what GitHub has) for that laptop to continue.
+// `rudder __pull-export` (src/cloud-pull.ts) builds it in this clone; the bytes
+// go up to the control plane with the worker token, like sync's.
+async function pullRun(project, params) {
+  const runId = String(params.runId || "");
+  if (!/^[A-Za-z0-9._-]+$/.test(runId) || runId.startsWith(".")) {
+    throw new Error("bad run id");
+  }
+  const uploadPath = String(params.uploadPath || "");
+  if (!SYNC_PATH_RE.test(uploadPath)) {
+    throw new Error("bad upload path");
+  }
+  if (!fs.existsSync(path.join(project.dir, ".rudder", "runs", runId, "run.json"))) {
+    throw new Error("that agent is not on the home machine");
+  }
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "rudder-pull-"));
+  try {
+    const out = path.join(dir, "pull.bundle");
+    const result = await captureAll("rudder", ["__pull-export", "--repo", project.dir, "--run", runId, out], {
+      env: { ...baseChildEnv },
+      cwd: project.dir,
+      timeoutMs: 110_000,
+    });
+    const line = result.stdout.trim().split("\n").reverse().find((entry) => entry.trim().startsWith("{"));
+    if (result.code !== 0 || !line || !fs.existsSync(out)) {
+      throw new Error(firstLine(result.stderr || result.stdout) || "rudder __pull-export failed");
+    }
+    const exported = JSON.parse(line);
+    const response = await fetch(`${cloudUrl}${uploadPath}`, {
+      method: "PUT",
+      headers: { authorization: `Bearer ${workerToken}`, "content-type": "application/octet-stream" },
+      body: fs.readFileSync(out),
+    });
+    if (!response.ok) {
+      throw new Error(`upload failed (HTTP ${response.status})`);
+    }
+    log(`${project.name}: bundled ${runId} for a laptop`);
+    return exported;
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
@@ -866,6 +921,7 @@ async function publishState() {
       dashboard: project.status,
       error: project.error,
       agents: project.status === "cloning" ? [] : project.agents(),
+      plan: project.status === "cloning" ? null : readProjectPlan(project.dir),
       ports: ports
         .filter((entry) => entry.workspaceId === project.workspaceId)
         .map((entry) => ({ port: entry.port, label: entry.label, url: servedPorts.get(entry.port)?.url ?? null })),

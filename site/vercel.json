@@ -15,7 +15,17 @@
     },
     {
       "source": "/login",
-      "destination": "https://rudder-cloud-control.fly.dev/cli/login",
+      "destination": "https://rudder-cloud-control.fly.dev/app",
+      "permanent": false
+    },
+    {
+      "source": "/app",
+      "destination": "https://rudder-cloud-control.fly.dev/app",
+      "permanent": false
+    },
+    {
+      "source": "/download/mac",
+      "destination": "https://github.com/exla-ai/rudder/releases/latest/download/Rudder.dmg",
       "permanent": false
     },
     {

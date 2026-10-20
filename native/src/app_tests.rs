@@ -716,6 +716,63 @@ fn poll_steer_inbox_consumes_files_and_records_unknown_target() {
 }
 
 #[test]
+fn web_approve_steer_clears_the_named_plans_gate() {
+    let dir = unique_test_repo("steer-approve");
+    let steer = dir.join(".rudder").join("steer");
+    std::fs::create_dir_all(&steer).unwrap();
+    let mut app = App::new();
+    app.cwd = dir.clone();
+    // An empty queue takes approve_planned_queue_for's no-launch path, so the
+    // gate logic is exercised without spawning workers.
+    app.plan_mut().awaiting_approval = true;
+    let plan_id = app.plan().id.clone();
+    let receipt = |id: &str| -> serde_json::Value {
+        let path = dir.join(".rudder").join("steer-receipts").join(format!("{id}.json"));
+        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+    };
+
+    // An unknown plan id fails visibly and leaves the gate shut.
+    std::fs::write(
+        steer.join("1700000000001-a.json"),
+        r#"{"requestId":"request-approve-1","kind":"approve","taskId":"plan-nope","instruction":"approve"}"#,
+    )
+    .unwrap();
+    app.poll_steer_inbox();
+    assert_eq!(receipt("request-approve-1")["status"], "failed");
+    assert!(app.plan().awaiting_approval);
+
+    // The named plan is approved.
+    std::fs::write(
+        steer.join("1700000000002-b.json"),
+        format!(r#"{{"requestId":"request-approve-2","kind":"approve","taskId":"{plan_id}","instruction":"approve"}}"#),
+    )
+    .unwrap();
+    app.poll_steer_inbox();
+    assert_eq!(receipt("request-approve-2")["status"], "delivered");
+    assert!(!app.plan().awaiting_approval, "the web Approve cleared the gate");
+
+    // A second click on an already-approved plan is not an error.
+    std::fs::write(
+        steer.join("1700000000003-c.json"),
+        format!(r#"{{"requestId":"request-approve-3","kind":"approve","taskId":"{plan_id}","instruction":"approve"}}"#),
+    )
+    .unwrap();
+    app.poll_steer_inbox();
+    assert_eq!(receipt("request-approve-3")["status"], "delivered");
+
+    // No id with nothing waiting says so.
+    std::fs::write(
+        steer.join("1700000000004-d.json"),
+        r#"{"requestId":"request-approve-4","kind":"approve","taskId":"","instruction":"approve"}"#,
+    )
+    .unwrap();
+    app.poll_steer_inbox();
+    assert_eq!(receipt("request-approve-4")["status"], "failed");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn web_conductor_steer_uses_task_input_path_without_a_live_conductor() {
     let dir = unique_test_repo("web-conductor-steer");
     let mut app = App::new();

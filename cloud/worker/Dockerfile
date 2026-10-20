@@ -113,6 +113,7 @@ COPY cloud/worker/hook-paths.mjs ./hook-paths.mjs
 COPY cloud/worker/asks.mjs ./asks.mjs
 COPY cloud/worker/logins.mjs ./logins.mjs
 COPY cloud/worker/digest.mjs ./digest.mjs
+COPY cloud/worker/plan.mjs ./plan.mjs
 
 COPY cloud/worker/entrypoint.sh /usr/local/bin/rudder-worker
 RUN chmod +x /usr/local/bin/rudder-worker

@@ -1,0 +1,80 @@
+# Rudder for macOS. A native shell around the Rudder app (/app on the control
+# plane), the macOS twin of ../ios: Google sign-in through
+# ASWebAuthenticationSession, the bearer token in the Keychain, the app UI in a
+# WKWebView, plus a menu bar item and pulling cloud agents onto this Mac.
+# Distributed with Developer ID (not the App Store): no sandbox, hardened runtime.
+#
+#   brew install xcodegen && xcodegen generate && open Rudder.xcodeproj
+#   scripts/build.sh            # archive, notarize, DMG (see README.md)
+name: Rudder
+options:
+  bundleIdPrefix: ai.exla
+  deploymentTarget:
+    macOS: "14.0"
+  createIntermediateGroups: true
+
+settings:
+  base:
+    DEVELOPMENT_TEAM: 3C4383262W
+    CODE_SIGN_STYLE: Automatic
+    # Swift 5 language mode: the app is small and main-actor bound; Swift 6
+    # strict checking can be turned on once it builds clean under it.
+    SWIFT_VERSION: "5.0"
+    MACOSX_DEPLOYMENT_TARGET: "14.0"
+    MARKETING_VERSION: "1.0.0"
+    CURRENT_PROJECT_VERSION: "1"
+
+targets:
+  Rudder:
+    type: application
+    platform: macOS
+    sources:
+      - path: App
+      - path: Core
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: ai.exla.rudder.mac
+        PRODUCT_NAME: Rudder
+        INFOPLIST_FILE: App/Info.plist
+        CODE_SIGN_ENTITLEMENTS: App/Rudder.entitlements
+        ENABLE_HARDENED_RUNTIME: YES
+        ENABLE_APP_SANDBOX: NO
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+        COMBINE_HIDPI_IMAGES: YES
+        # Notarization requires a secure timestamp on every signature.
+        OTHER_CODE_SIGN_FLAGS: "--timestamp"
+
+  RudderCoreTests:
+    type: bundle.unit-test
+    platform: macOS
+    # The pure core is compiled straight into the test bundle: no app host.
+    sources:
+      - path: Core
+      - path: Tests
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: ai.exla.rudder.mac.tests
+        GENERATE_INFOPLIST_FILE: YES
+
+schemes:
+  Rudder:
+    build:
+      targets:
+        Rudder: all
+        RudderCoreTests: [test]
+    run:
+      config: Debug
+    test:
+      config: Debug
+      targets:
+        - RudderCoreTests
+    archive:
+      config: Release
+  RudderCoreTests:
+    build:
+      targets:
+        RudderCoreTests: all
+    test:
+      targets:
+        - RudderCoreTests

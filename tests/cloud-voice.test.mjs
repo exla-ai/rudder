@@ -456,3 +456,47 @@ serverTest("a voice session is minted with the account's state, and a tool call 
   const overview = await (await fetch(`${base}/api/app/voice/tool`, { method: "POST", headers: auth, body: JSON.stringify({ name: "get_overview", arguments: "{}" }) })).json();
   assert.match(overview.output, /^Project libra \(exla-ai\/libra\):/);
 });
+
+unitTest("a Rudder plan waiting for approval is in the overview, is news once, and launch_plan approves it", async () => {
+  const list = projects();
+  list[0].plan = {
+    nodes: [
+      { id: "n0", title: "Add the pricing table", status: "planned" },
+      { id: "n1", title: "Wire checkout to it", status: "planned" },
+    ],
+    awaitingApproval: true,
+    plans: [{ id: "plan-1", awaitingApproval: true, request: "rebuild the pricing page" }],
+  };
+  const overview = voice.overviewText(list);
+  assert.match(overview, /plan waiting for approval \(launch_plan\): "rebuild the pricing page", 2 tasks/);
+  assert.ok(voice.VOICE_TOOLS.some((tool) => tool.name === "launch_plan"));
+
+  // The first poll is a baseline; a plan that starts waiting later is said once.
+  const quiet = projects();
+  const first = voice.voiceUpdates(quiet, null);
+  const news = voice.voiceUpdates(list, first.seen);
+  assert.equal(news.updates.length, 1);
+  assert.match(news.updates[0], /plan in libra is ready and waiting for approval: "rebuild the pricing page"/);
+  assert.deepEqual(voice.voiceUpdates(list, news.seen).updates, []);
+
+  const { ctx, calls } = fakeContext(list);
+  const result = await voice.runVoiceTool(ctx, "launch_plan", "{}");
+  assert.deepEqual(calls.pop(), { method: "action", params: { workspaceId: "ws-libra", planId: "plan-1", action: "approve" } });
+  assert.match(result.output, /Approved "rebuild the pricing page" in libra/);
+
+  // Two waiting in one project: ask which, unless the words pick one.
+  list[0].plan.plans.push({ id: "plan-2", awaitingApproval: true, request: "add dark mode" });
+  assert.match((await voice.runVoiceTool(ctx, "launch_plan", "{}")).output, /2 plans are waiting in libra/);
+  await voice.runVoiceTool(ctx, "launch_plan", JSON.stringify({ plan: "dark mode" }));
+  assert.equal(calls.pop().params.planId, "plan-2");
+
+  // Nothing waiting anywhere.
+  const none = fakeContext(projects());
+  assert.match((await voice.runVoiceTool(none.ctx, "launch_plan", "{}")).output, /No plan is waiting/);
+  assert.equal(none.calls.length, 0);
+
+  // A plan in flight is summarized, not offered for approval.
+  const running = projects();
+  running[1].plan = { nodes: [{ id: "n0", title: "a", status: "merged" }, { id: "n1", title: "b", status: "running" }], awaitingApproval: false, plans: [] };
+  assert.match(voice.overviewText(running), /plan: 1 of 2 tasks merged, 1 running\./);
+});

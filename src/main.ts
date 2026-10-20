@@ -230,6 +230,18 @@ export async function main(): Promise<void> {
       console.log(JSON.stringify(report));
       return;
     }
+    case "__pull-export": {
+      // The home machine's half of `rudder cloud pull` (src/cloud-pull.ts):
+      // bundle one run into the file given, print what was bundled.
+      const { exportRunForPull } = await import("./cloud-pull.js");
+      const out = parsed.args[0];
+      if (!parsed.flags.repo || !parsed.flags.run || !out) {
+        throw new Error("__pull-export requires --repo <clone> --run <id> <out.tgz>");
+      }
+      const exported = await exportRunForPull(path.resolve(parsed.flags.repo), parsed.flags.run, path.resolve(out));
+      process.stdout.write(`${JSON.stringify(exported)}\n`);
+      return;
+    }
     case "__adopt-moved": {
       await runAdoptMoved(parsed);
       return;

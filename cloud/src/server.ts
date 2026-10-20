@@ -25,6 +25,10 @@ import {
   SLACK_HELP_TEXT,
   verifySlackSignature,
 } from "./slack.js";
+import { createOrgStore, handleOrgApi } from "./orgs.js";
+import { createOnboardingStore, handleOnboardingApi } from "./onboarding.js";
+import { createProductAnalytics } from "./product-analytics.js";
+import { createIntegrations } from "./integrations.js";
 
 type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
 
@@ -307,6 +311,35 @@ database.exec(`
     updated_at text not null
   );
 `);
+
+// Orgs (admins and members), the first-run surface picker, and product
+// analytics for the web app. Each module owns its tables; see cloud/src/*.ts.
+const orgStore = createOrgStore(database);
+const onboardingStore = createOnboardingStore(database);
+const productAnalytics = createProductAnalytics();
+const captureProductEvent = (accountId: string, name: string, props?: Record<string, unknown>): void => {
+  void productAnalytics.capture(accountId, name, props);
+};
+// Slack and Linear, per org or per person. Its dependencies are functions
+// declared further down (hoisted), so the module never imports server.ts.
+const integrations = createIntegrations({
+  database,
+  env: process.env,
+  fetch: globalThis.fetch,
+  baseURL,
+  orgRole: (accountId: string, orgId: string) => orgStore.roleOf(accountId, orgId),
+  orgIdsForAccount: (accountId: string) => orgStore.orgIdsForAccount(accountId),
+  listProjects: (accountId: string) => {
+    const home = findHomeRow(accountId);
+    return home ? homeProjects(home) as never : [];
+  },
+  deliverTask: async (accountId: string, workspaceId: string, text: string) => {
+    const home = await homeWithControl(accountId);
+    const { repo } = requireHomeRepo(accountId, workspaceId);
+    await homeRpc(home.id, "task", { workspaceId: repo.id, text: text.slice(0, 16_000) });
+  },
+  capture: captureProductEvent,
+});
 
 // Secrets vault: initialized lazily so a missing RUDDER_SECRETS_KEY only
 // breaks the vault endpoints, not the rest of the control plane.
@@ -617,6 +650,9 @@ const server = http.createServer({ noDelay: true }, async (req, res) => {
     }
     if (req.method === "GET" && (url.pathname === "/app" || url.pathname.startsWith("/app/"))) {
       await serveAppFile(res, url.pathname);
+      return;
+    }
+    if (url.pathname.startsWith("/api/integrations/") && await integrations.handlePublicApi(req, res, url)) {
       return;
     }
     if (url.pathname === "/api/app/pair/start" || url.pathname === "/api/app/pair/finish") {
@@ -4941,6 +4977,7 @@ type HomeProject = {
   error?: string;
   agents?: HomeAgent[];
   ports?: JsonRecord[];
+  plan?: JsonRecord | null;
 };
 type HomeState = {
   projects: HomeProject[];
@@ -5602,6 +5639,12 @@ function attachHomeControl(homeId: string, ws: WebSocket): void {
         logins: objectField(message, "logins"),
         updatedAt: new Date().toISOString(),
       });
+      // Slack notifications: what moved to needs-you / done / failed.
+      const homeRow = findWorkspaceById.get(homeId) as Record<string, unknown> | undefined;
+      const homeAccount = optionalString(homeRow?.account_id);
+      if (homeRow && homeAccount) {
+        void integrations.onHomeState(homeAccount, homeProjects(rowToWorkspace(homeRow)) as never);
+      }
       for (const project of homeStates.get(homeId)!.projects) {
         if (typeof project?.workspaceId === "string") {
           try {
@@ -6012,6 +6055,7 @@ function homeProjects(home: Workspace): JsonRecord[] {
       dashboard: project?.dashboard ?? null,
       agents: (project?.agents ?? []) as unknown as Json,
       ports: (project?.ports ?? []) as unknown as Json,
+      plan: (project?.plan ?? null) as Json,
       clients: Array.from(workspaceChannels.get(row.id)?.clients ?? []).filter(isOpen).length,
       pinnedAt: row.pinnedAt ?? null,
       lastActivityAt: row.lastActivityAt ?? null,
@@ -6124,6 +6168,50 @@ async function handleHomeApi(req: IncomingMessage, res: ServerResponse, url: URL
       }
     }
     sendJson(res, 200, { results });
+    return;
+  }
+  if (req.method === "POST" && url.pathname === "/api/rudder/home/pull") {
+    // `rudder cloud pull <run>` (and the Mac app's "Open on this Mac"): the
+    // home bundles one agent's jj change and the laptop fetches it through
+    // the same one-shot sync blob as /sync, never over the control socket.
+    const body = await readJsonBody(req);
+    const runId = stringField(body, "runId") ?? "";
+    if (!/^[A-Za-z0-9._-]{1,120}$/.test(runId)) {
+      throw badRequest("runId is required");
+    }
+    // Pulling never creates a machine: there is nothing on one that never existed.
+    if (!findHomeRow(authContext.accountId)) {
+      sendJson(res, 404, { error: "you have no cloud machine yet" });
+      return;
+    }
+    const home = await homeWithControl(authContext.accountId);
+    const workspaceId = stringField(body, "workspace");
+    const wantedRepo = stringField(body, "repo")?.toLowerCase();
+    const repo = homeRepos(home.id).find((row) => (workspaceId
+      ? row.id === workspaceId
+      : Boolean(wantedRepo) && repoSlugFromUrl(row.repoUrl).toLowerCase() === wantedRepo));
+    if (!repo) {
+      sendJson(res, 404, { error: "that repo is not open on your cloud machine" });
+      return;
+    }
+    const outId = newHomeSyncBlob(authContext.accountId, home.id, "out", null);
+    let report: JsonRecord;
+    try {
+      report = await homeRpc(home.id, "pull", {
+        workspaceId: repo.id,
+        runId,
+        uploadPath: `/api/rudder/home/${encodeURIComponent(home.id)}/syncs/${outId}`,
+      }, 150_000) as JsonRecord;
+    } catch (error) {
+      homeSyncBlobs.delete(outId);
+      throw error;
+    }
+    if (!homeSyncBlobs.get(outId)?.bytes) {
+      homeSyncBlobs.delete(outId);
+      sendJson(res, 502, { error: "the cloud machine did not upload the agent's work" });
+      return;
+    }
+    sendJson(res, 200, { ...report, repo: repoSlugFromUrl(repo.repoUrl), download: `/api/rudder/home/syncs/${outId}` });
     return;
   }
   const syncDownload = req.method === "GET" ? HOME_SYNC_DOWNLOAD_RE.exec(url.pathname) : null;
@@ -6250,6 +6338,15 @@ async function serveAppFile(res: ServerResponse, pathname: string): Promise<void
   res.end(body);
 }
 
+// Where sign-in returns to: an invite or Slack link opened while signed out
+// comes back to itself. Only same-origin /app paths, never a full URL.
+function appReturnPath(next: string | null): string {
+  if (!next || !/^\/app(\/[A-Za-z0-9._~%/-]*)?(\?[A-Za-z0-9._~%&=-]*)?$/.test(next) || next.includes("//") || next.includes("..")) {
+    return "/app";
+  }
+  return next;
+}
+
 async function handleAppLogin(url: URL, res: ServerResponse): Promise<void> {
   const provider = url.searchParams.get("provider") === "github" ? "github" : "google";
   const providers = configuredProviders();
@@ -6268,7 +6365,7 @@ async function handleAppLogin(url: URL, res: ServerResponse): Promise<void> {
     // via /app/native-done, which hands it a bearer token on its own scheme.
     body: JSON.stringify({
       provider,
-      callbackURL: url.searchParams.get("native") === "1" ? `${baseURL}/app/native-done` : `${baseURL}/app`,
+      callbackURL: url.searchParams.get("native") === "1" ? `${baseURL}/app/native-done` : `${baseURL}${appReturnPath(url.searchParams.get("next"))}`,
       disableRedirect: true,
     }),
   }));
@@ -6295,10 +6392,26 @@ async function handleAppLogin(url: URL, res: ServerResponse): Promise<void> {
 
 async function handleAppApi(req: IncomingMessage, res: ServerResponse, url: URL): Promise<void> {
   const account = await requireAccount(req);
+  if (await handleOrgApi(req, res, url, account, { store: orgStore, sendJson, readJsonBody, baseURL, capture: captureProductEvent })) {
+    return;
+  }
+  if (await handleOnboardingApi(req, res, url, account, { store: onboardingStore, sendJson, readJsonBody, capture: captureProductEvent })) {
+    return;
+  }
+  if (await productAnalytics.handleEventApi(req, res, url, account, { sendJson, readJsonBody })) {
+    return;
+  }
+  if (await integrations.handleAppApi(req, res, url, account)) {
+    return;
+  }
   const home = findHomeRow(account.accountId);
   if (req.method === "GET" && url.pathname === "/api/app/state") {
     rememberTimeZone(account.accountId, req.headers["x-rudder-timezone"] ?? url.searchParams.get("tz"));
-    if (home) {
+    // The Mac menu bar polls every 30s to count what needs you. That is not
+    // someone opening the app: it must not wake the machine or hold off its
+    // idle stop (and with it the idle image update).
+    const passive = url.searchParams.get("passive") === "1" || req.headers["x-rudder-passive"] === "1";
+    if (home && !passive) {
       touchHome(home.id);
       // Opening the app is the wake-up: a home that went to sleep (or lost
       // its control socket) is started without anyone finding a Wake button.
@@ -6310,6 +6423,8 @@ async function handleAppApi(req: IncomingMessage, res: ServerResponse, url: URL)
       email: account.email ?? null,
       home: homeSummary(home),
       projects: home ? homeProjects(home) : [],
+      onboarding: onboardingStore.onboardingSummary(account.accountId) as unknown as Json,
+      orgs: orgStore.listOrgsForAccount(account.accountId) as unknown as Json,
       github: vaultGithubStatus(account.accountId),
       digest: latestDigestPreview(account.accountId),
     });
@@ -6564,14 +6679,22 @@ async function handleAppApi(req: IncomingMessage, res: ServerResponse, url: URL)
     return;
   }
   if (req.method === "POST" && url.pathname === "/api/app/action") {
-    // Dashboard actions the phone can take on one agent: stop, merge, delete.
+    // Dashboard actions the phone and web can take: stop, merge or delete one
+    // agent, or approve a plan waiting for its go-ahead (`plan` = its id).
     const body = await readJsonBody(req);
     const { repo } = requireHomeRepo(account.accountId, stringField(body, "workspace") ?? "");
     const action = stringField(body, "action") ?? "";
-    if (action !== "stop" && action !== "merge" && action !== "delete") {
-      throw badRequest("action must be stop, merge or delete");
+    if (action !== "stop" && action !== "merge" && action !== "delete" && action !== "approve") {
+      throw badRequest("action must be stop, merge, delete or approve");
     }
-    sendJson(res, 200, await homeRpc(home.id, "action", { workspaceId: repo.id, runId: stringField(body, "run") ?? "", action }));
+    const planId = stringField(body, "plan") ?? "";
+    if (planId && !/^[A-Za-z0-9._-]{1,120}$/.test(planId)) {
+      throw badRequest("bad plan id");
+    }
+    const params: JsonRecord = action === "approve"
+      ? { workspaceId: repo.id, planId, action }
+      : { workspaceId: repo.id, runId: stringField(body, "run") ?? "", action };
+    sendJson(res, 200, await homeRpc(home.id, "action", params));
     return;
   }
   sendJson(res, 404, { error: "not found" });

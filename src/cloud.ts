@@ -25,6 +25,7 @@ import { cloudAuthPath } from "./state.js";
 import { runLaptopOnboarding, type CloudRepoSummary } from "./onboarding.js";
 import { renderQrForTerminal } from "./qr.js";
 import { describeSync, exportWork, importWork, syncCheckout, type CheckoutSyncReport } from "./checkout-sync.js";
+import { pullFromHome } from "./cloud-pull.js";
 import type { CloudAuthState, CloudSail, JsonValue } from "./types.js";
 import {
   ensureDir,
@@ -308,6 +309,9 @@ export async function runCloudCommand(command: string, args: string[], options: 
       return;
     case "move":
       await moveCommand(rest, options);
+      return;
+    case "pull":
+      await pullCommand(rest, options);
       return;
     case "bootstrap":
       await bootstrap(rest, options);
@@ -3985,6 +3989,10 @@ Usage:
       move this repo's unfinished agents (or just the named ones) to the
       home machine: their jj changes and conversations go along, nothing is
       pushed to GitHub, and they keep working with this laptop closed
+  rudder cloud pull <runId> [--json]
+      copy one of the home machine's agents to this computer, in a local
+      clone of its repo: a jj workspace at its change (uncommitted edits
+      included) and its conversation, listed paused in the dashboard
   rudder cloud app
       a one-time code that signs the phone app in to this account
   rudder cloud doctor
@@ -4337,6 +4345,21 @@ type HomeMoveJob = {
 
 const HOME_MOVE_POLL_MS = 1500;
 const HOME_MOVE_DEADLINE_MS = 15 * 60 * 1000;
+
+// `rudder cloud pull <runId>`: the reverse of move, for one agent (src/cloud-pull.ts).
+async function pullCommand(args: string[], options: CloudCommandOptions): Promise<void> {
+  const client = await cloudClient({ requireToken: true });
+  const json = options.json || args.includes("--json");
+  const pulled = await pullFromHome(args, { json }, { client, githubSlug: githubSlugFromOrigin });
+  if (json) {
+    printJson({ path: pulled.path, runId: pulled.runId, title: pulled.title });
+    return;
+  }
+  console.log(`Pulled "${pulled.title}" to ${pulled.path}`);
+  console.log(pulled.resumable
+    ? "It is paused in the dashboard here; Enter on its row continues the conversation."
+    : "It is paused in the dashboard here; its conversation did not come along, so Enter starts it fresh on its work.");
+}
 
 async function moveCommand(args: string[], options: CloudCommandOptions): Promise<void> {
   const yes = options.yes || args.includes("--yes") || args.includes("-y");

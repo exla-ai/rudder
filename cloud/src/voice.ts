@@ -35,6 +35,13 @@ export type VoiceAgent = {
   asks?: VoiceAsk[];
 };
 
+/** A project's /plan task graph (cloud/worker/plan.mjs). */
+export type VoicePlan = {
+  nodes?: Array<{ id: string; title?: string | null; status?: string | null }>;
+  awaitingApproval?: boolean;
+  plans?: Array<{ id: string; awaitingApproval?: boolean; request?: string | null }>;
+};
+
 export type VoiceProject = {
   workspaceId: string;
   name: string;
@@ -43,6 +50,7 @@ export type VoiceProject = {
   dashboard?: string | null;
   failureReason?: string | null;
   agents: VoiceAgent[];
+  plan?: VoicePlan | null;
 };
 
 export type VoiceContext = {
@@ -179,6 +187,19 @@ export const VOICE_TOOLS: ToolDef[] = [
   },
   {
     type: "function",
+    name: "launch_plan",
+    description: "Approve a Rudder plan that is waiting for approval, so its agents start (the same as Approve in the app). A Rudder plan is the task graph a /plan request produced. Not for one agent's own plan prompt: that is answer_prompt.",
+    parameters: {
+      type: "object",
+      properties: {
+        project: projectParam,
+        plan: { type: "string", description: "Words from the plan's request. Leave out when only one plan is waiting." },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    type: "function",
     name: "find_repos",
     description: "Search the user's GitHub repos that can be opened as a project on the cloud machine.",
     parameters: {
@@ -212,7 +233,7 @@ export const VOICE_TOOLS: ToolDef[] = [
 
 export function voiceInstructions(projects: VoiceProject[], surface: VoiceSurface, focus?: string): string {
   const lines = [
-    "You are Rudder, a voice assistant for a developer's coding agents. Rudder runs Claude Code and Codex agents on the user's cloud machine, one dashboard per GitHub project. You can see every project and agent, explain what they are doing, and act for the user: message an agent, start a task, answer an agent's permission request, questions or plan, interrupt, stop, merge or delete an agent, and open a new project.",
+    "You are Rudder, a voice assistant for a developer's coding agents. Rudder runs Claude Code and Codex agents on the user's cloud machine, one dashboard per GitHub project. You can see every project and agent, explain what they are doing, and act for the user: message an agent, start a task, answer an agent's permission request, questions or plan, launch a Rudder plan that is waiting for approval, interrupt, stop, merge or delete an agent, and open a new project.",
     surface === "carplay"
       ? "The user is DRIVING and talking to you through CarPlay. Keep every reply short (one to three spoken sentences), never read out code, file paths, long ids or URLs, and never ask them to look at a screen."
       : surface === "call"
@@ -314,6 +335,8 @@ export async function runVoiceTool(ctx: VoiceContext, name: string, rawArgs: unk
         return await answerPrompt(ctx, args);
       case "agent_action":
         return await agentAction(ctx, args);
+      case "launch_plan":
+        return await launchPlan(ctx, args);
       case "find_repos":
         return await findRepos(ctx, args);
       case "open_project": {
@@ -567,6 +590,55 @@ async function agentAction(ctx: VoiceContext, args: Record<string, unknown>): Pr
   return { output: `${action === "stop" ? "Stopped" : "Deleted"} ${shortTitle(agent)} in ${project.name}.` };
 }
 
+function waitingPlans(project: VoiceProject): Array<{ id: string; request: string }> {
+  return (project.plan?.plans ?? [])
+    .filter((entry) => entry.awaitingApproval && typeof entry.id === "string")
+    .map((entry) => ({ id: entry.id, request: oneLine(entry.request || "") }));
+}
+
+function planName(request: string): string {
+  return request ? `"${clip(request, 80)}"` : "the plan";
+}
+
+function planWords(request: string): string {
+  return request ? clip(request, 80) : "untitled plan";
+}
+
+async function launchPlan(ctx: VoiceContext, args: Record<string, unknown>): Promise<VoiceToolResult> {
+  const projects = ctx.projects();
+  const named = str(args.project);
+  const candidates = named ? [resolveProject(projects, named)] : projects.filter((project) => waitingPlans(project).length || project.plan?.awaitingApproval);
+  if (!candidates.length) {
+    return { output: "No plan is waiting for approval." };
+  }
+  if (candidates.length > 1) {
+    return { output: `Plans are waiting in ${listNames(candidates.map((project) => project.name))}. Ask the user which project.` };
+  }
+  const project = candidates[0];
+  let waiting = waitingPlans(project);
+  if (!waiting.length && !project.plan?.awaitingApproval) {
+    return { output: `No plan is waiting for approval in ${project.name}.` };
+  }
+  const query = tokens(str(args.plan));
+  if (waiting.length > 1 && query.length) {
+    const best = bestMatches(waiting, query, (entry) => tokens(entry.request));
+    if (best.length) {
+      waiting = best;
+    }
+  }
+  if (waiting.length > 1) {
+    return { output: `${waiting.length} plans are waiting in ${project.name}: ${listNames(waiting.map((entry) => planWords(entry.request)), "or")}. Ask the user which one.` };
+  }
+  const target = waiting[0];
+  const result = (await ctx.rpc("action", { workspaceId: project.workspaceId, planId: target?.id ?? "", action: "approve" })) as { status?: string } | null;
+  const name = planName(target?.request ?? "");
+  return {
+    output: result?.status === "queued"
+      ? `Approval for ${name} in ${project.name} is queued; it launches when the dashboard picks it up.`
+      : `Approved ${name} in ${project.name}. Its agents are starting.`,
+  };
+}
+
 async function findRepos(ctx: VoiceContext, args: Record<string, unknown>): Promise<VoiceToolResult> {
   const result = (await ctx.rpc("repos", {}, 70_000)) as { repos?: Array<{ repo?: string; description?: string | null; open?: boolean }> };
   const words = tokens(str(args.query));
@@ -618,6 +690,16 @@ export function voiceUpdates(projects: VoiceProject[], seen: VoiceSeen | null): 
   const next: VoiceSeen = {};
   const updates: string[] = [];
   for (const project of projects) {
+    for (const entry of waitingPlans(project)) {
+      // A plan waiting for approval is news once; the key keeps it said.
+      const key = `${project.workspaceId}/plan:${entry.id}`;
+      if (seen && seen[key] === undefined && updates.length < UPDATES_PER_POLL) {
+        updates.push(`A plan in ${project.name} is ready and waiting for approval: ${planName(entry.request)}. Ask the user whether to launch it.`);
+      } else if (seen && seen[key] === undefined) {
+        continue;
+      }
+      next[key] = "waiting";
+    }
     for (const agent of project.agents) {
       const key = `${project.workspaceId}/${agent.id}`;
       const before = seen?.[key];
@@ -859,6 +941,10 @@ export function overviewText(projects: VoiceProject[]): string {
       header.push(`dashboard ${project.dashboard}`);
     }
     out.push(`${header.join(", ")}:`);
+    const plan = planLine(project);
+    if (plan) {
+      out.push(`  ${plan}`);
+    }
     const agents = [...project.agents].sort((a, b) => rank(a) - rank(b) || (b.updatedAt ?? 0) - (a.updatedAt ?? 0));
     const shown = agents.filter((agent) => ACTIVE.has(agent.status ?? "") || needsUser(agent)).slice(0, 12);
     const quiet = agents.length - shown.length;
@@ -880,6 +966,29 @@ export function overviewText(projects: VoiceProject[]): string {
     }
   }
   return out.join("\n");
+}
+
+function planLine(project: VoiceProject): string | null {
+  const plan = project.plan;
+  if (!plan) {
+    return null;
+  }
+  const waiting = waitingPlans(project);
+  const nodes = plan.nodes ?? [];
+  if (waiting.length || plan.awaitingApproval) {
+    const titles = nodes.filter((node) => node.status === "planned" || node.status === "ready").map((node) => clip(oneLine(node.title || node.id), 60));
+    const what = waiting.length ? listNames(waiting.map((entry) => planWords(entry.request))) : "a plan";
+    return `plan waiting for approval (launch_plan): ${what}${titles.length ? `, ${titles.length} ${titles.length === 1 ? "task" : "tasks"}: ${listNames(titles.slice(0, 6))}` : ""}.`;
+  }
+  if (!nodes.length) {
+    return null;
+  }
+  const count = (status: string) => nodes.filter((node) => node.status === status).length;
+  const parts = [`${count("merged")} of ${nodes.length} tasks merged`];
+  if (count("running")) parts.push(`${count("running")} running`);
+  if (count("review")) parts.push(`${count("review")} in review`);
+  if (count("failed")) parts.push(`${count("failed")} failed`);
+  return `plan: ${parts.join(", ")}.`;
 }
 
 function rank(agent: VoiceAgent): number {

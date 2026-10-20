@@ -5,7 +5,9 @@
 // /app/__mock/home/<running|stopped|failed|none> (machine states),
 // /app/__mock/creds/<out|claude|both|expired> (Claude Code / Codex sign-in),
 // /app/__mock/fresh (a brand new account: no GitHub, no agent login, no repos),
-// /app/__mock/computer (prints a code to approve, as `rudder login` would).
+// /app/__mock/computer (prints a code to approve, as `rudder login` would),
+// /app/__mock/onboard (show the setup picker again), /app/__mock/integrations/<on|off|unset>,
+// /app/__mock/invite (prints a join link). Orgs, invites, Slack/Linear and a plan are mocked too.
 // The digest uses the real worker/digest.mjs and cloud/dist/digest.js (build cloud first).
 import http from "node:http";
 import fs from "node:fs";
@@ -67,8 +69,23 @@ const projects = [
       agent({ id: "run_a3", title: "Tailnet HTTPS for previews", task: "Expose dev servers over tailnet https", status: "review", backend: "claude", model: "sonnet", nodeId: "n2", planId: "plan_1", updatedAt: T0 - 18 * MIN, lastMessage: "Done. Ports 3000 and 5173 are reachable at https://rudder-home.tail4c2e1.ts.net. Ready to merge." }),
       agent({ id: "run_a4", title: "Delete cloud workspaces safely", task: "Request + reaper for deletes", status: "done", backend: "claude", model: "opus", updatedAt: T0 - 3 * 60 * MIN, lastMessage: "Added the deletion reaper with a 30s sweep and 410s for dead rows." }),
       agent({ id: "run_a5", title: "Bump jj to 0.40 flags", task: "jj rebase -o", status: "merged", backend: "codex", model: "gpt-6.1-sol", updatedAt: T0 - 26 * 60 * MIN, lastMessage: "Merged into main." }),
+      agent({ id: "run_o1", title: "Plan: preview links everywhere", task: "Make every dev server reachable from the phone", status: "waiting", backend: "claude", model: "opus", mode: "rudder-plan", planId: "plan_1", updatedAt: T0 - 3 * MIN, lastMessage: "Here is the plan: 5 tasks. Approve it to launch, or tell me what to change." }),
+      agent({ id: "run_a7", title: "Port scanner for the home", task: "List listening ports per project", status: "working", backend: "codex", model: "gpt-6.1-sol", nodeId: "n1", planId: "plan_1", updatedAt: T0 - 2 * MIN, lastMessage: "Reading /proc/net/tcp6 for owner pids." }),
       agent({ id: "run_a6", title: "Explore opencode resume", task: "opencode session resume", status: "stopped", backend: "opencode", model: "anthropic/claude-sonnet", updatedAt: T0 - 50 * 60 * MIN, lastMessage: "Stopped by you." }),
     ],
+    plan: {
+      updatedAt: iso(T0 - 3 * MIN),
+      awaitingApproval: true,
+      plans: [{ id: "plan_1", awaitingApproval: true, request: "Make every dev server on the home reachable from the phone" }],
+      nodes: [
+        { id: "n0", title: "Tailscale in the worker image", status: "merged", runId: "run_a5", backend: "codex", model: "gpt-6.1-sol", deps: [] },
+        { id: "n1", title: "Port scanner for the home", status: "running", runId: "run_a7", backend: "codex", model: "gpt-6.1-sol", deps: [{ on: "n0", type: "hard" }] },
+        { id: "n2", title: "Tailnet HTTPS for previews", status: "review", runId: "run_a3", backend: "claude", model: "sonnet", deps: [{ on: "n0", type: "hard" }] },
+        { id: "n3", title: "Preview links in the phone app", status: "planned", runId: null, backend: "claude", model: "opus", deps: [{ on: "n1", type: "hard" }, { on: "n2", type: "hard" }] },
+        { id: "n4", title: "Docs for preview links", status: "ready", runId: null, backend: "claude", model: "sonnet", deps: [{ on: "n2", type: "soft" }] },
+        { id: "n5", title: "Plain http fallback", status: "failed", runId: "run_a4", backend: "claude", model: "opus", deps: [{ on: "n2", type: "hard" }] },
+      ],
+    },
     ports: [
       { port: 3000, url: "https://rudder-home.tail4c2e1.ts.net:3000", label: "board" },
       { port: 5173, url: "https://rudder-home.tail4c2e1.ts.net:5173", label: "vite dev" },
@@ -196,6 +213,172 @@ function serveStatic(req, res, url) {
   fs.createReadStream(target).pipe(res);
 }
 
+// ---------- Onboarding, orgs, invites, integrations (CONTRACT.md) ----------
+const onboarding = { surfaces: [], completedAt: process.env.MOCK_ONBOARDED === "1" ? iso(now()) : null };
+const ME = "better-auth:me";
+const orgs = new Map([["org_exla", {
+  id: "org_exla", name: "Exla", createdAt: iso(now() - 40 * 24 * 60 * MIN),
+  members: [
+    { accountId: ME, email: "viraat@example.com", name: "Viraat Das", role: "admin", joinedAt: iso(now() - 40 * 24 * 60 * MIN) },
+    { accountId: "better-auth:sam", email: "sam@exla.ai", name: "Sam Lee", role: "admin", joinedAt: iso(now() - 30 * 24 * 60 * MIN) },
+    { accountId: "github:991", email: "ava@exla.ai", name: null, role: "member", joinedAt: iso(now() - 3 * 24 * 60 * MIN) },
+  ],
+  invites: [{ id: "inv_1", email: "jo@exla.ai", role: "member", createdAt: iso(now() - 2 * 60 * MIN), expiresAt: iso(now() + 6 * 24 * 60 * MIN) }],
+}]]);
+const inviteTokens = new Map([["tok_demo", { orgId: "org_exla", role: "member", email: null, used: false }]]);
+let integMode = "on"; // on: configured | off: configured, nothing connected | unset: configured:false
+const integStore = new Map();
+function integ(scope) {
+  if (!integStore.has(scope)) integStore.set(scope, scope === "org_exla"
+    ? { slack: { connected: true, team: { id: "T1", name: "Exla" }, channel: { id: "C2", name: "agents" } }, linear: { connected: true, workspace: { name: "Exla" } } }
+    : { slack: { connected: false, team: null, channel: null }, linear: { connected: false, workspace: null } });
+  return integStore.get(scope);
+}
+const mine = (o) => o.members.find((m) => m.accountId === ME);
+const orgList = () => [...orgs.values()].filter(mine).map((o) => ({ id: o.id, name: o.name, role: mine(o).role, memberCount: o.members.length, createdAt: o.createdAt }));
+const ISSUES = [
+  { id: "lin_1", identifier: "EXL-142", title: "Preview links should open in the phone app", url: "https://linear.app/exla/issue/EXL-142", state: "In Progress", priority: 2, team: "Rudder" },
+  { id: "lin_2", identifier: "EXL-139", title: "Digest misses agents merged after midnight", url: "https://linear.app/exla/issue/EXL-139", state: "Todo", priority: 1, team: "Rudder" },
+  { id: "lin_3", identifier: "EXL-120", title: "Settle bets when a market resolves", url: "https://linear.app/exla/issue/EXL-120", state: "Backlog", priority: 3, team: "Wager" },
+];
+
+/** Returns true when it answered the request, undefined otherwise. */
+function orgRoutes(req, res, p, url, body) {
+  const m = req.method;
+  const send = (status, obj) => { if (status === 204) { res.writeHead(204); res.end(); } else json(res, status, obj); return true; };
+  if (p === "/api/app/event" && m === "POST") return send(204);
+  if (p === "/api/app/onboarding") {
+    if (m === "POST") {
+      if (Array.isArray(body.surfaces)) onboarding.surfaces = body.surfaces.filter((s) => ["web", "mac", "terminal", "phone"].includes(s));
+      if (body.complete) onboarding.completedAt = iso(now());
+    }
+    return send(200, { ...onboarding });
+  }
+  if (p === "/api/app/orgs") {
+    if (m === "POST") {
+      const name = String(body.name || "").trim();
+      if (!name) return send(400, { error: "Give the organization a name." });
+      const id = `org_${Math.random().toString(36).slice(2, 8)}`;
+      orgs.set(id, { id, name, createdAt: iso(now()), members: [{ accountId: ME, email: "viraat@example.com", name: "Viraat Das", role: "admin", joinedAt: iso(now()) }], invites: [] });
+      return send(200, { org: { id, name, role: "admin", memberCount: 1, createdAt: iso(now()) } });
+    }
+    return send(200, { orgs: orgList() });
+  }
+  let r;
+  if ((r = p.match(/^\/api\/app\/orgs\/([^/]+)(?:\/(invites|members)(?:\/([^/]+))?)?$/))) {
+    const org = orgs.get(decodeURIComponent(r[1]));
+    if (!org || !mine(org)) return send(404, { error: "Organization not found" });
+    const admin = mine(org).role === "admin";
+    const admins = () => org.members.filter((x) => x.role === "admin").length;
+    const [, , sub, rawId] = r;
+    const id = rawId && decodeURIComponent(rawId);
+    if (!sub) {
+      if (m === "GET") return send(200, { org: { id: org.id, name: org.name, createdAt: org.createdAt }, role: mine(org).role, members: org.members.map((x) => ({ ...x, you: x.accountId === ME })), invites: admin ? org.invites : [] });
+      if (!admin) return send(403, { error: "Only admins can do that." });
+      if (m === "PATCH") { org.name = String(body.name || org.name).trim(); return send(200, { org: { id: org.id, name: org.name } }); }
+      if (m === "DELETE") { orgs.delete(org.id); return send(200, { ok: true }); }
+    }
+    if (sub === "invites") {
+      if (!admin) return send(403, { error: "Only admins can do that." });
+      if (m === "POST") {
+        const token = `tok_${Math.random().toString(36).slice(2, 12)}`;
+        const inv = { id: `inv_${Math.random().toString(36).slice(2, 8)}`, email: body.email || null, role: body.role === "admin" ? "admin" : "member", createdAt: iso(now()), expiresAt: iso(now() + 7 * 24 * 60 * MIN) };
+        org.invites.push(inv);
+        inviteTokens.set(token, { orgId: org.id, role: inv.role, email: inv.email, used: false, inviteId: inv.id });
+        return send(200, { invite: { ...inv, url: `http://${req.headers.host}/app/join/${token}` } });
+      }
+      if (m === "DELETE" && id) { org.invites = org.invites.filter((i) => i.id !== id); return send(200, { ok: true }); }
+    }
+    if (sub === "members" && id) {
+      const target = org.members.find((x) => x.accountId === id);
+      if (!target) return send(404, { error: "Not a member" });
+      if (m === "POST") {
+        if (!admin) return send(403, { error: "Only admins can do that." });
+        if (target.role === "admin" && body.role !== "admin" && admins() === 1) return send(409, { error: "an org needs at least one admin" });
+        target.role = body.role === "admin" ? "admin" : "member";
+        return send(200, { ok: true });
+      }
+      if (m === "DELETE") {
+        if (!admin && id !== ME) return send(403, { error: "Only admins can do that." });
+        if (target.role === "admin" && admins() === 1) return send(409, { error: "an org needs at least one admin" });
+        org.members = org.members.filter((x) => x !== target);
+        return send(200, { ok: true });
+      }
+    }
+    return send(405, { error: "Method not allowed" });
+  }
+  if ((r = p.match(/^\/api\/app\/invites\/([^/]+)(\/accept)?$/))) {
+    const inv = inviteTokens.get(decodeURIComponent(r[1]));
+    if (!inv) return send(404, { error: "This invite link is not valid." });
+    if (inv.used) return send(410, { error: "This invite was already used or has expired." });
+    const org = orgs.get(inv.orgId);
+    if (!org) return send(410, { error: "This invite was already used or has expired." });
+    const alreadyMember = !!mine(org);
+    if (!r[2]) return send(200, { org: { id: org.id, name: org.name }, role: inv.role, email: inv.email, expiresAt: iso(now() + 6 * 24 * 60 * MIN), alreadyMember });
+    if (m !== "POST") return send(405, { error: "Method not allowed" });
+    if (inv.email && inv.email !== "viraat@example.com") return send(403, { error: `This invite is for ${inv.email}.` });
+    if (!alreadyMember) org.members.push({ accountId: ME, email: "viraat@example.com", name: "Viraat Das", role: inv.role, joinedAt: iso(now()) });
+    inv.used = true;
+    if (inv.inviteId) org.invites = org.invites.filter((i) => i.id !== inv.inviteId);
+    return send(200, { org: { id: org.id, name: org.name, role: mine(org).role } });
+  }
+  const scope = url.searchParams.get("org") || body.org || "personal";
+  const orgOk = scope === "personal" || (orgs.get(scope) && mine(orgs.get(scope)));
+  const canManage = scope === "personal" || mine(orgs.get(scope) || { members: [] })?.role === "admin";
+  if (p.startsWith("/api/app/integrations") || p.startsWith("/api/app/linear/")) {
+    if (!orgOk) return send(404, { error: "Organization not found" });
+  }
+  const configured = integMode !== "unset";
+  if (p === "/api/app/integrations" && m === "GET") {
+    const it = integ(scope);
+    const on = integMode === "on";
+    return send(200, {
+      slack: { configured, connected: configured && on && it.slack.connected, team: on ? it.slack.team : null, channel: on ? it.slack.channel : null },
+      linear: { configured, connected: configured && on && it.linear.connected, workspace: on ? it.linear.workspace : null },
+      canManage,
+    });
+  }
+  if ((r = p.match(/^\/api\/app\/integrations\/(slack|linear)\/start$/)) && m === "POST") {
+    if (!configured) return send(503, { error: `${r[1] === "slack" ? "Slack" : "Linear"} is not set up on this server yet.` });
+    if (!canManage) return send(403, { error: "Only admins can do that." });
+    integMode = "on";
+    return send(200, { url: `/app/__mock/oauth/${r[1]}${scope !== "personal" ? `?org=${encodeURIComponent(scope)}` : ""}` });
+  }
+  if ((r = p.match(/^\/api\/app\/integrations\/(slack|linear)$/)) && m === "DELETE") {
+    if (!canManage) return send(403, { error: "Only admins can do that." });
+    const it = integ(scope);
+    if (r[1] === "slack") it.slack = { connected: false, team: null, channel: null }; else it.linear = { connected: false, workspace: null };
+    return send(200, { ok: true });
+  }
+  const CHANNELS = [{ id: "C1", name: "general" }, { id: "C2", name: "agents" }, { id: "C3", name: "eng-alerts" }];
+  if (p === "/api/app/integrations/slack/channels" && m === "GET") return send(200, { channels: CHANNELS });
+  if (p === "/api/app/integrations/slack/channel" && m === "POST") {
+    const ch = CHANNELS.find((c) => c.id === body.channel);
+    if (!ch) return send(400, { error: "Pick a channel." });
+    integ(scope).slack.channel = ch;
+    return send(200, { channel: ch });
+  }
+  if (p === "/api/app/linear/issues" && m === "GET") {
+    if (!(integMode === "on" && integ(scope).linear.connected)) return send(409, { error: "Linear is not connected." });
+    const q = (url.searchParams.get("q") || "").toLowerCase();
+    return send(200, { issues: ISSUES.filter((i) => !q || `${i.identifier} ${i.title}`.toLowerCase().includes(q)) });
+  }
+  if (p === "/api/app/linear/start" && m === "POST") {
+    const issue = ISSUES.find((i) => i.id === body.issueId);
+    if (!issue) return send(404, { error: "Issue not found" });
+    const list = freshProjects ?? projects;
+    const proj = list.find((x) => x.workspaceId === body.workspace);
+    const text = `${issue.identifier}: ${issue.title}\n\n${issue.url}`;
+    if (proj) proj.agents.unshift(agent({ id: `run_l${Date.now() % 1e6}`, title: issue.title, task: text, status: "working", backend: "claude", model: "opus", createdAt: now(), updatedAt: now(), fresh: true, lastMessage: "Starting on the Linear issue." }));
+    return send(200, { ok: true, text });
+  }
+  if ((r = p.match(/^\/api\/app\/link\/slack\/([^/]+)$/)) && m === "POST") {
+    if (r[1] === "expired") return send(410, { error: "This link has expired. Run /rudder link in Slack again." });
+    return send(200, { ok: true, slack: { team: "Exla", user: "viraat" } });
+  }
+  return undefined;
+}
+
 const delay = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const server = http.createServer(async (req, res) => {
@@ -203,7 +386,12 @@ const server = http.createServer(async (req, res) => {
   const p = url.pathname;
 
   if (p === "/") { res.writeHead(302, { Location: "/app" }); return res.end(); }
-  if (p.startsWith("/app/login")) { signedOut = false; res.writeHead(302, { Location: "/app" }); return res.end(); }
+  if (p.startsWith("/app/login")) {
+    signedOut = false;
+    const next = url.searchParams.get("next") || "";
+    res.writeHead(302, { Location: /^\/app\/[\w\-/%.]*$/.test(next) ? next : "/app" });
+    return res.end();
+  }
   if (p === "/app/__mock/signout") { signedOut = true; res.writeHead(302, { Location: "/app" }); return res.end(); }
   if (p.startsWith("/app/__mock/home/")) { homeMode = p.split("/").pop(); res.writeHead(302, { Location: "/app" }); return res.end(); }
   if (p.startsWith("/app/__mock/creds/")) {
@@ -225,6 +413,23 @@ const server = http.createServer(async (req, res) => {
     res.writeHead(200, { "Content-Type": "text/plain" });
     return res.end(`code: ${code}\napprove: /app/approve?code=${code}\n`);
   }
+  if (p === "/app/__mock/onboard") { onboarding.completedAt = null; res.writeHead(302, { Location: "/app" }); return res.end(); }
+  if (p.startsWith("/app/__mock/integrations/")) { integMode = p.split("/").pop(); res.writeHead(302, { Location: "/app/settings" }); return res.end(); }
+  if (p === "/app/__mock/invite") {
+    const token = `tok_${Math.random().toString(36).slice(2, 10)}`;
+    inviteTokens.set(token, { orgId: "org_exla", role: "member", email: null, used: false });
+    res.writeHead(200, { "Content-Type": "text/plain" });
+    return res.end(`join: /app/join/${token}\n`);
+  }
+  if (p.startsWith("/app/__mock/oauth/")) {
+    const provider = p.split("/").pop();
+    const scope = url.searchParams.get("org") || "personal";
+    const it = integ(scope);
+    if (provider === "slack") it.slack = { ...it.slack, connected: true, team: { id: "T1", name: "Exla" }, channel: null };
+    if (provider === "linear") it.linear = { ...it.linear, connected: true, workspace: { name: "Exla" } };
+    res.writeHead(302, { Location: `/app/settings?connected=${provider}` });
+    return res.end();
+  }
   if (p === "/api/auth/sign-out" && req.method === "POST") { signedOut = true; return json(res, 200, { success: true }); }
 
   if (p.startsWith("/api/app/")) {
@@ -240,6 +445,8 @@ const server = http.createServer(async (req, res) => {
         projects: homeMode === "none" ? [] : freshProjects ?? projects,
         github: { connected: githubConnected, source: githubConnected ? "sync" : null, updatedAt: null },
         digest: digestPreviewOf(digestStore[0]) ?? null,
+        onboarding: { ...onboarding },
+        orgs: orgList(),
       });
     }
     if (p === "/api/app/digests" && req.method === "GET") {
@@ -275,7 +482,9 @@ const server = http.createServer(async (req, res) => {
       await delay(700);
       return json(res, 200, { path: `/workspace/code/${proj.name}/.rudder/uploads/20261017-013000-${name}`, name, size });
     }
-    const body = req.method === "POST" ? await readBody(req) : {};
+    const body = req.method === "POST" || req.method === "PATCH" ? await readBody(req) : {};
+    const handled = orgRoutes(req, res, p, url, body);
+    if (handled !== undefined) return;
     if (p === "/api/app/send") {
       const t = transcriptFor(body.workspace, body.run);
       if (!t) return json(res, 404, { error: "Agent not found" });
@@ -301,6 +510,18 @@ const server = http.createServer(async (req, res) => {
       proj.agents.unshift(agent({ id, title, task: body.text, status: "working", backend: "claude", model: "opus", mode: "main", createdAt: now(), updatedAt: now(), lastMessage: "Starting up.", fresh: true }));
       proj.lastActivityAt = iso(now());
       return json(res, 200, { ok: true });
+    }
+    if (p === "/api/app/action" && body.action === "approve") {
+      const proj = (freshProjects ?? projects).find((x) => x.workspaceId === body.workspace);
+      const plan = proj?.plan;
+      const waiting = (plan?.plans || []).filter((x) => x.awaitingApproval);
+      const target = body.plan ? (plan?.plans || []).find((x) => x.id === body.plan) : waiting.length === 1 ? waiting[0] : null;
+      if (!target) return json(res, 404, { error: waiting.length > 1 ? "several plans are waiting: name one" : "plan not found" });
+      if (!target.awaitingApproval) return json(res, 409, { error: "plan is not waiting for approval" });
+      target.awaitingApproval = false;
+      plan.awaitingApproval = plan.plans.some((x) => x.awaitingApproval);
+      for (const n of plan.nodes) if (n.status === "ready") n.status = "running";
+      return json(res, 200, { ok: true, status: "delivered" });
     }
     if (p === "/api/app/action") {
       const t = transcriptFor(body.workspace, body.run);
@@ -416,8 +637,8 @@ const server = http.createServer(async (req, res) => {
     if (p === "/api/app/models") {
       return json(res, 200, {
         current: { backend: "claude", model: "claude-opus-5-5" },
-        claude: [{ label: "Default" }, { label: "Opus 5.5", value: "claude-opus-5-5" }, { label: "Sonnet 5.5", value: "claude-sonnet-5-5" }, { label: "Fable 5.1", value: "claude-fable-5-1" }],
-        codex: [{ label: "Default" }, { label: "GPT-6.1 Sol", value: "gpt-6.1-sol" }, { label: "GPT-5.3 Codex", value: "gpt-5.3-codex" }],
+        claude: [{ label: "Default" }, { label: "Opus 5.5", value: "claude-opus-5-5", detail: "most capable" }, { label: "Sonnet 5.5", value: "claude-sonnet-5-5", detail: "fast and strong" }, { label: "Fable 5.1", value: "claude-fable-5-1", detail: "long tasks" }, { label: "Haiku 4.5", value: "claude-haiku-4-5", detail: "quickest" }],
+        codex: [{ label: "Default" }, { label: "GPT-6.1 Sol", value: "gpt-6.1-sol", detail: "flagship" }, { label: "GPT-5.3 Codex", value: "gpt-5.3-codex", detail: "coding tuned" }],
       });
     }
     if (p === "/api/app/repos") {

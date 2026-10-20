@@ -1176,6 +1176,71 @@ brain lives in the cloud, and the phone is a first-class client.
   included. Restart it from a laptop or the phone. iOS/Xcode and signing stay
   local.
 
+### 9.8.2 The web app, orgs, Slack/Linear, and the Mac app (2026-10-20)
+Decided with the user: the TUI stays for power users, but the front door is the
+WEB app (`cloud/app/`, served at `/app`; rudder.exla.ai `/login` and Get started
+redirect there). It is deliberately simple: an agent panel and an orchestrator
+(plan) panel, a model picker instead of typing `/model`, no god's view. The Mac
+app is the same web UI in a native shell plus local abilities. Agents always run
+on the user's own Claude Code / Codex subscription.
+- **Surface picker** (`cloud/src/onboarding.ts`, table `rudder_onboarding`): first
+  run after sign-in asks Web / Mac app / Terminal / Phone (multi-select), then shows
+  each one's next step. `GET|POST /api/app/onboarding`; `/api/app/state` carries
+  `onboarding` and `orgs`.
+- **Orgs** (`cloud/src/orgs.ts`): roles `admin` (adds/removes people, changes
+  roles, connects integrations) and `member`. Invites are single-use links
+  (`/app/join/<token>`, hash stored, 7 days, optional email lock); nothing sends
+  email. An org always keeps one admin (409 otherwise). Membership shares the
+  org's integrations, not machines or agents.
+- **Analytics** (`cloud/src/product-analytics.ts`): `POST /api/app/event` with a
+  whitelist (`PRODUCT_EVENTS`), the same PostHog project as `src/analytics.ts`,
+  anonymous (sha256 of the account id), props sanitized. Server-side events
+  (org_*, onboarding_completed, integration_*, linear_issue_started) are captured
+  by the modules themselves; the client must not resend them.
+- **Slack + Linear** (`cloud/src/integrations.ts`, `slack-app.ts`, `linear.ts`):
+  per org (admins connect) or personal. OAuth tokens sealed with AES-256-GCM under
+  a key derived from `RUDDER_SECRETS_KEY` (no key: connect is 503). Slack posts to
+  the chosen channel when an agent needs you / is ready / failed (first state per
+  account after a restart is a baseline), and `/rudder` (`link`, `status`,
+  `projects`, `<project> <task>`) works for Slack users linked to an account.
+  Linear lists issues and starts an agent from one, commenting on the issue. Env:
+  `RUDDER_SLACK_CLIENT_ID/_SECRET/_SIGNING_SECRET`,
+  `RUDDER_LINEAR_CLIENT_ID/_SECRET`. Slack app: redirect
+  `<base>/api/integrations/slack/callback`, slash command URL
+  `<base>/api/integrations/slack/commands`, bot scopes chat:write,
+  chat:write.public, commands, channels:read, groups:read, im:write, public
+  distribution on. Linear app: callback `<base>/api/integrations/linear/callback`.
+  The older env-only shared-channel glue (`slack.ts`, `/api/slack/events`) is
+  untouched and separate.
+- **Plans on the phone/web**: the supervisor reads `.rudder/graph.json` and
+  `.rudder/plan-queue.json` (`cloud/worker/plan.mjs`, re-read on mtime) into each
+  project's `plan` in home state; `homeProjects` passes it through. Approve is a
+  steer kind, not a chat message: `POST /api/app/action {action:"approve", plan}`
+  -> home `action` -> steer `{kind:"approve", taskId:<plan id>}` ->
+  `deliver_approve_request` -> `approve_planned_queue_for` (empty id = the one
+  waiting plan; several waiting = refused).
+  The voice assistant (app, CarPlay, phone number) sees the same plan: the
+  overview says "plan waiting for approval", a newly waiting plan is a live
+  update once, and `launch_plan` sends the same approve (words from the
+  request pick between several; never confused with an agent's own
+  ExitPlanMode plan, which stays `answer_prompt`).
+- **Pull an agent to a laptop** (`rudder cloud pull <run> [--json]`,
+  `src/cloud-pull.ts`; route `POST /api/rudder/home/pull`; home RPC `pull` runs
+  `rudder __pull-export`). A COPY: the cloud agent keeps running. One-agent move
+  bundle (commit incl. uncommitted edits, run.json, transcript) through a one-shot
+  sync blob, adopted as a paused row in a local jj workspace. Never creates a home.
+- **Mac app** (`mac/`, XcodeGen, Developer ID + notarized DMG, not the App Store
+  because it runs the local `rudder` CLI): WKWebView on `/app` with
+  `RUDDER_NATIVE.platform = "mac"`, Keychain token, notifications, Dock badge, a
+  menu bar count of what needs you (polls `/api/app/state?passive=1`, which never
+  wakes or touches the home: keep it that way), and "Open a copy on this Mac"
+  (`openLocal` -> `rudder cloud pull`). Bridge contract in `mac/README.md`. The
+  DMG is served from `rudder.exla.ai/download/mac` -> the latest GitHub release
+  asset `Rudder.dmg`.
+- **Not built yet**: the cloud agent using the Mac as a runner (xcodebuild /
+  simulator on the user's Mac on the agent's behalf), Sparkle auto-update for the
+  Mac app, and org-level shared credentials / SSO.
+
 ### 9.9 Known limitations (current state, not action items)
 Documented so they are not rediscovered: workspace re-use ignores a newer snapshot with
 the same fingerprint; migrated-agent fresh-prompt fallback is silent on a corrupt

@@ -302,6 +302,13 @@ export function createOrgStore(database: Database.Database, options: { now?: () 
   return {
     roleOf,
 
+    /** Name and email for display (the team view), from better-auth or the join email. */
+    profile(accountId: string): { email: string | null; name: string | null } {
+      const user = authUser(accountId);
+      const row = database.prepare("select email from rudder_org_members where account_id = ? and email is not null order by joined_at desc limit 1").get(accountId) as { email?: string } | undefined;
+      return { email: user?.email ?? row?.email ?? null, name: user?.name ?? null };
+    },
+
     orgIdsForAccount(accountId: string): string[] {
       return (q.orgIds.all(accountId) as Array<{ org_id: string }>).map((row) => row.org_id);
     },

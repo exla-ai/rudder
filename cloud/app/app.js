@@ -12,6 +12,7 @@ import { openModelPicker, modelChip } from "/app/model-picker.js";
 import { SettingsScreen, JoinScreen, SlackLinkScreen, openLinearIssues, linearAvailable, rememberPendingLink, takePendingLink } from "/app/org.js";
 import { OnboardingScreen, onboardingDue } from "/app/onboarding.js";
 import { canOpenOnMac, openCopyOnMac, MAC_ICON } from "/app/mac-local.js";
+import { TeamScreen, loadTeamFor, teamAgent, teamPath, hasTeam, memberName, firstName } from "/app/team.js";
 
 function dayLabel(ms) {
   const d = new Date(ms), now = new Date();
@@ -82,6 +83,9 @@ Object.assign(app, {
   updateScreen: () => updateScreen(), onSignedOut: () => handleSignedOut(), signOut: () => signOut(),
   openComputerSignIn: (c) => openComputerSignIn(c), openGithubConnect: () => openGithubConnect(),
   githubState: (st) => githubState(st), machineLabel: (hm) => machineLabel(hm), isDesktop: () => isDesktop(),
+  // team.js: a teammate's agent reads with the same labels as your own.
+  teamStatus: (a) => (a.asking ? { label: ASK_LABEL[a.asking] || "Needs approval", cls: "s-needs" } : statusOf(a.status)),
+  backendLabel: (a) => backendLabel(a),
 });
 
 // The Mac shell posts a notification when an agent newly needs you (the
@@ -397,6 +401,12 @@ function parseRoute(path) {
   if (parts[0] !== "app") return { name: "home", path: "/app" };
   if (parts[1] === "digest") return { name: "digest", id: parts[2] ? decodeURIComponent(parts[2]) : null, path };
   if (parts[1] === "settings") return { name: "settings", path: "/app/settings" };
+  if (parts[1] === "team" && parts[2] && parts[3] && parts[4]) {
+    // A teammate's agent, read only. Not `ws`: the sidebar and plan column
+    // follow `ws`, and this project is not yours.
+    return { name: "team-agent", member: decodeURIComponent(parts[2]), tws: decodeURIComponent(parts[3]), run: decodeURIComponent(parts[4]), path };
+  }
+  if (parts[1] === "team") return { name: "team", path: `/app/team${location.search}` };
   if (parts[1] === "welcome") return { name: "welcome", path: "/app/welcome" };
   if (parts[1] === "join" && parts[2]) return { name: "join", token: decodeURIComponent(parts[2]), path, needsAccount: true };
   if (parts[1] === "link" && parts[2] === "slack" && parts[3]) return { name: "slack-link", code: decodeURIComponent(parts[3]), path, needsAccount: true };
@@ -466,6 +476,8 @@ function buildScreen(route) {
   if (route.name === "agent") return AgentScreen(route.ws, route.run);
   if (route.name === "digest") return DigestScreen(route.id);
   if (route.name === "settings") return SettingsScreen();
+  if (route.name === "team") return TeamScreen();
+  if (route.name === "team-agent") return AgentScreen(route.tws, route.run, { member: route.member });
   if (route.name === "welcome") return OnboardingScreen({ again: !onboardingDue(store.state) });
   if (route.name === "join") return JoinScreen(route.token);
   if (route.name === "slack-link") return SlackLinkScreen(route.code);
@@ -519,6 +531,7 @@ function DesktopShell() {
         <div class="ds-sec"><div class="ds-h"><span>Projects</span><button type="button" class="ds-add" aria-label="Add project" title="Add project">${icon("plus")}</button></div><div class="ds-projects"></div></div>
       </div>
       <div class="ds-foot">
+        <a class="ds-link ds-team" href="/app/team" data-link hidden>${icon("users")}<span>Team</span></a>
         <a class="ds-link ds-digest" href="/app/digest" data-link>${icon("sun")}<span>Digest</span></a>
         <a class="ds-link ds-settings" href="/app/settings" data-link><span class="avatar"></span><span class="ds-who"><span class="ds-email"></span><span class="ds-org"></span></span>${icon("settings")}</a>
       </div>
@@ -564,6 +577,8 @@ function DesktopShell() {
     setText(el.querySelector(".ds-org"), org ? org.name : "Personal");
     el.querySelector(".ds-settings").classList.toggle("on", route?.name === "settings");
     el.querySelector(".ds-digest").classList.toggle("on", route?.name === "digest");
+    el.querySelector(".ds-team").hidden = !hasTeam(s);
+    el.querySelector(".ds-team").classList.toggle("on", route?.name === "team" || route?.name === "team-agent");
 
     const needs = needsList();
     needsSec.hidden = !needs.length;
@@ -922,7 +937,7 @@ function agentRow({ showProject = false } = {}) {
       <span class="a-dot"><span class="dot"></span></span>
       <div class="a-body">
         <div class="a-top"><span class="a-title"></span><span class="a-time"></span></div>
-        <div class="a-meta"><span class="status-text"></span><span class="chip c-proj"></span><span class="chip c-model"></span><span class="chip mono c-phase"></span></div>
+        <div class="a-meta"><span class="status-text"></span><span class="chip c-lock" hidden>${icon("lock")}<span>Private</span></span><span class="chip c-proj"></span><span class="chip c-model"></span><span class="chip mono c-phase"></span></div>
         <div class="a-msg"></div>
       </div></a>`);
     el._showProject = showProject;
@@ -1013,10 +1028,13 @@ function updateAgentRow(el, { p, a }) {
   const phase = el.querySelector(".c-phase");
   const phaseText = a.nodeId ? a.nodeId : (a.phase && a.phase !== a.status ? a.phase : "");
   setText(phase, phaseText); phase.hidden = !phaseText || el._showProject;
+  const lock = el.querySelector(".c-lock");
+  lock.hidden = a.visibility !== "private" || !hasTeam(store.state);
+  lock.title = "Only you can see this agent. Teammates see only its status.";
   const msg = (a.lastMessage || a.summary || a.task || "").replace(/\s+/g, " ").trim();
   const m = el.querySelector(".a-msg");
   setText(m, msg); m.hidden = !msg;
-  el.setAttribute("aria-label", `${a.title || "Agent"}, ${st.label}, ${p.name}`);
+  el.setAttribute("aria-label", `${a.title || "Agent"}, ${st.label}, ${p.name}${lock.hidden ? "" : ", private"}`);
 }
 
 function machineLabel(home) {
@@ -1744,6 +1762,9 @@ function HomeScreen() {
     acts.appendChild(micBtn);
   }
   acts.appendChild(refreshButton(refreshState));
+  // Team: what your teammates' agents are doing (team.js), once you have one.
+  const teamBtn = h(`<a class="icon-btn" href="/app/team" data-link aria-label="Team" title="Team" hidden>${icon("users")}</a>`);
+  acts.appendChild(teamBtn);
   const avatarBtn = h(`<button type="button" class="icon-btn" aria-label="Settings"><span class="avatar"></span></button>`);
   avatarBtn.addEventListener("click", openSettings);
   acts.appendChild(avatarBtn);
@@ -1799,6 +1820,7 @@ function HomeScreen() {
   function update() {
     const s = store.state;
     setText(avatarBtn.querySelector(".avatar"), (s?.email || "?").slice(0, 1));
+    teamBtn.hidden = !hasTeam(s);
     if (!s) {
       if (!machineSlot.firstElementChild) {
         machineSlot.innerHTML = `<div class="sk sk-card" style="height:66px;margin-top:6px"></div>`;
@@ -2330,6 +2352,37 @@ function ProjectScreen(ws) {
   linearBtn.addEventListener("click", () => openLinearIssues(ws, { onStarted: () => refreshState() }));
   tools.appendChild(linearBtn);
   linearAvailable().then((ok) => { linearBtn.hidden = !ok; });
+  // "New agents here are private" (team.ts): only once you have a team.
+  const privBtn = h(`<button type="button" class="tool-chip priv-chip" hidden aria-pressed="false"></button>`);
+  let privOverride = null; // what this device just set, until the state agrees
+  const paintPriv = (p) => {
+    privBtn.hidden = !p || !hasTeam(store.state);
+    if (privBtn.hidden) return;
+    if (privOverride !== null && !!p.newAgentsPrivate === privOverride) privOverride = null;
+    const on = privOverride ?? !!p.newAgentsPrivate;
+    const sig = String(on);
+    if (privBtn.dataset.sig === sig) return;
+    privBtn.dataset.sig = sig;
+    privBtn.innerHTML = `${icon(on ? "lock" : "users")}<span>${on ? "New agents private" : "Team sees new agents"}</span>`;
+    privBtn.classList.toggle("on", on);
+    privBtn.setAttribute("aria-pressed", String(on));
+    privBtn.title = on ? "New agents in this project are private. Click to let your team see new ones" : "Your team sees new agents in this project. Click to make new ones private";
+  };
+  privBtn.addEventListener("click", async () => {
+    const p = findProject(ws);
+    if (!p || privBtn.disabled) return;
+    const next = !(privOverride ?? !!p.newAgentsPrivate);
+    privBtn.disabled = true;
+    try {
+      await api("/api/app/visibility", { method: "POST", body: { workspace: ws, newAgentsPrivate: next } });
+      privOverride = next;
+      paintPriv(p);
+      toast(next ? "New agents in this project start private" : "Your team sees new agents in this project");
+      refreshState();
+    } catch (err) { if (err.status !== 401) toast(err.message, { error: true }); }
+    finally { privBtn.disabled = false; }
+  });
+  tools.appendChild(privBtn);
   composer.el.querySelector("form").before(tools);
   // On a phone the plan is a section of this screen; on desktop it has a column.
   const planSlot = el.querySelector(".plan-slot");
@@ -2363,6 +2416,7 @@ function ProjectScreen(ws) {
       return;
     }
     composer.el.hidden = false;
+    paintPriv(p);
     setText(el.querySelector(".title"), p.name || p.repo);
     setText(el.querySelector(".repo"), [p.repo, p.ref].filter(Boolean).join(" @ "));
 
@@ -2618,8 +2672,12 @@ function createAskCard(ask, { onAnswer }) {
 
 const OUT_LIMIT = 2400;
 
-function AgentScreen(ws, run) {
-  const key = `${ws}|${run}`;
+function AgentScreen(ws, run, { member = null } = {}) {
+  // `member`: a teammate's agent (team.js), read only. No composer, prompts,
+  // terminal or actions, and its transcript comes through the team route.
+  const ro = !!member;
+  const key = ro ? `team|${member}|${ws}|${run}` : `${ws}|${run}`;
+  const agentNow = () => (ro ? teamAgent(member, ws, run)?.agent : findAgent(ws, run)) || null;
   track("agent_panel_opened", { layout: isDesktop() ? "desktop" : "phone" });
   const el = h(`<section class="screen">
     <header class="topbar">
@@ -2627,6 +2685,7 @@ function AgentScreen(ws, run) {
       <div class="titles"><div class="title"></div>
         <div class="subtitle"><span class="dot"></span><span class="st"></span><span class="sep">·</span><span class="bk"></span></div></div>
       ${canOpenOnMac() ? `<button type="button" class="icon-btn mac-copy" aria-label="Open a copy on this Mac" title="Open a copy on this Mac">${MAC_ICON}</button>` : ""}
+      <button type="button" class="icon-btn lock-toggle" hidden aria-pressed="false"></button>
       <button type="button" class="icon-btn term-toggle" aria-label="Show the agent's terminal" aria-pressed="false">${icon("terminal")}</button>
       <button type="button" class="icon-btn more" aria-label="Agent actions" aria-haspopup="menu">${icon("more")}</button>
     </header>
@@ -2651,8 +2710,11 @@ function AgentScreen(ws, run) {
   const typing = el.querySelector(".typing");
   const pill = el.querySelector(".new-pill");
   const back = el.querySelector(".back");
-  back.href = projectPath(ws);
-  back.addEventListener("click", (e) => { e.preventDefault(); goBack(projectPath(ws)); });
+  const backTo = ro ? teamPath() : projectPath(ws);
+  back.href = backTo;
+  back.setAttribute("aria-label", ro ? "Back to team" : "Back to project");
+  back.addEventListener("click", (e) => { e.preventDefault(); goBack(backTo); });
+  if (ro) for (const n of el.querySelectorAll(".mac-copy, .term-toggle, .more")) n.hidden = true;
   topbarScrollShadow(scroller, bar);
 
   const composer = createComposer({
@@ -2663,13 +2725,60 @@ function AgentScreen(ws, run) {
     onSubmit: (text, files) => { send(text, files); return true; },
   });
   el.querySelector(".chat-wrap").after(composer.el);
+  // Read only: whose agent this is, where the composer would be.
+  const roBar = ro ? h(`<div class="composer ro-bar" role="note"><div class="rb-in"><span class="rb-ic">${icon("eye")}</span><span class="rb-text"><span class="rb-t"></span><span class="rb-s"></span></span></div></div>`) : null;
+  if (ro) {
+    composer.el.hidden = true;
+    composer.el.after(roBar);
+  }
+  const paintRoBar = () => {
+    if (!ro) return;
+    const m = teamAgent(member, ws, run)?.member;
+    setText(roBar.querySelector(".rb-t"), `${m ? memberName(m) : "A teammate"}'s agent · Read only`);
+    setText(roBar.querySelector(".rb-s"), `You can read along. Only ${m ? firstName(m) : "they"} can message it, answer it or change it.`);
+  };
+
+  // Your own agent: private hides it from teammates (team.ts). Shown once
+  // you are in an org, since before that nobody else could see it anyway.
+  const lockBtn = el.querySelector(".lock-toggle");
+  const paintLock = () => {
+    const a = agentNow();
+    const show = !ro && hasTeam(store.state) && !!a && !a.pending;
+    lockBtn.hidden = !show;
+    if (!show) return;
+    const priv = a.visibility === "private";
+    const sig = String(priv);
+    if (lockBtn.dataset.sig === sig) return;
+    lockBtn.dataset.sig = sig;
+    lockBtn.innerHTML = icon(priv ? "lock" : "unlock");
+    lockBtn.classList.toggle("on", priv);
+    lockBtn.setAttribute("aria-pressed", String(priv));
+    lockBtn.setAttribute("aria-label", priv ? "Private: only you can see this agent. Share it with your team" : "Your team can see this agent. Make it private");
+    lockBtn.title = priv ? "Private. Only you can see it" : "Visible to your team. Click to make it private";
+  };
+  lockBtn.addEventListener("click", async () => {
+    const a = agentNow();
+    if (!a || lockBtn.disabled) return;
+    const next = a.visibility === "private" ? "team" : "private";
+    lockBtn.disabled = true;
+    try {
+      await api("/api/app/visibility", { method: "POST", body: { workspace: ws, run, visibility: next } });
+      a.visibility = next;
+      postNative({ type: "haptic" });
+      toast(next === "private" ? "Private. Teammates see only its status" : "Your team can see this agent again");
+      paintLock();
+      refreshState();
+    } catch (err) { if (err.status !== 401) toast(err.message, { error: true }); }
+    finally { lockBtn.disabled = false; }
+  });
 
   // Pinned above the composer: the oldest prompt the agent is blocked on.
   const askSlot = h(`<div class="ask-slot"></div>`);
   composer.el.before(askSlot);
   let askCard = null;
   function paintAsk() {
-    const asks = pendingAsks(findAgent(ws, run));
+    if (ro) return;
+    const asks = pendingAsks(agentNow());
     const ask = asks[0];
     if (!ask) { if (askCard) { askCard.remove(); askCard = null; } return; }
     if (askCard?._askId !== ask.id) {
@@ -2715,11 +2824,11 @@ function AgentScreen(ws, run) {
     }
   });
   const isRunning = (status) => status === "running" || !!statusOf(status).live;
-  fastStatePoll = () => {
-    const a = findAgent(ws, run);
+  if (!ro) fastStatePoll = () => {
+    const a = agentNow();
     return !!a && (isRunning(a.status) || pendingAsks(a).length > 0);
   };
-  pollState();
+  if (!ro) pollState();
 
   // `/` commands: the message is typed into the agent's own terminal, so its
   // commands work. Suggest the common ones for this backend.
@@ -2731,7 +2840,7 @@ function AgentScreen(ws, run) {
   };
   const renderSlash = () => {
     const value = composer.textarea.value;
-    const backend = findAgent(ws, run)?.backend === "codex" ? "codex" : "claude";
+    const backend = agentNow()?.backend === "codex" ? "codex" : "claude";
     if (!value.startsWith("/") || value.includes("\n")) { slashBox.hidden = true; return; }
     const q = value.toLowerCase();
     const hits = SLASH[backend].filter(([cmd]) => cmd.startsWith(q) || (q.length > 1 && cmd.includes(q.slice(1)))).slice(0, 6);
@@ -2805,8 +2914,8 @@ function AgentScreen(ws, run) {
   }, { passive: true });
   pill.addEventListener("click", () => { toBottom(true); pill.classList.remove("show"); });
   // Keep the bottom pinned when the keyboard resizes the viewport.
-  const ro = new ResizeObserver(() => { if (atBottom) toBottom(false); });
-  ro.observe(scroller);
+  const resizeObs = new ResizeObserver(() => { if (atBottom) toBottom(false); });
+  resizeObs.observe(scroller);
 
   // Copy buttons + tool expansion (delegated)
   msgsEl.addEventListener("click", async (e) => {
@@ -2863,7 +2972,7 @@ function AgentScreen(ws, run) {
   // Mac app: pull a copy of this agent into the local clone.
   const copyHere = () => {
     const p = findProject(ws);
-    const a = findAgent(ws, run);
+    const a = agentNow();
     openCopyOnMac({ runId: run, repo: p?.repo || null, title: a?.title || store.transcripts.get(key)?.title || null });
   };
   el.querySelector(".mac-copy")?.addEventListener("click", copyHere);
@@ -2874,7 +2983,7 @@ function AgentScreen(ws, run) {
   function closeMenu() { menuEl?.remove(); menuEl = null; moreBtn.setAttribute("aria-expanded", "false"); }
   moreBtn.addEventListener("click", () => {
     if (menuEl) return closeMenu();
-    const a = findAgent(ws, run);
+    const a = agentNow();
     const status = a?.status || store.transcripts.get(key)?.status;
     const canStop = !["stopped", "merged", "failed", "orphaned"].includes(status);
     const canMerge = status === "done" || status === "review";
@@ -2899,7 +3008,7 @@ function AgentScreen(ws, run) {
   el.addEventListener("keydown", (e) => { if (e.key === "Escape" && menuEl) { closeMenu(); moreBtn.focus(); } });
 
   async function act(action) {
-    const a = findAgent(ws, run);
+    const a = agentNow();
     const name = a?.title || "this agent";
     const ok = await confirmDialog(action === "merge"
       ? { title: "Merge this agent's work?", body: `Rudder merges "${name}" into the project's main checkout.`, confirm: "Merge" }
@@ -2945,13 +3054,24 @@ function AgentScreen(ws, run) {
     if (inflight) return;
     inflight = true;
     try {
-      const t = await api(`/api/app/transcript?workspace=${encodeURIComponent(ws)}&run=${encodeURIComponent(run)}&limit=300`);
+      const t = ro
+        ? await api(`/api/app/team/transcript?member=${encodeURIComponent(member)}&workspace=${encodeURIComponent(ws)}&run=${encodeURIComponent(run)}&limit=300`)
+        : await api(`/api/app/transcript?workspace=${encodeURIComponent(ws)}&run=${encodeURIComponent(run)}&limit=300`);
       store.transcripts.set(key, t);
       lastErr = null;
       waking = false;
       reconcilePending(t);
     } catch (err) {
       // A sleeping home is being woken by the server: say so in place, no toast.
+      // A teammate's sleeping machine is never woken from here; a private (or
+      // deleted) agent is a 404. Both say so in place.
+      if (ro && (err.status === 503 || err.status === 404)) {
+        waking = err.status === 503;
+        const prev = store.transcripts.get(key);
+        const text = err.status === 404 ? "This agent is private now, or it was deleted." : err.message;
+        store.transcripts.set(key, { ...(prev || {}), messages: err.status === 404 ? [] : prev?.messages || [], error: text, roNotice: text });
+        return;
+      }
       if (err.waking) {
         waking = true;
         const prev = store.transcripts.get(key);
@@ -2980,11 +3100,13 @@ function AgentScreen(ws, run) {
   }
 
   function header() {
-    const a = findAgent(ws, run);
+    paintRoBar();
+    paintLock();
+    const a = agentNow();
     const t = store.transcripts.get(key);
     const title = a?.title || t?.title || "Agent";
     setText(el.querySelector(".title"), title);
-    document.title = `${title} · Rudder`;
+    document.title = ro ? `${title} · ${memberName(teamAgent(member, ws, run)?.member)} · Rudder` : `${title} · Rudder`;
     const status = a?.status || t?.status;
     const st = a ? agentStatus(a) : statusOf(status);
     const sub = el.querySelector(".subtitle");
@@ -3001,7 +3123,7 @@ function AgentScreen(ws, run) {
   function paint() {
     const status = header();
     paintAsk();
-    interruptBtn.hidden = !isRunning(status);
+    interruptBtn.hidden = ro || !isRunning(status);
     const t = store.transcripts.get(key);
     if (!t) {
       if (!msgsEl.firstElementChild) {
@@ -3046,7 +3168,7 @@ function AgentScreen(ws, run) {
     } else if (!items.length && !t.error) {
       items.push({ kind: "empty", id: "empty" });
     } else if (!items.length && t.error) {
-      items.push({ kind: "error", id: "error", text: t.error });
+      items.push({ kind: "error", id: "error", text: t.error, ...(ro ? { ic: t.roNotice?.includes("private") ? "lock" : "power", title: t.roNotice?.includes("private") ? "Not visible to you" : "Their cloud machine is asleep" } : {}) });
     }
 
     el.querySelector(".truncated-note").hidden = !t.truncated;
@@ -3064,7 +3186,7 @@ function AgentScreen(ws, run) {
   function createItem(x) {
     if (x.kind === "day") return h(`<div class="day"></div>`);
     if (x.kind === "empty") return emptyState({ ic: "inbox", title: "No messages yet", body: "This agent has not said anything yet. Its conversation shows up here as it works." });
-    if (x.kind === "error") return emptyState({ ic: "alert", title: "Couldn't load the conversation", body: escapeHtml(x.text) });
+    if (x.kind === "error") return emptyState({ ic: x.ic || "alert", title: x.title || "Couldn't load the conversation", body: escapeHtml(x.text) });
     if (x.kind === "pending") return h(`<div class="msg user"><div class="atts" hidden></div><div class="bubble md"></div><div class="m-foot"></div></div>`);
     if (x.kind === "steps") {
       return h(`<div class="steps"><button type="button" class="tool-row steps-row" aria-expanded="false">
@@ -3188,8 +3310,12 @@ function AgentScreen(ws, run) {
   let timer = null;
   const tick = async () => {
     timer = null;
-    if (!document.hidden) await loadTranscript();
-    timer = setTimeout(tick, waking ? 5000 : 2000);
+    if (!document.hidden) {
+      // A teammate's agent: its title and status come from the team view.
+      if (ro) loadTeamFor(member).then(() => { if (timer !== -1) paint(); });
+      await loadTranscript();
+    }
+    if (timer !== -1) timer = setTimeout(tick, ro ? (waking ? 10000 : 3000) : waking ? 5000 : 2000);
   };
   const onVis = () => { if (!document.hidden) { clearTimeout(timer); tick(); } };
   document.addEventListener("visibilitychange", onVis);
@@ -3203,9 +3329,9 @@ function AgentScreen(ws, run) {
     destroy() {
       clearTimeout(timer); timer = -1;
       termOn = false; clearTimeout(termTimer);
-      fastStatePoll = null;
+      if (!ro) fastStatePoll = null;
       document.removeEventListener("visibilitychange", onVis);
-      ro.disconnect();
+      resizeObs.disconnect();
       document.title = "Rudder";
     },
   };

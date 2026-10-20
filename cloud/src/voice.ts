@@ -67,6 +67,15 @@ export type VoiceContext = {
   startWaitMs?: number;
   /** Told about every tool call (product analytics); ok is false when it threw. */
   onTool?: (name: string, ok: boolean) => void;
+  /** Teammates' agents (team.ts), private ones already redacted. Read-only:
+   * no tool resolves a name against them, so nothing can act on them. */
+  teammates?: () => VoiceTeammate[];
+};
+
+export type VoiceTeammate = {
+  name: string | null;
+  email: string | null;
+  projects: Array<{ name: string; agents: Array<{ private: boolean; title?: string; status: string; asking?: string | null }> }>;
 };
 
 export type VoiceMemory = {
@@ -338,8 +347,10 @@ async function runTool(ctx: VoiceContext, name: string, rawArgs: unknown, failed
   }
   try {
     switch (name) {
-      case "get_overview":
-        return { output: overviewText(ctx.projects()) };
+      case "get_overview": {
+        const team = teamOverviewText(ctx.teammates?.() ?? []);
+        return { output: team ? `${overviewText(ctx.projects())}\n\n${team}` : overviewText(ctx.projects()) };
+      }
       case "get_agent":
         return await getAgent(ctx, args);
       case "send_message":
@@ -982,6 +993,26 @@ export function overviewText(projects: VoiceProject[]): string {
     }
   }
   return out.join("\n");
+}
+
+/** Teammates' live agents, for awareness only (the user cannot act on them). */
+export function teamOverviewText(team: VoiceTeammate[]): string {
+  const out: string[] = [];
+  for (const member of team) {
+    const lines: string[] = [];
+    for (const project of member.projects) {
+      for (const agent of project.agents) {
+        if (agent.private || !(ACTIVE.has(agent.status) || agent.asking)) {
+          continue;
+        }
+        lines.push(`  - ${clip(oneLine(agent.title || "an agent"), 80)} in ${project.name}: ${agent.asking || agent.status === "waiting" ? "waiting on them" : agent.status}`);
+      }
+    }
+    if (lines.length) {
+      out.push(`${member.name || member.email || "A teammate"}:`, ...lines.slice(0, 8));
+    }
+  }
+  return out.length ? ["Teammates (read only: you cannot message or act on their agents):", ...out].join("\n") : "";
 }
 
 function planLine(project: VoiceProject): string | null {

@@ -50,6 +50,8 @@ export type IntegrationAgent = {
   title?: string | null;
   status?: string | null;
   asks?: unknown[] | null;
+  /** "private" (team.ts): an org channel gets no title for it. */
+  visibility?: string | null;
 };
 
 export type IntegrationProject = {
@@ -910,9 +912,9 @@ export function createIntegrations(deps: IntegrationsDeps) {
       .filter((install): install is Install => Boolean(install?.channelId));
   }
 
-  function notificationText(project: IntegrationProject, agent: IntegrationAgent, category: NotifyCategory): string {
+  function notificationText(project: IntegrationProject, agent: IntegrationAgent, category: NotifyCategory, redact = false): string {
     const icon = category === "needs" ? ":raising_hand:" : category === "failed" ? ":x:" : ":white_check_mark:";
-    const title = agent.title || agent.id;
+    const title = redact ? "Private agent" : agent.title || agent.id;
     return `${icon} *${slackEscape(project.name)}* · ${slackEscape(title)} ${statusLine(agent, category)}\n${slackLink(agentUrl(project.workspaceId, agent.id), "Open in Rudder")}`;
   }
 
@@ -922,7 +924,9 @@ export function createIntegrations(deps: IntegrationsDeps) {
       const known = memory.get(accountId) ?? new Map<string, AgentMemory>();
       memory.set(accountId, known);
       const seen = new Set<string>();
-      const posts: string[] = [];
+      // A private agent posts its title only to the person's own channel; an
+      // org channel (teammates read it) gets "Private agent".
+      const posts: Array<{ full: string; org: string }> = [];
       const at = now();
       for (const project of projects ?? []) {
         for (const agent of project.agents ?? []) {
@@ -943,7 +947,8 @@ export function createIntegrations(deps: IntegrationsDeps) {
           const lastPost = entry.posted.get(category);
           const fresh = lastPost === undefined || (entry.turnAt > lastPost && at - lastPost >= NOTIFY_REPEAT_MS);
           if (!first && notifiable && changed && fresh) {
-            posts.push(notificationText(project, agent, category));
+            const full = notificationText(project, agent, category);
+            posts.push({ full, org: agent.visibility === "private" ? notificationText(project, agent, category, true) : full });
             entry.posted.set(category, at);
           }
           entry.category = category;
@@ -961,8 +966,8 @@ export function createIntegrations(deps: IntegrationsDeps) {
       const channels = notifyChannels(accountId);
       await Promise.all(
         channels.flatMap((install) =>
-          posts.map((text) =>
-            postSlack(deps.fetch, str(install.token.accessToken), install.channelId!, text).catch((error: unknown) =>
+          posts.map((post) =>
+            postSlack(deps.fetch, str(install.token.accessToken), install.channelId!, install.ownerKind === "org" ? post.org : post.full).catch((error: unknown) =>
               log(`integrations: slack notify failed for ${install.ownerKind}:${install.ownerId}: ${error instanceof Error ? error.message : String(error)}`),
             ),
           ),

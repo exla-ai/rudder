@@ -26,6 +26,7 @@ import {
   verifySlackSignature,
 } from "./slack.js";
 import { createOrgStore, handleOrgApi } from "./orgs.js";
+import { buildTeamView, createVisibilityStore, handleTeamApi, type TeamDeps } from "./team.js";
 import { createOnboardingStore, handleOnboardingApi } from "./onboarding.js";
 import { createProductAnalytics } from "./product-analytics.js";
 import { createIntegrations } from "./integrations.js";
@@ -315,6 +316,9 @@ database.exec(`
 // Orgs (admins and members), the first-run surface picker, and product
 // analytics for the web app. Each module owns its tables; see cloud/src/*.ts.
 const orgStore = createOrgStore(database);
+// Team view + private agents (cloud/src/team.ts): visibility per home-repo
+// workspace and run id, never in the dashboard's run.json.
+const visibilityStore = createVisibilityStore(database);
 const onboardingStore = createOnboardingStore(database);
 const productAnalytics = createProductAnalytics();
 const captureProductEvent = (accountId: string, name: string, props?: Record<string, unknown>): void => {
@@ -5664,6 +5668,21 @@ function attachHomeControl(homeId: string, ws: WebSocket): void {
         logins: objectField(message, "logins"),
         updatedAt: new Date().toISOString(),
       });
+      // "New agents here are private": pin each agent seen for the first time,
+      // in the same tick the state lands, so no teammate ever reads it as team.
+      let pinned = 0;
+      for (const project of homeStates.get(homeId)!.projects) {
+        if (typeof project?.workspaceId === "string" && Array.isArray(project.agents)) {
+          try {
+            pinned += visibilityStore.pinNew(project.workspaceId, project.agents.map((agent) => String((agent as JsonRecord)?.id ?? "")));
+          } catch {
+            // best effort
+          }
+        }
+      }
+      if (pinned) {
+        schedulePersistDatabase();
+      }
       // Slack notifications: what moved to needs-you / done / failed.
       const homeRow = findWorkspaceById.get(homeId) as Record<string, unknown> | undefined;
       const homeAccount = optionalString(homeRow?.account_id);
@@ -6070,6 +6089,11 @@ function homeProjects(home: Workspace): JsonRecord[] {
   const live = new Map((homeStates.get(home.id)?.projects ?? []).map((project) => [project.workspaceId, project]));
   return homeRepos(home.id).map((row) => {
     const project = live.get(row.id);
+    // Each agent says whether teammates may see it (team.ts).
+    const visibility = visibilityStore.forProject(row.id);
+    const agents = (project?.agents ?? []).map((agent) => (agent && typeof agent === "object" && typeof (agent as JsonRecord).id === "string"
+      ? { ...(agent as JsonRecord), visibility: visibilityStore.effective(visibility, String((agent as JsonRecord).id)) }
+      : agent));
     return {
       workspaceId: row.id,
       name: row.repoName ?? "repo",
@@ -6078,7 +6102,8 @@ function homeProjects(home: Workspace): JsonRecord[] {
       status: row.status,
       failureReason: project?.error ?? row.failureReason ?? null,
       dashboard: project?.dashboard ?? null,
-      agents: (project?.agents ?? []) as unknown as Json,
+      agents: agents as unknown as Json,
+      newAgentsPrivate: visibility.newAgentsPrivate,
       ports: (project?.ports ?? []) as unknown as Json,
       plan: (project?.plan ?? null) as Json,
       clients: Array.from(workspaceChannels.get(row.id)?.clients ?? []).filter(isOpen).length,
@@ -6416,6 +6441,47 @@ async function handleAppLogin(url: URL, res: ServerResponse): Promise<void> {
   res.end();
 }
 
+// The team view reads only what is already in memory: a teammate looking never
+// wakes or touches anyone's machine (no touchHome, no wake).
+const teamDeps: TeamDeps = {
+  orgsFor: (accountId) => orgStore.listOrgsForAccount(accountId).map((org) => ({ id: org.id, name: org.name })),
+  membersOf: (viewer, orgId) => orgStore.getOrgView(viewer, orgId).members,
+  projectsOf: (accountId) => {
+    const home = findHomeRow(accountId);
+    return home && home.status !== "deleting" ? (homeProjects(home) as never) : [];
+  },
+  machineOf: (accountId) => {
+    const home = findHomeRow(accountId);
+    return !home || home.status === "deleting" ? "none" : isOpen(homeControls.get(home.id)) ? "awake" : "asleep";
+  },
+};
+const teamApiDeps = {
+  ...teamDeps,
+  visibility: visibilityStore,
+  sendJson,
+  readJsonBody: (req: IncomingMessage) => readJsonBody(req),
+  requireOwnProject: (accountId: string, workspaceId: string) => ({ workspaceId: requireHomeRepo(accountId, workspaceId).repo.id }),
+  knownRunIds: (workspaceId: string) => {
+    for (const state of homeStates.values()) {
+      const project = state.projects.find((candidate) => candidate?.workspaceId === workspaceId);
+      if (project) {
+        return (project.agents ?? []).map((agent) => String((agent as JsonRecord)?.id ?? "")).filter(Boolean);
+      }
+    }
+    return [];
+  },
+  connectedHomeOf: (accountId: string) => {
+    const home = findHomeRow(accountId);
+    return home && home.status !== "deleting" && isOpen(homeControls.get(home.id)) ? home.id : null;
+  },
+  rpc: (homeId: string, method: string, params: Record<string, unknown>) => homeRpc(homeId, method, params as JsonRecord),
+  persist: () => schedulePersistDatabase(),
+  displayName: (accountId: string) => {
+    const profile = orgStore.profile(accountId);
+    return profile.name || profile.email || "Your teammate";
+  },
+};
+
 async function handleAppApi(req: IncomingMessage, res: ServerResponse, url: URL): Promise<void> {
   const account = await requireAccount(req);
   if (await handleOrgApi(req, res, url, account, { store: orgStore, sendJson, readJsonBody, baseURL, capture: captureProductEvent })) {
@@ -6428,6 +6494,9 @@ async function handleAppApi(req: IncomingMessage, res: ServerResponse, url: URL)
     return;
   }
   if (await integrations.handleAppApi(req, res, url, account)) {
+    return;
+  }
+  if (await handleTeamApi(req, res, url, account, teamApiDeps)) {
     return;
   }
   const home = findHomeRow(account.accountId);
@@ -7195,6 +7264,13 @@ function voiceContext(accountId: string, surface: "phone" | "carplay" | "call" =
     memory,
     log: (line) => console.log(`voice ${accountId.slice(-6)}: ${line}`),
     projects: () => voiceProjects(accountId),
+    teammates: () => {
+      try {
+        return buildTeamView({ accountId }, null, teamDeps).members as never;
+      } catch {
+        return [];
+      }
+    },
     rpc: async (method, params, timeoutMs) => {
       const home = findHomeRow(accountId);
       const live = home && isOpen(homeControls.get(home.id)) ? home : await homeWithControl(accountId);

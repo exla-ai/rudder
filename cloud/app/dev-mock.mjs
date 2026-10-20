@@ -7,7 +7,8 @@
 // /app/__mock/fresh (a brand new account: no GitHub, no agent login, no repos),
 // /app/__mock/computer (prints a code to approve, as `rudder login` would),
 // /app/__mock/onboard (show the setup picker again), /app/__mock/integrations/<on|off|unset>,
-// /app/__mock/invite (prints a join link). Orgs, invites, Slack/Linear and a plan are mocked too.
+// /app/__mock/invite (prints a join link). Orgs, invites, Slack/Linear and a plan are mocked too,
+// and so is the team view (two teammates in Exla, one asleep; uses cloud/dist/team.js).
 // The digest uses the real worker/digest.mjs and cloud/dist/digest.js (build cloud first).
 import http from "node:http";
 import fs from "node:fs";
@@ -55,7 +56,7 @@ const home = () => homeMode === "none" ? null : ({
 });
 
 const agent = (o) => ({
-  phase: null, model: null, mode: "execute", lastMessage: null, summary: null, nodeId: null, planId: null, remoteUrl: null,
+  phase: null, model: null, mode: "execute", lastMessage: null, summary: null, nodeId: null, planId: null, remoteUrl: null, visibility: "team",
   createdAt: T0 - 90 * MIN, updatedAt: T0 - 10 * MIN, ...o,
 });
 
@@ -66,7 +67,7 @@ const projects = [
     agents: [
       agent({ id: "run_a1", title: "Phone app for agent control", task: "Build the phone-first web app under cloud/app", status: "working", backend: "claude", model: "opus", mode: "main", updatedAt: T0 - 1 * MIN, lastMessage: "Wiring the transcript poll to keep scroll pinned only when you are already at the bottom.", remoteUrl: "https://claude.ai/code/session_01Abc" }),
       agent({ id: "run_a2", title: "Fix flaky Ctrl+W chord test", task: "Stabilize the e2e chord tests", status: "waiting", backend: "codex", model: "gpt-6.1-sol", phase: "permission", updatedAt: T0 - 4 * MIN, lastMessage: "I need permission to run `cargo test --release` with network access. Allow?" }),
-      agent({ id: "run_a3", title: "Tailnet HTTPS for previews", task: "Expose dev servers over tailnet https", status: "review", backend: "claude", model: "sonnet", nodeId: "n2", planId: "plan_1", updatedAt: T0 - 18 * MIN, lastMessage: "Done. Ports 3000 and 5173 are reachable at https://rudder-home.tail4c2e1.ts.net. Ready to merge." }),
+      agent({ id: "run_a3", title: "Tailnet HTTPS for previews", task: "Expose dev servers over tailnet https", status: "review", visibility: "private", backend: "claude", model: "sonnet", nodeId: "n2", planId: "plan_1", updatedAt: T0 - 18 * MIN, lastMessage: "Done. Ports 3000 and 5173 are reachable at https://rudder-home.tail4c2e1.ts.net. Ready to merge." }),
       agent({ id: "run_a4", title: "Delete cloud workspaces safely", task: "Request + reaper for deletes", status: "done", backend: "claude", model: "opus", updatedAt: T0 - 3 * 60 * MIN, lastMessage: "Added the deletion reaper with a 30s sweep and 410s for dead rows." }),
       agent({ id: "run_a5", title: "Bump jj to 0.40 flags", task: "jj rebase -o", status: "merged", backend: "codex", model: "gpt-6.1-sol", updatedAt: T0 - 26 * 60 * MIN, lastMessage: "Merged into main." }),
       agent({ id: "run_o1", title: "Plan: preview links everywhere", task: "Make every dev server reachable from the phone", status: "waiting", backend: "claude", model: "opus", mode: "rudder-plan", planId: "plan_1", updatedAt: T0 - 3 * MIN, lastMessage: "Here is the plan: 5 tasks. Approve it to launch, or tell me what to change." }),
@@ -211,6 +212,65 @@ function serveStatic(req, res, url) {
   if (rel === "sw.js") headers["Service-Worker-Allowed"] = "/app";
   res.writeHead(200, headers);
   fs.createReadStream(target).pipe(res);
+}
+
+// ---------- Team view (cloud/src/team.ts, through its built module) ----------
+const teamLib = await import("../dist/team.js").catch(() => null);
+const HR = 60 * MIN;
+const teammates = {
+  "better-auth:sam": { machine: "awake", projects: [
+    { workspaceId: "wsp_sam_billing", name: "billing-api", repo: "exla-ai/billing-api", agents: [
+      agent({ id: "run_s1", title: "Retry failed invoices with backoff", task: "Retry failed invoices", status: "working", backend: "claude", model: "opus", updatedAt: T0 - 1 * MIN }),
+      agent({ id: "run_s2", title: "Salary bands import", task: "secret", status: "waiting", backend: "claude", model: "opus", asks: [{ id: "1-aaaaaaaa", kind: "question" }], visibility: "private", updatedAt: T0 - 6 * MIN }),
+      agent({ id: "run_s3", title: "Stripe tax IDs on invoices", task: "Tax IDs", status: "review", backend: "codex", model: "gpt-6.1-sol", updatedAt: T0 - 40 * MIN }),
+    ] },
+    { workspaceId: "wsp_sam_rudder", name: "rudder", repo: "exla-ai/rudder", agents: [
+      agent({ id: "run_s4", title: "Team view in the web app", task: "Show teammates' agents", status: "working", backend: "claude", model: "sonnet", phase: "testing", updatedAt: T0 - 2 * MIN }),
+    ] },
+  ] },
+  "github:991": { machine: "asleep", projects: [
+    { workspaceId: "wsp_ava_docs", name: "docs", repo: "exla-ai/docs", agents: [
+      agent({ id: "run_v1", title: "Rewrite the quickstart for the Mac app", task: "Quickstart for Mac", status: "done", backend: "claude", model: "opus", updatedAt: T0 - 3 * HR }),
+      agent({ id: "run_v2", title: "secret", task: "secret", status: "failed", visibility: "private", updatedAt: T0 - 5 * HR }),
+    ] },
+  ] },
+};
+const teamDeps = () => ({
+  orgsFor: () => orgList().map((o) => ({ id: o.id, name: o.name })),
+  membersOf: (_viewer, orgId) => {
+    const org = orgs.get(orgId);
+    if (!org || !mine(org)) throw Object.assign(new Error("org not found"), { status: 404 });
+    return org.members.map((m) => ({ ...m, you: m.accountId === ME }));
+  },
+  projectsOf: (id) => teammates[id]?.projects ?? [],
+  machineOf: (id) => teammates[id]?.machine ?? "none",
+});
+function teamRoutes(req, res, p, url, body) {
+  if (p === "/api/app/team" && req.method === "GET") {
+    if (!teamLib) return json(res, 404, { error: "build cloud first (npm --prefix cloud run build)" }), true;
+    try { return json(res, 200, teamLib.buildTeamView({ accountId: ME }, url.searchParams.get("org") || null, teamDeps())), true; }
+    catch (err) { return json(res, err.status || 500, { error: err.message }), true; }
+  }
+  if (p === "/api/app/team/transcript" && req.method === "GET") {
+    const mate = teammates[url.searchParams.get("member")];
+    const proj = mate?.projects.find((x) => x.workspaceId === url.searchParams.get("workspace"));
+    const a = proj?.agents.find((x) => x.id === url.searchParams.get("run"));
+    if (!a || a.visibility === "private") return json(res, 404, { error: "not found" }), true;
+    if (mate.machine !== "awake") return json(res, 503, { error: "Ava's cloud machine is asleep. Their agents show here again when it wakes.", asleep: true }), true;
+    if (!transcripts.has(a.id)) transcripts.set(a.id, baseTranscript(a));
+    return json(res, 200, { runId: a.id, title: a.title, backend: a.backend, status: a.status, messages: transcripts.get(a.id), readOnly: true }), true;
+  }
+  if (p === "/api/app/visibility" && req.method === "POST") {
+    const proj = projects.find((x) => x.workspaceId === body.workspace);
+    if (!proj) return json(res, 404, { error: "project not found" }), true;
+    if (typeof body.newAgentsPrivate === "boolean") { proj.newAgentsPrivate = body.newAgentsPrivate; return json(res, 200, { workspaceId: proj.workspaceId, newAgentsPrivate: proj.newAgentsPrivate }), true; }
+    const a = proj.agents.find((x) => x.id === body.run);
+    if (!a) return json(res, 404, { error: "agent not found" }), true;
+    if (body.visibility !== "team" && body.visibility !== "private") return json(res, 400, { error: "visibility must be team or private" }), true;
+    a.visibility = body.visibility;
+    return json(res, 200, { workspaceId: proj.workspaceId, run: a.id, visibility: a.visibility }), true;
+  }
+  return undefined;
 }
 
 // ---------- Onboarding, orgs, invites, integrations (CONTRACT.md) ----------
@@ -483,7 +543,7 @@ const server = http.createServer(async (req, res) => {
       return json(res, 200, { path: `/workspace/code/${proj.name}/.rudder/uploads/20261017-013000-${name}`, name, size });
     }
     const body = req.method === "POST" || req.method === "PATCH" ? await readBody(req) : {};
-    const handled = orgRoutes(req, res, p, url, body);
+    const handled = orgRoutes(req, res, p, url, body) ?? teamRoutes(req, res, p, url, body);
     if (handled !== undefined) return;
     if (p === "/api/app/send") {
       const t = transcriptFor(body.workspace, body.run);

@@ -415,6 +415,16 @@ test("notifications: baseline first, one post per transition, deduped", async ()
     await ctx.integrations.onHomeState("bob", state([{ id: "r9", title: "x", status: "failed" }]));
     assert.equal(posts().length, 6);
 
+    // A private agent's title goes to the person's own channel only; the org
+    // channel (teammates read it) says "Private agent".
+    await ctx.integrations.onHomeState("alice", state([{ id: "r3", title: "Secret plan", status: "working", visibility: "private" }]));
+    await ctx.integrations.onHomeState("alice", state([{ id: "r3", title: "Secret plan", status: "failed", visibility: "private" }]));
+    const privatePosts = posts().slice(6);
+    assert.equal(privatePosts.length, 2);
+    assert.match(privatePosts.find((p) => p.channel === "C1").text, /Secret plan/);
+    assert.ok(!privatePosts.find((p) => p.channel === "C2").text.includes("Secret plan"));
+    assert.match(privatePosts.find((p) => p.channel === "C2").text, /Private agent/);
+
     // Slack errors are swallowed.
     ctx.upstream.calls.length = 0;
     const broken = createIntegrations({

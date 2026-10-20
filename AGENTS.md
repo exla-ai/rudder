@@ -1191,7 +1191,34 @@ on the user's own Claude Code / Codex subscription.
   roles, connects integrations) and `member`. Invites are single-use links
   (`/app/join/<token>`, hash stored, 7 days, optional email lock); nothing sends
   email. An org always keeps one admin (409 otherwise). Membership shares the
-  org's integrations, not machines or agents.
+  org's integrations and a read-only view of each other's agents (next bullet),
+  never machines.
+- **Team view and private agents** (`cloud/src/team.ts`, `cloud/app/team.js`):
+  `GET /api/app/team[?org=]` lists your org-mates (not you) grouped by person and
+  project, built ONLY from the in-memory home state (`homeProjects`), so a sleeping
+  machine shows its last state as "Asleep" and looking never wakes or touches it.
+  Agent fields are a whitelist (title, status, phase, backend, model, ask KIND,
+  updatedAt; never task, lastMessage, remoteUrl or ask content).
+  `GET /api/app/team/transcript?member=&workspace=&run=` proxies the owner's
+  `transcript` RPC only when viewer and owner share an org, the run is in the
+  owner's reported state and it is not private, and only while the owner's
+  control socket is open (else 503 `{asleep}`); every miss is one 404. The web
+  app opens it as `AgentScreen(..., { member })`: no composer, prompts, terminal
+  or menu. Writes stay owner-only: send/task/upload/keys/answer/pin/action/screen
+  and visibility all resolve the workspace through the CALLER's account
+  (`requireHomeRepo`), and `tests/cloud-team.test.mjs` proves a teammate gets
+  404 on each with nothing reaching the owner's machine. Visibility is
+  `team` (default) or `private`, set by the owner (`POST /api/app/visibility
+  {workspace, run, visibility}` or `{workspace, newAgentsPrivate}`), stored in
+  `rudder_agent_visibility` keyed by home-repo workspace id + run id (`run_id
+  "*"` = the project default), NOT in run.json: the dashboard owns that file and
+  the answer must hold while the machine sleeps. Turning the project default on
+  pins every known agent `team`; each agent first seen afterwards is pinned
+  `private` in the same tick its state lands (`pinNew`). A private agent reaches
+  teammates only as `{id, private, status, asking, updatedAt}`; its own row in
+  `homeProjects` carries `visibility` so org Slack channels get "Private agent"
+  instead of its title (the personal channel still gets the title), and the
+  voice overview lists only teammates' non-private live agents, read only.
 - **Analytics** (`cloud/src/product-analytics.ts`): `POST /api/app/event` with a
   whitelist (`PRODUCT_EVENTS`), the same PostHog project as `src/analytics.ts`,
   anonymous (sha256 of the account id), props sanitized. Server-side events

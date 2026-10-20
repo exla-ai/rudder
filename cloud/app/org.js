@@ -54,7 +54,7 @@ export async function linearAvailable() {
 
 /* Shared bits -------------------------------------------------------- */
 
-function screenShell(title, { back = "/app" } = {}) {
+export function screenShell(title, { back = "/app" } = {}) {
   const el = h(`<section class="screen settings-screen">
     <header class="topbar">
       <a class="icon-btn back" aria-label="Back">${icon("back")}</a>
@@ -71,20 +71,20 @@ function screenShell(title, { back = "/app" } = {}) {
   return { el, body: el.querySelector(".set-body") };
 }
 
-function section(title, { count } = {}) {
+export function section(title, { count } = {}) {
   const sec = h(`<div class="section"><div class="section-head"><h2></h2><span class="count"></span></div><div class="sec-body"></div></div>`);
   setText(sec.querySelector("h2"), title);
   if (count != null) setText(sec.querySelector(".count"), String(count));
   return { el: sec, body: sec.querySelector(".sec-body"), setCount: (n) => setText(sec.querySelector(".count"), n == null ? "" : String(n)) };
 }
 
-function initials(s) {
+export function initials(s) {
   const t = String(s || "?").trim();
   const parts = t.split(/[\s@._-]+/).filter(Boolean);
   return ((parts[0]?.[0] || "?") + (parts.length > 1 ? parts[1][0] : "")).toUpperCase();
 }
 
-function note(text, cls = "") {
+export function note(text, cls = "") {
   const n = h(`<div class="repo-note ${cls}"></div>`);
   n.textContent = text;
   return n;
@@ -255,6 +255,11 @@ export function SettingsScreen() {
       nameRow.appendChild(rename);
     }
     frag.push(nameRow);
+
+    // Team: what everyone's agents are doing (team.js).
+    const teamLink = h(`<a class="card team-link tap" data-link><span class="tl-ic">${icon("users")}</span><span class="tl-text"><span class="tl-name">See your team's agents</span><span class="tl-sub">What each person is running right now. Read only.</span></span>${icon("chevron")}</a>`);
+    teamLink.href = `/app/team?org=${encodeURIComponent(scope)}`;
+    frag.push(teamLink);
 
     // Members
     const list = h(`<div class="card members" role="list" aria-label="Members"></div>`);

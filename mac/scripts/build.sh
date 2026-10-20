@@ -86,7 +86,10 @@ ditto "$ARCHIVE/Products/Applications/Rudder.app" "$APP"
 
 say "Checking the signature"
 codesign --verify --deep --strict --verbose=2 "$APP"
-codesign -dv "$APP" 2>&1 | grep -q "flags=.*runtime" || die "hardened runtime is not on"
+# Read it into a variable first: under pipefail, `grep -q` closing the pipe
+# early kills codesign with SIGPIPE and the check fails on a good signature.
+SIGNATURE="$(codesign -dv "$APP" 2>&1)"
+grep -q "flags=.*runtime" <<<"$SIGNATURE" || die "hardened runtime is not on"
 
 say "Notarizing the app"
 ZIP="$OUT/Rudder-notarize.zip"

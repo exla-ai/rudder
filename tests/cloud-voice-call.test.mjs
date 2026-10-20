@@ -255,3 +255,113 @@ serverTest("a call from a listed number is answered, runs a tool on the home mac
   await waitFor(() => requests.some((r) => r.url === "/v1/realtime/calls/rtc_mine/hangup"));
   assert.match(log, /voice call rtc_mine: answering/);
 });
+
+serverTest("a deploy mid-call: the caller is told, and the next server rejoins the same call", async (t) => {
+  const requests = [];
+  const sockets = [];
+  const openai = http.createServer((req, res) => {
+    let body = "";
+    req.on("data", (d) => { body += d; });
+    req.on("end", () => {
+      requests.push({ url: req.url, body: body ? JSON.parse(body) : null });
+      res.setHeader("content-type", "application/json");
+      res.end("{}");
+    });
+  });
+  const wss = new WebSocketServer({ server: openai });
+  wss.on("connection", (socket, req) => {
+    const entry = { socket, url: req.url, events: [] };
+    socket.on("message", (data) => entry.events.push(JSON.parse(data.toString())));
+    sockets.push(entry);
+  });
+  await new Promise((resolve) => openai.listen(0, "127.0.0.1", resolve));
+  t.after(() => { wss.close(); openai.close(); });
+
+  const port = await freePort();
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "rudder-call-restart-"));
+  const dbPath = path.join(dataDir, "state.sqlite");
+  const base = `http://127.0.0.1:${port}`;
+  const children = [];
+  t.after(() => {
+    for (const child of children) child.kill("SIGKILL");
+    fs.rmSync(dataDir, { recursive: true, force: true });
+  });
+  let log = "";
+  const start = async () => {
+    const child = spawn(process.execPath, [path.join(cloudDir, "dist", "server.js")], {
+      cwd: cloudDir,
+      env: {
+        ...process.env,
+        PORT: String(port),
+        BETTER_AUTH_URL: base,
+        BETTER_AUTH_SECRET: "test-secret-test-secret",
+        RUDDER_CLOUD_DATA_DIR: dataDir,
+        RUDDER_CLOUD_DB: dbPath,
+        RUDDER_CLOUD_PERSIST_STATE: "0",
+        RUDDER_S3_BUCKET: "",
+        SLACK_BOT_TOKEN: "",
+        FLY_API_TOKEN: "",
+        OPENAI_API_KEY: "sk-test-key",
+        RUDDER_OPENAI_BASE_URL: `http://127.0.0.1:${openai.address().port}`,
+        RUDDER_VOICE_CALL_WEBHOOK_SECRET: secret,
+        RUDDER_VOICE_PHONES: "+14255550100=acct-call",
+      },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    child.stdout.on("data", (d) => { log += d; });
+    child.stderr.on("data", (d) => { log += d; });
+    children.push(child);
+    await waitFor(async () => (await fetch(`${base}/health`).catch(() => null))?.ok);
+    return child;
+  };
+
+  const first = await start();
+  await waitFor(() => fs.existsSync(dbPath));
+  await sleep(150);
+  const require = createRequire(path.join(cloudDir, "package.json"));
+  const Database = require("better-sqlite3");
+  const now = new Date().toISOString();
+  const db = new Database(dbPath);
+  db.prepare(`
+    insert into rudder_workspaces (id, account_id, workspace_key, repo_name, status, machine_id, worker_token_hash,
+      source_kind, repo_url, home_id, created_at, updated_at, last_activity_at)
+    values ('home-r', 'acct-call', 'home', 'home', 'running', 'm-home', @hash, 'home', null, null, @now, @now, @now)
+  `).run({ hash: tokenHash("rdrw_restart"), now });
+  db.close();
+
+  const body = JSON.stringify({ type: "realtime.call.incoming", data: { call_id: "rtc_restart", sip_headers: [{ name: "From", value: "<sip:+14255550100@x>" }] } });
+  assert.equal((await fetch(`${base}/api/voice/call`, { method: "POST", headers: { "content-type": "application/json", ...sign(body) }, body })).status, 200);
+  await waitFor(() => sockets.length === 1 && sockets[0].events.some((e) => e.type === "response.create"));
+  const before = sockets[0];
+  before.socket.send(JSON.stringify({ type: "response.created", response: { id: "r1" } }));
+  before.socket.send(JSON.stringify({ type: "response.done", response: { id: "r1", status: "completed", output: [] } }));
+  await sleep(100);
+
+  // Fly stops the machine for a deploy.
+  const exited = new Promise((resolve) => first.on("exit", resolve));
+  first.kill("SIGINT");
+  const notice = await waitFor(() => before.events.find((e) => e.item?.role === "system" && /restarting right now/.test(e.item.content[0].text)));
+  assert.ok(notice, "the caller hears why it goes quiet");
+  await exited;
+  assert.ok(!requests.some((r) => r.url.endsWith("/hangup")), "the call is not hung up");
+
+  // The new server rejoins the call without accepting it again.
+  await start();
+  await waitFor(() => sockets.length === 2);
+  await sleep(1500);
+  assert.equal(sockets.length, 2, "rejoined once, not twice");
+  const after = sockets[1];
+  assert.equal(after.url, "/v1/realtime?call_id=rtc_restart");
+  const back = await waitFor(() => after.events.find((e) => e.item?.role === "system"));
+  assert.match(back.item.content[0].text, /reconnected now/);
+  assert.equal(requests.filter((r) => r.url.endsWith("/accept")).length, 1);
+  assert.match(log, /voice call _restart: rejoining after a restart/);
+
+  // When it ends normally it is forgotten: a third server would not rejoin it.
+  after.socket.terminate();
+  await waitFor(() => /voice call _restart: ended/.test(log.split("rejoining")[1] ?? ""));
+  await sleep(100);
+  const check = new Database(dbPath, { readonly: true });
+  assert.equal(check.prepare("select count(*) as n from rudder_voice_calls").get().n, 0);
+  check.close();
+});

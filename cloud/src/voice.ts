@@ -26,8 +26,11 @@ export type VoiceAgent = {
   phase?: string | null;
   backend?: string | null;
   model?: string | null;
+  createdAt?: number | null;
   updatedAt?: number | null;
   lastMessage?: string | null;
+  /** A task typed a moment ago whose run record does not exist yet. */
+  pending?: boolean;
   summary?: string | null;
   asks?: VoiceAsk[];
 };
@@ -49,7 +52,20 @@ export type VoiceContext = {
   rpc(method: string, params: Record<string, unknown>, timeoutMs?: number): Promise<unknown>;
   /** Clone a GitHub repo onto the home machine and open it. */
   openRepo(repo: string): Promise<unknown>;
+  /** What this conversation did, so "tell it to..." right after a start_task reaches the new agent. */
+  memory?: VoiceMemory;
+  log?: (line: string) => void;
+  /** How long to wait for a just-started agent's run to appear (tests shorten it). */
+  startWaitMs?: number;
 };
+
+export type VoiceMemory = {
+  /** The task this conversation started last. */
+  started?: { workspaceId: string; text: string; at: number; runId?: string };
+};
+
+/** A started task's follow-ups go to its agent for this long. */
+const STARTED_FOCUS_MS = 10 * 60_000;
 
 export type VoiceToolResult = { output: string; end?: boolean };
 
@@ -69,8 +85,9 @@ const projectParam = {
 };
 const agentParam = {
   type: "string",
-  description: "Which agent: words from its title or task, or its id. Leave out to mean the one that needs the user (or the only one).",
+  description: "Which agent: words from its title or task, or its id. \"just started\" means the agent your last start_task created. Leave out to mean the one that needs the user (or the only one).",
 };
+const userWords = "The user's own words, as close to verbatim as you can: drop filler like um and fix obvious speech-to-text slips, but never reinterpret (\"test site\" stays \"test site\"), expand, or add steps of your own.";
 
 export const VOICE_TOOLS: ToolDef[] = [
   {
@@ -92,13 +109,13 @@ export const VOICE_TOOLS: ToolDef[] = [
   {
     type: "function",
     name: "send_message",
-    description: "Send a message to a running or finished agent, exactly as if the user typed it to that agent. Use for instructions, follow-ups and corrections to existing work.",
+    description: "Send a message to a running or finished agent, exactly as if the user typed it to that agent. Use for instructions, follow-ups and corrections to existing work. A follow-up about a task you just started goes to agent \"just started\" (or leave agent out).",
     parameters: {
       type: "object",
       properties: {
         project: projectParam,
         agent: agentParam,
-        text: { type: "string", description: "The message, written out clearly as the user would type it (fix speech-to-text slips)." },
+        text: { type: "string", description: `The message. ${userWords}` },
       },
       required: ["text"],
       additionalProperties: false,
@@ -107,12 +124,12 @@ export const VOICE_TOOLS: ToolDef[] = [
   {
     type: "function",
     name: "start_task",
-    description: "Start new work in a project. Rudder's main agent for that project picks it up.",
+    description: "Start new work in a project as a new agent. Use it for new work, not for a follow-up to an existing agent.",
     parameters: {
       type: "object",
       properties: {
         project: projectParam,
-        text: { type: "string", description: "The task, written out clearly with everything the user said about it." },
+        text: { type: "string", description: `The task, with everything the user said about it. ${userWords}` },
       },
       required: ["text"],
       additionalProperties: false,
@@ -147,13 +164,14 @@ export const VOICE_TOOLS: ToolDef[] = [
   {
     type: "function",
     name: "agent_action",
-    description: "stop: stop the agent. interrupt: interrupt its current turn (like Esc) but keep it. merge: merge or publish its finished work. delete: remove the agent.",
+    description: "stop: stop the agent. interrupt: interrupt its current turn (like Esc) but keep it. merge: merge or publish its finished work. delete: remove the agent (only after the user said yes to deleting that exact agent). One agent per call.",
     parameters: {
       type: "object",
       properties: {
         project: projectParam,
         agent: agentParam,
         action: { type: "string", enum: ["stop", "interrupt", "merge", "delete"] },
+        confirmed: { type: "boolean", description: "For delete: true only once the user has said yes to deleting this exact agent, named back to them." },
       },
       required: ["action"],
       additionalProperties: false,
@@ -201,8 +219,10 @@ export function voiceInstructions(projects: VoiceProject[], surface: VoiceSurfac
         ? "The user PHONED you, most likely while DRIVING. Keep every reply short (one to three spoken sentences), never read out code, file paths, long ids or URLs, and never ask them to look at a screen. Ending the conversation hangs up the call."
         : "The user is talking to you on their phone. Keep replies short and spoken; never read out code, file paths, long ids or URLs.",
     "Speak naturally, like a sharp colleague giving a status update. Summarize; lead with what needs the user. Say agent names by their short title, never their id.",
-    "Always call get_overview or get_agent before describing current state; the snapshot below may be stale. Do what the user asks right away without asking for confirmation, then say in a few words what you did. If a request is ambiguous between agents or projects, ask one short question.",
-    "When the user dictates a message or task, pass it on faithfully, cleaned of filler words and speech-to-text slips, in the user's words, not a rewrite. Reply in the user's language.",
+    "Always call get_overview or get_agent before describing current state; the snapshot below may be stale. Do what the user asks right away without asking for confirmation, then say in a few words what you did and to which agent and project, so the user knows exactly where it went. The one exception is delete: name the agent and project and get a yes first. If a request is ambiguous between agents or projects, ask one short question.",
+    "When the user dictates a message or task, pass on their own words: do not reinterpret, expand or add steps. A follow-up right after you started a task is for that new agent (agent \"just started\"), not an older one.",
+    "Only say something happened when a tool result says so. If a tool says it did not work, or that it is queued or still starting, tell the user that plainly.",
+    "The user speaks English. Speech that is not English is background noise: ignore it.",
     "When the user is done, say a brief goodbye and call end_conversation.",
     "",
     "Snapshot when this conversation started:",
@@ -221,6 +241,8 @@ export function voiceSessionConfig(options: {
   instructions: string;
   transcribeModel?: string | null;
   minimal?: boolean;
+  /** Transcription language (ISO-639-1); keeps road noise from being captioned as Korean. */
+  language?: string | null;
   /** A phone call: SIP negotiates the audio format, so none is named. */
   sip?: boolean;
 }): Record<string, unknown> {
@@ -236,7 +258,9 @@ export function voiceSessionConfig(options: {
     // A car is a far-field microphone; transcripts feed the phone's captions.
     input.noise_reduction = { type: "far_field" };
     if (options.transcribeModel) {
-      input.transcription = { model: options.transcribeModel };
+      input.transcription = options.language
+        ? { model: options.transcribeModel, language: options.language }
+        : { model: options.transcribeModel };
     }
   }
   return {
@@ -342,24 +366,127 @@ async function getAgent(ctx: VoiceContext, args: Record<string, unknown>): Promi
 }
 
 async function sendMessage(ctx: VoiceContext, args: Record<string, unknown>): Promise<VoiceToolResult> {
-  const text = str(args.text).trim();
+  const text = str(args.text).trim().slice(0, 16_000);
   if (!text) {
     return { output: "What should the message say?" };
   }
+  const started = startedTarget(ctx, args);
+  if (started) {
+    const found = await waitForStarted(ctx, started);
+    if (!found) {
+      // Its run record is still being made: deliver the moment it exists.
+      void deliverWhenStarted(ctx, started, text);
+      return { output: `The new agent in ${projectName(ctx, started.workspaceId)} is still starting up; your message will reach it the moment it starts. Tell the user that, in a few words.` };
+    }
+    return delivered(ctx, found.project, found.agent, text);
+  }
   const project = resolveProject(ctx.projects(), str(args.project));
-  const agent = resolveAgent(project, str(args.agent));
-  await ctx.rpc("send", { workspaceId: project.workspaceId, runId: agent.id, text: text.slice(0, 16_000) });
-  return { output: `Sent to ${shortTitle(agent)} in ${project.name}.` };
+  return delivered(ctx, project, resolveAgent(project, str(args.agent)), text);
+}
+
+async function delivered(ctx: VoiceContext, project: VoiceProject, agent: VoiceAgent, text: string): Promise<VoiceToolResult> {
+  const result = (await ctx.rpc("send", { workspaceId: project.workspaceId, runId: agent.id, text })) as { status?: string } | null;
+  const name = `"${shortTitle(agent)}" (${STATUS_WORDS[agent.status ?? ""] ?? agent.status ?? "unknown"}) in ${project.name}`;
+  ctx.log?.(`sent to ${agent.id} in ${project.name}: ${result?.status ?? "?"}`);
+  if (result?.status === "queued") {
+    return { output: `Queued for ${name}: "${clip(text, 200)}". Its dashboard has not taken it yet; it will on its next check. Tell the user it is queued for that agent.` };
+  }
+  return { output: `Delivered to ${name}: "${clip(text, 200)}". Tell the user in a few words which agent got it.` };
 }
 
 async function startTask(ctx: VoiceContext, args: Record<string, unknown>): Promise<VoiceToolResult> {
-  const text = str(args.text).trim();
+  const text = str(args.text).trim().slice(0, 16_000);
   if (!text) {
     return { output: "What is the task?" };
   }
   const project = resolveProject(ctx.projects(), str(args.project));
-  await ctx.rpc("task", { workspaceId: project.workspaceId, text: text.slice(0, 16_000) });
-  return { output: `Started in ${project.name}.` };
+  const at = Date.now();
+  const result = (await ctx.rpc("task", { workspaceId: project.workspaceId, text })) as { status?: string } | null;
+  if (ctx.memory) {
+    ctx.memory.started = { workspaceId: project.workspaceId, text, at };
+  }
+  const queued = result?.status === "queued" ? " Its dashboard has not picked it up yet; it will on its next check." : "";
+  return { output: `Started a new agent in ${project.name} for: "${clip(text, 200)}".${queued} Follow-ups for it go to agent "just started".` };
+}
+
+const JUST_STARTED = /^(the )?(one|agent|task)?\s*(you |i |we )?(just )?(started|created|new|newest one|new one|new agent|new task)( one| agent| task)?$|^just started$/;
+
+/** The task this conversation just started, when the call is about it. */
+function startedTarget(ctx: VoiceContext, args: Record<string, unknown>): NonNullable<VoiceMemory["started"]> | null {
+  const started = ctx.memory?.started;
+  if (!started || Date.now() - started.at > STARTED_FOCUS_MS) {
+    return null;
+  }
+  const query = str(args.agent).trim().toLowerCase();
+  const named = query !== "" && JUST_STARTED.test(query);
+  if (!named && query !== "") {
+    return null;
+  }
+  const project = str(args.project).trim();
+  if (project) {
+    try {
+      if (resolveProject(ctx.projects(), project).workspaceId !== started.workspaceId) {
+        return null;
+      }
+    } catch {
+      return null;
+    }
+  }
+  return started;
+}
+
+function findStarted(ctx: VoiceContext, started: NonNullable<VoiceMemory["started"]>): { project: VoiceProject; agent: VoiceAgent } | null {
+  const project = ctx.projects().find((candidate) => candidate.workspaceId === started.workspaceId);
+  if (!project) {
+    return null;
+  }
+  const real = project.agents.filter((agent) => !agent.pending);
+  if (started.runId) {
+    const agent = real.find((candidate) => candidate.id === started.runId);
+    return agent ? { project, agent } : null;
+  }
+  const words = normalized(started.text).slice(0, 80);
+  const byTask = real.filter((agent) => words && normalized(agent.task ?? "").includes(words));
+  const newer = real.filter((agent) => (agent.createdAt ?? 0) >= started.at - 2_000);
+  const agent = byTask.length === 1 ? byTask[0] : newer.length === 1 ? newer[0] : byTask.find((candidate) => newer.includes(candidate));
+  if (!agent) {
+    return null;
+  }
+  started.runId = agent.id;
+  return { project, agent };
+}
+
+async function waitForStarted(ctx: VoiceContext, started: NonNullable<VoiceMemory["started"]>): Promise<{ project: VoiceProject; agent: VoiceAgent } | null> {
+  const deadline = Date.now() + (ctx.startWaitMs ?? 15_000);
+  for (;;) {
+    const found = findStarted(ctx, started);
+    if (found || Date.now() >= deadline) {
+      return found;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+}
+
+async function deliverWhenStarted(ctx: VoiceContext, started: NonNullable<VoiceMemory["started"]>, text: string): Promise<void> {
+  const deadline = Date.now() + 3 * 60_000;
+  while (Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 2_000));
+    const found = findStarted(ctx, started);
+    if (found) {
+      try {
+        await ctx.rpc("send", { workspaceId: found.project.workspaceId, runId: found.agent.id, text });
+        ctx.log?.(`held message delivered to ${found.agent.id} in ${found.project.name}`);
+      } catch (error) {
+        ctx.log?.(`held message for ${found.agent.id} failed: ${error instanceof Error ? error.message : String(error)}`);
+      }
+      return;
+    }
+  }
+  ctx.log?.(`held message dropped: the new agent in ${started.workspaceId} never appeared`);
+}
+
+function projectName(ctx: VoiceContext, workspaceId: string): string {
+  return ctx.projects().find((project) => project.workspaceId === workspaceId)?.name ?? "that project";
 }
 
 async function answerPrompt(ctx: VoiceContext, args: Record<string, unknown>): Promise<VoiceToolResult> {
@@ -427,6 +554,9 @@ async function agentAction(ctx: VoiceContext, args: Record<string, unknown>): Pr
   }
   if (action !== "stop" && action !== "merge" && action !== "delete") {
     return { output: "The action must be stop, interrupt, merge or delete." };
+  }
+  if (action === "delete" && args.confirmed !== true) {
+    return { output: `Not deleted yet. Ask the user: delete "${shortTitle(agent)}" in ${project.name}? Call again with confirmed true only if they say yes.` };
   }
   await ctx.rpc("action", { workspaceId: project.workspaceId, runId: agent.id, action });
   if (action === "merge") {

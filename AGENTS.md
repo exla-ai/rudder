@@ -1088,7 +1088,18 @@ brain lives in the cloud, and the phone is a first-class client.
   interrupt = Esc, stop / merge / delete, find and open repos, end). Spoken names
   resolve by word overlap (`resolveProject` / `resolveAgent`); no name means the
   one that needs you; ambiguity goes back to the model as a question. Decided with
-  the user: act without spoken confirmation. Env: `OPENAI_API_KEY` (or
+  the user: act without spoken confirmation, EXCEPT delete (2026-10-20, after a
+  call deleted the wrong agent): `agent_action` delete without `confirmed: true`
+  returns "ask the user", naming the agent. Every message/task result names the
+  agent, its status and project and says delivered vs queued, so the assistant
+  tells the caller exactly where it went. A follow-up right after `start_task`
+  goes to the NEW agent (agent "just started", or no agent named): `VoiceMemory`
+  per account remembers the started task, waits up to 15s for its run record
+  (the dashboard lists it as `pending` first) and, failing that, holds the
+  message and delivers it the moment the run exists. Tool texts tell the model
+  to pass the user's own words ("test site" once became "test suite").
+  Transcription is pinned to `RUDDER_VOICE_LANGUAGE` (default `en`; road noise
+  was captioned as Korean). Env: `OPENAI_API_KEY` (or
   `RUDDER_OPENAI_API_KEY`, 503 without), `RUDDER_VOICE_MODEL` (default
   `gpt-realtime-2.1`), `RUDDER_VOICE` (`marin`), `RUDDER_VOICE_TRANSCRIBE_MODEL`
   (`""` turns captions off). CarPlay (`CarPlaySceneDelegate.swift`) is a list
@@ -1113,6 +1124,16 @@ brain lives in the cloud, and the phone is a first-class client.
   time, never over the user, tool batches in order, live updates in quiet moments) and
   hangs up after the goodbye (`output_audio_buffer.stopped`, 6s cap), after 3 idle
   minutes, or at 30 minutes. Audio never touches the control plane.
+  **A deploy does not end a call.** OpenAI keeps the SIP call up when our socket
+  drops (seen: a deploy killed Rudder's side 7 minutes into a call and the line
+  stayed open, toolless, for 6 more). Each live call is a `rudder_voice_calls`
+  row (persisted to S3 with the rest of the state on shutdown). On SIGINT the
+  server tells each caller it is restarting (`VoiceCallControl.notice`, then 3s,
+  `kill_timeout = "10s"` in fly.toml) and keeps the rows; the next server reads
+  them AT BOOT (`voiceCallsAtBoot`, so a call answered meanwhile is not joined
+  twice), reconnects to `?call_id=` without accepting again (`resume: true`), and
+  tells the model it is back and to re-check anything in flight. A call that
+  ends normally deletes its row.
 - **Twilio's side of the phone line (`cloud/src/twilio-watch.ts`).** Rudder only hears
   about a call once OpenAI's webhook arrives, so a call Twilio failed to route, or one
   OpenAI never handed over, used to leave no trace. With `TWILIO_ACCOUNT_SID` +

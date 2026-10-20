@@ -106,6 +106,8 @@ unitTest("the model starts with a spoken-friendly snapshot that leads with what 
   assert.deepEqual(session.audio.input.format, { type: "audio/pcm", rate: 24000 });
   assert.equal(session.audio.output.voice, "marin");
   assert.equal(session.audio.input.transcription.model, "t");
+  assert.equal(session.audio.input.transcription.language, undefined);
+  assert.equal(voice.voiceSessionConfig({ model: "m", voice: "marin", instructions: "x", transcribeModel: "t", language: "en" }).audio.input.transcription.language, "en", "road noise is not captioned as Korean");
   assert.ok(session.tools.every((tool) => tool.type === "function" && tool.parameters.type === "object"));
   const minimal = voice.voiceSessionConfig({ model: "m", voice: "marin", instructions: "x", transcribeModel: "t", minimal: true });
   assert.equal(minimal.audio.input.transcription, undefined);
@@ -130,7 +132,7 @@ unitTest("tool calls do on the home machine what the app's buttons do", async ()
   const { ctx, calls } = fakeContext();
 
   let result = await voice.runVoiceTool(ctx, "send_message", JSON.stringify({ project: "libra", agent: "login", text: "also add a test" }));
-  assert.equal(result.output, "Sent to Fix login redirect in libra.");
+  assert.equal(result.output, 'Delivered to "Fix login redirect" (working) in libra: "also add a test". Tell the user in a few words which agent got it.');
   assert.deepEqual(calls.pop(), { method: "send", params: { workspaceId: "ws-libra", runId: "run-login", text: "also add a test" } });
 
   result = await voice.runVoiceTool(ctx, "start_task", JSON.stringify({ project: "shop", text: "add dark mode" }));
@@ -179,8 +181,59 @@ unitTest("tool calls do on the home machine what the app's buttons do", async ()
   assert.match((await voice.runVoiceTool(ctx, "launch_rockets", "{}")).output, /no tool called launch_rockets/);
   assert.equal(calls.length, 0);
 
+  result = await voice.runVoiceTool(ctx, "agent_action", JSON.stringify({ project: "libra", agent: "old docs", action: "delete" }));
+  assert.match(result.output, /^Not deleted yet\. Ask the user: delete "Old docs cleanup" in libra\?/);
+  assert.equal(calls.length, 0, "a delete waits for a spoken yes");
+  result = await voice.runVoiceTool(ctx, "agent_action", JSON.stringify({ project: "libra", agent: "old docs", action: "delete", confirmed: true }));
+  assert.equal(result.output, "Deleted Old docs cleanup in libra.");
+  assert.deepEqual(calls.pop(), { method: "action", params: { workspaceId: "ws-libra", runId: "run-old", action: "delete" } });
+
+  const queued = { ...ctx, rpc: async () => ({ ok: true, status: "queued" }) };
+  assert.match((await voice.runVoiceTool(queued, "send_message", JSON.stringify({ project: "libra", agent: "login", text: "hi" }))).output, /^Queued for "Fix login redirect"/);
+
   const failing = { ...ctx, rpc: async () => { throw new Error("the libra dashboard is starting"); } };
   assert.equal((await voice.runVoiceTool(failing, "start_task", JSON.stringify({ project: "libra", text: "x" }))).output, "That did not work: the libra dashboard is starting");
+});
+
+unitTest("a follow-up right after start_task reaches the new agent, not an older one", async () => {
+  const list = projects();
+  const { ctx, calls } = fakeContext(list);
+  ctx.memory = {};
+  ctx.startWaitMs = 3_000;
+  const result = await voice.runVoiceTool(ctx, "start_task", JSON.stringify({ project: "libra", text: "deploy the merged changes to the cloud" }));
+  assert.match(result.output, /^Started a new agent in libra for: "deploy the merged changes to the cloud"\. Follow-ups for it go to agent "just started"\./);
+  calls.pop();
+  // The dashboard lists it as pending first, then its run record appears.
+  list[0].agents.push({ id: "pending-1", title: "deploy the merged changes", task: "deploy the merged changes to the cloud", status: "starting", pending: true });
+  setTimeout(() => list[0].agents.push({ id: "run-deploy", title: "Deploy merged changes", task: "deploy the merged changes to the cloud", status: "working", createdAt: Date.now() }), 600);
+  const sent = await voice.runVoiceTool(ctx, "send_message", JSON.stringify({ agent: "just started", text: "also deploy a new test site" }));
+  assert.match(sent.output, /^Delivered to "Deploy merged changes" \(working\) in libra: "also deploy a new test site"/);
+  assert.deepEqual(calls.pop(), { method: "send", params: { workspaceId: "ws-libra", runId: "run-deploy", text: "also deploy a new test site" } });
+  // Left out, the agent is still the new one; named, it is the one named.
+  await voice.runVoiceTool(ctx, "send_message", JSON.stringify({ text: "and tell me when it is live" }));
+  assert.equal(calls.pop().params.runId, "run-deploy");
+  await voice.runVoiceTool(ctx, "send_message", JSON.stringify({ project: "libra", agent: "login", text: "x" }));
+  assert.equal(calls.pop().params.runId, "run-login");
+  // Another project's agents are not pulled to the new one.
+  await voice.runVoiceTool(ctx, "send_message", JSON.stringify({ project: "shop", agent: "database", text: "x" }));
+  assert.equal(calls.pop().params.runId, "run-db");
+});
+
+unitTest("a message for an agent still starting is held and delivered once it exists", async () => {
+  const list = projects();
+  const { ctx, calls } = fakeContext(list);
+  const logs = [];
+  Object.assign(ctx, { memory: {}, startWaitMs: 0, log: (line) => logs.push(line) });
+  await voice.runVoiceTool(ctx, "start_task", JSON.stringify({ project: "shop", text: "add dark mode" }));
+  calls.pop();
+  const result = await voice.runVoiceTool(ctx, "send_message", JSON.stringify({ text: "use the brand colors" }));
+  assert.match(result.output, /still starting up; your message will reach it the moment it starts/);
+  list[1].agents.push({ id: "run-dark", title: "Add dark mode", task: "add dark mode", status: "working", createdAt: Date.now() });
+  for (let i = 0; i < 40 && !calls.length; i++) {
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  assert.deepEqual(calls.pop(), { method: "send", params: { workspaceId: "ws-shop", runId: "run-dark", text: "use the brand colors" } });
+  assert.match(logs.at(-1), /held message delivered to run-dark/);
 });
 
 unitTest("while a conversation is open, a finished, failed or blocked agent becomes news, once", () => {

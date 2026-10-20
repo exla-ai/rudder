@@ -13,10 +13,10 @@ import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import type { Duplex } from "node:stream";
 import { WebSocket, WebSocketServer } from "ws";
 import { createSecretsVault, SecretsVaultError, type SecretItemInput, type SecretsVault } from "./secrets.js";
-import { callerIdTrusted, callerNumber, incomingCall, parseVoicePhones, runVoiceCall, verifyOpenAiWebhook, type IncomingCall } from "./voice-call.js";
+import { callerIdTrusted, callerNumber, incomingCall, parseVoicePhones, runVoiceCall, verifyOpenAiWebhook, type IncomingCall, type VoiceCallControl } from "./voice-call.js";
 import { TwilioWatch, type RudderCallRecord } from "./twilio-watch.js";
 import { composeDigest, DEFAULT_DIGEST_TIME_ZONE, digestDueDay, digestPreview, digestWindow, validTimeZone, zonedClock, type Digest, type DigestRawProject } from "./digest.js";
-import { runVoiceTool, voiceGreeting, voiceInstructions, voiceSessionConfig, voiceUpdateMessage, voiceUpdates, type VoiceContext, type VoiceProject } from "./voice.js";
+import { runVoiceTool, voiceGreeting, voiceInstructions, voiceSessionConfig, voiceUpdateMessage, voiceUpdates, type VoiceContext, type VoiceMemory, type VoiceProject } from "./voice.js";
 import {
   formatOutputForSlack,
   parseSlackCommand,
@@ -294,6 +294,13 @@ database.exec(`
     digest_json text not null,
     unique(account_id, day)
   );
+  -- Phone calls in progress, so a restarted server rejoins them (voice-call.ts).
+  create table if not exists rudder_voice_calls (
+    call_id text primary key,
+    account_id text not null,
+    started_at integer not null
+  );
+
   create table if not exists rudder_account_prefs (
     account_id text primary key,
     time_zone text,
@@ -1170,9 +1177,15 @@ server.listen(port, () => {
 
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
   process.once(signal, () => {
-    void persistDatabaseToS3().finally(() => {
-      process.exit(signal === "SIGINT" ? 130 : 143);
-    });
+    // A deploy used to cut a phone call off mid-sentence. The call itself
+    // stays up at OpenAI and the next server rejoins it (resumeVoiceCalls);
+    // here the caller hears why it goes quiet for a few seconds.
+    const calls = shutDownVoiceCalls();
+    void sleep(calls ? VOICE_RESTART_NOTICE_MS : 0)
+      .then(() => persistDatabaseToS3())
+      .finally(() => {
+        process.exit(signal === "SIGINT" ? 130 : 143);
+      });
   });
 }
 
@@ -6988,6 +7001,8 @@ const VOICE_MODEL = process.env.RUDDER_VOICE_MODEL || "gpt-realtime-2.1";
 const VOICE_NAME = process.env.RUDDER_VOICE || "marin";
 // Captions on the phone come from input transcription; "" turns it off.
 const VOICE_TRANSCRIBE_MODEL = process.env.RUDDER_VOICE_TRANSCRIBE_MODEL ?? "gpt-4o-mini-transcribe";
+// "" lets the transcriber guess, which captioned road noise as Korean.
+const VOICE_LANGUAGE = process.env.RUDDER_VOICE_LANGUAGE ?? "en";
 
 const VOICE_MINTS_PER_HOUR = Number(process.env.RUDDER_VOICE_MINTS_PER_HOUR) || 40;
 const voiceMints = new Map<string, number[]>();
@@ -7001,8 +7016,19 @@ function voiceProjects(accountId: string): VoiceProject[] {
   return home ? (homeProjects(home) as unknown as VoiceProject[]) : [];
 }
 
+// Per account, so a follow-up to a task started a moment ago reaches the new
+// agent whether it came over a call or the app's voice screen.
+const voiceMemories = new Map<string, VoiceMemory>();
+
 function voiceContext(accountId: string): VoiceContext {
+  let memory = voiceMemories.get(accountId);
+  if (!memory) {
+    memory = {};
+    voiceMemories.set(accountId, memory);
+  }
   return {
+    memory,
+    log: (line) => console.log(`voice ${accountId.slice(-6)}: ${line}`),
     projects: () => voiceProjects(accountId),
     rpc: async (method, params, timeoutMs) => {
       const home = findHomeRow(accountId);
@@ -7050,7 +7076,7 @@ async function handleVoiceSession(res: ServerResponse, account: { accountId: str
     body: JSON.stringify({
       // Only needed to open the socket; a connected session keeps going.
       expires_after: { anchor: "created_at", seconds: 120 },
-      session: voiceSessionConfig({ model: VOICE_MODEL, voice: VOICE_NAME, instructions, transcribeModel: VOICE_TRANSCRIBE_MODEL, minimal }),
+      session: voiceSessionConfig({ model: VOICE_MODEL, voice: VOICE_NAME, instructions, transcribeModel: VOICE_TRANSCRIBE_MODEL, language: VOICE_LANGUAGE, minimal }),
     }),
     signal: AbortSignal.timeout(20_000),
   });
@@ -7169,34 +7195,114 @@ async function answerVoiceCall(call: IncomingCall): Promise<void> {
   const projects = voiceProjects(accountId);
   const instructions = voiceInstructions(projects, "call");
   const session = (minimal: boolean) =>
-    voiceSessionConfig({ model: VOICE_MODEL, voice: VOICE_NAME, instructions, transcribeModel: VOICE_TRANSCRIBE_MODEL, minimal, sip: true });
+    voiceSessionConfig({ model: VOICE_MODEL, voice: VOICE_NAME, instructions, transcribeModel: VOICE_TRANSCRIBE_MODEL, language: VOICE_LANGUAGE, minimal, sip: true });
   const agents = projects.reduce((sum, project) => sum + (project.agents?.length ?? 0), 0);
   noteVoiceCall(tag, "answering");
   console.log(`voice call ${tag}: answering (${projects.length} projects, ${agents} agents${isOpen(homeControls.get(home.id)) ? "" : ", home not connected"})`);
-  await runVoiceCall({
-    callId: call.callId,
-    apiKey,
-    baseUrl: OPENAI_BASE_URL,
+  await driveVoiceCall(call.callId, accountId, Date.now(), {
     session: session(false),
     fallbackSession: session(true),
     greeting: voiceGreeting(projects),
-    ctx: voiceContext(accountId),
-    safetyIdentifier: createHash("sha256").update(accountId).digest("hex").slice(0, 32),
-    log: (message) => {
-      if (message === "ended") {
-        noteVoiceCall(tag, "ended");
-      }
-      console.log(`voice call ${tag}: ${message}`);
-    },
-    updateMs: Number(process.env.RUDDER_VOICE_CALL_UPDATE_MS) || undefined,
   });
 }
+
+const VOICE_RESTART_NOTICE_MS = 3_000;
+const VOICE_CALL_MAX_MS = 30 * 60_000;
+const insertVoiceCall = database.prepare("insert or replace into rudder_voice_calls (call_id, account_id, started_at) values (?, ?, ?)");
+const deleteVoiceCall = database.prepare("delete from rudder_voice_calls where call_id = ?");
+const listVoiceCalls = database.prepare("select call_id, account_id, started_at from rudder_voice_calls");
+const liveVoiceCalls = new Map<string, VoiceCallControl | null>();
+let voiceShuttingDown = false;
+
+// One call on this server, new or rejoined after a restart. Its row lives
+// while the call does, so the next server knows to rejoin it.
+async function driveVoiceCall(
+  callId: string,
+  accountId: string,
+  startedAt: number,
+  how: { session?: Record<string, unknown>; fallbackSession?: Record<string, unknown>; greeting: string; resume?: boolean },
+): Promise<void> {
+  const tag = callId.slice(-8);
+  const apiKey = openAiApiKey();
+  insertVoiceCall.run(callId, accountId, startedAt);
+  schedulePersistDatabase();
+  liveVoiceCalls.set(callId, null);
+  try {
+    await runVoiceCall({
+      callId,
+      apiKey,
+      baseUrl: OPENAI_BASE_URL,
+      session: how.session ?? {},
+      fallbackSession: how.fallbackSession,
+      greeting: how.greeting,
+      resume: how.resume,
+      onControl: (control) => liveVoiceCalls.set(callId, control),
+      maxMs: Math.max(60_000, VOICE_CALL_MAX_MS - (Date.now() - startedAt)),
+      ctx: voiceContext(accountId),
+      safetyIdentifier: createHash("sha256").update(accountId).digest("hex").slice(0, 32),
+      log: (message) => {
+        if (message === "ended") {
+          noteVoiceCall(tag, "ended");
+        }
+        console.log(`voice call ${tag}: ${message}`);
+      },
+      updateMs: Number(process.env.RUDDER_VOICE_CALL_UPDATE_MS) || undefined,
+    });
+  } finally {
+    liveVoiceCalls.delete(callId);
+    // Going down mid-call: keep the row so the next server rejoins it.
+    if (!voiceShuttingDown) {
+      deleteVoiceCall.run(callId);
+      schedulePersistDatabase();
+    }
+  }
+}
+
+/** Tells every live call the server is restarting; returns how many there were. */
+function shutDownVoiceCalls(): number {
+  voiceShuttingDown = true;
+  for (const [callId, control] of liveVoiceCalls) {
+    console.log(`voice call ${callId.slice(-8)}: server restarting, the next one rejoins`);
+    control?.notice("Rudder's server is restarting right now (not from the user). Tell the user in one short sentence that you are reconnecting and will be back in a few seconds. Do not call any tools until you are told you are back.");
+  }
+  return liveVoiceCalls.size;
+}
+
+// The calls the previous server left, read at boot: a call answered here in
+// the meantime is this server's own and must not be joined twice.
+const voiceCallsAtBoot = listVoiceCalls.all() as Array<{ call_id: string; account_id: string; started_at: number }>;
+
+function resumeVoiceCalls(): void {
+  if (!openAiApiKey()) {
+    return;
+  }
+  for (const row of voiceCallsAtBoot) {
+    if (liveVoiceCalls.has(row.call_id)) {
+      continue;
+    }
+    if (Date.now() - row.started_at > VOICE_CALL_MAX_MS) {
+      deleteVoiceCall.run(row.call_id);
+      continue;
+    }
+    const tag = row.call_id.slice(-8);
+    noteVoiceCall(tag, "answering", undefined, row.started_at);
+    console.log(`voice call ${tag}: rejoining after a restart`);
+    void driveVoiceCall(row.call_id, row.account_id, row.started_at, {
+      resume: true,
+      greeting: "You were cut off for a few seconds while Rudder's server restarted, and you are reconnected now (not from the user). Tell the user in one short sentence that you are back. Anything you were doing just before may not have finished: check with get_overview or get_agent before saying it did.",
+    }).catch((error) => {
+      console.warn(`voice call ${tag}: could not rejoin: ${error instanceof Error ? error.message : String(error)}`);
+    });
+  }
+}
+
+setTimeout(resumeVoiceCalls, 1_000).unref?.();
 
 // Rudder's side of each call, for joining with Twilio's (cloud/src/twilio-watch.ts).
 // In memory: a restart forgets them, and the Fly log keeps the long history.
 const voiceCallRecords: RudderCallRecord[] = [];
 
-function noteVoiceCall(tag: string, outcome: RudderCallRecord["outcome"], detail?: string): void {
+function noteVoiceCall(tag: string, outcome: RudderCallRecord["outcome"], detail?: string, at = Date.now()): void {
   const record = voiceCallRecords.find((entry) => entry.tag === tag);
   if (record) {
     // "ended" never hides why a call was refused or failed.
@@ -7206,7 +7312,7 @@ function noteVoiceCall(tag: string, outcome: RudderCallRecord["outcome"], detail
     }
     return;
   }
-  voiceCallRecords.push({ tag, at: Date.now(), outcome, detail });
+  voiceCallRecords.push({ tag, at, outcome, detail });
   if (voiceCallRecords.length > 200) {
     voiceCallRecords.shift();
   }

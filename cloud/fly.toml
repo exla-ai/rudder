@@ -1,5 +1,7 @@
 app = "rudder-cloud-control"
 primary_region = "sjc"
+# Room to tell a caller the server is restarting before it goes (voice-call.ts).
+kill_timeout = "10s"
 
 [build]
   dockerfile = "Dockerfile"
@@ -13,7 +15,7 @@ primary_region = "sjc"
   RUDDER_CLOUD_DATA_DIR = "/tmp/rudder-cloud"
   RUDDER_FLY_APP_NAME = "rudder-workers-exla"
   RUDDER_FLY_REGION = "sjc"
-  RUDDER_WORKER_IMAGE = "registry.fly.io/rudder-workers-exla:3.5.5"
+  RUDDER_WORKER_IMAGE = "registry.fly.io/rudder-workers-exla:3.5.6-1"
   RUDDER_IDLE_PAUSE_MS = "7200000"
   RUDDER_PUBLIC_LOGIN_URL = "https://rudder.exla.ai/login"
   GOOGLE_CLIENT_ID = "126214446123-b245olbglilh1edvnk0qu7sb2asbin2q.apps.googleusercontent.com"

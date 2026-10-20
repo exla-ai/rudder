@@ -139,6 +139,19 @@ export type VoiceCallOptions = {
   maxMs?: number;
   /** How long the goodbye may play before hanging up. */
   goodbyeMs?: number;
+  /**
+   * Rejoin a call this server already accepted before it restarted: no accept,
+   * and `greeting` tells the model it is back. OpenAI keeps the call up when
+   * our socket drops, so a deploy no longer ends it.
+   */
+  resume?: boolean;
+  /** Called once connected with a way to speak to the model mid-call (a restart notice). */
+  onControl?: (control: VoiceCallControl) => void;
+};
+
+export type VoiceCallControl = {
+  /** Have the model say something now, unless the user is talking. */
+  notice(text: string): void;
 };
 
 type ToolCall = { name: string; arguments: string; callId: string };
@@ -157,13 +170,15 @@ export async function runVoiceCall(options: VoiceCallOptions): Promise<void> {
     signal: AbortSignal.timeout(15_000),
   });
 
-  let accepted = await api("accept", options.session);
-  if (accepted.status === 400 && options.fallbackSession) {
-    log(`accept refused (${(await accepted.text()).slice(0, 300)}); retrying without extras`);
-    accepted = await api("accept", options.fallbackSession);
-  }
-  if (!accepted.ok) {
-    throw new Error(`accept failed: ${accepted.status} ${(await accepted.text()).slice(0, 300)}`);
+  if (!options.resume) {
+    let accepted = await api("accept", options.session);
+    if (accepted.status === 400 && options.fallbackSession) {
+      log(`accept refused (${(await accepted.text()).slice(0, 300)}); retrying without extras`);
+      accepted = await api("accept", options.fallbackSession);
+    }
+    if (!accepted.ok) {
+      throw new Error(`accept failed: ${accepted.status} ${(await accepted.text()).slice(0, 300)}`);
+    }
   }
 
   const socket = new WebSocket(`${options.baseUrl.replace(/^http/, "ws")}/v1/realtime?call_id=${encodeURIComponent(options.callId)}`, {
@@ -305,9 +320,15 @@ export async function runVoiceCall(options: VoiceCallOptions): Promise<void> {
   };
 
   socket.on("open", () => {
-    log("connected");
+    log(options.resume ? "reconnected" : "connected");
     systemMessage(options.greeting);
     requestResponse();
+    options.onControl?.({
+      notice: (text) => {
+        systemMessage(text);
+        requestResponse();
+      },
+    });
   });
 
   socket.on("message", (data) => {

@@ -906,7 +906,7 @@ dialog.sheet .dialog { border-radius: 22px 22px 0 0; padding-bottom: calc(var(--
 .d-head { font-weight: 650; font-size: 17px; letter-spacing: -0.01em; margin-top: 10px; line-height: 1.3; }
 .d-sub { font-size: 13px; color: var(--muted); margin-top: 4px; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
 .d-sub:empty, .d-stats:empty, .d-lines:empty { display: none; }
-.d-stats { margin-top: 10px; }
+.d-stats { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 14px; margin-top: 10px; font-size: 13px; color: var(--muted); }
 .d-lines { font-size: 14px; color: var(--ink-2); margin-top: 6px; }
 .d-days { display: flex; gap: 8px; overflow-x: auto; margin: 6px -16px 0; padding: 2px 16px 4px; scrollbar-width: none; }
 .d-days::-webkit-scrollbar { display: none; }

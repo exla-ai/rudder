@@ -416,79 +416,144 @@
             </p>
           </div>
 
-          <ul class="integrations" data-reveal>
-            <li class="integration">
-              <span class="integration-logo"><svg viewBox="0 0 24 24" aria-hidden="true"><path fill="#E01E5A" d="M6.2 14.6a2.1 2.1 0 1 1-2.1-2.1h2.1v2.1zm1 0a2.1 2.1 0 1 1 4.2 0v5.3a2.1 2.1 0 1 1-4.2 0v-5.3z"/><path fill="#36C5F0" d="M9.4 6.2a2.1 2.1 0 1 1 2.1-2.1v2.1H9.4zm0 1a2.1 2.1 0 1 1 0 4.2H4.1a2.1 2.1 0 1 1 0-4.2h5.3z"/><path fill="#2EB67D" d="M17.8 9.4a2.1 2.1 0 1 1 2.1 2.1h-2.1V9.4zm-1 0a2.1 2.1 0 1 1-4.2 0V4.1a2.1 2.1 0 1 1 4.2 0v5.3z"/><path fill="#ECB22E" d="M14.6 17.8a2.1 2.1 0 1 1-2.1 2.1v-2.1h2.1zm0-1a2.1 2.1 0 1 1 0-4.2h5.3a2.1 2.1 0 1 1 0 4.2h-5.3z"/></svg></span>
-              <h3>Slack</h3>
-              <p>
-                Pings your channel when an agent needs you, finishes, or fails.
-                <code class="mono">/rudder &lt;project&gt; &lt;task&gt;</code> starts one.
-              </p>
-            </li>
-            <li class="integration">
-              <span class="integration-logo"><svg viewBox="0 0 24 24" aria-hidden="true"><path fill="#5E6AD2" d="M2.9 13.9 10.1 21.1A9.2 9.2 0 0 1 2.9 13.9zM2.8 11.4l9.8 9.8a9 9 0 0 0 2.1-.4L3.2 9.3a9 9 0 0 0-.4 2.1zM3.9 7.7l12.4 12.4c.5-.3 1-.6 1.5-1L4.9 6.2c-.4.5-.7 1-1 1.5zM6 5.1A9.2 9.2 0 1 1 18.9 18L6 5.1z"/></svg></span>
-              <h3>Linear</h3>
-              <p>
-                Start an agent from any issue. It comments back on the issue as
-                it goes.
-              </p>
-            </li>
-          </ul>
+          <!-- Radios, not JS: both demos are in the DOM, Slack is checked, and
+               each panel's markup is its final frame, so this reads fine with
+               scripting off. The script below replays the visible one. -->
+          <div class="intg" data-reveal>
+            <input class="intg-input" type="radio" name="intg" id="intg-slack" checked />
+            <input class="intg-input" type="radio" name="intg" id="intg-linear" />
 
-          <div class="flow" data-reveal aria-label="Demonstration: assigning a Linear issue to Rudder starts an agent, and Slack pings you when it has a question" role="img">
-            <div class="flow-card flow-linear">
-              <div class="flow-app"><svg viewBox="0 0 24 24" aria-hidden="true"><path fill="#5E6AD2" d="M2.9 13.9 10.1 21.1A9.2 9.2 0 0 1 2.9 13.9zM2.8 11.4l9.8 9.8a9 9 0 0 0 2.1-.4L3.2 9.3a9 9 0 0 0-.4 2.1zM3.9 7.7l12.4 12.4c.5-.3 1-.6 1.5-1L4.9 6.2c-.4.5-.7 1-1 1.5zM6 5.1A9.2 9.2 0 1 1 18.9 18L6 5.1z"/></svg><span>Linear</span><span class="flow-crumb">Rudder › EXL-142</span></div>
-              <div class="flow-body">
-                <p class="flow-title">Preview links should open in the phone app</p>
-                <dl class="flow-props">
-                  <div><dt>Status</dt><dd><span class="fl-pill fl-todo" data-to="1">Todo</span><span class="fl-pill fl-prog" data-from="1">In Progress</span></dd></div>
-                  <div class="flow-assign"><dt>Assignee</dt><dd><span class="fl-none" data-to="1">Unassigned</span><span class="fl-who" data-from="1"><img src="/favicon.svg" width="16" height="16" alt="" /> Rudder</span><span class="flow-cursor" data-from="0" data-to="2" aria-hidden="true"></span></dd></div>
-                </dl>
-                <div class="flow-comment" data-from="5">
-                  <span class="fl-avatar"><img src="/favicon.svg" width="16" height="16" alt="" /></span>
-                  <p><b>Rudder</b> started an agent on <span class="mono">rudder</span>. <u>Open in Rudder</u></p>
+            <div class="intg-tabs">
+              <label for="intg-slack" class="intg-tab">
+                <span class="integration-logo"><svg viewBox="0 0 24 24" aria-hidden="true"><path fill="#E01E5A" d="M6.2 14.6a2.1 2.1 0 1 1-2.1-2.1h2.1v2.1zm1 0a2.1 2.1 0 1 1 4.2 0v5.3a2.1 2.1 0 1 1-4.2 0v-5.3z"/><path fill="#36C5F0" d="M9.4 6.2a2.1 2.1 0 1 1 2.1-2.1v2.1H9.4zm0 1a2.1 2.1 0 1 1 0 4.2H4.1a2.1 2.1 0 1 1 0-4.2h5.3z"/><path fill="#2EB67D" d="M17.8 9.4a2.1 2.1 0 1 1 2.1 2.1h-2.1V9.4zm-1 0a2.1 2.1 0 1 1-4.2 0V4.1a2.1 2.1 0 1 1 4.2 0v5.3z"/><path fill="#ECB22E" d="M14.6 17.8a2.1 2.1 0 1 1-2.1 2.1v-2.1h2.1zm0-1a2.1 2.1 0 1 1 0-4.2h5.3a2.1 2.1 0 1 1 0 4.2h-5.3z"/></svg></span>
+                <span class="intg-tab-text">
+                  <b>Slack</b>
+                  <em>Talk to your agents from a channel. <code class="mono">/rudder</code> starts one, and it pings you when it needs you.</em>
+                </span>
+              </label>
+              <label for="intg-linear" class="intg-tab">
+                <span class="integration-logo"><svg viewBox="0 0 24 24" aria-hidden="true"><path fill="#5E6AD2" d="M2.9 13.9 10.1 21.1A9.2 9.2 0 0 1 2.9 13.9zM2.8 11.4l9.8 9.8a9 9 0 0 0 2.1-.4L3.2 9.3a9 9 0 0 0-.4 2.1zM3.9 7.7l12.4 12.4c.5-.3 1-.6 1.5-1L4.9 6.2c-.4.5-.7 1-1 1.5zM6 5.1A9.2 9.2 0 1 1 18.9 18L6 5.1z"/></svg></span>
+                <span class="intg-tab-text">
+                  <b>Linear</b>
+                  <em>File an issue, assign it, and it lands in that teammate's Rudder. The agent comments back on the issue.</em>
+                </span>
+              </label>
+            </div>
+
+            <!-- Slack: a channel conversation with the Rudder app -->
+            <div class="intg-panel intg-panel-slack" data-last="7" role="img" aria-label="Demonstration: in Slack, /rudder starts an agent, the agent asks a question, you open it and answer, and Rudder posts when the work is ready for review">
+              <div class="sk-win">
+                <aside class="sk-side" aria-hidden="true">
+                  <p class="sk-ws">exla</p>
+                  <p class="sk-sec">Channels</p>
+                  <p class="sk-ch"># general</p>
+                  <p class="sk-ch is-on"># agents</p>
+                  <p class="sk-ch"># ios</p>
+                  <p class="sk-sec">Apps</p>
+                  <p class="sk-ch"><img src="/favicon.svg" width="12" height="12" alt="" /> Rudder</p>
+                </aside>
+                <div class="sk-main">
+                  <div class="sk-head"><b># agents</b><span>Rudder posts here when an agent needs you</span></div>
+                  <div class="sk-msgs">
+                    <div class="sk-msg" data-from="1">
+                      <span class="sk-av sk-av-you">V</span>
+                      <div>
+                        <p class="sk-from"><b>Viraat</b> <span class="sk-time">9:38</span></p>
+                        <p><span class="sk-cmd">/rudder api rate-limit the public endpoints</span></p>
+                      </div>
+                    </div>
+                    <div class="sk-msg" data-from="2">
+                      <span class="sk-av"><img src="/favicon.svg" width="16" height="16" alt="" /></span>
+                      <div>
+                        <p class="sk-from"><b>Rudder</b> <span class="sk-app">APP</span> <span class="sk-time">9:38</span></p>
+                        <p>Started an agent on <b>api</b>: <i>Rate-limit the public endpoints</i></p>
+                        <p class="sk-meta"><span class="st st-work">● Working</span> Claude · opus</p>
+                      </div>
+                    </div>
+                    <div class="sk-msg sk-ask" data-from="4">
+                      <span class="sk-av"><img src="/favicon.svg" width="16" height="16" alt="" /></span>
+                      <div>
+                        <p class="sk-from"><b>Rudder</b> <span class="sk-app">APP</span> <span class="sk-time">9:44</span></p>
+                        <p><span class="st st-ask">● Needs you</span> on <b>api</b>: <i>Keep limits in Redis, or in memory per instance?</i></p>
+                        <p class="sk-btns"><span class="sk-btn sk-btn-go" data-pressed-at="5">Open agent</span></p>
+                        <p class="sk-thread" data-from="6">✓ You answered in Rudder: <i>Redis, we already run it.</i> Back to work.</p>
+                      </div>
+                    </div>
+                    <div class="sk-msg" data-from="7">
+                      <span class="sk-av"><img src="/favicon.svg" width="16" height="16" alt="" /></span>
+                      <div>
+                        <p class="sk-from"><b>Rudder</b> <span class="sk-app">APP</span> <span class="sk-time">9:57</span></p>
+                        <p><span class="st st-done">✓ Ready for review</span> <i>Rate-limit the public endpoints</i> · 4 files <span class="add">+212</span> · tests pass</p>
+                        <p class="sk-btns"><span class="sk-btn sk-btn-go">Open agent</span><span class="sk-btn">Review diff</span></p>
+                      </div>
+                    </div>
+                  </div>
+                  <div class="sk-compose">
+                    <span class="sk-typing" data-from="0" data-to="1">/rudder api rate-limit the public endpoints<i class="caret"></i></span>
+                    <span class="sk-typing sk-ph" data-from="1">Message #agents</span>
+                  </div>
                 </div>
               </div>
             </div>
 
-            <span class="flow-wire" data-from="2" aria-hidden="true"></span>
-
-            <div class="flow-card flow-rudder">
-              <div class="flow-app"><img src="/favicon.svg" width="16" height="16" alt="" /><span>Rudder</span><span class="flow-crumb">rudder</span></div>
-              <div class="flow-body">
-                <p class="flow-empty" data-to="2">Waiting for work…</p>
-                <div data-from="2">
-                  <p class="flow-title">Preview links open in the app</p>
-                  <p class="fl-status">
-                    <span class="st st-start" data-from="2" data-to="3">● Starting</span>
-                    <span class="st st-work" data-from="3" data-to="6">● Working</span>
-                    <span class="st st-ask" data-from="6" data-to="8">● Has a question</span>
-                    <span class="st st-work" data-from="8">● Working</span>
-                    <span class="fl-model">Claude · opus</span>
-                  </p>
-                  <ul class="flow-log">
-                    <li data-from="3"><span class="dot"></span>Read <span class="mono">src/links.ts</span></li>
-                    <li data-from="4"><span class="dot"></span>Edit <span class="mono">ios/App/DeepLink.swift</span> <span class="add">+38</span></li>
-                    <li class="fl-q" data-from="6">Keep the old <span class="mono">rudder://</span> links working on iOS 17?</li>
-                    <li class="fl-you" data-from="7"><b>You</b> Yes, keep them.</li>
-                  </ul>
+            <!-- Linear: an issue is filed, assigned to the right teammate, and lands in their Rudder -->
+            <div class="intg-panel intg-panel-linear" data-last="9" role="img" aria-label="Demonstration: an issue is created in Linear and assigned to Priya on the iOS team; it shows up in Priya's Rudder, she starts an agent, and the agent comments back on the issue">
+              <div class="ln-win">
+                <div class="flow-app"><svg viewBox="0 0 24 24" aria-hidden="true"><path fill="#5E6AD2" d="M2.9 13.9 10.1 21.1A9.2 9.2 0 0 1 2.9 13.9zM2.8 11.4l9.8 9.8a9 9 0 0 0 2.1-.4L3.2 9.3a9 9 0 0 0-.4 2.1zM3.9 7.7l12.4 12.4c.5-.3 1-.6 1.5-1L4.9 6.2c-.4.5-.7 1-1 1.5zM6 5.1A9.2 9.2 0 1 1 18.9 18L6 5.1z"/></svg><span>Linear</span><span class="flow-crumb">Exla › iOS</span></div>
+                <div class="ln-body">
+                  <div class="ln-compose" data-from="0" data-to="2">
+                    <p class="ln-crumb">New issue · iOS</p>
+                    <p class="ln-title"><span data-from="0" data-to="1" class="ln-ph">Issue title</span><span data-from="1">Preview links should open in the phone app<i class="caret"></i></span></p>
+                    <p class="ln-desc" data-from="1">Tapping a preview link in a Slack or iMessage thread opens Safari instead of Rudder.</p>
+                    <p class="ln-create"><span class="sk-btn sk-btn-ln" data-pressed-at="1">Create issue</span></p>
+                  </div>
+                  <div class="ln-issue" data-from="2">
+                    <p class="ln-id">EXL-142</p>
+                    <p class="flow-title">Preview links should open in the phone app</p>
+                    <dl class="flow-props">
+                      <div><dt>Status</dt><dd><span class="fl-pill" data-to="7">Todo</span><span class="fl-pill fl-prog" data-from="7">In Progress</span></dd></div>
+                      <div><dt>Labels</dt><dd><span class="fl-pill ln-label">iOS</span></dd></div>
+                      <div class="ln-assign"><dt>Assignee</dt><dd>
+                        <span class="fl-none" data-to="4">Unassigned</span>
+                        <span class="fl-who" data-from="4"><span class="sk-av sk-av-sm ln-p">P</span> Priya</span>
+                        <span class="flow-cursor" data-from="2" data-to="4" aria-hidden="true"></span>
+                        <span class="ln-menu" data-from="3" data-to="4">
+                          <span><span class="sk-av sk-av-sm ln-m">M</span> Marcus <em>web</em></span>
+                          <span class="is-hi"><span class="sk-av sk-av-sm ln-p">P</span> Priya <em>iOS</em></span>
+                          <span><span class="sk-av sk-av-sm ln-s">S</span> Sam <em>infra</em></span>
+                        </span>
+                      </dd></div>
+                    </dl>
+                    <div class="flow-comment" data-from="7">
+                      <span class="fl-avatar"><img src="/favicon.svg" width="16" height="16" alt="" /></span>
+                      <p><b>Rudder</b> for Priya: started an agent on <span class="mono">rudder</span>. Edited <span class="mono">DeepLink.swift</span>, tests pass. <u>Open in Rudder</u></p>
+                    </div>
+                  </div>
                 </div>
               </div>
-            </div>
 
-            <span class="flow-wire" data-from="6" aria-hidden="true"></span>
+              <span class="flow-wire" data-from="5" aria-hidden="true"></span>
 
-            <div class="flow-card flow-slack">
-              <div class="flow-app"><svg viewBox="0 0 24 24" aria-hidden="true"><path fill="#E01E5A" d="M6.2 14.6a2.1 2.1 0 1 1-2.1-2.1h2.1v2.1zm1 0a2.1 2.1 0 1 1 4.2 0v5.3a2.1 2.1 0 1 1-4.2 0v-5.3z"/><path fill="#36C5F0" d="M9.4 6.2a2.1 2.1 0 1 1 2.1-2.1v2.1H9.4zm0 1a2.1 2.1 0 1 1 0 4.2H4.1a2.1 2.1 0 1 1 0-4.2h5.3z"/><path fill="#2EB67D" d="M17.8 9.4a2.1 2.1 0 1 1 2.1 2.1h-2.1V9.4zm-1 0a2.1 2.1 0 1 1-4.2 0V4.1a2.1 2.1 0 1 1 4.2 0v5.3z"/><path fill="#ECB22E" d="M14.6 17.8a2.1 2.1 0 1 1-2.1 2.1v-2.1h2.1zm0-1a2.1 2.1 0 1 1 0-4.2h5.3a2.1 2.1 0 1 1 0 4.2h-5.3z"/></svg><span>Slack</span><span class="flow-crumb"># agents</span></div>
-              <div class="flow-body">
-                <p class="flow-empty" data-to="6">No new messages</p>
-                <div class="flow-msg" data-from="6">
-                  <span class="fl-avatar"><img src="/favicon.svg" width="16" height="16" alt="" /></span>
-                  <div>
-                    <p class="fl-from"><b>Rudder</b> <span class="fl-app">APP</span> <span class="fl-time">9:41</span></p>
-                    <p>EXL-142 needs you: <i>Keep the old rudder:// links working on iOS 17?</i></p>
-                    <p class="fl-btns"><span class="fl-btn" data-pressed-at="7">Open agent</span><span class="fl-btn fl-btn-2">Reply</span></p>
-                    <p class="fl-thread" data-from="8">✓ Answered. Back to work.</p>
+              <div class="ln-rudder">
+                <div class="flow-app"><img src="/favicon.svg" width="16" height="16" alt="" /><span>Priya's Rudder</span><span class="flow-crumb">rudder</span></div>
+                <div class="flow-body">
+                  <p class="flow-empty" data-to="5">Nothing assigned to you</p>
+                  <div class="ln-note" data-from="5">
+                    <p class="ln-note-head"><b>EXL-142</b> · assigned to you in Linear</p>
+                    <p class="flow-title">Preview links should open in the phone app</p>
+                    <p class="sk-btns" data-to="6"><span class="sk-btn sk-btn-go" data-pressed-at="5">Start agent</span><span class="sk-btn">Later</span></p>
+                  </div>
+                  <div data-from="6">
+                    <p class="fl-status">
+                      <span class="st st-start" data-from="6" data-to="7">● Starting</span>
+                      <span class="st st-work" data-from="7">● Working</span>
+                      <span class="fl-model">Claude · opus</span>
+                    </p>
+                    <ul class="flow-log">
+                      <li data-from="7"><span class="dot"></span>Read <span class="mono">src/links.ts</span></li>
+                      <li data-from="8"><span class="dot"></span>Edit <span class="mono">ios/App/DeepLink.swift</span> <span class="add">+38</span></li>
+                      <li data-from="9"><span class="dot"></span>Bash <span class="mono">xcodebuild test</span> · passed</li>
+                    </ul>
                   </div>
                 </div>
               </div>
@@ -739,40 +804,55 @@
     </script>
   
     <script>
-      // Linear -> Rudder -> Slack demo. Markup is the final frame, so it reads
-      // fine with scripting off or reduced motion; the script replays it in view.
+      // Slack and Linear demos. Each panel's markup is its final frame, so it
+      // reads fine with scripting off or reduced motion; the script replays the
+      // panel on screen and starts over when you switch tabs.
       (function () {
-        var flow = document.querySelector(".flow");
-        if (!flow || !("IntersectionObserver" in window)) return;
+        var box = document.querySelector(".intg");
+        if (!box || !("IntersectionObserver" in window)) return;
         if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
-        var items = flow.querySelectorAll("[data-from],[data-to]");
-        var pressed = flow.querySelectorAll("[data-pressed-at]");
-        var LAST = 8, timer = null, step = 0;
+        var timer = null, step = 0, panel = null, inView = false;
+        function current() {
+          return box.querySelector(document.getElementById("intg-linear").checked ? ".intg-panel-linear" : ".intg-panel-slack");
+        }
         function paint() {
-          items.forEach(function (el) {
+          panel.querySelectorAll("[data-from],[data-to]").forEach(function (el) {
             var f = el.hasAttribute("data-from") ? +el.getAttribute("data-from") : -1;
             var t = el.hasAttribute("data-to") ? +el.getAttribute("data-to") : 99;
             var on = step >= f && step < t;
             if (on && el.classList.contains("gone")) { el.classList.remove("gone"); el.classList.remove("pop"); void el.offsetWidth; el.classList.add("pop"); }
             else if (!on) el.classList.add("gone");
           });
-          pressed.forEach(function (el) { el.classList.toggle("pressed", step === +el.getAttribute("data-pressed-at")); });
+          panel.querySelectorAll("[data-pressed-at]").forEach(function (el) {
+            el.classList.toggle("pressed", step === +el.getAttribute("data-pressed-at"));
+          });
         }
         function tick() {
+          var last = +panel.getAttribute("data-last");
           paint();
-          var wait = step === 0 ? 1400 : step === LAST ? 3600 : 1300;
-          step = step === LAST ? 0 : step + 1;
+          var wait = step === 0 ? 1500 : step === last ? 4000 : 1300;
+          step = step === last ? 0 : step + 1;
           timer = setTimeout(tick, wait);
         }
-        flow.classList.add("armed");
-        items.forEach(function (el) { el.classList.add("gone"); });
-        var io = new IntersectionObserver(function (es) {
+        function stop() { if (timer) { clearTimeout(timer); timer = null; } }
+        function start() {
+          stop();
+          panel = current();
+          panel.classList.add("armed");
+          panel.querySelectorAll("[data-from],[data-to]").forEach(function (el) { el.classList.add("gone"); });
+          step = 0;
+          tick();
+        }
+        box.querySelectorAll(".intg-input").forEach(function (r) {
+          r.addEventListener("change", function () { if (inView) start(); });
+        });
+        new IntersectionObserver(function (es) {
           es.forEach(function (e) {
-            if (e.isIntersecting && !timer) { step = 0; tick(); }
-            else if (!e.isIntersecting && timer) { clearTimeout(timer); timer = null; }
+            inView = e.isIntersecting;
+            if (inView && !timer) start();
+            else if (!inView) stop();
           });
-        }, { threshold: 0.3 });
-        io.observe(flow);
+        }, { threshold: 0.3 }).observe(box);
       })();
     </script>
 </body>

@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Rudder Privacy Policy</title>
+    <meta name="description" content="What Rudder collects, why, and what it never does with it." />
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <style>
+      :root { --bg: #fdfdfd; --ink: #16191c; --ink-2: #5b6168; --line: #e4e6e8; --accent: #2f6fdd; }
+      @media (prefers-color-scheme: dark) { :root { --bg: #111417; --ink: #e8eaec; --ink-2: #9aa1a8; --line: #262b30; --accent: #7aa7ff; } }
+      body { margin: 0; background: var(--bg); color: var(--ink); font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+      main { max-width: 720px; margin: 0 auto; padding: 48px 16px 80px; }
+      h1 { font-size: 32px; margin: 0 0 4px; }
+      h2 { font-size: 20px; margin: 36px 0 8px; }
+      p, li { color: var(--ink); }
+      .muted { color: var(--ink-2); }
+      a { color: var(--accent); }
+      header a { text-decoration: none; color: var(--ink); font-weight: 600; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <header><a href="/">Rudder</a></header>
+      <h1 style="margin-top:32px">Privacy Policy</h1>
+      <p class="muted">Last updated October 21, 2026. Rudder is made by Exla.</p>
+
+      <h2>What we collect</h2>
+      <ul>
+        <li><strong>Your account.</strong> When you sign in with Google or GitHub we receive your name, email address and profile picture. We use them to identify your account and nothing else.</li>
+        <li><strong>Your cloud machine.</strong> If you use Rudder Cloud, the repositories you open, your agents' conversations and the settings you choose to sync live on a machine that belongs to your account. Other accounts cannot see them, except teammates in an organization you joined, who see only what the Team view shows and never agents you marked private.</li>
+        <li><strong>Connected services.</strong> Tokens for GitHub, Slack or Linear are stored encrypted and used only to do what you asked, such as opening a pull request or posting to the channel you picked.</li>
+        <li><strong>Anonymous usage events.</strong> Rudder counts which features are used (for example "an agent started"), keyed by a one-way hash, never your code, prompts, file paths or tokens. Turn it off with <code>rudder telemetry off</code>.</li>
+      </ul>
+
+      <h2>What we never do</h2>
+      <ul>
+        <li>We do not sell your data or use it for advertising.</li>
+        <li>We do not train models on your code or conversations.</li>
+        <li>We do not read your Google data beyond your basic profile; Rudder requests no other Google scopes.</li>
+      </ul>
+
+      <h2>Third parties</h2>
+      <p>Rudder runs on Fly.io and Amazon Web Services, and the site on Vercel. Your agents talk to the model providers you sign in to (Anthropic, OpenAI) under your own accounts. The voice assistant sends audio to OpenAI to transcribe and answer it. Usage counts go to PostHog.</p>
+
+      <h2>Keeping and deleting</h2>
+      <p>You can delete your cloud machines, workspaces and agents at any time from the app or the CLI. To delete your account and everything stored with it, open an issue at <a href="https://github.com/exla-ai/rudder/issues">github.com/exla-ai/rudder</a> or write to us through the contact on that page, and we will remove it within 30 days.</p>
+
+      <h2>Changes</h2>
+      <p>If this policy changes we will update the date above.</p>
+    </main>
+  </body>
+</html>

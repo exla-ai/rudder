@@ -434,6 +434,66 @@
               </p>
             </li>
           </ul>
+
+          <div class="flow" data-reveal aria-label="Demonstration: assigning a Linear issue to Rudder starts an agent, and Slack pings you when it has a question" role="img">
+            <div class="flow-card flow-linear">
+              <div class="flow-app"><svg viewBox="0 0 24 24" aria-hidden="true"><path fill="#5E6AD2" d="M2.9 13.9 10.1 21.1A9.2 9.2 0 0 1 2.9 13.9zM2.8 11.4l9.8 9.8a9 9 0 0 0 2.1-.4L3.2 9.3a9 9 0 0 0-.4 2.1zM3.9 7.7l12.4 12.4c.5-.3 1-.6 1.5-1L4.9 6.2c-.4.5-.7 1-1 1.5zM6 5.1A9.2 9.2 0 1 1 18.9 18L6 5.1z"/></svg><span>Linear</span><span class="flow-crumb">Rudder › EXL-142</span></div>
+              <div class="flow-body">
+                <p class="flow-title">Preview links should open in the phone app</p>
+                <dl class="flow-props">
+                  <div><dt>Status</dt><dd><span class="fl-pill fl-todo" data-to="1">Todo</span><span class="fl-pill fl-prog" data-from="1">In Progress</span></dd></div>
+                  <div class="flow-assign"><dt>Assignee</dt><dd><span class="fl-none" data-to="1">Unassigned</span><span class="fl-who" data-from="1"><img src="/favicon.svg" width="16" height="16" alt="" /> Rudder</span><span class="flow-cursor" data-from="0" data-to="2" aria-hidden="true"></span></dd></div>
+                </dl>
+                <div class="flow-comment" data-from="5">
+                  <span class="fl-avatar"><img src="/favicon.svg" width="16" height="16" alt="" /></span>
+                  <p><b>Rudder</b> started an agent on <span class="mono">rudder</span>. <u>Open in Rudder</u></p>
+                </div>
+              </div>
+            </div>
+
+            <span class="flow-wire" data-from="2" aria-hidden="true"></span>
+
+            <div class="flow-card flow-rudder">
+              <div class="flow-app"><img src="/favicon.svg" width="16" height="16" alt="" /><span>Rudder</span><span class="flow-crumb">rudder</span></div>
+              <div class="flow-body">
+                <p class="flow-empty" data-to="2">Waiting for work…</p>
+                <div data-from="2">
+                  <p class="flow-title">Preview links open in the app</p>
+                  <p class="fl-status">
+                    <span class="st st-start" data-from="2" data-to="3">● Starting</span>
+                    <span class="st st-work" data-from="3" data-to="6">● Working</span>
+                    <span class="st st-ask" data-from="6" data-to="8">● Has a question</span>
+                    <span class="st st-work" data-from="8">● Working</span>
+                    <span class="fl-model">Claude · opus</span>
+                  </p>
+                  <ul class="flow-log">
+                    <li data-from="3"><span class="dot"></span>Read <span class="mono">src/links.ts</span></li>
+                    <li data-from="4"><span class="dot"></span>Edit <span class="mono">ios/App/DeepLink.swift</span> <span class="add">+38</span></li>
+                    <li class="fl-q" data-from="6">Keep the old <span class="mono">rudder://</span> links working on iOS 17?</li>
+                    <li class="fl-you" data-from="7"><b>You</b> Yes, keep them.</li>
+                  </ul>
+                </div>
+              </div>
+            </div>
+
+            <span class="flow-wire" data-from="6" aria-hidden="true"></span>
+
+            <div class="flow-card flow-slack">
+              <div class="flow-app"><svg viewBox="0 0 24 24" aria-hidden="true"><path fill="#E01E5A" d="M6.2 14.6a2.1 2.1 0 1 1-2.1-2.1h2.1v2.1zm1 0a2.1 2.1 0 1 1 4.2 0v5.3a2.1 2.1 0 1 1-4.2 0v-5.3z"/><path fill="#36C5F0" d="M9.4 6.2a2.1 2.1 0 1 1 2.1-2.1v2.1H9.4zm0 1a2.1 2.1 0 1 1 0 4.2H4.1a2.1 2.1 0 1 1 0-4.2h5.3z"/><path fill="#2EB67D" d="M17.8 9.4a2.1 2.1 0 1 1 2.1 2.1h-2.1V9.4zm-1 0a2.1 2.1 0 1 1-4.2 0V4.1a2.1 2.1 0 1 1 4.2 0v5.3z"/><path fill="#ECB22E" d="M14.6 17.8a2.1 2.1 0 1 1-2.1 2.1v-2.1h2.1zm0-1a2.1 2.1 0 1 1 0-4.2h5.3a2.1 2.1 0 1 1 0 4.2h-5.3z"/></svg><span>Slack</span><span class="flow-crumb"># agents</span></div>
+              <div class="flow-body">
+                <p class="flow-empty" data-to="6">No new messages</p>
+                <div class="flow-msg" data-from="6">
+                  <span class="fl-avatar"><img src="/favicon.svg" width="16" height="16" alt="" /></span>
+                  <div>
+                    <p class="fl-from"><b>Rudder</b> <span class="fl-app">APP</span> <span class="fl-time">9:41</span></p>
+                    <p>EXL-142 needs you: <i>Keep the old rudder:// links working on iOS 17?</i></p>
+                    <p class="fl-btns"><span class="fl-btn" data-pressed-at="7">Open agent</span><span class="fl-btn fl-btn-2">Reply</span></p>
+                    <p class="fl-thread" data-from="8">✓ Answered. Back to work.</p>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
         </section>
 
         <section class="section showcase" aria-labelledby="desk-title">
@@ -677,5 +737,43 @@
         io.observe(box);
       })();
     </script>
-  </body>
+  
+    <script>
+      // Linear -> Rudder -> Slack demo. Markup is the final frame, so it reads
+      // fine with scripting off or reduced motion; the script replays it in view.
+      (function () {
+        var flow = document.querySelector(".flow");
+        if (!flow || !("IntersectionObserver" in window)) return;
+        if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+        var items = flow.querySelectorAll("[data-from],[data-to]");
+        var pressed = flow.querySelectorAll("[data-pressed-at]");
+        var LAST = 8, timer = null, step = 0;
+        function paint() {
+          items.forEach(function (el) {
+            var f = el.hasAttribute("data-from") ? +el.getAttribute("data-from") : -1;
+            var t = el.hasAttribute("data-to") ? +el.getAttribute("data-to") : 99;
+            var on = step >= f && step < t;
+            if (on && el.classList.contains("gone")) { el.classList.remove("gone"); el.classList.remove("pop"); void el.offsetWidth; el.classList.add("pop"); }
+            else if (!on) el.classList.add("gone");
+          });
+          pressed.forEach(function (el) { el.classList.toggle("pressed", step === +el.getAttribute("data-pressed-at")); });
+        }
+        function tick() {
+          paint();
+          var wait = step === 0 ? 1400 : step === LAST ? 3600 : 1300;
+          step = step === LAST ? 0 : step + 1;
+          timer = setTimeout(tick, wait);
+        }
+        flow.classList.add("armed");
+        items.forEach(function (el) { el.classList.add("gone"); });
+        var io = new IntersectionObserver(function (es) {
+          es.forEach(function (e) {
+            if (e.isIntersecting && !timer) { step = 0; tick(); }
+            else if (!e.isIntersecting && timer) { clearTimeout(timer); timer = null; }
+          });
+        }, { threshold: 0.3 });
+        io.observe(flow);
+      })();
+    </script>
+</body>
 </html>

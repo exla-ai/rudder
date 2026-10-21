@@ -687,3 +687,86 @@ serverTest("a home on an old image is updated in place once its agents are idle,
   await sleep(2500);
   assert.equal(flyCalls.filter((call) => call.method === "POST").length, 1);
 });
+
+serverTest("a sleeping home's last state is a memory: live rows read paused, never working", async (t) => {
+  const { port, base, dbPath } = await bootServer(t);
+  const cliToken = "rdr_stale_test_cli";
+  const workerToken = "rdrw_stale_test_worker";
+  const now = new Date().toISOString();
+  const db = new Database(dbPath);
+  db.pragma("journal_mode = WAL");
+  db.prepare(
+    "insert or replace into rudder_tokens (token_hash, account_id, email, created_at, last_used_at) values (?,?,?,?,?)",
+  ).run(tokenHash(cliToken), "acct-stale", "stale@example.com", now, now);
+  const insert = db.prepare(`
+    insert into rudder_workspaces (id, account_id, workspace_key, repo_name, status, machine_id, worker_token_hash,
+      source_kind, repo_url, home_id, created_at, updated_at, last_activity_at)
+    values (@id, 'acct-stale', @key, @name, 'running', @machine, @hash, @kind, @url, @home, @now, @now, @now)
+  `);
+  insert.run({ id: "home-stale", key: "home", name: "home", machine: "m-stale", hash: tokenHash(workerToken), kind: "home", url: null, home: null, now });
+  insert.run({ id: "repo-stale", key: "home:a/b", name: "b", machine: null, hash: tokenHash(workerToken), kind: "home-repo", url: "https://github.com/a/b.git", home: "home-stale", now });
+  db.close();
+  const auth = { authorization: `Bearer ${cliToken}` };
+  const agentsNow = async () => (await (await fetch(`${base}/api/app/state`, { headers: auth })).json()).projects[0];
+  const connect = async () => {
+    const ws = new WebSocket(`ws://127.0.0.1:${port}/api/rudder/home/home-stale/control`, { headers: { authorization: `Bearer ${workerToken}` } });
+    await new Promise((resolve, reject) => { ws.on("open", resolve); ws.on("error", reject); });
+    return ws;
+  };
+  const agents = [
+    { id: "w", title: "working", status: "working" },
+    { id: "q", title: "asking", status: "working", asks: [{ id: "1-aaaaaaaa", kind: "question" }] },
+    { id: "i", title: "interrupted", status: "waiting", attention: "interrupted" },
+    { id: "rv", title: "review", status: "review", phase: "review" },
+    { id: "pr", title: "pr open", status: "review", phase: "review", pr: { state: "open", number: 7, url: "https://github.com/a/b/pull/7" } },
+    { id: "cf", title: "conflict", status: "review", phase: "integration-blocked", conflict: true, pr: { state: "open" } },
+    { id: "pm", title: "pr merged (old supervisor)", status: "done", phase: "completed", pr: { state: "merged" } },
+    { id: "db", title: "delivery blocked (old supervisor)", status: "done", phase: "delivery blocked" },
+  ];
+  const first = await connect();
+  first.send(JSON.stringify({ type: "state", projects: [{ workspaceId: "repo-stale", name: "b", dashboard: "running", agents }] }));
+  let project = await waitFor(async () => {
+    const next = await agentsNow();
+    return next.agents?.length ? next : null;
+  });
+  const byId = (p) => Object.fromEntries(p.agents.map((a) => [a.id, a]));
+  let rows = byId(project);
+  assert.equal(project.live, true);
+  assert.deepEqual([rows.w.status, rows.w.needsYou, rows.w.reason], ["working", false, null]);
+  assert.deepEqual([rows.q.needsYou, rows.q.reason], [true, "question"]);
+  assert.deepEqual([rows.i.needsYou, rows.i.reason], [true, "interrupted"]);
+  assert.deepEqual([rows.rv.needsYou, rows.rv.reason], [true, "review"]);
+  assert.deepEqual([rows.pr.needsYou, rows.pr.reason], [false, null], "an open PR waits on GitHub, not on you");
+  assert.deepEqual([rows.cf.needsYou, rows.cf.reason], [true, "conflict"], "a conflict needs you even with a PR open");
+  assert.deepEqual([rows.pm.status, rows.pm.needsYou], ["merged", false], "a merged PR is merged");
+  assert.deepEqual([rows.db.status, rows.db.reason], ["failed", "delivery-blocked"]);
+  assert.ok(!rows.w.stale);
+
+  // The machine goes to sleep: the socket closes and nothing new arrives.
+  first.close();
+  project = await waitFor(async () => {
+    const next = await agentsNow();
+    return next.live === false ? next : null;
+  });
+  rows = byId(project);
+  for (const id of ["w", "q", "i"]) {
+    assert.equal(rows[id].status, "paused", `${id} is not live on a sleeping machine`);
+    assert.equal(rows[id].stale, true);
+    assert.equal(typeof rows[id].lastSeen, "number");
+  }
+  assert.deepEqual(rows.q.asks, [], "a prompt held by a dead hook cannot be answered");
+  assert.equal(rows.q.needsYou, false);
+  assert.equal(rows.rv.reason, "review", "finished work still waits for review while it sleeps");
+  assert.ok(!rows.rv.stale);
+
+  // It wakes: until it reports again the old state stays a memory, then it is live.
+  const second = await connect();
+  t.after(() => second.close());
+  assert.equal((await agentsNow()).live, false);
+  second.send(JSON.stringify({ type: "state", projects: [{ workspaceId: "repo-stale", name: "b", dashboard: "running", agents: [agents[0]] }] }));
+  project = await waitFor(async () => {
+    const next = await agentsNow();
+    return next.live === true ? next : null;
+  });
+  assert.equal(project.agents[0].status, "working");
+});

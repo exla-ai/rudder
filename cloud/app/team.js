@@ -67,7 +67,10 @@ function memberSummary(m) {
   for (const p of m.projects || []) {
     for (const a of p.agents || []) {
       total += 1;
-      if (a.asking || a.status === "waiting") needs += 1;
+      // needsYou is the control plane's one rule; review and failures wait on
+      // a person too, but "waiting on <name>" means blocked mid-turn.
+      const blocked = typeof a.needsYou === "boolean" ? a.needsYou && a.reason !== "review" && a.reason !== "failed" : a.status === "waiting";
+      if (a.asking || blocked) needs += 1;
       else if (LIVE.has(a.status)) live += 1;
     }
   }

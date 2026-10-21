@@ -25,6 +25,7 @@
 // own toggle, and every agent route in server.ts keeps resolving the
 // workspace through the caller's own account.
 
+import { agentNeeds, type StatusAgent } from "./agent-status.js";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type Database from "better-sqlite3";
 
@@ -164,6 +165,12 @@ export type TeamSourceAgent = {
   pending?: unknown;
   asks?: unknown;
   visibility?: unknown;
+  attention?: unknown;
+  conflict?: unknown;
+  notInTrunk?: unknown;
+  pr?: unknown;
+  needsYou?: unknown;
+  reason?: unknown;
 };
 
 export type TeamSourceProject = {
@@ -174,7 +181,7 @@ export type TeamSourceProject = {
 };
 
 export type TeamAgent =
-  | { id: string; private: true; status: string; asking: string | null; updatedAt: number | null }
+  | { id: string; private: true; status: string; asking: string | null; needsYou: boolean; reason: string | null; updatedAt: number | null }
   | {
       id: string;
       private: false;
@@ -184,6 +191,8 @@ export type TeamAgent =
       backend: string | null;
       model: string | null;
       asking: string | null;
+      needsYou: boolean;
+      reason: string | null;
       pending: boolean;
       updatedAt: number | null;
     };
@@ -209,8 +218,14 @@ export function teamAgentView(agent: TeamSourceAgent, visibility: Visibility): T
   const status = str(agent.status) ?? "unknown";
   const asking = askingKind(agent.asks);
   const updatedAt = num(agent.updatedAt);
+  // The control plane's one rule (agent-status.ts); a category, never content.
+  const needs = typeof agent.needsYou === "boolean"
+    ? { needsYou: agent.needsYou, reason: str(agent.reason) }
+    : agentNeeds(agent as StatusAgent);
+  const needsYou = needs.needsYou;
+  const reason = needs.reason ?? null;
   if (visibility === "private") {
-    return { id, private: true, status, asking, updatedAt };
+    return { id, private: true, status, asking, needsYou, reason, updatedAt };
   }
   return {
     id,
@@ -221,6 +236,8 @@ export function teamAgentView(agent: TeamSourceAgent, visibility: Visibility): T
     backend: str(agent.backend),
     model: str(agent.model),
     asking,
+    needsYou,
+    reason,
     pending: agent.pending === true,
     updatedAt,
   };
@@ -228,9 +245,11 @@ export function teamAgentView(agent: TeamSourceAgent, visibility: Visibility): T
 
 const LIVE = new Set(["working", "starting"]);
 function rank(agent: TeamAgent): number {
-  if (agent.asking || agent.status === "waiting") return 0;
+  // Blocked on a person mid-turn first, then working, then finished work
+  // that wants a look (review, failed, conflict), then the rest.
+  if (agent.needsYou && agent.reason !== "review" && agent.reason !== "failed") return 0;
   if (LIVE.has(agent.status)) return 1;
-  if (agent.status === "review" || agent.status === "failed") return 2;
+  if (agent.needsYou) return 2;
   return 3;
 }
 

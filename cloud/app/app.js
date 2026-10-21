@@ -58,11 +58,51 @@ const answeredAsks = new Set();
 const pendingAsks = (a) => (Array.isArray(a?.asks) ? a.asks : []).filter((q) => q && !answeredAsks.has(q.id));
 const ASK_LABEL = { permission: "Needs approval", question: "Has a question", plan: "Plan ready" };
 const askLabel = (q) => ASK_LABEL[q?.kind] || "Needs approval";
-const needsYou = (a) => pendingAsks(a).length > 0 || a.status === "waiting" || a.status === "review" || a.status === "failed";
-// An agent blocked on a prompt reads as needing you, whatever its status says.
+// Why an agent needs you, as the control plane decided it (agent-status.ts
+// stamps `needsYou` + `reason` on every agent; AGENTS.md §9.8.2).
+const REASON = {
+  permission: { label: "Needs permission", cls: "s-needs" },
+  question: { label: "Asked a question", cls: "s-needs" },
+  plan: { label: "Plan ready", cls: "s-needs" },
+  input: { label: "Needs input", cls: "s-needs" },
+  interrupted: { label: "Interrupted", cls: "s-needs" },
+  error: { label: "Turn failed", cls: "s-failed" },
+  conflict: { label: "Merge conflict", cls: "s-needs" },
+  "not-in-trunk": { label: "Not in main", cls: "s-needs" },
+  delivery: { label: "Needs delivery proof", cls: "s-needs" },
+  "delivery-blocked": { label: "Delivery blocked", cls: "s-failed" },
+  review: { label: "Ready for review", cls: "s-done" },
+  failed: { label: "Failed", cls: "s-failed" },
+};
+const ASK_REASONS = new Set(["permission", "question", "plan"]);
+const needsYou = (a) => {
+  if (!a || a.pending) return false;
+  if (pendingAsks(a).length) return true;
+  if (typeof a.needsYou === "boolean") {
+    // A prompt answered from this screen stops counting before the state agrees.
+    if (a.needsYou && ASK_REASONS.has(a.reason) && (a.asks || []).length) return false;
+    return a.needsYou;
+  }
+  // A control plane older than the needsYou field.
+  return a.status === "waiting" || a.status === "review" || a.status === "failed";
+};
+const prState = (a) => a?.pr?.state || null;
+// The row's label: the prompt it is blocked on, why it needs you, what its PR
+// is doing, or (from a sleeping machine) when it was last seen.
 const agentStatus = (a) => {
   const asks = pendingAsks(a);
-  return asks.length ? { label: askLabel(asks[0]), cls: "s-needs" } : statusOf(a?.status);
+  if (asks.length) return { label: askLabel(asks[0]), cls: "s-needs" };
+  if (a?.stale) {
+    const ago = rel(a.lastSeen);
+    return { label: ago && ago !== "now" ? `Paused · last seen ${/^\d/.test(ago) ? `${ago} ago` : ago}` : "Paused", cls: "s-idle" };
+  }
+  if (needsYou(a) && REASON[a.reason]) return REASON[a.reason];
+  const pr = prState(a);
+  if (a?.status === "merged" && pr === "merged") return { label: "PR merged", cls: "s-accent" };
+  if ((a?.status === "review" || a?.status === "done") && (pr === "open" || pr === "draft")) {
+    return { label: pr === "draft" ? "Draft PR" : "PR open", cls: "s-accent" };
+  }
+  return statusOf(a?.status);
 };
 const BACKEND = { claude: "Claude", codex: "Codex", opencode: "opencode" };
 const backendLabel = (a) => [BACKEND[a.backend] || a.backend, a.model].filter(Boolean).join(" · ");
@@ -84,7 +124,8 @@ Object.assign(app, {
   openComputerSignIn: (c) => openComputerSignIn(c), openGithubConnect: () => openGithubConnect(),
   githubState: (st) => githubState(st), machineLabel: (hm) => machineLabel(hm), isDesktop: () => isDesktop(),
   // team.js: a teammate's agent reads with the same labels as your own.
-  teamStatus: (a) => (a.asking ? { label: ASK_LABEL[a.asking] || "Needs approval", cls: "s-needs" } : statusOf(a.status)),
+  teamStatus: (a) => (a.asking ? { label: ASK_LABEL[a.asking] || "Needs approval", cls: "s-needs" }
+    : a.needsYou && REASON[a.reason] ? REASON[a.reason] : statusOf(a.status)),
   backendLabel: (a) => backendLabel(a),
 });
 
@@ -2294,7 +2335,8 @@ function groupOf(a) {
   if (pendingAsks(a).length) return "needs";
   if (a.status === "working" || a.status === "starting") return "working";
   if (needsYou(a)) return "needs";
-  if (a.status === "done" && Date.now() - (a.updatedAt || 0) < 36 * 3600 * 1000) return "done";
+  // Finished and not needing you (done, or review waiting on an open PR).
+  if ((a.status === "done" || a.status === "review") && Date.now() - (a.updatedAt || 0) < 36 * 3600 * 1000) return "done";
   return "earlier";
 }
 

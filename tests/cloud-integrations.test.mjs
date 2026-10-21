@@ -74,7 +74,7 @@ function fakeUpstream() {
   return { calls, fetchImpl };
 }
 
-async function setup({ env = ENV, now } = {}) {
+async function setup({ env = ENV, now, needsDebounceMs = 0 } = {}) {
   const database = new Database(":memory:");
   const upstream = fakeUpstream();
   const roles = new Map([["org1:alice", "admin"], ["org1:bob", "member"]]);
@@ -94,6 +94,7 @@ async function setup({ env = ENV, now } = {}) {
     deliverTask: async (accountId, workspaceId, text) => { delivered.push({ accountId, workspaceId, text }); },
     capture: (accountId, name, props) => events.push({ accountId, name, props }),
     log: () => {},
+    needsDebounceMs,
   });
   const server = http.createServer(async (req, res) => {
     const url = new URL(req.url, "http://localhost");
@@ -433,6 +434,34 @@ test("notifications: baseline first, one post per transition, deduped", async ()
     });
     await broken.onHomeState("alice", state([{ id: "r1", status: "working" }]));
     await broken.onHomeState("alice", state([{ id: "r1", status: "failed" }]));
+  } finally {
+    await ctx.close();
+  }
+});
+
+test("notifications: a needs-you blip shorter than the hold never posts; one that stays does, with its reason", async () => {
+  const ctx = await setup({ needsDebounceMs: 150 });
+  try {
+    await connectSlack(ctx, "alice");
+    await ctx.call("POST", "/api/app/integrations/slack/channel", { account: "alice", body: { channel: "C1" } });
+    const posts = () => ctx.upstream.calls.filter((c) => c.url.includes("chat.postMessage")).map((c) => JSON.parse(c.body));
+    const state = (agents) => [{ workspaceId: "ws1", name: "rudder", agents }];
+    await ctx.integrations.onHomeState("alice", state([{ id: "r1", title: "Fix tests", status: "working" }]));
+    // An Esc interrupt flashes needs-you, then the next turn starts.
+    await ctx.integrations.onHomeState("alice", state([{ id: "r1", title: "Fix tests", status: "waiting", attention: "interrupted", needsYou: true, reason: "interrupted" }]));
+    await ctx.integrations.onHomeState("alice", state([{ id: "r1", title: "Fix tests", status: "working" }]));
+    await ctx.integrations.idle();
+    await new Promise((r) => setTimeout(r, 250));
+    assert.equal(posts().length, 0, "the blip was not news");
+    // A permission prompt that stays past the hold is.
+    await ctx.integrations.onHomeState("alice", state([{ id: "r1", title: "Fix tests", status: "waiting", needsYou: true, reason: "permission" }]));
+    assert.equal(posts().length, 0, "held, not posted at once");
+    await ctx.integrations.idle();
+    assert.equal(posts().length, 1);
+    assert.match(posts()[0].text, /Fix tests needs you: needs your permission/);
+    // An open PR is done, not needs-you.
+    await ctx.integrations.onHomeState("alice", state([{ id: "r1", title: "Fix tests", status: "review", needsYou: false, reason: null, pr: { state: "open" } }]));
+    assert.match(posts()[1].text, /Fix tests done, PR open/);
   } finally {
     await ctx.close();
   }

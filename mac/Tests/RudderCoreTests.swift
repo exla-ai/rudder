@@ -102,6 +102,19 @@ final class RudderCoreTests: XCTestCase {
         XCTAssertEqual(items.first(where: { $0.runId == "r7" })?.reason, "has a question")
     }
 
+    func testNeedsYouReadsTheStampedField() throws {
+        let state = """
+        {"projects":[{"workspaceId":"w1","name":"site","agents":[
+          {"id":"r1","status":"review","needsYou":false,"reason":null,"pr":{"state":"open"},"updatedAt":3},
+          {"id":"r2","status":"waiting","needsYou":true,"reason":"interrupted","updatedAt":2},
+          {"id":"r3","status":"paused","stale":true,"needsYou":false,"updatedAt":1}
+        ]}]}
+        """
+        let items = try XCTUnwrap(NeedsYou.items(fromStateJSON: Data(state.utf8)))
+        XCTAssertEqual(items.map(\.runId), ["r2"])
+        XCTAssertEqual(items.first?.reason, "was interrupted")
+    }
+
     func testNeedsYouBadBodies() {
         XCTAssertNil(NeedsYou.items(fromStateJSON: Data("not json".utf8)))
         XCTAssertNil(NeedsYou.items(fromStateJSON: Data("[1,2]".utf8)))

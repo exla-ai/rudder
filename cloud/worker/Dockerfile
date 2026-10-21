@@ -111,6 +111,7 @@ COPY cloud/worker/home.mjs ./home.mjs
 COPY cloud/worker/transcripts.mjs ./transcripts.mjs
 COPY cloud/worker/hook-paths.mjs ./hook-paths.mjs
 COPY cloud/worker/asks.mjs ./asks.mjs
+COPY cloud/worker/agent-status.mjs ./agent-status.mjs
 COPY cloud/worker/logins.mjs ./logins.mjs
 COPY cloud/worker/digest.mjs ./digest.mjs
 COPY cloud/worker/plan.mjs ./plan.mjs

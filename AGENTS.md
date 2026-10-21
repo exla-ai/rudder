@@ -760,7 +760,7 @@ brain lives in the cloud, and the phone is a first-class client.
   Every path that destroys machines skips rows without `machine_id`; keep it so.
 - **Control socket.** `home.mjs` (the supervisor, chosen by `RUDDER_HOME=1` in
   `entrypoint.sh`) holds `/api/rudder/home/<id>/control`: the repo list comes down
-  (`repos`), project state goes up every 3s when changed (`state`), and the phone's
+  (`repos`), project state is checked every 1.5s (`STATE_INTERVAL_MS`) and goes up when changed (`state`), and the phone's
   requests arrive as `rpc` (transcript, send, task, action, close). The server keeps
   only the latest state in memory; the supervisor re-sends it on reconnect.
 - **The phone never touches a PTY.** Messages, new tasks, stop and merge are written
@@ -1275,6 +1275,35 @@ on the user's own Claude Code / Codex subscription.
   (`openLocal` -> `rudder cloud pull`). Bridge contract in `mac/README.md`. The
   DMG is served from `rudder.exla.ai/download/mac` -> the latest GitHub release
   asset `Rudder.dmg`.
+- **Agent status: one rule, stamped on every agent** (`cloud/worker/agent-status.mjs`,
+  `cloud/src/agent-status.ts`). The supervisor reads each run.json into a status
+  word plus raw facts: `status` (working / waiting / review / done / paused /
+  failed / stopped / merged / orphaned), `phase`, `attention`, `asks`,
+  `conflict`, `notInTrunk`, and `pr: {state, number, url}` (state from the
+  dashboard's `publish.observedState`; null on dashboards that do not write it).
+  A running record reads `paused` while the repo's dashboard is not running and
+  `orphaned` when its `process.pid` is dead, so a dead dashboard never shows
+  Working (and `activeAgents`, which holds off idle updates, counts only real
+  work). `delivery blocked` is `failed`; a merge whose change left trunk is
+  `review`, not `merged`; a merged PR is `merged`. The control plane then stamps
+  `needsYou` + `reason` in `homeProjects`, and every surface (web, Mac menu bar
+  and Dock, team view, voice, Slack) reads those two fields; nothing re-derives
+  needs-you. Needs you = a prompt (`permission` / `question` / `plan`), a stopped
+  turn (`input` / `interrupted` / `error`), `conflict`, `not-in-trunk`, missing
+  delivery proof (`delivery`), `delivery-blocked`, `failed`, or finished
+  workspace work awaiting merge (`review`). A row whose PR is open or a draft
+  is waiting on GitHub, NOT on you; a conflict still needs you with a PR open.
+  The app labels by reason ("Needs permission", "Interrupted", "Turn failed",
+  "Merge conflict") and by PR ("PR open", "Draft PR", "PR merged").
+- **A sleeping home's state is a memory.** `homeStates` keeps the socket that
+  delivered each state; it is live only while that socket is the open control
+  socket (`homeStateLive`). Otherwise working / starting / waiting rows are served
+  as `paused` with `stale: true` and `lastSeen` (ms), their prompts dropped (the
+  hooks died with the machine), and the project carries `live: false` +
+  `stateAt`; the app shows "Paused · last seen 5m ago". On SIGTERM the supervisor
+  stops the dashboards and publishes one last state (rows read Paused) before
+  exiting. Slack holds a first needs-you for 2.5s (`NEEDS_DEBOUNCE_MS`) so an
+  interrupt's blip is not posted.
 - **Not built yet**: the cloud agent using the Mac as a runner (xcodebuild /
   simulator on the user's Mac on the agent's behalf), Sparkle auto-update for the
   Mac app, and org-level shared credentials / SSO.

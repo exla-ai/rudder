@@ -24,6 +24,7 @@ import pty from "node-pty";
 
 import { readTranscript, lastAssistantText, userTask } from "./transcripts.mjs";
 import { readAsks, askDecision, isAskId } from "./asks.mjs";
+import { statusFields } from "./agent-status.mjs";
 import { sanitizeHomeHookConfigs } from "./hook-paths.mjs";
 import { createLoginRunner } from "./logins.mjs";
 import { collectDigestRuns } from "./digest.mjs";
@@ -130,8 +131,16 @@ for (const signal of ["SIGTERM", "SIGINT"]) {
     for (const project of projects.values()) {
       project.stop();
     }
-    // Dashboards persist Paused rows on SIGTERM; give them a moment (Fly waits 10s).
-    setTimeout(() => process.exit(0), 5000).unref();
+    // Dashboards persist Paused rows on SIGTERM; give them a moment (Fly waits
+    // 10s), then send the state once more so the app reads Paused, not the
+    // Working it last heard, while the machine is down.
+    setTimeout(() => {
+      lastStateJson = "";
+      void publishState()
+        .catch((error) => log(`state: ${error.message}`))
+        .finally(() => setTimeout(() => process.exit(0), 300).unref());
+    }, 4000).unref();
+    setTimeout(() => process.exit(0), 6000).unref();
   });
 }
 
@@ -324,7 +333,9 @@ class Project {
   }
 
   agents() {
-    return readAgents(this.dir);
+    // Only a running dashboard hosts agents: while it is down (restarting,
+    // stopped by SIGTERM, failed) no row is working, whatever run.json says.
+    return readAgents(this.dir, { dashboardRunning: this.status === "running" && !!this.term && !this.stopped });
   }
 }
 
@@ -946,7 +957,7 @@ function scheduleStateSoon() {
   setTimeout(() => void publishState().catch((error) => log(`state: ${error.message}`)), 150).unref();
 }
 
-function readAgents(repoDir) {
+function readAgents(repoDir, options = {}) {
   const runsDir = path.join(repoDir, ".rudder", "runs");
   let entries = [];
   try {
@@ -965,7 +976,7 @@ function readAgents(repoDir) {
     if (!record || typeof record !== "object" || record.id !== id) {
       continue;
     }
-    agents.push(agentSummary(record));
+    agents.push(agentSummary(record, options));
   }
   // A task typed a moment ago has no run record until its workspace is named;
   // the dashboard lists those here so the phone shows them at once.
@@ -995,9 +1006,8 @@ function readAgents(repoDir) {
 }
 
 
-function agentSummary(record) {
+function agentSummary(record, options = {}) {
   const updatedAt = toMillis(record.updatedAt) ?? toMillis(record.createdAt);
-  const status = phoneStatus(record);
   let lastMessage = null;
   let remoteUrl = null;
   try {
@@ -1015,9 +1025,9 @@ function agentSummary(record) {
     id: record.id,
     title: (record.taskSummary || userTask(record.task) || record.id || "").toString().slice(0, 200),
     task: userTask(record.task).slice(0, 2000),
-    status,
-    phase: record.lifecyclePhase ?? null,
-    attention: record.attention ?? null,
+    // status, phase, attention, conflict, notInTrunk, pr (agent-status.mjs);
+    // the control plane derives needsYou + reason from these and the asks.
+    ...statusFields(record, options),
     backend: record.backend ?? "claude",
     model: record.model ?? null,
     mode: record.mode ?? null,
@@ -1066,29 +1076,6 @@ async function answerAsk(project, params) {
   fs.renameSync(tmp, file);
   scheduleStateSoon();
   return { ok: true };
-}
-
-// The phone's vocabulary: working / waiting / review / done / paused / failed /
-// stopped / merged / orphaned.
-function phoneStatus(record) {
-  const status = String(record.status || "");
-  const phase = String(record.lifecyclePhase || "");
-  if (status === "running" || status === "steering" || status === "verifying" || status === "created") {
-    return record.attention ? "waiting" : "working";
-  }
-  if (status === "completed" || status === "merge-conflict") {
-    if (phase === "review" || status === "merge-conflict" || phase.includes("needs merge") || phase.includes("proof")) {
-      return "review";
-    }
-    return "done";
-  }
-  if (status === "cancelled") {
-    return "stopped";
-  }
-  if (["merged", "failed", "paused", "orphaned", "migrated"].includes(status)) {
-    return status === "migrated" ? "done" : status;
-  }
-  return status || "done";
 }
 
 // ---------------------------------------------------------------------------

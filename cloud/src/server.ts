@@ -30,6 +30,7 @@ import { buildTeamView, createVisibilityStore, handleTeamApi, type TeamDeps } fr
 import { createOnboardingStore, handleOnboardingApi } from "./onboarding.js";
 import { createProductAnalytics } from "./product-analytics.js";
 import { createIntegrations } from "./integrations.js";
+import { annotateAgent } from "./agent-status.js";
 
 type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
 
@@ -5014,6 +5015,9 @@ type HomeState = {
   credentials?: JsonRecord;
   logins?: JsonRecord;
   updatedAt: string;
+  /** The control socket that sent it: the state is live only while that
+   * socket is the open control socket (homeStateLive). */
+  via?: WebSocket;
 };
 type PendingRpc = {
   resolve: (value: Json) => void;
@@ -5667,6 +5671,7 @@ function attachHomeControl(homeId: string, ws: WebSocket): void {
         credentials: objectField(message, "credentials"),
         logins: objectField(message, "logins"),
         updatedAt: new Date().toISOString(),
+        via: ws,
       });
       // "New agents here are private": pin each agent seen for the first time,
       // in the same tick the state lands, so no teammate ever reads it as team.
@@ -6064,6 +6069,15 @@ function serveHomeUpload(req: IncomingMessage, res: ServerResponse, homeId: stri
   res.end(upload.bytes);
 }
 
+// What the supervisor last said is the truth only while the socket it came
+// on is still the open control socket. Once it closes (the machine slept,
+// stopped or lost its network) the state is a memory, served as such.
+function homeStateLive(homeId: string): boolean {
+  const state = homeStates.get(homeId);
+  const control = homeControls.get(homeId);
+  return Boolean(state && control && state.via === control && isOpen(control));
+}
+
 function homeSummary(home: Workspace | null): JsonRecord | null {
   if (!home) {
     return null;
@@ -6081,18 +6095,24 @@ function homeSummary(home: Workspace | null): JsonRecord | null {
     credentials: state?.credentials ?? null,
     logins: state?.logins ?? null,
     stateUpdatedAt: state?.updatedAt ?? null,
+    stateLive: homeStateLive(home.id),
   };
 }
 
 // Repo rows merged with what the supervisor last reported for each.
 function homeProjects(home: Workspace): JsonRecord[] {
-  const live = new Map((homeStates.get(home.id)?.projects ?? []).map((project) => [project.workspaceId, project]));
+  const state = homeStates.get(home.id);
+  const live = new Map((state?.projects ?? []).map((project) => [project.workspaceId, project]));
+  // Asleep or disconnected: live rows are frozen as paused, never "Working".
+  const stateLive = homeStateLive(home.id);
+  const lastSeen = state ? Date.parse(state.updatedAt) || null : null;
   return homeRepos(home.id).map((row) => {
     const project = live.get(row.id);
-    // Each agent says whether teammates may see it (team.ts).
+    // Each agent says whether teammates may see it (team.ts), and whether it
+    // needs you and why (agent-status.ts).
     const visibility = visibilityStore.forProject(row.id);
     const agents = (project?.agents ?? []).map((agent) => (agent && typeof agent === "object" && typeof (agent as JsonRecord).id === "string"
-      ? { ...(agent as JsonRecord), visibility: visibilityStore.effective(visibility, String((agent as JsonRecord).id)) }
+      ? annotateAgent({ ...(agent as JsonRecord), visibility: visibilityStore.effective(visibility, String((agent as JsonRecord).id)) }, { live: stateLive, lastSeen })
       : agent));
     return {
       workspaceId: row.id,
@@ -6102,6 +6122,9 @@ function homeProjects(home: Workspace): JsonRecord[] {
       status: row.status,
       failureReason: project?.error ?? row.failureReason ?? null,
       dashboard: project?.dashboard ?? null,
+      // false: what follows is the last state seen, at stateAt, not now.
+      live: stateLive,
+      stateAt: lastSeen,
       agents: agents as unknown as Json,
       newAgentsPrivate: visibility.newAgentsPrivate,
       ports: (project?.ports ?? []) as unknown as Json,

@@ -10,6 +10,8 @@
 //
 // Pure apart from the VoiceContext it is handed, so tests drive it with fakes.
 
+import { isNeedsYou, type StatusAgent } from "./agent-status.js";
+
 export type VoiceAsk = {
   id: string;
   tool?: string;
@@ -951,8 +953,9 @@ function overlap(query: string[], words: string[]): number {
 
 const ACTIVE = new Set(["working", "waiting", "review", "paused", "failed", "starting"]);
 
+// The control plane's one rule (agent-status.ts), stamped on every agent.
 export function needsUser(agent: VoiceAgent): boolean {
-  return (agent.asks ?? []).length > 0 || agent.status === "waiting" || agent.status === "review" || agent.status === "failed";
+  return isNeedsYou(agent as unknown as StatusAgent);
 }
 
 export function overviewText(projects: VoiceProject[]): string {

@@ -65,7 +65,7 @@ test("a private agent keeps only its status; a team agent is a whitelist", () =>
     id: "run-1", title: "Secret plan", task: "the whole task", status: "working", backend: "claude", model: "opus",
     updatedAt: 5, lastMessage: "said something", remoteUrl: "https://claude.ai/x", asks: [{ id: "1-aaaaaaaa", kind: "question", questions: ["?"] }],
   };
-  assert.deepEqual(team.teamAgentView(agent, "private"), { id: "run-1", private: true, status: "working", asking: "question", updatedAt: 5 });
+  assert.deepEqual(team.teamAgentView(agent, "private"), { id: "run-1", private: true, status: "working", asking: "question", needsYou: true, reason: "question", updatedAt: 5 });
   const open = team.teamAgentView(agent, "team");
   assert.equal(open.title, "Secret plan");
   assert.equal(open.model, "opus");
@@ -254,7 +254,7 @@ test("team view, private agents, outsiders and owner-only writes", { timeout: 60
   assert.equal(mate.projects.length, 1);
   assert.equal(mate.projects[0].workspaceId, "repo-alice");
   const [privRow, pubRow] = mate.projects[0].agents; // needs-input sorts first
-  assert.deepEqual(privRow, { id: "run-priv", private: true, status: "waiting", asking: "permission", updatedAt: 2 });
+  assert.deepEqual(privRow, { id: "run-priv", private: true, status: "waiting", asking: "permission", needsYou: true, reason: "permission", updatedAt: 2 });
   assert.equal(pubRow.title, "Public work");
   assert.equal(pubRow.backend, "claude");
   assert.equal(pubRow.model, "opus");

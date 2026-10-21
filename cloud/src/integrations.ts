@@ -15,6 +15,7 @@
 import { createCipheriv, createDecipheriv, createHash, createHmac, hkdfSync, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { Database } from "better-sqlite3";
+import { agentNeeds, type StatusAgent } from "./agent-status.js";
 import { verifySlackSignature } from "./slack.js";
 import {
   exchangeSlackCode,
@@ -50,6 +51,13 @@ export type IntegrationAgent = {
   title?: string | null;
   status?: string | null;
   asks?: unknown[] | null;
+  /** Stamped by the control plane (agent-status.ts); derived when absent. */
+  needsYou?: boolean | null;
+  reason?: string | null;
+  phase?: string | null;
+  attention?: string | null;
+  conflict?: boolean | null;
+  pr?: unknown;
   /** "private" (team.ts): an org channel gets no title for it. */
   visibility?: string | null;
 };
@@ -73,6 +81,8 @@ export type IntegrationsDeps = {
   deliverTask: (accountId: string, workspaceId: string, text: string) => Promise<void>;
   capture?: (accountId: string, name: string, props?: Record<string, unknown>) => void;
   log?: (message: string) => void;
+  /** How long a first needs-you waits before it posts (tests pass 0 or a few ms). */
+  needsDebounceMs?: number;
 };
 
 export type Account = { accountId: string; email?: string };
@@ -82,6 +92,10 @@ const LINK_CODE_TTL_MS = 10 * 60 * 1000;
 // The same agent reaching the same status again inside this window (a flap
 // between waiting and working, say) is not news.
 const NOTIFY_REPEAT_MS = 60 * 1000;
+// A first "needs you" waits this long before it posts: an Esc interrupt or a
+// permission prompt answered in the terminal reads as needs-you for a second
+// or two, and that blip is not news.
+const NEEDS_DEBOUNCE_MS = 2500;
 const MAX_BODY_BYTES = 256 * 1024;
 
 class HttpError extends Error {
@@ -109,7 +123,13 @@ type Install = {
 };
 
 type NotifyCategory = "needs" | "ready" | "failed" | "working" | "other";
-type AgentMemory = { category: NotifyCategory; posted: Map<NotifyCategory, number>; turnAt: number };
+type AgentMemory = {
+  category: NotifyCategory;
+  posted: Map<NotifyCategory, number>;
+  turnAt: number;
+  /** A needs-you post waiting out NEEDS_DEBOUNCE_MS; cancel() drops it. */
+  held?: { cancel: () => void };
+};
 
 export function deriveIntegrationKey(secret: string | undefined, label: string): Buffer | null {
   const raw = (secret ?? "").trim();
@@ -215,16 +235,26 @@ function header(req: IncomingMessage, name: string): string | undefined {
   return Array.isArray(value) ? value[0] : value;
 }
 
+function needsOf(agent: IntegrationAgent): { needsYou: boolean; reason: string | null } {
+  return typeof agent.needsYou === "boolean"
+    ? { needsYou: agent.needsYou, reason: agent.reason ?? null }
+    : agentNeeds(agent as StatusAgent);
+}
+
+// Slack's categories, from the control plane's one needs-you rule: finished
+// work awaiting review is "ready", a failure is "failed", anything else that
+// needs you (a prompt, input, an interrupt, a conflict) is "needs".
 function agentCategory(agent: IntegrationAgent): NotifyCategory {
   const status = String(agent.status ?? "");
-  if ((Array.isArray(agent.asks) && agent.asks.length > 0) || status === "waiting") {
+  const needs = needsOf(agent);
+  if (status === "failed" || needs.reason === "failed" || needs.reason === "delivery-blocked") {
+    return "failed";
+  }
+  if (needs.needsYou && needs.reason !== "review") {
     return "needs";
   }
   if (status === "review" || status === "done") {
     return "ready";
-  }
-  if (status === "failed") {
-    return "failed";
   }
   if (status === "working" || status === "starting") {
     return "working";
@@ -232,12 +262,29 @@ function agentCategory(agent: IntegrationAgent): NotifyCategory {
   return "other";
 }
 
+const NEEDS_WORDS: Record<string, string> = {
+  permission: "needs your permission",
+  question: "asked you a question",
+  plan: "has a plan for you",
+  input: "needs your input",
+  interrupted: "was interrupted and is waiting for you",
+  error: "hit an error and is waiting for you",
+  conflict: "hit a merge conflict",
+  "not-in-trunk": "merged work is no longer in main",
+  delivery: "needs delivery proof",
+};
+
 function statusLine(agent: IntegrationAgent, category: NotifyCategory): string {
   if (category === "needs") {
-    return "needs you";
+    const words = NEEDS_WORDS[needsOf(agent).reason ?? ""];
+    return words ? `needs you: ${words}` : "needs you";
   }
   if (category === "failed") {
     return "failed";
+  }
+  const pr = agent.pr && typeof agent.pr === "object" ? (agent.pr as { state?: unknown }).state : null;
+  if (pr === "open" || pr === "draft") {
+    return "done, PR open";
   }
   return agent.status === "review" ? "ready for review" : "done";
 }
@@ -248,6 +295,7 @@ export function createIntegrations(deps: IntegrationsDeps) {
   const { database } = deps;
   const now = deps.now ?? Date.now;
   const log = deps.log ?? ((message: string) => console.warn(message));
+  const needsDebounceMs = Math.max(0, deps.needsDebounceMs ?? NEEDS_DEBOUNCE_MS);
   const baseURL = deps.baseURL.replace(/\/+$/, "");
   const tokenKey = deriveIntegrationKey(deps.env.RUDDER_SECRETS_KEY, "rudder-integrations-token-v1");
   const stateKey = deriveIntegrationKey(deps.env.RUDDER_SECRETS_KEY, "rudder-integrations-state-v1");
@@ -928,6 +976,7 @@ export function createIntegrations(deps: IntegrationsDeps) {
       // org channel (teammates read it) gets "Private agent".
       const posts: Array<{ full: string; org: string }> = [];
       const at = now();
+      const held: Array<{ entry: AgentMemory; key: string; post: { full: string; org: string } }> = [];
       for (const project of projects ?? []) {
         for (const agent of project.agents ?? []) {
           if (!agent?.id) {
@@ -944,38 +993,84 @@ export function createIntegrations(deps: IntegrationsDeps) {
           }
           const notifiable = category === "needs" || category === "ready" || category === "failed";
           const changed = !previous || previous.category !== category;
+          if (changed && entry.held) {
+            // It left needs-you before the hold ran out: a blip, not news.
+            entry.held.cancel();
+          }
           const lastPost = entry.posted.get(category);
           const fresh = lastPost === undefined || (entry.turnAt > lastPost && at - lastPost >= NOTIFY_REPEAT_MS);
           if (!first && notifiable && changed && fresh) {
             const full = notificationText(project, agent, category);
-            posts.push({ full, org: agent.visibility === "private" ? notificationText(project, agent, category, true) : full });
-            entry.posted.set(category, at);
+            const post = { full, org: agent.visibility === "private" ? notificationText(project, agent, category, true) : full };
+            if (category === "needs" && needsDebounceMs > 0) {
+              held.push({ entry, key, post });
+            } else {
+              posts.push(post);
+              entry.posted.set(category, at);
+            }
           }
           entry.category = category;
           known.set(key, entry);
         }
       }
-      for (const key of known.keys()) {
+      for (const [key, entry] of known) {
         if (!seen.has(key)) {
+          entry.held?.cancel();
           known.delete(key);
         }
       }
-      if (posts.length === 0) {
-        return;
+      for (const { entry, key, post } of held) {
+        entry.held?.cancel();
+        let release: () => void = () => undefined;
+        const settled = new Promise<void>((resolve) => { release = resolve; });
+        pending.add(settled);
+        const done = () => {
+          pending.delete(settled);
+          release();
+        };
+        const hold = {
+          cancel: () => {
+            clearTimeout(timer);
+            if (entry.held === hold) {
+              entry.held = undefined;
+            }
+            done();
+          },
+        };
+        // Posted only if the agent still needs you when the hold runs out; a
+        // later state that moves it on cancels the hold (above).
+        const timer = setTimeout(() => {
+          entry.held = undefined;
+          if (known.get(key) === entry && entry.category === "needs") {
+            entry.posted.set("needs", now());
+            void sendPosts(accountId, [post]).finally(done);
+          } else {
+            done();
+          }
+        }, needsDebounceMs);
+        timer.unref?.();
+        entry.held = hold;
       }
-      const channels = notifyChannels(accountId);
-      await Promise.all(
-        channels.flatMap((install) =>
-          posts.map((post) =>
-            postSlack(deps.fetch, str(install.token.accessToken), install.channelId!, install.ownerKind === "org" ? post.org : post.full).catch((error: unknown) =>
-              log(`integrations: slack notify failed for ${install.ownerKind}:${install.ownerId}: ${error instanceof Error ? error.message : String(error)}`),
-            ),
-          ),
-        ),
-      );
+      await sendPosts(accountId, posts);
     } catch (error) {
       log(`integrations: onHomeState failed: ${error instanceof Error ? error.message : String(error)}`);
     }
+  }
+
+  async function sendPosts(accountId: string, posts: Array<{ full: string; org: string }>): Promise<void> {
+    if (posts.length === 0) {
+      return;
+    }
+    const channels = notifyChannels(accountId);
+    await Promise.all(
+      channels.flatMap((install) =>
+        posts.map((post) =>
+          postSlack(deps.fetch, str(install.token.accessToken), install.channelId!, install.ownerKind === "org" ? post.org : post.full).catch((error: unknown) =>
+            log(`integrations: slack notify failed for ${install.ownerKind}:${install.ownerId}: ${error instanceof Error ? error.message : String(error)}`),
+          ),
+        ),
+      ),
+    );
   }
 
   return {

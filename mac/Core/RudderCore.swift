@@ -143,7 +143,9 @@ struct NeedsYouItem: Equatable {
 }
 
 /// "Needs you", counted exactly as the web app counts it (app.js `needsYou`):
-/// a pending ask, or status waiting / review / failed.
+/// the control plane stamps `needsYou` + `reason` on every agent (AGENTS.md
+/// §9.8.2). A server older than that field: a pending ask, or status
+/// waiting / review / failed.
 enum NeedsYou {
     static let statuses: Set<String> = ["waiting", "review", "failed"]
 
@@ -151,8 +153,26 @@ enum NeedsYou {
         if let asks = agent["asks"] as? [Any], asks.contains(where: { $0 is [String: Any] }) {
             return true
         }
+        if let stamped = agent["needsYou"] as? Bool {
+            return stamped
+        }
         return statuses.contains(agent["status"] as? String ?? "")
     }
+
+    static let reasons: [String: String] = [
+        "permission": "needs permission",
+        "question": "has a question",
+        "plan": "has a plan for you",
+        "input": "needs input",
+        "interrupted": "was interrupted",
+        "error": "turn failed",
+        "conflict": "has a merge conflict",
+        "not-in-trunk": "is no longer in main",
+        "delivery": "needs delivery proof",
+        "delivery-blocked": "delivery blocked",
+        "review": "ready for review",
+        "failed": "failed",
+    ]
 
     /// Newest first. nil when the body is not the state JSON.
     static func items(fromStateJSON data: Data) -> [NeedsYouItem]? {
@@ -189,6 +209,9 @@ enum NeedsYou {
             case "plan": return "has a plan for you"
             default: return "needs approval"
             }
+        }
+        if let reason = agent["reason"] as? String, let words = reasons[reason] {
+            return words
         }
         switch agent["status"] as? String {
         case "waiting": return "waiting for you"

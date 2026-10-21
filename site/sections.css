@@ -1192,3 +1192,7 @@
   padding: 0;
   border: 0;
 }
+
+.team-icon svg {
+  color: var(--work);
+}

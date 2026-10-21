@@ -1187,3 +1187,8 @@
 .drive-embed .twitter-tweet a {
   color: var(--work);
 }
+
+.drive-embed .twitter-tweet-rendered {
+  padding: 0;
+  border: 0;
+}

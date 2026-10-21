@@ -130,7 +130,13 @@ serverTest("a home machine's repos, state and phone requests flow over its contr
   // The iOS shell's sign-in ends here; with no browser session it reports an error on its scheme.
   const nativeDone = await fetch(`${base}/app/native-done`, { redirect: "manual" });
   assert.equal(nativeDone.status, 302);
-  assert.equal(nativeDone.headers.get("location"), "rudder://auth?error=signin");
+  assert.match(nativeDone.headers.get("location"), /^rudder:\/\/auth\?error=signin&message=Sign-in%20did%20not%20finish/);
+  // A refused sign-in (Better Auth's errorCallbackURL) says why, to the shell and on the web.
+  const refused = await fetch(`${base}/app/native-done?error=account_not_linked`, { redirect: "manual" });
+  assert.match(decodeURIComponent(refused.headers.get("location")), /error=account_not_linked&message=This email already has a Rudder account/);
+  const webRefused = await fetch(`${base}/app/signin-error?error=account_not_linked`);
+  assert.equal(webRefused.status, 200);
+  assert.match(await webRefused.text(), /already has a Rudder account[\s\S]*href="\/app"/);
 
   // A worker token is not a user token.
   assert.equal((await fetch(`${base}/api/app/state`, { headers: { authorization: `Bearer ${workerToken}` } })).status, 401);

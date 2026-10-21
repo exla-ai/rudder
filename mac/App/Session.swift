@@ -67,7 +67,10 @@ final class Session {
             Keychain.write(token)
             self.token = token
         } else {
-            errorMessage = "Sign-in did not finish. Try again."
+            // The server says why (an email already signed up another way, a
+            // cancelled or expired sign-in).
+            let items = url.flatMap { URLComponents(url: $0, resolvingAgainstBaseURL: false)?.queryItems } ?? []
+            errorMessage = items.first(where: { $0.name == "message" })?.value ?? "Sign-in did not finish. Try again."
         }
     }
 

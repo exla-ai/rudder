@@ -689,6 +689,10 @@ const server = http.createServer({ noDelay: true }, async (req, res) => {
       await handleAppNativeDone(req, res);
       return;
     }
+    if (url.pathname === "/app/signin-error") {
+      handleAppSigninError(url, res);
+      return;
+    }
     if (req.method === "GET" && (url.pathname === "/app" || url.pathname.startsWith("/app/"))) {
       await serveAppFile(res, url.pathname);
       return;
@@ -6490,6 +6494,9 @@ async function handleAppLogin(url: URL, res: ServerResponse): Promise<void> {
     body: JSON.stringify({
       provider,
       callbackURL: url.searchParams.get("native") === "1" ? `${baseURL}/app/native-done` : `${baseURL}${appReturnPath(url.searchParams.get("next"))}`,
+      // A refused sign-in comes back to the app with its reason. Without
+      // this Better Auth sent it to the bare server root, the old CLI page.
+      errorCallbackURL: url.searchParams.get("native") === "1" ? `${baseURL}/app/native-done` : `${baseURL}/app/signin-error`,
       disableRedirect: true,
     }),
   }));
@@ -6891,11 +6898,32 @@ async function handleAppApi(req: IncomingMessage, res: ServerResponse, url: URL)
 // End of the iOS app's sign-in: the browser session just created is exchanged
 // for a Rudder bearer token, handed back on the app's own URL scheme. The token
 // is the same kind `rudder login` stores, scoped to the same account.
+const SIGNIN_ERRORS: Record<string, string> = {
+  account_not_linked: "This email already has a Rudder account from another sign-in (GitHub or Google). Sign in that way once; after that both work.",
+  access_denied: "Sign-in was cancelled.",
+  state_mismatch: "The sign-in took too long or was opened in another browser. Try again.",
+  please_restart_the_process: "The sign-in took too long or was opened in another browser. Try again.",
+};
+
+function signinErrorText(code: string | null): string {
+  return (code && SIGNIN_ERRORS[code]) || `Sign-in did not finish${code ? ` (${code.replace(/_/g, " ")})` : ""}. Try again.`;
+}
+
+function handleAppSigninError(url: URL, res: ServerResponse): void {
+  const message = signinErrorText(url.searchParams.get("error"));
+  sendHtml(res, renderShell({
+    title: "Sign in · Rudder",
+    body: `<section class="hero"><h1>Couldn't sign you in.</h1><p class="lede">${escapeHtml(message)}</p><p><a class="button" href="/app">Back to Rudder</a></p></section>`,
+  }), 200);
+}
+
 async function handleAppNativeDone(req: IncomingMessage, res: ServerResponse): Promise<void> {
-  const session = await getBetterAuthSession(req);
+  const failed = new URL(req.url ?? "/", "http://x").searchParams.get("error");
+  const session = failed ? null : await getBetterAuthSession(req);
   if (!session?.user?.id) {
+    // The iOS and Mac shells show this text on their sign-in screen.
     res.statusCode = 302;
-    res.setHeader("Location", "rudder://auth?error=signin");
+    res.setHeader("Location", `rudder://auth?error=${encodeURIComponent(failed || "signin")}&message=${encodeURIComponent(signinErrorText(failed))}`);
     res.end();
     return;
   }

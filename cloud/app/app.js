@@ -593,6 +593,8 @@ function DesktopShell() {
     });
     const here = route?.ws;
     if (here && !openSet.has(here)) { openSet.add(here); saveOpen(); }
+    // reconcile keeps unkeyed children, so the "Loading…" placeholder goes by hand.
+    if (projects.length) projectsEl.querySelector(":scope > .ds-none")?.remove();
     reconcile(projectsEl, projects, (p) => p.workspaceId,
       () => h(`<div class="ds-proj"><div class="ds-prow"><button type="button" class="ds-tw" aria-expanded="false">${icon("chevron")}</button><a class="ds-pn" data-link><span class="ds-pname"></span><span class="ds-pc"></span></a></div><div class="ds-agents" role="list"></div></div>`),
       (pEl, p) => {
@@ -620,6 +622,7 @@ function DesktopShell() {
         // Live and recent agents; the project screen has the rest.
         const agents = (p.agents || []).filter((a) => groupOf(a) !== "earlier" || (route?.run === a.id))
           .sort((x, y) => (y.updatedAt || 0) - (x.updatedAt || 0)).slice(0, 12);
+        if (agents.length) list.querySelector(":scope > .ds-none")?.remove();
         reconcile(list, agents, (a) => a.id, sideAgent, (a, ag) => paintAgent(a, { p, a: ag }));
         const hidden = (p.agents || []).length - agents.length;
         let moreEl = pEl.querySelector(".ds-more");

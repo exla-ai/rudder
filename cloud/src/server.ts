@@ -1812,7 +1812,7 @@ const GITHUB_ICON_SVG = `<svg viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/
 
 const BRAND_SVG = `<svg viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><rect x="6" y="6" width="52" height="52" rx="12" fill="#fff"/><rect x="6" y="6" width="52" height="52" rx="12" fill="none" stroke="#111" stroke-width="3"/><path d="M18 20h12c8 0 13 4 13 11s-5 11-13 11h-6v9h-6V20Zm6 6v10h6c4 0 7-2 7-5s-3-5-7-5h-6Z" fill="#111"/><path d="M39 42l8 9" stroke="#111" stroke-width="6" stroke-linecap="round"/></svg>`;
 
-function renderShell(options: { title: string; body: string; footer?: string }): string {
+function renderShell(options: { title: string; body: string; footer?: string; brand?: string }): string {
   return `<!doctype html>
 <html lang="en">
   <head>
@@ -1861,14 +1861,14 @@ function renderShell(options: { title: string; body: string; footer?: string }):
   <body>
     <div class="page">
       <header>
-        <a class="brand" href="https://rudder.exla.ai">${BRAND_SVG}<span>Rudder Cloud</span></a>
+        <a class="brand" href="https://rudder.exla.ai">${BRAND_SVG}<span>${escapeHtml(options.brand ?? "Rudder Cloud")}</span></a>
         <nav>
           <a href="https://rudder.exla.ai">rudder.exla.ai</a>
           <a href="https://github.com/exla-ai/rudder">GitHub</a>
         </nav>
       </header>
       <main>${options.body}</main>
-      <footer>${options.footer ?? "You can close this tab once the CLI says you're signed in. Rudder Cloud uses Better Auth for OAuth — your provider tokens stay on this server."}</footer>
+      <footer>${options.footer ?? "You can close this tab once the CLI says you're signed in. Rudder Cloud uses Better Auth for OAuth, and your provider tokens stay on this server."}</footer>
     </div>
   </body>
 </html>`;
@@ -4694,6 +4694,10 @@ function createBetterAuth() {
         trustedProviders: ["google", "github"],
       },
     },
+    // A sign-in whose state is gone (expired, opened in another browser)
+    // has no errorCallbackURL to go to; without this it fell through to the
+    // server root, the old CLI login page.
+    onAPIError: { errorURL: `${baseURL.replace(/\/$/, "")}/app/signin-error` },
   });
 }
 
@@ -6913,7 +6917,9 @@ function handleAppSigninError(url: URL, res: ServerResponse): void {
   const message = signinErrorText(url.searchParams.get("error"));
   sendHtml(res, renderShell({
     title: "Sign in · Rudder",
-    body: `<section class="hero"><h1>Couldn't sign you in.</h1><p class="lede">${escapeHtml(message)}</p><p><a class="button" href="/app">Back to Rudder</a></p></section>`,
+    brand: "Rudder",
+    body: `<section class="hero"><h1>Couldn't sign you in.</h1><p class="lede">${escapeHtml(message)}</p><p><a class="button" href="/app/login">Try again</a> &nbsp; <a href="/app">Back to Rudder</a></p></section>`,
+    footer: "",
   }), 200);
 }
 

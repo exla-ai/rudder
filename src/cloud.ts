@@ -368,6 +368,11 @@ export async function runCloudCommand(command: string, args: string[], options: 
       // way to launch a worker ON that task (the instance name is derived from it).
       // Use task mode so the worker actually RUNS the task instead of opening an
       // idle dashboard. Explicit `rudder cloud sail <name>` keeps name-only mode.
+      // Except one word naming a project on the home machine (`rudder cloud
+      // tempo`): that is "open tempo", not a task called "tempo".
+      if (command === "cloud" && rest.length === 0 && /^[\w.\/-]+$/.test(subcommand) && await attachHomeProject(subcommand, options)) {
+        return;
+      }
       await launch(command === "sail" ? args : [subcommand, ...rest], options, "task");
       return;
   }

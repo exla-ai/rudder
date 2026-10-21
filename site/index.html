@@ -6,7 +6,7 @@
     <title>Rudder: coding agents in parallel, steered from your phone</title>
     <meta
       name="description"
-      content="Rudder runs Claude Code, Codex and opencode in parallel on one repository, each in its own jj workspace. Start them from the terminal or your phone, approve their prompts anywhere, and they keep working on your cloud machine with the laptop closed. Use it from the terminal, the browser, the Mac app or the iPhone app."
+      content="Rudder runs Claude Code, Codex and opencode side by side, each in its own jj workspace. Start them from the terminal or your phone, approve their prompts anywhere, and they keep working on your cloud machine with the laptop closed. Use it from the terminal, the browser, the Mac app or the iPhone app."
     />
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
     <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
@@ -16,18 +16,18 @@
     <meta property="og:title" content="Rudder" />
     <meta
       property="og:description"
-      content="Many agents, one repo, none of them colliding. Steered from your terminal or your phone."
+      content="Many agents, none of them colliding. Steered from your terminal or your phone."
     />
     <meta property="og:image" content="https://rudder.exla.ai/og.png" />
     <meta property="og:image:type" content="image/png" />
     <meta property="og:image:width" content="1200" />
     <meta property="og:image:height" content="630" />
-    <meta property="og:image:alt" content="Rudder: many agents, one repo, steered from your phone." />
+    <meta property="og:image:alt" content="Rudder: many agents, steered from your phone." />
     <meta name="twitter:card" content="summary_large_image" />
     <meta name="twitter:title" content="Rudder" />
-    <meta name="twitter:description" content="Many agents, one repo, none of them colliding. Steered from your terminal or your phone." />
+    <meta name="twitter:description" content="Many agents, none of them colliding. Steered from your terminal or your phone." />
     <meta name="twitter:image" content="https://rudder.exla.ai/og.png" />
-    <meta name="twitter:image:alt" content="Rudder: many agents, one repo, steered from your phone." />
+    <meta name="twitter:image:alt" content="Rudder: many agents, steered from your phone." />
     <meta name="theme-color" content="#fdfdfd" media="(prefers-color-scheme: light)" />
     <meta name="theme-color" content="#111417" media="(prefers-color-scheme: dark)" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
@@ -64,11 +64,6 @@
           <span>Rudder</span>
         </a>
         <nav class="site-nav" aria-label="Primary">
-          <a href="#phone">Phone</a>
-          <a href="/setup">Set up</a>
-          <a href="/docs">Docs</a>
-          <a href="https://github.com/exla-ai/rudder">GitHub</a>
-          <a href="/login">Sign in</a>
           <a class="nav-install" href="/app">Get started</a>
         </nav>
       </header>
@@ -81,13 +76,12 @@
               New: the Mac app, and voice on iPhone
               <span aria-hidden="true">→</span>
             </a>
-            <h1 id="title">Many agents. <span class="nw">One repo.</span> <span class="h1-accent">Steered from your phone.</span></h1>
+            <h1 id="title">Many agents. <span class="h1-accent">Steered from your phone.</span></h1>
             <p class="lede">
-              Run Claude Code, Codex and opencode side by side, each in
-              <strong>its own workspace</strong>, on your cloud machine. Drive
-              them from <strong>your terminal</strong>, <strong>the
-              browser</strong>, <strong>the Mac app</strong> or <strong>your
-              phone</strong>.
+              Run <strong>your own Claude Code and Codex</strong>, with your
+              settings and hooks, <strong>anywhere</strong>. Each agent gets its
+              own workspace on your cloud machine, and you drive them from your
+              terminal, the browser, the Mac app or your phone.
             </p>
             <div class="install" id="install">
               <code id="install-command"
@@ -167,6 +161,46 @@
         <!-- Run it anywhere. One ruled form with four columns, not a card grid:
              each column is a surface, its one-line pitch, and the real way to
              get it. Two by two on a tablet, ruled rows on a phone. -->
+        <section class="section harness-section" id="harness" aria-labelledby="harness-title">
+          <div class="section-head" data-reveal>
+            <h2 id="harness-title">Your Claude Code. Your Codex. <span class="h1-accent">Now anywhere.</span></h2>
+            <p>
+              Rudder does not replace the agent you already trust. It runs the
+              real Claude Code and Codex, on your own subscription, set up the way
+              you set them up, and gives them a machine that never sleeps.
+            </p>
+          </div>
+
+          <ul class="points" data-reveal>
+            <li class="point">
+              <span class="way-no">the real CLIs</span>
+              <h3>Not a lookalike</h3>
+              <p>
+                The same <code class="mono">claude</code> and
+                <code class="mono">codex</code> you run today, in a real terminal,
+                with their own slash commands, prompts and plan mode.
+              </p>
+            </li>
+            <li class="point">
+              <span class="way-no">your setup</span>
+              <h3>Your plan, your settings</h3>
+              <p>
+                Sign in with your Claude or ChatGPT plan. Your settings and hooks
+                come along, so every agent behaves the way you tuned it.
+              </p>
+            </li>
+            <li class="point">
+              <span class="way-no">anywhere</span>
+              <h3>Laptop optional</h3>
+              <p>
+                They run on your cloud machine and keep going with the lid
+                closed. Pick them up from the terminal, a browser, the Mac or
+                your phone.
+              </p>
+            </li>
+          </ul>
+        </section>
+
         <section class="section ways-section" id="ways" aria-labelledby="ways-title">
           <div class="section-head" data-reveal>
             <h2 id="ways-title">Run it anywhere.</h2>
@@ -336,6 +370,38 @@
             </li>
           </ol>
 
+        </section>
+
+        <section class="section integrations-section" id="integrations" aria-labelledby="integrations-title">
+          <div class="section-head" data-reveal>
+            <h2 id="integrations-title">Works with Slack and Linear.</h2>
+            <p>
+              Connect them in two clicks, no API keys to paste. Rudder tells your
+              team when an agent needs someone, and turns an issue into a running
+              agent.
+            </p>
+          </div>
+
+          <ul class="integrations" data-reveal>
+            <li class="integration">
+              <span class="integration-logo"><svg viewBox="0 0 24 24" aria-hidden="true"><path fill="#E01E5A" d="M6.2 14.6a2.1 2.1 0 1 1-2.1-2.1h2.1v2.1zm1 0a2.1 2.1 0 1 1 4.2 0v5.3a2.1 2.1 0 1 1-4.2 0v-5.3z"/><path fill="#36C5F0" d="M9.4 6.2a2.1 2.1 0 1 1 2.1-2.1v2.1H9.4zm0 1a2.1 2.1 0 1 1 0 4.2H4.1a2.1 2.1 0 1 1 0-4.2h5.3z"/><path fill="#2EB67D" d="M17.8 9.4a2.1 2.1 0 1 1 2.1 2.1h-2.1V9.4zm-1 0a2.1 2.1 0 1 1-4.2 0V4.1a2.1 2.1 0 1 1 4.2 0v5.3z"/><path fill="#ECB22E" d="M14.6 17.8a2.1 2.1 0 1 1-2.1 2.1v-2.1h2.1zm0-1a2.1 2.1 0 1 1 0-4.2h5.3a2.1 2.1 0 1 1 0 4.2h-5.3z"/></svg></span>
+              <h3>Slack</h3>
+              <p>
+                A message in your channel when an agent needs you, is ready for
+                review, or fails. Type <code class="mono">/rudder status</code> to
+                see what is running, or <code class="mono">/rudder &lt;project&gt; &lt;task&gt;</code>
+                to start one.
+              </p>
+            </li>
+            <li class="integration">
+              <span class="integration-logo"><svg viewBox="0 0 24 24" aria-hidden="true"><path fill="#5E6AD2" d="M2.9 13.9 10.1 21.1A9.2 9.2 0 0 1 2.9 13.9zM2.8 11.4l9.8 9.8a9 9 0 0 0 2.1-.4L3.2 9.3a9 9 0 0 0-.4 2.1zM3.9 7.7l12.4 12.4c.5-.3 1-.6 1.5-1L4.9 6.2c-.4.5-.7 1-1 1.5zM6 5.1A9.2 9.2 0 1 1 18.9 18L6 5.1z"/></svg></span>
+              <h3>Linear</h3>
+              <p>
+                Pick an issue and start an agent on it. Rudder comments on the
+                issue so everyone watching it can follow the work.
+              </p>
+            </li>
+          </ul>
         </section>
 
         <section class="section showcase" aria-labelledby="desk-title">
@@ -546,7 +612,7 @@
       </main>
 
       <footer class="site-foot">
-        <span>Rudder, a terminal orchestrator for coding agents.</span>
+        <span>Rudder: your coding agents, running anywhere.</span>
         <nav aria-label="Footer">
           <a href="/docs">Docs</a>
           <a href="/download/mac">Mac app</a>

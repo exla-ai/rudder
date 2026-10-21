@@ -258,6 +258,23 @@
           </div>
         </section>
 
+        <section class="section drive-section" id="drive" aria-labelledby="drive-title">
+          <div class="section-head" data-reveal>
+            <h2 id="drive-title">Talk to it from the car.</h2>
+            <p>
+              Here I am asking Rudder what my agents are doing while I drive.
+              CarPlay is waiting on Apple's approval, so for now it's a phone call.
+            </p>
+          </div>
+          <div class="drive-embed" data-reveal>
+            <blockquote class="twitter-tweet" data-dnt="true" data-align="center" data-conversation="none">
+              <p lang="en" dir="ltr">You can use Rudder while you are driving<br><br>- CarPlay app is waiting for approval<br>- right now it’s a phone number</p>
+              &mdash; Viraat (@therealviraat)
+              <a href="https://twitter.com/therealviraat/status/2112385085966307503">Watch the video on X</a>
+            </blockquote>
+          </div>
+        </section>
+
         <section class="section phone-section" id="phone" aria-labelledby="phone-title">
           <div class="section-head" data-reveal>
             <h2 id="phone-title">Close the laptop. The agents keep going.</h2>
@@ -592,5 +609,26 @@
     </div>
 
     <script type="module" src="/site.js"></script>
+    <script>
+      // The X embed loads only when its section is near the screen, in the
+      // visitor's color scheme.
+      (function () {
+        var box = document.querySelector(".drive-embed");
+        if (!box) return;
+        var load = function () {
+          var q = box.querySelector(".twitter-tweet");
+          if (q && window.matchMedia("(prefers-color-scheme: dark)").matches) q.setAttribute("data-theme", "dark");
+          var sc = document.createElement("script");
+          sc.async = true;
+          sc.src = "https://platform.twitter.com/widgets.js";
+          document.body.appendChild(sc);
+        };
+        if (!("IntersectionObserver" in window)) return load();
+        var io = new IntersectionObserver(function (es) {
+          if (es.some(function (e) { return e.isIntersecting; })) { io.disconnect(); load(); }
+        }, { rootMargin: "600px 0px" });
+        io.observe(box);
+      })();
+    </script>
   </body>
 </html>

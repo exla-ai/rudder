@@ -1167,3 +1167,23 @@
     border-top: var(--hair) solid var(--rule);
   }
 }
+
+/* ---------- talk to it from the car ---------- */
+
+.drive-embed {
+  display: flex;
+  justify-content: center;
+}
+
+.drive-embed .twitter-tweet {
+  max-width: 550px;
+  margin: 0 auto;
+  padding: 18px 20px;
+  border: var(--hair) solid var(--rule);
+  border-radius: 14px;
+  color: var(--ink-2);
+}
+
+.drive-embed .twitter-tweet a {
+  color: var(--work);
+}

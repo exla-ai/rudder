@@ -175,7 +175,7 @@ class Project {
       const reason = firstLine(error.message);
       this.error = !githubCredentials && /could not read Username|Authentication failed|Repository not found/i.test(reason)
         ? "can't clone: the cloud vault has no GitHub token. Run `rudder cloud` in this repo on your laptop to add one."
-        : `git clone failed: ${reason}`;
+        : this.local ? `couldn't create the project: ${reason}` : `git clone failed: ${reason}`;
       log(`${this.name}: ${this.error}`);
       return;
     }
@@ -185,9 +185,24 @@ class Project {
     this.spawnDashboard();
   }
 
+  // A local project (`local:<name>`, made from the app without GitHub): a
+  // fresh git repo with one empty commit for jj and the dashboard to stand on.
+  get local() {
+    return String(this.descriptor.remote || "").startsWith("local:");
+  }
+
   async ensureClone() {
     if (fs.existsSync(path.join(this.dir, ".git"))) {
-      shSoft(`git -C ${q(this.dir)} fetch --all -q`);
+      if (!this.local) shSoft(`git -C ${q(this.dir)} fetch --all -q`);
+      return;
+    }
+    if (this.local) {
+      log(`${this.name}: new local project`);
+      fs.mkdirSync(this.dir, { recursive: true });
+      await run(`git -C ${q(this.dir)} init -q -b main`);
+      shSoft(`git -C ${q(this.dir)} config user.email >/dev/null 2>&1 || git -C ${q(this.dir)} config user.email "rudder-cloud@local"`);
+      shSoft(`git -C ${q(this.dir)} config user.name >/dev/null 2>&1 || git -C ${q(this.dir)} config user.name "Rudder Cloud"`);
+      await run(`git -C ${q(this.dir)} commit -q --allow-empty -m "New project"`);
       return;
     }
     this.status = "cloning";
@@ -207,6 +222,8 @@ class Project {
       RUDDER_WORKSPACE_ID: this.workspaceId,
       RUDDER_REPO_NAME: this.name,
       RUDDER_CLOUD_RUNTIME: "home",
+      // No GitHub behind a local project: merges stay on the machine.
+      ...(this.local ? { RUDDER_CLOUD_WORKER: "0" } : {}),
     };
     this.term = pty.spawn("rudder", [], { name: "xterm-256color", cols: this.cols, rows: this.rows, cwd: this.dir, env });
     this.status = "running";

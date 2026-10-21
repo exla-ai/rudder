@@ -253,7 +253,10 @@ export function createLoginRunner({ spawnPty, env, dir, cwd, log = () => {}, onC
       } catch {
         // not yet
       }
-      const first = opened.split("\n").map((line) => line.trim()).find((line) => /^https:\/\//.test(line));
+      // A CLI that ignores $BROWSER (Codex on macOS) still prints the link:
+      // take the printed authorize URL whose redirect comes back to this machine.
+      const printed = [...stripAnsi(session.output).matchAll(/https:\/\/[^\s"'<>]+/g)].map((m) => m[0]).find((u) => localCallback(u));
+      const first = opened.split("\n").map((line) => line.trim()).find((line) => /^https:\/\//.test(line)) || printed;
       if (first) {
         session.url = first;
         session.callback = localCallback(first);

@@ -260,7 +260,8 @@ a { color: var(--accent); }
 /* Signing an agent in */
 .login-sheet .add-head { margin-bottom: 14px; }
 /* First-run setup steps (rows reuse .acct) */
-.setup-sec .section-head .count { color: var(--accent); font-weight: 600; }
+.setup-sec .section-head { align-items: center; }
+.setup-sec .setup-x { width: 28px; height: 28px; margin: -6px -6px -6px 0; color: var(--faint); }
 .setup .acct .a-sub { white-space: normal; }
 .setup .acct.done .a-title { color: var(--muted); }
 .setup .acct.done .m-icon { background: var(--done-soft); color: var(--done); }
@@ -790,7 +791,7 @@ dialog.sheet .dialog { border-radius: 22px 22px 0 0; padding-bottom: calc(var(--
 .name-hint { font-size: 13px; color: var(--muted); margin: 7px 2px 0; min-height: 18px; overflow-wrap: anywhere; }
 .name-hint b { color: var(--ink); font-weight: 600; }
 .name-hint.err { color: var(--failed); }
-.name-hint .link { border: 0; background: none; padding: 0; font: inherit; font-weight: 600; color: var(--accent); text-decoration: underline; cursor: pointer; }
+.name-hint .link, .create-note .link { border: 0; background: none; padding: 0; font: inherit; font-weight: 600; color: var(--accent); text-decoration: underline; cursor: pointer; }
 .create-btn { margin-top: 20px; flex: none; }
 .create-btn[disabled] { background: var(--surface-3); color: var(--faint); }
 .create-btn.busy[disabled] { background: var(--accent); color: var(--accent-ink); opacity: 0.75; }

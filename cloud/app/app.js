@@ -127,6 +127,8 @@ Object.assign(app, {
   teamStatus: (a) => (a.asking ? { label: ASK_LABEL[a.asking] || "Needs approval", cls: "s-needs" }
     : a.needsYou && REASON[a.reason] ? REASON[a.reason] : statusOf(a.status)),
   backendLabel: (a) => backendLabel(a),
+  // org.js: Settings lists the same Claude Code / Codex rows as the home screen.
+  accountsCard: () => AccountsCard(),
 });
 
 // The Mac shell posts a notification when an agent newly needs you (the
@@ -209,7 +211,72 @@ async function openProjectRepo(repo, dlg) {
 // account or any org you belong to. The two are separate tabs because the
 // owner filter for browsing and the owner a new repo goes under are separate
 // choices.
+// A project with no GitHub repo behind it: a new folder on the cloud machine
+// (git init, no remote). Agents work in it the same way; merges stay on the
+// machine instead of opening pull requests.
+function openLocalProject() {
+  const dlg = h(`<dialog class="sheet add-sheet" aria-label="New project"><div class="dialog">
+    <div class="sheet-grab"></div>
+    <div class="add-head"><h3>New project</h3><button type="button" class="icon-btn" data-act="close" aria-label="Close">${icon("x")}</button></div>
+    <form class="add-pane create-pane" novalidate>
+      <label class="field-label" for="local-name">Project name</label>
+      <input id="local-name" class="input" name="name" placeholder="my-new-app" autocapitalize="off" autocorrect="off" spellcheck="false" enterkeyhint="go" maxlength="100">
+      <div class="name-hint" aria-live="polite"></div>
+      <button type="submit" class="btn accent block create-btn" disabled>Create project</button>
+      <div class="create-note">A new folder on your cloud machine, ready for agents. <button type="button" class="link gh-link">Connect GitHub</button> to open your repos instead.</div>
+    </form>
+  </div></dialog>`);
+  const form = dlg.querySelector("form");
+  const nameIn = form.querySelector("input");
+  const hint = form.querySelector(".name-hint");
+  const btn = form.querySelector(".create-btn");
+  const clean = (raw) => raw.trim().replace(/[^A-Za-z0-9._-]+/g, "-").replace(/-{2,}/g, "-").replace(/^[-.]+|-+$/g, "");
+  const taken = (name) => (store.state?.projects || []).some((p) => (p.name || "").toLowerCase() === name.toLowerCase());
+  function sync() {
+    const name = clean(nameIn.value);
+    hint.className = "name-hint";
+    if (!nameIn.value.trim()) hint.textContent = "Letters, numbers, dashes, dots and underscores.";
+    else if (!name || name === "." || name === "..") { hint.classList.add("err"); hint.textContent = "Try letters and numbers."; }
+    else if (taken(name)) { hint.classList.add("err"); hint.textContent = `You already have a project called ${name}.`; }
+    else hint.textContent = name === nameIn.value.trim() ? `Creates ~/code/${name}` : `Creates it as ~/code/${name}`;
+    btn.disabled = !name || name === "." || name === ".." || taken(name);
+  }
+  nameIn.addEventListener("input", sync);
+  form.querySelector(".gh-link").addEventListener("click", () => { dlg.close(); openGithubConnect(); });
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const name = clean(nameIn.value);
+    if (btn.disabled || !name) return;
+    btn.disabled = true;
+    btn.classList.add("busy");
+    setText(btn, `Creating ${name}…`);
+    try {
+      const res = await api("/api/app/create", { method: "POST", body: { local: true, name } });
+      dlg.close();
+      toast(`Created ${name}`);
+      await refreshState();
+      const ws = res?.workspace?.workspaceId || res?.workspace?.id;
+      if (ws) navigate(projectPath(ws));
+    } catch (err) {
+      if (err.status !== 401) toast(err.message, { error: true });
+      btn.classList.remove("busy");
+      setText(btn, "Create project");
+      sync();
+    }
+  });
+  dlg.addEventListener("click", (e) => {
+    if (e.target === dlg || e.target.closest('[data-act="close"]')) dlg.close();
+  });
+  dlg.addEventListener("close", () => dlg.remove());
+  document.body.appendChild(dlg);
+  dlg.showModal();
+  sync();
+  if (!coarse) nameIn.focus();
+}
+
 function openAddProject() {
+  // No GitHub yet: a new project is just a folder on the cloud machine.
+  if (store.state?.github?.connected === false && githubState(store.state).kind !== "ok") { openLocalProject(); return; }
   const dlg = h(`<dialog class="sheet add-sheet" aria-label="Add project"><div class="dialog">
     <div class="sheet-grab"></div>
     <div class="add-head"><h3>Add project</h3><button type="button" class="icon-btn" data-act="close" aria-label="Close">${icon("x")}</button></div>
@@ -1613,66 +1680,45 @@ function ComputerCard() {
   return { el };
 }
 
-// A fresh account's three steps. Each row is done or not; the card goes away
-// once all three are done (and stays away, so a sleeping machine's unknown
-// logins never bring it back).
+// A fresh account's first step: sign in Claude Code, Codex, or both. Each is
+// its own row; the card goes away once both are signed in or the user closes
+// it (Settings has the same rows), and stays away.
 const SETUP_DONE_KEY = "rudder.setupDone";
 function SetupCard() {
   const el = h(`<div class="section setup-sec">
-    <div class="section-head"><h2>Get set up</h2><span class="count"></span></div>
+    <div class="section-head"><h2>Get set up</h2><button type="button" class="icon-btn setup-x" aria-label="Close setup">${icon("x")}</button></div>
     <div class="card accounts setup" role="list" aria-label="Setup steps"></div></div>`);
   const list = el.querySelector(".setup");
-  const STEPS = [
-    { id: "github", ic: "github", title: "Connect GitHub", action: "Connect", run: () => openGithubConnect() },
-    { id: "agent", ic: "spark", title: "Sign in Claude Code or Codex", action: "Sign in", run: () => openAgentChooser() },
-    { id: "repo", ic: "folder", title: "Pick or create a repo", action: "Add", run: () => openAddProject() },
-  ];
+  el.querySelector(".setup-x").addEventListener("click", () => { ls.set(SETUP_DONE_KEY, true); el.hidden = true; });
+  const SUB = { claude: "Agents run on your Claude subscription", codex: "Agents run on your ChatGPT subscription" };
   const rows = new Map();
-  for (const step of STEPS) {
+  for (const agent of AGENTS) {
     const row = h(`<div class="acct" role="listitem">
-      <div class="m-icon">${icon(step.ic)}</div>
+      <div class="m-icon">${icon(agent.ic)}</div>
       <div class="a-body"><div class="a-title"><span></span></div><div class="a-sub"></div></div>
       <span class="setup-check" hidden>${icon("check")}</span>
-      <button type="button" class="btn small accent a-btn"></button>
+      <button type="button" class="btn small accent a-btn">Sign in</button>
     </div>`);
-    setText(row.querySelector(".a-title span"), step.title);
-    setText(row.querySelector(".a-btn"), step.action);
-    row.querySelector(".a-btn").addEventListener("click", step.run);
+    setText(row.querySelector(".a-title span"), `Sign in to ${agent.label}`);
+    row.querySelector(".a-btn").addEventListener("click", () => openAgentSignIn(agent.id));
     list.appendChild(row);
-    rows.set(step.id, row);
-  }
-  function states(s) {
-    const home = s?.home;
-    const agents = AGENTS.map((x) => agentLoginState(home, x.id));
-    const signedIn = agents.findIndex((st) => st.kind === "ok");
-    let agent;
-    if (signedIn >= 0) agent = { kind: "ok", sub: `${AGENTS[signedIn].label} · ${agents[signedIn].sub}` };
-    else if (agents.some((st) => st.kind === "busy")) agent = { kind: "busy", sub: "Signing in…" };
-    else if (home && !home.credentials) agent = { kind: "unknown", sub: home.connected ? "Checking…" : "Checked when your cloud machine is up" };
-    else agent = { kind: "out", sub: "Agents run with your own subscription or API key" };
-    const projects = s?.projects || [];
-    const repo = projects.length
-      ? { kind: "ok", sub: projects.length === 1 ? projects[0].repo || projects[0].name : `${projects.length} projects` }
-      : { kind: "out", sub: "It's cloned onto your cloud machine" };
-    return { github: githubState(s), agent, repo };
+    rows.set(agent.id, row);
   }
   function update(s) {
     if (ls.get(SETUP_DONE_KEY)) { el.hidden = true; return; }
-    const st = states(s);
-    const all = Object.values(st);
-    if (all.every((x) => x.kind === "ok")) { ls.set(SETUP_DONE_KEY, true); el.hidden = true; return; }
-    // Nothing known to be missing (a sleeping machine): nothing to show.
-    el.hidden = !all.some((x) => x.kind === "out");
-    const doneCount = all.filter((x) => x.kind === "ok").length;
-    setText(el.querySelector(".count"), `${doneCount} of ${all.length}`);
+    const home = s?.home;
+    const st = Object.fromEntries(AGENTS.map((x) => [x.id, agentLoginState(home, x.id)]));
+    if (AGENTS.every((x) => st[x.id].kind === "ok")) { ls.set(SETUP_DONE_KEY, true); el.hidden = true; return; }
+    // A machine that is up but has not reported its logins yet: wait for it.
+    el.hidden = !!home?.connected && !home.credentials;
     for (const [id, row] of rows) {
       const x = st[id];
       const sub = row.querySelector(".a-sub");
-      setText(sub, x.sub);
+      setText(sub, x.kind === "ok" || x.kind === "busy" || x.err ? x.sub : SUB[id]);
       sub.classList.toggle("err", !!x.err);
       row.classList.toggle("done", x.kind === "ok");
       row.querySelector(".setup-check").hidden = x.kind !== "ok";
-      row.querySelector(".a-btn").hidden = x.kind === "ok" || x.kind === "unknown";
+      row.querySelector(".a-btn").hidden = x.kind === "ok" || x.kind === "checking";
     }
   }
   return { el, update };
@@ -1788,7 +1834,6 @@ function HomeScreen() {
     </header>
     <div class="scroller">
       <div class="ptr">${icon("down")}</div>
-      <div class="section digest-slot"></div>
       <div class="section projects-sec">
         <div class="section-head"><h2>Projects</h2><span class="count"></span></div>
         <div class="projects-body"><div class="list projects"></div></div>
@@ -1800,6 +1845,7 @@ function HomeScreen() {
       </div>
       <div class="section machine-slot"></div>
       <div class="section computer-slot"></div>
+      <div class="section digest-slot"></div>
     </div></section>`);
   const bar = el.querySelector(".topbar");
   const scroller = el.querySelector(".scroller");
@@ -1952,40 +1998,15 @@ function HomeScreen() {
     reconcile(projectsEl, projects, (p) => p.workspaceId, createProjectCard, updateProjectCard);
 
     if (!projects.length) {
-      const body = home
-        ? "Add a GitHub repo to clone it onto your cloud machine, then start agents on it from here."
-        : "Your agents run on your own cloud machine, so they keep going with your phone locked and your laptop closed. Create it, then sign in to Claude Code or Codex.";
-      const key = home ? "h" : "n";
-      if (!emptyEl || emptyEl.dataset.k !== key) {
-        emptyEl = emptyState({ ic: home ? "folder" : "server", title: home ? "No projects yet" : "Welcome to Rudder", body, action: home ? null : createMachineButton() });
-        emptyEl.dataset.k = key;
-      }
+      const body = "Add a project, then start agents on it from here. They run on your own cloud machine, so they keep going with your phone locked and your laptop closed.";
+      if (!emptyEl) emptyEl = emptyState({ ic: "folder", title: home ? "No projects yet" : "Welcome to Rudder", body });
+      setText(emptyEl.querySelector("h3"), home ? "No projects yet" : "Welcome to Rudder");
       if (emptyEl.parentNode !== projectsBody) projectsBody.appendChild(emptyEl);
     } else if (emptyEl) { emptyEl.remove(); emptyEl = null; }
     renderAdd();
   }
 
   return { el, update };
-}
-
-// A new account has no machine: creating one is the first step, from here.
-function createMachineButton() {
-  const btn = h(`<button type="button" class="btn accent">${icon("server")}<span>Create my cloud machine</span></button>`);
-  btn.addEventListener("click", async () => {
-    btn.disabled = true;
-    setText(btn.querySelector("span"), "Creating…");
-    try {
-      const res = await api("/api/app/wake", { method: "POST", body: {} });
-      if (res?.home && store.state) store.state.home = res.home;
-      toast("Creating your cloud machine. The first start takes a minute or two.");
-    } catch (err) {
-      if (err.status !== 401) toast(err.message, { error: true });
-      btn.disabled = false;
-      setText(btn.querySelector("span"), "Create my cloud machine");
-    }
-    await refreshState();
-  });
-  return btn;
 }
 
 // A pin tapped on this phone wins until the server's state agrees: a poll
@@ -2039,6 +2060,8 @@ const DASH = {
   starting: { label: "Starting", cls: "s-accent" }, cloning: { label: "Cloning", cls: "s-accent" },
   stopped: { label: "Stopped", cls: "s-idle" }, failed: { label: "Failed", cls: "s-failed" },
 };
+// A local project is created, not cloned.
+const dashOf = (p) => (p.dashboard === "cloning" && !p.repo ? DASH.starting : DASH[p.dashboard]);
 function updateProjectCard(el, p) {
   el.href = projectPath(p.workspaceId);
   const agents = p.agents || [];
@@ -2046,7 +2069,7 @@ function updateProjectCard(el, p) {
   const n = agents.filter(needsYou).length;
   const d = agents.filter((a) => a.status === "done" || a.status === "merged").length;
   setText(el.querySelector(".p-name"), p.name || p.repo || "Project");
-  setText(el.querySelector(".p-repo"), [p.repo, p.ref].filter(Boolean).join(" @ "));
+  setText(el.querySelector(".p-repo"), [p.repo || "Local project", p.ref].filter(Boolean).join(" @ "));
   for (const [sel, v] of [[".st-w", w], [".st-n", n], [".st-d", d]]) {
     const s = el.querySelector(sel);
     setText(s.querySelector("b"), String(v));
@@ -2054,7 +2077,7 @@ function updateProjectCard(el, p) {
   }
   setText(el.querySelector(".st-n").lastChild, n === 1 ? " needs you" : " need you");
   el.querySelector(".p-live").hidden = w === 0;
-  const dash = DASH[p.dashboard] || (p.status === "failed" ? DASH.failed : null);
+  const dash = dashOf(p) || (p.status === "failed" ? DASH.failed : null);
   const dp = el.querySelector(".p-dash");
   dp.hidden = !dash;
   if (dash) { dp.className = `pill p-dash ${dash.cls}`; setText(dp, dash.label); }
@@ -2470,10 +2493,10 @@ function ProjectScreen(ws) {
     composer.el.hidden = false;
     paintPriv(p);
     setText(el.querySelector(".title"), p.name || p.repo);
-    setText(el.querySelector(".repo"), [p.repo, p.ref].filter(Boolean).join(" @ "));
+    setText(el.querySelector(".repo"), [p.repo || "Local project", p.ref].filter(Boolean).join(" @ "));
 
     // Dashboard status banner
-    const dash = DASH[p.dashboard];
+    const dash = dashOf(p);
     if (dash || p.failureReason) {
       let banner = statusSlot.firstElementChild;
       if (!banner) { banner = h(`<div class="card machine"><div class="m-icon">${icon("server")}</div><div class="m-body"><div class="m-title"><span class="pill"><span class="dot"></span><span class="pl"></span></span></div><div class="m-sub"></div></div></div>`); statusSlot.appendChild(banner); }
@@ -2483,7 +2506,7 @@ function ProjectScreen(ws) {
       pill.querySelector(".dot").classList.toggle("live", p.dashboard === "starting" || p.dashboard === "cloning");
       setText(pill.querySelector(".pl"), d.label);
       const sub = banner.querySelector(".m-sub");
-      setText(sub, p.failureReason || (p.dashboard === "cloning" ? `Cloning ${p.repo} onto your cloud machine.` : p.dashboard === "starting" ? "Starting the Rudder dashboard for this project." : "The Rudder dashboard for this project is not running."));
+      setText(sub, p.failureReason || (p.dashboard === "cloning" ? (p.repo ? `Cloning ${p.repo} onto your cloud machine.` : "Creating the project on your cloud machine.") : p.dashboard === "starting" ? "Starting the Rudder dashboard for this project." : "The Rudder dashboard for this project is not running."));
       sub.classList.toggle("err", !!p.failureReason);
     } else statusSlot.replaceChildren();
 

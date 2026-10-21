@@ -711,6 +711,16 @@ const server = http.createServer(async (req, res) => {
         ],
       });
     }
+    if (p === "/api/app/create" && body.local) {
+      const name = String(body.name || "");
+      const ws = `wsl_${name.replace(/[^\w]/g, "_")}`;
+      const list = freshProjects ?? projects;
+      if (list.some((x) => x.name === name)) return json(res, 409, { error: `a project called ${name} is already on your cloud machine` });
+      list.push({ workspaceId: ws, name, repo: "", ref: null, status: "queued", failureReason: null, dashboard: "cloning", clients: 0, lastActivityAt: iso(now()), agents: [], ports: [] });
+      setTimeout(() => { const x = list.find((q) => q.workspaceId === ws); if (x) { x.dashboard = "running"; x.status = "running"; } }, 4000);
+      if (homeMode === "none" || homeMode === "stopped") homeMode = "queued", setTimeout(() => { homeMode = "running"; }, 6000);
+      return json(res, 200, { home: home(), workspace: { workspaceId: ws } });
+    }
     if (p === "/api/app/create") {
       return json(res, 200, { workspace: { id: "ws-new", workspaceId: "ws-new", repo: `${body.owner}/${body.name}` } });
     }

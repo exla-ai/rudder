@@ -128,6 +128,12 @@ type FlyMachine = {
 const port = Number(process.env.PORT || 3000);
 const baseURL = requiredEnv("BETTER_AUTH_URL", `http://localhost:${port}`);
 const authBaseURL = `${baseURL.replace(/\/$/, "")}/api/auth`;
+const authHost = new URL(baseURL).host.toLowerCase();
+// Behind Fly the Host header is the name the client asked for.
+function onAuthHost(req: IncomingMessage): boolean {
+  const host = String(req.headers["x-forwarded-host"] || req.headers.host || "").split(",")[0].trim().toLowerCase();
+  return !host || host === authHost || host.startsWith("localhost") || host.startsWith("127.0.0.1");
+}
 const dataDir = process.env.RUDDER_CLOUD_DATA_DIR || path.join(os.homedir(), ".rudder-cloud");
 const dbPath = process.env.RUDDER_CLOUD_DB || path.join(dataDir, "rudder-cloud.sqlite");
 const awsRegion = process.env.AWS_REGION || process.env.AWS_DEFAULT_REGION || "us-east-1";
@@ -663,6 +669,16 @@ const server = http.createServer({ noDelay: true }, async (req, res) => {
     }
     if (url.pathname.startsWith("/api/rudder/workspace")) {
       await handleWorkspaceApi(req, res, url);
+      return;
+    }
+    // Sign-in runs on the auth domain (BETTER_AUTH_URL) only: Google shows
+    // the app's name for a verified domain, and the OAuth state cookie must be
+    // on the host the callback comes back to. The iOS and Mac shells still
+    // start on the old fly.dev address, so bounce them over first.
+    if ((url.pathname === "/app/login" || url.pathname === "/app/native-done") && !onAuthHost(req)) {
+      res.statusCode = 302;
+      res.setHeader("Location", `${baseURL.replace(/\/$/, "")}${url.pathname}${url.search}`);
+      res.end();
       return;
     }
     if (url.pathname === "/app/login") {
@@ -5548,7 +5564,7 @@ function homeRepoDirName(homeId: string, slug: string): string {
   return taken ? `${owner}-${name}` : name;
 }
 
-function ensureHomeRepoRow(home: Workspace, slug: string, branch?: string): Workspace {
+function ensureHomeRepoRow(home: Workspace, slug: string, branch?: string, repoUrl = `https://github.com/${slug}.git`): Workspace {
   const key = homeRepoKey(slug);
   const existing = findWorkspaceByKey.get(home.accountId, key) as Record<string, unknown> | undefined;
   const now = new Date().toISOString();
@@ -5562,7 +5578,7 @@ function ensureHomeRepoRow(home: Workspace, slug: string, branch?: string): Work
       .run(home.status, optionalString(homeRow.worker_token_hash) ?? null, home.id, now, row.id);
     return rowToWorkspace(findWorkspaceById.get(row.id));
   }
-  const name = homeRepoDirName(home.id, slug);
+  const name = repoUrl.startsWith(LOCAL_REPO_PREFIX) ? slug.split("/")[1] : homeRepoDirName(home.id, slug);
   const id = uniqueWorkspaceId(name);
   insertWorkspace.run({
     id,
@@ -5578,7 +5594,7 @@ function ensureHomeRepoRow(home: Workspace, slug: string, branch?: string): Work
     volumeId: null,
     workerTokenHash: optionalString(homeRow.worker_token_hash) ?? null,
     sourceKind: "home-repo",
-    repoUrl: `https://github.com/${slug}.git`,
+    repoUrl,
     gitRef: branch ?? null,
     lastActivityAt: now,
     lastHeartbeatAt: null,
@@ -5587,6 +5603,26 @@ function ensureHomeRepoRow(home: Workspace, slug: string, branch?: string): Work
   });
   database.prepare("update rudder_workspaces set home_id = ? where id = ?").run(home.id, id);
   return rowToWorkspace(findWorkspaceById.get(id));
+}
+
+// A local project's row stores `local:<name>` where a clone would store the
+// GitHub url; the machine runs `git init` for it instead of `git clone`.
+const LOCAL_REPO_PREFIX = "local:";
+const LOCAL_NAME_RE = /^[A-Za-z0-9_][\w.-]{0,99}$/;
+
+async function openLocalProjectOnHome(accountId: string, rawName: string): Promise<JsonRecord> {
+  const name = rawName.trim();
+  if (!LOCAL_NAME_RE.test(name) || name.endsWith(".git")) {
+    throw badRequest("name can use letters, numbers, dashes, dots and underscores");
+  }
+  const home = await ensureHomeRunning(accountId);
+  if (homeRepos(home.id).some((row) => row.repoName?.toLowerCase() === name.toLowerCase())) {
+    throw Object.assign(new Error(`a project called ${name} is already on your cloud machine`), { status: 409 });
+  }
+  const repo = ensureHomeRepoRow(home, `~local/${name}`, undefined, `${LOCAL_REPO_PREFIX}${name}`);
+  pushHomeRepos(home.id);
+  schedulePersistDatabase();
+  return { home: home as unknown as JsonRecord, workspace: repo as unknown as JsonRecord };
 }
 
 function repoSlugFromUrl(url: string | undefined): string {
@@ -6610,6 +6646,12 @@ async function handleAppApi(req: IncomingMessage, res: ServerResponse, url: URL)
   }
   if (req.method === "POST" && url.pathname === "/api/app/create") {
     const body = await readJsonBody(req);
+    // A local project: a new folder on the machine, no GitHub (works before
+    // GitHub is connected at all).
+    if ((body as JsonRecord)?.local === true) {
+      sendJson(res, 200, await openLocalProjectOnHome(account.accountId, stringField(body, "name") ?? ""));
+      return;
+    }
     const live = await homeWithControl(account.accountId);
     const created = await homeRpc(live.id, "createRepo", {
       owner: stringField(body, "owner") ?? "",

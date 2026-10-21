@@ -126,11 +126,15 @@ export function SettingsScreen() {
   }
 
   const account = section("Account");
+  // Claude Code and Codex on the cloud machine: sign in, or switch accounts.
+  const agentsSec = section("Agents");
+  const agentsCard = app.accountsCard?.();
+  if (agentsCard) agentsSec.body.appendChild(agentsCard.el);
   const scopeSec = section("Workspace");
   const orgSec = section("Organization");
   const intSec = section("Integrations");
   const more = h(`<div class="section set-foot"></div>`);
-  body.append(account.el, scopeSec.el, orgSec.el, intSec.el, more);
+  body.append(account.el, agentsSec.el, scopeSec.el, orgSec.el, intSec.el, more);
 
   // Account: who, where the agents run, sign-in helpers.
   const kvs = h(`<div class="card set-kvs"></div>`);
@@ -157,6 +161,7 @@ export function SettingsScreen() {
   function paintAccount() {
     const s = app.store?.state || {};
     const home = s.home;
+    agentsCard?.update(home);
     const rows = [["Account", s.email || "Signed in"], ["Cloud machine", home ? app.machineLabel?.(home)?.label || home.status : "None"]];
     if (home?.tailnet?.dnsName) rows.push(["Tailscale", home.tailnet.dnsName]);
     const gh = app.githubState?.(s);

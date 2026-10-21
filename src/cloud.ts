@@ -3158,7 +3158,53 @@ async function attach(args: string[], options: CloudCommandOptions): Promise<voi
     await openOnHome(false, { ...options, reattach: true });
     return;
   }
+  // A project on the home machine, by name: the way back to one made there
+  // (the phone's "new project" has no GitHub origin for a checkout to name).
+  if (await attachHomeProject(sailId, options)) {
+    return;
+  }
+  const client = await cloudClient({ requireToken: true });
+  const listed = await client.request<{ sails?: { id?: string }[] }>("/api/rudder/sail", { method: "GET" }).catch(() => null);
+  if (Array.isArray(listed?.sails) && !listed.sails.some((sail) => sail?.id === sailId)) {
+    throw new Error(`no cloud worker or home project named ${sailId}. \`rudder cloud home\` lists the projects on your home machine.`);
+  }
   await attachWithReconnect({ kind: "sail", id: sailId, label: sailId }, options);
+}
+
+async function attachHomeProject(name: string, options: CloudCommandOptions): Promise<boolean> {
+  const client = await cloudClient({ requireToken: true });
+  let projects: Record<string, JsonValue>[] = [];
+  try {
+    const result = await client.request<{ projects?: Record<string, JsonValue>[] }>("/api/rudder/home", { method: "GET" });
+    projects = result.projects ?? [];
+  } catch {
+    return false;
+  }
+  const wanted = name.toLowerCase();
+  const project = projects.find((p) => String(p.name ?? "").toLowerCase() === wanted || String(p.repo ?? "").toLowerCase() === wanted)
+    ?? projects.find((p) => String(p.repo ?? "").toLowerCase().split("/")[1] === wanted);
+  if (!project) {
+    return false;
+  }
+  const open = () => client.request<HomeOpenResponse>("/api/rudder/home/open", { method: "POST", body: { project: String(project.name) } });
+  const result = await open();
+  const workspaceId = typeof result.workspace?.id === "string" ? result.workspace.id : "";
+  if (!workspaceId) {
+    throw new Error("the control plane did not return a workspace for this project");
+  }
+  if (options.json) {
+    printJson(result as unknown as JsonValue);
+    return true;
+  }
+  if (!process.stdin.isTTY || !process.stdout.isTTY) {
+    process.stderr.write(`${project.name} is open on the home machine (workspace ${workspaceId}). Run \`rudder cloud attach ${project.name}\` from a terminal to attach.\n`);
+    return true;
+  }
+  process.stderr.write(`Opening ${project.name} on your home machine...\n`);
+  await attachWithReconnect({ kind: "workspace", id: workspaceId, label: `${project.name} on home` }, options, async () => {
+    await open();
+  });
+  return true;
 }
 
 type AttachTarget = {
@@ -4011,7 +4057,7 @@ Usage:
       resumes its conversation there; no runId uploads the current
       Rudder workspace state
   rudder cloud logs <id>
-  rudder cloud attach [id]        (no id: reattach this repo on the home machine)
+  rudder cloud attach [id|name]   (no id: reattach this repo on the home machine; a name: that project on it)
       stream the live cloud worker terminal into this pane
   rudder cloud talk <id> "<message>"
       send a message to a running instance and show its reply
@@ -5123,7 +5169,7 @@ async function homeCommand(args: string[], options: CloudCommandOptions): Promis
     const agents = Array.isArray(project.agents) ? (project.agents as Record<string, JsonValue>[]) : [];
     const working = agents.filter((agent) => agent.status === "working").length;
     const waiting = agents.filter((agent) => agent.status === "waiting" || agent.status === "review").length;
-    console.log(`  ${project.name}  ${project.repo}  ${project.dashboard ?? project.status}  ${working} working, ${waiting} need you`);
+    console.log(`  ${project.name}  ${project.repo || "(local, rudder cloud attach " + project.name + ")"}  ${project.dashboard ?? project.status}  ${working} working, ${waiting} need you`);
     if (project.failureReason) {
       console.log(`    why: ${project.failureReason}`);
     }

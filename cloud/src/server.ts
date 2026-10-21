@@ -5649,6 +5649,20 @@ function pushHomeRepos(homeId: string): void {
 }
 
 async function openRepoOnHome(accountId: string, body: Json): Promise<JsonRecord> {
+  // `rudder cloud attach <name>`: a project already on the home machine, by
+  // name. The only way back to one made there (a local project has no GitHub
+  // origin for a laptop checkout to name).
+  const project = (stringField(body, "project") ?? "").trim().toLowerCase();
+  if (project) {
+    const existing = findHomeRow(accountId);
+    const row = existing ? homeRepos(existing.id).find((r) => (r.repoName ?? "").toLowerCase() === project) : undefined;
+    if (!row) {
+      throw Object.assign(new Error(`no project named ${project} on your cloud machine`), { status: 404 });
+    }
+    const home = await ensureHomeRunning(accountId, sanitizeRegion(stringField(body, "region")));
+    pushHomeRepos(home.id);
+    return { home: home as unknown as JsonRecord, workspace: row as unknown as JsonRecord };
+  }
   const slug = (stringField(body, "repo") ?? "").trim().replace(/\.git$/, "");
   if (!REPO_SLUG_RE.test(slug)) {
     throw badRequest("repo must look like owner/name");

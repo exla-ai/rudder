@@ -923,6 +923,7 @@ brain lives in the cloud, and the phone is a first-class client.
   sync would read as diverged. `rudder cloud sync <name>` clones a repo that is only on
   the home into `~/code/<name>` first. Agents and their workspaces do not travel (that
   is `/sync move`), only the main checkout.
+- **Projects made on the home machine** (the phone's new project without GitHub, `repoUrl` `local:<name>`) have no origin a laptop checkout could name, so `rudder cloud attach <name>` finds a home project by name (`/api/rudder/home/open {project}`, wakes the home) before treating the argument as a sail id.
 - **Update when idle (`sweepIdleHomeUpdates`, server.ts).** A release pins a new
   `RUDDER_WORKER_IMAGE`, but the home keeps the image it booted with, and restarting
   cuts off agents mid-turn. Every minute the control plane checks each connected home:

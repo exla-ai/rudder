@@ -23,6 +23,18 @@ key. `/main` puts an agent in the main checkout when you want one there, and
 > [`AGENTS.md`](./AGENTS.md) first; it is the engineering reference and the
 > source of truth for architecture, conventions, and release rules.
 
+## Run it anywhere
+
+<p>
+  <a href="https://rudder.exla.ai/app"><img alt="Open in your browser" src="https://img.shields.io/badge/Open_in_your-Browser-111318?style=for-the-badge&logo=googlechrome&logoColor=white&labelColor=111318" height="36"></a>
+  <a href="https://rudder.exla.ai/download/mac"><img alt="Download for Mac" src="https://img.shields.io/badge/Download_for-Mac-111318?style=for-the-badge&logo=apple&logoColor=white&labelColor=111318" height="36"></a>
+  <a href="https://testflight.apple.com/join/JV4dwM6E"><img alt="Get it for iPhone on TestFlight" src="https://img.shields.io/badge/iPhone-TestFlight-5B7CFA?style=for-the-badge&logo=apple&logoColor=white&labelColor=111318" height="36"></a>
+  <a href="https://www.npmjs.com/package/@exla/rudder"><img alt="Install the terminal app from npm" src="https://img.shields.io/badge/Terminal-npm_i_--g_@exla/rudder-111318?style=for-the-badge&logo=npm&logoColor=white&labelColor=CB3837" height="36"></a>
+</p>
+
+Same agents everywhere: the web app at [rudder.exla.ai/app](https://rudder.exla.ai/app),
+the signed Mac app, the iPhone app (beta on TestFlight), or the terminal.
+
 ## Install
 
 ```bash

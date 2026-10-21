@@ -897,7 +897,7 @@
   box-shadow: 0 20px 60px rgba(0, 0, 0, 0.18);
 }
 
-/* ---------- four ways in ----------
+/* ---------- run it anywhere ----------
  *
  * Terminal, web, Mac app, iPhone. One ruled form with four columns divided by
  * hairlines, not four cards: each column is a surface, a one-line pitch and
@@ -1025,5 +1025,77 @@
   }
   .way > p {
     max-width: var(--measure);
+  }
+}
+
+/* ---------- get-it badges (web, Mac, iPhone) ---------- */
+
+.get-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 18px;
+}
+
+.get-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 48px;
+  padding: 7px 16px 7px 12px;
+  border-radius: 12px;
+  background: var(--ink);
+  color: var(--stock);
+  text-decoration: none;
+  line-height: 1.1;
+  box-shadow: 0 1px 0 color-mix(in oklch, var(--ink) 40%, transparent),
+    0 6px 18px -10px color-mix(in oklch, var(--ink) 70%, transparent);
+  transition: transform 140ms ease, box-shadow 140ms ease;
+}
+
+.get-badge:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 1px 0 color-mix(in oklch, var(--ink) 40%, transparent),
+    0 10px 24px -10px color-mix(in oklch, var(--ink) 80%, transparent);
+}
+
+.get-badge:focus-visible {
+  outline: 2px solid var(--work);
+  outline-offset: 3px;
+}
+
+.get-badge svg {
+  width: 22px;
+  height: 22px;
+  flex: none;
+}
+
+.get-badge span {
+  display: flex;
+  flex-direction: column;
+  font-weight: 600;
+  font-size: 1.02rem;
+  letter-spacing: -0.01em;
+}
+
+.get-badge small {
+  font-size: 0.66rem;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+  opacity: 0.78;
+}
+
+@media (max-width: 420px) {
+  .get-badge {
+    flex: 1 1 100%;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .get-badge {
+    transition: none;
+  }
+  .get-badge:hover {
+    transform: none;
   }
 }

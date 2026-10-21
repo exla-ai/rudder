@@ -618,6 +618,14 @@ const server = http.createServer({ noDelay: true }, async (req, res) => {
       await handleCliLoginPoll(req, res);
       return;
     }
+    // The CLI's sign-in pages start OAuth too, so they bounce like /app/login
+    // below: older CLIs and printed links still name the fly.dev address.
+    if (req.method === "GET" && (url.pathname === "/cli/login" || url.pathname === "/cli/approve" || url.pathname.startsWith("/cli/oauth/")) && !onAuthHost(req)) {
+      res.statusCode = 302;
+      res.setHeader("Location", `${baseURL.replace(/\/$/, "")}${url.pathname}${url.search}`);
+      res.end();
+      return;
+    }
     if (req.method === "GET" && url.pathname === "/cli/login") {
       renderLoginPage(url, res);
       return;

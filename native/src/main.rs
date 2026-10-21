@@ -260,6 +260,12 @@ const HANDOFF_PICKER_LIMIT: usize = 8;
 const MOUSE_DEBUG_ENV: &str = "RUDDER_MOUSE_DEBUG";
 const RUDDER_MOUSE_ENABLE_SEQUENCES: &[u8] = b"\x1b[?1003l\x1b[?1000h\x1b[?1002h\x1b[?1006h";
 const RUDDER_MOUSE_DISABLE_SEQUENCES: &[u8] = b"\x1b[?1006l\x1b[?1003l\x1b[?1002l\x1b[?1000l";
+/// Every exit gives the shell a plain keyboard, whatever pushed what meanwhile:
+/// pop the whole kitty flag stack and zero it, modifyOtherKeys and focus
+/// reporting off. One pop was not enough: a mode left on made Ghostty send
+/// Cmd+C to zsh as `;9;99~`, and with the mouse still reported nothing could
+/// be selected to copy.
+pub(crate) const TERMINAL_KEYBOARD_RESET: &[u8] = b"\x1b[<99u\x1b[=0;1u\x1b[>4m\x1b[?1004l";
 const SLOW_FRAME_THRESHOLD: Duration = Duration::from_millis(66);
 const SLOW_POLL_THRESHOLD: Duration = Duration::from_millis(33);
 const SLOW_DRAW_THRESHOLD: Duration = Duration::from_millis(33);
@@ -20906,6 +20912,7 @@ fn main() -> Result<()> {
         return run_mouse_test(args.get(1).map(String::as_str).unwrap_or("parsed"));
     }
     if args.first().is_some_and(|arg| arg == "attach") {
+        install_terminal_panic_hook();
         return run_attach_client(&args[1..]);
     }
     // The MCP server a /gam Claude half spawns (gam_link.rs). Never touches the
@@ -20914,6 +20921,7 @@ fn main() -> Result<()> {
         return run_gam_channel_server(&args[1..]);
     }
 
+    install_terminal_panic_hook();
     let mut terminal = setup_terminal()?;
     let result = run(&mut terminal);
     restore_terminal(&mut terminal)?;
@@ -21203,6 +21211,21 @@ fn run_mouse_test_parsed() -> Result<()> {
     result
 }
 
+/// A panic unwinds past restore_terminal, which left the shell in raw mode
+/// with the mouse and every key reported. Reset first, then the usual message.
+fn install_terminal_panic_hook() {
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let _ = disable_raw_mode();
+        let mut stdout = io::stdout();
+        let _ = stdout.write_all(RUDDER_MOUSE_DISABLE_SEQUENCES);
+        let _ = stdout.write_all(TERMINAL_KEYBOARD_RESET);
+        let _ = stdout.write_all(b"\x1b[?2004l\x1b[?1049l\x1b[?7h\x1b[?25h\x1b[0m");
+        let _ = stdout.flush();
+        previous(info);
+    }));
+}
+
 fn restore_terminal(terminal: &mut Tui) -> Result<()> {
     disable_raw_mode()?;
     disable_rudder_mouse_capture(terminal.backend_mut())?;
@@ -21213,6 +21236,8 @@ fn restore_terminal(terminal: &mut Tui) -> Result<()> {
         DisableBracketedPaste,
         LeaveAlternateScreen
     )?;
+    terminal.backend_mut().write_all(TERMINAL_KEYBOARD_RESET)?;
+    terminal.backend_mut().flush()?;
     // Clear the tab title we set on startup so the user's shell prompt can
     // rewrite it on exit. Empty title is the conventional way to release it.
     let _ = set_terminal_title(&mut io::stdout(), "");

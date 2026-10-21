@@ -45,7 +45,13 @@ export const KITTY_KEYBOARD_POP = "\x1b[<u";
 const ALT_SCREEN_ON = "\x1b[?1049h";
 const ALT_SCREEN_OFF = "\x1b[?1049l\x1b[?25h";
 const MOUSE_ON = "\x1b[?1000h\x1b[?1002h\x1b[?1006h";
-const MOUSE_OFF = "\x1b[?1006l\x1b[?1002l\x1b[?1000l";
+const MOUSE_OFF = "\x1b[?1006l\x1b[?1015l\x1b[?1005l\x1b[?1003l\x1b[?1002l\x1b[?1000l";
+// Leaving must give the shell a plain keyboard whatever the cloud stream did
+// meanwhile: a remote dashboard that restarted mid-attach pushed its keyboard
+// flags again, and one pop left Ghostty reporting every key (Cmd+C reached zsh
+// as `;9;99~`, and with the mouse still reported nothing could be selected).
+// Pop the whole kitty stack, zero the flags, modifyOtherKeys and focus off.
+export const KEYBOARD_RESET = "\x1b[<99u\x1b[=0;1u\x1b[>4m\x1b[?1004l";
 // Bracketed paste on the LOCAL terminal. The remote dashboard enables it once at
 // startup, long gone from the bounded replay by the time a terminal attaches, so
 // without this a paste arrives as raw keystrokes: Ghostty/iTerm ask "paste
@@ -135,6 +141,7 @@ export class AttachSession {
     this.stopGapInput();
     if (this.held) {
       this.output.write(KITTY_KEYBOARD_POP);
+      this.output.write(KEYBOARD_RESET);
       this.output.write(BRACKETED_PASTE_OFF);
       this.output.write(MOUSE_OFF);
       // Release the tab title so the shell prompt can rewrite it.

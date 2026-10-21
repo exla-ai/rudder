@@ -3262,6 +3262,18 @@ async function attachWithReconnect(
   });
   let result: AttachResult = "failed";
   let gaveUp = false;
+  // Closing the tab (SIGHUP), a kill (SIGTERM) or a crash must still give the
+  // terminal back, or the shell is left reporting every key and the mouse.
+  const releaseOnExit = () => session.release();
+  const releaseAndExit = (code: number) => () => {
+    session.release();
+    process.exit(code);
+  };
+  const onHup = releaseAndExit(129);
+  const onTerm = releaseAndExit(143);
+  process.on("exit", releaseOnExit);
+  process.once("SIGHUP", onHup);
+  process.once("SIGTERM", onTerm);
   try {
     result = await runAttach(target, { ...options, quietBanner: false }, session);
     let attempts = 0;
@@ -3296,6 +3308,9 @@ async function attachWithReconnect(
     }
   } finally {
     session.release();
+    process.off("exit", releaseOnExit);
+    process.off("SIGHUP", onHup);
+    process.off("SIGTERM", onTerm);
   }
   if (gaveUp) {
     process.stderr.write(`\nCould not reach Rudder Cloud for a while. Your agents are still running there; run \`rudder cloud\` to come back.\n`);

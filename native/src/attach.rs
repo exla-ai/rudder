@@ -711,6 +711,7 @@ pub(crate) fn run_attach_client(args: &[String]) -> Result<()> {
         let mut stdout = io::stdout();
         let _ = stdout.write_all(b"\x1b[?7h\x1b[?25h\x1b[0m");
         let _ = disable_rudder_mouse_capture(&mut stdout);
+        let _ = stdout.write_all(TERMINAL_KEYBOARD_RESET);
         let _ = execute!(stdout, DisableBracketedPaste, LeaveAlternateScreen);
         let _ = stdout.flush();
     }
@@ -814,6 +815,7 @@ fn run_dashboard_client(stream: UnixStream) -> Result<()> {
             DisableBracketedPaste,
             LeaveAlternateScreen
         );
+        let _ = stdout.write_all(TERMINAL_KEYBOARD_RESET);
         let _ = set_terminal_title(&mut stdout, "");
         let _ = stdout.flush();
     }

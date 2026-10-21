@@ -329,9 +329,15 @@ async function probe(clientId, redirect, scopes) {
   const url = new URL("https://accounts.google.com/o/oauth2/v2/auth");
   url.search = new URLSearchParams({ client_id: clientId, redirect_uri: redirect, response_type: "code", scope: scopes.join(" "), prompt: "select_account" }).toString();
   const response = await fetch(url, { redirect: "follow", headers: { "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36", "accept-language": "en-US" } });
-  const text = pageText(await response.text());
+  const html = await response.text();
+  const text = pageText(html);
   const error = text.match(/Error 400: (\w+)/)?.[1] ?? text.match(/Error 401: (\w+)/)?.[1] ?? text.match(/Error 403: (\w+)/)?.[1] ?? (response.url.includes("/signin/oauth/error") ? "unknown_error" : null);
-  const appName = text.match(/to continue to ([^.]+?)(?:\s+(?:Email|Forgot|Not your|Create account|Next)\b|$)/)?.[1]?.trim() ?? null;
+  // The name sits in a data-app-name attribute (seen 2026-10); the text
+  // match is the fallback for older page shapes. Unverified branding shows
+  // the redirect URI's domain here, not the App name.
+  const appName = pageText(html.match(/data-app-name="([^"]+)"/)?.[1] ?? "").trim()
+    || text.match(/to continue to ([^.]+?)(?:\s+(?:Email|Forgot|Not your|Create account|Next)\b|$)/)?.[1]?.trim()
+    || null;
   return { error, appName, finalUrl: response.url };
 }
 
@@ -364,7 +370,7 @@ async function checkClient(o) {
     }
     const nameOk = !expect || r.appName.toLowerCase() === expect.toLowerCase();
     if (!nameOk) ok = false;
-    console.log(`${nameOk ? "✓" : "✗"} ${redirect}: accepted; Google shows "continue to ${r.appName}"${nameOk ? "" : `, expected "${expect}". Fix the App name on the Branding page (it is not the project name).`}`);
+    console.log(`${nameOk ? "✓" : "✗"} ${redirect}: accepted; Google shows "continue to ${r.appName}"${nameOk ? "" : `, expected "${expect}". ${/\./.test(r.appName) ? "Google shows a domain until the branding is verified (Branding page, Verify branding)." : "Fix the App name on the Branding page (it is not the project name)."}`}`);
   }
   if (!ok) process.exit(1);
 }

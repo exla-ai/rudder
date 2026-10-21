@@ -1,6 +1,6 @@
 ---
 name: rudder-google-cloud
-description: Use for any Google Cloud or Google API setup — creating or naming a GCP project, enabling APIs (Gmail, Calendar, Drive, Gemini, …), "Sign in with Google" / Google OAuth clients, the consent screen (app name, logo, domains, scopes, verification, test users), redirect_uri_mismatch and other OAuth errors, gcloud auth, service accounts and keys, and storing the resulting secrets. Makes sure users see the product's own name on Google's screens, never a stray project like "My First Project".
+description: Use for any Google Cloud or Google API setup — creating or naming a GCP project, enabling APIs (Gmail, Calendar, Drive, Gemini, …), "Sign in with Google" / Google OAuth clients, the consent screen (app name, logo, domains, scopes, brand verification, test users), moving sign-in to another domain, redirect_uri_mismatch and other OAuth errors, gcloud auth, service accounts and keys, and storing the resulting secrets. Makes sure users see the product's own name on Google's screens, never a stray project like "My First Project".
 ---
 
 # Google Cloud, done properly
@@ -14,6 +14,15 @@ Helper: `node <this skill dir>/scripts/gcp.mjs <command>` (Node 18+, no deps).
 It finds credentials from `gcloud`, gcloud's stored login, or ADC; run
 `whoami` first.
 
+**Google's official skills cover the rest.** This skill is the product layer
+(project naming, consent screen, OAuth client, what a user sees). For general
+`gcloud` work use Google's `gcloud` skill (check leaf syntax with `gcloud help
+<command>` before running it, `--limit`/`--filter`/`--format` on every list,
+`--quiet`, dry-run where supported) and `google-cloud-recipe-auth` for IAM,
+service accounts and ADC. Both are in the `google-cloud-developer` plugin; if
+they are not loaded: `claude plugin marketplace add google/skills && claude
+plugin install google-cloud-developer@google-plugins`.
+
 ## The rules
 
 1. **One project per product, named after the product.** Display name = the
@@ -25,7 +34,11 @@ It finds credentials from `gcloud`, gcloud's stored login, or ADC; run
 2. **The consent screen's App name is what users read**, not the project name
    and not the client name. Set it on the Branding page to the product name,
    with the product's own support email, home page, privacy and terms URLs, and
-   the product's domain as an authorized domain.
+   the product's domain as an authorized domain. **It only shows once the
+   branding is verified.** Until then Google shows the redirect URI's domain:
+   the registrable domain for your own (`app.rudder.exla.ai` → "exla.ai"), the
+   whole host for a platform one ("rudder-cloud-control.fly.dev"). See "Brand
+   verification" below.
 3. **Ask for the narrowest scopes that work.** Basic (openid/email/profile) can go
    straight to production. Sensitive (Calendar, gmail.send) need verification.
    Restricted (Gmail read/modify/compose, Drive full) need verification **and**
@@ -94,8 +107,8 @@ real sign-in in a browser and say in your report what the screen showed.
 - **Testing vs production**: in Testing only listed test users can sign in and
   refresh tokens expire after 7 days — fine for a demo, wrong for real users.
   Publish as soon as the scopes allow it.
-- **Logo**: uploading one triggers brand verification; leave it off until the
-  user is ready to verify. The name, links and domain still show.
+- **Logo**: uploading one adds a logo review to verification; leave it off
+  unless the user wants it, since basic scopes verify faster without one.
 - **Internal user type** restricts sign-in to the org's Workspace accounts — only
   right for internal tools.
 - **Verification** (sensitive/restricted scopes): needs the home page on the
@@ -113,9 +126,60 @@ real sign-in in a browser and say in your report what the screen showed.
   again) and the consent App name (Branding page). The project ID can never
   change — choose it once, deliberately.
 
+## Brand verification (getting the App name on screen)
+
+Branding page → **Verify branding**. Google checks that every **authorized
+domain** is verified in Search Console by an owner of the project, that the
+home page and privacy policy live on those domains and name the app, and that
+the support email belongs to the owner. Basic scopes: usually a few days.
+
+- **Redirect URIs must be on a domain the user owns.** Platform hosts
+  (`*.fly.dev`, `*.vercel.app`, `*.run.app`, `*.awsapprunner.com`,
+  `*.netlify.app`) can never be verified, and while they are authorized
+  domains verification fails. Serve the auth callback from the product's own
+  domain (e.g. `app.<domain>`), then remove the platform redirect URIs and
+  their authorized domains.
+- **Search Console**: add a Domain property for the apex and verify it with
+  the DNS TXT record it gives (through the DNS host's API if you have it,
+  otherwise ask the user), signed in as the same account that owns the project.
+
+## Moving sign-in to another domain
+
+Order matters. Switching the app first breaks sign-in for everyone.
+
+1. Point the new host at the app (DNS + TLS) and check it serves.
+2. Add the new redirect URI (and JS origin if used) to the Google client **and**
+   to every other provider on the same auth base URL (GitHub OAuth/App callback
+   URLs, Slack, Linear …). `check-client` must show it accepted.
+3. Make every page that STARTS a sign-in redirect to the new host before
+   starting it: the OAuth state cookie is set on the host that starts the flow
+   and must be there when the callback lands. Native shells and old CLIs keep
+   using the old address, so bounce their login pages; don't strand them.
+4. Flip the auth base URL (`BETTER_AUTH_URL`, `NEXTAUTH_URL`, …) and deploy.
+5. Real sign-in on the new host for each provider; then remove the old redirect
+   URIs and authorized domains, and verify the branding.
+
+## Keeping an existing client
+
+A client already shipped in apps (an iOS bundle, a published CLI, stored in a
+host's secrets) can stay in a misnamed project when moving it would change the
+client ID. Its consent screen can still say the product's name: set the
+Branding and verify it. Note the exception in the report; never silently.
+
+## In the browser
+
+- Google may ask for a passkey, security key or password re-auth (the URL
+  carries `rapt=`). Stop and ask the user to complete it; never type it.
+- The client page's "Last used date" lags by days. Confirm which client is live
+  from the app's own sign-in redirect (`curl -sI <login url>` → `client_id=`),
+  not from that date.
+- Settings "may take 5 minutes to a few hours"; `check-client` usually sees a
+  new redirect URI within a minute.
+
 ## Report
 
 Say which project (ID and display name), which APIs, which client (ID, never
 the secret), where the secrets live, the `check-client` result per redirect
-URI, what the real sign-in screen showed, the publishing status, and any
-verification still owed (with the user cap it implies).
+URI (including the name Google shows today), what the real sign-in screen
+showed, the publishing and brand-verification status, and any verification
+still owed (with the user cap it implies).

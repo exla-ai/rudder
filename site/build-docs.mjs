@@ -1051,6 +1051,7 @@ function render(slug, page) {
       rel="stylesheet"
     />
     <link rel="stylesheet" href="/docs.css" />
+    <script defer src="/analytics.js"></script>
   </head>
   <body>
     <a class="skip-link" href="#main">Skip to content</a>

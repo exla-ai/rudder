@@ -159,7 +159,7 @@ fixed tag or a bucket instead.
 1. Launch; sign in with Google. The app opens on `/app`; quit and relaunch: still
    signed in, same page.
 2. Cmd+R, Cmd+[, Cmd+], Cmd+, (settings). A GitHub link opens in the browser.
-3. Menu bar: the wheel icon; with an agent waiting, its count, the agent listed;
+3. Menu bar: the Helm wheel icon; with an agent waiting, its count, the agent listed;
    clicking it opens that agent. Make a new agent need you: a notification
    appears within 30s; clicking it (with the window closed) opens the window on it.
 4. In Safari's Web Inspector (Debug build: Develop > your Mac > Rudder):

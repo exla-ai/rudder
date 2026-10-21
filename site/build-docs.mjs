@@ -1032,6 +1032,17 @@ function render(slug, page) {
     <meta name="description" content="${page.lede.replace(/"/g, "&quot;")}" />
     <link rel="canonical" href="https://rudder.exla.ai${canonical}" />
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <meta property="og:type" content="article" />
+    <meta property="og:url" content="https://rudder.exla.ai${canonical}" />
+    <meta property="og:site_name" content="Rudder" />
+    <meta property="og:title" content="${page.title} · Rudder docs" />
+    <meta property="og:description" content="${page.lede.replace(/"/g, "&quot;")}" />
+    <meta property="og:image" content="https://rudder.exla.ai/og.png" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:image" content="https://rudder.exla.ai/og.png" />
     <meta name="theme-color" content="#ffffff" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />

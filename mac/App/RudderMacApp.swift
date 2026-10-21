@@ -165,9 +165,9 @@ struct MenuBarLabel: View {
         let count = model.needs.count
         Group {
             if count > 0 {
-                Text("\(Image(systemName: "steeringwheel")) \(count)")
+                Text("\(Image("MenuBarIcon")) \(count)")
             } else {
-                Image(systemName: "steeringwheel")
+                Image("MenuBarIcon")
             }
         }
         .accessibilityLabel(count == 1 ? "Rudder, 1 agent needs you" : "Rudder, \(count) agents need you")

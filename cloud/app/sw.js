@@ -1,10 +1,10 @@
 // Rudder app service worker: network first for the shell, cached copy when offline.
 // Never touches /api/.
-const CACHE = "rudder-app-v4";
+const CACHE = "rudder-app-v5";
 const SHELL = [
   "/app", "/app/app.js", "/app/render.js", "/app/core.js", "/app/plan.js", "/app/model-picker.js",
   "/app/org.js", "/app/team.js", "/app/onboarding.js", "/app/mac-local.js", "/app/styles.css", "/app/desktop.css",
-  "/app/manifest.webmanifest", "/app/icon.svg", "/app/apple-touch-icon.png", "/app/icon-512.png",
+  "/app/manifest.webmanifest", "/app/icon.svg", "/app/favicon.svg", "/app/apple-touch-icon.png", "/app/icon-512.png",
 ];
 const CDN = "https://cdn.jsdelivr.net/npm/";
 

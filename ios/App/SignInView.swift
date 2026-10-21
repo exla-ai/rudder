@@ -132,7 +132,7 @@ struct SignInView: View {
     }
 }
 
-/// The Rudder logo (the R mark from the site and the macOS app icon).
+/// The Rudder logo (the Helm mark from the site and the app icon).
 struct RudderMark: View {
     var body: some View {
         Image("Logo")

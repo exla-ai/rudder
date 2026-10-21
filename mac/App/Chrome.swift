@@ -98,7 +98,7 @@ struct Backdrop: View {
     }
 }
 
-/// The R mark on a soft shadow, like the app icon sitting on the page.
+/// The Helm mark on a soft shadow, like the app icon sitting on the page.
 struct Mark: View {
     var size: CGFloat = 76
 

@@ -5244,6 +5244,9 @@ impl App {
                 // cleared its badge. Answering IS the thing that ends the wait.
                 run.wait_signal = None;
                 self.dirty = true;
+                // run.json's `attention` is what the phone shows; clearing the
+                // badge here without writing it left "needs input" on the phone.
+                let _ = save_native_run_record(&self.cwd, run);
             }
         }
     }
@@ -19934,7 +19937,7 @@ What to do\n\
         let wanted: Vec<String> = self
             .agents
             .iter()
-            .filter(|run| run.status == AgentStatus::Merged)
+            .filter(|run| run.status == AgentStatus::Merged && !run.merged_through_pr())
             .filter_map(|run| {
                 run.integration
                     .merge_change_id
@@ -19946,8 +19949,9 @@ What to do\n\
             return;
         }
         let answers = jj_changes_in_trunk(&cwd, &wanted);
-        for run in self.agents.iter_mut() {
-            if run.status != AgentStatus::Merged {
+        let mut flipped: Vec<usize> = Vec::new();
+        for (index, run) in self.agents.iter_mut().enumerate() {
+            if run.status != AgentStatus::Merged || run.merged_through_pr() {
                 continue;
             }
             let Some(change) = run
@@ -19962,9 +19966,20 @@ What to do\n\
                 continue;
             };
             let was = run.integration.in_trunk;
+            let phase_before = run.lifecycle_label();
             run.integration.in_trunk = Some(in_trunk);
             if !in_trunk && was != Some(false) {
                 drifted.push((run.id.clone(), change));
+            }
+            if run.lifecycle_label() != phase_before {
+                flipped.push(index);
+            }
+        }
+        // `lifecyclePhase` is what remote readers see; a drift (or its repair)
+        // changes it, so write it down.
+        for index in flipped {
+            if let Some(run) = self.agents.get(index) {
+                let _ = save_native_run_record(&cwd, run);
             }
         }
         for (run_id, change) in drifted {
@@ -20220,6 +20235,11 @@ What to do\n\
             let mut changed = false;
             let mut worker_gone_exit: Option<u32> = None;
             let is_orchestrator = run.is_orchestrator();
+            // What run.json says this row is waiting on (the phone's "needs
+            // input"). Every wait transition below must reach disk, including the
+            // ones that only clear a latch (a spinner lifting an Error/Idle wait),
+            // so the comparison is made once, at the end, against this snapshot.
+            let attention_before = run_attention(run);
             let Some(terminal) = run.terminal.as_mut() else {
                 continue;
             };
@@ -20655,6 +20675,9 @@ What to do\n\
             if let Some(code) = worker_gone_exit {
                 mark_worker_gone_after_done(run, code);
                 run.terminal = None;
+                changed = true;
+            }
+            if attention_changed(attention_before, run) {
                 changed = true;
             }
             if changed {

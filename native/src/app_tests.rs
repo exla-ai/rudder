@@ -17675,6 +17675,7 @@ fn publish_evidence_survives_a_reload_so_a_row_is_not_published_twice() {
         // The PR's STATE is GitHub's answer, not Rudder's: it is re-derived by one
         // `gh pr list` on every probe and must never come back off disk (§12.75).
         state: Some("draft".to_string()),
+        observed_at: Some("2026-10-21T00:00:00Z".to_string()),
     };
     harness.save(&mut published);
 
@@ -28377,4 +28378,245 @@ fn an_agent_talking_about_a_permission_is_not_on_a_permission_prompt() {
     .map(|line| line.to_string())
     .collect();
     assert!(terminal_composer_blocked(Backend::Claude, &prompt).is_some());
+}
+
+// ---------------------------------------------------------------------------
+// Persisted status truth for remote readers (the cloud supervisor, the phone)
+// ---------------------------------------------------------------------------
+
+fn read_run_json(repo: &std::path::Path, id: &str) -> serde_json::Value {
+    let raw = fs::read_to_string(native_run_dir(repo, id).join("run.json")).expect("run.json");
+    serde_json::from_str(&raw).expect("valid json")
+}
+
+#[test]
+fn attention_changed_tracks_every_wait_transition() {
+    let mut run = test_agent_run("att", "work");
+    run.status = AgentStatus::Running;
+    run.wait_signal = Some(WaitSignal::Error(Some("rate limited".to_string())));
+    let before = run_attention(&run);
+    assert_eq!(before, Some("error"));
+    assert!(!attention_changed(before, &run));
+    // A spinner lifts the latch and nothing else moves: still a persisted change.
+    run.wait_signal = None;
+    assert!(attention_changed(before, &run));
+    assert_eq!(run_attention(&run), None);
+}
+
+/// The phone showed "Needs input" for an agent that was working again: the
+/// spinner cleared the Error latch in memory but nothing marked the row changed,
+/// so run.json kept `attention: "error"`.
+#[cfg(not(windows))]
+#[test]
+fn a_spinner_clearing_an_error_wait_reaches_run_json() {
+    let _env = env_guard();
+    let run_id = "att-spinner-itest";
+    let Some(sig) = crate::signals::signal_path(run_id) else {
+        return;
+    };
+    let _ = std::fs::remove_file(&sig);
+    crate::signals::prepare_worker_signals(run_id, Backend::Claude);
+    let repo = unique_test_repo("attention-spinner");
+    let mut app = App::new();
+    app.cwd = repo.clone();
+    let script = "printf '* Thinking... (esc to interrupt)\\n'; sleep 30";
+    let pane = TerminalPane::spawn_shell_or_command(
+        Some(TerminalCommand::with_args("/bin/sh", ["-c", script])),
+        TerminalPaneOptions {
+            size: TerminalSize { rows: 12, cols: 80 },
+            scrollback_lines: 100,
+            ..Default::default()
+        },
+    )
+    .expect("spawn worker pty");
+    let mut run = test_agent_run(run_id, "do the thing");
+    run.cwd = repo.clone();
+    run.backend = Backend::Claude;
+    run.status = AgentStatus::Running;
+    run.wait_signal = Some(WaitSignal::Error(Some("api error".to_string())));
+    save_native_run_record(&repo, &run).expect("seed record");
+    assert_eq!(read_run_json(&repo, run_id)["attention"], "error");
+    run.terminal = Some(pane);
+    app.agents.push(run);
+    app.selected_agent = 0;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        app.poll_agents();
+        if app.agents[0].wait_signal.is_none() {
+            break;
+        }
+        assert!(Instant::now() < deadline, "the spinner never lifted the wait");
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    assert_eq!(
+        read_run_json(&repo, run_id)["attention"],
+        serde_json::Value::Null,
+        "the cleared wait must be persisted, or the phone keeps saying it needs you"
+    );
+    if let Some(terminal) = app.agents[0].terminal.as_mut() {
+        terminal.terminate_and_wait();
+    }
+    let _ = std::fs::remove_file(&sig);
+    let _ = fs::remove_dir_all(&repo);
+}
+
+#[test]
+fn answering_an_agent_persists_the_cleared_attention() {
+    let repo = unique_test_repo("attention-clear");
+    let mut app = App::new();
+    app.cwd = repo.clone();
+    let mut run = test_agent_run("att-clear", "work");
+    run.cwd = repo.clone();
+    run.status = AgentStatus::Running;
+    run.wait_signal = Some(WaitSignal::Input);
+    run.needs_user_input = true;
+    save_native_run_record(&repo, &run).expect("seed");
+    assert_eq!(read_run_json(&repo, "att-clear")["attention"], "input");
+    app.agents.push(run);
+    app.selected_agent = 0;
+    app.clear_selected_attention_flags();
+    assert_eq!(read_run_json(&repo, "att-clear")["attention"], serde_json::Value::Null);
+    let _ = fs::remove_dir_all(&repo);
+}
+
+#[test]
+fn an_unchanged_save_does_not_bump_updated_at() {
+    let repo = unique_test_repo("updated-at");
+    let mut run = test_agent_run("stamp", "work");
+    run.cwd = repo.clone();
+    run.status = AgentStatus::Done;
+    save_native_run_record(&repo, &run).expect("first save");
+    let path = native_run_dir(&repo, "stamp").join("run.json");
+    // Pin a recognisably old stamp, as a week-old row would carry.
+    let mut record = read_run_json(&repo, "stamp");
+    record["updatedAt"] = serde_json::json!("1000");
+    fs::write(&path, serde_json::to_string_pretty(&record).unwrap()).unwrap();
+
+    save_native_run_record(&repo, &run).expect("unchanged save");
+    assert_eq!(
+        read_run_json(&repo, "stamp")["updatedAt"],
+        "1000",
+        "a reconcile re-save of an unchanged row must not pull it back into 'recent'"
+    );
+
+    run.status = AgentStatus::Failed;
+    save_native_run_record(&repo, &run).expect("changed save");
+    let after = read_run_json(&repo, "stamp");
+    assert_eq!(after["status"], "failed");
+    assert_ne!(after["updatedAt"], "1000", "a real change still stamps updatedAt");
+    let _ = fs::remove_dir_all(&repo);
+}
+
+fn published_done_run(repo: &std::path::Path, id: &str, number: u64) -> AgentRun {
+    let mut run = publishable_run(id, "ship the widget");
+    run.cwd = repo.to_path_buf();
+    run.publish = PublishEvidence {
+        branch: Some(format!("rudder/{id}")),
+        number: Some(number),
+        url: Some(format!("https://github.com/acme/widgets/pull/{number}")),
+        state: None,
+        observed_at: None,
+    };
+    run
+}
+
+fn feed_pr_states(app: &mut App, states: &[(u64, &str)]) {
+    let (tx, rx) = mpsc::channel();
+    tx.send(
+        states
+            .iter()
+            .map(|(number, state)| (*number, state.to_string()))
+            .collect::<HashMap<u64, String>>(),
+    )
+    .unwrap();
+    app.publish_pr_state_rx = Some(rx);
+    app.maybe_refresh_publish_pr_state();
+}
+
+#[test]
+fn row_leaves_review_only_for_a_merged_pr_on_a_finished_row() {
+    let repo = std::env::temp_dir();
+    let mut run = published_done_run(&repo, "pure", 7);
+    assert!(!row_leaves_review_for_merged_pr(&run), "state unknown");
+    run.publish.state = Some("open".to_string());
+    assert!(!row_leaves_review_for_merged_pr(&run));
+    run.publish.state = Some("merged".to_string());
+    assert!(row_leaves_review_for_merged_pr(&run));
+    run.status = AgentStatus::Running;
+    assert!(!row_leaves_review_for_merged_pr(&run), "a live turn is left alone");
+    run.status = AgentStatus::Merged;
+    assert!(!row_leaves_review_for_merged_pr(&run), "already merged");
+    assert!(!row_pr_state_can_move(&run));
+}
+
+#[test]
+fn pr_state_is_persisted_as_an_observation_for_remote_readers() {
+    let repo = publish_test_repo("observed");
+    let mut app = App::new();
+    app.cwd = repo.clone();
+    let run = published_done_run(&repo, "obs", 31);
+    save_native_run_record(&repo, &run).expect("seed");
+    app.agents.push(run);
+
+    feed_pr_states(&mut app, &[(31, "open")]);
+    let record = read_run_json(&repo, "obs");
+    assert_eq!(record["publish"]["observedState"], "open");
+    assert!(record["publish"]["observedAt"].is_string());
+    assert_eq!(record["status"], "completed", "an open PR stays in review");
+
+    // A failed or truncated `gh pr list` (PR absent) keeps the last observation.
+    feed_pr_states(&mut app, &[]);
+    assert_eq!(app.agents[0].publish.state.as_deref(), Some("open"));
+    assert_eq!(read_run_json(&repo, "obs")["publish"]["observedState"], "open");
+
+    // Native logic still never loads the observation back.
+    let reloaded = publish_evidence_from_record(&read_run_json(&repo, "obs"));
+    assert_eq!(reloaded.state, None);
+
+    // A save from a session that has not asked yet keeps the observation on disk.
+    let fresh = &mut app.agents[0];
+    fresh.publish.state = None;
+    fresh.publish.observed_at = None;
+    fresh.task_summary = "renamed".to_string();
+    save_native_run_record(&repo, fresh).expect("save without state");
+    assert_eq!(read_run_json(&repo, "obs")["publish"]["observedState"], "open");
+    let _ = fs::remove_dir_all(&repo);
+}
+
+#[test]
+fn a_pr_merged_on_github_moves_the_row_to_merged() {
+    let repo = publish_test_repo("pr-merged");
+    let mut app = App::new();
+    app.cwd = repo.clone();
+    let run = published_done_run(&repo, "landed", 77);
+    save_native_run_record(&repo, &run).expect("seed");
+    app.agents.push(run);
+
+    feed_pr_states(&mut app, &[(77, "merged")]);
+    let row = &app.agents[0];
+    assert_eq!(row.status, AgentStatus::Merged);
+    assert!(row.merged_through_pr());
+    assert_eq!(row.lifecycle_label(), "pr-merged");
+    assert_eq!(crate::render::agent_status_label(row), "PR merged");
+    let record = read_run_json(&repo, "landed");
+    assert_eq!(record["status"], "merged");
+    assert_eq!(record["lifecyclePhase"], "pr-merged");
+    assert_eq!(record["publish"]["observedState"], "merged");
+    assert_eq!(record["merge"]["pushed"], true);
+    let activity =
+        fs::read_to_string(repo.join(".rudder").join("activity.jsonl")).unwrap_or_default();
+    assert!(activity.contains("pr-merged"), "recorded with its ids: {activity}");
+    // Merged rows stop being polled.
+    assert!(!app.agents.iter().any(row_pr_state_can_move));
+    let _ = fs::remove_dir_all(&repo);
+}
+
+#[test]
+fn a_merge_that_left_trunk_is_a_persisted_phase() {
+    let mut run = test_agent_run("drift", "work");
+    run.status = AgentStatus::Merged;
+    run.integration.merge_change_id = Some("abc".to_string());
+    assert_eq!(run.lifecycle_label(), "merged-locally");
+    run.integration.in_trunk = Some(false);
+    assert_eq!(run.lifecycle_label(), "merged-not-in-trunk");
 }

@@ -5950,6 +5950,8 @@ pub(crate) fn agent_status_label(agent: &AgentRun) -> &'static str {
         // A "deploy/publish" node auto-merges within a tick, and the plain
         // "merged locally" label silently swallowed its unmet delivery proof.
         "merged · delivery proof needed"
+    } else if agent.merged_through_pr() {
+        "PR merged"
     } else if agent.status == AgentStatus::Merged && agent.integration.pushed {
         "pushed"
     } else if agent.status == AgentStatus::Merged {

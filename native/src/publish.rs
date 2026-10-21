@@ -154,6 +154,10 @@ pub(crate) struct PublishEvidence {
     pub(crate) url: Option<String>,
     /// `draft` / `open` / `merged` / `closed`. `None` = not asked yet.
     pub(crate) state: Option<String>,
+    /// When `state` was last learned from GitHub (stamp format of `now_stamp`).
+    /// Written to run.json as `publish.observedAt` next to `observedState` for
+    /// remote readers; like `state`, never loaded back.
+    pub(crate) observed_at: Option<String>,
 }
 
 impl PublishEvidence {
@@ -190,6 +194,7 @@ pub(crate) fn publish_evidence_from_record(record: &serde_json::Value) -> Publis
             .and_then(serde_json::Value::as_u64),
         url: text("url"),
         state: None,
+        observed_at: None,
     }
 }
 
@@ -1285,15 +1290,32 @@ impl App {
             match rx.try_recv() {
                 Ok(states) => {
                     let mut changed = false;
-                    for run in self.agents.iter_mut() {
+                    let stamp = now_stamp();
+                    let mut became_merged = Vec::new();
+                    for (index, run) in self.agents.iter_mut().enumerate() {
                         let Some(number) = run.publish.number else {
                             continue;
                         };
-                        let next = states.get(&number).cloned();
-                        if run.publish.state != next {
-                            run.publish.state = next;
+                        // A PR missing from the answer (a failed `gh`, or one past
+                        // the list limit) is "not told", not "no state": keep what
+                        // we last learned rather than blanking it.
+                        let Some(next) = states.get(&number).cloned() else {
+                            continue;
+                        };
+                        if run.publish.state.as_deref() != Some(next.as_str()) {
+                            run.publish.state = Some(next);
+                            run.publish.observed_at = Some(stamp.clone());
                             changed = true;
+                            // Remote readers (the cloud supervisor, the phone)
+                            // read the observed state off run.json.
+                            let _ = save_native_run_record(&self.cwd, run);
                         }
+                        if row_leaves_review_for_merged_pr(run) {
+                            became_merged.push(index);
+                        }
+                    }
+                    for index in became_merged {
+                        self.mark_pr_merged(index);
                     }
                     self.publish_pr_state_interval = if changed {
                         PUBLISH_PR_STATE_BASE_INTERVAL
@@ -1314,10 +1336,11 @@ impl App {
                 Err(TryRecvError::Disconnected) => {}
             }
         }
-        if self.publish_capability().is_none() {
-            return;
-        }
-        if !self.agents.iter().any(|run| run.publish.is_published()) {
+        // Not gated on the capability probe: a published row proves `gh` worked
+        // once, and a probe that failed transiently (or a home machine whose `gh`
+        // auth arrives from the vault after boot) must not freeze every PR's state
+        // at whatever it was. Only rows that can still move are asked about.
+        if !self.agents.iter().any(row_pr_state_can_move) {
             return;
         }
         let due = match self.last_publish_pr_state {
@@ -1348,6 +1371,35 @@ impl App {
                 let _ = tx.send(states);
             });
         }
+    }
+
+    /// GitHub merged this row's pull request: the work is in origin's default
+    /// branch, so the row leaves review. Recorded with the PR's identity, then the
+    /// same transition a local merge makes (plan node credited, record persisted,
+    /// context and graph mirrored). `pushed` is set because the work IS on the
+    /// remote, which also keeps the push check from re-asking git about a commit
+    /// GitHub may have squashed.
+    pub(crate) fn mark_pr_merged(&mut self, index: usize) {
+        let Some(run) = self.agents.get_mut(index) else {
+            return;
+        };
+        if !row_leaves_review_for_merged_pr(run) {
+            return;
+        }
+        run.integration.pushed = true;
+        let (id, summary, number, url, branch) = (
+            run.id.clone(),
+            run.task_summary.clone(),
+            run.publish.number,
+            run.publish.url.clone(),
+            run.publish.branch.clone(),
+        );
+        self.record_event(
+            "pr-merged",
+            &format!("PR #{} merged on GitHub: {summary}", number.unwrap_or_default()),
+            serde_json::json!({ "run": id, "pr": number, "url": url, "branch": branch }),
+        );
+        self.mark_agent_and_review_sources_merged(index, Vec::new());
     }
 
     /// Does pressing `m` on this row publish, or merge locally? Exactly one of the
@@ -1634,6 +1686,25 @@ impl App {
 /// pushed branch and a draft PR, never as a merge into its own checkout. The
 /// consent prompt for the first push is skipped there too: the user chose the
 /// cloud, and the cloud's only road home is GitHub.
+/// A published row whose PR GitHub reports merged, still sitting in review (or
+/// paused after a machine restart). Live turns are left alone: an agent you are
+/// still talking to is not finished just because its PR landed.
+pub(crate) fn row_leaves_review_for_merged_pr(run: &AgentRun) -> bool {
+    run.publish.is_published()
+        && run.publish.state.as_deref() == Some("merged")
+        && !run.is_main()
+        && matches!(
+            run.status,
+            AgentStatus::Done | AgentStatus::Paused | AgentStatus::Stopped
+        )
+}
+
+/// Rows the PR-state poll asks about: published and not yet merged or closed for
+/// good. A row already Merged keeps its last observation.
+pub(crate) fn row_pr_state_can_move(run: &AgentRun) -> bool {
+    run.publish.is_published() && run.status != AgentStatus::Merged
+}
+
 pub(crate) fn cloud_worker_publishes() -> bool {
     std::env::var("RUDDER_CLOUD_WORKER").ok().as_deref() == Some("1")
         && crate::cloudio::is_cloud_worker_session()

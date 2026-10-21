@@ -1583,9 +1583,19 @@ session id the backend had on disk the whole time. The rule:
   change is still an ancestor of `trunk() | @`. `IntegrationEvidence::in_trunk` is
   DERIVED, never loaded from the record. A row whose work left trunk renders as
   `merged · NOT in main` instead of claiming success forever.
+- A merged row whose change left trunk persists `lifecyclePhase:
+  "merged-not-in-trunk"` so remote readers stop reporting it as landed.
 - `flag_missing_workspaces` — the filesystem decides; the result lives in
   `App::rows_missing_workspace`, not on the row, because it is a question and not
   a fact about the run.
+
+Persisted truth follows the same rule. run.json's `attention` is derived
+(`run_attention`), so the poll loop compares it before and after each row's
+evaluation and saves on any difference: a spinner lifting an Error/Idle latch used
+to change nothing else and left the phone saying "needs input". And `updatedAt`
+moves only when the record's content does (`record_content_unchanged`; an
+identical save is skipped), so reconcile passes no longer pull old rows back into
+the phone's recent groups.
 
 Anything that changes is written through `App::record_event`, which is
 `append_activity_jsonl` plus the IDS INVOLVED (run, change, bookmark, commit, jj
@@ -1632,8 +1642,21 @@ has not landed; `m` waits rather than guessing a road that cannot be un-taken).
   instead of a blind retry. Stack state is read from `gh stack view --json`, never
   scraped from its glyph table.
 - **Derive-don't-cache (§12.7).** `PublishEvidence` persists `branch`/`number`/`url`
-  — facts about what Rudder did — and never the PR's state, which is GitHub's
-  answer.
+  — facts about what Rudder did. The PR's state is GitHub's answer: native logic
+  re-derives it from `gh pr list` and never loads it back. It IS written to
+  run.json as `publish.observedState` (`draft|open|merged|closed`) +
+  `publish.observedAt` (ms stamp), a cache for readers that cannot run `gh` (the
+  cloud supervisor, the phone), kept across a restart until the next poll answers.
+  A PR missing from the answer (failed `gh`, past the list limit) keeps the last
+  observation instead of blanking it.
+- **A merged PR leaves review.** When the poll sees a published row's PR `merged`
+  and the row is Done/Paused/Stopped (never a live turn), `mark_pr_merged` records a
+  `pr-merged` event and makes the same transition as a local merge (status `merged`,
+  `merge.pushed: true`, plan node credited). `lifecyclePhase` reads `pr-merged`, the
+  sidebar `PR merged`; `verify_merged_rows` skips these rows (GitHub may squash, so
+  the local change never enters trunk). The poll is not gated on the capability
+  probe: any published row that is not yet merged keeps it running, cloud home
+  included, with the usual 30s -> 600s backoff.
 
 Command CONSTRUCTION is separated from execution (the `launch.rs` split): every
 `gh`/`jj` argv is a pure function asserted in tests, and nothing in the suite

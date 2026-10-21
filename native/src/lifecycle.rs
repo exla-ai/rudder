@@ -315,6 +315,14 @@ pub(crate) fn verification_commands(cwd: &Path) -> Vec<VerificationCommand> {
 }
 
 impl AgentRun {
+    /// Merged because GitHub merged its pull request, not by a local jj merge
+    /// (which would have recorded a merge change).
+    pub(crate) fn merged_through_pr(&self) -> bool {
+        self.status == AgentStatus::Merged
+            && self.publish.is_published()
+            && self.integration.merge_change_id.is_none()
+    }
+
     pub(crate) fn lifecycle_label(&self) -> &'static str {
         if self.status == AgentStatus::Done && self.delivery.is_verified() {
             "deployed"
@@ -334,6 +342,13 @@ impl AgentRun {
             "integration-blocked"
         } else if self.integration.phase == IntegrationPhase::Integrating {
             "integrating"
+        } else if self.status == AgentStatus::Merged && self.integration.in_trunk == Some(false) {
+            // verify_merged_rows asked jj and the work is gone from trunk (undone,
+            // abandoned, rewritten). Persisted so remote readers do not keep
+            // reporting a merge the repository no longer contains.
+            "merged-not-in-trunk"
+        } else if self.status == AgentStatus::Merged && self.merged_through_pr() {
+            "pr-merged"
         } else if self.status == AgentStatus::Merged && self.integration.pushed {
             "pushed"
         } else if self.status == AgentStatus::Merged {

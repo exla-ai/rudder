@@ -1396,11 +1396,14 @@ pub(crate) fn save_native_run_record(repo_root: &Path, run: &AgentRun) -> Result
         }
     }
     // What Rudder DID when it published this row: the branch it pushed and the PR
-    // it opened. Only the identity is written. The PR's state (draft/open/merged)
-    // is GitHub's to answer and is re-derived on a poll, so persisting it here
-    // would be exactly the stale-cached-answer failure §12.7 exists to prevent.
+    // it opened. The PR's state (draft/open/merged/closed) is GitHub's to answer:
+    // native logic re-derives it on a poll and never loads it back (§12.7). It is
+    // still WRITTEN, as `observedState` + `observedAt`, so readers that cannot run
+    // `gh` themselves (the cloud supervisor, the phone) see the last answer with
+    // its age. A cache for remote readers, never an input to native decisions.
     if run.publish.is_published() || run.publish.branch.is_some() {
         let mut published = serde_json::json!({});
+        let recorded_publish = existing_record.get("publish");
         if let Some(map) = published.as_object_mut() {
             if let Some(branch) = run.publish.branch.as_ref() {
                 map.insert("branch".to_string(), serde_json::json!(branch));
@@ -1410,6 +1413,26 @@ pub(crate) fn save_native_run_record(repo_root: &Path, run: &AgentRun) -> Result
             }
             if let Some(url) = run.publish.url.as_ref() {
                 map.insert("url".to_string(), serde_json::json!(url));
+            }
+            match run.publish.state.as_ref() {
+                Some(state) => {
+                    map.insert("observedState".to_string(), serde_json::json!(state));
+                    let at = run
+                        .publish
+                        .observed_at
+                        .clone()
+                        .unwrap_or_else(|| now.clone());
+                    map.insert("observedAt".to_string(), serde_json::json!(at));
+                }
+                // Not asked yet this session (state is never loaded): keep the last
+                // observation on disk instead of erasing it until the next poll.
+                None => {
+                    for key in ["observedState", "observedAt"] {
+                        if let Some(value) = recorded_publish.and_then(|value| value.get(key)) {
+                            map.insert(key.to_string(), value.clone());
+                        }
+                    }
+                }
             }
         }
         if let Some(map) = record.as_object_mut() {
@@ -1427,6 +1450,13 @@ pub(crate) fn save_native_run_record(repo_root: &Path, run: &AgentRun) -> Result
             );
         }
     }
+    // `updatedAt` means "something about this run changed". Re-saving an
+    // unchanged row (reconcile passes, repaints, the PR poll) used to stamp it
+    // anyway, which reshuffled the phone's lists and pulled week-old rows back
+    // into its recent groups. Unchanged content is not written at all.
+    if record_content_unchanged(&record, &existing_record) {
+        return Ok(());
+    }
     let temp = record_path.with_extension(format!(
         "json.{}.{}.tmp",
         std::process::id(),
@@ -1441,6 +1471,22 @@ pub(crate) fn save_native_run_record(repo_root: &Path, run: &AgentRun) -> Result
     )?;
     fs::rename(temp, record_path)?;
     Ok(())
+}
+
+/// Whether a freshly built run record says the same thing as the one on disk,
+/// ignoring `updatedAt` (which the builder always stamps with now).
+pub(crate) fn record_content_unchanged(
+    record: &serde_json::Value,
+    existing: &serde_json::Value,
+) -> bool {
+    let strip = |value: &serde_json::Value| {
+        let mut value = value.clone();
+        if let Some(map) = value.as_object_mut() {
+            map.remove("updatedAt");
+        }
+        value
+    };
+    existing.as_object().is_some_and(|map| !map.is_empty()) && strip(record) == strip(existing)
 }
 
 /// Read the `merge` (or `sync`) state object back from a run's run.json. The TS
@@ -3528,6 +3574,12 @@ pub(crate) fn short_hash(value: &str) -> String {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     value.hash(&mut hasher);
     format!("{:010x}", hasher.finish())[..10].to_string()
+}
+
+/// Whether a row's persisted `attention` would change from `before`. Used by the
+/// poll loop so a wait that clears without any other state change is still saved.
+pub(crate) fn attention_changed(before: Option<&'static str>, run: &AgentRun) -> bool {
+    run_attention(run) != before
 }
 
 /// "permission" / "input" / "interrupted" / "error" while a running row waits on

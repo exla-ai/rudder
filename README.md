@@ -286,6 +286,18 @@ the highlighted one's result below it, and `Esc` backs out. `review` stays inlin
 up to five rows — merge-ready work should be one keystroke away — and collapses the
 same way past that, because a 25-row review section is not scannable either.
 
+## Agent skills
+
+Rudder installs capability skills for every Claude Code and Codex agent it runs
+(user-level, as `rudder-<name>`):
+
+- **rudder-google-cloud**: create and name Google Cloud projects, enable APIs,
+  and set up "Sign in with Google" so the consent screen shows your product's
+  name, with a checker that verifies redirect URIs and the app name the way a
+  signed-out user sees them.
+
+Set `RUDDER_DISABLE_AGENT_SKILLS=1` to skip.
+
 ## Commands and Orchestrator Skills
 
 Type these in the bottom task input. When an interactive Claude orchestrator is

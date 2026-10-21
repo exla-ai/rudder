@@ -564,6 +564,26 @@ generated project skills under `.claude/skills/rudder-*` for dashboard actions
 `plan/run`, and DAG editing/approval). Rudder consumes the
 corresponding one-shot `RUDDER_*` control markers from `RUDDER.md`.
 
+### Agent skills (capabilities shipped to every agent)
+Separate from the orchestrator's dashboard-control skills: `assets/skills/<name>/`
+holds capability skills (a `SKILL.md` plus optional `scripts/`) that
+`src/agent-skills.ts::ensureAgentSkills` installs on every `rudder` invocation
+into `~/.claude/skills/rudder-<name>/` and `~/.codex/skills/rudder-<name>/`
+(honoring `CLAUDE_CONFIG_DIR` / `CODEX_HOME`). User-level, so isolated jj
+workspaces, the main checkout and cloud workers all get them; files are rewritten
+only when they differ, other skills in those directories are never touched, and
+failures are swallowed. `RUDDER_DISABLE_AGENT_SKILLS=1` turns it off. The skill's
+frontmatter `name` must be `rudder-<dir>` (a test enforces it).
+
+- `google-cloud` → `rudder-google-cloud`: GCP projects named after the product,
+  API enablement, and Google OAuth done so users see the product's name. Its
+  `scripts/gcp.mjs` covers everything with an API (`whoami`, `projects`,
+  `ensure-project`, `enable`, `audit`), prints the Console checklist for what has
+  none (`oauth-plan`: Branding/Audience/Data access/Clients), and verifies from
+  outside with `check-client`, which probes Google's real authorize endpoint
+  signed out to catch `redirect_uri_mismatch`/`invalid_client` and read the
+  "continue to <App name>" the user will see.
+
 ### Review and merge-all
 `v` opens a review pane showing the run's `jj diff` (`ensure_review_diff`). The old
 Hunk (`hunk diff --watch`) integration was removed in favor of native jj diff

@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { ensureAgentSkills } from "./agent-skills.js";
 import fsp from "node:fs/promises";
 import net from "node:net";
 import os from "node:os";
@@ -107,6 +108,8 @@ export async function main(): Promise<void> {
   if (shouldAutoUpdateForCommand(parsed.command) && await autoUpdateAndRerunIfNeeded(process.argv.slice(2))) {
     return;
   }
+  // Capability skills (e.g. Google Cloud) for every agent Rudder launches.
+  await ensureAgentSkills();
   // One-time disclosure, before the dashboard takes over the screen. Printing it
   // here (rather than burying it in docs) is the deal: telemetry is on, and the
   // user is told what it is and how to stop it the first time they run anything.

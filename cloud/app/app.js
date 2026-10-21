@@ -1864,8 +1864,9 @@ function HomeScreen() {
       else if (home.status === "deleting") subText = "Being removed.";
       else {
         const bits = [];
-        if (home.tailnet?.dnsName) bits.push(home.tailnet.dnsName);
-        else if (home.tailnet?.hostname) bits.push(home.tailnet.hostname);
+        // Only a tailnet the machine actually joined is worth a word, and the
+        // full *.ts.net name is too long for a phone (Settings shows it).
+        if (home.tailnet?.online && home.tailnet?.dnsName) bits.push(`on Tailscale as ${home.tailnet.dnsName.split(".")[0]}`);
         bits.push(`${home.activeAgents || 0} active ${home.activeAgents === 1 ? "agent" : "agents"}`);
         // It is not the user's computer: say where it runs and why that matters.
         subText = `Runs in the cloud, so agents keep going with your laptop closed · ${bits.join(" · ")}`;

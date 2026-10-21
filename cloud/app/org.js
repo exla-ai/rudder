@@ -158,7 +158,7 @@ export function SettingsScreen() {
     const s = app.store?.state || {};
     const home = s.home;
     const rows = [["Account", s.email || "Signed in"], ["Cloud machine", home ? app.machineLabel?.(home)?.label || home.status : "None"]];
-    if (home?.tailnet?.dnsName) rows.push(["Tailnet", home.tailnet.dnsName]);
+    if (home?.tailnet?.dnsName) rows.push(["Tailscale", home.tailnet.dnsName]);
     const gh = app.githubState?.(s);
     if (gh) rows.push(["GitHub", gh.kind === "ok" ? gh.sub.replace(/^Connected as /, "") : "Not connected"]);
     if (PLATFORM) rows.push(["App", PLATFORM === "mac" ? "Mac" : "iOS"]);

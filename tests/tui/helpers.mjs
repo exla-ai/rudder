@@ -231,7 +231,6 @@ export async function launchRudder(t, { repo, claudeBin, home, cols = 120, rows 
       // The workspace namer runs the real `claude` from PATH, not the fake, and
       // starts the agent whenever its answer lands. That made a task's row (and
       // the focus jump to its pane) arrive at a time no test could predict.
-      RUDDER_WORKSPACE_NAMING: "0",
       TERM: "xterm-256color",
       ...(home ? { HOME: home } : {}),
       ...env,

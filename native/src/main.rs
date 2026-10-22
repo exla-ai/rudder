@@ -1980,11 +1980,6 @@ struct App {
     attach_server: Option<AttachServer>,
     attach_server_failed: bool,
     attach_clients: Vec<AttachClient>,
-    /// `/run` workers waiting for their workspace name (start_single_run_task).
-    /// `workspace_namer` is the model call that writes it; `None` in tests, which
-    /// set a fake, and the launch then names from the prompt as before.
-    pending_named_runs: Vec<PendingNamedRun>,
-    workspace_namer: Option<fn(&str) -> Option<String>>,
     /// Second dashboard views (view.rs): which view is handling input or
     /// rendering right now (`LOCAL_VIEW` = this terminal), which one owns the
     /// pane sizes, and the panes the current render must not resize.
@@ -2180,19 +2175,6 @@ struct App {
     /// Whether the wheel event being handled is in a burst.
     wheel_in_burst: bool,
 }
-
-/// A `/run` launch held until its workspace has a name.
-struct PendingNamedRun {
-    id: String,
-    input: String,
-    rx: mpsc::Receiver<Option<String>>,
-    started: Instant,
-    queued_at: String,
-}
-
-/// How long a `/run` waits for its workspace name before falling back to the
-/// prompt's own words. The namer is a one-shot haiku call (a few seconds).
-const WORKSPACE_NAMING_TIMEOUT: Duration = Duration::from_secs(8);
 
 #[derive(Clone, Debug)]
 struct MigratedAgent {
@@ -3253,12 +3235,6 @@ impl App {
             attach_server: None,
             attach_server_failed: false,
             attach_clients: Vec::new(),
-            pending_named_runs: Vec::new(),
-            workspace_namer: if cfg!(test) || std::env::var("RUDDER_WORKSPACE_NAMING").as_deref() == Ok("0") {
-                None
-            } else {
-                Some(generate_task_summary_title)
-            },
             acting_view: LOCAL_VIEW,
             pane_size_wants: HashMap::new(),
             drawer_row_map: Vec::new(),
@@ -8502,11 +8478,15 @@ impl App {
             .map(ToString::to_string)
             .or_else(|| rudder_plan_worker_title_from_prompt(input));
         let should_generate_summary = planner_title.is_none();
-        let workspace_label = planner_title.as_deref().unwrap_or(input);
         let task_summary = planner_title
             .as_deref()
             .map(|title| truncate_chars(title, 56))
             .unwrap_or_else(|| summarize_task(input));
+        // The workspace is named from the local summary, not a model title: a
+        // new task used to wait ~3s on a haiku call before anything started.
+        // The model title still arrives (spawn_task_summary_worker below) and
+        // renames the row; only the directory keeps the heuristic words.
+        let workspace_label = task_summary.as_str();
         let workspace = match prepare_jj_workspace(&self.cwd, workspace_label) {
             Ok(workspace) => workspace,
             Err(error) => {
@@ -13421,98 +13401,9 @@ Address the objection directly. If you disagree, say why inside \
         if input.is_empty() {
             return;
         }
-        // Name the workspace from a short model-written title, not the first
-        // words of the prompt: "boris-recently-posted-this-i-used-opus-5" says
-        // nothing about the work. The title comes first because the workspace
-        // directory (what the agent runs in, what its UI shows) cannot be
-        // renamed under a live agent. A planner-titled prompt already has one.
-        if let Some(namer) = self.workspace_namer {
-            if rudder_plan_worker_title_from_prompt(input).is_none() && is_git_repo(&self.cwd) {
-                let (tx, rx) = mpsc::channel();
-                let task = input.to_string();
-                thread::spawn(move || {
-                    let _ = tx.send(namer(&task));
-                });
-                self.pending_named_runs.push(PendingNamedRun {
-                    id: new_run_id(input),
-                    input: input.to_string(),
-                    rx,
-                    started: Instant::now(),
-                    queued_at: now_stamp(),
-                });
-                self.persist_pending_tasks();
-                self.notice = Some(format!("starting \"{}\" · naming its workspace…", short_task(input)));
-                self.dirty = true;
-                return;
-            }
-        }
-        self.launch_single_run_task(input, None);
-    }
-
-    /// Launch the `/run` workers whose workspace names have arrived, or whose
-    /// namer took too long (they fall back to the prompt's own words).
-    fn poll_pending_named_runs(&mut self) {
-        if self.pending_named_runs.is_empty() {
-            return;
-        }
-        let mut ready: Vec<(String, Option<String>)> = Vec::new();
-        self.pending_named_runs.retain(|pending| match pending.rx.try_recv() {
-            Ok(title) => {
-                ready.push((pending.input.clone(), title));
-                false
-            }
-            Err(mpsc::TryRecvError::Empty) if pending.started.elapsed() < WORKSPACE_NAMING_TIMEOUT => true,
-            Err(_) => {
-                ready.push((pending.input.clone(), None));
-                false
-            }
-        });
-        let launched = !ready.is_empty();
-        for (input, title) in ready {
-            self.launch_single_run_task(&input, title.as_deref());
-            self.dirty = true;
-        }
-        if launched {
-            self.persist_pending_tasks();
-        }
-    }
-
-    /// A task waiting on its workspace name has no row yet, so on the phone a
-    /// task just typed looked ignored for the seconds the namer takes. List the
-    /// waiting ones beside the run records, where the home machine's supervisor
-    /// reads agents, so they show as "starting" right away.
-    fn persist_pending_tasks(&self) {
-        let path = self.cwd.join(".rudder").join("pending-tasks.json");
-        if self.pending_named_runs.is_empty() {
-            let _ = std::fs::remove_file(&path);
-            return;
-        }
-        let tasks: Vec<serde_json::Value> = self
-            .pending_named_runs
-            .iter()
-            .map(|pending| {
-                serde_json::json!({
-                    "id": pending.id,
-                    "task": pending.input,
-                    "queuedAt": pending.queued_at,
-                })
-            })
-            .collect();
-        let Ok(bytes) = serde_json::to_vec(&serde_json::json!({ "tasks": tasks })) else {
-            return;
-        };
-        let temp = path.with_extension(format!("{}.tmp", std::process::id()));
-        if std::fs::create_dir_all(path.parent().unwrap_or(&self.cwd)).is_ok()
-            && std::fs::write(&temp, bytes).is_ok()
-        {
-            let _ = std::fs::rename(&temp, &path);
-        }
-    }
-
-    fn launch_single_run_task(&mut self, input: &str, title: Option<&str>) {
         let before = self.agents.len();
         self.notice = None;
-        self.start_execute_task_node(input, title, None);
+        self.start_execute_task_node(input, None, None);
         let launch_notice = self.notice.clone();
         if self.agents.len() > before {
             let Some(run) = self.agents.last() else {
@@ -20172,7 +20063,6 @@ What to do\n\
         self.drive_claude_message_navs();
         self.maybe_start_queued_reconcile();
         self.poll_task_summary_workers();
-        self.poll_pending_named_runs();
         self.poll_completion_summary_workers();
         self.poll_final_gate();
         // Cross-process CLI stop requests are authoritative and must be consumed

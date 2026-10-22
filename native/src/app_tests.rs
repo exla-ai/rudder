@@ -13291,6 +13291,26 @@ fn a_typed_task_never_touches_a_running_plan() {
     );
 }
 
+/// A typed task in a git repo starts in the same keystroke. It used to wait
+/// ~3s (up to 8) on a haiku call to name its workspace before any row existed;
+/// the model title now renames the row afterwards instead.
+#[test]
+fn a_typed_task_in_a_git_repo_starts_without_waiting_for_a_title() {
+    let repo = unique_test_repo("instant-run");
+    let status = std::process::Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(&repo)
+        .status()
+        .expect("git init");
+    assert!(status.success());
+    let mut app = App::new();
+    app.cwd = repo.clone();
+    app.start_task_from_input("boris recently posted this, make the webhook sender retry with backoff");
+    assert_eq!(app.agents.len(), 1, "the row exists right away");
+    assert!(!app.cwd.join(".rudder").join("pending-tasks.json").exists());
+    let _ = fs::remove_dir_all(&repo);
+}
+
 #[test]
 fn extract_rudder_questions_parses_a_numbered_block() {
     let out = "intro\nRUDDER_QUESTIONS_START\n1. Time range: 4 weeks or 6 months?\n2. Local only, or also deploy?\nRUDDER_QUESTIONS_END\ntrailing";
@@ -25922,50 +25942,6 @@ fn a_second_view_repaints_in_place_inside_a_synchronized_update() {
     assert!(frames[1].contains("\x1b[30;"), "the last row is painted");
 }
 
-/// `/run` names its workspace from a short model-written title before the
-/// workspace exists, instead of slugging the prompt's first words.
-#[test]
-fn a_run_waits_for_its_workspace_name_before_creating_the_workspace() {
-    fn namer(task: &str) -> Option<String> {
-        assert!(task.contains("webhook"), "the namer sees the whole prompt");
-        Some("Add retry backoff to webhook sender".to_string())
-    }
-    let repo = unique_test_repo("workspace-naming");
-    let status = std::process::Command::new("git")
-        .args(["init", "-q"])
-        .current_dir(&repo)
-        .status()
-        .expect("git init");
-    assert!(status.success());
-
-    let mut app = App::new();
-    app.cwd = repo;
-    app.workspace_namer = Some(namer);
-    app.start_single_run_task("boris recently posted this, i used it and the webhook sender should retry with backoff");
-    assert!(app.agents.is_empty(), "no workspace until the name is in");
-    assert_eq!(app.pending_named_runs.len(), 1);
-    assert!(
-        app.notice.as_deref().is_some_and(|notice| notice.contains("naming its workspace")),
-        "{:?}",
-        app.notice
-    );
-    // Listed for the phone while it waits, so a task typed there shows at once.
-    assert!(app.cwd.join(".rudder").join("pending-tasks.json").is_file());
-
-    // The namer's answer is what the launch is handed.
-    let pending = app.pending_named_runs.pop().expect("pending run");
-    let title = pending
-        .rx
-        .recv_timeout(Duration::from_secs(5))
-        .expect("namer answered");
-    assert_eq!(title.as_deref(), Some("Add retry backoff to webhook sender"));
-    assert_eq!(
-        slugify(title.as_deref().unwrap_or_default(), "task"),
-        "add-retry-backoff-to-webhook-sender"
-    );
-
-}
-
 #[cfg(not(windows))]
 #[test]
 fn clicking_a_link_in_the_worker_pane_opens_it_and_dragging_does_not() {
@@ -27176,32 +27152,6 @@ fn home_runs_answers_are_unknown_unless_the_home_said_so() {
     assert_eq!(parse_home_runs_answer(r#"{"known":true,"existing":[]}"#), Some(vec![]));
     assert_eq!(parse_home_runs_answer(r#"{"known":false}"#), None);
     assert_eq!(parse_home_runs_answer("not json"), None);
-}
-
-#[test]
-fn a_task_waiting_on_its_name_is_listed_for_the_phone_until_it_launches() {
-    let dir = unique_test_repo("pending-tasks");
-    let mut app = App::new();
-    app.cwd = dir.clone();
-    let (tx, rx) = mpsc::channel::<Option<String>>();
-    app.pending_named_runs.push(PendingNamedRun {
-        id: "pending-1".to_string(),
-        input: "add a dark mode".to_string(),
-        rx,
-        started: Instant::now(),
-        queued_at: "1792142435966".to_string(),
-    });
-    app.persist_pending_tasks();
-    let listed: serde_json::Value = serde_json::from_str(
-        &fs::read_to_string(dir.join(".rudder").join("pending-tasks.json")).unwrap(),
-    )
-    .unwrap();
-    assert_eq!(listed["tasks"][0]["task"], "add a dark mode");
-    drop(tx);
-    app.pending_named_runs.clear();
-    app.persist_pending_tasks();
-    assert!(!dir.join(".rudder").join("pending-tasks.json").exists());
-    let _ = fs::remove_dir_all(&dir);
 }
 
 /// The home machine stops when idle, and every live row comes back Paused with

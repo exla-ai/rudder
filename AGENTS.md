@@ -547,13 +547,14 @@ all of render.rs run unchanged. Rules worth keeping:
 - The socket falls back to `/tmp/rudder-<uid>/` when even the rudder home is too
   deep for `sun_path`.
 
-### Workspace names come from a title, not the prompt's first words
-`/run` (`start_single_run_task`) waits for a one-shot haiku title
-(`generate_task_summary_title`, `WORKSPACE_NAMING_TIMEOUT` = 12s, then it falls
-back to the prompt) BEFORE creating the jj workspace, because the workspace
-directory cannot be renamed under a live agent. Planner nodes already arrive
-titled. `RUDDER_WORKSPACE_NAMING=0` turns it off; tests have no namer unless
-they set `workspace_namer`.
+### A task starts on Enter; its title arrives after
+A typed task (`start_single_run_task`) creates its jj workspace at once, named
+from the local `summarize_task` words, and the one-shot haiku title
+(`spawn_task_summary_worker`) renames the ROW a few seconds later. It used to
+wait for that title before creating the workspace (the directory cannot be
+renamed under a live agent), which put ~3s (up to 8s) between Enter and any
+agent on every task. A slightly worse directory name beats a dead keystroke.
+Planner nodes already arrive titled.
 
 ### Orchestrator skills
 The bottom task pane remains the primary input surface for fresh requests,
@@ -1006,10 +1007,11 @@ brain lives in the cloud, and the phone is a first-class client.
   messages into Claude's `/config` search box. `terminal_composer_blocked` (detect.rs)
   reads a menu's or permission prompt's key hints off the bottom rows, and the steer
   path refuses with the reason instead; the phone shows it on the failed bubble.
-- A task typed on the phone used to show nothing for the seconds the workspace namer
-  takes; `.rudder/pending-tasks.json` lists it and the supervisor shows it as
-  "starting". The namer runs `claude -p` without the user's settings, hooks, plugins,
-  MCP or tools (~2s faster), falling back to the plain call on an older CLI.
+- A task typed on the phone gets its row at once (the dashboard no longer waits on a
+  workspace title). `.rudder/pending-tasks.json` is read only for dashboards that
+  still write it, and entries over a minute old are ignored as leftovers. The title
+  call runs `claude -p` without the user's settings, hooks, plugins, MCP or tools
+  (~2s faster), falling back to the plain call on an older CLI.
 - `/model` in the phone's task box opens a picker fed by `rudder __models` (the same
   lists as the dashboard's) and sends `/model <agent> <model>`.
 - **Photos and files from the phone.** `POST /api/app/upload?workspace=&name=` takes

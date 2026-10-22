@@ -999,7 +999,9 @@ function readAgents(repoDir, options = {}) {
     agents.push(agentSummary(record, options));
   }
   // A task typed a moment ago has no run record until its workspace is named;
-  // the dashboard lists those here so the phone shows them at once.
+  // dashboards before 3.9.6 list those here so the phone shows them at once.
+  // Newer ones launch at once and never write the file, so an old entry is a
+  // leftover, never a task still starting.
   try {
     const pending = JSON.parse(fs.readFileSync(path.join(repoDir, ".rudder", "pending-tasks.json"), "utf8"));
     for (const task of Array.isArray(pending?.tasks) ? pending.tasks : []) {
@@ -1007,6 +1009,9 @@ function readAgents(repoDir, options = {}) {
         continue;
       }
       const at = toMillis(task.queuedAt) ?? Date.now();
+      if (Date.now() - at > 60_000) {
+        continue;
+      }
       agents.push({
         id: task.id,
         title: userTask(task.task).slice(0, 200),

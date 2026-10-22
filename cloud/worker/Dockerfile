@@ -115,6 +115,7 @@ COPY cloud/worker/agent-status.mjs ./agent-status.mjs
 COPY cloud/worker/logins.mjs ./logins.mjs
 COPY cloud/worker/digest.mjs ./digest.mjs
 COPY cloud/worker/plan.mjs ./plan.mjs
+COPY cloud/worker/theme.mjs ./theme.mjs
 
 COPY cloud/worker/entrypoint.sh /usr/local/bin/rudder-worker
 RUN chmod +x /usr/local/bin/rudder-worker

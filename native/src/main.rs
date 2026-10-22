@@ -2077,6 +2077,9 @@ struct App {
     /// Throttle for the web-board steer inbox poll (.rudder/steer/*.json): checked
     /// ~once/sec from poll_agents so a browser "steer" reaches the right agent's PTY.
     last_steer_poll: Instant,
+    /// `<rudder home>/terminal-colors.json`, written by the cloud supervisor
+    /// from the attaching laptop's terminal; re-read when it changes.
+    terminal_colors_watch: rudder_native::term_colors::ColorsFileWatch,
     /// Hardening findings reported by finished workers, held until the plan reaches
     /// a phase boundary and then flushed as CLUMPS. See tasks::HardeningItem.
     hardening: Vec<crate::tasks::HardeningItem>,
@@ -3291,6 +3294,7 @@ impl App {
             last_publish_pr_state: None,
             last_workspace_gc: Instant::now(),
             last_steer_poll: Instant::now(),
+            terminal_colors_watch: Default::default(),
             hardening: hardening_backlog,
             control_results: Vec::new(),
             last_heartbeat_emit: Instant::now(),
@@ -20209,6 +20213,7 @@ What to do\n\
         // loop (11-33ms tick) is never stalled by the readdir/fs work.
         if self.last_steer_poll.elapsed() >= Duration::from_secs(1) {
             self.last_steer_poll = Instant::now();
+            self.terminal_colors_watch.poll();
             self.drain_diff_summaries();
             self.poll_steer_inbox();
             self.reconcile_cloud_moves();
@@ -20930,6 +20935,16 @@ fn main() -> Result<()> {
 
 fn setup_terminal() -> Result<Tui> {
     enable_raw_mode()?;
+    // Light or dark: the agents in the panes ask, and the pane answers with
+    // these (term_colors.rs). On a cloud machine nobody is on the other end of
+    // this terminal; the attaching laptop reports its colors instead.
+    use std::io::IsTerminal;
+    let cloud = env::var_os("RUDDER_CLOUD_WORKER").is_some() || env::var_os("RUDDER_CLOUD_RUNTIME").is_some();
+    if !cloud && io::stdin().is_terminal() {
+        if let Some(colors) = rudder_native::term_colors::query_outer_terminal(Duration::from_millis(300)) {
+            rudder_native::term_colors::set_terminal_colors(colors);
+        }
+    }
     let mut stdout = io::stdout();
     execute!(
         stdout,

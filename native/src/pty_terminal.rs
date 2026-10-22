@@ -11,7 +11,10 @@ use std::fmt;
 use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+
+use crate::term_colors::{colors_generation, theme_change_report, QueryScanner};
 use std::thread::{self, JoinHandle};
 
 use anyhow::{anyhow, Context, Result};
@@ -129,7 +132,12 @@ impl Default for TerminalPaneOptions {
 pub struct TerminalPane {
     master: Box<dyn MasterPty + Send>,
     child: Box<dyn Child + Send + Sync>,
-    writer: Box<dyn Write + Send>,
+    /// Shared with the reader thread, which answers the agent's color queries.
+    writer: Arc<Mutex<Box<dyn Write + Send>>>,
+    /// The agent asked for mode 2031 (appearance-change reports).
+    wants_theme_reports: Arc<AtomicBool>,
+    /// The terminal-colors generation this agent was last told about.
+    theme_generation: u64,
     output_rx: Receiver<Vec<u8>>,
     reader_thread: Option<JoinHandle<()>>,
     parser: vt100::Parser,
@@ -576,10 +584,14 @@ impl TerminalPane {
             .master
             .try_clone_reader()
             .context("failed to clone PTY reader")?;
-        let writer = pair
-            .master
-            .take_writer()
-            .context("failed to open PTY writer")?;
+        let writer = Arc::new(Mutex::new(
+            pair.master
+                .take_writer()
+                .context("failed to open PTY writer")?,
+        ));
+        let reply_writer = Arc::clone(&writer);
+        let wants_theme_reports = Arc::new(AtomicBool::new(false));
+        let reader_wants_theme_reports = Arc::clone(&wants_theme_reports);
         let (output_tx, output_rx) = mpsc::channel();
         let output_waker: Arc<Mutex<Option<PtyOutputWaker>>> = Arc::new(Mutex::new(None));
         let reader_waker = Arc::clone(&output_waker);
@@ -587,10 +599,21 @@ impl TerminalPane {
             .name("rudder-pty-reader".to_string())
             .spawn(move || {
                 let mut buf = [0_u8; 8192];
+                // Answered here, not on the main loop: an unfocused pane is only
+                // drained every 500ms, and an agent asking for the terminal's
+                // colors at startup gives up long before that.
+                let mut queries = QueryScanner::default();
                 loop {
                     match reader.read(&mut buf) {
                         Ok(0) => break,
                         Ok(n) => {
+                            let replies = queries.scan(&buf[..n]);
+                            reader_wants_theme_reports.store(queries.wants_theme_reports, Ordering::Relaxed);
+                            if !replies.is_empty() {
+                                if let Ok(mut writer) = reply_writer.lock() {
+                                    let _ = writer.write_all(&replies).and_then(|()| writer.flush());
+                                }
+                            }
                             if output_tx.send(buf[..n].to_vec()).is_err() {
                                 break;
                             }
@@ -620,6 +643,8 @@ impl TerminalPane {
             master: pair.master,
             child,
             writer,
+            wants_theme_reports,
+            theme_generation: colors_generation(),
             output_rx,
             reader_thread: Some(reader_thread),
             parser: vt100::Parser::new(
@@ -659,10 +684,10 @@ impl TerminalPane {
     }
 
     pub fn write_input(&mut self, bytes: &[u8]) -> Result<()> {
-        let write_result = self
-            .writer
-            .write_all(bytes)
-            .and_then(|()| self.writer.flush());
+        let write_result = match self.writer.lock() {
+            Ok(mut writer) => writer.write_all(bytes).and_then(|()| writer.flush()),
+            Err(_) => Err(std::io::Error::other("PTY writer lock poisoned")),
+        };
         match write_result {
             Ok(()) => Ok(()),
             Err(err) => {
@@ -719,6 +744,7 @@ impl TerminalPane {
     /// The returned bytes are raw terminal output for logging/debugging. The
     /// in-memory buffer is updated before this method returns.
     pub fn drain_output(&mut self) -> Vec<u8> {
+        self.report_theme_change();
         let mut drained = Vec::new();
         while let Ok(chunk) = self.output_rx.try_recv() {
             self.process_output_chunk(&chunk);
@@ -729,6 +755,21 @@ impl TerminalPane {
             self.invalidate_render_cache();
         }
         drained
+    }
+
+    /// The terminal's colors changed (light/dark): tell an agent that asked.
+    fn report_theme_change(&mut self) {
+        let generation = colors_generation();
+        if generation == self.theme_generation {
+            return;
+        }
+        self.theme_generation = generation;
+        if !self.wants_theme_reports.load(Ordering::Relaxed) {
+            return;
+        }
+        if let Some(report) = theme_change_report() {
+            let _ = self.write_input(&report);
+        }
     }
 
     /// Return the current visible terminal rows as plain text.

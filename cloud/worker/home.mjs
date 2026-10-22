@@ -21,6 +21,7 @@ import path from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { WebSocket } from "ws";
 import pty from "node-pty";
+import { writeTerminalColors } from "./theme.mjs";
 
 import { readTranscript, lastAssistantText, userTask } from "./transcripts.mjs";
 import { readAsks, askDecision, isAskId } from "./asks.mjs";
@@ -303,6 +304,8 @@ class Project {
         socket.send(JSON.stringify({ type: "probe-reply", id: payload.id ?? null }));
       } else if (payload?.type === "repaint") {
         this.repaint();
+      } else if (payload?.type === "theme") {
+        try { writeTerminalColors(payload); } catch (error) { log(`theme: ${error.message}`); }
       }
       // "signal" (Ctrl+C from a detaching laptop) is deliberately ignored: the
       // dashboard here outlives any one terminal attached to it.

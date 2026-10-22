@@ -815,6 +815,26 @@ brain lives in the cloud, and the phone is a first-class client.
   first paint 0.8ms vs 115ms, 10/10 confirmed. `rudder cloud` also keeps the
   vault's laptop config in step (Claude/Codex settings, hooks, ~/.aws,
   ~/.kalshi) by checksum.
+  Predictions take the look of the input they land in (its background, the
+  color of the text before them): opencode's grey box made every predicted
+  character flash in a black cell. The first key may type over an empty
+  input's grey or dim hint ("Ask anything…"), which it clears like the echo
+  will; it used to go unpredicted and hold back every key after it.
+- **Light or dark follows the real terminal (`native/src/term_colors.rs`,
+  `src/terminal-theme.ts`, `cloud/worker/theme.mjs`).** opencode, Codex and
+  Claude Code's auto theme ask the terminal for its colors (OSC 10/11) and, with
+  mode 2031, hear appearance changes (`CSI ? 997 ; 1|2 n`). In a pane they asked
+  the PANE, which never answered, so they always came up dark. Each pane's
+  reader thread now answers from the known colors at once (an unfocused pane
+  drains only every 500ms, too late for an agent's startup query) and an agent
+  that set 2031 is told when they change. Locally the dashboard asks its own
+  terminal at startup (DA1 last, so a terminal that ignores OSC 11 costs no
+  wait). In the cloud nobody is on the dashboard's terminal: `rudder cloud`
+  asks the laptop terminal, turns on 2031 there, takes the answers out of the
+  key stream and sends `{type:"theme", fg, bg}`; the supervisor writes
+  `<rudder home>/terminal-colors.json`, which every dashboard on the machine
+  re-reads each second. Agents started before the first report keep the theme
+  they chose unless they listen for 2031.
 - **Claude agents follow a session switch.** A Claude row's `Stop` and
   `UserPromptSubmit` hooks also write the live `session_id` to
   `<rudder home>/signals/<run>.claude-session`; `adopt_reported_claude_sessions`

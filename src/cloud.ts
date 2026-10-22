@@ -3474,9 +3474,18 @@ async function runAttach(
     }
 
     let lastCtrlC = 0;
+    // This terminal's light/dark colors, for the agents on the machine to
+    // theme themselves by (src/terminal-theme.ts). Sent on every connection.
+    const sendTheme = (colors: { fg: string | null; bg: string | null }) => {
+      if (socket.readyState === WebSocket.OPEN && hasControl && colors.bg && !probeMode) {
+        socket.send(JSON.stringify({ type: "theme", fg: colors.fg, bg: colors.bg }));
+      }
+    };
+    const offTheme = session.onTheme(sendTheme);
+
     const onStdin = (chunk: Buffer | string) => {
-      const buffer = typeof chunk === "string" ? Buffer.from(chunk, "utf8") : chunk;
-      if (socket.readyState !== WebSocket.OPEN) {
+      const buffer = session.filterInput(typeof chunk === "string" ? Buffer.from(chunk, "utf8") : chunk);
+      if (socket.readyState !== WebSocket.OPEN || buffer.length === 0) {
         return;
       }
       const hasCtrlC = containsCtrlC(buffer);
@@ -3587,6 +3596,7 @@ async function runAttach(
       offLeave();
       clearInterval(liveness);
       stdin.off("data", onStdin);
+      offTheme();
       stdout.off("resize", onResize);
       process.off("SIGINT", onSigint);
       splash?.stop();
@@ -3745,6 +3755,9 @@ async function runAttach(
         socket.send(queued, { binary: true });
       }
       requestRepaint();
+      if (session.theme?.known) {
+        sendTheme(session.theme.colors);
+      }
       if (!probeMode) {
         stdin.resume();
         stdin.on("data", onStdin);

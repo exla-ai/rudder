@@ -12,6 +12,7 @@
 
 import { randomUUID } from "node:crypto";
 import { EchoPredictor } from "./predict.js";
+import { THEME_QUERY, THEME_REPORTS_OFF, THEME_REPORTS_ON, TerminalThemeWatcher, type TerminalColors } from "./terminal-theme.js";
 
 export type SessionInput = {
   on(event: "data", listener: (chunk: Buffer | string) => void): unknown;
@@ -78,6 +79,8 @@ export class AttachSession {
   readonly interactive: boolean;
   /** The cloud's screen as last drawn (and predictive echo on top of it). */
   readonly predictor: EchoPredictor | null;
+  /** This terminal's colors, for the cloud's agents to theme themselves by. */
+  readonly theme: TerminalThemeWatcher | null;
   /** Connections that reached `open`. */
   connections = 0;
   /** The cloud has drawn on this terminal: a reconnect resumes that picture. */
@@ -98,6 +101,7 @@ export class AttachSession {
   private queuedBytes = 0;
   private lastCtrlC = 0;
   private leaveListeners = new Set<() => void>();
+  private themeListeners = new Set<(colors: TerminalColors) => void>();
 
   constructor(label: string, input: SessionInput, output: SessionOutput, options: SessionOptions) {
     this.label = label;
@@ -111,6 +115,27 @@ export class AttachSession {
         predict: options.predict ?? true,
       })
       : null;
+    this.theme = options.interactive
+      ? new TerminalThemeWatcher(
+        () => this.output.write(THEME_QUERY),
+        (colors) => {
+          for (const listener of [...this.themeListeners]) {
+            listener(colors);
+          }
+        },
+      )
+      : null;
+  }
+
+  /** Called with this terminal's colors whenever they are learned or change. */
+  onTheme(listener: (colors: TerminalColors) => void): () => void {
+    this.themeListeners.add(listener);
+    return () => this.themeListeners.delete(listener);
+  }
+
+  /** Input with the terminal's color replies taken out (they are not keys). */
+  filterInput(data: Buffer): Buffer {
+    return this.theme ? this.theme.filter(data) : data;
   }
 
   /** Take the terminal: alternate screen, raw keys, mouse and keyboard flags. */
@@ -130,6 +155,9 @@ export class AttachSession {
     this.output.write(MOUSE_ON);
     this.output.write(KITTY_KEYBOARD_PUSH);
     this.output.write(BRACKETED_PASTE_ON);
+    // Light or dark: answered on stdin, and again whenever the appearance flips.
+    this.output.write(THEME_REPORTS_ON);
+    this.output.write(THEME_QUERY);
   }
 
   /** Give the terminal back exactly once, whatever state it is in. */
@@ -143,6 +171,7 @@ export class AttachSession {
       this.output.write(KITTY_KEYBOARD_POP);
       this.output.write(KEYBOARD_RESET);
       this.output.write(BRACKETED_PASTE_OFF);
+      this.output.write(THEME_REPORTS_OFF);
       this.output.write(MOUSE_OFF);
       // Release the tab title so the shell prompt can rewrite it.
       this.output.write("\x1b]0;\x07");
@@ -284,7 +313,10 @@ export class AttachSession {
   }
 
   private onGapInput = (chunk: Buffer | string): void => {
-    const buffer = typeof chunk === "string" ? Buffer.from(chunk, "utf8") : chunk;
+    const buffer = this.filterInput(typeof chunk === "string" ? Buffer.from(chunk, "utf8") : chunk);
+    if (buffer.length === 0) {
+      return;
+    }
     if (containsCtrlC(buffer)) {
       // Never queued: an interrupt replayed into the dashboard after the
       // reconnect would land on whatever is running by then.

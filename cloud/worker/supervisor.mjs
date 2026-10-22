@@ -12,6 +12,7 @@ import path from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { WebSocket } from "ws";
 import pty from "node-pty";
+import { writeTerminalColors } from "./theme.mjs";
 
 import { countActiveAgents } from "./active-runs.mjs";
 
@@ -308,6 +309,10 @@ function handleControl(text) {
   }
   if (payload.type === "repaint") {
     signalRepaint();
+    return;
+  }
+  if (payload.type === "theme") {
+    try { writeTerminalColors(payload); } catch { /* ignore */ }
     return;
   }
   if (payload.type === "probe") {

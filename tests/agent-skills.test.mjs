@@ -24,6 +24,20 @@ test("the shipped Google Cloud skill is installed for Claude and Codex as rudder
   }
 });
 
+test("the shipped Namecheap DNS skill is installed for Claude and Codex as rudder-namecheap-dns", async () => {
+  const home = await tempDir("namecheap");
+  const targets = agentSkillTargets(home, {});
+  const result = await installAgentSkills({ targets });
+  assert.ok(result.installed.includes("claude:rudder-namecheap-dns"));
+  assert.ok(result.installed.includes("codex:rudder-namecheap-dns"));
+  for (const target of targets) {
+    const skill = await fsp.readFile(path.join(target.dir, "rudder-namecheap-dns", "SKILL.md"), "utf8");
+    assert.match(skill, /^---\nname: rudder-namecheap-dns\ndescription: .+\n---\n/);
+    const script = path.join(target.dir, "rudder-namecheap-dns", "scripts", "namecheap-dns");
+    assert.ok((await fsp.stat(script)).mode & 0o100, "helper script is executable");
+  }
+});
+
 test("installing again rewrites nothing, repairs edits, and leaves the user's own skills alone", async () => {
   const home = await tempDir("idempotent");
   const targets = agentSkillTargets(home, {});

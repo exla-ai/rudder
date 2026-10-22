@@ -1,0 +1,497 @@
+#!/usr/bin/env python3
+"""namecheap-dns: safe Namecheap DNS changes for agents.
+
+Namecheap's setHosts REPLACES every host record on a domain, so this tool
+never writes blind: it reads the live records, merges the change, backs the
+old set up, writes, then re-reads and checks the result.
+
+  namecheap-dns setup <api-user> [<api-key>] [--username U] [--client-ip IP]
+  namecheap-dns check                       credentials + IP whitelist + domain list
+  namecheap-dns list <domain>               host records and email mode
+  namecheap-dns set <domain> --add "A @ 76.76.21.21" --remove "CNAME www" [--replace] [--dry-run]
+  namecheap-dns vercel <domain> [--sub NAME ...] [--dry-run]
+                                            apex + www (or subdomains) to Vercel, parking removed
+  namecheap-dns forward <domain> [--add hello=you@example.com] [--remove hello] [--dry-run]
+  namecheap-dns lookup <name> [TYPE]        DNS-over-HTTPS lookup (no dig needed)
+  namecheap-dns restore <backup.json> [--dry-run]
+
+Credentials come from the environment or ~/.config/namecheap/credentials.env:
+  NAMECHEAP_API_USER, NAMECHEAP_API_KEY, NAMECHEAP_USERNAME (defaults to the
+  API user), NAMECHEAP_CLIENT_IP (defaults to this machine's public IPv4),
+  NAMECHEAP_SANDBOX=1 for the sandbox API.
+"""
+import argparse
+import json
+import os
+import shlex
+import sys
+import urllib.error
+import urllib.parse
+import urllib.request
+import xml.etree.ElementTree as ET
+from datetime import datetime
+from pathlib import Path
+
+API = 'https://api.namecheap.com/xml.response'
+SANDBOX_API = 'https://api.sandbox.namecheap.com/xml.response'
+CONFIG_DIR = Path(os.environ.get('NAMECHEAP_CONFIG_DIR', Path.home() / '.config' / 'namecheap'))
+CRED_FILE = CONFIG_DIR / 'credentials.env'
+BACKUP_DIR = CONFIG_DIR / 'backups'
+NS = '{http://api.namecheap.com/xml.response}'
+TWO_LEVEL_TLDS = {
+    'co.uk', 'org.uk', 'me.uk', 'ltd.uk', 'plc.uk', 'net.uk', 'com.au', 'net.au', 'org.au',
+    'co.nz', 'net.nz', 'org.nz', 'co.jp', 'com.br', 'com.mx', 'co.in', 'co.za', 'com.sg', 'com.tr',
+}
+# Types this tool can read back and write again without losing fields.
+ROUND_TRIP_TYPES = {'A', 'AAAA', 'ALIAS', 'CNAME', 'MX', 'MXE', 'NS', 'TXT', 'URL', 'URL301', 'FRAME'}
+REDIRECT_TYPES = {'URL', 'URL301', 'FRAME'}
+PARKING_TARGETS = ('parkingpage.namecheap.com',)
+VERCEL_A = '76.76.21.21'
+VERCEL_CNAME = 'cname.vercel-dns.com.'
+DEFAULT_TTL = '1800'
+
+
+class ApiError(Exception):
+    def __init__(self, errors, client_ip):
+        self.errors = errors
+        hints = []
+        numbers = {number for number, _ in errors}
+        text = ' '.join(message for _, message in errors).lower()
+        if '1011150' in numbers or ('ip' in text and ('whitelist' in text or 'invalid request ip' in text)):
+            hints.append(
+                f'This machine\'s IP {client_ip} is not whitelisted. Namecheap dashboard: Profile > Tools > '
+                'Namecheap API Access > Whitelisted IPs > add it.')
+        if numbers & {'1011102', '1011104', '1010102', '1010104'} or 'api key' in text or 'apiuser' in text:
+            hints.append('API user or key rejected. Re-run `namecheap-dns setup` with the key from Profile > Tools > Namecheap API Access.')
+        if 'not associated' in text or 'domain not found' in text or numbers & {'2019166', '2016166'}:
+            hints.append('That domain is not in this Namecheap account.')
+        detail = '; '.join(f'{number}: {message}' for number, message in errors)
+        super().__init__(detail + ''.join(f'\n  -> {hint}' for hint in hints))
+
+
+# ---------- credentials and transport ----------
+
+def read_cred_file():
+    values = {}
+    if CRED_FILE.exists():
+        for line in CRED_FILE.read_text().splitlines():
+            line = line.strip()
+            if line and not line.startswith('#') and '=' in line:
+                key, value = line.split('=', 1)
+                values[key.strip()] = value.strip().strip('"').strip("'")
+    return values
+
+
+def public_ip():
+    for url in ('https://api.ipify.org', 'https://ifconfig.me/ip', 'https://ipv4.icanhazip.com'):
+        try:
+            with urllib.request.urlopen(url, timeout=8) as response:
+                ip = response.read().decode().strip()
+                if ip.count('.') == 3:
+                    return ip
+        except (urllib.error.URLError, OSError):
+            continue
+    sys.exit('Could not find this machine\'s public IPv4. Set NAMECHEAP_CLIENT_IP.')
+
+
+def load_creds():
+    stored = read_cred_file()
+    get = lambda key: os.environ.get(key) or stored.get(key)
+    user, key = get('NAMECHEAP_API_USER'), get('NAMECHEAP_API_KEY')
+    if not user or not key:
+        sys.exit(
+            'NO_NAMECHEAP_CREDENTIALS: no API user/key in the environment or ' + str(CRED_FILE) + '.\n'
+            'One-time setup (the user does this once, then never again):\n'
+            '  1. Namecheap dashboard > Profile > Tools > Namecheap API Access > turn ON\n'
+            '     (Namecheap requires $50 balance, $50 spent in 2 years, or 20 domains).\n'
+            f'  2. Whitelisted IPs > add {public_ip()} (this machine).\n'
+            '  3. namecheap-dns setup <namecheap-username>   (prompts for the key)')
+    return {
+        'ApiUser': user,
+        'ApiKey': key,
+        'UserName': get('NAMECHEAP_USERNAME') or user,
+        'ClientIp': get('NAMECHEAP_CLIENT_IP') or public_ip(),
+        'sandbox': get('NAMECHEAP_SANDBOX') == '1',
+    }
+
+
+def call(creds, command, **params):
+    data = {name: creds[name] for name in ('ApiUser', 'ApiKey', 'UserName', 'ClientIp')}
+    data['Command'] = command
+    data.update({name: str(value) for name, value in params.items()})
+    request = urllib.request.Request(
+        SANDBOX_API if creds['sandbox'] else API,
+        data=urllib.parse.urlencode(data).encode(),
+        method='POST',
+    )
+    with urllib.request.urlopen(request, timeout=30) as response:
+        root = ET.fromstring(response.read())
+    if root.get('Status') != 'OK':
+        errors = [(error.get('Number', '?'), (error.text or '').strip()) for error in root.iter(NS + 'Error')]
+        raise ApiError(errors or [('?', 'unknown error')], creds['ClientIp'])
+    return root.find(NS + 'CommandResponse')
+
+
+# ---------- domain records ----------
+
+def split_domain(domain):
+    labels = domain.lower().strip().strip('.').split('.')
+    if len(labels) >= 3 and '.'.join(labels[-2:]) in TWO_LEVEL_TLDS:
+        sld, tld, extra = labels[-3], '.'.join(labels[-2:]), labels[:-3]
+    elif len(labels) >= 2:
+        sld, tld, extra = labels[-2], labels[-1], labels[:-2]
+    else:
+        sys.exit(f'Not a domain: {domain}')
+    if extra:
+        sys.exit(f'Pass the registered domain ({sld}.{tld}), not a subdomain; use the host field for "{".".join(extra)}".')
+    return sld, tld
+
+
+def norm(record_type, value):
+    value = (value or '').strip()
+    return value if record_type == 'TXT' else value.rstrip('.').lower()
+
+
+def same(a, b):
+    return (a['type'] == b['type'] and a['host'].lower() == b['host'].lower()
+            and norm(a['type'], a['address']) == norm(b['type'], b['address']))
+
+
+def fmt(record):
+    extra = f" pref={record['mxpref']}" if record['type'] in ('MX', 'MXE') else ''
+    return f"{record['type']:<6} {record['host']:<14} {record['address']}  ttl={record['ttl']}{extra}"
+
+
+def get_hosts(creds, domain):
+    sld, tld = split_domain(domain)
+    result = call(creds, 'namecheap.domains.dns.getHosts', SLD=sld, TLD=tld).find(NS + 'DomainDNSGetHostsResult')
+    records = [{
+        'type': host.get('Type', '').upper(),
+        'host': host.get('Name', ''),
+        'address': host.get('Address', ''),
+        'ttl': host.get('TTL') or DEFAULT_TTL,
+        'mxpref': host.get('MXPref') or '10',
+    } for host in result.iter(NS + 'host')]
+    return {
+        'domain': domain,
+        'records': records,
+        'email_type': (result.get('EmailType') or '').upper(),
+        'using_namecheap_dns': (result.get('IsUsingOurDNS') or '').lower() == 'true',
+    }
+
+
+def set_hosts(creds, domain, records, email_type):
+    sld, tld = split_domain(domain)
+    params = {'SLD': sld, 'TLD': tld}
+    for index, record in enumerate(records, 1):
+        params[f'HostName{index}'] = record['host']
+        params[f'RecordType{index}'] = record['type']
+        params[f'Address{index}'] = record['address']
+        params[f'TTL{index}'] = record['ttl'] or DEFAULT_TTL
+        if record['type'] in ('MX', 'MXE'):
+            params[f'MXPref{index}'] = record['mxpref'] or '10'
+    if email_type and email_type != 'NONE':
+        params['EmailType'] = email_type
+    result = call(creds, 'namecheap.domains.dns.setHosts', **params).find(NS + 'DomainDNSSetHostsResult')
+    if result is None or (result.get('IsSuccess') or '').lower() != 'true':
+        sys.exit('setHosts did not report success; nothing verified. Check the domain in the dashboard.')
+
+
+def parse_spec(spec, need_value):
+    parts = shlex.split(spec)
+    if len(parts) < (3 if need_value else 2):
+        sys.exit(f'Bad record "{spec}". Use "TYPE HOST VALUE [TTL] [MXPREF]", e.g. "A @ 76.76.21.21".')
+    record = {'type': parts[0].upper(), 'host': parts[1], 'address': parts[2] if len(parts) > 2 else None,
+              'ttl': parts[3] if len(parts) > 3 else DEFAULT_TTL, 'mxpref': parts[4] if len(parts) > 4 else '10'}
+    if need_value and record['type'] not in ROUND_TRIP_TYPES:
+        sys.exit(f'Record type {record["type"]} is not supported by this tool.')
+    return record
+
+
+def conflicts(existing, new):
+    """Records that cannot coexist with `new` at the same host."""
+    host = new['host'].lower()
+    out = []
+    for record in existing:
+        if record['host'].lower() != host or same(record, new):
+            continue
+        if new['type'] == 'CNAME' or record['type'] == 'CNAME':
+            out.append(record)  # a CNAME owns its name outright
+        elif new['type'] in ('A', 'AAAA', 'ALIAS') and record['type'] in REDIRECT_TYPES | {'ALIAS'}:
+            out.append(record)  # a redirect or ALIAS answers for the same name
+        elif new['type'] in REDIRECT_TYPES and record['type'] in {'A', 'AAAA', 'ALIAS'} | REDIRECT_TYPES:
+            out.append(record)
+        elif new['type'] == record['type'] and new['type'] in ('A', 'AAAA'):
+            out.append(record)  # a second A would round-robin traffic to the old target
+    return out
+
+
+def plan_change(current, adds, removes, replace):
+    records = [dict(record) for record in current]
+    removed, added = [], []
+    for spec in removes:
+        for record in list(records):
+            if (record['type'] == spec['type'] and record['host'].lower() == spec['host'].lower()
+                    and (spec['address'] is None or norm(record['type'], record['address']) == norm(spec['type'], spec['address']))):
+                records.remove(record)
+                removed.append(record)
+    for new in adds:
+        if any(same(record, new) for record in records):
+            continue
+        clash = conflicts(records, new)
+        if clash and not replace:
+            sys.exit('Refusing: ' + fmt(new) + ' conflicts with existing record(s):\n  '
+                     + '\n  '.join(fmt(record) for record in clash)
+                     + '\nRe-run with --replace to swap them, or --remove them explicitly.')
+        for record in clash:
+            records.remove(record)
+            removed.append(record)
+        records.append(new)
+        added.append(new)
+    return records, removed, added
+
+
+def backup(state):
+    BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+    os.chmod(CONFIG_DIR, 0o700)
+    # Microseconds keep two writes in the same second from overwriting each other's backup.
+    path = BACKUP_DIR / f"{state['domain']}-{datetime.now().strftime('%Y%m%dT%H%M%S.%f')}.json"
+    path.write_text(json.dumps(state, indent=2))
+    return path
+
+
+def apply(creds, domain, state, records, removed, added, dry_run, email_type=None):
+    unknown = [record for record in state['records'] if record['type'] not in ROUND_TRIP_TYPES]
+    if unknown:
+        sys.exit('Refusing to rewrite: the domain has record types this tool cannot round-trip:\n  '
+                 + '\n  '.join(fmt(record) for record in unknown) + '\nChange them in the dashboard instead.')
+    if not state['using_namecheap_dns']:
+        sys.exit(f'{domain} is not on Namecheap DNS (custom nameservers). Change records at that DNS host instead.')
+    for record in removed:
+        print('- ' + fmt(record))
+    for record in added:
+        print('+ ' + fmt(record))
+    target_email = email_type or state['email_type']
+    if target_email != state['email_type']:
+        print(f"~ email mode {state['email_type'] or 'NONE'} -> {target_email}")
+    if not removed and not added and target_email == state['email_type']:
+        print('No change needed; the records are already in place.')
+        return
+    if dry_run:
+        print('(dry run: nothing written)')
+        return
+    saved = backup(state)
+    print(f'Backed up previous records to {saved}')
+    set_hosts(creds, domain, records, target_email)
+    after = get_hosts(creds, domain)
+    missing = [record for record in added if not any(same(record, live) for live in after['records'])]
+    lingering = [record for record in removed if any(same(record, live) for live in after['records'])]
+    if missing or lingering:
+        sys.exit('Verification failed after write. Missing: ' + ', '.join(map(fmt, missing))
+                 + ' Still present: ' + ', '.join(map(fmt, lingering)) + f'\nRestore with: namecheap-dns restore {saved}')
+    print(f'Verified: {len(after["records"])} records live on Namecheap. Public DNS catches up within the TTL:')
+    print(f'  namecheap-dns lookup {domain} A')
+
+
+# ---------- commands ----------
+
+def cmd_setup(args):
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    os.chmod(CONFIG_DIR, 0o700)
+    api_key = args.api_key
+    if not api_key:
+        import getpass
+        # Prompted, not an argument: a key on the command line lands in shell
+        # history and the process list.
+        api_key = getpass.getpass('Namecheap API key: ').strip()
+    if not api_key:
+        sys.exit('No API key given.')
+    lines = [f'NAMECHEAP_API_USER={args.api_user}', f'NAMECHEAP_API_KEY={api_key}']
+    if args.username:
+        lines.append(f'NAMECHEAP_USERNAME={args.username}')
+    if args.client_ip:
+        lines.append(f'NAMECHEAP_CLIENT_IP={args.client_ip}')
+    fd = os.open(CRED_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, 'w') as handle:
+        handle.write('\n'.join(lines) + '\n')
+    os.chmod(CRED_FILE, 0o600)
+    print(f'Saved credentials to {CRED_FILE} (mode 600).')
+    cmd_check(args)
+
+
+def cmd_check(_args):
+    creds = load_creds()
+    result = call(creds, 'namecheap.domains.getList', PageSize=100).find(NS + 'DomainGetListResult')
+    domains = [(domain.get('Name'), domain.get('IsOurDNS'), domain.get('Expires')) for domain in result.iter(NS + 'Domain')]
+    print(f"OK: API user {creds['ApiUser']} from IP {creds['ClientIp']}. {len(domains)} domain(s):")
+    for name, ours, expires in domains:
+        print(f"  {name:<32} {'Namecheap DNS' if (ours or '').lower() == 'true' else 'custom nameservers':<20} expires {expires}")
+
+
+def cmd_list(args):
+    state = get_hosts(load_creds(), args.domain)
+    print(f"{args.domain}: {'Namecheap DNS' if state['using_namecheap_dns'] else 'custom nameservers'}, "
+          f"email mode {state['email_type'] or 'NONE'}")
+    for record in state['records']:
+        print('  ' + fmt(record))
+
+
+def cmd_set(args):
+    creds = load_creds()
+    state = get_hosts(creds, args.domain)
+    adds = [parse_spec(spec, True) for spec in args.add]
+    removes = [parse_spec(spec, False) for spec in args.remove]
+    records, removed, added = plan_change(state['records'], adds, removes, args.replace)
+    apply(creds, args.domain, state, records, removed, added, args.dry_run)
+
+
+def cmd_vercel(args):
+    creds = load_creds()
+    state = get_hosts(creds, args.domain)
+    removes = []
+    for record in state['records']:
+        if norm('CNAME', record['address']).endswith(PARKING_TARGETS) or (
+                record['type'] in REDIRECT_TYPES and record['host'] in ('@', 'www')):
+            removes.append(dict(record))  # Namecheap's default parking page and redirects
+    names = args.sub or ['@', 'www']
+    adds = []
+    for name in names:
+        if name == '@':
+            adds.append({'type': 'A', 'host': '@', 'address': VERCEL_A, 'ttl': DEFAULT_TTL, 'mxpref': '10'})
+        else:
+            adds.append({'type': 'CNAME', 'host': name, 'address': VERCEL_CNAME, 'ttl': DEFAULT_TTL, 'mxpref': '10'})
+    records, removed, added = plan_change(state['records'], adds, removes, replace=True)
+    apply(creds, args.domain, state, records, removed, added, args.dry_run)
+    if not args.dry_run:
+        print('Next: `vercel domains add ' + (args.domain if names == ['@', 'www'] else f'{names[0]}.{args.domain}')
+              + ' <project>` if not attached yet, then `vercel domains inspect` to confirm.')
+
+
+def cmd_forward(args):
+    creds = load_creds()
+    domain = args.domain.lower()
+    result = call(creds, 'namecheap.domains.dns.getEmailForwarding', DomainName=domain).find(
+        NS + 'DomainDNSGetEmailForwardingResult')
+    forwards = [(forward.get('mailbox'), (forward.text or '').strip()) for forward in result.iter(NS + 'Forward')]
+    if not args.add and not args.remove:
+        print(f'{domain} email forwards:' if forwards else f'{domain}: no email forwards')
+        for mailbox, target in forwards:
+            print(f'  {mailbox}@{domain} -> {target}')
+        return
+    wanted = [(mailbox, target) for mailbox, target in forwards if mailbox not in set(args.remove)]
+    for spec in args.add:
+        if '=' not in spec:
+            sys.exit(f'Bad forward "{spec}". Use mailbox=destination, e.g. hello=you@example.com')
+        mailbox, target = (part.strip() for part in spec.split('=', 1))
+        wanted = [(m, t) for m, t in wanted if m != mailbox] + [(mailbox, target)]
+    state = get_hosts(creds, domain)
+    if state['email_type'] != 'FWD':
+        has_mx = any(record['type'] in ('MX', 'MXE') for record in state['records'])
+        if has_mx and not args.force:
+            sys.exit(f"{domain} receives mail through MX records (mode {state['email_type']}). Switching to "
+                     'forwarding would cut that mail off. Re-run with --force only if that mail setup is unused.')
+        print(f"Switching {domain} email mode {state['email_type'] or 'NONE'} -> FWD")
+        records = [record for record in state['records'] if record['type'] not in ('MX', 'MXE')]
+        removed = [record for record in state['records'] if record['type'] in ('MX', 'MXE')]
+        apply(creds, domain, state, records, removed, [], args.dry_run, email_type='FWD')
+    for mailbox, target in wanted:
+        print(f'  {mailbox}@{domain} -> {target}')
+    if args.dry_run:
+        print('(dry run: forwards not written)')
+        return
+    params = {'DomainName': domain}
+    for index, (mailbox, target) in enumerate(wanted, 1):
+        params[f'MailBox{index}'] = mailbox
+        params[f'ForwardTo{index}'] = target
+    call(creds, 'namecheap.domains.dns.setEmailForwarding', **params)
+    print('Forwards saved.')
+
+
+def cmd_lookup(args):
+    """Resolve through Google and Cloudflare DNS-over-HTTPS; works where dig is not installed."""
+    for resolver in ('https://dns.google/resolve', 'https://cloudflare-dns.com/dns-query'):
+        url = f'{resolver}?' + urllib.parse.urlencode({'name': args.name, 'type': args.type.upper()})
+        request = urllib.request.Request(url, headers={'Accept': 'application/dns-json'})
+        try:
+            with urllib.request.urlopen(request, timeout=10) as response:
+                answers = json.load(response).get('Answer', [])
+        except (urllib.error.URLError, OSError, ValueError):
+            continue
+        records = [answer['data'] for answer in answers]
+        print(f"{args.name} {args.type.upper()} via {resolver.split('/')[2]}: " + (', '.join(records) or '(no answer)'))
+        if args.type.upper() == 'NS' and any('registrar-servers.com' in record for record in records):
+            print('-> Namecheap BasicDNS: use this tool.')
+        return
+    sys.exit('Both DNS-over-HTTPS resolvers were unreachable.')
+
+
+def cmd_restore(args):
+    saved = json.loads(Path(args.backup).read_text())
+    creds = load_creds()
+    state = get_hosts(creds, saved['domain'])
+    removed = [record for record in state['records'] if not any(same(record, old) for old in saved['records'])]
+    added = [record for record in saved['records'] if not any(same(record, live) for live in state['records'])]
+    apply(creds, saved['domain'], state, saved['records'], removed, added, args.dry_run, email_type=saved['email_type'])
+
+
+def main():
+    parser = argparse.ArgumentParser(prog='namecheap-dns', description=__doc__,
+                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = parser.add_subparsers(dest='command', required=True)
+
+    p = sub.add_parser('setup', help='store API credentials, then check them')
+    p.add_argument('api_user')
+    p.add_argument('api_key', nargs='?', help='omit to be prompted (keeps it out of shell history)')
+    p.add_argument('--username')
+    p.add_argument('--client-ip')
+    p.set_defaults(func=cmd_setup)
+
+    sub.add_parser('check', help='verify credentials and list domains').set_defaults(func=cmd_check)
+
+    p = sub.add_parser('list', help='show host records')
+    p.add_argument('domain')
+    p.set_defaults(func=cmd_list)
+
+    p = sub.add_parser('set', help='add/remove host records (merged, backed up, verified)')
+    p.add_argument('domain')
+    p.add_argument('--add', action='append', default=[], metavar='"TYPE HOST VALUE [TTL] [MXPREF]"')
+    p.add_argument('--remove', action='append', default=[], metavar='"TYPE HOST [VALUE]"')
+    p.add_argument('--replace', action='store_true', help='swap out records that conflict with an added one')
+    p.add_argument('--dry-run', action='store_true')
+    p.set_defaults(func=cmd_set)
+
+    p = sub.add_parser('vercel', help='point the apex + www (or --sub names) at Vercel')
+    p.add_argument('domain')
+    p.add_argument('--sub', action='append', metavar='NAME', help='subdomain(s) to CNAME to Vercel instead of @ + www')
+    p.add_argument('--dry-run', action='store_true')
+    p.set_defaults(func=cmd_vercel)
+
+    p = sub.add_parser('forward', help='list or change free email forwarding')
+    p.add_argument('domain')
+    p.add_argument('--add', action='append', default=[], metavar='mailbox=destination')
+    p.add_argument('--remove', action='append', default=[], metavar='mailbox')
+    p.add_argument('--force', action='store_true', help='allow switching a domain off MX mail to forwarding')
+    p.add_argument('--dry-run', action='store_true')
+    p.set_defaults(func=cmd_forward)
+
+    p = sub.add_parser('lookup', help='resolve a name over DNS-over-HTTPS (no dig needed)')
+    p.add_argument('name')
+    p.add_argument('type', nargs='?', default='A')
+    p.set_defaults(func=cmd_lookup)
+
+    p = sub.add_parser('restore', help='put a backup back')
+    p.add_argument('backup')
+    p.add_argument('--dry-run', action='store_true')
+    p.set_defaults(func=cmd_restore)
+
+    args = parser.parse_args()
+    try:
+        args.func(args)
+    except ApiError as error:
+        sys.exit(f'Namecheap API error: {error}')
+    except urllib.error.URLError as error:
+        sys.exit(f'Could not reach the Namecheap API: {error}')
+
+
+if __name__ == '__main__':
+    main()

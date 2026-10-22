@@ -224,7 +224,8 @@ test("`rudder login` prints the code, and a phone approval signs the CLI in", as
   child.stderr.on("data", (d) => { out += d.toString(); });
   const exited = new Promise((resolve) => child.on("exit", resolve));
   t.after(() => child.kill("SIGKILL"));
-  const code = (await waitFor(() => /\n {4}([A-HJ-NP-Z2-9]{3}-[A-HJ-NP-Z2-9]{3})\n/.exec(out), { timeout: 15000 }))[1];
+  // The code and the approve link can arrive in separate chunks: wait for both.
+  const code = (await waitFor(() => /\n {4}([A-HJ-NP-Z2-9]{3}-[A-HJ-NP-Z2-9]{3})\n[\s\S]*\/app\/approve\?code=/.exec(out), { timeout: 15000 }))[1];
   assert.match(out, new RegExp(`/app/approve\\?code=${code}`));
   assert.doesNotMatch(out, /\x1b\[30;47m/, "no QR drawn into a pipe");
   const approved = await client(base)("/api/app/computer/approve", { code, approve: true }, { authorization: "Bearer rdr_phone_cli" });

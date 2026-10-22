@@ -34,7 +34,12 @@ async function listFiles(root: string, rel = ""): Promise<string[]> {
   return files;
 }
 
-export type InstallResult = { installed: string[]; updatedFiles: number };
+// Skills Rudder once shipped under another name. Their rudder-<name> copies are
+// Rudder's own (never the user's), so an upgrade removes them rather than leave
+// agents two skills for the same job.
+export const RETIRED_AGENT_SKILLS = ["namecheap-dns"];
+
+export type InstallResult = { installed: string[]; updatedFiles: number; removed: string[] };
 
 export async function installAgentSkills(options: { sourceDir?: string; targets?: AgentSkillTarget[] } = {}): Promise<InstallResult> {
   const sourceDir = options.sourceDir ?? agentSkillsSourceDir();
@@ -43,7 +48,7 @@ export async function installAgentSkills(options: { sourceDir?: string; targets?
   try {
     skills = (await fsp.readdir(sourceDir, { withFileTypes: true })).filter((e) => e.isDirectory()).map((e) => e.name);
   } catch {
-    return { installed: [], updatedFiles: 0 };
+    return { installed: [], updatedFiles: 0, removed: [] };
   }
   const installed: string[] = [];
   let updatedFiles = 0;
@@ -66,7 +71,17 @@ export async function installAgentSkills(options: { sourceDir?: string; targets?
       installed.push(`${target.agent}:rudder-${skill}`);
     }
   }
-  return { installed, updatedFiles };
+  const removed: string[] = [];
+  for (const retired of RETIRED_AGENT_SKILLS) {
+    if (skills.includes(retired)) continue;
+    for (const target of targets) {
+      const dir = path.join(target.dir, `rudder-${retired}`);
+      if (!(await fsp.stat(dir).catch(() => null))) continue;
+      await fsp.rm(dir, { recursive: true, force: true });
+      removed.push(`${target.agent}:rudder-${retired}`);
+    }
+  }
+  return { installed, updatedFiles, removed };
 }
 
 /** Best effort: a read-only home or odd permissions must never block a run. */

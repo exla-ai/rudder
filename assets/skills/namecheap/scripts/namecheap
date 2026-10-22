@@ -1,19 +1,39 @@
 #!/usr/bin/env python3
-"""namecheap-dns: safe Namecheap DNS changes for agents.
+"""namecheap: the Namecheap account from the command line, safely, for agents.
 
-Namecheap's setHosts REPLACES every host record on a domain, so this tool
-never writes blind: it reads the live records, merges the change, backs the
-old set up, writes, then re-reads and checks the result.
+Namecheap's setHosts REPLACES every host record on a domain, so record changes
+never write blind: read the live records, merge, back the old set up, write,
+re-read and check. Anything that costs money (register, renew) shows the price
+and the balance and does nothing without --yes.
 
-  namecheap-dns setup <api-user> [<api-key>] [--username U] [--client-ip IP]
-  namecheap-dns check                       credentials + IP whitelist + domain list
-  namecheap-dns list <domain>               host records and email mode
-  namecheap-dns set <domain> --add "A @ 76.76.21.21" --remove "CNAME www" [--replace] [--dry-run]
-  namecheap-dns vercel <domain> [--sub NAME ...] [--dry-run]
-                                            apex + www (or subdomains) to Vercel, parking removed
-  namecheap-dns forward <domain> [--add hello=you@example.com] [--remove hello] [--dry-run]
-  namecheap-dns lookup <name> [TYPE]        DNS-over-HTTPS lookup (no dig needed)
-  namecheap-dns restore <backup.json> [--dry-run]
+Account
+  namecheap setup <api-user> [<api-key>] [--username U] [--client-ip IP]
+  namecheap check                         credentials + IP whitelist + domain list
+  namecheap balance                       account balance
+  namecheap domains [--expiring|--expired] [--search TEXT]
+  namecheap info <domain>                 status, expiry, auto-renew, privacy, nameservers
+  namecheap contacts <domain>             registrant/admin/tech/billing contacts
+
+Buying (prices first; --yes to spend)
+  namecheap available <domain> [...]      availability + premium price
+  namecheap price <tld> [--action register|renew|transfer]
+  namecheap register <domain> --contacts-from <owned domain> [--years N] [--yes]
+  namecheap renew <domain> [--years N] [--yes]
+  namecheap transfers                     incoming transfers and their status
+
+Registrar settings
+  namecheap nameservers <domain> [--set NS1 NS2 ...|--default]
+  namecheap lock <domain> [--on|--off]    registrar (transfer) lock
+  namecheap privacy [<domain>] [--on [--email E]|--off]   free domain privacy
+
+DNS (Namecheap BasicDNS)
+  namecheap list <domain>                 host records and email mode
+  namecheap set <domain> --add "A @ 76.76.21.21" --remove "CNAME www" [--replace] [--dry-run]
+  namecheap vercel <domain> [--sub NAME ...] [--dry-run]
+                                          apex + www (or subdomains) to Vercel, parking removed
+  namecheap forward <domain> [--add hello=you@example.com] [--remove hello] [--dry-run]
+  namecheap lookup <name> [TYPE]          DNS-over-HTTPS lookup (no dig needed)
+  namecheap restore <backup.json> [--dry-run]
 
 Credentials come from the environment or ~/.config/namecheap/credentials.env:
   NAMECHEAP_API_USER, NAMECHEAP_API_KEY, NAMECHEAP_USERNAME (defaults to the
@@ -62,7 +82,7 @@ class ApiError(Exception):
                 f'This machine\'s IP {client_ip} is not whitelisted. Namecheap dashboard: Profile > Tools > '
                 'Namecheap API Access > Whitelisted IPs > add it.')
         if numbers & {'1011102', '1011104', '1010102', '1010104'} or 'api key' in text or 'apiuser' in text:
-            hints.append('API user or key rejected. Re-run `namecheap-dns setup` with the key from Profile > Tools > Namecheap API Access.')
+            hints.append('API user or key rejected. Re-run `namecheap setup` with the key from Profile > Tools > Namecheap API Access.')
         if 'not associated' in text or 'domain not found' in text or numbers & {'2019166', '2016166'}:
             hints.append('That domain is not in this Namecheap account.')
         detail = '; '.join(f'{number}: {message}' for number, message in errors)
@@ -105,7 +125,7 @@ def load_creds():
             '  1. Namecheap dashboard > Profile > Tools > Namecheap API Access > turn ON\n'
             '     (Namecheap requires $50 balance, $50 spent in 2 years, or 20 domains).\n'
             f'  2. Whitelisted IPs > add {public_ip()} (this machine).\n'
-            '  3. namecheap-dns setup <namecheap-username>   (prompts for the key)')
+            '  3. namecheap setup <namecheap-username>   (prompts for the key)')
     return {
         'ApiUser': user,
         'ApiKey': key,
@@ -288,9 +308,9 @@ def apply(creds, domain, state, records, removed, added, dry_run, email_type=Non
     lingering = [record for record in removed if any(same(record, live) for live in after['records'])]
     if missing or lingering:
         sys.exit('Verification failed after write. Missing: ' + ', '.join(map(fmt, missing))
-                 + ' Still present: ' + ', '.join(map(fmt, lingering)) + f'\nRestore with: namecheap-dns restore {saved}')
+                 + ' Still present: ' + ', '.join(map(fmt, lingering)) + f'\nRestore with: namecheap restore {saved}')
     print(f'Verified: {len(after["records"])} records live on Namecheap. Public DNS catches up within the TTL:')
-    print(f'  namecheap-dns lookup {domain} A')
+    print(f'  namecheap lookup {domain} A')
 
 
 # ---------- commands ----------
@@ -407,6 +427,210 @@ def cmd_forward(args):
     print('Forwards saved.')
 
 
+def text(node, tag):
+    found = node.find(NS + tag) if node is not None else None
+    return (found.text or '').strip() if found is not None else ''
+
+
+def cmd_balance(_args):
+    result = call(load_creds(), 'namecheap.users.getBalances').find(NS + 'UserGetBalancesResult')
+    print(f"Available {result.get('AvailableBalance')} {result.get('Currency')} "
+          f"(account {result.get('AccountBalance')}, earned {result.get('EarnedAmount')}, "
+          f"funds needed for auto-renew {result.get('FundsRequiredForAutoRenew')})")
+
+
+def all_domains(creds, list_type='ALL', search=None):
+    page, out = 1, []
+    while True:
+        params = {'PageSize': 100, 'Page': page, 'ListType': list_type}
+        if search:
+            params['SearchTerm'] = search
+        response = call(creds, 'namecheap.domains.getList', **params)
+        batch = list(response.find(NS + 'DomainGetListResult').iter(NS + 'Domain'))
+        out.extend(batch)
+        paging = response.find(NS + 'Paging')
+        total = int(text(paging, 'TotalItems') or len(out))
+        if not batch or len(out) >= total:
+            return out
+        page += 1
+
+
+def cmd_domains(args):
+    list_type = 'EXPIRING' if args.expiring else 'EXPIRED' if args.expired else 'ALL'
+    domains = all_domains(load_creds(), list_type, args.search)
+    print(f'{len(domains)} domain(s):')
+    for domain in domains:
+        flags = [label for label, attr in (('auto-renew', 'AutoRenew'), ('locked', 'IsLocked'), ('privacy', 'WhoisGuard'))
+                 if (domain.get(attr) or '').lower() in ('true', 'enabled')]
+        dns = 'Namecheap DNS' if (domain.get('IsOurDNS') or '').lower() == 'true' else 'custom NS'
+        print(f"  {domain.get('Name'):<32} expires {domain.get('Expires'):<11} {dns:<14} {' '.join(flags)}")
+
+
+def cmd_info(args):
+    creds = load_creds()
+    result = call(creds, 'namecheap.domains.getInfo', DomainName=args.domain).find(NS + 'DomainGetInfoResult')
+    details = result.find(NS + 'DomainDetails')
+    privacy = result.find(NS + 'Whoisguard')
+    dns = result.find(NS + 'DnsDetails')
+    print(f"{result.get('DomainName')}: status {result.get('Status')}, owner {result.get('OwnerName')}, "
+          f"premium {result.get('IsPremium')}")
+    print(f"  created {text(details, 'CreatedDate')}, expires {text(details, 'ExpiredDate')}")
+    print(f"  privacy {privacy.get('Enabled') if privacy is not None else '?'}"
+          f"{' until ' + text(privacy, 'ExpiredDate') if privacy is not None and text(privacy, 'ExpiredDate') else ''}")
+    if dns is not None:
+        servers = [(server.text or '').strip() for server in dns.iter(NS + 'Nameserver')]
+        print(f"  DNS {dns.get('ProviderType')}: {', '.join(servers) or '(none listed)'}")
+    lock = call(creds, 'namecheap.domains.getRegistrarLock', DomainName=args.domain).find(NS + 'DomainGetRegistrarLockResult')
+    print(f"  registrar lock {lock.get('RegistrarLockStatus') if lock is not None else '?'}")
+
+
+CONTACT_ROLES = ('Registrant', 'Tech', 'Admin', 'AuxBilling')
+CONTACT_FIELDS = ('OrganizationName', 'JobTitle', 'FirstName', 'LastName', 'Address1', 'Address2', 'City',
+                  'StateProvince', 'StateProvinceChoice', 'PostalCode', 'Country', 'Phone', 'PhoneExt', 'Fax',
+                  'EmailAddress')
+
+
+def get_contacts(creds, domain):
+    result = call(creds, 'namecheap.domains.getContacts', DomainName=domain).find(NS + 'DomainContactsResult')
+    return {role: {field: text(result.find(NS + role), field) for field in CONTACT_FIELDS} for role in CONTACT_ROLES}
+
+
+def cmd_contacts(args):
+    for role, fields in get_contacts(load_creds(), args.domain).items():
+        name = ' '.join(filter(None, (fields['FirstName'], fields['LastName'])))
+        place = ', '.join(filter(None, (fields['City'], fields['StateProvince'], fields['Country'])))
+        print(f"  {role:<10} {name} <{fields['EmailAddress']}> {fields['OrganizationName']} {place}".rstrip())
+
+
+def cmd_available(args):
+    result = call(load_creds(), 'namecheap.domains.check', DomainList=','.join(args.domains))
+    for domain in result.iter(NS + 'DomainCheckResult'):
+        available = (domain.get('Available') or '').lower() == 'true'
+        premium = (domain.get('IsPremiumName') or '').lower() == 'true'
+        price = f" premium {domain.get('PremiumRegistrationPrice')}" if premium else ''
+        print(f"  {domain.get('Domain'):<32} {'AVAILABLE' if available else 'taken'}{price}")
+
+
+def tld_price(creds, tld, action, years=1):
+    response = call(creds, 'namecheap.users.getPricing', ProductType='DOMAIN',
+                    ProductCategory=action.upper(), ProductName=tld)
+    for product in response.iter(NS + 'Product'):
+        for price in product.iter(NS + 'Price'):
+            if price.get('Duration') == str(years):
+                return price
+    return None
+
+
+def cmd_price(args):
+    tld = args.tld.lstrip('.').lower()
+    price = tld_price(load_creds(), tld, args.action, args.years)
+    if price is None:
+        sys.exit(f'No {args.action} price for .{tld} ({args.years} year).')
+    print(f".{tld} {args.action} {args.years} year(s): {price.get('YourPrice') or price.get('Price')} {price.get('Currency')}"
+          f" (list {price.get('RegularPrice') or price.get('Price')}{', +ICANN fee ' + price.get('YourAdditonalCost') if price.get('YourAdditonalCost') else ''})")
+
+
+def money_gate(creds, what, price_node, years, yes):
+    balance = call(creds, 'namecheap.users.getBalances').find(NS + 'UserGetBalancesResult')
+    cost = price_node.get('YourPrice') or price_node.get('Price') if price_node is not None else '?'
+    currency = price_node.get('Currency') if price_node is not None else ''
+    print(f"{what}: {cost} {currency} per year x {years}; account balance {balance.get('AvailableBalance')} {balance.get('Currency')}")
+    if not yes:
+        sys.exit('Not charged. This spends money: confirm the item and total with the user, then re-run with --yes.')
+
+
+def cmd_renew(args):
+    creds = load_creds()
+    _, tld = split_domain(args.domain)
+    money_gate(creds, f'Renew {args.domain}', tld_price(creds, tld, 'renew', 1), args.years, args.yes)
+    result = call(creds, 'namecheap.domains.renew', DomainName=args.domain, Years=args.years).find(NS + 'DomainRenewResult')
+    print(f"Renewed {args.domain}: charged {result.get('ChargedAmount')}, order {result.get('OrderID')}")
+
+
+def cmd_register(args):
+    creds = load_creds()
+    _, tld = split_domain(args.domain)
+    check = call(creds, 'namecheap.domains.check', DomainList=args.domain).find(NS + 'DomainCheckResult')
+    if (check.get('Available') or '').lower() != 'true':
+        sys.exit(f'{args.domain} is not available.')
+    if (check.get('IsPremiumName') or '').lower() == 'true':
+        sys.exit(f"{args.domain} is a premium name ({check.get('PremiumRegistrationPrice')}); register it in the dashboard.")
+    contacts = get_contacts(creds, args.contacts_from)
+    money_gate(creds, f'Register {args.domain}', tld_price(creds, tld, 'register', 1), args.years, args.yes)
+    params = {'DomainName': args.domain, 'Years': args.years, 'AddFreeWhoisguard': 'yes', 'WGEnabled': 'yes'}
+    for role, fields in contacts.items():
+        for field, value in fields.items():
+            if value:
+                params[role + field] = value
+    if args.nameservers:
+        params['Nameservers'] = ','.join(args.nameservers)
+    result = call(creds, 'namecheap.domains.create', **params).find(NS + 'DomainCreateResult')
+    print(f"Registered {result.get('Domain')}: {result.get('Registered')}, charged {result.get('ChargedAmount')}, "
+          f"order {result.get('OrderID')}, privacy on")
+
+
+def cmd_transfers(_args):
+    result = call(load_creds(), 'namecheap.domains.transfer.getList', PageSize=100).find(NS + 'TransferGetListResult')
+    transfers = list(result.iter(NS + 'Transfer')) if result is not None else []
+    print(f'{len(transfers)} transfer(s):')
+    for transfer in transfers:
+        print(f"  {transfer.get('DomainName'):<32} {transfer.get('Status')} ({transfer.get('StatusDescription')}) "
+              f"id {transfer.get('ID')} {transfer.get('TransferDate')}")
+
+
+def cmd_nameservers(args):
+    creds = load_creds()
+    sld, tld = split_domain(args.domain)
+    if args.set and args.default:
+        sys.exit('Use --set or --default, not both.')
+    if args.set:
+        if len(args.set) < 2:
+            sys.exit('Give at least two nameservers.')
+        print(f"{args.domain}: nameservers -> {', '.join(args.set)}. Namecheap's own records stop being served.")
+        if not args.yes:
+            sys.exit('Not changed: re-run with --yes (it moves the whole domain to another DNS host).')
+        call(creds, 'namecheap.domains.dns.setCustom', SLD=sld, TLD=tld, Nameservers=','.join(args.set))
+    elif args.default:
+        print(f'{args.domain}: nameservers -> Namecheap BasicDNS.')
+        if not args.yes:
+            sys.exit('Not changed: re-run with --yes (records at the current DNS host stop being served).')
+        call(creds, 'namecheap.domains.dns.setDefault', SLD=sld, TLD=tld)
+    result = call(creds, 'namecheap.domains.dns.getList', SLD=sld, TLD=tld).find(NS + 'DomainDNSGetListResult')
+    servers = [(server.text or '').strip() for server in result.iter(NS + 'Nameserver')]
+    kind = 'Namecheap DNS' if (result.get('IsUsingOurDNS') or '').lower() == 'true' else 'custom'
+    print(f"{args.domain}: {kind}: {', '.join(servers)}")
+
+
+def cmd_lock(args):
+    creds = load_creds()
+    if args.on or args.off:
+        call(creds, 'namecheap.domains.setRegistrarLock', DomainName=args.domain, LockAction='LOCK' if args.on else 'UNLOCK')
+    result = call(creds, 'namecheap.domains.getRegistrarLock', DomainName=args.domain).find(NS + 'DomainGetRegistrarLockResult')
+    print(f"{args.domain}: registrar lock {result.get('RegistrarLockStatus')}")
+
+
+def cmd_privacy(args):
+    creds = load_creds()
+    result = call(creds, 'namecheap.whoisguard.getList', PageSize=100, ListType='ALL').find(NS + 'WhoisguardGetListResult')
+    entries = list(result.iter(NS + 'Whoisguard')) if result is not None else []
+    if args.domain:
+        entries = [entry for entry in entries if (entry.get('DomainName') or '').lower() == args.domain.lower()]
+        if not entries:
+            sys.exit(f'No domain privacy subscription found for {args.domain}.')
+    if args.on or args.off:
+        if not args.domain:
+            sys.exit('Name the domain to change.')
+        entry = entries[0]
+        if args.on:
+            email = args.email or get_contacts(creds, args.domain)['Registrant']['EmailAddress']
+            call(creds, 'namecheap.whoisguard.enable', WhoisguardID=entry.get('ID'), ForwardedToEmail=email)
+        else:
+            call(creds, 'namecheap.whoisguard.disable', WhoisguardID=entry.get('ID'))
+        return cmd_privacy(argparse.Namespace(domain=args.domain, on=False, off=False, email=None))
+    for entry in entries:
+        print(f"  {entry.get('DomainName') or '(unassigned)':<32} {entry.get('Status'):<10} id {entry.get('ID')} expires {entry.get('Expires')}")
+
+
 def cmd_lookup(args):
     """Resolve through Google and Cloudflare DNS-over-HTTPS; works where dig is not installed."""
     for resolver in ('https://dns.google/resolve', 'https://cloudflare-dns.com/dns-query'):
@@ -435,7 +659,7 @@ def cmd_restore(args):
 
 
 def main():
-    parser = argparse.ArgumentParser(prog='namecheap-dns', description=__doc__,
+    parser = argparse.ArgumentParser(prog='namecheap', description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest='command', required=True)
 
@@ -447,6 +671,70 @@ def main():
     p.set_defaults(func=cmd_setup)
 
     sub.add_parser('check', help='verify credentials and list domains').set_defaults(func=cmd_check)
+
+    sub.add_parser('balance', help='account balance').set_defaults(func=cmd_balance)
+
+    p = sub.add_parser('domains', help='list domains in the account')
+    p.add_argument('--expiring', action='store_true')
+    p.add_argument('--expired', action='store_true')
+    p.add_argument('--search')
+    p.set_defaults(func=cmd_domains)
+
+    p = sub.add_parser('info', help='status, expiry, privacy, nameservers, lock')
+    p.add_argument('domain')
+    p.set_defaults(func=cmd_info)
+
+    p = sub.add_parser('contacts', help='WHOIS contacts on a domain')
+    p.add_argument('domain')
+    p.set_defaults(func=cmd_contacts)
+
+    p = sub.add_parser('available', help='is a domain free to register')
+    p.add_argument('domains', nargs='+')
+    p.set_defaults(func=cmd_available)
+
+    p = sub.add_parser('price', help='your price for a TLD')
+    p.add_argument('tld')
+    p.add_argument('--action', choices=('register', 'renew', 'transfer'), default='register')
+    p.add_argument('--years', type=int, default=1)
+    p.set_defaults(func=cmd_price)
+
+    p = sub.add_parser('register', help='buy a domain (price first; --yes to charge)')
+    p.add_argument('domain')
+    p.add_argument('--contacts-from', required=True, metavar='OWNED_DOMAIN', help='copy WHOIS contacts from a domain you own')
+    p.add_argument('--years', type=int, default=1)
+    p.add_argument('--nameservers', nargs='+', help='custom nameservers (default: Namecheap BasicDNS)')
+    p.add_argument('--yes', action='store_true', help='actually charge the account')
+    p.set_defaults(func=cmd_register)
+
+    p = sub.add_parser('renew', help='renew a domain (price first; --yes to charge)')
+    p.add_argument('domain')
+    p.add_argument('--years', type=int, default=1)
+    p.add_argument('--yes', action='store_true', help='actually charge the account')
+    p.set_defaults(func=cmd_renew)
+
+    sub.add_parser('transfers', help='incoming domain transfers').set_defaults(func=cmd_transfers)
+
+    p = sub.add_parser('nameservers', help='show or change nameservers')
+    p.add_argument('domain')
+    p.add_argument('--set', nargs='+', metavar='NS')
+    p.add_argument('--default', action='store_true', help='back to Namecheap BasicDNS')
+    p.add_argument('--yes', action='store_true', help='confirm the switch')
+    p.set_defaults(func=cmd_nameservers)
+
+    p = sub.add_parser('lock', help='show or change the registrar lock')
+    p.add_argument('domain')
+    group = p.add_mutually_exclusive_group()
+    group.add_argument('--on', action='store_true')
+    group.add_argument('--off', action='store_true')
+    p.set_defaults(func=cmd_lock)
+
+    p = sub.add_parser('privacy', help='show or change free domain privacy')
+    p.add_argument('domain', nargs='?')
+    group = p.add_mutually_exclusive_group()
+    group.add_argument('--on', action='store_true')
+    group.add_argument('--off', action='store_true')
+    p.add_argument('--email', help='where privacy forwards mail (default: the registrant email)')
+    p.set_defaults(func=cmd_privacy)
 
     p = sub.add_parser('list', help='show host records')
     p.add_argument('domain')

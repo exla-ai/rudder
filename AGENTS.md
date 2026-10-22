@@ -583,13 +583,16 @@ frontmatter `name` must be `rudder-<dir>` (a test enforces it).
   outside with `check-client`, which probes Google's real authorize endpoint
   signed out to catch `redirect_uri_mismatch`/`invalid_client` and read the
   "continue to <App name>" the user will see.
-- `namecheap-dns` → `rudder-namecheap-dns`: DNS changes on Namecheap domains
-  through the API (`scripts/namecheap-dns`, Python stdlib). `setHosts` replaces
-  every record, so the tool always merges with the live set, backs up, writes and
-  re-reads; it never hands the user records to type. Credentials come from
-  `NAMECHEAP_API_USER`/`NAMECHEAP_API_KEY` (the Rudder vault on cloud machines)
-  or `~/.config/namecheap/credentials.env`; Namecheap also whitelists the
-  caller's IPv4, and a cloud machine's egress IP is not static.
+- `namecheap` → `rudder-namecheap`: the whole Namecheap account through the API
+  (`scripts/namecheap`, Python stdlib): DNS records, email forwarding,
+  nameservers, lock, privacy, domains/expiry/contacts, availability, pricing,
+  register/renew (print price + balance; charge only with `--yes`), transfers,
+  balance. `setHosts` replaces every record, so record writes always merge with
+  the live set, back up, write and re-read. Credentials: `NAMECHEAP_API_USER`/
+  `NAMECHEAP_API_KEY` (the Rudder vault on cloud machines) or
+  `~/.config/namecheap/credentials.env`; Namecheap also whitelists the caller's
+  IPv4, and a cloud machine's egress IP is not static. It was `namecheap-dns`
+  for one release; `RETIRED_AGENT_SKILLS` removes the old `rudder-` copy.
 
 ### Review and merge-all
 `v` opens a review pane showing the run's `jj diff` (`ensure_review_diff`). The old

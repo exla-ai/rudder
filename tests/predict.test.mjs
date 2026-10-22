@@ -29,13 +29,77 @@ test("a typed character shows at the caret at once and the cloud's echo confirms
   predictor.onServerData(frameWith("", 3));
   await settle();
   predictor.onInput("hi");
-  assert.equal(out.join(""), "\x1b[0m\x1b[3;3Hh\x1b[0m\x1b[3;3Hh\x1b[3;4Hi");
+  assert.equal(out.join(""), "\x1b[3;3H\x1b[0mh\x1b[0m\x1b[3;3H\x1b[0mh\x1b[3;4H\x1b[0mi\x1b[0m");
   out.length = 0;
   predictor.onServerData(frameWith("hi", 5));
   await settle();
   assert.equal(predictor.confirmed, 2);
   assert.equal(predictor.rollbacks, 0);
   assert.equal(out.length, 0, "a confirmed echo needs no repaint");
+});
+
+test("a typed character keeps the input box's background and the text's color", async () => {
+  const { predictor, out } = setup();
+  predictor.noteRtt(100);
+  // opencode: a grey input box, earlier text in a lighter grey, caret after it.
+  const box = "\x1b[48;2;30;30;30m";
+  predictor.onServerData(SYNC(`\x1b[2J\x1b[3;1H${box}\x1b[38;2;238;238;238mab${box}\x1b[38;2;255;255;255m          \x1b[0m\x1b[?25h\x1b[3;3H`));
+  await settle();
+  predictor.onInput("c");
+  assert.equal(out.join(""), "\x1b[3;3H\x1b[0;38;2;238;238;238;48;2;30;30;30mc\x1b[0m");
+});
+
+test("on an empty input the character takes the blank cell's look", async () => {
+  const { predictor, out } = setup();
+  predictor.noteRtt(100);
+  predictor.onServerData(SYNC(`\x1b[2J\x1b[3;1H\x1b[48;5;236m          \x1b[0m\x1b[?25h\x1b[3;1H`));
+  await settle();
+  predictor.onInput("x");
+  assert.equal(out.join(""), "\x1b[3;1H\x1b[0;48;5;236mx\x1b[0m");
+});
+
+// An empty opencode input: grey box, grey hint text starting at the caret.
+const hintFrame = (caretCol = 3) => SYNC(`\x1b[2J\x1b[3;1H\x1b[48;2;30;30;30m  \x1b[38;2;128;128;128mAsk me\x1b[38;2;255;255;255m     \x1b[0m\x1b[?25h\x1b[3;${caretCol}H`);
+
+test("the first key types over an empty input's hint, which clears like the echo will", async () => {
+  const { predictor, out } = setup();
+  predictor.noteRtt(100);
+  predictor.onServerData(hintFrame());
+  await settle();
+  predictor.onInput("ok");
+  const box = "\x1b[0;38;2;255;255;255;48;2;30;30;30m";
+  assert.equal(out.at(-1), `\x1b[3;3H${box}      \x1b[3;3H${box}o\x1b[3;4H${box}k\x1b[0m`);
+  out.length = 0;
+  predictor.onServerData(SYNC(`\x1b[2J\x1b[3;1H\x1b[48;2;30;30;30m  ok          \x1b[0m\x1b[?25h\x1b[3;5H`));
+  await settle();
+  assert.equal(predictor.confirmed, 2);
+  assert.equal(predictor.rollbacks, 0);
+});
+
+test("a hint typed over comes back on a rollback and on deleting the character", async () => {
+  const { predictor, out } = setup();
+  predictor.noteRtt(100);
+  predictor.onServerData(hintFrame());
+  await settle();
+  predictor.onInput("a");
+  out.length = 0;
+  predictor.onInput("\x7f");
+  assert.match(out.join("").replace(/\x1b\[[0-9;]*m/g, ""), /Ask me/, "backspace repaints the hint");
+  predictor.onInput("j");
+  out.length = 0;
+  predictor.onServerData(SYNC("\x1b[6;1Hmenu\x1b[6;5H"));
+  await settle();
+  assert.equal(predictor.rollbacks, 1);
+  assert.match(out.join("").replace(/\x1b\[[0-9;]*m/g, ""), /Ask me/, "a rollback repaints the hint");
+});
+
+test("ordinary text under the caret is not mistaken for a hint", async () => {
+  const { predictor, out } = setup();
+  predictor.noteRtt(100);
+  predictor.onServerData(frameWith("hello", 3));
+  await settle();
+  predictor.onInput("x");
+  assert.equal(out.length, 0);
 });
 
 test("a frame that has not echoed yet keeps the prediction drawn", async () => {
@@ -48,7 +112,7 @@ test("a frame that has not echoed yet keeps the prediction drawn", async () => {
   // A spinner repaint arrives before the echo; it may have redrawn the row.
   predictor.onServerData(frameWith("", 3));
   await settle();
-  assert.match(out.join(""), /\x1b\[3;3Hx/);
+  assert.match(out.join(""), /\x1b\[3;3H\x1b\[0mx/);
 });
 
 test("a key that was not typing is rolled back from the model", async () => {
@@ -90,7 +154,7 @@ test("nothing is drawn inside a cloud frame; it waits for the frame to end", asy
   assert.equal(out.length, 0);
   predictor.onServerData("\x1b[3;3H\x1b[?2026l");
   await settle();
-  assert.match(out.join(""), /\x1b\[3;3Hz/);
+  assert.match(out.join(""), /\x1b\[3;3H\x1b\[0mz/);
 });
 
 test("backspace takes back a prediction instantly; Enter stops predicting until the cloud catches up", async () => {
@@ -149,5 +213,5 @@ test("a frame drawn elsewhere mid-flight is not mistaken for a contradiction", a
   predictor.onServerData("\x1b[3;3H\x1b[?2026l");
   await settle();
   assert.equal(predictor.rollbacks, 0);
-  assert.match(out.join(""), /\x1b\[3;3Hk/);
+  assert.match(out.join(""), /\x1b\[3;3H\x1b\[0mk/);
 });

@@ -22,11 +22,14 @@ const require = createRequire(import.meta.url);
 const { Terminal } = require("@xterm/headless") as typeof import("@xterm/headless");
 
 type HeadlessTerminal = InstanceType<typeof Terminal>;
+type IBufferCell = import("@xterm/headless").IBufferCell;
 
 type Prediction = {
   row: number;
   col: number;
   ch: string;
+  /** SGR the character is drawn with: the look of the text it continues. */
+  sgr: string;
   at: number;
   shown: boolean;
 };
@@ -57,6 +60,9 @@ export class EchoPredictor {
   private readonly predict: boolean;
   private readonly now: () => number;
   private predictions: Prediction[] = [];
+  // The grey hint an empty input shows under its caret ("Ask anything…"),
+  // hidden while the first characters typed over it wait for their echo.
+  private placeholder: { row: number; start: number; end: number; sgr: string } | null = null;
   private pendingWrites = 0;
   private inSyncFrame = false;
   private midEscape = false;
@@ -230,11 +236,20 @@ export class EchoPredictor {
       col = this.caret.col;
     }
     // Leave the last column alone (wrapping is the cloud's call), and only
-    // type over blank cells: typing at the end of the input.
-    if (col >= this.model.cols - 1 || !this.cellBlank(row, col)) {
+    // type over blank cells (the end of the input) or an empty input's hint.
+    if (col >= this.model.cols - 1) {
       return false;
     }
-    const prediction: Prediction = { row, col, ch, at: this.now(), shown: false };
+    if (!last && !this.cellBlank(row, col)) {
+      this.placeholder = this.placeholderAt(row, col);
+      if (!this.placeholder) {
+        return false;
+      }
+    } else if (!this.typeable(row, col)) {
+      return false;
+    }
+    const sgr = last ? last.sgr : this.placeholder ? this.placeholder.sgr : this.typingSgr(row, col);
+    const prediction: Prediction = { row, col, ch, sgr, at: this.now(), shown: false };
     this.predictions.push(prediction);
     this.ensureTimer();
     if (this.atBoundary()) {
@@ -250,7 +265,14 @@ export class EchoPredictor {
       return false;
     }
     if (last.shown && this.atBoundary()) {
-      this.out(`\x1b[${last.row + 1};${last.col + 1}H${this.cellPaint(last.row, last.col)}\x1b[0m\x1b[${last.row + 1};${last.col + 1}H`);
+      // Deleting the only character typed over a hint brings the hint back.
+      const hint = this.predictions.length === 0 ? this.placeholder : null;
+      const repaint = hint ? this.paintCells(hint.row, hint.start, hint.end) : this.cellPaint(last.row, last.col);
+      const from = hint ? hint.start : last.col;
+      this.out(`\x1b[${last.row + 1};${from + 1}H${repaint}\x1b[0m\x1b[${last.row + 1};${last.col + 1}H`);
+    }
+    if (this.predictions.length === 0) {
+      this.placeholder = null;
     }
     return true;
   }
@@ -260,12 +282,17 @@ export class EchoPredictor {
     if (this.predictions.length === 0) {
       return;
     }
-    let text = "\x1b[0m";
+    let text = "";
+    const hint = this.placeholder;
+    if (hint) {
+      // The echo will clear the hint: clear it now, in the input's background.
+      text += `\x1b[${hint.row + 1};${hint.start + 1}H${hint.sgr}${" ".repeat(hint.end - hint.start)}`;
+    }
     for (const prediction of this.predictions) {
-      text += `\x1b[${prediction.row + 1};${prediction.col + 1}H${prediction.ch}`;
+      text += `\x1b[${prediction.row + 1};${prediction.col + 1}H${prediction.sgr}${prediction.ch}`;
       prediction.shown = true;
     }
-    this.out(text);
+    this.out(`${text}\x1b[0m`);
   }
 
   private reconcile(): void {
@@ -283,8 +310,11 @@ export class EchoPredictor {
       }
       this.predictions.shift();
       this.confirmed += 1;
+      // The cloud echoed over the hint, so it has cleared it itself.
+      this.placeholder = null;
     }
     if (this.predictions.length === 0) {
+      this.placeholder = null;
       return;
     }
     const first = this.predictions[0];
@@ -296,7 +326,7 @@ export class EchoPredictor {
     // another row: the key did something other than type.
     const contradicted = this.caret.row !== first.row
       || this.caret.col > first.col
-      || !this.cellBlank(first.row, first.col);
+      || !this.typeable(first.row, first.col);
     if (contradicted || this.now() - first.at > this.timeoutMs) {
       this.rollback();
       return;
@@ -313,13 +343,15 @@ export class EchoPredictor {
       return;
     }
     const shown = this.predictions.filter((prediction) => prediction.shown);
+    const hint = this.placeholder;
     this.predictions = [];
+    this.placeholder = null;
     this.rollbacks += 1;
     this.suspendedUntil = this.now() + this.cooldownMs;
     if (shown.length === 0 || !this.atBoundary()) {
       return;
     }
-    let text = "";
+    let text = hint ? `\x1b[${hint.row + 1};${hint.start + 1}H${this.paintCells(hint.row, hint.start, hint.end)}` : "";
     for (const prediction of shown) {
       text += `\x1b[${prediction.row + 1};${prediction.col + 1}H${this.cellPaint(prediction.row, prediction.col)}`;
     }
@@ -351,6 +383,48 @@ export class EchoPredictor {
     return this.model.buffer.active.getLine(row)?.getCell(col)?.getChars() ?? "";
   }
 
+  /** A cell a prediction may be drawn over: blank, or the hint it hides. */
+  private typeable(row: number, col: number): boolean {
+    const hint = this.placeholder;
+    if (hint && row === hint.row && col >= hint.start && col < hint.end) {
+      return true;
+    }
+    return this.cellBlank(row, col);
+  }
+
+  /**
+   * The hint an empty input draws under its caret: text in grey or dim,
+   * starting at the caret with nothing typed before it. Its extent is the run
+   * of cells in that look; typed text takes the look of the input after it.
+   */
+  private placeholderAt(row: number, col: number): { row: number; start: number; end: number; sgr: string } | null {
+    const line = this.model.buffer.active.getLine(row);
+    const cell = line?.getCell(col);
+    if (!line || !cell || !isHintLook(cell) || (col > 0 && !this.cellBlank(row, col - 1))) {
+      return null;
+    }
+    const background = backgroundCodes(cell);
+    let end = col;
+    while (end < this.model.cols - 1) {
+      const next = line.getCell(end);
+      if (!next || !isHintLook(next) || !sameCodes(backgroundCodes(next), background)) {
+        break;
+      }
+      end += 1;
+    }
+    const after = line.getCell(end);
+    const text = after && sameCodes(backgroundCodes(after), background) ? foregroundCodes(after) : ["0"];
+    return { row, start: col, end, sgr: `\x1b[${[...text, ...background].join(";")}m` };
+  }
+
+  private paintCells(row: number, start: number, end: number): string {
+    let text = "";
+    for (let col = start; col < end; col += 1) {
+      text += this.cellPaint(row, col);
+    }
+    return text;
+  }
+
   private cellBlank(row: number, col: number): boolean {
     const chars = this.cellChar(row, col);
     return chars === "" || chars === " ";
@@ -362,26 +436,79 @@ export class EchoPredictor {
     if (!cell) {
       return "\x1b[0m ";
     }
-    const codes: string[] = ["0"];
-    if (cell.isBold()) codes.push("1");
-    if (cell.isDim()) codes.push("2");
-    if (cell.isItalic()) codes.push("3");
-    if (cell.isUnderline()) codes.push("4");
-    if (cell.isInverse()) codes.push("7");
-    if (cell.isFgRGB()) {
-      const c = cell.getFgColor();
-      codes.push(`38;2;${(c >> 16) & 255};${(c >> 8) & 255};${c & 255}`);
-    } else if (cell.isFgPalette()) {
-      codes.push(`38;5;${cell.getFgColor()}`);
-    }
-    if (cell.isBgRGB()) {
-      const c = cell.getBgColor();
-      codes.push(`48;2;${(c >> 16) & 255};${(c >> 8) & 255};${c & 255}`);
-    } else if (cell.isBgPalette()) {
-      codes.push(`48;5;${cell.getBgColor()}`);
-    }
-    return `\x1b[${codes.join(";")}m${cell.getChars() || " "}`;
+    return `\x1b[${[...foregroundCodes(cell), ...backgroundCodes(cell)].join(";")}m${cell.getChars() || " "}`;
   }
+
+  /**
+   * How a character typed at this cell will look once the cloud echoes it.
+   * An input box with its own background (opencode's is grey) must keep it, or
+   * every predicted character flashes in a black box until the echo lands. The
+   * colors come from the text just before the caret when there is some on the
+   * same background, otherwise from the blank cell itself.
+   */
+  private typingSgr(row: number, col: number): string {
+    const line = this.model.buffer.active.getLine(row);
+    const cell = line?.getCell(col);
+    if (!cell) {
+      return "\x1b[0m";
+    }
+    const background = backgroundCodes(cell);
+    const before = col > 0 ? line?.getCell(col - 1) : undefined;
+    const text = before && !this.cellBlank(row, col - 1) && sameCodes(backgroundCodes(before), background)
+      ? before
+      : cell;
+    return `\x1b[${[...foregroundCodes(text), ...background].join(";")}m`;
+  }
+}
+
+function foregroundCodes(cell: IBufferCell): string[] {
+  const codes: string[] = ["0"];
+  if (cell.isBold()) codes.push("1");
+  if (cell.isDim()) codes.push("2");
+  if (cell.isItalic()) codes.push("3");
+  if (cell.isUnderline()) codes.push("4");
+  if (cell.isInverse()) codes.push("7");
+  if (cell.isFgRGB()) {
+    const c = cell.getFgColor();
+    codes.push(`38;2;${(c >> 16) & 255};${(c >> 8) & 255};${c & 255}`);
+  } else if (cell.isFgPalette()) {
+    codes.push(`38;5;${cell.getFgColor()}`);
+  }
+  return codes;
+}
+
+/** Grey or dim text: how inputs draw their hint ("Ask anything…", "Try …"). */
+function isHintLook(cell: IBufferCell): boolean {
+  if (cell.isDim()) {
+    return true;
+  }
+  if (cell.isFgRGB()) {
+    const c = cell.getFgColor();
+    const r = (c >> 16) & 255;
+    const g = (c >> 8) & 255;
+    const b = c & 255;
+    return Math.max(r, g, b) - Math.min(r, g, b) <= 16 && Math.max(r, g, b) >= 64 && Math.max(r, g, b) <= 170;
+  }
+  if (cell.isFgPalette()) {
+    const n = cell.getFgColor();
+    return n === 8 || (n >= 240 && n <= 248);
+  }
+  return false;
+}
+
+function backgroundCodes(cell: IBufferCell): string[] {
+  if (cell.isBgRGB()) {
+    const c = cell.getBgColor();
+    return [`48;2;${(c >> 16) & 255};${(c >> 8) & 255};${c & 255}`];
+  }
+  if (cell.isBgPalette()) {
+    return [`48;5;${cell.getBgColor()}`];
+  }
+  return [];
+}
+
+function sameCodes(a: string[], b: string[]): boolean {
+  return a.length === b.length && a.every((code, index) => code === b[index]);
 }
 
 /** Whether a chunk stops inside an escape sequence (the next chunk finishes it). */

@@ -215,3 +215,24 @@ test("a frame drawn elsewhere mid-flight is not mistaken for a contradiction", a
   assert.equal(predictor.rollbacks, 0);
   assert.match(out.join(""), /\x1b\[3;3H\x1b\[0mk/);
 });
+
+test("a cloud frame that lands before the echo keeps the cursor after the typed characters", async () => {
+  const { predictor } = setup();
+  predictor.noteRtt(100);
+  predictor.onServerData(frameWith("", 3));
+  await settle();
+  predictor.onInput("hi");
+  // An animation frame (a spinner elsewhere) parks the cloud's caret at col 3.
+  const spinner = SYNC("\x1b[6;1H*\x1b[?25h\x1b[3;3H");
+  const written = predictor.decorate(spinner);
+  assert.equal(written, SYNC("\x1b[6;1H*\x1b[?25h\x1b[3;3H\x1b[3;5H"));
+  predictor.onServerData(spinner);
+  await settle();
+  // Once the echo is in, frames pass through untouched.
+  predictor.onServerData(frameWith("hi", 5));
+  await settle();
+  assert.equal(predictor.decorate(spinner), spinner);
+  // A chunk that ends inside an open frame is left alone.
+  predictor.onInput("!");
+  assert.equal(predictor.decorate("\x1b[?2026h\x1b[6;1H*"), "\x1b[?2026h\x1b[6;1H*");
+});

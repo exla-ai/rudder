@@ -146,6 +146,29 @@ export class EchoPredictor {
     this.model.dispose();
   }
 
+  /**
+   * The bytes to write to the real terminal for a chunk the cloud drew. Every
+   * cloud frame ends by parking the cursor on the cloud's caret, which sits
+   * behind characters still waiting for their echo; show() then moved it back
+   * after them, so while an agent animated (opencode redraws ~40 times a
+   * second) the cursor flickered between the two cells. A frame that closes in
+   * this chunk now parks it after the last prediction, inside the frame. A
+   * frame that contradicts the prediction is rolled back, which puts the
+   * cursor where the cloud left it. Feed the ORIGINAL bytes to onServerData.
+   */
+  decorate(data: Buffer | string): Buffer | string {
+    const last = this.predictions[this.predictions.length - 1];
+    if (!last || !last.shown) {
+      return data;
+    }
+    const text = typeof data === "string" ? data : data.toString("utf8");
+    const end = text.lastIndexOf(SYNC_END);
+    if (end === -1 || text.lastIndexOf(SYNC_BEGIN) > end) {
+      return data;
+    }
+    return `${text.slice(0, end)}\x1b[${last.row + 1};${last.col + 2}H${text.slice(end)}`;
+  }
+
   /** Bytes the cloud drew. Call after writing them to the real terminal. */
   onServerData(data: Buffer | string): void {
     const text = typeof data === "string" ? data : data.toString("utf8");

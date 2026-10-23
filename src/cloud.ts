@@ -3813,7 +3813,7 @@ async function runAttach(
           sendResize();
           setTimeout(sendResize, 150);
         }
-        stdout.write(data);
+        stdout.write(predictor ? predictor.decorate(data) : data);
         predictor?.onServerData(data);
         return;
       }

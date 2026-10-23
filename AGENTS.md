@@ -189,7 +189,11 @@ Implemented in `src/run-manager.ts`.
    - Load config, pick backend + model + effort.
    - `ensureJj()` + `ensureColocated(repoRoot)` (`jj.ts`): jj is hard-required and
      auto-colocated (`jj git init --colocate`) so the repo still externally looks
-     like git.
+     like git. Only beside an EXISTING git repo whose root is the folder:
+     `colocateRefusal` refuses a non-git folder (Rudder never creates a repo; the
+     dashboard's main agent just edits the files), the home folder, and a folder
+     holding two or more repos (a stray `~/code/.git` once made all of ~/code one
+     repo). `rudder undo` in a folder with no jj says there is nothing to undo.
    - Decide jj workspace vs current checkout. Policy: a second concurrent run on
      the same checkout forces a workspace (`activeRunsForCheckout`). `--workspace`
      forces one explicitly.

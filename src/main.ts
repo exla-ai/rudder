@@ -23,6 +23,7 @@ import {
   currentOpId,
   ensureColocated,
   ensureJj,
+  isJjRepo,
   undoLast,
   undoToOp,
 } from "./jj.js";
@@ -1127,6 +1128,10 @@ async function runGraphMirror(parsed: Parsed): Promise<void> {
 async function runUndo(opId?: string): Promise<void> {
   const repoRoot = findRepoRoot();
   ensureJj();
+  if (!isJjRepo(repoRoot)) {
+    // Nothing Rudder did here can be undone; never create a repo just to say so.
+    throw new Error("nothing to undo: Rudder has not run anything in this folder");
+  }
   await ensureColocated(repoRoot);
 
   if (opId) {

@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import fsp from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import type { RunRecord } from "./types.js";
 import {
@@ -64,9 +65,54 @@ export async function ensureColocated(repoRoot: string): Promise<void> {
   await ensureProjectRuntimeIgnored(repoRoot);
   ensureJj();
   if (!isJjRepo(repoRoot)) {
+    const refusal = colocateRefusal(repoRoot);
+    if (refusal) throw new Error(refusal);
     await runCommand("jj", ["git", "init", "--colocate"], { cwd: repoRoot });
   }
   await untrackLegacyRudderState(repoRoot);
+}
+
+/**
+ * Why Rudder must not add jj to `dir`, or null when it may. Rudder only ever
+ * colocates jj beside an EXISTING git repo whose root is `dir`: it never creates
+ * a repository, so a folder that is not one stays that way. And a folder that
+ * holds other repos (~/code) or the home folder is refused even when someone
+ * ran `git init` there by mistake: jj would snapshot every project below it.
+ */
+export function colocateRefusal(dir: string): string | null {
+  const resolved = path.resolve(dir);
+  const shown = resolved.replace(os.homedir(), "~");
+  if (samePath(resolved, os.homedir()) || resolved === path.parse(resolved).root) {
+    return `Rudder will not set up version control in ${shown}. Open Rudder inside a project folder instead.`;
+  }
+  const top = runCommandSync("git", ["rev-parse", "--show-toplevel"], { cwd: resolved, allowFailure: true });
+  if (top.code !== 0 || !top.stdout.trim() || !samePath(top.stdout.trim(), resolved)) {
+    return `${shown} isn't a git repo, so Rudder can't give agents isolated workspaces here. Run \`git init\` in it if you want that; agents can still work directly in the folder.`;
+  }
+  const nested = nestedRepoNames(resolved);
+  if (nested.length >= 2) {
+    return `${shown} holds other projects (${nested.slice(0, 3).join(", ")}${nested.length > 3 ? ", ..." : ""}), so Rudder will not manage it as one repo. Open Rudder inside one of them.`;
+  }
+  return null;
+}
+
+function nestedRepoNames(dir: string): string[] {
+  let entries: fs.Dirent[];
+  try {
+    entries = fs.readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  return entries
+    .filter((e) => e.isDirectory() && !e.name.startsWith("."))
+    .filter((e) => {
+      try {
+        return fs.statSync(path.join(dir, e.name, ".git")).isDirectory();
+      } catch {
+        return false;
+      }
+    })
+    .map((e) => e.name);
 }
 
 /** Remove runtime files snapshotted by older Rudder versions while preserving

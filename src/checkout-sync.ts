@@ -17,7 +17,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { runCommand } from "./util.js";
-import { ensureJj } from "./jj.js";
+import { colocateRefusal, ensureJj } from "./jj.js";
 
 export interface CheckoutSyncReport {
   root: string;
@@ -236,6 +236,8 @@ export async function importWork(root: string, bundle: string, head: string, fro
   if (!fs.existsSync(path.join(root, ".jj"))) {
     // Plain colocate: Rudder's ignore entries would be an edit of this side's own.
     ensureJj();
+    const refusal = colocateRefusal(root);
+    if (refusal) return report("failed", refusal);
     await run(root, "jj", ["git", "init", "--colocate"]);
   }
   const bookmark = `rudder-sync/${from}`;

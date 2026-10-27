@@ -1,5 +1,8 @@
 .git
 .rudder
+.rudder-workspaces
+.rudder-worktrees
+.jj
 node_modules
 cloud/node_modules
 cloud/dist

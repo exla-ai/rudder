@@ -2574,6 +2574,15 @@ approved with Enter after an optional conversation.
   rest wait in Todo. Launches also hold while `/proc/meminfo` MemAvailable is under
   1.5 GB (`SWARM_MIN_FREE_BYTES`; no guard on macOS or under tests). Both holds
   are a notice, set only when it changes.
+- **Experiments start from the repo as it is on disk.** `jj workspace add` with
+  no `-r` (how every agent workspace is made) bases the workspace on the
+  PARENTS of the main checkout's `@`, so edits still in `@` are invisible to
+  workers. raindrop kept a whole research phase there (exp20 included), and a
+  swarm would have scored experiments against code they could not see. At
+  approval a swarm runs `checkpoint_working_copy` (gitio.rs): when `@` has
+  edits it is described (only if it has no description) and `jj new` closes
+  it, after the "Swarm approved" decision is written so the experiments see
+  that too. `/plan` and `/run` workers still start from `@`'s parents.
 - **Workers are told they are one of N** (`swarm_experiment_brief`, prepended to
   the launch prompt): stay in your experiment, tune only on training data, report
   results honestly through `rudder done` with no follow-ups.

@@ -16665,6 +16665,21 @@ Files involved: {}
                 Some("user-approved plan; workers implement these nodes in isolated workspaces, honoring the dependency edges"),
             );
         }
+        // Experiments must start from the repo as it is on disk, edits still in the
+        // working copy included (after the decision above, so they see it too).
+        if self.plans[plan_index].swarm.is_some() {
+            match checkpoint_working_copy(&self.cwd, "rudder: checkpoint before /swarm") {
+                Ok(Some(change)) => self.push_activity(format!(
+                    "checkpointed the working copy as {change} so every experiment starts from it"
+                )),
+                Ok(None) => {}
+                Err(error) => {
+                    self.notice = Some(format!(
+                        "swarm: could not checkpoint the working copy ({error}); experiments will not see its edits"
+                    ))
+                }
+            }
+        }
         // GENERATE graph.json from the approved DAG — the user's "it generates the
         // graph json" step. build_mirror_payload projects every planned node, so this
         // persists the full approved plan at the approval moment. run_scheduler

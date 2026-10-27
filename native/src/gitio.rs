@@ -2206,6 +2206,44 @@ fn run_jj_with_stale_recovery(cwd: &Path, args: &[&str]) -> Option<String> {
     Some(String::from_utf8_lossy(&retry.stdout).into_owned())
 }
 
+/// Close the checkout's working-copy change so new agent workspaces see its edits.
+/// `jj workspace add` bases a workspace on the PARENTS of the checkout's `@`, so
+/// whatever is still in `@` is invisible to every worker started from it (a repo
+/// kept a whole research phase there, and a swarm's experiments would have run
+/// without it). Keeps a description `@` already has. `Ok(None)` when `@` has no
+/// edits or the folder is not a jj repo; otherwise the change id now holding them.
+pub(crate) fn checkpoint_working_copy(repo: &Path, message: &str) -> Result<Option<String>, String> {
+    if !repo.join(".jj").exists() {
+        return Ok(None);
+    }
+    let state = run_jj_with_stale_recovery(
+        repo,
+        &[
+            "log",
+            "--no-graph",
+            "-r",
+            "@",
+            "-T",
+            "change_id.short() ++ \"\\t\" ++ if(empty, \"empty\", \"edits\") ++ \"\\t\" ++ if(description, \"described\", \"bare\")",
+        ],
+    )
+    .ok_or("jj could not read the working copy")?;
+    let mut fields = state.trim().split('\t');
+    let (Some(change), Some(edits), Some(described)) = (fields.next(), fields.next(), fields.next())
+    else {
+        return Err(format!("unexpected jj output: {}", state.trim()));
+    };
+    if edits == "empty" {
+        return Ok(None);
+    }
+    if described == "bare" {
+        run_jj_with_stale_recovery(repo, &["describe", change, "-m", message])
+            .ok_or("jj describe failed")?;
+    }
+    run_jj_with_stale_recovery(repo, &["new", change]).ok_or("jj new failed")?;
+    Ok(Some(change.to_string()))
+}
+
 /// Best-effort: set a jj workspace's working-copy change description to reflect
 /// the agent's status, so `jj log` reads like a live coordination board
 /// (`rudder[n3]: fix memory leak [done]`) instead of "(no description set)".

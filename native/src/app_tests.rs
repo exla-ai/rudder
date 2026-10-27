@@ -28855,3 +28855,67 @@ fn swarm_experiment_flag_round_trips_through_run_json() {
     assert_eq!(value["swarmExperiment"], serde_json::json!(true));
     let _ = fs::remove_dir_all(&repo);
 }
+
+#[test]
+fn swarm_checkpoint_carries_working_copy_edits_into_new_workspaces() {
+    // raindrop kept a whole research phase in the main checkout's working copy;
+    // a workspace added the way Rudder adds one (no -r) is based on that
+    // change's PARENTS, so every experiment would have started without it.
+    let repo = unique_test_repo("swarm-checkpoint");
+    fs::create_dir_all(&repo).unwrap();
+    let run = |program: &str, args: &[&str], cwd: &Path| {
+        let output = Command::new(program).args(args).current_dir(cwd).output().unwrap();
+        assert!(
+            output.status.success(),
+            "{program} {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).into_owned()
+    };
+    run("git", &["init", "-b", "main"], &repo);
+    run("git", &["config", "user.email", "test@example.com"], &repo);
+    run("git", &["config", "user.name", "Rudder Test"], &repo);
+    fs::write(repo.join("base.txt"), "base\n").unwrap();
+    run("git", &["add", "base.txt"], &repo);
+    run("git", &["commit", "-m", "base"], &repo);
+    run("jj", &["git", "init", "--colocate", "."], &repo);
+    fs::write(repo.join("research.txt"), "exp20\n").unwrap();
+
+    let change = checkpoint_working_copy(&repo, "rudder: checkpoint before /swarm")
+        .unwrap()
+        .expect("a working copy with edits is checkpointed");
+    let description = run(
+        "jj",
+        &["log", "--no-graph", "-r", &change, "-T", "description"],
+        &repo,
+    );
+    assert_eq!(description.trim(), "rudder: checkpoint before /swarm");
+
+    let experiment = repo.with_extension("experiment");
+    run(
+        "jj",
+        &["workspace", "add", &experiment.to_string_lossy(), "--name", "rudder-exp"],
+        &repo,
+    );
+    assert_eq!(
+        fs::read_to_string(experiment.join("research.txt")).unwrap(),
+        "exp20\n",
+        "an experiment starts from the edits"
+    );
+    assert_eq!(
+        checkpoint_working_copy(&repo, "unused").unwrap(),
+        None,
+        "an empty working copy is left alone"
+    );
+
+    // A working copy the user already described keeps its description.
+    run("jj", &["describe", "-m", "my research"], &repo);
+    fs::write(repo.join("more.txt"), "more\n").unwrap();
+    let described = checkpoint_working_copy(&repo, "unused").unwrap().unwrap();
+    let kept = run("jj", &["log", "--no-graph", "-r", &described, "-T", "description"], &repo);
+    assert_eq!(kept.trim(), "my research");
+
+    let _ = fs::remove_dir_all(&experiment);
+    let _ = fs::remove_dir_all(&repo);
+}

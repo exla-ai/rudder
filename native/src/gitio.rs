@@ -500,6 +500,69 @@ pub(crate) const AGENT_WORKSPACES_DIR: &str = ".rudder-workspaces";
 /// path it was created at. Only NEW workspaces use AGENT_WORKSPACES_DIR.
 pub(crate) const LEGACY_AGENT_WORKSPACES_DIR: &str = ".rudder-worktrees";
 
+/// Every jj workspace Rudder adds is named `rudder-<id>-<hash>` (`workspaceNameFor`
+/// in src/jj.ts; a moved agent keeps its laptop name). Any other name was made by
+/// someone else, and the workspace GC must leave it and its directory alone.
+pub(crate) const RUDDER_WORKSPACE_NAME_PREFIX: &str = "rudder-";
+
+/// `jj workspace list` as the workspace GC reads it.
+#[derive(Debug, Default, PartialEq)]
+pub(crate) struct WorkspaceRegistry {
+    /// Rudder's own workspaces that no live row owns.
+    pub(crate) forget: Vec<String>,
+    /// Roots of workspaces somebody else made.
+    pub(crate) foreign_roots: Vec<PathBuf>,
+    /// Somebody else's workspace is registered but jj did not say where it is,
+    /// so no directory can be told apart from it.
+    pub(crate) foreign_root_unknown: bool,
+}
+
+/// Sort a `jj workspace list` listing. `with_roots` means each line is
+/// `name\troot` (the `-T` template); otherwise it is jj's default `name: ...`.
+/// A row owns its workspace by name or, for records that never stored the name,
+/// by root.
+pub(crate) fn classify_registered_workspaces(
+    listing: &str,
+    with_roots: bool,
+    live_names: &HashSet<String>,
+    live_roots: &HashSet<PathBuf>,
+) -> WorkspaceRegistry {
+    let mut registry = WorkspaceRegistry::default();
+    for line in listing.lines() {
+        let (name, root) = if with_roots {
+            let (name, root) = line.split_once('\t').unwrap_or((line, ""));
+            let root = root.trim();
+            (name.trim(), (!root.is_empty()).then(|| canonical_or_raw(Path::new(root))))
+        } else {
+            (line.split(':').next().unwrap_or("").trim(), None)
+        };
+        if name.is_empty() || name == "default" || live_names.contains(name) {
+            continue;
+        }
+        if root.as_ref().is_some_and(|root| live_roots.contains(root)) {
+            continue;
+        }
+        if name.starts_with(RUDDER_WORKSPACE_NAME_PREFIX) {
+            registry.forget.push(name.to_string());
+        } else if let Some(root) = root {
+            registry.foreign_roots.push(root);
+        } else {
+            registry.foreign_root_unknown = true;
+        }
+    }
+    registry
+}
+
+/// The canonical path when it resolves, so `/tmp` and `/private/tmp` compare equal.
+pub(crate) fn canonical_or_raw(path: &Path) -> PathBuf {
+    fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// A directory that is a checkout of its own (a jj workspace or a git worktree).
+pub(crate) fn is_checkout_dir(path: &Path) -> bool {
+    path.join(".jj").exists() || path.join(".git").exists()
+}
+
 /// True when `path` sits inside either spelling of the agent-workspaces dir.
 pub(crate) fn is_under_agent_workspaces(path: &Path) -> bool {
     path.components().any(|component| {

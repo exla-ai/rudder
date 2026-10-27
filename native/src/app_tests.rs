@@ -16985,8 +16985,8 @@ fn gc_orphan_workspaces_protects_live_and_reaps_orphans() {
     let group = repo.join(".rudder-workspaces").join("proj");
     let live_dir = group.join("live-node");
     let orphan_dir = group.join("orphan-node");
-    std::fs::create_dir_all(&live_dir).unwrap();
-    std::fs::create_dir_all(&orphan_dir).unwrap();
+    std::fs::create_dir_all(live_dir.join(".jj")).unwrap();
+    std::fs::create_dir_all(orphan_dir.join(".jj")).unwrap();
     // grace=0 so idle-past-grace is always true in the test
     std::env::set_var("RUDDER_WORKTREE_GC_GRACE_SECS", "0");
 
@@ -17008,6 +17008,69 @@ fn gc_orphan_workspaces_protects_live_and_reaps_orphans() {
 
     std::env::remove_var("RUDDER_WORKTREE_GC_GRACE_SECS");
     let _ = std::fs::remove_dir_all(&repo);
+}
+
+#[test]
+fn gc_orphan_workspaces_never_deletes_what_rudder_did_not_make() {
+    // Seen in raindrop: a workspace made by hand straight under
+    // .rudder-workspaces was read as a GROUP, so its top-level folders (tools/,
+    // docs/, .jj) were each an "orphan" an hour later.
+    let _env = env_guard();
+    let repo = unique_test_repo("gc-foreign");
+    let root = repo.join(".rudder-workspaces");
+    let hand_made = root.join("raindrop-swarm-harness");
+    std::fs::create_dir_all(hand_made.join(".jj")).unwrap();
+    std::fs::create_dir_all(hand_made.join("tools").join("swarm")).unwrap();
+    std::fs::create_dir_all(hand_made.join("docs")).unwrap();
+    // Inside a real group: a folder that is not a checkout, and a real orphan.
+    let group = root.join("proj");
+    let not_checkout = group.join("notes");
+    let orphan = group.join("orphan-node");
+    std::fs::create_dir_all(&not_checkout).unwrap();
+    std::fs::create_dir_all(orphan.join(".jj")).unwrap();
+    std::env::set_var("RUDDER_WORKTREE_GC_GRACE_SECS", "0");
+
+    let mut app = App::new();
+    app.cwd = repo.clone();
+    app.gc_orphan_workspaces();
+
+    for dir in [hand_made.join("tools"), hand_made.join("docs"), hand_made.join(".jj")] {
+        assert!(dir.exists(), "{} is a hand-made workspace's own folder", dir.display());
+    }
+    assert!(not_checkout.exists(), "only a checkout is reclaimable");
+    assert!(!orphan.exists(), "a real orphan checkout is still reclaimed");
+
+    std::env::remove_var("RUDDER_WORKTREE_GC_GRACE_SECS");
+    let _ = std::fs::remove_dir_all(&repo);
+}
+
+#[test]
+fn workspace_gc_forgets_only_rudders_own_orphans() {
+    let live_names: HashSet<String> = ["rudder-live-abc123".to_string()].into_iter().collect();
+    let owned_root = PathBuf::from("/nonexistent/ws/owned-by-path");
+    let live_roots: HashSet<PathBuf> = [owned_root.clone()].into_iter().collect();
+    let listing = "default\t/repo\n\
+                   rudder-live-abc123\t/nonexistent/ws/live\n\
+                   rudder-old-def456\t/nonexistent/ws/owned-by-path\n\
+                   rudder-gone-0a1b2c\t/nonexistent/ws/gone\n\
+                   swarm-harness\t/nonexistent/ws/harness\n";
+    let registry = classify_registered_workspaces(listing, true, &live_names, &live_roots);
+    assert_eq!(
+        registry,
+        WorkspaceRegistry {
+            forget: vec!["rudder-gone-0a1b2c".to_string()],
+            foreign_roots: vec![PathBuf::from("/nonexistent/ws/harness")],
+            foreign_root_unknown: false,
+        },
+        "a live row owns by name or by root; a name Rudder never gives is somebody else's"
+    );
+
+    // An older jj without the `root` template: the hand-made workspace is still
+    // left registered, and its directory cannot be told apart.
+    let plain = "default: abc (empty)\nrudder-gone-0a1b2c: def x\nswarm-harness: ghi y\n";
+    let registry = classify_registered_workspaces(plain, false, &live_names, &HashSet::new());
+    assert_eq!(registry.forget, vec!["rudder-gone-0a1b2c".to_string()]);
+    assert!(registry.foreign_root_unknown);
 }
 
 #[test]

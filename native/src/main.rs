@@ -17095,30 +17095,55 @@ Files involved: {}
             .filter_map(|run| run.workspace_name.clone())
             .collect();
 
-        // 1) Forget registry entries jj still lists that no live row owns.
-        if let Ok(output) = Command::new("jj")
-            .args(["workspace", "list"])
-            .current_dir(&repo)
-            .stdin(std::process::Stdio::null())
-            .output()
-        {
-            if output.status.success() {
-                for line in String::from_utf8_lossy(&output.stdout).lines() {
-                    let name = line.split(':').next().unwrap_or("").trim();
-                    if name.is_empty() || name == "default" || live_names.contains(name) {
-                        continue;
-                    }
-                    let _ = Command::new("jj")
-                        .args(["workspace", "forget", name])
-                        .current_dir(&repo)
-                        .stdin(std::process::Stdio::null())
-                        .output();
-                }
-            }
-        }
+        let live_roots: HashSet<PathBuf> = live_paths
+            .iter()
+            .map(|path| crate::gitio::canonical_or_raw(path))
+            .collect();
 
-        // 2) Remove orphan directories under .rudder-workspaces/<group>/<node> that
-        // no live row owns and that have sat idle past the grace window.
+        // 1) Forget Rudder's own registry entries that no live row owns. A
+        // workspace somebody else made (any name Rudder does not give) stays
+        // registered, and its directory is protected below: one made by hand
+        // for a scorer was forgotten under it a minute after it was created.
+        let list = |args: &[&str]| {
+            Command::new("jj")
+                .args(args)
+                .current_dir(&repo)
+                .stdin(std::process::Stdio::null())
+                .output()
+                .ok()
+                .filter(|output| output.status.success())
+                .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
+        };
+        // `root` in the template needs a jj newer than some users run; the plain
+        // listing still names the workspaces.
+        let registry = list(&["workspace", "list", "-T", "name ++ \"\\t\" ++ root ++ \"\\n\""])
+            .map(|listing| (listing, true))
+            .or_else(|| list(&["workspace", "list"]).map(|listing| (listing, false)))
+            .map(|(listing, with_roots)| {
+                crate::gitio::classify_registered_workspaces(
+                    &listing,
+                    with_roots,
+                    &live_names,
+                    &live_roots,
+                )
+            })
+            .unwrap_or_default();
+        for name in &registry.forget {
+            let _ = Command::new("jj")
+                .args(["workspace", "forget", name])
+                .current_dir(&repo)
+                .stdin(std::process::Stdio::null())
+                .output();
+        }
+        if registry.foreign_root_unknown {
+            return;
+        }
+        let foreign_roots: HashSet<PathBuf> = registry.foreign_roots.into_iter().collect();
+
+        // 2) Remove orphan checkouts under .rudder-workspaces/<group>/<node> that
+        // no live row owns and that have sat idle past the grace window. Only a
+        // checkout is reclaimable, and a checkout placed straight under
+        // .rudder-workspaces is not a group: its folders are its own files.
         let mut removed = 0usize;
         // Both spellings: a repo that ran a pre-rename Rudder still has orphan
         // directories under the legacy path, and they are just as reclaimable.
@@ -17129,12 +17154,22 @@ Files involved: {}
             let root = repo.join(dir);
             if let Ok(groups) = fs::read_dir(&root) {
                 for group in groups.flatten() {
+                    if crate::gitio::is_checkout_dir(&group.path()) {
+                        continue;
+                    }
                     let Ok(entries) = fs::read_dir(group.path()) else {
                         continue;
                     };
                     for entry in entries.flatten() {
                         let path = entry.path();
-                        if !path.is_dir() || live_paths.contains(&path) {
+                        if !path.is_dir()
+                            || live_paths.contains(&path)
+                            || !crate::gitio::is_checkout_dir(&path)
+                        {
+                            continue;
+                        }
+                        let canonical = crate::gitio::canonical_or_raw(&path);
+                        if live_roots.contains(&canonical) || foreign_roots.contains(&canonical) {
                             continue;
                         }
                         let idle = fs::metadata(&path)

@@ -1538,6 +1538,17 @@ rudder.viraat.dev 308-redirects there (site/vercel.json).
   undo is free via `jj op restore` (`rudder undo`). jj 0.40 note: `jj rebase`
   uses `-o`/`--onto` (not `-d`); `jj git push --allow-new` is gone (plain
   `--bookmark` push handles new bookmarks) - both have fallbacks in `jj.ts`.
+- **The workspace GC only touches what Rudder made** (`gc_orphan_workspaces`,
+  main.rs). It forgets a jj workspace only when its name is Rudder's
+  (`rudder-<id>-<hash>`, `RUDDER_WORKSPACE_NAME_PREFIX`) and no live row owns it
+  by name or by root; any other registered workspace keeps its registration and
+  its directory. The directory pass reclaims only checkouts (`.jj` or `.git`
+  inside) one level under a group, and never treats a checkout sitting straight
+  under `.rudder-workspaces/` as a group. Before 3.9.10 it did: a scorer
+  workspace made by hand there was forgotten within a minute, and its `tools/`,
+  `docs/` and `.jj` folders were each an "orphan" an hour later. With a jj too
+  old for the `root` template and a foreign workspace registered, the directory
+  pass does not run at all.
 - **Atomic, serialized writes.** Anything that persists JSON should go through
   `writeJson`/`updateJson` so the per-path lock and unique temp names hold. Do not
   hand-roll temp-file writes for `run.json`/`config.json`.

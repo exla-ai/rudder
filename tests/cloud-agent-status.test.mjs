@@ -32,6 +32,13 @@ nodeTest("a running row reads working only while its dashboard and process are a
   assert.equal(phoneStatus({ status: "running", process: { pid: 2 ** 22 + 12345 } }), "orphaned");
 });
 
+nodeTest("a finished swarm experiment reads done, not review", () => {
+  const record = { status: "completed", lifecyclePhase: "review", swarmExperiment: true };
+  assert.equal(phoneStatus(record), "done");
+  assert.equal(phoneStatus({ ...record, status: "merge-conflict" }), "review", "a conflict still needs you");
+  assert.equal(phoneStatus({ ...record, lifecyclePhase: "delivery blocked" }), "failed");
+});
+
 nodeTest("finished rows: delivery blocked fails, a merged PR is merged, work out of trunk is not merged", () => {
   assert.equal(phoneStatus({ status: "completed", lifecyclePhase: "delivery blocked" }), "failed");
   assert.equal(phoneStatus({ status: "completed", lifecyclePhase: "delivery proof needed" }), "review");

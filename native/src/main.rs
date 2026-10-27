@@ -1678,6 +1678,24 @@ fn lift_gam_reply(lines: &[String]) -> Option<String> {
     (!reply.is_empty()).then(|| truncate_chars(&reply, GAM_MESSAGE_BUDGET_CHARS))
 }
 
+/// What makes a plan a `/swarm`: many competing experiments at one goal instead of a
+/// DAG of pieces that all merge. Persisted inside the plan's `plan-queue.json` entry.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SwarmPlan {
+    /// The experiment count the user typed (`/swarm 12 ...`); `None` lets the swarm
+    /// planner decide how many.
+    #[serde(default)]
+    requested: Option<usize>,
+    /// Node ids of the experiments, fixed at approval (`swarm_experiment_ids`). Any
+    /// other node is setup, which merges like a plan node so experiments start from it.
+    #[serde(default)]
+    experiments: std::collections::BTreeSet<String>,
+    /// The "swarm finished" notice has been shown; it is said once, not every tick.
+    #[serde(default)]
+    finished_announced: bool,
+}
+
 /// Everything ONE `/plan` owns. Several orchestrators run at once, each driving its
 /// own DAG, so none of this may be global: two plans reuse the same node ids (`n0`,
 /// `n1`, …) and each has its own approval gate, refine/rebase turn, and final gate.
@@ -1763,6 +1781,8 @@ struct PlanState {
     /// is paused for input, rendered as a clean numbered prompt in the orchestrator pane.
     /// Set when the planner pauses; cleared on DAG-capture / approval / fresh plan.
     pending_questions: Vec<String>,
+    /// `Some` when this plan is a `/swarm`.
+    swarm: Option<SwarmPlan>,
 }
 
 /// An open finished-work drawer: which bucket, and which member is highlighted.
@@ -2495,6 +2515,11 @@ struct AgentRun {
     /// the REPLACE path (`evaluate_completed_plan`), so the existing plan's
     /// not-yet-launched nodes are preserved. Ordinary planners have this `false`.
     reconcile_planner: bool,
+    /// True for a `/swarm` experiment: one of many competing attempts at the same goal.
+    /// Its work is compared, never merged automatically, so integration, merge-all,
+    /// review-all, drift nudges and follow-up expansion all pass it by. Persisted as
+    /// `swarmExperiment` so a restart and the cloud supervisor see it too.
+    swarm_experiment: bool,
     /// Live planner stream parser for a RudderPlan run: turns the backend's JSON
     /// event stream into a conversation transcript + the reconstructed assistant
     /// text the RUDDER_PLAN_TASKS parser reads, and captures the session id for
@@ -2983,6 +3008,13 @@ impl App {
             Some(id) => id == self.plans[plan_index].id,
             None => self.plans.len() == 1,
         }
+    }
+
+    /// Whether `run` belongs to a `/swarm` plan, for the labels that say "swarm" and
+    /// "experiments" where a `/plan` says "orchestrator" and "tasks".
+    fn run_is_in_swarm(&self, run: &AgentRun) -> bool {
+        (0..self.plans.len())
+            .any(|index| self.plans[index].swarm.is_some() && self.run_belongs_to_plan(run, index))
     }
 
     /// The workers belonging to `plan_index`. Node ids are per-plan, so any question
@@ -5720,6 +5752,8 @@ impl App {
             .iter()
             .filter(|run| run.status == AgentStatus::Done)
             .filter(|run| !run.is_oneoff())
+            // Competing experiments combined into one diff would be noise.
+            .filter(|run| !run.swarm_experiment)
             .filter(|run| !claimed.contains(&run.id))
             .filter_map(|run| {
                 let revision = run.jj_change_id.clone()?;
@@ -8422,6 +8456,7 @@ impl App {
             node_id: None,
             // Discriminator: route completion to the APPEND path, not REPLACE.
             reconcile_planner: true,
+            swarm_experiment: false,
             plan_stream: None,
             plan_output_cache: None,
             last_worker_input_at: None,
@@ -8612,6 +8647,7 @@ impl App {
             plan_id,
             reviewed_at: None,
             reconcile_planner: false,
+            swarm_experiment: false,
             plan_stream: None,
             plan_output_cache: None,
             last_worker_input_at: None,
@@ -8862,6 +8898,7 @@ Until the first packet arrives, reply only: \"standing by\"."
             plan_id: None,
             reviewed_at: None,
             reconcile_planner: false,
+            swarm_experiment: false,
             plan_stream: None,
             plan_output_cache: None,
             last_worker_input_at: None,
@@ -8953,6 +8990,7 @@ Until the first packet arrives, reply only: \"standing by\"."
             plan_id: None,
             reviewed_at: None,
             reconcile_planner: false,
+            swarm_experiment: false,
             plan_stream: None,
             plan_output_cache: None,
             last_worker_input_at: None,
@@ -10028,6 +10066,26 @@ Address the objection directly. If you disagree, say why inside \
     }
 
     fn start_rudder_plan_task(&mut self, input: &str) {
+        self.start_planner_task(input, None, format!("plan {}", summarize_task(input)));
+    }
+
+    /// `/swarm [n] <task>`: a planner that designs `count` competing experiments (or
+    /// decides how many), shown for approval like a plan. On Enter every experiment
+    /// runs in its own workspace, at most `swarm_max_parallel()` at once, and none of
+    /// them merges on its own.
+    fn start_swarm_task(&mut self, count: Option<usize>, task: &str) {
+        let request = swarm_request(count, task);
+        self.start_planner_task(
+            &request,
+            Some(SwarmPlan {
+                requested: count,
+                ..SwarmPlan::default()
+            }),
+            format!("swarm {}", summarize_task(task)),
+        );
+    }
+
+    fn start_planner_task(&mut self, input: &str, swarm: Option<SwarmPlan>, summary: String) {
         // SEVERAL ORCHESTRATORS: a fresh `/plan` opens its OWN plan next to any plan
         // already running, so two goals can be decomposed and conducted side by side.
         // (This replaced an at-most-one rule that retired every existing orchestrator
@@ -10061,6 +10119,8 @@ Address the objection directly. If you disagree, say why inside \
             self.retire_planner_row(&stale_id);
         }
         let plan = &mut self.plans[plan_index];
+        let is_swarm = swarm.is_some();
+        plan.swarm = swarm;
         // Remember the original request so the refine loop can re-plan against it
         // (each refinement layers the user's feedback on top of this, not on top of
         // the previous composite prompt).
@@ -10082,15 +10142,26 @@ Address the objection directly. If you disagree, say why inside \
             other => other,
         };
         let session_id = mint_session_id_for(backend);
-        let command = agent_command_with_orchestrator_mode(
-            backend,
-            &model,
-            effort,
-            input,
-            AgentMode::RudderPlan,
-            session_id.as_deref(),
-            interactive_planner,
-        );
+        let command = if is_swarm {
+            swarm_orchestrator_command(
+                backend,
+                &model,
+                effort,
+                input,
+                session_id.as_deref(),
+                interactive_planner,
+            )
+        } else {
+            agent_command_with_orchestrator_mode(
+                backend,
+                &model,
+                effort,
+                input,
+                AgentMode::RudderPlan,
+                session_id.as_deref(),
+                interactive_planner,
+            )
+        };
         let options = TerminalPaneOptions {
             size: TerminalSize::default(),
             cwd: Some(self.cwd.clone()),
@@ -10107,7 +10178,7 @@ Address the objection directly. If you disagree, say why inside \
             plan_id: Some(plan_id),
             reviewed_at: None,
             task: input.to_string(),
-            task_summary: format!("plan {}", summarize_task(input)),
+            task_summary: summary,
             current_prompt: input.to_string(),
             turns: vec![AgentTurn {
                 ts: created_at.clone(),
@@ -10149,6 +10220,7 @@ Address the objection directly. If you disagree, say why inside \
             soft_deps: Vec::new(),
             node_id: None,
             reconcile_planner: false,
+            swarm_experiment: false,
             plan_stream: None,
             plan_output_cache: None,
             last_worker_input_at: None,
@@ -10186,7 +10258,12 @@ Address the objection directly. If you disagree, say why inside \
                 let _ = terminal.drain_output();
                 Self::attach_output_waker(&self.pty_output_waker, &terminal);
                 run.terminal = Some(terminal);
-                self.notice = Some("planner started".to_string());
+                self.notice = Some(if is_swarm {
+                    "swarm planner started · it proposes the experiments, Enter launches them"
+                        .to_string()
+                } else {
+                    "planner started".to_string()
+                });
             }
             Err(error) => {
                 run.status = AgentStatus::Failed;
@@ -11724,6 +11801,16 @@ Address the objection directly. If you disagree, say why inside \
                 }
                 true
             }
+            Some("/swarm") => {
+                // Many competing experiments at one goal: the swarm planner proposes
+                // them, Enter launches them, and none merges on its own.
+                let rest = command_rest(input, "/swarm");
+                match parse_swarm_args(rest) {
+                    Ok((count, task)) => self.start_swarm_task(count, &task),
+                    Err(usage) => self.notice = Some(usage),
+                }
+                true
+            }
             Some("/gam") => {
                 // Generator + adversarial reviewer pair: one implements in an
                 // isolated workspace (or `main`), the other read-only questions it.
@@ -11916,7 +12003,7 @@ Address the objection directly. If you disagree, say why inside \
             }
             Some("/help") => {
                 self.notice = Some(
-                    "plain input -> one isolated mergeable worker in its own jj workspace · /plan <task> -> an orchestrator that plans and runs a DAG · /gam [model] <task> -> generator + adversarial reviewer pair; the reviewer can steer the generator mid-turn and stop it outright (split panes, ^W a toggles sides, ^W t shows the dialogue) · /main|/m <task> -> another agent in this shared checkout · $ <command> -> a shell in this checkout running it ($ alone opens a shell) · panes: Option-1/2/3/4 (4 = diff panel) or ^W · keys: j/k select · Option-[ / Option-] step agents from any pane · Enter focus · m merge · u undo a merge · M merge all · R review all · H move running agents to the home machine · g nest · ⌥d diff panel (n/p files, j/k scroll) · ⌥g god's view (every agent tiled; arrows move, Enter focuses) · o web ui · U usage dashboard · x stop · b branch chat · dd delete · cc clear merged · P model; · /handoff -> the selected agent moves to the home machine and resumes there; commands: /model /fast /sound /notify /color /main /plan /gam /resume /restore /handoff /share /usage /goal /cloud /sync /web /feedback"
+                    "plain input -> one isolated mergeable worker in its own jj workspace · /plan <task> -> an orchestrator that plans and runs a DAG · /swarm [n] <task> -> n competing experiments at one goal, proposed by a planner you can talk to, launched on Enter, none merges on its own · /gam [model] <task> -> generator + adversarial reviewer pair; the reviewer can steer the generator mid-turn and stop it outright (split panes, ^W a toggles sides, ^W t shows the dialogue) · /main|/m <task> -> another agent in this shared checkout · $ <command> -> a shell in this checkout running it ($ alone opens a shell) · panes: Option-1/2/3/4 (4 = diff panel) or ^W · keys: j/k select · Option-[ / Option-] step agents from any pane · Enter focus · m merge · u undo a merge · M merge all · R review all · H move running agents to the home machine · g nest · ⌥d diff panel (n/p files, j/k scroll) · ⌥g god's view (every agent tiled; arrows move, Enter focuses) · o web ui · U usage dashboard · x stop · b branch chat · dd delete · cc clear merged · P model; · /handoff -> the selected agent moves to the home machine and resumes there; commands: /model /fast /sound /notify /color /main /plan /swarm /gam /resume /restore /handoff /share /usage /goal /cloud /sync /web /feedback"
                         .to_string(),
                 );
                 true
@@ -13357,6 +13444,7 @@ Address the objection directly. If you disagree, say why inside \
             plan_id: None,
             reviewed_at: None,
             reconcile_planner: false,
+            swarm_experiment: false,
             plan_stream: None,
             plan_output_cache: None,
             last_worker_input_at: None,
@@ -13677,9 +13765,11 @@ Address the objection directly. If you disagree, say why inside \
         self.plans[plan_index].awaiting_approval = true;
         self.persist_plan_queue();
         self.open_plan_review();
-        self.notice = Some(format!(
-            "orchestrator proposed a {count}-node plan — edit inline · Ctrl+Enter approve"
-        ));
+        self.notice = Some(if self.plans[plan_index].swarm.is_some() {
+            format!("swarm proposed {count} experiments · talk to it to change them · Ctrl+Enter launches")
+        } else {
+            format!("orchestrator proposed a {count}-node plan — edit inline · Ctrl+Enter approve")
+        });
         self.dirty = true;
     }
 
@@ -13751,9 +13841,11 @@ Address the objection directly. If you disagree, say why inside \
         self.plans[plan_index].plan_summary = extract_rudder_plan_summary(&text);
         self.persist_plan_queue();
         self.open_plan_review();
-        self.notice = Some(format!(
-            "orchestrator updated the plan — now {count} node(s) · edit inline · Ctrl+Enter approve"
-        ));
+        self.notice = Some(if self.plans[plan_index].swarm.is_some() {
+            format!("swarm updated the list · now {count} experiment(s) · Ctrl+Enter launches")
+        } else {
+            format!("orchestrator updated the plan — now {count} node(s) · edit inline · Ctrl+Enter approve")
+        });
         self.dirty = true;
     }
 
@@ -15480,7 +15572,7 @@ Address the objection directly. If you disagree, say why inside \
     /// (the run is held `pending`, not marked ingested, until that result lands). Returns
     /// true only when a node was added synchronously here.
     fn ingest_worker_followups(&mut self, index: usize) -> bool {
-        let (run_id, node_id, sidecar_note, cwd, task, is_complete) = {
+        let (run_id, node_id, sidecar_note, cwd, task, is_complete, is_experiment) = {
             let Some(run) = self.agents.get_mut(index) else {
                 return false;
             };
@@ -15504,8 +15596,19 @@ Address the objection directly. If you disagree, say why inside \
                 run.cwd.clone(),
                 run.task_summary.clone(),
                 is_complete,
+                run.swarm_experiment,
             )
         };
+
+        // A swarm experiment reports results, not next steps: keep its account for the
+        // finished card, but never grow the swarm from it or mine its diff for more.
+        if is_experiment {
+            if let Some(note) = sidecar_note {
+                self.set_run_done_summary(index, &note);
+            }
+            self.mark_run_ingested(run_id);
+            return false;
+        }
 
         if let Some(note) = sidecar_note {
             // A note came through a direct channel. If the agent ADDRESSED follow-ups at
@@ -16514,6 +16617,13 @@ Files involved: {}
         self.plans[plan_index].awaiting_approval = false;
         self.plans[plan_index].planner_paused_for_input = false;
         self.plans[plan_index].pending_questions.clear();
+        // A swarm's experiments are fixed here, from the list the user approved: every
+        // node nothing else depends on. The rest is setup, which merges first.
+        let experiments = swarm_experiment_ids(&self.plans[plan_index].planned_nodes);
+        if let Some(swarm) = self.plans[plan_index].swarm.as_mut() {
+            swarm.experiments = experiments;
+            swarm.finished_announced = false;
+        }
         self.persist_plan_queue();
         self.plans[plan_index].plan_review = PlanReviewState::default();
         self.worker_view = WorkerView::Terminal;
@@ -16527,22 +16637,34 @@ Files involved: {}
         } else {
             self.plans[plan_index].plan_request.clone()
         };
-        let titles: Vec<String> = self
-            .plan()
+        let titles: Vec<String> = self.plans[plan_index]
             .planned_nodes
             .iter()
             .map(|n| n.title.clone())
             .collect();
-        self.record_decision(
-            "Plan approved",
-            &format!(
-                "Approved a {}-task plan for: {}. Tasks: {}.",
-                titles.len(),
-                goal.trim(),
-                titles.join("; ")
-            ),
-            Some("user-approved plan; workers implement these nodes in isolated workspaces, honoring the dependency edges"),
-        );
+        if self.plans[plan_index].swarm.is_some() {
+            self.record_decision(
+                "Swarm approved",
+                &format!(
+                    "Approved a swarm of {} experiments for: {}. Experiments: {}.",
+                    titles.len(),
+                    goal.trim(),
+                    titles.join("; ")
+                ),
+                Some("user-approved swarm; each experiment runs in its own workspace, all are scored the same way, and none merges on its own"),
+            );
+        } else {
+            self.record_decision(
+                "Plan approved",
+                &format!(
+                    "Approved a {}-task plan for: {}. Tasks: {}.",
+                    titles.len(),
+                    goal.trim(),
+                    titles.join("; ")
+                ),
+                Some("user-approved plan; workers implement these nodes in isolated workspaces, honoring the dependency edges"),
+            );
+        }
         // GENERATE graph.json from the approved DAG — the user's "it generates the
         // graph json" step. build_mirror_payload projects every planned node, so this
         // persists the full approved plan at the approval moment. run_scheduler
@@ -17050,6 +17172,7 @@ Files involved: {}
         let claimed = self.review_all_claimed_source_ids();
         let candidate = self.agents.iter().position(|run| {
             run.status == AgentStatus::Done
+                && !run.swarm_experiment
                 && !run.is_main()
                 && !run.merge_resolver
                 && !run.has_merge_conflict()
@@ -17207,6 +17330,7 @@ Files involved: {}
             let next = self.agents.iter().position(|run| {
                 run.node_id.is_some()
                     && run.status == AgentStatus::Done
+                    && !run.swarm_experiment
                     && !run.is_main()
                     && !run.merge_resolver
                     && !run.has_merge_conflict()
@@ -17448,10 +17572,60 @@ Files involved: {}
         for plan_index in 0..self.plans.len() {
             self.run_scheduler_for(plan_index);
         }
+        self.announce_finished_swarms();
         // MIRROR the plans into graph.json so the board reflects these DAGs. Covers
         // both the just-launched nodes (now Running agents) and the queues that
         // remain in Todo. Coalesced + non-fatal inside mirror_graph.
         self.mirror_graph();
+    }
+
+    /// Say once when a swarm's last experiment stops. Nothing in a swarm merges by
+    /// itself, so without this a finished swarm just goes quiet.
+    fn announce_finished_swarms(&mut self) {
+        for plan_index in 0..self.plans.len() {
+            let plan = &self.plans[plan_index];
+            let Some(swarm) = plan.swarm.as_ref() else {
+                continue;
+            };
+            if swarm.finished_announced
+                || swarm.experiments.is_empty()
+                || plan.awaiting_approval
+                || !plan.planned_nodes.is_empty()
+            {
+                continue;
+            }
+            let mut done = 0usize;
+            let mut failed = 0usize;
+            let mut finished = true;
+            for id in &swarm.experiments {
+                let latest = self
+                    .plan_agents(plan_index)
+                    .filter(|run| run.node_id.as_deref() == Some(id.as_str()))
+                    .last();
+                match latest.map(|run| run.status) {
+                    Some(AgentStatus::Done | AgentStatus::Merged) => done += 1,
+                    Some(AgentStatus::Failed | AgentStatus::Stopped) => failed += 1,
+                    _ => {
+                        finished = false;
+                        break;
+                    }
+                }
+            }
+            if !finished {
+                continue;
+            }
+            let total = swarm.experiments.len();
+            if let Some(swarm) = self.plans[plan_index].swarm.as_mut() {
+                swarm.finished_announced = true;
+            }
+            self.persist_plan_queue();
+            self.notice = Some(if failed == 0 {
+                format!("swarm finished: all {total} experiments done · Enter opens one, m merges one you pick")
+            } else {
+                format!("swarm finished: {done} of {total} experiments done, {failed} failed or stopped · Enter opens one, m merges one you pick")
+            });
+            self.dirty = true;
+        }
     }
 
     fn run_scheduler_for(&mut self, plan_index: usize) {
@@ -17461,6 +17635,8 @@ Files involved: {}
         let cap = max_parallel();
         let planner_task = self.plans[plan_index].planned_origin.clone();
         let mut launched = 0usize;
+        let swarm = self.plans[plan_index].swarm.clone();
+        let mut swarm_hold: Option<String> = None;
 
         // Launch at most MAX_LAUNCH_PER_TICK nodes per pass. Each launch shells a
         // synchronous jj-workspace setup that briefly blocks the UI thread, so
@@ -17471,6 +17647,12 @@ Files involved: {}
         // launch decision is recomputed each iteration so a node launched this pass
         // (now Running) updates the cap accounting before the next pick.
         while launched < MAX_LAUNCH_PER_TICK {
+            if swarm.is_some() {
+                if let Some(hold) = self.swarm_launch_hold(plan_index) {
+                    swarm_hold = Some(hold);
+                    break;
+                }
+            }
             let Some(position) = self.next_node_to_launch_in(plan_index, cap) else {
                 break;
             };
@@ -17483,20 +17665,36 @@ Files involved: {}
                 .insert(node.id.clone());
             self.persist_plan_queue();
             let title = node.title.clone();
-            let depends_on = self.dependency_context(&node);
+            let node_id = node.id.clone();
+            let experiment = swarm
+                .as_ref()
+                .filter(|swarm| swarm.experiments.contains(&node_id));
+            let mut depends_on = self.dependency_context(&node);
+            if let Some(swarm) = experiment {
+                depends_on.insert_str(0, &swarm_experiment_brief(&node_id, swarm.experiments.len()));
+            }
             let prompt = planned_node_worker_prompt(&planner_task, &node, &depends_on);
             self.start_execute_task_node(&prompt, Some(&title), Some(node));
+            if experiment.is_some() {
+                self.mark_swarm_experiment(&node_id);
+            }
             launched += 1;
         }
 
         if launched > 0 {
             let remaining = self.plans[plan_index].planned_nodes.len();
+            let noun = if swarm.is_some() { "experiment" } else { "node" };
             self.notice = Some(if remaining > 0 {
-                format!("launched {launched} node(s), {remaining} waiting in todo")
+                format!("launched {launched} {noun}(s), {remaining} waiting in todo")
             } else {
-                format!("launched {launched} node(s)")
+                format!("launched {launched} {noun}(s)")
             });
             self.dirty = true;
+        } else if let Some(hold) = swarm_hold {
+            if self.notice.as_deref() != Some(hold.as_str()) {
+                self.notice = Some(hold);
+                self.dirty = true;
+            }
         } else {
             // DEADLOCK SURFACE: a queued node whose HARD dep FAILED can never become ready
             // (is_ready only satisfies a hard dep that MERGED), so it would sit in Todo
@@ -17562,6 +17760,49 @@ Files involved: {}
     #[cfg(test)]
     fn next_node_to_launch(&self, cap: usize) -> Option<usize> {
         self.next_node_to_launch_in(self.active_plan_index(), cap)
+    }
+
+    /// Why a swarm may not start another experiment right now, or `None` when it may:
+    /// its own slots (`swarm.maxParallel`) are all running, or the machine is short
+    /// of memory. Only experiments that are actually waiting are held, so a swarm
+    /// whose queue is empty never reports a hold.
+    fn swarm_launch_hold(&self, plan_index: usize) -> Option<String> {
+        if self.plans[plan_index].planned_nodes.is_empty() {
+            return None;
+        }
+        let waiting = self.plans[plan_index].planned_nodes.len();
+        let cap = swarm_max_parallel();
+        let running = self
+            .plan_agents(plan_index)
+            .filter(|run| run.node_id.is_some() && run.status == AgentStatus::Running)
+            .count();
+        if running >= cap {
+            return Some(format!(
+                "swarm: {running} experiments running (the limit is {cap}), {waiting} waiting"
+            ));
+        }
+        let free = available_memory_bytes()?;
+        (free < SWARM_MIN_FREE_BYTES).then(|| {
+            format!(
+                "swarm: holding {waiting} experiment(s), only {:.1} GB of memory free",
+                free as f64 / (1024.0 * 1024.0 * 1024.0)
+            )
+        })
+    }
+
+    /// Flag the freshly launched run for `node_id` as a swarm experiment and persist it,
+    /// so it is never integrated and the flag survives a restart.
+    fn mark_swarm_experiment(&mut self, node_id: &str) {
+        let cwd = self.cwd.clone();
+        if let Some(run) = self
+            .agents
+            .iter_mut()
+            .rev()
+            .find(|run| run.node_id.as_deref() == Some(node_id))
+        {
+            run.swarm_experiment = true;
+            let _ = save_native_run_record(&cwd, run);
+        }
     }
 
     fn next_node_to_launch_in(&self, plan_index: usize, cap: usize) -> Option<usize> {
@@ -18145,6 +18386,7 @@ Files involved: {}
             plan_id: None,
             reviewed_at: None,
             reconcile_planner: false,
+            swarm_experiment: false,
             plan_stream: None,
             plan_output_cache: None,
             last_worker_input_at: None,
@@ -18448,6 +18690,7 @@ Files involved: {}
             .filter(|run| {
                 run.status == AgentStatus::Done
                     && run.has_merge_source()
+                    && !run.swarm_experiment
                     && !run.is_main()
                     && !run.is_oneoff()
                     && !run.is_orchestrator()
@@ -19219,6 +19462,9 @@ Files involved: {}
                     && matches!(r.mode, AgentMode::Execute)
                     && r.status == AgentStatus::Running
                     && !r.merge_resolver
+                    // Swarm experiments are SUPPOSED to touch the same files: they
+                    // compete and never merge, so an overlap is not a collision.
+                    && !r.swarm_experiment
             })
             .map(|(i, r)| (i, r.node_id.clone().unwrap_or_default(), r.cwd.clone()))
             .collect();
@@ -20897,6 +21143,15 @@ fn disable_rudder_mouse_capture(stdout: &mut impl Write) -> Result<()> {
     Ok(())
 }
 
+/// Memory the machine can still hand out, from `/proc/meminfo`. `None` where there is
+/// no such file (macOS) and under tests, which then never hold a swarm for memory.
+fn available_memory_bytes() -> Option<u64> {
+    if cfg!(test) {
+        return None;
+    }
+    meminfo_available_bytes(&std::fs::read_to_string("/proc/meminfo").ok()?)
+}
+
 fn command_rest<'a>(input: &'a str, command: &str) -> &'a str {
     input.trim_start().strip_prefix(command).unwrap_or_default()
 }
@@ -21602,6 +21857,8 @@ struct PlanQueueSnapshot {
     final_gate_summary: Option<String>,
     #[serde(default)]
     awaiting_approval: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    swarm: Option<SwarmPlan>,
 }
 
 impl PlanQueueSnapshot {
@@ -21618,6 +21875,7 @@ impl PlanQueueSnapshot {
             final_gate_status: plan.final_gate_status,
             final_gate_summary: plan.final_gate_summary.clone(),
             awaiting_approval: plan.awaiting_approval,
+            swarm: plan.swarm.clone(),
         }
     }
 
@@ -21646,6 +21904,7 @@ impl PlanQueueSnapshot {
             final_gate_status: self.final_gate_status,
             final_gate_summary: self.final_gate_summary,
             awaiting_approval: self.awaiting_approval,
+            swarm: self.swarm,
             ..PlanState::default()
         }
     }

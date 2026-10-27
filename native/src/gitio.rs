@@ -345,6 +345,7 @@ pub(crate) fn create_main_agent(
         plan_id: None,
         reviewed_at: None,
         reconcile_planner: false,
+        swarm_experiment: false,
         plan_stream: None,
         plan_output_cache: None,
         last_worker_input_at: None,
@@ -719,6 +720,10 @@ pub(crate) fn agent_from_run_record(
         .get("reconcilePlanner")
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(false);
+    let swarm_experiment = record
+        .get("swarmExperiment")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
     let merge_resolver = record
         .get("mergeResolver")
         .and_then(serde_json::Value::as_bool)
@@ -840,6 +845,7 @@ pub(crate) fn agent_from_run_record(
         // orchestrator. Read the persisted discriminator (absent in old records →
         // false, the real planner); load_persisted_agents filters true ones out.
         reconcile_planner,
+        swarm_experiment,
         plan_stream: None,
         plan_output_cache: None,
         last_worker_input_at: None,
@@ -1265,6 +1271,10 @@ pub(crate) fn save_native_run_record(repo_root: &Path, run: &AgentRun) -> Result
         // identifiable on reload and filtered out instead of resurfacing as a second
         // orchestrator. Absent in old records → defaults to false (the real planner).
         "reconcilePlanner": run.reconcile_planner,
+        // A `/swarm` experiment: compared against its siblings, never merged on its
+        // own. The cloud supervisor reads it so a finished experiment is not
+        // reported as work waiting on the user.
+        "swarmExperiment": run.swarm_experiment,
         "interactiveOrchestrator": run.interactive_orchestrator,
         "task": run.task,
         "taskSummary": run.task_summary,

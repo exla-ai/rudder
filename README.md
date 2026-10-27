@@ -79,8 +79,9 @@ With no arguments, `rudder` opens the dashboard. Type a task in the bottom input
 and press `Enter`: Rudder starts one worker for it in its own jj workspace. It
 lands in Review when done and merges back with `m`. Use `/main <task>` for an
 agent that works directly in the main checkout (for release, push and deploy
-work), `/gam <task>` to pair a builder with a reviewer from another model, or
-`/plan <task>` when you want a reviewed multi-agent DAG.
+work), `/gam <task>` to pair a builder with a reviewer from another model,
+`/plan <task>` when you want a reviewed multi-agent DAG, or `/swarm [n] <task>`
+to run many competing experiments at one goal and keep the ones that work.
 
 If a task needs shared local context like API tokens, private URLs, account ids,
 or environment values, save it with `/share <text>` in the task input. Rudder
@@ -309,6 +310,7 @@ running, Rudder also exposes matching project skills; the orchestrator can write
 | `/model` | Pick provider, then model, then effort |
 | `/fast` | Fast mode for new agents: flagship model at low effort (Claude opus / Codex gpt-6.1-sol); `/model` switches back |
 | `/plan <text>` | Start the orchestrator / DAG planner |
+| `/swarm [n] <task>` | Run `n` competing experiments at one goal (leave `n` out and the swarm decides). A conversational planner proposes the experiment list; talk to it to change the list, then press `Enter` to launch. Every experiment runs on the current model in its own workspace, at most 18 at a time (`swarm.maxParallel`), and none merges on its own |
 | `/gam [main] [<model>] <task>` | Generator + adversarial reviewer pair: split panes, the reviewer questions every round, steers the generator mid-turn, and can stop the run; only the generator edits. `^W t` shows the dialogue between them |
 | `/share <text>` | Save gitignored shared context for all agents in `RUDDER_SHARED.md` |
 | `/main [task]` or `/m` | Start an agent in the main checkout instead of its own workspace |

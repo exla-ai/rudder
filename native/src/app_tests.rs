@@ -8030,6 +8030,7 @@ fn test_agent_run(id: &str, task: &str) -> AgentRun {
         soft_deps: Vec::new(),
         node_id: None,
         reconcile_planner: false,
+        swarm_experiment: false,
         plan_stream: None,
         plan_output_cache: None,
         last_worker_input_at: None,
@@ -9882,6 +9883,7 @@ fn delete_agent_requires_second_d() {
         soft_deps: Vec::new(),
         node_id: None,
         reconcile_planner: false,
+        swarm_experiment: false,
         plan_stream: None,
         plan_output_cache: None,
         last_worker_input_at: None,
@@ -28569,4 +28571,224 @@ fn a_merge_that_left_trunk_is_a_persisted_phase() {
     assert_eq!(run.lifecycle_label(), "merged-locally");
     run.integration.in_trunk = Some(false);
     assert_eq!(run.lifecycle_label(), "merged-not-in-trunk");
+}
+
+// ---- /swarm ----
+
+#[test]
+fn swarm_args_take_an_optional_count_before_the_task() {
+    assert_eq!(
+        parse_swarm_args("12 beat the market on weather").unwrap(),
+        (Some(12), "beat the market on weather".to_string())
+    );
+    assert_eq!(
+        parse_swarm_args("beat the market").unwrap(),
+        (None, "beat the market".to_string())
+    );
+    // A number that is part of the task, not a count, stays in the task.
+    assert_eq!(
+        parse_swarm_args("2024 data only, find an edge").unwrap(),
+        (None, "2024 data only, find an edge".to_string())
+    );
+    assert!(parse_swarm_args("").is_err(), "no task is a usage error");
+    assert!(parse_swarm_args("8").is_err(), "a count with no task is a usage error");
+}
+
+#[test]
+fn swarm_experiments_are_the_nodes_nothing_depends_on() {
+    // `setup` builds the shared scorer; the experiments hard-depend on it, so it
+    // is the only node that merges. Everything else is an experiment.
+    let nodes = vec![
+        test_planned_node("setup", &[]),
+        test_planned_node("e1", &["setup"]),
+        test_planned_node("e2", &["setup"]),
+        test_planned_node("e3", &[]),
+    ];
+    let ids: Vec<String> = swarm_experiment_ids(&nodes).into_iter().collect();
+    assert_eq!(ids, vec!["e1", "e2", "e3"]);
+}
+
+#[test]
+fn swarm_memory_guard_reads_meminfo() {
+    let meminfo = "MemTotal:       16384000 kB\nMemFree:          100000 kB\nMemAvailable:    2048000 kB\n";
+    assert_eq!(meminfo_available_bytes(meminfo), Some(2_048_000 * 1024));
+    assert_eq!(meminfo_available_bytes("MemTotal: 1 kB\n"), None);
+}
+
+#[test]
+fn swarm_max_parallel_defaults_to_eighteen() {
+    assert_eq!(config_swarm_max_parallel(&serde_json::json!({})), 18);
+    assert_eq!(
+        config_swarm_max_parallel(&serde_json::json!({"swarm": {"maxParallel": 40}})),
+        40
+    );
+    assert_eq!(
+        config_swarm_max_parallel(&serde_json::json!({"swarm": {"maxParallel": 0}})),
+        18,
+        "a nonsense cap falls back to the default"
+    );
+}
+
+#[test]
+fn swarm_experiments_never_auto_merge() {
+    let mut app = App::new();
+    let mut run = test_agent_run("run-e1", "momentum variant");
+    run.status = AgentStatus::Done;
+    run.node_id = Some("e1".to_string());
+    run.swarm_experiment = true;
+    app.agents.push(run);
+
+    app.integrate_ready_plan_nodes();
+
+    // A plain plan node in this state is merged (and, with no workspace, fails);
+    // an experiment is left alone for the user to pick.
+    assert_eq!(app.agents[0].status, AgentStatus::Done);
+    assert!(app.agents[0].last_error.is_none());
+    assert!(
+        agent_status_text(&app.agents[0]).contains("experiment done"),
+        "a finished experiment says it waits for the user: {:?}",
+        agent_status_text(&app.agents[0])
+    );
+}
+
+#[test]
+fn swarm_holds_launches_at_its_own_cap() {
+    let mut app = App::new();
+    let cap = swarm_max_parallel();
+    app.plans[0].swarm = Some(SwarmPlan::default());
+    app.plans[0].awaiting_approval = false;
+    app.plans[0].planned_nodes = vec![test_planned_node("e99", &[])];
+    for index in 0..cap.saturating_sub(1) {
+        let mut run = test_agent_run(&format!("run-e{index}"), "experiment");
+        run.node_id = Some(format!("e{index}"));
+        run.status = AgentStatus::Running;
+        app.agents.push(run);
+    }
+    assert_eq!(app.swarm_launch_hold(0), None, "a free slot launches");
+
+    let mut run = test_agent_run("run-full", "experiment");
+    run.node_id = Some("e-full".to_string());
+    run.status = AgentStatus::Running;
+    app.agents.push(run);
+    let hold = app.swarm_launch_hold(0).expect("a full swarm holds");
+    assert!(hold.contains(&format!("the limit is {cap}")), "{hold}");
+    assert!(hold.contains("1 waiting"), "{hold}");
+}
+
+#[test]
+fn a_finished_swarm_says_so_once() {
+    let repo = unique_test_repo("swarm-finished");
+    let mut app = App::new();
+    app.cwd = repo.clone();
+    app.plans[0].swarm = Some(SwarmPlan {
+        requested: Some(2),
+        experiments: ["e1".to_string(), "e2".to_string()].into_iter().collect(),
+        finished_announced: false,
+    });
+    app.plans[0].awaiting_approval = false;
+    let mut first = test_agent_run("run-e1", "first idea");
+    first.node_id = Some("e1".to_string());
+    first.status = AgentStatus::Done;
+    app.agents.push(first);
+    let mut second = test_agent_run("run-e2", "second idea");
+    second.node_id = Some("e2".to_string());
+    second.status = AgentStatus::Running;
+    app.agents.push(second);
+
+    app.announce_finished_swarms();
+    assert!(app.notice.is_none(), "one experiment is still running");
+
+    app.agents[1].status = AgentStatus::Failed;
+    app.announce_finished_swarms();
+    let notice = app.notice.clone().unwrap_or_default();
+    assert!(notice.contains("swarm finished: 1 of 2 experiments done"), "{notice}");
+    assert!(app.plans[0].swarm.as_ref().unwrap().finished_announced);
+
+    app.notice = None;
+    app.announce_finished_swarms();
+    assert!(app.notice.is_none(), "the notice fires once");
+    let _ = fs::remove_dir_all(&repo);
+}
+
+#[test]
+fn swarm_plan_survives_a_restart() {
+    let mut app = App::new();
+    app.plans[0].swarm = Some(SwarmPlan {
+        requested: None,
+        experiments: ["e1".to_string()].into_iter().collect(),
+        finished_announced: true,
+    });
+    let file = PlanQueueFile {
+        plans: app.plans.iter().map(PlanQueueSnapshot::from_plan).collect(),
+    };
+    let raw = serde_json::to_string(&file).unwrap();
+    let restored = PlanQueueFile::parse(&raw).unwrap().into_plans();
+    assert_eq!(restored[0].swarm, app.plans[0].swarm);
+
+    // An ordinary plan writes no swarm key at all.
+    let plain = App::new();
+    let raw = serde_json::to_string(&PlanQueueFile {
+        plans: plain.plans.iter().map(PlanQueueSnapshot::from_plan).collect(),
+    })
+    .unwrap();
+    assert!(!raw.contains("swarm"), "{raw}");
+}
+
+#[test]
+fn swarm_orchestrator_commands_carry_the_swarm_contract() {
+    let interactive =
+        swarm_orchestrator_command(Backend::Claude, "opus", None, "beat the market", None, true);
+    let joined = interactive.args.join("\n");
+    assert!(joined.contains("rudder-swarm"), "named as a swarm session");
+    assert!(joined.contains("SWARM orchestrator"), "swarm system prompt");
+    assert!(joined.contains("Never merge experiments"));
+    assert!(joined.contains("beat the market"));
+
+    let plain = agent_command_with_orchestrator_mode(
+        Backend::Claude,
+        "opus",
+        None,
+        "beat the market",
+        AgentMode::RudderPlan,
+        None,
+        true,
+    );
+    assert!(!plain.args.join("\n").contains("SWARM"), "/plan is unchanged");
+
+    let headless =
+        swarm_orchestrator_command(Backend::Claude, "opus", None, "beat the market", None, false);
+    assert!(headless.args.join("\n").contains("swarm planner"));
+}
+
+#[test]
+fn swarm_experiment_brief_keeps_workers_honest() {
+    let brief = swarm_experiment_brief("e3", 12);
+    assert!(brief.contains("experiment e3, one of 12"), "{brief}");
+    assert!(brief.contains("rudder done"));
+    assert!(brief.ends_with("\n\n"));
+}
+
+#[test]
+fn bare_swarm_shows_its_usage() {
+    let mut app = App::new();
+    assert!(app.handle_command("/swarm"));
+    assert!(app
+        .notice
+        .as_deref()
+        .is_some_and(|notice| notice.starts_with("usage: /swarm [n] <task>")));
+    assert!(app.agents.is_empty(), "nothing starts without a task");
+}
+
+#[test]
+fn swarm_experiment_flag_round_trips_through_run_json() {
+    let repo = unique_test_repo("swarm-runjson");
+    let mut run = test_agent_run("run-e1", "experiment");
+    run.cwd = repo.clone();
+    run.node_id = Some("e1".to_string());
+    run.swarm_experiment = true;
+    save_native_run_record(&repo, &run).unwrap();
+    let raw = fs::read_to_string(repo.join(".rudder/runs/run-e1/run.json")).unwrap();
+    let value: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    assert_eq!(value["swarmExperiment"], serde_json::json!(true));
+    let _ = fs::remove_dir_all(&repo);
 }

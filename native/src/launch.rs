@@ -366,15 +366,69 @@ pub(crate) fn agent_command_with_orchestrator_mode(
     session_id: Option<&str>,
     orchestrator_interactive: bool,
 ) -> TerminalCommand {
+    build_agent_command(
+        backend,
+        model,
+        effort,
+        task,
+        mode,
+        session_id,
+        orchestrator_interactive,
+        false,
+    )
+}
+
+/// The `/swarm` orchestrator: the same launch as a `/plan` orchestrator, with the
+/// swarm's prompts (competing experiments, one scorer, nothing merges).
+pub(crate) fn swarm_orchestrator_command(
+    backend: Backend,
+    model: &str,
+    effort: Option<EffortLevel>,
+    task: &str,
+    session_id: Option<&str>,
+    orchestrator_interactive: bool,
+) -> TerminalCommand {
+    build_agent_command(
+        backend,
+        model,
+        effort,
+        task,
+        AgentMode::RudderPlan,
+        session_id,
+        orchestrator_interactive,
+        true,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_agent_command(
+    backend: Backend,
+    model: &str,
+    effort: Option<EffortLevel>,
+    task: &str,
+    mode: AgentMode,
+    session_id: Option<&str>,
+    orchestrator_interactive: bool,
+    swarm: bool,
+) -> TerminalCommand {
     let prompt = match mode {
         AgentMode::Execute => Some(execution_prompt(task)),
         AgentMode::Plan => Some(plan_prompt(task)),
         AgentMode::RudderPlan if orchestrator_interactive && backend == Backend::Claude => {
-            Some(rudder_orchestrator_prompt(task))
+            Some(if swarm {
+                swarm_orchestrator_prompt(task)
+            } else {
+                rudder_orchestrator_prompt(task)
+            })
         }
         AgentMode::RudderPlan if orchestrator_interactive && backend == Backend::Codex => {
-            Some(codex_orchestrator_prompt(task))
+            Some(if swarm {
+                codex_swarm_orchestrator_prompt(task)
+            } else {
+                codex_orchestrator_prompt(task)
+            })
         }
+        AgentMode::RudderPlan if swarm => Some(swarm_plan_prompt(task)),
         AgentMode::RudderPlan => Some(rudder_plan_prompt(task)),
         AgentMode::ReviewAll => Some(task.to_string()),
         AgentMode::Main => {
@@ -416,9 +470,13 @@ pub(crate) fn agent_command_with_orchestrator_mode(
                     "--allowedTools".to_string(),
                     "Read,Grep,Glob,LS,WebSearch,WebFetch,Bash,Edit,Write".to_string(),
                     "--append-system-prompt".to_string(),
-                    orchestrator_system_prompt(),
+                    if swarm {
+                        swarm_orchestrator_system_prompt()
+                    } else {
+                        orchestrator_system_prompt()
+                    },
                     "--name".to_string(),
-                    "rudder-orchestrator".to_string(),
+                    if swarm { "rudder-swarm" } else { "rudder-orchestrator" }.to_string(),
                 ],
                 AgentMode::RudderPlan => vec![
                     // Print mode: run non-interactively so Rudder parses the plan and
@@ -901,6 +959,7 @@ pub(crate) fn review_all_run(
         plan_id: None,
         reviewed_at: None,
         reconcile_planner: false,
+        swarm_experiment: false,
         plan_stream: None,
         plan_output_cache: None,
         last_worker_input_at: None,

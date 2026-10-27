@@ -216,6 +216,147 @@ pub(crate) fn codex_orchestrator_prompt(task: &str) -> String {
     format!("{system}\n\n{}", rudder_orchestrator_prompt(task))
 }
 
+/// Default number of experiments a swarm runs at once. Experiments past it wait in
+/// the queue; `swarm.maxParallel` in config.json changes it.
+pub(crate) const DEFAULT_SWARM_MAX_PARALLEL: usize = 18;
+
+/// `/swarm [n] <task>`: an optional experiment count, then the task. A leading
+/// number counts as the count only when it is a plausible one (1 to
+/// `MAX_PLAN_TASKS`), so "/swarm 2024 rain data" keeps the year in the task.
+pub(crate) fn parse_swarm_args(rest: &str) -> std::result::Result<(Option<usize>, String), String> {
+    let usage = "usage: /swarm [n] <task>: run n competing experiments on one goal (leave n out and the swarm decides how many)";
+    let rest = rest.trim();
+    if rest.is_empty() {
+        return Err(usage.to_string());
+    }
+    let (first, tail) = match rest.split_once(char::is_whitespace) {
+        Some((first, tail)) => (first, tail.trim()),
+        None => (rest, ""),
+    };
+    match first.parse::<usize>() {
+        Ok(count) if (1..=MAX_PLAN_TASKS).contains(&count) => {
+            if tail.is_empty() {
+                Err(usage.to_string())
+            } else {
+                Ok((Some(count), tail.to_string()))
+            }
+        }
+        _ => Ok((None, rest.to_string())),
+    }
+}
+
+/// The request the swarm orchestrator receives: the task with the experiment count
+/// stated on its first line, so the count survives into the plan's recorded origin.
+pub(crate) fn swarm_request(count: Option<usize>, task: &str) -> String {
+    match count {
+        Some(count) => format!("Experiments: {count}\n\n{}", task.trim()),
+        None => format!("Experiments: your choice\n\n{}", task.trim()),
+    }
+}
+
+/// What makes a swarm a swarm, shared by the interactive and headless planners.
+fn swarm_design_rules() -> String {
+    [
+        "A SWARM is not a plan to build one thing. It runs many COMPETING experiments at the SAME goal side by side, each worker in its own isolated workspace. Afterwards the experiments are compared and reconciled; most are thrown away and NONE is merged automatically. You design the experiments. You do not implement anything yourself.",
+        "HOW MANY: the request's first line says `Experiments: <n>` or `Experiments: your choice`. With a number, propose exactly that many experiments. With `your choice`, decide: enough to cover the genuinely distinct ideas worth testing, usually 4 to 20, and say why that many.",
+        "DISTINCT IDEAS: each experiment tests ONE hypothesis or variation (a different idea, model, rule, feature set or parameter region), never a copy of another. Spread them: include a plain baseline or control, careful variations of the most promising direction, and a few bold, out-of-the-box ideas. Use research and earlier results in the repo; do not re-run something the repo shows was already tested unless the user asks, and say which earlier work each experiment builds on.",
+        "ONE SCORER: every experiment is scored the SAME way so they can be ranked. Find how this repo measures results (a backtest, benchmark, eval or test command) and put the exact command, data or date windows, costs and metrics in every experiment's `success`. If the repo has no way to score yet, add ONE setup task with id `setup` that builds the shared scorer; every experiment HARD-depends on it, so they all start from it once it merges. `setup` is the only task that merges.",
+        "NO OVERFITTING: experiments tune only on the training data the repo defines. Held-out and out-of-sample data are for scoring, never for tuning; say which window is which in each experiment.",
+        "SELF-CONTAINED: each experiment's `prompt` says exactly what to change and how to score it, by REPOSITORY-RELATIVE paths only (never an absolute path). Experiments never merge, so they may touch the same files; still prefer one new file per experiment when the repo's layout allows, so the best ideas can be combined later. End every `prompt` by telling the worker to report its scored results (each metric, the data window, how it was measured) in its `rudder done` summary.",
+        "FORMAT: experiments get ids e1, e2, e3, ...; experiments never depend on each other; the only allowed edge is a `hard` dep on `setup`. Each task has a `title` naming the idea, a `goal`, and a `success` naming the scorer.",
+    ]
+    .join("\n\n")
+}
+
+const SWARM_TASKS_EXAMPLE: &str = "RUDDER_PLAN_TASKS_START\n{\"tasks\":[{\"id\":\"e1\",\"title\":\"baseline: the current rule unchanged\",\"prompt\":\"full prompt for this experiment's worker, ending with how to score it and what to report in rudder done\",\"goal\":\"one-line objective\",\"success\":\"the scoring command and metrics\",\"deps\":[]},{\"id\":\"e2\",\"title\":\"...\",\"prompt\":\"...\",\"goal\":\"...\",\"success\":\"...\",\"deps\":[]}]}\nRUDDER_PLAN_TASKS_END";
+
+/// System prompt for the INTERACTIVE swarm orchestrator (Claude). Like the plan
+/// orchestrator it converses with the user and writes its task list to RUDDER.md,
+/// which Rudder renders above the terminal and launches on approval.
+fn swarm_orchestrator_system_prompt_for(agent_name: &str, writable_files: &str) -> String {
+    [
+        format!("You are Rudder's SWARM orchestrator, running as a normal {agent_name} session the user talks to directly."),
+        swarm_design_rules(),
+        "PROJECT RULES: before designing experiments, read CLAUDE.md, AGENTS.md and any rules they point to (for a research repo that includes its hypothesis or protocol files and earlier results) and honor them. Copy every rule that affects an experiment into its `prompt`: workers only reliably see what their prompt carries. If RUDDER_SHARED.md exists beside RUDDER.md, read it; it holds local credentials and setup details workers may need. Do not put secret values in RUDDER.md or DECISIONS.md.".to_string(),
+        format!("Ask concise clarifying questions only when something material is missing. When the experiment list is ready, WRITE it to `RUDDER.md` OUTSIDE the `<!-- RUDDER_GENERATED_START -->` / `<!-- RUDDER_GENERATED_END -->` block, wrapped EXACTLY in these markers (one JSON object on its own lines):\n{SWARM_TASKS_EXAMPLE}\nThen show the user a short table in the chat (id, idea, what it changes) and ask them to review it. Rudder pins the list above this terminal and reloads it LIVE from RUDDER.md: whenever the user asks to add, drop or change experiments, re-write the FULL block so it always matches what you agreed. Never describe a change only in chat."),
+        "LAUNCH: the user launches by pressing Enter in Rudder's task box, or by confirming in this conversation. Only after an explicit confirmation here (\"yes\", \"go\", \"launch it\"), write the line `RUDDER_APPROVE_PLAN` on its own line into RUDDER.md, keeping the task block. Never write it preemptively or while still revising. When you only need to mention the marker in prose, write RUDDER_APPROVE_PLAN_TEMPLATE instead.".to_string(),
+        "AFTER LAUNCH: stay in this session as the swarm's conductor. Answer status questions from RUDDER.md's generated block (Active, Ready and Completed agents). You may stop an experiment with `RUDDER_STOP <id>` or message it with `RUDDER_INJECT <id> <message>`, written into RUDDER.md. Never merge experiments: do not write RUDDER_MERGE or RUDDER_MERGE_ALL unless the user explicitly names one experiment to merge. Rudder consumes marker lines and records what each did in RUDDER.md; re-read that before telling the user something happened.".to_string(),
+        format!("Only ever Edit/Write {writable_files}. Treat every other file as read-only."),
+    ]
+    .join("\n\n")
+}
+
+/// System prompt for the Claude interactive swarm orchestrator.
+pub(crate) fn swarm_orchestrator_system_prompt() -> String {
+    swarm_orchestrator_system_prompt_for("Claude Code", "RUDDER.md and RUDDER_SHARED.md")
+}
+
+/// First-turn prompt for the interactive swarm orchestrator.
+pub(crate) fn swarm_orchestrator_prompt(task: &str) -> String {
+    let task = strip_rudder_prompt_wrappers(task);
+    format!(
+        "You are Rudder's swarm orchestrator for this checkout. Read CLAUDE.md and AGENTS.md first if they exist (the repo's rules bind you and every experiment), then RUDDER.md and RUDDER_SHARED.md if they exist. Design the experiment list for the request below, write it to RUDDER.md outside Rudder's generated block, show the user the table and ask them to review it. Nothing launches until they approve.\n\nSwarm request:\n{task}"
+    )
+}
+
+/// Codex has no `--append-system-prompt`, so its swarm conductor gets the whole
+/// contract in the first turn.
+pub(crate) fn codex_swarm_orchestrator_prompt(task: &str) -> String {
+    let system = swarm_orchestrator_system_prompt_for("Codex", "RUDDER.md and RUDDER_SHARED.md");
+    format!("{system}\n\n{}", swarm_orchestrator_prompt(task))
+}
+
+/// HEADLESS swarm planner (`claude -p` / `codex exec`, or with
+/// RUDDER_INTERACTIVE_ORCHESTRATOR=0): designs the experiments read-only and prints
+/// the task block, which goes through the same approval gate as a plan.
+pub(crate) fn swarm_plan_prompt(task: &str) -> String {
+    let task = strip_rudder_prompt_wrappers(task);
+    [
+        "You are Rudder's swarm planner. You inspect the repository in READ-ONLY mode; your tools cannot edit files and you implement nothing. Read CLAUDE.md, AGENTS.md and any rules they point to, and copy every rule that affects an experiment into its `prompt`. Read RUDDER_SHARED.md if it exists.".to_string(),
+        format!("Swarm request:\n{task}"),
+        swarm_design_rules(),
+        "If something MATERIAL is missing, ask 1 to 4 concise questions and stop without a task block, one question per line between these markers:\nRUDDER_QUESTIONS_START\nWhich data window should experiments tune on?\nRUDDER_QUESTIONS_END\nOtherwise emit the complete experiment list this turn; the user reviews it before anything launches.".to_string(),
+        format!("Print exactly this block and no other JSON block:\n{SWARM_TASKS_EXAMPLE}\n\nAfter the block, add a short table (id, idea, what it changes) and say how every experiment is scored."),
+    ]
+    .join("\n\n")
+}
+
+/// A swarm stops starting experiments while the machine has less memory free than
+/// this. Each agent CLI holds a few hundred MB, and a swarm's backtests need room too.
+pub(crate) const SWARM_MIN_FREE_BYTES: u64 = 1536 * 1024 * 1024;
+
+/// `MemAvailable` from `/proc/meminfo` text, in bytes.
+pub(crate) fn meminfo_available_bytes(meminfo: &str) -> Option<u64> {
+    meminfo.lines().find_map(|line| {
+        let rest = line.strip_prefix("MemAvailable:")?;
+        let kb: u64 = rest.trim().trim_end_matches("kB").trim().parse().ok()?;
+        Some(kb * 1024)
+    })
+}
+
+/// The experiments of a swarm: every task no other task hard-depends on. A task
+/// something depends on is setup (the shared scorer), which merges like any plan
+/// node so the experiments start from it; experiments themselves never merge.
+pub(crate) fn swarm_experiment_ids(nodes: &[PlannedNode]) -> std::collections::BTreeSet<String> {
+    nodes
+        .iter()
+        .filter(|node| {
+            !nodes
+                .iter()
+                .any(|other| other.deps.iter().any(|dep| dep == &node.id))
+        })
+        .map(|node| node.id.clone())
+        .collect()
+}
+
+/// Appended to an experiment worker's prompt: its place in the swarm and the rules
+/// that keep the comparison fair.
+pub(crate) fn swarm_experiment_brief(id: &str, total: usize) -> String {
+    format!(
+        "SWARM EXPERIMENT: this is experiment {id}, one of {total} competing experiments Rudder is running side by side on the same goal, each in its own isolated workspace. Your work is compared against the others and is NOT merged automatically; the user decides what, if anything, lands. Stay inside YOUR experiment: test its idea faithfully even if you suspect another idea is better, and do not drift into other variations. Score it exactly as the experiment says, tuning only on the training data it names, never on held-out or out-of-sample data. Report honestly: a clear negative result is as useful as a positive one. When you finish, run `rudder done` with the scored results in `summary` (each metric, the data window, how it was measured) and an empty `followups` array; mention any new experiment idea in the summary instead.\n\n"
+    )
+}
+
 /// Build the RECONCILE planner prompt: a multi-agent plan is already in flight and
 /// the user is ADDING one task. The planner must emit exactly ONE node whose
 /// `deps` reference the existing frontier ids (never replace the plan). Mirrors the

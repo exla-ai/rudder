@@ -554,6 +554,11 @@ pub(crate) fn command_suggestions() -> Vec<Suggestion> {
             action: SuggestionAction::Insert("/plan ".to_string()),
         },
         Suggestion {
+            label: "/swarm [n] <task>".to_string(),
+            detail: "n competing experiments at one goal (leave n out and the swarm picks), all on the current model; it proposes them, Enter launches, none merges on its own".to_string(),
+            action: SuggestionAction::Insert("/swarm ".to_string()),
+        },
+        Suggestion {
             label: "/gam <task>".to_string(),
             detail: "two models on one task: one writes, the other (read-only) reviews every turn until it accepts".to_string(),
             action: SuggestionAction::Insert("/gam ".to_string()),

@@ -83,6 +83,11 @@ export function phoneStatus(record, { dashboardRunning = true, alive = pidAlive 
     if (pr?.state === "merged") {
       return "merged";
     }
+    // A finished /swarm experiment is a candidate to compare, not work that owes
+    // you a merge: a swarm of 18 would otherwise fill "Needs you".
+    if (record?.swarmExperiment) {
+      return "done";
+    }
     if (phase === "review" || phase.includes("needs merge") || phase.includes("proof") || phase === "integration-blocked") {
       return "review";
     }

@@ -2531,6 +2531,47 @@ between them; wheel routes to whichever half is under the pointer.
   queue fills, and master writes BLOCK until child exit then fail EIO — which
   looks exactly like an App bug. Foreground `cat >> log` drains correctly.
 
+### 14.10.6 `/swarm`: many competing experiments at one goal (2026-10)
+`/plan` splits one goal into DIFFERENT pieces and merges all of them. `/swarm [n]
+<task>` is the opposite: many attempts at the SAME goal, scored the same way, most
+thrown away. Built for research repos (the first target is raindrop, where each
+experiment is a trading strategy variant). Decided with the user: the grammar is
+exactly `/swarm [n] <task>` (no model arguments: every experiment uses the
+dashboard's `/model`), `n` is optional (the planner picks), and the list is
+approved with Enter after an optional conversation.
+
+- **Same machinery as `/plan`.** `start_swarm_task` -> `start_planner_task` with a
+  `SwarmPlan` on the plan's `PlanState::swarm` (persisted in `plan-queue.json`).
+  The orchestrator command is `swarm_orchestrator_command` (`launch.rs`, the same
+  builder with `swarm: true`): the interactive Claude conductor gets
+  `swarm_orchestrator_system_prompt` and is named `rudder-swarm`; Codex gets the
+  contract in its first turn; the headless planner gets `swarm_plan_prompt`. The
+  list is the usual `RUDDER_PLAN_TASKS` block in RUDDER.md, captured and approved
+  by the same paths (Ctrl+Enter / empty Enter / `RUDDER_APPROVE_PLAN`).
+- **Experiments are derived, not declared.** At approval,
+  `swarm_experiment_ids` fixes the experiments: every node nothing else
+  hard-depends on. A `setup` node (a shared scorer the experiments depend on) is
+  the only thing in a swarm that merges, and merges first.
+- **An experiment never merges by itself.** Each launched experiment's run is
+  flagged `swarm_experiment` (`swarmExperiment` in run.json), and integration,
+  merge-all, review-all, node review, drift nudges and follow-up expansion all
+  skip it. `m` on one merges it, because the user picked it. The row reads
+  `experiment done · m merges it`; the phone reads a finished one as `done`, not
+  `review`, so a swarm of 18 does not fill "Needs you".
+- **Capacity.** At most `swarm.maxParallel` (default 18, user's call) experiments
+  of one swarm run at once, on top of the global `orchestrator.maxParallel`; the
+  rest wait in Todo. Launches also hold while `/proc/meminfo` MemAvailable is under
+  1.5 GB (`SWARM_MIN_FREE_BYTES`; no guard on macOS or under tests). Both holds
+  are a notice, set only when it changes.
+- **Workers are told they are one of N** (`swarm_experiment_brief`, prepended to
+  the launch prompt): stay in your experiment, tune only on training data, report
+  results honestly through `rudder done` with no follow-ups.
+- When every experiment is Done/Failed/Stopped, `announce_finished_swarms` says so
+  once (`finished_announced`).
+- **Not built yet:** a scorer contract and leaderboard (per experiment plus a joint,
+  family-corrected score), a reconciler that writes a report and a combined
+  candidate, and the phone/web leaderboard.
+
 ### 14.10 Product decisions (the durable "why")
 Recorded so future contributors do not relitigate them:- **Autonomy without a confirm gate.** The conductor acts unilaterally (auto-expand,
   drift-fix, plan-rebase, merges). The bargain is VISIBLE (every action lands in

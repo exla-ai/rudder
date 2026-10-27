@@ -338,6 +338,25 @@ pub(crate) fn config_max_parallel(config: &serde_json::Value) -> usize {
         .unwrap_or(DEFAULT_MAX_PARALLEL)
 }
 
+/// `swarm.maxParallel`: how many experiments of one swarm run at once. Falls back
+/// to `DEFAULT_SWARM_MAX_PARALLEL` when unset or out of range.
+pub(crate) fn config_swarm_max_parallel(config: &serde_json::Value) -> usize {
+    config
+        .get("swarm")
+        .and_then(|swarm| swarm.get("maxParallel"))
+        .and_then(serde_json::Value::as_u64)
+        .map(|value| value as usize)
+        .filter(|value| (1..=1_000).contains(value))
+        .unwrap_or(DEFAULT_SWARM_MAX_PARALLEL)
+}
+
+pub(crate) fn swarm_max_parallel() -> usize {
+    load_rudder_config()
+        .as_ref()
+        .map(config_swarm_max_parallel)
+        .unwrap_or(DEFAULT_SWARM_MAX_PARALLEL)
+}
+
 /// The plan-orchestration parallelism cap for this session.
 pub(crate) fn max_parallel() -> usize {
     load_rudder_config()

@@ -1543,6 +1543,7 @@ fn push_orchestrator_row<'a>(
     // node launches. Surface that on the left panel in the attention color so
     // "it's asking for approval" is obvious without opening the plan.
     let awaiting = app.plan().awaiting_approval && agent.is_orchestrator() && !planning;
+    let swarm = app.run_is_in_swarm(agent);
     let badge = if planning { app.spinner_glyph() } else { BADGE };
     let (role, phase) = if planning {
         let backend = match agent.backend {
@@ -1554,8 +1555,14 @@ fn push_orchestrator_row<'a>(
     } else if awaiting {
         (
             "awaiting approval",
-            "press Enter on this row to launch the plan".to_string(),
+            if swarm {
+                "press Enter on this row to launch the experiments".to_string()
+            } else {
+                "press Enter on this row to launch the plan".to_string()
+            },
         )
+    } else if swarm {
+        ("swarm", orchestrator_phase_label(app, agent))
     } else {
         ("orchestrator", orchestrator_phase_label(app, agent))
     };
@@ -2608,12 +2615,16 @@ pub(crate) fn render_orchestrator(frame: &mut Frame<'_>, area: Rect, app: &mut A
     };
 
     let phase = orchestrator_phase_for_app(app, agent);
+    let swarm = app.run_is_in_swarm(agent);
     let phase_label = match app.plan().final_gate_status {
         FinalGateStatus::Running => "all integrated · verifying".to_string(),
         FinalGateStatus::Passed => "all integrated · checks passed".to_string(),
         FinalGateStatus::Failed => "all integrated · checks failed".to_string(),
         FinalGateStatus::Idle => match &phase {
             OrchestratorPhase::Planning => "plan mode".to_string(),
+            OrchestratorPhase::PlanReady(tasks) if swarm => {
+                format!("swarm · {} experiments", tasks.len())
+            }
             OrchestratorPhase::PlanReady(tasks) => format!("plan · {} tasks", tasks.len()),
         },
     };
@@ -2640,7 +2651,7 @@ pub(crate) fn render_orchestrator(frame: &mut Frame<'_>, area: Rect, app: &mut A
     // Header: ◆ ORCHESTRATOR · phase · <backend · model>.
     let header_spans = vec![
         Span::styled(
-            format!("{ORCH_MARK} ORCHESTRATOR"),
+            format!("{ORCH_MARK} {}", if swarm { "SWARM" } else { "ORCHESTRATOR" }),
             Style::default().fg(ACCENT),
         ),
         Span::styled("  ·  ", muted_style(focused)),
@@ -3312,6 +3323,10 @@ pub(crate) fn render_interactive_orchestrator(frame: &mut Frame<'_>, area: Rect,
     let focused = app.focus == FocusPane::Worker;
     // DAG pane on top (capped to a third, leaving room for the conversation), PTY below.
     let (dag_area, term_area) = interactive_orchestrator_areas(area);
+    let swarm = app
+        .agents
+        .get(app.selected_agent)
+        .is_some_and(|run| app.run_is_in_swarm(run));
 
     // ---- DAG pane (top) ----
     // Render the WHOLE plan (queued + already-launched nodes), so the tree stays
@@ -3319,7 +3334,16 @@ pub(crate) fn render_interactive_orchestrator(frame: &mut Frame<'_>, area: Rect,
     // reconstructs launched nodes from their agents; status badges come from live runs.
     let mut dag_lines: Vec<Line<'static>> = Vec::new();
     let tasks = app.orchestrator_dag_tasks();
-    if tasks.is_empty() {
+    if tasks.is_empty() && swarm {
+        dag_lines.push(Line::from(Span::styled(
+            "Designing experiments… talk to the swarm below.",
+            muted_style(focused),
+        )));
+        dag_lines.push(Line::from(Span::styled(
+            "It writes the experiment list to RUDDER.md; the list shows here.",
+            muted_style(focused),
+        )));
+    } else if tasks.is_empty() {
         dag_lines.push(Line::from(Span::styled(
             "Planning… talk to the orchestrator below.",
             muted_style(focused),
@@ -3330,7 +3354,12 @@ pub(crate) fn render_interactive_orchestrator(frame: &mut Frame<'_>, area: Rect,
         )));
     } else {
         dag_lines = orchestrator_dag_tree_lines(app, &tasks);
-        if app.plan().awaiting_approval {
+        if app.plan().awaiting_approval && swarm {
+            dag_lines.push(Line::from(Span::styled(
+                "awaiting approval: press empty Enter in the task pane to launch the experiments",
+                Style::default().fg(ACCENT),
+            )));
+        } else if app.plan().awaiting_approval {
             dag_lines.push(Line::from(Span::styled(
                 "awaiting approval — press empty Enter in the task pane to launch",
                 Style::default().fg(ACCENT),
@@ -3348,7 +3377,7 @@ pub(crate) fn render_interactive_orchestrator(frame: &mut Frame<'_>, area: Rect,
     frame.render_widget(
         Paragraph::new(dag_lines)
             .style(app_style())
-            .block(pane_block("dag", focused, app.nav_mode))
+            .block(pane_block(if swarm { "experiments" } else { "dag" }, focused, app.nav_mode))
             .scroll((scroll as u16, 0))
             .wrap(Wrap { trim: false }),
         dag_area,
@@ -5968,6 +5997,10 @@ pub(crate) fn agent_status_label(agent: &AgentRun) -> &'static str {
         // were unreachable for workspace runs because the awaits-merge branch
         // below always won.
         agent.lifecycle_label()
+    } else if agent.swarm_experiment && agent.status == AgentStatus::Done {
+        // A swarm experiment is a candidate, not a piece of the goal: it never
+        // integrates on its own, so "auto-merging" would be a lie.
+        "experiment done \u{b7} m merges it"
     } else if agent.status == AgentStatus::Done && agent_awaits_merge(agent) {
         // Two different futures, one bucket: planned DAG nodes integrate on
         // their own; everything else waits for the user. The old label

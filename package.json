@@ -1,6 +1,6 @@
 {
   "name": "@exla/rudder",
-  "version": "3.9.8",
+  "version": "3.9.9",
   "description": "A TUI for managing coding agents: run Claude Code, Codex and opencode side by side, each in its own isolated jj workspace.",
   "keywords": [
     "tui",

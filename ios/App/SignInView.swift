@@ -122,6 +122,8 @@ struct SignInView: View {
                             .multilineTextAlignment(.center)
                     }
                 }
+                // A phone-sized column on iPad, not buttons a screen wide.
+                .frame(maxWidth: 420)
                 .padding(.horizontal, 24)
                 .padding(.bottom, 28)
             }

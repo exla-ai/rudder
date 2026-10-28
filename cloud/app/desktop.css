@@ -253,11 +253,9 @@ body.desktop .toasts { left: 272px; }
 .ds-h { display: flex; align-items: center; justify-content: space-between; padding: 6px 8px 6px 10px; font-size: 12px; font-weight: 650; letter-spacing: 0.04em; text-transform: uppercase; color: var(--muted); }
 .ds-c { color: var(--needs); font-weight: 700; }
 .ds-add { width: 28px; height: 28px; border: 0; border-radius: 8px; background: none; color: var(--muted); display: grid; place-items: center; }
-.ds-add:hover { background: var(--surface-2); color: var(--ink); }
 .ds-add svg { width: 17px; height: 17px; }
 .ds-list, .ds-agents { display: flex; flex-direction: column; gap: 1px; }
 .ds-agent { display: flex; align-items: center; gap: 10px; padding: 7px 10px; border-radius: 9px; text-decoration: none; color: var(--ink); min-height: 40px; }
-.ds-agent:hover { background: var(--surface-2); }
 .ds-agent.on { background: var(--surface-3); }
 .ds-at { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 .ds-an { font-size: 14px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -266,28 +264,44 @@ body.desktop .toasts { left: 272px; }
 .ds-agents .ds-agent { min-height: 36px; padding: 5px 8px; }
 .ds-prow { display: flex; align-items: center; gap: 2px; }
 .ds-tw { width: 26px; height: 32px; border: 0; background: none; border-radius: 7px; color: var(--faint); display: grid; place-items: center; flex: none; }
-.ds-tw:hover { background: var(--surface-2); color: var(--ink-2); }
 .ds-tw svg { width: 14px; height: 14px; transition: transform 140ms; }
 .ds-tw[aria-expanded="true"] svg { transform: rotate(90deg); }
 .ds-pn { flex: 1; min-width: 0; display: flex; align-items: center; gap: 8px; padding: 7px 8px; border-radius: 9px; text-decoration: none; color: var(--ink); }
-.ds-pn:hover { background: var(--surface-2); }
 .ds-proj.on > .ds-prow .ds-pn { background: var(--surface-3); }
 .ds-pname { flex: 1; min-width: 0; font-weight: 600; font-size: 14.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ds-pc { font-size: 11.5px; font-weight: 700; min-width: 20px; height: 20px; padding: 0 6px; border-radius: 10px; display: grid; place-items: center; }
 .ds-pc:empty { display: none; }
 .ds-pc[class*="s-"] { background: var(--cs); color: var(--c); }
 .ds-more { display: block; font-size: 12.5px; color: var(--muted); text-decoration: none; padding: 2px 10px 8px 52px; }
-.ds-more:hover { color: var(--ink); }
 .ds-none { font-size: 13px; color: var(--faint); padding: 6px 10px; }
 .ds-foot { border-top: 1px solid var(--line); padding: 8px 8px calc(var(--sab) + 10px); display: flex; flex-direction: column; gap: 2px; }
 .ds-link { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-radius: 10px; text-decoration: none; color: var(--ink-2); font-size: 14.5px; font-weight: 500; min-height: 40px; }
-.ds-link:hover { background: var(--surface-2); }
 .ds-link.on { background: var(--surface-3); color: var(--ink); }
 .ds-link > svg { width: 18px; height: 18px; color: var(--muted); flex: none; }
 .ds-settings .avatar { width: 28px; height: 28px; font-size: 12px; flex: none; }
 .ds-who { flex: 1; min-width: 0; display: flex; flex-direction: column; line-height: 1.25; }
 .ds-email { font-size: 13.5px; color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ds-org { font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Hover only where a pointer hovers: on an iPad a tapped row would keep it. */
+@media (hover: hover) {
+  .ds-add:hover { background: var(--surface-2); color: var(--ink); }
+  .ds-agent:hover { background: var(--surface-2); }
+  .ds-tw:hover { background: var(--surface-2); color: var(--ink-2); }
+  .ds-pn:hover { background: var(--surface-2); }
+  .ds-more:hover { color: var(--ink); }
+  .ds-link:hover { background: var(--surface-2); }
+}
+
+/* In the iOS shell the page runs under the status bar. */
+.ds-top { padding-top: calc(var(--sat) + 6px); }
+.dsk-plan { padding-top: calc(var(--sat) + 10px); }
+
+/* An iPad in portrait: the sidebar and the screen, a little narrower. */
+@media (max-width: 1023px) {
+  .dsk { grid-template-columns: 248px minmax(0, 1fr); }
+  body.desktop .toasts { left: 248px; }
+}
 
 /* The Mac app's window has its own titlebar inset. */
 body.desktop.mac .ds-top { padding-top: 28px; }

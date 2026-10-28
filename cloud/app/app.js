@@ -569,13 +569,18 @@ document.addEventListener("click", (e) => {
 const viewEl = document.getElementById("view");
 let screen = null;
 
-// Desktop (a wide browser, the Mac app): a sidebar of projects and agents,
-// the screen in the middle, and the project's plan beside it. Phones keep the
-// stacked screens.
-const DESKTOP_MQ = matchMedia("(min-width: 1024px)");
+// Desktop (a wide browser, the Mac app, an iPad): a sidebar of projects and
+// agents, the screen in the middle, and the project's plan beside it once
+// there is room for a third column. Phones, and an iPad in Split View or
+// Slide Over, keep the stacked screens.
+const DESKTOP_MQ = matchMedia("(min-width: 1024px), (min-width: 768px) and (pointer: coarse)");
+const PLAN_COLUMN_MQ = matchMedia("(min-width: 1024px)");
 let desktop = null;
 app.onScopeChange = () => desktop?.update();
 const isDesktop = () => !!desktop;
+// An iPad in portrait has the sidebar but no room for the plan beside the
+// screen, so the project screen keeps the plan as a section, as on a phone.
+const hasPlanColumn = () => isDesktop() && PLAN_COLUMN_MQ.matches;
 // Full-page screens (no sidebar), on desktop too.
 const FULL_PAGE = new Set(["join", "slack-link", "welcome", "onboarding"]);
 
@@ -629,6 +634,7 @@ function updateScreen() {
   desktop?.update(parseRoute(location.pathname));
 }
 DESKTOP_MQ.addEventListener?.("change", () => mountScreen());
+PLAN_COLUMN_MQ.addEventListener?.("change", () => updateScreen());
 
 function DesktopShell() {
   const el = h(`<div class="dsk">
@@ -745,7 +751,7 @@ function DesktopShell() {
 
     // The plan beside the screen, for the project on screen.
     const p = route?.ws ? findProject(route.ws) : null;
-    const showPlan = !!planOf(p);
+    const showPlan = hasPlanColumn() && !!planOf(p);
     planCol.hidden = !showPlan;
     el.classList.toggle("with-plan", showPlan);
     if (!showPlan) { if (planView) { planView.el.remove(); planView = null; } return; }
@@ -2459,7 +2465,8 @@ function ProjectScreen(ws) {
   });
   tools.appendChild(privBtn);
   composer.el.querySelector("form").before(tools);
-  // On a phone the plan is a section of this screen; on desktop it has a column.
+  // On a phone (and an iPad in portrait) the plan is a section of this
+  // screen; on a wide screen it has a column.
   const planSlot = el.querySelector(".plan-slot");
   const planCard = PlanView({ ws, hrefFor: (run) => agentPath(ws, run), variant: "card" });
   planSlot.appendChild(planCard.el);
@@ -2510,8 +2517,8 @@ function ProjectScreen(ws) {
       sub.classList.toggle("err", !!p.failureReason);
     } else statusSlot.replaceChildren();
 
-    planSlot.hidden = isDesktop();
-    if (!isDesktop()) planCard.update(p);
+    planSlot.hidden = hasPlanColumn();
+    if (!hasPlanColumn()) planCard.update(p);
 
     // Ports
     const ports = p.ports || [];

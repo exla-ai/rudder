@@ -38,6 +38,11 @@ struct AppWebView: UIViewRepresentable {
         configuration.userContentController = controller
         configuration.allowsInlineMediaPlayback = true
         configuration.defaultWebpagePreferences.allowsContentJavaScript = true
+        // On iPad a web view asks for the desktop site by default, and WebKit
+        // then lays out at least 1024 wide and scales down whenever anything
+        // overflows. The app lays itself out for the real width (a sidebar on
+        // iPad, the phone screens in Split View), as on the iPhone.
+        configuration.defaultWebpagePreferences.preferredContentMode = .mobile
         configuration.applicationNameForUserAgent = "RudderiOS/\(Bundle.main.shortVersion)"
 
         let webView = WKWebView(frame: .zero, configuration: configuration)

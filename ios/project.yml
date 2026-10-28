@@ -14,8 +14,8 @@ settings:
     DEVELOPMENT_TEAM: 3C4383262W
     CODE_SIGN_STYLE: Automatic
     SWIFT_VERSION: "6.0"
-    MARKETING_VERSION: "1.0.3"
-    CURRENT_PROJECT_VERSION: "10"
+    MARKETING_VERSION: "1.0.4"
+    CURRENT_PROJECT_VERSION: "11"
 
 targets:
   Rudder:
@@ -27,7 +27,8 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: dev.viraat.rudder
-        # iPhone only, as build-ipa.sh always shipped it (UIDeviceFamily [1]); an
-        # iPad target must allow every orientation or App Store validation fails.
-        TARGETED_DEVICE_FAMILY: "1"
+        # iPhone and iPad. App Store validation refuses an iPad build that does
+        # not allow every orientation (Split View and Slide Over need them), so
+        # Info.plist lists all four for iPad and keeps the iPhone in portrait.
+        TARGETED_DEVICE_FAMILY: "1,2"
         INFOPLIST_FILE: App/Info.plist

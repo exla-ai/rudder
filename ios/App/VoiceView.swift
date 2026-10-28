@@ -48,6 +48,7 @@ struct VoiceView: View {
                 Spacer()
 
                 footer
+                    .frame(maxWidth: 420)
                     .padding(.horizontal, 28)
                     .padding(.bottom, 24)
             }

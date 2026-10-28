@@ -9,6 +9,8 @@
 # From the cloud machine (or anywhere with gh): bump CURRENT_PROJECT_VERSION in
 # ios/project.yml, push, then `gh workflow run ios.yml -f testflight=true` and
 # `gh run watch`. The last step hands the build to the external testers.
+# `-f screenshots=true` also photographs the app on iPad simulators against
+# the web app's dev mock (ios/scripts/ipad-screens.sh).
 name: iOS
 
 on:
@@ -26,6 +28,10 @@ on:
         description: "CURRENT_PROJECT_VERSION override (default: project.yml)"
         type: string
         default: ""
+      screenshots:
+        description: "Screenshots on iPad simulators (artifact ipad-screens)"
+        type: boolean
+        default: false
 
 concurrency:
   group: ios-${{ github.ref }}
@@ -59,6 +65,34 @@ jobs:
         with:
           name: ios-build-log
           path: ios/build.log
+
+  ipad:
+    needs: build
+    if: github.event_name == 'workflow_dispatch' && inputs.screenshots
+    runs-on: macos-15
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Xcode
+        run: |
+          sudo xcode-select -s "$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -1 || echo /Applications/Xcode.app)"
+          xcodebuild -version
+          xcrun simctl list runtimes available
+      - name: Generate the project
+        run: |
+          brew install xcodegen
+          cd ios && xcodegen generate
+      - name: Screenshots
+        run: ios/scripts/ipad-screens.sh "$RUNNER_TEMP/screens"
+      - name: Upload the screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ipad-screens
+          path: ${{ runner.temp }}/screens
 
   testflight:
     needs: build

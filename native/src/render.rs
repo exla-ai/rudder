@@ -3746,7 +3746,9 @@ fn worker_title_id(app: &App, run: &AgentRun) -> String {
     if run.is_main() {
         return "main".to_string();
     }
-    run.id.clone()
+    // The whole id repeats the task words the title already shows, so only its
+    // key (`k3f9q`), the same one the PR branch and Remote Control name carry.
+    run_short_key(&run.id)
 }
 
 fn oneoff_display_index(app: &App, run_id: &str) -> Option<usize> {

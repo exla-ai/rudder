@@ -9,6 +9,7 @@ import {
   pathExistsSync,
   runCommand,
   runCommandSync,
+  isReadableRunId,
   shortHash,
 } from "./util.js";
 import { ensureProjectRuntimeIgnored, saveRunRecord, workspacePath } from "./state.js";
@@ -342,8 +343,7 @@ export async function describeChange(repoRoot: string, changeId: string, message
 }
 
 /**
- * Create a jj workspace for a node/run. Workspace name matches the original
- * rudder regex `rudder-<id.slice(0,14)>-<shortHash(id).slice(0,6)>`. If
+ * Create a jj workspace for a node/run, named by `workspaceNameFor`. If
  * `atChangeId` is given, parent the working-copy commit on it; falls back to
  * `jj workspace add` + `jj edit <atChangeId>` if `-r` is unsupported.
  */
@@ -420,7 +420,17 @@ export async function createRunJjWorkspace(params: {
   });
 }
 
+/**
+ * `rudder-<id>` for a words-plus-key run id (`rudder-launch-video-k3f9q`), which
+ * is unique and readable by itself. Anything else (a plan node id like `n0`, an
+ * old timestamped run id) keeps the original `rudder-<id.slice(0,14)>-<hash6>`,
+ * so a record without a stored name still derives the name its workspace has.
+ * The `rudder-` prefix is what the native workspace GC trusts as Rudder's own.
+ */
 export function workspaceNameFor(id: string): string {
+  if (isReadableRunId(id)) {
+    return `rudder-${id}`;
+  }
   return `rudder-${id.slice(0, 14)}-${shortHash(id).slice(0, 6)}`;
 }
 

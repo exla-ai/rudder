@@ -18134,6 +18134,67 @@ fn publish_branches_are_namespaced_and_never_the_default_branch() {
 }
 
 #[test]
+fn run_ids_are_a_few_task_words_and_a_short_key() {
+    // The pane showed `1793065526747296000-branch-verify-orchard-project-merged-to-main-16388`.
+    let id = new_run_id("can you verify the orchard project merged to main");
+    let (slug, key) = id.rsplit_once('-').expect("words and a key");
+    assert_eq!(slug, "verify-orchard-project-merged", "{id}");
+    assert_eq!(key.len(), 5, "{id}");
+    assert!(key.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()), "{id}");
+    assert!(is_readable_run_id(&id), "{id}");
+    assert_eq!(run_short_key(&id), key);
+
+    // Same words, different runs.
+    assert_ne!(new_run_id("shell"), new_run_id("shell"));
+    assert!(new_run_id("shell").starts_with("shell-"));
+    // One enormous word is cut, not kept whole.
+    let long = new_run_id(&"x".repeat(200));
+    assert!(long.len() <= 32 + 1 + 5, "{long}");
+    assert!(is_readable_run_id(&long), "{long}");
+    // Secrets never reach a name that lands in jj, git and a PR branch.
+    let secret = new_run_id("use OPENAI_API_KEY=sk-proj-abcdefghijklmnopqrstuvwx for the deploy");
+    assert!(!secret.contains("abcdefghij"), "{secret}");
+}
+
+#[test]
+fn old_run_ids_still_get_a_short_key() {
+    let native = "1793065526747296000-branch-verify-orchard-project-merged-to-main-16388";
+    assert!(!is_readable_run_id(native));
+    // The pid tail was shared by every run of one dashboard; the timestamp tail is not.
+    assert_eq!(run_short_key(native), "6000");
+    let ts = "20261028080035-fix-the-thing-1a2b3c4d";
+    assert!(!is_readable_run_id(ts));
+    assert_eq!(run_short_key(ts), "0035");
+    // Ids that were never timestamped keep their last segment.
+    assert!(!is_readable_run_id("n0"));
+    assert!(!is_readable_run_id("run-abcdef12"));
+    assert!(!is_readable_run_id("Fix-thing-k3f9q"));
+}
+
+#[test]
+fn a_readable_run_id_names_its_publish_branch_and_worker_title() {
+    let branch = publish_branch_name("launch-video-k3f9q", "Launch video", "main");
+    assert_eq!(branch, "rudder/launch-video-k3f9q");
+
+    let mut app = App::new();
+    app.focus = FocusPane::Worker;
+    app.agents = vec![test_agent_run("launch-video-k3f9q", "launch video")];
+    app.selected_agent = 0;
+    let text = render_worker_text(&mut app, 100, 12);
+    assert!(text.contains("worker · k3f9q · launch video"), "{text}");
+    assert!(!text.contains("launch-video-k3f9q"), "{text}");
+
+    // A row from before keeps a short handle instead of its whole id.
+    app.agents = vec![test_agent_run(
+        "1793065526747296000-branch-verify-orchard-project-merged-to-main-16388",
+        "launch video",
+    )];
+    let text = render_worker_text(&mut app, 100, 12);
+    assert!(text.contains("worker · 6000 · launch video"), "{text}");
+    assert!(!text.contains("1793065526747296000"), "{text}");
+}
+
+#[test]
 fn gh_argv_is_built_as_specified() {
     // Draft is not optional (decision 4) and the base/head are explicit rather
     // than inferred from whatever branch the checkout happens to be on.
@@ -27003,8 +27064,16 @@ fn quitting_with_agents_running_offers_the_home_machine_and_h_moves_them() {
     assert_eq!(pane.review_source_ids, vec!["w1".to_string(), "w2".to_string()]);
 
     // The CLI exits once the home machine has them; the rows follow the records.
+    // The records can land before the dashboard sees the CLI exit, so wait for
+    // both.
     let deadline = Instant::now() + Duration::from_secs(10);
-    while app.agents[..2].iter().any(|run| run.status != AgentStatus::Migrated)
+    let pane_live = |app: &App| {
+        app.agents
+            .last()
+            .is_some_and(|pane| pane.terminal.is_some() && pane.status == AgentStatus::Running)
+    };
+    while (app.agents[..2].iter().any(|run| run.status != AgentStatus::Migrated)
+        || pane_live(&app))
         && Instant::now() < deadline
     {
         app.poll_agents();
@@ -27019,7 +27088,14 @@ fn quitting_with_agents_running_offers_the_home_machine_and_h_moves_them() {
             .any(|line| line == "cloud move --yes w1 w2"),
         "the move CLI got exactly the running workers"
     );
-    assert!(app.notice.clone().unwrap_or_default().contains("moved 2 agents to the home machine"), "{:?}", app.notice);
+    // The move lands inside poll_agents' own reconcile as often as in the call
+    // above, and later steps of that poll may replace the notice, so check the
+    // activity line the same landing writes.
+    assert!(
+        app.activity_log.iter().any(|line| line.starts_with("home: 2 agents moved")),
+        "{:?}",
+        app.activity_log
+    );
     // Nothing left running here, so quitting no longer asks.
     assert!(app.confirm_or_quit());
     std::env::remove_var("RUDDER_CLI");

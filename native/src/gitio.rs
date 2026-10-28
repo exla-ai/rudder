@@ -500,7 +500,8 @@ pub(crate) const AGENT_WORKSPACES_DIR: &str = ".rudder-workspaces";
 /// path it was created at. Only NEW workspaces use AGENT_WORKSPACES_DIR.
 pub(crate) const LEGACY_AGENT_WORKSPACES_DIR: &str = ".rudder-worktrees";
 
-/// Every jj workspace Rudder adds is named `rudder-<id>-<hash>` (`workspaceNameFor`
+/// Every jj workspace Rudder adds is named `rudder-<run id>`, or `rudder-<id>-<hash>`
+/// for a plan node or an older run (`workspaceNameFor`
 /// in src/jj.ts; a moved agent keeps its laptop name). Any other name was made by
 /// someone else, and the workspace GC must leave it and its directory alone.
 pub(crate) const RUDDER_WORKSPACE_NAME_PREFIX: &str = "rudder-";
@@ -1767,7 +1768,7 @@ pub(crate) struct WorkspaceInfo {
     pub(crate) path: PathBuf,
     pub(crate) branch: Option<String>,
     pub(crate) path_is_workspace: bool,
-    /// jj workspace name for the run (e.g. `rudder-<id>-<hash>`). Present for new
+    /// jj workspace name for the run (e.g. `rudder-launch-video-k3f9q`). Present for new
     /// runs isolated in a jj workspace; `None` for the dedicated main agent.
     pub(crate) workspace_name: Option<String>,
     /// The jj change id of the workspace's working-copy commit at launch.
@@ -3587,12 +3588,94 @@ pub(crate) fn ensure_gitignore_contains(repo_root: &Path, line: &str) -> Result<
     Ok(())
 }
 
+/// A run id is a few words of the task plus a short random key:
+/// `launch-video-k3f9q`. People see it as the jj workspace (`rudder-<id>`), the
+/// workspace folder, the PR branch (`rudder/<slug>-<key>`) and, by its key, the
+/// worker title. Ids used to be `<nanos>-<whole slug>-<dashboard pid>`
+/// (`1793065526747296000-branch-verify-orchard-project-merged-to-main-16388`):
+/// the pid was the same for every run of one dashboard, and the timestamp was
+/// nineteen digits nobody reads. Old ids are opaque strings and keep loading;
+/// nothing sorts or parses by id (rows sort by `created_at`).
+///
+/// The key is 5 base36 characters from a v4 uuid, about 60 million values, so
+/// two runs on the same words (every `shell`) still differ.
 pub(crate) fn new_run_id(task: &str) -> String {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    format!("{nanos}-{}-{}", slugify(task, "task"), std::process::id())
+    const ALPHABET: &[u8; 36] = b"0123456789abcdefghijklmnopqrstuvwxyz";
+    let mut value = uuid::Uuid::new_v4().as_u128();
+    let mut key = String::with_capacity(RUN_KEY_LEN);
+    for _ in 0..RUN_KEY_LEN {
+        key.push(ALPHABET[(value % 36) as usize] as char);
+        value /= 36;
+    }
+    format!("{}-{key}", run_id_slug(task))
+}
+
+const RUN_KEY_LEN: usize = 5;
+const RUN_SLUG_WORDS: usize = 4;
+const RUN_SLUG_CHARS: usize = 32;
+
+/// The words of a run id: the task's own summary (secrets redacted, "can you"
+/// and the like stripped), at most four words and 32 characters, filler words
+/// dropped so they do not spend the budget.
+fn run_id_slug(task: &str) -> String {
+    const FILLER: &[&str] = &[
+        "a", "an", "the", "to", "of", "in", "on", "for", "and", "with", "my", "our", "this",
+        "that", "it", "is", "be", "please",
+    ];
+    let words = slugify(&summarize_task(task), "task");
+    let all: Vec<&str> = words.split('-').filter(|word| !word.is_empty()).collect();
+    let kept: Vec<&str> = all
+        .iter()
+        .copied()
+        .filter(|word| !FILLER.contains(word))
+        .collect();
+    let source = if kept.is_empty() { all } else { kept };
+    let mut slug = String::new();
+    for word in source.into_iter().take(RUN_SLUG_WORDS) {
+        let needed = word.len() + usize::from(!slug.is_empty());
+        if !slug.is_empty() && slug.len() + needed > RUN_SLUG_CHARS {
+            break;
+        }
+        if !slug.is_empty() {
+            slug.push('-');
+        }
+        slug.push_str(word);
+    }
+    slug.truncate(RUN_SLUG_CHARS);
+    if slug.is_empty() {
+        "task".to_string()
+    } else {
+        slug
+    }
+}
+
+/// The short key that tells runs apart where the whole id is too long to show:
+/// the worker title, the Remote Control session name, the PR branch suffix.
+/// New ids end in their 5-character key. An old `<nanos>-<slug>-<pid>` id gives
+/// the last four digits of its timestamp: its pid tail was shared by every run
+/// of one dashboard (two libra agents were both "10389").
+pub(crate) fn run_short_key(run_id: &str) -> String {
+    let head = run_id.split('-').next().unwrap_or(run_id);
+    if head.len() >= 10 && head.chars().all(|c| c.is_ascii_digit()) {
+        return head[head.len() - 4..].to_string();
+    }
+    run_id.rsplit('-').next().unwrap_or(run_id).to_string()
+}
+
+/// Whether `run_id` has the words-plus-key shape `new_run_id` makes, so it can
+/// stand as a workspace or branch name by itself.
+pub(crate) fn is_readable_run_id(run_id: &str) -> bool {
+    let Some((slug, key)) = run_id.rsplit_once('-') else {
+        return false;
+    };
+    let lower_alnum = |c: char| c.is_ascii_lowercase() || c.is_ascii_digit();
+    let head = slug.split('-').next().unwrap_or(slug);
+    key.len() == RUN_KEY_LEN
+        && key.chars().all(lower_alnum)
+        && !slug.is_empty()
+        && slug.split('-').all(|word| !word.is_empty() && word.chars().all(lower_alnum))
+        && !(head.len() >= 10 && head.chars().all(|c| c.is_ascii_digit()))
+        && run_id.len() <= RUN_SLUG_CHARS + 1 + RUN_KEY_LEN
 }
 
 /// Append a cross-cutting conductor decision to the repo's DECISIONS.md (the shared,

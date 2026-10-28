@@ -200,9 +200,19 @@ Implemented in `src/run-manager.ts`.
    - `baseCommit = currentJjChangeId(repoRoot)`. `targetBranch =
      currentJjChangeId(repoRoot)` (else `currentBranch`).
    - `createRunWorkspace` -> `jj.ts::createRunJjWorkspace`: `jj workspace add` at
-     `.rudder-workspaces/<repo>-<hash>/<task-slug>-<hash>` with name
-     `rudder-<id..>-<hash>`. The run records `vcs:"jj"` and
-     `workspace.jjChangeId`.
+     `.rudder-workspaces/<repo>-<hash>/<run id>` with name `rudder-<run id>`.
+     The run records `vcs:"jj"` and `workspace.jjChangeId`.
+   - **Run ids are a few task words plus a 5-character key**:
+     `launch-video-k3f9q` (`new_run_id` in gitio.rs, `newRunId` in util.ts;
+     at most 4 words / 32 chars from the redacted task summary, filler words
+     dropped). The same id is the jj workspace, its folder and, with the
+     `rudder/` prefix, the PR branch; the worker title shows just the key
+     (`run_short_key`). They used to be `<nanos>-<whole slug>-<dashboard pid>`,
+     shown whole in the title. Old ids stay opaque strings and keep their old
+     derived names (`is_readable_run_id` / `isReadableRunId` decide), because
+     a record without a stored workspace name re-derives it from the id, and
+     a plan node id like `n0` keeps `rudder-n0-<hash6>`. Nothing sorts by id:
+     rows sort by `created_at`.
    - `createRunRecord` (`state.ts`) writes `.rudder/runs/<id>/run.json`.
    - `writeAgentContext` regenerates `RUDDER.md` and excludes it via
      `.git/info/exclude`.
@@ -303,7 +313,8 @@ Per repo (`<repo>/.rudder/`):
 - `undo-stack.json` (`UndoEntry[]`, atomic via `updateJson`)
 
 jj workspaces live outside the repo at
-`.rudder-workspaces/<repoSlug>-<repoHash>/<taskSlug>-<runHash>` so they never
+`.rudder-workspaces/<repoSlug>-<repoHash>/<run id>` (older runs:
+`<taskSlug>-<runHash>`) so they never
 nest inside the checkout. `RUDDER.md` is generated at the repo root and inside
 each active workspace, and excluded via each checkout's `.git/info/exclude`.
 
@@ -1540,7 +1551,8 @@ rudder.viraat.dev 308-redirects there (site/vercel.json).
   `--bookmark` push handles new bookmarks) - both have fallbacks in `jj.ts`.
 - **The workspace GC only touches what Rudder made** (`gc_orphan_workspaces`,
   main.rs). It forgets a jj workspace only when its name is Rudder's
-  (`rudder-<id>-<hash>`, `RUDDER_WORKSPACE_NAME_PREFIX`) and no live row owns it
+  (`rudder-<run id>`, or `rudder-<id>-<hash>` before 3.9.12,
+  `RUDDER_WORKSPACE_NAME_PREFIX`) and no live row owns it
   by name or by root; any other registered workspace keeps its registration and
   its directory. The directory pass reclaims only checkouts (`.jj` or `.git`
   inside) one level under a group, and never treats a checkout sitting straight

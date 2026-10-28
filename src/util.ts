@@ -7,6 +7,7 @@ import path from "node:path";
 import readline from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 import type { JsonValue } from "./types.js";
+import { summarizeTask } from "./task-summary.js";
 
 const DEFAULT_PATH = [
   "/opt/homebrew/bin",
@@ -354,9 +355,59 @@ export function slugPrefix(inputValue: string, fallback = "task", maxChars = 40)
   return slug || fallback;
 }
 
+const RUN_KEY_LEN = 5;
+const RUN_SLUG_WORDS = 4;
+const RUN_SLUG_CHARS = 32;
+const RUN_SLUG_FILLER = new Set([
+  "a", "an", "the", "to", "of", "in", "on", "for", "and", "with", "my", "our", "this",
+  "that", "it", "is", "be", "please",
+]);
+
+/**
+ * A run id is a few words of the task plus a short random key:
+ * `launch-video-k3f9q`. Mirrors native `new_run_id` (gitio.rs). It names the
+ * jj workspace (`rudder-<id>`), the workspace folder and the PR branch, so it
+ * has to read as words. Ids used to be `<YYYYMMDDHHMMSS>-<whole slug>-<uuid8>`;
+ * those stay valid opaque strings.
+ */
 export function newRunId(task: string): string {
-  const stamp = new Date().toISOString().replace(/[-:.TZ]/g, "").slice(0, 14);
-  return `${stamp}-${slugify(task)}-${randomUUID().slice(0, 8)}`;
+  let value = BigInt(`0x${randomUUID().replace(/-/g, "")}`);
+  let key = "";
+  for (let index = 0; index < RUN_KEY_LEN; index += 1) {
+    key += (value % 36n).toString(36);
+    value /= 36n;
+  }
+  return `${runIdSlug(task)}-${key}`;
+}
+
+function runIdSlug(task: string): string {
+  const all = slugify(summarizeTask(task), "task").split("-").filter(Boolean);
+  const kept = all.filter((word) => !RUN_SLUG_FILLER.has(word));
+  const words = (kept.length > 0 ? kept : all).slice(0, RUN_SLUG_WORDS);
+  let slug = "";
+  for (const word of words) {
+    if (slug && slug.length + 1 + word.length > RUN_SLUG_CHARS) {
+      break;
+    }
+    slug = slug ? `${slug}-${word}` : word;
+  }
+  return slug.slice(0, RUN_SLUG_CHARS) || "task";
+}
+
+/** Whether `id` has the words-plus-key shape `newRunId` makes. Mirrors native `is_readable_run_id`. */
+export function isReadableRunId(id: string): boolean {
+  const cut = id.lastIndexOf("-");
+  if (cut <= 0) {
+    return false;
+  }
+  const slug = id.slice(0, cut);
+  const key = id.slice(cut + 1);
+  return (
+    id.length <= RUN_SLUG_CHARS + 1 + RUN_KEY_LEN
+    && new RegExp(`^[a-z0-9]{${RUN_KEY_LEN}}$`).test(key)
+    && /^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(slug)
+    && !/^\d{10,}$/.test(slug.split("-")[0] ?? "")
+  );
 }
 
 export function shortHash(value: string): string {

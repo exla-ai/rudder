@@ -2,8 +2,8 @@ import fsp from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import type { JsonValue, RunRecord } from "./types.js";
-import { adoptLegacyWorkspaceKey } from "./state.js";
-import { pathExists, readJson, shortHash, slugPrefix } from "./util.js";
+import { adoptLegacyWorkspaceKey, workspaceDirName } from "./state.js";
+import { pathExists, readJson } from "./util.js";
 
 export type MigrationDecision = "migrate" | "migrate-fresh" | "stay" | "stop";
 
@@ -204,12 +204,7 @@ export function cloudWorkspacePath(repoName: string): string {
 
 export function cloudWorkspaceAbsolutePath(repoName: string, runId: string, task?: string): string {
   // Mirrors src/state.ts workspacePath() but rooted at the cloud workspace.
-  return path.posix.join("/workspace", ".rudder-workspaces", repoName, cloudWorkspaceDirName(runId, task));
-}
-
-function cloudWorkspaceDirName(runId: string, task?: string): string {
-  const slug = slugPrefix(task ?? runId, "task");
-  return `${slug}-${shortHash(runId).slice(0, 8)}`;
+  return path.posix.join("/workspace", ".rudder-workspaces", repoName, workspaceDirName(runId, task));
 }
 
 export function formatCandidateReason(candidate: MigrationCandidate): string {

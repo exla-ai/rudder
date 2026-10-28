@@ -635,7 +635,8 @@ enum AgentMode {
 
 const MAIN_AGENT_ID: &str = "__main__";
 /// Sentinel occupying `delete_pending` while a `c` clear-merged confirm is
-/// armed. Run ids are numeric strings, so this can never collide with one.
+/// armed. Run ids are lowercase words and digits joined by `-`, never `_`, so
+/// this can never collide with one.
 const CLEAR_MERGED_PENDING: &str = "__clear-merged__";
 
 const MAIN_BOOTSTRAP_PROMPT: &str =

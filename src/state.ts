@@ -24,6 +24,7 @@ import {
   readJson,
   rudderHome,
   runCommand,
+  isReadableRunId,
   shortHash,
   slugPrefix,
   slugify,
@@ -215,7 +216,15 @@ export function workspacePath(repoRoot: string, runId: string, task?: string): s
   return path.join(repoRoot, AGENT_WORKSPACES_DIR, repoName, workspaceDirName(runId, task));
 }
 
-function workspaceDirName(runId: string, task?: string): string {
+/**
+ * The folder under `.rudder-workspaces/<repo>/`: the run id itself when it is
+ * words plus a key (`launch-video-k3f9q`), else the old `<task slug>-<hash8>`.
+ * The cloud migration path (src/migration.ts) uses this too.
+ */
+export function workspaceDirName(runId: string, task?: string): string {
+  if (isReadableRunId(runId)) {
+    return runId;
+  }
   const slug = slugPrefix(task ?? runId, "task");
   const suffix = shortHash(runId).slice(0, 8);
   return `${slug}-${suffix}`;

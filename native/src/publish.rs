@@ -264,8 +264,12 @@ pub(crate) fn publish_branch_name(run_id: &str, label: &str, default_branch: &st
 }
 
 /// Short, stable disambiguator for a run id. Not a hash of the content — the id
-/// itself is already unique, this only shortens it for a branch name.
+/// itself is already unique, this only shortens it for a branch name. A
+/// words-plus-key id gives its key, so the branch reads `rudder/launch-video-k3f9q`.
 fn short_run_key(run_id: &str) -> String {
+    if is_readable_run_id(run_id) {
+        return run_short_key(run_id);
+    }
     let cleaned: String = run_id
         .chars()
         .filter(|ch| ch.is_ascii_alphanumeric())

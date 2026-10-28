@@ -720,15 +720,7 @@ pub(crate) fn remote_control_session_name(run_id: &str) -> Option<String> {
                 .and_then(|dir| dir.file_name().map(|name| name.to_string_lossy().to_string()))
         })
         .unwrap_or_else(|| "rudder".to_string());
-    // Run ids are "<timestamp>-<slug>-<checkout suffix>". The suffix is shared
-    // by every run in one checkout (two libra agents were both "libra ·
-    // 10389"), so the name takes the tail of the unique timestamp instead.
-    let head = run_id.split('-').next().unwrap_or(run_id);
-    let short = if head.len() > 4 && head.chars().all(|c| c.is_ascii_digit()) {
-        &head[head.len() - 4..]
-    } else {
-        run_id.rsplit('-').next().unwrap_or(run_id)
-    };
+    let short = run_short_key(run_id);
     // "(cloud)": in the Claude app these sit next to laptop sessions.
     Some(format!("{repo} · {short} (cloud)"))
 }

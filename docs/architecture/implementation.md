@@ -50,7 +50,7 @@ the three architecture documents already contained this session's planning work.
 | Private previews | Persisted Tailscale login, actual readiness, bounded async probes, exact project ownership, ready links and local open | E13 subset implemented; real userspace/Serve check passed; laptop/phone access remains untested |
 | Terminal stream | Shared home/sail helper, short output batching, bounded backpressure, connection fencing, UTF-8 and repaint recovery | E13 subset deployed in the worker image; real WS/PTY VM checks passed; existing homes adopt when idle |
 | Startup/download caches | Background CLI update, persistent account-local npm/pnpm/uv cache defaults, explicit overrides retained | Behavior tests pass; no distributed action-cache claim |
-| Full storage/engine rewrite | Milestones below | Initial engine/CAS/VFS/build foundations are in alpha.4 source and Cloud release 158; CLI publication, defaults, fleet and migration gates remain open |
+| Full storage/engine rewrite | Milestones below | Initial foundations and shorter startup context ship in alpha.7, npm `next` and Cloud release 159; default workspace integration, fleet and migration gates remain open |
 
 The current native simple-execution path remains an isolated worker; explicit
 main-checkout mode remains available. The initial automatic DAG path retains
@@ -67,10 +67,11 @@ path, so this is a stated alpha limitation, not complete Cloud routing parity.
 
 ## V4 foundations and current continuation, 2026-10-30
 
-Alpha.4 source is committed and the Cloud API is deployed as release 158.
-Newer source work below remains explicit and unshipped unless delivery evidence
-says otherwise. CLI publication and worker adoption are separate facts. The
-active objective remains the full plan.
+Alpha.7 is published on both npm `next` tags and the Cloud API is deployed as
+release 159. The shorter startup context from alpha.4 is included. New storage
+and workspace work below remains unshipped unless exact delivery evidence says
+otherwise. CLI publication and worker adoption are separate facts. The active
+objective remains the full plan.
 
 - `engine/` provides typed immutable roots, local checksummed CAS, staged
   publication, retained closures and conservative collection. Source,
@@ -152,13 +153,12 @@ active objective remains the full plan.
   material remains linked. Current context audit has no findings. See
   [prompt context](prompt-context.md).
 
-The primary npm package's alpha.3 `next` tag now resolves successfully. The
-previous registry-processing blocker has cleared. Cloud alpha.4 delivery is
-recorded in [the current Cloud proof](delivery-alpha4-cloud.json). Alpha.4/5/6
-npm publication is blocked: the Mac native unit suite exposed a hanging
-final-output regression and broker test failures. Superseded release workflows
-were canceled for diagnosis. All 59 Mac terminal journeys pass on alpha.6;
-that is separate from the remaining unit-suite gate.
+Both npm `next` tags now resolve to alpha.7, and fresh isolated Linux installs
+ran the packaged CLI and native binary. Alpha.7 fixes the Mac PTY teardown,
+inherited checkout-lock and broker response problems that blocked alpha.4/5/6
+publication. The full release workflow passed on all three native platforms,
+including 931 Mac dashboard tests, 27 library tests and all 59 terminal journeys.
+The stable `latest` tag remains 3.9.13. See [current delivery proof](delivery-alpha7.json).
 
 The alpha.4 release candidate passed the production and Cloud builds, 1,063
 Rust tests (16 ignored), 577 Node tests (8 additional optional skips), and all 59
@@ -222,23 +222,24 @@ revision, version, CI workflow result, published npm dist-tag, worker image
 digest, Fly release/deployment identity, canonical URL, UTC verification time,
 checks and active-home adoption state. A pushed commit is not a Cloud rollout.
 
-### Current Cloud delivery and CLI blocker
+### Current alpha.7 CLI and Cloud delivery
 
-[Cloud release 158](delivery-alpha4-cloud.json) runs alpha.4 revision
-`0c6e4d01c39c920d1e7bf3f0ee8f2418e0e10bbf`. The canonical app/health return
-200 and unauthenticated app/CAS access returns 401, verified at
-`2026-10-30T14:54:13.080Z`. The worker pin is alpha.4, with actual two-worker
-restore/compiler proof and cleanup at `14:40:53.368Z`. Existing active homes
-were not restarted; fleet adoption is not asserted.
+[Cloud release 159](delivery-alpha7.json) runs alpha.7 revision
+`a24bc4171d55ce9554068cdeb1b6e228b461d54d`. The canonical app/health returned
+200 and unauthenticated app/CAS access returned 401. The deployed process reports
+the alpha.7 worker pin, SQLite quick-check is `ok`, and the existing active home
+record survived deployment. Exact UTC times and image digests are in the report.
 
-Main also contains the narrow alpha.5/6 macOS readiness/socket/frame-test fixes.
-The alpha.6 native artifacts build on all three platforms and its separate Mac
-terminal suite passes 59/59. The full native unit suite still hangs in the held
-final-output regression and has three broker failures. Release workflows were
-canceled to expose their logs. No alpha.4/5/6 npm upload is claimed. A bounded
-Mac diagnostic branch contains only test instrumentation; it does not include
-the next storage/VCS working-tree changes. Finish actual Mac verification and
-the versioned main release before reporting a newer CLI installation.
+The actual alpha.7 worker image passed CLI/native/provider checks as UID1500 on
+a fresh Fly VM; that VM was deleted and absence verified at
+`2026-10-30T16:23:00.385Z`. Fresh installs of both npm packages passed at
+`2026-10-30T16:29:09.114Z`. Existing active home `8edd225a7d0378` remains started
+on its original 3.9.12 instance; no live agents were restarted. Full fleet adoption
+and local Mac installation are not claimed.
+
+The deploy used the frozen tag source with an explicit alpha.7 worker-image
+override. Tracked `cloud/fly.toml` still pins alpha.4; update that pin as part of
+the next versioned product release before redeploying from the checkout.
 
 The next uncommitted slice adds bounded File chunks, paged directories, explicit
 V1/V2 streaming tree adapters and ancestry-free RunnableRoot metadata. New roots

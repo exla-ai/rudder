@@ -87,6 +87,63 @@ new working-tree changes after alpha.9. They remain unshipped until their own
 checks and delivery record. CLI publication, configured worker image and live
 worker adoption remain separate facts. The active objective is the full plan.
 
+The next release candidate is alpha.10. Its mounted partial-capture proof passed
+as root and UID1500, retaining dirty chunks across lost replies, later FD writes,
+mmap and collection without creating a complete pin. Capture through data ACK
+took 711/724 ms in those individual loopback samples. The owned VM was deleted;
+[frozen source, failures and checksums are archived](../../examples/vfs/evidence/2026-10-30-partial-capture/README.md).
+Complete remote checkpoint/observation and accepted-source publication stay
+closed until their separate consumers are integrated.
+
+Local release checks passed: engine baseline 338 (before the subsequent auth
+control edits) plus 11 affected execution/control tests afterward; native 1,002;
+VCS bridge with CLI 32; JavaScript 650 passed/9 explicit skips; real terminal 59.
+TypeScript/Cloud compilation, optimized paired build, context audit, public
+artifact checksums and the inactive infrastructure validator also passed.
+These are local checks, not npm publication or deployed alpha.10 proof.
+
+The inactive Cloud PostgreSQL adapter passed 19 actual Node/pg transaction and
+crash/recovery tests on PostgreSQL17.11. A new native process-local lease guard
+passed 18 tests and the shared duration vectors. Neither activates a project,
+connects the production control plane nor qualifies provider failover/RPO.
+[Adapter evidence and remaining enrollment/provider gates](../../examples/fleet-authority/evidence/2026-10-30-node-adapter/README.md).
+
+The managed App path now has bounded preparation, fsynced reservation/assignment,
+actual backend process binding and authenticated stop/checkpoint receipts. It
+is an internal API without a public/default caller. Selected Codex key bootstrap
+passed against actual 0.166.0 with ephemeral storage and no model calls; its
+mandatory private v2 frontend gate, current TS consumer refusal and old-client
+recovery qualification are implemented/tested. See [auth evidence](../../examples/agent-runtime/evidence/2026-10-30-managed-auth/README.md)
+and [released-client refusal and its missing-owner limitation](../../examples/execution/compatibility/evidence/2026-10-30-alpha9-refusal/README.md).
+Default activation additionally needs a separate managed record namespace and
+durable protocol floor under the real owner/quiescence boundary.
+A new marker cannot physically fence an older native client.
+[Managed launch contract and open gates](managed-launch.md).
+
+Source review also found a concrete managed-network activation gate: the helper
+shares host TCP loopback, while the normal board serves its browser token to
+loopback clients. Filesystem/PID isolation cannot authenticate that raw HTTP
+client. No live exploit was attempted. Keep managed launch inactive until
+controlled guest networking and board access close that path. Cloud worker
+control and CAS retain their separate bearer/account checks.
+
+Next implementation contracts are [controlled networking and board access](managed-network-isolation.md),
+[remote launch and quiescent partial publication](remote-managed-launch.md),
+and [public provider caches with private CoW state](provider-runtime-cache.md).
+The last addresses a measured fresh-home finding: Codex populated roughly 87 MB
+across 5,502 public plugin-cache files without inference. Its supported
+catalog-free policy is a proposed selected profile, not a change to installed
+user plugins or a demonstrated cold-start speedup. The [provider rollout](authority-provider-rollout.md)
+and default-disabled RDS foundation are unapplied; no database or new persistent
+provider spend was created. Full fleet ingress/activation and migration remain open.
+
+The next build-pipeline change should compile native and its jj companion in
+one Cargo invocation with the `rudder-vcs-bridge/cli` feature union. Current
+separate commands rebuild engine/bridge under two dependency fingerprints.
+This is a measured build-graph observation, not an implemented optimization;
+qualify the combined graph, paired outputs and all three platforms before
+changing local, Docker and CI commands.
+
 - `engine/` provides typed immutable roots, local checksummed CAS, staged
   publication, retained closures and conservative collection. Source,
   environment, full private view and hardlink topology have separate identities.
@@ -97,8 +154,9 @@ worker adoption remain separate facts. The active objective is the full plan.
   disconnect. It fences compatible owners with an OS lock and journal epochs,
   refuses known live legacy schedulers, and exposes authenticated control and
   existing attach views. This extracts the existing App; it is still one project
-  per host process. Fleet PostgreSQL authority and the final machine-wide
-  multi-project actor have not been implemented.
+  per host process. Fleet authority ingress/activation and the final machine-wide
+  multi-project actor have not been implemented; the inactive tested PostgreSQL
+  adapter is a foundation for that work.
 - The SQLite WAL journal records capability-scoped commands, effects, mailboxes,
   explicit acknowledgments, topic versions and exact-root integration evidence.
   Retries by the original sender return historical receipts after a recipient

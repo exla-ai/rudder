@@ -175,7 +175,10 @@ if (process.argv[2] === "--managed-guard-probe") {
     ["legacy", "valid Git, jj and pre-VCS records keep their existing delete and stop behavior"],
   ]) {
     test(description, { skip: process.platform === "win32", timeout: 30_000 }, async (t) => {
-      const directory = await fsp.mkdtemp(path.join(os.tmpdir(), "rudder-managed-guard-"));
+      // Child process.cwd() resolves macOS /var -> /private/var (and other
+      // symlinked temp parents). Keep the expected identity canonical too;
+      // exact cwd assertions must still reject every managed workspace.
+      const directory = await fsp.realpath(await fsp.mkdtemp(path.join(os.tmpdir(), "rudder-managed-guard-")));
       t.after(() => fsp.rm(directory, { recursive: true, force: true }));
       const repo = path.join(directory, "repo");
       const bin = path.join(directory, "bin");

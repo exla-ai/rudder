@@ -72,12 +72,9 @@ fn graceful_drain_stops_new_controls_without_claiming_backend_completion() {
 fn managed_identity_rotation_preserves_only_the_exact_current_workspace_scope() {
     use crate::managed_launch::{ManagedLaunchFence, WorkspaceAssignment};
     use rudder_engine::{execution::ProtectedHostContextRef, protocol::{ObjectKind, ObjectRef}, vfs::rpc::{AttemptContext, ObservationBinding}};
-    let home = std::env::temp_dir().join(format!("rudder-grant-{}", uuid::Uuid::new_v4()));
-    fs::create_dir(&home).unwrap();
-    fs::set_permissions(&home, fs::Permissions::from_mode(0o700)).unwrap();
-    fs::create_dir_all(FabricPaths::new(&home).journal.parent().unwrap()).unwrap();
+    let mut fixture=crate::managed_store::tests::Fixture::new(); let store=fixture.prepare(); let home=fixture.home.clone();
     let mut journal = Journal::open(&FabricPaths::new(&home).journal).unwrap();
-    let owner = journal.create_project("p", "owner", "base", 0).unwrap();
+    let owner = fixture.owner.clone();
     let attempt = uuid::Uuid::new_v4().to_string();
     let epoch = journal.observe_run_attempt(&owner, "run", &attempt, 1).unwrap();
     let fence = ManagedLaunchFence { owner: owner.clone(), run_id: "run".into(), run_epoch: epoch,
@@ -90,6 +87,8 @@ fn managed_identity_rotation_preserves_only_the_exact_current_workspace_scope() 
             view_id: uuid::Uuid::new_v4().to_string(), owner: fence.owner_epoch(), namespace: uuid::Uuid::new_v4().to_string(),
             profile: reference(ObjectKind::Blob, b"profile"), exclusion_policy_digest: "a".repeat(64) },
         host_context: ProtectedHostContextRef { format_version: 1, path: home.join("context.json"), sha256: "b".repeat(64), size_bytes: 1 } };
+    store.run("run").unwrap().persist_reservation(&crate::managed_launch::ManagedRunSource::Reserved {
+        fence:fence.clone(), runnable_root:workspace.runnable_root.clone() }).unwrap();
     crate::managed_launch::persist_assignment(&home, &workspace).unwrap();
     let mut recipients = BTreeMap::from([("run".into(), epoch)]);
     let path = issue_identity(&home, &mut journal, &owner, "run", epoch, &recipients, 2, Some(&workspace)).unwrap();
@@ -167,6 +166,7 @@ fn test_agent_run(id: &str, task: &str) -> AgentRun {
         session_id: None,
         execution_profile: None,
         managed_local: None,
+        managed_store: None,
         terminal: None,
         terminal_size: None,
         last_output_at: Instant::now(),

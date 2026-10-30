@@ -2,13 +2,13 @@ use super::*;
 
 pub(super) fn initialize(conn: &mut Connection) -> Result<()> {
     let version: u32 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    ensure!(version <= 4, "journal schema is newer than this engine");
-    if version == 4 {
+    ensure!(version <= 5, "journal schema is newer than this engine");
+    if version >= 4 {
         return Ok(());
     }
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let version: u32 = tx.pragma_query_value(None, "user_version", |r| r.get(0))?;
-    ensure!(version <= 4, "journal schema is newer than this engine");
+    ensure!(version <= 5, "journal schema is newer than this engine");
     if version == 0 {
         tx.execute_batch(r#"
 CREATE TABLE projects(

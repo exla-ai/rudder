@@ -3,9 +3,11 @@ import fsp from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import "./board-source.mjs";
 
-import { startBoardDaemon } from "../dist/board/daemon.js";
-import {
+const { startBoardDaemon } = await import("../src/board/daemon.ts");
+const { requestBoardBootstrap } = await import("../src/board/host-access.ts");
+const {
   classifyCommand,
   localDay,
   parseClaudeLog,
@@ -18,7 +20,7 @@ import {
   projectFor,
   rangeSince,
   scanTokenUsage,
-} from "../dist/usage.js";
+} = await import("../src/usage.ts");
 
 async function tmpdir(t, name) {
   const root = await fsp.mkdtemp(path.join(os.tmpdir(), `rudder-usage-${name}-`));
@@ -365,7 +367,7 @@ test("vm_stat pages that macOS can reclaim count as available memory", () => {
   assert.equal(parseVmStat("garbage"), null);
 });
 
-test("the board serves the usage page and its read-only api", async (t) => {
+test("the board serves a neutral usage shell and authenticates every usage api", async (t) => {
   const root = await tmpdir(t, "daemon");
   const repo = path.join(root, "repo");
   const home = path.join(root, "home");
@@ -386,19 +388,25 @@ test("the board serves the usage page and its read-only api", async (t) => {
   t.after(() => daemon.close());
 
   const shell = await (await fetch(`${daemon.url}/usage`)).text();
-  assert.match(shell, /__RUDDER_VIEW__ = "usage"/);
-  assert.match(shell, /<title>rudder · usage<\/title>/);
+  assert.doesNotMatch(shell, /__RUDDER_|rudder-board-ticket|Bearer/);
+  assert.match(shell, /<title>rudder<\/title>/);
+  assert.equal((await fetch(`${daemon.url}/api/usage/tokens?range=7d`)).status, 401);
+  const bootstrap = new URL(await requestBoardBootstrap(repo, "usage"));
+  const exchanged = await fetch(`${daemon.url}/api/board/session`, { method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ instance_id: daemon.instanceId, ticket: bootstrap.hash.split("=")[1] }) });
+  assert.equal(exchanged.status, 200);
+  const headers = { Authorization: `Bearer ${(await exchanged.json()).token}` };
 
-  const tokens = await (await fetch(`${daemon.url}/api/usage/tokens?range=7d`)).json();
+  const tokens = await (await fetch(`${daemon.url}/api/usage/tokens?range=7d`, { headers })).json();
   assert.equal(tokens.range, "7d");
   assert.equal(tokens.days.length, 7);
   assert.equal(tokens.total.cost, 0);
   assert.equal(tokens.scannedFiles, 0);
 
-  const bogus = await (await fetch(`${daemon.url}/api/usage/tokens?range=1y`)).json();
+  const bogus = await (await fetch(`${daemon.url}/api/usage/tokens?range=1y`, { headers })).json();
   assert.equal(bogus.range, "30d", "unknown ranges fall back to the default");
 
-  const machine = await (await fetch(`${daemon.url}/api/usage/machine`)).json();
+  const machine = await (await fetch(`${daemon.url}/api/usage/machine`, { headers })).json();
   assert.ok(machine.totalMem > 0);
   assert.ok(Array.isArray(machine.processes));
   assert.ok(machine.byKind.rudder.count >= 0);

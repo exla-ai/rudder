@@ -87,10 +87,37 @@ pub(crate) struct EngineOwnership {
     record: OwnerRecord,
     record_path: PathBuf,
     released: bool,
+    identity_home: PathBuf,
+    managed_store: Option<crate::managed_store::ManagedStore>,
 }
 
 impl EngineOwnership {
     pub(crate) fn acquire(repo: &Path, mode: NativeAuthority) -> Result<Self> {
+        Self::acquire_inner(repo, mode, None, None)
+    }
+
+    /// Off-App, explicit local identity. Existing launchers retain their home
+    /// selection; managed preparation/recovery never infer a different home.
+    pub(crate) fn acquire_in_home(repo: &Path, mode: NativeAuthority, home: &Path) -> Result<Self> {
+        Self::acquire_inner(repo, mode, Some(home), None)
+    }
+
+    /// Explicit prepare recovery, not launch/resume permission. The caller
+    /// supplies the exact historical request; incomplete evidence is retained.
+    pub(crate) fn recover_managed_prepare(repo: &Path, home: &Path,
+        request: &rudder_engine::journal::ManagedProjectPrepare) -> Result<Self> {
+        let mut owner = Self::acquire_inner(repo, NativeAuthority::Fabric, Some(home), Some(request))?;
+        owner.prepare_managed_project(request)?;
+        Ok(owner)
+    }
+    pub(crate) fn recover_managed_prepare_with_plan(repo: &Path, home: &Path,
+        request: &rudder_engine::journal::ManagedProjectPrepare, plan: &crate::managed_store::ExperimentalRecoveryPlan) -> Result<Self> {
+        let mut owner=Self::acquire_inner(repo,NativeAuthority::Fabric,Some(home),Some(request))?;
+        owner.prepare_managed_project_with_plan(request,plan)?; Ok(owner)
+    }
+
+    fn acquire_inner(repo: &Path, mode: NativeAuthority, explicit_home: Option<&Path>,
+        recovery: Option<&rudder_engine::journal::ManagedProjectPrepare>) -> Result<Self> {
         let repo = repo.canonicalize().context("canonical engine checkout")?;
         let directory = repo.join(".rudder/engine");
         let lock = acquire_checkout_lock(&repo)?;
@@ -103,10 +130,24 @@ impl EngineOwnership {
         if mode == NativeAuthority::Fabric {
             reject_legacy_writers(&repo)?;
         }
-        let home = signals::rudder_home().context("no Rudder home for the engine journal")?;
+        let home = explicit_home.map(Path::to_path_buf).or_else(signals::rudder_home)
+            .context("no Rudder home for the engine journal")?;
         let paths = FabricPaths::new(&home);
+        let mut new_directories=Vec::new();
+        for ancestor in paths.root.ancestors() {
+            let ancestor=if ancestor.as_os_str().is_empty() { Path::new(".") } else { ancestor };
+            if ancestor.try_exists()? {
+                if !new_directories.is_empty() { new_directories.push(ancestor.to_path_buf()); }
+                break;
+            }
+            anyhow::ensure!(new_directories.len()<64,"engine home directory creation exceeds bounded depth");
+            new_directories.push(ancestor.to_path_buf());
+        }
         fs::create_dir_all(&paths.root)?;
         fs::set_permissions(&paths.root, fs::Permissions::from_mode(0o700))?;
+        // Persist every newly created directory entry, including a new HOME's
+        // entry in its first existing ancestor, before publishing any floor.
+        for directory in new_directories { File::open(directory)?.sync_all()?; }
         let canonical_home = home.canonicalize()?;
         let canonical_fabric = paths.root.canonicalize()?;
         let private_root = if canonical_home != repo {
@@ -127,8 +168,24 @@ impl EngineOwnership {
             pattern.push('/');
             exclude_runtime_path(&repo, &pattern)?;
         }
+        let paths = FabricPaths::new(&canonical_home);
         let mut journal = Journal::open(&paths.journal)?;
         let project = local_project_id(&repo)?;
+        // This check precedes every owner transfer, recovery operation and
+        // owner.json rewrite. Intent alone blocks a legacy restart after a
+        // crash before the schema5 transaction; a floor alone blocks one after.
+        let managed = journal.managed_project(&project)?;
+        let namespace_present = crate::managed_store::has_namespace_evidence(&canonical_home, &project)?;
+        if let Some(request) = recovery {
+            let binding = crate::managed_store::namespace(&canonical_home, &repo, &project, &journal)?;
+            anyhow::ensure!(request.namespace == binding
+                && crate::managed_store::read_prepare_intent(&binding, &journal)? == *request
+                && managed.as_ref().is_none_or(|receipt|receipt.request == *request),
+                "managed recovery request differs from retained evidence");
+        } else {
+            anyhow::ensure!(managed.is_none() && !namespace_present,
+                "managed project is prepared or quarantined; legacy Native startup is refused before ownership changes; use explicit recovery");
+        }
         let instance_id = uuid::Uuid::new_v4().to_string();
         let owner_id = format!("{}:{instance_id}", mode.name());
         // The lock plus refusal above establishes local quiescence. A transfer
@@ -174,7 +231,55 @@ impl EngineOwnership {
             record,
             record_path,
             released: false,
+            identity_home: canonical_home,
+            managed_store: None,
         })
+    }
+
+    /// Off-App explicit opt-in, while this actual CheckoutLock is held and
+    /// before any App/scheduler is started. This does not enable managed launch.
+    pub(crate) fn prepare_managed_project(&mut self,
+        request: &rudder_engine::journal::ManagedProjectPrepare) -> Result<crate::managed_store::ManagedStore> {
+        self.prepare_managed_inner(request,None)
+    }
+    pub(crate) fn experimental_recovery_plan(&self) -> Result<crate::managed_store::ExperimentalRecoveryPlan> {
+        self.assert_current()?;
+        let binding=crate::managed_store::namespace(&self.identity_home,&self.record.repo,&self.fence.project_id,&self.journal)?;
+        crate::managed_store::inspect_experimental(&binding)
+    }
+    pub(crate) fn prepare_managed_project_with_plan(&mut self,
+        request: &rudder_engine::journal::ManagedProjectPrepare, plan: &crate::managed_store::ExperimentalRecoveryPlan) -> Result<crate::managed_store::ManagedStore> {
+        self.prepare_managed_inner(request,Some(plan))
+    }
+    fn prepare_managed_inner(&mut self, request: &rudder_engine::journal::ManagedProjectPrepare,
+        recovery: Option<&crate::managed_store::ExperimentalRecoveryPlan>) -> Result<crate::managed_store::ManagedStore> {
+        anyhow::ensure!(self.record.state == "starting" && self.record.authority == "fabric",
+            "managed preparation requires a starting owned Fabric engine");
+        self.assert_current()?;
+        reject_legacy_writers(&self.record.repo)?;
+        let binding = crate::managed_store::namespace(&self.identity_home, &self.record.repo,
+            &self.fence.project_id, &self.journal)?;
+        anyhow::ensure!(request.namespace == binding, "managed prepare differs from the actual owner identity");
+        let experimental=crate::managed_store::inspect_experimental(&binding)?;
+        anyhow::ensure!(recovery.map_or_else(||experimental.is_empty(),|plan|plan==&experimental),
+            "experimental managed records require an explicit exact bounded recovery plan; originals retained");
+        crate::managed_store::persist_prepare_intent(request, &self.journal)?;
+        if let Some(plan)=recovery { crate::managed_store::persist_recovery_plan(plan,&binding)?; }
+        let receipt = self.journal.prepare_managed_project(&self.fence, request, epoch_ms())?;
+        let store = crate::managed_store::persist_prepared_receipt(&receipt, &self.journal)?;
+        if let Some(plan)=recovery { crate::managed_store::preserve_experimental(&store,plan)?; }
+        self.managed_store = Some(store.clone());
+        Ok(store)
+    }
+
+    pub(crate) fn managed_recovery_store(&self) -> Option<&crate::managed_store::ManagedStore> { self.managed_store.as_ref() }
+
+    pub(crate) fn require_legacy_startup(&self) -> Result<()> {
+        anyhow::ensure!(self.managed_store.is_none()
+            && self.journal.managed_project(&self.fence.project_id)?.is_none()
+            && !crate::managed_store::has_namespace_evidence(&self.identity_home, &self.fence.project_id)?,
+            "managed project remains recovery-only; legacy App/scheduler startup is refused");
+        Ok(())
     }
 
     pub(crate) fn assert_current(&self) -> Result<()> {

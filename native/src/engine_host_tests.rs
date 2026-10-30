@@ -48,6 +48,176 @@ fn public_status_never_exposes_the_control_nonce() {
     assert!(value.get("control_nonce").is_none());
 }
 
+fn managed_owner_fixture(scratch: &Scratch) -> (PathBuf, PathBuf, EngineOwnership, rudder_engine::journal::ManagedProjectPrepare) {
+    let repo=scratch.0.join("repo"); let home=scratch.0.join("home"); fs::create_dir(&repo).unwrap();
+    fs::DirBuilder::new().mode(0o700).create(&home).unwrap();
+    let owner=EngineOwnership::acquire_in_home(&repo,NativeAuthority::Fabric,&home).unwrap();
+    let binding=crate::managed_store::namespace(&home,&repo,&owner.fence.project_id,&owner.journal).unwrap();
+    let request=rudder_engine::journal::ManagedProjectPrepare { request_id:uuid::Uuid::new_v4().to_string(),namespace:binding };
+    (repo,home,owner,request)
+}
+
+#[test]
+fn managed_floor_refuses_both_legacy_startups_before_any_owner_rewrite() {
+    let scratch=Scratch::new(); let (repo,home,mut owner,request)=managed_owner_fixture(&scratch);
+    let store=owner.prepare_managed_project(&request).unwrap();
+    assert!(owner.managed_recovery_store().is_some()); assert!(owner.require_legacy_startup().is_err());
+    assert!(acquire_checkout_lock(&repo).is_err(),"preparation keeps the actual owner lock held");
+    let state=owner.journal.project_state(&owner.fence.project_id).unwrap();
+    let projection=fs::read(&owner.record_path).unwrap(); drop(owner);
+    for mode in [NativeAuthority::Legacy,NativeAuthority::Fabric] {
+        assert!(EngineOwnership::acquire_in_home(&repo,mode,&home).err().unwrap().to_string().contains("managed project"));
+        assert_eq!(fs::read(repo.join(".rudder/engine/owner.json")).unwrap(),projection);
+        assert_eq!(Journal::open(&store.binding().journal).unwrap().project_state(&state.owner.project_id).unwrap(),state);
+        assert!(!ownership_lock_held(&repo).unwrap());
+    }
+}
+
+#[test]
+fn managed_prepare_intent_alone_blocks_legacy_and_explicit_recovery_finishes_same_request() {
+    let scratch=Scratch::new(); let (repo,home,owner,request)=managed_owner_fixture(&scratch);
+    crate::managed_store::persist_prepare_intent(&request,&owner.journal).unwrap();
+    let old=owner.fence.clone(); let projection=fs::read(&owner.record_path).unwrap(); drop(owner);
+    assert!(EngineOwnership::acquire_in_home(&repo,NativeAuthority::Legacy,&home).is_err());
+    assert_eq!(fs::read(repo.join(".rudder/engine/owner.json")).unwrap(),projection);
+    let recovered=EngineOwnership::recover_managed_prepare(&repo,&home,&request).unwrap();
+    assert_ne!(recovered.fence,old); assert!(recovered.require_legacy_startup().is_err());
+    assert_eq!(recovered.managed_recovery_store().unwrap().receipt().request,request);
+}
+
+#[test]
+fn managed_floor_without_disk_receipt_is_recovery_only_and_keeps_historical_preparer() {
+    let scratch=Scratch::new(); let (repo,home,mut owner,request)=managed_owner_fixture(&scratch);
+    crate::managed_store::persist_prepare_intent(&request,&owner.journal).unwrap();
+    let receipt=owner.journal.prepare_managed_project(&owner.fence,&request,1).unwrap();
+    assert!(owner.require_legacy_startup().is_err()); let old=owner.fence.clone(); drop(owner);
+    assert!(EngineOwnership::acquire_in_home(&repo,NativeAuthority::Fabric,&home).is_err());
+    let recovered=EngineOwnership::recover_managed_prepare(&repo,&home,&request).unwrap();
+    assert_eq!(recovered.managed_recovery_store().unwrap().receipt(),&receipt);
+    assert_eq!(recovered.managed_recovery_store().unwrap().receipt().prepared_owner,old);
+    assert_ne!(recovered.fence,old); recovered.assert_current().unwrap();
+}
+
+#[test]
+fn managed_prepare_refuses_ready_engine_wrong_identity_and_live_legacy_children() {
+    let scratch=Scratch::new(); let (repo,_home,mut owner,request)=managed_owner_fixture(&scratch);
+    let mut wrong=request.clone(); wrong.namespace.home=repo.clone();
+    assert!(owner.prepare_managed_project(&wrong).is_err());
+    let run=repo.join(".rudder/runs/live"); fs::create_dir_all(&run).unwrap();
+    fs::write(run.join("run.json"),serde_json::to_vec(&serde_json::json!({"process":{"pid":std::process::id()}})).unwrap()).unwrap();
+    assert!(owner.prepare_managed_project(&request).is_err());
+    assert!(owner.journal.managed_project(&owner.fence.project_id).unwrap().is_none());
+    fs::remove_file(run.join("run.json")).unwrap(); owner.ready(None).unwrap();
+    assert!(owner.prepare_managed_project(&request).is_err());
+}
+
+#[test]
+fn managed_experimental_recovery_requires_exact_plan_and_retains_originals_without_import() {
+    let scratch=Scratch::new(); let (repo,_home,mut owner,request)=managed_owner_fixture(&scratch);
+    let run=repo.join(".rudder/runs/experimental"); fs::create_dir_all(&run).unwrap();
+    let original=serde_json::to_vec(&serde_json::json!({"id":"experimental","task":"old source","managedLocal":null,"status":"paused"})).unwrap();
+    fs::write(run.join("run.json"),&original).unwrap();
+    assert!(owner.prepare_managed_project(&request).is_err());
+    assert!(owner.journal.managed_project(&owner.fence.project_id).unwrap().is_none());
+    let plan=owner.experimental_recovery_plan().unwrap(); assert!(!plan.is_empty());
+    fs::write(run.join("run.json"),b"{}").unwrap();
+    assert!(owner.prepare_managed_project_with_plan(&request,&plan).is_err());
+    fs::write(run.join("run.json"),&original).unwrap();
+    let store=owner.prepare_managed_project_with_plan(&request,&plan).unwrap();
+    assert_eq!(fs::read(run.join("run.json")).unwrap(),original);
+    let recovered=crate::gitio::load_managed_agents(&store).unwrap(); assert_eq!(recovered.len(),1);
+    assert_eq!(recovered[0].managed_local,Some(crate::managed_launch::ManagedRunSource::Quarantined));
+    assert!(recovered[0].managed_store.is_none()); assert!(recovered[0].session_id.is_none());
+    assert!(crate::gitio::save_native_run_record(&repo,&recovered[0]).is_err());
+    assert_eq!(fs::read(run.join("run.json")).unwrap(),original);
+}
+
+#[test]
+fn managed_experimental_0644_assignment_preserves_exact_bytes_and_mode_through_replay_and_restart() {
+    use sha2::{Digest,Sha256};
+    let scratch=Scratch::new(); let (repo,home,mut owner,request)=managed_owner_fixture(&scratch);
+    let fence=crate::managed_launch::ManagedLaunchFence { owner:owner.fence.clone(),run_id:"experimental".into(),run_epoch:1,
+        attempt_id:uuid::Uuid::new_v4().to_string(),request_id:uuid::Uuid::new_v4().to_string() };
+    let reserved=crate::managed_launch::ManagedRunSource::Reserved { fence:fence.clone(),
+        runnable_root:rudder_engine::protocol::ObjectRef::from_bytes(rudder_engine::protocol::ObjectKind::RunnableRoot,b"old-root") };
+    let assignment=crate::managed_store::tests::assignment(&reserved);
+    let bytes=rudder_engine::protocol::canonical_json(&assignment).unwrap();
+    let old_parent=home.join("fabric/workspace-assignments"); fs::DirBuilder::new().mode(0o700).create(&old_parent).unwrap();
+    let selector=rudder_engine::protocol::canonical_json(&(fence.owner.clone(),&fence.run_id,&fence.attempt_id)).unwrap();
+    let old=old_parent.join(format!("{:x}.json",Sha256::digest(selector)));
+    fs::write(&old,&bytes).unwrap(); fs::set_permissions(&old,fs::Permissions::from_mode(0o644)).unwrap();
+    let legacy=repo.join(".rudder/runs/experimental"); fs::create_dir_all(&legacy).unwrap();
+    let record=serde_json::to_vec(&serde_json::json!({"id":"experimental","task":"shared old metadata",
+        "managedLocal":crate::managed_launch::ManagedRunSource::Assigned { assignment:Box::new(assignment) }})).unwrap();
+    fs::write(legacy.join("run.json"),&record).unwrap();
+    let plan=owner.experimental_recovery_plan().unwrap(); let store=owner.prepare_managed_project_with_plan(&request,&plan).unwrap();
+    assert_eq!(owner.prepare_managed_project_with_plan(&request,&plan).unwrap(),store);
+    let plan_directory=fs::read_dir(store.binding().directory.join("experimental-recovery")).unwrap().next().unwrap().unwrap().path();
+    let copied=plan_directory.join(format!("{:x}",Sha256::digest(b"experimental"))).join("assignment.json");
+    assert_eq!(fs::read(&copied).unwrap(),bytes); assert_eq!(fs::metadata(&copied).unwrap().mode() & 0o777,0o600);
+    let historical=store.receipt().clone(); drop(owner);
+    let recovered=EngineOwnership::recover_managed_prepare_with_plan(&repo,&home,&request,&plan).unwrap();
+    assert_eq!(recovered.managed_recovery_store().unwrap().receipt(),&historical);
+    assert_eq!(fs::read(&old).unwrap(),bytes); assert_eq!(fs::metadata(&old).unwrap().mode() & 0o777,0o644);
+    assert_eq!(fs::read(legacy.join("run.json")).unwrap(),record);
+}
+
+#[test]
+fn managed_prepare_supports_new_explicit_home_chain_and_keeps_legacy_restart_closed() {
+    let scratch=Scratch::new(); let repo=scratch.0.join("repo"); fs::create_dir(&repo).unwrap();
+    let home=scratch.0.join("new-parent/nested/home"); assert!(!home.exists());
+    let mut owner=EngineOwnership::acquire_in_home(&repo,NativeAuthority::Fabric,&home).unwrap();
+    let request=rudder_engine::journal::ManagedProjectPrepare { request_id:uuid::Uuid::new_v4().to_string(),
+        namespace:crate::managed_store::namespace(&home,&repo,&owner.fence.project_id,&owner.journal).unwrap() };
+    owner.prepare_managed_project(&request).unwrap(); drop(owner);
+    assert!(EngineOwnership::acquire_in_home(&repo,NativeAuthority::Legacy,&home).is_err());
+}
+
+#[test]
+fn managed_corrupt_or_missing_namespace_evidence_never_allows_legacy_takeover() {
+    for missing in [false,true] {
+        let scratch=Scratch::new(); let (repo,home,mut owner,request)=managed_owner_fixture(&scratch);
+        let store=owner.prepare_managed_project(&request).unwrap(); let state=owner.journal.project_state(&owner.fence.project_id).unwrap();
+        let projection=fs::read(&owner.record_path).unwrap();
+        if missing { fs::remove_dir_all(&store.binding().directory).unwrap(); }
+        else { fs::write(store.binding().directory.join("project.json"),b"corrupt").unwrap(); }
+        drop(owner);
+        assert!(EngineOwnership::acquire_in_home(&repo,NativeAuthority::Legacy,&home).is_err());
+        assert!(EngineOwnership::recover_managed_prepare(&repo,&home,&request).is_err());
+        assert_eq!(fs::read(repo.join(".rudder/engine/owner.json")).unwrap(),projection);
+        assert_eq!(Journal::open(store.binding().journal.clone()).unwrap().project_state(&state.owner.project_id).unwrap(),state);
+    }
+}
+
+#[test]
+#[ignore = "explicit exact tagged alpha10 CI binary; disposable cleared-env refusal only"]
+fn managed_schema_five_refuses_exact_alpha10_ci_binary_without_owner_rewrite() {
+    use sha2::{Digest,Sha256};
+    let binary=std::env::var_os("RUDDER_MANAGED_OLD_NATIVE_BINARY").expect("explicit tagged CI artifact path required");
+    let mut file=File::open(&binary).unwrap(); let mut hash=Sha256::new(); let mut bytes=[0u8;64*1024];
+    loop { let count=file.read(&mut bytes).unwrap(); if count==0 { break; } hash.update(&bytes[..count]); }
+    let hash=format!("{:x}",hash.finalize());
+    assert_eq!(hash,"76aa639e7a70a3386b3763a8dc88c3ad63527dc1e65047893d14b72a949d797c");
+    let scratch=Scratch::new(); let (repo,home,mut owner,request)=managed_owner_fixture(&scratch);
+    owner.prepare_managed_project(&request).unwrap();
+    let before=owner.journal.project_state(&owner.fence.project_id).unwrap(); let projection=fs::read(&owner.record_path).unwrap(); drop(owner);
+    struct ChildGuard(std::process::Child);
+    impl Drop for ChildGuard { fn drop(&mut self) { let _=self.0.kill(); let _=self.0.wait(); } }
+    let mut child=ChildGuard(Command::new(binary).args(["engine","serve","--repo"]).arg(&repo).current_dir(&repo)
+        .env_clear().env("HOME",&home).env("RUDDER_HOME",&home).env("PATH","/usr/bin:/bin").env("TERM","dumb")
+        .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped()).spawn().unwrap());
+    let deadline=Instant::now()+Duration::from_secs(5);
+    let (status,killed)=loop { if let Some(status)=child.0.try_wait().unwrap() { break (status,false); }
+        if Instant::now()>=deadline { child.0.kill().unwrap(); break (child.0.wait().unwrap(),true); } thread::sleep(Duration::from_millis(10)); };
+    let mut stderr=String::new(); child.0.stderr.take().unwrap().take(64*1024).read_to_string(&mut stderr).unwrap();
+    assert!(!killed,"old client reached an unexpected long-lived startup"); assert!(!status.success());
+    assert!(stderr.contains("journal schema is newer than this engine"),"old client did not refuse the schema boundary");
+    assert_eq!(Journal::open(home.join("fabric/journal.sqlite")).unwrap().project_state(&before.owner.project_id).unwrap(),before);
+    assert_eq!(fs::read(repo.join(".rudder/engine/owner.json")).unwrap(),projection);
+    assert!(!repo.join(".rudder/attach.sock").exists()); assert!(!ownership_lock_held(&repo).unwrap());
+    println!("exact tagged alpha10 CI artifact refused schema5: sha256={hash}, child_wait_completed=true, exit_code={:?}, owner_unchanged=true",status.code());
+}
+
 #[test]
 fn control_requires_the_current_instance_epoch_and_nonce() {
     let scratch = Scratch::new();

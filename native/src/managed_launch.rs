@@ -118,6 +118,7 @@ impl ManagedRunSource {
 /// Off-App, before any preparation effects. This immutable recovery marker is
 /// fsynced independently of the UI's replaceable run.json projection, which
 /// cannot by itself certify crash durability. It never grants live authority.
+#[cfg(test)]
 pub(crate) fn persist_reservation(path: &Path, source: &ManagedRunSource) -> Result<()> {
     let ManagedRunSource::Reserved { fence, .. } = source else { anyhow::bail!("initial managed sidecar must be a reservation"); };
     source.validate(&fence.run_id)?;
@@ -156,8 +157,8 @@ pub(crate) fn read_reservation(path: &Path) -> Result<Option<ManagedRunSource>> 
 
 pub(crate) fn assignment_path(home: &Path, fence: &ManagedLaunchFence) -> Result<PathBuf> {
     fence.validate()?;
-    let digest = Sha256::digest(canonical_json(&(fence.owner.clone(), &fence.run_id, &fence.attempt_id))?);
-    Ok(home.join("fabric/workspace-assignments").join(format!("{}.json", hex_digest(digest))))
+    Ok(crate::managed_store::run_directory(home, &fence.owner.project_id, &fence.run_id)
+        .join("attempts").join(&fence.attempt_id).join("assignment.json"))
 }
 fn hex_digest(bytes: impl AsRef<[u8]>) -> String { bytes.as_ref().iter().map(|b| format!("{b:02x}")).collect() }
 
@@ -165,24 +166,12 @@ fn hex_digest(bytes: impl AsRef<[u8]>) -> String { bytes.as_ref().iter().map(|b|
 /// can only reconcile the identical request; it cannot widen a running token.
 pub(crate) fn persist_assignment(home: &Path, assignment: &WorkspaceAssignment) -> Result<()> {
     assignment.validate(&assignment.fence)?;
-    let path = assignment_path(home, &assignment.fence)?;
-    let parent = path.parent().unwrap();
-    fs::DirBuilder::new().recursive(true).mode(0o700).create(parent)?;
-    let meta = fs::symlink_metadata(parent)?;
-    ensure!(meta.is_dir() && meta.uid() == unsafe { libc::geteuid() } && meta.mode() & 0o077 == 0,
-        "workspace assignment directory is not private");
-    let bytes = canonical_json(assignment)?;
-    if path.try_exists()? {
-        ensure!(read_assignment(home, &assignment.fence)? == Some(assignment.clone()),
-            "workspace assignment already belongs to different launch inputs");
-        return Ok(());
-    }
-    let mut file = OpenOptions::new().write(true).create_new(true).mode(0o600)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC).open(&path)?;
-    file.write_all(&bytes)?; file.sync_all()?; File::open(parent)?.sync_all()?;
-    Ok(())
+    let store = crate::managed_store::open_for_project(home, &assignment.fence.owner.project_id)?
+        .context("managed assignment requires explicit private namespace preparation")?;
+    store.run(&assignment.fence.run_id)?.persist_assignment(assignment)
 }
-/// Off-App. Missing means legacy. Invalid/stale data fails closed.
+/// Off-App. Missing on an ordinary unprepared project means legacy. A managed
+/// floor/namespace mismatch is an error, never a fallback to the old sidecar.
 pub(crate) fn read_assignment(home: &Path, fence: &ManagedLaunchFence) -> Result<Option<WorkspaceAssignment>> {
     read_assignment_record(home, fence, true)
 }
@@ -191,23 +180,29 @@ pub(crate) fn assignment_for_attempt(home: &Path, owner: &OwnerFence, run_id: &s
         attempt_id: attempt.into(), request_id: attempt.into() };
     read_assignment_record(home, &key, false)
 }
+/// Bounded immutable-file read for an already-owned App inventory. The caller
+/// supplies its current Journal-derived owner/run/attempt; the location was
+/// established off-App. Never open/init another journal or infer an identity.
+pub(crate) fn assignment_for_location(location: &crate::managed_store::ManagedRunLocation,
+    owner: &OwnerFence, run_id: &str, run_epoch: u64, attempt: &str) -> Result<Option<WorkspaceAssignment>> {
+    ensure!(location.run_id()==run_id && location.store().binding().project_id==owner.project_id,
+        "managed inventory location belongs to another project/run");
+    let assignment=location.assignment(attempt)?;
+    if let Some(assignment)=&assignment {
+        ensure!(assignment.fence.owner==*owner && assignment.fence.run_id==run_id
+            && assignment.fence.run_epoch==run_epoch && assignment.fence.attempt_id==attempt,
+            "managed inventory assignment differs from current owned attempt");
+    }
+    Ok(assignment)
+}
 fn read_assignment_record(home: &Path, fence: &ManagedLaunchFence, exact_request: bool) -> Result<Option<WorkspaceAssignment>> {
+    let Some(store) = crate::managed_store::open_for_project(home, &fence.owner.project_id)? else { return Ok(None); };
     let path = assignment_path(home, fence)?;
-    let file = match OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC).open(path) {
-        Ok(file) => file,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(error.into()),
-    };
-    let meta = file.metadata()?;
-    ensure!(meta.is_file() && meta.uid() == unsafe { libc::geteuid() } && meta.nlink() == 1
-        && meta.mode() & 0o077 == 0 && meta.len() <= 64 * 1024, "unsafe workspace assignment");
-    let mut bytes = Vec::new(); file.take(64 * 1024 + 1).read_to_end(&mut bytes)?;
-    let assignment: WorkspaceAssignment = serde_json::from_slice(&bytes)?;
-    assignment.validate(&assignment.fence)?;
+    match fs::symlink_metadata(&path) { Ok(_) => {}, Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None), Err(error) => return Err(error.into()) }
+    let assignment = store.run(&fence.run_id)?.assignment(&fence.attempt_id)?.context("managed assignment disappeared")?;
     ensure!(assignment.fence.owner == fence.owner && assignment.fence.run_id == fence.run_id
         && assignment.fence.run_epoch == fence.run_epoch && assignment.fence.attempt_id == fence.attempt_id
         && (!exact_request || assignment.fence == *fence), "workspace assignment is stale");
-    ensure!(canonical_json(&assignment)? == bytes, "noncanonical workspace assignment");
     Ok(Some(assignment))
 }
 
@@ -280,6 +275,7 @@ pub(crate) struct ManagedLocalLaunchRequest {
     pub fence: ManagedLaunchFence,
     pub journal: PathBuf,
     pub home: PathBuf,
+    pub managed_store: crate::managed_store::ManagedStore,
     pub store: rudder_engine::store::LocalStore,
     pub runnable_root: ObjectRef,
     /// Trusted accepted-history binding. Never inferred from a checkout/cwd.
@@ -289,6 +285,7 @@ pub(crate) struct ManagedLocalLaunchRequest {
     pub view_id: String,
     /// New owned directory, ending in the reserved request UUID.
     pub private_root: PathBuf,
+    pub endpoint_parent: PathBuf,
     pub backend: ManagedBackendProfile,
     pub credentials: SelectedCredentials,
     /// Trusted host selection only. These paths are denied to every runtime
@@ -309,11 +306,14 @@ pub(crate) struct ManagedLocalLaunchRequest {
 pub(crate) struct ManagedLocalLaunchInputs {
     pub journal: PathBuf,
     pub home: PathBuf,
+    pub managed_store: crate::managed_store::ManagedStore,
     pub store: rudder_engine::store::LocalStore,
     pub runnable_root: ObjectRef,
     pub seed_source: ObjectRef,
     pub seed: VerifiedMetadataTemplate,
     pub preparation_parent: PathBuf,
+    /// Explicit short, canonical UID-owned0700 parent for transient sockets.
+    pub endpoint_parent: PathBuf,
     pub backend: ManagedBackendProfile,
     pub credentials: SelectedCredentials,
     pub protected_credential_roots: Vec<PathBuf>,
@@ -328,6 +328,8 @@ impl ManagedLocalLaunchInputs {
     pub(crate) fn bind(self, fence: ManagedLaunchFence, operation_id: String, view_id: String) -> ManagedLocalLaunchRequest {
         ManagedLocalLaunchRequest { private_root: self.preparation_parent.join(&fence.request_id), fence,
             journal: self.journal, home: self.home, store: self.store, runnable_root: self.runnable_root,
+            managed_store:self.managed_store,
+            endpoint_parent:self.endpoint_parent,
             seed_source: self.seed_source, seed: self.seed, operation_id, view_id, backend: self.backend,
             credentials: self.credentials, protected_credential_roots: self.protected_credential_roots,
             runtime: self.runtime, native_guest: self.native_guest,
@@ -354,6 +356,44 @@ pub(crate) struct ManagedReportMapping {
     pub host_signal_file: PathBuf,
     pub guest_signal_file: PathBuf,
 }
+
+struct ManagedEndpoints { root:PathBuf, marker:Vec<u8>, backend_target:PathBuf }
+fn validate_endpoint_parent(parent: &Path, fence: &ManagedLaunchFence) -> Result<PathBuf> {
+    fence.validate()?;
+    ensure!(parent.is_absolute() && parent.canonicalize()? == parent, "managed endpoint parent must be explicit/canonical");
+    let meta=fs::symlink_metadata(parent)?;
+    ensure!(meta.is_dir() && meta.uid()==unsafe { libc::geteuid() } && meta.mode() & 0o777 == 0o700,
+        "managed endpoint parent must be UID-owned0700");
+    let root=parent.join(&fence.request_id);
+    for path in [root.join("backend.sock"),root.join("workspace/workspace.sock"),root.join("vcs/jj.sock")] {
+        ensure!(path.as_os_str().as_encoded_bytes().len()<100,"managed transient socket exceeds portable path bound");
+    }
+    Ok(root)
+}
+fn prepare_endpoints(parent: &Path, fence: &ManagedLaunchFence, permanent: &Path, backend_target:PathBuf) -> Result<ManagedEndpoints> {
+    let root=validate_endpoint_parent(parent,fence)?;
+    fs::DirBuilder::new().mode(0o700).create(&root)?;
+    let marker=canonical_json(&serde_json::json!({"format_version":1,"fence":fence,"permanent":permanent,"backend_target":backend_target}))?;
+    let mut file=OpenOptions::new().create_new(true).write(true).mode(0o600).custom_flags(libc::O_NOFOLLOW|libc::O_CLOEXEC).open(root.join("owner.json"))?;
+    file.write_all(&marker)?; file.sync_all()?;
+    std::os::unix::fs::symlink(&backend_target,root.join("backend.sock"))?;
+    File::open(&root)?.sync_all()?; File::open(parent)?.sync_all()?;
+    Ok(ManagedEndpoints { root,marker,backend_target })
+}
+fn retire_endpoints(endpoints:ManagedEndpoints) -> Result<()> {
+    let parent=endpoints.root.parent().context("managed endpoint parent absent")?;
+    ensure!(parent.canonicalize()? == parent,"managed endpoint parent changed");
+    for directory in [parent,endpoints.root.as_path()] {
+        let meta=fs::symlink_metadata(directory)?; ensure!(meta.is_dir() && meta.uid()==unsafe { libc::geteuid() }
+            && meta.mode() & 0o777 == 0o700,"managed endpoint ownership changed");
+    }
+    let file=OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW|libc::O_CLOEXEC|libc::O_NONBLOCK).open(endpoints.root.join("owner.json"))?;
+    let meta=file.metadata()?; ensure!(meta.is_file() && meta.len()<=64*1024 && meta.uid()==unsafe { libc::geteuid() } && meta.mode() & 0o077==0,"managed endpoint marker changed");
+    let mut marker=Vec::new(); file.take(64*1024+1).read_to_end(&mut marker)?;
+    ensure!(marker==endpoints.marker && fs::read_link(endpoints.root.join("backend.sock"))?==endpoints.backend_target,
+        "managed endpoint binding changed; retain for recovery");
+    fs::remove_dir_all(&endpoints.root)?; File::open(parent)?.sync_all()?; Ok(())
+}
 impl ManagedReportMapping {
     fn for_execution(home: &Path) -> Self {
         Self { host_done_file: home.join(".rudder-reports/done.json"),
@@ -370,6 +410,7 @@ pub(crate) struct PreparedManagedLaunch {
     pub execution_profile: String,
     pub identity_home: PathBuf,
     pub identity_journal: PathBuf,
+    pub managed_run: crate::managed_store::ManagedRunLocation,
     pub server_command: Option<Vec<String>>,
     codex_api_key: Option<ManagedCodexApiKey>,
     spec: Option<ExecutionSpec>,
@@ -377,6 +418,9 @@ pub(crate) struct PreparedManagedLaunch {
 }
 impl PreparedManagedLaunch {
     pub(crate) fn take_codex_api_key(&mut self) -> Option<ManagedCodexApiKey> { self.codex_api_key.take() }
+    /// App calls only after the exact checkpoint receipt AND actual PTY exit.
+    /// This queues transient endpoint cleanup on Drop; permanent data/pins stay.
+    pub(crate) fn confirm_transient_settlement(&mut self) { if let Some(retirement)=&mut self.retirement { retirement.endpoints_safe=true; } }
     #[cfg(target_os = "linux")]
     pub(crate) fn prepare_handoff(&self) -> Result<rudder_engine::execution::handoff::ManagedExecutionHandoff> {
         let spec = self.execution_spec()?;
@@ -419,18 +463,21 @@ impl PreparedManagedLaunch {
 struct Retirement {
     root: PathBuf,
     marker: Vec<u8>,
-    store: rudder_engine::store::LocalStore,
     pins: Vec<String>,
     adopted: bool,
+    endpoints:Option<ManagedEndpoints>,
+    endpoints_safe:bool,
 }
 fn retire_unused(retirement: Retirement) -> Result<()> {
-    if retirement.adopted { return Ok(()); }
-    ensure!(fs::read(retirement.root.join("preparation.json"))? == retirement.marker,
+    if retirement.adopted && !retirement.endpoints_safe { return Ok(()); }
+    let file=OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW|libc::O_CLOEXEC|libc::O_NONBLOCK).open(retirement.root.join("preparation.json"))?;
+    ensure!(file.metadata()?.is_file() && file.metadata()?.len()<=64*1024,"managed preparation marker exceeds bound");
+    let mut marker=Vec::new(); file.take(64*1024+1).read_to_end(&mut marker)?;
+    ensure!(marker == retirement.marker,
         "managed preparation retirement identity changed");
-    // Each pin includes this request UUID; shared preparation/cache pins are
-    // deliberately retained. Never delete a manager owned by another attempt.
-    for pin in &retirement.pins { retirement.store.unpin(pin)?; }
-    fs::remove_dir_all(&retirement.root)?;
+    // Permanent history, workspace/checkpoints, reservation and pins survive
+    // every automatic cleanup. Only exact owned transient endpoints retire.
+    if let Some(endpoints)=retirement.endpoints { retire_endpoints(endpoints)?; }
     Ok(())
 }
 fn retirement_queue() -> Option<&'static SyncSender<Retirement>> {
@@ -447,7 +494,7 @@ impl Drop for PreparedManagedLaunch {
         // No filesystem, database or child waits on the App thread. On bounded
         // queue exhaustion the durable preparation marker and pins remain for
         // explicit reconciliation; no success/retirement is inferred.
-        if let Some(retirement) = self.retirement.take().filter(|r| !r.adopted) {
+        if let Some(retirement) = self.retirement.take().filter(|r| !r.adopted || r.endpoints_safe) {
             if let Some(queue) = retirement_queue() { let _ = queue.try_send(retirement); }
         }
         if let Some(spec) = &mut self.spec {
@@ -462,6 +509,18 @@ impl Drop for PreparedManagedLaunch {
 pub(crate) fn prepare_local(mut request: ManagedLocalLaunchRequest, cancelled: Arc<AtomicBool>) -> Result<PreparedManagedLaunch> {
     ensure!(cfg!(target_os = "linux"), "managed local execution requires a qualified Linux worker");
     let journal = Journal::open(&request.journal)?;
+    let managed_run = request.managed_store.run(&request.fence.run_id)?;
+    ensure!(request.managed_store.binding().home == request.home
+        && request.managed_store.binding().journal == request.journal
+        && request.managed_store.binding().project_id == request.fence.owner.project_id
+        && crate::managed_store::ManagedStore::open(&journal, request.managed_store.binding())? == request.managed_store,
+        "managed preparation differs from explicit prepared project identity");
+    let reserved = managed_run.reservation(&request.fence.attempt_id)?.context("durable private managed reservation missing")?;
+    ensure!(matches!(&reserved, ManagedRunSource::Reserved { fence, runnable_root }
+        if fence == &request.fence && runnable_root == &request.runnable_root), "managed preparation differs from durable reservation");
+    ensure!(!crate::gitio::native_run_dir(&request.managed_store.binding().repository, &request.fence.run_id).try_exists()?,
+        "legacy run projection exists; explicit managed recovery required");
+    validate_endpoint_parent(&request.endpoint_parent,&request.fence)?;
     let check = || -> Result<()> {
         ensure!(!cancelled.load(Ordering::Acquire), "managed launch preparation cancelled");
         request.fence.check_current(&journal)
@@ -474,6 +533,8 @@ pub(crate) fn prepare_local(mut request: ManagedLocalLaunchRequest, cancelled: A
         .all(|component| matches!(component, std::path::Component::RootDir | std::path::Component::Normal(_)))
         && request.private_root.file_name()
         .is_some_and(|n| n == request.fence.request_id.as_str()), "managed private root must bind its reserved request");
+    ensure!(request.private_root.parent() == Some(request.managed_store.binding().directory.join("preparations").as_path()),
+        "managed preparation must remain inside its permanent private namespace");
     ensure!((1..=24 * 60 * 60).contains(&request.timeout_seconds), "invalid managed execution timeout");
     ensure!(request.backend.backend() == request.credentials.backend,
         "selected credential profile belongs to another backend");
@@ -499,14 +560,16 @@ pub(crate) fn prepare_local(mut request: ManagedLocalLaunchRequest, cancelled: A
     ensure!(request.store.read_object(&source.projection_policy)? == canonical_json(&policy)?,
         "managed source policy differs from its selected workspace profile");
     check()?;
+    crate::managed_store::prepare_execution_parent(&request.managed_store)?;
     fs::DirBuilder::new().mode(0o700).create(&request.private_root)?;
     let marker = canonical_json(&serde_json::json!({"format_version":1,"fence":request.fence,
-        "runnable_root":request.runnable_root,"seed":seed_ref,"phase":"preparing"}))?;
+        "runnable_root":request.runnable_root,"seed":seed_ref,"operation_id":request.operation_id,"view_id":request.view_id,
+        "endpoint_parent":request.endpoint_parent,"endpoint_root":request.endpoint_parent.join(&request.fence.request_id),"phase":"preparing"}))?;
     let mut file = OpenOptions::new().create_new(true).write(true).mode(0o600)
         .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC).open(request.private_root.join("preparation.json"))?;
     file.write_all(&marker)?; file.sync_all()?; File::open(&request.private_root)?.sync_all()?;
     let mut retirement = Retirement { root: request.private_root.clone(), marker,
-        store: request.store.clone(), pins: Vec::new(), adopted: false };
+        pins: Vec::new(), adopted: false,endpoints:None,endpoints_safe:false };
     let prepared = (|| -> Result<PreparedManagedLaunch> {
         for (kind, root) in [("runnable", &request.runnable_root), ("seed", &seed_ref)] {
             let pin = format!("managed:{}:{kind}", request.fence.request_id);
@@ -533,10 +596,14 @@ pub(crate) fn prepare_local(mut request: ManagedLocalLaunchRequest, cancelled: A
         // is explicitly refused here rather than inventing one before RPC.
         fork_private_metadata(&request.seed, &private, binding.clone(), None)?;
         check()?;
-        for name in ["context", "state", "projections", "endpoints"] {
+        for name in ["context", "state", "projections"] {
             fs::DirBuilder::new().mode(0o700).create(request.private_root.join(name))?;
         }
-        let endpoint = request.private_root.join("workspace");
+        let execution_root = request.private_root.join("e");
+        let backend_target = execution_root.join("runs").join(&request.fence.attempt_id).join("tmp/cx.sock");
+        retirement.endpoints=Some(prepare_endpoints(&request.endpoint_parent,&request.fence,&request.private_root,backend_target)?);
+        let transient=&retirement.endpoints.as_ref().unwrap().root;
+        let endpoint = transient.join("workspace");
         let service = CommandServiceConfig { format_version: 1,
             view: RpcViewConfig { format_version: 1, attempt: binding, observation: observation.clone(),
                 socket: endpoint.join("workspace.sock"), identity_file: endpoint.join("identity.json"),
@@ -551,8 +618,7 @@ pub(crate) fn prepare_local(mut request: ManagedLocalLaunchRequest, cancelled: A
             runnable_root: request.runnable_root.clone(), source: runnable.source.clone(), seed: seed_ref.clone(),
             observation: observation.clone(), host_context: host_context.clone() };
         assignment.validate(&request.fence)?;
-        let execution_root = request.private_root.join("e");
-        let host_socket = execution_root.join("runs").join(&request.fence.attempt_id).join("tmp/cx.sock");
+        let host_socket = transient.join("backend.sock");
         ensure!(host_socket.as_os_str().as_encoded_bytes().len() < 100, "managed backend socket exceeds portable path bound");
         let guest_socket = PathBuf::from("/tmp/cx.sock");
         let (command, server_command, home_files) = prepare_backend(&request.fence, &request.backend, &request.native_guest, &guest_socket)?;
@@ -566,6 +632,7 @@ pub(crate) fn prepare_local(mut request: ManagedLocalLaunchRequest, cancelled: A
         let mut authority_roots = vec![private, request.private_root.join("context"), request.private_root.join("state"),
             request.private_root.join("projections"), request.journal.clone()];
         authority_roots.extend(protected_roots);
+        authority_roots.push(request.endpoint_parent.clone());
         let spec = ExecutionSpec { format_version: 3, execution_id: request.fence.attempt_id.clone(),
             operation_id: request.operation_id.clone(), execution_root, manager_root: manager.root().into(),
             store_root: request.store.root().into(), authority_roots,
@@ -575,12 +642,13 @@ pub(crate) fn prepare_local(mut request: ManagedLocalLaunchRequest, cancelled: A
                 run_id: request.fence.run_id.clone(), run_epoch: request.fence.run_epoch, owner_epoch: request.fence.owner.epoch }),
             workspace_observation: Some(WorkspaceObservationProfile { binding: observation, endpoint_directory: endpoint,
                 application: Some(HelperApplicationSpec { format_version: 1, kind: crate::workspace_vcs::KIND.into(),
-                    host_context, projection_directory: request.private_root.join("endpoints/vcs") }) }), timeout_seconds: request.timeout_seconds };
+                    host_context, projection_directory: transient.join("vcs") }) }), timeout_seconds: request.timeout_seconds };
         spec.validate()?;
         check()?;
         File::open(&request.private_root)?.sync_all()?;
         File::open(request.private_root.parent().context("managed root parent absent")?)?.sync_all()?;
         Ok(PreparedManagedLaunch { assignment, transport: ManagedTransportMapping { host_socket, guest_socket, guest_cwd: "/workspace".into() }, reports,
+            managed_run,
             execution_profile: request.backend.execution_profile().into(), identity_home: request.home.clone(),
             identity_journal: request.journal.clone(), server_command, codex_api_key, spec: Some(spec), retirement: None })
     })();

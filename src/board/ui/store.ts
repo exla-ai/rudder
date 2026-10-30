@@ -1,3 +1,4 @@
+import { streamBoardEvents } from "./events";
 import { useEffect, useReducer, useRef, useState } from "preact/hooks";
 import {
   type ActivityEntry,
@@ -91,9 +92,8 @@ export type UseBoard = {
   name: string;
 };
 
-// useBoardState: one GET /state to seed, then an EventSource for live deltas.
-// No polling. On error EventSource auto-reconnects; we flag "reconnecting" and
-// on the next open refetch /state so we never drift after a gap.
+// Every connection is authenticated and bounded. A fresh stream carries a full
+// snapshot; reconnect also re-seeds state to cover any gap before the stream.
 export function useBoardState(slug: string): UseBoard {
   const [state, dispatch] = useReducer(reducer, undefined, initialState);
   const [conn, setConn] = useState<ConnState>("connecting");
@@ -101,123 +101,47 @@ export function useBoardState(slug: string): UseBoard {
   const hadOpenedRef = useRef(false);
 
   useEffect(() => {
-    let cancelled = false;
+    const controller = new AbortController();
     hadOpenedRef.current = false;
-
-    async function seed() {
+    const seed = async () => {
       try {
-        const snap = await fetchState(slug);
-        if (cancelled) return;
+        const snap = await fetchState(slug, controller.signal);
+        if (controller.signal.aborted) return;
         setName(snap.name || slug);
         dispatch({ type: "SNAPSHOT", snapshot: snap });
-      } catch {
-        // EventSource snapshot frame will still seed us if this fails.
-      }
-    }
-
-    void seed();
-
-    const es = new EventSource(eventsUrl(slug));
-
-    es.addEventListener("open", () => {
-      if (cancelled) return;
-      // Reconnect after a drop: re-seed from /state to catch missed frames.
-      if (hadOpenedRef.current) void seed();
-      hadOpenedRef.current = true;
-      setConn("live");
-    });
-
-    es.addEventListener("snapshot", (e) => {
-      if (cancelled) return;
-      try {
-        const snap = JSON.parse((e as MessageEvent).data) as BoardSnapshot;
-        setName(snap.name || slug);
-        dispatch({ type: "SNAPSHOT", snapshot: snap });
-      } catch {
-        /* ignore malformed frame */
-      }
-    });
-
-    es.addEventListener("node.added", (e) => {
-      if (cancelled) return;
-      try {
-        dispatch({ type: "NODE_UPSERT", node: JSON.parse((e as MessageEvent).data) });
-      } catch {
-        /* ignore */
-      }
-    });
-
-    es.addEventListener("node.updated", (e) => {
-      if (cancelled) return;
-      try {
-        dispatch({ type: "NODE_UPSERT", node: JSON.parse((e as MessageEvent).data) });
-      } catch {
-        /* ignore */
-      }
-    });
-
-    es.addEventListener("node.removed", (e) => {
-      if (cancelled) return;
-      try {
-        const data = JSON.parse((e as MessageEvent).data);
-        const id = typeof data === "string" ? data : data.id;
-        if (id) dispatch({ type: "NODE_REMOVE", id });
-      } catch {
-        /* ignore */
-      }
-    });
-
-    es.addEventListener("edge.added", (e) => {
-      if (cancelled) return;
-      try {
-        dispatch({ type: "EDGE_UPSERT", edge: JSON.parse((e as MessageEvent).data) });
-      } catch {
-        /* ignore */
-      }
-    });
-
-    es.addEventListener("edge.removed", (e) => {
-      if (cancelled) return;
-      try {
-        const data = JSON.parse((e as MessageEvent).data);
-        if (data?.from && data?.to) dispatch({ type: "EDGE_REMOVE", from: data.from, to: data.to });
-      } catch {
-        /* ignore */
-      }
-    });
-
-    es.addEventListener("memory.updated", (e) => {
-      if (cancelled) return;
-      try {
-        const data = JSON.parse((e as MessageEvent).data);
-        const memory: MemoryEntry[] = Array.isArray(data) ? data : data.memory ?? [];
-        dispatch({ type: "MEMORY", memory });
-      } catch {
-        /* ignore */
-      }
-    });
-
-    es.addEventListener("activity.updated", (e) => {
-      if (cancelled) return;
-      try {
-        const data = JSON.parse((e as MessageEvent).data);
-        const activity: ActivityEntry[] = Array.isArray(data) ? data : data.activity ?? [];
-        dispatch({ type: "ACTIVITY", activity });
-      } catch {
-        /* ignore */
-      }
-    });
-
-    es.addEventListener("error", () => {
-      if (cancelled) return;
-      // EventSource reconnects on its own; surface the state, never blank out.
-      setConn(hadOpenedRef.current ? "reconnecting" : "connecting");
-    });
-
-    return () => {
-      cancelled = true;
-      es.close();
+      } catch { /* The stream snapshot can seed us if this read fails. */ }
     };
+    void seed();
+    void streamBoardEvents(eventsUrl(slug), {
+      signal: controller.signal,
+      open: () => {
+        if (controller.signal.aborted) return;
+        if (hadOpenedRef.current) void seed();
+        hadOpenedRef.current = true;
+        setConn("live");
+      },
+      reconnecting: () => { if (!controller.signal.aborted) setConn(hadOpenedRef.current ? "reconnecting" : "connecting"); },
+      consume: ({ event, data: encoded }) => {
+        if (controller.signal.aborted) return;
+        try {
+          const data = JSON.parse(encoded);
+          switch (event) {
+            case "snapshot": setName(data.name || slug); dispatch({ type: "SNAPSHOT", snapshot: data }); break;
+            case "node.added": case "node.updated": dispatch({ type: "NODE_UPSERT", node: data }); break;
+            case "node.removed": {
+              const id = typeof data === "string" ? data : data.id;
+              if (id) dispatch({ type: "NODE_REMOVE", id });
+              break;
+            }
+            case "edge.added": dispatch({ type: "EDGE_UPSERT", edge: data }); break;
+            case "edge.removed": if (data?.from && data?.to) dispatch({ type: "EDGE_REMOVE", from: data.from, to: data.to }); break;
+            case "memory.updated": dispatch({ type: "MEMORY", memory: Array.isArray(data) ? data : data.memory ?? [] }); break;
+            case "activity.updated": dispatch({ type: "ACTIVITY", activity: Array.isArray(data) ? data : data.activity ?? [] }); break;
+          }
+        } catch { /* Malformed bounded frames never become HTML or control input. */ }
+      },
+    });
+    return () => controller.abort();
   }, [slug]);
 
   return { state, conn, name };

@@ -1,3 +1,5 @@
+import { boardFetch } from "./access";
+
 // Shared contract types — mirror exactly what the daemon serves.
 // See plan §7. Do not drift these from the server.
 
@@ -121,14 +123,6 @@ async function jsonOrThrow<T>(res: Response): Promise<T> {
   return res.json() as Promise<T>;
 }
 
-// Headers for a mutating request: the per-daemon token the board shell injected.
-// A custom header also forces a CORS preflight cross-origin (which the board never
-// approves), so this both authenticates same-origin calls and blocks drive-by CSRF.
-function mutationHeaders(extra?: Record<string, string>): Record<string, string> {
-  const token = (typeof window !== "undefined" && window.__RUDDER_TOKEN__) || "";
-  return { "x-rudder-token": token, ...(extra ?? {}) };
-}
-
 // Usage dashboard payloads (shapes owned by src/usage.ts; duplicated here so the
 // browser bundle never imports node code).
 export type UsageRange = "7d" | "30d" | "90d";
@@ -198,27 +192,27 @@ export type MachineReport = {
 };
 
 export async function fetchTokenUsage(range: UsageRange): Promise<TokenUsageReport> {
-  return jsonOrThrow(await fetch(`/api/usage/tokens?range=${encodeURIComponent(range)}`));
+  return jsonOrThrow(await boardFetch(`/api/usage/tokens?range=${encodeURIComponent(range)}`));
 }
 
 export async function fetchQuota(force = false): Promise<QuotaReport> {
-  return jsonOrThrow(await fetch(`/api/usage/quota${force ? "?refresh=1" : ""}`));
+  return jsonOrThrow(await boardFetch(`/api/usage/quota${force ? "?refresh=1" : ""}`));
 }
 
 export async function fetchMachine(): Promise<MachineReport> {
-  return jsonOrThrow(await fetch("/api/usage/machine"));
+  return jsonOrThrow(await boardFetch("/api/usage/machine"));
 }
 
 export async function fetchProjects(): Promise<{ projects: ProjectSummary[] }> {
-  return jsonOrThrow(await fetch("/api/projects"));
+  return jsonOrThrow(await boardFetch("/api/projects"));
 }
 
-export async function fetchState(slug: string): Promise<BoardSnapshot> {
-  return jsonOrThrow(await fetch(`/api/projects/${encodeURIComponent(slug)}/state`));
+export async function fetchState(slug: string, signal?: AbortSignal): Promise<BoardSnapshot> {
+  return jsonOrThrow(await boardFetch(`/api/projects/${encodeURIComponent(slug)}/state`, { signal }));
 }
 
 export async function fetchLog(slug: string, id: string, tail = 200): Promise<string> {
-  const res = await fetch(
+  const res = await boardFetch(
     `/api/projects/${encodeURIComponent(slug)}/tasks/${encodeURIComponent(id)}/log?tail=${tail}`
   );
   if (!res.ok) {
@@ -241,7 +235,7 @@ export async function postTask(
   return jsonOrThrow(
     await fetchMutationWithRetry(`/api/projects/${encodeURIComponent(slug)}/tasks`, {
       method: "POST",
-      headers: mutationHeaders({ "content-type": "application/json" }),
+      headers: { "content-type": "application/json" },
       body: JSON.stringify({ prompt, requestId }),
     })
   );
@@ -252,17 +246,17 @@ export async function postMerge(
   id: string
 ): Promise<{ status: string; conflictedFiles?: string[] }> {
   return jsonOrThrow(
-    await fetch(`/api/projects/${encodeURIComponent(slug)}/tasks/${encodeURIComponent(id)}/merge`, {
+    await boardFetch(`/api/projects/${encodeURIComponent(slug)}/tasks/${encodeURIComponent(id)}/merge`, {
       method: "POST",
-      headers: mutationHeaders(),
+      headers: {},
     })
   );
 }
 
 export async function postCancel(slug: string, id: string): Promise<void> {
-  const res = await fetch(
+  const res = await boardFetch(
     `/api/projects/${encodeURIComponent(slug)}/tasks/${encodeURIComponent(id)}/cancel`,
-    { method: "POST", headers: mutationHeaders() }
+    { method: "POST", headers: {} }
   );
   if (!res.ok) {
     throw new Error(`${res.status} ${res.statusText}`);
@@ -290,7 +284,7 @@ export async function postSteer(
   return jsonOrThrow(
     await fetchMutationWithRetry(target, {
       method: "POST",
-      headers: mutationHeaders({ "content-type": "application/json" }),
+      headers: { "content-type": "application/json" },
       body: JSON.stringify({ instruction, requestId }),
     })
   );
@@ -301,21 +295,21 @@ function newClientRequestId(): string {
     `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}-${Math.random().toString(36).slice(2)}`;
 }
 
-async function fetchMutationWithRetry(input: RequestInfo | URL, init: RequestInit): Promise<Response> {
+async function fetchMutationWithRetry(input: string, init: RequestInit): Promise<Response> {
   try {
-    return await fetch(input, init);
+    return await boardFetch(input, init);
   } catch {
     // Loopback responses can still be lost during a daemon/browser handoff.
     // Retry once with the same requestId so the server's durable claim makes
     // the mutation idempotent.
     await new Promise((resolve) => setTimeout(resolve, 150));
-    return fetch(input, init);
+    return boardFetch(input, init);
   }
 }
 
 export async function fetchSteerReceipt(slug: string, requestId: string): Promise<SteerReceipt> {
   return jsonOrThrow(
-    await fetch(
+    await boardFetch(
       `/api/projects/${encodeURIComponent(slug)}/steer-receipts/${encodeURIComponent(requestId)}`,
     ),
   );

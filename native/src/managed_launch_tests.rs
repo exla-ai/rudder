@@ -11,6 +11,14 @@ impl Fixture {
     }
 }
 impl Drop for Fixture { fn drop(&mut self) { let _ = fs::remove_dir_all(&self.0); } }
+struct EndpointFixture(PathBuf);
+impl EndpointFixture {
+    fn new() -> Self {
+        let path=PathBuf::from("/tmp").join(format!("rme-{}",&uuid::Uuid::new_v4().simple().to_string()[..12]));
+        fs::DirBuilder::new().mode(0o700).create(&path).unwrap(); Self(path.canonicalize().unwrap())
+    }
+}
+impl Drop for EndpointFixture { fn drop(&mut self) { let _=fs::remove_dir_all(&self.0); } }
 fn fence() -> ManagedLaunchFence {
     ManagedLaunchFence { owner: OwnerFence { project_id: "project".into(), owner_id: "owner".into(), epoch: 1 },
         run_id: "run".into(), run_epoch: 1, attempt_id: uuid::Uuid::new_v4().to_string(), request_id: uuid::Uuid::new_v4().to_string() }
@@ -27,22 +35,49 @@ fn assignment(fence: &ManagedLaunchFence) -> WorkspaceAssignment {
         host_context: ProtectedHostContextRef { format_version: 1, path: "/private/launch.json".into(),
             sha256: "b".repeat(64), size_bytes: 1 } }
 }
+fn private_fixture() -> (crate::managed_store::tests::Fixture, crate::managed_store::ManagedStore, ManagedLaunchFence) {
+    let mut fixture=crate::managed_store::tests::Fixture::new(); let store=fixture.prepare(); let mut fence=fence(); fence.owner=fixture.owner.clone();
+    fence.run_epoch=fixture.journal.observe_run_attempt(&fence.owner,&fence.run_id,&fence.attempt_id,2).unwrap();
+    store.run(&fence.run_id).unwrap().persist_reservation(&ManagedRunSource::Reserved { fence:fence.clone(),
+        runnable_root:ObjectRef::from_bytes(ObjectKind::RunnableRoot,b"runnable") }).unwrap();
+    (fixture,store,fence)
+}
 
 #[test]
 fn assignment_reconciles_exact_request_without_widening_or_reminting_identity() {
-    let fixture = Fixture::new(); let fence = fence(); let assignment = assignment(&fence);
-    persist_assignment(&fixture.0, &assignment).unwrap();
-    persist_assignment(&fixture.0, &assignment).unwrap();
-    assert_eq!(read_assignment(&fixture.0, &fence).unwrap(), Some(assignment.clone()));
-    assert_eq!(assignment_for_attempt(&fixture.0, &fence.owner, &fence.run_id, fence.run_epoch, &fence.attempt_id).unwrap(), Some(assignment.clone()));
+    let (fixture,_store,fence) = private_fixture(); let assignment = assignment(&fence);
+    persist_assignment(&fixture.home, &assignment).unwrap();
+    persist_assignment(&fixture.home, &assignment).unwrap();
+    assert_eq!(read_assignment(&fixture.home, &fence).unwrap(), Some(assignment.clone()));
+    assert_eq!(assignment_for_attempt(&fixture.home, &fence.owner, &fence.run_id, fence.run_epoch, &fence.attempt_id).unwrap(), Some(assignment.clone()));
     let mut changed = assignment.clone(); changed.observation.namespace = uuid::Uuid::new_v4().to_string();
-    assert!(persist_assignment(&fixture.0, &changed).is_err());
+    assert!(persist_assignment(&fixture.home, &changed).is_err());
     let mut other = fence.clone(); other.request_id = uuid::Uuid::new_v4().to_string();
-    assert!(read_assignment(&fixture.0, &other).is_err());
+    assert!(read_assignment(&fixture.home, &other).is_err());
     other = fence.clone(); other.run_epoch += 1;
-    assert!(read_assignment(&fixture.0, &other).is_err());
+    assert!(read_assignment(&fixture.home, &other).is_err());
     other = fence.clone(); other.attempt_id = uuid::Uuid::new_v4().to_string();
-    assert!(read_assignment(&fixture.0, &other).unwrap().is_none());
+    assert!(read_assignment(&fixture.home, &other).unwrap().is_none());
+}
+
+#[test]
+fn managed_inventory_assignment_reads_established_location_without_opening_journal() {
+    let (mut fixture,store,fence)=private_fixture(); let assigned=assignment(&fence);
+    persist_assignment(&fixture.home,&assigned).unwrap(); let location=store.run(&fence.run_id).unwrap();
+    // Close the owned test connection, then make a new journal open impossible.
+    // This tests the immutable read only, never treating the saved fence as live.
+    let replacement=Journal::open(fixture.home.join("replacement.sqlite")).unwrap();
+    drop(std::mem::replace(&mut fixture.journal,replacement));
+    let path=fixture.home.join("fabric/journal.sqlite"); fs::rename(&path,fixture.home.join("offline.sqlite")).unwrap(); fs::create_dir(&path).unwrap();
+    assert_eq!(assignment_for_location(&location,&fence.owner,&fence.run_id,fence.run_epoch,&fence.attempt_id).unwrap(),Some(assigned.clone()));
+    let mut other=fence.owner.clone(); other.epoch+=1;
+    assert!(assignment_for_location(&location,&other,&fence.run_id,fence.run_epoch,&fence.attempt_id).is_err());
+    assert!(assignment_for_location(&location,&fence.owner,"foreign-run",fence.run_epoch,&fence.attempt_id).is_err());
+    assert!(assignment_for_location(&location,&fence.owner,&fence.run_id,fence.run_epoch+1,&fence.attempt_id).is_err());
+    let assignment_path=assignment_path(&fixture.home,&fence).unwrap(); fs::remove_file(&assignment_path).unwrap();
+    assert!(assignment_for_location(&location,&fence.owner,&fence.run_id,fence.run_epoch,&fence.attempt_id).unwrap().is_none());
+    fs::write(&assignment_path,b"malformed").unwrap(); fs::set_permissions(&assignment_path,fs::Permissions::from_mode(0o600)).unwrap();
+    assert!(assignment_for_location(&location,&fence.owner,&fence.run_id,fence.run_epoch,&fence.attempt_id).is_err()); assert!(path.is_dir());
 }
 
 #[test]
@@ -66,15 +101,11 @@ fn durable_managed_source_markers_remain_recovery_evidence_and_invalid_presence_
         let record = serde_json::json!({"id":"run","task":"owned task","mode":"execute","status":"done", "managedLocal":marker,
             "session":{"nativeSessionId":"saved-session-is-not-liveness"}});
         let run = crate::gitio::agent_from_run_record(&fixture.0, record).unwrap();
-        assert_eq!(run.managed_local, Some(source));
+        assert_eq!(run.managed_local, Some(ManagedRunSource::Quarantined));
         assert_eq!(run.status, super::super::AgentStatus::Orphaned);
         assert!(!crate::launch::can_resume_agent(&run));
-        crate::gitio::save_native_run_record(&fixture.0, &run).unwrap();
-        let bytes = fs::read(crate::gitio::native_run_dir(&fixture.0, "run").join("run.json")).unwrap();
-        let saved: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        assert!(saved.get("managedLocal").is_some());
-        assert_eq!(saved["vcs"], "fabric");
-        assert!(crate::gitio::agent_from_run_record(&fixture.0, saved).unwrap().managed_local.is_some());
+        assert!(crate::gitio::save_native_run_record(&fixture.0, &run).is_err());
+        assert!(!crate::gitio::native_run_dir(&fixture.0,"run").join("run.json").exists());
     }
     let mut invalid = serde_json::to_value(ManagedRunSource::Reserved { fence, runnable_root: ObjectRef::from_bytes(ObjectKind::RunnableRoot, b"owned") }).unwrap();
     invalid["unknown_authority"] = serde_json::json!(true);
@@ -97,7 +128,7 @@ fn fsynced_reservation_survives_lost_run_projection_and_refuses_conflicting_requ
     persist_reservation(&path, &reserved).unwrap(); persist_reservation(&path, &reserved).unwrap();
     let run = crate::gitio::agent_from_run_record(&fixture.0, serde_json::json!({"id":"run","task":"owned","status":"done",
         "session":{"nativeSessionId":"old-host-session"}})).unwrap();
-    assert_eq!(run.managed_local, Some(reserved.clone()));
+    assert_eq!(run.managed_local, Some(ManagedRunSource::Quarantined));
     assert_eq!(run.status, super::super::AgentStatus::Orphaned);
     assert!(!crate::launch::can_resume_agent(&run));
     let mut changed = fence; changed.request_id = uuid::Uuid::new_v4().to_string();
@@ -111,15 +142,58 @@ fn fsynced_reservation_survives_lost_run_projection_and_refuses_conflicting_requ
 }
 
 #[test]
+fn experimental_missing_and_corrupt_run_projections_remain_visible_without_import_or_rewrite() {
+    let fixture=Fixture::new(); let reserved=ManagedRunSource::Reserved { fence:fence(), runnable_root:ObjectRef::from_bytes(ObjectKind::RunnableRoot,b"owned") };
+    let directory=crate::gitio::native_run_dir(&fixture.0,"run"); let marker=directory.join("managed-local.json");
+    persist_reservation(&marker,&reserved).unwrap(); let original=fs::read(&marker).unwrap();
+    for corrupt in [false,true] {
+        if corrupt { fs::write(directory.join("run.json"),b"partial JSON").unwrap(); }
+        let rows=crate::gitio::load_persisted_agents(&fixture.0); assert_eq!(rows.len(),1);
+        assert_eq!(rows[0].managed_local,Some(ManagedRunSource::Quarantined)); assert!(rows[0].managed_store.is_none());
+        assert_eq!(rows[0].status,super::super::AgentStatus::Orphaned);
+        assert!(crate::gitio::save_native_run_record(&fixture.0,&rows[0]).is_err());
+        assert_eq!(fs::read(&marker).unwrap(),original);
+    }
+}
+
+#[test]
+fn managed_transient_endpoints_require_explicit_short_private_parent_and_exact_binding() {
+    let fixture=Fixture::new(); let endpoints_parent=EndpointFixture::new(); let parent=endpoints_parent.0.clone(); let fence=fence();
+    let public=fixture.0.join("public"); fs::DirBuilder::new().mode(0o755).create(&public).unwrap();
+    assert!(validate_endpoint_parent(&public,&fence).is_err()); assert!(!public.join(&fence.request_id).exists());
+    let alias=fixture.0.join("alias"); std::os::unix::fs::symlink(&parent,&alias).unwrap(); assert!(validate_endpoint_parent(&alias,&fence).is_err());
+    let long=parent.join("long".repeat(30)); fs::DirBuilder::new().mode(0o700).create(&long).unwrap(); assert!(validate_endpoint_parent(&long,&fence).is_err());
+    let permanent=fixture.0.join("permanent"); fs::create_dir(&permanent).unwrap(); fs::write(permanent.join("history"),b"retain").unwrap();
+    let target=permanent.join("e/runs/attempt/tmp/cx.sock");
+    let endpoints=prepare_endpoints(&parent,&fence,&permanent,target.clone()).unwrap();
+    assert!(endpoints.root.join("workspace/workspace.sock").as_os_str().as_encoded_bytes().len()<100);
+    assert_eq!(fs::read_link(endpoints.root.join("backend.sock")).unwrap(),target);
+    let endpoint_root=endpoints.root.clone(); retire_endpoints(endpoints).unwrap();
+    assert!(!endpoint_root.exists()); assert_eq!(fs::read(permanent.join("history")).unwrap(),b"retain");
+}
+
+#[test]
+fn managed_endpoint_cleanup_refuses_changed_marker_and_never_deletes_permanent_state() {
+    let fixture=Fixture::new(); let endpoints_parent=EndpointFixture::new(); let parent=endpoints_parent.0.clone();
+    let permanent=fixture.0.join("permanent"); fs::create_dir(&permanent).unwrap(); let marker=b"owned preparation".to_vec(); fs::write(permanent.join("preparation.json"),&marker).unwrap();
+    let endpoints=prepare_endpoints(&parent,&fence(),&permanent,permanent.join("cx.sock")).unwrap(); let root=endpoints.root.clone(); let original=endpoints.marker.clone();
+    fs::write(root.join("owner.json"),b"changed").unwrap();
+    assert!(retire_endpoints(ManagedEndpoints { root:root.clone(),marker:original.clone(),backend_target:permanent.join("cx.sock") }).is_err());
+    assert!(root.exists()); fs::write(root.join("owner.json"),original).unwrap();
+    let retirement=Retirement { root:permanent.clone(),marker,pins:vec!["permanent-pin".into()],adopted:true,endpoints:Some(endpoints),endpoints_safe:true };
+    retire_unused(retirement).unwrap(); assert!(!root.exists()); assert!(permanent.join("preparation.json").exists());
+}
+
+#[test]
 fn assignment_files_refuse_symlinks_and_shared_modes() {
-    let fixture = Fixture::new(); let fence = fence(); let assignment = assignment(&fence);
-    persist_assignment(&fixture.0, &assignment).unwrap();
-    let path = assignment_path(&fixture.0, &fence).unwrap();
+    let (fixture,_store,fence) = private_fixture(); let assignment = assignment(&fence);
+    persist_assignment(&fixture.home, &assignment).unwrap();
+    let path = assignment_path(&fixture.home, &fence).unwrap();
     fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
-    assert!(read_assignment(&fixture.0, &fence).is_err());
+    assert!(read_assignment(&fixture.home, &fence).is_err());
     fs::remove_file(&path).unwrap();
     std::os::unix::fs::symlink("missing", path).unwrap();
-    assert!(read_assignment(&fixture.0, &fence).is_err());
+    assert!(read_assignment(&fixture.home, &fence).is_err());
 }
 
 #[test]

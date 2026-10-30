@@ -940,10 +940,8 @@ async function runNativeDashboard(): Promise<boolean> {
     const repoRoot = findRepoRoot();
     if (repoRoot) {
       board = await ensureBoardRunning(repoRoot, { open: false, scheduler: false });
-      // Hand the native child a deep link to THIS project's board so the `o` key /
-      // `/web` opens straight into the current project (not the all-projects index).
-      // The URL itself stays hidden in the TUI; the hotkey is the way in, and the
-      // board's "all projects" link is the way back out to other projects.
+      // Credential-free discovery hints only. Native browser callbacks use the
+      // private board endpoint; tickets and bearer sessions never enter env.
       env.RUDDER_BOARD_URL = board.projectUrl;
       env.RUDDER_BOARD_PORT = String(board.port);
     }

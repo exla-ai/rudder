@@ -1,71 +1,19 @@
-import { spawn } from "node:child_process";
-import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import fsp from "node:fs/promises";
 import http from "node:http";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { BoardAuthority, type BoardSession, type BoardTarget } from "./authority.js";
+import { openBoardBrowser, serveBoardHostAccess } from "./host-access.js";
 
-// Per-daemon secret. The SPA shell embeds it (only loopback callers ever receive
-// the shell — see the Host check below) and the browser echoes it back as the
-// `x-rudder-token` header on every mutating request. A custom header forces a CORS
-// preflight cross-origin (which this server never approves) and the value is
-// unguessable, so a drive-by web page cannot forge a steer/inject/merge/cancel.
-const BOARD_TOKEN = randomBytes(24).toString("hex");
-
-// Cap request bodies so an unauthenticated POST can't buffer unbounded memory.
 const MAX_BODY_BYTES = 1_000_000;
 
-/** This process's board token (exported for tests; it is regenerated each start). */
-export function getBoardToken(): string {
-  return BOARD_TOKEN;
-}
-
-/** The board binds 127.0.0.1 only, so a legitimate Host header is always loopback.
- *  Rejecting anything else defeats DNS-rebinding: an attacker page whose hostname
- *  resolves to 127.0.0.1 still sends its own (non-loopback) Host. */
 export function isLoopbackHost(req: IncomingMessage): boolean {
   const host = (req.headers.host ?? "").trim().toLowerCase();
   const name = host.replace(/:\d+$/, "");
   return name === "127.0.0.1" || name === "localhost" || name === "[::1]" || name === "::1";
-}
-
-function isLoopbackOrigin(origin: string): boolean {
-  try {
-    const h = new URL(origin).hostname.toLowerCase();
-    return h === "127.0.0.1" || h === "localhost" || h === "::1";
-  } catch {
-    return false;
-  }
-}
-
-export function hasValidToken(req: IncomingMessage): boolean {
-  const header = req.headers["x-rudder-token"];
-  const token = Array.isArray(header) ? header[0] : header;
-  if (typeof token !== "string" || token.length !== BOARD_TOKEN.length) {
-    return false;
-  }
-  try {
-    return timingSafeEqual(Buffer.from(token), Buffer.from(BOARD_TOKEN));
-  } catch {
-    return false;
-  }
-}
-
-/** Guard every state-mutating request. Returns true (after writing a 403) when the
- *  request must be denied: a non-loopback Origin, or a missing/invalid token. */
-function denyMutation(req: IncomingMessage, res: ServerResponse): boolean {
-  const origin = req.headers.origin;
-  if (typeof origin === "string" && origin.length > 0 && !isLoopbackOrigin(origin)) {
-    sendJson(res, 403, { error: "forbidden origin" });
-    return true;
-  }
-  if (!hasValidToken(req)) {
-    sendJson(res, 403, { error: "missing or invalid board token" });
-    return true;
-  }
-  return false;
 }
 
 import { findProjectBySlug, loadProjects, loadRunRecord, outputPath, projectStateDir, runsDir } from "../state.js";
@@ -95,6 +43,8 @@ import type {
 export type BoardDaemonHandle = {
   port: number;
   url: string;
+  instanceId: string;
+  bootstrapUrl: (target?: BoardTarget) => string;
   close: () => Promise<void>;
 };
 
@@ -113,18 +63,19 @@ const BOARD_JS_PATH = fileURLToPath(new URL("./board.js", import.meta.url));
 const BOARD_CSS_PATH = fileURLToPath(new URL("./board.css", import.meta.url));
 const logger = createLogger("board", { fileName: "daemon.log" });
 
-type SseClient = {
-  res: ServerResponse;
+type SseClient = { res: ServerResponse; session: BoardSession };
+type BoardProjection = {
+  authority: BoardAuthority;
+  sseClients: Map<string, Set<SseClient>>;
+  watchers: Map<string, fs.FSWatcher>;
+  decisionsWatchers: Map<string, fs.FSWatcher>;
+  watchTimers: Map<string, ReturnType<typeof setTimeout>>;
+  lastNodes: Map<string, Map<string, BoardNode>>;
+  lastEdges: Map<string, Map<string, BoardEdge>>;
+  lastMemory: Map<string, string>;
+  lastActivity: Map<string, string>;
+  broadcasts: Map<string, { again: boolean }>;
 };
-
-// One Set of SSE clients per slug, plus one fs.watch per watched runs dir.
-const sseClients = new Map<string, Set<SseClient>>();
-const watchers = new Map<string, fs.FSWatcher>();
-// A second watch per slug on the tracked DECISIONS.md at the repo root: it lives
-// outside .rudder, so a sibling decision (or `rudder remember`) must trigger a
-// re-broadcast (memory.updated SSE) the same way a run/graph change does.
-const decisionsWatchers = new Map<string, fs.FSWatcher>();
-const watchTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
 export async function startBoardDaemon(opts: {
   port: number;
@@ -135,29 +86,35 @@ export async function startBoardDaemon(opts: {
   controlMode?: BoardControlMode;
 }): Promise<BoardDaemonHandle> {
   const controlMode = opts.controlMode ?? "projector";
+  let slug = "";
+  try {
+    const projects = await loadProjects();
+    slug = projects.find((entry) => sameRepoPath(entry.repoRoot, opts.repoRoot))?.slug ?? "";
+  } catch { /* A new project can still open its index. */ }
+  const authority = new BoardAuthority(slug, controlMode);
+  const state: BoardProjection = { authority, sseClients: new Map(), watchers: new Map(),
+    decisionsWatchers: new Map(), watchTimers: new Map(), lastNodes: new Map(), lastEdges: new Map(),
+    lastMemory: new Map(), lastActivity: new Map(), broadcasts: new Map() };
   // Subscribe the SSE broadcaster to the shared bus: node.*/schedule.*/merge.*
   // events re-broadcast a fresh snapshot to every connected client (simplest
   // correct projection; the SPA always rebuilds from the snapshot on connect).
   let unsubscribe: (() => void) | undefined;
   if (opts.bus) {
     unsubscribe = opts.bus.subscribe(() => {
-      for (const slug of sseClients.keys()) {
-        void rebroadcastForSlug(slug);
+      for (const slug of state.sseClients.keys()) {
+        void rebroadcastForSlug(slug, state);
       }
     });
   }
 
-  const server = http.createServer((req, res) => {
-    handleRequest(req, res, opts.bus, controlMode, opts.repoRoot).catch((error) => {
-      const message = error instanceof Error ? error.message : String(error);
+  const server = http.createServer({ maxHeaderSize: 8192, headersTimeout: 5000, requestTimeout: 5000,
+    keepAliveTimeout: 5000, connectionsCheckingInterval: 500 }, (req, res) => {
+    handleRequest(req, res, opts.bus, controlMode, opts.repoRoot, state).catch(() => {
       logger.warn("board request failed", {
         method: req.method,
-        url: req.url,
-        repoRoot: opts.repoRoot,
-        error: message,
       });
       if (!res.headersSent) {
-        sendJson(res, 500, { error: message });
+        sendJson(res, 500, { error: "board request failed" });
       } else {
         try {
           res.end();
@@ -167,34 +124,46 @@ export async function startBoardDaemon(opts: {
       }
     });
   });
+  server.maxConnections = 128;
+  server.maxRequestsPerSocket = 100;
 
-  await new Promise<void>((resolve, reject) => {
-    server.once("error", reject);
-    server.listen(opts.port, "127.0.0.1", () => {
-      server.removeListener("error", reject);
-      resolve();
+  try {
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(opts.port, "127.0.0.1", () => {
+        server.removeListener("error", reject);
+        resolve();
+      });
     });
-  });
+  } catch (error) { authority.close(); unsubscribe?.(); throw error; }
 
   const address = server.address();
   const port = typeof address === "object" && address ? address.port : opts.port;
-  const url = `http://127.0.0.1:${port}`;
+  const url = new URL(`http://127.0.0.1:${port}`).origin;
+  authority.bindOrigin(url);
+  let host: Awaited<ReturnType<typeof serveBoardHostAccess>>;
+  try { host = await serveBoardHostAccess(opts.repoRoot, authority); }
+  catch (error) { authority.close(); server.close(); unsubscribe?.(); throw error; }
 
-  const close = async (): Promise<void> => {
+  let closing: Promise<void> | undefined;
+  const close = (): Promise<void> => closing ??= (async () => {
+    authority.close();
+    server.closeAllConnections();
+    await host.close();
     unsubscribe?.();
-    for (const [, timer] of watchTimers) {
+    for (const [, timer] of state.watchTimers) {
       clearTimeout(timer);
     }
-    watchTimers.clear();
-    for (const [, watcher] of watchers) {
+    state.watchTimers.clear();
+    for (const [, watcher] of state.watchers) {
       watcher.close();
     }
-    watchers.clear();
-    for (const [, watcher] of decisionsWatchers) {
+    state.watchers.clear();
+    for (const [, watcher] of state.decisionsWatchers) {
       watcher.close();
     }
-    decisionsWatchers.clear();
-    for (const [, clients] of sseClients) {
+    state.decisionsWatchers.clear();
+    for (const [, clients] of state.sseClients) {
       for (const client of clients) {
         try {
           client.res.end();
@@ -203,24 +172,15 @@ export async function startBoardDaemon(opts: {
         }
       }
     }
-    sseClients.clear();
+    state.sseClients.clear();
     await new Promise<void>((resolve) => server.close(() => resolve()));
-  };
-
-  // Determine this repo's slug for the open-browser convenience landing.
-  let slug = "";
-  try {
-    const projects = await loadProjects();
-    slug = projects.find((entry) => sameRepoPath(entry.repoRoot, opts.repoRoot))?.slug ?? "";
-  } catch {
-    slug = "";
-  }
+  })();
 
   if (opts.open) {
-    openBrowser(slug ? `${url}/rudder/${slug}` : `${url}/rudder`);
+    await openBoardBrowser(authority.bootstrapUrl()).catch(() => logger.warn("browser opener is unavailable"));
   }
 
-  return { port, url, close };
+  return { port, url, instanceId: authority.instanceId, bootstrapUrl: (target) => authority.bootstrapUrl(target), close };
 }
 
 async function handleRequest(
@@ -229,15 +189,45 @@ async function handleRequest(
   bus: RudderBus | undefined,
   controlMode: BoardControlMode,
   ownerRepoRoot: string,
+  state: BoardProjection,
 ): Promise<void> {
   const url = new URL(req.url || "/", "http://127.0.0.1");
   const pathname = decodeURIComponent(url.pathname);
   const method = (req.method || "GET").toUpperCase();
 
   // Anti-DNS-rebinding: the board is loopback-only, so reject any request whose Host
-  // is not loopback before it can read state or serve the token-bearing shell.
-  if (!isLoopbackHost(req)) {
+  // is not the bound loopback origin before serving even the neutral shell.
+  res.setHeader("Cache-Control", "no-store");
+  res.setHeader("Referrer-Policy", "no-referrer");
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; base-uri 'none'; frame-ancestors 'none'; object-src 'none'; form-action 'self'");
+  if (!isLoopbackHost(req) || !state.authority.matchesOrigin(req)) {
     sendJson(res, 403, { error: "forbidden host" });
+    return;
+  }
+
+  if (pathname === "/api/board/descriptor" && method === "GET") {
+    sendJson(res, 200, state.authority.descriptor());
+    return;
+  }
+  if (pathname === "/api/board/session" && method === "POST") {
+    const body = await readJsonBody(req, 4096);
+    const exchanged = Object.keys(body).sort().join(",") === "instance_id,ticket"
+      ? state.authority.exchange(req, body.ticket, body.instance_id) : null;
+    sendJson(res, exchanged ? 200 : 401, exchanged ?? { error: "Board access is unavailable" });
+    return;
+  }
+  let session: BoardSession | null = null;
+  if (pathname.startsWith("/api/")) {
+    session = state.authority.authenticate(req);
+    if (!session) { sendJson(res, 401, { error: "Open this board from Rudder to connect" }); return; }
+  }
+  if (pathname === "/api/board/session" && method === "GET") {
+    sendJson(res, 200, state.authority.info(session!));
+    return;
+  }
+  if (pathname === "/api/board/session/renew" && method === "POST") {
+    sendJson(res, 200, state.authority.renew(session!));
     return;
   }
 
@@ -255,7 +245,7 @@ async function handleRequest(
   // resources. Read-only, machine-wide (not per project), loopback-only like
   // everything else here.
   if (method === "GET" && (pathname === "/usage" || pathname === "/rudder/usage")) {
-    sendHtml(res, renderShell("", controlMode, false, "usage"));
+    sendHtml(res, renderShell());
     return;
   }
   if (method === "GET" && pathname === "/api/usage/tokens") {
@@ -296,23 +286,19 @@ async function handleRequest(
   if (apiMatch) {
     const slug = apiMatch[1] ?? "";
     const rest = apiMatch[2] ?? "";
-    await handleProjectApi(req, res, method, slug, rest, url, bus, controlMode, ownerRepoRoot);
+    await handleProjectApi(req, res, method, slug, rest, url, bus, controlMode, ownerRepoRoot, state, session!);
     return;
   }
 
   // SPA shell for the index and per-project routes.
   if (method === "GET" && (pathname === "/" || pathname === "/rudder")) {
-    sendHtml(res, renderShell("", controlMode, false));
+    sendHtml(res, renderShell());
     return;
   }
   const slugMatch = pathname.match(/^\/rudder\/([^/]+)\/?$/);
   if (method === "GET" && slugMatch) {
     const slug = slugMatch[1] ?? "";
-    const project = await findProjectBySlug(slug);
-    const canMutate = Boolean(
-      project && sameRepoPath(project.repoRoot, ownerRepoRoot),
-    );
-    sendHtml(res, renderShell(slug, controlMode, canMutate));
+    sendHtml(res, renderShell());
     return;
   }
 
@@ -326,21 +312,19 @@ async function handleProjectApi(
   slug: string,
   rest: string,
   url: URL,
-  bus?: RudderBus,
+  bus: RudderBus | undefined,
   controlMode: BoardControlMode = "projector",
   ownerRepoRoot = "",
+  state: BoardProjection,
+  session: BoardSession,
 ): Promise<void> {
+  if (!state.authority.valid(session)) { sendJson(res, 401, { error: "Board session expired" }); return; }
   const project = await findProjectBySlug(slug);
   if (!project) {
     sendJson(res, 404, { error: `unknown project: ${slug}` });
     return;
   }
 
-  // Every mutating route is a POST. Require the secret token (+ loopback origin)
-  // before any of them run, so a cross-site page cannot steer/inject/merge/cancel.
-  if (method === "POST" && denyMutation(req, res)) {
-    return;
-  }
   // One daemon owns exactly one repository's scheduler or native-projector
   // channel. Other registered projects remain readable in the overview, but
   // mutations here would route work to the wrong owner.
@@ -362,7 +346,7 @@ async function handleProjectApi(
   }
 
   if (rest === "/events" && method === "GET") {
-    await handleSse(req, res, project);
+    await handleSse(req, res, project, state, session);
     return;
   }
 
@@ -958,67 +942,47 @@ async function handleSse(
   req: IncomingMessage,
   res: ServerResponse,
   project: ProjectEntry,
+  state: BoardProjection,
+  session: BoardSession,
 ): Promise<void> {
-  res.writeHead(200, {
-    "content-type": "text/event-stream",
-    "cache-control": "no-cache, no-transform",
-    connection: "keep-alive",
-  });
+  const release = state.authority.registerStream(session, () => res.destroy());
+  if (!release) { sendJson(res, 429, { error: "Board stream capacity is busy" }); return; }
+  res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-store", connection: "keep-alive" });
   res.write(": connected\n\n");
-
-  const client: SseClient = { res };
-  let set = sseClients.get(project.slug);
-  if (!set) {
-    set = new Set();
-    sseClients.set(project.slug, set);
-  }
-  set.add(client);
-  ensureWatcher(project);
-
-  // Full snapshot on connect.
-  const snapshot = await buildSnapshot(project);
-  writeSseFrame(res, "snapshot", snapshot);
-
+  const client: SseClient = { res, session };
+  let clients = state.sseClients.get(project.slug);
+  if (!clients) { clients = new Set(); state.sseClients.set(project.slug, clients); }
+  clients.add(client);
+  let cleaned = false;
   const ping = setInterval(() => {
-    try {
-      res.write(": ping\n\n");
-    } catch {
-      // ignore
-    }
-  }, 15000);
-  ping.unref?.();
-
-  const cleanup = (): void => {
-    clearInterval(ping);
-    const clients = sseClients.get(project.slug);
-    if (clients) {
-      clients.delete(client);
-      if (clients.size === 0) {
-        sseClients.delete(project.slug);
-        const watcher = watchers.get(project.slug);
-        if (watcher) {
-          watcher.close();
-          watchers.delete(project.slug);
-        }
-        const decisionsWatcher = decisionsWatchers.get(project.slug);
-        if (decisionsWatcher) {
-          decisionsWatcher.close();
-          decisionsWatchers.delete(project.slug);
-        }
-        const timer = watchTimers.get(project.slug);
-        if (timer) {
-          clearTimeout(timer);
-          watchTimers.delete(project.slug);
-        }
-      }
+    if (!state.authority.valid(session) || res.writableLength > 8 * 1024 * 1024) { res.destroy(); return; }
+    res.write(": ping\n\n");
+  }, 15_000);
+  ping.unref();
+  const cleanup = () => {
+    if (cleaned) return;
+    cleaned = true; release(); clearInterval(ping);
+    const clients = state.sseClients.get(project.slug);
+    clients?.delete(client);
+    if (clients?.size === 0) {
+      state.sseClients.delete(project.slug);
+      state.watchers.get(project.slug)?.close(); state.watchers.delete(project.slug);
+      state.decisionsWatchers.get(project.slug)?.close(); state.decisionsWatchers.delete(project.slug);
+      clearTimeout(state.watchTimers.get(project.slug)); state.watchTimers.delete(project.slug);
+      state.lastNodes.delete(project.slug); state.lastEdges.delete(project.slug);
+      state.lastMemory.delete(project.slug); state.lastActivity.delete(project.slug);
     }
   };
-  req.on("close", cleanup);
-  res.on("close", cleanup);
+  req.once("aborted", cleanup);
+  res.once("close", cleanup);
+  ensureWatcher(project, state);
+  try { writeSseFrame(state, client, "snapshot", await buildSnapshot(project)); }
+  catch { res.destroy(); }
+  if (res.destroyed) cleanup();
 }
 
-function ensureWatcher(project: ProjectEntry): void {
-  if (watchers.has(project.slug)) {
+function ensureWatcher(project: ProjectEntry, state: BoardProjection): void {
+  if (state.watchers.has(project.slug)) {
     return;
   }
   // Watch the whole .rudder dir recursively: this covers both runs/<id>/*.json
@@ -1033,26 +997,26 @@ function ensureWatcher(project: ProjectEntry): void {
   }
   let watcher: fs.FSWatcher;
   try {
-    watcher = fs.watch(dir, { recursive: true }, () => scheduleBroadcast(project));
+    watcher = fs.watch(dir, { recursive: true }, () => scheduleBroadcast(project, state));
   } catch {
     try {
       // Non-recursive fallback: watch the runs dir (most active) since some
       // platforms reject recursive watches.
-      watcher = fs.watch(runsPath, () => scheduleBroadcast(project));
+      watcher = fs.watch(runsPath, () => scheduleBroadcast(project, state));
     } catch {
       return;
     }
   }
   watcher.on("error", () => undefined);
-  watchers.set(project.slug, watcher);
-  ensureDecisionsWatcher(project);
+  state.watchers.set(project.slug, watcher);
+  ensureDecisionsWatcher(project, state);
 }
 
 // Watch the repo-root DECISIONS.md (created on first render if absent) so an
 // agent or `rudder remember` appending a decision fires a re-broadcast and the
 // memory.updated SSE, exactly like a run/graph change inside .rudder.
-function ensureDecisionsWatcher(project: ProjectEntry): void {
-  if (decisionsWatchers.has(project.slug)) {
+function ensureDecisionsWatcher(project: ProjectEntry, state: BoardProjection): void {
+  if (state.decisionsWatchers.has(project.slug)) {
     return;
   }
   const decisionsPath = path.join(project.repoRoot, "DECISIONS.md");
@@ -1061,43 +1025,39 @@ function ensureDecisionsWatcher(project: ProjectEntry): void {
     // DECISIONS.md so the surface is covered even before it is first created.
     const watcher = fs.watch(project.repoRoot, (_event, filename) => {
       if (!filename || filename === "DECISIONS.md") {
-        scheduleBroadcast(project);
+        scheduleBroadcast(project, state);
       }
     });
     watcher.on("error", () => undefined);
-    decisionsWatchers.set(project.slug, watcher);
+    state.decisionsWatchers.set(project.slug, watcher);
   } catch {
     // Fall back to a direct file watch if the dir watch is rejected.
     try {
-      const watcher = fs.watch(decisionsPath, () => scheduleBroadcast(project));
+      const watcher = fs.watch(decisionsPath, () => scheduleBroadcast(project, state));
       watcher.on("error", () => undefined);
-      decisionsWatchers.set(project.slug, watcher);
+      state.decisionsWatchers.set(project.slug, watcher);
     } catch {
       // ignore: the .rudder watch + bus still cover most updates.
     }
   }
 }
 
-function scheduleBroadcast(project: ProjectEntry): void {
-  const existing = watchTimers.get(project.slug);
+function scheduleBroadcast(project: ProjectEntry, state: BoardProjection): void {
+  const existing = state.watchTimers.get(project.slug);
   if (existing) {
     clearTimeout(existing);
   }
   const timer = setTimeout(() => {
-    watchTimers.delete(project.slug);
-    void broadcastSnapshot(project);
+    state.watchTimers.delete(project.slug);
+    void rebroadcastForSlug(project.slug, state);
   }, 50);
   timer.unref?.();
-  watchTimers.set(project.slug, timer);
+  state.watchTimers.set(project.slug, timer);
 }
 
 // Phase 2 keeps deltas simple: recompute the snapshot and diff node ids so the
 // SPA receives node.added/node.updated/node.removed frames, mirroring the
 // cloud broadcast pattern (one payload, fan out to every client for the slug).
-const lastNodes = new Map<string, Map<string, BoardNode>>();
-const lastEdges = new Map<string, Map<string, BoardEdge>>();
-const lastMemory = new Map<string, string>();
-const lastActivity = new Map<string, string>();
 
 function edgeKey(edge: BoardEdge): string {
   return `${edge.from}->${edge.to}:${edge.kind}`;
@@ -1106,24 +1066,30 @@ function edgeKey(edge: BoardEdge): string {
 // Bus-driven re-broadcast: resolve the slug to a project and emit deltas. Used
 // when a scheduler/merge event fires so connected clients refresh without
 // waiting for the fs.watch debounce.
-async function rebroadcastForSlug(slug: string): Promise<void> {
-  const clients = sseClients.get(slug);
-  if (!clients || clients.size === 0) {
-    return;
-  }
-  const project = await findProjectBySlug(slug);
-  if (project) {
-    await broadcastSnapshot(project);
-  }
+async function rebroadcastForSlug(slug: string, state: BoardProjection): Promise<void> {
+  const active = state.broadcasts.get(slug);
+  if (active) { active.again = true; return; }
+  const pending = { again: false };
+  state.broadcasts.set(slug, pending);
+  try {
+    do {
+      pending.again = false;
+      if (!state.sseClients.get(slug)?.size) return;
+      const project = await findProjectBySlug(slug);
+      if (project && state.sseClients.get(slug)?.size) await broadcastSnapshot(project, state);
+    } while (pending.again);
+  } catch { /* A subsequent fs/bus event will retry projection. */ }
+  finally { state.broadcasts.delete(slug); }
 }
 
-async function broadcastSnapshot(project: ProjectEntry): Promise<void> {
-  const clients = sseClients.get(project.slug);
+async function broadcastSnapshot(project: ProjectEntry, state: BoardProjection): Promise<void> {
+  const clients = state.sseClients.get(project.slug);
   if (!clients || clients.size === 0) {
     return;
   }
   const snapshot = await buildSnapshot(project);
-  const previous = lastNodes.get(project.slug) ?? new Map<string, BoardNode>();
+  if (state.sseClients.get(project.slug) !== clients || clients.size === 0) return;
+  const previous = state.lastNodes.get(project.slug) ?? new Map<string, BoardNode>();
   const current = new Map<string, BoardNode>();
   for (const node of snapshot.nodes) {
     current.set(node.id, node);
@@ -1143,10 +1109,10 @@ async function broadcastSnapshot(project: ProjectEntry): Promise<void> {
       frames.push({ event: "node.removed", data: { id } });
     }
   }
-  lastNodes.set(project.slug, current);
+  state.lastNodes.set(project.slug, current);
 
   // Edge deltas from graph.json: edge.added / edge.removed for the Nest view.
-  const previousEdges = lastEdges.get(project.slug) ?? new Map<string, BoardEdge>();
+  const previousEdges = state.lastEdges.get(project.slug) ?? new Map<string, BoardEdge>();
   const currentEdges = new Map<string, BoardEdge>();
   for (const edge of snapshot.edges) {
     currentEdges.set(edgeKey(edge), edge);
@@ -1161,17 +1127,17 @@ async function broadcastSnapshot(project: ProjectEntry): Promise<void> {
       frames.push({ event: "edge.removed", data: { from: edge.from, to: edge.to } });
     }
   }
-  lastEdges.set(project.slug, currentEdges);
+  state.lastEdges.set(project.slug, currentEdges);
 
   const memoryKey = JSON.stringify(snapshot.memory);
-  if (lastMemory.get(project.slug) !== memoryKey) {
-    lastMemory.set(project.slug, memoryKey);
+  if (state.lastMemory.get(project.slug) !== memoryKey) {
+    state.lastMemory.set(project.slug, memoryKey);
     frames.push({ event: "memory.updated", data: { memory: snapshot.memory } });
   }
 
   const activityKey = JSON.stringify(snapshot.activity ?? []);
-  if (lastActivity.get(project.slug) !== activityKey) {
-    lastActivity.set(project.slug, activityKey);
+  if (state.lastActivity.get(project.slug) !== activityKey) {
+    state.lastActivity.set(project.slug, activityKey);
     frames.push({ event: "activity.updated", data: { activity: snapshot.activity ?? [] } });
   }
 
@@ -1180,15 +1146,19 @@ async function broadcastSnapshot(project: ProjectEntry): Promise<void> {
   }
   for (const client of clients) {
     for (const frame of frames) {
-      writeSseFrame(client.res, frame.event, frame.data);
+      writeSseFrame(state, client, frame.event, frame.data);
     }
   }
 }
 
-function writeSseFrame(res: ServerResponse, event: string, data: unknown): void {
+function writeSseFrame(state: BoardProjection, client: SseClient, event: string, data: unknown): void {
+  const { res } = client;
   try {
-    res.write(`event: ${event}\n`);
-    res.write(`data: ${JSON.stringify(data)}\n\n`);
+    if (!state.authority.valid(client.session)) { res.destroy(); return; }
+    const frame = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+    const bytes = Buffer.byteLength(frame);
+    if (bytes > 4 * 1024 * 1024 || res.writableLength + bytes > 8 * 1024 * 1024) { res.destroy(); return; }
+    res.write(frame);
   } catch {
     // ignore broken pipe
   }
@@ -1613,24 +1583,19 @@ async function loadActivity(repoRoot: string): Promise<BoardSnapshot["activity"]
 // HTML shell. The SPA owns all CSS; this carries no inline styles.
 // ---------------------------------------------------------------------------
 
-function renderShell(
-  slug: string,
-  controlMode: BoardControlMode,
-  canMutate: boolean,
-  view: "board" | "usage" = "board",
-): string {
-  const slugJson = JSON.stringify(slug ?? "");
+function renderShell(): string {
+  // No token, private project lookup or inline JSON. The browser derives its
+  // route and loads all private metadata only after capability exchange.
   return `<!doctype html>
 <html lang="en">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>${view === "usage" ? "rudder · usage" : "rudder"}</title>
+    <title>rudder</title>
     <link rel="stylesheet" href="/board.css" />
   </head>
   <body>
     <div id="app"></div>
-    <script>window.__RUDDER_SLUG__ = ${slugJson}; window.__RUDDER_TOKEN__ = ${JSON.stringify(BOARD_TOKEN)}; window.__RUDDER_CONTROL_MODE__ = ${JSON.stringify(controlMode)}; window.__RUDDER_CAN_MUTATE__ = ${JSON.stringify(canMutate)}; window.__RUDDER_VIEW__ = ${JSON.stringify(view)}</script>
     <script type="module" src="/board.js"></script>
   </body>
 </html>
@@ -1681,19 +1646,22 @@ function inRepo<T>(repoRoot: string, fn: () => Promise<T>): Promise<T> {
   return run;
 }
 
-async function readJsonBody(req: IncomingMessage): Promise<Record<string, unknown>> {
+async function readJsonBody(req: IncomingMessage, maxBytes = MAX_BODY_BYTES): Promise<Record<string, unknown>> {
   const chunks: Buffer[] = [];
   let total = 0;
-  for await (const chunk of req) {
-    const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-    total += buf.length;
-    if (total > MAX_BODY_BYTES) {
-      // Oversized body: stop reading and treat as empty (DoS guard).
-      req.destroy();
-      return {};
+  const deadline = setTimeout(() => req.destroy(), 5000);
+  deadline.unref();
+  try {
+    for await (const chunk of req) {
+      const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      total += buf.length;
+      if (total > maxBytes) {
+        req.destroy();
+        return {};
+      }
+      chunks.push(buf);
     }
-    chunks.push(buf);
-  }
+  } finally { clearTimeout(deadline); }
   if (chunks.length === 0) {
     return {};
   }
@@ -1726,13 +1694,4 @@ function sendJson(res: ServerResponse, status: number, body: unknown): void {
 function sendHtml(res: ServerResponse, body: string, status = 200): void {
   res.writeHead(status, { "content-type": "text/html; charset=utf-8" });
   res.end(body);
-}
-
-function openBrowser(url: string): void {
-  const platform = process.platform;
-  const command = platform === "darwin" ? "open" : platform === "win32" ? "cmd" : "xdg-open";
-  const args = platform === "win32" ? ["/c", "start", "", url] : [url];
-  const child = spawn(command, args, { detached: true, stdio: "ignore" });
-  child.on("error", () => undefined);
-  child.unref();
 }

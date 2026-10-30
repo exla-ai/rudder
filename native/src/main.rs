@@ -67,6 +67,8 @@ mod execution_cli;
 mod workspace_vcs;
 mod managed_launch;
 mod managed_app;
+mod managed_store;
+mod board_access;
 mod agent_link;
 mod workspace_cli;
 mod vfs_cli;
@@ -1899,9 +1901,10 @@ struct App {
     fast_mode: bool,
     /// Localhost URL of the live web board (http://127.0.0.1:PORT), passed in by the
     /// Node parent via RUDDER_BOARD_URL when the in-process board daemon is running.
-    /// None when launched without a board. Surfaced in the agents pane + opened by
-    /// `/web` and the `o` key so users can live-monitor and steer from the browser.
+    /// Credential-free display hint only. Browser actions use the private host
+    /// callback rather than treating a URL as authority.
     board_url: Option<String>,
+    board_open_rx: Option<(board_access::Target, mpsc::Receiver<board_access::OpenResult>)>,
     /// Whether the orchestrator runs as an INTERACTIVE backend PTY (the default; see
     /// `interactive_orchestrator()`) vs the headless decomposer. Snapshotted from the env
     /// ONCE at construction so render/poll/key paths read a per-App field instead of the
@@ -2471,6 +2474,8 @@ struct AgentRun {
     /// Retained logical source. Every legacy cwd/history consumer must refuse
     /// this marker, including malformed records and unadopted reservations.
     managed_local: Option<managed_launch::ManagedRunSource>,
+    /// Host-only trusted private store binding; never parsed from legacy JSON.
+    managed_store: Option<managed_store::ManagedRunLocation>,
     terminal: Option<TerminalPane>,
     terminal_size: Option<TerminalSize>,
     last_output_at: Instant,
@@ -3254,6 +3259,7 @@ impl App {
                         .unwrap_or_else(|| "http://127.0.0.1:4774".to_string()),
                 )
             },
+            board_open_rx: None,
             interactive_orchestrator: interactive_orchestrator(),
             scheduler_tick: 0,
             spinner_frame: 0,
@@ -8586,6 +8592,7 @@ impl App {
             session_id,
             execution_profile: None,
             managed_local: None,
+            managed_store: None,
             terminal: None,
             terminal_size: None,
             last_output_at: Instant::now(),
@@ -8779,6 +8786,7 @@ impl App {
             session_id,
             execution_profile: None,
             managed_local: None,
+            managed_store: None,
             terminal: None,
             terminal_size: None,
             last_output_at: Instant::now(),
@@ -9033,6 +9041,7 @@ Until the first packet arrives, reply only: \"standing by\"."
             session_id,
             execution_profile: None,
             managed_local: None,
+            managed_store: None,
             terminal: None,
             terminal_size: None,
             last_output_at: Instant::now(),
@@ -9128,6 +9137,7 @@ Until the first packet arrives, reply only: \"standing by\"."
             session_id: adversarial_session,
             execution_profile: None,
             managed_local: None,
+            managed_store: None,
             terminal: None,
             terminal_size: None,
             last_output_at: Instant::now(),
@@ -10363,6 +10373,7 @@ Address the objection directly. If you disagree, say why inside \
             session_id,
             execution_profile: None,
             managed_local: None,
+            managed_store: None,
             terminal: None,
             terminal_size: None,
             last_output_at: Instant::now(),
@@ -13235,6 +13246,9 @@ Address the objection directly. If you disagree, say why inside \
         }
         let existing = self.agents.iter().position(|run| run.id == run_id);
         if let Some(index) = existing {
+            if self.agents[index].managed_local.is_some() || self.agents[index].managed_store.is_some() {
+                return SteerDelivery::Failed("managed runs require explicit recovery; legacy adoption is unavailable".to_string());
+            }
             if self.agents[index]
                 .terminal
                 .as_mut()
@@ -13564,6 +13578,7 @@ Address the objection directly. If you disagree, say why inside \
             session_id: None,
             execution_profile: None,
             managed_local: None,
+            managed_store: None,
             terminal: None,
             terminal_size: None,
             last_output_at: Instant::now(),
@@ -15454,6 +15469,9 @@ Address the objection directly. If you disagree, say why inside \
     fn write_watched_screens(&mut self) {
         let repo = self.cwd.clone();
         for run in &mut self.agents {
+            if run.managed_local.is_some() || run.managed_store.is_some() {
+                continue;
+            }
             let dir = native_run_dir(&repo, &run.id);
             let watched = std::fs::metadata(dir.join("screen.watch"))
                 .and_then(|meta| meta.modified())
@@ -15567,53 +15585,47 @@ Address the objection directly. If you disagree, say why inside \
         }
     }
 
-    /// Open the live web board in the user's default browser (the `/web` command and
-    /// the `o` key). No-op with a notice when no board URL was provided.
     /// `U`: the usage dashboard in the browser — subscription quota meters for
     /// every signed-in Claude Code / Codex account, token costs from the CLIs'
     /// session logs at API rates, and live machine resources. Machine-wide,
     /// so it lives at the board root rather than under a project.
     fn open_usage_dashboard(&mut self) {
-        match self.board_url.clone() {
-            Some(url) => {
-                let usage = format!("{}/usage", url.trim_end_matches('/'));
-                match open_url_in_browser(&usage) {
-                    Ok(()) => {
-                        self.notice =
-                            Some("opening the usage dashboard in your browser".to_string())
-                    }
-                    Err(err) => {
-                        self.notice = Some(format!(
-                            "could not open browser ({err}); open {usage} manually"
-                        ))
-                    }
-                }
-            }
-            None => {
-                self.notice = Some("web UI is not running for this session".to_string());
-            }
-        }
+        self.request_board_open(board_access::Target::Usage);
     }
 
     fn open_web_ui(&mut self) {
-        match self.board_url.clone() {
-            Some(url) => match open_url_in_browser(&url) {
-                // Keep the URL hidden on success (the hotkey is the way in); only
-                // reveal it if auto-open fails so the user can open it manually.
-                Ok(()) => {
-                    self.notice =
-                        Some("opening this project's web view in your browser".to_string())
-                }
-                Err(err) => {
-                    self.notice = Some(format!(
-                        "could not open browser ({err}); open {url} manually"
-                    ))
-                }
-            },
-            None => {
-                self.notice = Some("web UI is not running for this session".to_string());
-            }
+        self.request_board_open(board_access::Target::Project);
+    }
+
+    fn request_board_open(&mut self, target: board_access::Target) {
+        if self.board_open_rx.is_none() {
+            self.board_open_rx = Some((target, board_access::begin_open(self.cwd.clone(), target)));
         }
+    }
+
+    fn poll_board_open(&mut self) {
+        // The bounded result may wait while this surface confirms another action.
+        // In headless mode each attached view applies its own notice guard.
+        if !self.engine_headless && (self.delete_pending.is_some() || self.merge_confirm.is_some()
+            || self.cloud_delete_confirm.is_some() || self.conflict_prompt.is_some()
+            || self.cloud_prompt.is_some() || self.quit_confirm_pending || self.rename_input.is_some()) {
+            return;
+        }
+        let Some((target, receiver)) = self.board_open_rx.as_ref() else { return; };
+        let message = match receiver.try_recv() {
+            Ok(board_access::OpenResult::Opened) => match target {
+                board_access::Target::Usage => "opening the usage dashboard in your browser",
+                board_access::Target::Project => "opening this project's web view in your browser",
+            },
+            Ok(board_access::OpenResult::Unavailable) | Err(mpsc::TryRecvError::Disconnected) =>
+                "web UI is unavailable for this session",
+            Err(mpsc::TryRecvError::Empty) => return,
+        };
+        let message = message.to_string();
+        self.board_open_rx = None;
+        if self.engine_headless { self.publish_engine_notice(message); }
+        else { self.notice = Some(message); }
+        self.dirty = true;
     }
 
     /// Live plan size = queued nodes + launched-but-not-merged plan agents. The
@@ -17016,7 +17028,7 @@ Files involved: {}
 
         // Plan-launched agents: those carrying a node_id, projected to a node
         // keyed by that node_id. AgentStatus maps onto the board's NodeStatus.
-        for run in &self.agents {
+        for run in self.agents.iter().filter(|run|run.managed_local.is_none() && run.managed_store.is_none()) {
             let Some(node_id) = run.node_id.as_ref() else {
                 continue;
             };
@@ -18197,9 +18209,8 @@ Files involved: {}
     /// of `dd`, and what a delete from the phone runs. Keeps the selection on a
     /// sensible neighbor and returns the notice to show.
     fn delete_agent_now(&mut self, index: usize) -> String {
-        if let Some(run) = self.agents.get(index).filter(|run| run.managed_local.is_some()) {
-            let id = run.id.clone();
-            managed_app::abandon(self, &id);
+        if self.agents.get(index).is_some_and(|run| run.managed_local.is_some() || run.managed_store.is_some()) {
+            return "managed run retained for explicit recovery".to_string();
         }
         let run = self.agents.remove(index);
         // Indices shifted under the rendered rows; drop the click map so a same-tick
@@ -18602,6 +18613,7 @@ Files involved: {}
             session_id: None,
             execution_profile: None,
             managed_local: None,
+            managed_store: None,
             terminal: None,
             terminal_size: None,
             last_output_at: Instant::now(),
@@ -20543,6 +20555,7 @@ What to do\n\
 
     fn poll_agents(&mut self) {
         let poll_started = Instant::now();
+        self.poll_board_open();
         // Background work (workspace removal) reports its outcome here.
         while let Ok(message) = self.bg_notice_rx.try_recv() {
             if self.engine_headless {
@@ -21366,6 +21379,8 @@ What to do\n\
 
 #[cfg(test)]
 mod app_tests;
+#[cfg(test)]
+mod board_app_tests;
 
 fn main() -> Result<()> {
     if std::env::args().any(|arg| arg == "--smoke") {
@@ -21766,6 +21781,7 @@ fn run_app_loop(mut terminal: Option<&mut Tui>, mut ownership: EngineOwnership) 
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
 
+    ownership.require_legacy_startup()?;
     let mut app = App::new();
     app.engine_headless = terminal.is_none();
     install_termination_handlers();

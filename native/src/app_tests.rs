@@ -2751,7 +2751,9 @@ fn real_pty_planner_full_summary_survives_stream_then_exit() {
     for _ in 0..400 {
         let _ = pane.drain_output();
         stream.ingest(pane.output_log_snapshot());
-        if matches!(pane.try_wait(), Ok(Some(_))) {
+        // Match production: OS exit may precede the reader forwarding the
+        // authoritative result. A temporarily empty queue is not EOF.
+        if matches!(pane.try_wait_after_output(), Ok(Some(_))) {
             // Final drain after exit (mirrors evaluate_completed_plan).
             for _ in 0..64 {
                 let had = !pane.drain_output().is_empty();
@@ -8020,6 +8022,7 @@ fn test_agent_run(id: &str, task: &str) -> AgentRun {
         session_id: None,
         execution_profile: None,
         managed_local: None,
+        managed_store: None,
         terminal: None,
         terminal_size: None,
         last_output_at: Instant::now(),
@@ -9879,6 +9882,7 @@ fn delete_agent_requires_second_d() {
         session_id: None,
         execution_profile: None,
         managed_local: None,
+        managed_store: None,
         terminal: None,
         terminal_size: None,
         last_output_at: Instant::now(),

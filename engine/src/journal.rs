@@ -31,6 +31,7 @@ mod mailbox;
 mod schema;
 mod runtime;
 mod vcs;
+mod managed;
 
 pub use commands::{
     CommandReceipt, CommandRequest, CommandState, EffectClaim, Reconciliation, Recovery,
@@ -45,6 +46,8 @@ pub use vcs::{
     PreparedVcsOperation, VcsIntentReceipt, VcsIntentRequest, VcsIntentState,
     VcsPublicationObservation, VcsPublisher, VcsRunFence,
 };
+pub use managed::{ManagedProjectNamespace, ManagedProjectPrepare, ManagedProjectReceipt, ManagedRecoveryCursor,
+    ManagedAttemptRecovery, ManagedAttemptRecoveryPage, MANAGED_WRITER_PROTOCOL};
 
 pub type TopicVersions = BTreeMap<String, u64>;
 

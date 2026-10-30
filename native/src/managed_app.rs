@@ -144,6 +144,14 @@ mod local {
                 "managed launch journal differs from its explicit identity home");
             anyhow::ensure!(journal.database_path()? == inputs.journal,
                 "managed launch worker journal differs from App ownership");
+            anyhow::ensure!(inputs.managed_store.binding().home == inputs.home
+                && inputs.managed_store.binding().journal == inputs.journal
+                && inputs.managed_store.binding().repository == self.cwd
+                && inputs.managed_store.binding().project_id == owner.project_id
+                && journal.managed_project(&owner.project_id)?.as_ref() == Some(inputs.managed_store.receipt())
+                && inputs.preparation_parent == inputs.managed_store.binding().directory.join("preparations"),
+                "managed launch requires its exact explicitly prepared private project store");
+            let location = inputs.managed_store.run(&run.id)?;
             let permit = self.managed_local.queue.admit()?;
             let attempt_id = uuid::Uuid::new_v4().to_string();
             let request_id = uuid::Uuid::new_v4().to_string();
@@ -156,6 +164,7 @@ mod local {
             source.validate(&run_id)?;
             let run = &mut self.agents[index];
             run.managed_local = Some(source); run.status = AgentStatus::Running;
+            run.managed_store = Some(location.clone());
             run.execution_profile = Some(inputs.backend.execution_profile().into());
             run.completed_at = None; run.last_error = Some("preparing managed local source".into());
             // This marker contains no credentials and must precede worker effects.
@@ -169,15 +178,21 @@ mod local {
             let request = inputs.bind(fence.clone(), operation_id, view_id);
             let worker_fence = fence.clone();
             let reservation = self.agents[index].managed_local.clone().unwrap();
-            let reservation_path = crate::gitio::native_run_dir(&self.cwd, &run_id).join("managed-local.json");
+            let reservation_projection = serde_json::json!({"id":run_id,"task":self.agents[index].task,
+                "backend":self.agents[index].backend.as_str(),"model":self.agents[index].model,
+                "status":"orphaned","mode":"execute","executionProfile":self.agents[index].execution_profile});
             let stage_waker = self.pty_output_waker.clone();
             let panic_fence = worker_fence.clone();
             let spawn = self.managed_local.queue.spawn(permit, self.pty_output_waker.clone(), move |events| {
                 let result = (|| -> Result<PreparedResult> {
                     let home = request.home.clone(); let journal_path = request.journal.clone(); let backend = request.backend.backend();
                     anyhow::ensure!(!cancelled.load(Ordering::Acquire), "managed launch cancelled before durable reservation");
-                    managed_launch::persist_reservation(&reservation_path, &reservation)?;
+                    location.persist_reservation(&reservation)?;
+                    location.write_projection(&reservation, &reservation_projection)?;
                     let prepared = managed_launch::prepare_local(request, cancelled.clone())?;
+                    // Immutable private evidence precedes the App's assignment
+                    // acknowledgment and every scoped grant/publication.
+                    location.persist_assignment(&prepared.assignment)?;
                     let (proceed, receive) = mpsc::sync_channel(1);
                     events.send(WorkerResult { fence: worker_fence.clone(), result: Ok(WorkerStep::Workspace { prepared, proceed }) })
                         .map_err(|_|anyhow::anyhow!("managed App retired before workspace assignment"))?;
@@ -277,6 +292,7 @@ mod local {
                 match result.result {
                     Ok(WorkerStep::Workspace { prepared, proceed }) => {
                         if journal.database_path()? != prepared.identity_journal || prepared.assignment.validate(&result.fence).is_err()
+                            || app.agents[index].managed_store.as_ref() != Some(&prepared.managed_run)
                             || !matches_workspace(app.agents[index].managed_local.as_ref(), &prepared.assignment, true) {
                             orphan(&app.cwd, &mut app.agents[index], "managed workspace result changed its reserved source/journal; no capability granted");
                             continue;
@@ -291,6 +307,7 @@ mod local {
                     }
                     Ok(WorkerStep::Ready(mut ready)) => {
                         if journal.database_path()? != ready.prepared.identity_journal || ready.prepared.assignment.validate(&result.fence).is_err()
+                            || app.agents[index].managed_store.as_ref() != Some(&ready.prepared.managed_run)
                             || !matches_workspace(app.agents[index].managed_local.as_ref(), &ready.prepared.assignment, false) {
                             orphan(&app.cwd, &mut app.agents[index], "managed helper result changed its assigned scope/journal; no helper spawned");
                             continue;
@@ -421,6 +438,7 @@ mod local {
                     // observed completed model turn still needs the FD receipt.
                     let proved = live.receipt.as_ref().is_some_and(|receipt| receipt.record.checkpoint.is_some());
                     app.fabric_runtime.close_managed_assignment(assignment); run.terminal = None; run.completed_at = None;
+                    if proved { live.prepared.confirm_transient_settlement(); }
                     run.status = if proved { AgentStatus::Paused } else { AgentStatus::Orphaned };
                     run.last_error = Some(if proved { "managed helper stopped with retained checkpoint; source acceptance remains pending".into() }
                         else { "managed helper exited without a matching shutdown receipt; recovery required".into() });
@@ -540,7 +558,7 @@ mod local {
                     attempt_id, request_id:uuid::Uuid::new_v4().to_string() };
                 let marker = ManagedRunSource::Reserved { fence:fence.clone(), runnable_root:rudder_engine::protocol::ObjectRef::from_bytes(rudder_engine::protocol::ObjectKind::RunnableRoot, b"fixture") };
                 let mut run = crate::gitio::agent_from_run_record(&app.cwd, serde_json::json!({"id":"run","task":"owned","managedLocal":marker})).unwrap();
-                run.status = AgentStatus::Running; app.agents.push(run);
+                run.managed_local = Some(marker); run.status = AgentStatus::Running; app.agents.push(run);
                 let mut state = ManagedAppState::default();
                 let cancelled = Arc::new(AtomicBool::new(false));
                 state.pending.insert("run".into(), Pending { fence:fence.clone(), cancelled:cancelled.clone(), started:Instant::now() });
@@ -575,7 +593,7 @@ mod local {
                     attempt_id:attempt, request_id:uuid::Uuid::new_v4().to_string() };
                 let marker = ManagedRunSource::Reserved { fence:fence.clone(), runnable_root:rudder_engine::protocol::ObjectRef::from_bytes(rudder_engine::protocol::ObjectKind::RunnableRoot, b"fixture") };
                 let mut run = crate::gitio::agent_from_run_record(&app.cwd, serde_json::json!({"id":"run","task":"owned","managedLocal":marker})).unwrap();
-                run.status = AgentStatus::Running; app.agents.push(run);
+                run.managed_local = Some(marker); run.status = AgentStatus::Running; app.agents.push(run);
                 assert!(still_pending(&app, &fence, &owner));
                 let cancelled = Arc::new(AtomicBool::new(false));
                 let mut state = ManagedAppState::default();

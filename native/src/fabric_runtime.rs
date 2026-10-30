@@ -404,9 +404,18 @@ impl RuntimeState {
             };
             let attempt = terminal.instance_id().to_string();
             let epoch = journal.run_epoch(&owner.project_id, &run.id)?;
-            let run_home = self.links.get(&run.id).and_then(|slot|slot.managed_home.clone()).or_else(||home.clone());
-            let workspace = run_home.as_ref().map(|home|crate::managed_launch::assignment_for_attempt(
-                home, owner, &run.id, epoch, &attempt)).transpose()?.flatten();
+            let (run_home,workspace) = match (&run.managed_local,&run.managed_store) {
+                (None,None) => (home.clone(),None),
+                (Some(crate::managed_launch::ManagedRunSource::Assigned { .. }),Some(location)) => {
+                    anyhow::ensure!(journal.database_path()?==location.store().binding().journal,
+                        "managed inventory differs from its established journal identity");
+                    let explicit_home=location.store().binding().home.clone();
+                    anyhow::ensure!(self.links.get(&run.id).and_then(|slot|slot.managed_home.as_ref()).is_none_or(|home|home==&explicit_home),
+                        "managed inventory changed its adopted identity home");
+                    (Some(explicit_home),crate::managed_launch::assignment_for_location(location,owner,&run.id,epoch,&attempt)?)
+                }
+                _ => anyhow::bail!("managed inventory requires its exact assigned private location"),
+            };
             if let Some(expected) = self.links.get(&run.id).and_then(|slot|slot.workspace.as_ref()) {
                 anyhow::ensure!(workspace.as_ref() == Some(expected), "managed assignment disappeared or changed during identity rotation");
             }

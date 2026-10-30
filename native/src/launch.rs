@@ -941,6 +941,7 @@ pub(crate) fn review_all_run(
         session_id,
         execution_profile: None,
         managed_local: None,
+        managed_store: None,
         terminal: None,
         terminal_size: None,
         last_output_at: Instant::now(),

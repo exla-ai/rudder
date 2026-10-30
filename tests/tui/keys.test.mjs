@@ -7,6 +7,9 @@ import assert from "node:assert/strict";
 import fsp from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
+import "../board-source.mjs";
+const { BoardAuthority } = await import("../../src/board/authority.ts");
+const { serveBoardHostAccess } = await import("../../src/board/host-access.ts");
 
 import {
   assertPrerequisites,
@@ -23,17 +26,25 @@ async function twoWorkerDashboard(t, prefix, { fakeBrowser = false } = {}) {
   const repo = await scratchRepo(prefix);
   t.after(() => removeScratch(repo));
   const { sleeper } = await fakeBackends(repo);
-  const browserLog = path.join(repo, "browser-url.txt");
+  const browserLog = path.join(repo, "browser-target.json");
   const env = {};
   if (fakeBrowser) {
-    const bin = path.join(repo, "fake-bin");
-    for (const name of ["open", "xdg-open"]) {
-      const opener = path.join(bin, name);
-      await fsp.writeFile(opener, `#!/bin/sh\nprintf '%s\\n' "$1" > '${browserLog}'\n`);
-      await fsp.chmod(opener, 0o755);
-    }
-    env.PATH = `${bin}${path.delimiter}${process.env.PATH ?? ""}`;
-    env.RUDDER_BOARD_URL = "http://127.0.0.1:4774/test-project";
+    const previous = process.env.RUDDER_HOME;
+    process.env.RUDDER_HOME = path.join(repo, ".tui-home");
+    const authority = new BoardAuthority("test-project", "projector");
+    authority.bindOrigin("http://127.0.0.1:4774");
+    let host;
+    try {
+      host = await serveBoardHostAccess(repo, authority, async (value) => {
+        const url = new URL(value);
+        // Exercise the host callback without launching a browser or recording
+        // a fragment in fixture logs, terminal notices or assertion output.
+        await fsp.writeFile(browserLog, JSON.stringify({ origin: url.origin, pathname: url.pathname,
+          hasTicket: /^#rudder-board-ticket=[a-f0-9]{64}$/.test(url.hash) }), { mode: 0o600 });
+      });
+    } catch (error) { authority.close(); throw error; }
+    finally { if (previous === undefined) delete process.env.RUDDER_HOME; else process.env.RUDDER_HOME = previous; }
+    t.after(async () => { await host.close(); authority.close(); });
   }
   const session = await launchRudder(t, { repo, claudeBin: sleeper, env });
   await session.waitForText("Type a task", { timeout: 20_000 });
@@ -123,14 +134,23 @@ test("guard-notice keys each fire: R (review-all), o (web), b (branch)", { timeo
   // R: nothing is done yet, so review-all says exactly that.
   await session.press("R");
   await session.waitForText("no completed workspaces ready to review", { timeout: 15_000 });
-  // o: opens the project's exact web URL through the OS opener. The fake keeps
-  // this hermetic on headless Linux and never opens a real browser in macOS CI.
+  // o: asks the private host callback to open a ticket for this project.
   await session.press("o");
   await session.waitForText("web view", { timeout: 15_000 });
-  await waitUntil(async () => (await fsp.readFile(browserLog, "utf8").catch(() => "")).trim() === "http://127.0.0.1:4774/test-project", {
+  await waitUntil(async () => {
+    const opened = JSON.parse(await fsp.readFile(browserLog, "utf8").catch(() => "null"));
+    return opened?.origin === "http://127.0.0.1:4774" && opened?.pathname === "/rudder/test-project" && opened?.hasTicket;
+  }, {
     timeout: 10_000,
-    label: "the browser opener receives the current project's URL",
+    label: "the private host opener receives a project ticket",
   });
+  assert.ok(!(await session.screen()).includes("rudder-board-ticket"));
+  await session.press("U");
+  await session.waitForText("usage dashboard", { timeout: 15_000 });
+  await waitUntil(async () => {
+    const opened = JSON.parse(await fsp.readFile(browserLog, "utf8").catch(() => "null"));
+    return opened?.pathname === "/usage" && opened?.hasTicket;
+  }, { timeout: 10_000, label: "the same private host callback opens usage" });
   // b: a sleeping fake worker has no transcript, so branch explains why.
   await session.press("b");
   await session.waitFor((s) => /branch failed|no session/i.test(s), {

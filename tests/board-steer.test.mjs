@@ -5,15 +5,26 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import "./board-source.mjs";
 
-import { RudderBus } from "../dist/bus.js";
-import { getBoardToken, startBoardDaemon } from "../dist/board/daemon.js";
-import { updateGraph } from "../dist/graph.js";
-import { createRunRecord, loadRunRecord, registerProject, saveRunRecord } from "../dist/state.js";
+const { RudderBus } = await import("../src/bus.ts");
+const { startBoardDaemon } = await import("../src/board/daemon.ts");
+const { requestBoardBootstrap } = await import("../src/board/host-access.ts");
+const { updateGraph } = await import("../src/graph.ts");
+const { createRunRecord, loadRunRecord, registerProject, saveRunRecord } = await import("../src/state.ts");
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const packageRoot = path.resolve(here, "..");
-const cli = path.join(packageRoot, "dist", "index.js");
+const cli = path.join(packageRoot, "src", "index.ts");
+
+async function authenticatedHeaders(repo, url) {
+  const bootstrap = new URL(await requestBoardBootstrap(repo));
+  const descriptor = await fetch(`${url}/api/board/descriptor`).then((r) => r.json());
+  const response = await fetch(`${url}/api/board/session`, { method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ instance_id: descriptor.instance_id, ticket: bootstrap.hash.split("=")[1] }) });
+  assert.equal(response.status, 200);
+  return { "content-type": "application/json", Authorization: `Bearer ${(await response.json()).token}` };
+}
 
 async function poll(fn, timeoutMs = 15_000, intervalMs = 50) {
   const deadline = Date.now() + timeoutMs;
@@ -85,10 +96,7 @@ test("projector board queues review feedback and new tasks for the native owner"
   });
   t.after(() => server.close());
 
-  const headers = {
-    "content-type": "application/json",
-    "x-rudder-token": getBoardToken(),
-  };
+  const headers = await authenticatedHeaders(repo, server.url);
   const steer = await fetch(`${server.url}/api/projects/${project.slug}/tasks/stable-node/steer`, {
     method: "POST",
     headers,
@@ -134,7 +142,7 @@ test("projector board queues review feedback and new tasks for the native owner"
   assert.ok(requests.some((r) => r.kind === "task" && r.taskId === "conductor"));
   assert.ok(requests.some((r) => r.kind === "merge" && r.taskId === "stable-node"));
 
-  const state = await fetch(`${server.url}/api/projects/${project.slug}/state`).then((r) => r.json());
+  const state = await fetch(`${server.url}/api/projects/${project.slug}/state`, { headers }).then((r) => r.json());
   const node = state.nodes.find((candidate) => candidate.id === "stable-node");
   assert.ok(node, "graph node keeps its stable id after launch");
   assert.equal(node.runId, "review-run");
@@ -143,7 +151,7 @@ test("projector board queues review feedback and new tasks for the native owner"
   await fsp.mkdir(otherRepo, { recursive: true });
   const other = await registerProject(otherRepo);
   const foreignShell = await fetch(`${server.url}/rudder/${other.slug}`).then((r) => r.text());
-  assert.match(foreignShell, /__RUDDER_CAN_MUTATE__ = false/, "foreign project is visibly read-only");
+  assert.doesNotMatch(foreignShell, /__RUDDER_|Bearer|rudder-board-ticket/, "shell carries no project capability or private owner metadata");
   const foreignMutation = await fetch(`${server.url}/api/projects/${other.slug}/tasks`, {
     method: "POST",
     headers,
@@ -195,6 +203,7 @@ test("standalone board redirects a running worker and returns it through review"
 
   const env = {
     ...process.env,
+    NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ""} --import=${JSON.stringify(path.join(here, "board-source.mjs"))}`,
     RUDDER_HOME: home,
     RUDDER_DISABLE_UPDATE_CHECK: "1",
     RUDDER_FAKE_BACKEND: "1",
@@ -225,13 +234,11 @@ test("standalone board redirects a running worker and returns it through review"
 
   const url = await poll(() => boardLog.match(/listening on (http:\/\/127\.0\.0\.1:\d+)/)?.[1]);
   assert.ok(url, `board did not start:\n${boardLog}`);
-  const shell = await fetch(`${url}/rudder/${project.slug}`).then((r) => r.text());
-  const token = shell.match(/__RUDDER_TOKEN__ = "([a-f0-9]+)"/)?.[1];
-  assert.ok(token, "shell exposes its per-daemon mutation token");
+  const headers = await authenticatedHeaders(repo, url);
 
   const response = await fetch(`${url}/api/projects/${project.slug}/tasks/running-node/steer`, {
     method: "POST",
-    headers: { "content-type": "application/json", "x-rudder-token": token },
+    headers,
     body: JSON.stringify({
       requestId: "headless-request-0001",
       instruction: "Focus the explanation on the web control path.",
@@ -243,7 +250,7 @@ test("standalone board redirects a running worker and returns it through review"
   assert.equal(receipt.mode, "redirected");
   const duplicateResponse = await fetch(`${url}/api/projects/${project.slug}/tasks/running-node/steer`, {
     method: "POST",
-    headers: { "content-type": "application/json", "x-rudder-token": token },
+    headers,
     body: JSON.stringify({
       requestId: "headless-request-0001",
       instruction: "Focus the explanation on the web control path.",
@@ -283,7 +290,7 @@ test("standalone board redirects a running worker and returns it through review"
 
   const reviewResponse = await fetch(`${url}/api/projects/${project.slug}/tasks/running-node/steer`, {
     method: "POST",
-    headers: { "content-type": "application/json", "x-rudder-token": token },
+    headers,
     body: JSON.stringify({ instruction: "Add one concise example before merging." }),
   });
   const reviewReceipt = await reviewResponse.json();
@@ -299,7 +306,7 @@ test("standalone board redirects a running worker and returns it through review"
     return hasTurn && graph.nodes["running-node"]?.status === "review" ? current : null;
   }, 20_000, 100);
   assert.ok(reviewedAgain, "review feedback runs as another turn and returns through Review again");
-  const finalState = await fetch(`${url}/api/projects/${project.slug}/state`).then((r) => r.json());
+  const finalState = await fetch(`${url}/api/projects/${project.slug}/state`, { headers }).then((r) => r.json());
   const finalNode = finalState.nodes.find((candidate) => candidate.id === "running-node");
   assert.equal(finalNode?.runId, run.id, "stable graph identity still points at the same run");
   assert.deepEqual(
@@ -329,10 +336,7 @@ test("fleet nudge queues one inbox request for every in-flight worker at once", 
   });
   t.after(() => server.close());
 
-  const headers = {
-    "content-type": "application/json",
-    "x-rudder-token": getBoardToken(),
-  };
+  const headers = await authenticatedHeaders(repo, server.url);
   const url = `${server.url}/api/projects/${project.slug}/nudge-all`;
 
   const empty = await fetch(url, {

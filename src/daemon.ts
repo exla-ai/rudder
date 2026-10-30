@@ -10,6 +10,7 @@ import { ensureDir, readJson, writeJson } from "./util.js";
 import { shortenHome } from "./util.js";
 import { startBoardDaemon } from "./board/daemon.js";
 import type { BoardControlMode, BoardDaemonHandle } from "./board/daemon.js";
+import { inspectBoardHostAccess, requestBoardOpen } from "./board/host-access.js";
 import { RudderBus } from "./bus.js";
 import { createLogger } from "./logger.js";
 import { onRunTransition, scheduleTick } from "./scheduler.js";
@@ -23,6 +24,8 @@ export type DaemonPidFile = {
   port: number;
   startedAt: string;
   controlMode?: BoardControlMode;
+  boardAccessVersion?: number;
+  boardInstanceId?: string;
 };
 
 export function daemonPidPath(repoRoot: string): string {
@@ -65,7 +68,7 @@ export async function ensureBoardRunning(
   const requestedMode: BoardControlMode = runScheduler ? "scheduler" : "projector";
 
   const existing = await readPidFile(repoRoot);
-  if (existing && existing.pid !== process.pid && processAlive(existing.pid)) {
+  if (existing && processAlive(existing.pid)) {
     if (!existing.controlMode) {
       throw new Error(
         `An older board process already owns this repository on port ${existing.port}; stop it once so Rudder can record its control mode safely.`,
@@ -76,7 +79,15 @@ export async function ensureBoardRunning(
         `A ${existing.controlMode} board already owns this repository on port ${existing.port}; stop it before starting ${requestedMode} mode.`,
       );
     }
-    const url = `http://127.0.0.1:${existing.port}`;
+    const url = new URL(`http://127.0.0.1:${existing.port}`).origin;
+    if (existing.boardAccessVersion !== 1 || !existing.boardInstanceId) {
+      throw new Error("An older board owns this project; restart its Rudder session to enable private browser access.");
+    }
+    const access = await inspectBoardHostAccess(repoRoot);
+    if (access.instance_id !== existing.boardInstanceId || access.origin !== url || access.control_mode !== requestedMode) {
+      throw new Error("Private board identity changed; restart its Rudder session.");
+    }
+    if (opts?.open) await requestBoardOpen(repoRoot);
     return { port: existing.port, url, slug, projectUrl: `${url}${projectPath}`, started: false };
   }
 
@@ -108,6 +119,8 @@ export async function ensureBoardRunning(
     port: handle.port,
     startedAt: new Date().toISOString(),
     controlMode: requestedMode,
+    boardAccessVersion: 1,
+    boardInstanceId: handle.instanceId,
   });
 
   const cleanup = async (): Promise<void> => {

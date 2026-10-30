@@ -2233,14 +2233,44 @@ mod tests {
         }
         pane.write_input(b"finish\n").unwrap();
         thread::sleep(Duration::from_millis(30));
+        // Name physical handle destruction separately from the nonblocking
+        // termination request. Empty stand-ins allow the same real master ->
+        // writer -> remaining-pane drop order without unsafe field extraction.
+        let stand_in = portable_pty::native_pty_system()
+            .openpty(pane.size.pty_size())
+            .unwrap();
+        let master = std::mem::replace(&mut pane.master, stand_in.master);
+        let sink: Arc<Mutex<Box<dyn Write + Send>>> =
+            Arc::new(Mutex::new(Box::new(std::io::sink())));
+        let writer = std::mem::replace(&mut pane.writer, sink);
         let started = Instant::now();
+        eprintln!("undrained-teardown phase=request-start elapsed_ms=0");
         pane.request_termination();
+        eprintln!(
+            "undrained-teardown phase=request-finished elapsed_ms={}",
+            started.elapsed().as_millis()
+        );
         let pending = pane.child.pending.clone();
         let already_reaped = pane.child.status.is_some();
+        drop(master);
+        eprintln!(
+            "undrained-teardown phase=master-dropped elapsed_ms={}",
+            started.elapsed().as_millis()
+        );
+        drop(writer);
+        eprintln!(
+            "undrained-teardown phase=writer-dropped elapsed_ms={}",
+            started.elapsed().as_millis()
+        );
         drop(pane);
+        eprintln!(
+            "undrained-teardown phase=pane-dropped elapsed_ms={}",
+            started.elapsed().as_millis()
+        );
         assert!(
             started.elapsed() < Duration::from_millis(250),
-            "teardown blocked on undrained slave output"
+            "teardown blocked on undrained slave output elapsed_ms={}",
+            started.elapsed().as_millis()
         );
         if let Some(pending) = pending {
             let deadline = Instant::now() + Duration::from_secs(5);

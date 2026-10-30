@@ -785,10 +785,20 @@ fn connection_call(inner: &Arc<Inner>, mut stream: UnixStream) {
         encoded = bytes;
     }
     // Never append an error frame after a partial response write.
-    let _ = stream
+    let written = stream
         .write_all(&(encoded.len() as u32).to_be_bytes())
         .and_then(|_| stream.write_all(&encoded))
         .and_then(|_| stream.flush());
+    #[cfg(test)]
+    if let Err(error) = &written {
+        eprintln!(
+            "broker response write failed: bytes={} kind={:?} errno={:?}",
+            encoded.len(),
+            error.kind(),
+            error.raw_os_error()
+        );
+    }
+    let _ = written;
 }
 
 #[derive(Clone)]

@@ -17,7 +17,9 @@ The prior plan is preserved in Git at
 [91579cf](https://github.com/exla-ai/rudder/blob/91579cf631b1d9d78afbbd786a6dc1f8120cc1ca/PLAN.md).
 The checkout was initially four commits behind it; the empty working change
 was rebased onto that existing main revision before editing documentation.
-No product code or infrastructure was changed for this research.
+The initial research phase changed no product code or infrastructure.
+Subsequent implementation, releases and measured experiments are tracked in
+[the implementation record](implementation.md).
 
 ### Current Rudder evidence
 

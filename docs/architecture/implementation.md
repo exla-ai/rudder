@@ -46,9 +46,9 @@ the three architecture documents already contained this session's planning work.
 
 | Track | Concrete scope | Gate and state |
 |---|---|---|
-| Planning/commands | Shared deterministic routing with an optional Decisions helper; read-only intent; one Cloud ingress; retired public pair/nudge entries | E11/E12 subset; implementation and regression verification underway |
-| Private previews | Persisted Tailscale login, actual readiness, bounded async probes, project-scoped ready links and local open | E13 subset; deterministic and real loopback tests underway |
-| Terminal stream | Shared home/sail helper, short output batching, bounded backpressure, connection fencing, UTF-8 and repaint recovery | E13 subset; real WS/PTY tests pass; production verification pending |
+| Planning/commands | Shared deterministic routing with an optional Decisions helper; read-only intent; home Cloud ingress; retired public pair/nudge entries | E11/E12 subset implemented and CI verified; legacy sail limitation below |
+| Private previews | Persisted Tailscale login, actual readiness, bounded async probes, exact project ownership, ready links and local open | E13 subset implemented; real userspace/Serve check passed; laptop/phone access remains untested |
+| Terminal stream | Shared home/sail helper, short output batching, bounded backpressure, connection fencing, UTF-8 and repaint recovery | E13 subset deployed in the worker image; real WS/PTY VM checks passed; existing homes adopt when idle |
 | Startup/download caches | Background CLI update, persistent account-local npm/pnpm/uv cache defaults, explicit overrides retained | Behavior tests pass; no distributed action-cache claim |
 | Full storage/engine rewrite | Milestones below | Planned, not implemented by these changes |
 
@@ -109,13 +109,66 @@ frame in the loopback fixture; this is not a production latency measurement.
 Real release-binary terminal end-to-end suite: 53 passed, no failures/skips.
 It exercises natural automatic planning through approval/workers/merge,
 discussion scope and command retirement. Final Node suite includes the added
-legacy sail guard. Alpha.2 packaging/deployment are verified below; alpha.3
-publication and deployment are the current delivery track.
+legacy sail guard. Alpha.3 CI also passed on the release runner: 481 Node tests
+passed with 10 optional skips, 880 native tests passed with 10 ignored, and all
+53 real-terminal tests passed. All three native platform artifacts built.
 
 Before closing this implementation track, replace pending entries with exact
 revision, version, CI workflow result, published npm dist-tag, worker image
 digest, Fly release/deployment identity, canonical URL, UTC verification time,
 checks and active-home adoption state. A pushed commit is not a Cloud rollout.
+
+### Latest delivery checkpoint
+
+Runtime source: `f1403d43b739a4ef61caa7c76ce7cee6fcab0eec`, tag
+`v4.0.0-alpha.3`, on `origin/main`. The
+[release workflow](https://github.com/exla-ai/rudder/actions/runs/41034639170)
+succeeded, including both npm uploads with `next` and signed provenance.
+
+Fly.io control-plane release **157**, machine instance
+`01M663AJSZP0492409NN1YEXP4`, runs that revision. The canonical
+[Rudder Cloud app](https://rudder.exla.ai/app), health endpoint and app asset
+returned HTTP 200; unauthenticated state access returned 401. Verified
+`2026-10-30T10:02:07Z`.
+
+- Control image: `sha256:32dac353e59cf60a9434881d836794927a3c154710f762b71db1281a974c30da`.
+- Worker image: `registry.fly.io/rudder-workers-exla:4.0.0-alpha.3`, digest
+  `sha256:6dc1d1fbbc30bee1ff18365e1332bf2124d0c92b8e946d7d51a380f680e1c2dd`.
+- Seven checks passed inside a disposable VM using the actual image, including
+  native Unicode/control keys, packaged routing/ownership, real WebSocket/PTY
+  roundtrip and output/control ordering. All temporary canary VMs were removed.
+- Real private HTTP Serve returned the exact fixture body through `tailscale nc`.
+  The temporary listener/route were removed and all seven prior routes preserved.
+  This was same-host userspace/Serve proof, not a laptop/phone latency result.
+- Existing homes were left on their running images. The configured idle updater
+  adopts the new image without interrupting active agents; full fleet adoption
+  is not claimed.
+
+Npm accepted both uploads but explicitly reported package processing. At
+`2026-10-30T10:06:35Z`, `@viraatdas/rudder@4.0.0-alpha.3` was available with
+the correct Git revision; an isolated install, CLI version, Linux native smoke,
+new modules and all three platform files were verified. Primary
+`@exla/rudder@4.0.0-alpha.3` still returned **404**, so primary-package
+installation remains externally blocked. Do not silently republish or retag
+the same version to work around provider processing.
+
+[Structured evidence](delivery-alpha3.json) contains the machine, image, CI,
+registry, canary, preview and cleanup checks. Refresh provider/registry state
+before making a later claim that it is available everywhere.
+
+### Storage restart point
+
+[The Linux E0/E1 report](phase0-linux-evidence.md) and its exact runner/raw archive
+are the first measured storage evidence. Warm view construction worked on the
+ext4 volume, with empty initial uppers and scoped parent/sibling write isolation;
+native reflinking did not. Namespace startup, agents, jj, real compilation,
+network, remote hydration and durability are outside these mount timings.
+
+Next: reproduce real end-to-end E0 workloads; qualify larger prepared roots and
+filesystem behavior; run E2 across two independent workers; compare candidate
+materializers; ratify identities/durability contracts before broad engine/VFS
+migration. The persistent Rust engine, distributed CAS/CoW, branch-aware build
+integration and durable general peer messaging remain required v4 work.
 
 Release preference was asked asynchronously: v4 prereleases on `next` versus
 3.x foundations or waiting for all gates. The user confirmed continuing to

@@ -1,0 +1,257 @@
+{
+  "schemaVersion": 1,
+  "milestone": "Rudder v4 foundations; full rewrite remains open",
+  "version": "4.0.0-alpha.3",
+  "sourceRevision": "f1403d43b739a4ef61caa7c76ce7cee6fcab0eec",
+  "recordedAt": "2026-10-30T10:06:35.311281+00:00",
+  "ci": {
+    "url": "https://github.com/exla-ai/rudder/actions/runs/41034639170",
+    "status": "success",
+    "javascript": {
+      "passed": 481,
+      "skipped": 10,
+      "failed": 0
+    },
+    "native": {
+      "passed": 880,
+      "ignored": 10,
+      "failed": 0
+    },
+    "tui": {
+      "passed": 53,
+      "failed": 0
+    },
+    "nativePlatforms": [
+      "linux-x64",
+      "darwin-arm64",
+      "darwin-x64"
+    ]
+  },
+  "npm": {
+    "distTag": "next",
+    "bothUploadsAccepted": true,
+    "signedProvenance": true,
+    "registry": {
+      "@exla/rudder": {
+        "status": 404,
+        "processing": true
+      },
+      "@viraatdas/rudder": {
+        "status": 200,
+        "version": "4.0.0-alpha.3",
+        "gitHead": "f1403d43b739a4ef61caa7c76ce7cee6fcab0eec",
+        "integrity": "sha512-tBstIRe6jdKL2i3B+dnN+Mw3035GYXmZU9Cvm9cas7YnXzvJjCw9XOwCDfP39aHfIupruQLemx+W/aVDR5IygQ=="
+      }
+    },
+    "verifiedAt": "2026-10-30T10:06:35.311281+00:00",
+    "legacyInstallation": {
+      "version": "4.0.0-alpha.3",
+      "allNativePlatformsPresent": true,
+      "linuxNativeSmoke": true,
+      "cliVersionSmoke": true
+    },
+    "primaryInstallationVerified": false
+  },
+  "cloud": {
+    "version": "4.0.0-alpha.3",
+    "revision": "f1403d43b739a4ef61caa7c76ce7cee6fcab0eec",
+    "provider": "Fly.io",
+    "release": 157,
+    "verifiedAt": "2026-10-30T10:02:07.995263+00:00",
+    "machines": [
+      {
+        "id": "8911d61a434978",
+        "state": "started",
+        "version": "01M663AJSZP0492409NN1YEXP4",
+        "image_ref": {
+          "registry": "registry.fly.io",
+          "repository": "rudder-cloud-control",
+          "tag": "4.0.0-alpha.3",
+          "digest": "sha256:32dac353e59cf60a9434881d836794927a3c154710f762b71db1281a974c30da",
+          "labels": {
+            "org.opencontainers.image.revision": "f1403d43b739a4ef61caa7c76ce7cee6fcab0eec"
+          }
+        },
+        "release": "157",
+        "workerImage": "registry.fly.io/rudder-workers-exla:4.0.0-alpha.3"
+      }
+    ],
+    "checks": [
+      {
+        "url": "https://rudder.exla.ai/app",
+        "status": 200,
+        "finalUrl": "https://rudder-cloud-control.fly.dev/app"
+      },
+      {
+        "url": "https://rudder-cloud-control.fly.dev/health",
+        "status": 200,
+        "finalUrl": "https://rudder-cloud-control.fly.dev/health",
+        "health": {
+          "ok": true,
+          "s3": true,
+          "fly": true,
+          "byoVm": true,
+          "state": true,
+          "secrets": true,
+          "auth": {
+            "google": true,
+            "github": true,
+            "githubDevice": true
+          }
+        }
+      },
+      {
+        "url": "https://rudder-cloud-control.fly.dev/app/core.js",
+        "status": 200,
+        "finalUrl": "https://rudder-cloud-control.fly.dev/app/core.js"
+      },
+      {
+        "url": "https://rudder-cloud-control.fly.dev/api/app/state?passive=1",
+        "status": 401,
+        "unauthorizedAccessDenied": true
+      }
+    ],
+    "temporaryCanariesRemoved": true,
+    "homeAdoption": [
+      {
+        "state": "started",
+        "image": "3.9.12"
+      },
+      {
+        "state": "stopped",
+        "image": "3.9.12"
+      },
+      {
+        "state": "stopped",
+        "image": "3.9.12"
+      },
+      {
+        "state": "stopped",
+        "image": "3.9.12"
+      }
+    ],
+    "rolloutNote": "Running home agents preserved; image adoption uses idle-update policy."
+  },
+  "workerImage": {
+    "tag": "registry.fly.io/rudder-workers-exla:4.0.0-alpha.3",
+    "digest": "sha256:6dc1d1fbbc30bee1ff18365e1332bf2124d0c92b8e946d7d51a380f680e1c2dd"
+  },
+  "workerCanary": {
+    "ok": true,
+    "expectedVersion": "4.0.0-alpha.3",
+    "startedAt": "2026-10-30T09:45:49.558Z",
+    "verifiedAt": "2026-10-30T09:45:51.475Z",
+    "durationMs": 1813,
+    "machineId": "8e720da7646398",
+    "packageRoot": "/opt/rudder",
+    "workerRoot": "/opt/rudder-worker",
+    "checks": [
+      {
+        "name": "packaged-version-and-cli",
+        "ok": true,
+        "durationMs": 734,
+        "version": "4.0.0-alpha.3",
+        "cliVersion": "4.0.0-alpha.3",
+        "node": "v22.23.4"
+      },
+      {
+        "name": "packaged-task-routing-and-cli-protocol",
+        "ok": true,
+        "durationMs": 683,
+        "routes": [
+          "discuss",
+          "execute",
+          "plan"
+        ],
+        "sha256": "afffcdedba7bef8b28f675ad92b0038f6151498809709820f80b46fc7cbb98a9"
+      },
+      {
+        "name": "worker-task-launch-guard",
+        "ok": true,
+        "durationMs": 6,
+        "execute": "original backend and task retained",
+        "discussAndPlan": "blocked before spawn",
+        "workspace": "dashboard retained",
+        "defaultPackagedImport": true,
+        "sha256": "68bec5dc2789a8e087873a779b15ca82757cd1cfa923c176f14baef76ce3fa3b"
+      },
+      {
+        "name": "native-binary-and-real-pty",
+        "ok": true,
+        "durationMs": 69,
+        "smoke": true,
+        "ptyUnicode": true,
+        "ptyControlKey": true,
+        "exitCode": 0,
+        "nativeVersionEndpoint": "none; release version checked through package and CLI",
+        "sha256": "58cc4aad9993d50f05d4580e092d0880bd4d1da47aa3f009ea7d20a168e78174"
+      },
+      {
+        "name": "real-websocket-and-pty-terminal-bridge",
+        "ok": true,
+        "durationMs": 83,
+        "wsVersion": "8.22.0",
+        "ptyVersion": "1.1.0",
+        "unicodeAndControlBytes": 39,
+        "inputFrameBytes": 1,
+        "exactRoundtrip": true,
+        "burstWrites": 1000,
+        "burstBinaryFrames": 1,
+        "outputControlOrdered": true,
+        "loopbackBurstMs": 15,
+        "sha256": "c30462979d1e44ccbab16bea3b7368a3b3fa4d6d293e6abf785a23af93c2dec0"
+      },
+      {
+        "name": "packaged-private-previews-offline-fixture",
+        "ok": true,
+        "durationMs": 30,
+        "online": false,
+        "advertisedUrls": 0,
+        "actualTailscaleCommands": 0,
+        "enrollment": "not attempted"
+      },
+      {
+        "name": "packaged-worker-entrypoints-parse",
+        "ok": true,
+        "durationMs": 145,
+        "parsed": [
+          "home",
+          "supervisor",
+          "task-launch",
+          "terminal-transport",
+          "tailscale-previews"
+        ]
+      }
+    ]
+  },
+  "privatePreview": {
+    "verifiedAt": "2026-10-30T09:19:03.602Z",
+    "protocol": "private HTTP Serve fallback",
+    "scope": "same-host userspace/Serve; no laptop/phone access claim",
+    "readinessMs": 57,
+    "requestMs": 18,
+    "httpStatus": 200,
+    "exactFixtureBody": true,
+    "existingRoutesPreserved": 7,
+    "temporaryRouteRemoved": true,
+    "listenerClosed": true,
+    "enrollmentOrAclOrFunnelChanges": false
+  },
+  "filesystemEvidence": {
+    "report": "phase0-linux-evidence.md",
+    "archive": "evidence/phase0-linux-2026-10-30.tar.gz",
+    "archiveSha256": "fa607899e717aa86c024b54962d85cf70318717a6d8709b751af4ae7a2035689",
+    "batches": 30,
+    "views": 165,
+    "completeE0orE1": false
+  },
+  "remaining": [
+    "Primary npm package processing/installation verification",
+    "Idle adoption of worker image on existing homes",
+    "Larger and two-worker workspace/build experiments",
+    "Persistent Rust machine engine and durable project authority",
+    "Distributed CoW/CAS, sound build cache and branch-aware build graph",
+    "Generalized durable agent messaging and active peer controls",
+    "Remaining command/surface migration and full v4 launch gates"
+  ]
+}

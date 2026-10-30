@@ -22,6 +22,8 @@ Companion documents:
 - [Research and implementation evidence](docs/architecture/research.md).
 - [Experiments, acceptance gates, and failure cases](docs/architecture/experiments.md).
 - [Implementation state and context handoff](docs/architecture/implementation.md).
+- [Measured Linux workspace substrate](docs/architecture/phase0-linux-evidence.md).
+- [Alpha.3 delivery evidence](docs/architecture/delivery-alpha3.json).
 
 ## 1. Product objective and constraints
 
@@ -1044,3 +1046,9 @@ The full stable v4 milestone requires the relevant E0-E13 gates, migration and
 recovery drills, supported Mac and Codex/Claude behavior, and release evidence.
 Do not mark that milestone complete because a local build, push or preliminary
 Cloud deployment succeeded.
+
+The first implementation increments through `4.0.0-alpha.3` are recorded in
+the implementation/delivery documents above. A bounded Fly experiment has
+also demonstrated private ext4-backed OverlayFS views, with exact raw samples
+and explicit limits. That is progress toward E0/E1, not a distributed cache,
+a completed filesystem qualification, or a real-compilation speedup claim.

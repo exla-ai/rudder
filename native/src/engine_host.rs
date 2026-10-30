@@ -470,6 +470,14 @@ struct ControlEvent {
     response: mpsc::SyncSender<serde_json::Value>,
 }
 
+fn prepare_control_stream(stream: &UnixStream) -> io::Result<()> {
+    // Darwin inherits a nonblocking listener's flag. The background control
+    // worker uses bounded blocking IO for complete request/response frames.
+    stream.set_nonblocking(false)?;
+    stream.set_read_timeout(Some(Duration::from_millis(500)))?;
+    stream.set_write_timeout(Some(Duration::from_millis(500)))
+}
+
 pub(crate) struct EngineControl {
     path: PathBuf,
     rx: mpsc::Receiver<ControlEvent>,
@@ -514,8 +522,9 @@ impl EngineControl {
                 while !thread_stop.load(Ordering::Acquire) {
                     match listener.accept() {
                         Ok((mut stream, _)) => {
-                            let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
-                            let _ = stream.set_write_timeout(Some(Duration::from_millis(500)));
+                            if prepare_control_stream(&stream).is_err() {
+                                continue;
+                            }
                             let request = read_control(&stream).ok();
                             let Some(request) = request else {
                                 continue;
@@ -608,9 +617,25 @@ impl Drop for EngineControl {
 
 fn read_control(stream: &UnixStream) -> Result<ControlRequest> {
     let mut line = Vec::new();
-    BufReader::new(stream)
-        .take((CONTROL_LIMIT + 1) as u64)
-        .read_until(b'\n', &mut line)?;
+    let deadline = Instant::now() + Duration::from_millis(500);
+    let mut reader = stream;
+    let mut part = [0u8; 1024];
+    while line.len() <= CONTROL_LIMIT {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        anyhow::ensure!(!remaining.is_zero(), "engine control request timed out");
+        // A partial read must not restart the entire request's deadline.
+        stream.set_read_timeout(Some(remaining))?;
+        let capacity = part.len().min(CONTROL_LIMIT + 1 - line.len());
+        let count = match reader.read(&mut part[..capacity]) {
+            Ok(count) => count,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error.into()),
+        };
+        if count == 0 { break; }
+        let end = part[..count].iter().position(|byte| *byte == b'\n');
+        line.extend_from_slice(&part[..end.map_or(count, |at| at + 1)]);
+        if end.is_some() { break; }
+    }
     anyhow::ensure!(
         line.len() <= CONTROL_LIMIT && line.last() == Some(&b'\n'),
         "invalid engine control request size"

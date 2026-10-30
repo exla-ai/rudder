@@ -1,0 +1,41 @@
+{
+  "account_type": "apiKey",
+  "auth_json_created": false,
+  "binary_version": "codex-cli 0.166.0",
+  "child_cleanup": {
+    "exit_signal": 9,
+    "kill_requested": true,
+    "wait_completed": true
+  },
+  "executable_sha256": "b8a11fedf24b2dfb59a70c9e52b030f9a508dcd49cd2dd0d41956f4c785156b8",
+  "format_version": 1,
+  "kernel_peer_pid_matches_owned_child": true,
+  "managed_helper_tested": false,
+  "model_calls": 0,
+  "network_isolation_tested": false,
+  "persisted_fixture_scan": {
+    "all_regular_files": true,
+    "buffer_bytes": 65536,
+    "bytes": 87112164,
+    "deadline_seconds": 15,
+    "files": 5502,
+    "max_entries": 16384,
+    "max_file_bytes": 67108864,
+    "max_files": 8192,
+    "max_total_bytes": 268435456,
+    "symlinks_followed": false
+  },
+  "provider_inference_tested": false,
+  "qualification": "standalone pinned-binary local auth contract; not managed-helper or provider inference qualification",
+  "real_credentials": false,
+  "rpc_methods": [
+    "initialize",
+    "config/read",
+    "account/login/start",
+    "account/read"
+  ],
+  "storage": "ephemeral",
+  "synthetic_key_persisted": false,
+  "thread_calls": 0,
+  "utc": "2026-10-30T22:16:10Z"
+}

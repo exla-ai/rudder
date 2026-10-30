@@ -52,6 +52,11 @@ struct RuntimeLink {
     qualified: bool,
     uncertain: bool,
     closed: bool,
+    draining: bool,
+    workspace: Option<crate::managed_launch::WorkspaceAssignment>,
+    managed_home: Option<PathBuf>,
+    #[cfg(target_os = "linux")]
+    owned_backend: Option<Arc<rudder_engine::execution::handoff::BackendProcessWitness>>,
 }
 
 struct BrokerWork {
@@ -100,7 +105,7 @@ impl RuntimeLink {
         if owned {
             capabilities.insert("cancel".into());
         }
-        if owned && !self.closed && !self.uncertain && self.thread.is_some() {
+        if owned && !self.closed && !self.draining && !self.uncertain && self.thread.is_some() {
             if self.qualified {
                 match self.phase {
                     RuntimePhase::Working => {
@@ -177,10 +182,91 @@ impl RuntimeLink {
 }
 
 impl RuntimeState {
+    /// App-only adoption, with no IO. Background preparation already persisted
+    /// the exact assignment/grant and started this broker before helper spawn.
+    pub(crate) fn adopt_managed_broker(&mut self, owner: &OwnerFence,
+        assignment: &crate::managed_launch::WorkspaceAssignment,
+        home: &Path, terminal: &mut TerminalPane, broker: AgentBroker, projection_hash: [u8; 32]) -> Result<()> {
+        assignment.validate(&assignment.fence)?;
+        let fence = &assignment.fence;
+        anyhow::ensure!(*owner == fence.owner && terminal.instance_id() == fence.attempt_id,
+            "managed broker result no longer owns this PTY/fence");
+        let profile = terminal.execution_profile().context("managed PTY has no explicit profile")?;
+        let backend = match profile { "codex-app-server" => Backend::Codex, "claude-sdk" => Backend::Claude,
+            _ => anyhow::bail!("managed PTY profile is unsupported") };
+        let binding = broker.binding();
+        anyhow::ensure!(binding.project_id == owner.project_id && binding.owner_epoch == owner.epoch
+            && binding.run_id == fence.run_id && binding.run_epoch == fence.run_epoch
+            && broker.socket_path() == agent_broker::socket_path(home, &owner.project_id, &fence.run_id, &fence.attempt_id),
+            "prepared broker belongs to another managed run/owner");
+        anyhow::ensure!(self.links.get(&fence.run_id).is_none_or(|old|old.closed),
+            "another runtime slot already owns the managed run");
+        let slot = RuntimeLink { attempt: fence.attempt_id.clone(), epoch: fence.run_epoch,
+            profile: profile.into(), backend, transport_uncertain: false, link: None,
+            broker: Some(broker), broker_work: None, projection_hash: Some(projection_hash), broker_failed_hash: None,
+            thread: None, active: None, interrupted: None, phase: RuntimePhase::Starting,
+            qualified: false, uncertain: false, closed: false, draining: false, workspace: Some(assignment.clone()), managed_home: Some(home.into()),
+            #[cfg(target_os = "linux")]
+            owned_backend: None };
+        terminal.set_before_terminate(slot.close_callback());
+        self.links.insert(fence.run_id.clone(), slot);
+        Ok(())
+    }
+
+    /// App-only attachment of evidence from its owned control handle. A saved
+    /// launch JSON, guest cwd or socket file cannot construct this witness.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn attach_managed_backend(&mut self, owner: &OwnerFence,
+        assignment: &crate::managed_launch::WorkspaceAssignment, terminal: &mut TerminalPane,
+        launch: AgentLinkLaunch, guest_cwd: PathBuf, expected_thread: Option<String>,
+        process: Arc<rudder_engine::execution::handoff::BackendProcessWitness>) -> Result<()> {
+        assignment.validate(&assignment.fence)?;
+        let fence = &assignment.fence;
+        anyhow::ensure!(*owner == fence.owner && terminal.instance_id() == fence.attempt_id,
+            "managed backend readiness arrived for a retired PTY/owner");
+        let slot = self.links.get_mut(&fence.run_id).context("managed broker was not adopted before backend readiness")?;
+        anyhow::ensure!(!slot.closed && !slot.draining && !slot.uncertain && slot.epoch == fence.run_epoch
+            && slot.attempt == fence.attempt_id && slot.workspace.as_ref() == Some(assignment)
+            && terminal.execution_profile() == Some(slot.profile.as_str())
+            && launch.run_id == fence.run_id && launch.attempt_id == fence.attempt_id,
+            "managed backend readiness belongs to another live assignment");
+        if let Some(owned) = &slot.owned_backend {
+            anyhow::ensure!(Arc::ptr_eq(owned, &process), "managed backend identity cannot be replaced");
+            return Ok(());
+        }
+        let handle = agent_link::spawn_managed_link(launch, guest_cwd, expected_thread, self.events_tx.clone(), process.clone())?;
+        slot.owned_backend = Some(process); slot.link = Some(handle);
+        terminal.set_before_terminate(slot.close_callback());
+        Ok(())
+    }
+
+    /// Stop admitting new backend controls without revoking/closing the broker
+    /// authority that the helper still needs for final writer/VCS/RPC drain.
+    pub(crate) fn begin_managed_shutdown(&mut self, owner: &OwnerFence,
+        assignment: &crate::managed_launch::WorkspaceAssignment, terminal: &TerminalPane) -> Result<()> {
+        assignment.validate(&assignment.fence)?;
+        let fence = &assignment.fence;
+        let slot = self.links.get_mut(&fence.run_id).context("managed runtime is absent")?;
+        anyhow::ensure!(*owner == fence.owner && terminal.instance_id() == fence.attempt_id
+            && slot.attempt == fence.attempt_id && slot.epoch == fence.run_epoch
+            && slot.workspace.as_ref() == Some(assignment), "managed shutdown belongs to another owned runtime");
+        slot.draining = true;
+        if let Some(link) = &slot.link { link.close(); }
+        Ok(())
+    }
+
     pub(crate) fn close(&mut self, run_id: &str) {
         if let Some(link) = self.links.get_mut(run_id) {
             link.close();
         }
+    }
+
+    /// A late managed lifecycle result may retire only its exact old slot,
+    /// even when another attempt has already reused the logical run id.
+    pub(crate) fn close_managed_assignment(&mut self, assignment: &crate::managed_launch::WorkspaceAssignment) {
+        if let Some(slot) = self.links.get_mut(&assignment.fence.run_id)
+            .filter(|slot|slot.attempt == assignment.fence.attempt_id && slot.epoch == assignment.fence.run_epoch
+                && slot.workspace.as_ref() == Some(assignment)) { slot.close(); }
     }
 
     fn poll(&mut self, app: &mut App, journal: &mut Journal, owner: &OwnerFence) -> Result<()> {
@@ -318,9 +404,19 @@ impl RuntimeState {
             };
             let attempt = terminal.instance_id().to_string();
             let epoch = journal.run_epoch(&owner.project_id, &run.id)?;
-            let identity = if let Some(home) = &home {
+            let run_home = self.links.get(&run.id).and_then(|slot|slot.managed_home.clone()).or_else(||home.clone());
+            let workspace = run_home.as_ref().map(|home|crate::managed_launch::assignment_for_attempt(
+                home, owner, &run.id, epoch, &attempt)).transpose()?.flatten();
+            if let Some(expected) = self.links.get(&run.id).and_then(|slot|slot.workspace.as_ref()) {
+                anyhow::ensure!(workspace.as_ref() == Some(expected), "managed assignment disappeared or changed during identity rotation");
+            }
+            if let Some(source) = &run.managed_local {
+                anyhow::ensure!(matches!(source, crate::managed_launch::ManagedRunSource::Assigned { assignment }
+                    if workspace.as_ref() == Some(assignment.as_ref())), "managed PTY has no exact persisted workspace assignment");
+            }
+            let identity = if let Some(home) = &run_home {
                 Some(issue_identity(
-                    home, journal, owner, &run.id, epoch, &peers, now,
+                    home, journal, owner, &run.id, epoch, &peers, now, workspace.as_ref(),
                 )?)
             } else {
                 None
@@ -345,6 +441,10 @@ impl RuntimeState {
             if !self.links.contains_key(&run.id) {
                 let profile = terminal.execution_profile().unwrap_or("native").to_string();
                 let prepared = (|| -> Result<Option<AgentLinkHandle>> {
+                    // A managed assignment always waits for App adoption of an
+                    // authenticated helper pidfd. Never downgrade to the legacy
+                    // socket/serialized-launch path after timeout or restart.
+                    if workspace.is_some() { return Ok(None); }
                     let launch = terminal
                         .agent_link_launch_json()
                         .map(serde_json::from_str::<AgentLinkLaunch>)
@@ -399,11 +499,15 @@ impl RuntimeState {
                     qualified: false,
                     uncertain: failed,
                     closed: false,
+                    draining: false,
+                    managed_home: workspace.as_ref().and_then(|_|run_home.clone()), workspace,
+                    #[cfg(target_os = "linux")]
+                    owned_backend: None,
                 };
                 self.links.insert(run.id.clone(), slot);
             }
             let slot = self.links.get_mut(&run.id).unwrap();
-            if let (Some(home), Some(identity_path)) = (&home, identity) {
+            if let (Some(home), Some(identity_path)) = (&run_home, identity) {
                 let identity: AgentIdentityFile = read_private(&identity_path, 16 * 1024)?;
                 let hash: [u8; 32] = Sha256::digest(serde_json::to_vec(&identity)?).into();
                 if !slot.closed
@@ -1175,12 +1279,13 @@ fn issue_identity(
     run_epoch: u64,
     recipients: &BTreeMap<String, u64>,
     now: i64,
+    workspace: Option<&crate::managed_launch::WorkspaceAssignment>,
 ) -> Result<PathBuf> {
     let path = identity_path(home, owner, run_id);
     let projection_path = path.with_extension("grant.json");
     let old_identity = read_private::<AgentIdentityFile>(&path, 16 * 1024).ok();
     let old_grant = read_private::<GrantProjection>(&projection_path, 1024 * 1024).ok();
-    let operations = [
+    let mut operations = [
         "agents:find",
         "message:send",
         "mailbox:read",
@@ -1193,13 +1298,22 @@ fn issue_identity(
     .into_iter()
     .map(str::to_string)
     .collect::<BTreeSet<_>>();
+    let mut scopes = BTreeSet::from(["project".into()]);
+    if let Some(workspace) = workspace {
+        workspace.validate(&workspace.fence)?;
+        anyhow::ensure!(workspace.fence.owner == *owner && workspace.fence.run_id == run_id
+            && workspace.fence.run_epoch == run_epoch, "workspace assignment belongs to another run/owner");
+        workspace.fence.check_current(journal)?;
+        operations.insert("workspace:observe".into());
+        scopes.insert(rudder_engine::execution::workspace_scope(&workspace.observation)?);
+    }
     let grant = CapabilityGrant {
         principal: format!("agent:{run_id}"),
         run_id: run_id.into(),
         run_epoch,
         operations,
         recipients: recipients.clone(),
-        scopes: BTreeSet::from(["project".into()]),
+        scopes,
         topics: BTreeSet::new(),
         expires_at_ms: Some(
             now.checked_add(24 * 60 * 60 * 1000)
@@ -1306,16 +1420,58 @@ pub(crate) fn prepare_agent_tools(
         epoch,
         &recipients,
         epoch_ms()?,
+        None,
     )?;
     let broker_socket = agent_broker::socket_path(&home, &owner.project_id, run_id, &attempt);
     let projected = agent_broker::project_identity(
         &broker_socket,
         &read_private::<AgentIdentityFile>(&identity, 16 * 1024)?,
     )?;
+    configure_agent_tools(command, backend, &projected, &broker_socket, &identity, &attempt)?;
+    Ok(())
+}
+
+pub(crate) struct AgentToolsProjection {
+    pub identity_file: PathBuf,
+    pub broker_socket: PathBuf,
+    pub projection_hash: [u8; 32],
+}
+
+/// Blocking identity/config IO, called off-App after accepting the reserved
+/// launch result. Never observes an attempt, reads cwd or chooses a profile.
+pub(crate) fn prepare_agent_tools_for_attempt(
+    command: &mut TerminalCommand,
+    backend: Backend,
+    home: &Path,
+    fence: &crate::managed_launch::ManagedLaunchFence,
+    workspace: Option<&crate::managed_launch::WorkspaceAssignment>,
+) -> Result<AgentToolsProjection> {
+    let mut journal = Journal::open(&FabricPaths::new(home).journal)?;
+    fence.check_current(&journal)?;
+    if let Some(workspace) = workspace {
+        workspace.validate(fence)?;
+        crate::managed_launch::persist_assignment(home, workspace)?;
+    }
+    let recipients = journal.owned_runs(&fence.owner)?.into_iter()
+        .map(|run| (run.run_id, run.run_epoch)).collect();
+    let identity = issue_identity(home, &mut journal, &fence.owner, &fence.run_id,
+        fence.run_epoch, &recipients, epoch_ms()?, workspace)?;
+    let socket = agent_broker::socket_path(home, &fence.owner.project_id, &fence.run_id, &fence.attempt_id);
+    let identity_record = read_private::<AgentIdentityFile>(&identity, 16 * 1024)?;
+    let projection_hash = Sha256::digest(serde_json::to_vec(&identity_record)?).into();
+    let projected = agent_broker::project_identity(&socket, &identity_record)?;
+    if workspace.is_none() {
+        configure_agent_tools(command, backend, &projected, &socket, &identity, &fence.attempt_id)?;
+    }
+    Ok(AgentToolsProjection { identity_file: projected, broker_socket: socket, projection_hash })
+}
+
+fn configure_agent_tools(command: &mut TerminalCommand, backend: Backend,
+    projected: &Path, broker_socket: &Path, identity: &Path, attempt: &str) -> Result<()> {
     let exe = env::current_exe()?;
     command
         .env
-        .push(("RUDDER_FABRIC_ATTEMPT_ID".into(), attempt));
+        .push(("RUDDER_FABRIC_ATTEMPT_ID".into(), attempt.into()));
     command.env.push((
         "RUDDER_FABRIC_IDENTITY".into(),
         projected.display().to_string(),

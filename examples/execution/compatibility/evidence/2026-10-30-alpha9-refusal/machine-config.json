@@ -1,0 +1,24 @@
+{
+  "init": {
+    "exec": [
+      "/bin/sleep",
+      "1200"
+    ]
+  },
+  "guest": {
+    "cpu_kind": "shared",
+    "cpus": 2,
+    "memory_mb": 2048
+  },
+  "env": {},
+  "services": [],
+  "mounts": [],
+  "restart": {
+    "policy": "no"
+  },
+  "metadata": {
+    "qualification": "d70afb46-452f-4942-b5c4-99bbe70d3011",
+    "rudder_role": "alpha9-compatibility-refusal",
+    "purpose": "disposable-schema5-old-client-refusal"
+  }
+}

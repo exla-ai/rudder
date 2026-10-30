@@ -113,6 +113,12 @@ pub struct Journal {
 }
 
 impl Journal {
+    /// Read-only local database identity for composing already-owned services.
+    /// This performs no query, filesystem lookup or authority transition.
+    pub fn database_path(&self) -> Result<&Path> {
+        self.conn.path().map(Path::new).context("journal has no filesystem database identity")
+    }
+
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         Self::open_with_busy_timeout(path, Duration::from_secs(5))
     }
@@ -279,6 +285,28 @@ impl Journal {
 
     pub fn run_epoch(&self, project_id: &str, run_id: &str) -> Result<u64> {
         run_epoch(&self.conn, project_id, run_id)
+    }
+
+    /// Read-only launch fence validation. Never reserves, replaces or remints
+    /// an attempt; the App must have observed this exact instance first.
+    pub fn current_run_attempt(
+        &self,
+        owner: &OwnerFence,
+        run_id: &str,
+        expected_epoch: u64,
+    ) -> Result<String> {
+        valid_id(run_id)?;
+        let tx = self.conn.unchecked_transaction()?;
+        assert_owner(&tx, owner)?;
+        assert_run(&tx, &owner.project_id, run_id, expected_epoch)?;
+        let instance: Option<String> = tx.query_row(
+            "SELECT instance_id FROM runs WHERE project_id=?1 AND run_id=?2",
+            params![owner.project_id, run_id],
+            |row| row.get(0),
+        )?;
+        let instance = instance.context("run has no App-reserved execution instance")?;
+        tx.commit()?;
+        Ok(instance)
     }
 
     /// Trusted local actor inventory used when minting exact peer grants.

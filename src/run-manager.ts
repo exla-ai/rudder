@@ -24,6 +24,7 @@ import {
   rememberBackendSelection,
   resolveRun,
   runDir,
+  runRecordPath,
   saveRunRecord,
   stopRequestPath,
 } from "./state.js";
@@ -74,6 +75,28 @@ import { captureSharedContextFromInput, redactSharedSecretValues, SHARED_CONTEXT
 // RUDDER_AUTO_STEER_DELAY_MS so the end-to-end test can drain a DAG quickly
 // instead of waiting 10s per node; defaults to 10s for real runs.
 const AUTO_STEER_DELAY_MS = Number(process.env.RUDDER_AUTO_STEER_DELAY_MS) || 10_000;
+
+// Native managed markers are recovery evidence, including malformed/quarantined
+// projections. Their durable sidecar can precede run.json, so neither a missing
+// project owner nor old branch/workspace fields authorize a legacy fallback.
+function hasManagedSource(run: RunRecord, repoRoot = run.repoRoot, runId = run.id): boolean {
+  const raw = run as unknown as Record<string, unknown>;
+  if (Object.hasOwn(raw, "managedLocal") || (raw.vcs !== undefined && raw.vcs !== "git" && raw.vcs !== "jj")) return true;
+  try {
+    fs.lstatSync(path.join(runDir(repoRoot, runId), "managed-local.json"));
+    return true;
+  } catch (error) {
+    // Unknown/unreadable recovery evidence must never become permission to
+    // mutate a checkout. lstat also protects corrupt directories and symlinks.
+    return (error as NodeJS.ErrnoException).code !== "ENOENT";
+  }
+}
+
+function assertLegacyRunAllowed(run: RunRecord, repoRoot = run.repoRoot, runId = run.id): void {
+  if (hasManagedSource(run, repoRoot, runId)) {
+    throw new Error(`Run ${runId} has managed or unsupported workspace recovery state. Use its owning engine for recovery or authenticated shutdown; legacy run commands cannot resume, integrate, stop or delete it.`);
+  }
+}
 
 function missingBackendError(backend: BackendId, healthMessage: string): MissingToolError {
   return new MissingToolError(backend, healthMessage);
@@ -215,6 +238,7 @@ export async function continueRun(params: {
   if (!run) {
     throw new Error(`Run not found: ${params.runId}`);
   }
+  assertLegacyRunAllowed(run, repoRoot, params.runId);
   if (run.mode && run.mode !== "execute") {
     throw new Error("Only headless execute runs can be continued from the standalone board.");
   }
@@ -258,6 +282,8 @@ export async function continueRun(params: {
 }
 
 async function interruptWorkerAttempt(repoRoot: string, owned: RunRecord): Promise<void> {
+  // This is the legacy process-kill path, not managed App authenticated stop.
+  assertLegacyRunAllowed(owned, repoRoot);
   const known = new Set<number>();
   const controllerGroups = new Set<number>();
   const collect = (run: RunRecord | null): void => {
@@ -279,6 +305,7 @@ async function interruptWorkerAttempt(repoRoot: string, owned: RunRecord): Promi
       [...controllerGroups].every((pid) => !processGroupAlive(pid));
     while (Date.now() < deadline) {
       const latest = await loadRunRecord(repoRoot, owned.id);
+      if (latest) assertLegacyRunAllowed(latest, repoRoot);
       if (latest && sameAttempt(latest, owned)) collect(latest);
       for (const pid of controllerGroups) {
         if (!processGroupAlive(pid) || signalledGroups.has(pid)) continue;
@@ -299,6 +326,7 @@ async function interruptWorkerAttempt(repoRoot: string, owned: RunRecord): Promi
         // declaring the old attempt fully quiesced.
         await delay(75);
         const settled = await loadRunRecord(repoRoot, owned.id);
+        if (settled) assertLegacyRunAllowed(settled, repoRoot);
         if (settled && sameAttempt(settled, owned)) collect(settled);
         if (stopped()) return true;
       }
@@ -338,6 +366,18 @@ function signalProcessGroup(controllerPid: number, signal: NodeJS.Signals): void
  */
 export function spawnWorker(repoRoot: string, runId: string, attemptId?: string): number | undefined {
   assertLegacyWriterAllowed(repoRoot);
+  let stored: string | undefined;
+  try { stored = fs.readFileSync(runRecordPath(repoRoot, runId), "utf8"); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+  if (stored !== undefined) {
+    let record: unknown;
+    try { record = JSON.parse(stored); } catch { throw new Error("Run record is unreadable; legacy worker was not started."); }
+    if (!isRecord(record)) throw new Error("Run record is invalid; legacy worker was not started.");
+    assertLegacyRunAllowed(record as unknown as RunRecord, repoRoot, runId);
+  } else {
+    // The launch handoff can precede its JSON save; a sidecar still wins.
+    assertLegacyRunAllowed({ id: runId, repoRoot } as RunRecord, repoRoot, runId);
+  }
   let stderrFd: number | undefined;
   try {
     fs.mkdirSync(runDir(repoRoot, runId), { recursive: true });
@@ -384,6 +424,7 @@ async function loadOwnedAttempt(
   for (let i = 0; i < (attemptId ? 600 : 1); i += 1) {
     const run = await loadRunRecord(repoRoot, runId);
     if (!run) return null;
+    assertLegacyRunAllowed(run, repoRoot, runId);
     if (!attemptId || run.process?.attemptId === attemptId) return run;
     // startRun/continueRun spawn immediately before their atomic run.json save.
     // Give the cross-process JSON lock a bounded handoff window instead of
@@ -402,10 +443,14 @@ function sameAttempt(left: RunRecord, right: RunRecord): boolean {
 
 async function attemptOwnsRun(repoRoot: string, run: RunRecord): Promise<boolean> {
   const latest = await loadRunRecord(repoRoot, run.id);
-  return Boolean(latest && sameAttempt(latest, run));
+  return Boolean(latest && !hasManagedSource(latest, repoRoot) && sameAttempt(latest, run));
 }
 
-function saveOwnedRun(run: RunRecord): Promise<boolean> {
+async function saveOwnedRun(run: RunRecord): Promise<boolean> {
+  // This recovery check precedes the atomic attempt CAS, so migration must
+  // still quiesce legacy writers before publishing managed ownership.
+  const latest = await loadRunRecord(run.repoRoot, run.id);
+  if (hasManagedSource(run) || (latest && hasManagedSource(latest))) return false;
   const expectedAttemptId = run.process?.attemptId;
   const expectedStartedAt = run.process?.startedAt;
   return saveRunRecord(
@@ -572,6 +617,7 @@ export async function workerRun(repoRoot: string, runId: string, attemptId?: str
 
 async function newerWorkerOwnsRun(repoRoot: string, staleRun: RunRecord): Promise<boolean> {
   const latest = await loadRunRecord(repoRoot, staleRun.id);
+  if (latest && hasManagedSource(latest, repoRoot)) return true;
   if (latest?.process?.attemptId && staleRun.process?.attemptId) {
     return latest.process.attemptId !== staleRun.process.attemptId;
   }
@@ -585,6 +631,7 @@ async function newerWorkerOwnsRun(repoRoot: string, staleRun: RunRecord): Promis
 }
 
 async function runBackendPass(run: RunRecord): Promise<{ run: RunRecord; exitCode: number }> {
+  assertLegacyRunAllowed(run);
   if (run.mode && run.mode !== "execute") {
     throw new Error("Only execute runs use the background worker.");
   }
@@ -785,6 +832,22 @@ function previewAgentContext(value: string, max: number): string {
 }
 
 async function writeRudderContextFiles(repoRoot: string, runs: RunRecord[], content: string): Promise<void> {
+  const normalizedPath = (value: string): string => {
+    try { return fs.realpathSync(value); } catch { return path.resolve(value); }
+  };
+  const protectedPaths = runs
+    .filter((run) => hasManagedSource(run, repoRoot))
+    .map((run) => run.workspace?.path)
+    .filter((value): value is string => typeof value === "string" && Boolean(value))
+    .map(normalizedPath);
+  const writable = (value: string): boolean => {
+    const resolved = normalizedPath(value);
+    return !protectedPaths.some((protectedPath) => {
+      const relative = path.relative(protectedPath, resolved);
+      return relative === "" || (!path.isAbsolute(relative) && relative !== ".." && !relative.startsWith(`..${path.sep}`));
+    });
+  };
+  if (!writable(repoRoot)) return;
   await ensureLine(path.join(repoRoot, ".gitignore"), "RUDDER.md");
   await ensureLine(path.join(repoRoot, ".gitignore"), SHARED_CONTEXT_FILE);
   // Workspaces live INSIDE the project at <repo>/<agent-workspaces-dir>; ignore them in the
@@ -794,7 +857,7 @@ async function writeRudderContextFiles(repoRoot: string, runs: RunRecord[], cont
   await ensureLine(path.join(repoRoot, ".gitignore"), `${LEGACY_AGENT_WORKSPACES_DIR}/`);
   const workspaces = new Set<string>([repoRoot]);
   for (const run of runs) {
-    if (run.workspace.path && await pathExists(run.workspace.path)) {
+    if (!hasManagedSource(run, repoRoot) && run.workspace.path && writable(run.workspace.path) && await pathExists(run.workspace.path)) {
       workspaces.add(run.workspace.path);
     }
   }
@@ -861,6 +924,7 @@ async function mergeRunIntoCurrentBranch(
   allowDirty: boolean,
   strategy: MergeStrategy,
 ): Promise<RunRecord> {
+  assertLegacyRunAllowed(run);
   if ((run.vcs ?? "git") === "jj") {
     return await mergeJjRunIntoCurrentWorkspace(run, allowDirty);
   }
@@ -868,6 +932,7 @@ async function mergeRunIntoCurrentBranch(
 }
 
 async function syncRunWorkspace(run: RunRecord, baseBranch: string): Promise<RunRecord> {
+  assertLegacyRunAllowed(run);
   if ((run.vcs ?? "git") === "jj") {
     return await syncJjRunWorkspace(run, baseBranch);
   }
@@ -875,6 +940,7 @@ async function syncRunWorkspace(run: RunRecord, baseBranch: string): Promise<Run
 }
 
 async function removeRunWorkspace(run: RunRecord, force = true): Promise<void> {
+  assertLegacyRunAllowed(run);
   if ((run.vcs ?? "git") === "jj") {
     await removeJjRunWorkspace(run);
     return;
@@ -914,6 +980,7 @@ function shortRunTask(run: RunRecord): string {
 }
 
 function workspaceKind(run: RunRecord): string {
+  if (hasManagedSource(run)) return "managed workspace";
   return (run.vcs ?? "git") === "jj" ? "jj-workspace" : "git-worktree";
 }
 
@@ -1033,6 +1100,7 @@ export async function stopRun(runId: string, options?: { silent?: boolean }): Pr
   if (!run) {
     throw new Error(`Run not found: ${runId}`);
   }
+  assertLegacyRunAllowed(run, repoRoot, runId);
   // The native dashboard owns interactive PTYs in another process. Record the
   // stop intent first so its poll loop observes cancellation before child-exit
   // handling can classify our SIGTERM/SIGKILL as a failure. Headless workers
@@ -1062,6 +1130,7 @@ export async function mergeRun(runId: string, allowDirty = false, options?: { si
   if (!run) {
     throw new Error(`Run not found: ${runId}`);
   }
+  assertLegacyRunAllowed(run, repoRoot, runId);
   if (run.status === "merged") {
     // SELF-HEAL before refusing. A run can be merged while the graph node it owns
     // still reads review — the run merged through a path that did not reconcile
@@ -1124,6 +1193,7 @@ export async function syncRun(runId?: string, options?: { silent?: boolean }): P
   if (!run) {
     throw new Error("No runs found.");
   }
+  assertLegacyRunAllowed(run, repoRoot);
   const hasIsolation = run.workspace.enabled && (run.workspace.workspaceName || run.workspace.branch);
   if (!hasIsolation) {
     throw new Error(`Run ${run.id} has no workspace to sync.`);
@@ -1168,6 +1238,7 @@ export async function deleteRun(runId: string, options?: { mergeFirst?: boolean;
   if (!run) {
     throw new Error(`Run not found: ${runId}`);
   }
+  assertLegacyRunAllowed(run, repoRoot, runId);
   let mergeError: unknown;
   if (options?.mergeFirst) {
     try {
@@ -1177,6 +1248,7 @@ export async function deleteRun(runId: string, options?: { mergeFirst?: boolean;
     }
   }
   const latest = await loadRunRecord(repoRoot, runId) ?? run;
+  assertLegacyRunAllowed(latest, repoRoot, runId);
   if (options?.mergeFirst && latest.merge?.status === "conflict") {
     throw new Error(`Merge conflict for ${runId}; resolve it before deleting the run.`);
   }
@@ -1247,6 +1319,7 @@ export async function cleanupRuns(force = false): Promise<void> {
 }
 
 function canCleanupRun(run: RunRecord, force: boolean): boolean {
+  if (hasManagedSource(run)) return false;
   if (!run.workspace.enabled) {
     return false;
   }
@@ -1570,7 +1643,7 @@ function isContextCompletedStatus(status: RunRecord["status"]): boolean {
 
 function runHasMergeSource(run: RunRecord): boolean {
   return Boolean(
-    run.workspace.enabled &&
+    !hasManagedSource(run) && run.workspace.enabled &&
       (run.workspace.path || run.workspace.branch || run.workspace.workspaceName || run.workspace.jjChangeId),
   );
 }

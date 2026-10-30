@@ -9,6 +9,9 @@ use std::{
 pub fn sealed_spec_fd(spec: &ExecutionSpec) -> Result<OwnedFd> {
     spec.validate()?;
     let bytes = crate::protocol::canonical_json(spec)?;
+    sealed_bytes_fd(&bytes)
+}
+pub(crate) fn sealed_bytes_fd(bytes: &[u8]) -> Result<OwnedFd> {
     ensure!(
         bytes.len() <= 1024 * 1024,
         "execution specification exceeds1MiB"
@@ -22,7 +25,7 @@ pub fn sealed_spec_fd(spec: &ExecutionSpec) -> Result<OwnedFd> {
     };
     ensure!(raw >= 0, "sealed execution memory is unavailable");
     let mut file = unsafe { File::from_raw_fd(raw as i32) };
-    file.write_all(&bytes)?;
+    file.write_all(bytes)?;
     file.seek(SeekFrom::Start(0))?;
     let seals = libc::F_SEAL_WRITE | libc::F_SEAL_GROW | libc::F_SEAL_SHRINK | libc::F_SEAL_SEAL;
     ensure!(
@@ -32,6 +35,13 @@ pub fn sealed_spec_fd(spec: &ExecutionSpec) -> Result<OwnedFd> {
     Ok(file.into())
 }
 pub fn read_spec_fd(fd: OwnedFd) -> Result<ExecutionSpec> {
+    let bytes = read_sealed_bytes(fd)?;
+    let spec: ExecutionSpec =
+        serde_json::from_slice(&bytes).context("invalid sealed execution specification")?;
+    spec.validate()?;
+    Ok(spec)
+}
+pub(crate) fn read_sealed_bytes(fd: OwnedFd) -> Result<Vec<u8>> {
     let seals = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GET_SEALS) };
     let required = libc::F_SEAL_WRITE | libc::F_SEAL_GROW | libc::F_SEAL_SHRINK | libc::F_SEAL_SEAL;
     ensure!(
@@ -51,19 +61,21 @@ pub fn read_spec_fd(fd: OwnedFd) -> Result<ExecutionSpec> {
         bytes.len() <= 1024 * 1024,
         "execution specification exceeds1MiB"
     );
-    let spec: ExecutionSpec =
-        serde_json::from_slice(&bytes).context("invalid sealed execution specification")?;
-    spec.validate()?;
-    Ok(spec)
+    Ok(bytes)
 }
 pub fn run_helper(_spec: ExecutionSpec) -> Result<ExecutionOutcome> {
-    supervisor(_spec, None)
+    supervisor(_spec, None, None)
 }
 pub fn run_helper_with_services(
     spec: ExecutionSpec,
     factory: HelperServicesFactory,
 ) -> Result<ExecutionOutcome> {
-    supervisor(spec, Some(factory))
+    supervisor(spec, Some(factory), None)
+}
+pub fn run_helper_with_managed_services(spec: ExecutionSpec, factory: HelperServicesFactory,
+    control: super::handoff::ManagedControl) -> Result<ExecutionOutcome> {
+    control.binding.validate(&spec)?;
+    supervisor(spec, Some(factory), Some(control))
 }
 
 use super::{root::Layout, state::State};
@@ -362,6 +374,8 @@ struct ChildSpec {
     nonce: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     application_projection: Option<GuestServiceProjection>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    managed: Option<ManagedExecutionBinding>,
 }
 #[derive(Serialize, Deserialize)]
 struct InitReport {
@@ -369,12 +383,16 @@ struct InitReport {
     agent_exit: i32,
     started: bool,
     error: Option<String>,
+    #[serde(default)]
+    managed_stop: bool,
 }
 #[derive(Serialize, Deserialize)]
 struct DrainReport {
     nonce: String,
     agent_exit: i32,
     kernel_drained: bool,
+    #[serde(default)]
+    managed_stop: bool,
 }
 
 pub fn arm_parent(parent: u32) -> Result<OwnedFd> {
@@ -420,6 +438,7 @@ fn proof() -> ExecutionIsolation {
 fn supervisor(
     spec: ExecutionSpec,
     factory: Option<HelperServicesFactory>,
+    mut control: Option<super::handoff::ManagedControl>,
 ) -> Result<ExecutionOutcome> {
     spec.validate()?;
     ensure!(
@@ -570,12 +589,17 @@ fn supervisor(
                 layout,
                 nonce: nonce.clone(),
                 application_projection,
+                managed: control.as_ref().map(|c| c.binding.clone()),
             };
             let payload = sealed_payload(&childspec)?;
             let (mut receive, send) = UnixStream::pair()?;
+            let (mut supervisor_control, init_control) = UnixStream::pair()?;
+            supervisor_control.set_read_timeout(Some(Duration::from_secs(2)))?;
+            supervisor_control.set_write_timeout(Some(Duration::from_secs(2)))?;
             receive.set_read_timeout(Some(Duration::from_secs(3)))?;
             let fd3 = duplicate_high(payload.as_raw_fd())?;
             let fd4 = duplicate_high(send.as_raw_fd())?;
+            let fd5 = control.as_ref().map(|_|duplicate_high(init_control.as_raw_fd())).transpose()?;
             let mut command = Command::new("/proc/self/exe");
             command
                 .args(["fabric", "execution", "child"])
@@ -586,11 +610,12 @@ fn supervisor(
                 command.pre_exec(move || {
                     if libc::dup2(fd3.as_raw_fd(), 3) < 0
                         || libc::dup2(fd4.as_raw_fd(), 4) < 0
+                        || fd5.as_ref().is_some_and(|fd|libc::dup2(fd.as_raw_fd(), 5) < 0)
                         || libc::setpgid(0, 0) != 0
                     {
                         return Err(std::io::Error::last_os_error());
                     }
-                    if libc::syscall(libc::SYS_close_range, 5u32, u32::MAX, 4u32) != 0 {
+                    if libc::syscall(libc::SYS_close_range, if fd5.is_some() { 6u32 } else { 5u32 }, u32::MAX, 4u32) != 0 {
                         return Err(std::io::Error::last_os_error());
                     }
                     Ok(())
@@ -604,12 +629,31 @@ fn supervisor(
             drop(command);
             drop(send);
             drop(payload);
+            drop(init_control);
             let mut guard = ProcessGuard(child.id() as i32);
             let began = Instant::now();
             let mut renewed = Instant::now();
+            let mut stop_sent = false;
+            let mut backend_ready = false;
+            let mut authenticated_sent = false;
             let status = loop {
                 if let Some(monitor) = &monitor {
                     monitor.check()?;
+                }
+                if let Some(control) = &mut control {
+                    if control.poll_stop()? && !stop_sent {
+                        supervisor_control.write_all(b"S")?; stop_sent = true;
+                    }
+                    if control.authenticated && !authenticated_sent && !stop_sent {
+                        supervisor_control.write_all(b"A")?; authenticated_sent = true;
+                    }
+                    let mut poll = libc::pollfd { fd: supervisor_control.as_raw_fd(), events: libc::POLLIN, revents: 0 };
+                    if unsafe { libc::poll(&mut poll, 1, 0) } > 0 && poll.revents & libc::POLLIN != 0 && !backend_ready {
+                        let (execution, descriptor): (String, _) = super::handoff::receive_control_packet(&mut supervisor_control)?;
+                        ensure!(execution == spec.execution_id, "backend readiness belongs to another execution");
+                        control.backend_ready(&descriptor.context("backend readiness lacks actual pidfd")?)?;
+                        backend_ready = true;
+                    }
                 }
                 if let Some(status) = child.try_wait()? {
                     guard.0 = 0;
@@ -645,6 +689,10 @@ fn supervisor(
                 drain.nonce == nonce && drain.kernel_drained,
                 "execution namespace-drain proof mismatch"
             );
+            if let Some(control) = &control {
+                ensure!(drain.managed_stop && control.request.is_some(),
+                    "kernel shutdown has no matching authenticated parent request");
+            }
             if unsafe { libc::isatty(0) } == 1 {
                 unsafe {
                     libc::tcsetpgrp(0, libc::getpgrp());
@@ -663,6 +711,7 @@ fn supervisor(
             state.record.agent_exit = Some(drain.agent_exit);
             state.record.checkpoint = Some(checkpoint);
             state.save()?;
+            if let Some(control) = &mut control { control.shutdown_receipt(&state.record)?; }
             Ok(ExecutionOutcome {
                 record: state.record.clone(),
                 isolation: proof(),
@@ -753,6 +802,8 @@ pub fn run_child() -> Result<()> {
     );
     let payload = read_payload(unsafe { OwnedFd::from_raw_fd(3) })?;
     payload.spec.validate()?;
+    if let Some(binding) = &payload.managed { binding.validate(&payload.spec)?; }
+    let init_control = payload.managed.as_ref().map(|_| UnixStream::from(unsafe { OwnedFd::from_raw_fd(5) }));
     let mut report = unsafe { File::from_raw_fd(4) };
     let parent = unsafe { libc::getppid() } as u32;
     let lifetime = arm_parent(parent)?;
@@ -777,14 +828,15 @@ pub fn run_child() -> Result<()> {
         drop(report);
         drop(init_receive);
         let mut pipe = init_send;
-        let result = namespace_init(&payload, wrapper.as_raw_fd());
+        let result = namespace_init(&payload, wrapper.as_raw_fd(), init_control);
         let code = match result {
-            Ok(exit) => {
+            Ok((exit, managed_stop)) => {
                 let frame = InitReport {
                     nonce: payload.nonce.clone(),
                     agent_exit: exit,
                     started: true,
                     error: None,
+                    managed_stop,
                 };
                 if pipe
                     .write_all(&crate::protocol::canonical_json(&frame).unwrap_or_default())
@@ -801,6 +853,7 @@ pub fn run_child() -> Result<()> {
                     agent_exit: 125,
                     started: false,
                     error: Some(format!("{error:#}")),
+                    managed_stop: false,
                 };
                 let _ =
                     pipe.write_all(&crate::protocol::canonical_json(&frame).unwrap_or_default());
@@ -810,6 +863,7 @@ pub fn run_child() -> Result<()> {
         unsafe { libc::_exit(code) }
     }
     drop(init_send);
+    drop(init_control);
     let mut guard = ProcessGuard(init);
     let mut status = 0;
     loop {
@@ -847,11 +901,12 @@ pub fn run_child() -> Result<()> {
         nonce: payload.nonce,
         agent_exit: outcome.agent_exit,
         kernel_drained: true,
+        managed_stop: outcome.managed_stop,
     };
     report.write_all(&crate::protocol::canonical_json(&frame)?)?;
     Ok(())
 }
-fn namespace_init(payload: &ChildSpec, parent: RawFd) -> Result<i32> {
+fn namespace_init(payload: &ChildSpec, parent: RawFd, mut control: Option<UnixStream>) -> Result<(i32, bool)> {
     ensure!(
         unsafe { libc::getpid() } == 1,
         "execution is not private PID namespace init"
@@ -942,9 +997,45 @@ fn namespace_init(payload: &ChildSpec, parent: RawFd) -> Result<i32> {
             Ok(())
         });
     }
+    let mut server = if let Some(binding) = &payload.managed {
+        if let Some(argv) = &binding.server_command {
+            let mut server = Command::new(&argv[0]);
+            server.args(&argv[1..]).env_clear().current_dir("/workspace")
+                .envs(command.get_envs().filter_map(|(key, value)| value.map(|value|(key, value))))
+                .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+            unsafe { server.pre_exec(|| {
+                if libc::setpgid(0, 0) != 0 || libc::syscall(libc::SYS_close_range, 3u32, u32::MAX, 4u32) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                drop_privileges()
+            }); }
+            let mut child = server.spawn().context("launch owned backend server")?;
+            if !wait_owned_backend(&mut child, &binding.guest_socket, control.as_mut())? {
+                unsafe { libc::kill(-1, libc::SIGKILL); }
+                return Ok((143, true));
+            }
+            send_backend_ready(control.as_mut().unwrap(), &payload.spec.execution_id, child.id())?;
+            ensure!(binding.frontend_start == ManagedFrontendStart::AfterHostApiKeyV1,
+                "owned server lacks mandatory authenticated frontend admission");
+            if !wait_frontend_auth(&mut child, control.as_mut().unwrap())? {
+                unsafe { libc::kill(-1, libc::SIGKILL); }
+                return Ok((143, true));
+            }
+            Some(child)
+        } else { None }
+    } else { None };
     let mut child = command
         .spawn()
         .context("launch command in restricted root")?;
+    if let Some(binding) = &payload.managed {
+        if server.is_none() {
+            if !wait_owned_backend(&mut child, &binding.guest_socket, control.as_mut())? {
+                unsafe { libc::kill(-1, libc::SIGKILL); }
+                return Ok((143, true));
+            }
+            send_backend_ready(control.as_mut().unwrap(), &payload.spec.execution_id, child.id())?;
+        }
+    }
     if unsafe { libc::isatty(0) } == 1 {
         ensure!(
             unsafe { libc::tcsetpgrp(0, child.id() as i32) } == 0,
@@ -955,13 +1046,20 @@ fn namespace_init(payload: &ChildSpec, parent: RawFd) -> Result<i32> {
         }
     }
     let began = Instant::now();
+    let mut managed_stop = false;
     let exit = loop {
+        if let Some(control) = &mut control {
+            if managed_stop_requested(control)? { managed_stop = true; break 143; }
+        }
         if let Some(status) = child.try_wait()? {
+            ensure!(payload.managed.is_none(),
+                "managed backend exited without authenticated parent shutdown; checkpoint authority withheld");
             break status.code().unwrap_or(128 + status.signal().unwrap_or(9));
         }
         if began.elapsed() > Duration::from_secs(payload.spec.timeout_seconds) {
-            break 124;
+            anyhow::bail!("backend execution timed out; checkpoint authority withheld");
         }
+        if let Some(server) = &mut server { ensure!(server.try_wait()?.is_none(), "owned backend server exited before its terminal"); }
         std::thread::sleep(Duration::from_millis(10));
     };
     // PID1's exit is the final kernel-enforced kill/reap barrier. Userland
@@ -970,7 +1068,89 @@ fn namespace_init(payload: &ChildSpec, parent: RawFd) -> Result<i32> {
     unsafe {
         libc::kill(-1, libc::SIGKILL);
     }
-    Ok(exit)
+    Ok((exit, managed_stop))
+}
+fn managed_stop_requested(control: &mut UnixStream) -> Result<bool> {
+    let mut event = libc::pollfd { fd: control.as_raw_fd(), events: libc::POLLIN, revents: 0 };
+    ensure!(unsafe { libc::poll(&mut event, 1, 0) } >= 0, "private init control poll failed");
+    if event.revents & libc::POLLIN != 0 {
+        let mut byte = [0]; control.read_exact(&mut byte)?;
+        ensure!(byte == *b"S", "invalid private init stop request"); return Ok(true);
+    }
+    ensure!(event.revents & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) == 0, "owning supervisor control ended");
+    Ok(false)
+}
+fn wait_frontend_auth(server: &mut std::process::Child, control: &mut UnixStream) -> Result<bool> {
+    wait_frontend_auth_until(server, control, Instant::now()+Duration::from_secs(30))
+}
+fn wait_frontend_auth_until(server: &mut std::process::Child, control: &mut UnixStream, deadline:Instant) -> Result<bool> {
+    loop {
+        ensure!(Instant::now() < deadline, "host frontend authentication deadline ended");
+        ensure!(server.try_wait()?.is_none(), "owned backend exited before host authentication");
+        let mut event = libc::pollfd { fd:control.as_raw_fd(), events:libc::POLLIN, revents:0 };
+        ensure!(unsafe { libc::poll(&mut event, 1, 10) } >= 0, "private frontend admission poll failed");
+        if event.revents & libc::POLLIN != 0 {
+            let mut byte = [0]; control.read_exact(&mut byte)?;
+            match byte[0] { b'A' => return Ok(true), b'S' => return Ok(false), _ => anyhow::bail!("invalid private frontend admission") }
+        }
+        ensure!(event.revents & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) == 0, "parent frontend admission control ended");
+    }
+}
+
+#[cfg(test)]
+mod frontend_auth_tests {
+    use super::*;
+    #[test]
+    fn only_private_parent_authentication_releases_frontend_and_stop_or_eof_withholds_it() {
+        for action in [b'A', b'S', b'X', 0] {
+            let (mut parent, mut init) = UnixStream::pair().unwrap();
+            let (result, received) = std::sync::mpsc::sync_channel(1);
+            let worker = std::thread::spawn(move || {
+                let mut server = Command::new("/bin/sleep").arg("30").spawn().unwrap();
+                let admitted = wait_frontend_auth_until(&mut server, &mut init, Instant::now()+Duration::from_secs(2));
+                let started = if matches!(admitted,Ok(true)) { Command::new("/bin/true").status().unwrap().success() } else { false };
+                server.kill().unwrap(); server.wait().unwrap();
+                result.send((admitted.is_ok(),started)).unwrap();
+            });
+            assert!(received.recv_timeout(Duration::from_millis(30)).is_err(), "no socket/text/default readiness may start the frontend");
+            if action == 0 { drop(parent); } else { parent.write_all(&[action]).unwrap(); }
+            let (valid,started) = received.recv_timeout(Duration::from_secs(2)).unwrap(); worker.join().unwrap();
+            assert_eq!(started,action == b'A'); assert_eq!(valid,matches!(action,b'A'|b'S'));
+        }
+    }
+    #[test]
+    fn missing_parent_authentication_is_bounded_and_never_admits_frontend() {
+        let (_parent, mut init) = UnixStream::pair().unwrap();
+        let mut server = Command::new("/bin/sleep").arg("30").spawn().unwrap();
+        let result = wait_frontend_auth_until(&mut server,&mut init,Instant::now()+Duration::from_millis(40));
+        server.kill().unwrap(); server.wait().unwrap(); assert!(result.is_err());
+    }
+}
+fn wait_owned_backend(child: &mut std::process::Child, socket: &std::path::Path,
+    mut control: Option<&mut UnixStream>) -> Result<bool> {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while Instant::now() < deadline {
+        if let Some(stream) = control.as_deref_mut() {
+            if managed_stop_requested(stream)? { return Ok(false); }
+        }
+        ensure!(child.try_wait()?.is_none(), "owned backend exited before readiness");
+        if let Ok(stream) = UnixStream::connect(socket) {
+            let mut cred: libc::ucred = unsafe { std::mem::zeroed() };
+            let mut length = std::mem::size_of_val(&cred) as libc::socklen_t;
+            ensure!(unsafe { libc::getsockopt(stream.as_raw_fd(), libc::SOL_SOCKET, libc::SO_PEERCRED,
+                (&mut cred as *mut libc::ucred).cast(), &mut length) } == 0 && cred.pid == child.id() as i32,
+                "guest socket belongs to another process, not the owned backend");
+            return Ok(true);
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    anyhow::bail!("owned backend readiness timed out")
+}
+fn send_backend_ready(control: &mut UnixStream, execution: &str, child: u32) -> Result<()> {
+    let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, child, 0) };
+    ensure!(fd >= 0, "actual backend pidfd is unavailable");
+    let fd = unsafe { OwnedFd::from_raw_fd(fd as i32) };
+    super::handoff::send_control_packet(control, &execution, Some(&fd))
 }
 fn drop_privileges() -> std::io::Result<()> {
     #[repr(C)]

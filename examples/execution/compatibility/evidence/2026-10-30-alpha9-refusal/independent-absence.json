@@ -1,0 +1,9 @@
+{
+  "verifiedAt": "2026-10-30T21:57:18.989Z",
+  "machine": "8ee325c7151e38",
+  "name": "rudder-alpha9-compat-d70afb46",
+  "absentId": true,
+  "absentName": true,
+  "absentNonce": true,
+  "scope": "independent post-controller filtered inventory; no machine configuration/environment printed"
+}

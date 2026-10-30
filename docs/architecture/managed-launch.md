@@ -5,7 +5,9 @@ qualification](../../examples/vcs/evidence/2026-10-30/native-v3/README.md).
 That proof used local workspace roots, real native broker authorization and
 debug-built executables, with a shell/jj fixture. It did not qualify actual
 Codex/Claude execution, normal App launch, provider credentials or lazy remote
-roots. The alpha8 boundary keeps default launch unchanged.
+roots. The alpha.9 release keeps default launch unchanged. The following
+composition is implemented in the working tree and remains explicitly inactive
+until its remaining activation and provider gates pass.
 
 ## One owner, one attempt
 
@@ -13,7 +15,7 @@ The App remains the only native state/PTy owner and scheduling authority. Heavy
 preparation runs outside its loop and returns typed results. No background task
 may launch a replacement agent, mutate App or choose a new run/attempt identity.
 
-The proposed host API is:
+The explicit host preparation API is:
 
 ```rust
 struct ManagedLaunchFence {
@@ -94,9 +96,11 @@ read-only image runtime, selected agent's private home/environment and its own
 broker/service endpoints. It receives no engine `.jj`, global CAS/journal,
 credential vault, all-profile HOME, peer identity or sibling workspace.
 
-Credential selection is explicit and occurs outside App. It copies only the
-selected provider's required material into bounded `home_files`/environment in
-the sealed handoff. The helper clears the inherited environment. The source
+Credential selection is explicit and occurs outside App. Claude receives only
+the selected API key in its bounded sealed environment. The selected Codex key
+stays on the host for authenticated app-server bootstrap with ephemeral storage;
+it is absent from guest home files, environment and the execution spec. The
+helper clears the inherited environment. The source
 profile selector/lease may be persisted privately; credential values may not.
 Qualification uses existing configured accounts without new sign-in, account or
 paid-plan changes, and avoids refresh-token reuse that could invalidate an
@@ -200,12 +204,57 @@ RemoteSession plus owned source/cache lifetime, protected context and broker
 authority. The existing post-RPC VCS application callback is too late. Local
 qualification does not authorize eager fallback or claim remote-root support.
 
-## Ownership for the next slice
+## Implemented composition and activation gates
 
-After the alpha8 snapshot/tag, the proposed lane owns a new `managed_launch.rs`
-and focused tests, agent-link host/guest mapping and readiness, execution
-control/lifecycle, and narrowly agreed Runtime assignment/grant APIs. Root owns
-App reservation/result/PTY wiring plus `gitio`/task startup, and store/delta/
-transfer; pager ownership remains separate. No Runtime/App product edits begin
-before that ownership handoff. Legacy wrappers, application None bytes and
-existing conversation profiles remain compatible.
+`App::start_managed_local` is an internal explicit API, with no public command,
+configuration or default caller yet. It accepts a stopped row without a legacy
+workspace/session, retained local roots, an authorized VCS seed and an explicit
+credential selection. At most two preparation workers run; their bounded typed
+results carry the original fence. Cancellation, panic and stale results settle
+without reviving a retired attempt.
+
+A private fsynced reservation precedes preparation effects. The assigned view
+is then persisted before any capability grant. The App adopts the exact broker
+and sealed handoff and remains the only PTY owner. Backend readiness carries an
+actual kernel process witness; guest report files carry candidate summaries,
+never readiness, acknowledgment or deployment authority.
+
+`ManagedExecutionHandle` requests authenticated graceful shutdown over a private
+parent channel. A checkpoint receipt is bound to the sealed spec, owned helper
+PID, exited backend witness and exact request/owner/run/attempt/view. App waits
+for both that receipt and PTY exit before recording Paused. Abrupt teardown or
+uncertain settlement withholds checkpoint success and source acceptance.
+
+Focused checks cover managed preparation/adoption, protected credential roots,
+broker binding, legacy resume guards, control-channel settlement and unchanged
+legacy handoff encoding. Real provider execution is still a separate gate.
+
+Before activation, recovery must establish an explicit compatibility boundary.
+Alpha.9 native ignores a new run marker, so a marker alone cannot prevent a
+legacy restart from reinterpreting a managed run. Managed records need their own
+namespace and a durable writer protocol floor, activated only after legacy
+owners and children are quiescent. Old-client refusal must be tested against the
+actual released binaries. This is cooperative compatibility, not physical
+revocation of arbitrary old clients.
+
+Selected API-key credentials are the first supported profile; OAuth remains
+typed unsupported until protected refresh coordination is qualified. Codex
+0.166.0 app-server disables environment-key login, so a fresh private home needs
+the supported `account/login/start` API and confirmed `account/read` before
+starting its TUI/thread. Passing `OPENAI_API_KEY` alone is insufficient. The host
+must keep the key out of persisted metadata, notices and diagnostic errors.
+Claude setup tokens and saved OAuth access/refresh tokens are distinct inputs;
+they cannot be substituted or copied from an active session without a qualified
+lifecycle.
+
+Guest networking is another concrete activation gate. The current restricted
+helper shares the host network namespace and reports `network_isolated:false`.
+The normal board serves its browser token to loopback HTTP clients; a raw guest
+client can satisfy those Host checks. Source review found that this reaches host
+project controls, despite filesystem/PID isolation. No live exploit was attempted.
+Default launch needs controlled guest networking and authenticated board access;
+pathname-socket protection does not isolate TCP loopback.
+
+Default activation, provider inference/OAuth qualification, managed-source
+acceptance, controlled networking and the remote pre-mount factory remain
+explicit follow-up work. No current internal API result claims those gates passed.

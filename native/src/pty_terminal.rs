@@ -957,6 +957,52 @@ pub struct TerminalCursor {
 }
 
 impl TerminalPane {
+    /// Spawn the exact helper prepared off-App. The sealed execution spec and
+    /// private control descriptors travel through the owned handoff after the
+    /// PTY child exists; they never enter terminal output, argv or environment.
+    /// The caller retains both receipts separately from rendered terminal data.
+    #[cfg(target_os = "linux")]
+    pub fn spawn_managed(
+        native_program: impl Into<String>,
+        handoff: rudder_engine::execution::handoff::ManagedExecutionHandoff,
+        attempt_id: &str,
+        execution_profile: &str,
+        agent_link_launch_json: Option<&str>,
+        options: TerminalPaneOptions,
+    ) -> Result<(
+        Self,
+        rudder_engine::execution::handoff::HandoffReceipt,
+        rudder_engine::execution::handoff::ManagedExecutionHandle,
+    )> {
+        anyhow::ensure!(
+            uuid::Uuid::parse_str(attempt_id).is_ok_and(|id| id.to_string() == attempt_id),
+            "managed PTY requires its reserved canonical attempt UUID"
+        );
+        anyhow::ensure!(
+            matches!(execution_profile, "claude-sdk" | "codex-app-server"),
+            "managed PTY requires a qualified backend profile"
+        );
+        anyhow::ensure!(
+            handoff.binding().execution_id == attempt_id
+                && handoff.binding().execution_profile == execution_profile,
+            "managed PTY identity differs from its sealed handoff"
+        );
+        let mut command = TerminalCommand::with_args(native_program, handoff.helper_args())
+            .with_env("RUDDER_FABRIC_ATTEMPT_ID", attempt_id)
+            .with_env("RUDDER_EXECUTION_PROFILE", execution_profile);
+        if let Some(launch) = agent_link_launch_json {
+            command = command.with_env("RUDDER_AGENT_LINK_LAUNCH", launch);
+        }
+        let pane = Self::spawn_shell_or_command(Some(command), options)?;
+        let pid = pane
+            .child_process_id()
+            .context("managed PTY has no owned helper PID")?;
+        // activate starts the bounded descriptor/control worker. It does not
+        // wait for helper readiness or perform workspace/model/network work.
+        let (receipt, control) = handoff.activate(pid)?;
+        Ok((pane, receipt, control))
+    }
+
     /// Spawn the user's shell when `command` is `None`, or spawn the supplied
     /// program and arguments when it is `Some`.
     ///

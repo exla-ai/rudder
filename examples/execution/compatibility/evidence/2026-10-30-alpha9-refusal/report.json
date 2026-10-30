@@ -1,0 +1,393 @@
+{
+  "formatVersion": 1,
+  "kind": "alpha9-compatibility-refusal",
+  "name": "rudder-alpha9-compat-d70afb46",
+  "nonce": "d70afb46-452f-4942-b5c4-99bbe70d3011",
+  "requestedImage": "registry.fly.io/rudder-workers-exla:4.0.0-alpha.9",
+  "expectedDigest": "sha256:939c5593c5ed1232577d575f7ff382448c466a9033874c94a1a684c4ec5d599a",
+  "sourceSha256": "117f16d79c61fb2900031de563f83dad1927d860d7a4e398620bc6f35a175b70",
+  "sourceManifestSha256": "01ee493d97698fc0406cf62bf3c0b5e8a78bccfa4757873f6ab40092e8cd5fe4",
+  "startedAt": "2026-10-30T21:55:32.209Z",
+  "steps": [
+    {
+      "step": "assert-empty-app-secrets",
+      "ms": 690
+    },
+    {
+      "step": "filtered-inventory",
+      "ms": 772
+    },
+    {
+      "step": "create-owned-canary",
+      "ms": 47254
+    },
+    {
+      "step": "filtered-inventory",
+      "ms": 623
+    },
+    {
+      "step": "private-source-download",
+      "ms": 3646
+    },
+    {
+      "step": "prepare-owned-fixture",
+      "ms": 1369
+    },
+    {
+      "step": "launch-owned-qualification",
+      "ms": 311
+    },
+    {
+      "step": "poll-owned-qualification",
+      "ms": 286
+    },
+    {
+      "step": "poll-owned-qualification",
+      "ms": 482
+    },
+    {
+      "step": "poll-owned-qualification",
+      "ms": 279
+    },
+    {
+      "step": "retrieve-generated-results",
+      "ms": 331
+    },
+    {
+      "step": "filtered-inventory",
+      "ms": 461
+    },
+    {
+      "step": "destroy-owned-canary",
+      "ms": 3043
+    },
+    {
+      "step": "filtered-inventory",
+      "ms": 712
+    },
+    {
+      "step": "filtered-inventory",
+      "ms": 456
+    }
+  ],
+  "requestedConfig": {
+    "init": {
+      "exec": [
+        "/bin/sleep",
+        "1200"
+      ]
+    },
+    "guest": {
+      "cpu_kind": "shared",
+      "cpus": 2,
+      "memory_mb": 2048
+    },
+    "env": {},
+    "services": [],
+    "mounts": [],
+    "restart": {
+      "policy": "no"
+    },
+    "metadata": {
+      "qualification": "d70afb46-452f-4942-b5c4-99bbe70d3011",
+      "rudder_role": "alpha9-compatibility-refusal",
+      "purpose": "disposable-schema5-old-client-refusal"
+    }
+  },
+  "machine": "8ee325c7151e38",
+  "instance": "01M67CZ8HZZM2V8PF56W3VM6ZC",
+  "region": "iad",
+  "image": {
+    "registry": "registry.fly.io",
+    "repository": "rudder-workers-exla",
+    "tag": "4.0.0-alpha.9",
+    "digest": "sha256:939c5593c5ed1232577d575f7ff382448c466a9033874c94a1a684c4ec5d599a"
+  },
+  "exitCode": 0,
+  "result": {
+    "cases": [
+      {
+        "backendTrapAbsent": true,
+        "integrity": "ok",
+        "mode": "fabric",
+        "native": [
+          {
+            "argv": [
+              "/opt/rudder/dist/native/rudder-native",
+              "engine",
+              "serve",
+              "--repo",
+              "/workspace/alpha9-compat-d70afb46-452f-4942-b5c4-99bbe70d3011/fabric/repo",
+              "--json"
+            ],
+            "exit": 1,
+            "ms": 8.807,
+            "output": "Error: journal schema is newer than this engine\n",
+            "terminal": false
+          },
+          {
+            "argv": [
+              "/opt/rudder/dist/native/rudder-native"
+            ],
+            "exit": 1,
+            "ms": 308.906,
+            "output": "\u001b]10;?\u001b\\\u001b]11;?\u001b\\\u001b[c\u001b[?1049h\u001b[?2004h\u001b[?1004h\u001b[>5u\u001b[?1003l\u001b[?1000h\u001b[?1002h\u001b[?1006h\u001b]0;⚪ repo\u0007\u001b[?1006l\u001b[?1003l\u001b[?1002l\u001b[?1000l\u001b[<1u\u001b[?1004l\u001b[?2004l\u001b[?1049l\u001b[<99u\u001b[=0;1u\u001b[>4m\u001b[?1004l\u001b]0;\u0007\u001b[?25hError: journal schema is newer than this engine\r\n",
+            "terminal": true
+          },
+          {
+            "argv": [
+              "/opt/rudder/dist/native/rudder-native",
+              "engine",
+              "serve",
+              "--repo",
+              "/workspace/alpha9-compat-d70afb46-452f-4942-b5c4-99bbe70d3011/fabric/repo"
+            ],
+            "exit": 1,
+            "ms": 6.378,
+            "output": "Error: journal schema is newer than this engine\n",
+            "terminal": false
+          }
+        ],
+        "ownerRunHistoryUnchanged": true,
+        "schemaVersion": 5,
+        "ts": {
+          "attempts": [],
+          "guard": "This project uses the persistent engine. Use its dashboard or machine API so commands retain the current owner epoch.",
+          "mode": "fabric",
+          "results": [
+            {
+              "error": "This project uses the persistent engine. Use its dashboard or machine API so commands retain the current owner epoch.",
+              "name": "board_continueRun",
+              "refused": true
+            },
+            {
+              "error": "This project uses the persistent engine. Use its dashboard or machine API so commands retain the current owner epoch.",
+              "name": "detached_workerRun",
+              "refused": true
+            },
+            {
+              "error": "This project uses the persistent engine. Use its dashboard or machine API so commands retain the current owner epoch.",
+              "name": "board_scheduler_tick",
+              "refused": true
+            }
+          ],
+          "scope": "exact alpha9 board writer functions; no HTTP server or model call"
+        }
+      },
+      {
+        "backendTrapAbsent": true,
+        "integrity": "ok",
+        "mode": "malformed",
+        "native": [
+          {
+            "argv": [
+              "/opt/rudder/dist/native/rudder-native",
+              "engine",
+              "serve",
+              "--repo",
+              "/workspace/alpha9-compat-d70afb46-452f-4942-b5c4-99bbe70d3011/malformed/repo",
+              "--json"
+            ],
+            "exit": 1,
+            "ms": 7.095,
+            "output": "Error: journal schema is newer than this engine\n",
+            "terminal": false
+          },
+          {
+            "argv": [
+              "/opt/rudder/dist/native/rudder-native"
+            ],
+            "exit": 1,
+            "ms": 307.919,
+            "output": "\u001b]10;?\u001b\\\u001b]11;?\u001b\\\u001b[c\u001b[?1049h\u001b[?2004h\u001b[?1004h\u001b[>5u\u001b[?1003l\u001b[?1000h\u001b[?1002h\u001b[?1006h\u001b]0;⚪ repo\u0007\u001b[?1006l\u001b[?1003l\u001b[?1002l\u001b[?1000l\u001b[<1u\u001b[?1004l\u001b[?2004l\u001b[?1049l\u001b[<99u\u001b[=0;1u\u001b[>4m\u001b[?1004l\u001b]0;\u0007\u001b[?25hError: journal schema is newer than this engine\r\n",
+            "terminal": true
+          },
+          {
+            "argv": [
+              "/opt/rudder/dist/native/rudder-native",
+              "engine",
+              "serve",
+              "--repo",
+              "/workspace/alpha9-compat-d70afb46-452f-4942-b5c4-99bbe70d3011/malformed/repo"
+            ],
+            "exit": 1,
+            "ms": 6.543,
+            "output": "Error: journal schema is newer than this engine\n",
+            "terminal": false
+          }
+        ],
+        "ownerRunHistoryUnchanged": true,
+        "schemaVersion": 5,
+        "ts": {
+          "attempts": [],
+          "guard": "Project engine ownership record is unreadable; recover the engine before starting a writer.",
+          "mode": "malformed",
+          "results": [
+            {
+              "error": "Project engine ownership record is unreadable; recover the engine before starting a writer.",
+              "name": "board_continueRun",
+              "refused": true
+            },
+            {
+              "error": "Project engine ownership record is unreadable; recover the engine before starting a writer.",
+              "name": "detached_workerRun",
+              "refused": true
+            },
+            {
+              "error": "Project engine ownership record is unreadable; recover the engine before starting a writer.",
+              "name": "board_scheduler_tick",
+              "refused": true
+            }
+          ],
+          "scope": "exact alpha9 board writer functions; no HTTP server or model call"
+        }
+      },
+      {
+        "backendTrapAbsent": true,
+        "integrity": "ok",
+        "mode": "unsupported",
+        "native": [
+          {
+            "argv": [
+              "/opt/rudder/dist/native/rudder-native",
+              "engine",
+              "serve",
+              "--repo",
+              "/workspace/alpha9-compat-d70afb46-452f-4942-b5c4-99bbe70d3011/unsupported/repo",
+              "--json"
+            ],
+            "exit": 1,
+            "ms": 6.549,
+            "output": "Error: journal schema is newer than this engine\n",
+            "terminal": false
+          },
+          {
+            "argv": [
+              "/opt/rudder/dist/native/rudder-native"
+            ],
+            "exit": 1,
+            "ms": 307.951,
+            "output": "\u001b]10;?\u001b\\\u001b]11;?\u001b\\\u001b[c\u001b[?1049h\u001b[?2004h\u001b[?1004h\u001b[>5u\u001b[?1003l\u001b[?1000h\u001b[?1002h\u001b[?1006h\u001b]0;⚪ repo\u0007\u001b[?1006l\u001b[?1003l\u001b[?1002l\u001b[?1000l\u001b[<1u\u001b[?1004l\u001b[?2004l\u001b[?1049l\u001b[<99u\u001b[=0;1u\u001b[>4m\u001b[?1004l\u001b]0;\u0007\u001b[?25hError: journal schema is newer than this engine\r\n",
+            "terminal": true
+          },
+          {
+            "argv": [
+              "/opt/rudder/dist/native/rudder-native",
+              "engine",
+              "serve",
+              "--repo",
+              "/workspace/alpha9-compat-d70afb46-452f-4942-b5c4-99bbe70d3011/unsupported/repo"
+            ],
+            "exit": 1,
+            "ms": 6.06,
+            "output": "Error: journal schema is newer than this engine\n",
+            "terminal": false
+          }
+        ],
+        "ownerRunHistoryUnchanged": true,
+        "schemaVersion": 5,
+        "ts": {
+          "attempts": [],
+          "guard": "Unsupported project engine authority; use a compatible Rudder engine.",
+          "mode": "unsupported",
+          "results": [
+            {
+              "error": "Unsupported project engine authority; use a compatible Rudder engine.",
+              "name": "board_continueRun",
+              "refused": true
+            },
+            {
+              "error": "Unsupported project engine authority; use a compatible Rudder engine.",
+              "name": "detached_workerRun",
+              "refused": true
+            },
+            {
+              "error": "Unsupported project engine authority; use a compatible Rudder engine.",
+              "name": "board_scheduler_tick",
+              "refused": true
+            }
+          ],
+          "scope": "exact alpha9 board writer functions; no HTTP server or model call"
+        }
+      },
+      {
+        "backendTrapAbsent": true,
+        "integrity": "ok",
+        "mode": "missing",
+        "native": [
+          {
+            "argv": [
+              "/opt/rudder/dist/native/rudder-native",
+              "engine",
+              "serve",
+              "--repo",
+              "/workspace/alpha9-compat-d70afb46-452f-4942-b5c4-99bbe70d3011/missing/repo",
+              "--json"
+            ],
+            "exit": 1,
+            "ms": 6.465,
+            "output": "Error: journal schema is newer than this engine\n",
+            "terminal": false
+          },
+          {
+            "argv": [
+              "/opt/rudder/dist/native/rudder-native"
+            ],
+            "exit": 1,
+            "ms": 307.96,
+            "output": "\u001b]10;?\u001b\\\u001b]11;?\u001b\\\u001b[c\u001b[?1049h\u001b[?2004h\u001b[?1004h\u001b[>5u\u001b[?1003l\u001b[?1000h\u001b[?1002h\u001b[?1006h\u001b]0;⚪ repo\u0007\u001b[?1006l\u001b[?1003l\u001b[?1002l\u001b[?1000l\u001b[<1u\u001b[?1004l\u001b[?2004l\u001b[?1049l\u001b[<99u\u001b[=0;1u\u001b[>4m\u001b[?1004l\u001b]0;\u0007\u001b[?25hError: journal schema is newer than this engine\r\n",
+            "terminal": true
+          },
+          {
+            "argv": [
+              "/opt/rudder/dist/native/rudder-native",
+              "engine",
+              "serve",
+              "--repo",
+              "/workspace/alpha9-compat-d70afb46-452f-4942-b5c4-99bbe70d3011/missing/repo"
+            ],
+            "exit": 1,
+            "ms": 6.669,
+            "output": "Error: journal schema is newer than this engine\n",
+            "terminal": false
+          }
+        ],
+        "ownerRunHistoryUnchanged": true,
+        "schemaVersion": 5,
+        "ts": {
+          "attempts": [],
+          "guard": "allowed",
+          "limitation": "alpha9 TS missing owner projection fails open; no writer invoked",
+          "mode": "missing"
+        }
+      }
+    ],
+    "fixtureAbsent": true,
+    "kernel": "6.12.114-fly",
+    "kind": "alpha9-compatibility-refusal",
+    "limitations": [
+      "manually generated schema5 fixture, not implemented activation migration",
+      "protocol refusal only; no physical revocation or provider qualification",
+      "no model, authenticated provider, active home or actual legacy task exercised"
+    ],
+    "moduleHashes": {
+      "engine-authority": "25c3a1f244983fc14ee550fc6273bff2cbc03a68d10c592679152294305ae0f9",
+      "run-manager": "4d71893d05c00c0a19d6239fcaa6a912b7b68060530af36fdcf1b7799c802fe9",
+      "scheduler": "e528c5b1c25ba37f2a31dd99f5a1974a5e5bb783ed5c63b9d1ef4902bf4236e6",
+      "state": "6448a5c1b7273d8d8b466fd1f0047e23845ab2f5d390cf2322c25f998f4614e8"
+    },
+    "native": {
+      "path": "/opt/rudder/dist/native/rudder-native",
+      "sha256": "c08e44c5feb0fe9b2a4907e725cedd07cab5d2daf887622245e62f40fdfd2c85"
+    },
+    "ok": true,
+    "packageVersion": "4.0.0-alpha.9",
+    "python": "3.11.2 (main, Oct  7 2026, 12:35:07) [GCC 12.2.0]",
+    "sqlite": "3.40.1",
+    "uid": 1500
+  },
+  "ok": true,
+  "cleanupVerified": true,
+  "independentAbsence": true,
+  "verifiedAt": "2026-10-30T21:56:35.960Z"
+}

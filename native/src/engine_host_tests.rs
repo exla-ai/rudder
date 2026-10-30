@@ -277,6 +277,65 @@ fn control_frames_reject_oversized_incomplete_and_unknown_fields() {
 }
 
 #[test]
+fn accepted_nonblocking_control_stream_waits_for_fragments_and_retains_its_deadline() {
+    use std::os::fd::AsRawFd;
+    let (reader, mut writer) = UnixStream::pair().unwrap();
+    // Force Darwin's accepted-socket state on every Unix test host.
+    reader.set_nonblocking(true).unwrap();
+    prepare_control_stream(&reader).unwrap();
+    let flags = unsafe { libc::fcntl(reader.as_raw_fd(), libc::F_GETFL) };
+    assert!(flags >= 0);
+    assert_eq!(flags & libc::O_NONBLOCK, 0);
+    let payload = serde_json::to_vec(&ControlRequest {
+        format_version: 1,
+        op: "status".into(),
+        instance_id: "fragmented-instance".into(),
+        epoch: 7,
+        nonce: "public-control-fixture".into(),
+    })
+    .unwrap();
+    let split = payload.len() / 2;
+    writer.write_all(&payload[..split]).unwrap();
+    let sender = thread::spawn(move || {
+        thread::sleep(Duration::from_millis(30));
+        writer.write_all(&payload[split..]).unwrap();
+        writer.write_all(b"\n").unwrap();
+    });
+    let request = read_control(&reader).expect("wait for the rest of a valid control frame");
+    sender.join().unwrap();
+    assert_eq!(request.op, "status");
+    assert_eq!(request.instance_id, "fragmented-instance");
+
+    let (reader, mut writer) = UnixStream::pair().unwrap();
+    reader.set_nonblocking(true).unwrap();
+    prepare_control_stream(&reader).unwrap();
+    writer.write_all(b"{").unwrap();
+    let started = Instant::now();
+    assert!(read_control(&reader).is_err(), "an incomplete live peer cannot wait forever");
+    assert!(started.elapsed() >= Duration::from_millis(100), "inherited EAGAIN bypassed the deadline");
+    assert!(started.elapsed() < Duration::from_secs(3), "the configured control deadline was lost");
+    drop(writer);
+}
+
+#[test]
+fn slow_control_fragments_cannot_extend_the_whole_request_deadline() {
+    let (reader, mut writer) = UnixStream::pair().unwrap();
+    prepare_control_stream(&reader).unwrap();
+    let sender = thread::spawn(move || {
+        for _ in 0..64 {
+            if writer.write_all(b" ").is_err() { break; }
+            thread::sleep(Duration::from_millis(60));
+        }
+    });
+    let started = Instant::now();
+    assert!(read_control(&reader).is_err());
+    assert!(started.elapsed() < Duration::from_secs(2),
+        "regular partial reads restarted the whole request deadline");
+    drop(reader);
+    sender.join().unwrap();
+}
+
+#[test]
 fn machine_notices_preserve_confirmation_and_draft_then_project_once() {
     let scratch = Scratch::new();
     let mut app = App::new();

@@ -1,0 +1,12 @@
+{
+  "nonce": "d70afb46-452f-4942-b5c4-99bbe70d3011",
+  "name": "rudder-alpha9-compat-d70afb46",
+  "image": "registry.fly.io/rudder-workers-exla:4.0.0-alpha.9",
+  "digest": "sha256:939c5593c5ed1232577d575f7ff382448c466a9033874c94a1a684c4ec5d599a",
+  "app": "rudder-workers-exla",
+  "role": "alpha9-compatibility-refusal",
+  "evidence": "/workspace/code/exla-ai-rudder/examples/execution/compatibility/evidence/2026-10-30-alpha9-refusal",
+  "sourceSha256": "117f16d79c61fb2900031de563f83dad1927d860d7a4e398620bc6f35a175b70",
+  "payloadSha256": "bbe6cf4749c4c3640fdb1a3794deb0611ee69ff94c96999394b64f7a78d4699f",
+  "sourceManifestSha256": "01ee493d97698fc0406cf62bf3c0b5e8a78bccfa4757873f6ab40092e8cd5fe4"
+}

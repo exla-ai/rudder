@@ -1,4 +1,31 @@
 use super::*;
+
+#[test]
+fn owned_backend_peer_is_verified_before_any_protocol_bytes_are_sent() {
+    use std::io::Read;
+    struct RefusedPeer(AtomicBool);
+    impl OwnedPeerProcess for RefusedPeer {
+        fn verify_peer(&self, _: &UnixStream) -> Result<()> {
+            self.0.store(true, Ordering::Release);
+            anyhow::bail!("fixture belongs to another actual backend process")
+        }
+        fn check_current(&self) -> Result<()> { Ok(()) }
+    }
+    let directory = std::env::temp_dir().join(format!("rudder-owned-link-{}", uuid::Uuid::new_v4()));
+    fs::create_dir(&directory).unwrap();
+    let path = directory.join("cx.sock");
+    let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap(); stream.set_nonblocking(false).unwrap();
+        stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        stream.set_write_timeout(Some(Duration::from_secs(2))).unwrap();
+        let mut byte = [0]; assert_eq!(stream.read(&mut byte).unwrap(), 0, "unowned peer must never receive initialize/handshake bytes");
+    });
+    let process = RefusedPeer(AtomicBool::new(false));
+    assert!(connect(&path, &AtomicBool::new(false), Some(&process)).is_err());
+    assert!(process.0.load(Ordering::Acquire));
+    server.join().unwrap(); fs::remove_dir_all(directory).unwrap();
+}
 use std::os::unix::net::UnixListener;
 use std::os::unix::process::CommandExt;
 use std::sync::Mutex;
@@ -1081,6 +1108,7 @@ impl MockServer {
                     Err(error) => panic!("mock accept: {error}"),
                 }
             };
+            stream.set_nonblocking(false).unwrap();
             stream
                 .set_read_timeout(Some(Duration::from_secs(2)))
                 .unwrap();

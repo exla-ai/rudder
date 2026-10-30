@@ -323,6 +323,7 @@ pub(crate) fn create_main_agent(
         delivery: DeliveryEvidence::for_task(prompt),
         session_id: None,
         execution_profile: None,
+        managed_local: None,
         terminal: None,
         terminal_size: None,
         last_output_at: Instant::now(),
@@ -862,6 +863,22 @@ pub(crate) fn agent_from_run_record(
                 && matches!(status, AgentStatus::Running | AgentStatus::Stopped)
         });
 
+    let managed_local = record.get("managedLocal").map(|value| {
+        serde_json::from_value::<crate::managed_launch::ManagedRunSource>(value.clone()).ok()
+            .filter(|source| source.validate(&id).is_ok())
+            .unwrap_or(crate::managed_launch::ManagedRunSource::Quarantined)
+    });
+    // The fsynced sidecar precedes all managed preparation. A crash that lost
+    // or reverted the UI projection must never turn this source into legacy.
+    let managed_local = match crate::managed_launch::read_reservation(&native_run_dir(repo_root, &id).join("managed-local.json")) {
+        Ok(None) => managed_local,
+        Ok(Some(reservation)) if reservation.validate(&id).is_ok() => match managed_local {
+            Some(source) if source.matches_reservation(&reservation) => Some(source),
+            None => Some(reservation),
+            _ => Some(crate::managed_launch::ManagedRunSource::Quarantined),
+        },
+        _ => Some(crate::managed_launch::ManagedRunSource::Quarantined),
+    };
     let mut run = AgentRun {
         plain_process: false,
         id,
@@ -888,6 +905,7 @@ pub(crate) fn agent_from_run_record(
         delivery,
         session_id,
         execution_profile: Some(record.get("executionProfile").and_then(serde_json::Value::as_str).unwrap_or("native").to_string()),
+        managed_local,
         terminal: None,
         terminal_size: None,
         last_output_at: Instant::now(),
@@ -939,6 +957,14 @@ pub(crate) fn agent_from_run_record(
     // telemetry rides the durable had_merge_conflict marker, not the label.
     if run.status == AgentStatus::Merged {
         run.restore_pre_conflict_identity();
+    }
+    if run.managed_local.is_some() {
+        // Persisted assignments are recovery evidence only. No saved PID,
+        // socket path or old owner epoch recreates an owned helper lifecycle.
+        run.status = AgentStatus::Orphaned;
+        run.completed_at = None;
+        run.merge_resolver = false;
+        run.last_error = Some("managed local source requires explicit owned recovery; checkout resume is unavailable".into());
     }
     Some(run)
 }
@@ -1255,12 +1281,14 @@ pub(crate) fn save_native_run_record(repo_root: &Path, run: &AgentRun) -> Result
         .get("targetBranch")
         .and_then(serde_json::Value::as_str)
         .map(ToOwned::to_owned)
-        .unwrap_or_else(|| current_branch_at(repo_root).unwrap_or_else(|| "HEAD".to_string()));
+        .unwrap_or_else(|| if run.managed_local.is_some() { String::new() }
+            else { current_branch_at(repo_root).unwrap_or_else(|| "HEAD".to_string()) });
     let base_commit = existing_record
         .get("baseCommit")
         .and_then(serde_json::Value::as_str)
         .map(ToOwned::to_owned)
         .unwrap_or_else(|| {
+            if run.managed_local.is_some() { return String::new(); }
             git_output(repo_root, ["rev-parse", "HEAD"])
                 .map(|value| value.trim().to_string())
                 .unwrap_or_default()
@@ -1381,6 +1409,10 @@ pub(crate) fn save_native_run_record(repo_root: &Path, run: &AgentRun) -> Result
     });
     if let Some(gam) = run.gam.as_ref() {
         record["gam"] = gam_state_to_json(gam);
+    }
+    if let Some(source) = &run.managed_local {
+        record["managedLocal"] = serde_json::to_value(source)?;
+        record["vcs"] = serde_json::Value::String("fabric".into());
     }
     // Native and TS commands share run.json. Preserve fields owned by the TS
     // merge/undo/verifier layers instead of replacing the document with the

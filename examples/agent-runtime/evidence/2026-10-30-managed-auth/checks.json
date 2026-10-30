@@ -1,0 +1,48 @@
+{
+  "format_version": 1,
+  "scope": "focused local checks; not full workspace or release proof",
+  "checks": [
+    {
+      "command": "cargo test --locked -p rudder-engine --lib execution::",
+      "passed": 11,
+      "log": "/workspace/rudder-managed-auth-engine-control.log"
+    },
+    {
+      "command": "cargo test --locked -p rudder-native --bin rudder-native managed_",
+      "passed": 32,
+      "ignored": 1,
+      "log": "/workspace/rudder-managed-auth-native-managed.log"
+    },
+    {
+      "command": "cargo test --locked -p rudder-engine --test execution_handoff --test execution_rpc",
+      "passed": 9,
+      "log": "/workspace/rudder-managed-auth-engine-legacy.log"
+    },
+    {
+      "command": "cargo test --locked -p rudder-native --bin rudder-native agent_link::tests",
+      "passed": 34,
+      "log": "/workspace/rudder-managed-auth-native-agent-link.log"
+    },
+    {
+      "command": "cargo test --locked -p rudder-native --bin rudder-native engine_host::tests::accepted_nonblocking",
+      "passed": 1,
+      "log": "/workspace/rudder-managed-auth-native-host.log"
+    },
+    {
+      "command": "cargo check --locked -p rudder-native --bin rudder-native --lib",
+      "result": "passed",
+      "log": "/workspace/rudder-managed-auth-native-build.log"
+    },
+    {
+      "command": "cargo test --locked -p rudder-native --bin rudder-native selected_codex_key_stays_host_only_and_forces_ephemeral_store_before_literal_prompt",
+      "passed": 1,
+      "log": "/workspace/rudder-managed-auth-home-mapping-final.log"
+    },
+    {
+      "command": "RUDDER_MANAGED_CODEX_TEST_BINARY=<explicit pinned binary> cargo test --locked -p rudder-native --bin rudder-native pinned_codex_0166_synthetic_ephemeral_auth_contract -- --ignored --nocapture",
+      "passed": 1,
+      "seconds": 19.69,
+      "log": "/workspace/rudder-managed-auth-pinned-synthetic-final2.log"
+    }
+  ]
+}

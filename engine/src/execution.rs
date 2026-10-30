@@ -279,6 +279,85 @@ pub struct HelperServices {
 /// closure must not spawn threads; neither may sealed-spec handoff preparation.
 pub type HelperServicesFactory = Box<dyn FnOnce(&ExecutionSpec) -> Result<HelperServices>>;
 
+/// Credential-free binding carried alongside the sealed spec. Legacy specs and
+/// handoffs retain their exact encoding; this requires managed-helper dispatch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ManagedFrontendStart { Immediate, AfterHostApiKeyV1 }
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ManagedExecutionBinding {
+    pub format_version: u32,
+    pub request_id: String,
+    pub run_id: String,
+    pub run_epoch: u64,
+    pub execution_id: String,
+    pub operation_id: String,
+    pub view_id: String,
+    pub owner: OwnerEpoch,
+    pub execution_profile: String,
+    pub frontend_start: ManagedFrontendStart,
+    pub server_command: Option<Vec<String>>,
+    pub guest_socket: PathBuf,
+}
+impl ManagedExecutionBinding {
+    pub fn validate(&self, spec: &ExecutionSpec) -> Result<()> {
+        for id in [&self.request_id, &self.execution_id, &self.operation_id, &self.view_id] {
+            ensure!(Uuid::parse_str(id).is_ok_and(|u| u.to_string() == *id), "noncanonical managed execution identity");
+        }
+        ensure!(self.format_version == 2 && self.execution_id == spec.execution_id
+            && self.operation_id == spec.operation_id && self.view_id == spec.view_id && self.owner == spec.owner
+            && self.run_epoch > 0 && !self.run_id.is_empty() && self.run_id.len() <= 256
+            && matches!(self.execution_profile.as_str(), "codex-app-server" | "claude-sdk")
+            && self.guest_socket == Path::new("/tmp/cx.sock") && spec.format_version == 3,
+            "managed execution differs from the reserved local assignment");
+        let broker = spec.broker_binding.as_ref().ok_or_else(||anyhow::anyhow!("managed execution has no broker binding"))?;
+        ensure!(broker.run_id == self.run_id && broker.run_epoch == self.run_epoch
+            && broker.owner_epoch == self.owner.epoch, "managed broker fence differs");
+        ensure!((self.execution_profile == "codex-app-server") == self.server_command.is_some(),
+            "managed server/profile mismatch");
+        ensure!(self.frontend_start == if self.execution_profile == "codex-app-server" { ManagedFrontendStart::AfterHostApiKeyV1 }
+            else { ManagedFrontendStart::Immediate }, "managed frontend has no matching authenticated-start protocol");
+        if let Some(command) = &self.server_command {
+            ensure!(!command.is_empty() && command.len() <= 256 && Path::new(&command[0]).is_absolute()
+                && command.iter().all(|a| a.len() <= 64 * 1024 && !a.contains('\0')),
+                "invalid managed backend command");
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StopAndCheckpoint {
+    pub request_id: String,
+    pub execution_id: String,
+    pub operation_id: String,
+    pub view_id: String,
+    pub run_id: String,
+    pub run_epoch: u64,
+    pub owner: OwnerEpoch,
+}
+impl StopAndCheckpoint {
+    pub fn validate(&self, binding: &ManagedExecutionBinding) -> Result<()> {
+        ensure!(Uuid::parse_str(&self.request_id).is_ok_and(|u|u.to_string() == self.request_id)
+            && self.execution_id == binding.execution_id && self.operation_id == binding.operation_id
+            && self.view_id == binding.view_id && self.run_id == binding.run_id
+            && self.run_epoch == binding.run_epoch && self.owner == binding.owner,
+            "shutdown request differs from the owned managed attempt");
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ManagedShutdownReceipt {
+    pub request: StopAndCheckpoint,
+    pub record: ExecutionRecord,
+    pub kernel_drained: bool,
+}
+
 pub fn workspace_scope(binding: &ObservationBinding) -> Result<String> {
     use sha2::{Digest, Sha256};
     binding.validate()?;

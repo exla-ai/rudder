@@ -19,6 +19,11 @@ fn slot() -> RuntimeLink {
         qualified: true,
         uncertain: false,
         closed: false,
+        draining: false,
+        workspace: None,
+        managed_home: None,
+        #[cfg(target_os = "linux")]
+        owned_backend: None,
     }
 }
 
@@ -48,6 +53,66 @@ fn runtime_capabilities_require_owned_qualified_exact_turn() {
         .capabilities;
     assert!(capabilities.contains("resume"));
     assert!(!capabilities.contains("deliver"));
+}
+
+#[test]
+fn graceful_drain_stops_new_controls_without_claiming_backend_completion() {
+    let mut link = slot();
+    link.draining = true;
+    assert_eq!(link.observation("target", Backend::Claude, true).capabilities,
+        BTreeSet::from(["inspect".into(), "cancel".into()]));
+    assert_eq!(link.phase, RuntimePhase::Working);
+    assert!(!link.closed, "broker/workspace authority remains live for helper drain");
+    link.active = None; link.phase = RuntimePhase::Waiting; link.qualified = false;
+    assert!(!link.observation("target", Backend::Claude, true).capabilities.contains("deliver"),
+        "SDK bootstrap cannot bypass shutdown admission");
+}
+
+#[test]
+fn managed_identity_rotation_preserves_only_the_exact_current_workspace_scope() {
+    use crate::managed_launch::{ManagedLaunchFence, WorkspaceAssignment};
+    use rudder_engine::{execution::ProtectedHostContextRef, protocol::{ObjectKind, ObjectRef}, vfs::rpc::{AttemptContext, ObservationBinding}};
+    let home = std::env::temp_dir().join(format!("rudder-grant-{}", uuid::Uuid::new_v4()));
+    fs::create_dir(&home).unwrap();
+    fs::set_permissions(&home, fs::Permissions::from_mode(0o700)).unwrap();
+    fs::create_dir_all(FabricPaths::new(&home).journal.parent().unwrap()).unwrap();
+    let mut journal = Journal::open(&FabricPaths::new(&home).journal).unwrap();
+    let owner = journal.create_project("p", "owner", "base", 0).unwrap();
+    let attempt = uuid::Uuid::new_v4().to_string();
+    let epoch = journal.observe_run_attempt(&owner, "run", &attempt, 1).unwrap();
+    let fence = ManagedLaunchFence { owner: owner.clone(), run_id: "run".into(), run_epoch: epoch,
+        attempt_id: attempt.clone(), request_id: uuid::Uuid::new_v4().to_string() };
+    let reference = |kind, bytes: &[u8]| ObjectRef::from_bytes(kind, bytes);
+    let workspace = WorkspaceAssignment { format_version: 1, fence: fence.clone(),
+        runnable_root: reference(ObjectKind::RunnableRoot, b"runnable"), source: reference(ObjectKind::SourceRoot, b"source"),
+        seed: reference(ObjectKind::Directory, b"seed"),
+        observation: ObservationBinding { format_version: 1, attempt: AttemptContext { execution_id: attempt.clone(), operation_id: uuid::Uuid::new_v4().to_string() },
+            view_id: uuid::Uuid::new_v4().to_string(), owner: fence.owner_epoch(), namespace: uuid::Uuid::new_v4().to_string(),
+            profile: reference(ObjectKind::Blob, b"profile"), exclusion_policy_digest: "a".repeat(64) },
+        host_context: ProtectedHostContextRef { format_version: 1, path: home.join("context.json"), sha256: "b".repeat(64), size_bytes: 1 } };
+    crate::managed_launch::persist_assignment(&home, &workspace).unwrap();
+    let mut recipients = BTreeMap::from([("run".into(), epoch)]);
+    let path = issue_identity(&home, &mut journal, &owner, "run", epoch, &recipients, 2, Some(&workspace)).unwrap();
+    let first: AgentIdentityFile = read_private(&path, 16 * 1024).unwrap();
+    journal.authorize_workspace(&first.token, &workspace.observation, 2).unwrap();
+    journal.register_run(&owner, "peer", 3).unwrap();
+    recipients.insert("peer".into(), 1);
+    let path = issue_identity(&home, &mut journal, &owner, "run", epoch, &recipients, 3, Some(&workspace)).unwrap();
+    let rotated: AgentIdentityFile = read_private(&path, 16 * 1024).unwrap();
+    assert_ne!(rotated.token, first.token);
+    assert!(journal.authenticate_agent(&first.token, 3).is_err());
+    journal.authorize_workspace(&rotated.token, &workspace.observation, 3).unwrap();
+    let mut sibling = workspace.observation.clone(); sibling.namespace = uuid::Uuid::new_v4().to_string();
+    assert!(journal.authorize_workspace(&rotated.token, &sibling, 3).is_err());
+    let replacement = uuid::Uuid::new_v4().to_string();
+    let epoch = journal.observe_run_attempt(&owner, "run", &replacement, 4).unwrap();
+    recipients.insert("run".into(), epoch);
+    assert!(issue_identity(&home, &mut journal, &owner, "run", epoch, &recipients, 4, Some(&workspace)).is_err());
+    let path = issue_identity(&home, &mut journal, &owner, "run", epoch, &recipients, 5, None).unwrap();
+    let legacy: AgentIdentityFile = read_private(&path, 16 * 1024).unwrap();
+    assert!(journal.authorize_workspace(&legacy.token, &workspace.observation, 5).is_err());
+    assert!(crate::managed_launch::assignment_for_attempt(&home, &owner, "run", epoch, &replacement).unwrap().is_none());
+    fs::remove_dir_all(home).unwrap();
 }
 
 #[test]
@@ -101,6 +166,7 @@ fn test_agent_run(id: &str, task: &str) -> AgentRun {
         delivery: DeliveryEvidence::default(),
         session_id: None,
         execution_profile: None,
+        managed_local: None,
         terminal: None,
         terminal_size: None,
         last_output_at: Instant::now(),

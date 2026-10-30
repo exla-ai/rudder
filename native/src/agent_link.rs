@@ -22,6 +22,12 @@ use std::sync::mpsc::{self, Receiver, Sender, SyncSender, TryRecvError};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+#[cfg(target_os = "linux")]
+#[path = "managed_codex_auth.rs"]
+mod managed_codex_auth;
+#[cfg(target_os = "linux")]
+pub(crate) use managed_codex_auth::{authenticate_managed_codex_api_key, ManagedCodexAuthError};
+
 const MAX_MESSAGE: usize = 64 * 1024;
 const MAX_COMMANDS: usize = 4096;
 const COMMAND_QUEUE: usize = 32;
@@ -665,6 +671,35 @@ pub(crate) fn spawn_link(
     expected_thread_id: Option<String>,
     events: Sender<AgentLinkEvent>,
 ) -> Result<AgentLinkHandle> {
+    spawn_link_with_process(launch, cwd.canonicalize()?, expected_thread_id, events, None)
+}
+
+trait OwnedPeerProcess: Send + Sync {
+    fn verify_peer(&self, stream: &UnixStream) -> Result<()>;
+    fn check_current(&self) -> Result<()>;
+}
+#[cfg(target_os = "linux")]
+impl OwnedPeerProcess for rudder_engine::execution::handoff::BackendProcessWitness {
+    fn verify_peer(&self, stream: &UnixStream) -> Result<()> { self.verify_peer(stream) }
+    fn check_current(&self) -> Result<()> { self.check_current() }
+}
+
+/// Only an authenticated helper's transferred pidfd authorizes this path.
+/// Guest cwd is protocol data and is never canonicalized as a host path.
+#[cfg(target_os = "linux")]
+pub(crate) fn spawn_managed_link(launch: AgentLinkLaunch, guest_cwd: PathBuf,
+    expected_thread_id: Option<String>, events: Sender<AgentLinkEvent>,
+    process: Arc<rudder_engine::execution::handoff::BackendProcessWitness>) -> Result<AgentLinkHandle> {
+    ensure!(guest_cwd == Path::new("/workspace"), "managed backend cwd differs from its guest projection");
+    let profile = if launch.backend == "codex" { "codex-app-server" } else { launch.backend.as_str() };
+    ensure!(process.matches_attempt(&launch.run_id, &launch.attempt_id, profile),
+        "backend kernel identity belongs to another run/attempt/profile");
+    spawn_link_with_process(launch, guest_cwd, expected_thread_id, events, Some(process))
+}
+
+fn spawn_link_with_process(launch: AgentLinkLaunch, cwd: PathBuf,
+    expected_thread_id: Option<String>, events: Sender<AgentLinkEvent>,
+    process: Option<Arc<dyn OwnedPeerProcess>>) -> Result<AgentLinkHandle> {
     ensure!(
         launch.format_version == 1 && matches!(launch.backend.as_str(), "codex" | "claude-sdk"),
         "unsupported live adapter launch"
@@ -683,17 +718,15 @@ pub(crate) fn spawn_link(
         .socket_path
         .parent()
         .context("Codex socket has no private directory")?;
-    let metadata = fs::symlink_metadata(parent)?;
-    ensure!(
-        metadata.is_dir()
-            && metadata.uid() == unsafe { libc::geteuid() }
+    if process.is_none() {
+        let metadata = fs::symlink_metadata(parent)?;
+        ensure!(metadata.is_dir() && metadata.uid() == unsafe { libc::geteuid() }
             && metadata.permissions().mode() & 0o077 == 0,
-        "Codex socket directory must be private to the engine user"
-    );
+            "Codex socket directory must be private to the engine user");
+    }
     if let Some(thread) = &expected_thread_id {
         valid_id(thread)?;
     }
-    let cwd = cwd.canonicalize()?;
     let (tx, rx) = mpsc::sync_channel(COMMAND_QUEUE);
     let stopped = Arc::new(AtomicBool::new(false));
     let worker_stop = Arc::clone(&stopped);
@@ -713,6 +746,7 @@ pub(crate) fn spawn_link(
                 &events,
                 &rx,
                 &worker_stop,
+                process.as_deref(),
             );
             worker_stop.store(true, Ordering::Release);
             while let Ok(queued) = rx.try_recv() {
@@ -850,7 +884,7 @@ fn lifecycle_method(message: &Value) -> bool {
     )
 }
 
-fn connect(path: &Path, stopped: &AtomicBool) -> Result<Rpc> {
+fn connect(path: &Path, stopped: &AtomicBool, process: Option<&dyn OwnedPeerProcess>) -> Result<Rpc> {
     let deadline = Instant::now() + SETUP_TIMEOUT;
     loop {
         ensure!(
@@ -859,6 +893,7 @@ fn connect(path: &Path, stopped: &AtomicBool) -> Result<Rpc> {
         );
         match UnixStream::connect(path) {
             Ok(stream) => {
+                if let Some(process) = process { process.verify_peer(&stream)?; }
                 stream.set_read_timeout(Some(Duration::from_secs(2)))?;
                 stream.set_write_timeout(Some(Duration::from_secs(2)))?;
                 let config = tungstenite::protocol::WebSocketConfig {
@@ -1551,8 +1586,9 @@ fn codex_loop(
     events: &Sender<AgentLinkEvent>,
     commands: &Receiver<QueuedCommand>,
     stopped: &AtomicBool,
+    process: Option<&dyn OwnedPeerProcess>,
 ) -> Result<()> {
-    let mut rpc = connect(&launch.socket_path, stopped)?;
+    let mut rpc = connect(&launch.socket_path, stopped, process)?;
     let mut early = Vec::new();
     let initialized = rpc
         .call(
@@ -1693,6 +1729,7 @@ fn codex_loop(
         }
         state.notification(&message);
     }
+    if let Some(process) = process { process.check_current()?; }
     emit(
         launch,
         events,
@@ -1718,6 +1755,7 @@ fn codex_loop(
     state.flush(launch, events);
     let result = (|| -> Result<()> {
         loop {
+            if let Some(process) = process { process.check_current()?; }
             ensure!(
                 !stopped.load(Ordering::Acquire),
                 "agent attempt link closed"
@@ -1749,6 +1787,7 @@ fn codex_loop(
                                 !stopped.load(Ordering::Acquire),
                                 "agent attempt link closed"
                             );
+                            if let Some(process) = process { process.check_current()?; }
                             if let Err(error) = rpc.request(method, params) {
                                 state.uncertain(format!("control transport write failed: {error}"));
                                 return Err(error);
@@ -1761,6 +1800,7 @@ fn codex_loop(
                 }
             }
             if let Some(message) = rpc.read()? {
+                if let Some(process) = process { process.check_current()?; }
                 if message.get("method").is_some() {
                     if launch.backend == "claude-sdk" {
                         if let Some(profile) = profile_notification(&message, &thread) {

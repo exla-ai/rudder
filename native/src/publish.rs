@@ -1011,6 +1011,7 @@ pub(crate) struct PublishSubject {
 }
 
 pub(crate) fn publish_subject_for(run: &AgentRun, default_branch: &str) -> Option<PublishSubject> {
+    if run.managed_local.is_some() { return None; }
     let change_id = run
         .jj_change_id
         .as_deref()
@@ -1466,6 +1467,13 @@ impl App {
     /// node carries its whole plan, because a node's PR is not reviewable without
     /// the stack it sits in.
     pub(crate) fn publish_agent_at(&mut self, index: usize) {
+        let managed = self.agents.get(index).is_some_and(|run| run.managed_local.is_some()
+            || run.node_id.is_some() && run.plan_id.as_ref().is_some_and(|plan|
+                self.agents.iter().any(|member|member.plan_id.as_ref() == Some(plan) && member.managed_local.is_some())));
+        if managed {
+            self.notice = Some("managed source acceptance is pending; legacy history publication is unavailable".into());
+            return;
+        }
         let Some(capability) = self.publish_capability().cloned() else {
             // Name the ACTUAL problem. "publishing is not active" tells someone who
             // expected a PR nothing about whether to log in, install gh, or stop

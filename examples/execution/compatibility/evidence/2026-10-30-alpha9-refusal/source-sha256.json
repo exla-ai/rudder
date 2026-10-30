@@ -1,0 +1,78 @@
+{
+  "formatVersion": 1,
+  "sourceRevision": "11f1f75e5a18555f6c7e257aacc6b4097f425c5e",
+  "files": {
+    "qualification/qualify-alpha9.mjs": {
+      "sha256": "b49bc18d79eef3959ce40f189c5b91b9d5fe54b7b749113b386d380ade4e17fc",
+      "bytes": 11768
+    },
+    "qualification/guest.py": {
+      "sha256": "e5af1bed2d4d56e5105ba90d159f662300a00a86f68fe936f8d4bb42eb95ce2e",
+      "bytes": 8904
+    },
+    "qualification/probe-ts.mjs": {
+      "sha256": "201f8ead5085001adad8043915ef174267823a792bd47b297c2b9a98e8933cc4",
+      "bytes": 3107
+    },
+    "alpha9/engine/src/journal/schema.rs": {
+      "sha256": "caab66640e5971d8e1d0d9c654772ecda600015c0f29ca0eee7ca48229ec70f7",
+      "bytes": 6185
+    },
+    "alpha9/engine/src/journal.rs": {
+      "sha256": "d9e66b19795a3125615f7b81e0bc233ef547ef24c30b55f67e6ad78e7f8c4de0",
+      "bytes": 26902
+    },
+    "alpha9/engine/src/paths.rs": {
+      "sha256": "81182d22dacb0eaa5522f7d98cf2c02ff819cc5e47c7163878a0465be98a222f",
+      "bytes": 1619
+    },
+    "alpha9/native/src/engine_host.rs": {
+      "sha256": "5b4615216d78f85369d1ace2f5102caca61a5fcbcb1f43439ec0d2b0507cf7b0",
+      "bytes": 30758
+    },
+    "alpha9/native/src/gitio.rs": {
+      "sha256": "b55966100ebd08c3ec258690c5ac39f0b0d2d124e5b12ea284f8f3c1beb87449",
+      "bytes": 148117
+    },
+    "alpha9/native/src/launch.rs": {
+      "sha256": "4e572be8a2e67292a6ca750b9725c36f09898ff86cc8636569752a2b2cfeb31f",
+      "bytes": 51271
+    },
+    "alpha9/native/src/main.rs": {
+      "sha256": "faeb4c93c7956eeeabffd6394d7fb6511731f67cfefc5ce702611c36b70fdf8a",
+      "bytes": 1025350
+    },
+    "alpha9/src/engine-authority.ts": {
+      "sha256": "08da273d83dffb11b31c3b15df542f63ff5d62495b7288d9c8dc42287dd284f5",
+      "bytes": 1369
+    },
+    "alpha9/src/state.ts": {
+      "sha256": "1eb807fabd843a4b7a1cf1d1a064c453f6514c15e8d3ee46dd6b79b89e0f2bc1",
+      "bytes": 29266
+    },
+    "alpha9/src/run-manager.ts": {
+      "sha256": "d403ea0e7ffe9d35c1f646fd9db007b268ade7f2067e56c2190f950ee1ebd824",
+      "bytes": 53880
+    },
+    "alpha9/src/scheduler.ts": {
+      "sha256": "7d8eab7a66baefc40353acf5e748361c5128843e28d4fae781db6a754047abc3",
+      "bytes": 41541
+    },
+    "alpha9/src/board/daemon.ts": {
+      "sha256": "ccd74974d52a4a14b32a7dd5995d4c46cf0ce96e17cc87ad719222167160dce3",
+      "bytes": 60727
+    },
+    "alpha9/src/backends.ts": {
+      "sha256": "40fed89578ac50601fb78e44f21b9db0349f01b4ae39386b4d837a9473567412",
+      "bytes": 24077
+    },
+    "alpha9/package.json": {
+      "sha256": "625098bd2f2e0ae536500fd304e1d24a87d4db03f49b0338a5e289e5694ac84b",
+      "bytes": 3008
+    },
+    "alpha9/cloud/worker/Dockerfile": {
+      "sha256": "8ea93a7ad0fde653ca4be5fbe41a37253a2a5381e4689da9bdfa88daded833c0",
+      "bytes": 9305
+    }
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "format_version": 1,
+  "result": "post_auth_scan_bound_failed",
+  "auth_bootstrap": "passed",
+  "child_cleanup": {
+    "kill_requested": true,
+    "wait_completed": true,
+    "exit_signal": 9,
+    "proof": "Assertions precede failed scanner assertion in test source"
+  },
+  "failed_assertion": "files <= 128 && metadata.len() <= 16 * 1024 * 1024",
+  "observed_file": {
+    "relative_path": "codex/.tmp/plugins/.git/objects/pack/pack-f811a37b58b15bd30e1edad7816103ab8e2af16e.pack",
+    "type": "Git pack archive (PACK header verified)",
+    "bytes": 25495172
+  },
+  "fixture_files": 5502,
+  "fixture_regular_file_bytes": 87111201,
+  "test_source_sha256": "b72f399d839c65e31d42e82363e25eb5524b4c45c2b516870e9ed945336417a7",
+  "log": "/workspace/rudder-managed-auth-pinned-synthetic-final.log",
+  "remediation": "Bounded streaming scan of every regular file; no skipped cache/core files"
+}

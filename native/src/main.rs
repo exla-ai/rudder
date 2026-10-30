@@ -65,6 +65,8 @@ mod fabric_cli;
 mod fabric_runtime;
 mod execution_cli;
 mod workspace_vcs;
+mod managed_launch;
+mod managed_app;
 mod agent_link;
 mod workspace_cli;
 mod vfs_cli;
@@ -1876,6 +1878,7 @@ struct App {
     task_history_draft: String,
     agents: Vec<AgentRun>,
     fabric_runtime: fabric_runtime::RuntimeState,
+    managed_local: managed_app::ManagedAppState,
     /// Every live plan, in the order its `/plan` was started. Several orchestrators
     /// may run at once and each owns exactly one entry, so plan state is per-plan
     /// rather than global. NEVER empty: `App::new` seeds one plan (holding whatever
@@ -2465,6 +2468,9 @@ struct AgentRun {
     session_id: Option<String>,
     /// Persisted renderer/control contract; historical runs remain native.
     execution_profile: Option<String>,
+    /// Retained logical source. Every legacy cwd/history consumer must refuse
+    /// this marker, including malformed records and unadopted reservations.
+    managed_local: Option<managed_launch::ManagedRunSource>,
     terminal: Option<TerminalPane>,
     terminal_size: Option<TerminalSize>,
     last_output_at: Instant,
@@ -3177,6 +3183,7 @@ impl App {
         let task_routing = mpsc::channel();
         Self {
             fabric_runtime: fabric_runtime::RuntimeState::default(),
+            managed_local: managed_app::ManagedAppState::default(),
             gam_links: HashMap::new(),
             gam_signals: HashMap::new(),
             gam_link_tx,
@@ -5046,6 +5053,7 @@ impl App {
             return false;
         };
 
+        if !managed_app::accepts_input(self, self.selected_agent) { return false; }
         let capture_as_prompt = self.selected_worker_accepts_prompt_input();
         let result = match self.selected_terminal_mut() {
             Some(terminal) => {
@@ -5628,6 +5636,12 @@ impl App {
     /// reviewed the row (same weak gate as `v`); closing returns focus to the
     /// worker so the next keystroke lands where the conversation is.
     fn toggle_diff_panel(&mut self) {
+        if self.agents.get(self.selected_agent).is_some_and(|run|run.managed_local.is_some()) {
+            self.diff_panel.open = false;
+            self.notice = Some("managed source observation is pending; checkout diff is unavailable".into());
+            self.dirty = true;
+            return;
+        }
         if self.diff_panel.open {
             self.diff_panel.open = false;
             self.diff_area = None;
@@ -5672,6 +5686,12 @@ impl App {
         if !self.diff_panel.open {
             return;
         }
+        if self.agents.get(self.selected_agent).is_some_and(|run|run.managed_local.is_some()) {
+            self.diff_panel.open = false;
+            self.diff_area = None;
+            self.dirty = true;
+            return;
+        }
         if self.diff_panel.drain() {
             self.dirty = true;
         }
@@ -5680,6 +5700,11 @@ impl App {
         };
         let run_id = run.id.clone();
         self.diff_panel.track(&run_id);
+        if run.managed_local.is_some() {
+            // The retained view has no checkout representation. Its pending
+            // observation consumer must never display this App's host diff.
+            return;
+        }
         // Token totals come from the backend's session log; refresh them
         // while the panel is open so the header's cost keeps up with the turn.
         let tokens_due = self
@@ -5797,6 +5822,7 @@ impl App {
         self.agents
             .iter()
             .filter(|run| run.status == AgentStatus::Done)
+            .filter(|run| run.managed_local.is_none())
             .filter(|run| !run.is_oneoff())
             // Competing experiments combined into one diff would be noise.
             .filter(|run| !run.swarm_experiment)
@@ -6524,6 +6550,7 @@ impl App {
     }
 
     fn handle_paste(&mut self, text: String) {
+        if self.focus == FocusPane::Worker && !managed_app::accepts_input(self, self.selected_agent) { return; }
         if self.focus == FocusPane::Worker
             && self.agents.get(self.selected_agent)
                 .and_then(|run| run.terminal.as_ref())
@@ -7445,6 +7472,7 @@ impl App {
     }
 
     fn write_mouse_to_selected_worker(&mut self, mouse: MouseEvent, area: Rect) -> bool {
+        if !managed_app::accepts_input(self, self.selected_agent) { return false; }
         let Some(bytes) = mouse_event_to_sgr(mouse, area) else {
             return false;
         };
@@ -7465,6 +7493,7 @@ impl App {
     }
 
     fn scroll_selected_worker_or_forward(&mut self, mouse: MouseEvent, area: Rect) -> bool {
+        let may_forward = managed_app::accepts_input(self, self.selected_agent);
         let rows = self.wheel_delta(mouse, area.height);
         let mouse_bytes = mouse_event_to_sgr(mouse, area);
         let Some(terminal) = self.selected_terminal_mut() else {
@@ -7483,7 +7512,7 @@ impl App {
         // `alternate_history` screenshot buffer must not intercept them -- it grows a
         // frame on every repaint, so for a live TUI like opencode the offset always
         // moves, `moved` is always true, and the child would never see a single scroll.
-        let child_owns_wheel = alternate && terminal.wants_sgr_mouse_events_snapshot();
+        let child_owns_wheel = may_forward && alternate && terminal.wants_sgr_mouse_events_snapshot();
         if !child_owns_wheel {
             terminal.scrollback_by(rows);
         }
@@ -7494,7 +7523,7 @@ impl App {
         } else {
             terminal.wants_sgr_mouse_events_snapshot()
         };
-        if !moved && rows != 0 && wants_mouse {
+        if may_forward && !moved && rows != 0 && wants_mouse {
             if let Some(bytes) = mouse_bytes {
                 if let Err(error) = terminal.write_input(&bytes) {
                     write_error = Some(error.to_string());
@@ -7544,6 +7573,7 @@ impl App {
     }
 
     fn scroll_gam_half(&mut self, mouse: MouseEvent, area: Rect, index: usize) -> bool {
+        let may_forward = managed_app::accepts_input(self, index);
         let rows = self.wheel_delta(mouse, area.height);
         let mouse_bytes = mouse_event_to_sgr(mouse, area);
         let Some(terminal) = self
@@ -7557,7 +7587,7 @@ impl App {
         let alternate = terminal.uses_alternate_screen_snapshot();
         // Same ownership rule as the single-pane path: an alternate-screen app
         // that asked for SGR mouse tracking owns its own wheel.
-        let child_owns_wheel = alternate && terminal.wants_sgr_mouse_events_snapshot();
+        let child_owns_wheel = may_forward && alternate && terminal.wants_sgr_mouse_events_snapshot();
         if !child_owns_wheel {
             terminal.scrollback_by(rows);
         }
@@ -7569,7 +7599,7 @@ impl App {
             terminal.wants_sgr_mouse_events_snapshot()
         };
         let mut forwarded = false;
-        if !moved && rows != 0 && wants_mouse {
+        if may_forward && !moved && rows != 0 && wants_mouse {
             if let Some(bytes) = mouse_bytes {
                 forwarded = terminal.write_input(&bytes).is_ok();
             }
@@ -7632,12 +7662,13 @@ impl App {
     }
 
     fn handle_worker_page_key(&mut self, key: KeyEvent, rows: isize) {
+        let may_forward = managed_app::accepts_input(self, self.selected_agent);
         let Some(bytes) = terminal_bytes_for_key(key) else {
             return;
         };
         let result = match self.selected_terminal_mut() {
             Some(terminal) => {
-                if terminal.uses_alternate_screen_snapshot() {
+                if may_forward && terminal.uses_alternate_screen_snapshot() {
                     terminal.write_input(&bytes)
                 } else {
                     terminal.scrollback_by(rows);
@@ -7838,7 +7869,9 @@ impl App {
                 remaining.push(pending);
                 continue;
             }
-            if let Some(run) = self.agents.iter_mut().find(|run| run.id == pending.run_id) {
+            if let Some(index) = self.agents.iter().position(|run| run.id == pending.run_id) {
+                if !managed_app::accepts_input(self, index) { continue; }
+                let run = &mut self.agents[index];
                 if let Some(terminal) = run.terminal.as_mut() {
                     let _ = terminal.write_input(b"\r");
                     run.last_worker_input_at = Some(Instant::now());
@@ -8552,6 +8585,7 @@ impl App {
             delivery: DeliveryEvidence::default(),
             session_id,
             execution_profile: None,
+            managed_local: None,
             terminal: None,
             terminal_size: None,
             last_output_at: Instant::now(),
@@ -8744,6 +8778,7 @@ impl App {
             delivery: DeliveryEvidence::for_task(&goal_prompt),
             session_id,
             execution_profile: None,
+            managed_local: None,
             terminal: None,
             terminal_size: None,
             last_output_at: Instant::now(),
@@ -8997,6 +9032,7 @@ Until the first packet arrives, reply only: \"standing by\"."
             delivery: DeliveryEvidence::for_task(&goal_prompt),
             session_id,
             execution_profile: None,
+            managed_local: None,
             terminal: None,
             terminal_size: None,
             last_output_at: Instant::now(),
@@ -9091,6 +9127,7 @@ Until the first packet arrives, reply only: \"standing by\"."
             delivery: DeliveryEvidence::default(),
             session_id: adversarial_session,
             execution_profile: None,
+            managed_local: None,
             terminal: None,
             terminal_size: None,
             last_output_at: Instant::now(),
@@ -10325,6 +10362,7 @@ Address the objection directly. If you disagree, say why inside \
             delivery: DeliveryEvidence::default(),
             session_id,
             execution_profile: None,
+            managed_local: None,
             terminal: None,
             terminal_size: None,
             last_output_at: Instant::now(),
@@ -10796,6 +10834,10 @@ Address the objection directly. If you disagree, say why inside \
         let Some(run) = self.agents.get(index) else {
             return false;
         };
+        if run.managed_local.is_some() {
+            self.notice = Some("managed source requires explicit owned recovery; checkout conversation resume is unavailable".into());
+            return false;
+        }
         if run.terminal.is_some()
             || run.plain_process
             || run.is_orchestrator()
@@ -10974,6 +11016,7 @@ Address the objection directly. If you disagree, say why inside \
         let Some(run) = self.agents.get_mut(index) else {
             return false;
         };
+        if run.managed_local.is_some() { return false; }
         if run.terminal.is_some() && run.status == AgentStatus::Running {
             return false;
         }
@@ -13520,6 +13563,7 @@ Address the objection directly. If you disagree, say why inside \
             delivery: DeliveryEvidence::default(),
             session_id: None,
             execution_profile: None,
+            managed_local: None,
             terminal: None,
             terminal_size: None,
             last_output_at: Instant::now(),
@@ -15379,6 +15423,7 @@ Address the objection directly. If you disagree, say why inside \
         let Some(index) = self.agent_index_for_token(task_id) else {
             return SteerDelivery::Failed(format!("target not found: {task_id}"));
         };
+        if !managed_app::accepts_input(self, index) { return SteerDelivery::Failed("managed helper is not accepting input".into()); }
         let mut bytes = Vec::new();
         for key in keys.split(',').map(str::trim).filter(|key| !key.is_empty()) {
             match remote_key_bytes(key) {
@@ -15677,6 +15722,7 @@ Address the objection directly. If you disagree, say why inside \
             let Some(run) = self.agents.get_mut(index) else {
                 return false;
             };
+            if run.managed_local.is_some() { return false; }
             // Only a cleanly-Done worker is eligible for the diff-backstop; a Failed/Stopped
             // one may still have a filed note we should read, but its diff is half-finished.
             let is_complete = run.status == AgentStatus::Done;
@@ -18151,6 +18197,10 @@ Files involved: {}
     /// of `dd`, and what a delete from the phone runs. Keeps the selection on a
     /// sensible neighbor and returns the notice to show.
     fn delete_agent_now(&mut self, index: usize) -> String {
+        if let Some(run) = self.agents.get(index).filter(|run| run.managed_local.is_some()) {
+            let id = run.id.clone();
+            managed_app::abandon(self, &id);
+        }
         let run = self.agents.remove(index);
         // Indices shifted under the rendered rows; drop the click map so a same-tick
         // click resolves to nothing instead of a neighbor (next render rebuilds it).
@@ -18551,6 +18601,7 @@ Files involved: {}
             // it; Codex records it under the fork's cwd, discovered at completion).
             session_id: None,
             execution_profile: None,
+            managed_local: None,
             terminal: None,
             terminal_size: None,
             last_output_at: Instant::now(),
@@ -19330,6 +19381,10 @@ Files involved: {}
         new_goal: &str,
         target: Option<(Backend, String, Option<EffortLevel>)>,
     ) -> bool {
+        if self.agents.get(index).is_some_and(|run|run.managed_local.is_some()) {
+            self.notice = Some("managed local source requires explicit owned recovery; checkout restart is unavailable".into());
+            return false;
+        }
         let cwd_default = self.cwd.clone();
         let retargeted = target.is_some();
         if let Some((backend, model, effort)) = target {
@@ -19510,6 +19565,7 @@ Files involved: {}
     /// picks it up on its next turn). Returns false if there is no live terminal
     /// (the caller can fall back to re-goal-via-resume).
     fn live_inject_at(&mut self, index: usize, text: &str) -> bool {
+        if !managed_app::accepts_input(self, index) { return false; }
         let run_id = match self.agents.get(index) {
             Some(run) => run.id.clone(),
             None => return false,
@@ -19543,6 +19599,7 @@ Files involved: {}
     /// its jj workspace on disk (undoable / re-goalable). Its node id never enters the
     /// merged set, so hard dependents stay correctly blocked.
     fn stop_agent_at(&mut self, index: usize) -> bool {
+        if let Some(stopped) = managed_app::stop(self, index) { return stopped; }
         let cwd = self.cwd.clone();
         let (label, run_id) = {
             let Some(run) = self.agents.get_mut(index) else {
@@ -20012,6 +20069,7 @@ What to do\n\
         let Some(run) = self.agents.get(index) else {
             anyhow::bail!("no selected agent");
         };
+        anyhow::ensure!(run.managed_local.is_none(), "managed source acceptance is pending; checkout integration is unavailable");
         // Already merged: a confirm prompt acted on a stale snapshot and an intervening
         // plan integration already merged this run. Re-running `rudder merge` would create a
         // spurious second merge. No-op instead.
@@ -20590,6 +20648,9 @@ What to do\n\
         let background: HashSet<_> = background.into_iter().take(BACKGROUND_DRAINS_PER_TICK)
             .map(|(_, index)| index).collect();
         for (index, run) in self.agents.iter_mut().enumerate() {
+            // This lifecycle is consumed only by managed_app's authenticated
+            // helper channel. Legacy exit/hooks cannot certify its checkpoint.
+            if run.managed_local.is_some() { continue; }
             let mut changed = false;
             let mut worker_gone_exit: Option<u32> = None;
             let is_orchestrator = run.is_orchestrator();
@@ -21270,10 +21331,15 @@ What to do\n\
         let mut failures = Vec::new();
         for run in &mut self.agents {
             if run.terminal.is_some() {
-                if run.backend == Backend::Codex && run.session_id.is_none() {
+                if run.managed_local.is_none() && run.backend == Backend::Codex && run.session_id.is_none() {
                     run.session_id = latest_codex_session_id_for_cwd(&run.cwd);
                 }
                 run.terminal = None;
+                if run.managed_local.is_some() {
+                    run.status = AgentStatus::Orphaned;
+                    run.completed_at = None;
+                    run.last_error = Some(format!("managed helper ownership ended because {reason}; no checkpoint acknowledged"));
+                }
                 if run.status == AgentStatus::Running {
                     run.status = AgentStatus::Paused;
                     run.needs_permission = false;
@@ -21813,6 +21879,7 @@ fn run_app_loop(mut terminal: Option<&mut Tui>, mut ownership: EngineOwnership) 
             }
             if ownership.is_fabric() {
                 let (journal, owner) = ownership.journal_parts();
+                managed_app::poll(&mut app, journal, owner)?;
                 fabric_runtime::poll(&mut app, journal, owner)?;
             }
             app.poll_agents();
@@ -22797,6 +22864,7 @@ impl App {
                 let Some(index) = self.attached_run_index(pos) else {
                     return;
                 };
+                if !managed_app::accepts_input(self, index) { return; }
                 let run = &mut self.agents[index];
                 run.last_worker_input_at = Some(Instant::now());
                 let result = run

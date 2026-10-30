@@ -438,6 +438,7 @@ impl App {
         let Some(plan_index) = (0..self.plans.len()).find(|&index| {
             let plan = &self.plans[index];
             plan.final_gate_status == FinalGateStatus::Idle
+                && !self.plan_agents(index).any(|run| run.managed_local.is_some())
                 && !plan.awaiting_approval
                 && plan.planned_nodes.is_empty()
                 && !plan.plan_launched_node_ids.is_empty()

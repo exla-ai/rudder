@@ -26,6 +26,11 @@ pub(crate) fn run(args: &[String]) -> Result<()> {
             rudder_engine::execution::linux::run_child()?;
             return Ok(());
         }
+        if args.len() == 5 && args[0] == "managed-helper" && args[1] == "--handoff" && args[3] == "--parent-pid" {
+            let (spec, control) = rudder_engine::execution::handoff::receive_managed(&args[2], args[4].parse()?)?;
+            let outcome = rudder_engine::execution::linux::run_helper_with_managed_services(spec, services_factory(), control)?;
+            std::process::exit(outcome.record.agent_exit.unwrap_or(125));
+        }
         if args.len() != 5
             || args[0] != "helper"
             || args[1] != "--handoff"

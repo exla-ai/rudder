@@ -81,7 +81,7 @@ impl OwnerRecord {
 /// The OS lock fences compatible native owners, including legacy mode. The
 /// journal CAS supplies the persisted epoch. A PID is informational only.
 pub(crate) struct EngineOwnership {
-    lock: File,
+    _lock: CheckoutLock,
     journal: Journal,
     fence: OwnerFence,
     record: OwnerRecord,
@@ -168,7 +168,7 @@ impl EngineOwnership {
         let record_path = directory.join("owner.json");
         write_owner_record(&record_path, &record)?;
         Ok(Self {
-            lock,
+            _lock: lock,
             journal,
             fence,
             record,
@@ -214,15 +214,6 @@ impl EngineOwnership {
 
     pub(crate) fn journal_parts(&mut self) -> (&mut Journal, &OwnerFence) {
         (&mut self.journal, &self.fence)
-    }
-}
-
-impl Drop for EngineOwnership {
-    fn drop(&mut self) {
-        // Unclean failure deliberately leaves the journal owner active/uncertain;
-        // the next lock holder must reconcile and CAS to a new epoch. Never unlink
-        // the lock file: another process may already be waiting on its inode.
-        let _ = FileExt::unlock(&self.lock);
     }
 }
 
@@ -693,7 +684,23 @@ fn ownership_lock_held(repo: &Path) -> Result<bool> {
     }
 }
 
-fn acquire_checkout_lock(repo: &Path) -> Result<File> {
+/// Explicit unlock also covers errors before EngineOwnership is constructed.
+/// A concurrent fork can temporarily inherit a close-on-exec descriptor; merely
+/// closing the parent's copy would keep its flock held until that child execs.
+struct CheckoutLock(File);
+impl std::ops::Deref for CheckoutLock {
+    type Target = File;
+    fn deref(&self) -> &File { &self.0 }
+}
+impl Drop for CheckoutLock {
+    fn drop(&mut self) {
+        // Unclean failure leaves journal authority uncertain for reconciliation.
+        // Never unlink the lock inode, which another owner may be waiting on.
+        let _ = FileExt::unlock(&self.0);
+    }
+}
+
+fn acquire_checkout_lock(repo: &Path) -> Result<CheckoutLock> {
     let directory = repo.join(".rudder/engine");
     fs::create_dir_all(&directory)?;
     let file = OpenOptions::new()
@@ -706,7 +713,7 @@ fn acquire_checkout_lock(repo: &Path) -> Result<File> {
     FileExt::try_lock_exclusive(&file).map_err(|error| anyhow::anyhow!(
         "another Rudder owner holds this checkout; attach to it or shut it down explicitly ({error})"
     ))?;
-    Ok(file)
+    Ok(CheckoutLock(file))
 }
 
 fn absent_status(repo: &Path) -> serde_json::Value {

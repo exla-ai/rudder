@@ -94,6 +94,22 @@ fn checkout_lock_excludes_a_second_owner_and_keeps_one_inode() {
 }
 
 #[test]
+fn checkout_release_unlocks_even_while_an_inherited_descriptor_remains_open() {
+    let scratch = Scratch::new();
+    let first = acquire_checkout_lock(&scratch.0).unwrap();
+    // dup shares the same open file description, as an in-flight fork does
+    // before close-on-exec. No child scheduling race is needed to reproduce it.
+    let inherited = first.try_clone().unwrap();
+    drop(first);
+    let second = acquire_checkout_lock(&scratch.0).unwrap();
+    assert!(ownership_lock_held(&scratch.0).unwrap());
+    drop(inherited);
+    assert!(ownership_lock_held(&scratch.0).unwrap(), "an old descriptor cannot release the replacement owner");
+    drop(second);
+    assert!(!ownership_lock_held(&scratch.0).unwrap());
+}
+
+#[test]
 fn old_legacy_attach_owner_is_refused_before_journal_or_app_start() {
     let scratch = Scratch::new();
     fs::create_dir(scratch.0.join(".rudder")).unwrap();

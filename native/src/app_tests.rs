@@ -7490,8 +7490,21 @@ fn external_stop_request_kills_native_pty_and_stays_cancelled() {
     assert_eq!(app.agents[0].status, AgentStatus::Stopped);
     assert!(app.agents[0].terminal.is_none());
     assert!(!stop_requested(&repo, "native-stop"));
-    let alive = unsafe { libc::kill(pid as libc::pid_t, 0) } == 0;
-    assert!(!alive, "the PTY process group is terminated and reaped");
+    // The actor requests teardown; its bounded background owner supplies the
+    // actual reap proof. Keep cancellation authoritative through later polls.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if unsafe { libc::kill(pid as libc::pid_t, 0) } != 0 {
+            assert_eq!(std::io::Error::last_os_error().raw_os_error(), Some(libc::ESRCH));
+            break;
+        }
+        assert!(Instant::now() < deadline, "the PTY process was not terminated and reaped");
+        app.poll_agents();
+        assert_eq!(app.agents[0].status, AgentStatus::Stopped);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    app.poll_agents();
+    assert_eq!(app.agents[0].status, AgentStatus::Stopped);
 }
 
 #[test]

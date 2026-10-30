@@ -105,6 +105,7 @@ jobs:
           node-version: "22"
 
       - name: Prepare complete native suite prerequisites
+        id: native_prerequisites
         if: success()
         timeout-minutes: 10
         run: |
@@ -123,7 +124,7 @@ jobs:
           python3 native-diagnostic-runner.py '' native-full-bin --parallel --timeout-seconds 300
 
       - name: Verify complete native library suite
-        if: success()
+        if: ${{ always() && steps.native_prerequisites.outcome == 'success' }}
         timeout-minutes: 7
         run: |
           python3 native-diagnostic-runner.py '' native-full-lib --library --parallel --timeout-seconds 300

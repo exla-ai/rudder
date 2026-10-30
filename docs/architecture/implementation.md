@@ -120,3 +120,8 @@ Release preference was asked asynchronously: v4 prereleases on `next` versus
 3.x foundations or waiting for all gates. No answer arrived during implementation;
 proceed with the stated recommended v4 prerelease assumption.
 An alpha must not move npm `latest` or masquerade as complete stable v4.
+
+The first alpha CI run built all three native artifacts, then caught a macOS
+test-fixture assumption about GNU `timeout`. Publication was stopped; no alpha.1
+package reached npm. The fixture now supplies its own command wrapper. Keep
+the original tag and cut alpha.2, then verify the complete release workflow.

@@ -63,6 +63,10 @@ test("a blocked agent update does not delay the supervisor", async (t) => {
   const writeBin = (name, contents) => fs.writeFile(path.join(bin, name), `#!/bin/sh\n${contents}\n`, { mode: 0o755 });
   await writeBin("claude", 'if [ "$1" = update ]; then while [ ! -f "$TEST_UPDATE_RELEASE" ]; do sleep 0.02; done; : > "$TEST_UPDATE_DONE"; fi');
   await writeBin("node", ': > "$TEST_SUPERVISOR_STARTED"');
+  // The production image supplies GNU timeout. This fixture exercises startup
+  // ordering, so provide its command wrapper on macOS as well as Linux; the
+  // test's own deadline/release keeps the blocked updater bounded.
+  await writeBin("timeout", 'shift\nexec "$@"');
   await writeBin("npm", "exit 0");
   await writeBin("codex", "exit 0");
   const source = await fs.readFile(new URL("../cloud/worker/entrypoint.sh", import.meta.url), "utf8");

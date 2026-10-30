@@ -156,8 +156,6 @@ struct OwnedPtyChild {
     pending: Option<Arc<Mutex<ReapObservation>>>,
     pid: Option<u32>,
     status: Option<portable_pty::ExitStatus>,
-    #[cfg(test)]
-    trace_termination: bool,
 }
 impl OwnedPtyChild {
     fn new(child: Box<dyn Child + Send + Sync>, reservation: ChildReservation) -> Self {
@@ -167,8 +165,6 @@ impl OwnedPtyChild {
             reservation: Some(reservation),
             pending: None,
             status: None,
-            #[cfg(test)]
-            trace_termination: false,
         }
     }
     fn try_wait(&mut self) -> std::io::Result<Option<portable_pty::ExitStatus>> {
@@ -208,50 +204,33 @@ impl OwnedPtyChild {
         }
     }
     fn request_termination(&mut self) {
-        #[cfg(test)]
-        let trace_started = Instant::now();
-        macro_rules! trace {
-            ($phase:expr) => {
-                #[cfg(test)]
-                if self.trace_termination {
-                    eprintln!(
-                        "owned-child-termination phase={} elapsed_ms={}",
-                        $phase,
-                        trace_started.elapsed().as_millis()
-                    );
-                }
-            };
-        }
-        trace!("start");
         if self.child.is_none() {
             return;
         }
-        trace!("try-wait-start");
         if matches!(self.try_wait(), Ok(Some(_))) {
-            trace!("already-reaped");
             self.child.take();
             return;
         }
-        trace!("try-wait-finished");
-        let mut child = self.child.take().expect("owned PTY child");
+        let child = self.child.take().expect("owned PTY child");
         #[cfg(unix)]
         if let Some(pid) = self.pid.filter(|pid| *pid > 1) {
             // The unreaped child still reserves its PID. Invalidate controls
             // before this method; never signal an already reaped/reused PID.
             unsafe {
                 libc::kill(-(pid as libc::pid_t), libc::SIGTERM);
-                trace!("group-term-finished");
                 libc::kill(-(pid as libc::pid_t), libc::SIGKILL);
-                trace!("group-kill-finished");
+                libc::kill(pid as libc::pid_t, libc::SIGKILL);
             }
         }
-        let _ = child.kill();
-        trace!("child-kill-finished");
+        // portable-pty Child::kill sleeps/polls through a Unix SIGHUP grace
+        // period. Direct Unix signals above reserve no actor-side wait. The
+        // split non-Unix killer uses the owned platform handle directly.
+        #[cfg(not(unix))]
+        let _ = child.clone_killer().kill();
         let reservation = self.reservation.take().expect("live child admission");
         let reaper = reservation.reaper.clone();
         let observation = Arc::new(Mutex::new(ReapObservation::default()));
         self.pending = Some(observation.clone());
-        trace!("queue-lock-start");
         reaper
             .jobs
             .lock()
@@ -261,7 +240,6 @@ impl OwnedPtyChild {
                 observation,
                 _reservation: reservation,
             });
-        trace!("queued");
         reaper.wake.notify_one();
     }
 }
@@ -2129,16 +2107,21 @@ mod tests {
     }
     impl portable_pty::ChildKiller for FakeChild {
         fn kill(&mut self) -> std::io::Result<()> {
-            self.kills.fetch_add(1, Ordering::SeqCst);
+            panic!("portable child kill may sleep and must never run on the actor");
+        }
+        fn clone_killer(&self) -> Box<dyn portable_pty::ChildKiller + Send + Sync> {
+            Box::new(FakeSplitKiller(self.kills.clone()))
+        }
+    }
+    #[derive(Debug)]
+    struct FakeSplitKiller(Arc<AtomicUsize>);
+    impl portable_pty::ChildKiller for FakeSplitKiller {
+        fn kill(&mut self) -> std::io::Result<()> {
+            self.0.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
         fn clone_killer(&self) -> Box<dyn portable_pty::ChildKiller + Send + Sync> {
-            Box::new(Self {
-                ready: self.ready.clone(),
-                polls: self.polls.clone(),
-                kills: self.kills.clone(),
-                fail_poll: None,
-            })
+            Box::new(Self(self.0.clone()))
         }
     }
     impl Child for FakeChild {
@@ -2198,7 +2181,19 @@ mod tests {
             reaper.0.reserve().is_err(),
             "pending child retains its slot"
         );
+        let original = child.pending.clone().unwrap();
         child.request_termination();
+        assert!(
+            Arc::ptr_eq(&original, child.pending.as_ref().unwrap()),
+            "teardown must retain the original receipt without another effect"
+        );
+        #[cfg(unix)]
+        assert_eq!(
+            kills.load(Ordering::SeqCst),
+            0,
+            "Unix must use direct signals rather than portable kill grace"
+        );
+        #[cfg(not(unix))]
         assert_eq!(
             kills.load(Ordering::SeqCst),
             1,
@@ -2260,41 +2255,11 @@ mod tests {
         }
         pane.write_input(b"finish\n").unwrap();
         thread::sleep(Duration::from_millis(30));
-        pane.child.trace_termination = true;
-        // Name physical handle destruction separately from the nonblocking
-        // termination request. Empty stand-ins allow the same real master ->
-        // writer -> remaining-pane drop order without unsafe field extraction.
-        let stand_in = portable_pty::native_pty_system()
-            .openpty(pane.size.pty_size())
-            .unwrap();
-        let master = std::mem::replace(&mut pane.master, stand_in.master);
-        let sink: Arc<Mutex<Box<dyn Write + Send>>> =
-            Arc::new(Mutex::new(Box::new(std::io::sink())));
-        let writer = std::mem::replace(&mut pane.writer, sink);
         let started = Instant::now();
-        eprintln!("undrained-teardown phase=request-start elapsed_ms=0");
         pane.request_termination();
-        eprintln!(
-            "undrained-teardown phase=request-finished elapsed_ms={}",
-            started.elapsed().as_millis()
-        );
         let pending = pane.child.pending.clone();
         let already_reaped = pane.child.status.is_some();
-        drop(master);
-        eprintln!(
-            "undrained-teardown phase=master-dropped elapsed_ms={}",
-            started.elapsed().as_millis()
-        );
-        drop(writer);
-        eprintln!(
-            "undrained-teardown phase=writer-dropped elapsed_ms={}",
-            started.elapsed().as_millis()
-        );
         drop(pane);
-        eprintln!(
-            "undrained-teardown phase=pane-dropped elapsed_ms={}",
-            started.elapsed().as_millis()
-        );
         assert!(
             started.elapsed() < Duration::from_millis(250),
             "teardown blocked on undrained slave output elapsed_ms={}",

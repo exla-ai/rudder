@@ -28209,18 +28209,11 @@ done
 #[test]
 fn a_failed_command_pane_says_what_the_command_printed() {
     use std::sync::Arc;
-    let test_started = Instant::now();
-    let phase = |name: &str| {
-        eprintln!("plain-pane-exit phase={name} elapsed_ms={}", test_started.elapsed().as_millis());
-    };
-    phase("start");
     // `/sync` on the cloud machine ran `rudder cloud sync`, which printed "Not
     // logged in to Rudder Cloud" and exited 1; the row only said "agent process
     // exited (exit 1)", naming an agent that never existed and hiding the reason.
     let dir = unique_test_repo("plain-pane-exit");
-    phase("repository-created");
     let mut app = App::new();
-    phase("app-created");
     app.cwd = dir.clone();
     let command = TerminalCommand::with_args(
         "/bin/sh",
@@ -28235,7 +28228,6 @@ fn a_failed_command_pane_says_what_the_command_printed() {
         },
     )
     .expect("spawn command pane");
-    phase("pane-spawned");
     // Darwin waits for kernel PTY output to drain before a child becomes a
     // zombie. First drain the initial marker, then hold the reader AFTER it
     // forwards the final error, keeping those bytes queued and EOF unpublished.
@@ -28251,7 +28243,6 @@ fn a_failed_command_pane_says_what_the_command_printed() {
         assert!(Instant::now() < initial_deadline, "initial output did not drain");
         std::thread::sleep(Duration::from_millis(5));
     }
-    phase("initial-output-drained");
     let release = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
     // Release before either the pane or App is dropped on EVERY assertion path.
     // Otherwise a failed handshake tests teardown with its own reader held.
@@ -28281,19 +28272,15 @@ fn a_failed_command_pane_says_what_the_command_printed() {
                 .unwrap();
         }
     }));
-    phase("reader-waker-installed");
     fs::write(dir.join(".final-gate"), b"write final error").unwrap();
-    phase("final-output-requested");
     held_rx
         .recv_timeout(Duration::from_secs(5))
         .expect("reader held after forwarding final error");
-    phase("reader-held-after-final-output");
     let exit_deadline = Instant::now() + Duration::from_secs(5);
     while pane.is_alive() {
         assert!(Instant::now() < exit_deadline, "command did not exit while final output was held");
         std::thread::sleep(Duration::from_millis(5));
     }
-    phase("process-exit-observed");
     assert!(!pane.visible_lines_snapshot().iter().any(|line| line.contains("Not logged in")), "the final error must still be queued, not already parsed");
     let mut run = test_agent_run_with_terminal(&app, pane);
     run.id = "cloud-sync-pane".to_string();
@@ -28301,15 +28288,12 @@ fn a_failed_command_pane_says_what_the_command_printed() {
     run.plain_process = true;
     app.agents.push(run);
     app.set_run_error(0, "agent process exited (exit 0)".into());
-    phase("error-cannot-bypass-drain");
     assert_eq!(
         app.agents[0].status,
         AgentStatus::Running,
         "an error string cannot bypass final output drain"
     );
-    phase("poll-with-reader-held-start");
     app.poll_agents();
-    phase("poll-with-reader-held-finished");
     assert_eq!(
         app.agents[0].status,
         AgentStatus::Running,
@@ -28317,15 +28301,12 @@ fn a_failed_command_pane_says_what_the_command_printed() {
     );
     assert!(app.agents[0].terminal.as_ref().unwrap().visible_lines_snapshot().iter().any(|line| line.contains("Not logged in to Rudder Cloud")), "the App must drain the queued final error while awaiting EOF");
     reader_release_guard.release();
-    phase("reader-released");
 
     let deadline = Instant::now() + Duration::from_secs(5);
-    phase("final-output-poll-start");
     while app.agents[0].status != AgentStatus::Failed && Instant::now() < deadline {
         app.poll_agents();
         std::thread::sleep(Duration::from_millis(20));
     }
-    phase("final-output-poll-finished");
     let run = &app.agents[0];
     assert_eq!(run.status, AgentStatus::Failed);
     let error = run.last_error.clone().unwrap_or_default();
@@ -28334,13 +28315,9 @@ fn a_failed_command_pane_says_what_the_command_printed() {
     assert!(!error.contains("agent process"), "{error}");
     assert!(run.terminal.as_ref().unwrap().is_output_only());
     assert!(run.terminal.as_ref().unwrap().child_process_id().is_none());
-    phase("final-output-assertions-passed");
 
-    phase("app-drop-start");
     drop(app);
-    phase("app-drop-finished");
     let _ = std::fs::remove_dir_all(&dir);
-    phase("finished");
 }
 
 

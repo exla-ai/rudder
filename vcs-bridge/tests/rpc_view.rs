@@ -25,7 +25,8 @@ use rudder_vcs_bridge::vfs_provider::{self, SourceProjectionPolicy};
 use rudder_vcs_bridge::working_copy::*;
 use rudder_vcs_bridge::*;
 use std::fs;
-use std::io::{Read, Write};
+use std::io::{self, Read, Write};
+use std::os::fd::AsRawFd;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -300,20 +301,34 @@ impl Drop for Fixture {
     }
 }
 
-fn frame(stream: &mut UnixStream) -> Vec<u8> {
-    let mut n = [0; 4];
-    stream.read_exact(&mut n).unwrap();
-    let n = u32::from_be_bytes(n) as usize;
-    assert!(n <= MAX_RESPONSE_BYTES);
-    let mut out = vec![0; n];
-    stream.read_exact(&mut out).unwrap();
-    out
+fn blocking_proxy_stream(stream: &UnixStream, read_timeout: Duration) -> io::Result<()> {
+    stream.set_nonblocking(false)?;
+    stream.set_read_timeout(Some(read_timeout))?;
+    stream.set_write_timeout(Some(Duration::from_secs(2)))
 }
-fn write_frame(stream: &mut UnixStream, bytes: &[u8]) {
-    stream
-        .write_all(&(bytes.len() as u32).to_be_bytes())
-        .unwrap();
-    stream.write_all(bytes).unwrap();
+fn frame(stream: &mut UnixStream) -> io::Result<Vec<u8>> {
+    let mut n = [0; 4];
+    stream.read_exact(&mut n)?;
+    let n = u32::from_be_bytes(n) as usize;
+    if n > MAX_RESPONSE_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "proxy fixture frame exceeds bound",
+        ));
+    }
+    let mut out = vec![0; n];
+    stream.read_exact(&mut out)?;
+    Ok(out)
+}
+fn write_frame(stream: &mut UnixStream, bytes: &[u8]) -> io::Result<()> {
+    if bytes.len() > MAX_RESPONSE_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "proxy fixture frame exceeds bound",
+        ));
+    }
+    stream.write_all(&(bytes.len() as u32).to_be_bytes())?;
+    stream.write_all(bytes)
 }
 struct DropReplyProxy {
     path: PathBuf,
@@ -326,6 +341,13 @@ struct DropReplyProxy {
 }
 impl DropReplyProxy {
     fn start(path: PathBuf, target: PathBuf) -> Self {
+        Self::with_inherited_nonblocking(path, target, false)
+    }
+    fn with_inherited_nonblocking(
+        path: PathBuf,
+        target: PathBuf,
+        force_inherited_nonblocking: bool,
+    ) -> Self {
         let listener = UnixListener::bind(&path).unwrap();
         fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
         listener.set_nonblocking(true).unwrap();
@@ -345,25 +367,51 @@ impl DropReplyProxy {
             while !s.load(Ordering::Acquire) {
                 match listener.accept() {
                     Ok((mut client, _)) => {
-                        let request = frame(&mut client);
-                        let json: serde_json::Value = serde_json::from_slice(&request).unwrap();
-                        let op = json["operation"]["operation"].as_str().unwrap();
-                        let mut server = UnixStream::connect(&target).unwrap();
-                        write_frame(&mut server, &request);
-                        let response = frame(&mut server);
-                        if op == "observe" {
-                            c.fetch_add(1, Ordering::SeqCst);
-                            if o.swap(false, Ordering::AcqRel) {
-                                continue;
+                        let _ = (|| -> Result<()> {
+                            if force_inherited_nonblocking {
+                                // Exercise inherited Darwin socket flags on
+                                // Linux too, with real response backpressure.
+                                client.set_nonblocking(true)?;
+                                let size: libc::c_int = 4096;
+                                let result = unsafe {
+                                    libc::setsockopt(
+                                        client.as_raw_fd(),
+                                        libc::SOL_SOCKET,
+                                        libc::SO_SNDBUF,
+                                        &size as *const _ as *const libc::c_void,
+                                        std::mem::size_of_val(&size) as libc::socklen_t,
+                                    )
+                                };
+                                if result != 0 {
+                                    return Err(io::Error::last_os_error().into());
+                                }
                             }
-                        }
-                        if op == "adopt" && a.swap(false, Ordering::AcqRel) {
-                            continue;
-                        }
-                        if op == "execute" && x.swap(false, Ordering::AcqRel) {
-                            continue;
-                        }
-                        write_frame(&mut client, &response);
+                            // BSD accept inherits O_NONBLOCK; this proxy uses
+                            // bounded blocking framing, including on replies.
+                            blocking_proxy_stream(&client, Duration::from_secs(2))?;
+                            let request = frame(&mut client)?;
+                            let json: serde_json::Value = serde_json::from_slice(&request)?;
+                            let op = json["operation"]["operation"].as_str().unwrap_or("");
+                            let mut server = UnixStream::connect(&target)?;
+                            // Existing managed commands may execute for 90s.
+                            blocking_proxy_stream(&server, Duration::from_secs(100))?;
+                            write_frame(&mut server, &request)?;
+                            let response = frame(&mut server)?;
+                            if op == "observe" {
+                                c.fetch_add(1, Ordering::SeqCst);
+                                if o.swap(false, Ordering::AcqRel) {
+                                    return Ok(());
+                                }
+                            }
+                            if op == "adopt" && a.swap(false, Ordering::AcqRel) {
+                                return Ok(());
+                            }
+                            if op == "execute" && x.swap(false, Ordering::AcqRel) {
+                                return Ok(());
+                            }
+                            write_frame(&mut client, &response)?;
+                            Ok(())
+                        })();
                     }
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                         thread::sleep(Duration::from_millis(2))
@@ -391,6 +439,55 @@ impl Drop for DropReplyProxy {
         }
         let _ = fs::remove_file(&self.path);
     }
+}
+
+#[test]
+fn inherited_nonblocking_proxy_delivers_large_reply_under_backpressure() {
+    let endpoint = tempfile::Builder::new()
+        .prefix("rv-nb-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let target = endpoint.path().join("target.sock");
+    let listener = UnixListener::bind(&target).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let proxy = DropReplyProxy::with_inherited_nonblocking(
+        endpoint.path().join("proxy.sock"),
+        target,
+        true,
+    );
+    let expected = vec![0x73; MAX_RESPONSE_BYTES];
+    let response = expected.clone();
+    let (sent, received) = std::sync::mpsc::sync_channel(1);
+    let server = thread::spawn(move || {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let mut stream = loop {
+            match listener.accept() {
+                Ok((stream, _)) => break stream,
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    assert!(std::time::Instant::now() < deadline, "proxy did not connect");
+                    thread::sleep(Duration::from_millis(2));
+                }
+                Err(error) => panic!("proxy target accept: {error}"),
+            }
+        };
+        blocking_proxy_stream(&stream, Duration::from_secs(2)).unwrap();
+        assert_eq!(
+            frame(&mut stream).unwrap(),
+            b"{\"operation\":{\"operation\":\"head\"}}"
+        );
+        write_frame(&mut stream, &response).unwrap();
+        sent.send(()).unwrap();
+    });
+    let mut client = UnixStream::connect(&proxy.path).unwrap();
+    blocking_proxy_stream(&client, Duration::from_secs(5)).unwrap();
+    write_frame(&mut client, b"{\"operation\":{\"operation\":\"head\"}}").unwrap();
+    received.recv_timeout(Duration::from_secs(5)).unwrap();
+    // No response bytes are consumed until the proxy's small send buffer fills.
+    thread::sleep(Duration::from_millis(50));
+    let actual = frame(&mut client).unwrap();
+    assert_eq!(actual.len(), expected.len());
+    assert!(actual == expected, "proxy altered the framed response body");
+    server.join().unwrap();
 }
 
 #[test]

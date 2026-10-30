@@ -50,9 +50,15 @@ pub fn wait_file(path: &Path, seconds: u64) -> Result<()> {
     }
     Ok(())
 }
-pub fn frame(stream: &mut UnixStream) -> Result<Vec<u8>> {
-    stream.set_read_timeout(Some(Duration::from_secs(100)))?;
+pub fn blocking_stream(stream: &UnixStream, read_timeout: Duration) -> Result<()> {
+    // Darwin inherits the nonblocking listener flag through accept(). Framed
+    // I/O below relies on blocking reads/writes with explicit finite timeouts.
+    stream.set_nonblocking(false)?;
+    stream.set_read_timeout(Some(read_timeout))?;
     stream.set_write_timeout(Some(Duration::from_secs(2)))?;
+    Ok(())
+}
+pub fn frame(stream: &mut UnixStream) -> Result<Vec<u8>> {
     let mut prefix = [0; 4];
     stream.read_exact(&mut prefix)?;
     let size = u32::from_be_bytes(prefix) as usize;
@@ -98,10 +104,13 @@ impl ReplyProxy {
                 match listener.accept() {
                     Ok((mut client, _)) => {
                         let _ = (|| -> Result<()> {
+                            blocking_stream(&client, Duration::from_secs(2))?;
                             let request = frame(&mut client)?;
                             let json: serde_json::Value = serde_json::from_slice(&request)?;
                             let operation = json["operation"]["operation"].as_str().unwrap_or("");
                             let mut server = UnixStream::connect(&target)?;
+                            // The managed command has a 90s execution budget.
+                            blocking_stream(&server, Duration::from_secs(100))?;
                             send(&mut server, &request)?;
                             let response = frame(&mut server)?;
                             if operation == "observe" {

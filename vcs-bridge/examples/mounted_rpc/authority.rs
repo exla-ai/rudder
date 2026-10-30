@@ -37,8 +37,7 @@ impl Client {
             "fixture authority binding mismatch"
         );
         let mut stream = UnixStream::connect(&self.socket)?;
-        stream.set_read_timeout(Some(Duration::from_secs(2)))?;
-        stream.set_write_timeout(Some(Duration::from_secs(2)))?;
+        wire::blocking_stream(&stream, Duration::from_secs(2))?;
         wire::send(
             &mut stream,
             &serde_json::to_vec(&Request {
@@ -98,6 +97,7 @@ impl Server {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
                         let _ = (|| -> Result<()> {
+                            wire::blocking_stream(&stream, Duration::from_secs(2))?;
                             let request: Request =
                                 serde_json::from_slice(&wire::frame(&mut stream)?)?;
                             let allowed = a.load(Ordering::Acquire)

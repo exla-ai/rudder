@@ -9,7 +9,8 @@ use std::{
     collections::BTreeMap,
     fs,
     io::{Read, Write},
-    net::TcpListener,
+    net::{TcpListener, TcpStream},
+    os::fd::AsRawFd,
     path::{Path, PathBuf},
     process::Command,
     sync::{
@@ -142,6 +143,13 @@ struct Http {
 }
 impl Http {
     fn new(body: Vec<u8>, root: serde_json::Value) -> Self {
+        Self::with_inherited_nonblocking(body, root, false)
+    }
+    fn with_inherited_nonblocking(
+        body: Vec<u8>,
+        root: serde_json::Value,
+        force_inherited_nonblocking: bool,
+    ) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let calls = Arc::new(AtomicUsize::new(0));
@@ -165,6 +173,25 @@ impl Http {
                 while !stop.load(Ordering::Acquire) {
                     match listener.accept() {
                         Ok((mut stream, _)) => {
+                            if force_inherited_nonblocking {
+                                // Model Darwin on Linux too, with enough
+                                // backpressure to exercise a partial write.
+                                stream.set_nonblocking(true).unwrap();
+                                let size: libc::c_int = 64 * 1024;
+                                let result = unsafe {
+                                    libc::setsockopt(
+                                        stream.as_raw_fd(),
+                                        libc::SOL_SOCKET,
+                                        libc::SO_SNDBUF,
+                                        &size as *const _ as *const libc::c_void,
+                                        std::mem::size_of_val(&size) as libc::socklen_t,
+                                    )
+                                };
+                                assert_eq!(result, 0);
+                            }
+                            // BSD accept inherits O_NONBLOCK. This worker uses
+                            // blocking I/O with finite socket timeouts instead.
+                            stream.set_nonblocking(false).unwrap();
                             stream.set_read_timeout(Some(Duration::from_millis(50))).unwrap(); stream.set_write_timeout(Some(Duration::from_secs(2))).unwrap();
                             let mut request = Vec::new(); let mut part = [0; 1024];
                             while request.len() <= 16384 && !request.windows(4).any(|v| v == b"\r\n\r\n") && !stop.load(Ordering::Acquire) {
@@ -231,6 +258,43 @@ fn cache(base: &Path, source: &NodeRemoteSource) -> RemoteCache {
 fn stop(source: &NodeRemoteSource) {
     source.terminate();
     until(|| source.stats().unwrap().child_exited);
+}
+
+#[test]
+fn inherited_nonblocking_http_stream_delivers_complete_4mib_body_under_backpressure() {
+    let body = vec![0x39; 4 * 1024 * 1024];
+    let reference = ObjectRef::from_bytes(ObjectKind::Blob, &body);
+    let http = Http::with_inherited_nonblocking(body.clone(), root(&reference), true);
+    let address = http
+        .url
+        .strip_prefix("http://")
+        .unwrap()
+        .split('/')
+        .next()
+        .unwrap();
+    let mut client = TcpStream::connect(address).unwrap();
+    client.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    client.set_write_timeout(Some(Duration::from_secs(2))).unwrap();
+    let request = format!(
+        "GET /api/rudder/fabric/objects/blob/{}/{} HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer secret-fixture-token\r\n\r\n",
+        reference.digest, reference.size_bytes,
+    );
+    client.write_all(request.as_bytes()).unwrap();
+    until(|| http.calls.load(Ordering::Acquire) == 1);
+    // Hold the reader long enough for a nonblocking writer to exhaust its
+    // small send buffer. A bounded blocking writer waits for us to drain it.
+    std::thread::sleep(Duration::from_millis(50));
+    let mut response = Vec::new();
+    client.read_to_end(&mut response).unwrap();
+    let header_end = response
+        .windows(4)
+        .position(|part| part == b"\r\n\r\n")
+        .unwrap()
+        + 4;
+    assert!(response.starts_with(b"HTTP/1.1 200 OK\r\n"));
+    assert_eq!(response.len() - header_end, body.len());
+    assert_eq!(ObjectRef::from_bytes(ObjectKind::Blob, &response[header_end..]), reference);
+    assert!(http.auth_ok.load(Ordering::Acquire));
 }
 
 #[test]

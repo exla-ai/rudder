@@ -1,0 +1,24 @@
+{
+  "formatVersion": 1,
+  "canaryIds": [
+    "847317b2dd1748",
+    "846edda2761958"
+  ],
+  "canaryNames": [
+    "rudder-alpha10-boot-b1a1db33",
+    "rudder-alpha10-cas-3d524c02"
+  ],
+  "absent": true,
+  "database": {
+    "syntheticCredentialRows": 0,
+    "workspaces": 49,
+    "integrity": "ok"
+  },
+  "home": {
+    "id": "8edd225a7d0378",
+    "instance": "01M670MG4A8E0DWE9GA1C0PQ92",
+    "state": "started",
+    "unchanged": true
+  },
+  "verifiedAt": "2026-10-30T22:56:14.680Z"
+}

@@ -1,0 +1,11 @@
+{
+  "frozenFilesMatchTaggedSource": true,
+  "revision": "56f825ea3c1d6136b1a20b3031f835ef33f870cd",
+  "sourceEnvelopeSha256": "a87f94ec3058b88af5cd284e95fab9dc42629a2998ad378874c5d9a38067e6bd",
+  "sourceFiles": 1301,
+  "versionCommitChangedOnly": [
+    "package-lock.json",
+    "package.json"
+  ],
+  "versionMetadataSecretMatches": 0
+}

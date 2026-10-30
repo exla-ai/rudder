@@ -1,0 +1,102 @@
+{
+  "format_version": 1,
+  "provider": "Fly.io",
+  "version": "4.0.0-alpha.10",
+  "revision": "56f825ea3c1d6136b1a20b3031f835ef33f870cd",
+  "image": "registry.fly.io/rudder-workers-exla:4.0.0-alpha.10",
+  "expectedDigest": "sha256:ae1d4bf448c05dc71373efb1b9efd6510dfed4526f76838bc53e1a5c00a446ff",
+  "nonce": "b1a1db33-bc3b-44bd-9a46-d081139043e0",
+  "name": "rudder-alpha10-boot-b1a1db33",
+  "steps": [
+    {
+      "step": "assert-no-app-secrets",
+      "ms": 577
+    },
+    {
+      "step": "create-owned-smoke",
+      "ms": 31222
+    },
+    {
+      "step": "inventory",
+      "ms": 516
+    },
+    {
+      "step": "read-bounded-proof",
+      "ms": 2029
+    },
+    {
+      "step": "read-bounded-proof",
+      "ms": 769
+    },
+    {
+      "step": "read-bounded-proof",
+      "ms": 959
+    },
+    {
+      "step": "inventory",
+      "ms": 465
+    },
+    {
+      "step": "destroy-owned-smoke",
+      "ms": 2443
+    },
+    {
+      "step": "inventory",
+      "ms": 484
+    }
+  ],
+  "limits": [
+    "The real image bootstrap, cache setup and entrypoint execute. An image-owned-node preload probes and holds before supervisor module evaluation.",
+    "No model call, account vault, worker credential, live home or production workspace is used.",
+    "Managed execution remains opt-in; this does not prove full backend, fleet or remote-build admission."
+  ],
+  "machine": "847317b2dd1748",
+  "instance": "01M67FTPGG0FV6V1266E58AG1Y",
+  "region": "sjc",
+  "checks": {
+    "kind": "alpha10-full-image-boot-smoke",
+    "ok": true,
+    "uid": 1500,
+    "gid": 1500,
+    "nnp": "1",
+    "zeroCapabilities": true,
+    "supplementaryGroups": "",
+    "fuseGranted": true,
+    "fuseOpen": true,
+    "cacheOwnedByUser": true,
+    "rootReentryDenied": true,
+    "realBootstrapAndEntrypoint": true,
+    "supervisorModuleEvaluated": false,
+    "packageVersion": "4.0.0-alpha.10",
+    "version": "4.0.0-alpha.10",
+    "node": "v22.23.4",
+    "kernel": "6.12.114-fly",
+    "claude": "2.1.314 (Claude Code)",
+    "codex": "codex-cli 0.166.0",
+    "tailscale": "1.104.4",
+    "jj": "jj 0.40.0-941d0290f5511db1d1cf8e4fe7365ba7d1828ea0",
+    "git": "git version 2.56.0",
+    "jjFetchChangedFileRemote": true,
+    "capabilities": {
+      "authority": "local-only",
+      "format_version": 1,
+      "metadata_encoding": "canonical-json-v1",
+      "object_hash": "sha256",
+      "scheduler": false
+    },
+    "bridge": {
+      "automatic_jj_replacement": false,
+      "format_version": 1,
+      "jj_version": "0.40.0",
+      "local_development": false,
+      "vfs_default": false,
+      "vfs_provider_required": true
+    },
+    "nativeSha256": "2693b31ad483e829ca51f761a9ec23ed31474cd3c7b21d64bde6050436943c7c",
+    "buddySha256": "60bee0829d6a24752c8e9df94e0493ba0b302a540a1f95a3ea9559d7e5126c68",
+    "verifiedAt": "2026-10-30T22:46:06.542Z"
+  },
+  "ok": true,
+  "cleanupVerified": true,
+  "verifiedAt": "2026-10-30T22:46:11.664Z"
+}

@@ -1,8 +1,8 @@
 # Partial workspaces and local delta retention
 
-Updated 2026-10-30. Object-set retention and delta transfer are included in Cloud
-alpha.9. The owning partial-capture journal below is new working-tree code;
-npm remains alpha.7 and default agent launch is unchanged.
+Updated 2026-10-30. Object-set retention, delta transfer and the owning
+partial-capture journal are included in Cloud alpha.10. npm remains alpha.7
+pending release CI; default agent launch is unchanged.
 
 A remotely retained workspace need not exist completely on a worker. New
 private writes, however, must survive the worker process restarting on that

@@ -50,7 +50,7 @@ the three architecture documents already contained this session's planning work.
 | Private previews | Persisted Tailscale login, actual readiness, bounded async probes, exact project ownership, ready links and local open | E13 subset implemented; real userspace/Serve check passed; laptop/phone access remains untested |
 | Terminal stream | Shared home/sail helper, short output batching, bounded backpressure, connection fencing, UTF-8 and repaint recovery | E13 subset deployed in the worker image; real WS/PTY VM checks passed; existing homes adopt when idle |
 | Startup/download caches | Background CLI update, persistent account-local npm/pnpm/uv cache defaults, explicit overrides retained | Behavior tests pass; no distributed action-cache claim |
-| Full storage/engine rewrite | Milestones below | Bounded formats, remote workspace/cache and scoped native VCS interfaces are configured in Cloud release160 / worker alpha.9; npm remains alpha.7 pending the next checked release. Default workspace integration, fleet and migration gates remain open |
+| Full storage/engine rewrite | Milestones below | Cloud release 161 / worker alpha.10 is deployed and verified; npm remains alpha.7 pending release CI. Default workspace integration, fleet and migration gates remain open |
 
 The current native simple-execution path remains an isolated worker; explicit
 main-checkout mode remains available. The initial automatic DAG path retains
@@ -67,27 +67,34 @@ path, so this is a stated alpha limitation, not complete Cloud routing parity.
 
 ## V4 foundations and current continuation, 2026-10-30
 
-Cloud alpha.9 is deployed as release160 from
-`11f1f75e5a18555f6c7e257aacc6b4097f425c5e`; the canonical app, health,
+Cloud alpha.10 is deployed as release 161 from
+`56f825ea3c1d6136b1a20b3031f835ef33f870cd`; the canonical app, health,
 authentication, database integrity and unchanged active-home instance were
-verified at `2026-10-30T21:10:29Z`. Its complete worker image passed an owned
-Fly bootstrap/runtime smoke. See [exact delivery evidence](delivery-alpha9.json).
+verified at `2026-10-30T22:48:32Z`. Its complete worker image passed an owned
+Fly bootstrap/runtime smoke. A fresh worker restored the synthetic RunnableRoot
+from deployed S3 and retained it across native restart. Both owned canaries and
+the temporary credential row were independently absent at `2026-10-30T22:56:14Z`.
+See [exact delivery evidence](delivery-alpha10.json).
 The active home keeps its running alpha.7 image until idle.
 
-Both npm `next` tags still point to alpha.7. Alpha.9 publication failed twice in
+Both npm `next` tags still point to alpha.7, verified at `2026-10-30T22:57:09Z`.
+Alpha.10 release CI is still building the Intel Mac pair; Linux/ARM artifacts,
+Mac/iOS and TUI CI passed. Alpha.9 publication failed twice in
 the macOS remote-root HTTP fixture before npm publication. Darwin inherits a
 listener's nonblocking flag, while the fixture assumed blocking full-body
-writes. The next source slice normalizes accepted streams and adds forced
+writes. Alpha.10 normalizes accepted streams and adds forced
 backpressure tests, including the real engine-control handler. Do not retag
 alpha.9, publish by hand or treat its Cloud deployment as npm availability.
 
 The shorter startup context from alpha.4 is included. Partial-capture namespace4,
-the inactive PostgreSQL authority adapter and explicit managed App launch are
-new working-tree changes after alpha.9. They remain unshipped until their own
-checks and delivery record. CLI publication, configured worker image and live
-worker adoption remain separate facts. The active objective is the full plan.
+the inactive PostgreSQL authority adapter and explicit internal managed App
+composition are included in Cloud alpha.10. New alpha.11 working-tree changes
+add private managed storage/protocol floors, board capabilities and verified
+paired build artifacts. Those changes are unshipped. CLI publication, configured
+worker image and live worker adoption remain separate facts. The active
+objective is the full plan.
 
-The next release candidate is alpha.10. Its mounted partial-capture proof passed
+Alpha.10's mounted partial-capture proof passed
 as root and UID1500, retaining dirty chunks across lost replies, later FD writes,
 mmap and collection without creating a complete pin. Capture through data ACK
 took 711/724 ms in those individual loopback samples. The owned VM was deleted;
@@ -100,7 +107,7 @@ control edits) plus 11 affected execution/control tests afterward; native 1,002;
 VCS bridge with CLI 32; JavaScript 650 passed/9 explicit skips; real terminal 59.
 TypeScript/Cloud compilation, optimized paired build, context audit, public
 artifact checksums and the inactive infrastructure validator also passed.
-These are local checks, not npm publication or deployed alpha.10 proof.
+These local checks are separate from the linked Cloud proof and pending npm gate.
 
 The inactive Cloud PostgreSQL adapter passed 19 actual Node/pg transaction and
 crash/recovery tests on PostgreSQL17.11. A new native process-local lease guard
@@ -137,12 +144,12 @@ user plugins or a demonstrated cold-start speedup. The [provider rollout](author
 and default-disabled RDS foundation are unapplied; no database or new persistent
 provider spend was created. Full fleet ingress/activation and migration remain open.
 
-The next build-pipeline change should compile native and its jj companion in
-one Cargo invocation with the `rudder-vcs-bridge/cli` feature union. Current
-separate commands rebuild engine/bridge under two dependency fingerprints.
-This is a measured build-graph observation, not an implemented optimization;
-qualify the combined graph, paired outputs and all three platforms before
-changing local, Docker and CI commands.
+The alpha.11 build-pipeline changes unify native and its jj companion under
+`rudder-vcs-bridge/cli` and validate exact-source paired prebuilt manifests.
+Forty-seven focused JS cases pass. A read-only frozen alpha.10 build compiled
+each workspace library/binary once in 599.79 seconds with two jobs and reused
+dependencies. That run qualifies the command/outputs, not a controlled speedup;
+integrated current-source tests and all three release platforms remain pending.
 
 - `engine/` provides typed immutable roots, local checksummed CAS, staged
   publication, retained closures and conservative collection. Source,

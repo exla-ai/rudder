@@ -20,6 +20,126 @@ use std::time::{Duration, Instant};
 
 const EXIT_OUTPUT_GRACE: Duration = Duration::from_secs(2);
 
+/// Wait only on the reader thread, with a bounded timeout so an inherited slave
+/// cannot keep a stopped pane's reader alive. Darwin's poll does not reliably
+/// support terminal devices; kqueue also avoids select's FD_SETSIZE limit.
+#[cfg(unix)]
+struct PtyReadiness {
+    #[cfg(not(target_os = "macos"))]
+    fd: Option<std::os::fd::RawFd>,
+    #[cfg(target_os = "macos")]
+    queue: Option<std::os::fd::OwnedFd>,
+}
+
+#[cfg(unix)]
+impl PtyReadiness {
+    fn new(fd: Option<std::os::fd::RawFd>) -> std::io::Result<Self> {
+        #[cfg(target_os = "macos")]
+        {
+            use std::os::fd::{AsRawFd, FromRawFd};
+
+            let queue = if let Some(fd) = fd {
+                let raw_queue = unsafe { libc::kqueue() };
+                if raw_queue < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                // Own the queue immediately so every initialization error closes it.
+                let queue = unsafe { std::os::fd::OwnedFd::from_raw_fd(raw_queue) };
+                if unsafe { libc::fcntl(queue.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) } < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                let change = libc::kevent {
+                    ident: fd as _,
+                    filter: libc::EVFILT_READ,
+                    flags: libc::EV_ADD | libc::EV_ENABLE,
+                    fflags: 0,
+                    data: 0,
+                    udata: std::ptr::null_mut(),
+                };
+                let timeout = libc::timespec {
+                    tv_sec: 0,
+                    tv_nsec: 0,
+                };
+                if unsafe {
+                    libc::kevent(
+                        queue.as_raw_fd(),
+                        &change,
+                        1,
+                        std::ptr::null_mut(),
+                        0,
+                        &timeout,
+                    )
+                } < 0
+                {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Some(queue)
+            } else {
+                None
+            };
+            Ok(Self { queue })
+        }
+        #[cfg(not(target_os = "macos"))]
+        Ok(Self { fd })
+    }
+
+    fn wait(&self) -> std::io::Result<bool> {
+        #[cfg(target_os = "macos")]
+        {
+            use std::os::fd::AsRawFd;
+
+            let Some(queue) = self.queue.as_ref() else {
+                return Ok(true);
+            };
+            let mut event = std::mem::MaybeUninit::<libc::kevent>::uninit();
+            let timeout = libc::timespec {
+                tv_sec: 0,
+                tv_nsec: 50_000_000,
+            };
+            let ready = unsafe {
+                libc::kevent(
+                    queue.as_raw_fd(),
+                    std::ptr::null(),
+                    0,
+                    event.as_mut_ptr(),
+                    1,
+                    &timeout,
+                )
+            };
+            if ready < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            if ready == 0 {
+                return Ok(false);
+            }
+            // kevent initialized one event. EV_EOF still permits reading buffered
+            // tail bytes; only an actual registration/runtime error ends the reader.
+            let event = unsafe { event.assume_init() };
+            if event.flags & libc::EV_ERROR != 0 && event.data != 0 {
+                return Err(std::io::Error::from_raw_os_error(event.data as i32));
+            }
+            Ok(true)
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let Some(fd) = self.fd else {
+                return Ok(true);
+            };
+            let mut poll = libc::pollfd {
+                fd,
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            let ready = unsafe { libc::poll(&mut poll, 1, 50) };
+            if ready < 0 {
+                Err(std::io::Error::last_os_error())
+            } else {
+                Ok(ready > 0)
+            }
+        }
+    }
+}
+
 use anyhow::{anyhow, Context, Result};
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize};
 
@@ -604,6 +724,9 @@ impl TerminalPane {
         let pair = pty_system
             .openpty(options.size.pty_size())
             .context("failed to open PTY")?;
+        #[cfg(unix)]
+        let reader_readiness = PtyReadiness::new(pair.master.as_raw_fd())
+            .context("failed to initialize PTY reader readiness")?;
 
         let mut builder = command_builder(command, &options.term)?;
         if let Some(cwd) = &options.cwd {
@@ -633,8 +756,6 @@ impl TerminalPane {
         let reader_waker = Arc::clone(&output_waker);
         let reader_stop = Arc::new(AtomicBool::new(false));
         let stopped = Arc::clone(&reader_stop);
-        #[cfg(unix)]
-        let reader_fd = pair.master.as_raw_fd();
         let reader_thread = thread::Builder::new()
             .name("rudder-pty-reader".to_string())
             .spawn(move || {
@@ -648,29 +769,16 @@ impl TerminalPane {
                         break;
                     }
                     #[cfg(unix)]
-                    if let Some(fd) = reader_fd {
-                        // This is the sole reader. Poll before read so dropping
-                        // a pane can stop it even if an escaped descendant keeps
-                        // a silent slave open. No App thread waits for this poll.
-                        let mut poll = libc::pollfd {
-                            fd,
-                            events: libc::POLLIN,
-                            revents: 0,
-                        };
-                        let ready = unsafe { libc::poll(&mut poll, 1, 50) };
+                    {
+                        let ready = reader_readiness.wait();
                         if stopped.load(Ordering::Acquire) {
                             break;
                         }
-                        if ready == 0 {
-                            continue;
-                        }
-                        if ready < 0 {
-                            if std::io::Error::last_os_error().kind()
-                                == std::io::ErrorKind::Interrupted
-                            {
-                                continue;
-                            }
-                            break;
+                        match ready {
+                            Ok(true) => {}
+                            Ok(false) => continue,
+                            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
+                            Err(_) => break,
                         }
                     }
                     match reader.read(&mut buf) {
@@ -1635,7 +1743,7 @@ impl Drop for TerminalPane {
         self.reader_stop.store(true, Ordering::Release);
         self.terminate_child();
         // An inherited slave can delay EOF. Never join a still-running reader
-        // on the App actor: the stop-aware poll closes its handles even if a
+        // on the App actor: the bounded readiness wait closes its handles even if a
         // silent descendant outlives its group. Finished threads are reaped.
         if let Some(handle) = self.reader_thread.take() {
             if handle.is_finished() {
@@ -1768,6 +1876,77 @@ fn default_shell() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn real_pty_readiness_delivers_output_and_eof_before_exit_grace() {
+        let mut pane = TerminalPane::spawn_shell_or_command(
+            Some(TerminalCommand::with_args(
+                "/bin/sh",
+                [
+                    "-c",
+                    "printf 'readiness-start\\n'; sleep 0.05; printf 'readiness-tail\\n'; exit 7",
+                ],
+            )),
+            TerminalPaneOptions::default(),
+        )
+        .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let status = loop {
+            pane.drain_output();
+            if let Some(status) = pane.try_wait_after_output().unwrap() {
+                break status;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "real PTY output/exit did not finish"
+            );
+            thread::sleep(Duration::from_millis(5));
+        };
+        assert_eq!(status.exit_code(), 7);
+        assert!(
+            pane.output_eof,
+            "reader must observe actual EOF, not the exit timeout"
+        );
+        assert!(pane.output_log.contains("readiness-start"));
+        assert!(pane.output_log.contains("readiness-tail"));
+    }
+
+    #[test]
+    fn stopped_pty_reader_finishes_while_live_child_keeps_slave_open() {
+        let mut pane = TerminalPane::spawn_shell_or_command(
+            Some(TerminalCommand::with_args(
+                "/bin/sh",
+                ["-c", "printf 'reader-ready\\n'; read -r value"],
+            )),
+            TerminalPaneOptions::default(),
+        )
+        .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !pane.output_log.contains("reader-ready") {
+            pane.drain_output();
+            assert!(
+                Instant::now() < deadline,
+                "reader did not receive live PTY output"
+            );
+            thread::sleep(Duration::from_millis(5));
+        }
+        pane.reader_stop.store(true, Ordering::Release);
+        let reader = pane.reader_thread.take().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !reader.is_finished() {
+            assert!(
+                Instant::now() < deadline,
+                "stopped reader remained blocked on an open slave"
+            );
+            thread::sleep(Duration::from_millis(5));
+        }
+        reader.join().unwrap();
+        assert!(
+            pane.try_wait().unwrap().is_none(),
+            "reader shutdown must not require child exit"
+        );
+        // Dropping the pane still invalidates controls and terminates/reaps its child.
+    }
 
     #[test]
     fn exit_output_waits_for_forwarded_tail_and_reader_eof() {

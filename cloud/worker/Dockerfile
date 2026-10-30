@@ -14,8 +14,9 @@ RUN --mount=type=cache,id=rudder-cargo-registry,target=/usr/local/cargo/registry
     --mount=type=cache,id=rudder-cargo-git,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,id=rudder-native-release,target=/src/target,sharing=locked \
     cargo clean --locked --release -p rudder-engine -p rudder-native -p rudder-vcs-bridge \
-  && cargo build --release --locked -p rudder-native --bin rudder-native \
-  && cargo build --release --locked -p rudder-vcs-bridge --features cli --bin rudder-jj \
+  && cargo build --release --locked --manifest-path Cargo.toml \
+       -p rudder-native -p rudder-vcs-bridge --features rudder-vcs-bridge/cli \
+       --bin rudder-native --bin rudder-jj \
   && cp target/release/rudder-native /rudder-native \
   && cp target/release/rudder-jj /rudder-jj
 

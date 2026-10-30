@@ -25,7 +25,7 @@ async function fixture(t) {
   const exe = await binary(t); if (!exe) return null;
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "rudder-agent-mcp-"));
   t.after(() => fs.rm(dir, { recursive: true, force: true }));
-  const generated = spawnSync("cargo", ["test", "-p", "rudder-engine", "--test", "agent_api_tools", "--", "--exact", "export_agent_mcp_fixture", "--ignored"], {
+  const generated = spawnSync("cargo", ["test", "--workspace", "--locked", "--features", "rudder-vcs-bridge/cli", "--test", "agent_api_tools", "--", "--exact", "export_agent_mcp_fixture", "--ignored"], {
     cwd: root, env: { ...process.env, RUDDER_AGENT_MCP_FIXTURE_DIR: dir }, encoding: "utf8", timeout: 180_000, maxBuffer: 1024 * 1024,
   });
   assert.equal(generated.status, 0, generated.stderr || generated.error?.message);

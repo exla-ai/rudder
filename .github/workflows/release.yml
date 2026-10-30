@@ -6,7 +6,7 @@ name: Release
 #
 # Release flow (from a clean, pushed main):
 #   npm version patch        # bumps package.json + lock, commits, tags vX.Y.Z
-#   git push --follow-tags   # pushes the commit and the tag -> triggers this
+#   git push origin main vX.Y.Z  # explicitly push main and only the newly created tag
 #
 # One-time setup: add an npm "Automation" access token as the repo secret
 # NPM_TOKEN (Settings -> Secrets and variables -> Actions -> New secret).
@@ -34,10 +34,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Build native binary
-        run: |
-          cargo build --release --locked --manifest-path native/Cargo.toml --bin rudder-native
-          cargo build --release --locked -p rudder-vcs-bridge --features cli --bin rudder-jj
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Build native pair
+        run: node scripts/build-native.mjs
 
       - name: Stage native artifact
         run: |
@@ -46,6 +48,7 @@ jobs:
           cp target/release/rudder-jj "native-dist/${{ matrix.key }}/rudder-jj"
           chmod 755 "native-dist/${{ matrix.key }}/rudder-native"
           chmod 755 "native-dist/${{ matrix.key }}/rudder-jj"
+          node scripts/native-artifacts.mjs create --directory "native-dist/${{ matrix.key }}" --platform "${{ matrix.key }}" --revision "$GITHUB_SHA"
 
       - uses: actions/upload-artifact@v4
         with:
@@ -70,6 +73,9 @@ jobs:
         with:
           node-version: "22"
           registry-url: "https://registry.npmjs.org"
+
+      - name: Verify complete native artifacts and source revision
+        run: node scripts/native-artifacts.mjs verify --root prebuilt-native --revision "$GITHUB_SHA"
 
       - name: Verify tag matches package.json version
         run: |
@@ -114,7 +120,7 @@ jobs:
       # MCP/broker JS journeys export trusted fixtures from Rust test binaries.
       # Compile outside their short per-fixture timeout on a fresh CI checkout.
       - name: Compile engine and native test fixtures
-        run: cargo test --workspace --no-run
+        run: cargo test --workspace --locked --features rudder-vcs-bridge/cli --no-run
 
       - name: Typecheck + JS tests
         run: |
@@ -127,10 +133,10 @@ jobs:
           RUDDER_NATIVE_BIN: ${{ github.workspace }}/prebuilt-native/rudder-native-darwin-arm64/rudder-native
 
       - name: Native tests
-        run: cargo test --workspace
+        run: cargo test --workspace --locked --features rudder-vcs-bridge/cli
 
       - name: Managed jj provider tests
-        run: cargo test -p rudder-vcs-bridge --features cli
+        run: cargo test --workspace --locked --features rudder-vcs-bridge/cli --test guest_diagnostics --test identities_and_seed --test journal_integration --test projection --test publication --test rpc_view --test vfs_provider --test working_copy
 
       # Screen-level e2e: the REAL prebuilt dashboard binary in a real PTY,
       # driven by keystrokes via tui-integration-tests (which fetches its own
@@ -154,8 +160,9 @@ jobs:
           path: tui-report.html
           if-no-files-found: ignore
 
-      # `npm publish` runs `prepack` (tsc + cargo build --release + copy-native),
-      # and copy-native folds the downloaded native artifacts into dist/native.
+      # Both publishes run prepack's TS/board/package work. Native Cargo is
+      # bypassed only after all three source-bound binary pairs verify again;
+      # copy-native rehashes while staging the downloaded artifacts.
       - name: Publish to npm
         id: publish
         continue-on-error: true
@@ -163,6 +170,7 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           RUDDER_NATIVE_PREBUILTS: ${{ github.workspace }}/prebuilt-native
+          RUDDER_NATIVE_SOURCE_REVISION: ${{ github.sha }}
 
       # The same build under the pre-3.4.0 name, so installs of @viraatdas/rudder
       # auto-update to a version that knows the new name and moves itself over
@@ -176,6 +184,7 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           RUDDER_NATIVE_PREBUILTS: ${{ github.workspace }}/prebuilt-native
+          RUDDER_NATIVE_SOURCE_REVISION: ${{ github.sha }}
 
       - name: Fail when the new name did not publish
         if: steps.publish.outcome != 'success'

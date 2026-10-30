@@ -16,7 +16,7 @@ async function fixture(t) {
   if (!(await fs.stat(binary).catch(() => null))) { if (process.env.CI) assert.fail("agent broker tests require the current native artifact"); t.skip("build rudder-native or set RUDDER_NATIVE_BIN"); return; }
   const base = path.join(os.homedir(), ".cache/rudder-agent-broker-tests"); await fs.mkdir(base, { recursive: true, mode: 0o700 });
   const directory = await fs.mkdtemp(path.join(base, "case-"));
-  const generated = spawnSync("cargo", ["test", "-p", "rudder-native", "--bin", "rudder-native", "agent_broker::tests::export_broker_fixture", "--", "--exact", "--ignored"], { cwd: repo, env: { ...process.env, RUDDER_AGENT_BROKER_FIXTURE_DIR: directory }, encoding: "utf8", timeout: 180_000, maxBuffer: 2 * 1024 * 1024 });
+  const generated = spawnSync("cargo", ["test", "--workspace", "--locked", "--features", "rudder-vcs-bridge/cli", "--bin", "rudder-native", "agent_broker::tests::export_broker_fixture", "--", "--exact", "--ignored"], { cwd: repo, env: { ...process.env, RUDDER_AGENT_BROKER_FIXTURE_DIR: directory }, encoding: "utf8", timeout: 180_000, maxBuffer: 2 * 1024 * 1024 });
   assert.equal(generated.status, 0, generated.stderr || generated.error?.message);
   const f = { binary, directory, ...JSON.parse(await fs.readFile(path.join(directory, "fixture.json"), "utf8")) };
   const children = new Set();

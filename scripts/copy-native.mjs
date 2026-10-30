@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 import fs from "node:fs";
 import path from "node:path";
+import { randomUUID } from "node:crypto";
+import { checkedSourceRevision, MANIFEST_NAME, readNativeBinary, verifyNativeArtifacts } from "./native-artifacts.mjs";
 
 const nativeBinaryBase = "rudder-native";
 const nativeBinaryName = process.platform === "win32" ? `${nativeBinaryBase}.exe` : nativeBinaryBase;
@@ -17,7 +19,7 @@ function copyExecutable(src, dest) {
 }
 
 function copyCurrentBuild() {
-  const sources = [
+  const sources = process.env.CARGO_TARGET_DIR ? [path.join(process.env.CARGO_TARGET_DIR, "release", nativeBinaryName)] : [
     path.join("target", "release", nativeBinaryName),
     path.join("native", "target", "release", nativeBinaryName),
   ];
@@ -25,70 +27,43 @@ function copyCurrentBuild() {
   if (!src) {
     return false;
   }
-  copyExecutable(src, path.join(distNativeDir, platformKey, nativeBinaryName));
   const companion = path.join(path.dirname(src), companionBinaryName);
   if (!fs.existsSync(companion)) {
     throw new Error("Native build is missing rudder-jj; run npm run build-native.");
   }
+  copyExecutable(src, path.join(distNativeDir, platformKey, nativeBinaryName));
   copyExecutable(companion, path.join(distNativeDir, platformKey, companionBinaryName));
   return true;
 }
 
-function copyPrebuiltArtifacts() {
+async function copyPrebuiltArtifacts() {
   const root = process.env.RUDDER_NATIVE_PREBUILTS;
-  if (!root || !fs.existsSync(root)) {
-    return 0;
-  }
-  let copied = 0;
-  for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
-    if (!entry.isDirectory()) {
-      continue;
-    }
-    const key = entry.name.replace(/^rudder-native-/, "");
-    const dir = path.join(root, entry.name);
-    const candidates = [
-      path.join(dir, "rudder-native"),
-      path.join(dir, "rudder-native.exe"),
-      path.join(dir, key, "rudder-native"),
-      path.join(dir, key, "rudder-native.exe"),
-      path.join(dir, "native-dist", key, "rudder-native"),
-      path.join(dir, "native-dist", key, "rudder-native.exe"),
-    ];
-    const src = candidates.find((candidate) => fs.existsSync(candidate)) ?? findNestedNativeBinary(dir);
-    if (!src) {
-      continue;
-    }
-    const name = src.endsWith(".exe") ? "rudder-native.exe" : "rudder-native";
-    const companionName = src.endsWith(".exe") ? "rudder-jj.exe" : "rudder-jj";
-    const companion = path.join(path.dirname(src), companionName);
-    if (!fs.existsSync(companion)) {
-      throw new Error(`Native artifact ${key} is missing its rudder-jj companion.`);
-    }
-    copyExecutable(src, path.join(distNativeDir, key, name));
-    copyExecutable(companion, path.join(distNativeDir, key, companionName));
-    copied += 1;
-  }
-  return copied;
-}
-
-function findNestedNativeBinary(dir) {
-  const pending = [{ dir, depth: 0 }];
-  while (pending.length > 0) {
-    const current = pending.pop();
-    if (!current || current.depth > 4) {
-      continue;
-    }
-    for (const entry of fs.readdirSync(current.dir, { withFileTypes: true })) {
-      const full = path.join(current.dir, entry.name);
-      if (entry.isFile() && (entry.name === "rudder-native" || entry.name === "rudder-native.exe")) {
-        return full;
+  if (!root) throw new Error("RUDDER_NATIVE_PREBUILTS must name a complete verified artifact set");
+  const verified = await verifyNativeArtifacts({ root, expectedRevision: process.env.RUDDER_NATIVE_SOURCE_REVISION });
+  // Check every platform before any output changes; rehash while copying into
+  // private staging so a changed source cannot become a packaged executable.
+  fs.mkdirSync("dist", { recursive: true });
+  const staging = path.join("dist", `.native-stage-${randomUUID()}`);
+  fs.mkdirSync(staging, { mode: 0o700 });
+  try {
+    for (const artifact of verified.artifacts) {
+      const directory = path.join(staging, artifact.platform);
+      fs.mkdirSync(directory);
+      for (const file of artifact.files) {
+        await readNativeBinary(file.path, file, path.join(directory, file.name));
       }
-      if (entry.isDirectory()) {
-        pending.push({ dir: full, depth: current.depth + 1 });
-      }
+      fs.writeFileSync(path.join(directory, MANIFEST_NAME), JSON.stringify(artifact.manifest, null, 2) + "\n");
     }
+    if (checkedSourceRevision({ expectedRevision: process.env.RUDDER_NATIVE_SOURCE_REVISION }) !== verified.sourceRevision) throw new Error("Native source changed while staging artifacts");
+    fs.mkdirSync(distNativeDir, { recursive: true });
+    for (const artifact of verified.artifacts) {
+      const destination = path.join(distNativeDir, artifact.platform);
+      fs.rmSync(destination, { recursive: true, force: true });
+      fs.renameSync(path.join(staging, artifact.platform), destination);
+    }
+  } finally {
+    fs.rmSync(staging, { recursive: true, force: true });
   }
-  return undefined;
 }
 
 function removeLegacyFlatBinary() {
@@ -96,6 +71,6 @@ function removeLegacyFlatBinary() {
   fs.rmSync(path.join(distNativeDir, "rudder-native.exe"), { force: true });
 }
 
-copyCurrentBuild();
-copyPrebuiltArtifacts();
+if (Object.hasOwn(process.env, "RUDDER_NATIVE_PREBUILTS")) await copyPrebuiltArtifacts();
+else copyCurrentBuild();
 removeLegacyFlatBinary();

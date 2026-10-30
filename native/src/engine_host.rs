@@ -7,7 +7,7 @@ use rudder_engine::paths::{local_project_id, FabricPaths};
 use serde::{Deserialize, Serialize};
 use std::fs::{File, OpenOptions};
 use std::io::BufReader;
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{FileTypeExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -366,8 +366,58 @@ fn connect_local(path: PathBuf) -> io::Result<UnixStream> {
     })?
 }
 
+/// Check filesystem absence before constructing a Unix socket address: Darwin
+/// rejects a long checkout path before connect() can report ENOENT. Live attach
+/// sockets live at short targets behind the checkout's symlink.
+fn existing_attach_endpoint(path: &Path) -> io::Result<Option<PathBuf>> {
+    let mut endpoint = path.to_path_buf();
+    for _ in 0..40 {
+        let metadata = match fs::symlink_metadata(&endpoint) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        if metadata.file_type().is_symlink() {
+            let target = fs::read_link(&endpoint)?;
+            endpoint = if target.is_absolute() {
+                target
+            } else {
+                endpoint.parent().unwrap_or_else(|| Path::new(".")).join(target)
+            };
+            continue;
+        }
+        if !metadata.file_type().is_socket() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "existing attach endpoint is not a Unix socket",
+            ));
+        }
+        if endpoint.as_os_str().len() >= 100 {
+            // A relative symlink can contain enough ../ components to reach a
+            // short socket even though its joined spelling is long. Preserve
+            // already-short aliases such as /tmp on macOS.
+            match endpoint.canonicalize() {
+                Ok(shorter) if shorter.as_os_str().len() < endpoint.as_os_str().len() => {
+                    endpoint = shorter;
+                }
+                Ok(_) => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+                Err(error) => return Err(error),
+            }
+        }
+        return Ok(Some(endpoint));
+    }
+    Err(io::Error::new(
+        io::ErrorKind::InvalidData,
+        "attach endpoint contains too many symbolic links",
+    ))
+}
+
 fn attach_is_live(path: &Path) -> Result<bool> {
-    match connect_local(resolve_attach_socket(path)) {
+    let endpoint = existing_attach_endpoint(path)
+        .context("cannot establish that the previous attach owner is quiescent")?;
+    let Some(endpoint) = endpoint else { return Ok(false) };
+    match connect_local(endpoint) {
         Ok(_) => Ok(true),
         Err(error)
             if matches!(

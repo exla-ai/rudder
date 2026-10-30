@@ -6,8 +6,8 @@
     "size_bytes": 8258
   },
   "currentDockerfile": {
-    "sha256": "89d10c13bb18310cd94a47faaa2b5a5035604c22189806384b997e94d0d4bfdd",
-    "size_bytes": 9098
+    "sha256": "8ea93a7ad0fde653ca4be5fbe41a37253a2a5381e4689da9bdfa88daded833c0",
+    "size_bytes": 9305
   },
   "commands": [
     "cargo build --release --locked -p rudder-native --bin rudder-native",
@@ -32,5 +32,14 @@
     "workspaceArtifacts": "cargo clean --locked --release -p rudder-engine -p rudder-native -p rudder-vcs-bridge before each build",
     "reason": "Source mtimes alone cannot authorize cached workspace binaries",
     "imageQualificationPending": true
+  },
+  "dependencyCacheDockerfile": {
+    "sha256": "89d10c13bb18310cd94a47faaa2b5a5035604c22189806384b997e94d0d4bfdd",
+    "size_bytes": 9098
+  },
+  "copiedNativeCleanup": {
+    "removeSourceDistNativeBeforeBuilderCopy": true,
+    "reason": "Platform-keyed host binaries must not override the fresh container pair",
+    "fullImageQualificationPending": true
   }
 }

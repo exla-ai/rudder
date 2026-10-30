@@ -130,6 +130,9 @@ COPY scripts ./scripts
 RUN RUDDER_SKIP_POSTINSTALL=1 npm ci --omit=dev
 COPY dist ./dist
 COPY assets ./assets
+# Local npm builds can contain platform-keyed binaries that the resolver would
+# prefer over our fresh container build. Install exactly the builder's pair.
+RUN rm -rf ./dist/native && mkdir -p ./dist/native
 COPY --from=native-builder /rudder-native ./dist/native/rudder-native
 COPY --from=native-builder /rudder-jj ./dist/native/rudder-jj
 RUN chmod +x ./dist/native/rudder-native ./dist/native/rudder-jj \

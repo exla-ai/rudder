@@ -156,6 +156,8 @@ struct OwnedPtyChild {
     pending: Option<Arc<Mutex<ReapObservation>>>,
     pid: Option<u32>,
     status: Option<portable_pty::ExitStatus>,
+    #[cfg(test)]
+    trace_termination: bool,
 }
 impl OwnedPtyChild {
     fn new(child: Box<dyn Child + Send + Sync>, reservation: ChildReservation) -> Self {
@@ -165,6 +167,8 @@ impl OwnedPtyChild {
             reservation: Some(reservation),
             pending: None,
             status: None,
+            #[cfg(test)]
+            trace_termination: false,
         }
     }
     fn try_wait(&mut self) -> std::io::Result<Option<portable_pty::ExitStatus>> {
@@ -204,13 +208,31 @@ impl OwnedPtyChild {
         }
     }
     fn request_termination(&mut self) {
+        #[cfg(test)]
+        let trace_started = Instant::now();
+        macro_rules! trace {
+            ($phase:expr) => {
+                #[cfg(test)]
+                if self.trace_termination {
+                    eprintln!(
+                        "owned-child-termination phase={} elapsed_ms={}",
+                        $phase,
+                        trace_started.elapsed().as_millis()
+                    );
+                }
+            };
+        }
+        trace!("start");
         if self.child.is_none() {
             return;
         }
+        trace!("try-wait-start");
         if matches!(self.try_wait(), Ok(Some(_))) {
+            trace!("already-reaped");
             self.child.take();
             return;
         }
+        trace!("try-wait-finished");
         let mut child = self.child.take().expect("owned PTY child");
         #[cfg(unix)]
         if let Some(pid) = self.pid.filter(|pid| *pid > 1) {
@@ -218,14 +240,18 @@ impl OwnedPtyChild {
             // before this method; never signal an already reaped/reused PID.
             unsafe {
                 libc::kill(-(pid as libc::pid_t), libc::SIGTERM);
+                trace!("group-term-finished");
                 libc::kill(-(pid as libc::pid_t), libc::SIGKILL);
+                trace!("group-kill-finished");
             }
         }
         let _ = child.kill();
+        trace!("child-kill-finished");
         let reservation = self.reservation.take().expect("live child admission");
         let reaper = reservation.reaper.clone();
         let observation = Arc::new(Mutex::new(ReapObservation::default()));
         self.pending = Some(observation.clone());
+        trace!("queue-lock-start");
         reaper
             .jobs
             .lock()
@@ -235,6 +261,7 @@ impl OwnedPtyChild {
                 observation,
                 _reservation: reservation,
             });
+        trace!("queued");
         reaper.wake.notify_one();
     }
 }
@@ -2233,6 +2260,7 @@ mod tests {
         }
         pane.write_input(b"finish\n").unwrap();
         thread::sleep(Duration::from_millis(30));
+        pane.child.trace_termination = true;
         // Name physical handle destruction separately from the nonblocking
         // termination request. Empty stand-ins allow the same real master ->
         // writer -> remaining-pane drop order without unsafe field extraction.

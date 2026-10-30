@@ -624,8 +624,18 @@ fn disconnected(stream: &UnixStream) -> bool {
         && fd.revents & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) != 0
 }
 fn connection_call(inner: &Arc<Inner>, mut stream: UnixStream) {
-    let _ = stream.set_read_timeout(Some(Duration::from_millis(20)));
-    let _ = stream.set_write_timeout(Some(Duration::from_millis(500)));
+    // BSD accept() inherits the listener's O_NONBLOCK flag; Linux does not.
+    // Our per-connection worker uses blocking I/O with bounded timeouts. Without
+    // clearing the flag, a response larger than the socket buffer is truncated
+    // at the first EAGAIN even when the client is actively reading it.
+    if stream
+        .set_nonblocking(false)
+        .and_then(|_| stream.set_read_timeout(Some(Duration::from_millis(20))))
+        .and_then(|_| stream.set_write_timeout(Some(Duration::from_millis(500))))
+        .is_err()
+    {
+        return;
+    }
     let bytes = match read_frame(
         &mut stream,
         MAX_REQUEST,

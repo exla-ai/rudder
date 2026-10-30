@@ -377,6 +377,38 @@ fn token_rotation_publication_gap_recovers_without_replaying_a_dispatched_call()
 }
 
 #[test]
+fn inherited_nonblocking_connections_deliver_large_frames_to_active_readers() {
+    let f = Fixture::new();
+    let broker = f.broker();
+    let b_socket = socket_path(&f.root, "p", "b", "attempt-1");
+    let b_identity = project_identity(&b_socket, &f.b).unwrap();
+    let api = AgentApi::open(f.root.join("journal.sqlite"), &b_identity).unwrap();
+    for n in 0..2 {
+        api.call("agents_send", json!({"idempotency_key":format!("active-large-{n}"),"recipient_run":"a","recipient_epoch":1,"scope":"project","message":"x".repeat(50_000)})).unwrap();
+    }
+    let (mut client, server) = UnixStream::pair().unwrap();
+    server.set_nonblocking(true).unwrap();
+    client.set_read_timeout(Some(Duration::from_millis(20))).unwrap();
+    client.set_write_timeout(Some(Duration::from_secs(1))).unwrap();
+    let inner = broker.inner.clone();
+    let worker = std::thread::spawn(move || connection_call(&inner, server));
+    write_frame(&mut client, &Request {
+        format_version: 1,
+        id: uuid::Uuid::new_v4().to_string(),
+        identity: f.a.clone(),
+        operation: Operation::Pending,
+    }, MAX_REQUEST).unwrap();
+    let response: Response = serde_json::from_slice(&read_frame(
+        &mut client, MAX_RESPONSE, Instant::now() + Duration::from_secs(3), || Ok(()),
+    ).unwrap()).unwrap();
+    assert!(response.error.is_none());
+    let messages: Vec<MessageEnvelope> = serde_json::from_value(response.result.unwrap()).unwrap();
+    assert_eq!(messages.len(), 2);
+    worker.join().unwrap();
+    let _ = fs::remove_dir_all(b_identity.parent().unwrap());
+}
+
+#[test]
 fn slow_readers_release_their_connection_budget_and_do_not_acknowledge_messages() {
     let f = Fixture::new();
     let broker = f.broker();

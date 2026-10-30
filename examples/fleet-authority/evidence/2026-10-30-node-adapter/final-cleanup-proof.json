@@ -1,0 +1,37 @@
+{
+  "observedAt": "2026-10-30T21:18:30.298Z",
+  "app": "rudder-workers-exla",
+  "owned": [
+    {
+      "id": "82025df7354278",
+      "name": "rudder-authority-node-20261030-a1",
+      "idPresent": false,
+      "nameOrNoncePresent": false
+    },
+    {
+      "id": "8d0e30aed01448",
+      "name": "rudder-authority-node-20261030-a2",
+      "idPresent": false,
+      "nameOrNoncePresent": false
+    },
+    {
+      "id": "811d3e0bd23d08",
+      "name": "rudder-authority-node-20261030-a3",
+      "idPresent": false,
+      "nameOrNoncePresent": false
+    },
+    {
+      "id": "874792eae505e8",
+      "name": "rudder-authority-node-20261030-a4",
+      "idPresent": false,
+      "nameOrNoncePresent": false
+    },
+    {
+      "id": "78111762c2e4d8",
+      "name": "rudder-authority-node-20261030-a5",
+      "idPresent": false,
+      "nameOrNoncePresent": false
+    }
+  ],
+  "ok": true
+}

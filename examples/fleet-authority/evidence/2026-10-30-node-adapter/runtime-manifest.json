@@ -1,0 +1,20 @@
+{
+  "nodeVersion": "v22.23.4",
+  "nodeBinarySha256": "94efd062ed066c1a0b332e18249859c905e920eeada5df55d24c99b919629a90",
+  "pgVersion": "8.23.1",
+  "runtimeArchiveSha256": "7da23262b692279b5040d38c1b1baa20d7a35185f254e336cda1c042f4370d53",
+  "runtimeArchiveRetainedInWorkspace": true,
+  "runtimeArchiveCommitted": false,
+  "compiledModuleHashes": {
+    "cloud/dist/project-authority/authority.js": "1c8c1961a1b6e1252a0d330a61c12ff8b149000ea73ddb9fc936d9b45bb7df37",
+    "cloud/dist/project-authority/config.js": "910f0c6fbc1fc207c412e2d01874bff159786fcd1d0f49a6b7f40db4c9055cb3",
+    "cloud/dist/project-authority/index.js": "c0a65fbccd51413d46fb605ae875a851d56863c93c7d962d87569fab491d5074",
+    "cloud/dist/project-authority/lease.js": "3e0d0776b56cfe7dac97f08ab39314287ca82434fbb4c0a4be54073577e7a388",
+    "cloud/dist/project-authority/migration.js": "5641866178e2faaaf43fd986894a12d8aa676c4f58e9ac5afb1713a380058acf",
+    "cloud/dist/project-authority/pool.js": "4f7ff320467387439a7241eac532890af80d436a2dd613557c3ea2d78747f407",
+    "cloud/dist/project-authority/qualification.js": "dacf24adc6b5b4c55b7b12f975681dc6dc6ef9f3a9589b8e0c7d2010b4a40950",
+    "cloud/dist/project-authority/schema.js": "7b04ea8265a9124716aacbd3621d1b0e6106d1dee90a557166ce08b79ea32746",
+    "cloud/dist/project-authority/types.js": "16d23a0c0896184539fc353ad83ff8b615927d1b4f027693ad8c6d402d25c20c"
+  },
+  "note": "Runtime includes only compiled authority JS, the explicit pg dependency graph and the hashed existing Node executable. Source archive has no runtime binary, credentials or database files."
+}

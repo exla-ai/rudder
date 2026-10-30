@@ -1,0 +1,68 @@
+{
+  "format_version": 1,
+  "name": "rudder-authority-node-20261030-a5",
+  "nonce": "f42ccdd8-9e6b-46f4-a576-6ae916ed6cbc",
+  "role": "authority-node-qualification",
+  "app": "rudder-workers-exla",
+  "output": "/workspace/rudder-authority-node-20261030-a5",
+  "sourceHashes": {
+    "cloud/package.json": "7764dac3a1c0f650611158a0492f9c49bb0584afa0357d944c4a37b96881ff6f",
+    "cloud/package-lock.json": "52cc5950de5c680f33d68ad407841394a883aaa06182159ea7738abfcd67d233",
+    "cloud/src/project-authority/authority.ts": "f577cb0a3708da9d5420e09c338d338621816086e3627222ee9a7ccded75f04e",
+    "cloud/src/project-authority/config.ts": "24aab130fed1f4cd357da00bab5fb6b09e594a8a8329d5ad145c978bd11fb64d",
+    "cloud/src/project-authority/index.ts": "ac25e862b4d1debcf8b0d80dbdb1af1edcc38987bb1d4633ed4102352373e8ef",
+    "cloud/src/project-authority/lease.ts": "8c668db294b876f0c46128d9ac21469c00e541ef4b8ac92370a9c3037539a417",
+    "cloud/src/project-authority/migration.ts": "57ae43f54e9930e627b0c36101d26cad7b8a23252b7e7183a715e1a88280c29c",
+    "cloud/src/project-authority/pool.ts": "ceb17d9cb448d83d2ac65935c2ecbf885e8e37c26f050eb2806d25b95d463b8e",
+    "cloud/src/project-authority/qualification.ts": "9970d7f308bae0b58699559b36335bf0329e20d71226319afc25c14acc638f6b",
+    "cloud/src/project-authority/schema.ts": "01efa773244685004209232412a504569927d2c8ab42125e2a1f19df54d0a2a7",
+    "cloud/src/project-authority/types.ts": "8f474b7590bf0eec3104cd25c5a93a48c0f1f0e143825fd59defe6a5429f3887",
+    "tests/project-authority.test.mjs": "985f2d27ffe6ff5e93c78894101b2c0dc38dbe2cc399bc2beb0c680d4d98a2fa",
+    "tests/project-authority-pg.test.mjs": "888885cc1540c700eb1db3e5d30deb5e63c438cae3deda9eabc40e75bca8f473",
+    "examples/fleet-authority/qualify-node.mjs": "222cd840aeacb1cae37bd7ca2713a22c33c6f59348b9e9f3d79c1f66f81d65f2",
+    "examples/fleet-authority/qualify-node-guest.sh": "060ecf60cd4dd00a1e4a3e285d7e4c095cdcac59837e98ead0bddf00d8640b85"
+  },
+  "sourceArchive": "/workspace/rudder-authority-node-20261030-a5/source.tar.gz",
+  "sourceArchiveSha256": "deba6056fa19b62e8f23da08f9ba144f9d7a7fbafd359be98ff0cf0b96e6301d",
+  "image": {
+    "requested": "postgres:17-bookworm",
+    "indexDigest": "sha256:839fbb5a4942a7758dd93e18b42ea5649807491a0545b5eeeb8f0b8bb11857a5",
+    "platform": "linux/amd64",
+    "manifestDigest": "sha256:2cd2c0f809604aaeff6f0ec8f40aecbd025613107561015c69369a1a7f1d3416",
+    "image": "docker.io/library/postgres@sha256:2cd2c0f809604aaeff6f0ec8f40aecbd025613107561015c69369a1a7f1d3416",
+    "primaryDocumentation": "https://hub.docker.com/_/postgres"
+  },
+  "runtime": {
+    "archive": "/workspace/rudder-authority-node-20261030-a5/runtime.tar.gz",
+    "sha256": "7da23262b692279b5040d38c1b1baa20d7a35185f254e336cda1c042f4370d53",
+    "hashes": {
+      "cloud/dist/project-authority/authority.js": "1c8c1961a1b6e1252a0d330a61c12ff8b149000ea73ddb9fc936d9b45bb7df37",
+      "cloud/dist/project-authority/config.js": "910f0c6fbc1fc207c412e2d01874bff159786fcd1d0f49a6b7f40db4c9055cb3",
+      "cloud/dist/project-authority/index.js": "c0a65fbccd51413d46fb605ae875a851d56863c93c7d962d87569fab491d5074",
+      "cloud/dist/project-authority/lease.js": "3e0d0776b56cfe7dac97f08ab39314287ca82434fbb4c0a4be54073577e7a388",
+      "cloud/dist/project-authority/migration.js": "5641866178e2faaaf43fd986894a12d8aa676c4f58e9ac5afb1713a380058acf",
+      "cloud/dist/project-authority/pool.js": "4f7ff320467387439a7241eac532890af80d436a2dd613557c3ea2d78747f407",
+      "cloud/dist/project-authority/qualification.js": "dacf24adc6b5b4c55b7b12f975681dc6dc6ef9f3a9589b8e0c7d2010b4a40950",
+      "cloud/dist/project-authority/schema.js": "7b04ea8265a9124716aacbd3621d1b0e6106d1dee90a557166ce08b79ea32746",
+      "cloud/dist/project-authority/types.js": "16d23a0c0896184539fc353ad83ff8b615927d1b4f027693ad8c6d402d25c20c",
+      "cloud/package.json": "7764dac3a1c0f650611158a0492f9c49bb0584afa0357d944c4a37b96881ff6f",
+      "node": "94efd062ed066c1a0b332e18249859c905e920eeada5df55d24c99b919629a90"
+    },
+    "nodeVersion": "v22.23.4",
+    "packages": [
+      "pg",
+      "pg-connection-string",
+      "pg-int8",
+      "pg-pool",
+      "pg-protocol",
+      "pg-types",
+      "pgpass",
+      "postgres-array",
+      "postgres-bytea",
+      "postgres-date",
+      "postgres-interval",
+      "split2",
+      "xtend"
+    ]
+  }
+}

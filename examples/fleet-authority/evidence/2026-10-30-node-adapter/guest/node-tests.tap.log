@@ -1,0 +1,125 @@
+TAP version 13
+# Subtest: real Node authority transactions, auth/fence/CAS races, crash/reply loss and bounded settlement
+    # Subtest: frozen incarnation and privileged runtime role are refused
+    ok 1 - frozen incarnation and privileged runtime role are refused
+      ---
+      duration_ms: 24.282571
+      type: 'test'
+      ...
+    # Subtest: tenant, credential, request-author and admission boundaries
+    ok 2 - tenant, credential, request-author and admission boundaries
+      ---
+      duration_ms: 54.544016
+      type: 'test'
+      ...
+    # Subtest: concurrent acquire, renewal dedup, old boot/process, physical release and expiry
+    ok 3 - concurrent acquire, renewal dedup, old boot/process, physical release and expiry
+      ---
+      duration_ms: 212.318381
+      type: 'test'
+      ...
+    # Subtest: post-lock clock rejects an expired renewal and revocation races serialize before admission
+    ok 4 - post-lock clock rejects an expired renewal and revocation races serialize before admission
+      ---
+      duration_ms: 253.132811
+      type: 'test'
+      ...
+    # Subtest: exact head/topic CAS and verification identity, durable event/receipt/outbox
+    ok 5 - exact head/topic CAS and verification identity, durable event/receipt/outbox
+      ---
+      duration_ms: 251.45917
+      type: 'test'
+      ...
+    # Subtest: lost COMMIT acknowledgment is uncertain and reconciles by original key
+    ok 6 - lost COMMIT acknowledgment is uncertain and reconciles by original key
+      ---
+      duration_ms: 36.183197
+      type: 'test'
+      ...
+    # Subtest: client budget does not free admission while a driver operation is unsettled
+    ok 7 - client budget does not free admission while a driver operation is unsettled
+      ---
+      duration_ms: 381.782932
+      type: 'test'
+      ...
+    # Subtest: server crash rolls back full acceptance and durable retry survives restart
+    ok 8 - server crash rolls back full acceptance and durable retry survives restart
+      ---
+      duration_ms: 369.591196
+      type: 'test'
+      ...
+    # Subtest: overflow rolls back and sanitized failures expose neither SQL nor parameters
+    ok 9 - overflow rolls back and sanitized failures expose neither SQL nor parameters
+      ---
+      duration_ms: 36.916077
+      type: 'test'
+      ...
+    1..9
+ok 1 - real Node authority transactions, auth/fence/CAS races, crash/reply loss and bounded settlement
+  ---
+  duration_ms: 2012.848989
+  type: 'test'
+  ...
+# Subtest: authority defaults inactive without acquiring a connection
+ok 2 - authority defaults inactive without acquiring a connection
+  ---
+  duration_ms: 2.464901
+  type: 'test'
+  ...
+# Subtest: configuration rejects DSN/SSL overrides and public errors contain no private values
+ok 3 - configuration rejects DSN/SSL overrides and public errors contain no private values
+  ---
+  duration_ms: 0.89897
+  type: 'test'
+  ...
+# Subtest: signed counters use canonical decimal strings and fail closed on overflow
+ok 4 - signed counters use canonical decimal strings and fail closed on overflow
+  ---
+  duration_ms: 0.53574
+  type: 'test'
+  ...
+# Subtest: canonical operation bytes preserve ordering, reject unsafe/cyclic values and cap size
+ok 5 - canonical operation bytes preserve ordering, reject unsafe/cyclic values and cap size
+  ---
+  duration_ms: 0.992141
+  type: 'test'
+  ...
+# Subtest: lease deadline begins at FIRST send and never trusts response arrival or wall clocks
+ok 6 - lease deadline begins at FIRST send and never trusts response arrival or wall clocks
+  ---
+  duration_ms: 0.63316
+  type: 'test'
+  ...
+# Subtest: late renewal cannot revive an expired attempt even if the deadline was not polled
+ok 7 - late renewal cannot revive an expired attempt even if the deadline was not polled
+  ---
+  duration_ms: 0.23595
+  type: 'test'
+  ...
+# Subtest: old boot/process/epoch/serial responses never change a live fence
+ok 8 - old boot/process/epoch/serial responses never change a live fence
+  ---
+  duration_ms: 0.437111
+  type: 'test'
+  ...
+# Subtest: all observed monotonic regressions and nonfinite/reset clocks permanently fence
+ok 9 - all observed monotonic regressions and nonfinite/reset clocks permanently fence
+  ---
+  duration_ms: 0.90925
+  type: 'test'
+  ...
+# Subtest: missing or nonfinite safety inputs cannot create a NaN permanent lease
+ok 10 - missing or nonfinite safety inputs cannot create a NaN permanent lease
+  ---
+  duration_ms: 0.50354
+  type: 'test'
+  ...
+1..10
+# tests 19
+# suites 0
+# pass 19
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 2232.852964

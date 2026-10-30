@@ -15,11 +15,13 @@
     "@aws-sdk/s3-request-presigner": "^3.1047.0",
     "better-auth": "^1.4.0",
     "better-sqlite3": "^12.5.0",
+    "pg": "8.23.1",
     "ws": "^8.18.0"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^22.15.3",
+    "@types/pg": "8.23.1",
     "@types/ws": "^8.5.13",
     "tsx": "^4.21.0",
     "typescript": "^5.8.3"

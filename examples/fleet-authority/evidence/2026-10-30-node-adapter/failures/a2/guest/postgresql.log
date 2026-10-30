@@ -1,0 +1,7 @@
+2026-10-30 21:06:14.916 UTC [673]  LOG:  starting PostgreSQL 17.11 (Debian 17.11-1.pgdg12+2) on x86_64-pc-linux-gnu, compiled by gcc (Debian 12.2.0-14+deb12u1) 12.2.0, 64-bit
+2026-10-30 21:06:14.916 UTC [673]  LOG:  listening on Unix socket "/var/tmp/rudder-authority-node-d241a799-3e31-45fc-b86a-b4e6f13fa4fe/socket/.s.PGSQL.55432"
+2026-10-30 21:06:14.920 UTC [676]  LOG:  database system was shut down at 2026-10-30 21:06:11 UTC
+2026-10-30 21:06:14.925 UTC [673]  LOG:  database system is ready to accept connections
+2026-10-30 21:06:15.019 UTC [686] psql LOG:  statement: SELECT jsonb_build_object('version',version(),'fsync',current_setting('fsync'),'synchronous_commit',current_setting('synchronous_commit'),'full_page_writes',current_setting('full_page_writes'),'listen_addresses',current_setting('listen_addresses'),'socket_permissions',current_setting('unix_socket_permissions'),'data_checksums',current_setting('data_checksums'),'boot_id',pg_read_file('/proc/sys/kernel/random/boot_id'))
+2026-10-30 21:06:15.043 UTC [673]  LOG:  received immediate shutdown request
+2026-10-30 21:06:15.048 UTC [673]  LOG:  database system is shut down

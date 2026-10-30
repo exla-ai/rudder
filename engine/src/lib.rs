@@ -4,6 +4,7 @@
 //! are not a replicated project authority and must not be placed on shared NFS.
 
 pub mod protocol;
+pub mod fleet_lease;
 pub mod paths;
 pub mod store;
 pub mod content;

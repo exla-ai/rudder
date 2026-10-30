@@ -1,0 +1,1 @@
+error: exec: "/var/tmp/rudder-authority-node-runtime/node": stat /var/tmp/rudder-authority-node-runtime/node: permission denied

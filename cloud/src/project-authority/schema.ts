@@ -1,0 +1,404 @@
+// Version 1 derives from the qualified design fixture. Executed only by explicit migration.
+export const schemaSql = String.raw`
+CREATE SCHEMA rudder_project_authority;
+SET LOCAL search_path = rudder_project_authority, pg_catalog;
+
+CREATE DOMAIN epoch AS bigint CHECK (VALUE > 0);
+CREATE DOMAIN counter AS bigint CHECK (VALUE >= 0);
+CREATE DOMAIN sha256 AS text CHECK (VALUE ~ '^[0-9a-f]{64}$');
+
+CREATE TABLE authorities (
+  authority_id uuid PRIMARY KEY,
+  state text NOT NULL CHECK (state IN ('frozen','ready','retired')),
+  protocol_version integer NOT NULL CHECK (protocol_version > 0),
+  created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+  restore_witness sha256
+);
+CREATE UNIQUE INDEX one_ready_authority ON authorities ((true)) WHERE state = 'ready';
+
+-- Authority ingress verifies these bearer hashes, not a restored legacy token
+-- table. Trusted enrollment/issuance and revocation are separate from app login.
+CREATE TABLE authority_credentials (
+  account_id text NOT NULL, credential_id text NOT NULL,
+  principal_id text NOT NULL,
+  kind text NOT NULL CHECK (kind IN ('user','engine','service')),
+  token_sha256 sha256 NOT NULL UNIQUE,
+  expires_at timestamptz NOT NULL, revoked_at timestamptz,
+  PRIMARY KEY (account_id,credential_id)
+);
+
+CREATE TABLE engine_instances (
+  account_id text NOT NULL,
+  engine_instance_id uuid NOT NULL, -- fresh for EVERY engine process start
+  machine_id text NOT NULL,         -- provider resource identity, not authority
+  machine_installation_id uuid NOT NULL,
+  machine_boot_id text NOT NULL CHECK (length(machine_boot_id) BETWEEN 1 AND 180),
+  protocol_version integer NOT NULL CHECK (protocol_version > 0),
+  authenticated_key_id text NOT NULL,
+  revoked_at timestamptz,
+  last_observed_at timestamptz,
+  PRIMARY KEY (account_id,engine_instance_id),
+  FOREIGN KEY (account_id,authenticated_key_id) REFERENCES authority_credentials (account_id,credential_id)
+);
+
+-- Inserted only by trusted CAS admission after an owned durable root pin exists.
+-- This table is not an alternative CAS and does not make its own data durable.
+CREATE TABLE retained_roots (
+  account_id text NOT NULL,
+  root_id text NOT NULL CHECK (length(root_id) BETWEEN 1 AND 180),
+  kind text NOT NULL,
+  algorithm text NOT NULL CHECK (algorithm = 'sha256'),
+  digest sha256 NOT NULL,
+  size_bytes numeric(20,0) NOT NULL CHECK (size_bytes BETWEEN 0 AND 18446744073709551615),
+  receipt_canonical bytea NOT NULL CHECK (octet_length(receipt_canonical) <= 65536),
+  receipt_sha256 sha256 NOT NULL,
+  retained_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+  PRIMARY KEY (account_id,root_id)
+);
+
+CREATE TABLE projects (
+  authority_id uuid NOT NULL REFERENCES authorities,
+  account_id text NOT NULL,
+  project_id uuid NOT NULL,
+  project_key text NOT NULL,
+  mode text NOT NULL CHECK (mode IN ('shadow','importing','ready','draining','frozen','retired')),
+  owner_epoch epoch NOT NULL,
+  owner_engine_instance uuid,
+  lease_id uuid,
+  lease_until timestamptz,
+  renew_serial counter NOT NULL DEFAULT 0,
+  event_seq counter NOT NULL DEFAULT 0,
+  integration_version counter NOT NULL DEFAULT 0,
+  head_vcs_commit text,
+  head_source_root text,
+  head_environment_root text,
+  PRIMARY KEY (authority_id,account_id,project_id),
+  UNIQUE (authority_id,account_id,project_key),
+  FOREIGN KEY (account_id,owner_engine_instance) REFERENCES engine_instances,
+  FOREIGN KEY (account_id,head_source_root) REFERENCES retained_roots,
+  FOREIGN KEY (account_id,head_environment_root) REFERENCES retained_roots,
+  CHECK ((owner_engine_instance IS NULL AND lease_id IS NULL AND lease_until IS NULL)
+      OR (owner_engine_instance IS NOT NULL AND lease_id IS NOT NULL AND lease_until IS NOT NULL)),
+  CHECK (mode <> 'ready' OR (head_vcs_commit IS NOT NULL AND head_source_root IS NOT NULL AND head_environment_root IS NOT NULL)),
+  CHECK (mode NOT IN ('shadow','importing','retired') OR owner_engine_instance IS NULL)
+);
+
+CREATE TABLE ownership_receipts (
+  authority_id uuid NOT NULL, account_id text NOT NULL, project_id uuid NOT NULL,
+  owner_epoch epoch NOT NULL,
+  owner_engine_instance uuid,
+  operation_id uuid NOT NULL,
+  cause text NOT NULL CHECK (cause IN ('created','claimed','released','transferred','restored')),
+  quiescence_root text,
+  receipt_canonical bytea NOT NULL,
+  PRIMARY KEY (authority_id,account_id,project_id,owner_epoch),
+  UNIQUE (authority_id,account_id,project_id,operation_id),
+  FOREIGN KEY (authority_id,account_id,project_id) REFERENCES projects,
+  FOREIGN KEY (account_id,owner_engine_instance) REFERENCES engine_instances,
+  FOREIGN KEY (account_id,quiescence_root) REFERENCES retained_roots
+);
+ALTER TABLE projects ADD CONSTRAINT owner_has_history
+  FOREIGN KEY (authority_id,account_id,project_id,owner_epoch)
+  REFERENCES ownership_receipts DEFERRABLE INITIALLY DEFERRED;
+
+-- Trusted authentication creates these memberships. A restored legacy auth
+-- SQLite file cannot restore revoked Cloud project privileges.
+CREATE TABLE project_principals (
+  authority_id uuid NOT NULL, account_id text NOT NULL, project_id uuid NOT NULL,
+  principal_id text NOT NULL, principal_kind text NOT NULL CHECK (principal_kind IN ('user','service')),
+  access_version epoch NOT NULL,
+  operations jsonb NOT NULL CHECK (jsonb_typeof(operations) = 'array'),
+  scopes jsonb NOT NULL CHECK (jsonb_typeof(scopes) = 'array'),
+  revoked_at timestamptz,
+  PRIMARY KEY (authority_id,account_id,project_id,principal_id),
+  FOREIGN KEY (authority_id,account_id,project_id) REFERENCES projects
+);
+
+CREATE TABLE runs (
+  authority_id uuid NOT NULL, account_id text NOT NULL, project_id uuid NOT NULL,
+  run_id text NOT NULL,
+  current_epoch epoch NOT NULL,
+  current_attempt uuid,
+  PRIMARY KEY (authority_id,account_id,project_id,run_id),
+  FOREIGN KEY (authority_id,account_id,project_id) REFERENCES projects
+);
+CREATE TABLE run_attempts (
+  authority_id uuid NOT NULL, account_id text NOT NULL, project_id uuid NOT NULL,
+  run_id text NOT NULL, run_epoch epoch NOT NULL, attempt_id uuid NOT NULL,
+  owner_epoch epoch NOT NULL,
+  engine_instance_id uuid NOT NULL,
+  view_id uuid NOT NULL, namespace uuid NOT NULL, profile_root text NOT NULL,
+  state text NOT NULL CHECK (state IN ('planned','admitted','running','fenced','quiesced','completed','orphaned')),
+  lease_id uuid, lease_until timestamptz, renew_serial counter NOT NULL DEFAULT 0,
+  PRIMARY KEY (authority_id,account_id,project_id,run_id,run_epoch),
+  UNIQUE (authority_id,account_id,project_id,run_id,run_epoch,attempt_id),
+  UNIQUE (attempt_id),
+  FOREIGN KEY (authority_id,account_id,project_id,run_id) REFERENCES runs,
+  FOREIGN KEY (authority_id,account_id,project_id,owner_epoch) REFERENCES ownership_receipts,
+  FOREIGN KEY (account_id,engine_instance_id) REFERENCES engine_instances,
+  FOREIGN KEY (account_id,profile_root) REFERENCES retained_roots,
+  CHECK ((lease_id IS NULL) = (lease_until IS NULL)),
+  CHECK (state NOT IN ('admitted','running') OR lease_id IS NOT NULL)
+);
+ALTER TABLE runs ADD CONSTRAINT current_attempt_is_exact
+  FOREIGN KEY (authority_id,account_id,project_id,run_id,current_epoch,current_attempt)
+  REFERENCES run_attempts (authority_id,account_id,project_id,run_id,run_epoch,attempt_id)
+  DEFERRABLE INITIALLY DEFERRED;
+
+-- Renewal retries use their own bounded transport nonce namespace. Unlike
+-- ownership changes, heartbeats need not append a permanent project event.
+-- Expired records can be collected only after the maximum retry window.
+CREATE TABLE lease_renewals (
+  authority_id uuid NOT NULL, account_id text NOT NULL, project_id uuid NOT NULL,
+  request_id uuid NOT NULL, grant_kind text NOT NULL CHECK (grant_kind IN ('owner','run')),
+  owner_epoch epoch NOT NULL, lease_id uuid NOT NULL, renew_serial epoch NOT NULL,
+  engine_instance_id uuid NOT NULL,
+  run_id text, run_epoch epoch, attempt_id uuid,
+  request_canonical bytea NOT NULL CHECK (octet_length(request_canonical) <= 8192),
+  issued_at timestamptz NOT NULL, lease_until timestamptz NOT NULL,
+  PRIMARY KEY (authority_id,account_id,project_id,request_id),
+  UNIQUE (authority_id,account_id,project_id,lease_id,renew_serial),
+  FOREIGN KEY (authority_id,account_id,project_id,owner_epoch) REFERENCES ownership_receipts,
+  FOREIGN KEY (account_id,engine_instance_id) REFERENCES engine_instances,
+  FOREIGN KEY (authority_id,account_id,project_id,run_id,run_epoch,attempt_id)
+    REFERENCES run_attempts (authority_id,account_id,project_id,run_id,run_epoch,attempt_id),
+  CHECK (lease_until > issued_at),
+  CHECK ((grant_kind = 'owner' AND run_id IS NULL AND run_epoch IS NULL AND attempt_id IS NULL)
+      OR (grant_kind = 'run' AND run_id IS NOT NULL AND run_epoch IS NOT NULL AND attempt_id IS NOT NULL))
+);
+
+CREATE TABLE events (
+  authority_id uuid NOT NULL, account_id text NOT NULL, project_id uuid NOT NULL,
+  project_seq counter NOT NULL CHECK (project_seq > 0), event_id uuid NOT NULL,
+  kind text NOT NULL, principal_id text NOT NULL,
+  payload jsonb NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+  PRIMARY KEY (authority_id,account_id,project_id,project_seq),
+  UNIQUE (event_id),
+  FOREIGN KEY (authority_id,account_id,project_id) REFERENCES projects
+);
+
+-- Key namespace is SHARED by command/message/decision/integration/cutover acts.
+-- Canonical bytes, not jsonb::text or a hash alone, decide duplicate equality.
+CREATE TABLE idempotency (
+  authority_id uuid NOT NULL, account_id text NOT NULL, project_id uuid NOT NULL,
+  principal_id text NOT NULL, idempotency_key text NOT NULL CHECK (length(idempotency_key) BETWEEN 1 AND 180),
+  operation_id uuid NOT NULL, operation_kind text NOT NULL,
+  sender_run text, sender_epoch epoch, sender_attempt uuid,
+  request_sha256 sha256 NOT NULL,
+  request_canonical bytea NOT NULL CHECK (octet_length(request_canonical) <= 1048576),
+  accepted_seq counter NOT NULL,
+  accepted_receipt jsonb NOT NULL,
+  PRIMARY KEY (authority_id,account_id,project_id,principal_id,idempotency_key),
+  UNIQUE (authority_id,account_id,project_id,operation_id),
+  FOREIGN KEY (authority_id,account_id,project_id,accepted_seq) REFERENCES events,
+  FOREIGN KEY (authority_id,account_id,project_id,sender_run,sender_epoch,sender_attempt)
+    REFERENCES run_attempts (authority_id,account_id,project_id,run_id,run_epoch,attempt_id),
+  CHECK ((sender_run IS NULL AND sender_epoch IS NULL AND sender_attempt IS NULL)
+      OR (sender_run IS NOT NULL AND sender_epoch IS NOT NULL AND sender_attempt IS NOT NULL))
+);
+
+CREATE TABLE capabilities (
+  capability_id uuid PRIMARY KEY, token_sha256 sha256 NOT NULL UNIQUE,
+  authority_id uuid NOT NULL, account_id text NOT NULL, project_id uuid NOT NULL,
+  principal_id text NOT NULL, owner_epoch epoch NOT NULL,
+  run_id text NOT NULL, run_epoch epoch NOT NULL, attempt_id uuid NOT NULL,
+  operations jsonb NOT NULL CHECK (jsonb_typeof(operations) = 'array'),
+  scopes jsonb NOT NULL CHECK (jsonb_typeof(scopes) = 'array'),
+  topics jsonb NOT NULL CHECK (jsonb_typeof(topics) = 'array'),
+  expires_at timestamptz NOT NULL, revoked_at timestamptz,
+  UNIQUE (authority_id,account_id,project_id,capability_id),
+  FOREIGN KEY (authority_id,account_id,project_id,owner_epoch) REFERENCES ownership_receipts,
+  FOREIGN KEY (authority_id,account_id,project_id,run_id,run_epoch,attempt_id)
+    REFERENCES run_attempts (authority_id,account_id,project_id,run_id,run_epoch,attempt_id)
+);
+CREATE TABLE capability_targets (
+  authority_id uuid NOT NULL, account_id text NOT NULL, project_id uuid NOT NULL,
+  capability_id uuid NOT NULL, run_id text NOT NULL, run_epoch epoch NOT NULL, attempt_id uuid NOT NULL,
+  PRIMARY KEY (capability_id,run_id),
+  FOREIGN KEY (authority_id,account_id,project_id,capability_id)
+    REFERENCES capabilities (authority_id,account_id,project_id,capability_id),
+  FOREIGN KEY (authority_id,account_id,project_id,run_id,run_epoch,attempt_id)
+    REFERENCES run_attempts (authority_id,account_id,project_id,run_id,run_epoch,attempt_id)
+);
+
+CREATE TABLE commands (
+  authority_id uuid NOT NULL, account_id text NOT NULL, project_id uuid NOT NULL,
+  command_id uuid NOT NULL, accepted_seq counter NOT NULL,
+  accepted_owner_epoch epoch NOT NULL, capability_id uuid,
+  authority_evidence_sha256 sha256 NOT NULL,
+  target_run text NOT NULL, target_epoch epoch NOT NULL, target_attempt uuid NOT NULL,
+  kind text NOT NULL, payload jsonb NOT NULL,
+  engine_received_at timestamptz, adapter_written_at timestamptz,
+  PRIMARY KEY (authority_id,account_id,project_id,command_id),
+  FOREIGN KEY (authority_id,account_id,project_id,command_id)
+    REFERENCES idempotency (authority_id,account_id,project_id,operation_id),
+  FOREIGN KEY (authority_id,account_id,project_id,accepted_seq) REFERENCES events,
+  FOREIGN KEY (authority_id,account_id,project_id,accepted_owner_epoch) REFERENCES ownership_receipts,
+  FOREIGN KEY (authority_id,account_id,project_id,capability_id)
+    REFERENCES capabilities (authority_id,account_id,project_id,capability_id),
+  FOREIGN KEY (authority_id,account_id,project_id,target_run,target_epoch,target_attempt)
+    REFERENCES run_attempts (authority_id,account_id,project_id,run_id,run_epoch,attempt_id)
+);
+CREATE INDEX commands_by_attempt ON commands (authority_id,account_id,project_id,target_run,target_epoch,accepted_seq);
+CREATE TABLE command_effects (
+  authority_id uuid NOT NULL, account_id text NOT NULL, project_id uuid NOT NULL,
+  command_id uuid NOT NULL,
+  state text NOT NULL CHECK (state IN ('pending','started','uncertain','completed')),
+  effect_scope text NOT NULL CHECK (effect_scope IN ('run','integration','delivery')),
+  claim_id uuid, claim_owner_epoch epoch, claim_engine_instance uuid,
+  outcome jsonb, reconciliation_witness text,
+  PRIMARY KEY (authority_id,account_id,project_id,command_id),
+  FOREIGN KEY (authority_id,account_id,project_id,command_id) REFERENCES commands,
+  FOREIGN KEY (authority_id,account_id,project_id,claim_owner_epoch) REFERENCES ownership_receipts,
+  FOREIGN KEY (account_id,claim_engine_instance) REFERENCES engine_instances,
+  FOREIGN KEY (account_id,reconciliation_witness) REFERENCES retained_roots,
+  CHECK (state NOT IN ('started','uncertain') OR (claim_id IS NOT NULL AND claim_owner_epoch IS NOT NULL AND claim_engine_instance IS NOT NULL))
+);
+CREATE TABLE effect_observations (
+  authority_id uuid NOT NULL, account_id text NOT NULL, project_id uuid NOT NULL,
+  observation_id uuid NOT NULL, command_id uuid NOT NULL, claim_id uuid NOT NULL,
+  origin_engine_instance uuid NOT NULL, witness jsonb NOT NULL,
+  PRIMARY KEY (authority_id,account_id,project_id,observation_id),
+  FOREIGN KEY (authority_id,account_id,project_id,command_id) REFERENCES commands,
+  FOREIGN KEY (account_id,origin_engine_instance) REFERENCES engine_instances
+);
+
+CREATE TABLE outbox (
+  authority_id uuid NOT NULL, account_id text NOT NULL, project_id uuid NOT NULL,
+  outbox_id uuid NOT NULL, event_seq counter NOT NULL, kind text NOT NULL,
+  destination text NOT NULL, payload jsonb NOT NULL,
+  status text NOT NULL CHECK (status IN ('pending','leased','delivered')),
+  holder uuid, claim_id uuid, claim_until timestamptz, next_attempt_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+  attempts counter NOT NULL DEFAULT 0,
+  PRIMARY KEY (authority_id,account_id,project_id,outbox_id),
+  UNIQUE (authority_id,account_id,project_id,event_seq,kind,destination),
+  FOREIGN KEY (authority_id,account_id,project_id,event_seq) REFERENCES events,
+  CHECK (status <> 'leased' OR (holder IS NOT NULL AND claim_id IS NOT NULL AND claim_until IS NOT NULL))
+);
+CREATE INDEX ready_outbox ON outbox (next_attempt_at,outbox_id) WHERE status <> 'delivered';
+
+CREATE TABLE mailboxes (
+  authority_id uuid NOT NULL, account_id text NOT NULL, project_id uuid NOT NULL,
+  run_id text NOT NULL, run_epoch epoch NOT NULL,
+  tail_seq counter NOT NULL DEFAULT 0, ack_cursor counter NOT NULL DEFAULT 0,
+  engine_cursor counter NOT NULL DEFAULT 0,
+  pending_count counter NOT NULL DEFAULT 0, pending_bytes counter NOT NULL DEFAULT 0,
+  PRIMARY KEY (authority_id,account_id,project_id,run_id,run_epoch),
+  FOREIGN KEY (authority_id,account_id,project_id,run_id,run_epoch) REFERENCES run_attempts,
+  CHECK (ack_cursor <= tail_seq AND engine_cursor <= tail_seq)
+);
+CREATE TABLE messages (
+  authority_id uuid NOT NULL, account_id text NOT NULL, project_id uuid NOT NULL,
+  message_id uuid NOT NULL, project_seq counter NOT NULL,
+  sender_run text NOT NULL, sender_epoch epoch NOT NULL,
+  recipient_run text NOT NULL, recipient_epoch epoch NOT NULL,
+  conversation_id uuid, request_id uuid, reply_to uuid,
+  intent text NOT NULL, priority smallint NOT NULL CHECK (priority BETWEEN 0 AND 3),
+  body text NOT NULL CHECK (octet_length(body) <= 65536),
+  topic_vector jsonb NOT NULL, artifact_refs jsonb NOT NULL,
+  expires_at timestamptz NOT NULL,
+  PRIMARY KEY (authority_id,account_id,project_id,message_id),
+  UNIQUE (authority_id,account_id,project_id,recipient_run,recipient_epoch,message_id),
+  FOREIGN KEY (authority_id,account_id,project_id,message_id)
+    REFERENCES idempotency (authority_id,account_id,project_id,operation_id),
+  FOREIGN KEY (authority_id,account_id,project_id,project_seq) REFERENCES events,
+  FOREIGN KEY (authority_id,account_id,project_id,sender_run,sender_epoch) REFERENCES run_attempts,
+  FOREIGN KEY (authority_id,account_id,project_id,recipient_run,recipient_epoch) REFERENCES run_attempts,
+  FOREIGN KEY (authority_id,account_id,project_id,reply_to) REFERENCES messages
+);
+CREATE UNIQUE INDEX request_correlation ON messages (authority_id,account_id,project_id,sender_run,sender_epoch,request_id) WHERE request_id IS NOT NULL;
+CREATE TABLE mailbox_deliveries (
+  authority_id uuid NOT NULL, account_id text NOT NULL, project_id uuid NOT NULL,
+  run_id text NOT NULL, run_epoch epoch NOT NULL, delivery_seq counter NOT NULL CHECK (delivery_seq > 0),
+  message_id uuid NOT NULL,
+  disposition text NOT NULL CHECK (disposition IN ('pending','agent_acked','skipped','expired')),
+  engine_received_at timestamptz, adapter_written_at timestamptz,
+  disposition_event counter,
+  PRIMARY KEY (authority_id,account_id,project_id,run_id,run_epoch,delivery_seq),
+  UNIQUE (authority_id,account_id,project_id,run_id,run_epoch,message_id),
+  FOREIGN KEY (authority_id,account_id,project_id,run_id,run_epoch) REFERENCES mailboxes,
+  FOREIGN KEY (authority_id,account_id,project_id,run_id,run_epoch,message_id)
+    REFERENCES messages (authority_id,account_id,project_id,recipient_run,recipient_epoch,message_id),
+  FOREIGN KEY (authority_id,account_id,project_id,disposition_event) REFERENCES events
+);
+
+CREATE TABLE decisions (
+  authority_id uuid NOT NULL, account_id text NOT NULL, project_id uuid NOT NULL,
+  decision_id uuid NOT NULL, topic text NOT NULL, version epoch NOT NULL,
+  principal_id text NOT NULL, scope text NOT NULL, statement jsonb NOT NULL,
+  previous_id uuid, project_seq counter NOT NULL,
+  PRIMARY KEY (authority_id,account_id,project_id,decision_id),
+  UNIQUE (authority_id,account_id,project_id,topic,version),
+  UNIQUE (authority_id,account_id,project_id,topic,version,decision_id),
+  FOREIGN KEY (authority_id,account_id,project_id,decision_id)
+    REFERENCES idempotency (authority_id,account_id,project_id,operation_id),
+  FOREIGN KEY (authority_id,account_id,project_id,previous_id) REFERENCES decisions,
+  FOREIGN KEY (authority_id,account_id,project_id,project_seq) REFERENCES events
+);
+CREATE TABLE topics (
+  authority_id uuid NOT NULL, account_id text NOT NULL, project_id uuid NOT NULL,
+  topic text NOT NULL, version epoch NOT NULL, decision_id uuid NOT NULL,
+  PRIMARY KEY (authority_id,account_id,project_id,topic),
+  FOREIGN KEY (authority_id,account_id,project_id,topic,version,decision_id)
+    REFERENCES decisions (authority_id,account_id,project_id,topic,version,decision_id)
+);
+
+-- Trusted gate-runner admission only. Agent JSON cannot create a verification.
+CREATE TABLE verifications (
+  authority_id uuid NOT NULL, account_id text NOT NULL, project_id uuid NOT NULL,
+  verification_id uuid NOT NULL, owner_epoch epoch NOT NULL,
+  base_version counter NOT NULL, base_head text NOT NULL, tested_head text NOT NULL,
+  tested_source_root text NOT NULL, tested_environment_root text NOT NULL,
+  gate_receipt_root text NOT NULL, build_contract_root text NOT NULL,
+  PRIMARY KEY (authority_id,account_id,project_id,verification_id),
+  FOREIGN KEY (authority_id,account_id,project_id,owner_epoch) REFERENCES ownership_receipts,
+  FOREIGN KEY (account_id,tested_source_root) REFERENCES retained_roots,
+  FOREIGN KEY (account_id,tested_environment_root) REFERENCES retained_roots,
+  FOREIGN KEY (account_id,gate_receipt_root) REFERENCES retained_roots,
+  FOREIGN KEY (account_id,build_contract_root) REFERENCES retained_roots
+);
+CREATE TABLE verification_topics (
+  authority_id uuid NOT NULL, account_id text NOT NULL, project_id uuid NOT NULL,
+  verification_id uuid NOT NULL, topic text NOT NULL, expected_version counter NOT NULL,
+  PRIMARY KEY (authority_id,account_id,project_id,verification_id,topic),
+  FOREIGN KEY (authority_id,account_id,project_id,verification_id) REFERENCES verifications
+);
+CREATE TABLE integration_commits (
+  authority_id uuid NOT NULL, account_id text NOT NULL, project_id uuid NOT NULL,
+  integration_id uuid NOT NULL, version epoch NOT NULL, previous_version counter NOT NULL,
+  owner_epoch epoch NOT NULL, previous_head text NOT NULL, new_head text NOT NULL,
+  source_root text NOT NULL, environment_root text NOT NULL, verification_id uuid NOT NULL,
+  project_seq counter NOT NULL,
+  PRIMARY KEY (authority_id,account_id,project_id,version),
+  UNIQUE (authority_id,account_id,project_id,integration_id),
+  FOREIGN KEY (authority_id,account_id,project_id,integration_id)
+    REFERENCES idempotency (authority_id,account_id,project_id,operation_id),
+  FOREIGN KEY (authority_id,account_id,project_id,verification_id) REFERENCES verifications,
+  FOREIGN KEY (authority_id,account_id,project_id,owner_epoch) REFERENCES ownership_receipts,
+  FOREIGN KEY (authority_id,account_id,project_id,project_seq) REFERENCES events,
+  FOREIGN KEY (account_id,source_root) REFERENCES retained_roots,
+  FOREIGN KEY (account_id,environment_root) REFERENCES retained_roots,
+  CHECK (version::numeric = previous_version::numeric + 1)
+);
+
+CREATE TABLE cutovers (
+  authority_id uuid NOT NULL, account_id text NOT NULL, project_id uuid NOT NULL,
+  cutover_id uuid NOT NULL,
+  legacy_origin text NOT NULL, export_sha256 sha256,
+  state text NOT NULL CHECK (state IN ('planned','admission_frozen','draining','sealed','imported','activated','rolled_back','blocked')),
+  quiescence_root text, export_root text, import_receipt jsonb,
+  activated_owner_epoch epoch,
+  PRIMARY KEY (authority_id,account_id,project_id,cutover_id),
+  UNIQUE (authority_id,account_id,project_id,legacy_origin,export_sha256),
+  FOREIGN KEY (authority_id,account_id,project_id) REFERENCES projects,
+  FOREIGN KEY (account_id,quiescence_root) REFERENCES retained_roots,
+  FOREIGN KEY (account_id,export_root) REFERENCES retained_roots,
+  CHECK (state NOT IN ('sealed','imported','activated') OR
+    (export_sha256 IS NOT NULL AND export_root IS NOT NULL AND quiescence_root IS NOT NULL)),
+  CHECK (state <> 'activated' OR (import_receipt IS NOT NULL AND activated_owner_epoch IS NOT NULL))
+);
+
+-- DDL is only the relational skeleton. API-only DML, immutable rows, exact
+-- grant/head/topic checks, limits, clock policy and quiescence are mandatory.
+`;

@@ -1,0 +1,48 @@
+{
+  "lossless": true,
+  "reason": "Whitespace-preserving or large raw logs",
+  "files": [
+    {
+      "original": "failures/a2/guest/initdb.log",
+      "compressed": "failures/a2/guest/initdb.log.gz",
+      "rawSha256": "f4f34c3ba53a08008e49706c5eae251606e6ae107d6b77a378fdb88d7499cc9a",
+      "gzipSha256": "dbf49a0a57a505ed790433391279b513fbafce4efc471e5b3f6d0c987bc3db7e",
+      "bytes": 928
+    },
+    {
+      "original": "failures/a3/guest/initdb.log",
+      "compressed": "failures/a3/guest/initdb.log.gz",
+      "rawSha256": "0b3d4da6447d07207f528b83ddcee29526161d397a03b2286e7b3f850e688383",
+      "gzipSha256": "04b779f721fa0da30c6940094d3320e3963317c53c5bbd5fa67106246b3e414e",
+      "bytes": 928
+    },
+    {
+      "original": "guest/initdb.log",
+      "compressed": "guest/initdb.log.gz",
+      "rawSha256": "13a232a0655e33d474fb2124010bdc0935ba4a192831cca9651823eee84af998",
+      "gzipSha256": "b293d6a92143203c96c0c015dbfb6a5b326e5871f138ce1f4e87743eabcf3767",
+      "bytes": 928
+    },
+    {
+      "original": "guest/postgresql.log",
+      "compressed": "guest/postgresql.log.gz",
+      "rawSha256": "3dc81f1f08ddb9de54a962c5a7289c112c77af28770bc9da42e47343125a4c72",
+      "gzipSha256": "98d2a93c9e1a9f1dc7092a34f19d0bf4c91e33fccd8bd9b42c23bc0d6a2506f1",
+      "bytes": 1002263
+    },
+    {
+      "original": "previous-passing/a4/guest/initdb.log",
+      "compressed": "previous-passing/a4/guest/initdb.log.gz",
+      "rawSha256": "91392cbbe92c68f41e4ecf1eceb647448de034d95d538b3912887ccc8a601d4b",
+      "gzipSha256": "0350d34f1e694cdcab5051ab10bc418a5d728a15fc1401fbee027d90159bc46d",
+      "bytes": 928
+    },
+    {
+      "original": "previous-passing/a4/guest/postgresql.log",
+      "compressed": "previous-passing/a4/guest/postgresql.log.gz",
+      "rawSha256": "27654ceacbc8b3855cc7a01cf9ab8807e1ce29387e50ee42b72942ed47ccbc15",
+      "gzipSha256": "592bda1f2d45fdeed00d9186dcf8e9e41aa4da6fb05269343f0e6eabb0b70406",
+      "bytes": 954778
+    }
+  ]
+}

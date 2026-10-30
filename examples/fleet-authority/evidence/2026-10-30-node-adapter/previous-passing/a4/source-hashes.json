@@ -1,0 +1,17 @@
+{
+  "cloud/package.json": "7764dac3a1c0f650611158a0492f9c49bb0584afa0357d944c4a37b96881ff6f",
+  "cloud/package-lock.json": "52cc5950de5c680f33d68ad407841394a883aaa06182159ea7738abfcd67d233",
+  "cloud/src/project-authority/authority.ts": "7b1df787b89b50819187031793a441aea9e4009b46fd3e2457b427e50b6ba540",
+  "cloud/src/project-authority/config.ts": "24aab130fed1f4cd357da00bab5fb6b09e594a8a8329d5ad145c978bd11fb64d",
+  "cloud/src/project-authority/index.ts": "ac25e862b4d1debcf8b0d80dbdb1af1edcc38987bb1d4633ed4102352373e8ef",
+  "cloud/src/project-authority/lease.ts": "8c668db294b876f0c46128d9ac21469c00e541ef4b8ac92370a9c3037539a417",
+  "cloud/src/project-authority/migration.ts": "0cddb2d3c58877c8cc460f036c4d506b912d1bc9f31860fe08e77980432e9e7e",
+  "cloud/src/project-authority/pool.ts": "a384aa806de325aeb73f0627be92ff9a61ae4242b137db5f3ca1f276082f81ce",
+  "cloud/src/project-authority/qualification.ts": "9970d7f308bae0b58699559b36335bf0329e20d71226319afc25c14acc638f6b",
+  "cloud/src/project-authority/schema.ts": "01efa773244685004209232412a504569927d2c8ab42125e2a1f19df54d0a2a7",
+  "cloud/src/project-authority/types.ts": "8f474b7590bf0eec3104cd25c5a93a48c0f1f0e143825fd59defe6a5429f3887",
+  "tests/project-authority.test.mjs": "985f2d27ffe6ff5e93c78894101b2c0dc38dbe2cc399bc2beb0c680d4d98a2fa",
+  "tests/project-authority-pg.test.mjs": "684895637917917d5a60af2bdbeea2b4ecd71f23a337595b115840d98bc15838",
+  "examples/fleet-authority/qualify-node.mjs": "222cd840aeacb1cae37bd7ca2713a22c33c6f59348b9e9f3d79c1f66f81d65f2",
+  "examples/fleet-authority/qualify-node-guest.sh": "060ecf60cd4dd00a1e4a3e285d7e4c095cdcac59837e98ead0bddf00d8640b85"
+}

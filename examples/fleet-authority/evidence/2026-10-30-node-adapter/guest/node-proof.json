@@ -1,0 +1,90 @@
+{
+  "authorityId": "43a94317-8194-41eb-8254-0fd61ac7f56b",
+  "realSessionBlockers": [
+    {
+      "kind": "row-lock",
+      "projectId": "c31f9233-9d06-40bf-a8f4-744e14ba84d3",
+      "observed": [
+        {
+          "pid": 717,
+          "wait_event_type": "Lock",
+          "wait_event": "transactionid",
+          "blockers": [
+            720
+          ]
+        }
+      ]
+    },
+    {
+      "kind": "concurrent-node-adapter-requests",
+      "projectId": "c31f9233-9d06-40bf-a8f4-744e14ba84d3",
+      "observed": [
+        {
+          "pid": 717,
+          "wait_event_type": "Lock",
+          "wait_event": "transactionid",
+          "blockers": [
+            720
+          ]
+        },
+        {
+          "pid": 721,
+          "wait_event_type": "Lock",
+          "wait_event": "tuple",
+          "blockers": [
+            717
+          ]
+        }
+      ]
+    },
+    {
+      "kind": "node-renewal-clock-after-row-lock",
+      "expiry": "2026-10-30 21:17:24.294188+00",
+      "observed": {
+        "pid": 721,
+        "xact_start": "2026-10-30 21:17:24.146891+00",
+        "wait_event_type": "Lock",
+        "blockers": [
+          722
+        ]
+      }
+    },
+    {
+      "kind": "row-lock",
+      "projectId": "51ba7763-c004-47c0-8137-3c633a3ea404",
+      "observed": [
+        {
+          "pid": 721,
+          "wait_event_type": "Lock",
+          "wait_event": "transactionid",
+          "blockers": [
+            723
+          ]
+        }
+      ]
+    },
+    {
+      "kind": "concurrent-node-adapter-requests",
+      "projectId": "51ba7763-c004-47c0-8137-3c633a3ea404",
+      "observed": [
+        {
+          "pid": 717,
+          "wait_event_type": "Lock",
+          "wait_event": "tuple",
+          "blockers": [
+            721
+          ]
+        },
+        {
+          "pid": 721,
+          "wait_event_type": "Lock",
+          "wait_event": "transactionid",
+          "blockers": [
+            723
+          ]
+        }
+      ]
+    }
+  ],
+  "scope": "Node adapter on one isolated PostgreSQL server; no HA/RPO/application-ingress qualification"
+}

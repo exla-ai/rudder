@@ -620,6 +620,26 @@ that exact topology separately satisfies the authority contract.
 
 ## Implementation order and required evidence
 
+An inactive first library slice now lives in
+[cloud/src/project-authority](../../cloud/src/project-authority/README.md). It
+implements restricted PG transactions/migration, trusted admission, sealed
+bootstrap/handoff, owner leases, exact head/topic CAS and durable receipts/outbox.
+It has no HTTP or scheduler wiring and no authority activation method. Its
+[real Node adapter evidence](../../examples/fleet-authority/evidence/2026-10-30-node-adapter/README.md)
+records 19 passing tests on PostgreSQL 17.11, including concurrency, uncertainty,
+settlement budgets and process-crash recovery. This is independent of provider
+HA/RPO qualification and the remaining ingress/native/physical-cutover gates.
+
+The inactive [native lease guard](../../engine/src/fleet_lease.rs) uses one
+fresh process identity across projects, strict bounded grant decoding, exact
+authenticated-context matching and first-send monotonic deadlines. It cannot
+deserialize or restore permission from saved dates. Clock regression/reset,
+expiry, process changes and explicit uncertainty permanently fence that instance.
+Its 18 integration tests and shared TS duration vectors pass on Linux. The
+production clock uses Linux BOOTTIME or macOS continuous time; these OS clocks
+do not qualify Fly hypervisor pauses or provider failover. No HTTP bridge,
+renewal watchdog or scheduler consumes it yet.
+
 Implement the restricted PostgreSQL transaction/API layer and versioned wire
 types first, then engine local inbox/outbox plus in-memory fences, then the
 controlled effect gateway, shadow importer and project-scoped cutover. Replace

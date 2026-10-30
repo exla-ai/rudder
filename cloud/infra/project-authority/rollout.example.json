@@ -1,0 +1,30 @@
+{
+  "status": "unapplied-provider-and-transport-review",
+  "region": "us-east-1",
+  "authority": { "mode": "inactive" },
+  "providerCandidate": "rds-postgresql-traditional-multi-az-db-instance",
+  "transport": "unresolved",
+  "preferredTransportToQualify": "aws-vpc-authority-api",
+  "workloadIdentity": {
+    "reuseExistingProvider": true,
+    "issuer": "https://oidc.fly.io/exla",
+    "audience": "sts.amazonaws.com",
+    "subjectPattern": "exla:rudder-cloud-control:*",
+    "newRolePermissions": "transport-specific only; no reuse or widening of Fabric S3 role",
+    "authorityRuntimeRoleArn": null
+  },
+  "provisioning": {
+    "ProvisioningState": "disabled",
+    "PostgreSQL17MinorVersion": "",
+    "AvailabilityZoneA": "",
+    "AvailabilityZoneB": "",
+    "OperatorPrincipalArn": "",
+    "DBInstanceClass": "db.t4g.small",
+    "DBInstanceIdentifier": "rudder-authority-preprod"
+  },
+  "reviewedAuthorityIncarnation": null,
+  "providerFailureEnvelopeConfirmed": false,
+  "haAndRecoveryQualificationPassed": false,
+  "physicalLegacyWriterQuiescencePassed": false,
+  "productionSpendApproved": false
+}

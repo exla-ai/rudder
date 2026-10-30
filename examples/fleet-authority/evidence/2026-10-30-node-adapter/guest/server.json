@@ -1,0 +1,1 @@
+{"fsync": "on", "boot_id": "c07604c3-5db3-42b0-93a5-53ffa867bec8\n", "version": "PostgreSQL 17.11 (Debian 17.11-1.pgdg12+2) on x86_64-pc-linux-gnu, compiled by gcc (Debian 12.2.0-14+deb12u1) 12.2.0, 64-bit", "data_checksums": "on", "full_page_writes": "on", "listen_addresses": "", "socket_permissions": "0700", "synchronous_commit": "on"}

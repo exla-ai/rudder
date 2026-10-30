@@ -29,7 +29,7 @@ import { sanitizeHomeHookConfigs } from "./hook-paths.mjs";
 import { createLoginRunner } from "./logins.mjs";
 import { collectDigestRuns } from "./digest.mjs";
 import { readProjectPlan } from "./plan.mjs";
-import { createTailnetPreviews, runTailnetCommand } from "./tailscale-previews.mjs";
+import { createTailnetPreviews, projectForPreviewPath, runTailnetCommand } from "./tailscale-previews.mjs";
 import { createTerminalTransport } from "./terminal-transport.mjs";
 
 const cloudUrl = (process.env.RUDDER_CLOUD_URL || "").trim().replace(/\/$/, "");
@@ -1252,20 +1252,7 @@ function portLabel(comm, cmdline) {
 }
 
 function projectForPath(cwd) {
-  if (!cwd) {
-    return null;
-  }
-  for (const project of projects.values()) {
-    if (cwd === project.dir || cwd.startsWith(`${project.dir}/`)) {
-      return project.workspaceId;
-    }
-    // jj workspaces live beside the repo: <code>/.rudder-workspaces/<name>-<hash>/...
-    const workspaces = path.join(path.dirname(project.dir), ".rudder-workspaces", `${project.name}-`);
-    if (cwd.startsWith(workspaces)) {
-      return project.workspaceId;
-    }
-  }
-  return null;
+  return projectForPreviewPath(cwd, projects.values());
 }
 
 // ---------------------------------------------------------------------------

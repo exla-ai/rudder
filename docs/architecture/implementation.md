@@ -101,7 +101,7 @@ implementation turn independent journals into competing project authorities.
 ## Verification and delivery record
 
 Current checks: root production build, Cloud TypeScript build and typechecking
-pass. Final Node suite: 478 passed, 8 skipped, 0 failed (486 total); native suite:
+pass. Alpha.3 Node suite: 483 passed, 8 skipped, 0 failed (491 total); native suite:
 859 dashboard tests plus 19 library and 1 terminal-color integration test pass
 (10 documented ignored tests). Persistent cache/boot behavior, shared terminal
 and private-preview fixtures pass. A 1,000-write burst coalesced into one WS
@@ -109,7 +109,8 @@ frame in the loopback fixture; this is not a production latency measurement.
 Real release-binary terminal end-to-end suite: 53 passed, no failures/skips.
 It exercises natural automatic planning through approval/workers/merge,
 discussion scope and command retirement. Final Node suite includes the added
-legacy sail guard. Packaging and deployment are pending.
+legacy sail guard. Alpha.2 packaging/deployment are verified below; alpha.3
+publication and deployment are the current delivery track.
 
 Before closing this implementation track, replace pending entries with exact
 revision, version, CI workflow result, published npm dist-tag, worker image
@@ -117,11 +118,26 @@ digest, Fly release/deployment identity, canonical URL, UTC verification time,
 checks and active-home adoption state. A pushed commit is not a Cloud rollout.
 
 Release preference was asked asynchronously: v4 prereleases on `next` versus
-3.x foundations or waiting for all gates. No answer arrived during implementation;
-proceed with the stated recommended v4 prerelease assumption.
+3.x foundations or waiting for all gates. The user confirmed continuing to
+publish even unstable increments. Use the established v4 `next` channel.
 An alpha must not move npm `latest` or masquerade as complete stable v4.
 
 The first alpha CI run built all three native artifacts, then caught a macOS
 test-fixture assumption about GNU `timeout`. Publication was stopped; no alpha.1
 package reached npm. The fixture now supplies its own command wrapper. Keep
 the original tag and cut alpha.2, then verify the complete release workflow.
+
+Alpha.2 passed all CI gates and was accepted by npm with signed provenance.
+Fly control-plane release 156 and the alpha.2 worker image passed deployment
+and disposable-VM checks. Npm reported asynchronous package processing: the
+legacy name became visible while the primary name remained pending.
+
+The next incremental fix, alpha.3, tightens legacy preview ownership so `foo`
+cannot capture `foo-bar`'s sibling workspace. Modern nested workspace paths,
+exact legacy group/hash boundaries and ambiguous-owner rejection have focused
+regression coverage. Current source creates workspaces under the repository's
+excluded managed directory; earlier guidance about a sibling default was stale.
+
+The user confirmed continuing to publish even unstable increments. Keep the
+implementation/deployment facts distinct from the still-planned v4 engine,
+distributed CoW storage, build graph and durable coordination workstreams.

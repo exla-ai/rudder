@@ -6,14 +6,98 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { runCloudCommand } from "../dist/cloud.js";
 import { canonicalPreviewUrl, cloudPreviews, previewAccess, previewReachable } from "../dist/tailscale-preview.js";
-import { createTailnetPreviews, previewOrigin, probePreview, tailnetStatus } from "../cloud/worker/tailscale-previews.mjs";
+import { createTailnetPreviews, previewOrigin, probePreview, projectForPreviewPath, tailnetStatus } from "../cloud/worker/tailscale-previews.mjs";
 
 const host = "rudder-home.example.ts.net";
 const online = () => ({ BackendState: "Running", Self: { HostName: "rudder-home", DNSName: `${host}.`, Online: true } });
 const listener = (extra = {}) => ({ port: 3000, pid: 42, workspaceId: "project-a", label: "vite", address: "0100007F", family: 4, ...extra });
 const success = { code: 0, stdout: "", stderr: "" };
+
+const project = (name, extra = {}) => ({ name, workspaceId: `project-${name}`, dir: `/workspace/code/${name}`, ...extra });
+
+test("preview ownership uses exact project boundaries regardless of similar names and order", () => {
+  const foo = project("foo");
+  const fooBar = project("foo-bar");
+  for (const projects of [[foo, fooBar], [fooBar, foo]]) {
+    assert.equal(projectForPreviewPath(foo.dir, projects), foo.workspaceId);
+    assert.equal(projectForPreviewPath(`${foo.dir}/src`, projects), foo.workspaceId);
+    assert.equal(projectForPreviewPath(`${fooBar.dir}/src`, projects), fooBar.workspaceId);
+    for (const cwd of ["/workspace/code/foobar/src", "/workspace/code/foo-other/src", "/workspace/code/foo-barista/src", "/tmp/foo/src"]) {
+      assert.equal(projectForPreviewPath(cwd, projects), null, cwd);
+    }
+  }
+  for (const cwd of ["", null, 42, "foo/src", "/workspace/code/foo\0/src", "/workspace/code/foo/../unmanaged/src"]) {
+    assert.equal(projectForPreviewPath(cwd, [foo]), null);
+  }
+});
+
+test("modern nested workspaces belong to the most specific managed project", () => {
+  const outer = project("foo");
+  const inner = project("ui", { dir: `${outer.dir}/packages/ui` });
+  for (const projects of [[outer, inner], [inner, outer]]) {
+    assert.equal(projectForPreviewPath(`${inner.dir}/src`, projects), inner.workspaceId);
+    for (const directory of [".rudder-workspaces", ".rudder-worktrees"]) {
+      assert.equal(projectForPreviewPath(`${inner.dir}/${directory}/ui-abcdef0123/task/src`, projects), inner.workspaceId);
+      assert.equal(projectForPreviewPath(`${outer.dir}/${directory}/foo-abcdef0123/task/src`, projects), outer.workspaceId);
+    }
+  }
+  assert.equal(projectForPreviewPath(`${outer.dir}//src/`, [project("foo", { dir: `${outer.dir}/` })]), outer.workspaceId);
+});
+
+test("legacy sibling workspaces require an exact project slug and a complete legitimate hash", () => {
+  const foo = project("foo");
+  const fooBar = project("foo-bar");
+  const sha1 = (value) => createHash("sha1").update(value).digest("hex").slice(0, 10);
+  for (const projects of [[foo, fooBar], [fooBar, foo]]) {
+    for (const directory of [".rudder-workspaces", ".rudder-worktrees"]) {
+      for (const item of [foo, fooBar]) {
+        const group = `${item.name}-${sha1(item.dir)}`;
+        assert.equal(projectForPreviewPath(`/workspace/code/${directory}/${group}/fix-preview-a1b2c/src`, projects), item.workspaceId);
+      }
+      // Older/native hashes also have ten lowercase hexadecimal characters.
+      assert.equal(projectForPreviewPath(`/workspace/code/${directory}/foo-e2dd83c0e5/old-task-12345678`, projects), foo.workspaceId);
+    }
+  }
+  // A descriptor's display name cannot override the actual project directory.
+  assert.equal(projectForPreviewPath(`/workspace/code/.rudder-workspaces/foo-bar-${sha1(fooBar.dir)}/task`, [{ ...fooBar, name: "foo" }]), fooBar.workspaceId);
+  assert.equal(projectForPreviewPath(`/workspace/code/.rudder-workspaces/foo-bar-${sha1(fooBar.dir)}/task`, [foo]), null);
+});
+
+test("unmanaged and malformed legacy groups never advertise another project's preview", () => {
+  const projects = [project("foo"), project("foo-bar")];
+  for (const group of ["foo-unmanaged", "foo-other-abcdef0123", "foo-bar-other-abcdef0123", "foo-abcdef012", "foo-abcdef01234", "foo-abcdef012g", "foo-ABCDEF0123", "foo-abcdef0123-neighbor"]) {
+    assert.equal(projectForPreviewPath(`/workspace/code/.rudder-workspaces/${group}/task/src`, projects), null, group);
+  }
+  for (const cwd of ["/workspace/code/.rudder-workspaces/foo-abcdef0123", "/workspace/code/.rudder-workspaces", "/other/code/.rudder-workspaces/foo-abcdef0123/task", "/workspace/code/.rudder-workspaces-neighbor/foo-abcdef0123/task"]) {
+    assert.equal(projectForPreviewPath(cwd, projects), null, cwd);
+  }
+});
+
+test("ambiguous project roots and colliding legacy slugs fail closed", () => {
+  const foo = project("foo");
+  const alias = { ...foo, workspaceId: "other-owner" };
+  for (const projects of [[foo, alias], [alias, foo]]) {
+    assert.equal(projectForPreviewPath(`${foo.dir}/src`, projects), null);
+    assert.equal(projectForPreviewPath("/workspace/code/.rudder-workspaces/foo-abcdef0123/task/src", projects), null);
+  }
+  assert.equal(projectForPreviewPath(`${foo.dir}/src`, [foo, { ...foo }]), foo.workspaceId);
+  const hyphen = project("foo-bar");
+  const underscore = project("foo_bar");
+  for (const projects of [[hyphen, underscore], [underscore, hyphen]]) {
+    assert.equal(projectForPreviewPath("/workspace/code/.rudder-workspaces/foo-bar-abcdef0123/task/src", projects), null);
+    assert.equal(projectForPreviewPath(`${hyphen.dir}/src`, projects), hyphen.workspaceId);
+    assert.equal(projectForPreviewPath(`${underscore.dir}/src`, projects), underscore.workspaceId);
+  }
+  const longName = `${"a".repeat(47)}-project`;
+  const long = project(longName);
+  // TS truncates the slug before adding its separator; native trims that dash.
+  for (const slug of ["a".repeat(47), `${"a".repeat(47)}-`]) {
+    assert.equal(projectForPreviewPath(`/workspace/code/.rudder-workspaces/${slug}-abcdef0123/task`, [long]), long.workspaceId);
+  }
+});
 
 function harness({ status = online(), serve = () => success, probe = async () => true } = {}) {
   const calls = [];

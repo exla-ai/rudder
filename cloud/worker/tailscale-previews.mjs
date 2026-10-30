@@ -1,5 +1,50 @@
 import http from "node:http";
 import { execFile } from "node:child_process";
+import path from "node:path";
+
+/** Resolve a listener's cwd to one managed project, independent of list order. */
+export function projectForPreviewPath(cwd, projects) {
+  if (typeof cwd !== "string" || !path.isAbsolute(cwd) || cwd.includes("\0")) return null;
+  const target = path.resolve(cwd);
+  let longestRoot = -1;
+  let owners = new Set();
+  const contains = (root) => {
+    const relative = path.relative(root, target);
+    return relative === "" || (relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
+  };
+  const candidate = (root, workspaceId) => {
+    if (root.length < longestRoot) return;
+    if (root.length > longestRoot) {
+      longestRoot = root.length;
+      owners = new Set();
+    }
+    owners.add(workspaceId);
+  };
+  for (const project of projects) {
+    if (typeof project?.dir !== "string" || !path.isAbsolute(project.dir) || project.dir.includes("\0")
+      || typeof project.workspaceId !== "string" || !project.workspaceId.trim()) continue;
+    const root = path.resolve(project.dir);
+    // Current workspaces are inside the repo, under either directory spelling.
+    if (contains(root)) candidate(root, project.workspaceId);
+
+    // Older workspaces lived beside the repo. Match the WHOLE group component:
+    // <slug(basename)>-<10 hex>/<run>/..., never a broad `<project name>-` prefix.
+    // Validate the hash shape rather than recomputing it: native and TS hashes
+    // differ, and an existing workspace can retain a pre-move absolute path.
+    const slug = path.basename(root).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 48) || "repo";
+    const nativeSlug = slug.replace(/-+$/g, "") || "repo";
+    for (const directory of [".rudder-workspaces", ".rudder-worktrees"]) {
+      const container = path.join(path.dirname(root), directory);
+      if (!contains(container)) continue;
+      const components = path.relative(container, target).split(path.sep);
+      if (components.length < 2) continue; // The group alone is not a workspace.
+      const group = /^(.*)-([a-f0-9]{10})$/.exec(components[0]);
+      if (!group || (group[1] !== slug && group[1] !== nativeSlug)) continue;
+      candidate(path.join(container, components[0]), project.workspaceId);
+    }
+  }
+  return owners.size === 1 ? owners.values().next().value : null;
+}
 
 export function runTailnetCommand(args, { socket, timeoutMs = 10_000 } = {}) {
   return new Promise((resolve) => {

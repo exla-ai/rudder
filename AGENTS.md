@@ -201,7 +201,7 @@ Implemented in `src/run-manager.ts`.
    - `baseCommit = currentJjChangeId(repoRoot)`. `targetBranch =
      currentJjChangeId(repoRoot)` (else `currentBranch`).
    - `createRunWorkspace` -> `jj.ts::createRunJjWorkspace`: `jj workspace add` at
-     `.rudder-workspaces/<repo>-<hash>/<run id>` with name `rudder-<run id>`.
+     `<repo>/.rudder-workspaces/<repo>-<hash>/<run id>` with name `rudder-<run id>`.
      The run records `vcs:"jj"` and `workspace.jjChangeId`.
    - **Run ids are a few task words plus a 5-character key**:
      `launch-video-k3f9q` (`new_run_id` in gitio.rs, `newRunId` in util.ts;
@@ -313,10 +313,12 @@ Per repo (`<repo>/.rudder/`):
 - `runs/<id>/spec.json`, `runs/<id>/verifier.json`
 - `undo-stack.json` (`UndoEntry[]`, atomic via `updateJson`)
 
-jj workspaces live outside the repo at
-`.rudder-workspaces/<repoSlug>-<repoHash>/<run id>` (older runs:
-`<taskSlug>-<runHash>`) so they never
-nest inside the checkout. `RUDDER.md` is generated at the repo root and inside
+New jj workspaces live at
+`<repo>/.rudder-workspaces/<repoSlug>-<repoHash>/<run id>` (older runs:
+`<taskSlug>-<runHash>`). The runtime exclusion prevents the parent checkout
+from snapshotting them. Legacy sibling groups and `.rudder-worktrees` paths
+remain recognized; use saved paths rather than relocating existing runs.
+`RUDDER.md` is generated at the repo root and inside
 each active workspace, and excluded via each checkout's `.git/info/exclude`.
 
 ### Persistence helpers: `src/util.ts`
@@ -2640,7 +2642,8 @@ Recorded so future contributors do not relitigate them:- **Autonomy without a co
   routes into no existing plan: a fresh task chooses discussion, one worker or a
   new proposed plan through automatic intent routing.
 - **Explicit isolation.** Automatically planned DAG workers and plain Execute
-  workers get their own jj workspace, never nested in the repo. Explicit main-owner runs intentionally
+  workers get their own jj workspace under the excluded managed directory.
+  Explicit main-owner runs intentionally
   use the real checkout so one agent can finish repository/release/deployment steps.
   The only real cross-agent risks for isolated work are a future merge conflict (jj
   records it, the AI resolver fixes it) or interface drift (the hard edge is the guard).

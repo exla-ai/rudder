@@ -1,0 +1,86 @@
+name: Native PTY diagnostics
+
+on:
+  push:
+    branches: [rudder/mac-pty-diagnostic]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  held-reader:
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compile the exact native test fixture
+        timeout-minutes: 20
+        run: |
+          cargo test -p rudder-native --bin rudder-native --no-run --message-format=json > native-diagnostic-build.jsonl
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          binaries = []
+          for line in Path('native-diagnostic-build.jsonl').read_text().splitlines():
+              item = json.loads(line)
+              if item.get('reason') == 'compiler-artifact' and item.get('profile', {}).get('test') and item.get('target', {}).get('name') == 'rudder-native' and item.get('executable'):
+                  binaries.append(item['executable'])
+          if len(binaries) != 1:
+              raise SystemExit(f'expected one native test binary, found {len(binaries)}')
+          Path('native-diagnostic-binary.txt').write_text(binaries[0])
+          PY
+          cat > native-diagnostic-runner.py <<'PY'
+          import os
+          import signal
+          import subprocess
+          import sys
+          from pathlib import Path
+
+          test_filter, prefix, *extra = sys.argv[1:]
+          executable = Path('native-diagnostic-binary.txt').read_text()
+          command = [executable, test_filter, '--nocapture', '--test-threads=1', *extra]
+          log = Path(prefix + '.log')
+          sample = Path(prefix + '.sample.txt')
+          with log.open('w') as output:
+              process = subprocess.Popen(command, stdout=output, stderr=subprocess.STDOUT, start_new_session=True)
+              try:
+                  result = process.wait(timeout=45)
+              except subprocess.TimeoutExpired:
+                  print('Test fixture exceeded 45s; sampling the actual test process.', flush=True)
+                  try:
+                      subprocess.run(['/usr/bin/sample', str(process.pid), '5', '1', '-file', str(sample)], check=False, timeout=15)
+                  finally:
+                      try:
+                          os.killpg(process.pid, signal.SIGKILL)
+                      except ProcessLookupError:
+                          pass
+                      process.wait(timeout=10)
+                  result = 124
+          print(log.read_text())
+          if sample.exists():
+              print(sample.read_text())
+          raise SystemExit(result)
+          PY
+
+      - name: Run only the held-reader test with bounded stack sampling
+        timeout-minutes: 5
+        run: python3 native-diagnostic-runner.py app_tests::a_failed_command_pane_says_what_the_command_printed native-diagnostic --exact
+
+      - name: Isolate broker failures even if the held-reader test timed out
+        if: always()
+        timeout-minutes: 5
+        run: python3 native-diagnostic-runner.py agent_broker::tests:: native-broker
+
+      - name: Preserve bounded phase trace and stack sample
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-held-reader-diagnostics
+          path: |
+            native-diagnostic.log
+            native-diagnostic.sample.txt
+            native-broker.log
+            native-broker.sample.txt
+          if-no-files-found: ignore

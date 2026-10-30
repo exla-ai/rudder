@@ -1,0 +1,23 @@
+{
+  "image": "debian:bookworm-slim",
+  "init": {
+    "exec": [
+      "/bin/sleep",
+      "900"
+    ]
+  },
+  "guest": {
+    "cpu_kind": "shared",
+    "cpus": 2,
+    "memory_mb": 2048
+  },
+  "restart": {
+    "policy": "no"
+  },
+  "auto_destroy": true,
+  "services": [],
+  "env": {},
+  "metadata": {
+    "rudder_role": "execution-qualification"
+  }
+}

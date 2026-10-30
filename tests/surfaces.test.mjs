@@ -288,7 +288,7 @@ test("renderContract injects the propagation rules incl. the adapt-on-change rul
   }
   // The anti-drift rule: agents adapt to a changed plan rather than straying.
   assert.ok(
-    PROPAGATION_RULES.some((rule) => /ADAPT/.test(rule) && /does not stray/.test(rule)),
+    PROPAGATION_RULES.some((rule) => /Adapt/.test(rule) && /relevant topic/.test(rule)),
     "an adapt-on-plan-change rule must be present",
   );
   // No em dashes in the rules (project constraint).

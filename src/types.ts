@@ -314,6 +314,8 @@ export type RunRecord = {
   task: string;
   taskSummary?: string;
   taskSummaryLlm?: boolean;
+  /** Persisted renderer/control contract. Older records retain native compatibility. */
+  executionProfile?: "native" | "claude-sdk" | "codex-app-server";
   backend: BackendId;
   model?: string;
   effort?: EffortLevel;
@@ -464,6 +466,7 @@ export type BackendAdapter = {
 };
 
 export type SpecContract = {
+  runtimeRole?: "main-owner" | "isolated-worker";
   runId: string;
   task: string;
   goal: string; // one-line OBJECTIVE for the launch Objective line

@@ -107,11 +107,20 @@ jobs:
           npm ci
           npm run build
 
+      # MCP/broker JS journeys export trusted fixtures from Rust test binaries.
+      # Compile outside their short per-fixture timeout on a fresh CI checkout.
+      - name: Compile engine and native test fixtures
+        run: cargo test --workspace --no-run
+
       - name: Typecheck + JS tests
-        run: npm test
+        run: |
+          chmod +x prebuilt-native/rudder-native-darwin-arm64/rudder-native
+          npm test
+        env:
+          RUDDER_NATIVE_BIN: ${{ github.workspace }}/prebuilt-native/rudder-native-darwin-arm64/rudder-native
 
       - name: Native tests
-        run: cargo test --manifest-path native/Cargo.toml
+        run: cargo test --workspace
 
       # Screen-level e2e: the REAL prebuilt dashboard binary in a real PTY,
       # driven by keystrokes via tui-integration-tests (which fetches its own

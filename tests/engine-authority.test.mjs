@@ -1,0 +1,33 @@
+import assert from "node:assert/strict";
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import test from "node:test";
+import { assertLegacyWriterAllowed, projectEngineAuthority } from "../dist/engine-authority.js";
+import { persistentProjectEngineRequested } from "../dist/engine.js";
+import { spawnWorker, workerRun } from "../dist/run-manager.js";
+import { scheduleTick, onRunTransition } from "../dist/scheduler.js";
+import { ensureBoardRunning } from "../dist/daemon.js";
+
+test("project migration survives a closed surface and blocks duplicate legacy schedulers", async (t) => {
+  const repo = await fs.mkdtemp(path.join(os.tmpdir(), "rudder-engine-authority-"));
+  t.after(() => fs.rm(repo, { recursive: true, force: true }));
+  assert.equal(projectEngineAuthority(repo), undefined);
+  assertLegacyWriterAllowed(repo);
+  assert.equal(persistentProjectEngineRequested(repo, {}), false);
+  await fs.mkdir(path.join(repo, ".rudder/engine"), { recursive: true });
+  const ownerFile = path.join(repo, ".rudder/engine/owner.json");
+  await fs.writeFile(ownerFile, JSON.stringify({ format_version: 1, authority: "fabric", state: "stopped" }));
+  assert.equal(persistentProjectEngineRequested(repo, {}), true);
+  assert.equal(persistentProjectEngineRequested(repo, { RUDDER_ENGINE: "legacy-native" }), false);
+  assert.throws(() => spawnWorker(repo, "must-not-start"), /persistent engine/);
+  await assert.rejects(workerRun(repo, "must-not-start"), /persistent engine/);
+  await assert.rejects(scheduleTick(repo, {}), /persistent engine/);
+  await assert.rejects(onRunTransition(repo, "must-not-start", {}), /persistent engine/);
+  await assert.rejects(ensureBoardRunning(repo), /persistent engine/);
+  await assert.rejects(fs.stat(path.join(repo, ".rudder/runs/must-not-start")), { code: "ENOENT" });
+  await fs.writeFile(ownerFile, '{"format_version":2,"authority":"fabric"}');
+  assert.throws(() => assertLegacyWriterAllowed(repo), /Unsupported/);
+  await fs.writeFile(ownerFile, "interrupted write");
+  assert.throws(() => assertLegacyWriterAllowed(repo), /unreadable/);
+});

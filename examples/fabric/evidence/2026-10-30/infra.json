@@ -1,0 +1,10 @@
+{
+  "verifiedAt": "2026-10-30T11:29:29.573Z",
+  "stackId": "arn:aws:cloudformation:us-east-1:597088032164:stack/rudder-fabric-v1/07965f40-d455-11f1-a8c8-12fff9a0bc77",
+  "status": "CREATE_COMPLETE",
+  "outputs": {
+    "BucketName": "rudder-fabric-v1-597088032164-us-east-1",
+    "OidcIssuer": "https://oidc.fly.io/exla",
+    "RoleArn": "arn:aws:iam::597088032164:role/rudder-fabric-control-v1"
+  }
+}

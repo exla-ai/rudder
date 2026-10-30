@@ -1,0 +1,17 @@
+{
+  "verifiedAt": "2026-10-30T11:38:28.450Z",
+  "provider": "AWS S3/Fly OIDC",
+  "bucket": "rudder-fabric-v1-597088032164-us-east-1",
+  "checks": [
+    "Fly workload role assumed without an access key",
+    "Bucket versioning enabled",
+    "No bucket lifecycle expiration",
+    "Conditional checksum-verified object PUT/GET passed",
+    "Unconditional object overwrite denied",
+    "Duplicate conditional write conflicts",
+    "Writer cannot delete immutable objects",
+    "Staging conditional create/renew/delete allowed"
+  ],
+  "ok": true,
+  "retainedQualificationObject": "fabric/v1/accounts/1ac7be0d44216d115745e8b13cb9183b34993c83e210d3163c783c4cffcbae44/objects/sha256/4663f3decb5267e7829b99c67b69a634bef1ecf81202c83c4a900fbda3278e44"
+}

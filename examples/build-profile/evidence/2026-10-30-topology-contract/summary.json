@@ -1,0 +1,451 @@
+{
+  "artifact_smoke": {
+    "rust_archive_valid": true,
+    "typescript_answer": 42
+  },
+  "cases": [
+    {
+      "case": "cold-native-cache",
+      "environment_validation_ms": 13654,
+      "executed_actions": 2,
+      "frontend_ms": 1769,
+      "graph_reused_actions": 0,
+      "native_action_digests": [
+        {
+          "hash": "176ede31f6a972ad97ba5ac8cfa9e282bdfca4ec1694a6b1beeb2fac8491fa04",
+          "size_bytes": 142
+        },
+        {
+          "hash": "e17c933b793fdd4b32b0654cebd4c67cb3e197d39859329867bb57a0ec33b437",
+          "size_bytes": 142
+        }
+      ],
+      "prepared_output": {
+        "algorithm": "sha256",
+        "digest": "fce6f5a41de851ba2c1792d7764156e7dec1430e32d4682772d53d393be3bc4e",
+        "kind": "directory",
+        "size_bytes": 447
+      },
+      "remote_cache_hits": 0,
+      "run_receipt": {
+        "algorithm": "sha256",
+        "digest": "9fdbfd68fa64746eaa972ab557ea229fe1aa824e1b9e3b54b5a7b8604c0c1d3e",
+        "kind": "action_result",
+        "size_bytes": 2469
+      },
+      "source_action_key": {
+        "algorithm": "sha256",
+        "digest": "dcc5398132ad97da035dc2b0d39e5c03fdcab374c803d58bf8340dc595bcbfb0",
+        "kind": "action_key",
+        "size_bytes": 4437
+      },
+      "source_materialization_ms": 4,
+      "trace_id": "8f714948-fd04-4153-8711-d6ae2a0cd537",
+      "wall_ms": 17651
+    },
+    {
+      "case": "warm-same-graph",
+      "environment_validation_ms": 1182,
+      "executed_actions": 0,
+      "frontend_ms": 165,
+      "graph_reused_actions": 2,
+      "native_action_digests": [],
+      "prepared_output": {
+        "algorithm": "sha256",
+        "digest": "fce6f5a41de851ba2c1792d7764156e7dec1430e32d4682772d53d393be3bc4e",
+        "kind": "directory",
+        "size_bytes": 447
+      },
+      "remote_cache_hits": 0,
+      "run_receipt": {
+        "algorithm": "sha256",
+        "digest": "4cef604a3d052958f8527ae204894e8b4c85669489335e6f0071392991857b57",
+        "kind": "action_result",
+        "size_bytes": 2283
+      },
+      "source_action_key": {
+        "algorithm": "sha256",
+        "digest": "dcc5398132ad97da035dc2b0d39e5c03fdcab374c803d58bf8340dc595bcbfb0",
+        "kind": "action_key",
+        "size_bytes": 4437
+      },
+      "source_materialization_ms": 0,
+      "trace_id": "a2d40c4b-4693-41b7-9670-21b07826818f",
+      "wall_ms": 3560
+    },
+    {
+      "case": "fresh-graph-reapi-hit",
+      "environment_validation_ms": 1082,
+      "executed_actions": 0,
+      "frontend_ms": 467,
+      "graph_reused_actions": 0,
+      "native_action_digests": [
+        {
+          "hash": "176ede31f6a972ad97ba5ac8cfa9e282bdfca4ec1694a6b1beeb2fac8491fa04",
+          "size_bytes": 142
+        },
+        {
+          "hash": "e17c933b793fdd4b32b0654cebd4c67cb3e197d39859329867bb57a0ec33b437",
+          "size_bytes": 142
+        }
+      ],
+      "prepared_output": {
+        "algorithm": "sha256",
+        "digest": "fce6f5a41de851ba2c1792d7764156e7dec1430e32d4682772d53d393be3bc4e",
+        "kind": "directory",
+        "size_bytes": 447
+      },
+      "remote_cache_hits": 2,
+      "run_receipt": {
+        "algorithm": "sha256",
+        "digest": "4a8ecacb831043e0409aa37844a89bab52be7e5a0a6e9df73bbfa2ca2c1e52fb",
+        "kind": "action_result",
+        "size_bytes": 2468
+      },
+      "source_action_key": {
+        "algorithm": "sha256",
+        "digest": "dcc5398132ad97da035dc2b0d39e5c03fdcab374c803d58bf8340dc595bcbfb0",
+        "kind": "action_key",
+        "size_bytes": 4437
+      },
+      "source_materialization_ms": 5,
+      "trace_id": "baccd6b8-d745-47ed-856a-c589cbcde94c",
+      "wall_ms": 3216
+    },
+    {
+      "case": "source-edit-preparation-hit",
+      "environment_validation_ms": 989,
+      "executed_actions": 1,
+      "frontend_ms": 1621,
+      "graph_reused_actions": 0,
+      "native_action_digests": [
+        {
+          "hash": "14bc920ea361ee6aaffedf8eea77de771b2c19802c209367e50e54cba8509b5e",
+          "size_bytes": 142
+        },
+        {
+          "hash": "176ede31f6a972ad97ba5ac8cfa9e282bdfca4ec1694a6b1beeb2fac8491fa04",
+          "size_bytes": 142
+        }
+      ],
+      "prepared_output": {
+        "algorithm": "sha256",
+        "digest": "c54c2668b820e069f28e27c523c414a4c2fe4d8da110b90b24cac0b8290e6c2f",
+        "kind": "directory",
+        "size_bytes": 447
+      },
+      "remote_cache_hits": 1,
+      "run_receipt": {
+        "algorithm": "sha256",
+        "digest": "75ee7706ce06ddb31dcefe53c96ed0b2925d7b5bc39e8b06ec624e0fa9fe2283",
+        "kind": "action_result",
+        "size_bytes": 2469
+      },
+      "source_action_key": {
+        "algorithm": "sha256",
+        "digest": "64a7ab785dfa0dbc2f241870e2ddefe4abefa7e0cabc343244fc5d8cb87d5d1b",
+        "kind": "action_key",
+        "size_bytes": 4437
+      },
+      "source_materialization_ms": 3,
+      "trace_id": "f8b96b46-1162-4e9c-b6b2-0f35544f3ef1",
+      "wall_ms": 5287
+    },
+    {
+      "case": "lockfile-invalidation",
+      "environment_validation_ms": 1065,
+      "executed_actions": 2,
+      "frontend_ms": 1529,
+      "graph_reused_actions": 0,
+      "native_action_digests": [
+        {
+          "hash": "8bce75c974cab720cd9534bcc8a5ea95a4d22a96589698e3cf00b2b244cb8440",
+          "size_bytes": 142
+        },
+        {
+          "hash": "907bb000527fa878cae08b379455972156028b8683a01a93a4c9e584c2f9fc13",
+          "size_bytes": 142
+        }
+      ],
+      "prepared_output": {
+        "algorithm": "sha256",
+        "digest": "c54c2668b820e069f28e27c523c414a4c2fe4d8da110b90b24cac0b8290e6c2f",
+        "kind": "directory",
+        "size_bytes": 447
+      },
+      "remote_cache_hits": 0,
+      "run_receipt": {
+        "algorithm": "sha256",
+        "digest": "bfcd6d5d8e57c9b460e5125346d7333c0e51cef4fd8f6b0cb83918489fb36724",
+        "kind": "action_result",
+        "size_bytes": 2469
+      },
+      "source_action_key": {
+        "algorithm": "sha256",
+        "digest": "8cfa84bdfebfc8ed385677e47aecac75526d35faee39c3f9e262b52fb767169d",
+        "kind": "action_key",
+        "size_bytes": 4437
+      },
+      "source_materialization_ms": 3,
+      "trace_id": "d0dcb18a-8e5d-4cd6-8817-39df60115246",
+      "wall_ms": 4303
+    },
+    {
+      "case": "compiler-byte-invalidation",
+      "environment_validation_ms": 18413,
+      "executed_actions": 2,
+      "frontend_ms": 1469,
+      "graph_reused_actions": 0,
+      "native_action_digests": [
+        {
+          "hash": "329d7af3a78ee57e8597607a751735f8cf9e086217d1ebe24dfde29898c2a13f",
+          "size_bytes": 142
+        },
+        {
+          "hash": "851d09f04a64ec1c78546910252db3d237ca848a022a905191a3d0548c3666d8",
+          "size_bytes": 142
+        }
+      ],
+      "prepared_output": {
+        "algorithm": "sha256",
+        "digest": "c54c2668b820e069f28e27c523c414a4c2fe4d8da110b90b24cac0b8290e6c2f",
+        "kind": "directory",
+        "size_bytes": 447
+      },
+      "remote_cache_hits": 0,
+      "run_receipt": {
+        "algorithm": "sha256",
+        "digest": "44f5852ba7a6462874c43adb81e4fb27c82937bc3fa6b841f4a63cd81c3e26ad",
+        "kind": "action_result",
+        "size_bytes": 2469
+      },
+      "source_action_key": {
+        "algorithm": "sha256",
+        "digest": "f42c4395098ceaf420b92e8531d3e459e75cc4fb1f018aefcad9250693f9b166",
+        "kind": "action_key",
+        "size_bytes": 4437
+      },
+      "source_materialization_ms": 7,
+      "trace_id": "3bb9e251-dd69-4cba-92ff-6dcb5325f277",
+      "wall_ms": 21665
+    },
+    {
+      "case": "platform-contract-invalidation",
+      "environment_validation_ms": 1414,
+      "executed_actions": 2,
+      "frontend_ms": 1327,
+      "graph_reused_actions": 0,
+      "native_action_digests": [
+        {
+          "hash": "122bd379903a91b374b246873d10cd923e76e0614c188b17f61eabf9884c1f86",
+          "size_bytes": 142
+        },
+        {
+          "hash": "17e80dab4283ded936fe29f869a916f9003fa405214e2b083d55eb9fd7b7c5fc",
+          "size_bytes": 142
+        }
+      ],
+      "prepared_output": {
+        "algorithm": "sha256",
+        "digest": "c54c2668b820e069f28e27c523c414a4c2fe4d8da110b90b24cac0b8290e6c2f",
+        "kind": "directory",
+        "size_bytes": 447
+      },
+      "remote_cache_hits": 0,
+      "run_receipt": {
+        "algorithm": "sha256",
+        "digest": "7c4e4575ae731d7ee5661dbe3e693fb8951c3b0adb824db53f86e91ad9ab0a43",
+        "kind": "action_result",
+        "size_bytes": 2469
+      },
+      "source_action_key": {
+        "algorithm": "sha256",
+        "digest": "ebb2ebf60811581527899c9867d1d51eeb28c17820f87006107b2a9111514f58",
+        "kind": "action_key",
+        "size_bytes": 4474
+      },
+      "source_materialization_ms": 3,
+      "trace_id": "43fe46bc-f3ea-4c89-887c-06bcf0af7215",
+      "wall_ms": 4277
+    },
+    {
+      "case": "build-policy-invalidation",
+      "environment_validation_ms": 981,
+      "executed_actions": 2,
+      "frontend_ms": 1471,
+      "graph_reused_actions": 0,
+      "native_action_digests": [
+        {
+          "hash": "5a32ec36433a4250a324942f56c4f015b974eb18f7ffc0284085b6c7a796876b",
+          "size_bytes": 142
+        },
+        {
+          "hash": "95d9512e3bb1feb4b6d72b0e28d17a9fca9568b782b273ef47f41200c3e94c42",
+          "size_bytes": 142
+        }
+      ],
+      "prepared_output": {
+        "algorithm": "sha256",
+        "digest": "c54c2668b820e069f28e27c523c414a4c2fe4d8da110b90b24cac0b8290e6c2f",
+        "kind": "directory",
+        "size_bytes": 447
+      },
+      "remote_cache_hits": 0,
+      "run_receipt": {
+        "algorithm": "sha256",
+        "digest": "dc24c5307a243ec4bfa5dfe717cf42f623799dae492064a78fb3864670f74985",
+        "kind": "action_result",
+        "size_bytes": 2469
+      },
+      "source_action_key": {
+        "algorithm": "sha256",
+        "digest": "27e169820d60be8c56994ac7ca80442cafd9d5e3c52197812388f44d91eabc68",
+        "kind": "action_key",
+        "size_bytes": 4445
+      },
+      "source_materialization_ms": 3,
+      "trace_id": "6e47e035-2971-4707-993b-d6ff377e47a7",
+      "wall_ms": 4159
+    },
+    {
+      "case": "coalesced-miss-0",
+      "environment_validation_ms": 1123,
+      "executed_actions": 0,
+      "frontend_ms": 366,
+      "graph_reused_actions": 0,
+      "native_action_digests": [
+        {
+          "hash": "176ede31f6a972ad97ba5ac8cfa9e282bdfca4ec1694a6b1beeb2fac8491fa04",
+          "size_bytes": 142
+        },
+        {
+          "hash": "e736c062ab9afca1d0996911c3012be4230e2ade041817247f18a06855b7f25e",
+          "size_bytes": 142
+        }
+      ],
+      "prepared_output": {
+        "algorithm": "sha256",
+        "digest": "c9ddac342bfcb65b133764bb890a834faedbc7ca94b0a20338716ec2613d45c0",
+        "kind": "directory",
+        "size_bytes": 447
+      },
+      "remote_cache_hits": 2,
+      "run_receipt": {
+        "algorithm": "sha256",
+        "digest": "cc2d6fe2d9fbcd85ea6d5a39836aa029ee64248946baf9bc8f7d6a47fd9b0aaf",
+        "kind": "action_result",
+        "size_bytes": 2468
+      },
+      "source_action_key": {
+        "algorithm": "sha256",
+        "digest": "e5afd86b3d7610645d3e372c8cc920ff92e4d136bc5f8843f4e4c267ae961ca4",
+        "kind": "action_key",
+        "size_bytes": 4437
+      },
+      "source_materialization_ms": 3,
+      "trace_id": "d6721173-e5f8-40da-84ac-565efe11a8dc",
+      "wall_ms": 4872
+    },
+    {
+      "case": "coalesced-miss-1",
+      "environment_validation_ms": 1114,
+      "executed_actions": 1,
+      "frontend_ms": 717,
+      "graph_reused_actions": 0,
+      "native_action_digests": [
+        {
+          "hash": "176ede31f6a972ad97ba5ac8cfa9e282bdfca4ec1694a6b1beeb2fac8491fa04",
+          "size_bytes": 142
+        },
+        {
+          "hash": "e736c062ab9afca1d0996911c3012be4230e2ade041817247f18a06855b7f25e",
+          "size_bytes": 142
+        }
+      ],
+      "prepared_output": {
+        "algorithm": "sha256",
+        "digest": "c9ddac342bfcb65b133764bb890a834faedbc7ca94b0a20338716ec2613d45c0",
+        "kind": "directory",
+        "size_bytes": 447
+      },
+      "remote_cache_hits": 1,
+      "run_receipt": {
+        "algorithm": "sha256",
+        "digest": "710d015cbff5961d3beb6696577a8292fba3879f0ac42accbd6a6156e5e0da3c",
+        "kind": "action_result",
+        "size_bytes": 2468
+      },
+      "source_action_key": {
+        "algorithm": "sha256",
+        "digest": "e5afd86b3d7610645d3e372c8cc920ff92e4d136bc5f8843f4e4c267ae961ca4",
+        "kind": "action_key",
+        "size_bytes": 4437
+      },
+      "source_materialization_ms": 6,
+      "trace_id": "c7b1a5a2-bc21-45c5-8a92-1a9142f81281",
+      "wall_ms": 3899
+    }
+  ],
+  "cold_preparation_publication_ms": 22294,
+  "denied_effects": [
+    "network",
+    "secrets",
+    "signing",
+    "deployment",
+    "external_state",
+    "clock",
+    "randomness"
+  ],
+  "format_version": 1,
+  "platform": {
+    "abi": "glibc-2.36",
+    "architecture": "x86_64",
+    "os": "linux"
+  },
+  "scope": {
+    "backend": "bazel-remote2.6.4",
+    "buildbarn_qualified": false,
+    "cache_protocol": "native-gRPC-REAPI-v2",
+    "cold_definition": "empty frontend graph and action cache; OS page cache is not flushed",
+    "cross_engine_cache_hits_claimed": false,
+    "remote_execution": false,
+    "shared_divergent_warm_dice_claimed": false
+  },
+  "tools": {
+    "bazel_remote": "/workspace/home/.cache/rudder-build-profile/ongoing-2026-10-30/rudder-build-profile-qualified/tools/bazel-remote",
+    "buck2": "/workspace/home/.cache/rudder-build-profile/ongoing-2026-10-30/rudder-build-profile-qualified/tools/buck2",
+    "compilers": {
+      "compiler_paths": {
+        "node": "tools/node",
+        "python": "tools/python/bin/python3",
+        "rust": "tools/rust/bin/rustc",
+        "typescript": "tools/typescript/lib/tsc.js",
+        "unshare": "tools/unshare"
+      },
+      "format_version": 1,
+      "node": "v22.23.4",
+      "platform": {
+        "abi": "glibc-2.36",
+        "architecture": "x86_64",
+        "os": "linux"
+      },
+      "preparation_revision": 2,
+      "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+      "typescript": "5.9.3"
+    },
+    "directory": "/workspace/home/.cache/rudder-build-profile/ongoing-2026-10-30/rudder-build-profile-qualified",
+    "format_version": 1,
+    "frontend_sha256": "f90e3b3674650a96f9773d8cda92006890a6a348bd7ab7d85dd0f8837fcbcab4",
+    "host_driver": {
+      "kernel": "6.12.114-fly",
+      "preparation_python_sha256": "9bee109da0dce17a7c9eeaca9f420cc6770a9fe143b9382d73bd22fe59b21a5f",
+      "python_path": "/usr/bin/python3",
+      "python_sha256": "9bee109da0dce17a7c9eeaca9f420cc6770a9fe143b9382d73bd22fe59b21a5f",
+      "unshare_sha256": "9fb85770a4a0b5cb2bff8e64c2934dd1b0674eaaae18fd550dea2520c69a45d9"
+    },
+    "prepare_seconds": 0.17155682199518196,
+    "prepared": "/workspace/home/.cache/rudder-build-profile/ongoing-2026-10-30/rudder-build-profile-qualified/prepared"
+  },
+  "verified_at_epoch_ms": 1793363482629,
+  "warm_preparation_index_lookup_ms": 2
+}

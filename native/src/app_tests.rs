@@ -1861,6 +1861,7 @@ fn a_merged_workspace_with_a_live_agent_in_it_is_never_swept() {
         TerminalPaneOptions::default(),
     )
     .expect("spawn sleeper");
+    run.execution_profile = terminal.execution_profile().map(str::to_string);
     run.terminal = Some(terminal);
     assert!(
         !merged_workspace_is_sweepable(&run, long_ago + Duration::from_secs(60 * 24 * 3600), grace),
@@ -8004,6 +8005,7 @@ fn test_agent_run(id: &str, task: &str) -> AgentRun {
         publish: PublishEvidence::default(),
         delivery: DeliveryEvidence::default(),
         session_id: None,
+        execution_profile: None,
         terminal: None,
         terminal_size: None,
         last_output_at: Instant::now(),
@@ -8044,6 +8046,7 @@ fn test_agent_run(id: &str, task: &str) -> AgentRun {
 fn test_agent_run_with_terminal(app: &App, terminal: TerminalPane) -> AgentRun {
     let mut run = test_agent_run("run-1", "test task");
     run.cwd = app.cwd.clone();
+    run.execution_profile = terminal.execution_profile().map(str::to_string);
     run.terminal = Some(terminal);
     run
 }
@@ -8538,9 +8541,12 @@ fn main_prompt_is_an_end_to_end_delivery_contract() {
     let prompt = main_task_prompt("deploy the app");
     assert!(prompt.contains("single end-to-end owner"));
     assert!(prompt.contains("Pushing alone is not deployment"));
-    assert!(prompt.contains("Computer Use"));
+    assert!(prompt.contains("prior authorization"));
     assert!(prompt.contains("verifiedAt"));
     assert!(prompt.ends_with("deploy the app"));
+    assert!(prompt.len() < 1_600, "startup instructions should stay compact");
+    assert!(execution_prompt("fix one bug").len() < 1_400);
+    assert!(!prompt.contains("Before each significant step"));
 }
 
 #[test]
@@ -9857,6 +9863,7 @@ fn delete_agent_requires_second_d() {
         publish: PublishEvidence::default(),
         delivery: DeliveryEvidence::default(),
         session_id: None,
+        execution_profile: None,
         terminal: None,
         terminal_size: None,
         last_output_at: Instant::now(),
@@ -28201,6 +28208,7 @@ done
 #[cfg(not(windows))]
 #[test]
 fn a_failed_command_pane_says_what_the_command_printed() {
+    use std::sync::Arc;
     // `/sync` on the cloud machine ran `rudder cloud sync`, which printed "Not
     // logged in to Rudder Cloud" and exited 1; the row only said "agent process
     // exited (exit 1)", naming an agent that never existed and hiding the reason.
@@ -28209,9 +28217,9 @@ fn a_failed_command_pane_says_what_the_command_printed() {
     app.cwd = dir.clone();
     let command = TerminalCommand::with_args(
         "/bin/sh",
-        ["-c", "echo 'rudder: Not logged in to Rudder Cloud.'; exit 1"],
+        ["-c", "while [ ! -f .reader-gate ]; do sleep 0.01; done; printf 'initial progress\n'; while [ ! -f .final-gate ]; do sleep 0.01; done; echo 'rudder: Not logged in to Rudder Cloud.'; exit 1"],
     );
-    let pane = TerminalPane::spawn_shell_or_command(
+    let mut pane = TerminalPane::spawn_shell_or_command(
         Some(command),
         TerminalPaneOptions {
             size: TerminalSize { rows: 5, cols: 60 },
@@ -28220,11 +28228,53 @@ fn a_failed_command_pane_says_what_the_command_printed() {
         },
     )
     .expect("spawn command pane");
+    // Hold the real reader after its first forwarded chunk. The final error
+    // is written only after this handshake, and the process exits while those
+    // bytes are still waiting in the kernel PTY. No scheduling race is needed.
+    let release = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+    let reader_release = release.clone();
+    let first = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let reader_first = first.clone();
+    let (held_tx, held_rx) = std::sync::mpsc::channel();
+    pane.set_output_waker(Arc::new(move || {
+        if reader_first.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            let _ = held_tx.send(());
+            let (lock, wake) = &*reader_release;
+            let guard = lock.lock().unwrap();
+            let _ = wake
+                .wait_timeout_while(guard, Duration::from_secs(10), |released| !(*released))
+                .unwrap();
+        }
+    }));
+    fs::write(dir.join(".reader-gate"), b"ready").unwrap();
+    held_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("reader held after initial chunk");
+    fs::write(dir.join(".final-gate"), b"write final error").unwrap();
+    let exit_deadline = Instant::now() + Duration::from_secs(5);
+    while pane.is_alive() {
+        assert!(Instant::now() < exit_deadline);
+        std::thread::sleep(Duration::from_millis(5));
+    }
     let mut run = test_agent_run_with_terminal(&app, pane);
     run.id = "cloud-sync-pane".to_string();
     run.task = "cloud sync".to_string();
     run.plain_process = true;
     app.agents.push(run);
+    app.set_run_error(0, "agent process exited (exit 0)".into());
+    assert_eq!(
+        app.agents[0].status,
+        AgentStatus::Running,
+        "an error string cannot bypass final output drain"
+    );
+    app.poll_agents();
+    assert_eq!(
+        app.agents[0].status,
+        AgentStatus::Running,
+        "OS exit alone cannot finalize before the reader forwards final output"
+    );
+    *release.0.lock().unwrap() = true;
+    release.1.notify_all();
 
     let deadline = Instant::now() + Duration::from_secs(5);
     while app.agents[0].status != AgentStatus::Failed && Instant::now() < deadline {
@@ -28237,9 +28287,132 @@ fn a_failed_command_pane_says_what_the_command_printed() {
     assert!(error.starts_with("cloud sync exited (exit 1)"), "{error}");
     assert!(error.contains("Not logged in to Rudder Cloud"), "{error}");
     assert!(!error.contains("agent process"), "{error}");
+    assert!(run.terminal.as_ref().unwrap().is_output_only());
+    assert!(run.terminal.as_ref().unwrap().child_process_id().is_none());
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+
+#[test]
+fn managed_write_error_or_exit_zero_cannot_create_a_completed_turn() {
+    let dir = unique_test_repo("typed-exit-authority");
+    let mut app = App::new();
+    app.cwd = dir.clone();
+    let command = TerminalCommand::with_args("/bin/sh", ["-c", "exit 0"])
+        .with_env("RUDDER_EXECUTION_PROFILE", "claude-sdk");
+    let mut pane = TerminalPane::spawn_shell_or_command(
+        Some(command),
+        TerminalPaneOptions {
+            cwd: Some(dir.clone()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        pane.drain_output();
+        if pane.try_wait_after_output().unwrap().is_some() {
+            break;
+        }
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    app.agents.push(test_agent_run_with_terminal(&app, pane));
+    app.set_run_error(0, "agent process exited (exit 0)".into());
+    assert_eq!(app.agents[0].status, AgentStatus::Paused);
+    assert!(app.agents[0].completed_at.is_none());
+    app.agents[0].terminal = None;
+    app.agents[0].status = AgentStatus::Running;
+    app.set_run_error(0, "agent process exited (exit 0)".into());
+    assert_eq!(
+        app.agents[0].status,
+        AgentStatus::Paused,
+        "even without a PTY the persisted managed profile keeps typed authority"
+    );
+    app.agents[0].status = AgentStatus::Done;
+    app.agents[0].completed_at = Some(Instant::now());
+    app.set_run_error(0, "agent process exited (exit 0)".into());
+    assert_eq!(
+        app.agents[0].status,
+        AgentStatus::Done,
+        "a previously typed completion remains a fact"
+    );
+    assert!(app.agents[0].completed_at.is_some());
+    app.agents[0].status = AgentStatus::Stopped;
+    app.set_run_error(0, "agent process exited (exit 0)".into());
+    assert_eq!(
+        app.agents[0].status,
+        AgentStatus::Stopped,
+        "a write error cannot revive stopped work"
+    );
+    drop(app);
+    let _ = fs::remove_dir_all(dir);
+}
+
+
+#[test]
+fn completed_plain_command_keeps_read_only_output_after_later_polls() {
+    let dir = unique_test_repo("retained-command-output");
+    let mut app = App::new();
+    app.cwd = dir.clone();
+    let pane = TerminalPane::spawn_shell_or_command(
+        Some(TerminalCommand::with_args(
+            "/bin/sh",
+            ["-c", "printf 'Restored jj to operation fixture-proof\\n'"],
+        )),
+        TerminalPaneOptions {
+            cwd: Some(dir.clone()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let mut run = test_agent_run_with_terminal(&app, pane);
+    run.id = "undo-output".into();
+    run.task = "undo".into();
+    run.plain_process = true;
+    app.agents.push(run);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while app.agents[0].status == AgentStatus::Running {
+        app.poll_agents();
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(app.agents[0].status, AgentStatus::Done);
+    for _ in 0..5 {
+        app.poll_agents();
+    }
+    let terminal = app.agents[0]
+        .terminal
+        .as_ref()
+        .expect("plain command proof remains visible");
+    assert!(terminal.is_output_only());
+    assert!(terminal.child_process_id().is_none());
+    assert!(terminal
+        .visible_lines_snapshot()
+        .join("\n")
+        .contains("Restored jj to operation fixture-proof"));
+    let record: serde_json::Value =
+        serde_json::from_slice(&fs::read(dir.join(".rudder/runs/undo-output/run.json")).unwrap())
+            .unwrap();
+    assert!(
+        record.get("process").is_none(),
+        "retained output must not persist a stale live PID"
+    );
+    app.focus = FocusPane::Worker;
+    app.selected_agent = 0;
+    app.handle_worker_key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE));
+    app.handle_paste("no command may run".into());
+    assert_eq!(app.agents[0].status, AgentStatus::Done);
+    assert!(app.agents[0].last_error.is_none());
+    assert!(app
+        .notice
+        .as_deref()
+        .is_some_and(|notice| notice.contains("read-only")));
+    drop(app);
+    let _ = fs::remove_dir_all(dir);
+}
+
 
 #[test]
 fn claude_folder_trust_dialog_is_a_wait_not_work() {
@@ -28831,4 +29004,49 @@ fn swarm_checkpoint_carries_working_copy_edits_into_new_workspaces() {
 
     let _ = fs::remove_dir_all(&experiment);
     let _ = fs::remove_dir_all(&repo);
+}
+
+#[test]
+fn managed_execution_profiles_survive_records_and_old_conversations_keep_native() {
+    let repo=unique_test_repo("execution-profile-record");
+    let mut run=test_agent_run("managed-profile", "change the parser");
+    run.cwd=repo.clone();
+    run.execution_profile=Some("claude-sdk".into());
+    save_native_run_record(&repo,&run).unwrap();
+    let path=native_run_dir(&repo,&run.id).join("run.json");
+    let mut record:serde_json::Value=serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+    assert_eq!(record["executionProfile"],"claude-sdk");
+    let restored=agent_from_run_record(&repo,record.clone()).unwrap();
+    assert_eq!(restored.execution_profile.as_deref(),Some("claude-sdk"));
+    record.as_object_mut().unwrap().remove("executionProfile");
+    let legacy=agent_from_run_record(&repo,record).unwrap();
+    assert_eq!(legacy.execution_profile.as_deref(),Some("native"));
+    let _=fs::remove_dir_all(repo);
+}
+
+#[test]
+fn managed_turns_ignore_legacy_done_and_successful_exit_without_turn_evidence() {
+    let _env=env_guard();
+    let mut app=App::new();
+    std::env::set_var("RUDDER_HOME",app.cwd.join("home"));
+    let mut run=test_agent_run("typed-lifecycle", "change the parser");
+    run.cwd=app.cwd.clone();run.backend=Backend::Claude;run.status=AgentStatus::Running;
+    let command=TerminalCommand::with_args("/bin/sh",["-c","sleep 60"])
+        .with_env("RUDDER_EXECUTION_PROFILE","claude-sdk");
+    run.terminal=Some(TerminalPane::spawn_shell_or_command(Some(command),TerminalPaneOptions::default()).unwrap());
+    run.execution_profile=Some("claude-sdk".into());
+    let signal=signals::signal_path(&run.id).unwrap();
+    fs::create_dir_all(signal.parent().unwrap()).unwrap();
+    fs::write(&signal,r#"{"state":"done"}"#).unwrap();
+    app.agents=vec![run];
+    app.poll_agents();
+    assert_eq!(app.agents[0].status,AgentStatus::Running,"a generic Stop is not typed completion");
+    app.agents[0].terminal=None;
+    let command=TerminalCommand::with_args("/bin/sh",["-c","exit 0"])
+        .with_env("RUDDER_EXECUTION_PROFILE","claude-sdk");
+    app.agents[0].terminal=Some(TerminalPane::spawn_shell_or_command(Some(command),TerminalPaneOptions::default()).unwrap());
+    let deadline=Instant::now()+Duration::from_secs(3);
+    while app.agents[0].terminal.is_some() && Instant::now()<deadline { app.poll_agents(); std::thread::sleep(Duration::from_millis(20)); }
+    assert_eq!(app.agents[0].status,AgentStatus::Paused,"local-only or unobserved process success cannot fulfill a task");
+    assert!(app.agents[0].terminal.is_none());
 }

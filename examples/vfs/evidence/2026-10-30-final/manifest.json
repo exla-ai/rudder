@@ -1,0 +1,76 @@
+{
+  "created_at": "2026-10-30T12:27:12.480338+00:00",
+  "files": {
+    "README.md": {
+      "bytes": 1439,
+      "sha256": "0a1af1b2c44cb4522f87deb9d89363484a16cc7557d47bba153147c106764ec9"
+    },
+    "mounted-output.log": {
+      "bytes": 3530,
+      "sha256": "eb4b58feb78f19cfbb451d2f16ab2eebdb656fdfa7461006f5174962724b1c28"
+    },
+    "mounted-report.json": {
+      "bytes": 10418,
+      "sha256": "642c87311aae7a2876673605b98fb7831fd74e9bc724f7c77b1c3c55267b6b6b"
+    },
+    "native-cli-smoke.json": {
+      "bytes": 273,
+      "sha256": "436b997cf8f3033b9ed57defd6698304ee327b1093e605189176b55cef644b35"
+    },
+    "scripts/guest-canary.sh": {
+      "bytes": 898,
+      "sha256": "0307456ef4fbf64bd7711046277adf962ed1e777930b6050b1596289ebff23fc"
+    },
+    "scripts/historical-run-canary.py.txt": {
+      "bytes": 4548,
+      "sha256": "3ba809c632e12f4bff68456d23d5e21685249484a58f8d43ad84d961590687f5"
+    },
+    "source-checksums.json": {
+      "bytes": 601,
+      "sha256": "e655df05f4b4aa4068522524eb6c4c9694979084db3cb29cbdfffea43d116b50"
+    },
+    "source/driver.rs.gz": {
+      "bytes": 3093,
+      "sha256": "6b10e606ae9d11a01ded223a3c9de4008b886e28cac72d0d2dff23e608bca663",
+      "uncompressed_bytes": 10065,
+      "uncompressed_path": "source/driver.rs",
+      "uncompressed_sha256": "9630498a1b3311812a783e3618032a62827c6c59d1ecfc35d3615d9331b86651"
+    },
+    "source/linux.rs.gz": {
+      "bytes": 4764,
+      "sha256": "8c8b8f26590f5df818b8554967acea886f3f6e0f6f01524f1bbefed0cdd130ea",
+      "uncompressed_bytes": 18329,
+      "uncompressed_path": "source/linux.rs",
+      "uncompressed_sha256": "eaa0e19a4080c48c1499032fde128078ede0effc70ae31f8c479ac01de56c07f"
+    },
+    "source/vfs.rs.gz": {
+      "bytes": 15727,
+      "sha256": "71d1b62601db27c382e1dfe932781d2d6b149bd672561d7a1f62ac45e015fb2b",
+      "uncompressed_bytes": 69635,
+      "uncompressed_path": "source/vfs.rs",
+      "uncompressed_sha256": "f1755e1dd5679a78945d8b9fe0ecc260644c06edf8c65eeb5e74fc52bf336a51"
+    },
+    "source/vfs_backend.rs.gz": {
+      "bytes": 4265,
+      "sha256": "fd6db2dcd56752f9f92769cd4c31d95a6d0de437e99e73fcc31590e43a12f691",
+      "uncompressed_bytes": 18365,
+      "uncompressed_path": "source/vfs_backend.rs",
+      "uncompressed_sha256": "03483b75aeaa572b327b3e51dd83e4d1c61519e243d141d3888277b742f75f86"
+    },
+    "source/vfs_cli.rs.gz": {
+      "bytes": 1419,
+      "sha256": "001670cb5e8e407b538fd1e32f3266b3966ba9a5849205c4387469809caf6203",
+      "uncompressed_bytes": 4417,
+      "uncompressed_path": "source/vfs_cli.rs",
+      "uncompressed_sha256": "05241ac8e9f6119c842994598b4d54ad7a60d7dfcd29e26a3e3914c8265003a4"
+    },
+    "source/vfs_mount.rs.gz": {
+      "bytes": 3893,
+      "sha256": "21d79d196228cd163a602ae5307031ccf459ef9de2b9ea8d7f0c9a4f7501914a",
+      "uncompressed_bytes": 12255,
+      "uncompressed_path": "source/vfs_mount.rs",
+      "uncompressed_sha256": "c167443e59819406a1200fb35fe5f37426a48e405f2ea32b8ec2f7e78d004224"
+    }
+  },
+  "format_version": 1
+}

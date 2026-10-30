@@ -1,0 +1,272 @@
+{
+  "provider": "Fly.io",
+  "app": "rudder-workers-exla",
+  "limits": {
+    "cpus": 2,
+    "memory_mb": 2048,
+    "max_lifetime_seconds": 900,
+    "services": 0,
+    "volumes": 0,
+    "production_env": false
+  },
+  "steps": [
+    {
+      "step": "assert-no-app-secrets",
+      "code": 0,
+      "duration_seconds": 0.585
+    },
+    {
+      "step": "create-disposable-canary",
+      "code": 0,
+      "duration_seconds": 3.156
+    },
+    {
+      "step": "read-canary-config",
+      "code": 0,
+      "duration_seconds": 0.552
+    },
+    {
+      "step": "upload-owned-test-binary",
+      "code": 0,
+      "duration_seconds": 16.33
+    },
+    {
+      "step": "upload-owned-native-binary",
+      "code": 0,
+      "duration_seconds": 28.655
+    },
+    {
+      "step": "start-contained-vfs-qualification",
+      "code": 0,
+      "duration_seconds": 0.244
+    },
+    {
+      "step": "poll-contained-vfs-qualification",
+      "code": 0,
+      "duration_seconds": 0.219
+    },
+    {
+      "step": "poll-contained-vfs-qualification",
+      "code": 0,
+      "duration_seconds": 0.207
+    },
+    {
+      "step": "poll-contained-vfs-qualification",
+      "code": 0,
+      "duration_seconds": 0.234
+    },
+    {
+      "step": "poll-contained-vfs-qualification",
+      "code": 0,
+      "duration_seconds": 0.236
+    },
+    {
+      "step": "poll-contained-vfs-qualification",
+      "code": 0,
+      "duration_seconds": 0.329
+    },
+    {
+      "step": "poll-contained-vfs-qualification",
+      "code": 0,
+      "duration_seconds": 0.357
+    },
+    {
+      "step": "poll-contained-vfs-qualification",
+      "code": 0,
+      "duration_seconds": 1.043
+    },
+    {
+      "step": "poll-contained-vfs-qualification",
+      "code": 0,
+      "duration_seconds": 0.187
+    },
+    {
+      "step": "poll-contained-vfs-qualification",
+      "code": 0,
+      "duration_seconds": 0.339
+    },
+    {
+      "step": "poll-contained-vfs-qualification",
+      "code": 0,
+      "duration_seconds": 0.543
+    },
+    {
+      "step": "poll-contained-vfs-qualification",
+      "code": 0,
+      "duration_seconds": 11.992
+    },
+    {
+      "step": "destroy-owned-canary",
+      "code": 0,
+      "duration_seconds": 6.581
+    },
+    {
+      "step": "verify-canary-absent",
+      "code": 0,
+      "duration_seconds": 0.46
+    }
+  ],
+  "machine_id": "876e0ea0100398",
+  "image_ref": {
+    "registry": "docker-hub-mirror.fly.io",
+    "repository": "library/debian",
+    "tag": "bookworm-slim",
+    "digest": "sha256:a3bba7dc7dbcc1f37c2856c51fc9a7fac96608f50cb87b1b4e4d8b8c85ae988e"
+  },
+  "region": "iad",
+  "instance_id": "01M66FBDG3BJ85PW5K16YMM0BQ",
+  "qualification": [
+    {
+      "execution_case_passed": "static"
+    },
+    {
+      "execution_case_passed": "node"
+    },
+    {
+      "execution_case_passed": "teardown"
+    },
+    {
+      "execution_case_passed": "interrupt"
+    },
+    {
+      "execution_case_passed": "crash"
+    },
+    {
+      "actual_terminal_pane": true,
+      "cgroup_limited": false,
+      "namespace_proc_fd_denial": true,
+      "network_isolated": false,
+      "no_source_cas_credentials": true,
+      "profile_uid": 1500,
+      "read_only_runtime": true,
+      "records": [
+        {
+          "agent_exit": 0,
+          "checkpoint": {
+            "directory": {
+              "algorithm": "sha256",
+              "digest": "c55e80fcf73fa093c07d5d1ec8546d2dfbf94af8e051e4a66eab0d125d94c1ad",
+              "kind": "directory",
+              "size_bytes": 1063
+            },
+            "format_version": 1,
+            "hardlinks": {
+              "algorithm": "sha256",
+              "digest": "1c47e42b53d280feb9d2bbdbc068cfb7cae32abbe5e490baeb3c8db2c0b1be75",
+              "kind": "blob",
+              "size_bytes": 32
+            }
+          },
+          "mode": "static",
+          "phase": "checkpointed",
+          "witnessed_processes_exited": 0
+        },
+        {
+          "agent_exit": 0,
+          "checkpoint": {
+            "directory": {
+              "algorithm": "sha256",
+              "digest": "66ced85eadfaa8f32c2e402cfaf377bb9d8d494aa87d0fc567d3ae18c96ec4d9",
+              "kind": "directory",
+              "size_bytes": 2137
+            },
+            "format_version": 1,
+            "hardlinks": {
+              "algorithm": "sha256",
+              "digest": "1c47e42b53d280feb9d2bbdbc068cfb7cae32abbe5e490baeb3c8db2c0b1be75",
+              "kind": "blob",
+              "size_bytes": 32
+            }
+          },
+          "mode": "node",
+          "phase": "checkpointed",
+          "witnessed_processes_exited": 0
+        },
+        {
+          "agent_exit": 0,
+          "checkpoint": {
+            "directory": {
+              "algorithm": "sha256",
+              "digest": "3788f987bed746e9db8bccc1120f5ef42b6156415f93736c90f779dc8460dbb4",
+              "kind": "directory",
+              "size_bytes": 1482
+            },
+            "format_version": 1,
+            "hardlinks": {
+              "algorithm": "sha256",
+              "digest": "1c47e42b53d280feb9d2bbdbc068cfb7cae32abbe5e490baeb3c8db2c0b1be75",
+              "kind": "blob",
+              "size_bytes": 32
+            }
+          },
+          "mode": "teardown",
+          "phase": "checkpointed",
+          "witnessed_processes_exited": 5
+        },
+        {
+          "agent_exit": 130,
+          "checkpoint": {
+            "directory": {
+              "algorithm": "sha256",
+              "digest": "c55e80fcf73fa093c07d5d1ec8546d2dfbf94af8e051e4a66eab0d125d94c1ad",
+              "kind": "directory",
+              "size_bytes": 1063
+            },
+            "format_version": 1,
+            "hardlinks": {
+              "algorithm": "sha256",
+              "digest": "1c47e42b53d280feb9d2bbdbc068cfb7cae32abbe5e490baeb3c8db2c0b1be75",
+              "kind": "blob",
+              "size_bytes": 32
+            }
+          },
+          "mode": "interrupt",
+          "phase": "checkpointed",
+          "witnessed_processes_exited": 4
+        },
+        {
+          "mode": "crash",
+          "no_forged_checkpoint": true,
+          "phase": "running",
+          "witnessed_processes_exited": 5
+        }
+      ],
+      "selected_home_env_only": true,
+      "static_shell_node_cc": true,
+      "valid_mcp_and_forged_token_denial": true
+    },
+    {
+      "node": "v18.20.4",
+      "cc": "12.2.0"
+    }
+  ],
+  "artifacts": {
+    "engine/src/execution.rs": "fe7f50e536b438a7058d0ab0d4bd95b12bb5265cd0314af4a8dcbf709885cda2",
+    "engine/src/execution/handoff.rs": "df6d8460db00ff23610f520765fa301e95e94b458c0af90357b31ae84837599a",
+    "engine/src/execution/linux.rs": "a54edcd5035941f3d62ca7e5aece106578581b17622ae69e973c0021df468b08",
+    "engine/src/execution/root.rs": "9c592a70b84fa166f09649854d0c7ee09b708f08bcad6d5c17744f7e141cb3c5",
+    "engine/src/execution/state.rs": "c89dec72b26461b3b6e3c744572e3837a07a2495877cde240ce101ee6e191352",
+    "engine/src/execution/qualification_driver.rs": "90ea9e6a3995d4295b159984b6ad672d72c922d6f945a4286dc80a4920547c43",
+    "engine/tests/execution_handoff.rs": "42e1659364bac906baf2cb1b82fdd0f5541297c8d376b206ea822a791ccf5aef",
+    "engine/tests/execution_mount.rs": "aacd800136cf7cc14d9546af182aa8340df451c6dfed5110f368df19828068d4",
+    "native/src/execution_cli.rs": "8842aeec2f0d4e649cd385003cb80f1999b5daa962df9467ff61f1f72c530445",
+    "controller": {
+      "sha256": "3489bf3f442fa7377b77671408f084a42a50e0b5f4ac2f9e52d0582ffca60e29",
+      "bytes": 55289056
+    },
+    "native": {
+      "sha256": "7a2bee25cd9aa227ae62576f7263b0f7c10080c6843789165a7823a419310769",
+      "bytes": 22182920
+    }
+  },
+  "destroyed": true,
+  "cleanup_verified": true,
+  "verified_at": "2026-10-30T13:19:39Z",
+  "kernel": "6.12.114-fly",
+  "kernel_proof": {
+    "command": "/bin/uname -r",
+    "exit_code": 0,
+    "output": "6.12.114-fly",
+    "scope": "separate read on the same owned canary before destruction"
+  }
+}

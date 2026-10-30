@@ -1,0 +1,70 @@
+# Explicitly owned disposable Fly app required; no default target.
+import json, os, pathlib, re, subprocess, time
+
+ROOT = pathlib.Path(os.environ['RUDDER_EXECUTION_CANARY_DIR']).resolve()
+FLY = os.environ.get('RUDDER_FLYCTL', 'flyctl')
+APP = os.environ['RUDDER_EXECUTION_FLY_APP']
+owned = None
+report = {'provider':'Fly.io','app':APP,'limits':{'cpus':2,'memory_mb':2048,'max_lifetime_seconds':900,'services':0,'volumes':0,'production_env':False},'steps':[]}
+
+def run(args, timeout=60, label=None):
+    start=time.monotonic()
+    r=subprocess.run([FLY,*args],cwd='/tmp',capture_output=True,text=True,timeout=timeout)
+    record={'step':label or args[0], 'code':r.returncode,'duration_seconds':round(time.monotonic()-start,3)}
+    report['steps'].append(record)
+    if r.returncode: raise RuntimeError(json.dumps(record)+' '+r.stderr[-2000:])
+    return r.stdout+r.stderr
+
+try:
+    existing=json.loads(run(['secrets','list','-a',APP,'--json'],label='assert-no-app-secrets'))
+    assert existing==[], 'canary app has secrets; refusing launch'
+    out=run(['machine','run','debian:bookworm-slim','-a',APP,'--machine-config',str(ROOT/'fly-canary-config.json'),'--name','rudder-execution-qualification-'+str(int(time.time())),'--region','iad','--detach','--skip-dns-registration','--file-local','/tmp/vfs-canary.sh='+str(ROOT/'guest-canary.sh')],timeout=120,label='create-disposable-canary')
+    m=re.search(r'Machine ID:\s*([0-9a-f]+)',out)
+    if not m: raise RuntimeError('unable to identify owned machine: '+out[-2000:])
+    owned=m.group(1); report['machine_id']=owned
+    print(json.dumps({'created_canary':owned,'max_lifetime_seconds':900}),flush=True)
+    time.sleep(3)
+    machines=json.loads(run(['machine','list','-a',APP,'--json'],label='read-canary-config'))
+    status=next(x for x in machines if x.get('id')==owned)
+    assert 'config' in status, 'provider list omitted config; cannot verify isolation'
+    config=status.get('config',{})
+    assert not config.get('services') and not config.get('mounts'), 'unexpected services or volumes'
+    assert set(config.get('env',{})).issubset({'PRIMARY_REGION','FLY_PRIMARY_REGION'}), 'unexpected injected environment'
+    report['image_ref']=status.get('image_ref'); report['region']=status.get('region'); report['instance_id']=status.get('instance_id')
+    run(['ssh','sftp','put',str(ROOT/'controller.gz'),'/tmp/controller.gz','-a',APP,'--machine',owned,'--mode','0600','--quiet'],timeout=90,label='upload-owned-test-binary')
+    run(['ssh','sftp','put',str(ROOT/'native.gz'),'/tmp/native.gz','-a',APP,'--machine',owned,'--mode','0600','--quiet'],timeout=90,label='upload-owned-native-binary')
+    cmd="/bin/sh -lc '(timeout 600 /bin/sh /tmp/vfs-canary.sh; echo $? >/tmp/vfs-done) >/tmp/vfs-output 2>&1 </dev/null & echo started'"
+    run(['machine','exec',owned,cmd,'-a',APP,'--timeout','15'],timeout=25,label='start-contained-vfs-qualification')
+    deadline=time.monotonic()+650
+    out=''
+    while time.monotonic()<deadline:
+        probe=run(['machine','exec',owned,"/bin/sh -lc 'if test -f /tmp/vfs-done; then echo FINISHED; cat /tmp/vfs-done; cat /tmp/vfs-output; else echo PENDING; tail -n 4 /tmp/vfs-output 2>/dev/null; fi'",'-a',APP,'--timeout','15'],timeout=25,label='poll-contained-vfs-qualification')
+        if 'FINISHED' in probe:
+            out=probe
+            assert 'FINISHED\n0\n' in out, 'qualification command failed: '+out[-5000:]
+            break
+        print(json.dumps({'canary_progress':probe[-600:]}),flush=True)
+        time.sleep(3)
+    assert out, 'qualification deadline exceeded'
+    (ROOT/'execution-full-output.log').write_text(out)
+    lines=[x for x in out.splitlines() if x.startswith('{')]
+    assert lines, 'no qualification JSON'
+    report['qualification']=[json.loads(line) for line in lines]
+    report['artifacts']=json.loads((ROOT/'execution-source-checksums.json').read_text())
+except Exception as e:
+    report['error']=str(e)[:3000]
+finally:
+    if owned:
+        try:
+            out=run(['machine','destroy',owned,'-a',APP,'--force'],timeout=60,label='destroy-owned-canary')
+            report['destroyed']=True
+        except Exception as e: report['cleanup_error']=str(e)[:2000]
+        try:
+            remaining=json.loads(run(['machine','list','-a',APP,'--json'],timeout=30,label='verify-canary-absent'))
+            report['cleanup_verified']=not any(x.get('id')==owned for x in remaining)
+        except Exception as e: report['cleanup_verification_error']=str(e)[:1000]
+    report['verified_at']=time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime())
+    (ROOT/'execution-full-report.json').write_text(json.dumps(report,indent=2))
+    print(json.dumps(report,separators=(',',':')),flush=True)
+
+if 'error' in report or not report.get('cleanup_verified'): raise SystemExit(1)

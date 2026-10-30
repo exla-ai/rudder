@@ -44,6 +44,10 @@ The user has established these directions:
   within delegated scope, with observable outcomes and preserved workspace state.
 - The rewrite must remove redundant user commands and generated coordination
   machinery. A simpler CLI/slash surface is a launch requirement, not later polish.
+- Startup instructions must stay compact. Load applicable repo rules once and
+  fetch detailed references or coordination history when the task needs them.
+  Recheck ownership and relevant decisions at integration boundaries. Preserve
+  verification and delivery responsibilities without repeated handbook injection.
 - Users express a task or follow-up; Rudder chooses when decomposition is useful.
   They should not have to invoke `/plan`. Sunset standalone `/gam`; preserve
   review as a normal verification capability and reuse its backend transports.
@@ -1047,8 +1051,12 @@ recovery drills, supported Mac and Codex/Claude behavior, and release evidence.
 Do not mark that milestone complete because a local build, push or preliminary
 Cloud deployment succeeded.
 
-The first implementation increments through `4.0.0-alpha.3` are recorded in
-the implementation/delivery documents above. A bounded Fly experiment has
-also demonstrated private ext4-backed OverlayFS views, with exact raw samples
-and explicit limits. That is progress toward E0/E1, not a distributed cache,
-a completed filesystem qualification, or a real-compilation speedup claim.
+The first published increments through `4.0.0-alpha.3` are recorded in the
+implementation/delivery documents above. The subsequent source track contains
+the local CAS/journal, opt-in persistent project host, Rust CoW VFS, native
+transfer adapters and a measured Buck2/REAPI workload. Mounted Fly and real S3
+checks support specific filesystem and retention contracts. See the
+[implementation record](docs/architecture/implementation.md) for exact samples,
+limits and current release state. Fleet authority, restricted worker roots,
+default VFS agent launch, machine-wide ownership, Mac qualification and complete
+surface migration retain their own gates.

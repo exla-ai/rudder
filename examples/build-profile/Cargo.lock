@@ -1,0 +1,6 @@
+# Managed sample has no third-party Rust dependencies.
+version = 4
+
+[[package]]
+name = "rudder-build-profile-fixture"
+version = "0.1.0"

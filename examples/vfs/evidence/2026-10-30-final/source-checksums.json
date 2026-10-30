@@ -1,0 +1,10 @@
+{
+  "binary_sha256": "61b9edc4a8303e812685ef4c985d57363e84401b8ea32b441280550fedebee33",
+  "sources": {
+    "engine/src/vfs.rs": "f1755e1dd5679a78945d8b9fe0ecc260644c06edf8c65eeb5e74fc52bf336a51",
+    "engine/src/vfs/linux.rs": "eaa0e19a4080c48c1499032fde128078ede0effc70ae31f8c479ac01de56c07f",
+    "engine/tests/vfs_backend.rs": "03483b75aeaa572b327b3e51dd83e4d1c61519e243d141d3888277b742f75f86",
+    "engine/tests/vfs_mount.rs": "c167443e59819406a1200fb35fe5f37426a48e405f2ea32b8ec2f7e78d004224",
+    "native/src/vfs_cli.rs": "05241ac8e9f6119c842994598b4d54ad7a60d7dfcd29e26a3e3914c8265003a4"
+  }
+}

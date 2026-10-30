@@ -1,6 +1,7 @@
 FROM rust:1-bookworm AS native-builder
 WORKDIR /src
 COPY native ./native
+COPY engine ./engine
 # The binary embeds assets (the notifier icon) with include_bytes!.
 COPY assets ./assets
 COPY Cargo.toml Cargo.lock ./

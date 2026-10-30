@@ -1,0 +1,36 @@
+FINISHED
+0
+{"missing_device_fails_closed":true,"uid":1500}
+phase=prepare count=1
+phase=mounted count=1
+phase=identity
+phase=descendant
+phase=mmap
+phase=unmount
+phase=checkpoint
+phase=restore
+phase=prepare count=100
+phase=mounted count=100
+phase=prepare count=10000
+phase=mounted count=10000
+phase=prepare count=100000
+phase=mounted count=100000
+phase=crash
+{"active_host_modified":false,"backend":"rudder-logical-fuser-0.18.0","detached_descendant_busy_then_reaped":true,"gid_map":"0          0 4294967295","kernel":"6.12.114-fly","scaling":[{"atomic_save":true,"entries":1,"fork_ns":8721608,"fork_samples_ns":[13172450,8852998,10663684,10272049,8160161],"hardlink_restore":true,"inodes_after_rename":3,"mmap_msync":true,"open_fd_unlink":true,"prepare_ns":5023772,"raw_names":true,"rename_samples_ns":[4356994,3861592,40349827,5330736,24316856],"rename_syscall_ns":22289886,"strict_busy_unmount":true},{"entries":100,"fork_ns":19756425,"fork_samples_ns":[9553063,10258137,9128512,10585147,9256752],"inodes_after_rename":3,"prepare_ns":29604289,"rename_samples_ns":[5458524,5506631,6028121,5013916,6088954],"rename_syscall_ns":14450685},{"entries":10000,"fork_ns":10237764,"fork_samples_ns":[10696285,9345772,9378097,10574130,10284641],"inodes_after_rename":3,"prepare_ns":2616744179,"rename_samples_ns":[15196070,5204712,14546851,4976257,4711228],"rename_syscall_ns":5608761},{"entries":100000,"fork_ns":46796747,"fork_samples_ns":[43907166,32719592,39154396,44999960,43645566],"inodes_after_rename":3,"prepare_ns":27645009604,"rename_samples_ns":[16103374,14532005,5380542,10942007,10691157],"rename_syscall_ns":5496190}],"schema":1,"server_abort_recovery":true,"uid":0,"uid_map":"0          0 4294967295","writeback_cache":false}
+phase=prepare count=1
+phase=mounted count=1
+phase=identity
+phase=descendant
+phase=mmap
+phase=unmount
+phase=checkpoint
+phase=restore
+phase=prepare count=100
+phase=mounted count=100
+phase=prepare count=10000
+phase=mounted count=10000
+phase=prepare count=100000
+phase=mounted count=100000
+phase=crash
+{"active_host_modified":false,"backend":"rudder-logical-fuser-0.18.0","detached_descendant_busy_then_reaped":true,"gid_map":"1500       1500          1","kernel":"6.12.114-fly","scaling":[{"atomic_save":true,"entries":1,"fork_ns":46621758,"fork_samples_ns":[46544207,41263353,40861628,41482806,42225791],"hardlink_restore":true,"inodes_after_rename":3,"mmap_msync":true,"open_fd_unlink":true,"prepare_ns":5332341,"raw_names":true,"rename_samples_ns":[9015724,12983189,5439061,6300534,10693142],"rename_syscall_ns":4186283,"strict_busy_unmount":true},{"entries":100,"fork_ns":43606856,"fork_samples_ns":[20066572,41803941,43595193,43539552,44783223],"inodes_after_rename":3,"prepare_ns":29512942,"rename_samples_ns":[5392394,6125040,5223783,6047748,5103728],"rename_syscall_ns":5319875},{"entries":10000,"fork_ns":12462819,"fork_samples_ns":[11107702,10109709,10531431,9946119,11642300],"inodes_after_rename":3,"prepare_ns":2477835887,"rename_samples_ns":[5363647,4921548,5285685,5592440,5072890],"rename_syscall_ns":5919478},{"entries":100000,"fork_ns":43927095,"fork_samples_ns":[43509752,42834956,42342752,42515193,44044416],"inodes_after_rename":3,"prepare_ns":26556720348,"rename_samples_ns":[9040281,4795178,10356244,4810512,6079371],"rename_syscall_ns":5351872}],"schema":1,"server_abort_recovery":true,"uid":1500,"uid_map":"1500       1500          1","writeback_cache":false}
+{"initial_mount_namespace_unchanged":true,"device_group":1500,"device_mode":"0660","setuid_helper_installed":false}

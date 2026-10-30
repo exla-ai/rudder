@@ -50,7 +50,7 @@ the three architecture documents already contained this session's planning work.
 | Private previews | Persisted Tailscale login, actual readiness, bounded async probes, exact project ownership, ready links and local open | E13 subset implemented; real userspace/Serve check passed; laptop/phone access remains untested |
 | Terminal stream | Shared home/sail helper, short output batching, bounded backpressure, connection fencing, UTF-8 and repaint recovery | E13 subset deployed in the worker image; real WS/PTY VM checks passed; existing homes adopt when idle |
 | Startup/download caches | Background CLI update, persistent account-local npm/pnpm/uv cache defaults, explicit overrides retained | Behavior tests pass; no distributed action-cache claim |
-| Full storage/engine rewrite | Milestones below | Planned, not implemented by these changes |
+| Full storage/engine rewrite | Milestones below | Local engine/CAS/VFS/build foundations implemented in the unreleased continuation below; fleet/migration gates remain open |
 
 The current native simple-execution path remains an isolated worker; explicit
 main-checkout mode remains available. The initial automatic DAG path retains
@@ -64,6 +64,99 @@ home/dashboard alternative until that adapter migrates. Starting a permanent
 dashboard in its place without task identity/approval/completion tracking would
 misreport completion. Local `/cloud` task forwarding still reaches that legacy
 path, so this is a stated alpha limitation, not complete Cloud routing parity.
+
+## Unreleased continuation, 2026-10-30
+
+This is source and qualification evidence after alpha.3. A new release, Cloud
+API rollout and worker adoption must be recorded separately before calling it
+shipped. The active objective remains the full plan.
+
+- `engine/` provides typed immutable roots, local checksummed CAS, staged
+  publication, retained closures and conservative collection. Source,
+  environment, full private view and hardlink topology have separate identities.
+  Checkpoint v3 retains the topology; validated build inputs include it in both
+  Rudder and native frontend action contracts. Local retention cannot assert
+  remote durability by itself.
+- The opt-in persistent native host owns one checkout after its terminal views
+  disconnect. It fences compatible owners with an OS lock and journal epochs,
+  refuses known live legacy schedulers, and exposes authenticated control and
+  existing attach views. This extracts the existing App; it is still one project
+  per host process. Fleet PostgreSQL authority and the final machine-wide
+  multi-project actor have not been implemented.
+- The SQLite WAL journal records capability-scoped commands, effects, mailboxes,
+  explicit acknowledgments, topic versions and exact-root integration evidence.
+  Retries by the original sender return historical receipts after a recipient
+  restart; they never route into its replacement. Started effects recover as
+  uncertain and require reconciliation. Exact live thread/turn observations gate
+  controls; a pending command rechecks its original grant and both run epochs
+  before dispatch. Retired pending targets receive a rejected receipt; started
+  effects remain uncertain. Real Claude 2.1.314 and Codex 0.166.0 engine/dashboard
+  steering passed, including attributed peer input and explicit same-thread
+  resume. Ordinary mail still requires inbox/ack; automatic wake is not shipped.
+  Codex model-turn interruption can leave a yielded shell running until process
+  cancellation or engine shutdown. See [actual provider evidence](../../examples/agent-runtime/evidence/2026-10-30/README.md).
+- Rudder's Rust VFS has immutable prepared directory indexes and private
+  persistent inode/namespace deltas. Actual mounted Fly tests cover inherited
+  directory rename, raw names, hardlinks, shared mmap/fsync, atomic saves,
+  open-unlinked files, strict busy unmount and server-abort recovery. A 100,000
+  child directory rename visited no children. A rootless UID1500 self-mapped
+  user/mount namespace can open a boot-delegated `/dev/fuse` without a custom
+  privileged broker. The explicit restricted execution helper also passed the
+  real `TerminalPane` path with Node/gcc, private roots, external broker auth,
+  credential/CAS/peer denial, Ctrl+C and witnessed crash teardown. Its owned VM
+  was deleted and absence verified at `2026-10-30T13:19:39Z`. Default launch,
+  managed view/VCS integration and uncertain-run reconciliation remain open.
+  [Execution proof and limits](worker-execution.md), including uninterruptible
+  I/O limits, are separate from [VFS qualification](vfs-qualification.md).
+- A pinned Buck2 profile builds real Rust and TypeScript against a real native
+  REAPI cache. Archived whole-build warm samples range from 2.45 to 3.56 s.
+  The latest topology-aware matrix measured a fresh-graph remote hit at 3.216 s
+  and a source edit at 5.287 s under concurrent development load. Prepared-index
+  lookup is 2 ms; initial preparation/materialization remains substantial. This profile does
+  not yet build arbitrary Cargo/build scripts or prove cross-engine action
+  interoperability. See [build profile and raw samples](build-profile.md).
+- The new remote store has a retained/versioned S3 bucket and a Fly OIDC workload
+  role. CloudFormation `rudder-fabric-v1` completed at
+  `2026-10-30T11:29:29.573Z`. Workload-role conditional-write, no-overwrite,
+  immutable-delete denial and staging-renewal checks passed at
+  `2026-10-30T11:38:28.450Z`. Default-profile admin credentials remain outside
+  application configuration; the app uses temporary workload credentials. The
+  cache-miss policy update completed at `2026-10-30T13:01:57.637Z`: the dedicated
+  bucket allows the role to distinguish missing keys (404) from denial (403).
+  At `2026-10-30T13:09:26.122Z`, the actual Fly OIDC role passed a loopback test
+  of the current HTTP handler: fresh miss, conditional upload, hit, root
+  publication/read, identical download and immutable-delete denial. Deployed
+  login/worker authentication remains a separate rollout gate. [Safe reports](../../examples/fabric/evidence/2026-10-30/README.md).
+- The Cloud CAS API streams large downloads and spools uploads privately before
+  checksum-verified conditional S3 writes. A real 70 MiB S3 round trip and strict
+  root publication passed at `2026-10-30T12:14:20.550Z`: upload 964 ms, download
+  745 ms, publication 884 ms, peak process RSS 126,623,744 bytes. That check used
+  the admin default profile; deployed worker authentication is a separate gate.
+  Blob limits are 256 MiB; directory metadata remains bounded at 4 MiB. Large
+  flat directories need a sharded format before general remote scale claims.
+- One persistent framed native helper supplies pinned source and staged target
+  transfer adapters. The actual HTTP handler, 70 MiB blob and an independent
+  fresh native CAS are tested together, including loss/corruption and u64
+  checkpoint cursors. Live independent-worker restore remains a rollout gate.
+  See [transfer contracts](fabric-transfer.md).
+- Startup prompt and generated guidance now request relevant context on demand.
+  The main role contract is 1,167 bytes, worker contract 915 bytes, and Rudder's
+  own always-loaded `AGENTS.md` is 5,820 bytes, down from 193,536. Full reference
+  material remains linked. Current context audit has no findings. See
+  [prompt context](prompt-context.md).
+
+The primary npm package's alpha.3 `next` tag now resolves successfully. The
+previous registry-processing blocker has cleared. No alpha.4 delivery is
+asserted by this source record.
+
+The alpha.4 release candidate passed the production and Cloud builds, 1,063
+Rust tests (16 ignored), 577 Node tests (8 additional optional skips), and all 59
+real-terminal tests. The final output changes also passed the focused Cloud
+home and PTY regressions: completed command output remains readable, failures
+include drained final text, and a managed backend still needs typed completion.
+The context audit has no findings. Source/evidence inspection found no matches
+to the configured AWS, Claude or Codex secrets, including compressed sources.
+These are local checks; the tag workflow, registry and rollout remain separate.
 
 ## Dependency-ordered continuation
 
@@ -144,13 +237,13 @@ returned HTTP 200; unauthenticated state access returned 401. Verified
   adopts the new image without interrupting active agents; full fleet adoption
   is not claimed.
 
-Npm accepted both uploads but explicitly reported package processing. At
+Npm accepted both uploads but initially reported package processing. At
 `2026-10-30T10:06:35Z`, `@viraatdas/rudder@4.0.0-alpha.3` was available with
 the correct Git revision; an isolated install, CLI version, Linux native smoke,
 new modules and all three platform files were verified. Primary
-`@exla/rudder@4.0.0-alpha.3` still returned **404**, so primary-package
-installation remains externally blocked. Do not silently republish or retag
-the same version to work around provider processing.
+`@exla/rudder@4.0.0-alpha.3` still returned **404**. A later registry check
+confirmed both packages resolve alpha.3 through `next`; that blocker has
+cleared. No republishing or retagging was needed.
 
 [Structured evidence](delivery-alpha3.json) contains the machine, image, CI,
 registry, canary, preview and cleanup checks. Refresh provider/registry state

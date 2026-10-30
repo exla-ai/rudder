@@ -1,0 +1,10 @@
+{
+  "verifiedAt": "2026-10-30T12:21:31.311876+00:00",
+  "native_cli": true,
+  "real_source_hardlinks": true,
+  "fork_initial_inode_count": 1,
+  "checkpoint_roundtrip": true,
+  "seal_destroy": true,
+  "input_unchanged": true,
+  "temporary_fixture_removed_after_exit": true
+}

@@ -1,0 +1,119 @@
+{
+  "format_version": 1,
+  "kind": "restricted-linux-execution-qualification",
+  "verified_at": "2026-10-30T13:19:39Z",
+  "machine_id": "876e0ea0100398",
+  "cleanup_verified": true,
+  "source": [
+    {
+      "repository_path": "engine/src/execution.rs",
+      "archive_path": "source/engine__src__execution.rs.gz",
+      "sha256": "fe7f50e536b438a7058d0ab0d4bd95b12bb5265cd0314af4a8dcbf709885cda2",
+      "compressed_sha256": "1a47999ac4b123db7df899dc1f87e8b2a3780edb034867d718d9e4469958268a",
+      "uncompressed_bytes": 7256
+    },
+    {
+      "repository_path": "engine/src/execution/handoff.rs",
+      "archive_path": "source/engine__src__execution__handoff.rs.gz",
+      "sha256": "df6d8460db00ff23610f520765fa301e95e94b458c0af90357b31ae84837599a",
+      "compressed_sha256": "7a883a8c002a87f2c69355c9bedff382bce078398f74556c29c876b21e5bed4f",
+      "uncompressed_bytes": 9322
+    },
+    {
+      "repository_path": "engine/src/execution/linux.rs",
+      "archive_path": "source/engine__src__execution__linux.rs.gz",
+      "sha256": "a54edcd5035941f3d62ca7e5aece106578581b17622ae69e973c0021df468b08",
+      "compressed_sha256": "df73fca989fb8d9bb45ca8a0ced88bd5b91db918399c67363efaf31e31fd9cdb",
+      "uncompressed_bytes": 21431
+    },
+    {
+      "repository_path": "engine/src/execution/root.rs",
+      "archive_path": "source/engine__src__execution__root.rs.gz",
+      "sha256": "9c592a70b84fa166f09649854d0c7ee09b708f08bcad6d5c17744f7e141cb3c5",
+      "compressed_sha256": "dff6863714ed920dc64e5cf0c6d5eac173804dce35de7c520d4e5be93d5975c7",
+      "uncompressed_bytes": 17625
+    },
+    {
+      "repository_path": "engine/src/execution/state.rs",
+      "archive_path": "source/engine__src__execution__state.rs.gz",
+      "sha256": "c89dec72b26461b3b6e3c744572e3837a07a2495877cde240ce101ee6e191352",
+      "compressed_sha256": "7f990a1f195e687882cdb53b75d7e1f0775c4ccc8f9826cc07c80d5c1f7faeef",
+      "uncompressed_bytes": 5362
+    },
+    {
+      "repository_path": "engine/src/execution/qualification_driver.rs",
+      "archive_path": "source/engine__src__execution__qualification_driver.rs.gz",
+      "sha256": "90ea9e6a3995d4295b159984b6ad672d72c922d6f945a4286dc80a4920547c43",
+      "compressed_sha256": "c65fd95eeabe8cbaff63da3b1e1a6bf631e7d90988279687cfce4ff6ec327712",
+      "uncompressed_bytes": 21680
+    },
+    {
+      "repository_path": "engine/tests/execution_handoff.rs",
+      "archive_path": "source/engine__tests__execution_handoff.rs.gz",
+      "sha256": "42e1659364bac906baf2cb1b82fdd0f5541297c8d376b206ea822a791ccf5aef",
+      "compressed_sha256": "52ac882273848138ff8e0a0ba7c6b18a80df2906be1923d78c585fa016f6e501",
+      "uncompressed_bytes": 7211
+    },
+    {
+      "repository_path": "engine/tests/execution_mount.rs",
+      "archive_path": "source/engine__tests__execution_mount.rs.gz",
+      "sha256": "aacd800136cf7cc14d9546af182aa8340df451c6dfed5110f368df19828068d4",
+      "compressed_sha256": "69cfa92701211f887e64646925416bc47deebc586238eb37b76d9425d45834d5",
+      "uncompressed_bytes": 2321
+    },
+    {
+      "repository_path": "native/src/execution_cli.rs",
+      "archive_path": "source/native__src__execution_cli.rs.gz",
+      "sha256": "8842aeec2f0d4e649cd385003cb80f1999b5daa962df9467ff61f1f72c530445",
+      "compressed_sha256": "046cdaf144e258ada62836ab0549bae163fc1c88e9c7aeb351bd41d9fcb62217",
+      "uncompressed_bytes": 1202
+    }
+  ],
+  "artifacts": [
+    {
+      "path": "README.md",
+      "sha256": "a840a2882de92686d884fdc0eacb427e3b3662960b4a466bcf6419e8fb26ec9d",
+      "bytes": 2431
+    },
+    {
+      "path": "mounted-output.log",
+      "sha256": "6030fd15a10647428c04728a6c3dccab260993c93f7d0cdc7cee6429e6f99a2f",
+      "bytes": 2259
+    },
+    {
+      "path": "mounted-report.json",
+      "sha256": "5acd33a4890c2baaff35ff4a853dae7dfd6a85318f58d776ac38672214034769",
+      "bytes": 7852
+    },
+    {
+      "path": "scripts/fly-canary-config.json",
+      "sha256": "858f89869425cd7c3023ec1e3464d5e925214bad6e61fbf8e9be5e21d07eef3c",
+      "bytes": 348
+    },
+    {
+      "path": "scripts/guest-canary.sh",
+      "sha256": "e608cfe435ba5618cb9de282b5cb10d55de1a1a3152dd4ba4d594239638c3d48",
+      "bytes": 730
+    },
+    {
+      "path": "scripts/run-canary.py",
+      "sha256": "bf4d12cd38f9beb6a9942dd72a5b64c06faf692d3603eb7c143d8a93e4b48890",
+      "bytes": 4787
+    },
+    {
+      "path": "source-checksums.json",
+      "sha256": "d5b3273cf5f861d92db98628bd94eb96086edb9775c5b9a63dfd47be3a0e3cfd",
+      "bytes": 1193
+    }
+  ],
+  "notes": [
+    "Source snapshots are exact qualified files compressed without timestamps; no compiled binaries or credentials are archived.",
+    "The repeat-run script parameterizes the owning app, Fly executable and artifact directory; the report describes the actual historical canary.",
+    "Normal Cargo tests do not create machines, mount filesystems or change device permissions."
+  ],
+  "post_qualification_formatting": {
+    "repository_path": "engine/src/execution/qualification_driver.rs",
+    "current_sha256": "fcb30a020a1bef21256fce5b009837f47eb5965903cadc9c2c4ca9163746a039",
+    "change": "rustfmt-only line wrapping of the bounded broker fixture startup check; compressed source preserves the exact preformat qualified file"
+  }
+}

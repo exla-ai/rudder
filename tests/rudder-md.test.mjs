@@ -158,23 +158,24 @@ test("withRudderMdLock proceeds (best-effort) when a fresh lock is never release
 // loadInstructionFiles: visible truncation marker.
 // ---------------------------------------------------------------------------
 
-test("loadInstructionFiles appends a visible marker only when a file is truncated", async () => {
+test("workers get context references without duplicating file bodies; API planning has a visible budget", async () => {
   const dir = await mkdtemp(path.join(tmpdir(), "rudder-instr-"));
   try {
     await writeFile(path.join(dir, "AGENTS.md"), "x".repeat(12_500), "utf8");
     await writeFile(path.join(dir, "README.md"), "short readme\n", "utf8");
+    await writeFile(path.join(dir, "CLAUDE.md"), "c".repeat(12_000), "utf8");
     const files = await loadInstructionFiles(dir, dir);
     const agents = files.find((file) => file.path === "AGENTS.md");
-    assert.ok(agents, "AGENTS.md is injected");
-    assert.ok(
-      agents.content.endsWith(
-        "[Rudder: AGENTS.md truncated at 12000 of 12500 chars; read AGENTS.md in the workspace for the rest.]",
-      ),
-      `marker missing; tail was: ${agents.content.slice(-120)}`,
-    );
-    assert.ok(agents.content.startsWith("x".repeat(200)), "truncated body precedes the marker");
+    assert.ok(agents, "AGENTS.md remains discoverable");
+    assert.match(agents.content, /read on demand.*12500 bytes/);
+    assert.ok(!agents.content.includes("x".repeat(100)), "workers do not reload auto-loaded rules into every prompt");
     const readme = files.find((file) => file.path === "README.md");
-    assert.equal(readme.content, "short readme\n", "untruncated files carry no marker");
+    assert.match(readme.content, /Usage reference/);
+    const planner = await loadInstructionFiles(dir, dir, { mode: "planning" });
+    assert.ok(planner.reduce((bytes, file) => bytes + file.content.length, 0) < 8_300, "one total planning budget instead of a full budget per context file");
+    assert.match(planner.find((file) => file.path === "AGENTS.md").content, /truncated; 12500 chars/);
+    assert.match(planner.find((file) => file.path === "CLAUDE.md").content, /truncated; 12000 chars/);
+    assert.ok(!planner.find((file) => file.path === "README.md").content.includes("short readme"));
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

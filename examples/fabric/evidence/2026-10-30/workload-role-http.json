@@ -1,0 +1,41 @@
+{
+  "ok": true,
+  "verifiedAt": "2026-10-30T13:09:26.122Z",
+  "provider": "Fly OIDC + AWS S3",
+  "credentialSource": "actual control-machine workload identity, no admin key",
+  "roleArn": "arn:aws:iam::597088032164:role/rudder-fabric-control-v1",
+  "bucket": "rudder-fabric-v1-597088032164-us-east-1",
+  "missingStatus": 404,
+  "deleteStatus": 403,
+  "scope": "loopback instance of actual HTTP handler; production login/worker auth separate",
+  "checks": [
+    "fresh workload-role GetObject returns404",
+    "actual HTTP missing reports fresh object",
+    "streamed conditional SHA256 blob upload",
+    "missing reports verified existing object",
+    "new immutable root publishes and reads back",
+    "streamed download bytes match",
+    "retained immutable delete denied"
+  ],
+  "receipt": {
+    "format_version": 1,
+    "root_id": "qualified-root",
+    "root": {
+      "kind": "blob",
+      "algorithm": "sha256",
+      "digest": "64b4523ca9fb43cb0421096e1eca31e316613e4afb0dba84de5a2bd9729a3e9f",
+      "size_bytes": 72
+    },
+    "durability": "replicated",
+    "published_at_ms": 1793365765971,
+    "object_count": 1,
+    "total_bytes": 72
+  },
+  "namespace": "fabric/v1/accounts/2af2728436f7a2d10e82f645205ab0d1769a9fde94c24a589fee4a1b25be349b",
+  "cleanup": {
+    "ok": true,
+    "checkedAt": "2026-10-30T13:20:22.364Z",
+    "ownedScriptsRemaining": 0,
+    "ownedModuleDirectoriesRemaining": 0
+  }
+}

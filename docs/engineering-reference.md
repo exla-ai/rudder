@@ -1,0 +1,2798 @@
+# Rudder engineering reference
+
+Engineering and implementation reference for Rudder. This is the internal map of
+how the project is built. End users should read `README.md` instead (install and
+usage). Agents start with the concise [repository rules](../AGENTS.md) and read
+the relevant sections of this reference when needed.
+
+> Note: `RUDDER.md` in the repo root is generated at runtime by Rudder to
+> coordinate live agents in a checkout. It is not authored documentation. Do not
+> hand-edit it; it is rewritten on the next run and git-excluded.
+
+---
+
+## 1. What Rudder is
+
+Rudder is a terminal app for running coding agents (Claude Code and Codex) in
+parallel. Each task gets an isolated jj (Jujutsu) workspace, colocated with git,
+and runs a real agent CLI inside a native terminal pane. Rudder owns the outer
+workflow around those agents: a three-pane dashboard, pane focus, scrollback,
+task summaries, live review, and merge back to the base branch. Rudder Cloud is
+an optional hosted worker mode that keeps the same local control surface.
+
+It ships as the npm package `@exla/rudder`, binary `rudder`
+(`dist/index.js`).
+
+Release rule for pushes: when pushing Rudder product changes to `origin/main`,
+ship them as an npm versioned release unless the user explicitly asks for a
+non-release push. Run the relevant tests, commit the change, run `npm version
+patch`/`minor`/`major` as appropriate, then push `main` and the created tag.
+After pushing, verify the GitHub release workflow and `npm view
+@exla/rudder version` so the user knows which version contains the fix.
+
+Two big pieces, one product:
+
+- A **TypeScript orchestrator** (the `rudder` CLI): argument parsing, run
+  lifecycle, jj workspaces (colocated with git), backend adapters, state
+  persistence, auth, cloud.
+- A **Rust native dashboard** (`rudder-native`): the interactive three-pane TUI
+  that hosts the agent PTYs, drawn with ratatui over crossterm, with real
+  pseudo-terminals via portable-pty.
+
+A third piece, **Rudder Cloud** (`cloud/`), is a standalone control-plane server
+plus a worker image, used only when a task is handed off to the cloud.
+
+---
+
+## 2. Repository layout
+
+```
+.
+├── src/                  TypeScript orchestrator (compiled to dist/)
+├── native/               Rust native dashboard crate (rudder-native)
+│   ├── src/main.rs        the App state machine + domain types + entry/run loop
+│   ├── src/render.rs      ratatui rendering: panes, prompts, layout, styles
+│   ├── src/selection.rs   mouse->coordinate mapping, selection, clipboard, cells
+│   ├── src/detect.rs      worker-output heuristics for permission/prompt UX (not completion)
+│   ├── src/signals.rs     official completion signals (Claude Stop hook / Codex notify / opencode plugin) — PRIMARY
+│   ├── src/handoff.rs     conversation handoff: discovery, transcript titles, queued requests
+│   ├── src/models.rs      model/effort tables, model picker, suggestion ranking
+│   ├── src/launch.rs      agent launch/resume command building, review-all runs
+│   ├── src/tasks.rs       prompt construction, task summaries, rudder-plan parsing
+│   ├── src/task_routing.rs automatic task intent routing + optional TS classifier bridge
+│   ├── src/gitio.rs       git/jj-workspace/run-record persistence + fs helpers
+│   ├── src/cloudio.rs     cloud command plumbing + Codex session-log scanning
+│   ├── src/usage.rs       token-usage accounting, pricing, date helpers
+│   ├── src/lifecycle.rs   integration evidence + final repository-check discovery
+│   ├── src/publish.rs     GitHub publishing: detection, gh/jj argv, DAG -> stacks
+│   ├── src/config.rs      ~/.rudder config + model defaults + update notices
+│   ├── src/textedit.rs    input editing (drafts, history, cursor/word ops)
+│   ├── src/keys.rs        key/mouse event -> terminal byte encoding
+│   ├── src/plan_stream.rs streaming planner JSONL -> live transcript + plan capture
+│   ├── src/theme.rs       color palette (paper/ink/accent + status colors)
+│   ├── src/app_tests.rs   #[cfg(test)] dashboard tests
+│   └── src/pty_terminal.rs PTY wrapper + terminal emulation/scrollback (in lib.rs)
+├── cloud/                Rudder Cloud control plane (Node http server) + worker image
+│   ├── src/server.ts      auth, CLI login, sail (workers), workspace (snapshots)
+│   └── worker/            the cloud worker container (entrypoint + supervisor)
+├── site/                 Marketing site (static, deployed to rudder.exla.ai on Vercel)
+├── tests/                Node integration tests (*.test.mjs against dist/)
+├── dist/                 Build output (JS + copied native binary). Not tracked; built on publish.
+├── assets/               Static assets bundled into the npm package
+├── package.json          npm metadata; build/test scripts
+├── Cargo.toml            workspace manifest for the native crate
+├── setup.sh              one-shot installer helper
+├── README.md             customer-facing install + usage
+└── AGENTS.md             this file
+```
+
+`dist/` is build output and is NOT tracked in git (it was removed from the repo
+in PR #15). The npm `files` allowlist still ships `dist/`, `assets/`, `README.md`,
+`package.json`, and `prepack` runs the full build, so `npm publish` always packs
+a fresh `dist/` (including `dist/native/rudder-native`). Rebuild before
+publishing; there is nothing to commit under `dist/`.
+
+---
+
+## 3. Architecture overview
+
+```
+ user
+  │  rudder <task> / rudder (no args)
+  ▼
+ src/index.ts ──> src/main.ts (arg parse + command dispatch)
+  │                     │
+  │  no args + TTY      │ subcommands (run, doctor, login, cloud, ...)
+  ▼                     ▼
+ native dashboard   native Rust app (rudder-native)
+ (rudder-native)         │  creates jj workspace (jj.ts), writes run.json (state.ts)
+  │  hosts PTYs          │  spawns a detached `rudder __worker --repo --run <id>`
+  │  reads run.json      ▼
+  │  directly        __worker -> backend adapter (backends.ts)
+  │                      │  claude / codex(rudder-codex) / acpx, streamed as events
+  ▼                      ▼
+ panes: Agents | Worker | Task     .rudder/runs/<id>/{run.json,events.ndjson,output.txt}
+```
+
+Key idea: the TypeScript side is the orchestrator and source of truth on disk
+(`run.json`). The native dashboard renders that state, hosts the real agent
+terminals, and triggers TS operations (start/merge/sync/cleanup) by shelling back
+into `rudder`. They communicate through the filesystem (`.rudder/runs/`) and
+process spawns, not a socket.
+
+---
+
+## 4. The TypeScript orchestrator
+
+### Entry: `src/index.ts`
+- Shebang `#!/usr/bin/env node`. Dynamically imports `main.js` so the cwd-recovery
+  guard runs first.
+- `recoverCwdIfNeeded()`: if `process.cwd()` throws (deleted/unreadable dir, common
+  after a workspace is removed), it walks `$PWD` ancestors, then `~`, `/tmp`, `/`,
+  and `chdir`s to the first readable one. Surfaces a notice.
+- Top-level try/catch turns any thrown error into `rudder: <message>` + `exit(1)`,
+  with `MissingToolError` printed as-is (it carries an install hint).
+
+### Dispatch: `src/main.ts`
+- `parseArgs(argv)` builds `{ command, args[], flags{} }`. Flags include
+  `--version/-v`, `--help/-h`, `--json`, `--quiet/-q`, `--detach/-d`, `--watch`,
+  `--follow/-f`, `--workspace` (alias `--worktree`), `--queue`, `--allow-dirty`, `--force`,
+  `--non-interactive`, `--cwd`, `--repo`, `--run`, `--backend`, and `--model`.
+- `main()` flow:
+  - Before user-facing command dispatch, `autoUpdateAndRerunIfNeeded` checks npm
+    and runs `npm install -g @exla/rudder@<latest>` when this global install
+    is stale, then re-runs the original command with `RUDDER_SKIP_AUTO_UPDATE=1`.
+    Internal `__*` commands, `rudder done` worker callbacks, local source checkouts,
+    CI, npx temp installs, and `RUDDER_DISABLE_AUTO_UPDATE`/
+    `RUDDER_DISABLE_UPDATE_CHECK` skip this.
+  - `--version`/`version`: print version (after auto-update if applicable).
+  - `--cwd <dir>`: chdir.
+  - No command + args present: treat the args as a task and `startRun`.
+  - No command + TTY: `openDashboard` (the native dashboard). This is the default
+    `rudder` experience.
+  - No command + not TTY: `printHelp`.
+
+Public commands (the `switch (parsed.command)`):
+
+| Command | Purpose |
+|---|---|
+| `run <task>` | Start a run (workspace-isolated by default policy) |
+| `claude` / `codex` / `acpx [args]` | Start a run pinned to a backend |
+| `dashboard` | Open the native dashboard (default when no args + TTY) |
+| `restart` | Reset the local Rudder session, then open the dashboard |
+| `mouse-test` | Native mouse diagnostics |
+| `onboard` / `doctor` | Setup wizard / environment check (`src/auth.ts`) |
+| `login` | Browser auth for Rudder Cloud |
+| `cloud` / `sail` | Cloud worker control (`src/cloud.ts`) |
+| `watch` / `logs` / `status` / `runs` | Inspect runs |
+| `stop` / `delete` / `merge` / `sync` / `cleanup` | Manage runs |
+
+Internal commands (prefixed `__`, spawned by Rudder itself, not for users):
+`__worker` (the per-run worker process), `__agents`, `__task`, `__worker-idle`
+(tmux pane drivers).
+
+### The native dashboard launcher
+`openDashboard` resolves the native binary via
+`src/native-binary.ts::resolveNativeBinaryPath()` which checks, in order:
+`dist/native/rudder-native`, `target/release/rudder-native`,
+`native/target/release/rudder-native`. There is no tmux or Ink fallback; if the
+native binary is unavailable, Rudder reports that directly.
+
+---
+
+## 5. Run lifecycle (the core)
+
+Implemented in `src/run-manager.ts`.
+
+1. **Start** (`startRun`):
+   - Resolve repo root (`git.ts::findRepoRoot`, git `rev-parse --show-toplevel`,
+     falling back to `path.resolve(cwd)`).
+   - Load config, pick backend + model + effort.
+   - `ensureJj()` + `ensureColocated(repoRoot)` (`jj.ts`): jj is hard-required and
+     auto-colocated (`jj git init --colocate`) so the repo still externally looks
+     like git. Only beside an EXISTING git repo whose root is the folder:
+     `colocateRefusal` refuses a non-git folder (Rudder never creates a repo; the
+     dashboard's main agent just edits the files), the home folder, and a folder
+     holding two or more repos (a stray `~/code/.git` once made all of ~/code one
+     repo). `rudder undo` in a folder with no jj says there is nothing to undo.
+   - Decide jj workspace vs current checkout. Policy: a second concurrent run on
+     the same checkout forces a workspace (`activeRunsForCheckout`). `--workspace`
+     forces one explicitly.
+   - `baseCommit = currentJjChangeId(repoRoot)`. `targetBranch =
+     currentJjChangeId(repoRoot)` (else `currentBranch`).
+   - `createRunWorkspace` -> `jj.ts::createRunJjWorkspace`: `jj workspace add` at
+     `<repo>/.rudder-workspaces/<repo>-<hash>/<run id>` with name `rudder-<run id>`.
+     The run records `vcs:"jj"` and `workspace.jjChangeId`.
+   - **Run ids are a few task words plus a 5-character key**:
+     `launch-video-k3f9q` (`new_run_id` in gitio.rs, `newRunId` in util.ts;
+     at most 4 words / 32 chars from the redacted task summary, filler words
+     dropped). The same id is the jj workspace, its folder and, with the
+     `rudder/` prefix, the PR branch; the worker title shows just the key
+     (`run_short_key`). They used to be `<nanos>-<whole slug>-<dashboard pid>`,
+     shown whole in the title. Old ids stay opaque strings and keep their old
+     derived names (`is_readable_run_id` / `isReadableRunId` decide), because
+     a record without a stored workspace name re-derives it from the id, and
+     a plan node id like `n0` keeps `rudder-n0-<hash6>`. Nothing sorts by id:
+     rows sort by `created_at`.
+   - `createRunRecord` (`state.ts`) writes `.rudder/runs/<id>/run.json`.
+   - `writeAgentContext` regenerates `RUDDER.md` and excludes it via
+     `.git/info/exclude`.
+   - Spawn a **detached** worker: `rudder __worker --repo <root> --run <id>`,
+     `unref()`ed so the parent can exit. The run goes `created -> running`.
+
+2. **Worker** (`__worker` in `run-manager.ts`):
+   - Loads the run, builds a spec (`brain.ts::createSpec` ->
+     `renderContract`), and drives the backend through `backends.ts`.
+   - Streams `RudderEvent`s, appended to `.rudder/runs/<id>/events.ndjson`;
+     `backend.output`/`backend.error` text is also appended to `output.txt`.
+   - On each status/session change it calls `saveRunRecord`.
+   - Optional auto-steer loop (`AUTO_STEER_DELAY_MS`, bounded by
+     `run.autoSteer.max`) nudges an idle agent to continue.
+
+3. **Backends** (`src/backends.ts`, `getBackend(id)` returns a `BackendAdapter`):
+   - **claude**: spawns `claude`. New session: `--session-id <uuid>`. Resume:
+     `--resume <id> --fork-session`. Effort mapped via `normalizeEffortForBackend`.
+   - **codex**: spawns the wrapped `rudder-codex` binary (see
+     `src/codex-binary.ts`: `ensureRudderCodexBinary`, `codexLaunchEnv`,
+     `CODEX_RUDDER_CONFIG_ARGS`) so Rudder controls config/auth without touching
+     the user's global Codex setup.
+   - **acpx**: ensures a Codex session via `acpx codex sessions ensure --name`,
+     then runs `acpx codex ...`.
+   - All three funnel through `spawnAndStream(...)` which pipes child stdout/stderr
+     into `RudderEvent`s and resolves with the exit code.
+   - `backendEnv(provider)` injects the right `ANTHROPIC_*` / `OPENAI_*` env from
+     the resolved auth profile.
+
+4. **Verify** (`brain.ts::verifyRun`): produces a `VerificationResult`
+   (`satisfied`, `missing`, `notes`, `shouldContinue`) written to `verifier.json`.
+
+5. **Merge / sync** (jj-first; routed by `run.vcs` in `run-manager.ts`):
+   - New runs are jj. `mergeJjRunIntoCurrentWorkspace(run, allowDirty)` (`jj.ts`):
+     captures `currentOpId` first (records it on `MergeState.operationId`), then
+     `jj new <into> <node>` to merge the run's change into the current change `@`.
+     jj records any conflict in the merge change (`jj resolve --list`) rather than
+     blocking; sets `MergeState.mergeChangeId` and `run.status` to `merged` or
+     `merge-conflict`. A clean integration moves the target bookmark to the merge
+     change, requires `exportToGit` (`jj git export`) to succeed, and records the
+     exported Git commit plus whether `origin/<bookmark>` contains it. A resolver
+     finalizes that existing merge change instead of creating another merge on top.
+   - `syncRunWorkspace(run, baseBranch)` (`jj.ts`): `jj rebase -s <node> -o <trunk>`
+     (jj records conflicts in place, never blocks; no rebase-in-progress dance).
+   - `removeRunWorkspace(run)` (`jj.ts`): `jj workspace forget <name>` + rm dir.
+   - **Global undo:** `currentOpId`/`undoToOp`/`undoLast` back `rudder undo [opId]`;
+     `.rudder/undo-stack.json` records `UndoEntry`s. `jj op restore` is global - it
+     rewinds all workspaces and refs at once.
+   - **Legacy git runs** (`run.vcs === "git"`, created before the jj switch) stay
+     mergeable via the git helpers kept in `git.ts`
+     (`mergeGitRunIntoCurrentBranch`, `syncGitRunWorktree`, `rebaseWorktreeOntoBase`,
+     `resolveRebaseBaseRef`, `removeGitWorktree`), reached only behind the vcs guard.
+
+---
+
+## 6. Data model and on-disk state
+
+### Types: `src/types.ts`
+The important shapes:
+- `RunRecord`: the full per-run document. Status union is
+  `created | running | steering | verifying | completed | failed | cancelled |
+  paused | orphaned | migrated | merge-conflict | merged`. Native also persists a
+  `lifecyclePhase` (`working`, `verifying`, `integrating`, `resolving`,
+  `merged-locally`, `pushed`, `deployed`, `delivery proof needed`, `orphaned`, or
+  `cloud-owned`). Holds
+  `workspace{enabled,path,branch?,workspaceName?,jjChangeId?}` (pre-rename records use the `worktree` key and are promoted on read),
+  `vcs:"jj"|"git"`, `process{pid,...}`, `turns[]`, `autoSteer`,
+  `session{nativeSessionId,...}`, `terminal{kind:"tmux",...}`, `verification`,
+  `merge` (with `operationId`/`mergeChangeId`), `sync`,
+  `resolverFor?`/`resolverRunId?`, `taskSummary`/`taskSummaryLlm`, and optional
+  `delivery` evidence (`kind`, status, target/url/appPath, provider, revision,
+  deployment id/version, verification time, and smoke checks). Process completion,
+  local integration, push, and verified delivery are deliberately separate facts.
+- `RudderConfig`: `defaultBackend`, `lastUsedBackend`, `mergeStrategy`,
+  `runPolicy`, `backends{claude,codex,acpx}` (each `BackendConfig` with
+  `model`/`effort`/`reasoningEffort`/`profileId`).
+- `AuthProfileStore`: provider credentials (`api_key` / `oauth` / `token`),
+  plus `order`, `lastGood`, `usageStats` (cooldown/disable tracking).
+- `RudderEvent`: the event-stream union appended to `events.ndjson`.
+- `SpecContract` / `VerificationResult` / `RunRequest` / `BackendAdapter`.
+- `CloudAuthState` / `CloudSail` for cloud.
+- `VcsMode = "git" | "jj"`: new runs are always `"jj"`; `"git"` only appears on
+  legacy records merged behind the vcs guard (section 12).
+- `UndoEntry = {opId,label,ts,runIds[]}`: entries on `.rudder/undo-stack.json`
+  backing `rudder undo`.
+
+### File layout
+Global (`~/.rudder/`, overridable via `RUDDER_HOME`):
+- `config.json` (`RudderConfig`, written `0o600`)
+- `auth-profiles.json` (`AuthProfileStore`, `0o600`)
+- `cloud.json` (`CloudAuthState`)
+
+Per repo (`<repo>/.rudder/`):
+- `runs/<id>/run.json` (`RunRecord`)
+- `runs/<id>/events.ndjson` (append-only event log)
+- `runs/<id>/output.txt` (raw backend stdout/stderr)
+- `runs/<id>/spec.json`, `runs/<id>/verifier.json`
+- `undo-stack.json` (`UndoEntry[]`, atomic via `updateJson`)
+
+New jj workspaces live at
+`<repo>/.rudder-workspaces/<repoSlug>-<repoHash>/<run id>` (older runs:
+`<taskSlug>-<runHash>`). The runtime exclusion prevents the parent checkout
+from snapshotting them. Legacy sibling groups and `.rudder-worktrees` paths
+remain recognized; use saved paths rather than relocating existing runs.
+`RUDDER.md` is generated at the repo root and inside
+each active workspace, and excluded via each checkout's `.git/info/exclude`.
+
+### Persistence helpers: `src/util.ts`
+- `writeJson(path, value, {mode})`: atomic write (temp file + `rename`) under a
+  **per-path async lock** (`withPathLock`). The temp name includes
+  `process.pid + Date.now() + randomUUID()` so concurrent writers to the same
+  file never collide on the temp path.
+- `updateJson(path, transform)`: read-modify-write under the same lock; used by
+  `saveRunRecord` so a foreground status write cannot clobber the background LLM
+  title (`taskSummaryLlm`).
+- `readJson<T>`: returns `null` on any read/parse failure.
+- `commandExists`, `runCommand`/`runCommandSync` (with a sane default PATH for GUI
+  launches), `MissingToolError` (carries `TOOL_INSTALL_HINTS`), `shortenHome`,
+  `slugPrefix`, `shortHash`.
+
+### State module: `src/state.ts`
+Path helpers (`runRecordPath`, `eventsPath`, ...), `loadConfig`/`saveConfig`
+(with `defaultConfig`/`normalizeConfig`), `createRunRecord`, `saveRunRecord`,
+`loadRunRecord`/`listRuns`, and the **background LLM summarizer**
+(`maybeBackgroundLlmSummarize`): fire-and-forget, gated by an in-flight Set and
+the `taskSummaryLlm` flag, upgrades the naive task summary to an LLM-generated
+title and persists it via the atomic path above.
+
+---
+
+## 7. Native dashboard (`native/src/main.rs`, `native/src/pty_terminal.rs`)
+
+Stack: `ratatui` (rendering) over `crossterm` (input + raw mode + mouse), with
+`portable-pty` for real pseudo-terminals. One `App` struct holds all state;
+a render loop draws three panes and an input loop dispatches key/mouse events.
+
+The crate is split into focused modules (see the layout in section 2).
+`main.rs` keeps the domain types (the enums + structs like `AgentRun`) and the
+whole `App` struct + `impl App`, plus the `main`/`run` entry. Free functions live
+in topic modules (`render`, `selection`, `detect`, `models`, `launch`, `tasks`,
+`gitio`, `cloudio`, `usage`, `config`, `textedit`, `keys`). Module convention:
+every module is a child of the binary crate and pulls shared scope with
+`use super::*`; the crate root re-exports each module (`mod x; use crate::x::*;`)
+so call sites stay unchanged and modules can use each other. Because the modules
+are descendants of the crate root, they read crate-root-private items (the `App`
+struct's fields and methods, the domain types' fields) for free; only items moved
+*out* of the root are marked `pub(crate)`. Keeping the entire `impl App` in
+`main.rs` is deliberate: it avoids having to widen the visibility of `App`'s many
+private methods. Splitting `App` itself out later would require that visibility
+churn, so it was left whole.
+
+### The run loop and the single-thread mutation model
+`run()` (in `main.rs`) is the whole engine: one thread, one owned `App`. Each
+iteration it (1) calls `poll_agents()` (the heartbeat), (2) redraws if `dirty`, then
+(3) blocks for a terminal-input or PTY-output channel signal, with `TICK_RATE` = 33 ms
+as a timer backstop. PTY reader threads wake the loop immediately when child output
+arrives, so planner streaming does not require a faster polling cadence. Animation-only
+spinner redraws are capped at 100 ms. Up to `MAX_EVENTS_PER_FRAME` = 64 queued events
+drain per frame.
+
+**Single-writer invariant.** `App` is mutated ONLY from this loop, via `&mut self`
+methods, so mutation is serialized: no locks, no races. There is no separate
+"scheduler object" to poke; `run_scheduler`/`next_node_to_launch` are stateless logic
+that *reads* `App` state, so changing scheduling behavior means changing the state
+they read (e.g. `stop_agent_at` sets a node `Stopped`, which the next tick observes).
+Exactly three things trigger a mutation: (a) your keystrokes (`handle_key`/
+`handle_mouse`), (b) the heartbeat (`poll_agents` → on its tick cadence:
+`run_scheduler`, `maybe_ingest_worker_followups`, `integrate_ready_plan_nodes`,
+`finalize_merge_resolvers`, `maybe_handle_drift`), and (c) background results drained
+from mpsc channels. Work that must not block the UI (the haiku task-summary and
+completion-note summarizers, cloud status) runs on background threads that COMPUTE and
+SEND a message; the loop drains the channel and applies the write. Threads never touch
+`App`. The LLM agents are likewise pure data producers (plan blocks, `rudder done`
+notes); they feed data that the loop ingests, they do not mutate `App`.
+
+**PTY drain throttling.** `poll_agents` fully drains the FOCUSED agent's PTY every
+frame, throttles unfocused agents to once per `UNFOCUSED_DRAIN_INTERVAL` = 500 ms (so
+vt100 parse cost scales with focus, not agent count), and always drains a streaming
+planner every tick. Completion of an interactive agent is declared once it has looked
+idle for `READY_GRACE` = 3200 ms (or on clean process exit), which is robust against a
+TUI that repaints while idle.
+
+**Perf diagnostics.** The native TUI writes NDJSON timing logs only when
+`RUDDER_NATIVE_PERF=1`; normal runs do no perf-log I/O. This logs scroll routing,
+queued event drain counts, `poll_agents`,
+PTY drain/parse, worker/review line rendering, `terminal.draw`, and frame totals. Logs
+rotate at 10MB, keep three rotated files, and startup deletes perf logs older than three
+days.
+
+### Panes and focus
+`FocusPane = Agents | Worker | Task`.
+
+**Zoom and narrow screens.** Claude Code and Codex reprint their conversation at
+the new width on a resize, so the agent panes rewrap themselves; the clipping
+people saw when zooming in (Cmd+) was Rudder's own sidebar. Sidebar rows are
+built as `Line`s and `wrap_sidebar_line` splits any row wider than the pane
+onto indented continuation rows (the click-map spans are shifted to match, so
+every list row is still one screen row). The 17-row key list collapses to one
+line when the pane cannot fit it and the agents. Below `NARROW_LAYOUT_WIDTH`
+(90 columns) one pane takes the width beside the task bar: the worker, or the
+agent list while it has focus.
+- **Agents**: the run list. Grouped: a `main`-branch agent section first, then
+  workspace runs, then a merged section. Select with `j/k` or arrows; `Enter`
+  focuses/starts; `m` merge, `d` delete, `r` rename, `v` review, `x` stop (a running
+  plan worker; keeps its workspace), `g` toggle nested DAG view. (The `u` sync key was
+  removed along with `/sync`; jj keeps workspaces current.)
+- **Worker**: the real PTY of the focused agent (claude/codex). Keystrokes are
+  forwarded to the child so its prompts, slash commands, selection, and `Tab`
+  behave natively. Trackpad scroll moves scrollback like a terminal; alternate
+  screen apps are handled in `pty_terminal.rs`.
+- **Task**: an input line that starts the next agent. Supports history (`Up`/
+  `Down`), readline-style editing (Ctrl+A/E/U/K/W/D/H, Alt/Ctrl+Backspace word
+  delete, Alt+Left/Right word nav), and slash-command completion. Fresh plain input
+  selects discussion, one isolated worker, or an approval-gated DAG through
+  `task_routing.rs`. Discussion/plan-only intent opens a guarded Main session;
+  `/main` explicitly selects the shared checkout. `/plan` is an unadvertised
+  compatibility entry; `/gam` and `/nudge` no longer launch their old workflows.
+  (`/run` and `/ask` were already removed; `OneOff` rows from older
+  sessions still load.) `$ <command>` opens a shell pane instead of a task
+  (`start_shell_pane`): an interactive `$SHELL -l` in the checkout with the
+  command typed in, a `plain_process` row like Rudder's own CLI panes, checked
+  before shared-context capture so `$ export X_TOKEN=..` is not filed there.
+
+**Graceful shutdown truth.** A dashboard-owned live PTY becomes `Paused` before it is
+dropped, and native persistence removes the `process` object whenever no PTY is owned.
+Never persist `Running` after intentionally killing the terminal. `Enter` on a paused
+row resumes it, using the saved backend session when available; an uncontrolled record
+that merely claims `Running` after a crash is reconciled as orphaned instead.
+
+**Cross-referencing the panes (v2.4.0).** Plan node ids (`n0`, `n1`, …) are the
+join key everywhere: the orchestrator DAG row shows `n2 <title>`, the matching
+worker's agents-pane status line shows `run n2`, and the worker pane title shows
+`worker · n2 · <task summary>`. A finished-but-unmerged workspace run reads
+`done · needs merge` (`agent_awaits_merge`, render.rs) because a bare "done"
+misled users into thinking dependents would launch — only `Merged` unblocks.
+
+**Mouse hit-testing (v2.4.0).** Clicks resolve through `app.agent_row_map`, a
+row→agent-index map recorded from the ACTUALLY rendered frame (a thread-local
+span recorder in `render_agents`, harvested per frame). This replaced a
+hardcoded "agents start at row 12" offset that silently broke whenever the
+header grew. The map is cleared on every `agents` Vec insert/remove so a
+same-tick click can never resolve to a shifted neighbor.
+
+**Notices and prompts (v2.6.0).** The transient notice line is severity-styled
+by content (`notice_style` in render.rs: errors red, pending confirmations
+amber, routine status muted), and `Esc` dismisses it from any pane without
+consuming Esc's pane action. Merge/conflict/cloud confirmations are modals with
+accent-colored key hints; the merge modal carries the auto-commit caution
+itself (no parallel notice), the conflict modal caps its file list at 8 with an
+overflow line, and the delete confirm names the agent.
+
+**Clickable links.** `vt100` drops OSC 8, so `TerminalPane` lifts the edges out
+of the byte stream (the same scanner as OSC 777/9 notifications), reads the cursor at
+each edge, and records the linked TEXT with its url (`TerminalHyperlink`): cells move
+on scroll and Ink repaints, the text does not. A plain click (no drag) in a worker
+pane opens the agent-marked link under it, else a bare `http(s)://`/`file://` url in
+the row (`hyperlink_at`), via `open`/`xdg-open`; only http, https, file and mailto
+are ever handed to the OS. Child PTYs get `FORCE_HYPERLINK=1` so Claude Code emits
+links whatever the outer terminal is.
+
+**God's view (⌥g).** `⌥g` (Option+g's `©` too, and `g` under `^W` / nav mode; bare
+`g` in the agents list is still nest view) replaces the whole screen with every
+live agent's terminal tiled as a grid (`render_gods_view`, `gods_view_grid`: near-
+square tiles, at least 28x7, paged when they do not fit). Each tile is the bottom of
+that pane's styled cells (`styled_tail_window_snapshot`, ending at the last
+non-blank or cursor row) cropped to the tile, NEVER a resize of the PTY: resizing
+repaints the agent and drops scrollback. Titles carry id, task summary,
+backend/model and working / needs you / done / paused in the agents-list colors.
+Arrows or h/j/k/l move the highlight, Enter or a click focuses that agent in the
+worker pane, and Esc or ⌥g closes it. While open it owns the keyboard and mouse
+(Ctrl+C still quits). All its state is in `view_state!`.
+
+### Keybindings (the input model in `handle_key`)
+Order of handling matters; the early returns gate everything else.
+- **Ctrl+C / q**: quit, guarded by `confirm_or_quit` when agents are still
+  running (first press asks; a second `q`/Ctrl+C confirms). Every pane's
+  `q` routes through the same guard — `q` used to quit instantly.
+- **Ctrl+W (leader)**: arms a one-shot leader. The *next* key runs a dashboard
+  command and disarms: `1/2/3` focus panes, `v` review, `m` merge, `R` review-all,
+  `M` merge-all, `r` rename, `j/k` move, `d` delete, `q` quit, `Esc`
+  cancels. See `handle_leader_key`. This is the reliable cross-terminal way to
+  drive the dashboard from inside the worker pane. Tradeoff: Ctrl+W no longer
+  reaches the worker PTY as readline "delete word".
+- **Ctrl+G (nav mode)**: a *sticky* mode (toggle on/off) with the same command
+  set; `Esc` exits. Predates the leader; both are kept.
+- **Option/Alt + 1/2/3 and v**: jump panes / toggle review directly. Many macOS
+  terminals (Terminal.app, default iTerm2) do not send an Alt modifier for
+  Option+key, so the dashboard *also* accepts the typographic characters Option
+  produces on a US layout: Option+1=`¡` (U+00A1), Option+2=`™` (U+2122),
+  Option+3=`£` (U+00A3), Option+v=`√` (U+221A).
+- Otherwise the key is dispatched to the focused pane's handler.
+
+### `rudder attach`: other terminals mirroring a pane (`native/src/attach.rs`)
+tmux's shape without giving up the single-writer `App`. The dashboard binds a unix
+socket on its first heartbeat (`service_attach_clients`); every other terminal is a
+thin client (`rudder-native attach`, reached by `rudder attach` or by bare `rudder`
+when `attachSocketLive()` finds a dashboard already serving the checkout). Threads
+never touch `App`: connections feed `AttachEvent`s over an mpsc and the main loop
+applies them. The dashboard renders the pane for the client exactly as it renders
+its own worker pane (`styled_line_window_snapshot`), so the scrollback view and
+⌥v/⌥b are the same code (`nav_claude_messages` is keyed by run id for this
+reason), and streams changed rows as ANSI text; keys come back as PTY bytes via
+`terminal_bytes_for_key`, the same encoding the worker pane uses. Rules worth
+keeping:
+- **The socket lives at `<rudder home>/attach/<hash>.sock`** and
+  `<repo>/.rudder/attach.sock` is a SYMLINK to it: `sun_path` is ~104 bytes and a
+  checkout path is not (the first test run failed on exactly this). Clients
+  `read_link` before connecting; the TS probe uses `realpath`, which also fails on
+  the dangling link a crashed dashboard leaves behind.
+- **An attached terminal owns the pane size.** The three resize sites in render.rs
+  skip a run that `run_is_attached`, because `TerminalPane::resize` drops the
+  region scrollback, and bouncing the size between the dashboard's selection and
+  the attached tab would wipe the history ⌥v walks every time the selection moved.
+- **Attached panes drain every tick** like the focused one (the 500ms unfocused
+  throttle is bypassed for them).
+- **The single-pane client selects and copies itself.** It captures the mouse for
+  the wheel, which takes selection away from the terminal, so it mirrors the rows
+  it drew (`AttachScreen`), highlights a drag, copies on release (OSC 52 from the
+  client reaches the terminal the user is in) and opens a url on a click.
+- A client that falls behind is not waited for: `try_send` on a bounded queue,
+  and a dropped frame just marks it `needs_full`.
+
+### Second dashboard views (`native/src/view.rs`)
+Bare `rudder` in a checkout whose dashboard is live runs `rudder-native attach
+--dashboard`: a FULL second view over the same attach socket, not a second App.
+Per-view state (selection, focus, task draft, popups, click maps, areas: the
+`view_state!` list) lives in a `ViewState` per client and `App::with_view` swaps
+it into `App` around that view's input and its render, so every key handler and
+all of render.rs run unchanged. Rules worth keeping:
+- **A field that belongs to a person looking at the screen goes in the
+  `view_state!` list**, or both tabs will share it (and fight over it).
+- **Selection crosses by run id**, not index: rows are inserted and removed while
+  a view is stashed. Click maps are dropped when `agents.len()` moved.
+- **A shared pane takes the SMALLEST size any view showing it asks for**
+  (`App::fit_pane`, tmux's `window-size smallest`; `pane_size_wants` is keyed by
+  view and run, cleared per view at `begin_view_frame`). It used to follow the
+  view that typed last, and two views a row apart (a notice, a longer task-bar
+  hint) resized the agent on every switch between tabs: each resize makes the
+  agent repaint its whole screen, which was the flicker. A single-pane
+  attachment still owns its pane outright.
+- **No visible clears, no torn frames.** Every frame (the dashboard's own and
+  each view's) is wrapped in DEC synchronized output (`?2026h`/`?2026l`), and a
+  view's reset paints over the old picture (`force_full_repaint` marks the
+  previous buffer with a sentinel glyph) instead of sending `ESC[2J`.
+- **A view's quit keys close the view** (`confirm_or_quit` returns early when
+  `acting_in_remote_view`), never the dashboard.
+- Frames are ratatui's own diff: the view's `Terminal` has a fixed viewport and a
+  backend writing into a buffer (`ViewOutput`), whose bytes go out as
+  `ServerMsg::Screen`. Input comes back as serialized crossterm `Event`s
+  (crossterm's `serde` feature).
+- The socket falls back to `/tmp/rudder-<uid>/` when even the rudder home is too
+  deep for `sun_path`.
+
+### A task starts on Enter; its title arrives after
+A typed task (`start_single_run_task`) creates its jj workspace at once, named
+from the local `summarize_task` words, and the one-shot haiku title
+(`spawn_task_summary_worker`) renames the ROW a few seconds later. It used to
+wait for that title before creating the workspace (the directory cannot be
+renamed under a live agent), which put ~3s (up to 8s) between Enter and any
+agent on every task. A slightly worse directory name beats a dead keystroke.
+Planner nodes already arrive titled.
+
+### Orchestrator skills
+The bottom task pane remains the primary input surface for fresh requests,
+slash commands, plan refinements, and empty-Enter approval. When the interactive
+Claude orchestrator is running, it can also edit the DAG in `RUDDER.md` and use
+generated project skills under `.claude/skills/rudder-*` for dashboard actions
+(`model`, `main`, `goal`, `usage`, `cloud/login`, `review-all`, `merge-all`,
+`plan/run`, and DAG editing/approval). Rudder consumes the
+corresponding one-shot `RUDDER_*` control markers from `RUDDER.md`.
+
+### Agent skills (capabilities shipped to every agent)
+Separate from the orchestrator's dashboard-control skills: `assets/skills/<name>/`
+holds capability skills (a `SKILL.md` plus optional `scripts/`) that
+`src/agent-skills.ts::ensureAgentSkills` installs on every `rudder` invocation
+into `~/.claude/skills/rudder-<name>/` and `~/.codex/skills/rudder-<name>/`
+(honoring `CLAUDE_CONFIG_DIR` / `CODEX_HOME`). User-level, so isolated jj
+workspaces, the main checkout and cloud workers all get them; files are rewritten
+only when they differ, other skills in those directories are never touched, and
+failures are swallowed. `RUDDER_DISABLE_AGENT_SKILLS=1` turns it off. The skill's
+frontmatter `name` must be `rudder-<dir>` (a test enforces it).
+
+- `google-cloud` → `rudder-google-cloud`: GCP projects named after the product,
+  API enablement, and Google OAuth done so users see the product's name. Its
+  `scripts/gcp.mjs` covers everything with an API (`whoami`, `projects`,
+  `ensure-project`, `enable`, `audit`), prints the Console checklist for what has
+  none (`oauth-plan`: Branding/Audience/Data access/Clients), and verifies from
+  outside with `check-client`, which probes Google's real authorize endpoint
+  signed out to catch `redirect_uri_mismatch`/`invalid_client` and read the
+  "continue to <App name>" the user will see.
+- `namecheap` → `rudder-namecheap`: the whole Namecheap account through the API
+  (`scripts/namecheap`, Python stdlib): DNS records, email forwarding,
+  nameservers, lock, privacy, domains/expiry/contacts, availability, pricing,
+  register/renew (print price + balance; charge only with `--yes`), transfers,
+  balance. `setHosts` replaces every record, so record writes always merge with
+  the live set, back up, write and re-read. Credentials: `NAMECHEAP_API_USER`/
+  `NAMECHEAP_API_KEY` (the Rudder vault on cloud machines) or
+  `~/.config/namecheap/credentials.env`; Namecheap also whitelists the caller's
+  IPv4, and a cloud machine's egress IP is not static. It was `namecheap-dns`
+  for one release; `RETIRED_AGENT_SKILLS` removes the old `rudder-` copy.
+
+### Review and merge-all
+`v` opens a review pane showing the run's `jj diff` (`ensure_review_diff`). The old
+Hunk (`hunk diff --watch`) integration was removed in favor of native jj diff
+inspection. `R` (review-all) creates an aggregate Codex agent over all completed
+jj workspaces; `M` (merge-all) opens a confirmation to merge them. Review-all creates
+a jj aggregate change, combines each source revision into it, and runs a dedicated
+agent whose task is a `/review` over the combined diff. Native no longer creates or
+integrates Git worktree branches.
+
+### Tests
+`native/src/app_tests.rs` holds the dashboard tests (528, plus one `#[ignore]`d live
+conductor harness; declared `#[cfg(test)] mod app_tests;` in `main.rs`). Includes the
+leader/Option-key coverage: `ctrl_w_leader_then_digit_focuses_pane`,
+`ctrl_w_leader_is_one_shot`, `ctrl_w_leader_escape_cancels_without_action`,
+`option_typographic_chars_focus_panes`, `alt_digit_still_focuses_pane`, plus the
+existing nav-mode, worker-scroll, and rendering tests.
+
+---
+
+## 8. Auth (`src/auth.ts`)
+
+- `detectEnvironment()` checks for `claude`, `codex`, `acpx` on PATH (+ acpx
+  version and the latest npm acpx).
+- Credentials are mirrored into `~/.rudder/auth-profiles.json` from whatever the
+  user already has, in priority order:
+  - Claude: macOS Keychain (`Claude Code-credentials`) or
+    `~/.claude/.credentials.json`.
+  - Codex: `~/.codex/auth.json`.
+  - Env: `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`.
+- `runDoctor` prints a status report (also `--json`). `runOnboard` is the
+  interactive setup. Rudder never requires API keys if you already log in through
+  Claude Code or Codex.
+
+---
+
+## 9. Rudder Cloud (`src/cloud.ts` + `cloud/`)
+
+Optional hosted worker mode: run the same agents on a remote machine while the local
+dashboard stays the control surface. The CLI client is `src/cloud.ts`; the control
+plane is a standalone deployable in `cloud/` (currently hosted at
+`https://rudder-cloud-control.fly.dev`, override with `RUDDER_CLOUD_URL`). It is
+optional and decoupled: the npm package stays light, and nothing here runs unless you
+`rudder login` and hand off a task.
+
+### 9.1 Two shapes: sails vs workspaces
+Both use the same worker image and snapshot format; they differ in lifecycle + storage.
+- **Sails** — ephemeral, task-oriented. The Fly machine lives only as long as the task;
+  storage is transient. Statuses: `queued | running | paused | completed | failed`.
+  Idle sails are PAUSED (suspended, not destroyed) after `RUDDER_IDLE_PAUSE_MS`
+  (default ~2h) so they can resume without re-downloading the snapshot; a separate admin
+  GC does true cleanup.
+- **Workspaces** — persistent dev environments (Fly-only). Backed by a persistent volume
+  (default ~3GB). Statuses: `queued | running | paused | stopped | failed`. Idle-swept
+  (`sweepIdleWorkspaces`, every ~60s) and stopped after `RUDDER_WORKSPACE_IDLE_MS`
+  (~30 min), except while the supervisor reports at least one active agent with a fresh
+  heartbeat. Keyed by `(account_id, workspace_key)` so re-launch reuses the same volume.
+
+### 9.2 CLI (`src/cloud.ts`)
+Subcommands: `login`, `launch`, `sail`, `byoc`, `vm`/`byo-vm`, `list`/`ls`, `status`,
+`logs`, `attach`, `workspace`, `onload`, `bootstrap`, `pause`, `resume`, `stop`,
+`setup-github`, `setup-google`, `setup-byoc`, `setup-vm`, `setup-fly`, `setup`,
+`runtime`.
+- `login` runs a browser/device-style flow (polls `/api/cli/login/poll`) and stores
+  `CloudAuthState` in `~/.rudder/cloud.json` (`cloudAuthPath()`, mode `0o600`): `token`,
+  `cloudUrl`, `defaultRuntime`, `byocSshHost`, `accountId`, `email`, `expiresAt`.
+- `onload` snapshots the current Rudder workspace (repo + selected HOME auth/config) and
+  uploads it via an S3 presigned URL so a worker can continue the task.
+- `onload <runId>` is the single-agent cloud handoff (bare `/handoff` in the dashboard):
+  it builds a migration plan scoped to that run (`buildSingleRunPlan` — every other
+  candidate is forced to "stay" so the cloud dashboard never resumes agents still
+  running locally), snapshots the repo with only that run's record
+  (`rudderStateRunIds`), stages its workspace + Claude session jsonl, and launches a
+  sail with NO task — the worker then boots the bare dashboard, which resumes the
+  conversation via `claude --resume`. The manifest field names are a three-way
+  contract (CLI writer / `cloud/worker/supervisor.mjs` stager / `native/src/gitio.rs`
+  reader) pinned by `tests/cloud-handoff.test.mjs`; the vocabulary is "workspace"
+  ("worktree" spellings are read for old snapshots, never written).
+- Error messages prefer the parsed server error, then the body, then `<status>
+  <statusText>` (so empty gateway responses still report a code).
+
+### 9.3 Auth + account isolation
+Better Auth handles Google + GitHub OAuth; there is also a GitHub device flow and a
+`gh auth token` exchange. The control plane issues a Rudder CLI token stored HASHED as
+`rdr_<base64>` in `rudder_tokens`. Every query is keyed to an `account_id`
+(`github:<id>` or `better-auth:<uuid>`), so tenants never see each other's sails or
+workspaces. Worker-to-control-plane auth uses a separate `RUDDER_WORKER_TOKEN`
+(`rdrw_*`); client streaming uses the user token. Admin endpoints are gated by
+`RUDDER_ADMIN_EMAILS`.
+
+### 9.4 Snapshots
+`createSnapshot` stages the repo (via `git ls-files`) + a small set of HOME paths +
+metadata, packaged as a `.tgz` (`repo/`, `home/`, `env/cloud-env.json`,
+`manifest.json`) and stored to S3 at `snapshots/{accountId}/{date}/{uuid}.tgz`
+(AES256, 1-hour presigned URLs). Ordinary snapshots deliberately EXCLUDE secrets and
+bulk: `.ssh`, `.gnupg`, keychains, `.env*`, key files, and
+`.cache`/`node_modules`/workspaces. Explicit multi-agent `cloud workspace attach`
+migration is the exception for project `.env*` files: it copies repo and nested-package
+dotenv files into the staged repo and every migrated worker workspace. On
+macOS it extracts Claude OAuth tokens from the Keychain into `.claude/.credentials.json`
+so the worker can authenticate. Env capture is allow-listed (`*_API_KEY`/`*_TOKEN`/
+`*_SECRET` plus `RUDDER_CLOUD_ENV_VARS`) and excludes `PATH`/`HOME`/`USER`/shell/Rudder
+internals.
+Explicit multi-agent migration calls `captureCloudEnv(true)`, which captures every inherited
+process variable except the blocklist; ordinary snapshots retain the credential/suffix
+allowlist. Variables exported only inside a child agent PTY cannot flow back to the parent,
+so the dotenv overlay is the durable source for those project-specific values.
+
+### 9.5 Control plane (`cloud/src/server.ts`)
+A plain Node `http` server (no framework). Dependencies: `better-auth` +
+`better-sqlite3` (auth + state), `@aws-sdk/client-s3` + `s3-request-presigner`
+(snapshots), `ws` (streaming). Route groups: `/api/auth/*` (better-auth), `/api/cli/
+login*`, `/api/rudder/setup/{github,google}`, `/api/rudder/sail*`,
+`/api/rudder/workspace*`, `/api/admin/workspace/gc`. State is a SQLite db (`/tmp/
+rudder-cloud/rudder-cloud.sqlite` locally, or restored from S3 at
+`RUDDER_CLOUD_STATE_KEY`) with tables: `rudder_tokens`, `rudder_sails`,
+`rudder_workspaces` (unique on `account_id + workspace_key`), `rudder_settings` (OAuth
+client ids/secrets), plus the Better Auth tables. **Stateless control plane:** when
+`RUDDER_CLOUD_PERSIST_STATE=1` and `RUDDER_S3_BUCKET` is set, SQLite is restored from S3
+on boot and persisted after each request (debounced), so the Fly app can restart without
+losing sails/workspaces. Deploy config: `cloud/fly.toml` + `cloud/Dockerfile`.
+
+### 9.6 Runtimes: Fly Machines + BYOC
+- **Fly Machines (managed):** `createFlyMachine` POSTs `/v1/apps/{app}/machines` with
+  `RUDDER_WORKER_IMAGE` (`auto_destroy:false`). Idle pause via `shouldPauseStaleSail`;
+  workspace idle-stop via `sweepIdleWorkspaces`; true cleanup via the admin GC.
+- **BYOC (bring your own compute):** `byoVmBootstrapCommand` emits a `docker run` script
+  (with `arm64` detection) that `startByoVmWorkerOverSsh` runs over SSH (under `nohup`
+  unless `RUDDER_BYOC_AUTOSTART=0`). BYOC cannot pause/resume (only stop); its state
+  comes from heartbeats only.
+
+### 9.6.1 Deleting cloud things (request + reaper)
+Sails and workspaces can be DELETED, not just stopped: `rudder cloud delete <sail>`,
+`rudder cloud workspace delete [id]` (no id = this repo's), and `dd` on a cloud-owned
+row in the dashboard. Every entry point asks first: the CLI prompts `[y/N]` and refuses
+outright without a TTY unless `--yes`/`--force` is passed; the dashboard opens a yes/no
+modal (`CloudDeleteConfirm`) that names what goes. A migrated row lives in the repo's
+SHARED cloud workspace, which cannot drop one agent from the outside, so deleting it
+deletes the workspace and the modal says how many agents go with it.
+
+On the control plane a delete is a request that a reaper finishes:
+`requestDeletion` flips the row to `deleting` at once (a workspace's `workspace_key`
+becomes `deleted:<id>` so a fresh attach for the repo is never blocked), closes its
+channels, and tries the teardown for up to 20s: Fly machine (only ours; a BYO VM sail
+has none), workspace volume, snapshot object (only when no other live row boots from
+the same key; it carries repo + staged auth), then the row. Whatever fails stays
+`deleting` with the reason in `delete_error`, and `sweepDeletions`
+(`RUDDER_DELETE_SWEEP_MS`, default 30s, plus once at boot) retries it until it is gone.
+A `deleting` row is dead to everything else: heartbeats get 410 and cannot resurrect it,
+worker/attach upgrades get 410, stop/pause/resume get 409, and the admin GC skips it.
+The dashboard removes its local rows as soon as the cloud accepts the delete.
+
+### 9.7 WebSocket streaming
+Each sail/workspace has a `Channel`: one worker WS + N client WS + a ~256KB ring buffer
+replayed on attach. The worker pipes PTY bytes as binary frames; the control plane
+broadcasts them to clients (permessage-deflate for frames over ~1KB). A channel is
+disposed when the worker and all clients disconnect. (This is a WebSocket bridge, not an
+SSH tunnel: no key distribution, simpler firewall traversal, but Fly must not strip the
+`Upgrade` header.)
+
+Exactly one client is the channel controller. The first live attachment retains input
+and PTY-resize ownership; later clients observe read-only and are promoted only when the
+controller disconnects. Promotion clears the former controller's queued input/geometry
+and asks the promoted client for its current size. Ctrl+C is never buffered while the
+worker is absent, because replaying an old interrupt into the next worker boot kills the
+new dashboard before it can reconnect.
+
+The exception is the SAME terminal coming back. `rudder cloud` attaches with
+`?client=<id>`, one id per run, and a socket with the id of an existing client replaces
+it, control and buffered input included. A laptop that slept leaves a half-open socket
+the relay still counts as controller until a ping fails (`SOCKET_PING_MS`, now 15s), and
+before this the returning terminal sat read-only with its keys dropped. A client without
+an id, or with another id, still only watches.
+
+### 9.8 Worker image (`cloud/worker/`)
+`Dockerfile` (base `node:22-slim`, runs as non-root `rudder`) + `entrypoint.sh` +
+`supervisor.mjs`. The supervisor installs the agent CLIs (claude-code, codex, acpx,
+hunkdiff), fetches + restores the snapshot from `RUDDER_SNAPSHOT_URL`, handles migrated
+agents (`migration.json`), spawns `rudder` (workspace) or `rudder codex --workspace
+<task>` (sail) under a `node-pty` 120x32, bridges I/O to the control-plane WS, and
+reports a final heartbeat on exit. On restart it checks `.rudder-staged.json` and
+re-fetches a fresh signed URL from the snapshot-url endpoint.
+
+### 9.8.1 The home machine (2.16.0) and the phone app
+The default shape is now ONE long-lived machine per account holding every repo,
+not a machine per repo. Decided with the user 2026-10-15: GitHub is the source of
+truth (work returns as a pushed branch + draft PR, no local<->cloud sync), Rudder's
+brain lives in the cloud, and the phone is a first-class client.
+- **Rows.** The home is a `rudder_workspaces` row with `source_kind = "home"`
+  (`workspace_key = "home"`); it owns the Fly machine (performance 4 CPU / 16 GB,
+  `RUDDER_HOME_*` env to resize) and a 50 GB volume. Each repo opened on it is a
+  `home-repo` row (`workspace_key = "home:<owner/repo>"`, `home_id` -> the home) that
+  owns NO machine or volume, shares the home's worker token hash, and keeps an
+  ordinary workspace PTY channel, so `rudder cloud` attaches exactly as before.
+  Every path that destroys machines skips rows without `machine_id`; keep it so.
+- **Control socket.** `home.mjs` (the supervisor, chosen by `RUDDER_HOME=1` in
+  `entrypoint.sh`) holds `/api/rudder/home/<id>/control`: the repo list comes down
+  (`repos`), project state is checked every 1.5s (`STATE_INTERVAL_MS`) and goes up when changed (`state`), and the phone's
+  requests arrive as `rpc` (transcript, send, task, action, close). The server keeps
+  only the latest state in memory; the supervisor re-sends it on reconnect.
+- **The phone never touches a PTY.** Messages, new tasks, stop and merge are written
+  into the repo dashboard's steer inbox (`.rudder/steer`), the same channel as the
+  web board, and the supervisor waits for the receipt. The dashboard stays the single
+  writer. `deliver_steer_request` now types into any row with a live PTY (Done or
+  Paused included) and RESUMES rows with no process (main via `steer_resume_main`,
+  workers via re-goal): after the machine stops, every row is Paused.
+- **Boot reopen.** On the home runtime only (`RUDDER_CLOUD_RUNTIME=home`, read once
+  into `App::home_runtime`), the first heartbeat runs
+  `reopen_live_rows_after_home_boot`: rows that were live when the machine went
+  down (Paused, or Running-turned-Orphaned at this start) get their saved session
+  resumed through `spawn_claude_resume_for` (hooks re-wired, NO new turn), so each
+  Claude pane's `--remote-control` session is back online in the Claude app without
+  a steer. Main and Execute rows with a Claude/Codex session id and an existing
+  workspace only; Stopped/Done/Failed/Merged/Migrated, cloud-owned, orchestrators,
+  shell panes, /gam pairs and merge resolvers are left alone. Capped at 12, most
+  recently used first.
+- **Region.** Default region is `sjc` (the user is on the US west coast; a
+  keystroke crossed to `iad` and back, ~110ms). `rudder cloud home region <code>`
+  (`POST /api/rudder/home/region`, background job, GET for progress) stops the
+  home, FORKS its volume into the new region, recreates the machine on the copy
+  and keeps the old volume as a backup; nothing is deleted.
+- **Predictive local echo (`src/predict.ts`).** The attach client keeps an
+  xterm-headless model of the cloud screen and draws a typed printable character
+  at the caret immediately (the dashboard always parks the real cursor on the
+  input caret), between cloud frames only (never inside `?2026h..l` or a split
+  escape). The cloud's echo confirms it; a contradiction (caret moved, cell
+  drawn differently) or 1.2s without an echo repaints the cells from the model.
+  Engages once the ping RTT is >= 30ms; `RUDDER_PREDICT=0` disables,
+  `RUDDER_PREDICT_DEBUG=1` prints confirmed/rollback counts on exit. Measured:
+  first paint 0.8ms vs 115ms, 10/10 confirmed. `rudder cloud` also keeps the
+  vault's laptop config in step (Claude/Codex settings, hooks, ~/.aws,
+  ~/.kalshi) by checksum.
+  Predictions take the look of the input they land in (its background, the
+  color of the text before them): opencode's grey box made every predicted
+  character flash in a black cell. The first key may type over an empty
+  input's grey or dim hint ("Ask anything…"), which it clears like the echo
+  will; it used to go unpredicted and hold back every key after it.
+- **Light or dark follows the real terminal (`native/src/term_colors.rs`,
+  `src/terminal-theme.ts`, `cloud/worker/theme.mjs`).** opencode, Codex and
+  Claude Code's auto theme ask the terminal for its colors (OSC 10/11) and, with
+  mode 2031, hear appearance changes (`CSI ? 997 ; 1|2 n`). In a pane they asked
+  the PANE, which never answered, so they always came up dark. Each pane's
+  reader thread now answers from the known colors at once (an unfocused pane
+  drains only every 500ms, too late for an agent's startup query) and an agent
+  that set 2031 is told when they change. Locally the dashboard asks its own
+  terminal at startup (DA1 last, so a terminal that ignores OSC 11 costs no
+  wait). In the cloud nobody is on the dashboard's terminal: `rudder cloud`
+  asks the laptop terminal, turns on 2031 there, takes the answers out of the
+  key stream and sends `{type:"theme", fg, bg}`; the supervisor writes
+  `<rudder home>/terminal-colors.json`, which every dashboard on the machine
+  re-reads each second. Agents started before the first report keep the theme
+  they chose unless they listen for 2031.
+- **Claude agents follow a session switch.** A Claude row's `Stop` and
+  `UserPromptSubmit` hooks also write the live `session_id` to
+  `<rudder home>/signals/<run>.claude-session`; `adopt_reported_claude_sessions`
+  (60s reconcile, and first thing in the boot reopen) moves the run record onto
+  it. Without it, `/resume` inside the pane left the phone reading an empty
+  transcript and a reboot reopening the wrong conversation.
+- **Coming back to a terminal.** The phone app calls the home the "cloud machine" (it is not the user's computer) and Remote Control sessions are named `<repo> · <id> (cloud)`. The attach client pings the relay every 5s and
+  treats a missed pong (20s) or a timer that fired 15s late (the laptop slept)
+  as a dropped connection, which `attachWithReconnect` reopens (waking the home
+  through `home/open`). Bare `rudder cloud` on a repo already open on the home,
+  and `rudder cloud attach` with no id, reattach without the first-run
+  local-work warning and .env offer.
+- **A drop is a badge, not an interruption (`src/attach-session.ts`).** One
+  `AttachSession` holds the terminal for the whole attach, reconnects included:
+  alternate screen, raw keys, mouse and keyboard flags are taken once and given
+  back once. A drop used to drop you to the shell with a message, wait up to
+  15s, and repaint the dashboard into the main buffer. Now the last picture
+  stays, a badge sits top right (`⟳ Reconnecting · your agents keep running`,
+  drawn with save/restore cursor and erased by repainting its cells from the
+  predictor's screen model), keys typed in the gap are queued (64KB) and sent
+  first on the next connection, and Ctrl+C is never queued: twice within 3s
+  leaves. Retries go 250ms, 1s, 2s, 3s, then every 5s. The same badge replaces
+  the old lines printed into the picture for "worker disconnected" and
+  "read-only". Every connection sends `{type:"repaint"}`. The supervisors turn it
+  into a SIGWINCH to the dashboard's process group, and the dashboard treats a
+  resize to the same size as "draw every cell" (`repaint_all` +
+  `force_full_repaint`, painted over in place, no clear), because the relay's
+  replay is only the tail of the output. The supervisors also repaint when their
+  own socket reconnects, so the relay's fresh replay buffer starts with a whole
+  frame.
+- **Opening the app wakes the home.** `/api/app/state` starts a sleeping or
+  disconnected home in the background (`wakeHomeInBackground`, 60s cooldown after
+  a failed wake). Polled reads (transcript, screen) answer `503 {waking:true}`
+  and the app shows "Waking" in place instead of a toast; writes (send, task,
+  keys, action) wait up to 90s for the control socket so a message sent to a
+  sleeping home is delivered, not lost.
+- **What survives a stop.** `$HOME` is on the ephemeral rootfs, so `~/.claude`,
+  `~/.codex`, `~/.rudder`, `~/.config` are symlinked into `/workspace/home`.
+  Vault files are rewritten every boot EXCEPT the Claude/Codex login files, where the
+  copy that expires later wins (`keepFresherLogin`): a refreshed token on disk must
+  not be replaced by the vault's older one. Repo-scoped vault files
+  (`~/code/<repo>/.env.local`) are written after the clone, never before (a
+  non-empty clone target fails). Hook configs (`~/.claude/settings.json`,
+  `~/.codex/hooks.json`) are fixed after every vault write (`hook-paths.mjs`):
+  laptop `/Users/<name>`/`/home/<name>` prefixes become this `$HOME`
+  (`~/.claude/hooks` is synced and chmodded +x, the vault keeps no modes), and a
+  hook whose command starts with an absolute path still missing here is dropped.
+- **Tailscale.** userspace `tailscaled` as the non-root user, state on the volume,
+  `--hostname=rudder-home`. Listening ports (from `/proc/net/tcp*`, owner pid ->
+  cwd -> project) that are not Rudder/agent processes get `tailscale serve --https`;
+  if HTTPS certs are off on the tailnet the link falls back to plain http (userspace
+  mode forwards tailnet connections to 127.0.0.1).
+- **Remote Control.** `RUDDER_REMOTE_CONTROL=1` (set by the supervisor) makes
+  `augment_worker_command` add `--remote-control "<repo> · <id>"` to every Claude
+  worker/main pane. The one-time consent is `remoteDialogSeen: true` in
+  `~/.claude.json`, written by the supervisor with the folder-trust entries.
+- **Publishing in the cloud.** `cloud_worker_publishes()` (RUDDER_CLOUD_WORKER=1 on a
+  cloud session) makes `m` always take the Publish route and skips the first-push
+  consent modal; a local merge on a machine nobody looks at is never what you want.
+- **Failure reasons.** `failure_reason` columns on sails and workspaces, set from
+  heartbeat `reason`/`exitCode`, from any create/start that throws
+  (`recordStartFailure`), and from a project's clone/dashboard error; cleared on the
+  next good start. Shown by `rudder cloud list`, `workspace status`, `home`.
+- **Phone app.** Static files in `cloud/app/`, served at `/app` (the control-plane
+  Dockerfile copies them). `/api/app/*` accepts the better-auth session cookie OR a
+  bearer `rdr_` token. `/app/login` goes straight to Google; `?native=1` ends at
+  `/app/native-done`, which mints a bearer token and redirects to `rudder://auth?token=`
+  for the iOS shell (Google refuses OAuth inside an embedded web view).
+  The home screen leads with Projects, pinned ones first in the order they were
+  pinned (`pinned_at` on the home-repo row, set by `POST /api/app/pin`, so every
+  device agrees), then Needs you, then the machine card, which moves above the
+  projects only while it has failed or a login is broken.
+- `rudder cloud --snapshot` and repos without a GitHub origin keep the old
+  per-repo snapshot workspace.
+- **Moving a laptop's agents onto the home machine** (`src/move-home.ts`). `H` in the
+  dashboard (also `^W H`, the quit gate's "N agents are running here. Move them to
+  the home machine?", `/handoff` on one row, and `RUDDER_CLOUD_MIGRATE`) pauses the
+  running isolated workers and runs `rudder cloud move --yes <ids>`. Nothing is
+  pushed to GitHub: ONE git bundle carries every agent's jj `@` commit (minus what
+  `origin`'s default branch has, so unpushed local integration changes come along),
+  plus each run.json and its Claude transcript / Codex rollout. The control plane
+  holds it in a job (`POST /api/rudder/home/move`, polled by id) and asks the
+  supervisor to `adopt`; the supervisor pulls the bytes with its worker token
+  (`GET /api/rudder/home/<id>/moves/<move>/bundle`, never over the control socket),
+  runs `rudder __adopt-moved` (fetch into the clone, `jj workspace add` + `jj edit`
+  so the workspace's `@` IS the moved commit, transcript placed for `--resume` at the
+  new cwd, a `paused` run.json with a `migration` block), and queues a steer `adopt`
+  per run; the repo's dashboard loads the row and resumes it at most once. A row has
+  moved only when the CLI has written `migrated` (+ `movedTo: {kind: "home"}`) into
+  the LAPTOP's run.json, which it does after the home reported it staged;
+  `reconcile_cloud_moves` follows the records and resumes locally whatever a move
+  pane did not hand over. (The old paths flipped rows to Migrated at spawn time,
+  which raced the CLI into finding nothing to move; they follow the records too now.)
+- **Deletes are one fact everywhere.** The phone lists run records, so `dd` on the
+  home dashboard removes it from the phone. The phone's swipe/menu Delete is a steer
+  `delete` (`deliver_delete_request`, the same core as `dd`). For moved agents the
+  laptop asks `rudder cloud home runs <ids>` (backed off, 20s to 300s) and drops rows
+  the home no longer has; `known: false` (asleep, cloning) is never read as deleted.
+  `dd` on a moved row runs `rudder cloud home delete`, which the control plane queues
+  until a sleeping home reconnects.
+- **`/sync` (`rudder cloud sync`, `src/checkout-sync.ts`).** GitHub is the meeting
+  point between devices, so sync is: this checkout and the home machine's clone
+  (`rudder __sync-checkout`, run by the supervisor's `sync` RPC behind
+  `POST /api/rudder/home/sync`, which wakes the home) each fetch and move to the newest
+  default branch ONLY when nothing would be lost or tangled: git fast-forwards a clean
+  checkout on the default branch; jj runs `jj new main@origin` when `@` is empty and
+  nothing below it is unpushed. Uncommitted or unpushed work on either side is reported,
+  never pushed, rebased or overwritten. It also brings the vault's copy of the laptop's
+  config level (`ensureVaultAws`). `/sync all` / `--all` covers every repo on the home.
+  Typed ON the home (`RUDDER_CLOUD_RUNTIME=home`) it is local only (`homeMachineSync`):
+  the home has no CLI login (`~/.rudder/cloud.json`) and the laptop path would sync it
+  with itself, so it just pulls the newest default branch into its own clone(s) when
+  safe; `/sync move` there is a notice. A failed plain pane (`plain_process`) reports
+  `<label> exited (exit N): <its last line>`, never "agent process exited".
+- **Work travels too, without GitHub (3.2.1).** Each side's work GitHub lacks (the jj
+  working copy and unpushed changes below it) is a git bundle (`exportWork`): the
+  laptop's rides in the sync request, the home's is PUT back to the control plane
+  (`/api/rudder/home/<id>/syncs/<blob>`, worker token; the laptop fetches
+  `/api/rudder/home/syncs/<blob>`; in memory, 15 min). Not a pushed WIP branch: jj
+  tracks every non-ignored file, so a stray secret would reach GitHub. The receiver
+  (`importWork`) moves onto it (`jj new <head>`) only when nothing is lost: it has no
+  work of its own, its work is already in the incoming history, or its edits read the
+  same there (Rudder's .gitignore lines in a fresh clone). Otherwise both stay and the
+  incoming one is bookmark `rudder-sync/<from>`. The SENDER checkpoints a working copy
+  with edits (`jj new`) so its next edits are a child of what was sent, or every second
+  sync would read as diverged. `rudder cloud sync <name>` clones a repo that is only on
+  the home into `~/code/<name>` first. Agents and their workspaces do not travel (that
+  is `/sync move`), only the main checkout.
+- **Projects made on the home machine** (the phone's new project without GitHub, `repoUrl` `local:<name>`) have no origin a laptop checkout could name, so `rudder cloud attach <name>` finds a home project by name (`/api/rudder/home/open {project}`, wakes the home) before treating the argument as a sail id.
+- **Update when idle (`sweepIdleHomeUpdates`, server.ts).** A release pins a new
+  `RUDDER_WORKER_IMAGE`, but the home keeps the image it booted with, and restarting
+  cuts off agents mid-turn. Every minute the control plane checks each connected home:
+  when its machine image differs from the pinned one and NO agent has been `working`
+  / `starting` or holding a prompt (`asks`) for `RUDDER_HOME_IDLE_UPDATE_MS` (5 min),
+  and nobody has touched it for as long (`last_activity_at`), it updates the machine
+  IN PLACE (`POST machines/<id>` with the current config and the new image: same
+  volume, env, mounts). The boot reopen brings the agents back. At most one attempt
+  per 15 min. So after a release, you never restart the home by hand.
+- **`/sync` also shows the agents.** After syncing it lists the cloud's agents for
+  the repo (needs you / working / done, from the home's last state) and the laptop's
+  still-running movable agents; `/sync move` hands those over through the same
+  pause-then-move path as `H` (`request_move_all_home`).
+- **The phone answers prompts like the Claude app** (`native/src/permission_hook.mjs`,
+  `cloud/worker/asks.mjs`). On the home runtime every Claude agent's settings get a
+  `PermissionRequest` hook (timeout a day). Claude shows its own dialog WHILE the hook
+  runs and takes whichever answers first (measured on 2.1.302), so the terminal still
+  works. The hook writes `<signals>/<run>.asks/<id>.json`; the supervisor lists it as
+  the agent's `asks` (kind permission / question / plan); `POST /api/app/answer`
+  writes `<id>.answer.json`, which the hook prints as the decision. Approvals:
+  allow, allow always (`updatedPermissions` = Claude's suggestions), deny + reason.
+  Questions (AskUserQuestion, bypass mode included): allow with `updatedInput.answers`
+  keyed by question text, multi-select joined ", ". Plans (ExitPlanMode): Claude
+  IGNORES a hook allow for a plan but takes deny + message as "revise", so approve is
+  the key `1` and revise is a deny. Claude does not cancel a hook whose dialog was
+  answered in the terminal: the hook watches the transcript for the call's
+  `tool_result` (or an interrupt) and withdraws. The app's stop-square sends Esc
+  (interrupt the turn, not the agent).
+- **A remote message is never typed into a menu.** The phone once "delivered" two
+  messages into Claude's `/config` search box. `terminal_composer_blocked` (detect.rs)
+  reads a menu's or permission prompt's key hints off the bottom rows, and the steer
+  path refuses with the reason instead; the phone shows it on the failed bubble.
+- A task typed on the phone gets its row at once (the dashboard no longer waits on a
+  workspace title). `.rudder/pending-tasks.json` is read only for dashboards that
+  still write it, and entries over a minute old are ignored as leftovers. The title
+  call runs `claude -p` without the user's settings, hooks, plugins, MCP or tools
+  (~2s faster), falling back to the plain call on an older CLI.
+- `/model` in the phone's task box opens a picker fed by `rudder __models` (the same
+  lists as the dashboard's) and sends `/model <agent> <model>`.
+- **Photos and files from the phone.** `POST /api/app/upload?workspace=&name=` takes
+  the raw bytes (25 MB cap, refused on `Content-Length` before reading so the phone
+  gets a 413 and not a reset), holds them in memory for at most 5 minutes, and asks
+  the supervisor over the control socket (`upload` rpc) to pull them once from
+  `GET /api/rudder/home/<id>/uploads/<upload>` with its worker token (bytes never
+  ride the control socket, same as move bundles). The file lands in
+  `<repo>/.rudder/uploads/<YYYYMMDD-HHMMSS>-<name>` and the message goes out with
+  an `Attached files:` list of those paths, which the agent reads with its own
+  tools; the app turns that list back into chips. The clip opens a menu (Photos,
+  Camera, Files) where each goes straight to its picker. WebKit's file input
+  cannot do that for Photos (anything accepting images gets WebKit's own Photo
+  Library / Take Photo / Choose Files menu first), so the iOS shell from 1.0.2
+  (build 4) answers a `pick` message with native pickers (`AttachmentPicker.swift`:
+  PHPicker, no permission, HEIC delivered as JPEG; the camera; the document
+  picker) and hands the bytes back as base64 through `window.rudderPicked`
+  (`RUDDER_NATIVE.picker`). Without it a file input stands in; on iOS Files uses
+  `accept="application/octet-stream"`, which makes WebKit skip its menu while
+  still allowing every type. Desktop skips the menu. Shells before 1.0.1 have no
+  `NSCameraUsageDescription` (a camera pick crashes them), so their menu offers
+  Files only and says to update.
+- **Pasting from the laptop into a cloud agent (`src/paste-bridge.ts`, 3.3.1).** An agent
+  on the home reads the HOME's clipboard and disk, so Claude Code's Ctrl+V found nothing
+  (xclip, no clipboard) and a dropped screenshot was a `/Users/...` path that does not
+  exist there. The `rudder cloud` client looks at each input chunk before it goes up:
+  Ctrl+V (0x16 or kitty `\x1b[118;5u`) with files or an image on the LOCAL clipboard
+  (JXA over NSPasteboard: Finder files first, then an image as PNG, ~60ms), or a paste
+  made ONLY of existing local files (quoted, backslash-escaped, `file://`), is uploaded
+  through `/api/app/upload` into `<repo>/.rudder/uploads` and replaced by a bracketed
+  paste of the cloud paths. Claude Code turns a pasted image path into `[Image #N]`
+  (checked on 2.1.302), and the dashboard's task box does too (`pasted_image_path`).
+  Anything else passes through unbuffered; keys typed during an upload wait behind it
+  so order holds; a failed upload sends the original bytes and shows the reason.
+- **A compacted conversation is one marker, not a user message.**
+  `transcripts.mjs` turns Claude's `compact_boundary` + `isCompactSummary` entry and
+  Codex's `compacted` line into a `{role:"system", kind:"compact"}` message carrying
+  `{trigger, preTokens, summary}` (preamble and "continue from where it left off"
+  trailer stripped). The app renders it as a divider ("Context compacted · 367k
+  tokens summarized") that expands to the summary, and recognizes the old shape (a
+  user message starting "This session is being continued...") from workers that
+  predate it.
+- **Add project** is two tabs: "Open a repo" (search, owner chips, Open/Added per
+  row) and "New repo" (an owner list with your account and every org, a live
+  name check that says the exact `owner/name` it will create or that it already
+  exists, Private/Public). The last owner and filter are remembered per device.
+- **Signing Claude Code and Codex in from the phone** (`cloud/worker/logins.mjs`,
+  `ios/App/AgentLogin.swift`). The home screen has a row per agent CLI under the
+  machine card (Signed in · account · plan, Login expired, Not signed in) fed by
+  `home.credentials` (now with `plan`) and `home.logins` (the in-flight sign-ins,
+  public view only: no urls or codes). Sign in (`POST /api/app/login/start`, rpc
+  `loginStart`) runs the CLI's own login on the machine in a pty with `BROWSER`
+  pointed at a script that writes the authorize url to a file: `claude auth login
+  --claudeai` (its callback is `http://localhost:<random port>/callback`) or
+  `codex login` (`127.0.0.1:1455/auth/callback`). The iOS shell (1.0.2 build 5,
+  `RUDDER_NATIVE.login`) opens that url in ASWebAuthenticationSession (Safari's
+  cookies, so a signed-in user only taps Authorize) and listens on the PHONE's
+  loopback at the same port; the redirect lands there, the query goes back through
+  `window.rudderAuthorized` and `/api/app/login/finish`, and the machine checks the
+  `state` and replays the GET against the CLI's own server. Nothing to copy. A
+  wrong state is refused before the replay (Claude's CLI aborts on one). Without
+  the shell, or when the listener fails, Claude falls back to its paste-a-code page
+  (`code\r` typed into the pty) and Codex to `codex login --device-auth` (the app
+  shows the code and polls). `ANTHROPIC_API_KEY`/`CLAUDE_CODE_OAUTH_TOKEN` are
+  removed from the login's env so the CLI does not sign in with a key instead. An
+  account with no machine sees "Create my cloud machine" (`/api/app/wake` creates
+  one), and Sign in on a machine that is not up yet waits for it (503 retries).
+  GitHub comes from the vault: the laptop's, or the phone's own Connect GitHub
+  (next bullet).
+- **Phone and laptop, one sign-in (new-user onboarding).** `rudder login`'s device
+  login now carries a single-use `userCode` (`K7P-4QX`, the pairing alphabet, dies
+  with the 5 min login) and an `approveUrl` (`/app/approve?code=`). On a terminal
+  the CLI prints the code and a QR of that url (`src/qr.ts`, a dependency-free
+  encoder checked against libqrencode in `tests/qr.test.mjs`) and opens the
+  browser only on Enter; without a terminal it opens the browser as before. The
+  phone's "Sign in a computer" (Settings, the "Use Rudder on your computer" card,
+  or the QR, which waits in localStorage through a sign-in) calls
+  `/api/app/computer/lookup` (shows the hostname the CLI sent) then `/approve`,
+  which issues the CLI token on the PHONE's account (verified email only, like
+  `/cli/approve`). Any answer burns the code; a deny makes the poll return
+  `denied` and the CLI then stops instead of falling back to `gh auth token`.
+  Wrong codes: 10 per minute per account and per address. After login (and from
+  `rudder doctor`), on a TTY only, `src/onboarding.ts` offers to install Claude
+  Code / Codex when neither is present and runs their own login, offers the
+  login when installed but signed out, and lists the cloud repos with the
+  `rudder cloud sync <name>` hint. It never copies agent logins from the vault
+  (refresh-token rotation signs one side out). **Connect GitHub from the phone**
+  runs GitHub's device flow on the control plane (`/api/app/github/start|poll|
+  cancel`, scope `repo read:org workflow`, the same `RUDDER_GITHUB_DEVICE_CLIENT_ID`
+  as the CLI fallback, which today is the GitHub CLI's public OAuth app) and
+  stores `GH_TOKEN` (source `phone`) in the vault, then re-sends the home's repo
+  list so the supervisor re-reads the vault and re-checks credentials. Needs
+  `RUDDER_SECRETS_KEY`; without it the route says so (503). `/api/app/state`
+  carries `github: {connected, source}` from the vault so the app knows even
+  while the machine sleeps. The home screen's "Get set up" card (GitHub, an agent
+  login, a repo) hides once all three are done and stays hidden
+  (`rudder.setupDone`); a never-connected GitHub is a setup step there, not a red
+  machine-card error.
+
+- **The morning digest (`cloud/src/digest.ts`, `cloud/worker/digest.mjs`).** At 9:01
+  in the account's time zone (the app sends `X-Rudder-Timezone` on every state poll,
+  kept in `rudder_account_prefs`; default America/Los_Angeles) `sweepDigests` (every
+  `RUDDER_DIGEST_SWEEP_MS`, 60s; `RUDDER_DIGEST=0` off) asks the home machine's
+  `digest` rpc what every open project's agents did since the previous digest (run.json
+  records: started, your messages, finished, merged, pushed, PR, deployed), groups it
+  by project with a timeline, and stores one row per local day in `rudder_digests`
+  (about two months kept). A sleeping home is woken for it until noon; after that the
+  app's `GET /api/app/digest?live=1` finishes it. The app leads with the newest digest
+  (`state.digest`), `/app/digest[/<id>]` shows it by project, and "So far today" is the
+  live, unstored window. The iOS shell schedules a repeating 9:01 local notification
+  (`DigestReminder.swift`, turned on from the digest screen, `RUDDER_NATIVE.digest`);
+  tapping it opens `/app/digest`. Its text is fixed: a local notification cannot carry
+  the day's headline.
+- **Talking to Rudder (phone and CarPlay, `cloud/src/voice.ts`).** The phone holds
+  the audio and speaks to OpenAI's realtime model directly over a WebSocket
+  (`VoiceAssistant.swift`: AVAudioEngine with voice processing for echo
+  cancellation, pcm16 24 kHz both ways, barge-in truncates the playing item), with a
+  2-minute client secret (40 an hour per account, `RUDDER_VOICE_MINTS_PER_HOUR`) from `POST /api/app/voice/session`. That route configures
+  the WHOLE session (instructions with a snapshot of the account's projects and
+  agents, semantic VAD, far-field noise reduction, input transcription for
+  captions, the tools), so the app sends no config of its own and the prompt and
+  tools change with a control-plane deploy, not an App Store build. A 400 from the
+  mint is retried without the extras (noise reduction, transcription). Every tool
+  call is relayed to `POST /api/app/voice/tool` and run here against the home
+  machine with the same RPCs as the app's buttons (overview, agent detail with its
+  transcript tail, message, task, answer a permission / questions / plan,
+  interrupt = Esc, stop / merge / delete, find and open repos, end). Spoken names
+  resolve by word overlap (`resolveProject` / `resolveAgent`); no name means the
+  one that needs you; ambiguity goes back to the model as a question. Decided with
+  the user: act without spoken confirmation, EXCEPT delete (2026-10-20, after a
+  call deleted the wrong agent): `agent_action` delete without `confirmed: true`
+  returns "ask the user", naming the agent. Every message/task result names the
+  agent, its status and project and says delivered vs queued, so the assistant
+  tells the caller exactly where it went. A follow-up right after `start_task`
+  goes to the NEW agent (agent "just started", or no agent named): `VoiceMemory`
+  per account remembers the started task, waits up to 15s for its run record
+  (the dashboard lists it as `pending` first) and, failing that, holds the
+  message and delivers it the moment the run exists. Tool texts tell the model
+  to pass the user's own words ("test site" once became "test suite").
+  Transcription is pinned to `RUDDER_VOICE_LANGUAGE` (default `en`; road noise
+  was captioned as Korean). Env: `OPENAI_API_KEY` (or
+  `RUDDER_OPENAI_API_KEY`, 503 without), `RUDDER_VOICE_MODEL` (default
+  `gpt-realtime-2.1`), `RUDDER_VOICE` (`marin`), `RUDDER_VOICE_TRANSCRIBE_MODEL`
+  (`""` turns captions off). CarPlay (`CarPlaySceneDelegate.swift`) is a list
+  (Talk to Rudder, then what needs you) that presents `CPVoiceControlTemplate`
+  while a conversation runs; it only appears once Apple grants the
+  `com.apple.developer.carplay-voice-based-conversation` entitlement (iOS 26.4+)
+  and the App Store profile carries it, since signing takes entitlements from
+  the profile.
+- **Calling Rudder (`cloud/src/voice-call.ts`).** A phone number for the same
+  assistant, because a phone call works through CarPlay in any car today while the
+  CarPlay voice template waits on Apple. Twilio number -> Elastic SIP trunk whose
+  origination URI is `sip:<openai project id>@sip.api.openai.com;transport=tls` ->
+  OpenAI posts a signed `realtime.call.incoming` webhook to `POST /api/voice/call`.
+  The server checks the Standard Webhooks signature (`RUDDER_VOICE_CALL_WEBHOOK_SECRET`,
+  the `whsec_` from the OpenAI project's webhook; unset = 503, fail closed), maps the
+  `From` number to an account (`RUDDER_VOICE_PHONES="+14255550100=<account id>,..."`),
+  refuses a call whose `X-Twilio-VerStat` is present and not `TN-Validation-Passed-A`
+  (caller id can be spoofed), counts it against the voice rate limit, and accepts with
+  `voiceSessionConfig({sip: true})` (no audio formats, SIP negotiates them) and the
+  `call` surface's instructions. It then drives the call over
+  `wss://.../v1/realtime?call_id=` exactly like the phone's loop (one response at a
+  time, never over the user, tool batches in order, live updates in quiet moments) and
+  hangs up after the goodbye (`output_audio_buffer.stopped`, 6s cap), after 3 idle
+  minutes, or at 30 minutes. Audio never touches the control plane.
+  **A deploy does not end a call.** OpenAI keeps the SIP call up when our socket
+  drops (seen: a deploy killed Rudder's side 7 minutes into a call and the line
+  stayed open, toolless, for 6 more). Each live call is a `rudder_voice_calls`
+  row (persisted to S3 with the rest of the state on shutdown). On SIGINT the
+  server tells each caller it is restarting (`VoiceCallControl.notice`, then 3s,
+  `kill_timeout = "10s"` in fly.toml) and keeps the rows; the next server reads
+  them AT BOOT (`voiceCallsAtBoot`, so a call answered meanwhile is not joined
+  twice), reconnects to `?call_id=` without accepting again (`resume: true`), and
+  tells the model it is back and to re-check anything in flight. A call that
+  ends normally deletes its row.
+- **Twilio's side of the phone line (`cloud/src/twilio-watch.ts`).** Rudder only hears
+  about a call once OpenAI's webhook arrives, so a call Twilio failed to route, or one
+  OpenAI never handed over, used to leave no trace. With `TWILIO_ACCOUNT_SID` +
+  `TWILIO_AUTH_TOKEN` (or `TWILIO_API_KEY` + `TWILIO_API_SECRET`) set as Fly secrets,
+  the control plane polls Twilio's Calls and Monitor Alerts every
+  `RUDDER_TWILIO_WATCH_MS` (30s) and logs `twilio call <sid tail>: <status> ... rudder
+  <tag>: <verdict>` and `twilio alert <code> ...` into the same stream as the
+  `voice call` lines (`flyctl logs -a rudder-cloud-control | grep -E "voice call|twilio"`).
+  Each finished Twilio call is joined one-to-one with the nearest Rudder call record
+  (`noteVoiceCall`, 45s window) and gets a verdict; anything but `ok` (never reached
+  Rudder, refused, failed, under 5s) is a warning. The first poll is a baseline, never
+  news; caller numbers are masked to their last four digits. `GET
+  /api/admin/voice/calls` (admin only) returns the joined list. In memory only: a
+  restart forgets the joins, the Fly log keeps the history.
+- **Developing Rudder on the home machine.** Rust is not in the worker image; the
+  supervisor installs it once onto the volume (`~/.cargo`, `~/.rustup`, persisted
+  like `~/.claude`) in the background on first boot, and agents get
+  `~/.cargo/bin` on PATH. The dashboard there runs the installed `/opt/rudder`, so
+  editing `~/code/rudder` never breaks the session doing the editing.
+  The AWS CLI v2 and the Session Manager plugin install the same way
+  (`/workspace/tools/bin`, on agents' PATH), so SSH-over-SSM works with the
+  vault's `~/.aws`; `rudder cloud` offers to refresh `~/.aws` when the laptop's
+  copy changed, and the doctor compares the AWS principal (ARN) too.
+  The Vercel and Netlify CLIs install there too. Netlify's login is the
+  laptop's (vault: `~/.config/netlify/config.json` + `NETLIFY_AUTH_TOKEN`);
+  Vercel's is the cloud's OWN device login, kept in
+  `~/.local/share/com.vercel.cli` on the volume, because Vercel rotates the
+  refresh token and a shared copy signs one side out (an OAuth CLI token
+  also cannot mint a classic token: 403). Namecheap has no API access set up.
+  Go installs the same way (latest stable from go.dev into `/workspace/tools`,
+  `~/go` persisted). The IMAGE itself carries what a fresh project expects so
+  agents never stop to install basics: build-essential, cmake, pkg-config,
+  libssl-dev, python3 with pip/venv (`PIP_BREAK_SYSTEM_PACKAGES=1`), uv, bun,
+  pnpm, jq, ripgrep, fd, sqlite3, psql, redis-cli, git-lfs, zip/xz/bzip2, tmux,
+  htop, vim-tiny. Small and universal goes in the image; big or fast-moving
+  toolchains (Rust, Go, cloud CLIs) go on the volume, so they survive a stop
+  without bloating every boot. `RUDDER_HOME_TOOLCHAINS=0` skips the volume ones.
+  `rudder cloud home stop` refuses to run on the home machine itself
+  (`RUDDER_CLOUD_RUNTIME=home`): it would end every agent there, the caller
+  included. Restart it from a laptop or the phone. iOS/Xcode and signing stay
+  local.
+
+### 9.8.2 The web app, orgs, Slack/Linear, and the Mac app (2026-10-20)
+Decided with the user: the TUI stays for power users, but the front door is the
+WEB app (`cloud/app/`, served at `/app`; rudder.exla.ai `/login` and Get started
+redirect there). It is deliberately simple: an agent panel and an orchestrator
+(plan) panel, a model picker instead of typing `/model`, no god's view. The Mac
+app is the same web UI in a native shell plus local abilities. Agents always run
+on the user's own Claude Code / Codex subscription.
+- **Surface picker** (`cloud/src/onboarding.ts`, table `rudder_onboarding`): first
+  run after sign-in asks Web / Mac app / Terminal / Phone (multi-select), then shows
+  each one's next step. `GET|POST /api/app/onboarding`; `/api/app/state` carries
+  `onboarding` and `orgs`.
+- **Orgs** (`cloud/src/orgs.ts`): roles `admin` (adds/removes people, changes
+  roles, connects integrations) and `member`. Invites are single-use links
+  (`/app/join/<token>`, hash stored, 7 days, optional email lock); nothing sends
+  email. An org always keeps one admin (409 otherwise). Membership shares the
+  org's integrations and a read-only view of each other's agents (next bullet),
+  never machines.
+- **Team view and private agents** (`cloud/src/team.ts`, `cloud/app/team.js`):
+  `GET /api/app/team[?org=]` lists your org-mates (not you) grouped by person and
+  project, built ONLY from the in-memory home state (`homeProjects`), so a sleeping
+  machine shows its last state as "Asleep" and looking never wakes or touches it.
+  Agent fields are a whitelist (title, status, phase, backend, model, ask KIND,
+  updatedAt; never task, lastMessage, remoteUrl or ask content).
+  `GET /api/app/team/transcript?member=&workspace=&run=` proxies the owner's
+  `transcript` RPC only when viewer and owner share an org, the run is in the
+  owner's reported state and it is not private, and only while the owner's
+  control socket is open (else 503 `{asleep}`); every miss is one 404. The web
+  app opens it as `AgentScreen(..., { member })`: no composer, prompts, terminal
+  or menu. Writes stay owner-only: send/task/upload/keys/answer/pin/action/screen
+  and visibility all resolve the workspace through the CALLER's account
+  (`requireHomeRepo`), and `tests/cloud-team.test.mjs` proves a teammate gets
+  404 on each with nothing reaching the owner's machine. Visibility is
+  `team` (default) or `private`, set by the owner (`POST /api/app/visibility
+  {workspace, run, visibility}` or `{workspace, newAgentsPrivate}`), stored in
+  `rudder_agent_visibility` keyed by home-repo workspace id + run id (`run_id
+  "*"` = the project default), NOT in run.json: the dashboard owns that file and
+  the answer must hold while the machine sleeps. Turning the project default on
+  pins every known agent `team`; each agent first seen afterwards is pinned
+  `private` in the same tick its state lands (`pinNew`). A private agent reaches
+  teammates only as `{id, private, status, asking, updatedAt}`; its own row in
+  `homeProjects` carries `visibility` so org Slack channels get "Private agent"
+  instead of its title (the personal channel still gets the title), and the
+  voice overview lists only teammates' non-private live agents, read only.
+- **Analytics** (`cloud/src/product-analytics.ts`): `POST /api/app/event` with a
+  whitelist (`PRODUCT_EVENTS`), the same PostHog project as `src/analytics.ts`,
+  anonymous (sha256 of the account id), props sanitized. Server-side events
+  (org_*, onboarding_completed, integration_*, linear_issue_started) are captured
+  by the modules themselves; the client must not resend them. The server also
+  counts what every client does at the route, so web, Mac, phone and voice are
+  covered at once (`SERVER_ONLY_EVENTS`, which `/api/app/event` refuses):
+  `app_active` (once per account, UTC day and platform, never from a passive
+  poll), `message_sent`, `prompt_answered`, `agent_action` {action},
+  `plan_approved` {via app|voice}, `agent_pulled`, `voice_session_started`
+  {surface}, `voice_tool_used` {tool, ok, surface: phone|carplay|call} (the
+  `onTool` hook on `VoiceContext`), `voice_call_started` / `voice_call_ended`
+  {duration_s}, and `app_error` {route with ids replaced, status} for a 5xx on
+  `/api/app/*`. The client sends `X-Rudder-Platform` (browser, mac, ios) on every
+  call and `track()` stamps `platform` itself. PostHog's `source` property is
+  always "app", so event props use `via`.
+- **Slack + Linear** (`cloud/src/integrations.ts`, `slack-app.ts`, `linear.ts`):
+  per org (admins connect) or personal. OAuth tokens sealed with AES-256-GCM under
+  a key derived from `RUDDER_SECRETS_KEY` (no key: connect is 503). Slack posts to
+  the chosen channel when an agent needs you / is ready / failed (first state per
+  account after a restart is a baseline), and `/rudder` (`link`, `status`,
+  `projects`, `<project> <task>`) works for Slack users linked to an account.
+  Linear lists issues and starts an agent from one, commenting on the issue. Env:
+  `RUDDER_SLACK_CLIENT_ID/_SECRET/_SIGNING_SECRET`,
+  `RUDDER_LINEAR_CLIENT_ID/_SECRET`. Slack app: redirect
+  `<base>/api/integrations/slack/callback`, slash command URL
+  `<base>/api/integrations/slack/commands`, bot scopes chat:write,
+  chat:write.public, commands, channels:read, groups:read, im:write, public
+  distribution on. Linear app: callback `<base>/api/integrations/linear/callback`.
+  The older env-only shared-channel glue (`slack.ts`, `/api/slack/events`) is
+  untouched and separate.
+- **Plans on the phone/web**: the supervisor reads `.rudder/graph.json` and
+  `.rudder/plan-queue.json` (`cloud/worker/plan.mjs`, re-read on mtime) into each
+  project's `plan` in home state; `homeProjects` passes it through. Approve is a
+  steer kind, not a chat message: `POST /api/app/action {action:"approve", plan}`
+  -> home `action` -> steer `{kind:"approve", taskId:<plan id>}` ->
+  `deliver_approve_request` -> `approve_planned_queue_for` (empty id = the one
+  waiting plan; several waiting = refused).
+  The voice assistant (app, CarPlay, phone number) sees the same plan: the
+  overview says "plan waiting for approval", a newly waiting plan is a live
+  update once, and `launch_plan` sends the same approve (words from the
+  request pick between several; never confused with an agent's own
+  ExitPlanMode plan, which stays `answer_prompt`).
+- **Pull an agent to a laptop** (`rudder cloud pull <run> [--json]`,
+  `src/cloud-pull.ts`; route `POST /api/rudder/home/pull`; home RPC `pull` runs
+  `rudder __pull-export`). A COPY: the cloud agent keeps running. One-agent move
+  bundle (commit incl. uncommitted edits, run.json, transcript) through a one-shot
+  sync blob, adopted as a paused row in a local jj workspace. Never creates a home.
+- **Mac app** (`mac/`, XcodeGen, Developer ID + notarized DMG, not the App Store
+  because it runs the local `rudder` CLI): WKWebView on `/app` with
+  `RUDDER_NATIVE.platform = "mac"`, Keychain token, notifications, Dock badge, a
+  menu bar count of what needs you (polls `/api/app/state?passive=1`, which never
+  wakes or touches the home: keep it that way), and "Open a copy on this Mac"
+  (`openLocal` -> `rudder cloud pull`). Bridge contract in `mac/README.md`. The
+  DMG is served from `rudder.exla.ai/download/mac` -> the latest GitHub release
+  asset `Rudder.dmg`.
+- **Agent status: one rule, stamped on every agent** (`cloud/worker/agent-status.mjs`,
+  `cloud/src/agent-status.ts`). The supervisor reads each run.json into a status
+  word plus raw facts: `status` (working / waiting / review / done / paused /
+  failed / stopped / merged / orphaned), `phase`, `attention`, `asks`,
+  `conflict`, `notInTrunk`, and `pr: {state, number, url}` (state from the
+  dashboard's `publish.observedState`; null on dashboards that do not write it).
+  A running record reads `paused` while the repo's dashboard is not running and
+  `orphaned` when its `process.pid` is dead, so a dead dashboard never shows
+  Working (and `activeAgents`, which holds off idle updates, counts only real
+  work). `delivery blocked` is `failed`; a merge whose change left trunk is
+  `review`, not `merged`; a merged PR is `merged`. The control plane then stamps
+  `needsYou` + `reason` in `homeProjects`, and every surface (web, Mac menu bar
+  and Dock, team view, voice, Slack) reads those two fields; nothing re-derives
+  needs-you. Needs you = a prompt (`permission` / `question` / `plan`), a stopped
+  turn (`input` / `interrupted` / `error`), `conflict`, `not-in-trunk`, missing
+  delivery proof (`delivery`), `delivery-blocked`, `failed`, or finished
+  workspace work awaiting merge (`review`). A row whose PR is open or a draft
+  is waiting on GitHub, NOT on you; a conflict still needs you with a PR open.
+  The app labels by reason ("Needs permission", "Interrupted", "Turn failed",
+  "Merge conflict") and by PR ("PR open", "Draft PR", "PR merged").
+- **A sleeping home's state is a memory.** `homeStates` keeps the socket that
+  delivered each state; it is live only while that socket is the open control
+  socket (`homeStateLive`). Otherwise working / starting / waiting rows are served
+  as `paused` with `stale: true` and `lastSeen` (ms), their prompts dropped (the
+  hooks died with the machine), and the project carries `live: false` +
+  `stateAt`; the app shows "Paused · last seen 5m ago". On SIGTERM the supervisor
+  stops the dashboards and publishes one last state (rows read Paused) before
+  exiting. Slack holds a first needs-you for 2.5s (`NEEDS_DEBOUNCE_MS`) so an
+  interrupt's blip is not posted.
+- **Not built yet**: the cloud agent using the Mac as a runner (xcodebuild /
+  simulator on the user's Mac on the agent's behalf), Sparkle auto-update for the
+  Mac app, and org-level shared credentials / SSO.
+
+### 9.9 Known limitations (current state, not action items)
+Documented so they are not rediscovered: workspace re-use ignores a newer snapshot with
+the same fingerprint; migrated-agent fresh-prompt fallback is silent on a corrupt
+`run.json`; deleting a workspace SQLite row can orphan its Fly volume; worker tokens
+(`rdrw_*`) and Rudder CLI tokens never expire/rotate; an expired presigned URL can hang
+silently if the snapshot-url endpoint is unreachable; BYOC has no crash timeout (can sit
+"running"); OAuth reconfig has no rollback; attach-during-restart replays the pre-pause
+buffer (a client then asks for a repaint, which a worker image older than 3.1.11 ignores);
+`includeRudderState` copies all `run.json` with no pruning. The cloud path is
+functional but less battle-tested than the local dashboard; treat it as beta.
+
+---
+
+## 10. Models and effort
+
+- `src/models.ts`: model discovery for the `/model` picker. Sources, each guarded
+  so a corrupt cache degrades to a fallback rather than throwing:
+  - `models.dev` cache (`readModelsDevCache`),
+  - local Codex cache `~/.codex/models_cache.json` (`discoverCodexModelsLocal`),
+  - Claude project models (`collectClaudeProjectModels`).
+  `discoverModelOptions(backend, default)` merges these; callers fall back to
+  `fallbackModelOptions`.
+- `native/src/models.rs` mirrors the same discovery for the dashboard picker. Codex
+  rows read `~/.codex/models_cache.json` before models.dev so new account-specific
+  families (for example GPT-5.6 Sol/Terra/Luna) appear immediately in Codex's own order.
+  The models.dev cache (~6MB) is parsed once per (path, mtime, size), not on every
+  frame the palette is open (`cached_models_dev_rows`; the memo is off under tests).
+- `src/effort.ts`: `EffortLevel = low | medium | high | xhigh | max` and the
+  per-backend mapping (Claude uses `effort`, Codex uses `reasoningEffort`).
+  opencode gets `undefined`: it has no effort flag, and passing one it would
+  reject is worse than offering no dial.
+- **opencode (third backend, added with `/handoff`).** `Backend::Opencode` /
+  `BackendId "opencode"`. Model ids are provider-qualified (`anthropic/claude-…`);
+  an EMPTY model is legal and means "opencode's own default", so `-m` is omitted
+  rather than passed empty. The picker reads a cached `opencode models` list
+  (`<rudder home>/opencode-models.txt`, refreshed detached once a day) because
+  only opencode knows which providers the user authenticated. Every launch is the
+  interactive TUI (`--auto` for workers, omitted for planners so an unexpected
+  edit stops for approval, `--prompt` for the first turn); there is no headless
+  streaming mode to parse, so planner output is read from the pane like the
+  interactive orchestrator. Known gaps, deliberate: no token/cost accounting
+  (`usage.rs` reports zero), no cloud-worker support, no `/fast` preset.
+- **`/fast` (v2.5.0, decided):** the fast preset is the FLAGSHIP model at LOW
+  effort — claude `opus(low)`, codex `gpt-6.1-sol(low)` (`fast_model_for`,
+  `native/src/models.rs`) — never a downgrade to haiku/spark. This mirrors
+  Claude Code's own fast mode (Opus with faster output, not a smaller model).
+  The claude CLI has no flag to launch with its native fast output mode
+  pre-enabled (verified against `--help` and the settings docs; only
+  `CLAUDE_CODE_DISABLE_FAST_MODE` exists), so low effort is the closest
+  launchable equivalent. The preset persists via the normal model-defaults path
+  and applies to NEW agents only. Small tiers stay reachable via `/model`.
+
+---
+
+## 11. Build, test, release
+
+From `package.json`:
+- `npm run build` = `tsc -p tsconfig.json` then `build-native`
+  (`cargo build --release --manifest-path native/Cargo.toml`) then `copy-native`
+  (copies the release binary to `dist/native/rudder-native`, `0o755`). `prepack`
+  runs `build`, so publishing always rebuilds.
+- `npm run check` = `tsc --noEmit` (fast typecheck).
+- `npm test` = `tsc` then `node --test tests/*.test.mjs`.
+- `npm run test:worker-scroll` = a focused subset of cargo tests for worker-pane
+  scrollback behavior.
+- Native tests: `cargo test --manifest-path native/Cargo.toml` (260+ tests + one
+  `#[ignore]`d live conductor harness, run with `-- --ignored --nocapture`).
+- **Native TUI harness** (`app_tests.rs`): drive the REAL `App` end-to-end with no
+  auth/network. `render_screen(app, w, h)` renders the actual dashboard
+  (`render::render`) to a `TestBackend` and returns the screen as text, so tests assert
+  on what the USER SEES. `write_fake_bin` + `RUDDER_CLAUDE_BIN`/`RUDDER_CODEX_BIN`
+  (`launch.rs` `claude_program()`/`codex_program()`) inject a fake backend: a planner
+  fake emits a canned decomposer stream (a `result` event whose text streams the
+  RUDDER_PLAN_TASKS block) so the full planner→parse→DAG→render path runs
+  deterministically; a worker fake writes files + exits (process-exit completion). `env_guard()` serializes tests
+  that mutate the process-global `RUDDER_*_BIN`. Pattern: build `App`, point a fake bin,
+  `start_rudder_plan_task` / feed keys, loop `poll_agents()`, then `render_screen` +
+  assert. See `tui_harness_drives_planner_to_dag_and_renders_it` and
+  `tui_harness_renders_the_plan_mode_card_when_the_planner_asks`.
+
+`tests/` are integration tests that import from `dist/` (so build first):
+`rebase-first.test.mjs` exercises merge/rebase/sync via `git.ts` + `state.ts`.
+`board-steer.test.mjs` covers both web-control owners: projector requests become
+durable native inbox entries, and a real standalone board redirects a delayed fake
+worker end-to-end before returning the same task/workspace to Review.
+`e2e-orchestrator.test.mjs` is the WHOLE-WORKFLOW test: it drives the real
+`rudder plan` + `rudder board` CLIs against a throwaway git+jj repo and verifies the
+DAG drains end-to-end (schedule → isolated jj workspace → worker → verify → jj merge →
+unblock dependents), covering both a hard-edge (serialized) and a parallel/fan-in DAG.
+It is deterministic via TEST-ONLY env hooks baked into the production code:
+`RUDDER_FAKE_MODEL_OUTPUT` (planner returns a canned plan block, see `callTextModel`),
+`RUDDER_FAKE_BACKEND=1` (each worker applies `[[FAKE_FILE:..]]` edits from the node prompt
+and exits 0, see `getBackend`/`fakeBackend`), and `RUDDER_AUTO_STEER_DELAY_MS` (shrinks the
+post-pass steering wait). No auth or real model needed. Note: the `cloud/` subproject has its
+own build — `cloud-relay`/`slack` tests need `npm --prefix cloud install` +
+`npm --prefix cloud run build` first, and self-skip (rather than error) when
+those artifacts are absent so `npm test` stays green in a fresh worktree.
+
+Always, before shipping a source change:
+1. `npm run check` (or `npm run build`),
+2. `cargo test --manifest-path native/Cargo.toml` if `native/` changed,
+3. `node --test tests/*.test.mjs`,
+4. rebuild before publishing so the packed `dist/` (incl.
+   `dist/native/rudder-native`) is current. `prepack` does this automatically;
+   `dist/` is not committed, so there is nothing to stage.
+
+### Releasing (tag-driven, drift-proof)
+
+Releases publish to npm from CI when a `vX.Y.Z` tag is pushed
+(`.github/workflows/release.yml`), so the published version is always pinned to a
+committed git tag. The workflow refuses to publish if the tag does not match
+`package.json` `version`, so the repo and the registry can never drift apart (the
+failure mode that left `1.0.70`–`1.0.73` on npm but never in git).
+
+Cut a release from a clean, pushed `main`:
+
+```bash
+npm version patch          # bumps package.json + package-lock, commits, tags vX.Y.Z
+git push --follow-tags     # pushes the commit and the tag; CI publishes
+```
+
+Prerelease versions (for example `npm version 4.0.0-alpha.1`) publish to the
+`next` dist-tag; stable versions publish to `latest`. Both package names use the
+same channel. A v4 foundation alpha is not completion of the full rewrite;
+the plan and [implementation record](architecture/implementation.md) track
+remaining launch gates. The updater follows `latest`, compares prerelease
+precedence correctly, and does not downgrade an installed v4 alpha to stable v3.
+
+`npm publish` runs in CI via `prepack` (tsc + `cargo build --release` +
+copy-native), with `--provenance` (hence the `repository` field and
+`id-token: write` permission). One-time setup: add an npm "Automation" token as
+the repo secret `NPM_TOKEN`. The workflow installs jj itself (`brew install jj`)
+before `npm ci`: the native tests drive real jj, and Rudder's postinstall no
+longer puts one on the system PATH (it keeps a private copy). 3.1.17 failed to
+publish on exactly that.
+
+Do NOT run `npm publish` by hand anymore. Hand-publishing is exactly what caused
+the drift, and it also ties the bundled native binary to whatever machine you
+publish from.
+
+Platforms: the release builds `rudder-native` on darwin-arm64, darwin-x64 and
+linux-x64 runners (`native-artifacts` matrix) and `copy-native` folds all three
+into `dist/native/<platform>-<arch>/`, so one package serves Apple Silicon,
+Intel Macs and Linux x64. Windows and linux-arm64 are not built.
+
+**Two package names (3.4.0).** The project moved from `viraatdas/rudder` to
+`exla-ai/rudder` (GitHub redirects the old URLs) and the npm package from
+`@viraatdas/rudder` to `@exla/rudder`. Every release publishes the SAME build
+under both names (the workflow rewrites `name` and publishes again), so an old
+install auto-updates under its old name to a build whose `moveToRenamedPackage`
+(src/version-check.ts) uninstalls `@viraatdas/rudder` and installs
+`@exla/rudder` (both own the `rudder` bin, so npm refuses EEXIST otherwise),
+putting the old version back if the new one will not install. Keep both
+publishes until old installs have drained; then `npm deprecate` the old name.
+The site moved to rudder.exla.ai (Vercel; DNS in Netlify's exla.ai zone);
+rudder.viraat.dev 308-redirects there (site/vercel.json).
+
+---
+
+## 12. Conventions and gotchas
+
+- **jj is the required internal substrate.** Run isolation and merge run on jj
+  (Jujutsu), colocated with git (`jj git init --colocate`) so the repo still
+  externally looks like git and final output is normal git commits / a PR. jj is
+  hard-required but never a separate install: `src/jj-binary.ts` fetches jj's
+  own release (pinned version + per-platform sha256) into
+  `~/.rudder/bin/jj/<version>/` from the npm postinstall (skipped as root, so a
+  `sudo npm i -g` cannot leave a root-owned `~/.rudder`) and again from `main()`
+  when jj is not on PATH, then prepends that dir to PATH so the dashboard,
+  workers and agents inherit it. A user's own jj wins. The pin stays at 0.40.0:
+  jj 0.46 `workspace add` needs git >= 2.42 and stock macOS / Debian 12 have
+  2.39. Only when that fails does `ensureJj` throw `MissingToolError("jj")`,
+  carrying the reason. The jj driver is `src/jj.ts` (all commands via
+  `runCommand("jj", ...)`); `git.ts` keeps only the externally-git contract
+  (root/branch/commit, status+diff for Hunk) plus the legacy git merge/sync
+  helpers behind a `run.vcs === "git"` guard. New runs always record
+  `vcs:"jj"` + `workspace.jjChangeId`. Use `exportToGit` after each merge. Global
+  undo is free via `jj op restore` (`rudder undo`). jj 0.40 note: `jj rebase`
+  uses `-o`/`--onto` (not `-d`); `jj git push --allow-new` is gone (plain
+  `--bookmark` push handles new bookmarks) - both have fallbacks in `jj.ts`.
+- **The workspace GC only touches what Rudder made** (`gc_orphan_workspaces`,
+  main.rs). It forgets a jj workspace only when its name is Rudder's
+  (`rudder-<run id>`, or `rudder-<id>-<hash>` before 3.9.12,
+  `RUDDER_WORKSPACE_NAME_PREFIX`) and no live row owns it
+  by name or by root; any other registered workspace keeps its registration and
+  its directory. The directory pass reclaims only checkouts (`.jj` or `.git`
+  inside) one level under a group, and never treats a checkout sitting straight
+  under `.rudder-workspaces/` as a group. Before 3.9.10 it did: a scorer
+  workspace made by hand there was forgotten within a minute, and its `tools/`,
+  `docs/` and `.jj` folders were each an "orphan" an hour later. With a jj too
+  old for the `root` template and a foreign workspace registered, the directory
+  pass does not run at all.
+- **Atomic, serialized writes.** Anything that persists JSON should go through
+  `writeJson`/`updateJson` so the per-path lock and unique temp names hold. Do not
+  hand-roll temp-file writes for `run.json`/`config.json`.
+- **Keybinding robustness on macOS.** When adding pane/global shortcuts, remember
+  Option+key may arrive as a typographic char without a modifier. Prefer the
+  Ctrl+W leader for new global actions, and add typographic fallbacks for any new
+  Option chord.
+- **The native dashboard reads `run.json` directly** and skips the TS load path,
+  so it does not see the TS-side background summarizer's in-memory state. Persist
+  through `saveRunRecord` and let the native side re-read.
+- **Codex binary and capability profiles.** `src/codex-binary.ts` prefers the user's
+  current `codex` on PATH (matching a direct session), with the checksum-pinned managed
+  `rudder-codex` binary only as a compatibility fallback; `RUDDER_CODEX_BIN` remains the
+  explicit override. Implementation/review/resume/shipping commands set
+  `features.plugins=true` and `features.computer_use=true`. Read-only planner/conductor
+  commands set both false. Keep the TS and Rust command builders in parity and retain
+  `notify=[]` before `signals::augment_worker_command` installs the per-run notifier.
+- **Parallel-work prompt guidance.** Every implementing agent (Execute/DAG worker,
+  Main owner, `/ask` one-off, and the TS `renderContract` used by `rudder run`/cloud
+  sails/the daemon) is told to batch independent tool calls in one turn and fan
+  independent subtasks out to concurrent subagents, never two on the same file.
+  Text lives in `parallel_work_rule!` (`native/src/tasks.rs`) and its TS mirror
+  `PARALLEL_WORK_RULE` (`src/brain.ts`); `tests/goal.test.mjs` fails if they drift.
+  Planners/orchestrators get `PARALLEL_PLAN_RULE` (soft-edged parallel nodes over
+  needless hard chains), mirrored in `src/planner.ts` `DEP_RULES`. Cloud has no
+  separate prompt path: the worker runs the same `rudder` binaries.
+- **Style.** No em dashes in copy or UI strings. Avoid "massively parallel"
+  framing in marketing copy.
+- **`dist/` is build output, not committed** (removed from git in PR #15).
+  `prepack` rebuilds it on publish; do not `git add dist/`. Forgetting to rebuild
+  before publishing would ship stale JS or a stale native binary.
+
+---
+
+## 12.5 Conversation handoff (`native/src/handoff.rs`, `src/handoff.ts`)
+
+Continuing an EXISTING CLI conversation as a Rudder agent. Two entry points, one
+launcher (`App::start_handoff_task`):
+
+- **Pull:** `/resume` in the task bar (`/handoff <session-id>` is a working alias — see
+  `RESUME_COMMANDS` / `resume_command_rest`, which every call site goes through; BARE
+  `/handoff` is different: it routes to `handoff_selected_agent_to_cloud`, the
+  single-run cloud handoff described in §9.2).
+  `suggestions_for` routes it to `handoff_suggestions`, which reads
+  `App::handoff_candidates` — a cache refilled on KEYSTROKES
+  (`maybe_refresh_handoff_candidates`, 3s throttle), never on the render path,
+  because the palette is consulted every frame. Rows show backend · model · age ·
+  short session id; the model comes from the transcript itself (Claude's
+  `message.model`, Codex's `turn_context.model`; opencode records none, so it is
+  omitted rather than invented).
+- **Push:** `rudder handoff "<next step>"` writes a JSON request into
+  `.rudder/handoffs/`; `poll_handoff_inbox` drains it inside the existing 1s
+  throttled block next to `poll_steer_inbox`. Requests are consumed exactly once
+  (the file is removed before the launch) and dropped after 6h.
+
+Invariants worth keeping:
+- **Always FORK, never resume in place.** The source chat is usually still open in
+  the user's terminal; two processes appending to one transcript corrupt it.
+  `spawn_forked_conversation` is shared with `b` (branch a live agent's chat).
+- **A conversation that does not exist must never create a workspace.** Both entry
+  points verify the session against the backend's own records first
+  (`claude_transcript_path` / `codex_session_exists` / `opencode_session_exists`).
+- **Session ids are spliced onto a command line**, so `valid_session_id` gates
+  every path, including requests read off disk.
+- **Discovery excludes Rudder's own machinery**: `.rudder-workspaces` (and legacy `.rudder-worktrees`) project dirs,
+  live agent rows' session ids, and non-interactive transcripts (Rudder's one-shot
+  `claude -p` calls for titles and completion notes record no session-mode marker).
+  If that filter ever empties the list, the unfiltered list is shown instead — a
+  noisy picker beats an empty one.
+- **Filter before truncating for GLOBAL session stores.** Claude's transcripts are
+  already per-directory, so "newest N files" is safe there. Codex keeps one global
+  tree (~1200 rollouts here, 52 for this repo, none in the newest 32), so taking
+  the newest N first showed the repo nothing. `recent_codex_conversations_in`
+  instead walks newest-first and stops at `limit` MATCHES or `CODEX_SCAN_LIMIT`
+  files, with a 4KB `"cwd":"…"` prefix reject before the full parse (~90ms over
+  1200 rollouts). Path matching tries both the raw and canonicalized cwd — the
+  rollout records whatever the shell was in, and a substring test cannot resolve
+  `/tmp` -> `/private/tmp`.
+- **Claude is scanned on the input thread; Codex and opencode are not.** The Codex
+  tree walk and `opencode session list` (~600ms) run on a background thread
+  (`handoff_extra_rx`) and merge when they land.
+- A seeded fork is told it is now in a different workspace (`worker_orientation`)
+  so it re-reads files rather than trusting its memory of the other checkout.
+
+---
+
+## 12.6 Telemetry and feedback (`src/analytics.ts`, `src/feedback.ts`, `native/src/telemetry.rs`)
+
+Anonymous product events, on by default, disclosed on first run
+(`pendingTelemetryNotice`, printed by `main()` before the dashboard takes the
+screen), off via `rudder telemetry off` or `RUDDER_TELEMETRY=0`.
+
+- **Transport** is PostHog's public capture endpoint — one POST with the PROJECT
+  token (write-only, safe to ship) and `$process_person_profile: false`, which
+  keeps events anonymous and ~4x cheaper. Verified against the live project.
+- **The dashboard has no HTTP client and must not grow one.** Rust shells out
+  detached to `rudder __event <name> --props '<json>'` (`native/src/telemetry.rs`),
+  so one implementation owns transport, redaction, and the off switch. A stalled
+  POST inside the render loop would be a worse bug than a missing metric.
+- **`projectHash` lives in ONE place** (`src/analytics.ts`). The Rust side sends no
+  project id; the detached CLI child inherits the dashboard's cwd and stamps it.
+- **What may be sent** is whitelisted per call site and filtered again by
+  `sanitizeProperties`: any string that looks like a path or a token is DROPPED,
+  not shipped. `redactText` (feedback) collapses home-relative and absolute paths
+  and token-shaped strings before anything leaves the machine — a GitHub issue is
+  public, so redaction runs for that destination too.
+- **Events today**: `dashboard_opened`, `agent_started`, `merge_finished`
+  (ok/conflict/planned — the "done but never merged" failure mode is the point),
+  `command_used` (name only, never the argument), `feedback`.
+- **`/feedback`** writes the local JSON copy FIRST (`.rudder/feedback/`), then the
+  usage event, then a `gh` issue if available, and reports honestly which
+  destinations were skipped and why.
+
+---
+
+## 12.7 Derived state: the reconcile pass (`App::reconcile_rows`)
+
+Every wrong thing the pane has shown came from a STORED answer drifting from
+something that already knew better — a row "running" with no process, "merged"
+whose change is not in trunk, owning a workspace that is gone, or missing a
+session id the backend had on disk the whole time. The rule:
+
+**If an authority can answer it, ask the authority. Do not cache the answer.**
+
+`reconcile_rows` runs on a 60s tick (and on the first poll after launch):
+- `ensure_session_ids_recorded` — Codex/opencode ids matched by cwd AND start time
+  (see §12.5), pinned while the run is alive so a crash cannot lose the mapping.
+- `verify_merged_rows` — `jj_change_in_trunk` asks jj whether each merged row's
+  change is still an ancestor of `trunk() | @`. `IntegrationEvidence::in_trunk` is
+  DERIVED, never loaded from the record. A row whose work left trunk renders as
+  `merged · NOT in main` instead of claiming success forever.
+- A merged row whose change left trunk persists `lifecyclePhase:
+  "merged-not-in-trunk"` so remote readers stop reporting it as landed.
+- `flag_missing_workspaces` — the filesystem decides; the result lives in
+  `App::rows_missing_workspace`, not on the row, because it is a question and not
+  a fact about the run.
+
+Persisted truth follows the same rule. run.json's `attention` is derived
+(`run_attention`), so the poll loop compares it before and after each row's
+evaluation and saves on any difference: a spinner lifting an Error/Idle latch used
+to change nothing else and left the phone saying "needs input". And `updatedAt`
+moves only when the record's content does (`record_content_unchanged`; an
+identical save is skipped), so reconcile passes no longer pull old rows back into
+the phone's recent groups.
+
+Anything that changes is written through `App::record_event`, which is
+`append_activity_jsonl` plus the IDS INVOLVED (run, change, bookmark, commit, jj
+op). Prose alone could not answer "what happened to this merge?" three hours
+later; these lines join to `jj op log`, which is the only other record of the same
+events. `u` on a merged row undoes exactly that operation via `rudder undo <op>`.
+
+---
+
+## 12.75 Publishing to GitHub (`native/src/publish.rs`)
+
+The second road to main. `m` on a reviewed row either merges locally or opens a
+pull request — **never both for the same row**. `App::merge_route_for` is the one
+place that decision is made, and `MergeRoute` has four answers: `LocalMerge`
+(publishing inactive), `ConfirmFirstPublish`, `Publish`, and `Checking` (the probe
+has not landed; `m` waits rather than guessing a road that cannot be un-taken).
+
+- **Auto-enables when it can work.** No config command. `probe_publish_capability`
+  asks: is `origin` a GitHub url, is `gh` on PATH, does `gh auth status` pass, what
+  does `gh repo view --json nameWithOwner,isFork,defaultBranchRef` say, and is
+  `github/gh-stack` installed. Missing extension or a fork costs STACKING only, not
+  publishing.
+- **Cheap and cached.** The probe runs on a background thread (it makes network
+  round-trips) with the §12.8 backoff, 20s → 600s. PR state (draft/open/merged) is
+  re-derived by ONE `gh pr list --json` covering every published row, not one
+  `gh pr view` per row.
+- **Consent is asked once per remote.** Rudder had never pushed to a remote, so the
+  first publish in a repo shows a modal naming the exact remote, branch and base.
+  The acceptance is recorded in `.rudder/publish.json` against the REMOTE URL, so
+  repointing `origin` asks again — a different remote is a different promise.
+- **Draft, and never the default branch.** `gh pr create --draft`; for stacks,
+  `gh stack submit --auto` WITHOUT `--open` (that is what leaves them drafts).
+  `stage_publish_branch` refuses a subject whose branch resolved to trunk.
+- **A plan is decomposed, not linearized.** `decompose_plan_for_publish` maps the
+  DAG to units: a linear hard chain (parent has exactly one hard child, child
+  exactly one hard parent) becomes one stack bottom-to-top; a JOIN (≥2 hard
+  parents) cannot be stacked and targets trunk; anything else is an independent PR.
+  Stacking parallel work would tell a reviewer PR 2 needs PR 1 first, which is
+  false.
+- **`gh stack sync`, never `gh stack push`.** Push is documented as non-atomic ("a
+  branch may update even if another branch is rejected"); sync pushes with
+  `--force-with-lease --atomic` and restores every branch on a rebase conflict.
+  `classify_stack_sync_failure` turns that safe abort into an actionable notice
+  instead of a blind retry. Stack state is read from `gh stack view --json`, never
+  scraped from its glyph table.
+- **Derive-don't-cache (§12.7).** `PublishEvidence` persists `branch`/`number`/`url`
+  — facts about what Rudder did. The PR's state is GitHub's answer: native logic
+  re-derives it from `gh pr list` and never loads it back. It IS written to
+  run.json as `publish.observedState` (`draft|open|merged|closed`) +
+  `publish.observedAt` (ms stamp), a cache for readers that cannot run `gh` (the
+  cloud supervisor, the phone), kept across a restart until the next poll answers.
+  A PR missing from the answer (failed `gh`, past the list limit) keeps the last
+  observation instead of blanking it.
+- **A merged PR leaves review.** When the poll sees a published row's PR `merged`
+  and the row is Done/Paused/Stopped (never a live turn), `mark_pr_merged` records a
+  `pr-merged` event and makes the same transition as a local merge (status `merged`,
+  `merge.pushed: true`, plan node credited). `lifecyclePhase` reads `pr-merged`, the
+  sidebar `PR merged`; `verify_merged_rows` skips these rows (GitHub may squash, so
+  the local change never enters trunk). The poll is not gated on the capability
+  probe: any published row that is not yet merged keeps it running, cloud home
+  included, with the usual 30s -> 600s backoff.
+
+Command CONSTRUCTION is separated from execution (the `launch.rs` split): every
+`gh`/`jj` argv is a pure function asserted in tests, and nothing in the suite
+shells out to real GitHub. Every execution goes through `bounded_output`, which
+spawns, polls `try_wait` against a deadline and kills on overrun — a synchronous
+network call on the 33ms render loop is a freeze, not a slow frame.
+
+---
+
+## 12.8 Performance: what the dashboard costs, and the two rules that keep it cheap
+
+Measured on a live session (macOS, `sample` + `footprint`, one agent running):
+27 MB resident / 34 MB peak for the TUI, and ~93% of samples blocked on the event
+loop's semaphore. The loop is genuinely event-driven — PTY output wakes it — so
+idle cost comes from the two things below, not from spinning.
+
+**Rule 1 — the styled grid is rebuilt every frame, so cells must not allocate.**
+`invalidate_render_cache` fires on every PTY drain, and the next frame
+re-materializes the whole screen through `compute_styled_lines_snapshot`. That is
+~9,300 cells for a full-screen pane. When `StyledTerminalCell.contents` was a
+`String` this meant ~9,300 mallocs per frame and profiling attributed ~41% of
+render time to it. It is now `CellContents`: 22 bytes inline plus a length,
+matching `vt100`'s own fixed cell (`CONTENT_BYTES = 22`, and it refuses to append
+past 18, so 21 bytes is the widest cluster the parser can emit — inline storage is
+lossless, not a truncation trade). The whole cell is `Copy` at 36 bytes, locked in
+by a `const` size assertion. Cost went 295µs → 87µs per frame.
+
+Two things follow, and both are easy to undo by accident:
+- **Never put a pointer in `StyledTerminalCell`** — a `String`, `Vec`, or `Box`
+  field restores the per-cell allocation and the size assertion will fail. Fix the
+  design, not the assertion.
+- **Build spans with `CellContents::span_text()`**, which hands out a
+  `Cow::Borrowed` from a static ASCII table for single-byte cells. Calling
+  `.to_string()` instead re-adds one allocation per cell in the render path.
+
+`native/tests/cell_render_bench.rs` measures this; it is `#[ignore]`d because it
+is a timing test:
+```
+cargo test --manifest-path native/Cargo.toml --release \
+  --test cell_render_bench -- --ignored --nocapture
+```
+
+**Rule 2 — a poll that spawns a process backs off.** Two background polls shell
+out, and both used to run at a fixed cadence forever:
+- `refresh_remote_integration_state` spawns `git merge-base` per merged-but-unpushed
+  agent. `origin/<bookmark>` only moves on a fetch or push, so a 5s cadence spawned
+  thousands of processes a day to re-learn an unchanged answer.
+- `refresh_cloud_workspace_status` spawns the **Node CLI** (`rudder cloud workspace
+  status`), which costs a full Node startup (~150ms CPU) per poll.
+
+Both now double their interval while the answer holds still and snap back to base
+the moment it changes — or, for the git one, when a newly merged agent appears
+(`remote_state_watched`). The caps differ on purpose: 300s for the push check,
+120s for cloud status, because nothing local signals a cloud workspace starting so
+that one has to keep looking. If you add a background poll that spawns anything,
+give it the same treatment via `backed_off_interval`.
+
+**Known, not yet addressed:** the Node supervisor that launches the TUI peaks near
+950 MB at startup and settles at 46–78 MB while using ~2s of CPU over hours. It
+stays resident to host the board daemon in-process (`ensureBoardRunning`), which
+starts on every launch whether or not anyone opens the board.
+
+---
+
+## 13. Where to start for common changes
+
+- New CLI command: add a `case` in `src/main.ts` and the implementation in the
+  matching module (`run-manager.ts` / `cloud.ts` / `auth.ts`).
+- New backend behavior: `src/backends.ts` (`BackendAdapter`) + `src/codex-binary.ts`
+  for Codex specifics.
+- Run isolation/merge/sync behavior: `src/jj.ts` (jj substrate) + `src/run-manager.ts`
+  (routing); `src/git.ts` for the externally-git surface + legacy git runs.
+- Dashboard input/state/keys: `native/src/main.rs` (`App` + `impl App`).
+  Rendering: `render.rs`. Terminal emulation/scroll: `pty_terminal.rs`. Output
+  heuristics: `detect.rs`. Add coverage in `app_tests.rs`.
+- Persistence/schema: `src/types.ts` + `src/state.ts` (+ `src/util.ts` for write
+  primitives).
+- Cloud: `src/cloud.ts` (client) + `cloud/src/server.ts` (control plane) +
+  `cloud/worker/` (worker image).
+
+---
+
+## 14. Orchestrator: the DAG, the schedulers, and the conductor (v3)
+
+Beyond single runs (sections 5–7), Rudder decomposes a goal into a DAG of tasks
+and runs them as a fleet. This section is the map of that orchestrator.
+
+**Several plans at once (v2.x).** `/plan` used to be AT-MOST-ONE: a second `/plan`
+retired the running orchestrator row and wiped the plan state. It no longer does.
+Each `/plan` owns a `PlanState` (`native/src/main.rs`) in `App::plans` — its own
+queue, launch/merge ledgers, approval gate, refine/rebase turn, plan review draft
+and final gate. `App::plan()` / `plan_mut()` resolve the plan the UI is acting on,
+DERIVED from the selection (the selected orchestrator's `plan_id`, or the plan
+owning the selected worker's node), falling back to the most recently started plan;
+nothing caches "the active plan". `AgentRun.plan_id` and `PlannedNode.plan_id` link a
+row or node back to its plan, and `adopt_plan_nodes` renames a node id that another
+plan already uses (deps rewritten with it) so `node_id` stays a unique join key —
+a lone plan keeps the planner's `n0`, `n1`, … verbatim. A run with NO `plan_id`
+(persisted before plan ids existed) is attributed to the single plan when there is
+only one, which is why one-plan sessions behave exactly as before. A fresh `/plan`
+RECYCLES a spent plan slot (no queue, no gate, no live workers) rather than stacking,
+so repeated single-plan use still shows exactly one orchestrator row.
+
+Deliberately still global: the `activity_log`, the parallelism cap (`max_parallel()`
+is a machine limit, not a per-plan one), `node_review_enabled`, and the `RUDDER.md`
+control channel — there is one per repo, so the INTERACTIVE orchestrator's file
+channel (`maybe_capture_orchestrator_plan`, `maybe_recapture_orchestrator_plan`,
+`scan_orchestrator_markers`) resolves to the live interactive conductor's plan and
+handles one at a time. Headless orchestrators stream their DAG through their own PTY
+and are fully plan-scoped, so any number run side by side. Plans share no state:
+each node gets its own jj workspace and merges independently, and there is no
+cross-plan coordination by design.
+
+### 14.1 The model
+- A goal → a DAG of task nodes in `.rudder/graph.json`. Edges are typed: **hard**
+  (consumer cannot succeed until producer MERGES), **soft** (advisory context, never
+  gates — runs in parallel), **judge** (variant gates a judge on reaching review).
+- Each node → a worker agent in its OWN isolated jj workspace. Because workspaces are
+  isolated, two running agents NEVER collide on disk; the real risks are a future
+  *merge* conflict (jj records it; the AI resolver fixes it) or *interface DRIFT*
+  (isolated pieces that don't compose).
+- `NodeStatus`: planned → running → review → merged (+ blocked / failed). The hard
+  edge is the primary anti-drift defense: a consumer launches only after its producer
+  is MERGED, so it builds on the real, landed interface.
+
+### 14.2 Two schedulers, one brain (deliberate; deduped)
+- **TUI brain** (`native/src/main.rs`): owns the plans in memory (`App::plans` +
+  `agents`), spawns each worker's PTY **in-process** (that is what renders the live
+  panes), and is the **sole worker scheduler** in interactive use (`run_scheduler`
+  fans out over every plan → `run_scheduler_for` → `next_node_to_launch_in` →
+  `start_execute_task_node`). It MIRRORS every plan into
+  `graph.json` one-way via `rudder __graph-mirror` (`mirror_graph`/`build_mirror_payload`);
+  the mirror is one flat node list because node ids are unique across plans.
+- **Daemon** (`src/scheduler.ts`): dispatches **only headless** (`rudder board`/`serve`,
+  `scheduler:true`), reading `graph.json` as source of truth and spawning detached
+  `rudder __worker` subprocesses. When the TUI is up it starts the daemon
+  **projector-only** (`scheduler:false`): the board serves HTTP+SSE and reflects
+  `graph.json` but never launches — so there is no double-launch.
+- **Web control follows the owner.** The board daemon receives an explicit
+  `scheduler | projector` control mode. In scheduler mode, task updates call
+  `continueRun` under the scheduler lock (a running pass is redirected; Review is
+  resumed) and a per-attempt id prevents the superseded worker from writing stale
+  terminal state. In projector mode, updates and `+ Task` are queued in
+  `.rudder/steer/`; the TUI consumes them through the same paths as worker PTY and
+  task-pane input. Never mutate `graph.json` from a projector-mode browser action:
+  the TUI deliberately does not read its mirror back.
+- `graph.json` is a **one-way mirror**: the TUI writes it (coalesced — the payload is
+  hashed and the write skipped when unchanged), the daemon/board read it; the TUI never
+  reads it back for scheduling. They are mutually-exclusive schedulers, not duplicates —
+  one runtime for live panes (Rust), one for headless/web (TS).
+
+**The scheduler: queue, ledger, gates, cadence.** Each plan's `planned_nodes` is its
+pending queue (the Todo section renders every plan's), while `plan_launched_node_ids`
+and `plan_merged_node_ids` are that plan's durable at-most-once facts. A launch records the node id and persists
+the shrunken queue in one snapshot *before* spawning the worker. Startup reconciles any
+older queue snapshot against persisted `AgentRun.node_id` records, so the crash window
+between run creation and queue persistence cannot relaunch a node. Presentation cleanup
+may delete merged rows without deleting the plan's completion facts. `run_scheduler` runs
+on approval and on the
+`SCHEDULER_TICK_INTERVAL = 8`-poll-tick cadence (~260 ms), and a node leaves the queue
+only when **three gates** all pass: (1) **approval** — nothing launches while
+`awaiting_approval`; (2) **readiness** — `next_node_to_launch` picks the first node
+whose every hard dep is `merged` (`PlannedNode::is_ready`; a dep absent from the plan
+counts satisfied, so dangling deps never deadlock; soft deps never gate); (3)
+**parallelism** — `running_plan_agents()` is under `max_parallel()` (config
+`orchestrator.maxParallel`, default 1000). At most `MAX_LAUNCH_PER_TICK = 2` start per
+pass (each launch synchronously shells a jj-workspace setup, so launches are spread to
+keep the UI responsive); readiness is recomputed before each pick. `next_node_to_launch`
+is a **pure decision** and rejects any id already present in the durable launch ledger or
+an agent row, which is why scheduling is deterministic and unit-testable without spawning
+PTYs. A merge flips a node to `Merged`, which satisfies
+its children's hard deps so they launch on the next tick — that ripple is how the DAG
+flows. Stopping a node (`stop_agent_at`, `x`) keeps its jj workspace, frees its slot
+(`Stopped` is not counted), and never enters the merged set (hard children stay blocked).
+
+### 14.3 Readiness contract (the dedup)
+A node is READY iff: it is still `planned`, every HARD parent is `merged` (a hard dep
+absent from the plan counts as satisfied — permissive, never deadlock on a dangling
+ref), and every JUDGE parent is `review`|`merged`. SOFT parents never gate.
+- Single source of truth: **`tests/fixtures/readiness-cases.json`**, consumed by BOTH
+  `app_tests::readiness_parity_fixture` (Rust, `include_str!`) and
+  `tests/readiness-parity.test.mjs` (TS). Change the rule → edit the fixture once;
+  both suites fail until both implementations agree. Judge gating is exercised TS-side
+  only until the TUI grows fan-out (noted in the fixture).
+- Rust: `PlannedNode::is_ready` (`native/src/tasks.rs`). TS: `isReady`/`readyNodes`
+  (`src/graph.ts`).
+
+### 14.4 Lifecycle: plan mode → ask → DAG → approve → conduct (headless, Rudder-owned)
+The planner is HEADLESS and fully Rudder-owned: there is no interactive plan-mode TUI. The
+user only ever talks to Rudder; the planner can never go off and implement on its own.
+
+1. **Plan (research).** Type a goal → `start_rudder_plan_task` spawns the
+   `AgentMode::RudderPlan` planner (`claude -p --output-format stream-json` read-only /
+   `codex exec --json`), streamed live in the orchestrator command-center via `plan_stream`
+   + `render_orchestrator`. It researches read-only and CANNOT implement (inspection-only
+   tools). The pinned row is LABELED as the model's **plan mode** ("plan mode · Claude Code
+   · researching the plan").
+2. **Ask (conditional).** The planner prompt (`rudder_plan_prompt`) tells it to ask 1–4
+   clarifying questions in a `RUDDER_QUESTIONS_START..END` block and STOP without a DAG
+   ONLY when something material is missing (scope, approach, key decision, constraint);
+   a clear or trivial request emits the COMPLETE DAG on the first turn with assumptions
+   stated in the post-block summary. When the planner produces NO DAG (it asked, or needs
+   detail), `evaluate_completed_plan` pauses for input and — if the model asked nothing —
+   supplies a deterministic fallback question via `planner_questions_or_forced`. The pane
+   renders the planner's inspection transcript first, then a bold "❓ The planner needs
+   your input" header + the questions as a NUMBERED list anchored at the BOTTOM of the body
+   (the body sticks to the bottom, so the questions stay in view above a long transcript
+   instead of scrolling off). The raw `RUDDER_QUESTIONS_START..END` block is stripped from
+   that transcript (`push_transcript_lines(strip_questions)`) so the questions are not
+   shown twice. The user's free-text answer routes through `planner_awaiting_input()` →
+   `refine_plan`, which RESUMES the same session with the clarification-answer framing
+   (`build_clarification_answer_followup`, distinct from the refine framing). The planner
+   then emits the DAG (or asks once more).
+3. **DAG ready.** The instant a `RUDDER_PLAN_TASKS` block parses, the pane flips to the
+   **pinned DAG** (`orchestrator_phase` Planning → PlanReady) and `awaiting_approval` holds.
+   CAPTURE ROBUSTNESS: if the live PTY stream truncated a large block, `evaluate_completed_plan`
+   falls back to the backend's authoritative session record (Claude's `~/.claude/projects`
+   transcript via `claude_transcript_final_text`, or Codex's `~/.codex/sessions` rollout via
+   `latest_codex_rudder_plan_output`), so a plan the model actually produced is never lost.
+4. **Refine.** Type in the task pane while awaiting approval (or in the focused
+   headless orchestrator chat) → `refine_plan` resumes the session and the DAG
+   updates in place (no wipe).
+5. **Approve → launch.** Empty-Enter → `approve_planned_queue` → `run_scheduler` dispatches
+   ready nodes (todo → running), each in its own jj workspace. The queued plan + gate state
+   plus launched/merged node ledgers persist to `.rudder/plan-queue.json` (a `plans: []`
+   array — one entry per live plan; a file written in the older single-plan shape is still
+   read and becomes one plan), so a mid-plan
+   restart resumes without losing or duplicating work. Interactive plan-file capture is
+   explicitly armed only by a fresh planning turn; an empty queue/all-merged fleet never
+   causes an old `RUDDER_PLAN_TASKS` block to be interpreted as a new request.
+   **Worker context at launch:** each worker gets its own checkout (hard-dep parents already
+   merged into its base), `RUDDER.md` (the live agent roster) + `DECISIONS.md`, and a launch
+   prompt carrying `Objective:` + `Done when:`, the original request, the node prompt, and a
+   **`Depends on:` block** (`App::dependency_context`) naming each hard/soft parent by title +
+   its `rudder done` interface summary so the worker builds on prerequisites instead of
+   reimplementing them.
+6. **Conduct.** After launch the orchestrator stays live (not a dead view): it grows the
+   DAG from completions, steers agents, and can rebase. Conductor actions are **autonomous
+   (no confirm)** but **visible** (`activity_log`) and **undoable** (jj op-log).
+
+### 14.4.1 Planner product decisions (canonical — do not re-litigate without cause)
+The planner UX went through several iterations; these are the settled decisions and WHY.
+- **Headless, not an interactive TUI.** An earlier "Path B" interactive front-end
+  (`AgentMode::PlanFront`, a raw `claude --permission-mode plan` PTY the user typed into)
+  was tried (1.4.0–1.5.1) and RETIRED (1.6.0). Its native ExitPlanMode menu handed control
+  to a single in-process agent and bypassed the fleet, the user ended up talking to Claude
+  instead of Rudder, and Rudder could only seize control via a racy transcript side-channel.
+  Do NOT reintroduce an interactive plan-mode TUI.
+- **Labeled "plan mode".** The headless decomposer is presented as the model's plan mode
+  (the pinned row + header show "plan mode · Claude Code/Codex · …") because that is what it
+  is to the user: the model planning read-only. This is a deliberate product framing.
+- **Conditional question round (2.12.x, REVERSING the earlier hard gate).** The planner
+  asks only when something material is missing; a clear request plans on the first turn
+  with stated assumptions. The earlier "hard first question gate" (mandatory round even
+  for trivial requests, enforced by `planner_question_round_done`) was retired because it
+  DISCARDED an already-parsed first-turn DAG and cost every fresh plan a second full
+  planner round-trip — the top user complaint about getting things done. The approval
+  gate (empty-Enter) remains the deterministic human checkpoint before anything launches;
+  a first-turn DAG is captured straight into it, never thrown away.
+- **Free-text answers, not a selectable widget.** Questions render as a numbered list and
+  the user answers in the task box with free text (e.g. "1: 6 months, 2: reuse"). Chosen over
+  forcing the headless model to invent multiple-choice options, because free text is more
+  flexible; the trade-off is it is not the arrow-select widget native plan mode shows.
+- **One Enter to launch after the DAG.** The DAG is shown for a single explicit approval
+  (empty-Enter) before the fleet runs; refining is just typing while it is shown.
+- **Authoritative-record fallback over stream-only capture.** Three capture attempts
+  (overlap splice 1.7.1, result-arm unification 1.8.0, transcript fallback 1.10.x); the
+  transcript fallback is the robust one because it reads the backend's own session log and
+  does not depend on the lossy live PTY stream.
+- **INTERACTIVE orchestrator — now the DEFAULT (1.20.0; PR #17/issue #16).** The Claude
+  orchestrator is a normal interactive Claude Code PTY you converse with (real plan-mode feel
+  + visible thinking, `launch.rs interactive_orchestrator()` now defaults TRUE; set
+  `RUDDER_INTERACTIVE_ORCHESTRATOR=0` to opt back into the headless `claude -p` decomposer).
+  Codex orchestrators stay headless regardless. Validated against real `claude` (it writes the
+  plan file + emits the marker). It uses the orchestrator system prompt
+  (`tasks.rs orchestrator_system_prompt`). It writes the DAG to `RUDDER.md`
+  outside Rudder's generated block; `App::maybe_capture_orchestrator_plan` reads it into
+  `planned_nodes`/`awaiting_approval`; `render_interactive_orchestrator` shows a DAG pane
+  ABOVE the live PTY; keys forward to the PTY (converse). Unlike the retired PlanFront, the
+  CC writes a DAG file so the DAG actually builds + renders. **SELF-LAUNCH (hardened, 1.21.0):**
+  after the user approves in chat, the orchestrator signals approval and Rudder launches.
+  `App::scan_orchestrator_markers` (poll_agents) checks even after the conductor's turn
+  has completed, because `RUDDER.md` is the durable control channel; a marker must not
+  strand merely because the PTY became Done before the next heartbeat. It checks, in
+  order: (1) PRIMARY — the orchestrator
+  WROTE a `RUDDER_APPROVE_PLAN` line INTO its plan file (a structured Write, exact content, no
+  TUI-rendering fragility); (2) FALLBACK — the marker printed in the orchestrator PTY
+  (`output_has_approve_marker`, exact full-line match after ANSI + markdown strip). Either calls
+  `approve_planned_queue()` → launch; no dedup ledger needed because that fn is idempotent
+  (early-returns once `awaiting_approval` flips false). The prompt tells the orchestrator to WRITE
+  the marker into RUDDER.md (and may also print it), only after explicit user approval, never
+  preemptively, quoting as `RUDDER_APPROVE_PLAN_TEMPLATE`. **APPROVE → GRAPH.JSON → LIVE CONDUCTOR:** on approval `approve_planned_queue`
+  (1) mirrors the full DAG into `.rudder/graph.json` (`mirror_graph`), (2) launches the worker
+  fleet (`run_scheduler`), then (3) keeps the interactive orchestrator PTY alive as a high-level
+  conductor. The orchestrator still must not implement product code itself; its post-approval job is
+  to talk with the user, inspect state read-only, and write one-shot `RUDDER_*` control markers into
+  `RUDDER.md`. The task pane forwards messages to the live orchestrator while a plan is active, so
+  high-level requests route through the conductor instead of bypassing it. The DAG pane survives the
+  scheduler draining `planned_nodes` via `orchestrator_dag_tasks`, which reconstructs already-launched
+  nodes from their `node_id` agents (deduped per id, latest agent wins) so the tree stays whole with
+  live status badges from `orchestrator_task_status`. NOTE: `interactive_orchestrator()` is read ONCE into the `App.interactive_orchestrator`
+  field at construction; render/poll/key read the FIELD (not the process-global env) so parallel
+  tests don't race — tests set the field directly (the headless-view render helper pins it false).
+  The bottom task bar remains available; the interactive orchestrator skills are an additional
+  control path generated under `.claude/skills/rudder-*`, with one-shot `RUDDER_*` control
+  markers consumed from `RUDDER.md`. Marker controls include add/replan (`RUDDER_ADD_TASK`,
+  `RUDDER_REPLAN`), per-worker control (`RUDDER_MERGE`, `RUDDER_STOP`, `RUDDER_RESUME`,
+  `RUDDER_REGOAL`, `RUDDER_INJECT`), and broad actions (`RUDDER_REVIEW_ALL`,
+  `RUDDER_MERGE_ALL`, `RUDDER_CLOUD_MIGRATE`). `RUDDER_CLOUD_MIGRATE` freezes live
+  isolated worker PTYs while leaving their records `running`, then launches `rudder cloud
+  workspace attach`; this avoids local/cloud duplicate execution and keeps the records
+  eligible for `findMigrationCandidates`.
+
+  `RUDDER_RESUME <node-or-run-id> <claude|codex> <model> [effort] [direction]` is the
+  provider/model-aware continuation primitive. It preserves the run's jj workspace and
+  identity. Same-provider retargets resume the existing backend session with the new model;
+  cross-provider retargets clear the provider-specific session id and start a fresh worker
+  with a handoff that tells it to inspect and continue the existing diff. The generated
+  `rudder-worker-control` skill maps natural-language pause/resume/model-switch requests to
+  ordered `RUDDER_STOP` + `RUDDER_RESUME` markers for each matching live node.
+
+### 14.4b Per-agent done/idle detection: official signals only (`native/src/signals.rs`)
+The native TUI runs workers as INTERACTIVE `claude`/`codex` in a PTY (they idle between
+turns instead of exiting), so "is this turn done?" can't use process-exit. The robust answer
+is each backend's OWN lifecycle signal, NOT scraping its TUI chrome:
+- **Claude Code:** a `Stop` hook (fires when the turn ends) + a `Notification` hook matched to
+  `idle_prompt` (paused for input), injected via `claude --settings <file>`.
+- **Codex:** the `notify` program (fires `agent-turn-complete`), injected via
+  `-c notify=["<script>"]` (replacing the baked `notify=[]`). Codex's newer `[hooks]` are
+  trust-gated, so unusable for a headless child; `notify` needs no trust.
+
+Both write `<rudder_home>/signals/<run_id>.json` = `{"state":"done"|"input"}`. The poll loop's
+interactive arm (`try_wait` Ok(None)) reads this as AUTHORITATIVE: `done` → `mark_run_done`
+(one-shot, cleared on consume so a later turn re-fires); `input` → `needs_user_input`. The
+`detect.rs` still recognizes permission and user-input prompts for ergonomics, but terminal
+chrome is never a completion source. Missing hook wiring fails visibly instead of leaving a
+worker stuck or guessing that a mid-tool lull is done. `augment_worker_command`
+wires this at the worker spawn sites (Execute/Main/ReviewAll/restart); headless planner modes
+(`-p` / `codex exec`) keep process-exit. Both hooks are validated live against the real CLIs
+(claude 2.x `Stop`, codex `agent-turn-complete`). The daemon/DAG path (`src/backends.ts`)
+already used official signals: `claude -p --output-format stream-json` and `codex exec --json`
+(`turn.completed`) + process exit.
+
+**Codex `notify` is not per-conversation (measured on codex 0.162, 2.15.4).** It
+fires `agent-turn-complete` for EVERY thread: the hidden title thread Codex runs
+~4s into a first turn, and each subagent. Each used to mark the run Done for a
+tick (the busy-spinner check reopened it, so the row looked fine) and ring
+"ready for review". The script now records the conversation id at
+`SessionStart` (the main thread id IS the session id) and ignores `notify` for
+other threads and any hook event carrying an `agent_id`; `Stop` and the
+conversation's own `notify` report the same turn, so `done` is written once per
+turn id. And because Codex fires `Stop` while its spinner is still drawn,
+`BUSY_REOPEN_GRACE` keeps a just-completed row from being reopened by it.
+
+**The wiring INVARIANT (v2.5.0, learned the hard way):** every path that (re)spawns a
+worker process MUST call `signals::augment_worker_command`. The per-run hook config file
+persists across spawns. A relaunch that forgets the wiring is a lifecycle error, not a
+different detection mode. Three paths have been bitten: the conflict-resolver respawn,
+migration-resume, and re-goal. When adding a spawn path, wire it.
+Signal hygiene: hook writes are ATOMIC (`printf > tmp && mv`, v2.6.x) so the poll loop
+never reads a torn JSON, and `cleanup_run_signals` removes a run's three signal files on
+agent delete.
+
+**What Claude's hooks actually do (measured on 2.1.278, every hook logging, in a pty):**
+a normal turn fires `UserPromptSubmit` → `MessageDisplay` (per message) → `Stop`, and
+the `idle_prompt` Notification exactly 60s after `Stop`. A local slash command
+(`/model`) fires NOTHING. An Esc interrupt fires NOTHING, for four minutes and
+counting. Two consequences in the poll loop: a Done Claude row goes back to Running
+only on the `working` signal (typing a draft or `/model` repaints without a turn, and
+no Stop ever ends a turn that never began), and `WaitSignal::Idle` is the backstop for
+any Running row whose pane has been silent at its composer for `IDLE_WITHOUT_SIGNAL`
+(60s): a working agent animates its spinner, so a minute of silence with the composer
+showing is not a slow turn. Seen live: a main agent whose first prompt got no reply
+spun for three hours.
+
+**The one hole in the official signals: a user interrupt.** When you press Esc (or
+reject a tool call) in a Claude pane, Claude prints `⎿ Interrupted · What should Claude
+do instead?` and fires NOTHING — no `Stop`, no `idle_prompt` notification, verified
+against claude 2.1.278 by driving it in a pty. A row used to spin as "running" for a day
+after that. `terminal_interrupted_from_lines` (detect.rs) reads that receipt off the pane
+and latches `WaitSignal::Interrupted` ("interrupted · waiting for you", tab glyph ⬓); the
+`UserPromptSubmit` → `working` signal of the next prompt, or a visible spinner, lifts it.
+This is a WAIT state, never completion: an interrupted plan worker must not auto-merge.
+
+**The tab glyph reports news, not history** (`tab_status_glyph`). ⊗ marks a failure only
+until you next press a key or click in the dashboard (`last_user_activity`), and a Failed
+row loaded from disk (no `completed_at`: it died in an earlier session) never pins it.
+Before this, two dead runs from a week earlier kept a repo's tab on ⊗ next to a worker
+that had quietly finished.
+
+### 14.4c Default task input: automatic intent routing (v4 foundations)
+A fresh native task goes through `task_routing.rs`; existing selected-agent
+follow-ups retain their addressed path. The actual simple-task default is an
+isolated Execute worker. Earlier descriptions of plain input always selecting
+Main were stale and are superseded here.
+
+- **Discuss / plan only:** one guarded Main session, no implementation workers.
+  Preserve this scope across restart/resume; saving an explicitly requested
+  prose artifact does not authorize product edits or delivery.
+- **Execute:** one isolated Execute worker, Review then selected `m`/merge-all.
+  `/main <task>` is the explicit shared-checkout/delivery-owner path.
+- **Plan:** `start_rudder_plan_task` proposes a read-only DAG using the existing
+  approval gate. `/plan` remains a hidden compatibility entry, including the
+  same protection for explicit discussion/plan-only intent.
+- **Optional classifier:** `RUDDER_TASK_ROUTING=decisions` plus `OPENAI_API_KEY`
+  invokes TS `__route-task` on a background thread. Rust has no HTTP client.
+  The helper redacts outgoing credentials, has bounded stdin/body/deadlines and
+  falls back to shared deterministic rules. Fixtures parity-test Rust and TS.
+  Home web/phone tasks route once in the home dashboard through the same ingress.
+  Legacy task sails retain finite direct execution; non-execute requests are
+  rejected until their lifecycle adapter migrates. Do not claim all Cloud task
+  entry points already support automatic planning.
+- **Retired public workflows:** `/gam` and `/nudge` return a retirement notice;
+  existing sessions/transports remain compatible until their users migrate.
+- **`/run` was already retired.** Ordinary implementation input supplies the
+  one-worker path; do not count this as a new v4 removal.
+- **`/ask` was removed.** It used to start a separate `AgentMode::OneOff` agent in the
+  main checkout. `OneOff` rows persisted before the removal still load into their own
+  `Bucket::OneOff` section and are excluded from merge, merge-all and review-all.
+
+Main and one-off `Done` rows mean direct work completed; they are not mislabeled as
+workspace review. If the task explicitly requested shipping, `DeliveryEvidence::for_task`
+proof-gates the row as `delivery proof needed` until `rudder done` records kind, target,
+verification time, and one or more checks. Only complete evidence may render `deployed`.
+
+### 14.5 Conductor capabilities (BUILT vs PLANNED)
+- **Auto-expand from completion** (BUILT). A finished worker reports via **`rudder
+  done`** report, and `maybe_ingest_worker_followups` → `ingest_worker_followups` →
+  `apply_worker_followups` grows the DAG from its recommended follow-ups. The report
+  travels back through one machine-readable channel:
+  1. **Sidecar file (authoritative).** The launcher sets `RUDDER_DONE_FILE =
+     <workspace>/.rudder/done/<node>.json` on the worker; `rudder done` writes the JSON
+     note there (atomic temp+rename, `surfaces.writeCompletionNoteFile`). The conductor
+     reads it straight off disk — it never passes through the agent's TUI, so it
+     survives any boxing/truncation/wrapping. Keyed by node id; under the gitignored
+     `.rudder/` so jj never merges it.
+     Main and one-off runs use the same channel keyed by run id. Their reports are
+     ingested by `ingest_direct_completion_notes`, including structured `delivery`
+     evidence; they do not participate in DAG follow-up expansion.
+  2. **Haiku backstop.** If no sidecar yielded structured follow-ups —
+     including a FREEFORM prose report (`{summary: raw}` with no `followups` field) —
+     `spawn_completion_backstop` runs a one-shot haiku summarizer over the worker's
+     `jj_diff_text` (≤16k chars) to reconstruct the note, feeding it the agent's own
+     prose. Cleanly-Done workers only (a Failed/Stopped worker's note is read but not
+     backstopped, since its half-finished diff invites noise). The run is held
+     `pending` (not ingested) until the summarizer returns, so it is never re-spawned.
+  `rudder done` enriches the report; it does not determine completion. Backend lifecycle
+  hooks or process exit finalize the turn automatically. An explicit empty
+  `followups: []` is TRUSTED (no backstop). Guards in
+  `apply_worker_followups`: dedupe by normalized title (`followup_title_exists` checks
+  queued + running), `MAX_FOLLOWUP_DEPTH = 3` via `followup_gen`, `MAX_PLAN_TASKS = 100`
+  cap, soft-by-default deps (hard only with explicit deps), `scope:"out"`
+  case-insensitive and recorded-not-injected. The "ingested" ledger
+  (`followups_ingested`) is persisted to `.rudder/ingestion-ledger.json` and reloaded
+  on startup so a restart never re-ingests/re-summarizes a handled worker; re-goaling a
+  worker clears its entry so its NEXT report is ingested. CRITICAL ORDERING: ingest runs
+  BEFORE `integrate_ready_plan_nodes` in the poll loop — a candidate is only ingested
+  while still `Done`, and integration flips `Done → Merged`, so integrating first would
+  drop follow-ups. Every grow is logged to `activity_log`.
+- **Reconcile** (BUILT). Typing a task post-launch injects ONE node
+  (`reconcile_injection` → `evaluate_completed_reconcile`).
+- **Steering** (BUILT: `stop_agent_at` wired to `x`; conductor markers route to
+  `merge_agent_at`, `stop_agent_at`, `regoal_agent_at`, and `live_inject_at`):
+  merge one, stop, re-goal-via-session-resume, and live-inject. (PLANNED: edge promote/demote,
+  extract-shared-node, drop, reorder.)
+- **Drift detection + fix** (BUILT). `maybe_handle_drift` (poll loop, ~5s throttle)
+  predicts cross-agent collisions: agents are isolated so the signal is two RUNNING
+  workers modifying the SAME file (`jj_touched_files` = `jj diff --name-only`).
+  **Product decision — AUTONOMOUS, no confirm** (the user chose this; it is consistent
+  with the no-confirm conductor bargain): on a newly-detected collision the conductor
+  **live-injects a coordination note** into the later-launched agent so it adapts
+  in-flight (integrate on top, coordinate via DECISIONS.md) — the LEAST-disruptive
+  autonomous fix (no restart, no stop), with the merge-time AI resolver as the
+  backstop if they still conflict. Each pair is nudged once (`surfaced_overlaps`) and
+  every action is logged to `activity_log`. (Semantic/interface drift via an LLM
+  classifier is a gated future enhancement; file-overlap is the shipped heuristic.)
+- **Plan-rebase** (BUILT). A typed message while CONDUCTING is classified by
+  `classify_new_direction` → `is_structural_direction` (replacement verbs like
+  "instead/scrap/rewrite/pivot", OR a message that references a MAJORITY of node
+  titles). ADDITIVE → reconcile one node; STRUCTURAL → `start_plan_rebase`, which
+  RESUMES the orchestrator session with `build_rebase_request` (states the three zones)
+  and sets `rebasing`. `maybe_detect_plan_ready` routes the revised block to
+  `evaluate_completed_rebase`, which diffs it against the live zones with the pure
+  `diff_plan` (id-join, title-overlap fallback) and applies build-forward, AUTONOMOUSLY:
+  **MERGED = baseline** (untouched, referenced as satisfied deps), **RUNNING =
+  keep / re-goal (objective changed) / stop (dropped, workspace kept)**, **TODO =
+  replaced**. Plan integration is suppressed while `rebasing` so the zones stay stable.
+  The diff is logged to `activity_log` (`+N added · M re-goaled · K stopped · J kept`);
+  undo rides the jj op-log. A planner that emits no block leaves the current plan intact.
+
+### 14.6 Coordination surfaces
+- **`DECISIONS.md`** — jj-tracked, agent-authored shared decisions log. ONE canonical
+  entry format (`renderDecisionEntry` in `src/surfaces.ts`): a `## title` heading, labeled
+  body lines (**What** / **Did** / **Interfaces** / **Follow-ups** / optional **Why**), and
+  a `- **By:** owner · <iso>` footer — uniform and scannable. Three writers, all that
+  format: `rudder remember` → `appendDecision`; `rudder done` → `appendCompletionNote`
+  (worker completion notes); and the CONDUCTOR → `append_conductor_decision`
+  (`native/src/gitio.rs`, via `App::record_decision`) for plan-approval / follow-up
+  depth+size-cap deferrals, so its plan/steer reasoning is durable and visible to the
+  fleet, not just in the in-pane `activity_log`. Workers re-read it before each step (the
+  propagation rules); the board parses it for the memory view (`parseDecisions` in
+  `src/board/daemon.ts`, which reads the `## ` blocks and still tolerates legacy bullets).
+- **`RUDDER.md`** — read-only, orchestrator-owned, `freshness:`-stamped projection of
+  the plan/status that workers re-read (`renderLiveRudderMd`). Git-excluded.
+  Native dashboard context writes must mirror the same generated block to every
+  known agent workspace, not only the root checkout or a pending workspace.
+  The generated status sections are intentionally separate: Active means live or
+  waiting, Ready means completed work awaiting review or merge, and Completed is
+  terminal history.
+- **`RUDDER_SHARED.md`** — gitignored local shared context for API tokens, private URLs,
+  account ids, env vars, and setup details the user gives Rudder and expects every agent
+  to use. It is intentionally separate from `DECISIONS.md` because it may contain
+  credential values and must not enter jj/git history. Native task-bar input calls
+  `capture_shared_context_from_user_input` for obvious `*_TOKEN=...` / API-key lines,
+  `/share <text>` forces an append, and `rudder share "<text>"` does the same from the
+  CLI. `write_rudder_context` / `writeLiveRudderMd` mirror the file into active worker
+  workspaces next to `RUDDER.md`, and every worker/orchestrator prompt tells agents to
+  read it when present. Do not store secret values in `RUDDER.md` or `DECISIONS.md`.
+- **`rudder done [--node <id>] '<json>'`** — `{summary, interfaces, followups:[{title,
+  why, scope}]}` from stdin or args. `parseCompletionNoteArg` (`src/surfaces.ts`)
+  accepts a bare object, a fenced ```json block, and falls back to `{summary: raw}` for
+  prose/arrays/primitives. Writes two durable completion channels: the sidecar file at
+  `$RUDDER_DONE_FILE` (authoritative) and a human bullet in `DECISIONS.md`. There is no
+  PTY-scrape channel. Records only; no jj. See §14.5 for how the
+  conductor consumes them.
+
+### 14.7 Merge model
+Planned DAG nodes integrate automatically; manually started runs use `m`/`M`. A
+hard-dep child launches only once its parent reaches `Merged`. Clean merge is
+mechanical jj (`jj new`); a
+conflict spawns the AI resolver (`start_conflict_resolution_agent` →
+`finalize_merge_resolvers`, jj-worded prompt). Undo via `rudder undo` (op-log). See
+section 5 / `src/jj.ts` for the run-level merge plumbing.
+
+**Merge-state legibility + durability:**
+- There is no auto-merge feature flag or retry-skip ledger. Planned work always
+  integrates; a durable conflict state is the blocker until it is resolved.
+- A CONFLICTED merge keeps the run `Done` (review bucket) because it is finished
+  work awaiting integration. Same rule on
+  reload: a run.json with `status:"merge-conflict"` loads as `Done`, not Stopped
+  (`agent_status_from_record`).
+- Integrated rows persist the jj merge change, target bookmark, exported Git commit,
+  and whether `origin/<bookmark>` contains that commit. Native refreshes the remote
+  containment state locally and renders `merged locally` versus `pushed`.
+- Once every launched DAG node is integrated, the final gate runs `jj resolve --list`,
+  `git diff --check`, discovered npm `check`/`test` scripts, and Cargo workspace tests.
+  Its durable state is stored in `plan-queue.json`, rendered by the orchestrator, and
+  mirrored into `RUDDER.md`; `/verify` reruns a failed gate.
+- A persisted `running` row with no native PTY becomes `orphaned` on restart instead
+  of being blindly relaunched. A successful fleet handoff becomes `migrated` /
+  `cloud-owned`, so local restart cannot duplicate cloud execution.
+- A merge REFUSES to start when the integration workspace `@` already has
+  unresolved conflicts (`mergeJjRunIntoCurrentWorkspace` guard, unconditional even
+  under `--allow-dirty`) — merging onto a conflicted `@` nests conflicts.
+- The TUI's `rudder` CLI shell-out (`run_rudder_jj_command`) has a 120s
+  timeout with kill+reap, so a hung jj can no longer freeze the dashboard forever.
+- Mechanical conflicts (RUDDER.md/DECISIONS.md/RUDDER_SHARED.md, .gitignore
+  union, package.json deep-merge, lockfiles) auto-resolve BEFORE any LLM resolver
+  (`auto_resolve_mechanical_conflicts`).
+
+**Serialization invariant (`withSchedulerLock`, `src/scheduler.ts`).** The daemon fires
+`scheduleTick` (1s interval), `onRunTransition` (per-run `fs.watch`), and the board's
+manual approve/merge endpoints — all in ONE process as un-awaited `void` calls. Every op
+that reads then advances `integrationChangeId` MUST go through `withSchedulerLock(repoRoot, …)`,
+which chains them onto a per-repo promise so they run one-at-a-time. Without it, two nodes
+reaching `review` in the same instant get merged concurrently against the SAME integration
+head, producing two sibling merges; the second `updateGraph` clobbers `integrationChangeId`
+and one node is marked `merged` while its diff is orphaned off the trunk (silent data loss).
+The public entry points lock; internal recursion uses the unlocked `*Core` variants to avoid
+self-deadlock (the lock is NOT reentrant). This bug is invisible to unit tests and only
+shows under near-simultaneous completions — it is covered by `tests/e2e-orchestrator.test.mjs`.
+
+**Cross-process integration lock (v2.6.x).** `withSchedulerLock` serializes only one
+process; a `rudder merge` CLI invocation (what the TUI shells out to) and a daemon tick
+are SEPARATE processes sharing the same `@`. Both outer merge seams —
+`mergeJjRunIntoCurrentWorkspace` (jj.ts) and `mergeNodeIntoIntegration` (scheduler.ts) —
+therefore take `.rudder/integrate.lock` (`withIntegrationLock`, src/rudder-md.ts: mkdir
+lock, 30s wait, 120s stale takeover, proceed-unlocked on timeout so a crashed holder
+never deadlocks). NOT reentrant: `mergeNode` inside those seams must never re-take it.
+
+### 14.7b Cross-process coordination and locking (the full map)
+Multiple OS processes share state: the Rust TUI, each `rudder <cmd>` CLI invocation
+(merge/done/share/…), the daemon, worker agent processes, and the orchestrator agent
+editing files directly. The rules:
+- **Atomic writes everywhere.** Every persisted JSON/state file is written temp+rename
+  (TS `writeJson` in src/util.ts — unique temp per write + in-process `withPathLock`;
+  Rust `write_config_atomically` / `save_native_run_record` / the ledger persisters;
+  signal hooks' `printf > tmp && mv`). A reader can see an OLD file, never a torn one.
+- **RUDDER.md** is read-modify-write from BOTH languages, so both take the SAME
+  advisory mkdir lock `<repo>/.rudder/rudder-md.lock` (TS `withRudderMdLock`,
+  Rust `acquire_rudder_md_lock` in gitio.rs; 50ms retry, 2s wait, 10s stale takeover,
+  proceed-unlocked on timeout). The merged write itself is temp+rename on both sides,
+  and `merge_generated_rudder_md` / `mergeGeneratedRudderMd` are PARITY
+  implementations (duplicate-block collapse, orphan-marker strip, byte-stable
+  re-render) — change one, change both, and keep their tests mirrored.
+- **Integration into `@`** takes `.rudder/integrate.lock` (above).
+- **DECISIONS.md** appends are a SINGLE `appendFile`/append call per entry
+  (O_APPEND): concurrent writers can interleave entry ORDER but cannot tear an
+  entry. Keep it that way — never split an entry across two appends.
+- **`.rudder` ledgers** (ingestion-ledger, followup-gen, plan
+  queue) are single-writer BY ASSUMPTION: one dashboard per checkout
+  (`runPolicy.sameCheckout: "single-active"`). Two concurrent TUIs on one repo
+  would last-writer-win each other's ledgers; that is out of contract.
+- **jj** serializes its own op store; concurrent jj commands degrade to
+  recoverable "concurrent operation" states, not corruption. The locks above
+  exist to avoid stacking LOGICAL merges, not to protect jj internals.
+
+### 14.8 Caps
+`MAX_PLAN_TASKS = 100` (per-plan parse cap AND the auto-expand backstop; overflow is
+surfaced, never silently truncated). `MAX_FOLLOWUP_DEPTH = 3`. Concurrency:
+`max_parallel()` (config `orchestrator.maxParallel`, default 1000), `MAX_LAUNCH_PER_TICK`.
+
+### 14.9 Status
+Built and shipped: cap=100; the `rudder done` completion report over three channels
+(sidecar file, PTY scrape, haiku diff-backstop) with a persisted ingest ledger;
+readiness dedup; auto-expand + activity log; steering primitives (re-goal/inject/stop,
+`x`); autonomous drift handling (file-overlap to coordination nudge); and plan-rebase
+(structural-vs-additive classify to build-forward diff/apply, §14.5). The conductor
+loop (plan, approve, then CONDUCT: auto-expand, steer, drift, rebase) is functionally
+complete and adversarially hardened across the completion pathway (freeform recovery,
+ingest-before-merge ordering, restart durability via the ledger). Planned (approved v3
+plan): an explicit `OrchestratorMode` enum/header (behaviour already derives from
+`refining`/`rebasing`/`awaiting_approval`), and the remaining DAG-edit steering (edge
+promote/demote, extract-shared, reorder).
+
+### 14.10.5 `/gam`: the generator/adversarial pair (2026-08)
+Legacy implementation reference. New `/gam` entry is sunset in the v4 foundation
+track; resume/transport code is retained for existing sessions and extraction.
+The following describes those legacy sessions, not an advertised new workflow.
+
+Two models argue about one piece of work: a GENERATOR implements (normal Execute
+worker, dashboard default model, isolated jj workspace unless the `main` keyword
+is given), and an ADVERSARIAL reviewer (the model named after `/gam`) questions
+it. Only the generator ever edits; the reviewer is read-only by construction —
+Claude via a tool ALLOWLIST (`GAM_ADVERSARIAL_CLAUDE_TOOLS`, no Bash because a
+Claude Bash call can write), Codex via `--sandbox read-only` (runtime-enforced).
+The reviewer is read-only over the FILES, not powerless over the RUN: Rudder
+acts on its verdicts, so it can revise, steer the generator mid-turn, or stop it.
+The pair renders as a SPLIT worker pane (generator left, adversarial right,
+`render_gam_split`) under a status bar and over a dialogue strip carrying the
+exchange between them (`^W` `t` hides it); click a half or `^W` `a` to move
+between them; wheel routes to whichever half is under the pointer.
+
+- **Transports, not typing (`native/src/gam_link.rs`, 2.14.81).** Packets,
+  revisions and steers are PUSHED into the live sessions and answers come back
+  STRUCTURED; the old bracket-paste + screen scrape is only the fallback.
+  - *Claude halves* get a per-run MCP server (`rudder-native gam-channel <dir>
+    <role> --channel`) loaded with `--mcp-config` +
+    `--dangerously-load-development-channels server:rudder_gam`. Rudder drops a
+    message in `<rudder home>/gam/<run>/inbox/`, the server pushes it as a
+    `notifications/claude/channel` event (mid-turn too), and verdicts/rebuttals
+    come back as `gam_verdict` / `gam_reply` TOOL CALLS written to `outbox/`.
+    Measured, not assumed: Claude treats channel content as untrusted and
+    IGNORED a mid-turn steer even when the user prompt vouched for it; it acts
+    once `--append-system-prompt` names the channel and a per-run nonce
+    (`claude_link_system_prompt`). Both flags are variadic, so they go at the
+    FRONT of the argv or they swallow the prompt. Rudder answers the dev-channel
+    consent dialog itself, reads the startup banner (joined across wrapped
+    lines) to decide the channel is live, and pastes if a push draws no output
+    within 20s.
+  - *Codex halves* run `codex --remote unix://…` against a private `codex
+    app-server` started by a `/bin/sh` wrapper in the pane's process group (a
+    group SIGKILL takes both). Rudder connects as a second websocket client
+    (tungstenite over the UDS; the socket path is a symlink, resolve it):
+    `turn/start` between turns (reviewer turns carry an `outputSchema`, so the
+    verdict is schema JSON), `turn/steer` with `expectedTurnId` mid-turn, and
+    the turn's agent messages from `turn/completed`. Pick the NON-ephemeral
+    loaded thread (the server titles the session in an ephemeral thread of its
+    own), retry `thread/resume` while the first rollout is still being written,
+    and let the LINK write the run's completion signal: `notify` fires for the
+    title thread too and marked a generator Done mid-turn. The link queues the
+    answer before writing `done`, and a reply block often sits in an EARLIER
+    agent message than the final one.
+  - Links are off under `cargo test` and with `RUDDER_GAM_LINK=0`, and only
+    wired when the CLI has the feature (Claude Code >= 2.1.80, `codex --help`
+    lists `--remote`). The split's half titles show `⇄ channel` / `⇄ app-server`
+    while a link carries the traffic.
+- **Grammar** (`parse_gam_args`): `/gam [main] [<reviewer>] [gen <generator>]
+  <task>`, each side `<claude|codex|opencode> [model] [effort]` or a bare model
+  alias; `main` and the two sides go in any order before the task. Bare aliases
+  (`/gam fable …`) resolve through `known_model_backend`, NEVER
+  `backend_for_model`, which guesses Claude for any word and would eat task
+  verbs. After a provider, a word is a model only if that backend knows it or it
+  is id-shaped (`gam_token_is_model_for`): "/gam claude fix the bug" used to run
+  a model called "fix". A provider alone gets its flagship
+  (`flagship_model_for`, the same table as `/fast`), a model alone its default
+  effort, and a typed effort is honored (it used to be dropped). No reviewer spec
+  means `default_gam_reviewer`: the OTHER provider's flagship, across from the
+  GENERATOR's backend (so `gen codex` gets a Claude reviewer). No `gen` means the
+  dashboard model writes. opencode can generate but never review.
+- **Picker** (`gam_suggestions`, models.rs): a state machine over the typed
+  words. Bare `/gam`: first row is "/gam <task>" naming the default pair (the
+  default selection never rewrites the line), then "same pair" + "/gam again"
+  when a pair is remembered, then the reviewer providers (claude, codex). Then
+  the reviewer's models, then an OPTIONAL generator step (first row keeps the
+  line, then `gen <provider>` rows), then the generator's models. Model rows are
+  `model_suggestions_for`, never a duplicated list. The Enter-capture window
+  covers the four gam chooser actions only; task words empty the palette.
+  `gam_line_preview` feeds the task-bar hint ("gam · X writes · Y reviews
+  (read-only) · isolated workspace"), with same-model and opencode warnings.
+- **Last pair** (`GamLastPair`): saved after every successful launch as
+  `gam.last {generator, reviewer, inMain, task}` in config.json
+  (`save_gam_last_pair`; a no-op under `cfg!(test)` without RUDDER_HOME), loaded
+  into `App::gam_last`. `GamLastPair::spec_line` puts it back on the line as
+  grammar that parses to the SAME pair (effort always spelled, "auto"
+  included). `/gam again` reruns it on its task.
+- **Status bar** (`gam_status_bar_lines`, render.rs): one or two rows above the
+  split (none under 12 rows) with round, who has the ball (writing the first
+  draft / answering objection N / reviewing turn N / checking in), steers,
+  queued notes and the last verdict, plus key hints. A settled pair states its
+  outcome, reason and next step, wrapping to two rows rather than cutting the
+  next step. Sidebar labels come from `gam_row_status_label` ("gam · under
+  review", never "done · press m" while a verdict is pending). Each PTY is sized
+  to its half's INNER rect (it used to be the outer, so lines wrapped 2 columns
+  late), and mouse hit-testing uses the same outer `worker_area` render does.
+- **Outcomes**: Accepted, Escalated, Halted (reviewer `stop`), Stalled (same diff
+  and same reply two rounds running; was an Escalated), StoppedByUser (`^W x`,
+  or the generator's row stopped/failed mid-turn, which used to leave the pair
+  "writing" forever). Reasons persist as `outcomeReason`.
+- **Keys**: `^W a` swap halves, `^W t` dialogue, `^W i` brief the reviewer
+  (`/tell ` on the task line), `^W x` stop the loop (Esc to any running half,
+  never a kill; both panes stay live). Nav mode takes the same letters bare.
+  `m` on a reviewer row merges its generator.
+- **`/tell <note>`**: queued in `GamState::user_notes` (persisted as
+  `pendingNotes`) and delivered in the NEXT review or interim packet under a
+  "FROM THE USER" section, sentinel-neutralized, then cleared. Typing it into the
+  reviewer at once could end its turn without a verdict. A settled pair has no
+  next packet, so the note goes straight in via `live_inject_at`. Notes show in
+  the dialogue as `GamMessageKind::Note`.
+- **Round loop** (`poll_gam_pairs`, runs every heartbeat after status updates):
+  generator turn Done → lift its optional `{GAM_REPLY_START..END}` reply note →
+  packet (original task + earlier dialogue + last objection/reply + `jj_diff_text`
+  bounded at 16k with a VISIBLE truncation marker) pasted into the reviewer pane
+  → reviewer turn Done → parse `{GAM_VERDICT_START..END}` JSON from its screen →
+  route accept / revise (becomes the generator's next user turn) / escalate /
+  stop. No round cap: the pair ends when the reviewer accepts, escalates or
+  stops, or when the generator stops making progress (same diff AND same
+  rebuttal two rounds running). `GAM_RUNAWAY_ROUNDS = 40` is a pure runaway
+  backstop. Unparseable verdicts escalate rather than guess. Both panes stay live
+  after settling for manual driving.
+- **The reviewer can stop the run** (`stop` verdict → `halt_gam_pair`): it kills
+  the generator's PTY through `stop_agent_at`, freezes its workspace, and settles
+  `GamOutcome::Halted`. Distinct from `escalate`, which leaves the generator idle
+  but alive — an escalation is "a human should decide", a stop is "continuing is
+  worse than stopping". The REVIEWER pane is deliberately left running, because
+  the user's first question after an unexpected stop is "why?" and it is the only
+  agent that can answer.
+- **The reviewer can steer mid-turn** (`GamPhase::AwaitingInterim`): a reviewer
+  that only speaks between turns cannot stop the turn that is going wrong. While
+  the generator is Running, every `GAM_INTERIM_INTERVAL` (150s) Rudder sends the
+  reviewer a DIFFERENT packet — partial diff plus the tail of the generator's
+  live pane (`gam_pane_tail`) — on a contract of continue / steer / stop.
+  `steer` is injected into the running generator's session and does NOT end the
+  turn or bump `round` (it bumps `steers`); `stop` halts; anything else,
+  including an unparseable block, means continue, because interrupting a turn on
+  a guess is worse than missing a check. Skipped with no reviewer turn spent when
+  the (diff, pane) fingerprint is unchanged, so a quiet turn is free. The watch
+  is armed only by a live turn (`next_interim_at`, transient), so it never runs
+  after a restart or after settling, and an unanswered check is abandoned UNREAD
+  after `GAM_INTERIM_TIMEOUT` — no review packet flows while one is out, so a
+  wedged reviewer would otherwise freeze the pair, and a pane still mid-turn
+  holds half a verdict at best.
+- **Relayed text cannot forge a control line** (`neutralize_gam_sentinels`): the
+  reviewer's PTY echoes whatever we paste, and a diff CONTEXT line (no `+`) or a
+  raw pane tail can be a bare sentinel — trivially so when the pair is working on
+  Rudder itself. Echoed sentinels are prefixed `(quoted) ` so they stay readable
+  and stop matching. The contract template the packet itself carries is caught by
+  the existing template guard in `parse_gam_verdict`.
+- **The dialogue is first-class** (`GamState.transcript`): every objection,
+  rebuttal, steer and final verdict, bounded at `GAM_TRANSCRIPT_LIMIT`. It serves
+  three readers — the user (the strip under the split, `^W t`), the reviewer
+  (earlier rounds are quoted back in every packet, so an argument survives its own
+  session being compacted; the CURRENT round is never duplicated there because it
+  has anchored sections), and a restart (it is the only part of the exchange that
+  outlives the PTYs).
+- **Zero new filesystem state by design**: packets/replies cross through PTY
+  stdin + the terminal buffers Rudder already owns; the only durable state is
+  the `gam` object inside each run.json (role, peerId, round, runawayRounds,
+  phase, task, lastObjection, lastReply, steers, transcript). Signals reuse
+  `<rudder_home>/signals/<run_id>.json`.
+- **Turn-start window** (`GAM_TURN_START_GRACE`): a revision or a steer is
+  injected while the generator row still reads Done — status only flips to
+  Running when the new turn's first output arrives. Delivering a review packet in
+  that window re-reviews the diff just judged, and since neither the diff nor the
+  reply has moved, the progress gate reads it as a stall and ends the pair one
+  heartbeat after the revision was sent. `poll_gam_pairs` therefore skips a Done
+  generator whose last input landed after its completion, bounded in time so a
+  dead PTY cannot wedge the loop shut. (The stall gate only became reachable when
+  `last_progress` started being written back to the ROWS: it had been set on a
+  local clone and dropped, so no stall was ever detected.)
+- **Freshness gate**: `GamState.awaiting_since` (transient, not serialized) is
+  stamped at delivery; routing requires the reviewer's `completed_at` AFTER it.
+  Without this, the reviewer's PREVIOUS Done satisfied the wait one frame after
+  delivery and routed its stale screen ("no verdict block" escalations on
+  delivery tick). Post-restart there is no timestamp; the PTYs are gone anyway
+  so routing escalates visibly.
+- **Testing hazard that cost an afternoon**: test fakes must read their PTY
+  stdin in the FOREGROUND. A background `cat >> log &` gets SIGTTIN-stopped on
+  the controlling terminal, silently never reads, the ~1KB kernel tty input
+  queue fills, and master writes BLOCK until child exit then fail EIO — which
+  looks exactly like an App bug. Foreground `cat >> log` drains correctly.
+
+### 14.10.6 `/swarm`: many competing experiments at one goal (2026-10)
+`/plan` splits one goal into DIFFERENT pieces and merges all of them. `/swarm [n]
+<task>` is the opposite: many attempts at the SAME goal, scored the same way, most
+thrown away. Built for research repos (the first target is raindrop, where each
+experiment is a trading strategy variant). Decided with the user: the grammar is
+exactly `/swarm [n] <task>` (no model arguments: every experiment uses the
+dashboard's `/model`), `n` is optional (the planner picks), and the list is
+approved with Enter after an optional conversation.
+
+- **Same machinery as `/plan`.** `start_swarm_task` -> `start_planner_task` with a
+  `SwarmPlan` on the plan's `PlanState::swarm` (persisted in `plan-queue.json`).
+  The orchestrator command is `swarm_orchestrator_command` (`launch.rs`, the same
+  builder with `swarm: true`): the interactive Claude conductor gets
+  `swarm_orchestrator_system_prompt` and is named `rudder-swarm`; Codex gets the
+  contract in its first turn; the headless planner gets `swarm_plan_prompt`. The
+  list is the usual `RUDDER_PLAN_TASKS` block in RUDDER.md, captured and approved
+  by the same paths (Ctrl+Enter / empty Enter / `RUDDER_APPROVE_PLAN`).
+- **Experiments are derived, not declared.** At approval,
+  `swarm_experiment_ids` fixes the experiments: every node nothing else
+  hard-depends on. A `setup` node (a shared scorer the experiments depend on) is
+  the only thing in a swarm that merges, and merges first.
+- **An experiment never merges by itself.** Each launched experiment's run is
+  flagged `swarm_experiment` (`swarmExperiment` in run.json), and integration,
+  merge-all, review-all, node review, drift nudges and follow-up expansion all
+  skip it. `m` on one merges it, because the user picked it. The row reads
+  `experiment done · m merges it`; the phone reads a finished one as `done`, not
+  `review`, so a swarm of 18 does not fill "Needs you".
+- **Capacity.** At most `swarm.maxParallel` (default 18, user's call) experiments
+  of one swarm run at once, on top of the global `orchestrator.maxParallel`; the
+  rest wait in Todo. Launches also hold while `/proc/meminfo` MemAvailable is under
+  1.5 GB (`SWARM_MIN_FREE_BYTES`; no guard on macOS or under tests). Both holds
+  are a notice, set only when it changes.
+- **Experiments start from the repo as it is on disk.** `jj workspace add` with
+  no `-r` (how every agent workspace is made) bases the workspace on the
+  PARENTS of the main checkout's `@`, so edits still in `@` are invisible to
+  workers. raindrop kept a whole research phase there (exp20 included), and a
+  swarm would have scored experiments against code they could not see. At
+  approval a swarm runs `checkpoint_working_copy` (gitio.rs): when `@` has
+  edits it is described (only if it has no description) and `jj new` closes
+  it, after the "Swarm approved" decision is written so the experiments see
+  that too. `/plan` and `/run` workers still start from `@`'s parents.
+- **Workers are told they are one of N** (`swarm_experiment_brief`, prepended to
+  the launch prompt): stay in your experiment, tune only on training data, report
+  results honestly through `rudder done` with no follow-ups.
+- When every experiment is Done/Failed/Stopped, `announce_finished_swarms` says so
+  once (`finished_announced`).
+- **Not built yet:** a scorer contract and leaderboard (per experiment plus a joint,
+  family-corrected score), a reconciler that writes a report and a combined
+  candidate, and the phone/web leaderboard.
+
+### 14.10 Product decisions (the durable "why")
+Recorded so future contributors do not relitigate them:- **Autonomy without a confirm gate.** The conductor acts unilaterally (auto-expand,
+  drift-fix, plan-rebase, merges). The bargain is VISIBLE (every action lands in
+  `activity_log`) and UNDOABLE (jj op-log via `rudder undo`), not gated. The only
+  explicit-intent action is reverting already-MERGED work (build-forward).
+- **Several plans, no shared state.** `/plan` is no longer at-most-one: each plan owns
+  its own `PlanState`, workspaces and merges, and talking to an orchestrator's pane edits
+  THAT plan. There is deliberately no cross-plan coordination — two plans that touch the
+  same files rejoin at the same place every isolated worker does, the merge. The task pane
+  routes into no existing plan: a fresh task chooses discussion, one worker or a
+  new proposed plan through automatic intent routing.
+- **Explicit isolation.** Automatically planned DAG workers and plain Execute
+  workers get their own jj workspace under the excluded managed directory.
+  Explicit main-owner runs intentionally
+  use the real checkout so one agent can finish repository/release/deployment steps.
+  The only real cross-agent risks for isolated work are a future merge conflict (jj
+  records it, the AI resolver fixes it) or interface drift (the hard edge is the guard).
+- **Delivery is evidence, not inference.** `Done`, local merge, push, and deployment are
+  orthogonal. A shipping request stays actionable until the completion sidecar provides
+  a concrete kind/target, verification timestamp, and smoke checks. Never infer deployed
+  from `git push`, a clean process exit, or a build artifact alone.
+- **TUI-primary scheduler, daemon projector.** The Rust TUI is the sole worker scheduler
+  in interactive use and hosts the PTYs in-process; the daemon runs projector-only
+  (`scheduler:false`) while the TUI is live, so there is never a double-launch. One
+  one-way, coalesced `graph.json` mirror; the TUI never reads it back.
+- **Determinism by construction.** Scheduling, merge, and lifecycle are a pure state
+  machine over the DAG (`next_node_to_launch` has no side effects); the LLM
+  non-determinism is quarantined in isolated workspaces and rejoins only at explicit
+  gates. Readiness is a single shared spec (`tests/fixtures/readiness-cases.json`),
+  parity-tested across Rust and TS.
+- **Soft vs hard edges.** Hard edges (wait for MERGE) are the minimal blocking set; soft
+  edges are context-only so siblings run in parallel.
+- **Graceful completion capture.** Three channels plus a diff-backstop so even a silent
+  or prose-only agent advances the plan; an explicit empty follow-up list is trusted.
+- **Thin theme.** Emphasis by COLOR, not weight (uniform font). No em dashes in UI or
+  copy; no "massively parallel" framing in marketing.
+- **jj is the substrate.** Internally jj (Jujutsu), externally git; global undo via
+  `jj op restore`. Never reintroduce the removed "R restart" agent feature.
+
+---
+
+## 15. Continual improvement loop (`rudder improve`)
+
+Status: **BUILT** (2026-07-07) in `src/improve/`; the eval-replay tier is the one
+designed-but-unbuilt stage. Full spec: `docs/continual-improvement.md`. This section is
+the map an agent needs before touching it; the spec is the source of truth for stage
+semantics. Do not re-derive the design from scratch.
+
+### 15.1 Shape
+A scheduled local batch loop that reads Rudder's own telemetry, mines it into ranked
+friction findings, proposes fixes via headless improvement agents (`claude -p
+--dangerously-skip-permissions`) in disposable git worktrees of the rudder checkout,
+gates them with the repo's deterministic test suites, judges them with a three-lens
+adversarial panel, and at `ship` autonomy (the default) pushes the fix to `origin/main`
+with an `npm version patch` tag so the section-11 tag-driven CI publishes the release.
+
+```
+collect → mine → rank → propose (worktree + context pack) → gate (npm ci/check/
+cargo test/npm test) → judge panel (refute-first, fails closed)
+→ ship (rebase → npm version patch → push main + tag) → outcome check next cycles
+```
+
+### 15.2 Decisions (settled; do not relitigate without cause)
+- **Scheduled batch, NOT a resident daemon.** `rudder improve run` under a launchd
+  LaunchAgent (`rudder improve schedule install`, nightly 03:30). Reasons: the work is
+  periodic, a laptop sleeps, batch runs are crash-isolated and resume from a watermark,
+  and the existing board daemon's debuggability problems (docs/observability-plan.md
+  §1.4) argue against a second resident process.
+- **Auto-ship is the default** (user decision, 2026-07-07, superseding the earlier
+  PR-only design): `improve.autonomy` is `observe | propose | ship(default)`. `ship`
+  rebases onto origin/main, re-typechecks, `npm version patch`, and pushes main + tag
+  in one non-forced push (`src/improve/ship.ts`). Guardrails: origin must match
+  `improve.allowedRemote` (exla-ai/rudder), the proposing agent may never touch
+  versions/tags, a failed push deletes the local tag, and a moved main wins (recorded
+  as push-conflict, retried next cycle). `propose` pushes branch `improve/<id>` only.
+- **Advisor pattern for judgment calls** (user decision, 2026-07-07, to conserve
+  usage): mining and judging go through `src/improve/advisor.ts` — executor
+  (`minerModel`/`judgeModel`, default sonnet) + advisor tool (`improve.advisorModel`,
+  default `claude-fable-5`, beta `advisor-tool-2026-03-01`, advisor capped at 2048
+  tokens/consult). Spend metered exactly from `usage.iterations`. Falls back to a
+  plain `callTextModel` call on missing API key, invalid pair, or any advisor error;
+  `advisorModel: ""` disables.
+- **Refute-first judging + outcome verification.** Judges are prompted to refute and
+  fail CLOSED (unparseable vote = reject; budget-exhausted vote = reject). Ship needs
+  zero regression flags, 2/3 approvals, AND a correctness approval (`panelDecision` in
+  judge.ts) — correctness rejections veto because an "approved but doesn't fix it"
+  ship wastes a release and mutes the finding. Later cycles compare each shipped
+  change's target metric before/after (≥7 days, ≥3 snapshots each side) and record
+  confirmed/no-effect/regressed; a no-effect/regressed outcome LIFTS the shipped
+  suppression in dedupe so the finding can resurface.
+- **Hand-shipped fixes must be recorded**: `rudder improve record shipped "<title>"
+  [--released vX.Y.Z]` appends the ledger entry that stops the miner re-proposing an
+  issue already fixed outside the loop. The miner prompt also carries recent ledger
+  history for semantic (paraphrase-proof) dedupe.
+- **Redaction at collect time.** `redactTaskSummarySecrets` runs over tasks and event
+  excerpts before anything reaches a model; raw transcripts are never shipped whole.
+- **Hard budget.** `improve.budgetUsd` (default $5) per cycle, checked before every
+  model call; over-budget findings are banked, and an unjudged proposal never ships.
+  Kill switch `RUDDER_IMPROVE=0` or `improve.enabled:false`.
+
+### 15.3 Where things live
+- Module `src/improve/{index,state,collect,mine,rank,advisor,propose,gate,judge,ship,
+  schedule}.ts`, dispatched as `improve` in `src/main.ts`; tests in
+  `tests/improve.test.mjs` (pure logic, no model calls).
+- State under `~/.rudder/improve/`: `cycle.lock` (mkdir lock, 6h stale takeover),
+  `watermark.json` (per-project consumption high-water marks), `metrics.jsonl` (one
+  snapshot per cycle), `ledger.jsonl` (findings/outcomes/rejection memory),
+  `reports/<cycle>.md`, `logs/` (agent + gate output), `worktrees/`.
+- Config: the optional `improve` block on `RudderConfig` (src/types.ts); defaults in
+  `IMPROVE_DEFAULTS` (src/improve/state.ts).
+
+### 15.4 Gotchas (learned building it)
+- **Collect must read run.json RAW** (`readRunsRaw` in collect.ts), never via
+  `state.ts::loadRunRecord`/`listRuns`: that load path fires the background LLM task
+  summarizer, which costs a model call per record AND rewrites run.json, bumping
+  `updatedAt` past the watermark so the same session is re-collected forever.
+- The whole observe path is deterministic under `RUDDER_FAKE_MODEL_OUTPUT` (the
+  advisor wrapper delegates to `callTextModel`, which honors the hook) — use it for
+  smoke tests, never real tokens.
+- `execStep` (state.ts) exists because `util.runCommand` has no timeout; gates and
+  agents must never hang a nightly cycle.
+- The improvement agent's `.rudder-improve-result.json` self-report is read and
+  DELETED before the leftover-commit, so it never lands in history.
+
+### 15.5 Remaining work
+The eval-replay tier (spec §4.6): distill frictional sessions into replayable cases
+under `~/.rudder/improve/evals/`, run candidate vs baseline (deterministic tier via
+`RUDDER_FAKE_MODEL_OUTPUT`/`RUDDER_FAKE_BACKEND=1`, live tier budgeted), and feed
+blind A/B deltas to the judge panel. Plus tractability feedback: outcome entries
+adjusting the static weights in `rank.ts::TRACTABILITY`.
+
+---
+
+## 16. Cloud operations discoveries
+
+- Workspace heartbeats are liveness signals, not user activity. Never advance
+  `last_activity_at` from a periodic worker heartbeat; idle shutdown must be based on
+  attach/input/control activity while still requiring zero live clients.
+- A manual stop is a desired-state boundary. Late worker heartbeats and final exit
+  reports must not move a `stopped` workspace back to `running` or `failed`.
+- Terminal replay must be byte-bounded and coalesced. Replaying every historical PTY
+  chunk separately caused more than 10,000 WebSocket frames for a single attach and
+  made local keystroke echo take over a second.
+- Fly volumes are billed while unattached. Workspace deletion/GC must retain enough
+  state to retry a failed volume deletion and must not lose orphan volume ids.
+
+---
+
+## Execute: Discoveries
+
+### 2026-07-17: direct-task ownership and truthful delivery
+
+- The installed system Codex already supports plugins, Computer Use, goals, and the
+  required notifier. Capability loss inside Rudder was self-inflicted by explicit
+  `features.*=false` overrides, not a Codex limitation. Keep worker and planner
+  profiles separate, and prefer the current system binary over the old managed fork.
+- A native `process` record is an ownership claim: it is valid only while the same
+  dashboard owns a live `TerminalPane`. Dropping a PTY while persisting `Running`
+  produces phantom work. Graceful exit must persist `Paused` and delete `process`.
+- Plain tasks need a single owner that can cross the implementation-to-delivery seam.
+  DAG planning remains valuable but must be explicit (`/plan`), because a read-only
+  planner plus isolated implementation workers has no inherent owner for versioning,
+  pushing, installing, or production verification.
+- Deployment cannot be inferred from process completion, a local merge, or a push.
+  Persist structured evidence and require a target, verification timestamp, and smoke
+  checks before any native/web/context surface says `deployed`.

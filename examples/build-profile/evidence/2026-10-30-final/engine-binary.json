@@ -1,0 +1,6 @@
+{
+  "binary": "target/release/deps/build_workload-a6f34b90c65e88da",
+  "sha256": "43dbc4016f8b6f802612b95cf27e015407022e5f44df3c4cd2321dccdb42f0dd",
+  "size_bytes": 4977864,
+  "profile": "release"
+}

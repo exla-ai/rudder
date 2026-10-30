@@ -1,0 +1,27 @@
+{
+  "ok": true,
+  "verifiedAt": "2026-10-30T12:14:20.550Z",
+  "provider": "AWS S3",
+  "credentialSource": "default profile (admin qualification)",
+  "bucket": "rudder-fabric-v1-597088032164-us-east-1",
+  "object": {
+    "kind": "blob",
+    "algorithm": "sha256",
+    "digest": "faea2bebe00c11e8b4f1e6b17fe1551a9c4a3d98cd52ed8dc6ef944feb06f96a",
+    "size_bytes": 73400320
+  },
+  "root_id": "streaming-qualification-v1",
+  "durability": "replicated",
+  "checks": [
+    "70MiB bounded spool and conditional S3 stream PUT",
+    "Streaming S3 GET size and SHA256 match",
+    "Strict cold closure verification streams raw content",
+    "Immutable root receipt retained"
+  ],
+  "timings_ms": {
+    "upload": 964,
+    "download": 745,
+    "publication": 884
+  },
+  "peakRSSBytes": 126623744
+}

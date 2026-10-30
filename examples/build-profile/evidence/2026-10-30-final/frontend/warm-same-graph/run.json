@@ -1,0 +1,81 @@
+{
+  "format_version": 1,
+  "stored": {
+    "key": {
+      "kind": "action_key",
+      "algorithm": "sha256",
+      "digest": "dcc5398132ad97da035dc2b0d39e5c03fdcab374c803d58bf8340dc595bcbfb0",
+      "size_bytes": 4437
+    },
+    "outputs": {
+      "kind": "directory",
+      "algorithm": "sha256",
+      "digest": "fce6f5a41de851ba2c1792d7764156e7dec1430e32d4682772d53d393be3bc4e",
+      "size_bytes": 447
+    },
+    "receipt": {
+      "kind": "action_result",
+      "algorithm": "sha256",
+      "digest": "19d51c9bee81855f2c14bb6b42db4305db1a9cc83ad9829422b6ad6ba0f84f12",
+      "size_bytes": 1571
+    },
+    "observation": {
+      "frontend": "buck2-rudder-linux-compile-v1",
+      "trace_id": "deb05231-7ff8-42fe-9dda-a93a9a3a959e",
+      "executed_actions": 2,
+      "remote_cache_hits": 0,
+      "native_action_digests": [
+        {
+          "hash": "9ece08a5a0f88f1e1a1e1ae1d32409d9b90fbb778cb1a2b6df2e561a0c1c140d",
+          "size_bytes": 142
+        },
+        {
+          "hash": "ce9836a3660453f9dcbdbd5402fe599d39c207acaa09e25dadfa04ec56604d63",
+          "size_bytes": 142
+        }
+      ],
+      "event_log": {
+        "kind": "blob",
+        "algorithm": "sha256",
+        "digest": "0a4a2d8dd80db8813d2ba27d64ecd07173e02f81636e02a74e5cfd9da96b4f03",
+        "size_bytes": 17791
+      },
+      "build_report": {
+        "kind": "blob",
+        "algorithm": "sha256",
+        "digest": "dd98ba78e1b923dfc9d09656e188dbf06dcee357c8260b6f0aaf4ed5c294ffc6",
+        "size_bytes": 1488
+      }
+    },
+    "requires_frontend_validation": true
+  },
+  "run_receipt": {
+    "kind": "action_result",
+    "algorithm": "sha256",
+    "digest": "45030ae15cb485b6affa8e36f4d00274a5f67637246d119edceb230261905c79",
+    "size_bytes": 2266
+  },
+  "observation": {
+    "frontend": "buck2-rudder-linux-compile-v1",
+    "trace_id": "e6a49d83-7f48-474e-bf3c-14d262a4e35a",
+    "executed_actions": 0,
+    "remote_cache_hits": 0,
+    "native_action_digests": [],
+    "event_log": {
+      "kind": "blob",
+      "algorithm": "sha256",
+      "digest": "d5ccbc6f4a8faeb85d27ca825be6145a0d9963d6cfdc837d003b998382b798f7",
+      "size_bytes": 11004
+    },
+    "build_report": {
+      "kind": "blob",
+      "algorithm": "sha256",
+      "digest": "28b53111da3fe30759a788d4bc14e91f0decff2c242d686a1a367dbaa1c44e52",
+      "size_bytes": 1488
+    }
+  },
+  "frontend_graph_reused_actions": 2,
+  "frontend_elapsed_ms": 114,
+  "environment_materialization_ms": 993,
+  "source_materialization_ms": 0
+}

@@ -339,7 +339,7 @@ function planSystemPrompt(): string {
 }
 
 export async function planTask(task: string, ctx: PlanContext): Promise<PlanDag> {
-  const instructions = await loadInstructionFiles(ctx.root).catch(() => []);
+  const instructions = await loadInstructionFiles(ctx.root, ctx.root, { mode: "planning" }).catch(() => []);
   const instructionText = instructions.length
     ? `\n\nRepository instructions:\n${instructions.map((file) => `### ${file.path}\n${file.content}`).join("\n\n")}`
     : "";

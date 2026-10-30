@@ -123,7 +123,7 @@ async function collectContextFiles(repoRoot: string): Promise<string[]> {
 }
 
 function secretPattern(): RegExp {
-  return /(sk-[A-Za-z0-9_-]{16,}|ghp_[A-Za-z0-9_]{16,}|github_pat_[A-Za-z0-9_]{16,}|xox[baprs]-[A-Za-z0-9-]{16,}|api[_-]?key\s*=\s*[A-Za-z0-9_.-]{16,})/i;
+  return /(?<![A-Za-z0-9_])(sk-[A-Za-z0-9_-]{16,}|ghp_[A-Za-z0-9_]{16,}|github_pat_[A-Za-z0-9_]{16,}|xox[baprs]-[A-Za-z0-9-]{16,}|(?:AKIA|ASIA)[A-Z0-9]{16}|api[_-]?key\s*=\s*[A-Za-z0-9_.-]{16,})/i;
 }
 
 function promptInjectionPattern(): RegExp {

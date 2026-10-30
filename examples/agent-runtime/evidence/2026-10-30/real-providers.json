@@ -1,0 +1,95 @@
+{
+  "dir": "<disposable qualification checkout>",
+  "verifiedAt": "2026-10-30T12:58:32.233Z",
+  "native": "<current debug rudder-native>",
+  "backends": {
+    "claude": {
+      "version": "2.1.314 (Claude Code)",
+      "sha256": "4487042b4c4f5d88d4568f68ae98aae0b1ffae58864cf57fb868641bc5f84594"
+    },
+    "codex": {
+      "version": "codex-cli 0.166.0",
+      "entrypointSha256": "e14fc83739c13c1074b12bd1acce4010c893c7f6fbfc1593b4a31d74cabb57af",
+      "entrypoint": "<private pinned npm install>/@openai/codex/bin/codex.js",
+      "executable": "<private pinned npm install>/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/bin/codex",
+      "sha256": "b8a11fedf24b2dfb59a70c9e52b030f9a508dcd49cd2dd0d41956f4c785156b8"
+    }
+  },
+  "checks": [
+    "Both real interactive renderers have exact owned thread/active-turn runtime observations.",
+    "Claude busy steer cancelled queued input, confirmed exact interrupted result, then accepted replacement peer input and reached typed completion.",
+    "Codex interrupt confirmed exact thread and turn, App paused, explicit pinned resume used same TUI thread with nonhuman untrusted peer context, then typed completion.",
+    "Neither fixture completion marker exists; turn-interrupt evidence is kept separate from kernel tool-process termination.",
+    "Authenticated durable mailbox retained peer author; transport completion did not acknowledge inbox."
+  ],
+  "limits": "Disposable same-host checkout and configured-provider credentials only. No original session/home modified. No distributed/restart durability claim.",
+  "bindings": {
+    "claude": {
+      "run": "main-branch-q1e5y",
+      "profile": "claude-sdk",
+      "thread": "5dcdd98e-61fd-45b6-81ce-6801ca76dbe6",
+      "attempt": "3ea763d6-2d1d-4cd2-990e-95b704377144",
+      "turn": "da646cf0-2d20-4388-aab8-9fc2cb6c4fd0"
+    },
+    "codex": {
+      "run": "main-branch-9s2nm",
+      "profile": "codex-app-server",
+      "thread": "01a18ce4-19fb-7bd3-a13c-d36790a5e050",
+      "attempt": "fd297a4a-121f-4b4f-a79f-46b6760bbb7f",
+      "turn": "01a18ce4-1afc-7702-97ac-fa095fbdc5fb"
+    }
+  },
+  "claudeSteerReceipt": {
+    "accepted_at_ms": 1793365125915,
+    "accepted_sequence": 13,
+    "command_id": "c2df7f84-7bba-4637-b672-3edbcac5f537",
+    "project_id": "local:2a7a5eeba7db89f0702e48680797e2c420ec5eb715c77580834cda3c494ed19a",
+    "result": {
+      "adapter": {
+        "status": "transport_accepted",
+        "turn_id": "2503c761-7bc4-47bb-ab8a-98e74e67c28a"
+      },
+      "attempt_id": "3ea763d6-2d1d-4cd2-990e-95b704377144",
+      "run_id": "main-branch-q1e5y"
+    },
+    "state": "completed"
+  },
+  "codexInterruptReceipt": {
+    "accepted_at_ms": 1793365128244,
+    "accepted_sequence": 19,
+    "command_id": "cb84339a-6b6d-44d9-9bf0-0c6a4a2482cb",
+    "project_id": "local:2a7a5eeba7db89f0702e48680797e2c420ec5eb715c77580834cda3c494ed19a",
+    "result": {
+      "adapter": {
+        "status": "interrupt_confirmed",
+        "turn_id": "01a18ce4-1afc-7702-97ac-fa095fbdc5fb"
+      },
+      "attempt_id": "fd297a4a-121f-4b4f-a79f-46b6760bbb7f",
+      "run_id": "main-branch-9s2nm"
+    },
+    "state": "completed"
+  },
+  "codexResumeReceipt": {
+    "accepted_at_ms": 1793365128406,
+    "accepted_sequence": 23,
+    "command_id": "e1961c77-b7a2-46d7-84a9-9dd5859d2847",
+    "project_id": "local:2a7a5eeba7db89f0702e48680797e2c420ec5eb715c77580834cda3c494ed19a",
+    "result": {
+      "adapter": {
+        "status": "transport_accepted",
+        "turn_id": "01a18ce4-3528-7731-9b56-ed76b519e131"
+      },
+      "attempt_id": "fd297a4a-121f-4b4f-a79f-46b6760bbb7f",
+      "run_id": "main-branch-9s2nm"
+    },
+    "state": "completed"
+  },
+  "claudeToolAliveAfterTurnControl": false,
+  "codexToolAliveAfterTurnControl": true,
+  "success": true,
+  "cleanup": {
+    "claudeToolGoneAfterEngineShutdown": true,
+    "codexToolGoneAfterEngineShutdown": true
+  },
+  "sourceState": "unreleased working tree; typed-provider qualification, not deployment proof"
+}

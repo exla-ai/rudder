@@ -1,0 +1,90 @@
+{
+  "format_version": 1,
+  "stored": {
+    "key": {
+      "kind": "action_key",
+      "algorithm": "sha256",
+      "digest": "14cdc9ced8d350935589f118485d82709636525f859abe5b79aea5242d06341d",
+      "size_bytes": 4421
+    },
+    "outputs": {
+      "kind": "directory",
+      "algorithm": "sha256",
+      "digest": "c54c2668b820e069f28e27c523c414a4c2fe4d8da110b90b24cac0b8290e6c2f",
+      "size_bytes": 447
+    },
+    "receipt": {
+      "kind": "action_result",
+      "algorithm": "sha256",
+      "digest": "ca1b757190a7fb88c41c70af41cb4e14196c2fee362156df26a8a5244413044f",
+      "size_bytes": 1571
+    },
+    "observation": {
+      "frontend": "buck2-rudder-linux-compile-v1",
+      "trace_id": "b1d2dadc-5bba-4ad2-ae6f-d0da520733f8",
+      "executed_actions": 2,
+      "remote_cache_hits": 0,
+      "native_action_digests": [
+        {
+          "hash": "625df358cabbcf3bb68ffb39779207b84acb8eed512f13541068fbf5f1a786d7",
+          "size_bytes": 142
+        },
+        {
+          "hash": "6bd5aac99349bdc94d5667dd0bfbfcbdc240cb78eb3db9d0bce1c66f28db3c62",
+          "size_bytes": 142
+        }
+      ],
+      "event_log": {
+        "kind": "blob",
+        "algorithm": "sha256",
+        "digest": "aab1a4b6090acef3f1257e739f16fc9d68cfbad11efb7344a006d3a16c07d369",
+        "size_bytes": 17640
+      },
+      "build_report": {
+        "kind": "blob",
+        "algorithm": "sha256",
+        "digest": "abb235bc2052e9e5ed4495fd523aa4ee84e3d109eb5d62fda91d55108f725e3e",
+        "size_bytes": 1488
+      }
+    },
+    "requires_frontend_validation": true
+  },
+  "run_receipt": {
+    "kind": "action_result",
+    "algorithm": "sha256",
+    "digest": "a2e60dd3d22785b86187146a1e1e9d07d2373fc1e73bfbb7ecb8ae65b041f6c8",
+    "size_bytes": 2452
+  },
+  "observation": {
+    "frontend": "buck2-rudder-linux-compile-v1",
+    "trace_id": "b1d2dadc-5bba-4ad2-ae6f-d0da520733f8",
+    "executed_actions": 2,
+    "remote_cache_hits": 0,
+    "native_action_digests": [
+      {
+        "hash": "625df358cabbcf3bb68ffb39779207b84acb8eed512f13541068fbf5f1a786d7",
+        "size_bytes": 142
+      },
+      {
+        "hash": "6bd5aac99349bdc94d5667dd0bfbfcbdc240cb78eb3db9d0bce1c66f28db3c62",
+        "size_bytes": 142
+      }
+    ],
+    "event_log": {
+      "kind": "blob",
+      "algorithm": "sha256",
+      "digest": "aab1a4b6090acef3f1257e739f16fc9d68cfbad11efb7344a006d3a16c07d369",
+      "size_bytes": 17640
+    },
+    "build_report": {
+      "kind": "blob",
+      "algorithm": "sha256",
+      "digest": "abb235bc2052e9e5ed4495fd523aa4ee84e3d109eb5d62fda91d55108f725e3e",
+      "size_bytes": 1488
+    }
+  },
+  "frontend_graph_reused_actions": 0,
+  "frontend_elapsed_ms": 1575,
+  "environment_materialization_ms": 1077,
+  "source_materialization_ms": 3
+}

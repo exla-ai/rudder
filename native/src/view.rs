@@ -65,8 +65,10 @@ view_state! {
     selected_agent: usize = 0,
     agents_scroll: usize = 0,
     notice: Option<String> = None,
+    machine_notice_cursor: u64 = 0,
     cloud_prompt: Option<CloudLaunchPrompt> = None,
     delete_pending: Option<String> = None,
+    frames_drawn: u64 = 0,
     delete_armed_frame: u64 = 0,
     merge_confirm: Option<MergeConfirmation> = None,
     cloud_delete_confirm: Option<CloudDeleteConfirm> = None,
@@ -221,6 +223,22 @@ pub(crate) const SYNC_END: &str = "\x1b[?2026l";
 pub(crate) const LOCAL_VIEW: u64 = 0;
 
 impl App {
+    /// A machine-level result must have a visible surface in headless mode.
+    /// Confirmation/modal state stays local to its person, as do task drafts.
+    pub(crate) fn project_engine_notice(&mut self) {
+        if !self.engine_headless || self.delete_pending.is_some() || self.merge_confirm.is_some()
+            || self.cloud_delete_confirm.is_some() || self.conflict_prompt.is_some()
+            || self.cloud_prompt.is_some() || self.quit_confirm_pending || self.rename_input.is_some() {
+            return;
+        }
+        if let Some((sequence, text)) = self.machine_notice.as_ref() {
+            if self.machine_notice_cursor < *sequence {
+                self.notice = Some(text.clone());
+                self.machine_notice_cursor = *sequence;
+            }
+        }
+    }
+
     /// Run `f` with the remote view `client_id`'s state swapped into `self`.
     /// `None` when that client is gone or is not a dashboard view.
     pub(crate) fn with_view<R>(
@@ -406,7 +424,12 @@ impl App {
             self.begin_view_frame(id);
             let drew = self
                 .with_view(id, |app, terminal| {
-                    terminal.draw(|frame| render(frame, app)).is_ok()
+                    app.project_engine_notice();
+                    let drawn = terminal.draw(|frame| render(frame, app)).is_ok();
+                    if drawn {
+                        app.frames_drawn = app.frames_drawn.wrapping_add(1);
+                    }
+                    drawn
                 })
                 .unwrap_or(false);
             let Some(client) = self.attach_clients.iter_mut().find(|client| client.id == id) else {

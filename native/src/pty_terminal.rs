@@ -10,12 +10,15 @@ use std::borrow::Cow;
 use std::fmt;
 use std::io::{Read, Write};
 use std::path::PathBuf;
-use std::sync::mpsc::{self, Receiver};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex};
 
 use crate::term_colors::{colors_generation, theme_change_report, QueryScanner};
 use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
+
+const EXIT_OUTPUT_GRACE: Duration = Duration::from_secs(2);
 
 use anyhow::{anyhow, Context, Result};
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize};
@@ -130,6 +133,12 @@ impl Default for TerminalPaneOptions {
 }
 
 pub struct TerminalPane {
+    /// Stable for this process attempt. A resumed pane gets a fresh identity,
+    /// even if the OS reuses a PID or the backend resumes the same conversation.
+    instance_id: String,
+    execution_profile: Option<String>,
+    agent_link_launch_json: Option<String>,
+    before_terminate: Option<Arc<dyn Fn() + Send + Sync>>,
     master: Box<dyn MasterPty + Send>,
     child: Box<dyn Child + Send + Sync>,
     /// Shared with the reader thread, which answers the agent's color queries.
@@ -139,7 +148,12 @@ pub struct TerminalPane {
     /// The terminal-colors generation this agent was last told about.
     theme_generation: u64,
     output_rx: Receiver<Vec<u8>>,
+    output_eof: bool,
+    exit_observed: Option<(portable_pty::ExitStatus, Instant)>,
+    output_only: bool,
+    terminated: bool,
     reader_thread: Option<JoinHandle<()>>,
+    reader_stop: Arc<AtomicBool>,
     parser: vt100::Parser,
     size: TerminalSize,
     alternate_history: Vec<Vec<String>>,
@@ -385,9 +399,12 @@ fn bare_url_at(chars: &[char], col: usize) -> Option<String> {
     // Trailing sentence punctuation is not part of the url; a closing paren is,
     // only when the url opened one (wikipedia-style links).
     loop {
-        let Some(last) = url.chars().last() else { break };
+        let Some(last) = url.chars().last() else {
+            break;
+        };
         let unbalanced_paren = last == ')' && url.matches('(').count() < url.matches(')').count();
-        if matches!(last, '.' | ',' | ';' | ':' | '!' | '?' | '\'' | ']' | '}') || unbalanced_paren {
+        if matches!(last, '.' | ',' | ';' | ':' | '!' | '?' | '\'' | ']' | '}') || unbalanced_paren
+        {
             url.pop();
         } else {
             break;
@@ -564,6 +581,25 @@ impl TerminalPane {
         command: Option<TerminalCommand>,
         options: TerminalPaneOptions,
     ) -> Result<Self> {
+        let instance_id = command
+            .as_ref()
+            .and_then(|cmd| {
+                cmd.env
+                    .iter()
+                    .rev()
+                    .find(|(key, _)| key == "RUDDER_FABRIC_ATTEMPT_ID")
+            })
+            .and_then(|(_, value)| uuid::Uuid::parse_str(value).ok())
+            .unwrap_or_else(uuid::Uuid::new_v4)
+            .to_string();
+        let launch_env = |name: &str| {
+            command
+                .as_ref()
+                .and_then(|cmd| cmd.env.iter().rev().find(|(key, _)| key == name))
+                .map(|(_, value)| value.clone())
+        };
+        let execution_profile = launch_env("RUDDER_EXECUTION_PROFILE");
+        let agent_link_launch_json = launch_env("RUDDER_AGENT_LINK_LAUNCH");
         let pty_system = portable_pty::native_pty_system();
         let pair = pty_system
             .openpty(options.size.pty_size())
@@ -595,6 +631,10 @@ impl TerminalPane {
         let (output_tx, output_rx) = mpsc::channel();
         let output_waker: Arc<Mutex<Option<PtyOutputWaker>>> = Arc::new(Mutex::new(None));
         let reader_waker = Arc::clone(&output_waker);
+        let reader_stop = Arc::new(AtomicBool::new(false));
+        let stopped = Arc::clone(&reader_stop);
+        #[cfg(unix)]
+        let reader_fd = pair.master.as_raw_fd();
         let reader_thread = thread::Builder::new()
             .name("rudder-pty-reader".to_string())
             .spawn(move || {
@@ -604,14 +644,45 @@ impl TerminalPane {
                 // colors at startup gives up long before that.
                 let mut queries = QueryScanner::default();
                 loop {
+                    if stopped.load(Ordering::Acquire) {
+                        break;
+                    }
+                    #[cfg(unix)]
+                    if let Some(fd) = reader_fd {
+                        // This is the sole reader. Poll before read so dropping
+                        // a pane can stop it even if an escaped descendant keeps
+                        // a silent slave open. No App thread waits for this poll.
+                        let mut poll = libc::pollfd {
+                            fd,
+                            events: libc::POLLIN,
+                            revents: 0,
+                        };
+                        let ready = unsafe { libc::poll(&mut poll, 1, 50) };
+                        if stopped.load(Ordering::Acquire) {
+                            break;
+                        }
+                        if ready == 0 {
+                            continue;
+                        }
+                        if ready < 0 {
+                            if std::io::Error::last_os_error().kind()
+                                == std::io::ErrorKind::Interrupted
+                            {
+                                continue;
+                            }
+                            break;
+                        }
+                    }
                     match reader.read(&mut buf) {
                         Ok(0) => break,
                         Ok(n) => {
                             let replies = queries.scan(&buf[..n]);
-                            reader_wants_theme_reports.store(queries.wants_theme_reports, Ordering::Relaxed);
+                            reader_wants_theme_reports
+                                .store(queries.wants_theme_reports, Ordering::Relaxed);
                             if !replies.is_empty() {
                                 if let Ok(mut writer) = reply_writer.lock() {
-                                    let _ = writer.write_all(&replies).and_then(|()| writer.flush());
+                                    let _ =
+                                        writer.write_all(&replies).and_then(|()| writer.flush());
                                 }
                             }
                             if output_tx.send(buf[..n].to_vec()).is_err() {
@@ -636,17 +707,34 @@ impl TerminalPane {
                         Err(_) => break,
                     }
                 }
+                // Publish EOF only after the final chunk, then wake the actor
+                // even when the last read produced no bytes.
+                drop(output_tx);
+                if let Ok(guard) = reader_waker.lock() {
+                    if let Some(waker) = guard.as_ref() {
+                        waker();
+                    }
+                }
             })
             .context("failed to start PTY reader thread")?;
 
         Ok(Self {
+            instance_id,
+            execution_profile,
+            agent_link_launch_json,
+            before_terminate: None,
             master: pair.master,
             child,
             writer,
             wants_theme_reports,
             theme_generation: colors_generation(),
             output_rx,
+            output_eof: false,
+            exit_observed: None,
+            output_only: false,
+            terminated: false,
             reader_thread: Some(reader_thread),
+            reader_stop,
             parser: vt100::Parser::new(
                 options.size.rows,
                 options.size.cols,
@@ -674,6 +762,24 @@ impl TerminalPane {
         })
     }
 
+    pub fn instance_id(&self) -> &str {
+        &self.instance_id
+    }
+
+    pub fn execution_profile(&self) -> Option<&str> {
+        self.execution_profile.as_deref()
+    }
+
+    pub fn agent_link_launch_json(&self) -> Option<&str> {
+        self.agent_link_launch_json.as_deref()
+    }
+
+    /// Invalidate control capabilities before any PTY process-tree teardown,
+    /// including implicit drop during replacement or deletion.
+    pub fn set_before_terminate(&mut self, callback: Arc<dyn Fn() + Send + Sync>) {
+        self.before_terminate = Some(callback);
+    }
+
     /// Install (or replace) the waker the reader thread fires after each output
     /// send. Called by the app right after spawning a pane so PTY output wakes the
     /// main loop; panes never given a waker simply fall back to the tick cadence.
@@ -684,6 +790,9 @@ impl TerminalPane {
     }
 
     pub fn write_input(&mut self, bytes: &[u8]) -> Result<()> {
+        if self.output_only {
+            return Err(anyhow!("command finished; retained output is read-only"));
+        }
         let write_result = match self.writer.lock() {
             Ok(mut writer) => writer.write_all(bytes).and_then(|()| writer.flush()),
             Err(_) => Err(std::io::Error::other("PTY writer lock poisoned")),
@@ -701,7 +810,7 @@ impl TerminalPane {
     }
 
     fn child_exit_summary(&mut self) -> Option<String> {
-        match self.child.try_wait() {
+        match self.try_wait() {
             Ok(Some(status)) => {
                 let code = status.exit_code();
                 if status.success() {
@@ -715,7 +824,7 @@ impl TerminalPane {
     }
 
     pub fn is_alive(&mut self) -> bool {
-        match self.child.try_wait() {
+        match self.try_wait() {
             Ok(None) => true,
             Ok(Some(_)) => false,
             Err(_) => false,
@@ -746,10 +855,19 @@ impl TerminalPane {
     pub fn drain_output(&mut self) -> Vec<u8> {
         self.report_theme_change();
         let mut drained = Vec::new();
-        while let Ok(chunk) = self.output_rx.try_recv() {
-            self.process_output_chunk(&chunk);
-            self.append_output_log(&chunk);
-            drained.extend_from_slice(&chunk);
+        loop {
+            match self.output_rx.try_recv() {
+                Ok(chunk) => {
+                    self.process_output_chunk(&chunk);
+                    self.append_output_log(&chunk);
+                    drained.extend_from_slice(&chunk);
+                }
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    self.output_eof = true;
+                    break;
+                }
+                Err(mpsc::TryRecvError::Empty) => break,
+            }
         }
         if !drained.is_empty() {
             self.invalidate_render_cache();
@@ -995,6 +1113,9 @@ impl TerminalPane {
     }
 
     pub fn wants_sgr_mouse_events_snapshot(&self) -> bool {
+        if self.output_only {
+            return false;
+        }
         let screen = self.parser.screen();
         screen.mouse_protocol_mode() != vt100::MouseProtocolMode::None
             && screen.mouse_protocol_encoding() == vt100::MouseProtocolEncoding::Sgr
@@ -1164,16 +1285,65 @@ impl TerminalPane {
         TerminalCursor {
             row,
             col,
-            visible: !self.parser.screen().hide_cursor(),
+            visible: !self.output_only && !self.parser.screen().hide_cursor(),
         }
     }
 
     pub fn child_process_id(&self) -> Option<u32> {
-        self.child.process_id()
+        if self.terminated || self.exit_observed.is_some() {
+            None
+        } else {
+            self.child.process_id()
+        }
     }
 
     pub fn try_wait(&mut self) -> Result<Option<portable_pty::ExitStatus>> {
-        self.child.try_wait().context("failed to poll child status")
+        if let Some((status, _)) = &self.exit_observed {
+            return Ok(Some(status.clone()));
+        }
+        let status = self
+            .child
+            .try_wait()
+            .context("failed to poll child status")?;
+        if let Some(status) = &status {
+            self.exit_observed = Some((status.clone(), Instant::now()));
+        }
+        Ok(status)
+    }
+
+    pub fn exit_observed(&self) -> bool {
+        self.exit_observed.is_some()
+    }
+    pub fn is_output_only(&self) -> bool {
+        self.output_only
+    }
+
+    /// Process exit and reader completion are independent. Never block the App
+    /// or consume bytes here: planners must receive every drained raw chunk.
+    /// A descendant holding the slave cannot delay exit finalization forever.
+    pub fn try_wait_after_output(&mut self) -> Result<Option<portable_pty::ExitStatus>> {
+        let status = self.try_wait()?;
+        if status.is_some()
+            && !self.output_eof
+            && self
+                .exit_observed
+                .as_ref()
+                .is_some_and(|(_, at)| at.elapsed() < EXIT_OUTPUT_GRACE)
+        {
+            return Ok(None);
+        }
+        Ok(status)
+    }
+
+    /// Retain the emulator of an exited plain command, never a writable child
+    /// or an old process ID that Drop might later signal after PID reuse.
+    pub fn retain_output_after_exit(&mut self) {
+        if self.exit_observed.is_none() {
+            return;
+        }
+        self.terminate_child();
+        self.output_only = true;
+        self.drain_output();
     }
 
     /// Explicitly terminate and reap the PTY process group. Lifecycle callers
@@ -1462,12 +1632,15 @@ impl TerminalPane {
 
 impl Drop for TerminalPane {
     fn drop(&mut self) {
+        self.reader_stop.store(true, Ordering::Release);
         self.terminate_child();
-        // Join the reader thread instead of detaching it. Once the child and
-        // all of its descendants are gone the slave PTY is fully closed, so the
-        // blocking `reader.read` returns EOF/EIO and the loop exits promptly.
+        // An inherited slave can delay EOF. Never join a still-running reader
+        // on the App actor: the stop-aware poll closes its handles even if a
+        // silent descendant outlives its group. Finished threads are reaped.
         if let Some(handle) = self.reader_thread.take() {
-            let _ = handle.join();
+            if handle.is_finished() {
+                let _ = handle.join();
+            }
         }
     }
 }
@@ -1508,6 +1681,13 @@ impl TerminalPane {
     /// workspace and the slave PTY open. We must also `wait()` the direct child
     /// or it lingers as a zombie for the lifetime of the process.
     fn terminate_child(&mut self) {
+        if let Some(callback) = self.before_terminate.take() {
+            callback();
+        }
+        if self.terminated {
+            return;
+        }
+        self.terminated = true;
         #[cfg(unix)]
         {
             if let Some(pid) = self.child.process_id() {
@@ -1523,7 +1703,11 @@ impl TerminalPane {
             }
         }
         let _ = self.child.kill();
-        let _ = self.child.wait();
+        if let Ok(status) = self.child.wait() {
+            if self.exit_observed.is_none() {
+                self.exit_observed = Some((status, Instant::now()));
+            }
+        }
     }
 }
 
@@ -1584,6 +1768,107 @@ fn default_shell() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn exit_output_waits_for_forwarded_tail_and_reader_eof() {
+        let mut pane = TerminalPane::spawn_shell_or_command(
+            Some(TerminalCommand::with_args("/bin/sh", ["-c", "exit 0"])),
+            TerminalPaneOptions::default(),
+        )
+        .unwrap();
+        while pane.try_wait().unwrap().is_none() {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let (sender, receiver) = mpsc::channel();
+        pane.output_rx = receiver;
+        pane.output_eof = false;
+        sender.send(b"final command proof\r\n".to_vec()).unwrap();
+        assert!(
+            pane.try_wait_after_output().unwrap().is_none(),
+            "process exit cannot skip undrained output"
+        );
+        assert!(String::from_utf8(pane.drain_output())
+            .unwrap()
+            .contains("final command proof"));
+        assert!(
+            pane.try_wait_after_output().unwrap().is_none(),
+            "a temporarily empty queue is not EOF"
+        );
+        drop(sender);
+        pane.drain_output();
+        assert!(pane.try_wait_after_output().unwrap().unwrap().success());
+    }
+
+    #[test]
+    fn exit_output_bound_keeps_eof_honest_and_retained_pane_has_no_live_pid() {
+        use std::sync::atomic::AtomicUsize;
+        let mut pane = TerminalPane::spawn_shell_or_command(
+            Some(TerminalCommand::with_args("/bin/sh", ["-c", "exit 0"])),
+            TerminalPaneOptions::default(),
+        )
+        .unwrap();
+        while pane.try_wait().unwrap().is_none() {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let (sender, receiver) = mpsc::channel();
+        pane.output_rx = receiver;
+        pane.output_eof = false;
+        pane.exit_observed.as_mut().unwrap().1 =
+            Instant::now() - EXIT_OUTPUT_GRACE - Duration::from_millis(1);
+        assert!(pane.try_wait_after_output().unwrap().unwrap().success());
+        assert!(!pane.output_eof, "timeout does not invent EOF");
+        let called = Arc::new(AtomicUsize::new(0));
+        let callback = called.clone();
+        pane.set_before_terminate(Arc::new(move || {
+            callback.fetch_add(1, Ordering::SeqCst);
+        }));
+        pane.retain_output_after_exit();
+        assert!(pane.is_output_only());
+        assert!(pane.child_process_id().is_none());
+        assert!(pane.write_input(b"must not execute").is_err());
+        drop(pane);
+        assert_eq!(
+            called.load(Ordering::SeqCst),
+            1,
+            "retired output cannot later signal a reused PID or repeat teardown"
+        );
+        drop(sender);
+    }
+
+    #[test]
+    fn control_invalidation_precedes_every_explicit_or_implicit_pty_teardown() {
+        use std::sync::atomic::AtomicUsize;
+        for implicit_drop in [false, true] {
+            let attempt = uuid::Uuid::new_v4().to_string();
+            let command = TerminalCommand::with_args("/bin/sh", ["-c", "sleep 60"])
+                .with_env("RUDDER_FABRIC_ATTEMPT_ID", &attempt)
+                .with_env("RUDDER_EXECUTION_PROFILE", "claude-sdk")
+                .with_env("RUDDER_AGENT_LINK_LAUNCH", "{\"format_version\":1}");
+            let mut pane =
+                TerminalPane::spawn_shell_or_command(Some(command), TerminalPaneOptions::default())
+                    .unwrap();
+            assert_eq!(pane.instance_id(), attempt);
+            assert_eq!(pane.execution_profile(), Some("claude-sdk"));
+            assert!(pane.agent_link_launch_json().is_some());
+            let pid = pane.child_process_id().unwrap() as libc::pid_t;
+            let calls = Arc::new(AtomicUsize::new(0));
+            let captured = calls.clone();
+            pane.set_before_terminate(Arc::new(move || {
+                assert_eq!(
+                    unsafe { libc::kill(pid, 0) },
+                    0,
+                    "controls must close while the owned process still exists"
+                );
+                captured.fetch_add(1, Ordering::SeqCst);
+            }));
+            if !implicit_drop {
+                pane.terminate_and_wait();
+            }
+            drop(pane);
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+            assert_eq!(unsafe { libc::kill(pid, 0) }, -1, "owned child was reaped");
+        }
+    }
 
     #[test]
     fn osc_notification_parsing_recognizes_777_and_9_only() {
@@ -1798,7 +2083,10 @@ mod tests {
             Some("https://github.com/o/r/pull/12"),
             "trailing period is not part of the url"
         );
-        assert_eq!(hyperlink_at(line, line.find("see").unwrap(), links.iter()), None);
+        assert_eq!(
+            hyperlink_at(line, line.find("see").unwrap(), links.iter()),
+            None
+        );
         assert_eq!(hyperlink_at(line, 0, links.iter()), None);
         assert_eq!(hyperlink_at(line, 500, links.iter()), None);
     }
@@ -1818,7 +2106,10 @@ mod tests {
         );
         // Clicking the "[link](" part of the token is not the url.
         assert_eq!(hyperlink_at(line, 1, std::iter::empty()), None);
-        assert_eq!(hyperlink_at("https:// nothing", 2, std::iter::empty()), None);
+        assert_eq!(
+            hyperlink_at("https:// nothing", 2, std::iter::empty()),
+            None
+        );
     }
 
     #[cfg(not(windows))]
@@ -1848,7 +2139,10 @@ mod tests {
             }
         }
         let lines = pane.visible_lines_snapshot();
-        let line = lines.iter().find(|l| l.contains("PR #1")).expect("link row");
+        let line = lines
+            .iter()
+            .find(|l| l.contains("PR #1"))
+            .expect("link row");
         let col = line.find("#1").unwrap();
         assert_eq!(
             pane.hyperlink_at(line, col).as_deref(),

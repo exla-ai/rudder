@@ -11,6 +11,7 @@
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1047.0",
+    "@aws-sdk/credential-provider-web-identity": "^3.972.85",
     "@aws-sdk/s3-request-presigner": "^3.1047.0",
     "better-auth": "^1.4.0",
     "better-sqlite3": "^12.5.0",

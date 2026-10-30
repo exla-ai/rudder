@@ -1,4 +1,5 @@
 import type { RudderBus } from "./bus.js";
+import { assertLegacyWriterAllowed } from "./engine-authority.js";
 import {
   createEmptyChange,
   createNodeWorkspace,
@@ -652,6 +653,7 @@ export function scheduleTick(repoRoot: string, bus: RudderBus): Promise<void> {
 }
 
 async function scheduleTickCore(repoRoot: string, bus: RudderBus): Promise<void> {
+  assertLegacyWriterAllowed(repoRoot);
   const config = await loadConfig();
   const orchestrator = config.orchestrator ?? { maxParallel: 1000 };
   const maxParallel = orchestrator.maxParallel ?? 1000;
@@ -831,6 +833,7 @@ export function onRunTransition(repoRoot: string, runId: string, bus: RudderBus)
 }
 
 async function onRunTransitionCore(repoRoot: string, runId: string, bus: RudderBus): Promise<void> {
+  assertLegacyWriterAllowed(repoRoot);
   const run = await loadRunRecord(repoRoot, runId).catch(() => null);
 
   // A resolver run finishing is handled specially: it owns no graph node of its

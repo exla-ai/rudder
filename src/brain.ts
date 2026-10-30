@@ -8,44 +8,53 @@ import { PROPAGATION_RULES } from "./surfaces.js";
 import { deriveGoal, deriveSuccess, extractSuccess, formatGoalPrompt } from "./goal.js";
 
 const INSTRUCTION_FILES = ["AGENTS.md", "CLAUDE.md", "README.md"];
-const INSTRUCTION_FILE_LIMIT = 12_000;
+const INSTRUCTION_FILE_LIMIT = 6_000;
+const PLANNER_INSTRUCTION_BUDGET = 8_000;
 
 // Prompt-budget truncation must be visible: without the marker, workers
 // silently lose every rule past the limit and have no cue to read the file.
-function truncateInstructionContent(name: string, content: string): string {
-  if (content.length <= INSTRUCTION_FILE_LIMIT) {
+function truncateInstructionContent(name: string, content: string, limit = INSTRUCTION_FILE_LIMIT): string {
+  if (content.length <= limit) {
     return content;
   }
-  return `${content.slice(0, INSTRUCTION_FILE_LIMIT)}\n\n[Rudder: ${name} truncated at ${INSTRUCTION_FILE_LIMIT} of ${content.length} chars; read ${name} in the workspace for the rest.]`;
+  const marker = `\n\n[Rudder: ${name} truncated; ${content.length} chars available in the workspace file.]`;
+  let end = Math.max(0, limit - marker.length);
+  if (end && /[\ud800-\udbff]/.test(content[end - 1] ?? "")) end--;
+  return `${content.slice(0, end)}${marker}`;
 }
 
 /**
- * Read the repo instruction files (AGENTS.md / CLAUDE.md / README.md) plus a
- * generated RUDDER.md if present, truncated for prompt budget. Shared by the
- * spec builder and the planner so both prime an agent with the same context.
+ * Workers get file references: native backends already load applicable rules
+ * and can read anything else they need. The tool-less API planner gets bounded
+ * AGENTS/CLAUDE text, never a duplicated README or generated task history.
  */
 export async function loadInstructionFiles(
   workspace: string,
   repoRoot?: string,
+  options: { mode?: "references" | "planning" } = {},
 ): Promise<Array<{ path: string; content: string }>> {
   const instructionsFiles: Array<{ path: string; content: string }> = [];
+  let remaining = PLANNER_INSTRUCTION_BUDGET;
   for (const name of INSTRUCTION_FILES) {
     const filePath = path.join(workspace, name);
     if (!(await pathExists(filePath))) {
       continue;
     }
-    const content = await fsp.readFile(filePath, "utf8");
+    const stat = await fsp.stat(filePath);
+    const inline = options.mode === "planning" && name !== "README.md" && remaining >= 256;
+    const content = inline ? truncateInstructionContent(name, await fsp.readFile(filePath, "utf8"), Math.min(INSTRUCTION_FILE_LIMIT, remaining))
+      : `${name === "README.md" ? "Usage reference" : "Repository rules"}; read on demand if not already loaded (${stat.size} bytes).`;
+    if (inline) remaining = Math.max(0, remaining - content.length);
     instructionsFiles.push({
       path: name,
-      content: truncateInstructionContent(name, content),
+      content,
     });
   }
   const contextFile = agentContextPath(repoRoot ?? workspace);
   if (await pathExists(contextFile)) {
-    const content = await fsp.readFile(contextFile, "utf8");
     instructionsFiles.push({
       path: "RUDDER.md",
-      content: truncateInstructionContent("RUDDER.md", content),
+      content: "Generated live coordination; consult when work overlaps or before integration.",
     });
   }
   return instructionsFiles;
@@ -59,6 +68,7 @@ export async function createSpec(run: RunRecord): Promise<SpecContract> {
   const acceptanceCriteria = buildAcceptanceCriteria(task);
   const spec: SpecContract = {
     runId: run.id,
+    runtimeRole: run.workspace.enabled ? "isolated-worker" : "main-owner",
     task,
     // The plain `rudder <task>` / TUI single-task spawn has no planner-supplied
     // goal: the objective is the task statement, and the success condition is
@@ -85,15 +95,17 @@ export async function createSpec(run: RunRecord): Promise<SpecContract> {
 // Parallel-work guidance for every implementing agent. Mirrors the Rust
 // `parallel_work_rule!` in native/src/tasks.rs; keep the text in parity.
 export const PARALLEL_WORK_RULE =
-  "Parallelize independent work. Batch independent reads, searches, and commands into one turn instead of running them one at a time. For independent subtasks (broad codebase searches, separate files or modules, independent verification), spawn concurrent subagents (Claude Code: the Agent/Task tool; Codex: its subagent tools when available), give each a self-contained brief, and merge their results yourself. Never let two subagents edit the same file. Keep steps that share files or depend on earlier results sequential, and verify after merging.";
+  "Batch independent reads and commands. Use concurrent subagents for substantial independent work when helpful; integrate and verify their results. Never let two subagents edit the same file.";
 
 export function renderContract(spec: SpecContract): string {
   const instructions = spec.instructionsFiles
-    .map((file) => `### ${file.path}\n${file.content}`)
-    .join("\n\n");
+    .map((file) => file.path)
+    .join(", ");
   const body = [
     "Rudder-specific context injected by Rudder",
-    "This context was generated by Rudder. It is coordination context, not text typed by the user.",
+    spec.runtimeRole === "main-owner"
+      ? "You own this request end to end in the user's main checkout. Preserve unrelated edits."
+      : "You are an isolated worker. Use jj status/diff; Rudder handles commits and integration. Keep to your assignment.",
     "",
     `Task: ${spec.task}`,
     "",
@@ -105,15 +117,12 @@ export function renderContract(spec: SpecContract): string {
       : "Suggested verification: choose the smallest relevant checks for this repo.",
     "",
     "Working rules:",
-    "- Read RUDDER.md first if it exists; it is generated by Rudder and lists other active Rudder agents and their workspaces. If RUDDER_SHARED.md exists beside it, read that too; it is gitignored user-shared context for tokens, env vars, private URLs, and local setup details that must survive model compaction.",
-    "- Keep changes focused on the task.",
-    "- Preserve unrelated user changes.",
-    "- Run relevant checks when practical and report any checks that could not be run.",
-    "- Do not mark the task complete unless the acceptance criteria are handled.",
+    "- Follow applicable repo rules once if not already loaded; read additional references only when relevant.",
+    "- Implement, run relevant checks and verify the requested outcome. Preserve prior authorization; report unfinished work honestly.",
     `- ${PARALLEL_WORK_RULE}`,
     ...PROPAGATION_RULES.map((rule) => `- ${rule}`),
     "",
-    instructions ? `Repository instructions:\n\n${instructions}` : "",
+    instructions ? `Available repository context: ${instructions}. File contents are not duplicated here.` : "",
   ]
     .filter(Boolean)
     .join("\n");

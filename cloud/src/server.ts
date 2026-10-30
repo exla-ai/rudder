@@ -10,6 +10,7 @@ import Database from "better-sqlite3";
 import { toNodeHandler } from "better-auth/node";
 import { DeleteObjectCommand, GetObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
+import { fromTokenFile } from "@aws-sdk/credential-provider-web-identity";
 import type { Duplex } from "node:stream";
 import { WebSocket, WebSocketServer } from "ws";
 import { createSecretsVault, SecretsVaultError, type SecretItemInput, type SecretsVault } from "./secrets.js";
@@ -31,6 +32,9 @@ import { createOnboardingStore, handleOnboardingApi } from "./onboarding.js";
 import { createProductAnalytics } from "./product-analytics.js";
 import { createIntegrations } from "./integrations.js";
 import { annotateAgent } from "./agent-status.js";
+import { FabricVerificationCache, S3FabricObjectStorage } from "./fabric-cas.js";
+import { createFabricHttpHandler } from "./fabric-http.js";
+import { cleanupFabricUploadSpools } from "./fabric-stream.js";
 
 type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
 
@@ -167,6 +171,37 @@ const slackAllowedUsers = new Set((process.env.RUDDER_SLACK_ALLOWED_USERS || "")
 const deviceLogins = new Map<string, DeviceLogin>();
 const githubBrowserLogins = new Map<string, GithubBrowserLogin>();
 const s3 = new S3Client({ region: awsRegion });
+const fabricBucket = (process.env.RUDDER_FABRIC_S3_BUCKET || "").trim();
+const fabricRole = (process.env.RUDDER_FABRIC_AWS_ROLE_ARN || "").trim();
+const fabricSpoolReady = !fabricBucket || await cleanupFabricUploadSpools().then(() => true).catch(() => false);
+const fabricS3 = fabricBucket && fabricRole ? new S3Client({
+  region: awsRegion,
+  // Fly init rotates this short-lived token when AWS_ROLE_ARN is configured.
+  // Explicit credentials keep the legacy snapshot key out of this new store.
+  credentials: fromTokenFile({
+    roleArn: fabricRole,
+    roleSessionName: "rudder-fabric-control",
+    webIdentityTokenFile: process.env.AWS_WEB_IDENTITY_TOKEN_FILE || "/.fly/oidc_token",
+  }),
+}) : null;
+// This prefix is retained indefinitely. Deployment verifies that bucket
+// lifecycle rules do not expire fabric/v1 before enabling publication.
+const fabricHttp = fabricS3 && fabricSpoolReady && process.env.RUDDER_FABRIC_DURABLE_STORE === "1"
+  ? createFabricHttpHandler({
+    storage: new S3FabricObjectStorage({ client: fabricS3, bucket: fabricBucket, timeoutMs: 60_000, maxConcurrency: 4 }),
+    verificationCache: new FabricVerificationCache(32 * 1024 * 1024),
+    authenticate: (req) => {
+      const workspaceId = req.headers["x-rudder-workspace-id"];
+      if (workspaceId !== undefined) {
+        if (typeof workspaceId !== "string") throw unauthorized();
+        const row = findWorkspaceById.get(workspaceId) as Record<string, unknown> | undefined;
+        if (!row || row.status === "deleting") throw unauthorized();
+        requireWorkerBearer(req, row);
+        return String(row.account_id);
+      }
+      return requireBearer(req).accountId;
+    },
+  }) : null;
 const slack = slackConfigFromEnv();
 // Slack message events are delivered at-least-once; dedupe by event_id so a
 // retry doesn't double-inject into an instance.
@@ -569,6 +604,14 @@ const server = http.createServer({ noDelay: true }, async (req, res) => {
   });
   try {
     const url = new URL(req.url || "/", baseURL);
+    if (url.pathname === "/api/rudder/fabric" || url.pathname.startsWith("/api/rudder/fabric/")) {
+      if (!fabricHttp) {
+        sendJson(res, 503, { format_version: 1, error: { code: "unavailable", message: "Fabric durable storage is not enabled" } });
+      } else {
+        await fabricHttp(req, res, url);
+      }
+      return;
+    }
     if (url.pathname.startsWith("/api/auth")) {
       refreshAuthHandler();
       authHandler(req, res);
@@ -578,6 +621,7 @@ const server = http.createServer({ noDelay: true }, async (req, res) => {
       sendJson(res, 200, {
         ok: true,
         s3: Boolean(snapshotBucket),
+        fabric: Boolean(fabricHttp),
         fly: Boolean(flyApiToken && flyAppName && flyWorkerImage),
         byoVm: Boolean(snapshotBucket && flyWorkerImage),
         state: Boolean(snapshotBucket && persistStateToS3),

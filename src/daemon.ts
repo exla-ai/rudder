@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import { assertLegacyWriterAllowed } from "./engine-authority.js";
 import fsp from "node:fs/promises";
 import path from "node:path";
 
@@ -54,6 +55,7 @@ export async function ensureBoardRunning(
   started: boolean;
   handle?: BoardDaemonHandle;
 }> {
+  if (opts?.scheduler !== false) assertLegacyWriterAllowed(repoRoot);
   // registerProject is idempotent and returns this repo's stable slug, which we use
   // to deep-link the browser straight to this project's board.
   const project = await registerProject(repoRoot).catch(() => null);

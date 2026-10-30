@@ -185,7 +185,7 @@ pub(crate) fn claude_fork_command(
     if let Some(prompt) = prompt.map(str::trim).filter(|value| !value.is_empty()) {
         args.push(prompt.to_string());
     }
-    TerminalCommand::with_args(claude_program(), args).with_env("CLAUDE_CODE_NO_FLICKER", "0")
+    TerminalCommand::with_args(claude_program(), args).with_env("CLAUDE_CODE_NO_FLICKER", "0").with_env("RUDDER_EXECUTION_PROFILE", "native")
 }
 
 /// BRANCH a Codex chat: `codex fork <session-id>` copies the conversation into a
@@ -549,11 +549,13 @@ fn build_agent_command(
                 args.push("--session-id".to_string());
                 args.push(sid.to_string());
             }
+            let initial_prompt = prompt.clone().unwrap_or_default();
             if let Some(prompt) = prompt {
                 args.push(prompt);
             }
             TerminalCommand::with_args(claude_program(), args)
                 .with_env("CLAUDE_CODE_NO_FLICKER", "0")
+                .with_env("RUDDER_AGENT_INITIAL_PROMPT", initial_prompt)
         }
         Backend::Codex => {
             // Interactive orchestrators use the normal Codex TUI and write their plan
@@ -936,6 +938,7 @@ pub(crate) fn review_all_run(
         publish: PublishEvidence::default(),
         delivery: DeliveryEvidence::default(),
         session_id,
+        execution_profile: None,
         terminal: None,
         terminal_size: None,
         last_output_at: Instant::now(),

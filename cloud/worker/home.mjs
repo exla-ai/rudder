@@ -794,8 +794,8 @@ async function waitForClone(workspaceId, timeoutMs) {
   }
 }
 
-// Like capture, but resolves on "close", after the output streams end: the
-// caller parses stdout, and "exit" can fire before the last chunk arrives.
+// Resolve on "close", after the output streams end: callers parse stdout,
+// and "exit" can fire before the last chunk arrives.
 function captureAll(command, args, { env, cwd, timeoutMs }) {
   return new Promise((resolve) => {
     let stdout = "";
@@ -807,7 +807,14 @@ function captureAll(command, args, { env, cwd, timeoutMs }) {
       resolve({ code: -1, stdout: "", stderr: error.message });
       return;
     }
-    const timer = setTimeout(() => child.kill("SIGKILL"), timeoutMs);
+    const timer = setTimeout(() => {
+      child.kill("SIGKILL");
+      // A descendant can inherit these pipes after the CLI exits. Keep the
+      // capture deadline bounded even when those descriptors never close.
+      child.stdout.destroy();
+      child.stderr.destroy();
+      resolve({ code: -1, stdout, stderr: stderr || "command output exceeded its deadline" });
+    }, timeoutMs);
     child.stdout.on("data", (chunk) => { stdout += chunk; });
     child.stderr.on("data", (chunk) => { stderr += chunk; });
     child.on("error", (error) => { clearTimeout(timer); resolve({ code: -1, stdout, stderr: error.message }); });
@@ -1412,22 +1419,7 @@ function codexAccount() {
 }
 
 function capture(command, args, { env, cwd, timeoutMs }) {
-  return new Promise((resolve) => {
-    let stdout = "";
-    let stderr = "";
-    let child;
-    try {
-      child = spawn(command, args, { env, cwd, stdio: ["ignore", "pipe", "pipe"] });
-    } catch (error) {
-      resolve({ code: -1, stdout: "", stderr: error.message });
-      return;
-    }
-    const timer = setTimeout(() => child.kill("SIGKILL"), timeoutMs);
-    child.stdout.on("data", (chunk) => { stdout += chunk; });
-    child.stderr.on("data", (chunk) => { stderr += chunk; });
-    child.on("error", (error) => { clearTimeout(timer); resolve({ code: -1, stdout, stderr: error.message }); });
-    child.on("exit", (code) => { clearTimeout(timer); resolve({ code: code ?? -1, stdout, stderr }); });
-  });
+  return captureAll(command, args, { env, cwd, timeoutMs });
 }
 
 // ---------------------------------------------------------------------------

@@ -1,0 +1,58 @@
+{
+  "trace_id": "48785566-b68d-4ea1-a605-d6de91745593",
+  "success": true,
+  "results": {
+    "root//:rust": {
+      "success": "SUCCESS",
+      "outputs": {
+        "DEFAULT": [
+          "buck-out/v2/art/root/1ef78538d8598cb2/__rust__/rust.rlib"
+        ]
+      },
+      "other_outputs": {},
+      "configured_graph_size": null,
+      "configured": {
+        "<unspecified>": {
+          "errors": [],
+          "success": "SUCCESS",
+          "outputs": {
+            "DEFAULT": [
+              "buck-out/v2/art/root/1ef78538d8598cb2/__rust__/rust.rlib"
+            ]
+          },
+          "other_outputs": {},
+          "configured_graph_size": null
+        }
+      },
+      "errors": []
+    },
+    "root//:typescript": {
+      "success": "SUCCESS",
+      "outputs": {
+        "DEFAULT": [
+          "buck-out/v2/art/root/1ef78538d8598cb2/__typescript__/js"
+        ]
+      },
+      "other_outputs": {},
+      "configured_graph_size": null,
+      "configured": {
+        "<unspecified>": {
+          "errors": [],
+          "success": "SUCCESS",
+          "outputs": {
+            "DEFAULT": [
+              "buck-out/v2/art/root/1ef78538d8598cb2/__typescript__/js"
+            ]
+          },
+          "other_outputs": {},
+          "configured_graph_size": null
+        }
+      },
+      "errors": []
+    }
+  },
+  "failures": {},
+  "project_root": "/workspace/home/.cache/rudder-build-profile/ongoing-2026-10-30/qualified-matrix-3/source-edit",
+  "truncated": false,
+  "strings": {}
+}

@@ -34,6 +34,7 @@ import { buildFanoutDag, gateDecision, planTask, scaffoldPlan } from "./planner.
 import { backfillLlmTaskSummaries, listRuns, loadConfig, popUndoEntry, projectStateDir, registerProject, runsDir } from "./state.js";
 import { discoverModelOptions } from "./models.js";
 import { resolveNativeBinaryPath } from "./native-binary.js";
+import { ensureEngineRunning, persistentProjectEngineRequested, runEngineCommand } from "./engine.js";
 import {
   cleanupRuns,
   deleteRun,
@@ -105,6 +106,18 @@ type Parsed = {
 };
 
 export async function main(): Promise<void> {
+  // The SDK renderer owns its provider argv and stdio/control protocol. Route
+  // before general flag parsing so provider options never become Rudder tasks.
+  if (process.argv[2] === "__claude-sdk") {
+    const { runClaudeSdkBridge } = await import("./claude-sdk.js");
+    await runClaudeSdkBridge(process.argv.slice(3));
+    return;
+  }
+  if (process.argv[2] === "engine" && process.argv[3] === "api" && ["upload", "download"].includes(process.argv[4] ?? "")) {
+    const { runFabricTransferCommand } = await import("./fabric-remote.js");
+    await runFabricTransferCommand(process.argv.slice(4));
+    return;
+  }
   const parsed = parseArgs(process.argv.slice(2));
   if (shouldAutoUpdateForCommand(parsed.command) && await autoUpdateAndRerunIfNeeded(process.argv.slice(2))) {
     return;
@@ -174,6 +187,9 @@ export async function main(): Promise<void> {
   }
 
   switch (parsed.command) {
+    case "engine":
+      await runEngineCommand(parsed.args[0], parsed.flags.repo ?? findRepoRoot(), parsed.flags.json);
+      return;
     case "tmux":
       throw new Error("The tmux dashboard has been removed. Run `rudder` or `rudder dashboard` to open the native dashboard.");
     case "attach": {
@@ -534,7 +550,7 @@ export function isInternalCommand(command: string | undefined): boolean {
 }
 
 // Commands that never touch a repository, so they never wait on a jj download.
-const JJ_FREE_COMMANDS = new Set(["__event", "__route-task", "telemetry", "feedback", "login", "logout", "help"]);
+const JJ_FREE_COMMANDS = new Set(["__event", "__route-task", "engine", "telemetry", "feedback", "login", "logout", "help"]);
 
 function shouldAutoUpdateForCommand(command: string | undefined): boolean {
   if (command?.startsWith("__")) {
@@ -848,6 +864,15 @@ async function maybeOnboard(): Promise<void> {
 
 async function openDashboard(parsed: Parsed): Promise<void> {
   await refreshModelCache();
+  if (await attachSocketLive()) {
+    await runNativeCommand(["attach", "--dashboard"]);
+    return;
+  }
+  if (persistentProjectEngineRequested(findRepoRoot())) {
+    await ensureEngineRunning(findRepoRoot());
+    await runNativeCommand(["attach", "--dashboard"]);
+    return;
+  }
   if (await runNativeDashboard()) {
     return;
   }
@@ -1388,6 +1413,7 @@ Usage:
   rudder                         Open native dashboard with real agent panes
   rudder restart                 Clear local session and open dashboard
   rudder attach [agent]          Mirror one live agent pane of the running dashboard in this terminal
+  rudder engine [start|status|shutdown]   Control the persistent project engine
   rudder "task"
   rudder run [options] "task"
   rudder claude [options] "task"

@@ -1,0 +1,16 @@
+{
+  "format_version": 1,
+  "buck2": {
+    "release": "2026-10-15",
+    "source_revision": "9a1876786f32806f6b65fc51f4c1c3077efc38a5",
+    "url": "https://github.com/meta/buck2/releases/download/2026-10-15/buck2-x86_64-unknown-linux-musl.zst",
+    "archive_sha256": "dc39a4702492333b46dcfa17129481b41f4820bb415e4efd437f70ef33ba451d",
+    "executable_sha256": "f90e3b3674650a96f9773d8cda92006890a6a348bd7ab7d85dd0f8837fcbcab4"
+  },
+  "bazel_remote": {
+    "release": "2.6.4",
+    "url": "https://github.com/buchgr/bazel-remote/releases/download/v2.6.4/bazel-remote-2.6.4-linux-amd64",
+    "executable_sha256": "6a6b64666c2238ec6b49b7b29f5e41e4149de09417a0028897c9bffe40376876"
+  },
+  "compiler_versions": {"rustc": "1.99.1", "node": "v22.23.4", "typescript": "5.9.3"}
+}

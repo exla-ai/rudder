@@ -741,9 +741,11 @@ pub(crate) fn augment_worker_command(
                 command.args.push("--settings".to_string());
                 command.args.push(path.display().to_string());
             }
-            if let Some(name) = remote_control_session_name(run_id) {
+            if !managed_claude_requested(command) {
+                if let Some(name) = remote_control_session_name(run_id) {
                 command.args.push("--remote-control".to_string());
-                command.args.push(name);
+                    command.args.push(name);
+                }
             }
         }
         Backend::Codex => {
@@ -784,4 +786,67 @@ pub(crate) fn augment_worker_command(
             }
         }
     }
+    let prepared = crate::fabric_runtime::prepare_agent_tools(command, backend, run_id)
+        .and_then(|()| prepare_managed_profile(command, backend, run_id));
+    if let Err(error) = prepared {
+        eprintln!("rudder engine agent identity setup failed: {error}");
+        if let Ok(exe) = std::env::current_exe() {
+            command.program = exe.display().to_string();
+            command.args = vec!["fabric".into(), "launch-error".into()];
+        }
+    }
+}
+
+/// A saved conversation keeps its original renderer/control contract. A new
+/// fabric run can select a managed profile without converting old resumes.
+pub(crate) fn augment_existing_worker_command(
+    command: &mut TerminalCommand, backend: Backend, mode: AgentMode,
+    run_id: &str, profile: Option<&str>,
+) {
+    if profile_override(command).is_none() {
+        command.env.push(("RUDDER_EXECUTION_PROFILE".into(), profile.unwrap_or("native").into()));
+    }
+    augment_worker_command(command, backend, mode, run_id);
+}
+
+fn profile_override(command: &TerminalCommand) -> Option<&str> {
+    command.env.iter().rev().find(|(key, _)| key == "RUDDER_EXECUTION_PROFILE").map(|(_, value)| value.as_str())
+}
+
+fn managed_claude_requested(command: &TerminalCommand) -> bool {
+    match profile_override(command) {
+        Some(profile) => profile == "claude-sdk",
+        None => std::env::var("RUDDER_CLAUDE_EXECUTION_PROFILE").ok().as_deref() == Some("sdk")
+            || (std::env::var("RUDDER_CLAUDE_EXECUTION_PROFILE").ok().as_deref() != Some("native")
+                && super::engine_host::current_process_is_fabric_owner()),
+    }
+}
+
+fn prepare_managed_profile(command: &mut TerminalCommand, backend: Backend, run_id: &str) -> Result<()> {
+    let Some(attempt) = command.env.iter().rev().find(|(key, _)| key == "RUDDER_FABRIC_ATTEMPT_ID").map(|(_, value)| value.clone()) else {
+        // Profiles require the persistent actor's exact attempt fence.
+        anyhow::ensure!(!matches!(profile_override(command), Some("claude-sdk" | "codex-app-server")), "managed execution requires the fabric engine");
+        command.env.retain(|(key, _)| key != "RUDDER_AGENT_INITIAL_PROMPT");
+        return Ok(());
+    };
+    let selected = profile_override(command).map(str::to_string).unwrap_or_else(|| match backend {
+        Backend::Claude if managed_claude_requested(command) => "claude-sdk".into(),
+        Backend::Codex => "codex-app-server".into(),
+        _ => "native".into(),
+    });
+    let launch = match (backend, selected.as_str()) {
+        (_, "native") => None,
+        (Backend::Claude, "claude-sdk") => {
+            let prompt = command.env.iter().rev().find(|(key, _)| key == "RUDDER_AGENT_INITIAL_PROMPT").map(|(_, value)| value.clone()).filter(|value| !value.is_empty());
+            Some(super::agent_link::prepare_claude_sdk_command(run_id, &attempt, command, prompt.as_deref())?)
+        }
+        (Backend::Codex, "codex-app-server") => super::agent_link::prepare_command(run_id, &attempt, backend, command)?,
+        _ => anyhow::bail!("unsupported execution profile for backend"),
+    };
+    command.env.retain(|(key, _)| key != "RUDDER_AGENT_INITIAL_PROMPT" && key != "RUDDER_EXECUTION_PROFILE");
+    command.env.push(("RUDDER_EXECUTION_PROFILE".into(), selected));
+    if let Some(launch) = launch {
+        command.env.push(("RUDDER_AGENT_LINK_LAUNCH".into(), serde_json::to_string(&launch)?));
+    }
+    Ok(())
 }

@@ -322,6 +322,7 @@ pub(crate) fn create_main_agent(
         publish: PublishEvidence::default(),
         delivery: DeliveryEvidence::for_task(prompt),
         session_id: None,
+        execution_profile: None,
         terminal: None,
         terminal_size: None,
         last_output_at: Instant::now(),
@@ -886,6 +887,7 @@ pub(crate) fn agent_from_run_record(
         publish,
         delivery,
         session_id,
+        execution_profile: Some(record.get("executionProfile").and_then(serde_json::Value::as_str).unwrap_or("native").to_string()),
         terminal: None,
         terminal_size: None,
         last_output_at: Instant::now(),
@@ -1343,6 +1345,7 @@ pub(crate) fn save_native_run_record(repo_root: &Path, run: &AgentRun) -> Result
         "task": run.task,
         "taskSummary": run.task_summary,
         "backend": run.backend.as_str(),
+        "executionProfile": run.terminal.as_ref().and_then(TerminalPane::execution_profile).or(run.execution_profile.as_deref()).unwrap_or("native"),
         "model": run.model,
         "effort": run.effort.map(|effort| effort.as_str()),
         "createdAt": run.created_at,
@@ -2502,7 +2505,7 @@ pub(crate) fn merge_decisions_sides(sides: &[String]) -> Option<String> {
             .max_by_key(|side| side.len())
             .cloned();
     }
-    let mut out = String::from("# Decisions\n\nShared, agent-authored log of cross-cutting decisions the fleet must honor. The conductor records plan/steer decisions here; workers record interface contracts + adjustments. Re-read before each significant step.\n\n");
+    let mut out = String::from("# Decisions\n\nShared, agent-authored log of cross-cutting decisions the fleet must honor. The conductor records plan/steer decisions here; workers record interface contracts + adjustments. Read relevant entries once; revisit when a relevant topic changes or before integration.\n\n");
     out.push_str(&entries.join("\n\n"));
     out.push('\n');
     Some(out)
@@ -2760,7 +2763,7 @@ pub(crate) fn write_rudder_context_with_history(
     // edits that are not in its workspace, or tries to hand work over by writing a
     // file into a directory nothing else can see. Stated once here rather than per
     // row: RUDDER.md is re-read every turn, so the rows stay one line each.
-    body.push_str("\n## Where each agent works\n\nEvery row below carries `where=`. `where=workspace` means that agent has its OWN jj workspace — a private copy of the repo at `.rudder-workspaces/<name>` (its `cwd=`), isolated from the user's checkout and from every other agent; its work reaches the user only when Rudder integrates it. `where=main-checkout` means that agent edits the user's REAL files in place: several agents can share that tree, and they have nothing to merge.\n\nSo: a sibling's uncommitted edits are NOT in your tree and you cannot read them, waiting on a file a sibling is \"about to write\" will hang forever, and writing into another agent's workspace to hand work over does not work. Coordinate through this file, not the filesystem.\n");
+    body.push_str("\n## Where each agent works\n\nEach row names its `cwd`. `where=workspace` is a private jj checkout; its edits reach other agents through integration. `where=main-checkout` shares the user's real files. Do not write into a sibling's workspace.\n");
     body.push_str("\n## Active local Rudder agents\n");
     let live_agents = agents
         .iter()
@@ -2800,8 +2803,11 @@ pub(crate) fn write_rudder_context_with_history(
         .collect::<Vec<_>>();
     if !completed_agents.is_empty() {
         body.push_str("\n## Completed local Rudder agents\n");
-        for agent in completed_agents {
+        for agent in completed_agents.iter().take(12) {
             append_agent_context_line(&mut body, agent);
+        }
+        if completed_agents.len() > 12 {
+            body.push_str(&format!("- {} older rows omitted; use `rudder runs --json` for full records.\n", completed_agents.len() - 12));
         }
     }
     // SESSION MEMORY: the user's recent instructions, newest first. Combined with
@@ -2821,10 +2827,10 @@ pub(crate) fn write_rudder_context_with_history(
     }
     append_control_results(&mut body, control_results);
     body.push_str(
-        "\nRead this file before making changes so you know what other Rudder agents are doing. If RUDDER_SHARED.md exists beside it, read that too; it is Rudder's gitignored file for user-shared credentials, API tokens, private URLs, and other local context that must survive model compaction.\n",
+        "\nCheck this file for overlapping owners and before integration. Read relevant decisions or RUDDER_SHARED.md setup when needed; avoid reloading unrelated history. Never copy credentials into generated context.\n",
     );
     body.push_str(
-        "\n## Version control\n\nThis repo uses jj (Jujutsu), colocated with git. Workspace agents each have their own jj workspace, main-checkout agents share the user's; jj is authoritative. Inspect changes with `jj status` / `jj diff`. Run `jj log` to see every agent's workspace and its description — Rudder sets each workspace's change description to what that agent is doing and its status (e.g. `rudder[n3]: fix memory leak [done]`), so read them to see where sibling work is and avoid stepping on the same files.\n\nIMPLEMENTATION nodes: do NOT run commit/branch/merge yourself — Rudder snapshots and integrates your working copy, and pushing partial node work is wrong.\n\nSHIPPING (push / publish / deploy) is NOT automatic and is a separate step: Rudder integrates work into LOCAL git only — it NEVER pushes to a remote or deploys. If your task is to push, publish, or deploy, that IS your job: push the integrated result with `jj git push` (or `git push`), then run the project's deploy command (or rely on the host auto-deploying from the pushed remote, e.g. Netlify/Vercel). `merged` means local git only — nothing is on the remote or live until you push and deploy, so verify the actual remote/host before reporting something as deployed.\n",
+        "\n## Version control\n\njj (Jujutsu) is authoritative and colocated with Git. Inspect with `jj status` / `jj diff`. Rudder snapshots and integrates isolated implementation workers; their owners handle authorized commit, push, release and deploy steps. Merged means local integration. Verify the remote and actual delivery target before reporting shipped work.\n",
     );
     {
         // One lock per write batch at the repo root (the TS side locks the same
@@ -3679,7 +3685,7 @@ pub(crate) fn is_readable_run_id(run_id: &str) -> bool {
 }
 
 /// Append a cross-cutting conductor decision to the repo's DECISIONS.md (the shared,
-/// agent-authored log workers re-read before each step). Mirrors the TS
+/// agent-authored log workers consult for relevant decisions). Mirrors the TS
 /// `renderDecisionEntry` format: a `## title` heading, **What** / optional **Why**, and a
 /// **By: conductor** footer. Best-effort; creates the file with a header when absent.
 /// Keeps the conductor's plan/steer decisions DURABLE and visible to the fleet, not only
@@ -3711,7 +3717,7 @@ pub(crate) fn append_conductor_decision(
     // deferring the same follow-ups — does not spam DECISIONS.md with identical entries.
     let signature = format!("## {title}\n- **What:** {what}\n");
     let path = repo_root.join("DECISIONS.md");
-    const HEADER: &str = "# Decisions\n\nShared, agent-authored log of cross-cutting decisions the fleet must honor. The conductor records plan/steer decisions here; workers record interface contracts + adjustments. Re-read before each significant step.\n\n";
+    const HEADER: &str = "# Decisions\n\nShared, agent-authored log of cross-cutting decisions the fleet must honor. The conductor records plan/steer decisions here; workers record interface contracts + adjustments. Read relevant entries once; revisit when a relevant topic changes or before integration.\n\n";
     let existing = fs::read_to_string(&path).unwrap_or_default();
     if existing.contains(&signature) {
         return false;

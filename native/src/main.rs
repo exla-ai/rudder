@@ -59,6 +59,16 @@ mod tasks;
 use crate::tasks::*;
 mod task_routing;
 use crate::task_routing::*;
+mod engine_host;
+use crate::engine_host::*;
+mod fabric_cli;
+mod fabric_runtime;
+mod execution_cli;
+mod agent_link;
+mod workspace_cli;
+mod vfs_cli;
+mod agent_mcp;
+mod agent_broker;
 mod launch;
 use crate::launch::*;
 mod models;
@@ -1864,6 +1874,7 @@ struct App {
     task_history_index: Option<usize>,
     task_history_draft: String,
     agents: Vec<AgentRun>,
+    fabric_runtime: fabric_runtime::RuntimeState,
     /// Every live plan, in the order its `/plan` was started. Several orchestrators
     /// may run at once and each owns exactly one entry, so plan state is per-plan
     /// rather than global. NEVER empty: `App::new` seeds one plan (holding whatever
@@ -1907,6 +1918,11 @@ struct App {
     model: String,
     effort: Option<EffortLevel>,
     notice: Option<String>,
+    /// Machine notices are projected into independent attached views only when
+    /// this App has no local terminal surface.
+    engine_headless: bool,
+    machine_notice: Option<(u64, String)>,
+    machine_notice_cursor: u64,
     cloud_prompt: Option<CloudLaunchPrompt>,
     /// Per-repo cloud mode: plain task input launches a Rudder Cloud worker
     /// instead of a local one, and the task pane says so. Persisted to
@@ -2446,6 +2462,8 @@ struct AgentRun {
     /// orthogonal to process status and local jj integration.
     delivery: DeliveryEvidence,
     session_id: Option<String>,
+    /// Persisted renderer/control contract; historical runs remain native.
+    execution_profile: Option<String>,
     terminal: Option<TerminalPane>,
     terminal_size: Option<TerminalSize>,
     last_output_at: Instant,
@@ -3157,6 +3175,7 @@ impl App {
         let cloud_deletes = mpsc::channel();
         let task_routing = mpsc::channel();
         Self {
+            fabric_runtime: fabric_runtime::RuntimeState::default(),
             gam_links: HashMap::new(),
             gam_signals: HashMap::new(),
             gam_link_tx,
@@ -3237,6 +3256,9 @@ impl App {
             model: selection.model,
             effort: selection.effort,
             notice: None,
+            engine_headless: false,
+            machine_notice: None,
+            machine_notice_cursor: 0,
             cloud_prompt: None,
             cloud_mode,
             delete_pending: None,
@@ -3453,6 +3475,13 @@ impl App {
     }
 
     fn mark_dirty(&mut self) {
+        self.dirty = true;
+    }
+
+    fn publish_engine_notice(&mut self, text: String) {
+        let sequence = self.machine_notice.as_ref().map_or(1, |(sequence, _)| sequence.wrapping_add(1));
+        self.machine_notice = Some((sequence, text.clone()));
+        self.record_activity(format!("engine notice: {text}"));
         self.dirty = true;
     }
 
@@ -3796,6 +3825,7 @@ impl App {
                 if let Some(mut old_terminal) = run.terminal.take() {
                     old_terminal.terminate_and_wait();
                 }
+                run.execution_profile = terminal.execution_profile().map(str::to_string);
                 run.terminal = Some(terminal);
                 run.status = AgentStatus::Running;
                 run.completed_at = None;
@@ -5004,6 +5034,13 @@ impl App {
             return false;
         }
 
+        if self.agents.get(self.selected_agent)
+            .and_then(|run| run.terminal.as_ref())
+            .is_some_and(TerminalPane::is_output_only)
+        {
+            self.notice = Some("command finished; output is read-only".into());
+            return false;
+        }
         let Some(bytes) = terminal_bytes_for_key(key) else {
             return false;
         };
@@ -5903,6 +5940,7 @@ impl App {
             Ok(mut terminal) => {
                 let _ = terminal.drain_output();
                 Self::attach_output_waker(&self.pty_output_waker, &terminal);
+                run.execution_profile = terminal.execution_profile().map(str::to_string);
                 run.terminal = Some(terminal);
             }
             Err(error) => {
@@ -6485,6 +6523,14 @@ impl App {
     }
 
     fn handle_paste(&mut self, text: String) {
+        if self.focus == FocusPane::Worker
+            && self.agents.get(self.selected_agent)
+                .and_then(|run| run.terminal.as_ref())
+                .is_some_and(TerminalPane::is_output_only)
+        {
+            self.notice = Some("command finished; output is read-only".into());
+            return;
+        }
         match self.focus {
             FocusPane::Worker => {
                 self.worker_selection = None;
@@ -8504,6 +8550,7 @@ impl App {
             publish: PublishEvidence::default(),
             delivery: DeliveryEvidence::default(),
             session_id,
+            execution_profile: None,
             terminal: None,
             terminal_size: None,
             last_output_at: Instant::now(),
@@ -8545,6 +8592,7 @@ impl App {
             Ok(mut terminal) => {
                 let _ = terminal.drain_output();
                 Self::attach_output_waker(&self.pty_output_waker, &terminal);
+                run.execution_profile = terminal.execution_profile().map(str::to_string);
                 run.terminal = Some(terminal);
                 self.notice = Some("reconciling added task into the plan".to_string());
             }
@@ -8694,6 +8742,7 @@ impl App {
             publish: PublishEvidence::default(),
             delivery: DeliveryEvidence::for_task(&goal_prompt),
             session_id,
+            execution_profile: None,
             terminal: None,
             terminal_size: None,
             last_output_at: Instant::now(),
@@ -8736,6 +8785,7 @@ impl App {
             Ok(mut terminal) => {
                 let _ = terminal.drain_output();
                 Self::attach_output_waker(&self.pty_output_waker, &terminal);
+                run.execution_profile = terminal.execution_profile().map(str::to_string);
                 run.terminal = Some(terminal);
             }
             Err(error) => {
@@ -8945,6 +8995,7 @@ Until the first packet arrives, reply only: \"standing by\"."
             publish: PublishEvidence::default(),
             delivery: DeliveryEvidence::for_task(&goal_prompt),
             session_id,
+            execution_profile: None,
             terminal: None,
             terminal_size: None,
             last_output_at: Instant::now(),
@@ -8997,6 +9048,7 @@ Until the first packet arrives, reply only: \"standing by\"."
             Ok(mut terminal) => {
                 let _ = terminal.drain_output();
                 Self::attach_output_waker(&self.pty_output_waker, &terminal);
+                run.execution_profile = terminal.execution_profile().map(str::to_string);
                 run.terminal = Some(terminal);
                 spawned_generator = true;
             }
@@ -9037,6 +9089,7 @@ Until the first packet arrives, reply only: \"standing by\"."
             publish: PublishEvidence::default(),
             delivery: DeliveryEvidence::default(),
             session_id: adversarial_session,
+            execution_profile: None,
             terminal: None,
             terminal_size: None,
             last_output_at: Instant::now(),
@@ -9091,6 +9144,7 @@ Until the first packet arrives, reply only: \"standing by\"."
                 Ok(mut terminal) => {
                     let _ = terminal.drain_output();
                     Self::attach_output_waker(&self.pty_output_waker, &terminal);
+                    adversarial_run.execution_profile = terminal.execution_profile().map(str::to_string);
                     adversarial_run.terminal = Some(terminal);
                 }
                 Err(error) => {
@@ -10269,6 +10323,7 @@ Address the objection directly. If you disagree, say why inside \
             publish: PublishEvidence::default(),
             delivery: DeliveryEvidence::default(),
             session_id,
+            execution_profile: None,
             terminal: None,
             terminal_size: None,
             last_output_at: Instant::now(),
@@ -10327,6 +10382,7 @@ Address the objection directly. If you disagree, say why inside \
             Ok(mut terminal) => {
                 let _ = terminal.drain_output();
                 Self::attach_output_waker(&self.pty_output_waker, &terminal);
+                run.execution_profile = terminal.execution_profile().map(str::to_string);
                 run.terminal = Some(terminal);
                 self.notice = Some(if is_swarm {
                     "swarm planner started · it proposes the experiments, Enter launches them"
@@ -10651,6 +10707,7 @@ Address the objection directly. If you disagree, say why inside \
             Ok(mut terminal) => {
                 let _ = terminal.drain_output();
                 Self::attach_output_waker(&self.pty_output_waker, &terminal);
+                run.execution_profile = terminal.execution_profile().map(str::to_string);
                 run.terminal = Some(terminal);
                 // Record the follow-up as a turn; KEEP run.task (the original label)
                 // and run.session_id (so the next refine can resume the same session;
@@ -10957,7 +11014,7 @@ Address the objection directly. If you disagree, say why inside \
         // loop WAITS for the official signal — a resumed process launched without
         // --settings / notify could never write it and would sit "running" forever.
         // (Same trap the conflict-resolver respawn fixed in e027f32.)
-        signals::augment_worker_command(&mut command, run.backend, run.mode, &run.id);
+        signals::augment_existing_worker_command(&mut command, run.backend, run.mode, &run.id, run.execution_profile.as_deref());
         // Same report channel as a fresh launch / re-goal, so `rudder done` from a
         // resumed session still lands where the conductor reads it.
         let report_id = run.node_id.as_deref().unwrap_or(&run.id);
@@ -10974,6 +11031,7 @@ Address the objection directly. If you disagree, say why inside \
             Ok(mut terminal) => {
                 let _ = terminal.drain_output();
                 Self::attach_output_waker(&self.pty_output_waker, &terminal);
+                run.execution_profile = terminal.execution_profile().map(str::to_string);
                 run.terminal = Some(terminal);
                 run.status = AgentStatus::Running;
                 run.completed_at = None;
@@ -11243,12 +11301,14 @@ Address the objection directly. If you disagree, say why inside \
                 session_id.as_deref(),
             )
         };
-        signals::augment_worker_command(
-            &mut command,
-            backend,
-            AgentMode::Main,
-            &self.agents[main_index].id.clone(),
-        );
+        if self.agents[main_index].execution_profile.is_some() {
+            signals::augment_existing_worker_command(
+                &mut command, backend, AgentMode::Main,
+                &self.agents[main_index].id, self.agents[main_index].execution_profile.as_deref(),
+            );
+        } else {
+            signals::augment_worker_command(&mut command, backend, AgentMode::Main, &self.agents[main_index].id);
+        }
         let done_file = worker_done_file(&self.cwd, &self.agents[main_index].id);
         if !bootstrap.is_empty() {
             let _ = std::fs::remove_file(&done_file);
@@ -11272,6 +11332,7 @@ Address the objection directly. If you disagree, say why inside \
                 Self::attach_output_waker(&self.pty_output_waker, &terminal);
                 let run = &mut self.agents[main_index];
                 run.cwd = cwd;
+                run.execution_profile = terminal.execution_profile().map(str::to_string);
                 run.terminal = Some(terminal);
                 run.status = AgentStatus::Running;
                 run.session_id = session_id;
@@ -11362,7 +11423,7 @@ Address the objection directly. If you disagree, say why inside \
         // Re-wire completion hooks like every other (re)spawn path; without this
         // the run would sit "running" forever waiting for a signal the resumed
         // process was never configured to send.
-        signals::augment_worker_command(&mut command, backend, run.mode, &run.id);
+        signals::augment_existing_worker_command(&mut command, backend, run.mode, &run.id, run.execution_profile.as_deref());
         let options = TerminalPaneOptions {
             size: run.terminal_size.unwrap_or_default(),
             cwd: Some(self.cwd.clone()),
@@ -11372,6 +11433,7 @@ Address the objection directly. If you disagree, say why inside \
             Ok(mut terminal) => {
                 let _ = terminal.drain_output();
                 Self::attach_output_waker(&self.pty_output_waker, &terminal);
+                run.execution_profile = terminal.execution_profile().map(str::to_string);
                 run.terminal = Some(terminal);
                 run.status = AgentStatus::Running;
                 run.last_output_at = Instant::now();
@@ -11528,7 +11590,7 @@ Address the objection directly. If you disagree, say why inside \
             Backend::Codex => codex_fork_command(&model, effort, session_id, instruction),
             Backend::Opencode => opencode_fork_command(&model, session_id, instruction),
         };
-        signals::augment_worker_command(&mut command, backend, run.mode, &run.id);
+        signals::augment_existing_worker_command(&mut command, backend, run.mode, &run.id, run.execution_profile.as_deref());
         let options = TerminalPaneOptions {
             size: run.terminal_size.unwrap_or_default(),
             cwd: Some(self.cwd.clone()),
@@ -11538,6 +11600,7 @@ Address the objection directly. If you disagree, say why inside \
             Ok(mut terminal) => {
                 let _ = terminal.drain_output();
                 Self::attach_output_waker(&self.pty_output_waker, &terminal);
+                run.execution_profile = terminal.execution_profile().map(str::to_string);
                 run.terminal = Some(terminal);
                 run.status = AgentStatus::Running;
                 run.last_output_at = Instant::now();
@@ -11741,7 +11804,7 @@ Address the objection directly. If you disagree, say why inside \
             session_id.as_deref(),
             orchestrator_interactive,
         );
-        signals::augment_worker_command(&mut command, run.backend, run.mode, &run.id);
+        signals::augment_existing_worker_command(&mut command, run.backend, run.mode, &run.id, run.execution_profile.as_deref());
         let options = TerminalPaneOptions {
             size: run.terminal_size.unwrap_or_default(),
             cwd: Some(run.cwd.clone()),
@@ -11752,6 +11815,7 @@ Address the objection directly. If you disagree, say why inside \
             Ok(mut terminal) => {
                 let _ = terminal.drain_output();
                 Self::attach_output_waker(&self.pty_output_waker, &terminal);
+                run.execution_profile = terminal.execution_profile().map(str::to_string);
                 run.terminal = Some(terminal);
                 run.status = AgentStatus::Running;
                 run.session_id = session_id;
@@ -13454,6 +13518,7 @@ Address the objection directly. If you disagree, say why inside \
             publish: PublishEvidence::default(),
             delivery: DeliveryEvidence::default(),
             session_id: None,
+            execution_profile: None,
             terminal: None,
             terminal_size: None,
             last_output_at: Instant::now(),
@@ -13499,6 +13564,7 @@ Address the objection directly. If you disagree, say why inside \
                     // The tty buffers it until the shell reads its first line.
                     let _ = terminal.write_input(text.as_bytes());
                 }
+                run.execution_profile = terminal.execution_profile().map(str::to_string);
                 run.terminal = Some(terminal);
                 self.notice = Some(format!("opened {label}"));
             }
@@ -14851,6 +14917,7 @@ Address the objection directly. If you disagree, say why inside \
             Ok(mut terminal) => {
                 let _ = terminal.drain_output();
                 Self::attach_output_waker(&self.pty_output_waker, &terminal);
+                run.execution_profile = terminal.execution_profile().map(str::to_string);
                 run.terminal = Some(terminal);
                 run.status = AgentStatus::Running;
                 run.completed_at = None;
@@ -17321,6 +17388,7 @@ Files involved: {}
             Ok(mut terminal) => {
                 let _ = terminal.drain_output();
                 Self::attach_output_waker(&self.pty_output_waker, &terminal);
+                run.execution_profile = terminal.execution_profile().map(str::to_string);
                 run.terminal = Some(terminal);
                 run.status = AgentStatus::Running;
                 run.last_output_at = Instant::now();
@@ -17944,21 +18012,56 @@ Files involved: {}
     }
 
     fn set_run_error(&mut self, index: usize, message: String) {
-        // A write that fails because the agent process ALREADY exited cleanly is
-        // not a run failure — the process simply finished (common for the
-        // non-interactive `claude -p` orchestrator, which prints its plan and
-        // exits; a stray scroll/keystroke into the dead pane would otherwise turn
-        // the whole pane red with "agent process exited (exit 0)"). Treat that as
-        // completion so a finished planner still gets its plan evaluated, and show
-        // a gentle notice instead of a hard error.
         let mut clean_exit = false;
         if let Some(run) = self.agents.get_mut(index) {
-            let exited_clean = run
+            let exit = run
                 .terminal
                 .as_mut()
-                .and_then(|terminal| terminal.try_wait().ok().flatten())
-                .is_some_and(|status| status.success())
-                || message.contains("(exit 0)");
+                .and_then(|terminal| terminal.try_wait_after_output().ok().flatten());
+            if run
+                .terminal
+                .as_ref()
+                .is_some_and(|terminal| terminal.exit_observed())
+                && exit.is_none()
+            {
+                self.notice = Some("process exited; collecting final output".into());
+                return;
+            }
+            let managed = matches!(
+                run.execution_profile.as_deref(),
+                Some("claude-sdk" | "codex-app-server")
+            ) || run.terminal.as_ref().is_some_and(|terminal| {
+                matches!(
+                    terminal.execution_profile(),
+                    Some("claude-sdk" | "codex-app-server")
+                )
+            });
+            if managed {
+                // A failed write, exit0 or error text cannot manufacture a
+                // typed completed turn. Preserve an already observed completion.
+                if !matches!(
+                    run.status,
+                    AgentStatus::Done
+                        | AgentStatus::Stopped
+                        | AgentStatus::Merged
+                        | AgentStatus::Migrated
+                        | AgentStatus::Orphaned
+                ) {
+                    run.status = if exit.as_ref().is_some_and(|status| status.success())
+                        || message.contains("(exit 0)")
+                    {
+                        AgentStatus::Paused
+                    } else {
+                        AgentStatus::Failed
+                    };
+                    run.completed_at = None;
+                    run.last_error = Some(message);
+                }
+                self.notice = Some("agent input unavailable; completion was not inferred".into());
+                return;
+            }
+            let exited_clean = exit.is_some_and(|status| status.success())
+                || run.terminal.is_none() && message.contains("(exit 0)");
             if exited_clean {
                 mark_run_done(run);
                 clean_exit = true;
@@ -17968,7 +18071,7 @@ Files involved: {}
             }
         }
         if clean_exit {
-            self.notice = Some("agent already finished".to_string());
+            self.notice = Some("agent already finished".into());
         }
     }
 
@@ -18446,6 +18549,7 @@ Files involved: {}
             // The fork mints its own fresh session id (Claude --fork-session prints
             // it; Codex records it under the fork's cwd, discovered at completion).
             session_id: None,
+            execution_profile: None,
             terminal: None,
             terminal_size: None,
             last_output_at: Instant::now(),
@@ -18489,6 +18593,7 @@ Files involved: {}
             Ok(mut terminal) => {
                 let _ = terminal.drain_output();
                 Self::attach_output_waker(&self.pty_output_waker, &terminal);
+                run.execution_profile = terminal.execution_profile().map(str::to_string);
                 run.terminal = Some(terminal);
             }
             Err(error) => {
@@ -19318,7 +19423,7 @@ Files involved: {}
             // RE-WIRE completion hooks for the re-goaled session: its hook config file
             // already exists, so the poll loop waits for the official signal — a
             // relaunch without the hooks wired would never flip back to review.
-            signals::augment_worker_command(&mut command, backend, run_mode, &run_id);
+            signals::augment_existing_worker_command(&mut command, backend, run.mode, &run.id, run.execution_profile.as_deref());
             let report_id = run.node_id.as_deref().unwrap_or(&run.id);
             command = command.with_env(
                 "RUDDER_DONE_FILE",
@@ -19347,6 +19452,7 @@ Files involved: {}
                 let now = now_stamp();
                 if let Some(run) = self.agents.get_mut(index) {
                     let starting_new_turn = run.status == AgentStatus::Done;
+                    run.execution_profile = terminal.execution_profile().map(str::to_string);
                     run.terminal = Some(terminal);
                     run.status = AgentStatus::Running;
                     run.session_id = new_session;
@@ -19691,6 +19797,7 @@ Files involved: {}
                 let now = now_stamp();
                 if let Some(run) = self.agents.get_mut(index) {
                     run.cwd = resolver_cwd.clone();
+                    run.execution_profile = terminal.execution_profile().map(str::to_string);
                     run.terminal = Some(terminal);
                     run.status = AgentStatus::Running;
                     if operation == ConflictOperation::Rebase {
@@ -20379,7 +20486,11 @@ What to do\n\
         let poll_started = Instant::now();
         // Background work (workspace removal) reports its outcome here.
         while let Ok(message) = self.bg_notice_rx.try_recv() {
-            self.notice = Some(message);
+            if self.engine_headless {
+                self.publish_engine_notice(message);
+            } else {
+                self.notice = Some(message);
+            }
             self.dirty = true;
         }
         while let Ok(outcome) = self.cloud_delete_rx.try_recv() {
@@ -20482,41 +20593,66 @@ What to do\n\
             // unfocused throttle and streams smoothly.
             let is_streaming_planner =
                 run.mode == AgentMode::RudderPlan && run.status == AgentStatus::Running;
-            let due_to_drain = is_focused
+            let due_to_drain = terminal.exit_observed()
+                || is_focused
                 || is_streaming_planner
                 || attached_ids.contains(&run.id)
                 || run
                     .last_drain_at
                     .is_none_or(|stamp| now.duration_since(stamp) >= UNFOCUSED_DRAIN_INTERVAL);
-            if !due_to_drain {
-                // Skip the heavy drain+parse on unfocused panes; still keep
-                // liveness signal cheap via try_wait below.
-                if run.status == AgentStatus::Running {
-                    if let Ok(Some(status)) = terminal.try_wait() {
-                        if status.success() {
-                            mark_run_done(run);
-                            if run.mode == AgentMode::RudderPlan && run.autosteered {
-                                completed_rudder_plans.push(index);
-                            }
-                        } else {
-                            run.status = AgentStatus::Failed;
-                            run.completed_at = Some(Instant::now());
-                            run.needs_permission = false;
-                            run.needs_user_input = false;
-                        }
-                        let _ = save_native_run_record(&repo_root, run);
+            if terminal.is_output_only() {
+                if !terminal.drain_output().is_empty() {
+                    any_dirty = true;
+                }
+                continue;
+            }
+            // Managed protocols supply the exact thread/turn lifecycle. Legacy
+            // Stop hooks, local slash-command results and terminal chrome cannot
+            // complete or revive those turns, even before the link is bound.
+            if matches!(terminal.execution_profile(), Some("claude-sdk" | "codex-app-server")) {
+                if due_to_drain {
+                    run.last_drain_at = Some(now);
+                    if !terminal.drain_output().is_empty() {
+                        run.last_output_at = now;
                         any_dirty = true;
-                        context_dirty = true;
                     }
-                } else if run.status == AgentStatus::Done {
-                    if let Ok(Some(status)) = terminal.try_wait() {
-                        mark_worker_gone_after_done(run, status.exit_code());
-                        run.terminal = None;
-                        let _ = save_native_run_record(&repo_root, run);
-                        any_dirty = true;
-                        context_dirty = true;
+                    let _ = terminal.take_notifications();
+                }
+                if let Some(signal) = signals::read_signal(&run.id) {
+                    signals::clear_signal(&run.id);
+                    match signal {
+                        signals::SignalState::Permission => { run.wait_signal = Some(WaitSignal::Permission); run.needs_permission = true; run.needs_user_input = false; changed = true; }
+                        signals::SignalState::Input => { run.wait_signal = Some(WaitSignal::Input); run.needs_user_input = true; changed = true; }
+                        signals::SignalState::Working => { run.wait_signal = None; run.needs_permission = false; run.needs_user_input = false; changed = true; }
+                        _ => {}
                     }
                 }
+                let exit = terminal.try_wait_after_output();
+                match exit {
+                    Ok(Some(status)) => {
+                        if run.status != AgentStatus::Done {
+                            run.status = if status.success() { AgentStatus::Paused } else { AgentStatus::Failed };
+                            run.last_error = Some(if status.success() { "agent process exited without a verified completed turn; resume explicitly".into() } else { format!("agent process {}", describe_exit_code(status.exit_code())) });
+                            run.completed_at = None;
+                        }
+                        run.terminal = None;
+                        changed = true;
+                    }
+                    Err(error) => { run.status = AgentStatus::Failed; run.last_error = Some(error.to_string()); run.terminal = None; changed = true; }
+                    Ok(None) => {}
+                }
+                if changed {
+                    let _ = save_native_run_record(&repo_root, run);
+                    any_dirty = true;
+                    context_dirty = true;
+                }
+                continue;
+            }
+            if !due_to_drain {
+                // Observing OS exit schedules the common final-drain path on
+                // the next tick, even for an unfocused pane. Do not finalize
+                // status here before the reader forwards its remaining bytes.
+                let _ = terminal.try_wait();
                 continue;
             }
             run.last_drain_at = Some(now);
@@ -20717,8 +20853,11 @@ What to do\n\
                 {
                     changed = true;
                 }
-                match terminal.try_wait() {
+                match terminal.try_wait_after_output() {
                     Ok(Some(status)) => {
+                        if run.plain_process {
+                            terminal.retain_output_after_exit();
+                        }
                         // Process exit is the most reliable signal: done if it
                         // succeeded, failed otherwise.
                         if status.success() {
@@ -20900,14 +21039,20 @@ What to do\n\
                 // went to a corpse and surfaced as a bare "agent process
                 // exited" failure minutes or hours later.
                 if run.status == AgentStatus::Done {
-                    if let Ok(Some(status)) = terminal.try_wait() {
+                    if let Ok(Some(status)) = terminal.try_wait_after_output() {
                         worker_gone_exit = Some(status.exit_code());
                     }
                 }
             }
             if let Some(code) = worker_gone_exit {
-                mark_worker_gone_after_done(run, code);
-                run.terminal = None;
+                if run.plain_process {
+                    if let Some(terminal) = run.terminal.as_mut() {
+                        terminal.retain_output_after_exit();
+                    }
+                } else {
+                    mark_worker_gone_after_done(run, code);
+                    run.terminal = None;
+                }
                 changed = true;
             }
             if attention_changed(attention_before, run) {
@@ -21101,7 +21246,12 @@ What to do\n\
     }
 
     fn shutdown(&mut self) {
-        self.close_attach_clients("the dashboard quit");
+        let _ = self.shutdown_with_reason("the Rudder dashboard closed; resume explicitly");
+    }
+
+    fn shutdown_with_reason(&mut self, reason: &str) -> Result<()> {
+        self.close_attach_clients(reason);
+        let mut failures = Vec::new();
         for run in &mut self.agents {
             if run.terminal.is_some() {
                 if run.backend == Backend::Codex && run.session_id.is_none() {
@@ -21113,16 +21263,22 @@ What to do\n\
                     run.needs_permission = false;
                     run.needs_user_input = false;
                     run.completed_at = None;
-                    run.last_error = Some(
-                        "paused because the Rudder dashboard closed; resume explicitly".to_string(),
-                    );
+                    run.last_error = Some(format!("paused because {reason}"));
                 }
                 // Save every detached terminal, including a Done process whose
                 // interactive CLI had not exited yet, so `process` is removed.
-                let _ = save_native_run_record(&self.cwd, run);
+                if let Err(error) = save_native_run_record(&self.cwd, run) {
+                    failures.push(format!("{}: {error:#}", run.id));
+                }
             }
         }
-        let _ = self.write_rudder_context_timed(None);
+        if let Err(error) = self.write_rudder_context_timed(None) {
+            failures.push(format!("context: {error:#}"));
+        }
+        if !failures.is_empty() {
+            bail!("could not persist paused engine state: {}", failures.join("; "));
+        }
+        Ok(())
     }
 }
 
@@ -21135,6 +21291,12 @@ fn main() -> Result<()> {
         return Ok(());
     }
     let args = std::env::args().skip(1).collect::<Vec<_>>();
+    if args.first().is_some_and(|arg| arg == "engine") {
+        return run_engine_command(&args[1..]);
+    }
+    if args.first().is_some_and(|arg| arg == "fabric") {
+        return fabric_cli::run(&args[1..]);
+    }
     if args.first().is_some_and(|arg| arg == "mouse-test") {
         return run_mouse_test(args.get(1).map(String::as_str).unwrap_or("parsed"));
     }
@@ -21512,11 +21674,28 @@ fn install_termination_handlers() {
 }
 
 fn run(terminal: &mut Tui) -> Result<()> {
+    let cwd = env::current_dir().context("dashboard checkout")?;
+    let repo = dashboard_root(&cwd).canonicalize()?;
+    let ownership = EngineOwnership::acquire(&repo, NativeAuthority::Legacy)?;
+    run_app_loop(Some(terminal), ownership)
+}
+
+fn run_app_loop(mut terminal: Option<&mut Tui>, mut ownership: EngineOwnership) -> Result<()> {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
 
     let mut app = App::new();
+    app.engine_headless = terminal.is_none();
     install_termination_handlers();
+    if ownership.is_fabric() {
+        #[cfg(unix)]
+        unsafe {
+            libc::signal(
+                libc::SIGINT,
+                request_termination as extern "C" fn(libc::c_int) as libc::sighandler_t,
+            );
+        }
+    }
 
     // The main loop selects on ONE channel fed by two kinds of source:
     //   * a dedicated stdin reader thread that forwards terminal input events, and
@@ -21553,7 +21732,7 @@ fn run(terminal: &mut Tui) -> Result<()> {
     // event is available and forwards each one to the loop. At shutdown this thread
     // is parked inside `event::read`; we intentionally do NOT join it — process exit
     // reaps it. A send error (loop dropped its receiver) or a read error ends it.
-    {
+    if terminal.is_some() {
         let term_tx = signal_tx.clone();
         thread::Builder::new()
             .name("rudder-term-reader".to_string())
@@ -21570,132 +21749,187 @@ fn run(terminal: &mut Tui) -> Result<()> {
             .ok();
     }
 
-    app.resume_migrated_agents();
-    // Unfreeze finished-but-stuck in-flight work (e.g. merge resolvers that completed under
-    // an older binary) BEFORE trying to resume anything, so a restart makes the board progress
-    // instead of resurrecting dead processes in their stuck state.
-    app.reconcile_orphaned_runs();
-    // Reconcile graph.json with the restored in-memory state on startup so the board does
-    // not show stale "planned" nodes from a previous session (and reflects the restored
-    // plan queue / reloaded agents). last_mirror_signature is None here, so this runs once.
-    app.mirror_graph();
+    let mut control = None;
+    let result = (|| -> Result<()> {
+        // Bind before resuming migrated sessions or reporting readiness. Failure is
+        // fatal for an owner: a second scheduler must never quietly run unattached.
+        app.attach_server = Some(AttachServer::start(
+            app.attach_socket_path(),
+            app.pty_output_waker.clone(),
+        )?);
+        if ownership.is_fabric() {
+            control = Some(EngineControl::bind(
+                &ownership,
+                app.pty_output_waker.clone(),
+            )?);
+        }
+        app.resume_migrated_agents();
+        // Unfreeze finished-but-stuck in-flight work (e.g. merge resolvers that completed under
+        // an older binary) BEFORE trying to resume anything, so a restart makes the board progress
+        // instead of resurrecting dead processes in their stuck state.
+        app.reconcile_orphaned_runs();
+        // Reconcile graph.json with the restored in-memory state on startup so the board does
+        // not show stale "planned" nodes from a previous session (and reflects the restored
+        // plan queue / reloaded agents). last_mirror_signature is None here, so this runs once.
+        app.mirror_graph();
+        let ready = ownership.ready(control.as_ref().map(EngineControl::path))?;
+        if ownership.is_fabric() {
+            println!("{}", serde_json::to_string(&ready)?);
+            io::stdout().flush()?;
+        }
 
-    loop {
-        let frame_started = Instant::now();
-        // Reset the PTY-output waker BEFORE poll_agents drains, so a byte arriving
-        // mid-drain re-arms it and enqueues a fresh wake instead of being lost.
-        pty_output_pending.store(false, Ordering::Release);
-        // poll_agents flips app.dirty when any state mutates (PTY bytes,
-        // status change, cloud info, etc).
-        if TERMINATION_REQUESTED.load(Ordering::SeqCst) {
-            app.shutdown();
-            break;
-        }
-        app.poll_agents();
-        app.refresh_tab_title();
-        app.service_attach_clients();
-        if drain_ready_events(&mut app, MAX_EVENTS_PER_FRAME, &signal_rx)? {
-            app.shutdown();
-            break;
-        }
-        // Second views (view.rs) redraw whenever this one would, plus on their
-        // own input.
-        let shared_changed = app.dirty;
-        if app.dirty && app.should_defer_scroll_draw() {
-            app.perf.log(
-                "draw_deferred",
-                serde_json::json!({
-                    "reason": "scroll_burst",
-                    "scroll_events": app.scroll_events_since_draw,
-                }),
-            );
-        } else if app.take_dirty() {
-            let draw_started = Instant::now();
-            let mut render_build_us = 0_u64;
-            app.begin_view_frame(LOCAL_VIEW);
-            if std::mem::take(&mut app.repaint_all) {
-                force_full_repaint(terminal);
-            }
-            // Synchronized output (view.rs): the terminal swaps the frame in
-            // whole instead of painting it as the bytes arrive.
-            let _ = terminal.backend_mut().write_all(SYNC_BEGIN.as_bytes());
-            let drawn = terminal.draw(|frame| {
-                let render_started = Instant::now();
-                render(frame, &mut app);
-                render_build_us = render_started.elapsed().as_micros() as u64;
-            })
-            .map(|_| ());
-            let _ = terminal.backend_mut().write_all(SYNC_END.as_bytes());
-            let _ = terminal.backend_mut().flush();
-            drawn?;
-            // The frame counter gates destructive confirms (dd): a confirm
-            // only counts after the confirmation notice has actually rendered.
-            app.frames_drawn = app.frames_drawn.wrapping_add(1);
-            let scroll_events = app.consume_scroll_draw_stats();
-            let draw_duration = draw_started.elapsed();
-            app.record_perf_duration("terminal_draw", draw_duration);
-            app.log_perf_duration_over(
-                "terminal_draw",
-                draw_duration,
-                SLOW_DRAW_THRESHOLD,
-                serde_json::json!({
-                    "render_build_us": render_build_us,
-                    "scroll_events": scroll_events,
-                }),
-            );
-        }
-        app.render_dashboard_views(shared_changed);
-
-        // PTY readers wake this loop as soon as child output arrives, so the timeout is
-        // only a backstop for timer-driven state and does not need a planner fast path.
-        let poll_timeout = app.scroll_draw_poll_timeout(TICK_RATE);
-        let active_us_before_block = frame_started.elapsed().as_micros() as u64;
-        // Block until a terminal event, a PTY-output nudge, or the tick backstop.
-        // TICK_RATE still bounds worst-case latency for state that
-        // does not signal (cloud polling, timers); PtyOutput just wakes us sooner.
-        match signal_rx.recv_timeout(poll_timeout) {
-            Ok(LoopSignal::Term(ev)) => {
-                if handle_event(&mut app, ev) {
-                    app.shutdown();
-                    break;
-                }
-                let shutdown = drain_ready_events(
-                    &mut app,
-                    MAX_EVENTS_PER_FRAME.saturating_sub(1),
-                    &signal_rx,
-                )?;
-                if shutdown {
-                    app.shutdown();
-                    return Ok(());
-                }
-            }
-            // Fresh child output: nothing to do here — the loop wraps back to
-            // poll_agents, which drains it. The wake itself is the point.
-            Ok(LoopSignal::PtyOutput) => {}
-            // Backstop tick elapsed with no signal.
-            Err(mpsc::RecvTimeoutError::Timeout) => {}
-            // The term reader and every waker sender are gone AND our own sender
-            // was dropped — cannot happen while `signal_tx` lives, but shut down
-            // cleanly rather than spin if it ever does.
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                app.shutdown();
+        loop {
+            let frame_started = Instant::now();
+            // Reset the PTY-output waker BEFORE poll_agents drains, so a byte arriving
+            // mid-drain re-arms it and enqueues a fresh wake instead of being lost.
+            pty_output_pending.store(false, Ordering::Release);
+            // poll_agents flips app.dirty when any state mutates (PTY bytes,
+            // status change, cloud info, etc).
+            if TERMINATION_REQUESTED.load(Ordering::SeqCst) {
                 break;
             }
-        }
-        let frame_duration = frame_started.elapsed();
-        app.record_perf_duration("frame_total", frame_duration);
-        app.log_perf_duration_over(
-            "frame_total",
-            frame_duration,
-            SLOW_FRAME_THRESHOLD,
-            serde_json::json!({
-                "active_us_before_block": active_us_before_block,
-            }),
-        );
-        app.perf_stats.emit_due(&mut app.perf);
-    }
+            ownership.assert_current()?;
+            if control
+                .as_mut()
+                .is_some_and(|server| server.poll(&mut ownership, &app))
+            {
+                break;
+            }
+            if ownership.is_fabric() {
+                let (journal, owner) = ownership.journal_parts();
+                fabric_runtime::poll(&mut app, journal, owner)?;
+            }
+            app.poll_agents();
+            if terminal.is_some() {
+                app.refresh_tab_title();
+            }
+            app.service_attach_clients();
+            if app.engine_headless {
+                if let Some(text) = app.notice.take() {
+                    app.publish_engine_notice(text);
+                }
+            }
+            if drain_ready_events(&mut app, MAX_EVENTS_PER_FRAME, &signal_rx)? {
+                break;
+            }
+            // Second views (view.rs) redraw whenever this one would, plus on their
+            // own input.
+            let shared_changed = app.dirty;
+            if let Some(terminal) = terminal.as_deref_mut() {
+                if app.dirty && app.should_defer_scroll_draw() {
+                    app.perf.log(
+                        "draw_deferred",
+                        serde_json::json!({
+                            "reason": "scroll_burst",
+                            "scroll_events": app.scroll_events_since_draw,
+                        }),
+                    );
+                } else if app.take_dirty() {
+                    let draw_started = Instant::now();
+                    let mut render_build_us = 0_u64;
+                    app.begin_view_frame(LOCAL_VIEW);
+                    if std::mem::take(&mut app.repaint_all) {
+                        force_full_repaint(terminal);
+                    }
+                    // Synchronized output (view.rs): the terminal swaps the frame in
+                    // whole instead of painting it as the bytes arrive.
+                    let _ = terminal.backend_mut().write_all(SYNC_BEGIN.as_bytes());
+                    let drawn = terminal
+                        .draw(|frame| {
+                            let render_started = Instant::now();
+                            render(frame, &mut app);
+                            render_build_us = render_started.elapsed().as_micros() as u64;
+                        })
+                        .map(|_| ());
+                    let _ = terminal.backend_mut().write_all(SYNC_END.as_bytes());
+                    let _ = terminal.backend_mut().flush();
+                    drawn?;
+                    // The frame counter gates destructive confirms (dd): a confirm
+                    // only counts after the confirmation notice has actually rendered.
+                    app.frames_drawn = app.frames_drawn.wrapping_add(1);
+                    let scroll_events = app.consume_scroll_draw_stats();
+                    let draw_duration = draw_started.elapsed();
+                    app.record_perf_duration("terminal_draw", draw_duration);
+                    app.log_perf_duration_over(
+                        "terminal_draw",
+                        draw_duration,
+                        SLOW_DRAW_THRESHOLD,
+                        serde_json::json!({
+                            "render_build_us": render_build_us,
+                            "scroll_events": scroll_events,
+                        }),
+                    );
+                }
+            } else {
+                // No host surface: consume its dirty bit without rendering a fake
+                // terminal or changing any agent's terminal dimensions.
+                app.take_dirty();
+            }
+            app.render_dashboard_views(shared_changed);
 
-    Ok(())
+            // PTY readers wake this loop as soon as child output arrives, so the timeout is
+            // only a backstop for timer-driven state and does not need a planner fast path.
+            let poll_timeout = app.scroll_draw_poll_timeout(TICK_RATE);
+            let active_us_before_block = frame_started.elapsed().as_micros() as u64;
+            // Block until a terminal event, a PTY-output nudge, or the tick backstop.
+            // TICK_RATE still bounds worst-case latency for state that
+            // does not signal (cloud polling, timers); PtyOutput just wakes us sooner.
+            match signal_rx.recv_timeout(poll_timeout) {
+                Ok(LoopSignal::Term(ev)) => {
+                    if handle_event(&mut app, ev) {
+                        break;
+                    }
+                    let shutdown = drain_ready_events(
+                        &mut app,
+                        MAX_EVENTS_PER_FRAME.saturating_sub(1),
+                        &signal_rx,
+                    )?;
+                    if shutdown {
+                        return Ok(());
+                    }
+                }
+                // Fresh child output: nothing to do here — the loop wraps back to
+                // poll_agents, which drains it. The wake itself is the point.
+                Ok(LoopSignal::PtyOutput) => {}
+                // Backstop tick elapsed with no signal.
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                // The term reader and every waker sender are gone AND our own sender
+                // was dropped — cannot happen while `signal_tx` lives, but shut down
+                // cleanly rather than spin if it ever does.
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    break;
+                }
+            }
+            let frame_duration = frame_started.elapsed();
+            app.record_perf_duration("frame_total", frame_duration);
+            app.log_perf_duration_over(
+                "frame_total",
+                frame_duration,
+                SLOW_FRAME_THRESHOLD,
+                serde_json::json!({
+                    "active_us_before_block": active_us_before_block,
+                }),
+            );
+            app.perf_stats.emit_due(&mut app.perf);
+        }
+
+        Ok(())
+    })();
+    let reason = if ownership.is_fabric() {
+        "the Rudder engine shut down; resume explicitly"
+    } else {
+        "the Rudder dashboard closed; resume explicitly"
+    };
+    let shutdown = app.shutdown_with_reason(reason);
+    let runtime_shutdown = if ownership.is_fabric() {
+        let (journal, owner) = ownership.journal_parts();
+        fabric_runtime::shutdown(&mut app, journal, owner)
+    } else {
+        Ok(())
+    };
+    drop(control);
+    let released = ownership.finish(result.is_ok() && shutdown.is_ok() && runtime_shutdown.is_ok());
+    result.and(shutdown).and(runtime_shutdown).and(released)
 }
 
 fn drain_ready_events(

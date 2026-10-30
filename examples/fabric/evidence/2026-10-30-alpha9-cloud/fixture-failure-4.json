@@ -1,0 +1,97 @@
+{
+  "format_version": 1,
+  "provider": "Fly.io / AWS S3",
+  "version": "4.0.0-alpha.9",
+  "revision": "11f1f75e5a18555f6c7e257aacc6b4097f425c5e",
+  "name": "rudder-alpha9-cas-9d3502bc",
+  "nonce": "9d3502bc-d889-4dd7-bd28-9c8dc4c1165d",
+  "image": "registry.fly.io/rudder-workers-exla:4.0.0-alpha.9",
+  "imageDigest": "sha256:939c5593c5ed1232577d575f7ff382448c466a9033874c94a1a684c4ec5d599a",
+  "rootId": "alpha9-runnable-9d3502bc-d889-4dd7-bd28-9c8dc4c1165d",
+  "steps": [
+    {
+      "step": "no-app-secrets",
+      "ms": 1169
+    },
+    {
+      "step": "create-synthetic-worker-auth",
+      "ms": 758
+    },
+    {
+      "step": "create-owned-worker",
+      "ms": 35445
+    },
+    {
+      "step": "inventory",
+      "ms": 456
+    },
+    {
+      "step": "read-owned-proof",
+      "ms": 779
+    },
+    {
+      "step": "read-owned-proof",
+      "ms": 895
+    },
+    {
+      "step": "inventory",
+      "ms": 982
+    },
+    {
+      "step": "destroy-owned-worker",
+      "ms": 2717
+    },
+    {
+      "step": "inventory",
+      "ms": 423
+    },
+    {
+      "step": "remove-synthetic-worker-auth",
+      "ms": 253
+    }
+  ],
+  "limits": [
+    "Small synthetic immutable fixture, not a cold-host performance workload or agent launch.",
+    "Producer bytes are a bounded in-memory fixture; worker restore uses the shipped native CAS and durable publication.",
+    "Only a generated synthetic account/workspace credential is used. No user account, vault or AWS key enters the canary.",
+    "Published synthetic immutable objects remain retained by the fabric no-GC policy."
+  ],
+  "fixture": {
+    "root": {
+      "kind": "runnable_root",
+      "algorithm": "sha256",
+      "digest": "b51897898c84c61ccdbd39e34712b8e9af805cace6fd182651d6a4047c6b1d92",
+      "size_bytes": 814
+    },
+    "logicalFileBytes": 9437184,
+    "objects": 15,
+    "encodedBytes": 9440515,
+    "largeFileSha256": "9b2c07acf4335bf58ea9192e7439190c02ea07bdc5e3a193486f1656a4f7f4f2",
+    "rawNameHex": "ff61"
+  },
+  "publication": {
+    "receipt": {
+      "format_version": 1,
+      "root_id": "alpha9-runnable-9d3502bc-d889-4dd7-bd28-9c8dc4c1165d",
+      "root": {
+        "kind": "runnable_root",
+        "algorithm": "sha256",
+        "digest": "b51897898c84c61ccdbd39e34712b8e9af805cace6fd182651d6a4047c6b1d92",
+        "size_bytes": 814
+      },
+      "durability": "replicated",
+      "published_at_ms": 1793395505533,
+      "object_count": 15,
+      "total_bytes": 9440515
+    },
+    "uploaded_objects": 15,
+    "uploaded_bytes": 9440515
+  },
+  "machine": "8410e0f27e3dd8",
+  "instance": "01M67B7HKVKBTMAH317VMVJZW5",
+  "ok": false,
+  "error": "{\"ok\":false,\"phase\":\"native-restore\",\"code\":\"local_request_failed\",\"message\":\"Local CAS rejected the request; no durable transfer success is implied\"}\n\nfalse !== true\n",
+  "cleanupVerified": true,
+  "syntheticCredentialRemoved": true,
+  "verifiedAt": "2026-10-30T21:25:50.633Z"
+}

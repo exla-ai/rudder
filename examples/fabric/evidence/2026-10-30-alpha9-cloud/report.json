@@ -1,0 +1,130 @@
+{
+  "format_version": 1,
+  "provider": "Fly.io / AWS S3",
+  "version": "4.0.0-alpha.9",
+  "revision": "11f1f75e5a18555f6c7e257aacc6b4097f425c5e",
+  "name": "rudder-alpha9-cas-03533830",
+  "nonce": "03533830-b2a9-4c9c-addb-fe12f5be50b5",
+  "image": "registry.fly.io/rudder-workers-exla:4.0.0-alpha.9",
+  "imageDigest": "sha256:939c5593c5ed1232577d575f7ff382448c466a9033874c94a1a684c4ec5d599a",
+  "rootId": "alpha9-runnable-03533830-b2a9-4c9c-addb-fe12f5be50b5",
+  "steps": [
+    {
+      "step": "no-app-secrets",
+      "ms": 1043
+    },
+    {
+      "step": "create-synthetic-worker-auth",
+      "ms": 261
+    },
+    {
+      "step": "create-owned-worker",
+      "ms": 43661
+    },
+    {
+      "step": "inventory",
+      "ms": 514
+    },
+    {
+      "step": "read-owned-proof",
+      "ms": 954
+    },
+    {
+      "step": "read-owned-proof",
+      "ms": 1151
+    },
+    {
+      "step": "read-owned-proof",
+      "ms": 758
+    },
+    {
+      "step": "inventory",
+      "ms": 461
+    },
+    {
+      "step": "destroy-owned-worker",
+      "ms": 2386
+    },
+    {
+      "step": "inventory",
+      "ms": 432
+    },
+    {
+      "step": "remove-synthetic-worker-auth",
+      "ms": 368
+    }
+  ],
+  "limits": [
+    "Small synthetic immutable fixture, not a cold-host performance workload or agent launch.",
+    "Producer bytes are a bounded in-memory fixture; worker restore uses the shipped native CAS and durable publication.",
+    "Only a generated synthetic account/workspace credential is used. No user account, vault or AWS key enters the canary.",
+    "Published synthetic immutable objects remain retained by the fabric no-GC policy."
+  ],
+  "fixture": {
+    "root": {
+      "kind": "runnable_root",
+      "algorithm": "sha256",
+      "digest": "d8edcfcb87a13a423662728298a5158c69e7bf55ca0a58797592d7ae00e60043",
+      "size_bytes": 814
+    },
+    "logicalFileBytes": 9437184,
+    "objects": 15,
+    "encodedBytes": 9440515,
+    "largeFileSha256": "9b2c07acf4335bf58ea9192e7439190c02ea07bdc5e3a193486f1656a4f7f4f2",
+    "rawNameHex": "ff61"
+  },
+  "publication": {
+    "receipt": {
+      "format_version": 1,
+      "root_id": "alpha9-runnable-03533830-b2a9-4c9c-addb-fe12f5be50b5",
+      "root": {
+        "kind": "runnable_root",
+        "algorithm": "sha256",
+        "digest": "d8edcfcb87a13a423662728298a5158c69e7bf55ca0a58797592d7ae00e60043",
+        "size_bytes": 814
+      },
+      "durability": "replicated",
+      "published_at_ms": 1793395642673,
+      "object_count": 15,
+      "total_bytes": 9440515
+    },
+    "uploaded_objects": 15,
+    "uploaded_bytes": 9440515
+  },
+  "machine": "48ee1eef966908",
+  "instance": "01M67BBNMSYTGMSC7AXM93C890",
+  "worker": {
+    "ok": true,
+    "uid": 1500,
+    "node": "v22.23.4",
+    "root": {
+      "kind": "runnable_root",
+      "algorithm": "sha256",
+      "digest": "d8edcfcb87a13a423662728298a5158c69e7bf55ca0a58797592d7ae00e60043",
+      "size_bytes": 814
+    },
+    "downloadedObjects": 15,
+    "downloadedBytes": 9440515,
+    "smallFixtureElapsedMs": 5015,
+    "nativeRestore": true,
+    "retainedAcrossNativeRestart": true,
+    "secondRestoreDownloadedObjects": 15,
+    "exactU64Bytes": true,
+    "chunkedFileSha256": "9b2c07acf4335bf58ea9192e7439190c02ea07bdc5e3a193486f1656a4f7f4f2",
+    "rawNameMetadata": true,
+    "fileModeMetadata": true,
+    "symlinkMetadata": true,
+    "filesystemMaterialization": false
+  },
+  "ok": true,
+  "cleanupVerified": true,
+  "syntheticCredentialRemoved": true,
+  "verifiedAt": "2026-10-30T21:28:19.513Z",
+  "controllerSha256": "26865222c2f7bb71dd35d2cc90c1faa161cd4a21bd908ac3ba3db6f2177bf04a",
+  "independentCleanup": {
+    "verifiedAt": "2026-10-30T21:29:21.782090+00:00",
+    "allOwnedMachinesAbsent": true,
+    "syntheticWorkspaceCredentialsRemaining": 0,
+    "productionWorkspaceCount": 49
+  }
+}

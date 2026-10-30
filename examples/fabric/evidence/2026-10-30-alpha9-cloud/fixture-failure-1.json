@@ -1,0 +1,57 @@
+{
+  "format_version": 1,
+  "provider": "Fly.io / AWS S3",
+  "version": "4.0.0-alpha.9",
+  "revision": "11f1f75e5a18555f6c7e257aacc6b4097f425c5e",
+  "name": "rudder-alpha9-cas-9b8b9623",
+  "nonce": "9b8b9623-5680-47b7-80e0-c02a31a6ba05",
+  "image": "registry.fly.io/rudder-workers-exla:4.0.0-alpha.9",
+  "imageDigest": "sha256:939c5593c5ed1232577d575f7ff382448c466a9033874c94a1a684c4ec5d599a",
+  "rootId": "alpha9-runnable-9b8b9623-5680-47b7-80e0-c02a31a6ba05",
+  "steps": [
+    {
+      "step": "no-app-secrets",
+      "ms": 495
+    },
+    {
+      "step": "create-synthetic-worker-auth",
+      "ms": 295
+    },
+    {
+      "step": "inventory",
+      "ms": 651
+    },
+    {
+      "step": "inventory",
+      "ms": 461
+    },
+    {
+      "step": "remove-synthetic-worker-auth",
+      "ms": 343
+    }
+  ],
+  "limits": [
+    "Small synthetic immutable fixture, not a cold-host performance workload or agent launch.",
+    "Producer bytes are a bounded in-memory fixture; worker restore uses the shipped native CAS and durable publication.",
+    "Only a generated synthetic account/workspace credential is used. No user account, vault or AWS key enters the canary.",
+    "Published synthetic immutable objects remain retained by the fabric no-GC policy."
+  ],
+  "fixture": {
+    "root": {
+      "kind": "runnable_root",
+      "algorithm": "sha256",
+      "digest": "1c78012caf51c0d95669bc5638ea78a79f2cadbfdf7f1df680fae8b35f2664e2",
+      "size_bytes": 814
+    },
+    "logicalFileBytes": 9437184,
+    "objects": 15,
+    "encodedBytes": 9440515,
+    "largeFileSha256": "9b2c07acf4335bf58ea9192e7439190c02ea07bdc5e3a193486f1656a4f7f4f2",
+    "rawNameHex": "ff61"
+  },
+  "ok": false,
+  "error": "Fabric request failed (HTTP 401)",
+  "cleanupVerified": true,
+  "syntheticCredentialRemoved": true,
+  "verifiedAt": "2026-10-30T21:17:25.141Z"
+}

@@ -1,0 +1,243 @@
+{
+  "schemaVersion": 1,
+  "milestone": "Rudder v4 alpha: bounded remote workspace formats, delta retention and managed VCS services; full plan remains open",
+  "version": "4.0.0-alpha.9",
+  "sourceRevision": "11f1f75e5a18555f6c7e257aacc6b4097f425c5e",
+  "delivery": {
+    "kind": "web",
+    "status": "deployed",
+    "target": "Rudder Cloud control API and configured alpha.9 worker image",
+    "url": "https://rudder.exla.ai/app",
+    "provider": "Fly.io",
+    "revision": "11f1f75e5a18555f6c7e257aacc6b4097f425c5e",
+    "deploymentId": "160",
+    "version": "4.0.0-alpha.9",
+    "verifiedAt": "2026-10-30T21:10:29.027071+00:00",
+    "checks": [
+      {
+        "url": "https://rudder.exla.ai/app",
+        "status": 200,
+        "expected": 200,
+        "finalUrl": "https://rudder-cloud-control.fly.dev/app",
+        "ok": true
+      },
+      {
+        "url": "https://rudder-cloud-control.fly.dev/health",
+        "status": 200,
+        "expected": 200,
+        "finalUrl": "https://rudder-cloud-control.fly.dev/health",
+        "ok": true,
+        "health": {
+          "ok": true,
+          "s3": true,
+          "fabric": true,
+          "fly": true,
+          "byoVm": true,
+          "state": true,
+          "secrets": true,
+          "auth": {
+            "google": true,
+            "github": true,
+            "githubDevice": true
+          }
+        }
+      },
+      {
+        "url": "https://rudder-cloud-control.fly.dev/api/app/state",
+        "status": 401,
+        "expected": 401,
+        "finalUrl": "https://rudder-cloud-control.fly.dev/api/app/state",
+        "ok": true
+      },
+      {
+        "url": "https://rudder-cloud-control.fly.dev/api/rudder/fabric/roots/unauthenticated-alpha9-smoke",
+        "status": 401,
+        "expected": 401,
+        "finalUrl": "https://rudder-cloud-control.fly.dev/api/rudder/fabric/roots/unauthenticated-alpha9-smoke",
+        "ok": true
+      }
+    ]
+  },
+  "control": {
+    "machine": "8911d61a434978",
+    "instance": "01M67AAQSVQEJ3Q27X1EX9ZBMR",
+    "imageDigest": "sha256:ef292c9e34d42d3669dd1f6fc626ab6496690dc28a7642f70085299b97c9a2be",
+    "databaseIntegrity": "ok",
+    "existingHomeRecordRetained": true,
+    "counts": {
+      "workspaces": 49,
+      "sails": 14
+    },
+    "sourceServerSha256": "96e6392705d1ac86949c09b5e69eb6ced86d53c1f8f820225df2cb7ceb3f4770"
+  },
+  "worker": {
+    "image": "registry.fly.io/rudder-workers-exla:4.0.0-alpha.9",
+    "imageDigest": "sha256:939c5593c5ed1232577d575f7ff382448c466a9033874c94a1a684c4ec5d599a",
+    "imageSmoke": {
+      "machine": "48e0356f9e7d18",
+      "instance": "01M67A4Y11CZEHT0V9RWKJ1H1K",
+      "region": "sjc",
+      "checks": {
+        "kind": "alpha9-full-image-boot-smoke",
+        "ok": true,
+        "uid": 1500,
+        "gid": 1500,
+        "nnp": "1",
+        "zeroCapabilities": true,
+        "supplementaryGroups": "",
+        "fuseGranted": true,
+        "fuseOpen": true,
+        "cacheOwnedByUser": true,
+        "rootReentryDenied": true,
+        "realBootstrapAndEntrypoint": true,
+        "supervisorModuleEvaluated": false,
+        "packageVersion": "4.0.0-alpha.9",
+        "version": "4.0.0-alpha.9",
+        "node": "v22.23.4",
+        "kernel": "6.12.114-fly",
+        "claude": "2.1.314 (Claude Code)",
+        "codex": "codex-cli 0.166.0",
+        "tailscale": "1.104.4",
+        "jj": "jj 0.40.0-941d0290f5511db1d1cf8e4fe7365ba7d1828ea0",
+        "git": "git version 2.56.0",
+        "jjFetchChangedFileRemote": true,
+        "capabilities": {
+          "authority": "local-only",
+          "format_version": 1,
+          "metadata_encoding": "canonical-json-v1",
+          "object_hash": "sha256",
+          "scheduler": false
+        },
+        "bridge": {
+          "automatic_jj_replacement": false,
+          "format_version": 1,
+          "jj_version": "0.40.0",
+          "local_development": false,
+          "vfs_default": false,
+          "vfs_provider_required": true
+        },
+        "nativeSha256": "c08e44c5feb0fe9b2a4907e725cedd07cab5d2daf887622245e62f40fdfd2c85",
+        "buddySha256": "91d4294297a2c9ba0e77a24f6d924767214bdaa7a59d429685428bcc72a4cd31",
+        "verifiedAt": "2026-10-30T21:06:53.761Z"
+      },
+      "cleanupVerified": true,
+      "verifiedAt": "2026-10-30T21:07:00.699Z"
+    },
+    "existingActiveHome": {
+      "machine": "8edd225a7d0378",
+      "instance": "01M670MG4A8E0DWE9GA1C0PQ92",
+      "state": "started",
+      "image": "registry.fly.io/rudder-workers-exla:4.0.0-alpha.7",
+      "digest": "sha256:404f46396aca77324d9b53c55d2824a5401af56ba5362d0bdae67e16108fc245",
+      "unchangedAcrossDeploy": true
+    },
+    "liveHomesRestarted": false,
+    "fleetAdoptionVerified": false,
+    "cloudFormatRestore": {
+      "evidence": "examples/fabric/evidence/2026-10-30-alpha9-cloud/report.json",
+      "machine": "48ee1eef966908",
+      "instance": "01M67BBNMSYTGMSC7AXM93C890",
+      "imageDigest": "sha256:939c5593c5ed1232577d575f7ff382448c466a9033874c94a1a684c4ec5d599a",
+      "root": {
+        "kind": "runnable_root",
+        "algorithm": "sha256",
+        "digest": "d8edcfcb87a13a423662728298a5158c69e7bf55ca0a58797592d7ae00e60043",
+        "size_bytes": 814
+      },
+      "replicated": {
+        "format_version": 1,
+        "root_id": "alpha9-runnable-03533830-b2a9-4c9c-addb-fe12f5be50b5",
+        "root": {
+          "kind": "runnable_root",
+          "algorithm": "sha256",
+          "digest": "d8edcfcb87a13a423662728298a5158c69e7bf55ca0a58797592d7ae00e60043",
+          "size_bytes": 814
+        },
+        "durability": "replicated",
+        "published_at_ms": 1793395642673,
+        "object_count": 15,
+        "total_bytes": 9440515
+      },
+      "checks": {
+        "ok": true,
+        "uid": 1500,
+        "node": "v22.23.4",
+        "root": {
+          "kind": "runnable_root",
+          "algorithm": "sha256",
+          "digest": "d8edcfcb87a13a423662728298a5158c69e7bf55ca0a58797592d7ae00e60043",
+          "size_bytes": 814
+        },
+        "downloadedObjects": 15,
+        "downloadedBytes": 9440515,
+        "smallFixtureElapsedMs": 5015,
+        "nativeRestore": true,
+        "retainedAcrossNativeRestart": true,
+        "secondRestoreDownloadedObjects": 15,
+        "exactU64Bytes": true,
+        "chunkedFileSha256": "9b2c07acf4335bf58ea9192e7439190c02ea07bdc5e3a193486f1656a4f7f4f2",
+        "rawNameMetadata": true,
+        "fileModeMetadata": true,
+        "symlinkMetadata": true,
+        "filesystemMaterialization": false
+      },
+      "cleanupVerified": true,
+      "syntheticCredentialRemoved": true,
+      "verifiedAt": "2026-10-30T21:28:19.513Z"
+    }
+  },
+  "cli": {
+    "status": "not-published",
+    "version": "4.0.0-alpha.9",
+    "ci": {
+      "release": "https://github.com/exla-ai/rudder/actions/runs/41125542105",
+      "status": "failure",
+      "nativePlatforms": [
+        "darwin-arm64",
+        "darwin-x64",
+        "linux-x64"
+      ],
+      "tui": "https://github.com/exla-ai/rudder/actions/runs/41125543340",
+      "tuiStatus": "success",
+      "mac": "https://github.com/exla-ai/rudder/actions/runs/41125541993",
+      "macStatus": "success",
+      "ios": "https://github.com/exla-ai/rudder/actions/runs/41125542040",
+      "iosStatus": "success",
+      "initialAttempt": {
+        "status": "failed",
+        "job": "https://github.com/exla-ai/rudder/actions/runs/41125542105/job/124314113740",
+        "failure": "Native remote-root loopback HTTP test returned SourceFailed on macOS; first publication was skipped.",
+        "failedTest": "actual_helper_http_lazy_lookup_in_100k_directory_fetches_only_two_4mib_ranges"
+      },
+      "retryJob": "https://github.com/exla-ai/rudder/actions/runs/41125542105/job/124318697276",
+      "retryStatus": "failure",
+      "failureDiagnosis": "Darwin accepted socket inherited O_NONBLOCK in the loopback HTTP fixture; full-body writes could truncate and return SourceFailed. Accepted-stream normalization and backpressure regressions are in the next working-tree slice.",
+      "publicationSkipped": true
+    }
+  },
+  "localChecks": {
+    "rustWorkspace": {
+      "passed": 1298,
+      "ignored": 17
+    },
+    "node": {
+      "passed": 638,
+      "optionalSkipped": 8
+    },
+    "bridgeCliPassed": 31,
+    "terminalJourneysPassed": 59,
+    "productionBuild": "passed",
+    "typecheck": "passed",
+    "cloudBuild": "passed",
+    "credentialScanMatches": 0
+  },
+  "limits": [
+    "This is an alpha milestone; the full PLAN.md objective remains active.",
+    "Full image smoke exercises actual bootstrap/cache setup and Node22 entrypoint with a preload probe before supervisor module evaluation; no model or vault is used.",
+    "Existing active homes retain their running images and adopt updates when idle.",
+    "Partial capture journal, real managed App launch and PostgreSQL authority changes began after this tag and are not shipped in alpha.9.",
+    "Lazy remote lookup/ranges/readdir, partial-object retention and native VCS services are explicit profiles; the default agent path and accepted-source integration remain gated.",
+    "No local macOS installation, production fleet authority migration or cold-fleet performance claim is made.",
+    "Fly rejected the digest-only image URI in the first canary. The versioned image tag was used and its actual resolved digest was verified."
+  ]
+}

@@ -1,0 +1,283 @@
+{
+  "format_version": 1,
+  "provider": "Fly.io / AWS S3",
+  "version": "4.0.0-alpha.9",
+  "revision": "11f1f75e5a18555f6c7e257aacc6b4097f425c5e",
+  "name": "rudder-alpha9-cas-62e24094",
+  "nonce": "62e24094-99c3-4963-b67d-84269d23000b",
+  "image": "registry.fly.io/rudder-workers-exla:4.0.0-alpha.9",
+  "imageDigest": "sha256:939c5593c5ed1232577d575f7ff382448c466a9033874c94a1a684c4ec5d599a",
+  "rootId": "alpha9-runnable-62e24094-99c3-4963-b67d-84269d23000b",
+  "steps": [
+    {
+      "step": "no-app-secrets",
+      "ms": 577
+    },
+    {
+      "step": "create-synthetic-worker-auth",
+      "ms": 712
+    },
+    {
+      "step": "create-owned-worker",
+      "ms": 27521
+    },
+    {
+      "step": "inventory",
+      "ms": 445
+    },
+    {
+      "step": "inventory",
+      "ms": 430
+    },
+    {
+      "step": "inventory",
+      "ms": 528
+    },
+    {
+      "step": "inventory",
+      "ms": 452
+    },
+    {
+      "step": "inventory",
+      "ms": 611
+    },
+    {
+      "step": "inventory",
+      "ms": 504
+    },
+    {
+      "step": "inventory",
+      "ms": 345
+    },
+    {
+      "step": "inventory",
+      "ms": 522
+    },
+    {
+      "step": "inventory",
+      "ms": 413
+    },
+    {
+      "step": "inventory",
+      "ms": 561
+    },
+    {
+      "step": "inventory",
+      "ms": 474
+    },
+    {
+      "step": "inventory",
+      "ms": 494
+    },
+    {
+      "step": "inventory",
+      "ms": 644
+    },
+    {
+      "step": "inventory",
+      "ms": 2179
+    },
+    {
+      "step": "inventory",
+      "ms": 552
+    },
+    {
+      "step": "inventory",
+      "ms": 1715
+    },
+    {
+      "step": "inventory",
+      "ms": 617
+    },
+    {
+      "step": "inventory",
+      "ms": 1716
+    },
+    {
+      "step": "inventory",
+      "ms": 593
+    },
+    {
+      "step": "inventory",
+      "ms": 818
+    },
+    {
+      "step": "inventory",
+      "ms": 720
+    },
+    {
+      "step": "inventory",
+      "ms": 659
+    },
+    {
+      "step": "inventory",
+      "ms": 553
+    },
+    {
+      "step": "inventory",
+      "ms": 449
+    },
+    {
+      "step": "inventory",
+      "ms": 533
+    },
+    {
+      "step": "inventory",
+      "ms": 409
+    },
+    {
+      "step": "inventory",
+      "ms": 511
+    },
+    {
+      "step": "inventory",
+      "ms": 385
+    },
+    {
+      "step": "inventory",
+      "ms": 457
+    },
+    {
+      "step": "inventory",
+      "ms": 801
+    },
+    {
+      "step": "inventory",
+      "ms": 518
+    },
+    {
+      "step": "inventory",
+      "ms": 485
+    },
+    {
+      "step": "inventory",
+      "ms": 981
+    },
+    {
+      "step": "inventory",
+      "ms": 601
+    },
+    {
+      "step": "inventory",
+      "ms": 1354
+    },
+    {
+      "step": "inventory",
+      "ms": 647
+    },
+    {
+      "step": "inventory",
+      "ms": 380
+    },
+    {
+      "step": "inventory",
+      "ms": 494
+    },
+    {
+      "step": "inventory",
+      "ms": 494
+    },
+    {
+      "step": "inventory",
+      "ms": 373
+    },
+    {
+      "step": "inventory",
+      "ms": 480
+    },
+    {
+      "step": "inventory",
+      "ms": 489
+    },
+    {
+      "step": "inventory",
+      "ms": 891
+    },
+    {
+      "step": "inventory",
+      "ms": 612
+    },
+    {
+      "step": "inventory",
+      "ms": 539
+    },
+    {
+      "step": "inventory",
+      "ms": 408
+    },
+    {
+      "step": "inventory",
+      "ms": 735
+    },
+    {
+      "step": "inventory",
+      "ms": 1106
+    },
+    {
+      "step": "inventory",
+      "ms": 623
+    },
+    {
+      "step": "inventory",
+      "ms": 588
+    },
+    {
+      "step": "inventory",
+      "ms": 531
+    },
+    {
+      "step": "destroy-owned-worker",
+      "ms": 1722
+    },
+    {
+      "step": "inventory",
+      "ms": 652
+    },
+    {
+      "step": "remove-synthetic-worker-auth",
+      "ms": 570
+    }
+  ],
+  "limits": [
+    "Small synthetic immutable fixture, not a cold-host performance workload or agent launch.",
+    "Producer bytes are a bounded in-memory fixture; worker restore uses the shipped native CAS and durable publication.",
+    "Only a generated synthetic account/workspace credential is used. No user account, vault or AWS key enters the canary.",
+    "Published synthetic immutable objects remain retained by the fabric no-GC policy."
+  ],
+  "fixture": {
+    "root": {
+      "kind": "runnable_root",
+      "algorithm": "sha256",
+      "digest": "9943378f1e171644aeda39ee4c3842c22903814ace6791f4451d20747916fc35",
+      "size_bytes": 814
+    },
+    "logicalFileBytes": 9437184,
+    "objects": 15,
+    "encodedBytes": 9440515,
+    "largeFileSha256": "9b2c07acf4335bf58ea9192e7439190c02ea07bdc5e3a193486f1656a4f7f4f2",
+    "rawNameHex": "ff61"
+  },
+  "publication": {
+    "receipt": {
+      "format_version": 1,
+      "root_id": "alpha9-runnable-62e24094-99c3-4963-b67d-84269d23000b",
+      "root": {
+        "kind": "runnable_root",
+        "algorithm": "sha256",
+        "digest": "9943378f1e171644aeda39ee4c3842c22903814ace6791f4451d20747916fc35",
+        "size_bytes": 814
+      },
+      "durability": "replicated",
+      "published_at_ms": 1793395122395,
+      "object_count": 15,
+      "total_bytes": 9440515
+    },
+    "uploaded_objects": 15,
+    "uploaded_bytes": 9440515
+  },
+  "ok": false,
+  "error": "Expected values to be strictly equal:\n+ actual - expected\n\n+ 'stopped'\n- 'started'\n     ^\n",
+  "cleanupVerified": true,
+  "syntheticCredentialRemoved": true,
+  "verifiedAt": "2026-10-30T21:22:16.584Z"
+}

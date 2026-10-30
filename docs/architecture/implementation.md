@@ -50,7 +50,7 @@ the three architecture documents already contained this session's planning work.
 | Private previews | Persisted Tailscale login, actual readiness, bounded async probes, exact project ownership, ready links and local open | E13 subset implemented; real userspace/Serve check passed; laptop/phone access remains untested |
 | Terminal stream | Shared home/sail helper, short output batching, bounded backpressure, connection fencing, UTF-8 and repaint recovery | E13 subset deployed in the worker image; real WS/PTY VM checks passed; existing homes adopt when idle |
 | Startup/download caches | Background CLI update, persistent account-local npm/pnpm/uv cache defaults, explicit overrides retained | Behavior tests pass; no distributed action-cache claim |
-| Full storage/engine rewrite | Milestones below | Initial foundations and shorter startup context ship in alpha.7, npm `next` and Cloud release 159; default workspace integration, fleet and migration gates remain open |
+| Full storage/engine rewrite | Milestones below | Bounded formats, remote workspace/cache and scoped native VCS interfaces are configured in Cloud release160 / worker alpha.9; npm remains alpha.7 pending the next checked release. Default workspace integration, fleet and migration gates remain open |
 
 The current native simple-execution path remains an isolated worker; explicit
 main-checkout mode remains available. The initial automatic DAG path retains
@@ -67,11 +67,25 @@ path, so this is a stated alpha limitation, not complete Cloud routing parity.
 
 ## V4 foundations and current continuation, 2026-10-30
 
-Alpha.7 is published on both npm `next` tags and the Cloud API is deployed as
-release 159. The shorter startup context from alpha.4 is included. New storage
-and workspace work below remains unshipped unless exact delivery evidence says
-otherwise. CLI publication and worker adoption are separate facts. The active
-objective remains the full plan.
+Cloud alpha.9 is deployed as release160 from
+`11f1f75e5a18555f6c7e257aacc6b4097f425c5e`; the canonical app, health,
+authentication, database integrity and unchanged active-home instance were
+verified at `2026-10-30T21:10:29Z`. Its complete worker image passed an owned
+Fly bootstrap/runtime smoke. See [exact delivery evidence](delivery-alpha9.json).
+The active home keeps its running alpha.7 image until idle.
+
+Both npm `next` tags still point to alpha.7. Alpha.9 publication failed twice in
+the macOS remote-root HTTP fixture before npm publication. Darwin inherits a
+listener's nonblocking flag, while the fixture assumed blocking full-body
+writes. The next source slice normalizes accepted streams and adds forced
+backpressure tests, including the real engine-control handler. Do not retag
+alpha.9, publish by hand or treat its Cloud deployment as npm availability.
+
+The shorter startup context from alpha.4 is included. Partial-capture namespace4,
+the inactive PostgreSQL authority adapter and explicit managed App launch are
+new working-tree changes after alpha.9. They remain unshipped until their own
+checks and delivery record. CLI publication, configured worker image and live
+worker adoption remain separate facts. The active objective is the full plan.
 
 - `engine/` provides typed immutable roots, local checksummed CAS, staged
   publication, retained closures and conservative collection. Source,

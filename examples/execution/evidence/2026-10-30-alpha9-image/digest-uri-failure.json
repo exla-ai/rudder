@@ -1,0 +1,238 @@
+{
+  "format_version": 1,
+  "provider": "Fly.io",
+  "version": "4.0.0-alpha.9",
+  "revision": "11f1f75e5a18555f6c7e257aacc6b4097f425c5e",
+  "image": "registry.fly.io/rudder-workers-exla@sha256:939c5593c5ed1232577d575f7ff382448c466a9033874c94a1a684c4ec5d599a",
+  "expectedDigest": "sha256:939c5593c5ed1232577d575f7ff382448c466a9033874c94a1a684c4ec5d599a",
+  "nonce": "4b84cb69-e787-4e8e-97fe-66177a51fec5",
+  "name": "rudder-alpha9-boot-4b84cb69",
+  "steps": [
+    {
+      "step": "assert-no-app-secrets",
+      "ms": 522
+    },
+    {
+      "step": "inventory",
+      "ms": 459
+    },
+    {
+      "step": "inventory",
+      "ms": 437
+    },
+    {
+      "step": "inventory",
+      "ms": 472
+    },
+    {
+      "step": "inventory",
+      "ms": 488
+    },
+    {
+      "step": "inventory",
+      "ms": 593
+    },
+    {
+      "step": "inventory",
+      "ms": 428
+    },
+    {
+      "step": "inventory",
+      "ms": 433
+    },
+    {
+      "step": "inventory",
+      "ms": 868
+    },
+    {
+      "step": "inventory",
+      "ms": 664
+    },
+    {
+      "step": "inventory",
+      "ms": 438
+    },
+    {
+      "step": "inventory",
+      "ms": 472
+    },
+    {
+      "step": "inventory",
+      "ms": 678
+    },
+    {
+      "step": "inventory",
+      "ms": 364
+    },
+    {
+      "step": "inventory",
+      "ms": 502
+    },
+    {
+      "step": "inventory",
+      "ms": 462
+    },
+    {
+      "step": "inventory",
+      "ms": 612
+    },
+    {
+      "step": "inventory",
+      "ms": 515
+    },
+    {
+      "step": "inventory",
+      "ms": 493
+    },
+    {
+      "step": "inventory",
+      "ms": 406
+    },
+    {
+      "step": "inventory",
+      "ms": 515
+    },
+    {
+      "step": "inventory",
+      "ms": 405
+    },
+    {
+      "step": "inventory",
+      "ms": 456
+    },
+    {
+      "step": "inventory",
+      "ms": 428
+    },
+    {
+      "step": "inventory",
+      "ms": 741
+    },
+    {
+      "step": "inventory",
+      "ms": 1332
+    },
+    {
+      "step": "inventory",
+      "ms": 495
+    },
+    {
+      "step": "inventory",
+      "ms": 498
+    },
+    {
+      "step": "inventory",
+      "ms": 440
+    },
+    {
+      "step": "inventory",
+      "ms": 342
+    },
+    {
+      "step": "inventory",
+      "ms": 445
+    },
+    {
+      "step": "inventory",
+      "ms": 588
+    },
+    {
+      "step": "inventory",
+      "ms": 477
+    },
+    {
+      "step": "inventory",
+      "ms": 973
+    },
+    {
+      "step": "inventory",
+      "ms": 576
+    },
+    {
+      "step": "inventory",
+      "ms": 333
+    },
+    {
+      "step": "inventory",
+      "ms": 640
+    },
+    {
+      "step": "inventory",
+      "ms": 414
+    },
+    {
+      "step": "inventory",
+      "ms": 449
+    },
+    {
+      "step": "inventory",
+      "ms": 532
+    },
+    {
+      "step": "inventory",
+      "ms": 482
+    },
+    {
+      "step": "inventory",
+      "ms": 826
+    },
+    {
+      "step": "inventory",
+      "ms": 823
+    },
+    {
+      "step": "inventory",
+      "ms": 687
+    },
+    {
+      "step": "inventory",
+      "ms": 1297
+    },
+    {
+      "step": "inventory",
+      "ms": 608
+    },
+    {
+      "step": "inventory",
+      "ms": 519
+    },
+    {
+      "step": "inventory",
+      "ms": 483
+    },
+    {
+      "step": "inventory",
+      "ms": 412
+    },
+    {
+      "step": "inventory",
+      "ms": 418
+    },
+    {
+      "step": "inventory",
+      "ms": 477
+    },
+    {
+      "step": "inventory",
+      "ms": 750
+    },
+    {
+      "step": "inventory",
+      "ms": 495
+    },
+    {
+      "step": "inventory",
+      "ms": 483
+    }
+  ],
+  "limits": [
+    "The real image bootstrap, cache setup and entrypoint execute. An image-owned-node preload probes and holds before supervisor module evaluation.",
+    "No model call, account vault, worker credential, live home or production workspace is used.",
+    "Managed execution remains opt-in; this does not prove full backend, fleet or remote-build admission."
+  ],
+  "createError": "Searching for image 'registry.fly.io/rudder-workers-exla@sha256:939c5593c5ed1232577d575f7ff382448c466a9033874c94a1a684c4ec5d599a' remotely...\nimage found: img_98dgp89z2z2nvxw0\nError: could not launch machine: failed to launch VM: failed to get manifest registry.fly.io/rudder-workers-exla@sha256:939c5593c5ed1232577d575f7ff382448c466a9033874c94a1a684c4ec5d599a: request failed: not found [http 404]: {\"errors\":[{\"code\":\"MANIFEST_UNKNOWN\",\"message\":\"manifest unknown\",\"detail\":\"unknown manifest name=z4k69dwm7vxnqp5m revision=sha256:939c5593c5ed1232577d575f7ff382448c466a9033874c94a1a684c4ec5d599a\"}]}\n (Request ID: 01M679YCEFD4ZQ9BW4R0A61JPX-iad)\n",
+  "ok": false,
+  "error": "Expected values to be strictly equal:\n+ actual - expected\n\n+ undefined\n- 'started'\n",
+  "cleanupVerified": true,
+  "verifiedAt": "2026-10-30T21:05:44.134Z"
+}

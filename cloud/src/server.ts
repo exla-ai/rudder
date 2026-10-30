@@ -6193,7 +6193,7 @@ function homeProjects(home: Workspace): JsonRecord[] {
       stateAt: lastSeen,
       agents: agents as unknown as Json,
       newAgentsPrivate: visibility.newAgentsPrivate,
-      ports: (project?.ports ?? []) as unknown as Json,
+      ports: (stateLive ? project?.ports ?? [] : []) as unknown as Json,
       plan: (project?.plan ?? null) as Json,
       clients: Array.from(workspaceChannels.get(row.id)?.clients ?? []).filter(isOpen).length,
       pinnedAt: row.pinnedAt ?? null,

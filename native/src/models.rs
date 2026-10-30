@@ -239,23 +239,12 @@ pub(crate) fn suggestions_for(app: &App) -> Vec<Suggestion> {
         return suggestions;
     }
 
-    if input.starts_with("/gam") {
-        // Bare "/gam" opens the reviewer picker, because choosing who argues
-        // with the generator is the interesting decision here. What it must NOT
-        // do is take the Enter key by surprise: the first row is "just type the
-        // task", so the default selection keeps the line and naming a provider
-        // is a deliberate arrow-down.
-        //
-        // Past that, /gam is a task command. The picker stays open only while
-        // the first word is still a partial PROVIDER name, matched by strict
-        // prefix, so an ordinary ask never turns back into a model chooser.
-        let rest = input.strip_prefix("/gam").unwrap_or_default();
-        // "/gamble" is not /gam.
-        if !rest.is_empty() && !rest.starts_with(char::is_whitespace) {
-            return rank_suggestions(command_suggestions(), input.trim_start_matches('/'));
-        }
-        maybe_refresh_models_dev_cache();
-        return gam_suggestions(app, rest.trim_start());
+    // Retired standalone workflows and the hidden /plan compatibility alias
+    // must not take over Enter or advertise another way to start ordinary work.
+    if ["/gam", "/nudge", "/plan"].iter().any(|command| {
+        input == *command || input.strip_prefix(command).is_some_and(|rest| rest.starts_with(char::is_whitespace))
+    }) {
+        return Vec::new();
     }
     rank_suggestions(command_suggestions(), input.trim_start_matches('/'))
 }
@@ -549,34 +538,9 @@ pub(crate) fn command_suggestions() -> Vec<Suggestion> {
             action: SuggestionAction::RunCommand("/fast".to_string()),
         },
         Suggestion {
-            label: "/plan <text>".to_string(),
-            detail: "orchestrator planner for DAG work (plain input runs one main agent instead)".to_string(),
-            action: SuggestionAction::Insert("/plan ".to_string()),
-        },
-        Suggestion {
             label: "/swarm [n] <task>".to_string(),
             detail: "n competing experiments at one goal (leave n out and the swarm picks), all on the current model; it proposes them, Enter launches, none merges on its own".to_string(),
             action: SuggestionAction::Insert("/swarm ".to_string()),
-        },
-        Suggestion {
-            label: "/gam <task>".to_string(),
-            detail: "two models on one task: one writes, the other (read-only) reviews every turn until it accepts".to_string(),
-            action: SuggestionAction::Insert("/gam ".to_string()),
-        },
-        Suggestion {
-            label: "/gam <reviewer> [gen <generator>] <task>".to_string(),
-            detail: "pick the models inline, e.g. /gam codex gpt-6.1-sol gen claude opus fix auth".to_string(),
-            action: SuggestionAction::Insert("/gam ".to_string()),
-        },
-        Suggestion {
-            label: "/gam again".to_string(),
-            detail: "rerun your last /gam pair on its last task".to_string(),
-            action: SuggestionAction::RunCommand("/gam again".to_string()),
-        },
-        Suggestion {
-            label: "/tell <note>".to_string(),
-            detail: "brief the /gam reviewer; the note rides along with its next review".to_string(),
-            action: SuggestionAction::Insert("/tell ".to_string()),
         },
         Suggestion {
             label: "/resume".to_string(),
@@ -624,12 +588,6 @@ pub(crate) fn command_suggestions() -> Vec<Suggestion> {
             label: "/merge-all".to_string(),
             detail: "merge all completed workspaces".to_string(),
             action: SuggestionAction::RunCommand("/merge-all".to_string()),
-        },
-        Suggestion {
-            label: "/nudge <message>".to_string(),
-            detail: "send one message to every in-flight worker (dead ones are resumed)"
-                .to_string(),
-            action: SuggestionAction::Insert("/nudge ".to_string()),
         },
         Suggestion {
             label: "/verify".to_string(),

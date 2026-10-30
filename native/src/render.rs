@@ -4931,12 +4931,6 @@ pub(crate) fn force_worker_cursor(backend: Backend) -> bool {
 /// the SAME string: if these drift, the pane height and mouse selection bounds
 /// disagree and clicks on valid input rows get rejected.
 pub(crate) fn task_default_hint(app: &App) -> String {
-    // A `/gam` line previews the pair it will start: who writes, who reviews,
-    // at what effort, and where. Every one of those has a default, and seeing
-    // the defaults before Enter is what makes it safe to skip the picker.
-    if let Some(preview) = gam_line_preview(app, &app.task_input) {
-        return preview;
-    }
     task_default_hint_static(app).to_string()
 }
 
@@ -4960,7 +4954,7 @@ fn task_default_hint_static(app: &App) -> &'static str {
     {
         "type to talk to the live orchestrator for status, retro, or follow-up control  ·  ^W pane"
     } else {
-        "type for one isolated mergeable worker; /plan for a DAG; /main for this checkout  ·  Option-1/2/3/4 or ^W pane"
+        "describe a task; Rudder plans when needed; /main for this checkout  ·  Option-1/2/3/4 or ^W pane"
     }
 }
 
@@ -5190,12 +5184,6 @@ pub(crate) fn render_suggestions(frame: &mut Frame<'_>, task_area: Rect, app: &A
 
     let title = if app.task_input.starts_with("/model") {
         model_picker_title(
-            &app.task_input,
-            selected_index.saturating_add(1),
-            suggestions.len(),
-        )
-    } else if app.task_input.trim_start().starts_with("/gam") {
-        gam_picker_title(
             &app.task_input,
             selected_index.saturating_add(1),
             suggestions.len(),

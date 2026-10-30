@@ -116,6 +116,10 @@ COPY cloud/worker/logins.mjs ./logins.mjs
 COPY cloud/worker/digest.mjs ./digest.mjs
 COPY cloud/worker/plan.mjs ./plan.mjs
 COPY cloud/worker/theme.mjs ./theme.mjs
+COPY cloud/worker/terminal-transport.mjs ./terminal-transport.mjs
+COPY cloud/worker/tailscale-previews.mjs ./tailscale-previews.mjs
+COPY cloud/worker/cache-env.sh ./cache-env.sh
+COPY cloud/worker/task-launch.mjs ./task-launch.mjs
 
 COPY cloud/worker/entrypoint.sh /usr/local/bin/rudder-worker
 RUN chmod +x /usr/local/bin/rudder-worker

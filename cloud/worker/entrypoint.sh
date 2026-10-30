@@ -1,17 +1,25 @@
 #!/usr/bin/env sh
 set -eu
 
+. /opt/rudder-worker/cache-env.sh
+
 # The image bakes whatever Claude Code was current on its build day, and a
 # machine boots from the image, so without this a worker ran a stale binary
 # for the life of the image tag (the auto-updater's "Updated to latest" only
 # ever reached the NEXT launch, and a fresh boot had no next launch to reach).
-# Bounded: a fresh image is a two-second no-op, a stale one downloads once.
+# Check in the background: image-provided CLIs can start immediately, even when
+# an update server is unavailable. Native Claude updates leave a running binary
+# intact and affect subsequent launches. Neither updater reads terminal input.
 # Skipped entirely with RUDDER_WORKER_SKIP_AGENT_UPDATE=1.
-if [ "${RUDDER_WORKER_SKIP_AGENT_UPDATE:-0}" != "1" ] && command -v claude >/dev/null 2>&1; then
-  echo "rudder-worker: checking for a Claude Code update ($(claude --version 2>/dev/null || echo unknown))" >&2
-  if ! timeout 90 claude update >&2; then
-    echo "rudder-worker: claude update did not complete; continuing with $(claude --version 2>/dev/null || echo unknown)" >&2
-  fi
+if [ "${RUDDER_WORKER_SKIP_AGENT_UPDATE:-0}" != "1" ]; then
+  (
+    if command -v claude >/dev/null 2>&1; then
+      echo "rudder-worker: checking for a Claude Code update" >&2
+      if ! timeout 90 claude update >&2; then
+        echo "rudder-worker: Claude Code update did not complete; keeping the installed version" >&2
+      fi
+    fi
+  ) </dev/null >&2 &
   # Codex refreshes in the background: it is not the default cloud backend, so
   # the first session need not wait on npm. A plain `npm install -g` removes
   # the old package before writing the new one, so `codex` did not exist for
@@ -32,7 +40,7 @@ if [ "${RUDDER_WORKER_SKIP_AGENT_UPDATE:-0}" != "1" ] && command -v claude >/dev
         rm -rf "$global/codex.old" "$next"
       fi
     fi
-  ) >/dev/null 2>&1 &
+  ) </dev/null >/dev/null 2>&1 &
 fi
 
 # A home machine (one per account, every repo on it) runs its own supervisor.

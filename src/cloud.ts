@@ -26,6 +26,7 @@ import { runLaptopOnboarding, type CloudRepoSummary } from "./onboarding.js";
 import { renderQrForTerminal } from "./qr.js";
 import { describeSync, exportWork, importWork, syncCheckout, type CheckoutSyncReport } from "./checkout-sync.js";
 import { pullFromHome } from "./cloud-pull.js";
+import { cloudPreviews, localTailnetStatus, previewAccess, previewReachable } from "./tailscale-preview.js";
 import type { CloudAuthState, CloudSail, JsonValue } from "./types.js";
 import {
   ensureDir,
@@ -249,6 +250,9 @@ export async function runCloudCommand(command: string, args: string[], options: 
       return;
     case "home":
       await homeCommand(rest, options);
+      return;
+    case "preview":
+      await cloudPreviewCommand(rest, options);
       return;
     case "doctor":
       await cloudDoctor(options);
@@ -4064,6 +4068,8 @@ Usage:
       holds every repo) and attach to its dashboard. --snapshot uploads this
       folder to its own machine instead.
   rudder cloud home [status|start|stop|open <owner/repo>]
+  rudder cloud preview [port] [--list] [--json]
+      open this repo's private Tailscale preview; list ready URLs with --list
   rudder cloud move [runId...] [--yes]
       move this repo's unfinished agents (or just the named ones) to the
       home machine: their jj changes and conversations go along, nothing is
@@ -5102,6 +5108,69 @@ async function homeAgentsCommand(client: CloudClient, sub: "runs" | "delete", ar
   console.log(result.status === "queued"
     ? "The home machine is asleep; it deletes them as soon as it is back."
     : "Deleted on the home machine.");
+}
+
+async function cloudPreviewCommand(args: string[], options: CloudCommandOptions): Promise<void> {
+  const listOnly = options.json || args.includes("--list");
+  const positional = args.filter((arg) => arg !== "--list");
+  if (positional.length > 1 || (positional[0] && !/^\d{2,5}$/.test(positional[0]))) {
+    throw new Error("Usage: rudder cloud preview [port] [--list] [--json]");
+  }
+  const requestedPort = positional[0] ? Number(positional[0]) : null;
+  if (requestedPort !== null && (requestedPort < 1024 || requestedPort > 65535)) {
+    throw new Error("Preview port must be between 1024 and 65535.");
+  }
+  const root = findRepoRoot();
+  const repo = await githubSlugFromOrigin(root).catch(() => null);
+  const project = repo ? { repo } : { name: path.basename(root) };
+  const client = await cloudClient({ requireToken: true });
+  type HomeState = { home: Record<string, JsonValue> | null; projects: Record<string, JsonValue>[] };
+  let state = await client.request<HomeState>("/api/rudder/home", { method: "GET" });
+  if (!listOnly && state.home && (!state.home.connected || state.home.stateLive === false)) {
+    process.stderr.write("Waking the cloud machine for its private preview...\n");
+    await client.request("/api/rudder/home/start", { method: "POST", body: {} });
+    const deadline = Date.now() + 90_000;
+    while ((!state.home?.connected || state.home.stateLive === false) && Date.now() < deadline) {
+      await sleep(1500);
+      state = await client.request<HomeState>("/api/rudder/home", { method: "GET" });
+    }
+  }
+  const ready = () => cloudPreviews(state, project).filter((entry) => requestedPort === null || entry.port === requestedPort);
+  let previews = ready();
+  if (!listOnly && !previews.length && state.home?.connected) {
+    const deadline = Date.now() + 20_000;
+    process.stderr.write("Waiting for this project's private preview...\n");
+    while (!previews.length && state.home?.connected && Date.now() < deadline) {
+      const tailnet = state.home.tailnet;
+      if (tailnet && typeof tailnet === "object" && !Array.isArray(tailnet) && tailnet.error) break;
+      await sleep(1000);
+      state = await client.request<HomeState>("/api/rudder/home", { method: "GET" });
+      previews = ready();
+    }
+  }
+  if (options.json) {
+    printJson({ previews, connected: state.home?.connected === true, access: "tailnet", requiresTailscale: true } as unknown as JsonValue);
+    return;
+  }
+  if (!previews.length) {
+    const tailnet = state.home?.tailnet;
+    const detail = tailnet && typeof tailnet === "object" && !Array.isArray(tailnet) && typeof tailnet.error === "string"
+      ? ` ${tailnet.error}.` : "";
+    throw new Error(`No ready private preview${requestedPort ? ` on port ${requestedPort}` : ""} for ${repo || project.name}.${detail} Start a dev server in that project's cloud workspace, then retry.`);
+  }
+  if (listOnly || previews.length > 1) {
+    for (const preview of previews) console.log(`:${preview.port} ${preview.label} ${preview.url}`);
+    if (!listOnly) console.log("Open one with: rudder cloud preview <port>");
+    return;
+  }
+  const preview = previews[0];
+  const access = previewAccess(await localTailnetStatus(), new URL(preview.url).hostname);
+  if (!access.ok) throw new Error(`${access.error} Preview: ${preview.url}`);
+  if (!(await previewReachable(preview.url))) {
+    throw new Error(`The preview is not reachable from this computer. Check the dev server and your existing Tailscale access rules. Preview: ${preview.url}`);
+  }
+  console.log(preview.url);
+  openBrowser(preview.url);
 }
 
 async function homeCommand(args: string[], options: CloudCommandOptions): Promise<void> {

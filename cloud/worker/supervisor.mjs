@@ -9,12 +9,13 @@ import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { StringDecoder } from "node:string_decoder";
 import { WebSocket } from "ws";
 import pty from "node-pty";
 import { writeTerminalColors } from "./theme.mjs";
 
 import { countActiveAgents } from "./active-runs.mjs";
+import { createTerminalTransport } from "./terminal-transport.mjs";
+import { createWorkerLaunchResolver } from "./task-launch.mjs";
 
 const cloudUrl = (process.env.RUDDER_CLOUD_URL || "").trim();
 const sailId = (process.env.RUDDER_SAIL_ID || "").trim();
@@ -30,6 +31,7 @@ const flyMachineId = (process.env.FLY_MACHINE_ID || "").trim();
 const isWorkspaceMode = Boolean(workspaceId);
 const sessionId = isWorkspaceMode ? workspaceId : sailId;
 const sessionKind = isWorkspaceMode ? "workspace" : "sail";
+let lastReportedState = "running";
 
 if (!sessionId) {
   console.error("RUDDER_WORKSPACE_ID or RUDDER_SAIL_ID is required");
@@ -101,16 +103,12 @@ if (Object.keys(capturedEnv).length > 0) {
   console.log(`Loaded ${Object.keys(capturedEnv).length} captured env var(s) from local snapshot.`);
 }
 
-const command = "rudder";
 // Cloud task sails run Claude Code by default: claude-code is installed in the
 // worker image and the snapshot carries its auth. Codex is NOT usable here —
 // Rudder's pinned Codex fork has no managed linux/x64 binary, so `rudder codex`
 // exits 1 on boot. Override with RUDDER_CLOUD_BACKEND only if a working codex
 // binary is provided via RUDDER_CODEX_BIN.
 const cloudBackend = (process.env.RUDDER_CLOUD_BACKEND || "claude").trim() || "claude";
-const args = isWorkspaceMode
-  ? []
-  : task ? [cloudBackend, "--worktree", task] : [];
 
 // Build the agent's environment from a COPY with the control-plane secrets removed.
 // The supervisor already captured these into module-level consts at startup, so the
@@ -141,6 +139,20 @@ for (const secret of ["RUDDER_WORKER_TOKEN", "RUDDER_SNAPSHOT_URL", "RUDDER_CLOU
   delete childEnv[secret];
 }
 
+// Resolve once, before opening a PTY or a transport. Reconnecting the socket
+// must never submit the task again. Legacy finite sails cannot reuse the
+// implementation contract for a discussion or an approval-gated plan.
+const resolveLaunch = createWorkerLaunchResolver({ isWorkspaceMode, task, backend: cloudBackend, env: childEnv });
+let launch;
+try {
+  launch = await resolveLaunch();
+} catch (error) {
+  console.error(error.message);
+  await reportDone("failed", 2, error.message);
+  process.exit(2);
+}
+const { command, args } = launch;
+
 const term = pty.spawn(command, args, {
   name: "xterm-256color",
   cols: 120,
@@ -150,39 +162,54 @@ const term = pty.spawn(command, args, {
 });
 
 let ws = null;
-let wsReadyPromise = connect();
-let lastReportedState = "running";
 let exited = false;
-let heartbeatTimer = setInterval(reportHeartbeat, 30000);
-const inputDecoder = new StringDecoder("utf8");
-const pendingOutput = [];
-let pendingOutputBytes = 0;
-const MAX_PENDING_OUTPUT_BYTES = 256 * 1024;
+let connectingSocket = null;
+let reconnectTimer = null;
+const transport = createTerminalTransport({
+  writeInput: (text) => term.write(text),
+  pauseOutput: () => { if (!exited) term.pause(); },
+  resumeOutput: () => { if (!exited) term.resume(); },
+  requestRepaint: signalRepaint,
+  onError: (error, socket) => {
+    console.error(`Terminal transport: ${error.message}`);
+    try { socket.terminate(); } catch { /* ignore */ }
+  },
+});
+let wsReadyPromise = connect();
+const heartbeatTimer = setInterval(reportHeartbeat, 30000);
 reportHeartbeat();
 
 term.onData((data) => {
   process.stdout.write(data);
-  const chunk = Buffer.from(data, "utf8");
-  const socket = ws;
-  if (socket && socket.readyState === WebSocket.OPEN) {
-    socket.send(chunk, { binary: true });
-  } else {
-    bufferPendingOutput(chunk);
-  }
+  transport.writeOutput(data);
 });
 
 term.onExit(({ exitCode, signal }) => {
   exited = true;
   clearInterval(heartbeatTimer);
+  if (reconnectTimer !== null) clearTimeout(reconnectTimer);
+  if (connectingSocket) connectingSocket.terminate();
   const state = exitCode === 0 ? "completed" : "failed";
   const code = exitCode ?? (signal ? 128 + signal : 1);
-  reportDone(state, code, state === "failed" ? `${command} exited with code ${code}` : undefined);
+  const reported = reportDone(state, code, state === "failed" ? `${command} exited with code ${code}` : undefined);
   const socket = ws;
+  let outputSent = Promise.resolve();
   if (socket && socket.readyState === WebSocket.OPEN) {
-    socket.send(JSON.stringify({ type: "exit", code: exitCode, signal: signal ?? null }));
-    socket.close(1000, "worker-exit");
+    outputSent = new Promise((resolve) => {
+      // The exit frame follows the last queued terminal bytes, including a
+      // final short batch. Closing the socket first used to lose that output.
+      transport.sendControl({ type: "exit", code: exitCode, signal: signal ?? null }, () => {
+        if (socket.readyState === WebSocket.OPEN) socket.close(1000, "worker-exit");
+        resolve();
+      });
+    });
   }
-  setTimeout(() => process.exit(exitCode ?? 1), 250).unref();
+  Promise.all([reported, outputSent]).finally(() => {
+    transport.dispose();
+    process.exit(code);
+  });
+  // A broken network must not keep a finished worker alive indefinitely.
+  setTimeout(() => process.exit(code), 1500).unref();
 });
 
 process.on("SIGTERM", () => {
@@ -205,14 +232,22 @@ function connect() {
   return new Promise((resolve) => {
     let connected = false;
     const socket = new WebSocket(wsUrl, {
+      handshakeTimeout: 10_000,
       headers: {
         authorization: `Bearer ${workerToken}`,
         ...(flyMachineId ? { "x-rudder-machine-id": flyMachineId } : {}),
       },
     });
+    connectingSocket = socket;
     socket.binaryType = "nodebuffer";
     socket.on("open", () => {
+      if (exited || connectingSocket !== socket) {
+        socket.terminate();
+        resolve(null);
+        return;
+      }
       connected = true;
+      connectingSocket = null;
       ws = socket;
       try { socket._socket?.setNoDelay?.(true); } catch { /* ignore */ }
       socket.send(JSON.stringify({
@@ -222,29 +257,42 @@ function connect() {
         sessionKind,
         sessionId,
       }));
-      flushPendingOutput(socket);
+      transport.attach(socket);
       // The relay starts a fresh replay buffer for this socket: begin it with
       // a whole picture.
       signalRepaint();
       resolve(socket);
     });
     socket.on("message", (data, isBinary) => {
-      if (exited) {
+      if (exited || !transport.isCurrent(socket)) {
         return;
       }
       if (isBinary && Buffer.isBuffer(data)) {
-        term.write(inputDecoder.write(data));
+        transport.writeInput(socket, data);
         return;
       }
       const text = Buffer.isBuffer(data) ? data.toString("utf8") : String(data);
       handleControl(text);
     });
     const reschedule = () => {
+      const wasConnecting = connectingSocket === socket;
+      const wasCurrent = ws === socket;
+      if (wasConnecting) connectingSocket = null;
+      if (wasCurrent) {
+        transport.detach(socket);
+        ws = null;
+      }
       if (exited) {
+        resolve(null);
         return;
       }
-      ws = null;
-      setTimeout(() => { wsReadyPromise = connect(); }, 2000);
+      if ((wasCurrent || wasConnecting) && !ws && !connectingSocket && reconnectTimer === null) {
+        reconnectTimer = setTimeout(() => {
+          reconnectTimer = null;
+          wsReadyPromise = connect();
+        }, 2000);
+      }
+      if (!connected) resolve(null);
     };
     socket.on("close", reschedule);
     socket.on("error", () => {
@@ -254,29 +302,6 @@ function connect() {
       }
     });
   });
-}
-
-function bufferPendingOutput(chunk) {
-  if (chunk.length >= MAX_PENDING_OUTPUT_BYTES) {
-    pendingOutput.length = 0;
-    pendingOutput.push(chunk.subarray(chunk.length - MAX_PENDING_OUTPUT_BYTES));
-    pendingOutputBytes = MAX_PENDING_OUTPUT_BYTES;
-    return;
-  }
-  pendingOutput.push(chunk);
-  pendingOutputBytes += chunk.length;
-  while (pendingOutputBytes > MAX_PENDING_OUTPUT_BYTES && pendingOutput.length > 1) {
-    pendingOutputBytes -= pendingOutput.shift().length;
-  }
-}
-
-function flushPendingOutput(socket) {
-  if (pendingOutputBytes === 0 || socket.readyState !== WebSocket.OPEN) {
-    return;
-  }
-  socket.send(Buffer.concat(pendingOutput, pendingOutputBytes), { binary: true });
-  pendingOutput.length = 0;
-  pendingOutputBytes = 0;
 }
 
 function handleControl(text) {
@@ -321,7 +346,7 @@ function handleControl(text) {
     const socket = ws;
     if (socket && socket.readyState === WebSocket.OPEN) {
       try {
-        socket.send(JSON.stringify({ type: "probe-reply", id: payload.id ?? null }));
+        transport.sendControl({ type: "probe-reply", id: payload.id ?? null });
       } catch {
         // ignore
       }

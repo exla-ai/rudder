@@ -59,6 +59,7 @@ plus a worker image, used only when a task is handed off to the cloud.
 │   ├── src/models.rs      model/effort tables, model picker, suggestion ranking
 │   ├── src/launch.rs      agent launch/resume command building, review-all runs
 │   ├── src/tasks.rs       prompt construction, task summaries, rudder-plan parsing
+│   ├── src/task_routing.rs automatic task intent routing + optional TS classifier bridge
 │   ├── src/gitio.rs       git/jj-workspace/run-record persistence + fs helpers
 │   ├── src/cloudio.rs     cloud command plumbing + Codex session-log scanning
 │   ├── src/usage.rs       token-usage accounting, pricing, date helpers
@@ -424,9 +425,11 @@ agent list while it has focus.
 - **Task**: an input line that starts the next agent. Supports history (`Up`/
   `Down`), readline-style editing (Ctrl+A/E/U/K/W/D/H, Alt/Ctrl+Backspace word
   delete, Alt+Left/Right word nav), and slash-command completion. Fresh plain input
-  starts or continues exactly one `AgentMode::Main` end-to-end owner in the real
-  checkout. `/plan` explicitly opts into the isolated DAG; `/run` starts one isolated
-  worker. (`/ask`, the old direct one-off, was removed; `OneOff` rows from older
+  selects discussion, one isolated worker, or an approval-gated DAG through
+  `task_routing.rs`. Discussion/plan-only intent opens a guarded Main session;
+  `/main` explicitly selects the shared checkout. `/plan` is an unadvertised
+  compatibility entry; `/gam` and `/nudge` no longer launch their old workflows.
+  (`/run` and `/ask` were already removed; `OneOff` rows from older
   sessions still load.) `$ <command>` opens a shell pane instead of a task
   (`start_shell_pane`): an interactive `$SHELL -l` in the checkout with the
   command typed in, a `plain_process` row like Rudder's own CLI panes, checked
@@ -1497,6 +1500,13 @@ npm version patch          # bumps package.json + package-lock, commits, tags vX
 git push --follow-tags     # pushes the commit and the tag; CI publishes
 ```
 
+Prerelease versions (for example `npm version 4.0.0-alpha.1`) publish to the
+`next` dist-tag; stable versions publish to `latest`. Both package names use the
+same channel. A v4 foundation alpha is not completion of the full rewrite;
+the plan and [implementation record](docs/architecture/implementation.md) track
+remaining launch gates. The updater follows `latest`, compares prerelease
+precedence correctly, and does not downgrade an installed v4 alpha to stable v3.
+
 `npm publish` runs in CI via `prepack` (tsc + `cargo build --release` +
 copy-native), with `--provenance` (hence the `repository` field and
 `id-token: write` permission). One-time setup: add an npm "Automation" token as
@@ -2156,22 +2166,32 @@ row loaded from disk (no `completed_at`: it died in an earlier session) never pi
 Before this, two dead runs from a week earlier kept a repo's tab on ⊗ next to a worker
 that had quietly finished.
 
-### 14.4c Default task input: one end-to-end main owner; `/plan` is explicit
-A FRESH task (no active plan) has a deterministic ownership contract:
+### 14.4c Default task input: automatic intent routing (v4 foundations)
+A fresh native task goes through `task_routing.rs`; existing selected-agent
+follow-ups retain their addressed path. The actual simple-task default is an
+isolated Execute worker. Earlier descriptions of plain input always selecting
+Main were stale and are superseded here.
 
-- **Plain task input** goes to `start_or_continue_default_main`. It reuses the first
-  `AgentMode::Main` row or creates one when absent, running in the real checkout with
-  `main_task_prompt`. That prompt makes one agent responsible for implementation,
-  tests, and any explicitly requested commit/version/push/deploy/install workflow.
-  This prevents a planner/worker split from losing final delivery ownership.
-- **`/plan <text>`** explicitly starts `start_rudder_plan_task` and the orchestrator /
-  isolated DAG path. Planners remain read-only; workers implement in jj workspaces.
-- **`/run <task>`** is the explicit escape hatch for exactly one isolated worker
-  with no DAG. It calls `start_execute_task_node(..., None)` and creates a normal
-  **`AgentMode::Execute`** run. In a git repo, this uses the jj workspace launch
-  path (`prepare_jj_workspace`), has no `node_id`, lands in Review when done, and
-  is mergeable through selected `m` or `/merge-all` into the current integration
-  checkout.
+- **Discuss / plan only:** one guarded Main session, no implementation workers.
+  Preserve this scope across restart/resume; saving an explicitly requested
+  prose artifact does not authorize product edits or delivery.
+- **Execute:** one isolated Execute worker, Review then selected `m`/merge-all.
+  `/main <task>` is the explicit shared-checkout/delivery-owner path.
+- **Plan:** `start_rudder_plan_task` proposes a read-only DAG using the existing
+  approval gate. `/plan` remains a hidden compatibility entry, including the
+  same protection for explicit discussion/plan-only intent.
+- **Optional classifier:** `RUDDER_TASK_ROUTING=decisions` plus `OPENAI_API_KEY`
+  invokes TS `__route-task` on a background thread. Rust has no HTTP client.
+  The helper redacts outgoing credentials, has bounded stdin/body/deadlines and
+  falls back to shared deterministic rules. Fixtures parity-test Rust and TS.
+  Home web/phone tasks route once in the home dashboard through the same ingress.
+  Legacy task sails retain finite direct execution; non-execute requests are
+  rejected until their lifecycle adapter migrates. Do not claim all Cloud task
+  entry points already support automatic planning.
+- **Retired public workflows:** `/gam` and `/nudge` return a retirement notice;
+  existing sessions/transports remain compatible until their users migrate.
+- **`/run` was already retired.** Ordinary implementation input supplies the
+  one-worker path; do not count this as a new v4 removal.
 - **`/ask` was removed.** It used to start a separate `AgentMode::OneOff` agent in the
   main checkout. `OneOff` rows persisted before the removal still load into their own
   `Bucket::OneOff` section and are excluded from merge, merge-all and review-all.
@@ -2382,6 +2402,10 @@ plan): an explicit `OrchestratorMode` enum/header (behaviour already derives fro
 promote/demote, extract-shared, reorder).
 
 ### 14.10.5 `/gam`: the generator/adversarial pair (2026-08)
+Legacy implementation reference. New `/gam` entry is sunset in the v4 foundation
+track; resume/transport code is retained for existing sessions and extraction.
+The following describes those legacy sessions, not an advertised new workflow.
+
 Two models argue about one piece of work: a GENERATOR implements (normal Execute
 worker, dashboard default model, isolated jj workspace unless the `main` keyword
 is given), and an ADVERSARIAL reviewer (the model named after `/gam`) questions
@@ -2613,9 +2637,10 @@ Recorded so future contributors do not relitigate them:- **Autonomy without a co
   its own `PlanState`, workspaces and merges, and talking to an orchestrator's pane edits
   THAT plan. There is deliberately no cross-plan coordination — two plans that touch the
   same files rejoin at the same place every isolated worker does, the merge. The task pane
-  still routes into NO plan: plain input always starts a standalone worker.
-- **Explicit isolation.** `/plan` DAG workers and `/run` workers get their own jj
-  workspace, never nested in the repo. Plain main-owner runs intentionally
+  routes into no existing plan: a fresh task chooses discussion, one worker or a
+  new proposed plan through automatic intent routing.
+- **Explicit isolation.** Automatically planned DAG workers and plain Execute
+  workers get their own jj workspace, never nested in the repo. Explicit main-owner runs intentionally
   use the real checkout so one agent can finish repository/release/deployment steps.
   The only real cross-agent risks for isolated work are a future merge conflict (jj
   records it, the AI resolver fixes it) or interface drift (the hard edge is the guard).

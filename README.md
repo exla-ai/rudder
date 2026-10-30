@@ -12,11 +12,18 @@
 [![Website](https://img.shields.io/badge/site-rudder.exla.ai-111111.svg)](https://rudder.exla.ai)
 
 Rudder is a TUI for managing coding agents. Run Claude Code, Codex and opencode
-side by side in one native dashboard: every task you type gets its own isolated
-jj workspace, so agents never step on each other. See which agent needs you,
+side by side in one native dashboard. Implementation workers get isolated
+jj workspaces. See which agent needs you,
 approve prompts, steer any agent mid-turn, and merge the results back with one
-key. `/main` puts an agent in the main checkout when you want one there, and
-`/plan` turns a bigger goal into a reviewed multi-agent DAG.
+key. Type a goal and Rudder chooses discussion, one worker, or a proposed
+multi-agent plan. `/main` explicitly selects the main checkout.
+
+The [v4 architecture and rollout](https://github.com/exla-ai/rudder/blob/main/PLAN.md) covers the distributed workspace,
+build-cache and persistent-engine rewrite. Early milestones do not imply that
+the complete storage/engine migration has shipped.
+
+This branch contains v4 alpha foundations. Install the prerelease with
+`npm install -g @exla/rudder@next`; the stable package remains on `latest`.
 
 > **AI agents and contributors:** this README is for using Rudder. If you are
 > an AI agent (or a human) working on the Rudder codebase itself, read
@@ -76,12 +83,19 @@ rudder
 ```
 
 With no arguments, `rudder` opens the dashboard. Type a task in the bottom input
-and press `Enter`: Rudder starts one worker for it in its own jj workspace. It
-lands in Review when done and merges back with `m`. Use `/main <task>` for an
-agent that works directly in the main checkout (for release, push and deploy
-work), `/gam <task>` to pair a builder with a reviewer from another model,
-`/plan <task>` when you want a reviewed multi-agent DAG, or `/swarm [n] <task>`
-to run many competing experiments at one goal and keep the ones that work.
+and press `Enter`. A narrow implementation starts one isolated worker; a broad
+architectural implementation proposes a plan for approval. Questions and
+plan-only requests open one discussion session without implementation workers.
+An isolated worker lands in Review and merges back with `m`. Use `/main <task>`
+for an agent working directly in the checkout, including release work.
+`/swarm [n] <task>` remains available for competing experiments.
+
+Routing works locally without an API key. To opt into bounded model-assisted
+routing, set `RUDDER_TASK_ROUTING=decisions` and `OPENAI_API_KEY`; a failed or
+slow classifier falls back to local rules. The classifier chooses a workflow;
+your selected agent still writes the plan. `/plan` remains a compatibility
+shortcut. Standalone `/gam` and `/nudge` have been retired; send a follow-up to
+the agent's pane and resume a stopped agent explicitly.
 
 If a task needs shared local context like API tokens, private URLs, account ids,
 or environment values, save it with `/share <text>` in the task input. Rudder
@@ -121,7 +135,7 @@ to `~/.rudder/config.json`.
 │ task list     │ live Claude Code or Codex terminal           │
 │ status/model  │ DAG-over-orchestrator, scrollback, review    │
 ├───────────────┴────────────────────────────────────────────┤
-│ task input: main owner by default, /plan DAG, /run isolated   │
+│ task input: discuss, work, or propose a plan automatically   │
 └──────────────────────────────────────────────────────────────┘
 ```
 
@@ -179,8 +193,8 @@ your browser. The board is a second control surface, not just a monitor: open a
 task to send an update while it runs, or request changes from Review to resume
 the same agent in the same workspace. The task's update thread records your
 directions alongside the latest worker activity. `+ Task` follows the same
-end-to-end main-owner path as typing in the dashboard task pane; use `/plan` in
-the native dashboard for an explicit DAG.
+task routing as the native dashboard when that dashboard owns the project.
+The standalone board retains its detached-worker workflow.
 
 The board also works on its own with `rudder board`: in that mode updates
 redirect or resume the detached worker directly and move revised work back
@@ -309,9 +323,7 @@ running, Rudder also exposes matching project skills; the orchestrator can write
 | --- | --- |
 | `/model` | Pick provider, then model, then effort |
 | `/fast` | Fast mode for new agents: flagship model at low effort (Claude opus / Codex gpt-6.1-sol); `/model` switches back |
-| `/plan <text>` | Start the orchestrator / DAG planner |
 | `/swarm [n] <task>` | Run `n` competing experiments at one goal (leave `n` out and the swarm decides). A conversational planner proposes the experiment list; talk to it to change the list, then press `Enter` to launch. Every experiment runs on the current model in its own workspace, at most 18 at a time (`swarm.maxParallel`), and none merges on its own |
-| `/gam [main] [<model>] <task>` | Generator + adversarial reviewer pair: split panes, the reviewer questions every round, steers the generator mid-turn, and can stop the run; only the generator edits. `^W t` shows the dialogue between them |
 | `/share <text>` | Save gitignored shared context for all agents in `RUDDER_SHARED.md` |
 | `/main [task]` or `/m` | Start an agent in the main checkout instead of its own workspace |
 | `/review-all` | Combine completed workspaces and start a Codex review-all agent |
@@ -360,17 +372,17 @@ disable both capabilities so planning cannot cause external side effects.
 
 ## One-Off and Planning
 
-Type a task in the bottom input and Rudder starts one worker for it in its own
-jj workspace. The same thing happens no matter what else is on screen: a
-standalone worker that touches nothing but its workspace, lands in Review when
-done, and merges back with `m` or `/merge-all`. A slash command Rudder does not
+Type a task in the bottom input. Rudder chooses discussion, one isolated worker
+or a proposed plan from the request. A standalone implementation worker touches
+its workspace, lands in Review and merges back with `m` or `/merge-all`.
+A slash command Rudder does not
 know is reported as unknown instead of being sent to an agent as a task.
 
 Use `/main <task>` for an agent in the main checkout itself, for work that has to
 happen there (release, push, deploy). Several may run there at once; they edit
 the same tree, so they can overwrite each other, and Rudder says so in the
-activity log rather than stopping you. Use `/plan <text>` when you want the
-orchestrator / DAG path: the read-only planner decomposes the task, then separate
+activity log rather than stopping you. Larger implementation goals can select
+the DAG path automatically: the read-only planner decomposes the task, then separate
 isolated workers implement its nodes. To change a running plan, talk to that
 orchestrator's own pane.
 
@@ -448,7 +460,7 @@ session, main checkout) instead of forking it into a worker.
 
 ## Worktrees and merging
 
-**Who merges what:** planned `/plan` DAG nodes integrate into your checkout
+**Who merges what:** approved DAG nodes integrate into your checkout
 **automatically** as soon as they finish — no per-node confirmation — so
 dependent nodes unblock and the chain keeps flowing (their row shows
 `done · auto-merging`, then `merged locally`; the final gate runs the repo's
@@ -577,11 +589,21 @@ reach an agent (a menu is open in its pane) says so instead of vanishing. Claude
 panes in the cloud also run with Remote Control, so they appear in the Claude
 app too.
 
-**Previews.** Put a Tailscale auth key in the vault
-(`rudder cloud secrets set TS_AUTHKEY`) and the home machine joins your tailnet
-as `rudder-home`. Any dev server an agent starts there shows up as an HTTPS link
-(`https://rudder-home.<tailnet>.ts.net:<port>`) in `rudder cloud home` and the
-phone app.
+**Previews.** Enroll the home machine with a Tailscale auth key in the vault
+(`rudder cloud secrets set TS_AUTHKEY`). It reuses its persisted login on later
+boots. Connect your laptop to the same tailnet and run `rudder cloud preview`
+from the project to open its ready dev server, or `rudder cloud preview --list`
+to inspect the links. Pass a port when several servers are running.
+
+Ready project previews also appear in the app. Rudder checks the listener and
+tailnet state before advertising it, removes stale links and prefers private
+HTTPS Serve. If tailnet certificates are unavailable, the link identifies a
+private HTTP fallback. This does not create a public Funnel. Discovery polls
+every five seconds; first-time enrollment/certificate setup can take longer.
+
+Home project tasks in the web/phone app use automatic planning. Legacy task
+sails retain direct execution in this initial v4 track; they refuse discussion
+or decomposition requests and point you to the home dashboard instead.
 
 Inside the dashboard, `/login` starts browser auth and `/cloud` toggles cloud
 mode: while it is on, tasks you type start as workers in Rudder Cloud and keep

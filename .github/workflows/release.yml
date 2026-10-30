@@ -64,7 +64,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "22"
           registry-url: "https://registry.npmjs.org"
 
       - name: Verify tag matches package.json version
@@ -76,6 +76,17 @@ jobs:
             echo "::error::Tag v$TAG_VERSION does not match package.json version $PKG_VERSION. Bump with 'npm version' so they always agree."
             exit 1
           fi
+
+      - name: Select npm release channel
+        id: channel
+        run: |
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+          const { version } = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+          const tag = version.split('+')[0].includes('-') ? 'next' : 'latest';
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `tag=${tag}\n`);
+          console.log(`Publishing ${version} to ${tag}`);
+          NODE
 
       - name: Configure git (rebase-first test creates temp repos)
         run: |
@@ -129,7 +140,7 @@ jobs:
       - name: Publish to npm
         id: publish
         continue-on-error: true
-        run: npm publish --provenance --access public
+        run: npm publish --provenance --access public --tag "${{ steps.channel.outputs.tag }}"
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           RUDDER_NATIVE_PREBUILTS: ${{ github.workspace }}/prebuilt-native
@@ -141,7 +152,7 @@ jobs:
       - name: Publish under the old name
         run: |
           node -e 'const fs=require("fs");const p=JSON.parse(fs.readFileSync("package.json"));p.name="@viraatdas/rudder";fs.writeFileSync("package.json",JSON.stringify(p,null,2)+"\n")'
-          npm publish --provenance --access public
+          npm publish --provenance --access public --tag "${{ steps.channel.outputs.tag }}"
           git checkout package.json
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

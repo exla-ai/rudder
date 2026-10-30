@@ -204,6 +204,9 @@ impl DeliveryEvidence {
 /// ordinary implementation request, but common direct requests such as “deploy
 /// it”, “ship a release”, and “install/launch the app” become proof-gated.
 pub(crate) fn task_requests_delivery(task: &str) -> bool {
+    if task.starts_with(DISCUSSION_PROMPT_PREFIX) {
+        return false;
+    }
     let text = task.to_ascii_lowercase();
     [
         "deploy",

@@ -18,7 +18,6 @@ import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { StringDecoder } from "node:string_decoder";
 import { WebSocket } from "ws";
 import pty from "node-pty";
 import { writeTerminalColors } from "./theme.mjs";
@@ -30,6 +29,8 @@ import { sanitizeHomeHookConfigs } from "./hook-paths.mjs";
 import { createLoginRunner } from "./logins.mjs";
 import { collectDigestRuns } from "./digest.mjs";
 import { readProjectPlan } from "./plan.mjs";
+import { createTailnetPreviews, runTailnetCommand } from "./tailscale-previews.mjs";
+import { createTerminalTransport } from "./terminal-transport.mjs";
 
 const cloudUrl = (process.env.RUDDER_CLOUD_URL || "").trim().replace(/\/$/, "");
 const homeId = (process.env.RUDDER_WORKSPACE_ID || "").trim();
@@ -51,7 +52,7 @@ const TOOLS_DIR = path.join(VOLUME, "tools");
 const TOOLS_BIN = path.join(TOOLS_DIR, "bin");
 const PERSIST_HOME = path.join(VOLUME, "home");
 const HOME = os.homedir() || process.env.HOME || "/home/rudder";
-const TS_SOCKET = "/tmp/tailscaled.sock";
+const TS_SOCKET = process.env.RUDDER_TAILSCALE_SOCKET || "/tmp/tailscaled.sock";
 const TS_HOSTNAME = (process.env.RUDDER_TAILSCALE_HOSTNAME || "rudder-home").trim();
 // 1.5s: a prompt an agent is blocked on should reach the phone quickly.
 const STATE_INTERVAL_MS = 1500;
@@ -68,6 +69,8 @@ let credentialsRunning = false;
 let credentialsAgain = false;
 let vaultRefreshedAt = 0;
 const lastMessageCache = new Map(); // runId -> { mtime, text }
+let scanningPorts = false;
+let previewsReady = false;
 
 if (!homeId || !cloudUrl || !workerToken) {
   console.error("home supervisor: RUDDER_WORKSPACE_ID, RUDDER_CLOUD_URL and RUDDER_WORKER_TOKEN are required");
@@ -87,9 +90,24 @@ if (vault) {
 }
 acceptClaudeDialogs([]);
 
-const tailnet = { hostname: TS_HOSTNAME, dnsName: null, online: false, https: null, error: null };
-const servedPorts = new Map(); // port -> { url, https }
-await startTailscale(vault?.env ?? {});
+const previews = createTailnetPreviews({
+  hostname: TS_HOSTNAME,
+  execute: (args) => runTailnetCommand(args, { socket: TS_SOCKET }),
+  ownedPorts: readPreviewPorts(),
+  onOwnedPorts: (ports) => {
+    const file = path.join(PERSIST_HOME, ".tailscale", "rudder-previews.json");
+    fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+    const tmp = `${file}.${process.pid}.${randomUUID()}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(ports), { mode: 0o600 });
+    fs.renameSync(tmp, file);
+  },
+  onChange: () => {
+    if (!previewsReady) return;
+    lastStateJson = "";
+    scheduleStateSoon();
+  },
+});
+const tailnet = previews.state;
 
 const baseChildEnv = buildChildEnv(vault?.env ?? {});
 
@@ -114,8 +132,12 @@ const projects = new Map();
 let controlSocket = null;
 let lastStateJson = "";
 let ports = []; // [{ port, pid, label, workspaceId|null }]
+previewsReady = true;
 
 connectControl();
+void startTailscale(vault?.env ?? {}).then(() => scanPorts()).catch((error) => {
+  previews.offline(`Tailscale could not start: ${error.code || "unavailable"}`);
+});
 void checkCredentials();
 void ensureRustToolchain().then(() => ensureGoToolchain());
 void ensureAwsTooling().then(() => checkCredentials());
@@ -161,9 +183,13 @@ class Project {
     this.ws = null;
     this.stopped = false;
     this.restarts = [];
-    this.pending = [];
-    this.pendingBytes = 0;
-    this.decoder = new StringDecoder("utf8");
+    this.io = createTerminalTransport({
+      writeInput: (text) => this.term?.write(text),
+      pauseOutput: () => this.term?.pause(),
+      resumeOutput: () => this.term?.resume(),
+      requestRepaint: () => this.repaint(),
+      onError: (_error, socket) => { try { socket.terminate(); } catch { /* closed */ } },
+    });
     this.cols = 120;
     this.rows = 32;
   }
@@ -231,12 +257,7 @@ class Project {
     this.error = null;
     const term = this.term;
     term.onData((data) => {
-      const chunk = Buffer.from(data, "utf8");
-      if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-        this.ws.send(chunk, { binary: true });
-      } else {
-        this.buffer(chunk);
-      }
+      if (this.term === term && !this.stopped) this.io.writeOutput(data);
     });
     term.onExit(({ exitCode, signal }) => {
       if (this.term !== term) {
@@ -270,24 +291,26 @@ class Project {
     const url = `${cloudUrl.replace(/^http/, "ws")}/api/rudder/workspace/${encodeURIComponent(this.workspaceId)}/worker`;
     const socket = new WebSocket(url, {
       headers: { authorization: `Bearer ${workerToken}` },
+      handshakeTimeout: 10_000,
     });
     socket.binaryType = "nodebuffer";
+    this.ws = socket;
     socket.on("open", () => {
-      this.ws = socket;
+      if (this.stopped || this.ws !== socket) {
+        socket.close();
+        return;
+      }
       try { socket._socket?.setNoDelay?.(true); } catch { /* ignore */ }
       socket.send(JSON.stringify({ type: "hello", cols: this.cols, rows: this.rows, sessionKind: "workspace", sessionId: this.workspaceId }));
-      if (this.pendingBytes > 0) {
-        socket.send(Buffer.concat(this.pending, this.pendingBytes), { binary: true });
-        this.pending = [];
-        this.pendingBytes = 0;
-      }
+      this.io.attach(socket);
       // The relay starts a fresh replay buffer for this socket: begin it with
       // a whole picture, so the next laptop to attach sees one.
       this.repaint();
     });
     socket.on("message", (data, isBinary) => {
+      if (!this.io.isCurrent(socket)) return;
       if (isBinary && Buffer.isBuffer(data)) {
-        this.term?.write(this.decoder.write(data));
+        this.io.writeInput(socket, data);
         return;
       }
       let payload;
@@ -301,7 +324,7 @@ class Project {
         this.rows = clamp(Math.floor(payload.rows), 5, 200);
         try { this.term?.resize(this.cols, this.rows); } catch { /* ignore */ }
       } else if (payload?.type === "probe") {
-        socket.send(JSON.stringify({ type: "probe-reply", id: payload.id ?? null }));
+        this.io.sendControl({ type: "probe-reply", id: payload.id ?? null });
       } else if (payload?.type === "repaint") {
         this.repaint();
       } else if (payload?.type === "theme") {
@@ -311,9 +334,9 @@ class Project {
       // dashboard here outlives any one terminal attached to it.
     });
     const retry = () => {
-      if (this.ws === socket) {
-        this.ws = null;
-      }
+      if (this.ws !== socket) return;
+      this.io.detach(socket);
+      this.ws = null;
       if (!this.stopped) {
         setTimeout(() => this.connect(), 2000).unref();
       }
@@ -331,17 +354,9 @@ class Project {
     signalRepaint(this.term?.pid);
   }
 
-  buffer(chunk) {
-    const MAX = 256 * 1024;
-    this.pending.push(chunk);
-    this.pendingBytes += chunk.length;
-    while (this.pendingBytes > MAX && this.pending.length > 1) {
-      this.pendingBytes -= this.pending.shift().length;
-    }
-  }
-
   stop() {
     this.stopped = true;
+    this.io.dispose();
     // The whole process group: the dashboard (rudder-native) pauses its live
     // agents on SIGTERM, which turns into resumable rows after a restart.
     try {
@@ -953,16 +968,10 @@ async function publishState() {
       error: project.error,
       agents: project.status === "cloning" ? [] : project.agents(),
       plan: project.status === "cloning" ? null : readProjectPlan(project.dir),
-      ports: ports
+      ports: previews.snapshot()
         .filter((entry) => entry.workspaceId === project.workspaceId)
-        .map((entry) => ({ port: entry.port, label: entry.label, url: servedPorts.get(entry.port)?.url ?? null })),
+        .map(({ port, label, url, https }) => ({ port, label, url, https, access: "tailnet" })),
     });
-  }
-  const unassigned = ports.filter((entry) => !entry.workspaceId);
-  if (unassigned.length > 0 && list.length > 0) {
-    // A server started outside any repo still deserves a link; it goes with
-    // the first project rather than nowhere.
-    list[0].ports.push(...unassigned.map((entry) => ({ port: entry.port, label: entry.label, url: servedPorts.get(entry.port)?.url ?? null })));
   }
   const state = { type: "state", projects: list, tailnet: { ...tailnet }, credentials, logins: logins.snapshot() };
   const json = JSON.stringify(state);
@@ -1108,6 +1117,9 @@ async function answerAsk(project, params) {
 // ---------------------------------------------------------------------------
 
 async function scanPorts() {
+  if (scanningPorts) return;
+  scanningPorts = true;
+  try {
   const listening = listeningSockets();
   const inodeToPid = socketOwners(new Set(listening.map((entry) => entry.inode)));
   const found = new Map();
@@ -1125,20 +1137,14 @@ async function scanPorts() {
       pid,
       label: info.label,
       workspaceId: projectForPath(info.cwd),
+      address: entry.address,
+      family: entry.family,
     });
   }
   ports = Array.from(found.values()).sort((a, b) => a.port - b.port);
-  if (tailnet.online) {
-    for (const entry of ports) {
-      if (!servedPorts.has(entry.port)) {
-        servePort(entry.port);
-      }
-    }
-    for (const port of Array.from(servedPorts.keys())) {
-      if (!found.has(port)) {
-        unservePort(port);
-      }
-    }
+  await previews.reconcile(ports);
+  } finally {
+    scanningPorts = false;
   }
 }
 
@@ -1163,7 +1169,7 @@ function listeningSockets() {
       if (!Number.isFinite(port) || port < 1024 || port === 41641) {
         continue;
       }
-      out.push({ port, inode: cols[9], address });
+      out.push({ port, inode: cols[9], address, family: file.endsWith("tcp6") ? 6 : 4 });
     }
   }
   return out;
@@ -1260,55 +1266,6 @@ function projectForPath(cwd) {
     }
   }
   return null;
-}
-
-function servePort(port) {
-  const host = tailnet.dnsName || TS_HOSTNAME;
-  // userspace tailscaled forwards inbound tailnet connections to 127.0.0.1,
-  // so the plain address reaches even a localhost-bound dev server. It is the
-  // link until (and unless) HTTPS serving turns out to work.
-  servedPorts.set(port, { url: `http://${host}:${port}`, https: false });
-  if (tailnet.https === false || !tailnet.dnsName) {
-    return;
-  }
-  // When Serve/HTTPS is not enabled on the tailnet, `tailscale serve` does not
-  // fail: it prints an "enable it here" link and WAITS. So it runs detached
-  // with a deadline, never on the event loop, and one refusal settles it.
-  const child = spawn("tailscale", ["--socket", TS_SOCKET, "serve", "--bg", `--https=${port}`, `http://127.0.0.1:${port}`], {
-    stdio: ["ignore", "pipe", "pipe"],
-  });
-  let output = "";
-  child.stdout.on("data", (chunk) => { output += chunk; });
-  child.stderr.on("data", (chunk) => { output += chunk; });
-  const timer = setTimeout(() => child.kill("SIGKILL"), 10_000);
-  child.on("exit", (code) => {
-    clearTimeout(timer);
-    if (code === 0) {
-      tailnet.https = true;
-      if (servedPorts.has(port)) {
-        servedPorts.set(port, { url: `https://${tailnet.dnsName}:${port}`, https: true });
-        lastStateJson = "";
-      }
-      return;
-    }
-    if (tailnet.https !== false) {
-      tailnet.https = false;
-      const link = /https:\/\/login\.tailscale\.com\/\S+/.exec(output)?.[0];
-      tailnet.error = link
-        ? `HTTPS previews are off on this tailnet; enable Serve at ${link}`
-        : `HTTPS previews unavailable (${firstLine(output) || `exit ${code}`})`;
-      log(tailnet.error);
-      lastStateJson = "";
-    }
-  });
-}
-
-function unservePort(port) {
-  const entry = servedPorts.get(port);
-  servedPorts.delete(port);
-  if (entry?.https) {
-    spawnSync("tailscale", ["--socket", TS_SOCKET, "serve", `--https=${port}`, "off"], { timeout: 10_000 });
-  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1582,11 +1539,17 @@ for i in z.infolist():
 // Tailscale.
 // ---------------------------------------------------------------------------
 
+function readPreviewPorts() {
+  try { return JSON.parse(fs.readFileSync(path.join(PERSIST_HOME, ".tailscale", "rudder-previews.json"), "utf8")); }
+  catch { return []; }
+}
+
 async function startTailscale(env) {
   const authKey = (env.TS_AUTHKEY || "").trim();
-  if (!authKey) {
-    tailnet.error = "no TS_AUTHKEY in the vault";
-    log("tailscale: skipped (no TS_AUTHKEY in the vault)");
+  const stateDir = path.join(PERSIST_HOME, ".tailscale");
+  const hasState = fs.existsSync(stateDir) && fs.readdirSync(stateDir).length > 0;
+  if (!authKey && !hasState) {
+    previews.offline("Add TS_AUTHKEY to the vault to enable private previews");
     return;
   }
   if (!commandExists("tailscaled")) {
@@ -1594,7 +1557,6 @@ async function startTailscale(env) {
     log("tailscale: not installed");
     return;
   }
-  const stateDir = path.join(PERSIST_HOME, ".tailscale");
   fs.mkdirSync(stateDir, { recursive: true, mode: 0o700 });
   const daemon = spawn("tailscaled", [
     "--tun=userspace-networking",
@@ -1603,8 +1565,9 @@ async function startTailscale(env) {
     "--port=41641",
   ], { stdio: ["ignore", "ignore", "pipe"], detached: false });
   daemon.stderr.on("data", () => undefined);
+  daemon.on("error", () => previews.offline("tailscaled could not start"));
   daemon.on("exit", (code) => {
-    tailnet.online = false;
+    previews.offline(`tailscaled exited (${code})`);
     log(`tailscaled exited (${code})`);
   });
   for (let attempt = 0; attempt < 50 && !fs.existsSync(TS_SOCKET); attempt += 1) {
@@ -1612,27 +1575,26 @@ async function startTailscale(env) {
   }
   // The node key persists on the volume, so after the first boot this rejoins
   // as the same device without spending the auth key again.
-  const up = spawnSync("tailscale", [
-    "--socket", TS_SOCKET, "up",
-    `--authkey=${authKey}`,
+  const existing = await runTailnetCommand(["status", "--json"], { socket: TS_SOCKET });
+  let authenticated = false;
+  try { authenticated = JSON.parse(existing.stdout)?.BackendState === "Running"; } catch { /* no login yet */ }
+  if (!authenticated && !authKey) {
+    previews.offline("Tailscale needs login; refresh TS_AUTHKEY in the vault");
+    return;
+  }
+  const up = await runTailnetCommand([
+    "up",
+    ...(authKey ? [`--authkey=${authKey}`] : []),
     `--hostname=${TS_HOSTNAME}`,
     "--accept-dns=false",
-  ], { encoding: "utf8", timeout: 60_000 });
-  if (up.status !== 0) {
-    tailnet.error = firstLine(up.stderr || up.stdout || "tailscale up failed");
+  ], { socket: TS_SOCKET, timeoutMs: 60_000 });
+  if (up.code !== 0) {
+    const detail = firstLine(up.stderr || up.stdout || "tailscale up failed");
+    tailnet.error = authKey ? detail.replaceAll(authKey, "[redacted]") : detail;
     log(`tailscale up failed: ${tailnet.error}`);
     return;
   }
-  const status = spawnSync("tailscale", ["--socket", TS_SOCKET, "status", "--json"], { encoding: "utf8", timeout: 10_000 });
-  try {
-    const parsed = JSON.parse(status.stdout);
-    tailnet.dnsName = String(parsed?.Self?.DNSName || "").replace(/\.$/, "") || null;
-    tailnet.hostname = parsed?.Self?.HostName || TS_HOSTNAME;
-    tailnet.online = Boolean(parsed?.Self?.Online ?? true);
-  } catch {
-    tailnet.online = true;
-  }
-  tailnet.error = null;
+  await previews.reconcile(ports);
   log(`tailscale up as ${tailnet.dnsName || tailnet.hostname}`);
 }
 

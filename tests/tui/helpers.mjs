@@ -228,6 +228,13 @@ export async function launchRudder(t, { repo, claudeBin, home, cols = 120, rows 
       RUDDER_CLI: path.join(repoRoot, "dist", "index.js"),
       RUDDER_CLAUDE_BIN: claudeBin,
       RUDDER_CODEX_BIN: claudeBin,
+      // Visual assertions describe a color terminal regardless of the parent
+      // shell's NO_COLOR setting (CI and agent shells often set it globally).
+      NO_COLOR: "",
+      COLORTERM: "truecolor",
+      // Routing tests use deterministic local policy and fake agent CLIs; a
+      // developer's optional classifier config must not trigger model calls.
+      RUDDER_TASK_ROUTING: "local",
       // The workspace namer runs the real `claude` from PATH, not the fake, and
       // starts the agent whenever its answer lands. That made a task's row (and
       // the focus jump to its pane) arrive at a time no test could predict.

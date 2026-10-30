@@ -206,6 +206,11 @@ export async function main(): Promise<void> {
       await workerRun(repo, run, parsed.flags.attempt);
       return;
     }
+    case "__route-task": {
+      const { runTaskRoutingCommand } = await import("./task-routing.js");
+      await runTaskRoutingCommand();
+      return;
+    }
     case "__launch-node": {
       await runLaunchNode(parsed);
       return;
@@ -529,7 +534,7 @@ export function isInternalCommand(command: string | undefined): boolean {
 }
 
 // Commands that never touch a repository, so they never wait on a jj download.
-const JJ_FREE_COMMANDS = new Set(["__event", "telemetry", "feedback", "login", "logout", "help"]);
+const JJ_FREE_COMMANDS = new Set(["__event", "__route-task", "telemetry", "feedback", "login", "logout", "help"]);
 
 function shouldAutoUpdateForCommand(command: string | undefined): boolean {
   if (command?.startsWith("__")) {

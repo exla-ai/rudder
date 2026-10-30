@@ -1359,17 +1359,17 @@ fn picker_enter_submits_command_with_arguments_instead_of_completing() {
 fn esc_dismisses_the_palette_before_clearing_the_draft() {
     let mut app = App::new();
     app.focus = FocusPane::Task;
-    app.task_input = "/pl".to_string();
+    app.task_input = "/mo".to_string();
     app.task_cursor = 3;
-    assert!(!suggestions_for(&app).is_empty(), "palette open for /pl");
+    assert!(!suggestions_for(&app).is_empty(), "palette open for /mo");
 
     // First Esc: palette closes, draft survives.
     app.handle_task_key(KeyEvent::from(KeyCode::Esc));
-    assert_eq!(app.task_input, "/pl", "draft kept");
+    assert_eq!(app.task_input, "/mo", "draft kept");
     assert!(suggestions_for(&app).is_empty(), "palette dismissed");
 
     // Editing re-enables the palette.
-    app.handle_task_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+    app.handle_task_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
     assert!(!suggestions_for(&app).is_empty(), "palette back after edit");
 
     // Esc with no palette clears the draft (original behavior).
@@ -6764,16 +6764,11 @@ fn slash_commands_rank_closest_matches() {
         );
     }
 
-    app.task_input = "/pl".to_string();
-    let plan_suggestions = suggestions_for(&app);
-    let plan = plan_suggestions
-        .first()
-        .expect("/plan suggestion should be present");
-    assert_eq!(plan.label.as_str(), "/plan <text>");
-    assert!(
-        plan.detail.contains("DAG"),
-        "/plan suggestion should explain DAG behavior"
-    );
+    app.task_input = "/mo".to_string();
+    assert_eq!(suggestions_for(&app).first().map(|suggestion| suggestion.label.as_str()), Some("/model"));
+    for hidden in ["/plan", "/gam", "/nudge", "/tell"] {
+        assert!(!command_suggestions().iter().any(|suggestion| suggestion.label.starts_with(hidden)));
+    }
 
     app.task_input = "/cl".to_string();
     assert_eq!(
@@ -13404,10 +13399,9 @@ fn completed_plan_does_not_hijack_a_new_task_into_refine() {
 #[cfg(not(windows))]
 #[test]
 fn default_task_input_starts_one_isolated_mergeable_worker() {
-    // Plain task input means ONE isolated worker in its own jj workspace. It used
-    // to mean an end-to-end agent in the real checkout; that is now `/main`, and
-    // `/plan` is the only route to an orchestrator. The safe thing is the default:
-    // typing a task cannot touch the user's tree.
+    // Ordinary implementation still means one isolated worker. Clear multi-part
+    // work selects the planner automatically; /main remains an explicit checkout
+    // control, and the hidden /plan alias preserves older scripted workflows.
     let _env = env_guard();
     let repo = unique_test_repo("default-worker");
     let worker = repo.join("fake-worker.sh");
@@ -13463,6 +13457,153 @@ fn plan_command_starts_orchestrator_for_dag_work() {
 
     std::env::remove_var("RUDDER_CODEX_BIN");
     let _ = fs::remove_dir_all(&repo);
+}
+
+#[cfg(not(windows))]
+#[test]
+fn automatic_multi_part_task_starts_a_planner_without_implementation_workers() {
+    let _env = env_guard();
+    let repo = unique_test_repo("automatic-plan");
+    let worker = repo.join("fake-worker.sh");
+    write_fake_bin(&worker, FAKE_CONDUCTOR_WORKER);
+    std::env::set_var("RUDDER_CODEX_BIN", &worker);
+    let mut app = App::new();
+    app.cwd = repo.clone();
+    app.backend = Backend::Codex;
+    app.start_task_from_input("implement the API and UI in parallel");
+    assert_eq!(app.agents.len(), 1);
+    assert_eq!(app.agents[0].mode, AgentMode::RudderPlan);
+    assert!(app.agents.iter().all(|run| run.node_id.is_none()));
+    assert!(app.agents.iter().all(|run| run.mode != AgentMode::Execute));
+    std::env::remove_var("RUDDER_CODEX_BIN");
+    let _ = fs::remove_dir_all(repo);
+}
+
+#[cfg(not(windows))]
+#[test]
+fn discussion_task_keeps_one_owner_and_never_enters_the_dag() {
+    let _env = env_guard();
+    let repo = unique_test_repo("automatic-discussion");
+    let worker = repo.join("fake-worker.sh");
+    write_fake_bin(&worker, FAKE_CONDUCTOR_WORKER);
+    std::env::set_var("RUDDER_CODEX_BIN", &worker);
+    let mut app = App::new();
+    app.cwd = repo.clone();
+    app.backend = Backend::Codex;
+    let task = "Let's just discuss the architectural rewrite; do not implement yet";
+    app.start_task_from_input(task);
+    assert_eq!(app.agents.len(), 1);
+    assert_eq!(app.agents[0].mode, AgentMode::Main);
+    assert_eq!(app.agents[0].task, task);
+    assert_eq!(app.agents[0].cwd, repo);
+    assert!(app.agents[0].current_prompt.starts_with(DISCUSSION_PROMPT_PREFIX));
+    assert!(app.agents[0].workspace_path.is_none());
+    assert!(!app.agents[0].delivery.required, "discussion scope does not request a release");
+    assert!(!app.plan_is_active());
+    assert!(!app.plan().awaiting_approval);
+    app.approve_planned_queue();
+    assert_eq!(app.agents.len(), 1, "Enter cannot launch implementation from a discussion");
+    std::env::remove_var("RUDDER_CODEX_BIN");
+    let _ = fs::remove_dir_all(repo);
+}
+
+#[cfg(not(windows))]
+#[test]
+fn plan_only_compatibility_alias_keeps_discussion_scope() {
+    let _env = env_guard();
+    let repo = unique_test_repo("plan-only-alias");
+    let worker = repo.join("fake-worker.sh");
+    write_fake_bin(&worker, FAKE_CONDUCTOR_WORKER);
+    std::env::set_var("RUDDER_CODEX_BIN", &worker);
+    let mut app = App::new();
+    app.cwd = repo.clone();
+    app.backend = Backend::Codex;
+    app.start_task_from_input("/plan just discuss how to deploy the architecture rewrite");
+    assert_eq!(app.agents.len(), 1);
+    assert_eq!(app.agents[0].mode, AgentMode::Main);
+    assert!(!app.agents[0].delivery.required, "discussing deployment is not delivery authorization");
+    assert!(!app.plan_is_active());
+    app.approve_planned_queue();
+    assert_eq!(app.agents.len(), 1);
+    std::env::remove_var("RUDDER_CODEX_BIN");
+    let _ = fs::remove_dir_all(repo);
+}
+
+#[cfg(not(windows))]
+#[test]
+fn remote_home_task_uses_the_same_discussion_routing_once() {
+    let _env = env_guard();
+    let repo = unique_test_repo("remote-discussion");
+    let worker = repo.join("fake-worker.sh");
+    write_fake_bin(&worker, FAKE_CONDUCTOR_WORKER);
+    std::env::set_var("RUDDER_CODEX_BIN", &worker);
+    let mut app = App::new();
+    app.cwd = repo.clone();
+    app.backend = Backend::Codex;
+    let result = app.deliver_steer_request("conductor", "Plan the migration, planning only");
+    assert!(matches!(result, SteerDelivery::Delivered));
+    assert_eq!(app.agents.len(), 1);
+    assert_eq!(app.agents[0].mode, AgentMode::Main);
+    assert!(!app.plan_is_active());
+    std::env::remove_var("RUDDER_CODEX_BIN");
+    let _ = fs::remove_dir_all(repo);
+}
+
+#[cfg(not(windows))]
+#[test]
+fn optional_routing_helper_runs_in_background_and_preserves_submitted_model() {
+    let _env = env_guard();
+    let repo = unique_test_repo("optional-routing");
+    let helper = repo.join("fake-rudder.sh");
+    let capture = repo.join("routing-request.json");
+    write_fake_bin(&helper, &format!(
+        "#!/bin/sh\n[ \"$1\" = __route-task ] || exit 2\ncat > {}\nprintf '%s\\n' '{{\"route\":\"plan\",\"source\":\"decisions\",\"reason\":\"multi-part implementation; approval required\"}}'\n",
+        shell_single_quote(&capture.to_string_lossy())
+    ));
+    let worker = repo.join("fake-worker.sh");
+    write_fake_bin(&worker, FAKE_CONDUCTOR_WORKER);
+    let keys = ["RUDDER_CLI", "RUDDER_TASK_ROUTING", "RUDDER_TEST_TASK_ROUTING", "OPENAI_API_KEY", "RUDDER_CODEX_BIN"];
+    let previous = keys.map(|key| (key, std::env::var_os(key)));
+    std::env::set_var("RUDDER_CLI", &helper);
+    std::env::set_var("RUDDER_TASK_ROUTING", "decisions");
+    std::env::set_var("RUDDER_TEST_TASK_ROUTING", "1");
+    std::env::set_var("OPENAI_API_KEY", "routing-test-placeholder");
+    std::env::set_var("RUDDER_CODEX_BIN", &worker);
+    let mut app = App::new();
+    app.cwd = repo.clone();
+    app.backend = Backend::Codex;
+    app.model = "gpt-6.1-sol".into();
+    let task = "implement a multi-module feature";
+    app.start_task_from_input(task);
+    assert!(app.agents.is_empty(), "helper cannot mutate the App from its thread");
+    app.backend = Backend::Claude;
+    app.model = "opus".into();
+    let outcome = app.task_routing_rx.recv_timeout(Duration::from_secs(3)).expect("bounded helper result");
+    assert_eq!(outcome.decision.source, "decisions");
+    app.finish_task_routing(outcome);
+    assert_eq!(app.agents.len(), 1);
+    assert_eq!(app.agents[0].mode, AgentMode::RudderPlan);
+    assert_eq!(app.agents[0].backend, Backend::Codex);
+    assert_eq!(app.agents[0].model, "gpt-6.1-sol");
+    assert_eq!(app.backend, Backend::Claude);
+    assert_eq!(app.model, "opus");
+    let request: serde_json::Value = serde_json::from_str(&fs::read_to_string(capture).unwrap()).unwrap();
+    assert_eq!(request, serde_json::json!({"task": task}));
+    for (key, value) in previous {
+        match value { Some(value) => std::env::set_var(key, value), None => std::env::remove_var(key) }
+    }
+    let _ = fs::remove_dir_all(repo);
+}
+
+#[test]
+fn retired_workflows_and_hidden_plan_alias_never_take_over_the_palette() {
+    let mut app = App::new();
+    for input in ["/gam", "/gam codex", "/gam again", "/nudge", "/nudge keep going", "/plan", "/plan implement a feature"] {
+        app.task_input = input.into();
+        assert!(suggestions_for(&app).is_empty(), "{input} must not launch a picker");
+        assert!(!task_default_hint(&app).contains("/plan"));
+        assert!(!task_default_hint(&app).contains("reviews"));
+    }
 }
 
 #[cfg(not(windows))]
@@ -19232,30 +19373,20 @@ fn nudge_all_is_recognized_as_an_orchestrator_marker() {
 }
 
 #[test]
-fn nudge_slash_command_runs_locally_without_the_orchestrator() {
-    // The whole point of /nudge is the dropped-connection case, which can have
-    // killed the orchestrator too. Rudder must handle it itself rather than
-    // forwarding the sentence to a conductor that may not be alive to read it.
+fn retired_standalone_commands_do_not_spawn_or_broadcast() {
     let mut app = App::new();
     let mut dead = test_agent_run("dead", "n0");
     dead.status = AgentStatus::Running;
     dead.terminal = None;
     app.agents = vec![dead];
-
-    assert!(app.handle_command("/nudge"));
-    assert_eq!(
-        app.notice.as_deref(),
-        Some("usage: /nudge <message to every in-flight worker>")
-    );
-
-    app.notice = None;
-    app.agents.clear();
-    assert!(app.handle_command("/nudge keep going"));
-    assert_eq!(
-        app.notice.as_deref(),
-        Some("no in-flight workers to nudge"),
-        "an empty fleet reports rather than silently doing nothing"
-    );
+    for input in ["/nudge", "/nudge keep going", "/gam", "/gam again", "/gam fix the cache"] {
+        app.notice = None;
+        app.start_task_from_input(input);
+        assert_eq!(app.agents.len(), 1, "{input} must not spawn an agent");
+        assert_eq!(app.agents[0].status, AgentStatus::Running);
+        assert!(app.agents[0].terminal.is_none(), "{input} must not resume an old worker");
+        assert!(app.notice.as_deref().is_some_and(|notice| notice.contains("has been retired")));
+    }
 }
 
 #[test]
@@ -21125,147 +21256,6 @@ fn an_unanswered_gam_mid_turn_check_is_abandoned_rather_than_wedging_the_pair() 
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-#[test]
-fn gam_suggestions_drill_down_like_the_model_picker() {
-    // The model rows come from the models.dev cache under RUDDER_HOME, so this
-    // reads process-global state too: repointed mid-test, the list changes out
-    // from under the row-by-row comparison below.
-    let _env = env_guard();
-    let mut app = App::new();
-    app.backend = Backend::Claude;
-    app.model = "sonnet".to_string();
-    app.gam_last = None;
-    // Bare "/gam" offers the reviewer picker, but the FIRST row is the
-    // do-nothing path so the default selection never rewrites the line.
-    app.task_input = "/gam".to_string();
-    let bare = suggestions_for(&app);
-    assert!(
-        matches!(bare.first().map(|s| &s.action), Some(SuggestionAction::Insert(text)) if text == "/gam "),
-        "the default row must keep the line, got {:?}",
-        bare.first().map(|s| s.label.clone())
-    );
-    // It names the default PAIR, so skipping the picker is an informed choice:
-    // your model writes, the other provider's flagship reviews.
-    let default_detail = bare.first().map(|s| s.detail.clone()).unwrap_or_default();
-    assert!(
-        default_detail.contains("claude sonnet") && default_detail.contains("codex gpt-6.1-sol"),
-        "the default row must name both halves of the default pair: {default_detail}"
-    );
-    // Reviewer providers only, not the flattened catalogue. opencode cannot
-    // review (no read-only sandbox), so offering it was a row that could only
-    // fail.
-    assert_eq!(
-        bare[1..]
-            .iter()
-            .map(|s| s.label.clone())
-            .collect::<Vec<_>>(),
-        vec!["claude".to_string(), "codex".to_string()],
-        "bare /gam offers the reviewer providers"
-    );
-    assert!(
-        bare[1..]
-            .iter()
-            .all(|s| matches!(s.action, SuggestionAction::ChooseGamProvider(_))),
-        "each row picks a reviewer provider"
-    );
-    assert!(
-        bare[1..]
-            .iter()
-            .all(|s| s.detail.starts_with("review with")),
-        "every provider row says what the choice is for"
-    );
-    // And the popup says what it is, so a list of model names cannot read as
-    // "/gam is about to change my model".
-    assert_eq!(
-        gam_picker_title("/gam", 1, bare.len()),
-        format!(" pick the adversarial model · 1/{} ", bare.len())
-    );
-    assert!(gam_picker_title("/gam codex", 1, 9).contains("pick the adversarial model · codex"));
-    // A choice, not a catalogue. Unbounded this is 100+ rows across three
-    // providers, which is a wall to scroll rather than a list to pick from.
-    assert!(
-        bare.len() <= 24,
-        "bare /gam offers {} rows; cap the per-provider slice",
-        bare.len()
-    );
-
-    // A partial provider name IS the opt-in drill-down.
-    app.task_input = "/gam cod".to_string();
-    let providers = suggestions_for(&app);
-    assert!(
-        providers
-            .iter()
-            .any(|suggestion| matches!(suggestion.action, SuggestionAction::ChooseGamProvider(_))),
-        "a partial provider name offers providers"
-    );
-
-    app.task_input = "/gam codex ".to_string();
-    let models = suggestions_for(&app);
-    assert!(
-        !models.is_empty(),
-        "codex models offered as adversarial candidates"
-    );
-    assert!(
-        models
-            .iter()
-            .all(|suggestion| matches!(suggestion.action, SuggestionAction::ChooseGamModel { .. })),
-        "every model row inserts into /gam, not defaults"
-    );
-
-    // The SAME list /model shows, never a hardcoded duplicate.
-    assert_eq!(
-        models.iter().map(|s| s.label.clone()).collect::<Vec<_>>(),
-        model_suggestions_for(Backend::Codex, "")
-            .iter()
-            .map(|s| s.label.clone())
-            .collect::<Vec<_>>(),
-    );
-    assert!(gam_picker_title("/gam codex gpt-6.1-sol ", 1, 4).contains("pick the generator"));
-    assert!(gam_picker_title("/gam codex gpt-6.1-sol gen claude ", 1, 4)
-        .contains("pick the generator model · claude"));
-
-    // Reviewer chosen: the optional generator step. Its first row keeps the
-    // line (Enter means "now I type the task") and says who writes by default.
-    app.task_input = "/gam codex gpt-5.5 ".to_string();
-    let step = suggestions_for(&app);
-    assert!(
-        matches!(step.first().map(|s| &s.action), Some(SuggestionAction::Insert(line)) if line == "/gam codex gpt-5.5 "),
-        "the generator step's first row keeps the line: {:?}",
-        step.first().map(|s| s.label.clone())
-    );
-    assert!(step[0].detail.contains("claude sonnet"), "{}", step[0].detail);
-    assert_eq!(
-        step[1..].iter().map(|s| s.label.clone()).collect::<Vec<_>>(),
-        vec!["gen claude", "gen codex", "gen opencode"],
-    );
-    // A task word ends the picker: the rest of the line is the task.
-    app.task_input = "/gam codex gpt-5.5 fix ".to_string();
-    assert!(suggestions_for(&app).is_empty());
-    app.task_input = "/gam codex gpt-5.5 fix the bug".to_string();
-    assert!(suggestions_for(&app).is_empty());
-
-    // `gen <provider> ` drills into the generator's models, from the same tables.
-    app.task_input = "/gam codex gpt-5.5 gen claude ".to_string();
-    let gen_models = suggestions_for(&app);
-    assert!(!gen_models.is_empty());
-    assert!(gen_models.iter().all(|s| matches!(
-        s.action,
-        SuggestionAction::ChooseGamGeneratorModel {
-            backend: Backend::Claude,
-            ..
-        }
-    )));
-    assert_eq!(
-        gen_models.iter().map(|s| s.label.clone()).collect::<Vec<_>>(),
-        model_suggestions_for(Backend::Claude, "")
-            .iter()
-            .map(|s| s.label.clone())
-            .collect::<Vec<_>>(),
-    );
-    // Once the generator's model is chosen, the line is the task's.
-    app.task_input = "/gam codex gpt-5.5 gen claude opus ".to_string();
-    assert!(suggestions_for(&app).is_empty());
-}
 
 #[cfg(not(windows))]
 #[test]
@@ -21457,55 +21447,6 @@ fn gam_reviewer_half_names_the_model_without_repeating_its_role() {
 // /gam drill-down Enter handling
 // ---------------------------------------------------------------------------
 
-#[test]
-fn gam_enter_captures_only_inside_the_picker_window() {
-    use crossterm::event::{KeyCode, KeyModifiers};
-    let enter = || KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
-
-    // Bare "/gam": the picker is open, but the row under the cursor is the
-    // do-nothing default, so Enter keeps the line rather than naming a model.
-    let mut app = App::new();
-    app.task_input = "/gam".to_string();
-    let _ = app.handle_task_key(enter());
-    assert_eq!(
-        app.task_input, "/gam ",
-        "Enter on the default row must not choose a provider"
-    );
-
-    // Provider step: Enter selects a reviewer backend once the user has
-    // started spelling one.
-    let mut app = App::new();
-    app.task_input = "/gam cod".to_string();
-    assert!(suggestions_for(&app)
-        .iter()
-        .any(|s| { matches!(s.action, SuggestionAction::ChooseGamProvider(_)) }));
-    let _captured = app.handle_task_key(enter());
-    assert!(
-        app.task_input.starts_with("/gam codex"),
-        "Enter applied a provider pick, input now {:?}",
-        app.task_input
-    );
-
-    // Model step: Enter selects a model instead of submitting.
-    if suggestions_for(&app)
-        .first()
-        .is_some_and(|s| matches!(s.action, SuggestionAction::ChooseGamModel { .. }))
-    {
-        let before = app.task_input.clone();
-        let _ = app.handle_task_key(enter());
-        assert_ne!(app.task_input, before, "model inserted");
-        assert!(app.task_input.starts_with("/gam "), "still a gam line");
-    }
-
-    // Task text typed after the model: palette hidden, Enter must NOT be
-    // captured (it submits).
-    app.task_input = "/gam codex gpt-5.5 refactor the parser".to_string();
-    assert!(suggestions_for(&app).is_empty());
-    assert!(!{
-        let sugg = suggestions_for(&app);
-        !sugg.is_empty()
-    });
-}
 
 #[test]
 fn gam_enter_with_task_words_submits_instead_of_picking() {
@@ -22627,16 +22568,16 @@ fn a_newline_chord_beats_the_open_palette() {
     // The palette's Enter arm ACCEPTS a suggestion. A newline chord is not an
     // accept, so it has to jump the queue or Shift+Enter silently ran a command.
     let mut app = App::new();
-    app.task_input = "/pl".to_string();
+    app.task_input = "/mo".to_string();
     app.task_cursor = 3;
     assert!(
         !suggestions_for(&app).is_empty(),
-        "the /plan suggestion is showing"
+        "the /moan suggestion is showing"
     );
 
     app.handle_task_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT));
     assert_eq!(
-        app.task_input, "/pl\n",
+        app.task_input, "/mo\n",
         "the draft grew a line, not a command"
     );
 }
@@ -27091,8 +27032,13 @@ fn quitting_with_agents_running_offers_the_home_machine_and_h_moves_them() {
     // The move lands inside poll_agents' own reconcile as often as in the call
     // above, and later steps of that poll may replace the notice, so check the
     // activity line the same landing writes.
-    assert!(
-        app.activity_log.iter().any(|line| line.starts_with("home: 2 agents moved")),
+    let acknowledged_moves: usize = app.activity_log.iter().filter_map(|line| {
+        let rest = line.strip_prefix("home: ")?;
+        if !rest.contains(" moved") { return None; }
+        rest.split_whitespace().next()?.parse::<usize>().ok()
+    }).sum();
+    assert_eq!(
+        acknowledged_moves, 2,
         "{:?}",
         app.activity_log
     );
@@ -27894,122 +27840,18 @@ fn gam_remembered_pair_round_trips_through_the_grammar() {
 
 /// The picker builds the line one step at a time, the way /model does, and
 /// the line it builds parses into the pair that was picked.
-#[test]
-fn gam_picker_builds_a_pair_step_by_step() {
-    let _env = env_guard();
-    let home = unique_test_repo("gam-picker-home");
-    std::env::set_var("RUDDER_HOME", &home);
-    let mut app = App::new();
-    app.backend = Backend::Claude;
-    app.model = "sonnet".to_string();
-    app.gam_last = None;
-    app.focus = FocusPane::Task;
-
-    let pick = |app: &mut App, want: &dyn Fn(&SuggestionAction) -> bool| {
-        let suggestion = suggestions_for(app)
-            .into_iter()
-            .find(|s| want(&s.action))
-            .unwrap_or_else(|| panic!("no matching row for {:?}", app.task_input));
-        app.apply_suggestion(suggestion);
-        app.task_input.clone()
-    };
-
-    app.task_input = "/gam main".to_string();
-    app.task_cursor = app.task_input.len();
-    let line = pick(&mut app, &|a| {
-        matches!(a, SuggestionAction::ChooseGamProvider(Backend::Codex))
-    });
-    assert_eq!(line, "/gam main codex ", "the provider pick keeps `main`");
-    let line = pick(&mut app, &|a| {
-        matches!(a, SuggestionAction::ChooseGamModel { model, .. } if model == "gpt-6.1-sol")
-    });
-    assert!(line.starts_with("/gam main codex gpt-6.1-sol"), "{line}");
-    let line = pick(&mut app, &|a| {
-        matches!(a, SuggestionAction::ChooseGamGeneratorProvider(Backend::Claude))
-    });
-    assert!(line.ends_with(" gen claude "), "{line}");
-    let line = pick(&mut app, &|a| {
-        matches!(a, SuggestionAction::ChooseGamGeneratorModel { model, .. } if model == "opus")
-    });
-    assert!(line.ends_with(" gen claude opus "), "{line}");
-
-    // Model picked on both sides: the palette gets out of the way of the task.
-    app.task_input = format!("{line}fix the flaky test");
-    app.task_cursor = app.task_input.len();
-    assert!(
-        suggestions_for(&app).is_empty(),
-        "task words must not keep a picker open"
-    );
-    let request = parse_gam_args(app.task_input.strip_prefix("/gam").unwrap(), Backend::Claude)
-        .expect("the built line parses");
-    assert!(request.in_main);
-    assert_eq!(request.adversarial_backend, Backend::Codex);
-    assert_eq!(request.adversarial_model, "gpt-6.1-sol");
-    let generator = request.generator.expect("gen side");
-    assert_eq!((generator.backend, generator.model.as_str()), (Backend::Claude, "opus"));
-    assert_eq!(request.task, "fix the flaky test");
-
-    // The task bar previews the pair before Enter.
-    let preview = gam_line_preview(&app, &app.task_input).expect("preview");
-    assert!(
-        preview.contains("claude opus") && preview.contains("codex gpt-6.1-sol"),
-        "{preview}"
-    );
-    assert!(preview.contains("in this checkout"), "{preview}");
-    let _ = fs::remove_dir_all(&home);
-}
 
 /// A remembered pair is offered on bare /gam: put back on the line, or rerun
 /// outright.
-#[test]
-fn gam_picker_offers_the_last_pair() {
-    let _env = env_guard();
-    let home = unique_test_repo("gam-last-home");
-    std::env::set_var("RUDDER_HOME", &home);
-    let mut app = App::new();
-    app.backend = Backend::Claude;
-    app.model = "sonnet".to_string();
-    let pair = GamLastPair {
-        generator: GamSide {
-            backend: Backend::Claude,
-            model: "sonnet".to_string(),
-            effort: Some(EffortLevel::High),
-        },
-        reviewer: GamSide {
-            backend: Backend::Codex,
-            model: "gpt-6.1-sol".to_string(),
-            effort: Some(EffortLevel::XHigh),
-        },
-        in_main: false,
-        task: "harden the retry loop".to_string(),
-    };
-    app.gam_last = Some(pair.clone());
-    app.task_input = "/gam".to_string();
-    let rows = suggestions_for(&app);
-    assert!(
-        rows.iter()
-            .any(|s| matches!(&s.action, SuggestionAction::Insert(line) if *line == pair.spec_line())),
-        "the same pair goes back on the line: {:?}",
-        rows.iter().map(|s| s.label.clone()).collect::<Vec<_>>()
-    );
-    assert!(
-        rows.iter()
-            .any(|s| matches!(&s.action, SuggestionAction::RunCommand(cmd) if cmd == "/gam again")),
-        "/gam again reruns it"
-    );
-    let preview = gam_line_preview(&app, "/gam again").expect("preview");
-    assert!(preview.contains("harden the retry loop") || preview.contains("codex gpt-6.1-sol"), "{preview}");
-    let _ = fs::remove_dir_all(&home);
-}
 
 #[test]
-fn gam_again_without_a_pair_says_how_to_start_one() {
+fn gam_again_without_a_pair_reports_retirement() {
     let mut app = App::new();
     app.gam_last = None;
     app.start_task_from_input("/gam again");
     assert!(app.agents.is_empty(), "nothing launches");
     let notice = app.notice.clone().unwrap_or_default();
-    assert!(notice.contains("no earlier pair"), "{notice}");
+    assert!(notice.contains("has been retired"), "{notice}");
 }
 
 /// `gam.last` in config.json survives a save and a reload.
@@ -28251,9 +28093,8 @@ fn gam_a_stopped_generator_settles_the_pair() {
     let _ = fs::remove_dir_all(&dir);
 }
 
-/// End to end through the real launch path with fake CLIs: a typed pair runs
-/// to an accepted verdict, the bar says so, and the pair is remembered so
-/// `/gam again` reruns it.
+/// Historical pair transport still runs to an accepted verdict. The retired
+/// command cannot create another pair, including from a remembered pair.
 #[cfg(not(windows))]
 #[test]
 fn gam_pair_runs_to_acceptance_and_is_remembered() {
@@ -28313,7 +28154,8 @@ done
     app.backend = Backend::Claude;
     app.model = "sonnet".to_string();
     app.gam_last = None;
-    app.start_task_from_input("/gam main codex gpt-6.1-sol high rewrite the retry logic");
+    let request = parse_gam_args("main codex gpt-6.1-sol high rewrite the retry logic", Backend::Claude).expect("legacy request");
+    app.start_gam_task(request);
     assert_eq!(app.agents.len(), 2, "notice: {:?}", app.notice);
     assert!(
         app.notice.clone().unwrap_or_default().contains("gam started"),
@@ -28349,15 +28191,10 @@ done
     .expect("json");
     assert_eq!(config_gam_last_pair(&config), Some(remembered.clone()));
 
-    // `/gam again` launches the same pair on the same task.
+    // The remembered state remains readable, but cannot reopen the retired UX.
     app.start_task_from_input("/gam again");
-    assert_eq!(app.agents.len(), 4, "notice: {:?}", app.notice);
-    let models = app.agents[2..]
-        .iter()
-        .map(|run| (run.backend, run.model.clone()))
-        .collect::<Vec<_>>();
-    assert!(models.contains(&(Backend::Claude, "sonnet".to_string())), "{models:?}");
-    assert!(models.contains(&(Backend::Codex, "gpt-6.1-sol".to_string())), "{models:?}");
+    assert_eq!(app.agents.len(), 2, "notice: {:?}", app.notice);
+    assert!(app.notice.as_deref().is_some_and(|notice| notice.contains("has been retired")));
     let _ = fs::remove_dir_all(&dir);
 }
 

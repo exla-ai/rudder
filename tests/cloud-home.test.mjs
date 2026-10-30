@@ -729,8 +729,9 @@ serverTest("a sleeping home's last state is a memory: live rows read paused, nev
     { id: "pm", title: "pr merged (old supervisor)", status: "done", phase: "completed", pr: { state: "merged" } },
     { id: "db", title: "delivery blocked (old supervisor)", status: "done", phase: "delivery blocked" },
   ];
+  const preview = { port: 3000, label: "dev", url: "https://rudder-home.tail1.ts.net:3000" };
   const first = await connect();
-  first.send(JSON.stringify({ type: "state", projects: [{ workspaceId: "repo-stale", name: "b", dashboard: "running", agents }] }));
+  first.send(JSON.stringify({ type: "state", projects: [{ workspaceId: "repo-stale", name: "b", dashboard: "running", agents, ports: [preview] }] }));
   let project = await waitFor(async () => {
     const next = await agentsNow();
     return next.agents?.length ? next : null;
@@ -738,6 +739,7 @@ serverTest("a sleeping home's last state is a memory: live rows read paused, nev
   const byId = (p) => Object.fromEntries(p.agents.map((a) => [a.id, a]));
   let rows = byId(project);
   assert.equal(project.live, true);
+  assert.deepEqual(project.ports, [preview], "the live home's ready preview is visible");
   assert.deepEqual([rows.w.status, rows.w.needsYou, rows.w.reason], ["working", false, null]);
   assert.deepEqual([rows.q.needsYou, rows.q.reason], [true, "question"]);
   assert.deepEqual([rows.i.needsYou, rows.i.reason], [true, "interrupted"]);
@@ -755,6 +757,7 @@ serverTest("a sleeping home's last state is a memory: live rows read paused, nev
     return next.live === false ? next : null;
   });
   rows = byId(project);
+  assert.deepEqual(project.ports, [], "an offline home cannot advertise a remembered preview as ready");
   for (const id of ["w", "q", "i"]) {
     assert.equal(rows[id].status, "paused", `${id} is not live on a sleeping machine`);
     assert.equal(rows[id].stale, true);
@@ -768,7 +771,9 @@ serverTest("a sleeping home's last state is a memory: live rows read paused, nev
   // It wakes: until it reports again the old state stays a memory, then it is live.
   const second = await connect();
   t.after(() => second.close());
-  assert.equal((await agentsNow()).live, false);
+  const notYetReported = await agentsNow();
+  assert.equal(notYetReported.live, false);
+  assert.deepEqual(notYetReported.ports, [], "a new socket needs fresh state before previews return");
   second.send(JSON.stringify({ type: "state", projects: [{ workspaceId: "repo-stale", name: "b", dashboard: "running", agents: [agents[0]] }] }));
   project = await waitFor(async () => {
     const next = await agentsNow();

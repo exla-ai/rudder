@@ -7,7 +7,35 @@ test("compareSemver orders patch/minor/major versions", () => {
   assert.equal(compareSemver("2.2.4", "2.2.5"), -1);
   assert.equal(compareSemver("2.3.0", "2.2.9"), 1);
   assert.equal(compareSemver("3.0.0", "3.0.0"), 0);
-  assert.equal(compareSemver("3.0.0-beta.1", "3.0.0"), 0);
+  assert.equal(compareSemver("3.0.0-beta.1", "3.0.0"), -1);
+});
+
+test("SemVer prerelease precedence follows the specification and ignores build metadata", () => {
+  const ordered = ["1.0.0-alpha", "1.0.0-alpha.1", "1.0.0-alpha.beta", "1.0.0-beta", "1.0.0-beta.2", "1.0.0-beta.11", "1.0.0-rc.1", "1.0.0"];
+  for (let i = 0; i < ordered.length; i++) {
+    for (let j = 0; j < ordered.length; j++) assert.equal(compareSemver(ordered[i], ordered[j]), Math.sign(i - j));
+  }
+  assert.equal(compareSemver("4.0.0-alpha.1+build.4", "4.0.0-alpha.1+build.99"), 0);
+  assert.equal(compareSemver("4.0.0+build.0", "4.0.0"), 0);
+  assert.equal(compareSemver("4.0.0-alpha-beta.2", "4.0.0-alpha-beta.11"), -1);
+  assert.equal(compareSemver("4.0.0-1", "4.0.0-alpha"), -1);
+});
+
+test("v4 alpha can upgrade to stable v4 without downgrading to stable v3", () => {
+  assert.equal(compareSemver("4.0.0-alpha.1", "4.0.0"), -1);
+  assert.equal(compareSemver("4.0.0-alpha.1", "3.99.99"), 1);
+  assert.equal(compareSemver("4.0.0-alpha.2", "4.0.0-alpha.10"), -1);
+  assert.equal(compareSemver("4.0.0-alpha.10", "4.0.0-alpha.10"), 0);
+});
+
+test("numeric identifiers retain precision, and short legacy inputs keep their fallback", () => {
+  assert.equal(compareSemver("1.2.9007199254740992", "1.2.9007199254740993"), -1);
+  assert.equal(compareSemver("4.0.0-alpha.9007199254740992", "4.0.0-alpha.9007199254740993"), -1);
+  assert.equal(compareSemver("v4.0.0-alpha.1", "4.0.0"), -1);
+  assert.equal(compareSemver("3.9", "3.9.0"), 0);
+  assert.equal(compareSemver("", "0.0.0"), 0);
+  assert.equal(compareSemver("nonsense", "2.0.0"), -1);
+  assert.equal(compareSemver("3.09.0", "3.9.0"), 0);
 });
 
 test("auto-update eligibility skips dev, npx, CI, and disabled environments", (t) => {

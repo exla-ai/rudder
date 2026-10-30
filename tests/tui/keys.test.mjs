@@ -4,6 +4,8 @@
 // something visible, so a dead or misrouted keybinding cannot ship green.
 // Discovered by driving the real binary and reading the real notices.
 import assert from "node:assert/strict";
+import fsp from "node:fs/promises";
+import path from "node:path";
 import test from "node:test";
 
 import {
@@ -12,15 +14,28 @@ import {
   launchRudder,
   removeScratch,
   scratchRepo,
+  waitUntil,
 } from "./helpers.mjs";
 
 assertPrerequisites();
 
-async function twoWorkerDashboard(t, prefix) {
+async function twoWorkerDashboard(t, prefix, { fakeBrowser = false } = {}) {
   const repo = await scratchRepo(prefix);
   t.after(() => removeScratch(repo));
   const { sleeper } = await fakeBackends(repo);
-  const session = await launchRudder(t, { repo, claudeBin: sleeper });
+  const browserLog = path.join(repo, "browser-url.txt");
+  const env = {};
+  if (fakeBrowser) {
+    const bin = path.join(repo, "fake-bin");
+    for (const name of ["open", "xdg-open"]) {
+      const opener = path.join(bin, name);
+      await fsp.writeFile(opener, `#!/bin/sh\nprintf '%s\\n' "$1" > '${browserLog}'\n`);
+      await fsp.chmod(opener, 0o755);
+    }
+    env.PATH = `${bin}${path.delimiter}${process.env.PATH ?? ""}`;
+    env.RUDDER_BOARD_URL = "http://127.0.0.1:4774/test-project";
+  }
+  const session = await launchRudder(t, { repo, claudeBin: sleeper, env });
   await session.waitForText("Type a task", { timeout: 20_000 });
   await session.type("alpha worker");
   await session.press("Enter");
@@ -36,7 +51,7 @@ async function twoWorkerDashboard(t, prefix) {
   // Focus the agents list so action keys route there.
   await session.press("Ctrl+W");
   await session.press("1");
-  return { repo, session };
+  return { repo, session, browserLog };
 }
 
 /** The task on the currently-selected (▶) row. */
@@ -104,13 +119,18 @@ test("r opens rename on the selected row; Esc cancels", { timeout: 60_000 }, asy
 });
 
 test("guard-notice keys each fire: R (review-all), o (web), b (branch)", { timeout: 60_000 }, async (t) => {
-  const { session } = await twoWorkerDashboard(t, "rudder-tui-guards-");
+  const { session, browserLog } = await twoWorkerDashboard(t, "rudder-tui-guards-", { fakeBrowser: true });
   // R: nothing is done yet, so review-all says exactly that.
   await session.press("R");
   await session.waitForText("no completed workspaces ready to review", { timeout: 15_000 });
-  // o: opens the project's web view (offline: it still emits the notice).
+  // o: opens the project's exact web URL through the OS opener. The fake keeps
+  // this hermetic on headless Linux and never opens a real browser in macOS CI.
   await session.press("o");
   await session.waitForText("web view", { timeout: 15_000 });
+  await waitUntil(async () => (await fsp.readFile(browserLog, "utf8").catch(() => "")).trim() === "http://127.0.0.1:4774/test-project", {
+    timeout: 10_000,
+    label: "the browser opener receives the current project's URL",
+  });
   // b: a sleeping fake worker has no transcript, so branch explains why.
   await session.press("b");
   await session.waitFor((s) => /branch failed|no session/i.test(s), {

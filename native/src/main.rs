@@ -57,6 +57,8 @@ mod textedit;
 use crate::textedit::*;
 mod tasks;
 use crate::tasks::*;
+mod task_routing;
+use crate::task_routing::*;
 mod launch;
 use crate::launch::*;
 mod models;
@@ -1928,6 +1930,8 @@ struct App {
     /// drains them into the notice line.
     bg_notice_tx: mpsc::Sender<String>,
     bg_notice_rx: mpsc::Receiver<String>,
+    task_routing_tx: mpsc::Sender<TaskRoutingOutcome>,
+    task_routing_rx: mpsc::Receiver<TaskRoutingOutcome>,
     merge_confirm: Option<MergeConfirmation>,
     /// The yes/no modal for deleting something in Rudder Cloud.
     cloud_delete_confirm: Option<CloudDeleteConfirm>,
@@ -3151,6 +3155,7 @@ impl App {
         let perf_stats = PerfStats::new(perf.enabled());
         let (gam_link_tx, gam_link_rx) = std::sync::mpsc::channel();
         let cloud_deletes = mpsc::channel();
+        let task_routing = mpsc::channel();
         Self {
             gam_links: HashMap::new(),
             gam_signals: HashMap::new(),
@@ -3240,6 +3245,8 @@ impl App {
             delete_armed_frame: 0,
             bg_notice_tx: bg_notices.0,
             bg_notice_rx: bg_notices.1,
+            task_routing_tx: task_routing.0,
+            task_routing_rx: task_routing.1,
             merge_confirm: None,
             cloud_delete_confirm: None,
             cloud_delete_tx: cloud_deletes.0,
@@ -6156,7 +6163,7 @@ impl App {
                 self.task_cursor = 1;
                 self.picker_index = 0;
                 self.notice = Some(
-                    "just type for one isolated mergeable worker, /plan for a DAG, /main|/m for this checkout, /resume to continue a chat you already started, /model, /usage, or /cloud"
+                    "describe a task; Rudder plans when needed; /main|/m for this checkout, /resume to continue a chat, /model, /usage, or /cloud"
                         .to_string(),
                 );
             }
@@ -7686,18 +7693,80 @@ impl App {
             return;
         }
 
-        // DEFAULT: one isolated worker in its own jj workspace, always.
-        //
-        // Plain input used to mean "one end-to-end agent in the real checkout", and
-        // while a plan was running it was instead routed into the orchestrator as
-        // conducting. Both are gone. A typed task now means the same thing no matter
-        // what else is on screen: a standalone mergeable worker that touches nothing
-        // but its own workspace. Editing a plan is done by talking to that
-        // orchestrator's own pane, which is unambiguous once several plans can run at
-        // once — a single global input could not say WHICH plan it meant.
-        // `/plan` is the only route to an orchestrator; `/main` is the only route
-        // into the shared checkout.
-        self.start_single_run_task(input);
+        // New local tasks choose a workflow automatically. Ordinary implementation
+        // keeps the existing isolated worker scope; only a clear multi-part task
+        // enters the existing approval-gated planner.
+        self.route_fresh_task(input);
+    }
+
+    fn route_fresh_task(&mut self, input: &str) {
+        let request = TaskRoutingRequest {
+            task: input.to_string(),
+            cwd: self.cwd.clone(),
+            backend: self.backend,
+            model: self.model.clone(),
+            effort: self.effort,
+        };
+        let decision = deterministic_task_route(input);
+        if decision.route == TaskRoute::Discuss || !optional_decisions_routing_enabled() {
+            self.finish_task_routing(TaskRoutingOutcome { request, decision });
+            return;
+        }
+        let tx = self.task_routing_tx.clone();
+        self.notice = Some("choosing task workflow".to_string());
+        self.dirty = true;
+        thread::spawn(move || {
+            let decision = classify_task_with_cli(&request.cwd, &request.task);
+            let _ = tx.send(TaskRoutingOutcome { request, decision });
+        });
+    }
+
+    fn finish_task_routing(&mut self, outcome: TaskRoutingOutcome) {
+        let TaskRoutingOutcome { request, decision } = outcome;
+        if self.cwd != request.cwd {
+            self.push_activity(format!("task not started because the checkout changed: {}", request.task));
+            if self.task_input.is_empty() {
+                self.replace_task_input(request.task);
+            }
+            self.notice = Some("checkout changed while routing; original task retained".to_string());
+            self.dirty = true;
+            return;
+        }
+        // Model and effort belong to the submitted request, even if the user
+        // changes their selection while the optional helper is running.
+        let previous = (self.backend, self.model.clone(), self.effort);
+        self.backend = request.backend;
+        self.model = request.model;
+        self.effort = request.effort;
+        let route_label = match decision.route {
+            TaskRoute::Discuss => "discussion in this checkout",
+            TaskRoute::Execute => "one isolated worker",
+            TaskRoute::Plan => "planning, then approval before isolated workers",
+        };
+        self.push_activity(format!("task route: {route_label} ({}) · {}", decision.source, decision.reason));
+        match decision.route {
+            TaskRoute::Discuss => self.start_discussion_task(&request.task),
+            TaskRoute::Execute => self.start_single_run_task(&request.task),
+            TaskRoute::Plan => self.start_rudder_plan_task(&request.task),
+        }
+        (self.backend, self.model, self.effort) = previous;
+        self.dirty = true;
+    }
+
+    fn start_discussion_task(&mut self, task: &str) {
+        // A fresh session cannot inherit implementation instructions from an
+        // older main agent. Keep the user's task verbatim in the row and apply
+        // the discussion scope only to the backend's launch prompt.
+        let mut run = create_main_agent(&self.cwd, self.backend, &self.model, self.effort, task);
+        // A discussion about deploying is not an authorized delivery request.
+        run.delivery = DeliveryEvidence::default();
+        let run_id = run.id.clone();
+        self.agents.insert(0, run);
+        self.agent_row_map.clear();
+        self.selected_agent = 0;
+        self.focus_or_spawn_main_with_prompt(&discussion_task_prompt(task));
+        self.notice = Some("discussion session in this checkout; implementation workers were not started".to_string());
+        spawn_task_summary_worker(self.task_summary_tx.clone(), run_id, task.to_string());
     }
 
     /// Queue a deferred Enter for `run_id`, flushed by `flush_pending_enters`
@@ -11794,9 +11863,11 @@ Address the objection directly. If you disagree, say why inside \
                 let rest = command_rest(input, "/plan").trim();
                 if rest.is_empty() {
                     self.notice = Some(
-                        "usage: /plan <task>: plan and run an isolated multi-agent DAG (plain input uses one end-to-end main agent)"
+                        "/plan is a compatibility alias; describe a multi-part implementation task to plan automatically (workers still require approval)"
                             .to_string(),
                     );
+                } else if deterministic_task_route(rest).route == TaskRoute::Discuss {
+                    self.start_discussion_task(rest);
                 } else {
                     self.start_rudder_plan_task(rest);
                 }
@@ -11813,36 +11884,7 @@ Address the objection directly. If you disagree, say why inside \
                 true
             }
             Some("/gam") => {
-                // Generator + adversarial reviewer pair: one implements in an
-                // isolated workspace (or `main`), the other read-only questions it.
-                let rest = command_rest(input, "/gam").trim();
-                // `/gam again`: the last pair on the last task, no retyping.
-                if rest == "again" {
-                    match self.gam_last.clone() {
-                        Some(last) if !last.task.trim().is_empty() => {
-                            self.start_gam_task(GamRequest {
-                                task: last.task,
-                                adversarial_backend: last.reviewer.backend,
-                                adversarial_model: last.reviewer.model,
-                                adversarial_effort: last.reviewer.effort,
-                                generator: Some(last.generator),
-                                in_main: last.in_main,
-                            });
-                        }
-                        _ => {
-                            self.notice = Some(
-                                "gam: no earlier pair to rerun yet · /gam <task> starts one".to_string(),
-                            );
-                        }
-                    }
-                    return true;
-                }
-                match parse_gam_args(rest, self.backend) {
-                    Ok(request) => self.start_gam_task(request),
-                    Err(usage) => {
-                        self.notice = Some(usage);
-                    }
-                }
+                self.notice = Some("/gam has been retired; describe the task and Rudder will choose its workflow".to_string());
                 true
             }
             Some("/restore") => {
@@ -12094,18 +12136,8 @@ Address the objection directly. If you disagree, say why inside \
                 self.request_merge_all_ready();
                 true
             }
-            // Handled by Rudder itself, NOT forwarded to the orchestrator agent.
-            // The case this exists for is a dropped connection, which can have
-            // killed the orchestrator too — asking a dead conductor to write
-            // RUDDER_NUDGE_ALL would leave the fleet stalled with no way back.
             Some("/nudge") => {
-                let message = command_rest(input, "/nudge").trim().to_string();
-                if message.is_empty() {
-                    self.notice =
-                        Some("usage: /nudge <message to every in-flight worker>".to_string());
-                } else {
-                    self.nudge_all_workers(&message);
-                }
+                self.notice = Some("/nudge has been retired; send a follow-up to the agent or orchestrator that owns the work".to_string());
                 true
             }
             Some("/verify") => {
@@ -20352,6 +20384,9 @@ What to do\n\
         }
         while let Ok(outcome) = self.cloud_delete_rx.try_recv() {
             self.finish_cloud_deletion(outcome);
+        }
+        while let Ok(outcome) = self.task_routing_rx.try_recv() {
+            self.finish_task_routing(outcome);
         }
         self.emit_dashboard_opened_once();
         self.continue_worker_drag_autoscroll();

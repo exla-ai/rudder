@@ -1,4 +1,4 @@
-// The /plan pipeline — the deepest, most complex flow, and until now entirely
+// The automatic planning pipeline — the deepest, most complex flow:
 // untested end-to-end: a plan is proposed as a task DAG, approved, its nodes
 // run as isolated workers, and their work merges into the checkout. This is a
 // journey because every step depends on the last, and the whole storyline is
@@ -35,8 +35,8 @@ test("plan → approve → workers → merge lands every node's work", { timeout
     await session.waitForText("Type a task", { timeout: 20_000 });
   });
 
-  await story.step("/plan proposes a two-node DAG", async () => {
-    await session.type("/plan build the two node thing");
+  await story.step("a multi-part task automatically proposes a two-node DAG", async () => {
+    await session.type("implement the API and UI in parallel");
     await session.press("Enter");
     await session.waitForText("Plan ready", { timeout: 40_000 });
     await session.waitForText("node 0", { timeout: 10_000 });

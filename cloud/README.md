@@ -280,14 +280,26 @@ docker buildx imagetools create -t registry.fly.io/rudder-workers-exla:arm64 \
   public.ecr.aws/exla/rudder-worker:<version>-arm64
 ```
 
-The worker image installs Rudder, acpx, and Hunk at startup, downloads the
-snapshot from S3, restores selected HOME config, and starts `rudder run
---worktree "$RUDDER_TASK"` inside the unpacked repo. Agent CLIs are installed
-as the non-root `rudder` user (Claude Code through its native installer, the
-npm ones under a home npm prefix) and the entrypoint runs a bounded
-`claude update` at every boot, so a worker runs the current Claude Code even
-on an image tag built weeks earlier. `RUDDER_WORKER_SKIP_AGENT_UPDATE=1`
-turns that off.
+The image includes Rudder and agent CLIs. Legacy sails restore their snapshot
+and run a finite isolated task; home machines host persistent project dashboards.
+In the initial v4 track, home tasks use automatic planning, while legacy sails
+accept direct execution and refuse discussion/decomposition with a home-workspace
+alternative. Workspace migration and no-task dashboards keep their existing path.
+
+Agent CLIs run as the non-root `rudder` user. Bounded Claude/Codex update checks
+run in the background so readiness does not wait on an update server.
+`RUDDER_WORKER_SKIP_AGENT_UPDATE=1` disables them. Home npm/pnpm/uv download
+caches default to the account volume under `/workspace/cache/build`; explicit
+tool paths take precedence. `RUDDER_CACHE_DIR` selects another root and
+`RUDDER_BUILD_CACHE=0` keeps tool defaults. Writable build outputs remain per
+workspace; these download caches are not a distributed action cache.
+
+Private previews reuse persisted Tailscale identity, probe live project-owned
+HTTP listeners and remove stale routes. `rudder cloud preview [port]` opens a
+ready project link on a connected laptop; `--list`/`--json` only inspect state.
+Discovery polls every five seconds and first-time certificate setup can take
+longer. The transport uses bounded output batching/backpressure and requests a
+fresh dashboard repaint after a gap rather than replaying an arbitrary byte tail.
 
 ## Bring Your Own VM
 

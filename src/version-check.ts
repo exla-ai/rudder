@@ -22,16 +22,47 @@ function cachePath(): string {
 }
 
 export function compareSemver(a: string, b: string): number {
-  const split = (v: string) =>
-    v
-      .split("-")[0]!
-      .split(".")
-      .map((part) => Number.parseInt(part, 10) || 0);
-  const aa = split(a);
-  const bb = split(b);
+  // Compare valid versions according to SemVer 2.0, including prereleases.
+  // Keep the historic numeric-core fallback for short/malformed legacy input.
+  const parse = (value: string) => {
+    const match = /^v?(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([\dA-Za-z-]+(?:\.[\dA-Za-z-]+)*))?(?:\+[\dA-Za-z-]+(?:\.[\dA-Za-z-]+)*)?$/.exec(value.trim());
+    if (!match) return null;
+    const prerelease = match[4]?.split(".") ?? [];
+    if (prerelease.some((part) => /^0\d+$/.test(part))) return null;
+    return { core: match.slice(1, 4), prerelease };
+  };
+  const numeric = (x: string, y: string) => x.length !== y.length ? (x.length < y.length ? -1 : 1)
+    : x === y ? 0 : x < y ? -1 : 1;
+  const aa = parse(a);
+  const bb = parse(b);
+  if (aa && bb) {
+    for (let i = 0; i < 3; i++) {
+      const result = numeric(aa.core[i]!, bb.core[i]!);
+      if (result) return result;
+    }
+    // A normal release sorts after every prerelease of the same core.
+    if (!aa.prerelease.length || !bb.prerelease.length) {
+      return aa.prerelease.length ? -1 : bb.prerelease.length ? 1 : 0;
+    }
+    for (let i = 0; i < Math.max(aa.prerelease.length, bb.prerelease.length); i++) {
+      const x = aa.prerelease[i];
+      const y = bb.prerelease[i];
+      if (x === undefined || y === undefined) return x === undefined ? -1 : 1;
+      if (x === y) continue;
+      const nx = /^\d+$/.test(x);
+      const ny = /^\d+$/.test(y);
+      if (nx && ny) return numeric(x, y);
+      if (nx !== ny) return nx ? -1 : 1;
+      return x < y ? -1 : 1;
+    }
+    return 0;
+  }
+  const legacy = (value: string) => value.split("-")[0]!.split(".").map((part) => Number.parseInt(part, 10) || 0);
+  const legacyA = legacy(a);
+  const legacyB = legacy(b);
   for (let i = 0; i < 3; i++) {
-    const x = aa[i] ?? 0;
-    const y = bb[i] ?? 0;
+    const x = legacyA[i] ?? 0;
+    const y = legacyB[i] ?? 0;
     if (x !== y) return x < y ? -1 : 1;
   }
   return 0;
@@ -156,7 +187,10 @@ export async function autoUpdateAndRerunIfNeeded(argv: string[]): Promise<boolea
   }
   const latest = await fetchLatest(AUTO_UPDATE_TIMEOUT_MS);
   if (latest && info.name === LEGACY_PACKAGE_NAME) {
-    return await moveToRenamedPackage(info.version, latest, argv);
+    // npm's latest tag can still point at v3 while this user opted into v4
+    // alpha. Renaming the package must not undo that explicit version choice.
+    const target = compareSemver(info.version, latest) > 0 ? info.version : latest;
+    return await moveToRenamedPackage(info.version, target, argv);
   }
   if (!latest || compareSemver(info.version, latest) >= 0) {
     if (latest) {

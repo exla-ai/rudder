@@ -1,0 +1,83 @@
+   Compiling rudder-engine v0.1.0 (/workspace/code/exla-ai-rudder/engine)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 23.99s
+     Running tests/vfs_observation.rs (target/debug/deps/vfs_observation-4288d6a0bd4a53ec)
+
+running 5 tests
+test source_exclusions_are_canonical_bounded_raw_paths ... ok
+test dirty_pages_have_owner_namespace_fencing_continuation_and_explicit_cursor_loss ... ok
+test failed_observation_is_budgeted_does_not_publish_and_does_not_claim_a_later_generation ... ok
+test publication_receipt_failure_recovers_original_observation_after_later_mutation ... ok
+test source_observation_is_retained_repeatable_and_does_not_seal_or_clear_private_state ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 17.35s
+
+     Running tests/vfs_ranges_backend.rs (target/debug/deps/vfs_ranges_backend-239d27fe12be3520)
+
+running 9 tests
+test durable_private_log_reopens_and_corruption_never_falls_back_to_base ... ok
+test acknowledged_range_metadata_and_data_survive_unclean_process_exit ... ok
+test checkpoint_receipt_failure_keeps_private_blocks_and_retry_can_reconcile_published_root ... ok
+test failed_range_transaction_keeps_prior_pointer_and_skips_orphan_tail ... ok
+test ranges_crash_child ... ok
+test paged_hardlinks_open_unlink_and_ancestor_move_roundtrip ... ok
+test inherited_large_file_range_copyup_and_checkpoint_reuse_unchanged_chunks ... ok
+test truncate_extend_holes_and_sparse_terabyte_do_not_resurrect_inherited_bytes ... ok
+test large_flat_directory_checkpoint_visits_only_changed_namespace ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 47.10s
+
+     Running tests/vfs_remote.rs (target/debug/deps/vfs_remote-4d5343cdfa9cb03b)
+
+running 29 tests
+test actual_file_length_mismatch_fails_before_creating_an_inherited_inode ... ok
+test local_nonblocking_directory_open_defers_enumeration_but_ordinary_open_stays_eager ... ok
+test inherited_hardlink_topology_requires_explicit_bulk_and_bad_expected_root_is_rejected ... ok
+test cached_proofs_are_bounded_and_local_mode_cannot_reopen_a_partial_view ... ok
+{"chunk_fetches":2,"constructor_and_fork_ms":83,"entries":100000,"event":"logical-remote-vfs","fixture_ms":48952,"local_complete_pins":0,"logical_file_bytes":218103808,"partial_cache_bytes":8505480,"private_copyup_bytes":65536}
+test remote_100k_fork_lookup_and_208mib_ranges_never_hydrate_or_pin_the_sdk ... ok
+test remote_partial_capture_crash_child ... ok
+test remote_directory_cookies_freeze_names_and_identity_across_namespace_mutations ... ok
+test remote_partial_capture_100k_entries_and_208mib_file_touch_only_dirty_chunk_and_radix_paths has been running for over 60 seconds
+test remote_partial_capture_cancel_after_head_commit_loses_only_the_reply has been running for over 60 seconds
+test remote_partial_capture_exclusions_moves_and_runtime_hardlink_gate has been running for over 60 seconds
+test remote_partial_capture_exhausted_candidate_retirement_preserves_prior_head has been running for over 60 seconds
+
+thread 'remote_partial_capture_100k_entries_and_208mib_file_touch_only_dirty_chunk_and_radix_paths' (28903) panicked at engine/tests/vfs_remote.rs:1881:10:
+called `Result::unwrap()` on an `Err` value: partial tree validation deadline exceeded
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test remote_partial_capture_100k_entries_and_208mib_file_touch_only_dirty_chunk_and_radix_paths ... FAILED
+test remote_partial_capture_cancel_after_head_commit_loses_only_the_reply ... ok
+test remote_partial_capture_exclusions_moves_and_runtime_hardlink_gate ... ok
+test remote_partial_capture_exhausted_candidate_retirement_preserves_prior_head ... ok
+test remote_partial_capture_late_cancel_keeps_data_for_same_nonce_reconciliation ... ok
+test remote_partial_capture_nonce_cursor_policy_head_cancel_and_quota_fail_closed ... ok
+test remote_partial_capture_real_process_death_reconciles_original_candidate_and_ack ... ok
+test remote_partial_capture_refuses_missing_or_corrupt_head_instead_of_recreating_it ... ok
+test remote_partial_capture_retains_only_produced_data_and_preserves_live_baseline ... ok
+test remote_readdir_crash_child ... ok
+test remote_partial_capture_revocation_after_retention_withholds_head_and_keeps_data ... ok
+test remote_readdir_acknowledged_reservations_survive_real_process_death ... ok
+test remote_readdir_cookie_and_live_cursor_quotas_leave_existing_seeks_usable ... ok
+test remote_readdir_over_100k_entries_uses_bounded_pages_without_file_or_blob_hydration has been running for over 60 seconds
+test remote_readdir_overlay_and_identity_quotas_are_checked_before_cursor_publication has been running for over 60 seconds
+test remote_readdir_physical_cursor_disk_quota_rolls_back_without_losing_prior_cursor has been running for over 60 seconds
+test remote_readdir_raw_prefixes_directory_moves_and_revocation_preserve_cursor_contract has been running for over 60 seconds
+{"cursor_db_bytes":5251072,"elapsed_ms":61874,"entries":100101,"file_or_blob_requests":0,"listing_ms":60989,"listing_stages":{"cookie_ns":1529313699,"cookies":100101,"cursor_commit_ns":52500162,"cursor_commits":392,"cursor_db_bytes":5251072,"identity_ns":2379356706,"live_cursors":1,"namespace_checkpoint_ns":298911320,"namespace_commit_ns":528325808,"namespace_identity_commits":392,"overlay_bytes":0,"overlay_rows":0,"pages_served":392,"reserved_bytes":16716837,"reserved_inodes":100101,"scan_ns":55404520526},"max_page_entries":256,"metadata_requests":1114,"phase":"remote_readdir_100k"}
+test remote_readdir_over_100k_entries_uses_bounded_pages_without_file_or_blob_hydration ... ok
+test remote_readdir_overlay_and_identity_quotas_are_checked_before_cursor_publication ... ok
+test remote_readdir_physical_cursor_disk_quota_rolls_back_without_losing_prior_cursor ... ok
+test remote_readdir_raw_prefixes_directory_moves_and_revocation_preserve_cursor_contract ... ok
+test remote_readdir_reopen_discards_cursors_but_preserves_reserved_identity ... ok
+test remote_readdir_reservations_never_return_unverified_child_attributes ... ok
+test sibling_range_cow_runtime_links_unlink_and_origin_rename_survive_reopen ... ok
+test stale_authority_blocks_private_and_inherited_operations_without_refetch ... ok
+test unavailable_provider_never_falls_back_to_arbitrary_local_cas_presence ... ok
+
+failures:
+
+failures:
+    remote_partial_capture_100k_entries_and_208mib_file_touch_only_dirty_chunk_and_radix_paths
+
+test result: FAILED. 28 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 293.14s
+
+error: test failed, to rerun pass `-p rudder-engine --test vfs_remote`

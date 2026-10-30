@@ -89,6 +89,66 @@ mod partial_tree_deltas {
     }
 
     #[test]
+    fn repeated_child_edges_are_validated_once_per_parent_and_all_lengths_still_checked() {
+        let graph = graph(1, true);
+        let setup = build_setup(&graph, RootLimits::default());
+        let temp = temp();
+        let store = LocalStore::open(temp.path().join("cas")).unwrap();
+        let links = topology(&setup.session);
+        let boundaries = vec![inherited_file(&graph, &setup.session), links.clone()];
+        for invalid_last in [false, true] {
+            let stage = store.begin_staging(Duration::from_secs(60)).unwrap();
+            let entries: Vec<_> = (0..128)
+                .map(|index| {
+                    DirectoryEntry::new(
+                        format!("shared-{index:04}").as_bytes(),
+                        EntryNode::File {
+                            object: graph.file.clone(),
+                            logical_size: 208 * 1024 * 1024
+                                + u64::from(invalid_last && index == 127),
+                            mode: 0o644,
+                        },
+                    )
+                    .unwrap()
+                })
+                .collect();
+            let root = PagedDirectory::new(&directory::LocalDirectoryStore::new(&store, &stage.id))
+                .build(0o755, entries)
+                .unwrap();
+            let shard = directory::decode_directory_root(&store.read_object(&root).unwrap())
+                .unwrap()
+                .directory_shard;
+            assert!(matches!(
+                directory::decode_shard(&store.read_object(&shard).unwrap()).unwrap().node,
+                ShardNode::Leaf { .. }
+            ));
+            let result = delta::retain_partial_tree(
+                &store,
+                &stage.id,
+                if invalid_last { "repeated-invalid" } else { "repeated-valid" },
+                &Uuid::new_v4().to_string(),
+                &setup.session,
+                &root,
+                links.reference(),
+                &[root.clone(), shard],
+                &boundaries,
+                &DeltaBudget::default(),
+            );
+            if invalid_last {
+                assert!(result.err().unwrap().to_string().contains("logical length"));
+                assert!(store.object_set_receipt("repeated-invalid").unwrap().is_none());
+            } else {
+                let retained = result.unwrap();
+                assert_eq!(retained.report().validated_edges, 2);
+                assert_eq!(retained.plan().local_objects.len(), 2);
+            }
+        }
+        let calls = graph.source.calls.lock().unwrap();
+        assert!(graph.chunks.iter().all(|chunk| !calls.contains(chunk)),
+            "validating repeated File refs must never hydrate its Blob chunks");
+    }
+
+    #[test]
     fn partial_plan_and_new_bytes_are_retained_atomically_without_hydrating_old_data() {
         let graph = graph(1, false);
         let setup = build_setup(&graph, RootLimits::default());
@@ -1761,6 +1821,10 @@ impl Http {
                 while !stop.load(Ordering::Acquire) {
                     match listener.accept() {
                         Ok((mut stream, _)) => {
+                            // Darwin inherits the listener's nonblocking flag;
+                            // Linux does not. This worker uses bounded blocking
+                            // reads/writes for complete HTTP response bodies.
+                            stream.set_nonblocking(false).unwrap();
                             stream
                                 .set_read_timeout(Some(Duration::from_millis(50)))
                                 .unwrap();
@@ -1836,9 +1900,13 @@ impl Http {
                                 },
                                 response.as_ref().map_or(0, Vec::len)
                             );
-                            let _ = stream.write_all(header.as_bytes());
+                            stream
+                                .write_all(header.as_bytes())
+                                .expect("write complete HTTP fixture header");
                             if let Some(body) = response {
-                                let _ = stream.write_all(&body);
+                                stream
+                                    .write_all(&body)
+                                    .expect("write complete HTTP fixture body");
                             }
                         }
                         Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {

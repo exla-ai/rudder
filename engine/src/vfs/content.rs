@@ -185,6 +185,9 @@ fn base_range(
     }
     let object = n.base.as_ref().context("inherited range lacks content")?;
     if let Some(remote) = &view.manager().0.remote {
+        if let Some(meter) = meter {
+            meter.content(count as u64)?;
+        }
         let bytes = remote.read_range(n.origin.as_deref(), object, offset, count)?;
         ensure!(
             bytes.len() == count,
@@ -402,6 +405,19 @@ pub(super) fn seal_metered(
     staging: &str,
     meter: Option<&WorkMeter<'_>>,
 ) -> Result<ObjectRef> {
+    seal_collected(view, c, n, staging, meter, None)
+}
+pub(super) fn seal_collected<'a>(
+    view: &'a VfsView,
+    c: &'a Connection,
+    n: &'a Node,
+    staging: &'a str,
+    meter: Option<&'a WorkMeter<'a>>,
+    collector: Option<&'a capture::Collector<'a>>,
+) -> Result<ObjectRef> {
+    if let Some(collector) = collector {
+        collector.bind(n)?;
+    }
     let dirty: bool = c.query_row(
         "SELECT EXISTS(SELECT 1 FROM file_blocks WHERE inode=?)",
         [sql_id(n.attr.ino)],
@@ -410,7 +426,11 @@ pub(super) fn seal_metered(
     let limit = base_limit(c, n)?;
     if !dirty && limit == n.attr.size {
         if let Some(base) = &n.base {
-            if cas::file_info(&Reader(view, meter), base)?.logical_size == n.attr.size {
+            let info = match collector {
+                Some(collector) => cas::file_info(collector, base)?,
+                None => cas::file_info(&Reader(view, meter), base)?,
+            };
+            if info.logical_size == n.attr.size {
                 return Ok(base.clone());
             }
         }
@@ -423,6 +443,7 @@ pub(super) fn seal_metered(
         limit,
         store,
         meter,
+        collector,
         metadata: BTreeMap::new(),
         metadata_order: VecDeque::new(),
         zeros: BTreeMap::new(),
@@ -448,6 +469,7 @@ struct Sealer<'a> {
     limit: u64,
     store: StagedContentStore<'a>,
     meter: Option<&'a WorkMeter<'a>>,
+    collector: Option<&'a capture::Collector<'a>>,
     metadata: BTreeMap<ObjectRef, FileNode>,
     metadata_order: VecDeque<ObjectRef>,
     zeros: BTreeMap<(u64, bool), ObjectRef>,
@@ -457,10 +479,15 @@ impl Sealer<'_> {
         if let Some(n) = self.metadata.get(r) {
             return Ok(n.clone());
         }
-        if let Some(meter) = self.meter {
-            meter.metadata(r.size_bytes)?;
-        }
-        let n = cas::decode_file_node(&self.store.read_object(r)?)?;
+        let bytes = if let Some(collector) = self.collector {
+            collector.read_metadata(r)?
+        } else {
+            if let Some(meter) = self.meter {
+                meter.metadata(r.size_bytes)?;
+            }
+            self.store.read_object(r)?
+        };
+        let n = cas::decode_file_node(&bytes)?;
         if self.metadata.len() >= 128 {
             if let Some(old) = self.metadata_order.pop_front() {
                 self.metadata.remove(&old);
@@ -475,7 +502,10 @@ impl Sealer<'_> {
             return Ok(None);
         };
         let mut at = 0;
-        let mut span = cas::file_info(&Reader(self.view, self.meter), &object)?.logical_size;
+        let mut span = match self.collector {
+            Some(collector) => cas::file_info(collector, &object)?.logical_size,
+            None => cas::file_info(&Reader(self.view, self.meter), &object)?.logical_size,
+        };
         let end = start.checked_add(length).context("seal range overflow")?;
         loop {
             if start == at && length == span {
@@ -575,7 +605,10 @@ impl Sealer<'_> {
             if let Some(meter) = self.meter {
                 meter.content(bytes.len() as u64)?;
             }
-            self.store.put_blob(&bytes)?
+            match self.collector {
+                Some(collector) => collector.put_blob(&bytes)?,
+                None => self.store.put_blob(&bytes)?,
+            }
         } else {
             let level = level(length)?;
             let span = if level == 0 {
@@ -611,7 +644,10 @@ impl Sealer<'_> {
             if let Some(meter) = self.meter {
                 meter.metadata(canonical_json(&node)?.len() as u64)?;
             }
-            self.store.put_file_node(&node)?
+            match self.collector {
+                Some(collector) => collector.put_file_node(&node)?,
+                None => self.store.put_file_node(&node)?,
+            }
         };
         if zero {
             self.zeros.insert((length, file), object.clone());

@@ -239,6 +239,54 @@ impl Resolver {
     pub(super) fn base(&self) -> &ObjectRef {
         &self.manifest.view_root
     }
+    pub(super) fn session(&self) -> &RemoteSession {
+        &self.session
+    }
+    pub(super) fn topology(&self) -> &ObjectRef {
+        &self.manifest.hardlinks
+    }
+    pub(super) fn topology_handle(&self) -> Result<ObjectHandle> {
+        mapped(self.root.child(&self.manifest.hardlinks))
+    }
+    /// Derive membership without reading the final File/Blob payload. Only the
+    /// bounded immutable directory route is loaded, including moved origins.
+    pub(super) fn capture_handle(
+        &self,
+        origin: Option<&str>,
+        expected: &ObjectRef,
+        meter: &observation::WorkMeter<'_>,
+    ) -> Result<ObjectHandle> {
+        let path = self.origin(origin)?;
+        let mut directory = self.directory.clone();
+        if path.is_empty() {
+            ensure!(expected == self.base(), "remote root origin differs");
+            return mapped(self.root.child(expected));
+        }
+        let mut prefix = String::new();
+        for (index, name) in path.iter().enumerate() {
+            meter.check()?;
+            let (page, entry) = self
+                .lookup_in_metered(&directory, &prefix, name, Some(meter))?
+                .ok_or_else(|| error(libc::ENOENT))?;
+            let object = match entry.node {
+                PagedNode::Directory { object } => object,
+                PagedNode::File { object, .. } if index + 1 == path.len() => object,
+                _ => return Err(error(libc::ELOOP)),
+            };
+            let handle = mapped(page.child(&object))?;
+            if index + 1 == path.len() {
+                ensure!(&object == expected, "remote capture origin differs");
+                return Ok(handle);
+            }
+            if !prefix.is_empty() {
+                prefix.push('/');
+            }
+            prefix.push_str(&hex::encode(name));
+            meter.metadata(object.size_bytes)?;
+            directory = self.load(format!("resolved:{prefix}"), handle)?;
+        }
+        Err(error(libc::EIO))
+    }
     pub(super) fn check_origin(&self, origin: &str) -> Result<()> {
         self.origin(Some(origin)).map(|_| ())
     }
@@ -368,8 +416,23 @@ impl Resolver {
         origin: &str,
         name: &[u8],
     ) -> Result<Option<(LoadedObject, paged::DirectoryEntry)>> {
+        self.lookup_in_metered(directory, origin, name, None)
+    }
+    fn lookup_in_metered(
+        &self,
+        directory: &LoadedObject,
+        origin: &str,
+        name: &[u8],
+        meter: Option<&observation::WorkMeter<'_>>,
+    ) -> Result<Option<(LoadedObject, paged::DirectoryEntry)>> {
         name_ok(name)?;
+        if let Some(meter) = meter {
+            meter.metadata(directory.reference().size_bytes)?;
+        }
         let header = mapped(directory.with_bytes(paged::decode_directory_root))??;
+        if let Some(meter) = meter {
+            meter.metadata(header.directory_shard.size_bytes)?;
+        }
         let mut current = self.child(
             directory,
             &header.directory_shard,
@@ -397,6 +460,9 @@ impl Resolver {
                     let Some(index) = children.iter().position(|child| child.edge == edge) else {
                         return Ok(None);
                     };
+                    if let Some(meter) = meter {
+                        meter.metadata(children[index].shard.size_bytes)?;
+                    }
                     current = self.edge(&current, index, &format!("page:{origin}"))?;
                 }
             }

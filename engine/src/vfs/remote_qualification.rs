@@ -1,4 +1,6 @@
 //! Generated-public-fixture qualification; Linux-only bin, never installed.
+#[path = "remote_capture_qualification.rs"]
+mod capture_qualification;
 use anyhow::{bail, Context, Result};
 use rudder_engine::{
     content::{FileNode, CHUNK_BYTES, FILE_LAYOUT},
@@ -819,6 +821,25 @@ fn exercise(base: &Path, helper: &Path, node: &Path, mode: &str) -> Result<()> {
         cache.stats()?.disk_bytes < 64 * 1024 * 1024,
         "unexpected SDK hydration"
     );
+    let (capture, capture_receipt) = capture_qualification::qualify_capture(
+        &manager,
+        &view,
+        &first_session,
+        &graph,
+        &file,
+        &sibling_file,
+    )?;
+    emit(serde_json::json!({"phase":"mounted_partial_capture","uid":uid,"results":capture}));
+    anyhow::ensure!(
+        http.objects
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|r| graph.chunks.contains(r))
+            .count()
+            == 2,
+        "capture hydrated additional unchanged SDK chunks"
+    );
     let busy = mounted
         .unmount()
         .err()
@@ -863,6 +884,15 @@ fn exercise(base: &Path, helper: &Path, node: &Path, mode: &str) -> Result<()> {
         "stale lookup failed for an unexpected reason"
     );
     remounted.discard()?;
+    let retained_after_revoke =
+        rudder_engine::delta::read_partial_tree(&store, &capture_receipt.retention)?;
+    anyhow::ensure!(
+        retained_after_revoke.capture_id == capture_receipt.request_nonce
+            && view
+                .inspect_partial_capture(&capture_receipt.request_nonce)
+                .is_err(),
+        "saved data receipt restored live attempt authority"
+    );
     anyhow::ensure!(
         vfs::errno(&view.read(1, 0, 1).unwrap_err()) == libc::ESTALE,
         "fenced logical operation succeeded"
@@ -891,7 +921,7 @@ fn exercise(base: &Path, helper: &Path, node: &Path, mode: &str) -> Result<()> {
         }
     };
     emit(
-        serde_json::json!({"ok":true,"profile":"remote_paged_readdir_v1","build_source_sha256":option_env!("RUDDER_QUALIFICATION_SOURCE_SHA").unwrap_or("unrecorded"),"uid":uid,"kernel":fs::read_to_string("/proc/sys/kernel/osrelease")?.trim(),"entries":100101,"logical_file_bytes":218103808u64,"fixture_ms":fixture_ms,"constructor_and_fork_ms":launch_ms,"readdir":readdir,"source_transport":"persistent Node helper + loopback authenticated HTTP fixture","root_receipt_requests":http.roots.load(Ordering::Acquire),"source_object_requests":http.objects.lock().unwrap().len(),"source_payload_requests":payload_requests.len(),"source_payload_bytes":payload_requests.iter().map(|r|r.size_bytes).sum::<u64>(),"partial_cache_bytes":cache.stats()?.disk_bytes,"private_copyup_bytes":log_bytes(&manager,&view)?,"complete_local_pins":store.retention()?.pins.len(),"mmap_msync_fsync":true,"sibling_isolation":true,"origin_rename":true,"runtime_hardlinks":true,"open_unlink":true,"busy_unmount_retry":true,"checkpoint_and_observation_rejected":true,"stale_lookup_rejected":true,"discard_strictly_closed":true,"discard_checkpoint_proof":false,"initial_host_mount_namespace_unchanged":host_namespace_verified,"host_namespace_check_delegated_to_outer_controller":!host_namespace_verified,"host_namespace_inspection_denied":host_namespace_read.is_err()}),
+        serde_json::json!({"ok":true,"profile":"remote_partial_capture_v1","build_source_sha256":option_env!("RUDDER_QUALIFICATION_SOURCE_SHA").unwrap_or("unrecorded"),"uid":uid,"kernel":fs::read_to_string("/proc/sys/kernel/osrelease")?.trim(),"entries":100101,"logical_file_bytes":218103808u64,"fixture_ms":fixture_ms,"constructor_and_fork_ms":launch_ms,"readdir":readdir,"partial_capture":capture,"retained_data_after_revocation":true,"source_transport":"persistent Node helper + loopback authenticated HTTP fixture","root_receipt_requests":http.roots.load(Ordering::Acquire),"source_object_requests":http.objects.lock().unwrap().len(),"source_payload_requests":payload_requests.len(),"source_payload_bytes":payload_requests.iter().map(|r|r.size_bytes).sum::<u64>(),"partial_cache_bytes":cache.stats()?.disk_bytes,"private_copyup_bytes":log_bytes(&manager,&view)?,"complete_local_pins":store.retention()?.pins.len(),"mmap_msync_fsync":true,"sibling_isolation":true,"origin_rename":true,"runtime_hardlinks":true,"open_unlink":true,"busy_unmount_retry":true,"checkpoint_and_observation_rejected":true,"stale_lookup_rejected":true,"discard_strictly_closed":true,"discard_checkpoint_proof":false,"initial_host_mount_namespace_unchanged":host_namespace_verified,"host_namespace_check_delegated_to_outer_controller":!host_namespace_verified,"host_namespace_inspection_denied":host_namespace_read.is_err()}),
     );
     drop((
         remounted,
@@ -919,7 +949,7 @@ pub fn main() {
     let arguments = std::env::args().skip(1).collect::<Vec<_>>();
     if arguments.first().map(String::as_str) == Some("--build-info") {
         emit(
-            serde_json::json!({"format_version":1,"qualification":"remote_paged_readdir_v1","ready":true,"default":false,"build_source_sha256":option_env!("RUDDER_QUALIFICATION_SOURCE_SHA").unwrap_or("unrecorded")}),
+            serde_json::json!({"format_version":1,"qualification":"remote_partial_capture_v1","ready":true,"default":false,"build_source_sha256":option_env!("RUDDER_QUALIFICATION_SOURCE_SHA").unwrap_or("unrecorded")}),
         );
         return;
     }

@@ -1,0 +1,16 @@
+{
+  "format_version": 1,
+  "purpose": "capture API source at local focused-test handoff; not a complete compiled build envelope",
+  "verified_at": "2026-10-30T21:14:12.916554+00:00",
+  "files": {
+    "engine/src/vfs.rs": "c47e81dd9714bbc8b1dc7fd6dadf80590c27bbf51a6de8455e4d77a790c70c97",
+    "engine/src/vfs/capture.rs": "990c8f9ddbed043379549320177bbfdaa0b03da135f99d711875effc638573d2",
+    "engine/src/vfs/content.rs": "9b2888217c05299a9418cc4e5c32d4a8d85e43306963ac198fa35fb587cac6e2",
+    "engine/src/vfs/namespace.rs": "f37805d72e48acfca67d6f7a7ce35a4e76fa9c5c5cde88929cb26aab299224e8",
+    "engine/src/vfs/observation.rs": "b075bb4fa355353bb22b360e55c9d87474c5f9ebab61e27cd55dc01ffa0ba497",
+    "engine/src/vfs/remote.rs": "f18e57a306383b4aaeda6b29f7e7f54589524de722f8c48d4999ed0410ceb8e0",
+    "engine/tests/vfs_remote.rs": "8dbf4a0b25bef5307382f962227841f8a26f2866ff7ac1b0901169756139d21d",
+    "engine/src/delta.rs": "90a59e6e57afacbacb0c2e870270cc3907a8639ff42b53ca03fa2e4e54e51770"
+  },
+  "engine_execution_and_native_sources_not_owned_or_frozen_here": true
+}

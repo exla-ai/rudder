@@ -27,6 +27,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
+mod capture;
 mod content;
 #[cfg(target_os = "linux")]
 pub mod linux;
@@ -35,6 +36,9 @@ mod observation;
 mod readdir;
 mod remote;
 pub mod rpc;
+pub use capture::{
+    PartialCaptureBudget, PartialCaptureReceipt, PartialCaptureRequest, PartialCaptureStatus,
+};
 pub use observation::{
     exclusion_policy_digest, DirtyCursor, DirtyEvent, DirtyPage, ObservationBudget,
     ObservationConsistency, VfsObservation,
@@ -128,6 +132,8 @@ pub struct VfsDescriptor {
     pub private_dirent_count: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data_plane: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub partial_capture_format: Option<u32>,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -181,6 +187,7 @@ pub fn capabilities() -> serde_json::Value {
                 "startup":"bounded manifests/profile/empty-topology and root page only",
                 "inherited_hardlinks":"nonempty topology requires explicit bulk path; runtime links supported",
                 "checkpoint":false,"live_observation":false,"root_pin":"no complete LocalStore pin",
+                "partial_capture":"explicit data-only receipt v1; permanent namespace4 activation; nonce/head journal; complete consumers gated",
                 "listing":"remote namespace3 fixed snapshots; bounded pages, disk cookies and stable inode reservations; quotas return EAGAIN",
                 "default_runtime_switch":false
             }
@@ -910,14 +917,17 @@ impl VfsManager {
             |r| r.get::<_, String>(0),
         )?;
         ensure!(
-            version == "1" || version == "2" || version == "3",
+            version == "1" || version == "2" || version == "3" || version == "4",
             "unsupported VFS version"
         );
         ensure!(
-            (version == "3") == self.0.remote.is_some(),
-            "remote pager requires explicit namespace3; legacy remote namespaces require migration"
+            (version == "3" || version == "4") == self.0.remote.is_some(),
+            "remote pager requires namespace3/4; legacy remote namespaces require migration"
         );
-        let v2 = version == "2" || version == "3";
+        let v2 = version == "2" || version == "3" || version == "4";
+        if version == "4" {
+            capture::validate_schema(&db)?;
+        }
         ensure!(
             db.query_row("SELECT value FROM meta WHERE key='view_id'", [], |r| r
                 .get::<_, String>(
@@ -984,7 +994,7 @@ impl VfsView {
     }
     pub(crate) fn require_local_checkpoint(&self) -> Result<()> {
         if self.manager().0.remote.is_some() {
-            return Err(error(libc::EOPNOTSUPP)).context("partial remote views require typed local-delta retention before checkpoint or observation");
+            return Err(error(libc::EOPNOTSUPP)).context("partial remote views require explicit partial capture/publication; complete checkpoint and observation remain unsupported");
         }
         Ok(())
     }
@@ -1029,6 +1039,7 @@ impl VfsView {
             inode_count: c.query_row("SELECT count(*) FROM nodes", [], |r| read_id(r, 0))?,
             private_dirent_count: c
                 .query_row("SELECT count(*) FROM dirents", [], |r| read_id(r, 0))?,
+            partial_capture_format: (get("format_version")? == "4").then_some(1),
             data_plane: self.0.v2.then(|| {
                 if self.manager().0.remote.is_some() {
                     "remote_paged_ranges_v1".to_string()

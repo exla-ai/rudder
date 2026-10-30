@@ -122,7 +122,7 @@ pub(super) fn initialize(c: &Connection, root_entries: u64) -> Result<()> {
 }
 pub(super) fn enabled(c: &Connection) -> Result<bool> {
     Ok(c.query_row(
-        "SELECT value IN ('2','3') FROM meta WHERE key='format_version'",
+        "SELECT value IN ('2','3','4') FROM meta WHERE key='format_version'",
         [],
         |r| r.get(0),
     )?)
@@ -419,12 +419,33 @@ pub(super) fn capture_metered(
     meter: Option<&WorkMeter<'_>>,
 ) -> Result<Captured> {
     view.require_local_checkpoint()?;
+    capture_inner(view, c, stage, policy, meter, None)
+}
+pub(super) fn capture_partial_metered<'a>(
+    view: &'a VfsView,
+    c: &'a Connection,
+    stage: &'a str,
+    policy: &'a ImportPolicy,
+    meter: &'a WorkMeter<'a>,
+    collector: &'a capture::Collector<'a>,
+) -> Result<Captured> {
+    capture_inner(view, c, stage, policy, Some(meter), Some(collector))
+}
+fn capture_inner<'a>(
+    view: &'a VfsView,
+    c: &'a Connection,
+    stage: &'a str,
+    policy: &'a ImportPolicy,
+    meter: Option<&'a WorkMeter<'a>>,
+    collector: Option<&'a capture::Collector<'a>>,
+) -> Result<Captured> {
     let mut capture = Capture {
         view,
         c,
         stage,
         policy,
         meter,
+        collector,
         files: BTreeMap::new(),
         directories: BTreeMap::new(),
         seen: BTreeSet::new(),
@@ -442,6 +463,7 @@ struct Capture<'a> {
     stage: &'a str,
     policy: &'a ImportPolicy,
     meter: Option<&'a WorkMeter<'a>>,
+    collector: Option<&'a capture::Collector<'a>>,
     files: BTreeMap<u64, ObjectRef>,
     directories: BTreeMap<u64, ObjectRef>,
     seen: BTreeSet<u64>,
@@ -456,6 +478,9 @@ impl Capture<'_> {
             "directory capture cycle/depth limit"
         );
         let n = require_dir(self.c, id)?;
+        if let Some(collector) = self.collector {
+            collector.bind(&n)?;
+        }
         let policy_relevant = self
             .policy
             .excluded_paths
@@ -472,14 +497,25 @@ impl Capture<'_> {
             inner: LocalDirectoryStore::new(self.view.manager().store(), self.stage),
             meter: self.meter,
         };
-        let tree = PagedDirectory::new(&adapter);
-        let mut root = ensure_paged_metered(
-            self.view.manager().store(),
-            self.stage,
-            n.base.as_ref(),
-            n.attr.mode,
-            self.meter,
-        )?;
+        let store: &dyn DirectoryStore = match self.collector {
+            Some(collector) => collector,
+            None => &adapter,
+        };
+        let tree = PagedDirectory::new(store);
+        let mut root = if self.collector.is_some() {
+            match &n.base {
+                Some(base) => base.clone(),
+                None => tree.build(n.attr.mode, std::iter::empty())?,
+            }
+        } else {
+            ensure_paged_metered(
+                self.view.manager().store(),
+                self.stage,
+                n.base.as_ref(),
+                n.attr.mode,
+                self.meter,
+            )?
+        };
         let mut names = BTreeSet::new();
         let mut q = self
             .c
@@ -530,9 +566,19 @@ impl Capture<'_> {
                             let object = if let Some(object) = self.files.get(&child.attr.ino) {
                                 object.clone()
                             } else {
-                                let object = content::seal_metered(
-                                    self.view, self.c, &child, self.stage, self.meter,
-                                )?;
+                                let object = match self.collector {
+                                    Some(collector) => content::seal_collected(
+                                        self.view,
+                                        self.c,
+                                        &child,
+                                        self.stage,
+                                        self.meter,
+                                        Some(collector),
+                                    )?,
+                                    None => content::seal_metered(
+                                        self.view, self.c, &child, self.stage, self.meter,
+                                    )?,
+                                };
                                 self.files.insert(child.attr.ino, object.clone());
                                 object
                             };

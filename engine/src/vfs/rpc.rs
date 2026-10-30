@@ -488,6 +488,9 @@ pub struct RpcActivity {
 }
 impl ObservationRpc {
     pub fn bind(view: VfsView, config: RpcConfig, directory: &Path) -> Result<Self> {
+        // This wire format returns complete observations. Remote captures use
+        // an explicit partial receipt and have no compatible RPC consumer yet.
+        view.require_local_checkpoint()?;
         // Endpoint paths are a projection detail, not the ownership authority.
         // A second path must not create a second nonce/adoption ingress for the
         // same actual view. Keep this independent of the mounted-view lock,

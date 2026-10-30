@@ -13,7 +13,10 @@ use rudder_engine::{
     },
     snapshot::{RunnableRoot, SourceV2},
     store::{ImportPolicy, LocalStore},
-    vfs::{self, NodeKind, ObservationBudget, RemoteOptions, VfsManager, VfsView},
+    vfs::{
+        self, NodeKind, ObservationBudget, PartialCaptureBudget, PartialCaptureReceipt,
+        PartialCaptureRequest, RemoteOptions, VfsManager, VfsView,
+    },
     workspace::WorkspaceProfile,
 };
 use std::{
@@ -1371,4 +1374,791 @@ fn remote_readdir_acknowledged_reservations_survive_real_process_death() {
     assert!(fresh.ino > witness.iter().map(|r| r.1).max().unwrap());
     assert!(manager.store().retention().unwrap().pins.is_empty());
     view.close_handle(1, handle).unwrap();
+}
+
+fn capture_request(view: &VfsView) -> PartialCaptureRequest {
+    PartialCaptureRequest {
+        nonce: Uuid::new_v4().to_string(),
+        expected_begin: view.dirty_cursor().unwrap(),
+        expected_head: view
+            .partial_capture_head()
+            .unwrap()
+            .map(|r| r.request_nonce),
+    }
+}
+fn capture_db(manager: &VfsManager, view: &VfsView) -> rusqlite::Connection {
+    rusqlite::Connection::open(
+        manager
+            .root()
+            .join("views")
+            .join(view.id())
+            .join("namespace.sqlite"),
+    )
+    .unwrap()
+}
+fn captured_private_bytes(
+    store: &LocalStore,
+    receipt: &PartialCaptureReceipt,
+    name: &[u8],
+) -> Vec<u8> {
+    let plan = rudder_engine::delta::read_partial_tree(store, &receipt.retention).unwrap();
+    let adapter = directory::LocalDirectoryStore::read_only(store);
+    let entry = PagedDirectory::new(&adapter)
+        .lookup(&plan.directory, name)
+        .unwrap()
+        .unwrap();
+    let EntryNode::File { object, .. } = entry.node else {
+        panic!("capture is not a file")
+    };
+    store.read_object(&object).unwrap()
+}
+
+struct CompleteRpcMustNotAuthorize;
+impl vfs::rpc::AttemptAuthority for CompleteRpcMustNotAuthorize {
+    fn validate(&self, _: &vfs::rpc::ObservationBinding) -> Result<()> {
+        panic!("complete RPC attempted to authorize a partial view")
+    }
+}
+fn reject_complete_rpc(view: &VfsView, session: &RemoteSession, path: &Path) {
+    let profile = canonical_json(view.manager().remote_profile().unwrap()).unwrap();
+    let config = vfs::rpc::RpcConfig {
+        attempt: vfs::rpc::AttemptContext {
+            execution_id: session.attempt().execution_id.clone(),
+            operation_id: session.attempt().operation_id.clone(),
+        },
+        profile: ObjectRef::from_bytes(ObjectKind::Blob, &profile),
+        authority: Arc::new(CompleteRpcMustNotAuthorize),
+        adoption_witness: None,
+        limits: vfs::rpc::RpcLimits::default(),
+    };
+    let rejected = vfs::rpc::ObservationRpc::bind(view.clone(), config, path)
+        .err()
+        .expect("partial view enabled complete RPC");
+    assert_eq!(vfs::errno(&rejected), libc::EOPNOTSUPP);
+    assert!(!path.exists());
+}
+
+#[test]
+fn remote_partial_capture_retains_only_produced_data_and_preserves_live_baseline() {
+    let _serial = serial();
+    let graph = graph(32);
+    let rig = rig(&graph, RemoteOptions::default());
+    assert!(rig.view.partial_capture_head().unwrap().is_none());
+    reject_complete_rpc(
+        &rig.view,
+        &rig.session,
+        &rig._dir.path().join("complete-rpc-before"),
+    );
+    assert_eq!(rig.view.descriptor().unwrap().partial_capture_format, None);
+    let file = rig
+        .view
+        .create(1, b"new", NodeKind::File, 0o640, b"")
+        .unwrap();
+    rig.view.write(file.ino, 0, b"before", true).unwrap();
+    let request = capture_request(&rig.view);
+    let receipt = rig
+        .view
+        .capture_partial_source(
+            &ImportPolicy::default(),
+            &request,
+            &PartialCaptureBudget::default(),
+        )
+        .unwrap();
+    assert_eq!(receipt.begin, request.expected_begin);
+    assert_eq!(receipt.end, receipt.begin);
+    assert_eq!(receipt.head_sequence, 1);
+    assert_eq!(
+        rig.view.descriptor().unwrap().partial_capture_format,
+        Some(1)
+    );
+    reject_complete_rpc(
+        &rig.view,
+        &rig.session,
+        &rig._dir.path().join("complete-rpc-after"),
+    );
+    assert_eq!(rig.view.descriptor().unwrap().base, graph.directory);
+    assert!(rig.view.descriptor().unwrap().latest.is_none());
+    assert!(rig.view.descriptor().unwrap().latest_snapshot.is_none());
+    let plan = rudder_engine::delta::read_partial_tree(&rig.store, &receipt.retention).unwrap();
+    assert!(plan.local_objects.len() < 16);
+    assert!(plan
+        .remote_boundaries
+        .iter()
+        .any(|p| p.reference == graph.file));
+    assert!(rig.store.retention().unwrap().pins.is_empty());
+    assert!(rig.store.retained_closure(&plan.directory).is_err());
+    assert!(graph
+        .source
+        .calls
+        .lock()
+        .unwrap()
+        .iter()
+        .all(|r| !graph.chunks.contains(r)));
+    assert!(rig.view.release_partial_capture(&request.nonce).is_err());
+    rig.view.write(file.ino, 0, b"later!", true).unwrap();
+    rig.store.gc(Duration::ZERO).unwrap();
+    assert_eq!(
+        captured_private_bytes(&rig.store, &receipt, b"new"),
+        b"before"
+    );
+    assert_eq!(rig.view.read(file.ino, 0, 6).unwrap(), b"later!");
+    assert_eq!(
+        rig.view
+            .capture_partial_source(
+                &ImportPolicy::default(),
+                &request,
+                &PartialCaptureBudget::default()
+            )
+            .unwrap(),
+        receipt
+    );
+    assert_eq!(
+        vfs::errno(&rig.view.checkpoint_snapshot_unmounted().unwrap_err()),
+        libc::EOPNOTSUPP
+    );
+    assert_eq!(
+        vfs::errno(
+            &rig.view
+                .observe_source(
+                    &ImportPolicy::default(),
+                    &Uuid::new_v4().to_string(),
+                    &ObservationBudget::default()
+                )
+                .unwrap_err()
+        ),
+        libc::EOPNOTSUPP
+    );
+    let second_request = capture_request(&rig.view);
+    let second = rig
+        .view
+        .capture_partial_source(
+            &ImportPolicy::default(),
+            &second_request,
+            &PartialCaptureBudget::default(),
+        )
+        .unwrap();
+    assert_eq!(second.previous_head, Some(request.nonce.clone()));
+    assert_eq!(second.head_sequence, 2);
+    assert_eq!(
+        captured_private_bytes(&rig.store, &second, b"new"),
+        b"later!"
+    );
+    rig.view.release_partial_capture(&request.nonce).unwrap();
+    rig.store.gc(Duration::ZERO).unwrap();
+    assert!(rig.store.object_set_refs(&receipt.retention.local).is_err());
+    assert_eq!(
+        captured_private_bytes(&rig.store, &second, b"new"),
+        b"later!"
+    );
+    rig.view.release_partial_capture(&request.nonce).unwrap();
+    assert_eq!(
+        rig.view
+            .inspect_partial_capture(&request.nonce)
+            .unwrap()
+            .unwrap()
+            .state,
+        "released"
+    );
+    let replacement_stage = rig.store.begin_staging(Duration::from_secs(60)).unwrap();
+    let replacement = ObjectRef::from_bytes(ObjectKind::Blob, b"replacement");
+    rig.store
+        .receive_staged(&replacement_stage.id, &replacement, b"replacement")
+        .unwrap();
+    let replacement_receipt = rig
+        .store
+        .retain_object_set(
+            &replacement_stage.id,
+            &receipt.retention.local.pin_id,
+            &[replacement.clone()],
+        )
+        .unwrap();
+    assert!(rig.view.release_partial_capture(&request.nonce).is_err());
+    assert_eq!(
+        rig.store.object_set_refs(&replacement_receipt).unwrap(),
+        vec![replacement]
+    );
+}
+
+#[test]
+fn remote_partial_capture_nonce_cursor_policy_head_cancel_and_quota_fail_closed() {
+    let _serial = serial();
+    let graph = graph(16);
+    let rig = rig(&graph, RemoteOptions::default());
+    let file = rig
+        .view
+        .create(1, b"new", NodeKind::File, 0o600, b"")
+        .unwrap();
+    rig.view.write(file.ino, 0, b"private", true).unwrap();
+    let request = capture_request(&rig.view);
+    let mut wrong = request.clone();
+    wrong.expected_begin.namespace = Uuid::new_v4().to_string();
+    assert!(rig
+        .view
+        .capture_partial_source(
+            &ImportPolicy::default(),
+            &wrong,
+            &PartialCaptureBudget::default()
+        )
+        .is_err());
+    assert!(rig
+        .view
+        .capture_partial_source_cancellable(
+            &ImportPolicy::default(),
+            &request,
+            &PartialCaptureBudget::default(),
+            &|| true
+        )
+        .is_err());
+    assert_eq!(rig.view.descriptor().unwrap().partial_capture_format, None);
+    let mut quota = PartialCaptureBudget::default();
+    quota.delta.max_objects = 1;
+    assert!(rig
+        .view
+        .capture_partial_source(&ImportPolicy::default(), &request, &quota)
+        .is_err());
+    assert!(rig.view.partial_capture_head().unwrap().is_none());
+    assert!(rig
+        .store
+        .object_set_receipt(&format!("vfs:partial:{}:{}", rig.view.id(), request.nonce))
+        .unwrap()
+        .is_none());
+    let receipt = rig
+        .view
+        .capture_partial_source(
+            &ImportPolicy::default(),
+            &request,
+            &PartialCaptureBudget::default(),
+        )
+        .unwrap();
+    assert!(rig
+        .view
+        .capture_partial_source(
+            &ImportPolicy {
+                excluded_paths: vec![vec![b"new".to_vec()]]
+            },
+            &request,
+            &PartialCaptureBudget::default()
+        )
+        .is_err());
+    let mut wrong = request.clone();
+    wrong.nonce = Uuid::new_v4().to_string();
+    assert!(rig
+        .view
+        .capture_partial_source(
+            &ImportPolicy::default(),
+            &wrong,
+            &PartialCaptureBudget::default()
+        )
+        .is_err());
+    assert_eq!(rig.view.partial_capture_head().unwrap(), Some(receipt));
+}
+
+#[test]
+fn remote_partial_capture_exhausted_candidate_retirement_preserves_prior_head() {
+    let _serial = serial();
+    let graph = graph(8);
+    let rig = rig(&graph, RemoteOptions::default());
+    let file = rig
+        .view
+        .create(1, b"new", NodeKind::File, 0o600, b"")
+        .unwrap();
+    rig.view.write(file.ino, 0, b"before", true).unwrap();
+    let request = capture_request(&rig.view);
+    let previous = rig
+        .view
+        .capture_partial_source(
+            &ImportPolicy::default(),
+            &request,
+            &PartialCaptureBudget::default(),
+        )
+        .unwrap();
+    rig.view.write(file.ino, 0, b"later!", true).unwrap();
+    for kind in ["objects", "metadata", "content", "boundaries"] {
+        let mut limits = PartialCaptureBudget::default();
+        match kind {
+            "objects" => limits.delta.max_objects = 1,
+            "metadata" => limits.work.max_metadata_bytes = 0,
+            "content" => limits.work.max_content_bytes = 0,
+            _ => limits.delta.max_boundary_objects = 1,
+        }
+        let failed = capture_request(&rig.view);
+        assert!(
+            rig.view
+                .capture_partial_source(&ImportPolicy::default(), &failed, &limits)
+                .is_err(),
+            "{kind}"
+        );
+        assert_eq!(
+            rig.view.partial_capture_head().unwrap(),
+            Some(previous.clone())
+        );
+        rig.view.release_partial_capture(&failed.nonce).unwrap();
+        rig.store.gc(Duration::ZERO).unwrap();
+        assert_eq!(
+            rig.view.partial_capture_head().unwrap(),
+            Some(previous.clone())
+        );
+        assert_eq!(
+            captured_private_bytes(&rig.store, &previous, b"new"),
+            b"before"
+        );
+        assert!(rig.view.release_partial_capture(&request.nonce).is_err());
+    }
+}
+
+#[test]
+fn remote_partial_capture_late_cancel_keeps_data_for_same_nonce_reconciliation() {
+    let _serial = serial();
+    let graph = graph(16);
+    let rig = rig(&graph, RemoteOptions::default());
+    let file = rig
+        .view
+        .create(1, b"new", NodeKind::File, 0o600, b"")
+        .unwrap();
+    rig.view.write(file.ino, 0, b"before", true).unwrap();
+    let request = capture_request(&rig.view);
+    let pin = format!("vfs:partial:{}:{}", rig.view.id(), request.nonce);
+    let cancelled = || rig.store.object_set_receipt(&pin).unwrap().is_some();
+    assert!(rig
+        .view
+        .capture_partial_source_cancellable(
+            &ImportPolicy::default(),
+            &request,
+            &PartialCaptureBudget::default(),
+            &cancelled
+        )
+        .is_err());
+    let status = rig
+        .view
+        .inspect_partial_capture(&request.nonce)
+        .unwrap()
+        .unwrap();
+    assert_eq!(status.state, "retained");
+    assert!(!status.current && status.receipt.is_none());
+    assert!(status.retention.is_some());
+    assert!(rig.view.partial_capture_head().unwrap().is_none());
+    rig.view.write(file.ino, 0, b"later!", true).unwrap();
+    rig.store.gc(Duration::ZERO).unwrap();
+    let receipt = rig
+        .view
+        .capture_partial_source(
+            &ImportPolicy::default(),
+            &request,
+            &PartialCaptureBudget::default(),
+        )
+        .unwrap();
+    assert_eq!(
+        captured_private_bytes(&rig.store, &receipt, b"new"),
+        b"before"
+    );
+    assert_eq!(rig.view.read(file.ino, 0, 6).unwrap(), b"later!");
+}
+
+#[test]
+fn remote_partial_capture_cancel_after_head_commit_loses_only_the_reply() {
+    let _serial = serial();
+    let graph = graph(8);
+    let rig = rig(&graph, RemoteOptions::default());
+    let file = rig
+        .view
+        .create(1, b"new", NodeKind::File, 0o600, b"")
+        .unwrap();
+    rig.view.write(file.ino, 0, b"before", true).unwrap();
+    let request = capture_request(&rig.view);
+    let c = capture_db(&rig.manager, &rig.view);
+    let cancelled = || {
+        c.query_row(
+            "SELECT EXISTS(SELECT 1 FROM partial_capture_head)",
+            [],
+            |r| r.get::<_, bool>(0),
+        )
+        .unwrap_or(false)
+    };
+    assert!(rig
+        .view
+        .capture_partial_source_cancellable(
+            &ImportPolicy::default(),
+            &request,
+            &PartialCaptureBudget::default(),
+            &cancelled
+        )
+        .is_err());
+    let saved = rig
+        .view
+        .inspect_partial_capture(&request.nonce)
+        .unwrap()
+        .unwrap();
+    assert_eq!(saved.state, "committed");
+    assert!(saved.current);
+    assert!(rig.view.release_partial_capture(&request.nonce).is_err());
+    rig.view.write(file.ino, 0, b"later!", true).unwrap();
+    rig.store.gc(Duration::ZERO).unwrap();
+    let reconciled = rig
+        .view
+        .capture_partial_source(
+            &ImportPolicy::default(),
+            &request,
+            &PartialCaptureBudget::default(),
+        )
+        .unwrap();
+    assert_eq!(Some(reconciled.clone()), saved.receipt);
+    assert_eq!(
+        captured_private_bytes(&rig.store, &reconciled, b"new"),
+        b"before"
+    );
+}
+
+#[test]
+fn remote_partial_capture_exclusions_moves_and_runtime_hardlink_gate() {
+    let _serial = serial();
+    let graph = graph(16);
+    let rig = rig(&graph, RemoteOptions::default());
+    let dir = rig.view.lookup(1, b"dir").unwrap();
+    rig.view.rename(1, b"dir", 1, b"moved", 0).unwrap();
+    let file = rig
+        .view
+        .create(1, b"new", NodeKind::File, 0o600, b"")
+        .unwrap();
+    rig.view.write(file.ino, 0, b"private", true).unwrap();
+    let policy = ImportPolicy {
+        excluded_paths: vec![vec![b"moved".to_vec(), b"child".to_vec()]],
+    };
+    let request = capture_request(&rig.view);
+    let receipt = rig
+        .view
+        .capture_partial_source(&policy, &request, &PartialCaptureBudget::default())
+        .unwrap();
+    let plan = rudder_engine::delta::read_partial_tree(&rig.store, &receipt.retention).unwrap();
+    let adapter = directory::LocalDirectoryStore::read_only(&rig.store);
+    let tree = PagedDirectory::new(&adapter);
+    let moved = tree.lookup(&plan.directory, b"moved").unwrap().unwrap();
+    let EntryNode::Directory { object } = moved.node else {
+        panic!("not a directory")
+    };
+    assert!(tree.lookup(&object, b"child").unwrap().is_none());
+    assert_eq!(rig.view.lookup(1, b"moved").unwrap().ino, dir.ino);
+    assert!(rig.view.lookup(dir.ino, b"child").is_ok());
+    let nested = ObjectRef::from_bytes(ObjectKind::Blob, b"nested");
+    assert!(graph
+        .source
+        .calls
+        .lock()
+        .unwrap()
+        .iter()
+        .all(|r| !graph.chunks.contains(r) && r != &nested));
+    rig.view.link(file.ino, 1, b"linked").unwrap();
+    let request = capture_request(&rig.view);
+    assert_eq!(
+        vfs::errno(
+            &rig.view
+                .capture_partial_source(&policy, &request, &PartialCaptureBudget::default())
+                .unwrap_err()
+        ),
+        libc::EOPNOTSUPP
+    );
+}
+
+#[test]
+fn remote_partial_capture_refuses_missing_or_corrupt_head_instead_of_recreating_it() {
+    let _serial = serial();
+    let graph = graph(8);
+    let rig = rig(&graph, RemoteOptions::default());
+    let request = capture_request(&rig.view);
+    rig.view
+        .capture_partial_source(
+            &ImportPolicy::default(),
+            &request,
+            &PartialCaptureBudget::default(),
+        )
+        .unwrap();
+    let c = capture_db(&rig.manager, &rig.view);
+    c.execute("DELETE FROM partial_capture_head", []).unwrap();
+    assert!(rig.view.partial_capture_head().is_err());
+    let next = PartialCaptureRequest {
+        nonce: Uuid::new_v4().to_string(),
+        expected_begin: rig.view.dirty_cursor().unwrap(),
+        expected_head: None,
+    };
+    assert!(rig
+        .view
+        .capture_partial_source(
+            &ImportPolicy::default(),
+            &next,
+            &PartialCaptureBudget::default()
+        )
+        .is_err());
+    assert_eq!(
+        c.query_row(
+            "SELECT value FROM meta WHERE key='format_version'",
+            [],
+            |r| r.get::<_, String>(0)
+        )
+        .unwrap(),
+        "4"
+    );
+}
+
+#[test]
+fn remote_partial_capture_100k_entries_and_208mib_file_touch_only_dirty_chunk_and_radix_paths() {
+    let _serial = serial();
+    let graph = graph(100100);
+    let rig = rig(&graph, RemoteOptions::default());
+    let file = rig.view.lookup(1, &graph.large_name).unwrap();
+    rig.view.write(file.ino, 11, b"changed", true).unwrap();
+    let request = capture_request(&rig.view);
+    let start = Instant::now();
+    let receipt = rig
+        .view
+        .capture_partial_source(
+            &ImportPolicy::default(),
+            &request,
+            &PartialCaptureBudget::default(),
+        )
+        .unwrap();
+    let elapsed = start.elapsed().as_millis();
+    let plan = rudder_engine::delta::read_partial_tree(&rig.store, &receipt.retention).unwrap();
+    assert!(plan.local_objects.len() < 32);
+    assert!(plan.remote_boundaries.len() < 1024);
+    assert!(rig.view.descriptor().unwrap().inode_count < 10);
+    let payloads: Vec<_> = graph
+        .source
+        .calls
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|r| graph.chunks.contains(r))
+        .cloned()
+        .collect();
+    assert_eq!(payloads, vec![graph.chunks[0].clone()]);
+    assert!(plan
+        .remote_boundaries
+        .iter()
+        .any(|p| p.reference == graph.chunks[1]));
+    assert!(rig.store.read_object(&graph.directory).is_err());
+    assert!(rig.store.read_object(&graph.chunks[0]).is_err());
+    assert!(rig.store.retention().unwrap().pins.is_empty());
+    rig.store.gc(Duration::ZERO).unwrap();
+    let adapter = directory::LocalDirectoryStore::read_only(&rig.store);
+    let entry = PagedDirectory::new(&adapter)
+        .lookup(&plan.directory, &graph.large_name)
+        .unwrap()
+        .unwrap();
+    let EntryNode::File { object, .. } = entry.node else {
+        panic!("not file")
+    };
+    let node =
+        rudder_engine::content::decode_file_node(&rig.store.read_object(&object).unwrap()).unwrap();
+    let chunk = rig.store.read_object(&node.children[0]).unwrap();
+    assert_eq!(&chunk[11..18], b"changed");
+    assert_eq!(node.children[1], graph.chunks[1]);
+    assert!(rig.store.read_object(&node.children[1]).is_err());
+    eprintln!(
+        "{}",
+        serde_json::json!({"event":"partial-capture-100k","entries":100101,"logical_file_bytes":file.size,"capture_ms":elapsed,"produced_reachable":plan.local_objects.len(),"remote_boundaries":plan.remote_boundaries.len(),"source_requests":graph.source.calls.lock().unwrap().len(),"payload_requests":payloads.len(),"private_bytes":private_bytes(&rig.manager,&rig.view),"complete_pins":0})
+    );
+}
+
+#[test]
+fn remote_partial_capture_revocation_after_retention_withholds_head_and_keeps_data() {
+    let _serial = serial();
+    let graph = graph(8);
+    let rig = rig(&graph, RemoteOptions::default());
+    let file = rig
+        .view
+        .create(1, b"new", NodeKind::File, 0o600, b"")
+        .unwrap();
+    rig.view.write(file.ino, 0, b"retained", true).unwrap();
+    let request = capture_request(&rig.view);
+    let pin = format!("vfs:partial:{}:{}", rig.view.id(), request.nonce);
+    let revoke = || {
+        if rig.store.object_set_receipt(&pin).unwrap().is_some() {
+            rig.session.invalidate();
+        }
+        false
+    };
+    let failure = rig
+        .view
+        .capture_partial_source_cancellable(
+            &ImportPolicy::default(),
+            &request,
+            &PartialCaptureBudget::default(),
+            &revoke,
+        )
+        .unwrap_err();
+    assert_eq!(vfs::errno(&failure), libc::ESTALE);
+    assert!(rig.view.inspect_partial_capture(&request.nonce).is_err());
+    let c = capture_db(&rig.manager, &rig.view);
+    assert_eq!(
+        c.query_row("SELECT count(*) FROM partial_capture_head", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        c.query_row(
+            "SELECT state FROM partial_captures WHERE nonce=?",
+            [&request.nonce],
+            |r| r.get::<_, String>(0)
+        )
+        .unwrap(),
+        "retained"
+    );
+    let saved: String = c
+        .query_row(
+            "SELECT retention FROM partial_captures WHERE nonce=?",
+            [&request.nonce],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let saved: rudder_engine::delta::PartialTreeReceipt = serde_json::from_str(&saved).unwrap();
+    rig.store.gc(Duration::ZERO).unwrap();
+    let plan = rudder_engine::delta::read_partial_tree(&rig.store, &saved).unwrap();
+    assert!(plan
+        .local_objects
+        .iter()
+        .any(|r| r == &ObjectRef::from_bytes(ObjectKind::Blob, b"retained")));
+    assert!(rig.store.retention().unwrap().pins.is_empty());
+}
+
+#[test]
+fn remote_partial_capture_crash_child() {
+    let Some(path) = std::env::var_os("RUDDER_TEST_PARTIAL_CAPTURE_ROOT") else {
+        return;
+    };
+    let path = PathBuf::from(path);
+    let attempt: AttemptBinding =
+        serde_json::from_slice(&fs::read(path.join("attempt.json")).unwrap()).unwrap();
+    let phase = fs::read_to_string(path.join("phase")).unwrap();
+    let mut graph = graph(32);
+    Arc::get_mut(&mut graph.source).unwrap().scope.tenant_id = attempt.view_id.clone();
+    let (manager, view) = crash_view(&path, &graph, &attempt);
+    let file = view.create(1, b"new", NodeKind::File, 0o600, b"").unwrap();
+    view.write(file.ino, 0, b"before", true).unwrap();
+    let request = capture_request(&view);
+    let mut saved = fs::File::create(path.join("request.json")).unwrap();
+    saved
+        .write_all(&serde_json::to_vec(&request).unwrap())
+        .unwrap();
+    saved.sync_all().unwrap();
+    let c = capture_db(&manager, &view);
+    let crash = || {
+        let state = c
+            .query_row(
+                "SELECT state FROM partial_captures WHERE nonce=?",
+                [&request.nonce],
+                |r| r.get::<_, String>(0),
+            )
+            .ok();
+        if phase == "candidate" && state.as_deref() == Some("candidate") {
+            unsafe { libc::_exit(83) }
+        }
+        if phase == "retained" && state.as_deref() == Some("retained") {
+            unsafe { libc::_exit(84) }
+        }
+        false
+    };
+    let receipt = view
+        .capture_partial_source_cancellable(
+            &ImportPolicy::default(),
+            &request,
+            &PartialCaptureBudget::default(),
+            &crash,
+        )
+        .unwrap();
+    let mut ack = fs::File::create(path.join("acked.json")).unwrap();
+    ack.write_all(&serde_json::to_vec(&receipt).unwrap())
+        .unwrap();
+    ack.sync_all().unwrap();
+    unsafe { libc::_exit(85) }
+}
+
+#[test]
+fn remote_partial_capture_real_process_death_reconciles_original_candidate_and_ack() {
+    let _serial = serial();
+    for phase in ["candidate", "retained", "committed", "expired"] {
+        let dir = temp();
+        let attempt = attempt();
+        fs::write(
+            dir.path().join("attempt.json"),
+            serde_json::to_vec(&attempt).unwrap(),
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("phase"),
+            if phase == "expired" {
+                "candidate"
+            } else {
+                phase
+            },
+        )
+        .unwrap();
+        let child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "remote_partial_capture_crash_child",
+                "--nocapture",
+            ])
+            .env("RUDDER_TEST_PARTIAL_CAPTURE_ROOT", dir.path())
+            .output()
+            .unwrap();
+        assert_eq!(
+            child.status.code(),
+            Some(match phase {
+                "candidate" | "expired" => 83,
+                "retained" => 84,
+                _ => 85,
+            }),
+            "{}",
+            String::from_utf8_lossy(&child.stderr)
+        );
+        let mut graph = graph(32);
+        Arc::get_mut(&mut graph.source).unwrap().scope.tenant_id = attempt.view_id.clone();
+        let (manager, view) = crash_view(dir.path(), &graph, &attempt);
+        let request: PartialCaptureRequest =
+            serde_json::from_slice(&fs::read(dir.path().join("request.json")).unwrap()).unwrap();
+        let file = view.lookup(1, b"new").unwrap();
+        view.write(file.ino, 0, b"later!", true).unwrap();
+        if phase == "expired" {
+            let stage: String = capture_db(&manager, &view)
+                .query_row(
+                    "SELECT stage FROM partial_captures WHERE nonce=?",
+                    [&request.nonce],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            manager.store().abandon_staging(&stage).unwrap();
+        }
+        manager.store().gc(Duration::ZERO).unwrap();
+        let result = view.capture_partial_source(
+            &ImportPolicy::default(),
+            &request,
+            &PartialCaptureBudget::default(),
+        );
+        if phase == "expired" {
+            assert!(format!("{:#}", result.unwrap_err()).contains("new nonce"));
+            assert_eq!(
+                view.inspect_partial_capture(&request.nonce)
+                    .unwrap()
+                    .unwrap()
+                    .state,
+                "unavailable"
+            );
+            assert!(view.partial_capture_head().unwrap().is_none());
+        } else {
+            let receipt = result.unwrap();
+            assert_eq!(
+                captured_private_bytes(manager.store(), &receipt, b"new"),
+                b"before"
+            );
+            assert_eq!(view.read(file.ino, 0, 6).unwrap(), b"later!");
+            assert_eq!(receipt.begin, request.expected_begin);
+            assert!(manager.store().retention().unwrap().pins.is_empty());
+            if phase == "committed" {
+                let ack: PartialCaptureReceipt =
+                    serde_json::from_slice(&fs::read(dir.path().join("acked.json")).unwrap())
+                        .unwrap();
+                assert_eq!(receipt, ack);
+            }
+        }
+    }
 }

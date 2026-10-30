@@ -1,0 +1,11 @@
+{
+  "format_version": 1,
+  "verified_at": "2026-10-30T21:38:57.181099+00:00",
+  "app": "rudder-workers-exla",
+  "machine": "857723db2965d8",
+  "name": "vfs-capture-23ebc148-32d",
+  "qualification": "23ebc148-32db-4102-a37d-229e57af420e",
+  "machine_id_absent": true,
+  "owned_name_and_nonce_absent": true,
+  "production_machines_mutated": false
+}

@@ -687,6 +687,13 @@ pub fn validate_child(
                     routing(&parent, link, &shard)?;
                 }
                 ShardNode::Leaf { entries } => {
+                    // A leaf can share this File descriptor across many names.
+                    // Decode it once, then check every matching entry's length.
+                    let child_logical_size = if child.kind == ObjectKind::File {
+                        Some(crate::content::decode_file_node(child_bytes)?.logical_size)
+                    } else {
+                        None
+                    };
                     let mut found = false;
                     for entry in entries {
                         match &entry.node {
@@ -696,8 +703,8 @@ pub fn validate_child(
                                 ..
                             } if object == child => {
                                 found = true;
-                                if child.kind == ObjectKind::File {
-                                    ensure!(crate::content::decode_file_node(child_bytes)?.logical_size == *logical_size, "file descriptor logical length differs from directory entry");
+                                if let Some(child_logical_size) = child_logical_size {
+                                    ensure!(child_logical_size == *logical_size, "file descriptor logical length differs from directory entry");
                                 }
                             }
                             EntryNode::Directory { object } if object == child => found = true,

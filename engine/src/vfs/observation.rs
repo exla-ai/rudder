@@ -123,6 +123,9 @@ impl<'a> WorkMeter<'a> {
         );
         Ok(())
     }
+    pub fn deadline(&self) -> Instant {
+        self.start + Duration::from_millis(self.budget.max_elapsed_ms)
+    }
     fn charge(&self, counter: &Cell<u64>, count: u64, maximum: u64, label: &str) -> Result<()> {
         self.check()?;
         let next = counter
@@ -222,7 +225,7 @@ pub(super) fn mutation(
     Ok(())
 }
 
-fn normalized_policy(policy: &ImportPolicy) -> Result<(ImportPolicy, String)> {
+pub(super) fn normalized_policy(policy: &ImportPolicy) -> Result<(ImportPolicy, String)> {
     ensure!(
         policy.excluded_paths.len() <= 4096,
         "source exclusion count exceeds4096"
@@ -270,7 +273,7 @@ pub fn exclusion_policy_digest(policy: &ImportPolicy) -> Result<String> {
 }
 
 impl VfsView {
-    fn observation_cursor(&self, c: &Connection) -> Result<DirtyCursor> {
+    pub(super) fn observation_cursor(&self, c: &Connection) -> Result<DirtyCursor> {
         ensure!(
             self.0.v2,
             "source observations require explicit paged/range profile"

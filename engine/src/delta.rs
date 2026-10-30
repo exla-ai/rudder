@@ -64,6 +64,7 @@ pub struct DeltaReport {
     pub metadata_reads: u64,
     pub metadata_bytes: u64,
     pub remote_metadata_loads: u64,
+    pub validated_edges: u64,
     pub elapsed_ms: u64,
 }
 /// Data validation/retention only. It is deliberately not a RunnableRoot,
@@ -222,9 +223,17 @@ impl Validation<'_> {
                 continue;
             }
             let bytes = self.metadata(&reference)?;
-            let edges = self.edges(&reference, &bytes)?;
+            // One descriptor can reference the same immutable child many times.
+            // validate_edge checks every occurrence in this parent (including
+            // each File span/leaf length), so repeating that whole validation
+            // per occurrence makes a shared-file leaf need quadratic work.
+            // Keep deduplication local to this parent: another parent still
+            // has to validate its own routing, summaries and logical lengths.
+            let edges: BTreeSet<_> = self.edges(&reference, &bytes)?.into_iter().collect();
             for child in edges {
+                self.check()?;
                 self.validate_edge(&reference, &bytes, &child)?;
+                self.report.validated_edges += 1;
                 pending.push(child);
             }
         }

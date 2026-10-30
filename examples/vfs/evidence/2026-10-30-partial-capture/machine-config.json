@@ -1,0 +1,23 @@
+{
+  "init": {
+    "exec": [
+      "/bin/sleep",
+      "1200"
+    ]
+  },
+  "guest": {
+    "cpu_kind": "shared",
+    "cpus": 2,
+    "memory_mb": 2048
+  },
+  "env": {},
+  "services": [],
+  "restart": {
+    "policy": "no"
+  },
+  "metadata": {
+    "rudder_role": "vfs-capture-qualification",
+    "qualification": "23ebc148-32db-4102-a37d-229e57af420e",
+    "purpose": "remote-partial-capture-qualification"
+  }
+}

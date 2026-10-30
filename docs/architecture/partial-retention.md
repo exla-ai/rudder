@@ -1,7 +1,8 @@
 # Partial workspaces and local delta retention
 
-Updated 2026-10-30. This describes opt-in working-tree code. Alpha.7 delivery
-does not include these interfaces; production defaults remain unchanged.
+Updated 2026-10-30. Object-set retention and delta transfer are included in Cloud
+alpha.9. The owning partial-capture journal below is new working-tree code;
+npm remains alpha.7 and default agent launch is unchanged.
 
 A remotely retained workspace need not exist completely on a worker. New
 private writes, however, must survive the worker process restarting on that
@@ -98,9 +99,33 @@ and head separately, preserving uncertain results for reconciliation.
 
 The first delta profile requires empty topology; nonempty links require the
 qualified whole-path/inode adapter. Runtime VFS links still retain their inode
-semantics. General remote checkpoint/observation remains explicitly gated until
-the producer collector and owning journal use this interface. A complete remote
-publisher must verify its own closure before returning replicated durability.
+semantics. General remote checkpoint/observation remains explicitly gated. A
+complete remote publisher must verify its own closure before returning
+replicated durability.
+
+## Owning view capture journal
+
+`VfsView::capture_partial_source` now collects producer references and authorized
+remote boundaries under explicit content, metadata, object, work and time
+budgets. Its receipt binds an exact begin/end dirty cursor, nonce, prior head,
+policy, view and remote attempt. It is `LiveBestEffort` data retention; writers
+may continue and the mutable base is unchanged.
+
+The namespace journal commits its immutable candidate before object retention
+and commits the receipt/head afterward. Lost replies reconcile the original
+candidate instead of capturing later writes under the same nonce. Permanent
+namespace version4 prevents alpha.9 clients from reopening activated namespaces.
+Retirement is generation-exact and cannot release the current head. General
+complete observation/RPC/checkpoint remain explicitly unsupported for remote
+views.
+
+Mounted root and UID1500 Fly cases completed capture through data ACK in 711 and
+724 ms, with 19 producer objects, two dirty 4 MiB chunks and zero complete pins.
+The actual FD remained open for later writes; nonce replay, mmap bytes,
+collection and retirement preserved the intended generations. The owned VM was
+deleted. These samples used authenticated loopback HTTP and a frozen driver,
+not production S3 or default provider launch. See [source, tests and exact
+limits](../../examples/vfs/evidence/2026-10-30-partial-capture/README.md).
 
 ## Delta transfer and remote validation
 
@@ -155,7 +180,10 @@ travels as opaque JSON to Rust without a JavaScript numeric conversion.
 The [remote mounted evidence](../../examples/vfs/evidence/2026-10-30-remote-ranges/README.md)
 qualifies lookup, private CoW and cleanup on Fly as root and UID1500. It uses
 authenticated loopback HTTP, not the deployed S3 API or a network latency SLA.
-Remaining gates include partial capture/publication integration, paged readdir,
-nonempty inherited topology, production cross-worker restore, native factory
-adoption, macOS, fleet authority and migration. Large directory listing is
-currently capped; fast narrow lookup does not yet prove unrestricted enumeration.
+Paged readdir now also passed actual mounted 100,101-entry enumeration as root
+and UID1500, with no File/Blob hydration. Its roughly 25-second cold listing
+samples remain a performance cost, distinct from fast narrow lookup and capture.
+See [paging evidence](../../examples/vfs/evidence/2026-10-30-remote-readdir/README.md).
+Remaining gates include quiescent partial publication and source acceptance,
+nonempty inherited topology, deployed lazy restore, native factory adoption,
+controlled guest networking, macOS, fleet authority and migration.

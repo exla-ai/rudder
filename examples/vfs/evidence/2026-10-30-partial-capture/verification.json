@@ -1,0 +1,17 @@
+{
+  "format_version": 1,
+  "initial_default_deadline_raw_sha256": "855f39a56213002ea4c5a9ab8d3326cc869b1c4d4b346d7d572d689da9d3a9ae",
+  "initial_failure_raw_bytes_preserved": true,
+  "frozen_capture_tests": 11,
+  "frozen_complete_rpc_tests": 14,
+  "frozen_repeated_child_tests": 1,
+  "frozen_directory_alias_tests": 1,
+  "frozen_total_passed": 27,
+  "debug_observation_regression_tests": 5,
+  "debug_range_regression_tests": 9,
+  "original_full_remote_passed": 28,
+  "original_full_remote_failed": 1,
+  "original_failure": "new large capture exceeded unchanged default30s before bounded duplicate-edge fixes",
+  "frozen_release_large_capture_ms": 507,
+  "current_call_path_matches_frozen_source": true
+}

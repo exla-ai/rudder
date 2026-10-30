@@ -1,0 +1,32 @@
+{
+  "format_version": 1,
+  "verified_at": "2026-10-30T21:38:57.181099+00:00",
+  "source_manifest_sha256": "36bf0f6eb38f8cb2cf7da083234f6011fa2ef679cd5706efebecd33a5141a749",
+  "qualified_source_manifest_sha256": "9d90829531cf4214768ddc3ae18a8fe358871b139136b7d4c354b3687cf2b9de",
+  "source_files_compared": 189,
+  "strict_allowlist_before_source_reads": true,
+  "checkout_matches_frozen_qualification": false,
+  "changed_files": [
+    "engine/src/execution/handoff.rs",
+    "engine/src/execution/linux.rs",
+    "engine/src/lib.rs",
+    "engine/tests/remote_root.rs",
+    "engine/tests/remote_source.rs",
+    "native/src/agent_link_tests.rs",
+    "native/src/engine_host.rs",
+    "native/src/engine_host_tests.rs",
+    "native/src/fabric_runtime.rs",
+    "native/src/fabric_runtime_tests.rs",
+    "native/src/gitio.rs",
+    "native/src/main.rs",
+    "native/src/managed_app.rs",
+    "native/src/managed_app_tests.rs",
+    "native/src/managed_launch.rs",
+    "native/src/managed_launch_tests.rs",
+    "native/src/publish.rs",
+    "vcs-bridge/examples/mounted_rpc/authority.rs",
+    "vcs-bridge/examples/mounted_rpc/wire.rs",
+    "vcs-bridge/tests/rpc_view.rs"
+  ],
+  "source_archive_sha256": "0ce908b36f362cbda54448c6e628f2ccc0c3faac10a4bbf80b3194548823ba53"
+}

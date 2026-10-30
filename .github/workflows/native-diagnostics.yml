@@ -1,0 +1,148 @@
+name: Native PTY diagnostics
+
+on:
+  push:
+    branches: [rudder/mac-pty-diagnostic]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  held-reader:
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compile the exact native test fixture
+        timeout-minutes: 20
+        run: |
+          cargo test -p rudder-native --no-run --message-format=json > native-diagnostic-build.jsonl
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          binaries = []
+          libraries = []
+          for line in Path('native-diagnostic-build.jsonl').read_text().splitlines():
+              item = json.loads(line)
+              if item.get('reason') == 'compiler-artifact' and item.get('profile', {}).get('test') and item.get('target', {}).get('name') == 'rudder-native' and item.get('executable'):
+                  binaries.append(item['executable'])
+              if item.get('reason') == 'compiler-artifact' and item.get('profile', {}).get('test') and item.get('target', {}).get('name') == 'rudder_native' and item.get('executable'):
+                  libraries.append(item['executable'])
+          if len(binaries) != 1 or len(libraries) != 1:
+              raise SystemExit(f'expected one native binary/library fixture, found {len(binaries)}/{len(libraries)}')
+          Path('native-diagnostic-binary.txt').write_text(binaries[0])
+          Path('native-diagnostic-library.txt').write_text(libraries[0])
+          PY
+          cat > native-diagnostic-runner.py <<'PY'
+          import argparse
+          import os
+          import signal
+          import subprocess
+          import sys
+          from pathlib import Path
+
+          parser = argparse.ArgumentParser()
+          parser.add_argument('test_filter')
+          parser.add_argument('prefix')
+          parser.add_argument('--library', action='store_true')
+          parser.add_argument('--parallel', action='store_true')
+          parser.add_argument('--exact', action='store_true')
+          parser.add_argument('--timeout-seconds', type=int, default=45)
+          args = parser.parse_args()
+          if not 1 <= args.timeout_seconds <= 300:
+              parser.error('timeout must be between 1 and 300 seconds')
+          executable = Path('native-diagnostic-library.txt' if args.library else 'native-diagnostic-binary.txt').read_text()
+          command = [executable, args.test_filter, '--nocapture']
+          if not args.parallel:
+              command.append('--test-threads=1')
+          if args.exact:
+              command.append('--exact')
+          log = Path(args.prefix + '.log')
+          sample = Path(args.prefix + '.sample.txt')
+          with log.open('w') as output:
+              process = subprocess.Popen(command, stdout=output, stderr=subprocess.STDOUT, start_new_session=True)
+              try:
+                  result = process.wait(timeout=args.timeout_seconds)
+              except subprocess.TimeoutExpired:
+                  print(f'Test fixture exceeded {args.timeout_seconds}s; sampling the actual test process.', flush=True)
+                  try:
+                      subprocess.run(['/usr/bin/sample', str(process.pid), '5', '1', '-file', str(sample)], check=False, timeout=15)
+                  finally:
+                      try:
+                          os.killpg(process.pid, signal.SIGKILL)
+                      except ProcessLookupError:
+                          pass
+                      process.wait(timeout=10)
+                  result = 124
+          print(log.read_text())
+          if sample.exists():
+              print(sample.read_text())
+          raise SystemExit(result)
+          PY
+
+      - name: Run only the held-reader test with bounded stack sampling
+        timeout-minutes: 5
+        run: |
+          python3 native-diagnostic-runner.py app_tests::a_failed_command_pane_says_what_the_command_printed native-diagnostic --exact
+
+      - name: Isolate broker failures even if the held-reader test timed out
+        if: always()
+        timeout-minutes: 5
+        run: |
+          python3 native-diagnostic-runner.py agent_broker::tests:: native-broker
+
+      - name: Verify PTY teardown and final-output library regressions
+        if: always()
+        timeout-minutes: 5
+        run: |
+          python3 native-diagnostic-runner.py pty_terminal::tests:: native-pty --library
+
+      - uses: actions/setup-node@v4
+        if: success()
+        with:
+          node-version: "22"
+
+      - name: Prepare complete native suite prerequisites
+        id: native_prerequisites
+        if: success()
+        timeout-minutes: 10
+        run: |
+          brew install jj
+          git config --global user.email "ci@rudder.local"
+          git config --global user.name "Rudder CI"
+          git config --global init.defaultBranch main
+          npm ci
+          npx tsc -p tsconfig.json
+          npm run chmod-cli
+
+      - name: Verify complete native binary suite
+        if: success()
+        timeout-minutes: 7
+        run: |
+          python3 native-diagnostic-runner.py '' native-full-bin --parallel --timeout-seconds 300
+
+      - name: Verify complete native library suite
+        if: ${{ always() && steps.native_prerequisites.outcome == 'success' }}
+        timeout-minutes: 7
+        run: |
+          python3 native-diagnostic-runner.py '' native-full-lib --library --parallel --timeout-seconds 300
+
+      - name: Preserve bounded phase trace and stack sample
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-held-reader-diagnostics
+          path: |
+            native-diagnostic.log
+            native-diagnostic.sample.txt
+            native-broker.log
+            native-broker.sample.txt
+            native-pty.log
+            native-pty.sample.txt
+            native-full-bin.log
+            native-full-bin.sample.txt
+            native-full-lib.log
+            native-full-lib.sample.txt
+          if-no-files-found: ignore

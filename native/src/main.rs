@@ -3819,11 +3819,11 @@ impl App {
                 let _ = terminal.drain_output();
                 Self::attach_output_waker(&self.pty_output_waker, &terminal);
                 let Some(run) = self.agents.get_mut(index) else {
-                    terminal.terminate_and_wait();
+                    terminal.request_termination();
                     return;
                 };
                 if let Some(mut old_terminal) = run.terminal.take() {
-                    old_terminal.terminate_and_wait();
+                    old_terminal.request_termination();
                 }
                 run.execution_profile = terminal.execution_profile().map(str::to_string);
                 run.terminal = Some(terminal);
@@ -13161,7 +13161,7 @@ Address the objection directly. If you disagree, say why inside \
             run.session_id = latest_codex_session_id_for_cwd(&run.cwd);
         }
         if let Some(mut terminal) = run.terminal.take() {
-            terminal.terminate_and_wait();
+            terminal.request_termination();
         }
         run.needs_permission = false;
         run.needs_user_input = false;
@@ -19569,7 +19569,7 @@ Files involved: {}
                 Vec::new()
             };
             if let Some(terminal) = run.terminal.as_mut() {
-                terminal.terminate_and_wait();
+                terminal.request_termination();
             }
             run.terminal = None;
             // User cancellation is absorbing. Integration conflict remains a
@@ -20992,7 +20992,7 @@ What to do\n\
                                     && !run.plain_process
                                     && !signals::worker_has_config(&run.id, run.backend)
                                 {
-                                    terminal.terminate_and_wait();
+                                    terminal.request_termination();
                                     run.status = AgentStatus::Failed;
                                     run.completed_at = Some(Instant::now());
                                     run.last_error = Some(

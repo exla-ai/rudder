@@ -1716,7 +1716,7 @@ fn picking_a_model_leaves_a_running_main_row_alone() {
     assert_eq!(app.model, "gpt-5.5");
     if let Some(run) = app.agents.first_mut() {
         if let Some(terminal) = run.terminal.as_mut() {
-            terminal.terminate_and_wait();
+            terminal.request_termination();
         }
     }
 }
@@ -1869,7 +1869,7 @@ fn a_merged_workspace_with_a_live_agent_in_it_is_never_swept() {
     );
 
     if let Some(terminal) = run.terminal.as_mut() {
-        terminal.terminate_and_wait();
+        terminal.request_termination();
     }
     let _ = std::fs::remove_dir_all(&workspace);
 }
@@ -7490,8 +7490,21 @@ fn external_stop_request_kills_native_pty_and_stays_cancelled() {
     assert_eq!(app.agents[0].status, AgentStatus::Stopped);
     assert!(app.agents[0].terminal.is_none());
     assert!(!stop_requested(&repo, "native-stop"));
-    let alive = unsafe { libc::kill(pid as libc::pid_t, 0) } == 0;
-    assert!(!alive, "the PTY process group is terminated and reaped");
+    // The actor requests teardown; its bounded background owner supplies the
+    // actual reap proof. Keep cancellation authoritative through later polls.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if unsafe { libc::kill(pid as libc::pid_t, 0) } != 0 {
+            assert_eq!(std::io::Error::last_os_error().raw_os_error(), Some(libc::ESRCH));
+            break;
+        }
+        assert!(Instant::now() < deadline, "the PTY process was not terminated and reaped");
+        app.poll_agents();
+        assert_eq!(app.agents[0].status, AgentStatus::Stopped);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    app.poll_agents();
+    assert_eq!(app.agents[0].status, AgentStatus::Stopped);
 }
 
 #[test]
@@ -23137,7 +23150,7 @@ fn cloud_mode_persists_and_routes_plain_tasks_to_cloud() {
     assert_eq!(status_bucket(run), Bucket::Cloud);
     assert!(run.terminal.is_some());
     if let Some(terminal) = run.terminal.as_mut() {
-        terminal.terminate_and_wait();
+        terminal.request_termination();
     }
     run.terminal = None;
     run.status = AgentStatus::Paused;
@@ -23158,7 +23171,7 @@ fn cloud_mode_persists_and_routes_plain_tasks_to_cloud() {
     }
     assert_eq!(attached_args, format!("cloud\nattach\n{sail_id}\n"));
     if let Some(terminal) = app.agents.last_mut().unwrap().terminal.as_mut() {
-        terminal.terminate_and_wait();
+        terminal.request_termination();
     }
     app.agents.last_mut().unwrap().terminal = None;
 
@@ -23392,7 +23405,7 @@ fn a_worker_pane_surfaces_claude_osc_notifications_to_the_app() {
         screen.contains("before after"),
         "payload never leaks into the rendered screen:\n{screen}"
     );
-    pane.terminate_and_wait();
+    pane.request_termination();
 }
 
 #[test]
@@ -25148,7 +25161,7 @@ fn live_claude_alt_v_repro() {
     std::thread::sleep(Duration::from_millis(300));
     app.agents[0].terminal.as_mut().unwrap().write_input(b"/exit\r").unwrap();
     std::thread::sleep(Duration::from_millis(500));
-    app.agents[0].terminal.as_mut().unwrap().terminate_and_wait();
+    app.agents[0].terminal.as_mut().unwrap().request_termination();
 }
 
 /// Manual probe of Claude Code's transcript pager as seen through Rudder's
@@ -25279,7 +25292,7 @@ fn live_claude_pager_probe() {
     std::thread::sleep(Duration::from_millis(300));
     pane.write_input(b"/exit\r").unwrap();
     std::thread::sleep(Duration::from_millis(500));
-    pane.terminate_and_wait();
+    pane.request_termination();
 }
 
 /// Live probe: what a Codex worker (rudder's own launch flags, inline) leaves
@@ -25368,7 +25381,7 @@ fn live_codex_normal_view_probe() {
         }
         pane.scrollback_by(-(rows as isize));
     }
-    pane.terminate_and_wait();
+    pane.request_termination();
 }
 
 #[cfg(not(windows))]
@@ -25478,7 +25491,7 @@ fn live_claude_normal_view_probe() {
     std::thread::sleep(Duration::from_millis(300));
     pane.write_input(b"/exit\r").unwrap();
     std::thread::sleep(Duration::from_millis(500));
-    pane.terminate_and_wait();
+    pane.request_termination();
 }
 
 #[cfg(not(windows))]
@@ -25622,7 +25635,7 @@ fn live_claude_streaming_scroll_probe() {
     std::thread::sleep(Duration::from_millis(300));
     pane.write_input(b"/exit\r").unwrap();
     std::thread::sleep(Duration::from_millis(500));
-    pane.terminate_and_wait();
+    pane.request_termination();
 }
 
 #[cfg(not(windows))]
@@ -25739,7 +25752,7 @@ fn live_claude_long_message_scroll_probe() {
     std::thread::sleep(Duration::from_millis(300));
     pane.write_input(b"/exit\r").unwrap();
     std::thread::sleep(Duration::from_millis(500));
-    pane.terminate_and_wait();
+    pane.request_termination();
 }
 
 #[cfg(not(windows))]
@@ -25852,7 +25865,7 @@ fn live_claude_long_message_walk() {
     std::thread::sleep(Duration::from_millis(300));
     app.agents[0].terminal.as_mut().unwrap().write_input(b"/exit\r").unwrap();
     std::thread::sleep(Duration::from_millis(500));
-    app.agents[0].terminal.as_mut().unwrap().terminate_and_wait();
+    app.agents[0].terminal.as_mut().unwrap().request_termination();
 }
 
 /// A second tab running `rudder` gets the WHOLE dashboard over the attach
@@ -27326,7 +27339,7 @@ fn home_machine_boot_reopens_paused_rows_without_a_new_turn() {
     let gone_live = app.agents[2].terminal.is_some();
     for run in app.agents.iter_mut() {
         if let Some(mut terminal) = run.terminal.take() {
-            terminal.terminate_and_wait();
+            terminal.request_termination();
         }
     }
     let args = fs::read_to_string(&args_log).unwrap_or_default();
@@ -27396,7 +27409,7 @@ fn home_machine_boot_reopens_an_idle_done_main_row_and_keeps_it_done() {
     let worker_live = app.agents[1].terminal.is_some();
     for run in app.agents.iter_mut() {
         if let Some(mut terminal) = run.terminal.take() {
-            terminal.terminate_and_wait();
+            terminal.request_termination();
         }
     }
     let args = fs::read_to_string(&args_log).unwrap_or_default();
@@ -28228,10 +28241,36 @@ fn a_failed_command_pane_says_what_the_command_printed() {
         },
     )
     .expect("spawn command pane");
-    // Hold the real reader after its first forwarded chunk. The final error
-    // is written only after this handshake, and the process exits while those
-    // bytes are still waiting in the kernel PTY. No scheduling race is needed.
+    // Darwin waits for kernel PTY output to drain before a child becomes a
+    // zombie. First drain the initial marker, then hold the reader AFTER it
+    // forwards the final error, keeping those bytes queued and EOF unpublished.
+    // The App must parse that real error and observe EOF before finalizing.
+    let (initial_tx, initial_rx) = std::sync::mpsc::channel();
+    pane.set_output_waker(Arc::new(move || { let _ = initial_tx.send(()); }));
+    fs::write(dir.join(".reader-gate"), b"ready").unwrap();
+    initial_rx.recv_timeout(Duration::from_secs(5)).expect("initial reader output");
+    let initial_deadline = Instant::now() + Duration::from_secs(5);
+    let mut initial = Vec::new();
+    while !initial.ends_with(b"initial progress\r\n") {
+        initial.extend(pane.drain_output());
+        assert!(Instant::now() < initial_deadline, "initial output did not drain");
+        std::thread::sleep(Duration::from_millis(5));
+    }
     let release = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+    // Release before either the pane or App is dropped on EVERY assertion path.
+    // Otherwise a failed handshake tests teardown with its own reader held.
+    struct ReaderRelease(Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>);
+    impl ReaderRelease {
+        fn release(&self) {
+            let (lock, wake) = &*self.0;
+            *lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = true;
+            wake.notify_all();
+        }
+    }
+    impl Drop for ReaderRelease {
+        fn drop(&mut self) { self.release(); }
+    }
+    let reader_release_guard = ReaderRelease(release.clone());
     let reader_release = release.clone();
     let first = Arc::new(std::sync::atomic::AtomicBool::new(true));
     let reader_first = first.clone();
@@ -28246,16 +28285,16 @@ fn a_failed_command_pane_says_what_the_command_printed() {
                 .unwrap();
         }
     }));
-    fs::write(dir.join(".reader-gate"), b"ready").unwrap();
+    fs::write(dir.join(".final-gate"), b"write final error").unwrap();
     held_rx
         .recv_timeout(Duration::from_secs(5))
-        .expect("reader held after initial chunk");
-    fs::write(dir.join(".final-gate"), b"write final error").unwrap();
+        .expect("reader held after forwarding final error");
     let exit_deadline = Instant::now() + Duration::from_secs(5);
     while pane.is_alive() {
-        assert!(Instant::now() < exit_deadline);
+        assert!(Instant::now() < exit_deadline, "command did not exit while final output was held");
         std::thread::sleep(Duration::from_millis(5));
     }
+    assert!(!pane.visible_lines_snapshot().iter().any(|line| line.contains("Not logged in")), "the final error must still be queued, not already parsed");
     let mut run = test_agent_run_with_terminal(&app, pane);
     run.id = "cloud-sync-pane".to_string();
     run.task = "cloud sync".to_string();
@@ -28271,10 +28310,10 @@ fn a_failed_command_pane_says_what_the_command_printed() {
     assert_eq!(
         app.agents[0].status,
         AgentStatus::Running,
-        "OS exit alone cannot finalize before the reader forwards final output"
+        "OS exit alone cannot finalize before reader EOF"
     );
-    *release.0.lock().unwrap() = true;
-    release.1.notify_all();
+    assert!(app.agents[0].terminal.as_ref().unwrap().visible_lines_snapshot().iter().any(|line| line.contains("Not logged in to Rudder Cloud")), "the App must drain the queued final error while awaiting EOF");
+    reader_release_guard.release();
 
     let deadline = Instant::now() + Duration::from_secs(5);
     while app.agents[0].status != AgentStatus::Failed && Instant::now() < deadline {
@@ -28290,6 +28329,7 @@ fn a_failed_command_pane_says_what_the_command_printed() {
     assert!(run.terminal.as_ref().unwrap().is_output_only());
     assert!(run.terminal.as_ref().unwrap().child_process_id().is_none());
 
+    drop(app);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -28555,7 +28595,7 @@ fn a_spinner_clearing_an_error_wait_reaches_run_json() {
         "the cleared wait must be persisted, or the phone keeps saying it needs you"
     );
     if let Some(terminal) = app.agents[0].terminal.as_mut() {
-        terminal.terminate_and_wait();
+        terminal.request_termination();
     }
     let _ = std::fs::remove_file(&sig);
     let _ = fs::remove_dir_all(&repo);

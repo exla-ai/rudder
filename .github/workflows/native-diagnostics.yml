@@ -66,12 +66,14 @@ jobs:
 
       - name: Run only the held-reader test with bounded stack sampling
         timeout-minutes: 5
-        run: python3 native-diagnostic-runner.py app_tests::a_failed_command_pane_says_what_the_command_printed native-diagnostic --exact
+        run: |
+          python3 native-diagnostic-runner.py app_tests::a_failed_command_pane_says_what_the_command_printed native-diagnostic --exact
 
       - name: Isolate broker failures even if the held-reader test timed out
         if: always()
         timeout-minutes: 5
-        run: python3 native-diagnostic-runner.py agent_broker::tests:: native-broker
+        run: |
+          python3 native-diagnostic-runner.py agent_broker::tests:: native-broker
 
       - name: Preserve bounded phase trace and stack sample
         if: always()

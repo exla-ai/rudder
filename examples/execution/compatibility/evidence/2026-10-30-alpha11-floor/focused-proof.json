@@ -1,0 +1,102 @@
+{
+  "format_version": 1,
+  "recorded_utc": "2026-10-30T23:20:08Z",
+  "scope": "alpha11 managed private state / cooperative writer floor; focused local qualification, not activation or release proof",
+  "old_client_refusal": {
+    "artifact_kind": "exact tagged alpha10 Linux CI artifact; not a published npm package",
+    "tagged_source": "56f825e",
+    "workflow_id": "41138915805",
+    "artifact_id": "13017677599",
+    "native_sha256": "76aa639e7a70a3386b3763a8dc88c3ad63527dc1e65047893d14b72a949d797c",
+    "provided_verified_zip_sha256": "da0c45fb8681ce3177116d40ef6db048e0dbe1b4e827c4ade151c009d62674dc",
+    "schema_version": 5,
+    "disposable_home_and_repo": true,
+    "environment_cleared": true,
+    "deadline_seconds": 5,
+    "exit_code": 1,
+    "child_wait_completed": true,
+    "owner_row_unchanged": true,
+    "owner_json_bytes_unchanged": true,
+    "attach_endpoint_not_created": true,
+    "ownership_lock_released": true,
+    "refusal": "journal schema is newer than this engine",
+    "log_finished_utc": "2026-10-30T23:13:51Z",
+    "log": "/workspace/rudder-managed-store-reviewed-alpha10-refusal.log"
+  },
+  "checks": [
+    {
+      "name": "managed_native",
+      "passed": 55,
+      "ignored": 2,
+      "log": "/workspace/rudder-managed-store-final-runtime-managed.log",
+      "log_sha256": "e7c354d44c177a7bac72a1a8b336a5f52a4e8c7e57ab40e57f7ace14fd9d4177"
+    },
+    {
+      "name": "runtime",
+      "passed": 11,
+      "ignored": 0,
+      "log": "/workspace/rudder-managed-store-final-runtime.log",
+      "log_sha256": "58018ecd1f33a0855ae01dd21f89104148e93f90f250ada87419d3cb1ac715d2"
+    },
+    {
+      "name": "owner",
+      "passed": 24,
+      "ignored": 1,
+      "log": "/workspace/rudder-managed-store-reviewed-owner.log",
+      "log_sha256": "091d492c11453d6dc769716f946f33f5bf6e0b2c9934cf2c13eec0a63506f700"
+    },
+    {
+      "name": "journal",
+      "passed": 41,
+      "ignored": 0,
+      "log": "/workspace/rudder-managed-store-journal-regressions.log",
+      "log_sha256": "1bc8b86fe4dca888793f5fdef5ae2eb84310ff61194508caaa464a963465051d"
+    },
+    {
+      "name": "exact_old_client",
+      "passed": 1,
+      "ignored": 0,
+      "log": "/workspace/rudder-managed-store-reviewed-alpha10-refusal.log",
+      "log_sha256": "de7274581f19b94c3647d9f586b7a915ceebb6667a1b8cd93979449ef96becdb"
+    },
+    {
+      "name": "native_bin_and_lib_check",
+      "result": "passed",
+      "command": "cargo check --locked -p rudder-native --bin rudder-native --lib",
+      "log": "/workspace/rudder-managed-store-final-build.log",
+      "log_sha256": "dede84ffb01defbd20b5dd83ed38c1e0f4302913e5afb959c96c43ba9c5a51cd"
+    }
+  ],
+  "source_hashes": {
+    "path": "/workspace/rudder-managed-store-source.sha256",
+    "sha256": "62741b3882fe58aece79d08ec4a04f6a620bafa4690cd33f02376a13292e96df",
+    "files": 17,
+    "shared_main_note": "main.rs includes root-owned board hooks and the three coordinated managed guards"
+  },
+  "contract": [
+    "Ordinary journal opens remain schema4; explicit owner-fenced prepare alone opts its database into5.",
+    "Prepared receipt/namespace are historical recovery evidence and never launch authority or a revived old owner fence.",
+    "Managed reservations/assignments are immutable fsynced private records; UI projections are bounded queued data outside legacy run/graph discovery.",
+    "New Native Legacy/Fabric startup refuses any project floor or namespace evidence before transfer/recover/owner.json rewrite.",
+    "Missing reservation files, malformed attempt events, and exhausted journal scan budget surface as quarantine; pre-floor legacy observations are ignored.",
+    "Explicit exact-hash experimental recovery copies old shared0644 metadata into new0600 files, preserving originals/modes through replay and restart.",
+    "Only exact owned transient endpoints retire; permanent state/history/checkpoints/pins remain for explicit recovery.",
+    "Runtime inventory uses established ManagedRunLocation and current Journal-derived fence, never opens another Journal or infers a managed home."
+  ],
+  "limitations": [
+    "Cooperative compatibility only: unsupported TS writers, alternate homes and arbitrary same-UID filesystem access are not physically fenced.",
+    "Schema5 affects the opted-in home database; new clients retain per-project floor checks and old Rust clients refuse opening that database.",
+    "RunIdentity pins its first attempt; retry/resume under the same run requires a separately designed explicit protocol.",
+    "Catalog bounds return explicit errors; callers must preserve them and must not fall back to an empty or legacy view.",
+    "Managed launch/default activation, controlled networking, actual provider/OAuth qualification, publisher/legacy retirement and accepted-source gates remain open.",
+    "No managed-helper/provider inference or Darwin runtime qualification was performed by this slice."
+  ],
+  "credential_audit": {
+    "actual_provider_credentials_read": false,
+    "existing_sessions_or_transcripts_read": false,
+    "provider_model_calls": 0,
+    "production_access": false,
+    "secrets_in_summary": false,
+    "copies": "safe summary and source digests only; no home/cache/session/target/log tree copied"
+  }
+}

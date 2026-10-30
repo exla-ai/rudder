@@ -1,0 +1,40 @@
+{
+  "formatVersion": 1,
+  "kind": "offline-preserved-netns-evidence-audit",
+  "assertionsPassed": true,
+  "originalWrapperPassed": false,
+  "originalWrapperFailure": "Incorrectly required CapBnd=0 after creation of a new user namespace.",
+  "liveProbeExitCode": 0,
+  "measuredResult": {
+    "kind": "qualification-result",
+    "completed": true,
+    "usernsAvailable": true,
+    "newnetAvailable": true,
+    "loopbackInProcess": true,
+    "afterExecEperm": true,
+    "afterCapDropEperm": true,
+    "tunStatErrno": 0,
+    "tunOpenErrno": 13,
+    "privateTapCreated": false,
+    "privateTapRemoved": false,
+    "ownedFdsClosed": true,
+    "loopbackRestored": true
+  },
+  "kernel": "6.12.114-fly",
+  "capabilityObservation": {
+    "initialBounding": "0000000000000000",
+    "createdUserNamespaceBounding": "000001ffffffffff",
+    "afterExecEffective": "0000000000000000",
+    "afterExecBounding": "000001ffffffffff"
+  },
+  "missingMeasurements": [
+    "Post-probe parent namespace/status and generated-file removal checks were skipped by the wrapper assertion; canary deletion removed all runtime data."
+  ],
+  "limitations": [
+    "TUNSETIFF/TAP creation was not attempted because UID1500 open failed EACCES; kernel TUN driver functionality is not established.",
+    "No public/private connectivity, egress proxy, packet helper, guest preview, model/provider or default activation was qualified."
+  ],
+  "sourceArchiveSha256": "681781a02e411ae68c58839fa3df12793595665a0a1a0e14cd1163f710454367",
+  "guestProofSha256": "363e01a6fbedfcd901785dc503db0009f3d54415e2ba373cd854a60838a5ce15",
+  "verifiedAt": "2026-10-30T23:23:28.261Z"
+}

@@ -50,7 +50,7 @@ the three architecture documents already contained this session's planning work.
 | Private previews | Persisted Tailscale login, actual readiness, bounded async probes, exact project ownership, ready links and local open | E13 subset implemented; real userspace/Serve check passed; laptop/phone access remains untested |
 | Terminal stream | Shared home/sail helper, short output batching, bounded backpressure, connection fencing, UTF-8 and repaint recovery | E13 subset deployed in the worker image; real WS/PTY VM checks passed; existing homes adopt when idle |
 | Startup/download caches | Background CLI update, persistent account-local npm/pnpm/uv cache defaults, explicit overrides retained | Behavior tests pass; no distributed action-cache claim |
-| Full storage/engine rewrite | Milestones below | Cloud release 161 / worker alpha.10 is deployed and verified; npm remains alpha.7 pending release CI. Default workspace integration, fleet and migration gates remain open |
+| Full storage/engine rewrite | Milestones below | Cloud release 161 / worker alpha.10 is deployed and verified; npm remains alpha.7 after the release-test failure recorded below. Default workspace integration, fleet and migration gates remain open |
 
 The current native simple-execution path remains an isolated worker; explicit
 main-checkout mode remains available. The initial automatic DAG path retains
@@ -77,9 +77,14 @@ the temporary credential row were independently absent at `2026-10-30T22:56:14Z`
 See [exact delivery evidence](delivery-alpha10.json).
 The active home keeps its running alpha.7 image until idle.
 
-Both npm `next` tags still point to alpha.7, verified at `2026-10-30T22:57:09Z`.
-Alpha.10 release CI is still building the Intel Mac pair; Linux/ARM artifacts,
-Mac/iOS and TUI CI passed. Alpha.9 publication failed twice in
+Both npm `next` tags still point to alpha.7, verified at `2026-10-30T23:11:06Z`.
+All three alpha.10 native platform builds, Mac/iOS and TUI CI passed. Its
+publication job then stopped on two managed-guard test path assertions. A
+symlinked TMPDIR reproduces both failures on Linux: child process.cwd() resolves
+the parent while the fixture compared its original spelling. Canonicalizing only
+the disposable fixture identity preserves exact refusal checks and changes that
+controlled run from 1 pass / 2 failures to 3 passes. The correction is in the
+alpha.11 working tree; alpha.10 remains unpublished. Alpha.9 publication failed twice in
 the macOS remote-root HTTP fixture before npm publication. Darwin inherits a
 listener's nonblocking flag, while the fixture assumed blocking full-body
 writes. Alpha.10 normalizes accepted streams and adds forced
@@ -93,6 +98,34 @@ add private managed storage/protocol floors, board capabilities and verified
 paired build artifacts. Those changes are unshipped. CLI publication, configured
 worker image and live worker adoption remain separate facts. The active
 objective is the full plan.
+
+Alpha.11 local integration adds:
+
+- [Private managed storage](managed-storage.md), explicit journal schema5 opt-in,
+  receipt-scoped recovery and pre-startup Native refusal. Focused checks cover
+  55 managed cases, 24 owner cases, 11 Runtime cases and 41 journal cases. The
+  exact tagged alpha.10 Linux CI artifact refuses the floor without rewriting
+  ownership. [Component proof](../../examples/execution/compatibility/evidence/2026-10-30-alpha11-floor/README.md).
+  TypeScript/alternate-home physical retirement, same-run retry and activation
+  remain unimplemented.
+- [Private board sessions](board-access.md), authenticated reads/control/SSE and
+  a bounded native browser callback. A disposable real Chromium run passed
+  bootstrap, reload, usage, live updates and daemon-restart behavior with
+  synthetic data. A subsequent Rust test-only temp-path correction keeps all
+  fixture endpoints within their disposable root on macOS too.
+- One native Cargo graph and complete, source-bound manifests for all three
+  release platforms. Frozen alpha.10 inputs qualified the graph with one
+  engine/bridge compilation each; that warm-cache run took 599.8s with two jobs.
+  It is not a controlled speedup measurement. Local candidate checks passed:
+  350 engine, 1,030 native, 32 bridge and 711 Node tests (9 optional skips), all 59 real
+  terminal journeys, production/Cloud builds and the context audit. The prior
+  full-workspace command exposed an obsolete test that bypassed production's
+  EOF-aware PTY wait; its summary assertion was retained and the corrected
+  Native/unit suites passed. Registry and rollout verification remain pending.
+
+The separate owned NEWNET/TUN observation is in
+[the networking gate](managed-network-isolation.md). It changes no product
+network defaults and does not establish egress, packet-helper or preview support.
 
 Alpha.10's mounted partial-capture proof passed
 as root and UID1500, retaining dirty chunks across lost replies, later FD writes,

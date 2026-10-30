@@ -1,0 +1,90 @@
+{
+  "formatVersion": 1,
+  "kind": "alpha10-private-netns-tun",
+  "revision": "56f825ea3c1d6136b1a20b3031f835ef33f870cd",
+  "requestedImageTag": "registry.fly.io/rudder-workers-exla:4.0.0-alpha.10",
+  "requestedImage": "registry.fly.io/rudder-workers-exla@sha256:ae1d4bf448c05dc71373efb1b9efd6510dfed4526f76838bc53e1a5c00a446ff",
+  "expectedDigest": "sha256:ae1d4bf448c05dc71373efb1b9efd6510dfed4526f76838bc53e1a5c00a446ff",
+  "nonce": "82d1b552-74d8-4770-93c1-645dc420ca64",
+  "name": "rudder-alpha10-netns-82d1b552",
+  "sourceManifestSha256": "a2ccac2dc88ef6041496f8b9d817143fd2a376f17b042260569874469ef51408",
+  "sourceArchiveSha256": "681781a02e411ae68c58839fa3df12793595665a0a1a0e14cd1163f710454367",
+  "configSha256": "20e39fde35735f3e2d2b0995a6c7bac84d7b0cd08e9912b98b2a6e7aa7027e24",
+  "startedAt": "2026-10-30T23:21:30.296Z",
+  "steps": [
+    {
+      "step": "assert-no-app-secrets",
+      "ms": 631
+    },
+    {
+      "step": "filtered-inventory",
+      "ms": 510
+    },
+    {
+      "step": "create-owned-canary",
+      "ms": 38685
+    },
+    {
+      "step": "filtered-inventory",
+      "ms": 799
+    },
+    {
+      "step": "read-generated-proof",
+      "ms": 1155
+    },
+    {
+      "step": "read-generated-proof",
+      "ms": 1136
+    },
+    {
+      "step": "filtered-inventory",
+      "ms": 582
+    },
+    {
+      "step": "destroy-exact-owned-canary",
+      "ms": 2603
+    },
+    {
+      "step": "filtered-inventory",
+      "ms": 556
+    },
+    {
+      "step": "filtered-inventory",
+      "ms": 531
+    }
+  ],
+  "restrictions": [
+    "No product source edits or product builds. Only the small archived C qualification program is compiled.",
+    "No services, volumes, app secrets, account/provider/workspace credentials, supervisor module evaluation or models.",
+    "No connect/bind/listen/setns, host listener scan, external network target or persistent TUN interface.",
+    "Only current-process namespace/capability metadata, /dev/net/tun and newly owned lo/TAP are probed.",
+    "This qualifies one kernel/image/UID execution only, not general egress, preview routing or default managed networking."
+  ],
+  "credentialIsolationPreflight": {
+    "appSecrets": 0,
+    "configuredCredentials": 0,
+    "supervisorBlockedByPreload": true,
+    "updatesDisabled": true,
+    "noServices": true,
+    "noMounts": true
+  },
+  "machine": {
+    "id": "86510dbe935228",
+    "name": "rudder-alpha10-netns-82d1b552",
+    "instance": "01M67HWRZDF3MXMNTQS1Q0JMF0",
+    "region": "sjc",
+    "digest": "sha256:ae1d4bf448c05dc71373efb1b9efd6510dfed4526f76838bc53e1a5c00a446ff",
+    "role": "alpha10-private-netns-tun",
+    "nonce": "82d1b552-74d8-4770-93c1-645dc420ca64",
+    "services": 0,
+    "mounts": 0
+  },
+  "proofSha256": "363e01a6fbedfcd901785dc503db0009f3d54415e2ba373cd854a60838a5ce15",
+  "ok": false,
+  "failedPhase": "read-generated-proof",
+  "error": "qualification failed at read-generated-proof",
+  "errorCode": "ERR_ASSERTION",
+  "cleanupVerified": true,
+  "independentAbsence": true,
+  "verifiedAt": "2026-10-30T23:22:19.499Z"
+}

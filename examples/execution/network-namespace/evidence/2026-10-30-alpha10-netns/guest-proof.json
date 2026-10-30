@@ -1,0 +1,274 @@
+{
+  "formatVersion": 1,
+  "kind": "alpha10-private-netns-tun",
+  "nonce": "82d1b552-74d8-4770-93c1-645dc420ca64",
+  "supervisorModuleEvaluated": false,
+  "modelCalls": false,
+  "hostSocketConnections": false,
+  "namespaceScope": "fresh UID1500 probe process and its newly owned user/network namespaces",
+  "credentialEnvironmentFields": 0,
+  "boot": {
+    "uid": 1500,
+    "gid": 1500,
+    "initial": {
+      "Uid": "1500\t1500\t1500\t1500",
+      "Gid": "1500\t1500\t1500\t1500",
+      "Groups": "",
+      "NoNewPrivs": "1",
+      "CapEff": "0000000000000000",
+      "CapPrm": "0000000000000000",
+      "CapInh": "0000000000000000",
+      "CapAmb": "0000000000000000",
+      "CapBnd": "0000000000000000"
+    },
+    "node": "v22.23.4",
+    "managedBootstrap": true,
+    "agentUpdatesDisabled": true,
+    "packageVersion": "4.0.0-alpha.10"
+  },
+  "parentBefore": {
+    "user": {
+      "device": "4",
+      "inode": "4026531837"
+    },
+    "net": {
+      "device": "4",
+      "inode": "4026531840"
+    }
+  },
+  "probeSourceSha256": "d61d556342f5d4992bd7424bc0c2637e41286823df1bfa983ee14cf082c0a5c6",
+  "compiler": "cc (Debian 12.2.0-14+deb12u1) 12.2.0",
+  "compile": {
+    "status": 0,
+    "signal": null,
+    "flags": [
+      "-std=c11",
+      "-O2",
+      "-Wall",
+      "-Wextra",
+      "-Werror",
+      "-o",
+      "/workspace/netns-qualification-82d1b552-74d8-4770-93c1-645dc420ca64/probe",
+      "/workspace/netns-qualification-82d1b552-74d8-4770-93c1-645dc420ca64/probe.c"
+    ]
+  },
+  "probeBinarySha256": "124a81ed14a13d59f5f14b156d3d2e811f3ea249476a5da94a2752274b9c75a3",
+  "probe": {
+    "status": 0,
+    "signal": null,
+    "stdoutSha256": "e53b6140c8a431ee674d82d1bb37ee3510fd16541b2472bcd17f4f710771e724",
+    "stderr": ""
+  },
+  "events": [
+    {
+      "kind": "process-status",
+      "stage": "fresh-exec-before-userns",
+      "uid": 1500,
+      "euid": 1500,
+      "gid": 1500,
+      "egid": 1500,
+      "fields": {
+        "CapInh": "0000000000000000",
+        "CapPrm": "0000000000000000",
+        "CapEff": "0000000000000000",
+        "CapBnd": "0000000000000000",
+        "CapAmb": "0000000000000000",
+        "NoNewPrivs": "1"
+      }
+    },
+    {
+      "kind": "kernel",
+      "release": "6.12.114-fly"
+    },
+    {
+      "kind": "owned-namespace-fd",
+      "stage": "before-userns",
+      "namespace": "user",
+      "device": "4",
+      "inode": "4026531837",
+      "type": 268435456,
+      "cloexec": true
+    },
+    {
+      "kind": "owned-namespace-fd",
+      "stage": "before-userns",
+      "namespace": "net",
+      "device": "4",
+      "inode": "4026531840",
+      "type": 1073741824,
+      "cloexec": true
+    },
+    {
+      "kind": "process-status",
+      "stage": "in-process-after-userns",
+      "uid": 1500,
+      "euid": 1500,
+      "gid": 1500,
+      "egid": 1500,
+      "fields": {
+        "CapInh": "0000000000000000",
+        "CapPrm": "000001ffffffffff",
+        "CapEff": "000001ffffffffff",
+        "CapBnd": "000001ffffffffff",
+        "CapAmb": "0000000000000000",
+        "NoNewPrivs": "1"
+      }
+    },
+    {
+      "kind": "owned-namespace-fd",
+      "stage": "after-userns",
+      "namespace": "user",
+      "device": "4",
+      "inode": "4026532224",
+      "type": 268435456,
+      "cloexec": true
+    },
+    {
+      "kind": "owned-namespace-fd",
+      "stage": "after-newnet",
+      "namespace": "net",
+      "device": "4",
+      "inode": "4026532225",
+      "type": 1073741824,
+      "cloexec": true
+    },
+    {
+      "kind": "netns-owner-witness",
+      "device": "4",
+      "inode": "4026532224",
+      "matchesCreatedUserns": true
+    },
+    {
+      "kind": "process-status",
+      "stage": "in-process-after-newnet",
+      "uid": 1500,
+      "euid": 1500,
+      "gid": 1500,
+      "egid": 1500,
+      "fields": {
+        "CapInh": "0000000000000000",
+        "CapPrm": "000001ffffffffff",
+        "CapEff": "000001ffffffffff",
+        "CapBnd": "000001ffffffffff",
+        "CapAmb": "0000000000000000",
+        "NoNewPrivs": "1"
+      }
+    },
+    {
+      "kind": "in-process-loopback-up",
+      "ok": true,
+      "onlyOwnedNewnetModified": true
+    },
+    {
+      "kind": "tun-device",
+      "statResult": 0,
+      "errno": 0,
+      "character": true,
+      "uid": 65534,
+      "gid": 65534,
+      "mode": "0600",
+      "major": 10,
+      "minor": 200
+    },
+    {
+      "kind": "tun-open",
+      "result": -1,
+      "errno": 13
+    },
+    {
+      "kind": "private-tap",
+      "attempted": false,
+      "result": -2,
+      "errno": 0,
+      "removedAfterClose": false,
+      "persistRequested": false
+    },
+    {
+      "kind": "process-status",
+      "stage": "after-external-exec",
+      "uid": 1500,
+      "euid": 1500,
+      "gid": 1500,
+      "egid": 1500,
+      "fields": {
+        "CapInh": "0000000000000000",
+        "CapPrm": "0000000000000000",
+        "CapEff": "0000000000000000",
+        "CapBnd": "000001ffffffffff",
+        "CapAmb": "0000000000000000",
+        "NoNewPrivs": "1"
+      }
+    },
+    {
+      "kind": "owned-namespace-fd",
+      "stage": "after-external-exec",
+      "namespace": "net",
+      "device": "4",
+      "inode": "4026532225",
+      "type": 1073741824,
+      "cloexec": true
+    },
+    {
+      "kind": "after-exec-loopback-down",
+      "result": -1,
+      "errno": 1,
+      "expectedEperm": true
+    },
+    {
+      "kind": "process-status",
+      "stage": "in-process-after-explicit-cap-drop",
+      "uid": 1500,
+      "euid": 1500,
+      "gid": 1500,
+      "egid": 1500,
+      "fields": {
+        "CapInh": "0000000000000000",
+        "CapPrm": "0000000000000000",
+        "CapEff": "0000000000000000",
+        "CapBnd": "000001ffffffffff",
+        "CapAmb": "0000000000000000",
+        "NoNewPrivs": "1"
+      }
+    },
+    {
+      "kind": "after-cap-drop-loopback-up",
+      "result": -1,
+      "errno": 1,
+      "expectedEperm": true
+    },
+    {
+      "kind": "qualification-result",
+      "completed": true,
+      "usernsAvailable": true,
+      "newnetAvailable": true,
+      "loopbackInProcess": true,
+      "afterExecEperm": true,
+      "afterCapDropEperm": true,
+      "tunStatErrno": 0,
+      "tunOpenErrno": 13,
+      "privateTapCreated": false,
+      "privateTapRemoved": false,
+      "ownedFdsClosed": true,
+      "loopbackRestored": true
+    }
+  ],
+  "result": {
+    "kind": "qualification-result",
+    "completed": true,
+    "usernsAvailable": true,
+    "newnetAvailable": true,
+    "loopbackInProcess": true,
+    "afterExecEperm": true,
+    "afterCapDropEperm": true,
+    "tunStatErrno": 0,
+    "tunOpenErrno": 13,
+    "privateTapCreated": false,
+    "privateTapRemoved": false,
+    "ownedFdsClosed": true,
+    "loopbackRestored": true
+  },
+  "ok": false,
+  "error": "qualification assertion failed",
+  "errorCode": "ERR_ASSERTION",
+  "verifiedAt": "2026-10-30T23:22:11.998Z"
+}

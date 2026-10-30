@@ -1,0 +1,6 @@
+{
+  "format_version": 1,
+  "private_runtime_removed": true,
+  "owned_browser_processes_absent": true,
+  "no_system_package_install": true
+}

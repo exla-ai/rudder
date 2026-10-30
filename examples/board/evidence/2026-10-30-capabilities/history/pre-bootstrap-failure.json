@@ -1,0 +1,17 @@
+{
+  "format_version": 1,
+  "kind": "local-headless-board-capability",
+  "started_at": "2026-10-30T23:11:27.492Z",
+  "playwright": "1.64.1",
+  "source_manifest_sha256": "b60292c260e1ff5add196567ffaa96eaad4addf2835c401a3fbc47f5161fd7e6",
+  "checks": {},
+  "limits": [
+    "Private staged server/UI bundles; no dist imports",
+    "Synthetic fixture/provider usage only; no real accounts or global session logs",
+    "Loopback browser qualification only; no managed guest/network namespace or Cloud proof"
+  ],
+  "ok": false,
+  "failed_stage": "launch",
+  "error_type": "Error",
+  "finished_at": "2026-10-30T23:11:28.227Z"
+}

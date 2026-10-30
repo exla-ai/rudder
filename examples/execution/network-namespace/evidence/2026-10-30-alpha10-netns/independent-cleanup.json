@@ -1,0 +1,12 @@
+{
+  "formatVersion": 1,
+  "kind": "separate-process-provider-inventory-absence",
+  "app": "rudder-workers-exla",
+  "machine": "86510dbe935228",
+  "name": "rudder-alpha10-netns-82d1b552",
+  "nonce": "82d1b552-74d8-4770-93c1-645dc420ca64",
+  "role": "alpha10-private-netns-tun",
+  "absentByIdNameNonce": true,
+  "noControlOrHomeExec": true,
+  "verifiedAt": "2026-10-30T23:23:28.976Z"
+}

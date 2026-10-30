@@ -1,0 +1,75 @@
+{
+  "format_version": 1,
+  "kind": "local-headless-board-capability",
+  "started_at": "2026-10-30T23:14:49.721Z",
+  "playwright": "1.64.1",
+  "source_manifest_sha256": "b60292c260e1ff5add196567ffaa96eaad4addf2835c401a3fbc47f5161fd7e6",
+  "checks": {
+    "anonymous_context": {
+      "private_api_statuses": [
+        401,
+        401,
+        401,
+        401,
+        401,
+        401,
+        401
+      ],
+      "neutral_shell": true,
+      "private_storage_absent": true
+    },
+    "bootstrap": {
+      "one_use": true,
+      "fragment_erased_before_first_fetch": true,
+      "session_storage": {
+        "count": 1,
+        "scoped": true,
+        "valid": true
+      },
+      "cookies": 0,
+      "project_rendered": true,
+      "log_rendered_as_text": true,
+      "script_injection_absent": true
+    },
+    "sse": {
+      "authenticated_fetch": true,
+      "live_update": true,
+      "query_credentials_absent": true
+    },
+    "reload": {
+      "same_session_reused": true,
+      "no_second_ticket_exchange": true
+    },
+    "usage": {
+      "authenticated": true,
+      "synthetic_scanned_files": 1,
+      "synthetic_calls": 1
+    },
+    "restart_stale_reload": {
+      "old_ui_closed": true,
+      "old_session_storage_cleared": true
+    },
+    "restart": {
+      "fresh_document": true,
+      "fresh_private_open_recovers": true
+    },
+    "sanitized_transport": {
+      "api_requests": 18,
+      "private_requests_all_bearer": true,
+      "request_fragments_absent": true,
+      "page_errors": 0,
+      "csp_violations": 0,
+      "credential_query_absent": true,
+      "external_node_fetches": 0,
+      "browser_external_requests": 0
+    }
+  },
+  "limits": [
+    "Private staged server/UI bundles; no dist imports",
+    "Synthetic fixture/provider usage only; no real accounts or global session logs",
+    "Loopback browser qualification only; no managed guest/network namespace or Cloud proof"
+  ],
+  "chromium": "156.0.8078.4",
+  "ok": true,
+  "finished_at": "2026-10-30T23:14:51.480Z"
+}

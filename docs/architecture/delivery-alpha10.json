@@ -204,11 +204,11 @@
     "fleetAdoptionVerified": false
   },
   "cli": {
-    "status": "publication-pending",
+    "status": "publication-failed",
     "version": "4.0.0-alpha.10",
     "releaseWorkflow": "https://github.com/exla-ai/rudder/actions/runs/41138915805",
     "lastRegistryObservation": {
-      "at": "2026-10-30T22:57:09.838Z",
+      "at": "2026-10-30T23:11:06.839170Z",
       "packages": [
         {
           "name": "@exla/rudder",
@@ -229,11 +229,27 @@
     "nativePlatformStatus": {
       "linux-x64": "success",
       "darwin-arm64": "success",
-      "darwin-x64": "in-progress"
+      "darwin-x64": "success"
     },
     "macAppCI": "success",
     "iosCI": "success",
-    "tuiCI": "success"
+    "tuiCI": "success",
+    "releaseConclusion": "failure",
+    "failure": {
+      "step": "Typecheck + JS tests",
+      "passed": 646,
+      "failed": 2,
+      "skipped": 11,
+      "completedAt": "2026-10-30T23:06:47Z",
+      "cause": "Managed guard test fixture compared symlinked macOS temp spelling with canonical child process.cwd(); reproduced on Linux with symlinked TMPDIR",
+      "correction": "Canonical disposable fixture identity; exact guard assertions preserved; correction belongs to the next version, not the immutable alpha10 tag",
+      "localNegativeControl": {
+        "beforePassed": 1,
+        "beforeFailed": 2,
+        "afterPassed": 3,
+        "afterFailed": 0
+      }
+    }
   },
   "localChecks": {
     "engineBaselineBeforeAuth": {

@@ -1438,16 +1438,22 @@ functional but less battle-tested than the local dashboard; treat it as beta.
 ## 11. Build, test, release
 
 From `package.json`:
-- `npm run build` = `tsc -p tsconfig.json` then `build-native`
-  (`cargo build --release --manifest-path native/Cargo.toml`) then `copy-native`
-  (copies the release binary to `dist/native/rudder-native`, `0o755`). `prepack`
-  runs `build`, so publishing always rebuilds.
+- `npm run build` cleans `dist/`, compiles TypeScript and the board, then builds
+  and copies the native/dashboard pair. `scripts/build-native.mjs` uses one
+  locked workspace Cargo graph for `rudder-native` and `rudder-jj`, with the
+  bridge CLI feature enabled. `prepack` runs this build.
+- Release CI supplies all three platform pairs with manifests bound to the
+  checked-out revision and each executable's SHA256/size. Only a complete,
+  reverified artifact set skips Cargo during packaging. Invalid explicit
+  prebuilts fail; they never fall back to a stale local build. Ordinary local
+  source/archive builds still use Cargo without requiring Git provenance.
 - `npm run check` = `tsc --noEmit` (fast typecheck).
 - `npm test` = `tsc` then `node --test tests/*.test.mjs`.
 - `npm run test:worker-scroll` = a focused subset of cargo tests for worker-pane
   scrollback behavior.
-- Native tests: `cargo test --manifest-path native/Cargo.toml` (260+ tests + one
-  `#[ignore]`d live conductor harness, run with `-- --ignored --nocapture`).
+- Native/engine tests: `cargo test --workspace --locked --features
+  rudder-vcs-bridge/cli`. Explicitly ignored provider/VM qualification fixtures
+  require their documented inputs; do not run every ignored fixture together.
 - **Native TUI harness** (`app_tests.rs`): drive the REAL `App` end-to-end with no
   auth/network. `render_screen(app, w, h)` renders the actual dashboard
   (`render::render`) to a `TestBackend` and returns the screen as text, so tests assert
@@ -1499,7 +1505,7 @@ Cut a release from a clean, pushed `main`:
 
 ```bash
 npm version patch          # bumps package.json + package-lock, commits, tags vX.Y.Z
-git push --follow-tags     # pushes the commit and the tag; CI publishes
+git push origin main vX.Y.Z # push main and only the newly created release tag
 ```
 
 Prerelease versions (for example `npm version 4.0.0-alpha.1`) publish to the

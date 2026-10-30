@@ -1,0 +1,11 @@
+{
+  "formatVersion": 1,
+  "machine": "86510dbe935228",
+  "name": "rudder-alpha10-netns-82d1b552",
+  "nonce": "82d1b552-74d8-4770-93c1-645dc420ca64",
+  "role": "alpha10-private-netns-tun",
+  "deleted": true,
+  "firstInventoryAbsent": true,
+  "secondIndependentInventoryAbsent": true,
+  "verifiedAt": "2026-10-30T23:22:19.498Z"
+}

@@ -3,9 +3,20 @@
 Status: source review and proposed fix, 2026-10-30. No listener probes, live-home
 access, credential access or exploit execution were performed. The findings
 describe reachable code when normal startup succeeds, not observed deployment
-state. No fix below is implemented. Managed/default activation requires the
+state. The alpha.11 working tree implements the
+[board capability fix](board-access.md); it is not yet released. Controlled
+guest networking remains unimplemented. Managed/default activation requires the
 network and board gates below, alongside [managed launch](managed-launch.md)
 and [remote composition](remote-managed-launch.md).
+
+An owned [alpha.10 Fly observation](../../examples/execution/network-namespace/evidence/2026-10-30-alpha10-netns/README.md)
+now demonstrates UID1500 USER/NEWNET creation and in-process loopback setup on
+kernel 6.12.114-fly. TUN open returns EACCES; no packet path or egress was tested.
+The original wrapper failed an incorrect postcheck about bounding capabilities;
+raw observations and the corrected offline audit remain separate. The child
+user namespace resets the bounding set, so boot-time zero capabilities are not
+the final exec boundary. The [proposed execution profile](execution-network-profile.md)
+records the stronger privilege/readiness and networking gates for the next slice.
 
 ## Concrete source finding
 
@@ -16,14 +27,15 @@ unshares USER/MNT; the execution child adds PID isolation, not NEWNET.
 network_isolated=false. Therefore guest 127.0.0.1 reaches host loopback listeners.
 Read-only mounts, a private HOME and closed authority FDs do not change that.
 
-The normal home startup chain is
+The pre-alpha.11 normal home startup chain is
 [home.mjs Project.spawnDashboard](../../cloud/worker/home.mjs) -> plain rudder ->
 [main.ts launch](../../src/main.ts) -> ensureBoardRunning(scheduler:false).
 [daemon.ts](../../src/daemon.ts) starts a projector board; a standalone board can
 instead own the scheduler. Startup is best effort, so this establishes an
 exposure when that listener exists, not that every deployed home has one.
 
-[The board server](../../src/board/daemon.ts) binds 127.0.0.1, normally port 4774:
+[The board server](../../src/board/daemon.ts) binds 127.0.0.1, normally port 4774.
+Before the alpha.11 capability fix, the reviewed path behaved as follows:
 
 1. GET /, /rudder, /rudder/:slug or /usage requires only a loopback Host header.
    renderShell embeds the per-daemon BOARD_TOKEN as window.__RUDDER_TOKEN__.

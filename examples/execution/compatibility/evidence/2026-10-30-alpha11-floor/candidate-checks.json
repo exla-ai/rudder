@@ -1,0 +1,54 @@
+{
+  "formatVersion": 1,
+  "recordedAt": "2026-10-30T23:51:10.987074+00:00",
+  "scope": "Current unversioned alpha11 candidate; Git version/tag/registry/Fly rollout are separate gates",
+  "checks": {
+    "rust": {
+      "engine": {
+        "passed": 350,
+        "ignored": 5,
+        "suites": 33,
+        "sourceChangedAfterEngineIntegration": "Only Native app_tests.rs EOF-aware fixture correction; engine199 envelope unchanged"
+      },
+      "native": {
+        "passed": 1030,
+        "ignored": 12,
+        "source": "workspace-unit-tests.log"
+      },
+      "bridgeIntegration": {
+        "passed": 32,
+        "ignored": 0,
+        "suites": 8
+      },
+      "docTests": "passed (3 crates/0 examples)",
+      "priorFullCommand": "Preserved exit101 for obsolete Native fixture, corrected without runtime change; all unaffected engine suites passed and Native+bridge/doc suites rerun",
+      "fullPlanGoal": "active"
+    },
+    "node": {
+      "passed": 711,
+      "skipped": 9,
+      "failed": 0
+    },
+    "terminal": {
+      "passed": 59,
+      "failed": 0
+    },
+    "productionBuild": "passed",
+    "cloudBuild": "passed",
+    "contextAuditFindings": 0,
+    "fixtureExportExecutablesRebuilt": false
+  },
+  "source": {
+    "frozenRustInputs": 199,
+    "frozenNodeAndBuildInputs": 214,
+    "managedFocusedSourceDifference": [
+      "native/src/app_tests.rs"
+    ],
+    "difference": "Only obsolete real-PTY test uses production EOF-aware wait; no managed runtime change"
+  },
+  "limits": [
+    "Full v4 goal remains active.",
+    "No default managed activation, provider inference/OAuth, general egress, accepted-source or physical legacy retirement claim.",
+    "The separate NEWNET wrapper failure is retained; only measured subset/offline assertions are qualified."
+  ]
+}

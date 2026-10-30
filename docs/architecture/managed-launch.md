@@ -5,7 +5,7 @@ qualification](../../examples/vcs/evidence/2026-10-30/native-v3/README.md).
 That proof used local workspace roots, real native broker authorization and
 debug-built executables, with a shell/jj fixture. It did not qualify actual
 Codex/Claude execution, normal App launch, provider credentials or lazy remote
-roots. The alpha.9 release keeps default launch unchanged. The following
+roots. Default launch remains unchanged. The following
 composition is implemented in the working tree and remains explicitly inactive
 until its remaining activation and provider gates pass.
 
@@ -235,7 +235,10 @@ legacy restart from reinterpreting a managed run. Managed records need their own
 namespace and a durable writer protocol floor, activated only after legacy
 owners and children are quiescent. Old-client refusal must be tested against the
 actual released binaries. This is cooperative compatibility, not physical
-revocation of arbitrary old clients.
+revocation of arbitrary old clients. The alpha.11 working tree adds the private
+managed-project [private storage](managed-storage.md), a transactional writer floor and conservative
+recovery. Neither preparing that floor nor reading a historical receipt permits
+the legacy App scheduler to run the project.
 
 Selected API-key credentials are the first supported profile; OAuth remains
 typed unsupported until protected refresh coordination is qualified. Codex
@@ -249,9 +252,11 @@ lifecycle.
 
 Guest networking is another concrete activation gate. The current restricted
 helper shares the host network namespace and reports `network_isolated:false`.
-The normal board serves its browser token to loopback HTTP clients; a raw guest
-client can satisfy those Host checks. Source review found that this reaches host
-project controls, despite filesystem/PID isolation. No live exploit was attempted.
+Before alpha.11 the normal board served its browser token to loopback HTTP
+clients; a raw guest client could satisfy those Host checks. Source review found
+that this reached host project controls, despite filesystem/PID isolation. No
+live exploit was attempted. The alpha.11 working tree adds
+[host-issued board sessions](board-access.md) with a private bootstrap channel.
 Default launch needs controlled guest networking and authenticated board access;
 pathname-socket protection does not isolate TCP loopback.
 

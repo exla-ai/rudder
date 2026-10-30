@@ -1,0 +1,13 @@
+{
+  "nonce": "82d1b552-74d8-4770-93c1-645dc420ca64",
+  "name": "rudder-alpha10-netns-82d1b552",
+  "app": "rudder-workers-exla",
+  "role": "alpha10-private-netns-tun",
+  "image": "registry.fly.io/rudder-workers-exla@sha256:ae1d4bf448c05dc71373efb1b9efd6510dfed4526f76838bc53e1a5c00a446ff",
+  "imageTag": "registry.fly.io/rudder-workers-exla:4.0.0-alpha.10",
+  "digest": "sha256:ae1d4bf448c05dc71373efb1b9efd6510dfed4526f76838bc53e1a5c00a446ff",
+  "revision": "56f825ea3c1d6136b1a20b3031f835ef33f870cd",
+  "sourceManifestSha256": "a2ccac2dc88ef6041496f8b9d817143fd2a376f17b042260569874469ef51408",
+  "sourceArchiveSha256": "681781a02e411ae68c58839fa3df12793595665a0a1a0e14cd1163f710454367",
+  "configSha256": "20e39fde35735f3e2d2b0995a6c7bac84d7b0cd08e9912b98b2a6e7aa7027e24"
+}

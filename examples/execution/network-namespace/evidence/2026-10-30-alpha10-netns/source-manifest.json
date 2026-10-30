@@ -1,0 +1,36 @@
+{
+  "formatVersion": 1,
+  "revision": "56f825ea3c1d6136b1a20b3031f835ef33f870cd",
+  "imageTag": "registry.fly.io/rudder-workers-exla:4.0.0-alpha.10",
+  "expectedDigest": "sha256:ae1d4bf448c05dc71373efb1b9efd6510dfed4526f76838bc53e1a5c00a446ff",
+  "files": {
+    "qualification/probe.c": {
+      "sha256": "d61d556342f5d4992bd7424bc0c2637e41286823df1bfa983ee14cf082c0a5c6",
+      "bytes": 11726
+    },
+    "qualification/preload.mjs": {
+      "sha256": "627485d1bc1fd818046295372d8bbd1a6c21c45e0bb0bcb2fafca6fd7fb0baa7",
+      "bytes": 7550
+    },
+    "qualification/qualify-alpha10.mjs": {
+      "sha256": "dbad59aee3c1e453d50c37b425aae47ad2a06f8e569861ab77c7b735d42e6848",
+      "bytes": 11993
+    },
+    "alpha10/cloud/worker/root-bootstrap.sh": {
+      "sha256": "ac705de5e58920e405153528268be394f10e026e7ca90ed34b095316b18003ca",
+      "bytes": 5283
+    },
+    "alpha10/cloud/worker/entrypoint.sh": {
+      "sha256": "c0c80fcd7f9110c6ec53e7f4e3fe2284b396d585dd80fa2f91315cbc3b2a7cca",
+      "bytes": 2964
+    },
+    "alpha10/cloud/worker/cache-env.sh": {
+      "sha256": "4f967af3350569ca6a0b609f13fc762267eba48f4d9e1e548b57019eab5a8a8c",
+      "bytes": 1151
+    },
+    "alpha10/cloud/worker/Dockerfile": {
+      "sha256": "8ea93a7ad0fde653ca4be5fbe41a37253a2a5381e4689da9bdfa88daded833c0",
+      "bytes": 9305
+    }
+  }
+}

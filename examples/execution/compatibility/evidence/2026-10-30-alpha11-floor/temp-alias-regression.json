@@ -1,0 +1,17 @@
+{
+  "formatVersion": 1,
+  "case": "Symlinked disposable TMPDIR path matches macOS /var canonicalization",
+  "before": {
+    "passed": 1,
+    "failed": 2,
+    "testSourceSha256": "ca8988367909a95f1d74c9a99b93ed5ffd9f4ad2f4ac4a5ea5bd0258fe776190"
+  },
+  "after": {
+    "passed": 3,
+    "failed": 0,
+    "testSourceSha256": "6aa434428943301309a682c094bf40b280db6d8253a1bb88572821c042a8bc35"
+  },
+  "exactManagedWorkspaceRefusalAssertionsRetained": true,
+  "runtimeCodeChanged": false,
+  "macOSTagCIGate": "Not yet run for this correction"
+}

@@ -1,7 +1,7 @@
 # Remote managed launch and quiescent partial checkpoints
 
-Status: proposed next implementation slice, 2026-10-30. These APIs and format
-floors are not implemented or activated. They compose the existing
+Status: proposed next implementation slice, 2026-10-30. These remote APIs and
+proposed format floors are not implemented or activated. They compose the existing
 [partial capture](partial-retention.md) and [managed launch](managed-launch.md)
 contracts toward [PLAN §§4–6 and 8](../../PLAN.md). Existing qualification does
 not establish remote managed launch, remote source acceptance or fleet latency.
@@ -54,6 +54,16 @@ unavailable or revoked authority denies further byte exposure and invalidates
 the session. Invalidating interest does not free admission or payload ownership
 until the actual transport settles. Polling continues through final receipt
 publication; the existing early monitor.finish must be split accordingly.
+
+Graceful stop withdraws exact guest network admission, streams and helpers; it
+retains the exact workspace/remote-root finalization authority and refresh
+monitor through PID/VCS/RPC/FUSE drain, capture retention and any required transfer-owned
+clone acknowledgments, execution-record fsync and authenticated shutdown receipt
+publication. Guest network withdrawal alone must not invalidate that source
+grant. Actual owner/run revocation invalidates RemoteSession and withholds
+checkpoint proof while preserving acknowledged data. The proposed
+[execution network profile](execution-network-profile.md) uses this same lifetime
+split; guest network authority cannot substitute for source finalization authority.
 
 All source/cache startup, capture, transfer, private jj and journal I/O runs on
 bounded workers or the dedicated helper. App alone adopts typed results and owns
@@ -129,11 +139,19 @@ reconciliation; the next launch uses a new view and freshly admitted session.
 
 ## Proposed compatibility and implementation boundary
 
-Proposed floors are ExecutionSpec4, ManagedExecutionBinding3, ExecutionRecord2,
-WorkspaceAssignment2, a separate partial RPC/provider protocol1 and
-QuiescedPartialCheckpoint1. Remote namespace5 permanently gates finalization
-semantics; local namespaces1/2 and live PartialCaptureReceipt1 stay unchanged.
-Journal schema5 gates new acceptance authority. Existing SourceV2/RunnableRoot1
+The proposed outer ExecutionSpec version is greater than3 and must be allocated
+jointly with the execution network profile; neither proposal independently
+reserves4. ManagedExecutionBinding3, ExecutionRecord2, WorkspaceAssignment2, a
+separate partial RPC/provider protocol1, QuiescedPartialCheckpoint1 and remote
+namespace5 remain proposals. The proposed remote namespace floor gates new
+finalization semantics; local namespaces1/2 and live PartialCaptureReceipt1 stay
+unchanged.
+
+Journal schema5 now implements only the opt-in managed-project writer floor and
+historical preparation/recovery receipt. It does not implement partial provider
+or history acceptance authority. Future acceptance requires a separately
+allocated journal schema/writer capability; opening schema5 or reading its
+receipt grants no launch or acceptance authority. Existing SourceV2/RunnableRoot1
 and individual-object retention schema2 need no reinterpretation.
 
 Minimal code groups: execution types/Linux/state/handoff; VFS remote/capture/

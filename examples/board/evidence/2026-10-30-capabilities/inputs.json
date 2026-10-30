@@ -1,0 +1,123 @@
+{
+  "format_version": 1,
+  "sources": [
+    {
+      "path": "private/entry.mjs",
+      "sha256": "2267e3db97f214d55d0843b4a641bb56f444a5b650bc9cce8af8aa620cfa922a"
+    },
+    {
+      "path": "src/backends.ts",
+      "sha256": "40fed89578ac50601fb78e44f21b9db0349f01b4ae39386b4d837a9473567412"
+    },
+    {
+      "path": "src/board/authority.ts",
+      "sha256": "308a043997c36ff5fc9ab58a1e88130389be770211c1957f3b34fe53cdde303d"
+    },
+    {
+      "path": "src/board/daemon.ts",
+      "sha256": "0eea8d1c72e745b3f357961b2cfb1519b969e42e1a764b0fb0502796b50344b3"
+    },
+    {
+      "path": "src/board/host-access.ts",
+      "sha256": "e1ffca59ac8313603b51e66d4d0dbc31df9d563a90a142af5339f26058af0cc2"
+    },
+    {
+      "path": "src/brain.ts",
+      "sha256": "d81c6a2956ddd9b07eb14fe43e2c71e9279def58adb12a9d5e679aefba57bbf2"
+    },
+    {
+      "path": "src/bus.ts",
+      "sha256": "faba5710e83b9493cb288683e286758614d1f39f207e43bbf3667544434e2f9f"
+    },
+    {
+      "path": "src/codex-binary.ts",
+      "sha256": "7d18772595a651c2b0026da88ba80e64231c7054c855d61fd8a014bc3cac4ec0"
+    },
+    {
+      "path": "src/effort.ts",
+      "sha256": "4c4b06656a6d12af2f0b09842582c7ef50a3e776002dbe85f6bce40e11a86f14"
+    },
+    {
+      "path": "src/engine-authority.ts",
+      "sha256": "08da273d83dffb11b31c3b15df542f63ff5d62495b7288d9c8dc42287dd284f5"
+    },
+    {
+      "path": "src/git.ts",
+      "sha256": "9cbedd525b20c127ac179b9e4aa29788bb8939bcf619f8495b866f94146d15f3"
+    },
+    {
+      "path": "src/goal.ts",
+      "sha256": "5a1356f29289ad03a43428e7141cc92a8b0134a8535f5b9a4ef13b3ef51519c5"
+    },
+    {
+      "path": "src/graph.ts",
+      "sha256": "b117a588585c4343f76967f730861c747f859c7f6d1efb778dbb8e9f5bb562d6"
+    },
+    {
+      "path": "src/jj-binary.ts",
+      "sha256": "4035a213344734f0a87f99c55c449efa4b6d4b980dd330a47d36e4bca87e5ab2"
+    },
+    {
+      "path": "src/jj.ts",
+      "sha256": "70ee50fe184bdf2227d7ff8e8b4154b11c8dd571b9ec771461728c6d71d9cab0"
+    },
+    {
+      "path": "src/logger.ts",
+      "sha256": "b2715999532a1d0fbe5fccb66e770b76164c128e4e2cc64fc88091673f35a9c1"
+    },
+    {
+      "path": "src/planner.ts",
+      "sha256": "bafe84982a758b1fcc58f9a65560922a8a7621f050e570e38a80dbed8ee41938"
+    },
+    {
+      "path": "src/rudder-md.ts",
+      "sha256": "a7d49e7984127e853fa403ba9dcafbf7db06da8ce5934ccf13611fa7f1e47782"
+    },
+    {
+      "path": "src/run-manager.ts",
+      "sha256": "881e149779917b4f1ae9a2a5fc94c53b61e77b366bd32334316251c9ac81e262"
+    },
+    {
+      "path": "src/scheduler.ts",
+      "sha256": "7d8eab7a66baefc40353acf5e748361c5128843e28d4fae781db6a754047abc3"
+    },
+    {
+      "path": "src/state.ts",
+      "sha256": "1eb807fabd843a4b7a1cf1d1a064c453f6514c15e8d3ee46dd6b79b89e0f2bc1"
+    },
+    {
+      "path": "src/surfaces.ts",
+      "sha256": "c4e6fb2b15e1dacd072df2c30dff08ddb4f33872677a8836fc909b7008fe36c4"
+    },
+    {
+      "path": "src/task-summary.ts",
+      "sha256": "14baa1ce2b378dbc6c4155a15ad2469685fe5a44b44b2672e26a02179572c9c1"
+    },
+    {
+      "path": "src/types.ts",
+      "sha256": "918e3e5eade8816695f7737a602f281ae1b8ec19d5e3f4d1f1e39374a1576d42"
+    },
+    {
+      "path": "src/usage.ts",
+      "sha256": "f8a484ebd9cd641d0ec30595dc8574a01ce202101c4ebcdc136366653befac44"
+    },
+    {
+      "path": "src/util.ts",
+      "sha256": "51b1329ee22afc6f4f8630ba201c6b9920beb604a4fbd6a447ab4dc805ce8745"
+    }
+  ],
+  "products": [
+    {
+      "path": "daemon.mjs",
+      "sha256": "326089e6357ec80be1f29dd1d252e632837e4b9c06d4ecc62f7935d0fe47af17"
+    },
+    {
+      "path": "board.js",
+      "sha256": "243e6d3fd7c32b7c181fbad8ba67e0daa82baf1afc0eab86c62afd40c6050963"
+    },
+    {
+      "path": "board.css",
+      "sha256": "735cbcfab19b181b8449c86bb56be08e92e6403840980c39e40b55d753578126"
+    }
+  ]
+}

@@ -181,6 +181,15 @@ impl AgentApi {
         journal.authenticate_agent(&identity.token, now_ms()?)
     }
 
+    /// Internal workspace-service authorization, deliberately absent from the
+    /// model-facing tool catalog. Read current credentials on every request.
+    pub fn authorize_workspace(&self, binding: &crate::vfs::rpc::ObservationBinding) -> Result<CapabilityIdentity> {
+        let (journal, identity) = self.load(Duration::from_millis(100))?;
+        let actual = journal.authorize_workspace(&identity.token, binding, now_ms()?)?;
+        ensure!(actual.project_id == self.binding.project && actual.run_id == self.binding.run && actual.run_epoch == self.binding.epoch && actual.owner_epoch == self.binding.owner_epoch, "workspace capability binding changed");
+        Ok(actual)
+    }
+
     fn load(&self, busy_wait: Duration) -> Result<(Journal, AgentIdentityFile)> {
         let identity = read_identity(&self.identity_file)?;
         ensure!(

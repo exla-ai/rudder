@@ -1,0 +1,1305 @@
+{
+  "format_version": 1,
+  "started_at": "2026-10-30T16:11:18.045897+00:00",
+  "fixture": "<FIXTURE>",
+  "binary": "<CARGO_TARGET_DIR>/debug/rudder-jj",
+  "binary_sha256": "9c7355bbb69eeaf868337b9f6c3e1e2201d9e25618cd358b7b55f3fb3e3f3b80",
+  "jj_crate_versions": {
+    "jj-cli": "0.40.0",
+    "jj-lib": "0.40.0"
+  },
+  "upstream_commit": "941d0290f5511db1d1cf8e4fe7365ba7d1828ea0",
+  "scope": "explicit local-development CLI compatibility only; not the production WorkspaceView provider",
+  "commands": [
+    {
+      "cwd": "prepared-template",
+      "argv": [
+        "<CARGO_TARGET_DIR>/debug/rudder-jj",
+        "--no-pager",
+        "--color=never",
+        "--version"
+      ],
+      "status": 0,
+      "elapsed_ms": 40.142888,
+      "stdout": "rudder-jj 0.40.0-rudder-bridge-v1\n",
+      "stderr": ""
+    },
+    {
+      "cwd": "prepared-template",
+      "argv": [
+        "git",
+        "--version"
+      ],
+      "status": 0,
+      "elapsed_ms": 2.094935,
+      "stdout": "git version 2.39.5\n",
+      "stderr": ""
+    },
+    {
+      "cwd": "prepared-template",
+      "argv": [
+        "<CARGO_TARGET_DIR>/debug/rudder-jj",
+        "--no-pager",
+        "--color=never",
+        "rudder-init-local"
+      ],
+      "status": 0,
+      "elapsed_ms": 58.969144,
+      "stdout": "",
+      "stderr": ""
+    },
+    {
+      "cwd": "prepared-template",
+      "argv": [
+        "<CARGO_TARGET_DIR>/debug/rudder-jj",
+        "--no-pager",
+        "--color=never",
+        "--config",
+        "git.write-change-id-header=false",
+        "describe",
+        "-m",
+        "legacy baseline"
+      ],
+      "status": 0,
+      "elapsed_ms": 162.449314,
+      "stdout": "",
+      "stderr": "Working copy  (@) now at: vssxstwt cf019e19 legacy baseline\nParent commit (@-)      : zzzzzzzz 00000000 (empty) (no description set)\n"
+    },
+    {
+      "cwd": "prepared-template",
+      "argv": [
+        "<CARGO_TARGET_DIR>/debug/rudder-jj",
+        "--no-pager",
+        "--color=never",
+        "log",
+        "-r",
+        "@",
+        "--no-graph",
+        "-T",
+        "commit_id ++ \" \" ++ change_id"
+      ],
+      "status": 0,
+      "elapsed_ms": 113.838023,
+      "stdout": "cf019e1937acc5314a6ee562612459124d6f36a8 vssxstwtzvrtlqtoskqslqplmvxvytwp",
+      "stderr": ""
+    },
+    {
+      "cwd": "prepared-template",
+      "argv": [
+        "git",
+        "cat-file",
+        "commit",
+        "cf019e1937acc5314a6ee562612459124d6f36a8"
+      ],
+      "status": 0,
+      "elapsed_ms": 2.060583,
+      "stdout": "tree bb34502d0b764bc0cf7d8c7a460192ee6f13dd00\nauthor Rudder Prototype <prototype@invalid.example> 1793376679 +0000\ncommitter Rudder Prototype <prototype@invalid.example> 1793376679 +0000\n\nlegacy baseline\n",
+      "stderr": ""
+    },
+    {
+      "cwd": "prepared-template",
+      "argv": [
+        "<CARGO_TARGET_DIR>/debug/rudder-jj",
+        "--no-pager",
+        "--color=never",
+        "bookmark",
+        "create",
+        "legacy",
+        "-r",
+        "@"
+      ],
+      "status": 0,
+      "elapsed_ms": 129.641423,
+      "stdout": "",
+      "stderr": "Created 1 bookmarks pointing to vssxstwt cf019e19 legacy | legacy baseline\n"
+    },
+    {
+      "cwd": "prepared-template",
+      "argv": [
+        "<CARGO_TARGET_DIR>/debug/rudder-jj",
+        "--no-pager",
+        "--color=never",
+        "new",
+        "-m",
+        "modern baseline"
+      ],
+      "status": 0,
+      "elapsed_ms": 129.636977,
+      "stdout": "",
+      "stderr": "Working copy  (@) now at: vozxwmsq 766148cd (empty) modern baseline\nParent commit (@-)      : vssxstwt cf019e19 legacy | legacy baseline\n"
+    },
+    {
+      "cwd": "prepared-template",
+      "argv": [
+        "<CARGO_TARGET_DIR>/debug/rudder-jj",
+        "--no-pager",
+        "--color=never",
+        "status"
+      ],
+      "status": 0,
+      "elapsed_ms": 153.99152,
+      "stdout": "Working copy changes:\nA modern.txt\nWorking copy  (@) : vozxwmsq 7a1fb120 modern baseline\nParent commit (@-): vssxstwt cf019e19 legacy | legacy baseline\n",
+      "stderr": ""
+    },
+    {
+      "cwd": "prepared-template",
+      "argv": [
+        "<CARGO_TARGET_DIR>/debug/rudder-jj",
+        "--no-pager",
+        "--color=never",
+        "log",
+        "-r",
+        "@",
+        "--no-graph",
+        "-T",
+        "commit_id ++ \" \" ++ change_id"
+      ],
+      "status": 0,
+      "elapsed_ms": 110.983582,
+      "stdout": "7a1fb1202956ac238682549a1e6032fb3af463cb vozxwmsqpoypzuysytxmsrozvvuuwtnm",
+      "stderr": ""
+    },
+    {
+      "cwd": "prepared-template",
+      "argv": [
+        "git",
+        "cat-file",
+        "commit",
+        "7a1fb1202956ac238682549a1e6032fb3af463cb"
+      ],
+      "status": 0,
+      "elapsed_ms": 2.034687,
+      "stdout": "tree fffb716e5528c6606d174f4f261cee2d8b3bb9e9\nparent cf019e1937acc5314a6ee562612459124d6f36a8\nauthor Rudder Prototype <prototype@invalid.example> 1793376680 +0000\ncommitter Rudder Prototype <prototype@invalid.example> 1793376680 +0000\nchange-id vozxwmsqpoypzuysytxmsrozvvuuwtnm\n\nmodern baseline\n",
+      "stderr": ""
+    },
+    {
+      "cwd": "prepared-template",
+      "argv": [
+        "<CARGO_TARGET_DIR>/debug/rudder-jj",
+        "--no-pager",
+        "--color=never",
+        "bookmark",
+        "create",
+        "baseline",
+        "-r",
+        "@"
+      ],
+      "status": 0,
+      "elapsed_ms": 124.817961,
+      "stdout": "",
+      "stderr": "Created 1 bookmarks pointing to vozxwmsq 7a1fb120 baseline | modern baseline\n"
+    },
+    {
+      "cwd": "prepared-template",
+      "argv": [
+        "<CARGO_TARGET_DIR>/debug/rudder-jj",
+        "--no-pager",
+        "--color=never",
+        "new",
+        "-m",
+        "prepared attempt template"
+      ],
+      "status": 0,
+      "elapsed_ms": 133.04401,
+      "stdout": "",
+      "stderr": "Working copy  (@) now at: xtorrswt 4b8a0e8c (empty) prepared attempt template\nParent commit (@-)      : vozxwmsq 7a1fb120 baseline | modern baseline\n"
+    },
+    {
+      "cwd": "prepared-template",
+      "argv": [
+        "<CARGO_TARGET_DIR>/debug/rudder-jj",
+        "--no-pager",
+        "--color=never",
+        "status"
+      ],
+      "status": 0,
+      "elapsed_ms": 107.895125,
+      "stdout": "The working copy has no changes.\nWorking copy  (@) : xtorrswt 4b8a0e8c (empty) prepared attempt template\nParent commit (@-): vozxwmsq 7a1fb120 baseline | modern baseline\n",
+      "stderr": ""
+    },
+    {
+      "cwd": "prepared-template",
+      "argv": [
+        "git",
+        "repack",
+        "-a",
+        "-d"
+      ],
+      "status": 0,
+      "elapsed_ms": 16.547348,
+      "stdout": "",
+      "stderr": ""
+    },
+    {
+      "cwd": ".",
+      "argv": [
+        "mount",
+        "--make-rprivate",
+        "/"
+      ],
+      "status": 0,
+      "elapsed_ms": 2.286823,
+      "stdout": "",
+      "stderr": ""
+    },
+    {
+      "cwd": ".",
+      "argv": [
+        "mount",
+        "--bind",
+        "<FIXTURE>/immutable-seed/objects",
+        "<FIXTURE>/immutable-seed/objects"
+      ],
+      "status": 0,
+      "elapsed_ms": 2.376482,
+      "stdout": "",
+      "stderr": ""
+    },
+    {
+      "cwd": ".",
+      "argv": [
+        "mount",
+        "-o",
+        "remount,bind,ro",
+        "<FIXTURE>/immutable-seed/objects",
+        "<FIXTURE>/immutable-seed/objects"
+      ],
+      "status": 0,
+      "elapsed_ms": 2.028466,
+      "stdout": "",
+      "stderr": ""
+    },
+    {
+      "cwd": "test_checkout_restore_and_real_git_commit_import/a",
+      "argv": [
+        "<CARGO_TARGET_DIR>/debug/rudder-jj",
+        "--no-pager",
+        "--color=never",
+        "new",
+        "baseline",
+        "-m",
+        "scratch changes"
+      ],
+      "status": 0,
+      "elapsed_ms": 130.114897,
+      "stdout": "",
+      "stderr": "Working copy  (@) now at: torrzonr febe8639 (empty) scratch changes\nParent commit (@-)      : vozxwmsq 7a1fb120 baseline | modern baseline\n"
+    },
+    {
+      "cwd": "test_checkout_restore_and_real_git_commit_import/a",
+      "argv": [
+        "<CARGO_TARGET_DIR>/debug/rudder-jj",
+        "--no-pager",
+        "--color=never",
+        "status"
+      ],
+      "status": 0,
+      "elapsed_ms": 151.316826,
+      "stdout": "Working copy changes:\nM base.txt\nWorking copy  (@) : torrzonr d5405a0e scratch changes\nParent commit (@-): vozxwmsq 7a1fb120 baseline | modern baseline\n",
+      "stderr": ""
+    },
+    {
+      "cwd": "test_checkout_restore_and_real_git_commit_import/a",
+      "argv": [
+        "<CARGO_TARGET_DIR>/debug/rudder-jj",
+        "--no-pager",
+        "--color=never",
+        "restore",
+        "--from",
+        "baseline",
+        "base.txt"
+      ],
+      "status": 0,
+      "elapsed_ms": 135.086868,
+      "stdout": "",
+      "stderr": "Working copy  (@) now at: torrzonr 6004e8cb (empty) scratch changes\nParent commit (@-)      : vozxwmsq 7a1fb120 baseline | modern baseline\nAdded 0 files, modified 1 files, removed 0 files\n"
+    },
+    {
+      "cwd": "test_checkout_restore_and_real_git_commit_import/a",
+      "argv": [
+        "<CARGO_TARGET_DIR>/debug/rudder-jj",
+        "--no-pager",
+        "--color=never",
+        "edit",
+        "legacy"
+      ],
+      "status": 0,
+      "elapsed_ms": 130.745787,
+      "stdout": "",
+      "stderr": "Working copy  (@) now at: vssxstwt cf019e19 legacy | legacy baseline\nParent commit (@-)      : zzzzzzzz 00000000 (empty) (no description set)\nAdded 0 files, modified 0 files, removed 1 files\n"
+    },
+    {
+      "cwd": "test_checkout_restore_and_real_git_commit_import/a",
+      "argv": [
+        "<CARGO_TARGET_DIR>/debug/rudder-jj",
+        "--no-pager",
+        "--color=never",
+        "new",
+        "baseline",
+        "-m",
+        "git interop"
+      ],
+      "status": 0,
+      "elapsed_ms": 151.977291,
+      "stdout": "",
+      "stderr": "Working copy  (@) now at: pnlntvzx 2fb3fff5 (empty) git interop\nParent commit (@-)      : vozxwmsq 7a1fb120 baseline | modern baseline\nAdded 1 files, modified 0 files, removed 0 files\n"
+    },
+    {
+      "cwd": "test_checkout_restore_and_real_git_commit_import/a",
+      "argv": [
+        "git",
+        "add",
+        "git-authored.txt"
+      ],
+      "status": 0,
+      "elapsed_ms": 3.133364,
+      "stdout": "",
+      "stderr": ""
+    },
+    {
+      "cwd": "test_checkout_restore_and_real_git_commit_import/a",
+      "argv": [
+        "git",
+        "commit",
+        "-q",
+        "-m",
+        "Git-authored commit"
+      ],
+      "status": 0,
+      "elapsed_ms": 7.121152,
+      "stdout": "",
+      "stderr": ""
+    },
+    {
+      "cwd": "test_checkout_restore_and_real_git_commit_import/a",
+      "argv": [
+        "git",
+        "rev-parse",
+        "HEAD"
+      ],
+      "status": 0,
+      "elapsed_ms": 3.515399,
+      "stdout": "603258d834e5aeda62b00abf12b9b6c330269abd\n",
+      "stderr": ""
+    },
+    {
+      "cwd": "test_checkout_restore_and_real_git_commit_import/a",
+      "argv": [
+        "<CARGO_TARGET_DIR>/debug/rudder-jj",
+        "--no-pager",
+        "--color=never",
+        "status"
+      ],
+      "status": 0,
+      "elapsed_ms": 147.482495,
+      "stdout": "The working copy has no changes.\nWorking copy  (@) : vkstrvss 80744eda (empty) (no description set)\nParent commit (@-): omuqtvzn 603258d8 Git-authored commit\n",
+      "stderr": "Reset the working copy parent to the new Git HEAD.\n"
+    },
+    {
+      "cwd": "test_checkout_restore_and_real_git_commit_import/a",
+      "argv": [
+        "<CARGO_TARGET_DIR>/debug/rudder-jj",
+        "--no-pager",
+        "--color=never",
+        "log",
+        "-r",
+        "603258d834e5aeda62b00abf12b9b6c330269abd",
+        "--no-graph",
+        "-T",
+        "commit_id ++ \" \" ++ change_id"
+      ],
+      "status": 0,
+      "elapsed_ms": 141.482008,
+      "stdout": "603258d834e5aeda62b00abf12b9b6c330269abd omuqtvznnwtmqmvrkmuzzmvtuosupsxn",
+      "stderr": ""
+    },
+    {
+      "cwd": "test_checkout_restore_and_real_git_commit_import/a",
+      "argv": [
+        "<CARGO_TARGET_DIR>/debug/rudder-jj",
+        "--no-pager",
+        "--color=never",
+        "file",
+        "show",
+        "-r",
+        "603258d834e5aeda62b00abf12b9b6c330269abd",
+        "git-authored.txt"
+      ],
+      "status": 0,
+      "elapsed_ms": 98.994717,
+      "stdout": "ordinary Git bytes\n",
+      "stderr": ""
+    },
+    {
+      "cwd": "test_checkout_restore_and_real_git_commit_import/a",
+      "argv": [
+        "<CARGO_TARGET_DIR>/debug/rudder-jj",
+        "--no-pager",
+        "--color=never",
+        "log",
+        "-r",
+        "legacy",
+        "--no-graph",
+        "-T",
+        "commit_id ++ \" \" ++ change_id"
+      ],
+      "status": 0,
+      "elapsed_ms": 110.815652,
+      "stdout": "cf019e1937acc5314a6ee562612459124d6f36a8 vssxstwtzvrtlqtoskqslqplmvxvytwp",
+      "stderr": ""
+    },
+    {
+      "cwd": "test_git_version_is_not_global_gate_but_fetch_needs_porcelain",
+      "argv": [
+        "git",
+        "init",
+        "--bare",
+        "-q",
+        "<FIXTURE>/test_git_version_is_not_global_gate_but_fetch_needs_porcelain/remote.git"
+      ],
+      "status": 0,
+      "elapsed_ms": 5.545584,
+      "stdout": "",
+      "stderr": ""
+    },
+    {
+      "cwd": "test_git_version_is_not_global_gate_but_fetch_needs_porcelain/a",
+      "argv": [
+        "<CARGO_TARGET_DIR>/debug/rudder-jj",
+        "--no-pager",
+        "--color=never",
+        "git",
+        "remote",
+        "add",
+        "fixture",
+        "<FIXTURE>/test_git_version_is_not_global_gate_but_fetch_needs_porcelain/remote.git"
+      ],
+      "status": 0,
+      "elapsed_ms": 148.178979,
+      "stdout": "",
+      "stderr": ""
+    },
+    {
+      "cwd": "test_git_version_is_not_global_gate_but_fetch_needs_porcelain/a",
+      "argv": [
+        "<CARGO_TARGET_DIR>/debug/rudder-jj",
+        "--no-pager",
+        "--color=never",
+        "bookmark",
+        "create",
+        "to-export",
+        "-r",
+        "baseline"
+      ],
+      "status": 0,
+      "elapsed_ms": 129.661258,
+      "stdout": "",
+      "stderr": "Created 1 bookmarks pointing to vozxwmsq 7a1fb120 baseline to-export | modern baseline\n"
+    },
+    {
+      "cwd": "test_git_version_is_not_global_gate_but_fetch_needs_porcelain/a",
+      "argv": [
+        "<CARGO_TARGET_DIR>/debug/rudder-jj",
+        "--no-pager",
+        "--color=never",
+        "git",
+        "export"
+      ],
+      "status": 0,
+      "elapsed_ms": 100.97301,
+      "stdout": "",
+      "stderr": "Nothing changed.\n"
+    },
+    {
+      "cwd": "test_git_version_is_not_global_gate_but_fetch_needs_porcelain/a",
+      "argv": [
+        "<CARGO_TARGET_DIR>/debug/rudder-jj",
+        "--no-pager",
+        "--color=never",
+        "git",
+        "push",
+        "--remote",
+        "fixture",
+        "--bookmark",
+        "to-export"
+      ],
+      "status": 0,
+      "elapsed_ms": 194.95229,
+      "stdout": "",
+      "stderr": "Changes to push to fixture:\n  Add bookmark to-export to 7a1fb1202956\n"
+    },
+    {
+      "cwd": "test_git_version_is_not_global_gate_but_fetch_needs_porcelain",
+      "argv": [
+        "git",
+        "--git-dir",
+        "<FIXTURE>/test_git_version_is_not_global_gate_but_fetch_needs_porcelain/remote.git",
+        "rev-parse",
+        "refs/heads/to-export"
+      ],
+      "status": 0,
+      "elapsed_ms": 2.044492,
+      "stdout": "7a1fb1202956ac238682549a1e6032fb3af463cb\n",
+      "stderr": ""
+    },
+    {
+      "cwd": "test_git_version_is_not_global_gate_but_fetch_needs_porcelain/a",
+      "argv": [
+        "<CARGO_TARGET_DIR>/debug/rudder-jj",
+        "--no-pager",
+        "--color=never",
+        "git",
+        "fetch",
+        "--remote",
+        "fixture"
+      ],
+      "status": 1,
+      "elapsed_ms": 111.595111,
+      "stdout": "",
+      "stderr": "Error: Git does not recognize required option: porcelain (note: Jujutsu requires git >= 2.41.0)\n"
+    },
+    {
+      "cwd": "test_legacy_extra_metadata_is_required_and_copied_privately/a",
+      "argv": [
+        "<CARGO_TARGET_DIR>/debug/rudder-jj",
+        "--no-pager",
+        "--color=never",
+        "log",
+        "-r",
+        "legacy",
+        "--no-graph",
+        "-T",
+        "commit_id ++ \" \" ++ change_id"
+      ],
+      "status": 0,
+      "elapsed_ms": 120.453944,
+      "stdout": "cf019e1937acc5314a6ee562612459124d6f36a8 vssxstwtzvrtlqtoskqslqplmvxvytwp",
+      "stderr": ""
+    },
+    {
+      "cwd": "test_legacy_extra_metadata_is_required_and_copied_privately/b",
+      "argv": [
+        "<CARGO_TARGET_DIR>/debug/rudder-jj",
+        "--no-pager",
+        "--color=never",
+        "log",
+        "-r",
+        "legacy",
+        "--no-graph",
+        "-T",
+        "commit_id ++ \" \" ++ change_id"
+      ],
+      "status": 0,
+      "elapsed_ms": 128.443141,
+      "stdout": "cf019e1937acc5314a6ee562612459124d6f36a8 vssxstwtzvrtlqtoskqslqplmvxvytwp",
+      "stderr": ""
+    },
+    {
+      "cwd": "test_legacy_extra_metadata_is_required_and_copied_privately/git-only-control",
+      "argv": [
+        "git",
+        "init",
+        "-q"
+      ],
+      "status": 0,
+      "elapsed_ms": 4.987981,
+      "stdout": "",
+      "stderr": ""
+    },
+    {
+      "cwd": "test_legacy_extra_metadata_is_required_and_copied_privately/git-only-control",
+      "argv": [
+        "git",
+        "update-ref",
+        "refs/heads/legacy",
+        "cf019e1937acc5314a6ee562612459124d6f36a8"
+      ],
+      "status": 0,
+      "elapsed_ms": 3.053887,
+      "stdout": "",
+      "stderr": ""
+    },
+    {
+      "cwd": "test_legacy_extra_metadata_is_required_and_copied_privately/git-only-control",
+      "argv": [
+        "/usr/local/bin/jj",
+        "git",
+        "init",
+        "--colocate"
+      ],
+      "status": 0,
+      "elapsed_ms": 47.941174,
+      "stdout": "",
+      "stderr": "Done importing changes from the underlying Git repo.\nInitialized repo in \".\"\nHint: Running `git clean -xdf` will remove `.jj/`!\n"
+    },
+    {
+      "cwd": "test_legacy_extra_metadata_is_required_and_copied_privately/git-only-control",
+      "argv": [
+        "/usr/local/bin/jj",
+        "log",
+        "-r",
+        "legacy",
+        "--no-graph",
+        "-T",
+        "change_id"
+      ],
+      "status": 0,
+      "elapsed_ms": 33.033263,
+      "stdout": "yutnktoxvrqpxvrtvtpsstuxrnpwwuln",
+      "stderr": ""
+    },
+    {
+      "cwd": "test_private_metadata_and_object_isolation/a",
+      "argv": [
+        "<CARGO_TARGET_DIR>/debug/rudder-jj",
+        "--no-pager",
+        "--color=never",
+        "describe",
+        "-m",
+        "private a"
+      ],
+      "status": 0,
+      "elapsed_ms": 180.341236,
+      "stdout": "",
+      "stderr": "Working copy  (@) now at: xtorrswt db08faba private a\nParent commit (@-)      : vozxwmsq 7a1fb120 baseline | modern baseline\n"
+    },
+    {
+      "cwd": "test_private_metadata_and_object_isolation/a",
+      "argv": [
+        "<CARGO_TARGET_DIR>/debug/rudder-jj",
+        "--no-pager",
+        "--color=never",
+        "log",
+        "-r",
+        "@",
+        "--no-graph",
+        "-T",
+        "commit_id ++ \" \" ++ change_id"
+      ],
+      "status": 0,
+      "elapsed_ms": 126.645437,
+      "stdout": "db08fabad67fff32983ddbccddb7be32f47d1262 xtorrswtnmwlllknulptqsunqrnrwvzy",
+      "stderr": ""
+    },
+    {
+      "cwd": "test_private_metadata_and_object_isolation/a",
+      "argv": [
+        "<CARGO_TARGET_DIR>/debug/rudder-jj",
+        "--no-pager",
+        "--color=never",
+        "bookmark",
+        "create",
+        "only-a",
+        "-r",
+        "@"
+      ],
+      "status": 0,
+      "elapsed_ms": 130.493064,
+      "stdout": "",
+      "stderr": "Created 1 bookmarks pointing to xtorrswt db08faba only-a | private a\n"
+    },
+    {
+      "cwd": "test_private_metadata_and_object_isolation/a",
+      "argv": [
+        "<CARGO_TARGET_DIR>/debug/rudder-jj",
+        "--no-pager",
+        "--color=never",
+        "new",
+        "-m",
+        "a child"
+      ],
+      "status": 0,
+      "elapsed_ms": 140.158667,
+      "stdout": "",
+      "stderr": "Working copy  (@) now at: qxqltpso e4dd81d2 (empty) a child\nParent commit (@-)      : xtorrswt db08faba only-a | private a\n"
+    },
+    {
+      "cwd": "test_private_metadata_and_object_isolation/b",
+      "argv": [
+        "git",
+        "cat-file",
+        "-e",
+        "db08fabad67fff32983ddbccddb7be32f47d1262"
+      ],
+      "status": 1,
+      "elapsed_ms": 2.218667,
+      "stdout": "",
+      "stderr": ""
+    },
+    {
+      "cwd": "test_private_metadata_and_object_isolation/b",
+      "argv": [
+        "git",
+        "show-ref",
+        "--verify",
+        "refs/heads/only-a"
+      ],
+      "status": 128,
+      "elapsed_ms": 2.657941,
+      "stdout": "",
+      "stderr": "fatal: 'refs/heads/only-a' - not a valid ref\n"
+    },
+    {
+      "cwd": "test_real_conflict_and_git_header_round_trip/a",
+      "argv": [
+        "<CARGO_TARGET_DIR>/debug/rudder-jj",
+        "--no-pager",
+        "--color=never",
+        "new",
+        "baseline",
+        "-m",
+        "left"
+      ],
+      "status": 0,
+      "elapsed_ms": 141.68951,
+      "stdout": "",
+      "stderr": "Working copy  (@) now at: nmnnkyyn cbf088f9 (empty) left\nParent commit (@-)      : vozxwmsq 7a1fb120 baseline | modern baseline\n"
+    },
+    {
+      "cwd": "test_real_conflict_and_git_header_round_trip/a",
+      "argv": [
+        "<CARGO_TARGET_DIR>/debug/rudder-jj",
+        "--no-pager",
+        "--color=never",
+        "bookmark",
+        "create",
+        "left",
+        "-r",
+        "@"
+      ],
+      "status": 0,
+      "elapsed_ms": 141.823956,
+      "stdout": "",
+      "stderr": "Created 1 bookmarks pointing to nmnnkyyn 542966a9 left | left\n"
+    },
+    {
+      "cwd": "test_real_conflict_and_git_header_round_trip/a",
+      "argv": [
+        "<CARGO_TARGET_DIR>/debug/rudder-jj",
+        "--no-pager",
+        "--color=never",
+        "new",
+        "baseline",
+        "-m",
+        "right"
+      ],
+      "status": 0,
+      "elapsed_ms": 134.684044,
+      "stdout": "",
+      "stderr": "Working copy  (@) now at: prmrnkrl c0546844 (empty) right\nParent commit (@-)      : vozxwmsq 7a1fb120 baseline | modern baseline\nAdded 0 files, modified 1 files, removed 0 files\n"
+    },
+    {
+      "cwd": "test_real_conflict_and_git_header_round_trip/a",
+      "argv": [
+        "<CARGO_TARGET_DIR>/debug/rudder-jj",
+        "--no-pager",
+        "--color=never",
+        "bookmark",
+        "create",
+        "right",
+        "-r",
+        "@"
+      ],
+      "status": 0,
+      "elapsed_ms": 172.687905,
+      "stdout": "",
+      "stderr": "Created 1 bookmarks pointing to prmrnkrl a4688401 right | right\n"
+    },
+    {
+      "cwd": "test_real_conflict_and_git_header_round_trip/a",
+      "argv": [
+        "<CARGO_TARGET_DIR>/debug/rudder-jj",
+        "--no-pager",
+        "--color=never",
+        "new",
+        "left",
+        "right",
+        "-m",
+        "unresolved merge"
+      ],
+      "status": 0,
+      "elapsed_ms": 155.657669,
+      "stdout": "",
+      "stderr": "Working copy  (@) now at: twwusvyx bf91ac9f (conflict) (empty) unresolved merge\nParent commit (@-)      : nmnnkyyn 542966a9 left | left\nParent commit (@-)      : prmrnkrl a4688401 right | right\nAdded 0 files, modified 1 files, removed 0 files\nWarning: There are unresolved conflicts at these paths:\nbase.txt    2-sided conflict\n"
+    },
+    {
+      "cwd": "test_real_conflict_and_git_header_round_trip/a",
+      "argv": [
+        "<CARGO_TARGET_DIR>/debug/rudder-jj",
+        "--no-pager",
+        "--color=never",
+        "log",
+        "-r",
+        "@",
+        "--no-graph",
+        "-T",
+        "commit_id ++ \" \" ++ change_id"
+      ],
+      "status": 0,
+      "elapsed_ms": 117.858128,
+      "stdout": "bf91ac9f7d520b98839bdf1aa59884278f680e03 twwusvyxvymwvzqsyvrmukrqolzmtnry",
+      "stderr": ""
+    },
+    {
+      "cwd": "test_real_conflict_and_git_header_round_trip/a",
+      "argv": [
+        "<CARGO_TARGET_DIR>/debug/rudder-jj",
+        "--no-pager",
+        "--color=never",
+        "log",
+        "-r",
+        "@",
+        "--no-graph",
+        "-T",
+        "conflict"
+      ],
+      "status": 0,
+      "elapsed_ms": 113.293055,
+      "stdout": "true",
+      "stderr": ""
+    },
+    {
+      "cwd": "test_real_conflict_and_git_header_round_trip/a",
+      "argv": [
+        "<CARGO_TARGET_DIR>/debug/rudder-jj",
+        "--no-pager",
+        "--color=never",
+        "status"
+      ],
+      "status": 0,
+      "elapsed_ms": 117.817645,
+      "stdout": "The working copy has no changes.\nWorking copy  (@) : twwusvyx bf91ac9f (conflict) (empty) unresolved merge\nParent commit (@-): nmnnkyyn 542966a9 left | left\nParent commit (@-): prmrnkrl a4688401 right | right\nWarning: There are unresolved conflicts at these paths:\nbase.txt    2-sided conflict\n",
+      "stderr": ""
+    },
+    {
+      "cwd": "test_real_conflict_and_git_header_round_trip/a",
+      "argv": [
+        "git",
+        "cat-file",
+        "commit",
+        "bf91ac9f7d520b98839bdf1aa59884278f680e03"
+      ],
+      "status": 0,
+      "elapsed_ms": 2.0457,
+      "stdout": "tree b7da3664cb8e2bac09e4fc769eac6ebcc708d2db\nparent 542966a9b2d8e91990c3bb0ad594de7eeb468e87\nparent a4688401a446ca71c21a3321e0382b5ea0730c64\nauthor Rudder Prototype <prototype@invalid.example> 1793376684 +0000\ncommitter Rudder Prototype <prototype@invalid.example> 1793376684 +0000\njj:conflict-labels nmnnkyyn 542966a9 \"left\"\n vozxwmsq 7a1fb120 \"modern baseline\"\n prmrnkrl a4688401 \"right\"\njj:trees 2c002e801a14737c749f53a11fe3a8b28aa91908 fffb716e5528c6606d174f4f261cee2d8b3bb9e9 5380ff756763f432fd6de69f6e361db79cc20797\nchange-id twwusvyxvymwvzqsyvrmukrqolzmtnry\n\nunresolved merge\n",
+      "stderr": ""
+    },
+    {
+      "cwd": "test_real_conflict_and_git_header_round_trip/a",
+      "argv": [
+        "<CARGO_TARGET_DIR>/debug/rudder-jj",
+        "--no-pager",
+        "--color=never",
+        "bookmark",
+        "create",
+        "unresolved",
+        "-r",
+        "@"
+      ],
+      "status": 0,
+      "elapsed_ms": 143.803248,
+      "stdout": "",
+      "stderr": "Created 1 bookmarks pointing to twwusvyx bf91ac9f unresolved | (conflict) (empty) unresolved merge\n"
+    },
+    {
+      "cwd": "test_real_conflict_and_git_header_round_trip/a",
+      "argv": [
+        "<CARGO_TARGET_DIR>/debug/rudder-jj",
+        "--no-pager",
+        "--color=never",
+        "git",
+        "export"
+      ],
+      "status": 0,
+      "elapsed_ms": 96.921524,
+      "stdout": "",
+      "stderr": "Nothing changed.\n"
+    },
+    {
+      "cwd": "test_real_conflict_and_git_header_round_trip/a",
+      "argv": [
+        "git",
+        "rev-parse",
+        "refs/heads/unresolved"
+      ],
+      "status": 0,
+      "elapsed_ms": 2.245907,
+      "stdout": "bf91ac9f7d520b98839bdf1aa59884278f680e03\n",
+      "stderr": ""
+    },
+    {
+      "cwd": "test_real_conflict_and_git_header_round_trip/git-roundtrip",
+      "argv": [
+        "git",
+        "init",
+        "-q"
+      ],
+      "status": 0,
+      "elapsed_ms": 4.062041,
+      "stdout": "",
+      "stderr": ""
+    },
+    {
+      "cwd": "test_real_conflict_and_git_header_round_trip/git-roundtrip",
+      "argv": [
+        "git",
+        "update-ref",
+        "refs/heads/unresolved",
+        "bf91ac9f7d520b98839bdf1aa59884278f680e03"
+      ],
+      "status": 0,
+      "elapsed_ms": 2.721482,
+      "stdout": "",
+      "stderr": ""
+    },
+    {
+      "cwd": "test_real_conflict_and_git_header_round_trip/git-roundtrip",
+      "argv": [
+        "/usr/local/bin/jj",
+        "git",
+        "init",
+        "--colocate"
+      ],
+      "status": 0,
+      "elapsed_ms": 42.174078,
+      "stdout": "",
+      "stderr": "Done importing changes from the underlying Git repo.\nInitialized repo in \".\"\nHint: Running `git clean -xdf` will remove `.jj/`!\n"
+    },
+    {
+      "cwd": "test_real_conflict_and_git_header_round_trip/git-roundtrip",
+      "argv": [
+        "/usr/local/bin/jj",
+        "log",
+        "-r",
+        "unresolved",
+        "--no-graph",
+        "-T",
+        "commit_id ++ \" \" ++ change_id ++ \" \" ++ conflict"
+      ],
+      "status": 0,
+      "elapsed_ms": 29.912712,
+      "stdout": "bf91ac9f7d520b98839bdf1aa59884278f680e03 twwusvyxvymwvzqsyvrmukrqolzmtnry true",
+      "stderr": ""
+    },
+    {
+      "cwd": "test_real_conflict_and_git_header_round_trip/git-roundtrip",
+      "argv": [
+        "/usr/local/bin/jj",
+        "edit",
+        "unresolved"
+      ],
+      "status": 0,
+      "elapsed_ms": 35.470506,
+      "stdout": "",
+      "stderr": "Working copy  (@) now at: twwusvyx bf91ac9f unresolved | (conflict) (empty) unresolved merge\nParent commit (@-)      : nmnnkyyn 542966a9 left\nParent commit (@-)      : prmrnkrl a4688401 right\nAdded 5 files, modified 0 files, removed 0 files\nWarning: There are unresolved conflicts at these paths:\nbase.txt    2-sided conflict\n"
+    },
+    {
+      "cwd": "test_real_conflict_and_git_header_round_trip/a",
+      "argv": [
+        "<CARGO_TARGET_DIR>/debug/rudder-jj",
+        "--no-pager",
+        "--color=never",
+        "status"
+      ],
+      "status": 0,
+      "elapsed_ms": 148.349852,
+      "stdout": "Working copy changes:\nM base.txt\nWorking copy  (@) : twwusvyx 3671a331 unresolved | unresolved merge\nParent commit (@-): nmnnkyyn 542966a9 left | left\nParent commit (@-): prmrnkrl a4688401 right | right\n",
+      "stderr": ""
+    },
+    {
+      "cwd": "test_real_conflict_and_git_header_round_trip/a",
+      "argv": [
+        "<CARGO_TARGET_DIR>/debug/rudder-jj",
+        "--no-pager",
+        "--color=never",
+        "log",
+        "-r",
+        "@",
+        "--no-graph",
+        "-T",
+        "commit_id ++ \" \" ++ change_id"
+      ],
+      "status": 0,
+      "elapsed_ms": 114.214429,
+      "stdout": "3671a331648da2252c0b0573a26e0aa8b3a0b362 twwusvyxvymwvzqsyvrmukrqolzmtnry",
+      "stderr": ""
+    },
+    {
+      "cwd": "test_real_conflict_and_git_header_round_trip/a",
+      "argv": [
+        "<CARGO_TARGET_DIR>/debug/rudder-jj",
+        "--no-pager",
+        "--color=never",
+        "log",
+        "-r",
+        "@",
+        "--no-graph",
+        "-T",
+        "conflict"
+      ],
+      "status": 0,
+      "elapsed_ms": 110.134328,
+      "stdout": "false",
+      "stderr": ""
+    },
+    {
+      "cwd": "test_real_conflict_and_git_header_round_trip/b",
+      "argv": [
+        "<CARGO_TARGET_DIR>/debug/rudder-jj",
+        "--no-pager",
+        "--color=never",
+        "log",
+        "-r",
+        "baseline",
+        "--no-graph",
+        "-T",
+        "commit_id ++ \" \" ++ change_id"
+      ],
+      "status": 0,
+      "elapsed_ms": 116.942694,
+      "stdout": "7a1fb1202956ac238682549a1e6032fb3af463cb vozxwmsqpoypzuysytxmsrozvvuuwtnm",
+      "stderr": ""
+    },
+    {
+      "cwd": "test_registration_and_normal_commands/a",
+      "argv": [
+        "/usr/local/bin/jj",
+        "status"
+      ],
+      "status": 255,
+      "elapsed_ms": 20.483648,
+      "stdout": "",
+      "stderr": "Internal error: This version of the jj binary doesn't support this type of repo\nCaused by: Unsupported working copy backend type 'rudder-local-development-v1'\n"
+    },
+    {
+      "cwd": "test_registration_and_normal_commands/a",
+      "argv": [
+        "<CARGO_TARGET_DIR>/debug/rudder-jj",
+        "--no-pager",
+        "--color=never",
+        "status"
+      ],
+      "status": 0,
+      "elapsed_ms": 117.041896,
+      "stdout": "The working copy has no changes.\nWorking copy  (@) : xtorrswt 4b8a0e8c (empty) prepared attempt template\nParent commit (@-): vozxwmsq 7a1fb120 baseline | modern baseline\n",
+      "stderr": ""
+    },
+    {
+      "cwd": "test_registration_and_normal_commands/a",
+      "argv": [
+        "<CARGO_TARGET_DIR>/debug/rudder-jj",
+        "--no-pager",
+        "--color=never",
+        "log",
+        "-r",
+        "legacy",
+        "--no-graph",
+        "-T",
+        "commit_id ++ \" \" ++ change_id"
+      ],
+      "status": 0,
+      "elapsed_ms": 111.122742,
+      "stdout": "cf019e1937acc5314a6ee562612459124d6f36a8 vssxstwtzvrtlqtoskqslqplmvxvytwp",
+      "stderr": ""
+    },
+    {
+      "cwd": "test_registration_and_normal_commands/a",
+      "argv": [
+        "<CARGO_TARGET_DIR>/debug/rudder-jj",
+        "--no-pager",
+        "--color=never",
+        "log",
+        "-r",
+        "baseline",
+        "--no-graph",
+        "-T",
+        "commit_id ++ \" \" ++ change_id"
+      ],
+      "status": 0,
+      "elapsed_ms": 112.515814,
+      "stdout": "7a1fb1202956ac238682549a1e6032fb3af463cb vozxwmsqpoypzuysytxmsrozvvuuwtnm",
+      "stderr": ""
+    },
+    {
+      "cwd": "test_registration_and_normal_commands/a",
+      "argv": [
+        "<CARGO_TARGET_DIR>/debug/rudder-jj",
+        "--no-pager",
+        "--color=never",
+        "log",
+        "-r",
+        "@",
+        "--no-graph",
+        "-T",
+        "commit_id ++ \" \" ++ change_id"
+      ],
+      "status": 0,
+      "elapsed_ms": 117.322182,
+      "stdout": "4b8a0e8c709ba530a24b4f6479e4e8974cdcee87 xtorrswtnmwlllknulptqsunqrnrwvzy",
+      "stderr": ""
+    },
+    {
+      "cwd": "test_registration_and_normal_commands/a",
+      "argv": [
+        "<CARGO_TARGET_DIR>/debug/rudder-jj",
+        "--no-pager",
+        "--color=never",
+        "status"
+      ],
+      "status": 0,
+      "elapsed_ms": 132.087715,
+      "stdout": "Working copy changes:\nM base.txt\nWorking copy  (@) : xtorrswt 0adc60bf prepared attempt template\nParent commit (@-): vozxwmsq 7a1fb120 baseline | modern baseline\n",
+      "stderr": ""
+    },
+    {
+      "cwd": "test_registration_and_normal_commands/a",
+      "argv": [
+        "<CARGO_TARGET_DIR>/debug/rudder-jj",
+        "--no-pager",
+        "--color=never",
+        "diff",
+        "--git"
+      ],
+      "status": 0,
+      "elapsed_ms": 108.802335,
+      "stdout": "diff --git a/base.txt b/base.txt\nindex df967b96a5..46596aa9f5 100644\n--- a/base.txt\n+++ b/base.txt\n@@ -1,1 +1,1 @@\n-base\n+private edit\n",
+      "stderr": ""
+    },
+    {
+      "cwd": "test_registration_and_normal_commands/a",
+      "argv": [
+        "<CARGO_TARGET_DIR>/debug/rudder-jj",
+        "--no-pager",
+        "--color=never",
+        "describe",
+        "-m",
+        "real extension edit"
+      ],
+      "status": 0,
+      "elapsed_ms": 129.715141,
+      "stdout": "",
+      "stderr": "Working copy  (@) now at: xtorrswt 25655252 real extension edit\nParent commit (@-)      : vozxwmsq 7a1fb120 baseline | modern baseline\n"
+    },
+    {
+      "cwd": "test_registration_and_normal_commands/a",
+      "argv": [
+        "<CARGO_TARGET_DIR>/debug/rudder-jj",
+        "--no-pager",
+        "--color=never",
+        "log",
+        "-r",
+        "@",
+        "--no-graph",
+        "-T",
+        "commit_id ++ \" \" ++ change_id"
+      ],
+      "status": 0,
+      "elapsed_ms": 115.80424,
+      "stdout": "256552527ebce76318a922e8f584aad3f170a7b5 xtorrswtnmwlllknulptqsunqrnrwvzy",
+      "stderr": ""
+    },
+    {
+      "cwd": "test_registration_and_normal_commands/a",
+      "argv": [
+        "<CARGO_TARGET_DIR>/debug/rudder-jj",
+        "--no-pager",
+        "--color=never",
+        "new",
+        "-m",
+        "real new change"
+      ],
+      "status": 0,
+      "elapsed_ms": 141.843072,
+      "stdout": "",
+      "stderr": "Working copy  (@) now at: uormzmtz 4d64f179 (empty) real new change\nParent commit (@-)      : xtorrswt 25655252 real extension edit\n"
+    },
+    {
+      "cwd": "test_registration_and_normal_commands/a",
+      "argv": [
+        "<CARGO_TARGET_DIR>/debug/rudder-jj",
+        "--no-pager",
+        "--color=never",
+        "log",
+        "-r",
+        "@",
+        "--no-graph",
+        "-T",
+        "commit_id ++ \" \" ++ change_id"
+      ],
+      "status": 0,
+      "elapsed_ms": 115.283957,
+      "stdout": "4d64f179c794d1381b311be0e0e61acd572a1e33 uormzmtznyzuxlwlxtkmywwszqlsuppq",
+      "stderr": ""
+    },
+    {
+      "cwd": "test_registration_and_normal_commands/a",
+      "argv": [
+        "<CARGO_TARGET_DIR>/debug/rudder-jj",
+        "--no-pager",
+        "--color=never",
+        "file",
+        "list"
+      ],
+      "status": 0,
+      "elapsed_ms": 124.056633,
+      "stdout": ".gitignore\nbase.txt\nlink\nmodern.txt\ntool.sh\n",
+      "stderr": ""
+    }
+  ],
+  "checks": [
+    "__main__.WorkingCopyExtension.test_checkout_restore_and_real_git_commit_import",
+    "__main__.WorkingCopyExtension.test_git_version_is_not_global_gate_but_fetch_needs_porcelain",
+    "__main__.WorkingCopyExtension.test_legacy_extra_metadata_is_required_and_copied_privately",
+    "__main__.WorkingCopyExtension.test_private_metadata_and_object_isolation",
+    "__main__.WorkingCopyExtension.test_real_conflict_and_git_header_round_trip",
+    "__main__.WorkingCopyExtension.test_registration_and_normal_commands"
+  ],
+  "version": "rudder-jj 0.40.0-rudder-bridge-v1",
+  "git_version": "git version 2.39.5",
+  "seed_readonly": {
+    "kernel_enforced": true,
+    "write_errno": 30
+  },
+  "seed": {
+    "sha256": "55add74bad03983d237eb04ebfd6d237b94f1b59ded1df7a876117a0920ec61d",
+    "files": 4,
+    "bytes": 2492
+  },
+  "baseline": {
+    "legacy": [
+      "cf019e1937acc5314a6ee562612459124d6f36a8",
+      "vssxstwtzvrtlqtoskqslqplmvxvytwp"
+    ],
+    "modern": [
+      "7a1fb1202956ac238682549a1e6032fb3af463cb",
+      "vozxwmsqpoypzuysytxmsrozvvuuwtnm"
+    ]
+  },
+  "git_version_qualification": {
+    "version": "git version 2.39.5",
+    "local_commands": "passed",
+    "local_bare_push": "passed",
+    "local_bare_fetch": "rejected unsupported --porcelain with minimum-version guidance"
+  },
+  "legacy_extra": {
+    "preserved_change": "vssxstwtzvrtlqtoskqslqplmvxvytwp",
+    "git_only_derived_change": "yutnktoxvrqpxvrtvtpsstuxrnpwwuln"
+  },
+  "conflict_roundtrip": {
+    "commit": "bf91ac9f7d520b98839bdf1aa59884278f680e03",
+    "change": "twwusvyxvymwvzqsyvrmukrqolzmtnry",
+    "resolved_commit": "3671a331648da2252c0b0573a26e0aa8b3a0b362"
+  },
+  "finished_at": "2026-10-30T16:11:27.075059+00:00",
+  "tests": {
+    "run": 6,
+    "failures": 0,
+    "errors": 0,
+    "successful": true
+  },
+  "path_sanitization": {
+    "fixture": "<FIXTURE>",
+    "cargo_target": "<CARGO_TARGET_DIR>",
+    "repository": "<REPOSITORY>"
+  }
+}

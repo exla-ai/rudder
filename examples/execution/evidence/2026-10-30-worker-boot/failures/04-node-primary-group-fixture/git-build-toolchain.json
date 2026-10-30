@@ -1,0 +1,11 @@
+{
+  "kind": "observed-git-builder-prerequisites",
+  "machine": "8175e0f944e938",
+  "verifiedAt": "2026-10-30T17:48:06Z",
+  "cargo": "cargo 1.65.0",
+  "rustc": "rustc 1.63.0",
+  "packageSuite": "Debian bookworm",
+  "source": "read-only command on exact owned disposable VM during Git compilation",
+  "gitMinimumRust": "1.49.0",
+  "gitExternalRustCrates": 0
+}

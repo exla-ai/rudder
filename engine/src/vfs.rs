@@ -1,9 +1,11 @@
 //! Persistent logical workspaces over immutable CAS directories.
 //!
-//! Preparing builds one shared directory index. Forking stores a root pointer,
+//! Legacy preparation builds a shared directory index; the explicit paged/range
+//! profile resolves immutable pages directly. Forking stores a root pointer,
 //! an owner epoch and an empty private namespace: it never visits inherited
 //! entries or hydrates file contents. SQLite FULL transactions acknowledge
-//! namespace operations; ordinary content writes acquire normal fsync semantics.
+//! namespace operations. Legacy writes have ordinary fsync semantics; range
+//! logs sync data before their metadata pointer is committed.
 //! The local DB is not the project journal or a distributed scheduling authority.
 //! No backing files are swept: uncertainty retains data rather than its only copy.
 
@@ -25,11 +27,26 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
+mod content;
 #[cfg(target_os = "linux")]
 pub mod linux;
+mod namespace;
+mod observation;
+mod readdir;
+mod remote;
+pub mod rpc;
+pub use observation::{
+    exclusion_policy_digest, DirtyCursor, DirtyEvent, DirtyPage, ObservationBudget,
+    ObservationConsistency, VfsObservation,
+};
+pub use readdir::{
+    DirectoryEntry as DirectoryListingEntry, DirectoryPage, ReaddirLimits, ReaddirStats,
+};
+pub use remote::{RemoteOptions, RemoteStats};
 
 const MAX_DEPTH: usize = 1024;
 const MAX_IO: usize = 16 * 1024 * 1024;
+const MAX_IMMUTABLE_FDS: usize = 128;
 
 #[derive(Clone)]
 pub struct VfsManager(Arc<Manager>);
@@ -37,6 +54,8 @@ struct Manager {
     root: PathBuf,
     store: LocalStore,
     index: Mutex<Connection>,
+    verified: Mutex<(HashMap<ObjectRef, Arc<File>>, VecDeque<ObjectRef>)>,
+    remote: Option<Arc<remote::Resolver>>,
 }
 #[derive(Clone)]
 pub struct VfsView(Arc<View>);
@@ -50,13 +69,15 @@ struct View {
     mounted: AtomicBool,
     next_handle: AtomicU64,
     handles: Mutex<HashMap<u64, Handle>>,
-    verified: Mutex<(HashMap<String, Arc<File>>, VecDeque<String>)>,
+    pager: Option<Mutex<readdir::Pager>>,
+    v2: bool,
 }
 #[derive(Clone)]
 struct Handle {
     ino: u64,
     flags: i32,
     directory: Option<Arc<Vec<(Vec<u8>, VfsAttr)>>>,
+    deferred_directory: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -105,6 +126,8 @@ pub struct VfsDescriptor {
     pub latest_snapshot: Option<VfsCheckpoint>,
     pub inode_count: u64,
     pub private_dirent_count: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_plane: Option<String>,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -142,6 +165,26 @@ pub fn capabilities() -> serde_json::Value {
         "runtime_hardlinks":true,"directory_format_v1_inherited_hardlink_identity":false,
         "plain_directory_checkpoint_hardlink_identity":false,"live_checkpoint":false,
         "content_durability":"fsync; namespace commits SQLite FULL; local volume only",
+        "optional_data_planes":{
+            "paged_ranges_v2":{
+                "default":false,"directory_formats":[1,2],"file_formats":["blob","file"],
+                "copy_up":"checksummed immutable64KiB private blocks; no inherited file copy",
+                "content_durability":"private log data sync before FULL SQLite pointer commit; local only",
+                "checkpoint":"dirty radix paths and4MiB chunks; publication still traverses retained metadata",
+                "live_observation":"retained LiveBestEffort; acknowledged-generation witness, never quiescence",
+                "listing":"opendir currently snapshots a whole directory in memory",
+                "mounted_root_replace":false,"default_runtime_switch":false
+            },
+            "remote_paged_ranges_v1":{
+                "default":false,"directory_formats":[2],"file_formats":["blob_le_4MiB","file_v1"],
+                "authority":"fresh exact RunnableRoot session; immutable origin proof paths; no arbitrary local-ref fallback",
+                "startup":"bounded manifests/profile/empty-topology and root page only",
+                "inherited_hardlinks":"nonempty topology requires explicit bulk path; runtime links supported",
+                "checkpoint":false,"live_observation":false,"root_pin":"no complete LocalStore pin",
+                "listing":"remote namespace3 fixed snapshots; bounded pages, disk cookies and stable inode reservations; quotas return EAGAIN",
+                "default_runtime_switch":false
+            }
+        },
         "garbage_collection":"no private backing/index sweep; retained CAS roots",
         "mount_provisioning":"root or same-UID user namespace with pre-provisioned device access; direct FD only, no setuid",
         "unsupported":["xattrs","chown","special files","POSIX record locks","live mounted checkpoints","macOS FUSE default"]
@@ -282,98 +325,72 @@ pub fn validate_snapshot(store: &LocalStore, snapshot: &VfsCheckpoint) -> Result
     snapshot.directory.validate()?;
     snapshot.hardlinks.validate()?;
     ensure!(
-        snapshot.hardlinks.size_bytes <= 64 * 1024 * 1024,
-        "hardlink topology exceeds64MiB"
+        snapshot.directory.size_bytes <= 128 * 1024 * 1024
+            && snapshot.hardlinks.size_bytes <= 64 * 1024 * 1024,
+        "snapshot metadata exceeds consumer bound"
     );
+    crate::tree::root_info(store, &snapshot.directory)?;
     let bytes = store.read_object(&snapshot.hardlinks)?;
     let topology: HardlinkTopology = serde_json::from_slice(&bytes)?;
     ensure!(
-        bytes == canonical_json(&topology)?,
-        "topology must be canonical JSON"
+        topology.format_version == 1
+            && topology.groups.len() <= 100_000
+            && canonical_json(&topology)? == bytes,
+        "invalid/noncanonical topology"
     );
-    ensure!(
-        topology.format_version == 1 && topology.groups.len() <= 100_000,
-        "unsupported topology version/size"
-    );
-    let mut cache = BTreeMap::<String, (ObjectRef, BTreeMap<Vec<u8>, EntryNode>)>::new();
-    let mut cached_bytes = 0u64;
-    fn load<'a>(
-        store: &LocalStore,
-        reference: &ObjectRef,
-        cache: &'a mut BTreeMap<String, (ObjectRef, BTreeMap<Vec<u8>, EntryNode>)>,
-        cached: &mut u64,
-    ) -> Result<&'a BTreeMap<Vec<u8>, EntryNode>> {
-        if !cache.contains_key(&reference.digest) {
-            *cached = cached
-                .checked_add(reference.size_bytes)
-                .context("directory cache overflow")?;
-            ensure!(
-                *cached <= 128 * 1024 * 1024,
-                "snapshot semantic validation directory cache exceeds128MiB"
-            );
-            let d = store.read_directory(reference)?;
-            let mut entries = BTreeMap::new();
-            for e in d.entries {
-                entries.insert(e.name()?, e.node);
-            }
-            cache.insert(reference.digest.clone(), (reference.clone(), entries));
-        }
-        let (actual, entries) = cache.get(&reference.digest).unwrap();
-        ensure!(actual == reference, "directory ref type/size differs");
-        Ok(entries)
-    }
-    load(store, &snapshot.directory, &mut cache, &mut cached_bytes)?;
     let mut paths = BTreeSet::new();
-    let mut previous_group: Option<Vec<Vec<u8>>> = None;
+    let mut previous_group = None;
     for group in &topology.groups {
         ensure!(
-            group.paths_hex.len() >= 2 && group.paths_hex.len() <= 100_000,
-            "invalid hardlink group size"
+            (2..=100_000).contains(&group.paths_hex.len()),
+            "hardlink group size exceeds bound"
         );
         let mut previous = None;
         let mut expected = None;
-        for (index, raw) in group.paths_hex.iter().enumerate() {
-            let decoded = decode_path(raw)?;
+        for raw in &group.paths_hex {
+            let path = decode_path(raw)?;
             ensure!(
-                previous.as_ref().is_none_or(|p| p < &decoded),
-                "hardlink paths unsorted/duplicate"
+                previous.as_ref().is_none_or(|p| p < &path)
+                    && paths.insert(path.clone())
+                    && paths.len() <= 1_000_000,
+                "unsorted/duplicate/excessive topology paths"
             );
-            previous = Some(decoded.clone());
-            ensure!(
-                paths.insert(decoded.clone()) && paths.len() <= 1_000_000,
-                "duplicate or excessive topology paths"
-            );
-            if index == 0 {
+            if previous.is_none() {
                 ensure!(
-                    previous_group.as_ref().is_none_or(|p| p < &decoded),
-                    "hardlink groups unsorted"
+                    previous_group.as_ref().is_none_or(|p| p < &path),
+                    "unsorted topology groups"
                 );
-                previous_group = Some(decoded.clone());
+                previous_group = Some(path.clone());
             }
+            previous = Some(path.clone());
             let mut directory = snapshot.directory.clone();
-            let mut leaf = None;
-            for (index, name) in decoded.iter().enumerate() {
-                let node = load(store, &directory, &mut cache, &mut cached_bytes)?
-                    .get(name)
-                    .context("hardlink path absent")?
-                    .clone();
-                match node {
-                    EntryNode::File { object, mode } if index + 1 == decoded.len() => {
-                        leaf = Some((object, mode))
-                    }
-                    EntryNode::Directory { object } if index + 1 < decoded.len() => {
+            let mut file = None;
+            for (index, name) in path.iter().enumerate() {
+                let entry = crate::tree::lookup(store, &directory, name)?
+                    .context("topology path absent")?;
+                match entry.node {
+                    crate::directory::EntryNode::Directory { object } if index + 1 < path.len() => {
                         directory = object
+                    }
+                    crate::directory::EntryNode::File {
+                        object,
+                        logical_size,
+                        mode,
+                    } if index + 1 == path.len() => {
+                        ensure!(
+                            crate::content::file_info(store, &object)?.logical_size == logical_size,
+                            "hardlink logical length differs from content"
+                        );
+                        file = Some((object, logical_size, mode));
                     }
                     _ => bail!("hardlink path must traverse directories and end at a regular file"),
                 }
             }
+            let file = file.context("hardlink path lacks file")?;
             if let Some(expected) = &expected {
-                ensure!(
-                    Some(expected) == leaf.as_ref(),
-                    "hardlink group content/mode differ"
-                )
+                ensure!(expected == &file, "hardlink group content/mode differ");
             } else {
-                expected = leaf
+                expected = Some(file);
             }
         }
     }
@@ -416,11 +433,14 @@ impl VfsManager {
         }
         let index = connection(&root.join("directories.sqlite"))?;
         index.execute_batch("CREATE TABLE IF NOT EXISTS directory_objects(digest TEXT PRIMARY KEY,reference TEXT NOT NULL,mode INTEGER NOT NULL,subdirectories INTEGER NOT NULL);CREATE TABLE IF NOT EXISTS directory_entries(digest TEXT NOT NULL,name BLOB NOT NULL,kind INTEGER NOT NULL,mode INTEGER NOT NULL,reference TEXT,target BLOB NOT NULL,PRIMARY KEY(digest,name)) WITHOUT ROWID;CREATE TABLE IF NOT EXISTS prepared(digest TEXT PRIMARY KEY,reference TEXT NOT NULL);CREATE TABLE IF NOT EXISTS topologies(digest TEXT NOT NULL,reference TEXT NOT NULL,directory TEXT NOT NULL,PRIMARY KEY(digest,directory));CREATE TABLE IF NOT EXISTS topology_paths(digest TEXT NOT NULL,path TEXT NOT NULL,group_id TEXT NOT NULL,nlink INTEGER NOT NULL,PRIMARY KEY(digest,path)) WITHOUT ROWID;CREATE INDEX IF NOT EXISTS topology_by_group ON topology_paths(digest,group_id);")?;
+        index.execute_batch("CREATE TABLE IF NOT EXISTS prepared_paged(digest TEXT PRIMARY KEY,reference TEXT NOT NULL,mode INTEGER NOT NULL,entries INTEGER NOT NULL,subdirectories INTEGER NOT NULL);")?;
         File::open(root)?.sync_all()?;
         Ok(Self(Arc::new(Manager {
             root: root.canonicalize()?,
             store,
             index: Mutex::new(index),
+            verified: Mutex::new((HashMap::new(), VecDeque::new())),
+            remote: None,
         })))
     }
     pub fn root(&self) -> &Path {
@@ -431,6 +451,10 @@ impl VfsManager {
     }
     /// Full preparation/indexing is intentionally outside the fork fast path.
     pub fn prepare(&self, root: &ObjectRef) -> Result<()> {
+        if self.0.remote.is_some() {
+            return Err(error(libc::EOPNOTSUPP))
+                .context("remote managers cannot prepare complete local roots");
+        }
         root.validate()?;
         ensure!(
             root.kind == ObjectKind::Directory,
@@ -510,9 +534,13 @@ impl VfsManager {
         Ok(())
     }
     pub fn fork(&self, id: &str, root: &ObjectRef, owner: OwnerEpoch) -> Result<VfsView> {
-        self.fork_inner(id, root, None, owner)
+        self.fork_inner(id, root, None, owner, false)
     }
     pub fn prepare_snapshot(&self, snapshot: &VfsCheckpoint) -> Result<()> {
+        if self.0.remote.is_some() {
+            return Err(error(libc::EOPNOTSUPP))
+                .context("remote managers require explicit partial-root retention");
+        }
         let topology = validate_snapshot(self.store(), snapshot)?;
         self.prepare(&snapshot.directory)?;
         let mut index = self.0.index.lock().map_err(|_| error(libc::EIO))?;
@@ -570,7 +598,13 @@ impl VfsManager {
             "snapshot topology must be prepared"
         );
         drop(index);
-        self.fork_inner(id, &snapshot.directory, Some(&snapshot.hardlinks), owner)
+        self.fork_inner(
+            id,
+            &snapshot.directory,
+            Some(&snapshot.hardlinks),
+            owner,
+            false,
+        )
     }
     /// Caller must stop all source writers, including descendants. This API
     /// performs a normal import; it does not claim to snapshot live files.
@@ -579,6 +613,10 @@ impl VfsManager {
         path: &Path,
         policy: &ImportPolicy,
     ) -> Result<VfsCheckpoint> {
+        if self.0.remote.is_some() {
+            return Err(error(libc::EOPNOTSUPP))
+                .context("remote managers cannot silently import an inherited SDK");
+        }
         let path = path.canonicalize()?;
         for owned in [self.root(), self.store().root()] {
             if let Ok(relative) = owned.strip_prefix(&path) {
@@ -677,9 +715,20 @@ impl VfsManager {
         root: &ObjectRef,
         topology: Option<&ObjectRef>,
         owner: OwnerEpoch,
+        v2: bool,
     ) -> Result<VfsView> {
         ensure!(Uuid::parse_str(id).is_ok(), "view id must be a UUID");
         owner.validate()?;
+        if let Some(remote) = &self.0.remote {
+            remote.guard()?;
+            ensure!(
+                v2 && topology.is_none()
+                    && id == remote.view_id()
+                    && owner == *remote.owner()
+                    && root == remote.base(),
+                "remote view differs from current session binding"
+            );
+        }
         let fork_lock = OpenOptions::new()
             .read(true)
             .write(true)
@@ -690,9 +739,18 @@ impl VfsManager {
             .open(self.root().join("fork.lock"))?;
         fork_lock.lock_exclusive()?;
         let reservation = self.root().join("requests").join(format!("{id}.json"));
-        let request = canonical_json(
-            &serde_json::json!({"format_version":1,"view_id":id,"root":root,"topology":topology,"owner":owner}),
-        )?;
+        let view_format = if self.0.remote.is_some() {
+            3
+        } else if v2 {
+            2
+        } else {
+            1
+        };
+        let mut request = serde_json::json!({"format_version":view_format,"view_id":id,"root":root,"topology":topology,"owner":owner});
+        if let Some(remote) = &self.0.remote {
+            request["remote_binding"] = serde_json::from_str(&remote.serialized_binding()?)?;
+        }
+        let request = canonical_json(&request)?;
         if reservation.exists() {
             ensure!(
                 fs::read(&reservation)? == request,
@@ -710,9 +768,13 @@ impl VfsManager {
             File::open(reservation.parent().unwrap())?.sync_all()?;
         }
         let index = self.0.index.lock().map_err(|_| error(libc::EIO))?;
-        let prepared:Option<(String,u32,i64)>=index.query_row("SELECT p.reference,d.mode,d.subdirectories FROM prepared p JOIN directory_objects d ON p.digest=d.digest WHERE p.digest=?",[&root.digest],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
-        let (reference, mode, subdirectories) =
-            prepared.context("root must be prepared before fork")?;
+        let prepared: Option<(String, u32, u64, u64)> = if v2 {
+            index.query_row("SELECT reference,mode,subdirectories,entries FROM prepared_paged WHERE digest=?",[&root.digest],|r|Ok((r.get(0)?,r.get(1)?,read_id(r,2)?,read_id(r,3)?))).optional()?
+        } else {
+            index.query_row("SELECT p.reference,d.mode,d.subdirectories FROM prepared p JOIN directory_objects d ON p.digest=d.digest WHERE p.digest=?",[&root.digest],|r|Ok((r.get(0)?,r.get(1)?,read_id(r,2)?,0))).optional()?
+        };
+        let (reference, mode, subdirectories, entries) =
+            prepared.context("root must be prepared for this data plane before fork")?;
         ensure!(reference == json_ref(root)?, "prepared root mismatch");
         drop(index);
         let final_path = self.root().join("views").join(id);
@@ -724,11 +786,13 @@ impl VfsManager {
             );
             return Ok(view);
         }
-        self.store()
-            .pin_existing(&format!("vfs:view:{id}:base"), root)?;
-        if let Some(t) = topology {
+        if self.0.remote.is_none() {
             self.store()
-                .pin_existing(&format!("vfs:view:{id}:topology"), t)?;
+                .pin_existing(&format!("vfs:view:{id}:base"), root)?;
+            if let Some(t) = topology {
+                self.store()
+                    .pin_existing(&format!("vfs:view:{id}:topology"), t)?;
+            }
         }
         // Publish a complete database by directory rename. Crash leftovers stay
         // hidden and retained; retries never open a half-created view database.
@@ -740,15 +804,29 @@ impl VfsManager {
         secure_dir(&path.join("files"))?;
         let mut db = connection(&path.join("namespace.sqlite"))?;
         db.execute_batch("CREATE TABLE meta(key TEXT PRIMARY KEY,value TEXT NOT NULL);CREATE TABLE nodes(id INTEGER PRIMARY KEY AUTOINCREMENT,kind INTEGER NOT NULL,mode INTEGER NOT NULL,base TEXT,target BLOB NOT NULL,backing TEXT,size INTEGER NOT NULL,nlink INTEGER NOT NULL,parent INTEGER NOT NULL,dirty INTEGER NOT NULL,atime INTEGER NOT NULL,mtime INTEGER NOT NULL,ctime INTEGER NOT NULL,origin TEXT);CREATE INDEX nodes_origin ON nodes(origin);CREATE TABLE dirents(parent INTEGER NOT NULL,name BLOB NOT NULL,child INTEGER,PRIMARY KEY(parent,name)) WITHOUT ROWID;CREATE INDEX dirents_by_child ON dirents(child);CREATE TABLE inherited_groups(group_id TEXT PRIMARY KEY,inode INTEGER NOT NULL);")?;
+        if v2 {
+            content::initialize(&db)?;
+            namespace::initialize(&db, entries)?;
+            observation::initialize(&db)?;
+        }
+        if self.0.remote.is_some() {
+            readdir::initialize(&db)?;
+        }
         let tx = db.transaction()?;
         let time = now();
         for (k, v) in [
-            ("format_version", "1".to_string()),
+            ("format_version", view_format.to_string()),
             ("view_id", id.to_string()),
             ("base", reference.clone()),
             ("owner", serde_json::to_string(&owner)?),
         ] {
             tx.execute("INSERT INTO meta VALUES(?,?)", params![k, v])?;
+        }
+        if let Some(remote) = &self.0.remote {
+            tx.execute(
+                "INSERT INTO meta VALUES('remote_binding',?)",
+                [remote.serialized_binding()?],
+            )?;
         }
         if let Some(t) = topology {
             tx.execute("INSERT INTO meta VALUES('topology',?)", [json_ref(t)?])?;
@@ -759,7 +837,12 @@ impl VfsManager {
                 mode,
                 reference,
                 Vec::<u8>::new(),
-                2 + subdirectories,
+                sql_id(
+                    subdirectories
+                        .checked_add(2)
+                        .filter(|v| *v <= i64::MAX as u64)
+                        .context("directory link count overflow")?
+                ),
                 time,
                 time,
                 time
@@ -791,20 +874,50 @@ impl VfsManager {
         lock.try_lock_exclusive()
             .context("view already owned by another filesystem process")?;
         let db = connection(&path.join("namespace.sqlite"))?;
+        let stored_remote: Option<String> = db
+            .query_row(
+                "SELECT value FROM meta WHERE key='remote_binding'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        match (&self.0.remote, stored_remote) {
+            (Some(remote), Some(stored)) => {
+                remote.guard()?;
+                ensure!(
+                    stored == remote.serialized_binding()?
+                        && id == remote.view_id()
+                        && owner == remote.owner(),
+                    "persisted remote view binding differs"
+                );
+            }
+            (None, None) => {}
+            _ => {
+                return Err(error(libc::EOPNOTSUPP)).context(
+                    "remote views require their exact fresh session; local mode cannot reopen them",
+                )
+            }
+        }
         let stored: String =
             db.query_row("SELECT value FROM meta WHERE key='owner'", [], |r| r.get(0))?;
         ensure!(
             serde_json::from_str::<OwnerEpoch>(&stored)? == *owner,
             "stale VFS owner epoch"
         );
+        let version = db.query_row(
+            "SELECT value FROM meta WHERE key='format_version'",
+            [],
+            |r| r.get::<_, String>(0),
+        )?;
         ensure!(
-            db.query_row(
-                "SELECT value FROM meta WHERE key='format_version'",
-                [],
-                |r| r.get::<_, String>(0)
-            )? == "1",
+            version == "1" || version == "2" || version == "3",
             "unsupported VFS version"
         );
+        ensure!(
+            (version == "3") == self.0.remote.is_some(),
+            "remote pager requires explicit namespace3; legacy remote namespaces require migration"
+        );
+        let v2 = version == "2" || version == "3";
         ensure!(
             db.query_row("SELECT value FROM meta WHERE key='view_id'", [], |r| r
                 .get::<_, String>(
@@ -820,6 +933,18 @@ impl VfsManager {
                 .to_string_lossy()
                 .as_ref()],
         )?;
+        let pager = self
+            .0
+            .remote
+            .as_ref()
+            .map(|remote| {
+                readdir::Pager::open(
+                    &path.join("readdir.sqlite"),
+                    remote.readdir_limits().clone(),
+                )
+                .map(Mutex::new)
+            })
+            .transpose()?;
         let view = VfsView(Arc::new(View {
             manager: self.clone(),
             id: id.to_string(),
@@ -830,7 +955,8 @@ impl VfsManager {
             mounted: AtomicBool::new(false),
             next_handle: AtomicU64::new(1),
             handles: Mutex::new(HashMap::new()),
-            verified: Mutex::new((HashMap::new(), VecDeque::new())),
+            pager,
+            v2,
         }));
         // Validate every recorded private backing before serving: never replace a
         // missing only copy with inherited bytes. Unreferenced files are retained.
@@ -841,6 +967,9 @@ impl VfsManager {
             for n in names {
                 view.private_file(&n?, false)?;
             }
+            if v2 {
+                content::validate_logs(&view, &c)?;
+            }
         }
         Ok(view)
     }
@@ -848,7 +977,16 @@ impl VfsManager {
 
 impl VfsView {
     fn db(&self) -> Result<std::sync::MutexGuard<'_, Connection>> {
+        if let Some(remote) = &self.0.manager.0.remote {
+            remote.guard()?;
+        }
         self.0.db.lock().map_err(|_| error(libc::EIO))
+    }
+    pub(crate) fn require_local_checkpoint(&self) -> Result<()> {
+        if self.manager().0.remote.is_some() {
+            return Err(error(libc::EOPNOTSUPP)).context("partial remote views require typed local-delta retention before checkpoint or observation");
+        }
+        Ok(())
     }
     pub fn id(&self) -> &str {
         &self.0.id
@@ -862,7 +1000,13 @@ impl VfsView {
             Ok(c.query_row("SELECT value FROM meta WHERE key=?", [key], |r| r.get(0))?)
         };
         Ok(VfsDescriptor {
-            format_version: 1,
+            format_version: if self.manager().0.remote.is_some() {
+                3
+            } else if self.0.v2 {
+                2
+            } else {
+                1
+            },
             view_id: self.0.id.clone(),
             owner: self.0.owner.clone(),
             base: serde_json::from_str(&get("base")?)?,
@@ -885,6 +1029,13 @@ impl VfsView {
             inode_count: c.query_row("SELECT count(*) FROM nodes", [], |r| read_id(r, 0))?,
             private_dirent_count: c
                 .query_row("SELECT count(*) FROM dirents", [], |r| read_id(r, 0))?,
+            data_plane: self.0.v2.then(|| {
+                if self.manager().0.remote.is_some() {
+                    "remote_paged_ranges_v1".to_string()
+                } else {
+                    "paged_ranges_v2".to_string()
+                }
+            }),
         })
     }
     fn private_file(&self, name: &str, write: bool) -> Result<File> {
@@ -899,9 +1050,48 @@ impl VfsView {
         Ok(f)
     }
     fn inherited_file(&self, r: &ObjectRef) -> Result<Arc<File>> {
-        let mut cache = self.0.verified.lock().map_err(|_| error(libc::EIO))?;
-        if let Some(f) = cache.0.get(&r.digest) {
+        if self.manager().0.remote.is_some() {
+            return Err(error(libc::EOPNOTSUPP)).context(
+                "remote inherited objects require proof-bound ranges, never local CAS FD fallback",
+            );
+        }
+        ensure!(
+            r.kind == ObjectKind::Blob,
+            "immutable FD resolver requires a raw Blob"
+        );
+        r.validate()?;
+        let mut cache = self
+            .0
+            .manager
+            .0
+            .verified
+            .lock()
+            .map_err(|_| error(libc::EIO))?;
+        if let Some(f) = cache.0.get(r) {
             return Ok(f.clone());
+        }
+        // A borrowed FD remains in the cache until its readers release it. Do
+        // not evict busy Arcs and silently exceed the descriptor limit across
+        // views. Admission fails explicitly if every bounded slot is in use.
+        if cache.0.len() >= MAX_IMMUTABLE_FDS {
+            for _ in 0..cache.1.len() {
+                let key = cache
+                    .1
+                    .pop_front()
+                    .context("immutable FD cache queue differs")?;
+                if cache
+                    .0
+                    .get(&key)
+                    .is_some_and(|file| Arc::strong_count(file) == 1)
+                {
+                    cache.0.remove(&key);
+                    break;
+                }
+                cache.1.push_back(key);
+            }
+            if cache.0.len() >= MAX_IMMUTABLE_FDS {
+                return Err(error(libc::EAGAIN));
+            }
         }
         let mut f = OpenOptions::new()
             .read(true)
@@ -929,16 +1119,20 @@ impl VfsView {
             "CAS checksum mismatch"
         );
         let f = Arc::new(f);
-        if cache.0.len() >= 128 {
-            if let Some(k) = cache.1.pop_front() {
-                cache.0.remove(&k);
-            }
-        }
-        cache.0.insert(r.digest.clone(), f.clone());
-        cache.1.push_back(r.digest.clone());
+        cache.0.insert(r.clone(), f.clone());
+        cache.1.push_back(r.clone());
         Ok(f)
     }
     fn lookup_tx(&self, c: &Connection, parent: u64, name: &[u8]) -> Result<Node> {
+        self.lookup_tx_metered(c, parent, name, None)
+    }
+    fn lookup_tx_metered(
+        &self,
+        c: &Connection,
+        parent: u64,
+        name: &[u8],
+        meter: Option<&observation::WorkMeter<'_>>,
+    ) -> Result<Node> {
         if name == b"." {
             return require_dir(c, parent);
         }
@@ -961,25 +1155,64 @@ impl VfsView {
                 None => Err(error(libc::ENOENT)),
             };
         }
-        let base = p.base.ok_or_else(|| error(libc::ENOENT))?;
-        let e=c.query_row("SELECT kind,mode,reference,target FROM inherited.directory_entries WHERE digest=? AND name=?",params![base.digest,name],|r|Ok((r.get::<_,i64>(0)?,r.get::<_,u32>(1)?,r.get::<_,Option<String>>(2)?,r.get::<_,Vec<u8>>(3)?))).optional()?.ok_or_else(||error(libc::ENOENT))?;
-        let reference =
-            e.2.as_ref()
-                .map(|s| serde_json::from_str::<ObjectRef>(s))
-                .transpose()?;
-        let size = reference
-            .as_ref()
-            .filter(|r| r.kind == ObjectKind::Blob)
-            .map(|r| r.size_bytes)
-            .unwrap_or(e.3.len() as u64);
-        let t = now();
-        let origin = p.origin.map(|p| {
+        self.materialize_inherited_tx(c, &p, parent, name, true, meter)
+    }
+    fn materialize_inherited_tx(
+        &self,
+        c: &Connection,
+        p: &Node,
+        parent: u64,
+        name: &[u8],
+        bind: bool,
+        meter: Option<&observation::WorkMeter<'_>>,
+    ) -> Result<Node> {
+        let base = p.base.clone().ok_or_else(|| error(libc::ENOENT))?;
+        let origin = p.origin.as_ref().map(|p| {
             if p.is_empty() {
                 hex::encode(name)
             } else {
                 format!("{p}/{}", hex::encode(name))
             }
         });
+        let mut logical_size = None;
+        let mut directory_counts = None;
+        let e = if self.0.v2 {
+            let entry = namespace::view_lookup(self, &p, &base, name, meter)?
+                .ok_or_else(|| error(libc::ENOENT))?;
+            match entry.node {
+                crate::directory::EntryNode::File {
+                    object,
+                    logical_size: size,
+                    mode,
+                } => {
+                    logical_size = Some(size);
+                    (1, mode, Some(json_ref(&object)?), Vec::new())
+                }
+                crate::directory::EntryNode::Directory { object } => {
+                    let (mode, entries, subdirectories) =
+                        namespace::view_header(self, origin.as_deref(), &object, meter)?;
+                    directory_counts = Some((entries, subdirectories));
+                    (2, mode, Some(json_ref(&object)?), Vec::new())
+                }
+                crate::directory::EntryNode::Symlink { target_hex } => {
+                    (3, 0o777, None, hex::decode(target_hex)?)
+                }
+            }
+        } else {
+            c.query_row("SELECT kind,mode,reference,target FROM inherited.directory_entries WHERE digest=? AND name=?",params![base.digest,name],|r|Ok((r.get::<_,i64>(0)?,r.get::<_,u32>(1)?,r.get::<_,Option<String>>(2)?,r.get::<_,Vec<u8>>(3)?))).optional()?.ok_or_else(||error(libc::ENOENT))?
+        };
+        let reference =
+            e.2.as_ref()
+                .map(|s| serde_json::from_str::<ObjectRef>(s))
+                .transpose()?;
+        let size = logical_size.unwrap_or_else(|| {
+            reference
+                .as_ref()
+                .filter(|r| r.kind == ObjectKind::Blob)
+                .map(|r| r.size_bytes)
+                .unwrap_or(e.3.len() as u64)
+        });
+        let t = now();
         let topology = c
             .query_row("SELECT value FROM meta WHERE key='topology'", [], |r| {
                 r.get::<_, String>(0)
@@ -1014,20 +1247,72 @@ impl VfsView {
             }
         }
         let nlink = if e.0 == 2 {
-            2 + c.query_row(
-                "SELECT subdirectories FROM inherited.directory_objects WHERE digest=?",
-                [&reference.as_ref().context("directory ref missing")?.digest],
-                |r| read_id(r, 0),
-            )?
+            let subdirectories = if let Some((_, subdirectories)) = directory_counts {
+                subdirectories
+            } else {
+                c.query_row(
+                    "SELECT subdirectories FROM inherited.directory_objects WHERE digest=?",
+                    [&reference.as_ref().context("directory ref missing")?.digest],
+                    |r| read_id(r, 0),
+                )?
+            };
+            subdirectories
+                .checked_add(2)
+                .filter(|v| *v <= i64::MAX as u64)
+                .context("directory link count overflow")?
         } else {
             group.as_ref().map(|(_, n)| *n).unwrap_or(1)
         };
-        c.execute("INSERT INTO nodes(kind,mode,base,target,backing,size,nlink,parent,dirty,atime,mtime,ctime,origin) VALUES(?,?,?,?,NULL,?,?,?,0,?,?,?,?)",params![e.0,e.1,e.2,e.3,sql_id(size),sql_id(nlink),sql_id(parent),t,t,t,origin])?;
-        let id = c.last_insert_rowid() as u64;
-        c.execute(
-            "INSERT INTO dirents VALUES(?,?,?)",
-            params![sql_id(parent), name, sql_id(id)],
-        )?;
+        let reserved = if let Some(remote) = &self.manager().0.remote {
+            remote.check_origin(origin.as_deref().context("remote inode origin missing")?)?;
+            Some(readdir::reserve(
+                c,
+                origin.as_deref().context("remote inode origin missing")?,
+                parent,
+                name,
+                NodeKind::from_code(e.0)?,
+                remote.readdir_limits(),
+            )?)
+        } else {
+            None
+        };
+        let id = if let Some(id) = reserved {
+            if let Some(existing) = c
+                .query_row("SELECT id FROM nodes WHERE id=?", [sql_id(id)], |r| {
+                    read_id(r, 0)
+                })
+                .optional()?
+            {
+                if bind {
+                    c.execute(
+                        "INSERT INTO dirents VALUES(?,?,?)",
+                        params![sql_id(parent), name, sql_id(existing)],
+                    )?;
+                }
+                return node(c, existing);
+            }
+            c.execute("INSERT INTO nodes(id,kind,mode,base,target,backing,size,nlink,parent,dirty,atime,mtime,ctime,origin) VALUES(?,?,?,?,?,NULL,?,?,?,0,?,?,?,?)",params![sql_id(id),e.0,e.1,e.2,e.3,sql_id(size),sql_id(nlink),sql_id(parent),t,t,t,origin])?;
+            id
+        } else {
+            c.execute("INSERT INTO nodes(kind,mode,base,target,backing,size,nlink,parent,dirty,atime,mtime,ctime,origin) VALUES(?,?,?,?,NULL,?,?,?,0,?,?,?,?)",params![e.0,e.1,e.2,e.3,sql_id(size),sql_id(nlink),sql_id(parent),t,t,t,origin])?;
+            c.last_insert_rowid() as u64
+        };
+        if let Some((entries, _)) = directory_counts {
+            ensure!(
+                entries <= i64::MAX as u64,
+                "directory count exceeds private namespace capacity"
+            );
+            c.execute(
+                "INSERT INTO directory_sizes VALUES(?,?)",
+                params![sql_id(id), sql_id(entries)],
+            )?;
+        }
+        if bind {
+            c.execute(
+                "INSERT INTO dirents VALUES(?,?,?)",
+                params![sql_id(parent), name, sql_id(id)],
+            )?;
+        }
         if let Some((g, _)) = group {
             c.execute(
                 "INSERT INTO inherited_groups VALUES(?,?)",
@@ -1044,11 +1329,27 @@ impl VfsView {
         self.actual_attr(n)
     }
     pub fn attr(&self, id: u64) -> Result<VfsAttr> {
-        let n = node(&*self.db()?, id)?;
+        let mut c = self.db()?;
+        let tx = c.transaction()?;
+        let n = match node(&tx, id) {
+            Ok(n) => n,
+            Err(e) if errno(&e) == libc::ENOENT && self.manager().0.remote.is_some() => {
+                let (parent, name, origin, kind) = readdir::reserved(&tx, id)?.ok_or(e)?;
+                let p = require_dir(&tx, parent)?;
+                let n = self.materialize_inherited_tx(&tx, &p, parent, &name, false, None)?;
+                ensure!(
+                    n.attr.ino == id && n.origin.as_ref() == Some(&origin) && n.attr.kind == kind,
+                    "materialized reservation identity differs"
+                );
+                n
+            }
+            Err(e) => return Err(e),
+        };
+        tx.commit()?;
         self.actual_attr(n)
     }
     fn actual_attr(&self, mut n: Node) -> Result<VfsAttr> {
-        if let Some(b) = n.backing {
+        if let Some(b) = n.backing.filter(|_| !self.0.v2) {
             n.attr.size = self.private_file(&b, false)?.metadata()?.len()
         }
         Ok(n.attr)
@@ -1057,6 +1358,9 @@ impl VfsView {
         let mut id = start;
         for _ in 0..=MAX_DEPTH {
             let n = node(c, id)?;
+            if id != 1 {
+                namespace::bindings_changed(c, id)?;
+            }
             c.execute(
                 "UPDATE nodes SET dirty=1,mtime=?,ctime=? WHERE id=?",
                 params![now(), now(), sql_id(id)],
@@ -1069,6 +1373,7 @@ impl VfsView {
         bail!("directory ancestor cycle/depth limit")
     }
     fn dirty_file(c: &Connection, id: u64) -> Result<()> {
+        namespace::bindings_changed(c, id)?;
         c.execute(
             "UPDATE nodes SET dirty=1,mtime=?,ctime=? WHERE id=?",
             params![now(), now(), sql_id(id)],
@@ -1116,6 +1421,9 @@ impl VfsView {
         let t = now();
         tx.execute("INSERT INTO nodes(kind,mode,base,target,backing,size,nlink,parent,dirty,atime,mtime,ctime,origin) VALUES(?,?,NULL,?,?,?,?,?,1,?,?,?,NULL)",params![kind.code(),mode,target,backing,target.len() as i64,if kind==NodeKind::Directory{2}else{1},sql_id(parent),t,t,t])?;
         let id = tx.last_insert_rowid() as u64;
+        if self.0.v2 && kind == NodeKind::Directory {
+            tx.execute("INSERT INTO directory_sizes VALUES(?,0)", [sql_id(id)])?;
+        }
         if kind == NodeKind::Directory {
             tx.execute(
                 "UPDATE nodes SET nlink=nlink+1 WHERE id=?",
@@ -1126,12 +1434,19 @@ impl VfsView {
             "INSERT OR REPLACE INTO dirents VALUES(?,?,?)",
             params![sql_id(parent), name, sql_id(id)],
         )?;
+        namespace::changed(&tx, parent, name)?;
+        namespace::count_delta(&tx, parent, 1)?;
         Self::dirty(&tx, parent)?;
+        observation::mutation(&tx, "create", id, Some(parent), Some(name), None)?;
         let n = node(&tx, id)?;
         tx.commit()?;
         self.actual_attr(n)
     }
     fn new_backing(&self, base: Option<&ObjectRef>) -> Result<String> {
+        if base.is_some() && self.manager().0.remote.is_some() {
+            return Err(error(libc::EOPNOTSUPP))
+                .context("remote copy-up must use private range blocks");
+        }
         let id = Uuid::new_v4().to_string();
         let mut f = OpenOptions::new()
             .write(true)
@@ -1168,6 +1483,14 @@ impl VfsView {
     }
     pub fn read(&self, id: u64, offset: u64, size: usize) -> Result<Vec<u8>> {
         ensure!(size <= MAX_IO, "read exceeds 16 MiB");
+        if self.0.v2 {
+            let c = self.db()?;
+            let n = node(&c, id)?;
+            if n.attr.kind != NodeKind::File {
+                return Err(error(libc::EISDIR));
+            }
+            return content::read(self, &c, &n, offset, size);
+        }
         let n = node(&*self.db()?, id)?;
         if n.attr.kind != NodeKind::File {
             return Err(error(libc::EISDIR));
@@ -1192,6 +1515,9 @@ impl VfsView {
         Ok(b)
     }
     fn hydrate_links(&self, c: &Connection, id: u64) -> Result<()> {
+        if self.0.v2 {
+            return namespace::hydrate_links(self, c, id);
+        }
         let group = c
             .query_row(
                 "SELECT group_id FROM inherited_groups WHERE inode=?",
@@ -1255,13 +1581,30 @@ impl VfsView {
         );
         let mut c = self.db()?;
         let tx = c.transaction()?;
-        let f = self.writable(&tx, id)?;
-        f.write_all_at(bytes, offset)?;
-        if sync {
-            f.sync_all()?;
+        if self.0.v2 {
+            mutable(&tx)?;
+            let n = node(&tx, id)?;
+            if n.attr.kind != NodeKind::File {
+                return Err(error(libc::EISDIR));
+            }
+            if bytes.is_empty() {
+                ensure!(
+                    n.attr.kind == NodeKind::File,
+                    "zero write requires a regular file"
+                );
+                return Ok(0);
+            }
+            content::write(self, &tx, &n, offset, bytes)?;
+        } else {
+            let f = self.writable(&tx, id)?;
+            f.write_all_at(bytes, offset)?;
+            if sync {
+                f.sync_all()?;
+            }
         }
         self.hydrate_links(&tx, id)?;
         Self::dirty_file(&tx, id)?;
+        observation::mutation(&tx, "write", id, None, None, None)?;
         tx.commit()?;
         Ok(bytes.len())
     }
@@ -1286,7 +1629,11 @@ impl VfsView {
         }
         if let Some(size) = size {
             ensure!(size <= i64::MAX as u64, "file too large");
-            self.writable(&tx, id)?.set_len(size)?;
+            if self.0.v2 {
+                content::truncate(self, &tx, &n, size)?;
+            } else {
+                self.writable(&tx, id)?.set_len(size)?;
+            }
         }
         if let Some(t) = atime {
             tx.execute(
@@ -1309,6 +1656,7 @@ impl VfsView {
             "UPDATE nodes SET mtime=? WHERE id=?",
             params![mtime, sql_id(id)],
         )?;
+        observation::mutation(&tx, "set_attr", id, None, None, None)?;
         let n = node(&tx, id)?;
         tx.commit()?;
         self.actual_attr(n)
@@ -1320,7 +1668,10 @@ impl VfsView {
         }
         Ok(n.target)
     }
-    fn names(c: &Connection, parent: u64) -> Result<Vec<Vec<u8>>> {
+    fn names(&self, c: &Connection, parent: u64) -> Result<Vec<Vec<u8>>> {
+        if self.0.v2 {
+            return namespace::names(self, c, parent);
+        }
         let n = require_dir(c, parent)?;
         let digest = n.base.as_ref().map(|r| r.digest.as_str()).unwrap_or("");
         let mut q=c.prepare("SELECT name FROM inherited.directory_entries b WHERE digest=? AND NOT EXISTS(SELECT 1 FROM dirents p WHERE p.parent=? AND p.name=b.name) UNION SELECT name FROM dirents WHERE parent=? AND child IS NOT NULL ORDER BY name")?;
@@ -1331,7 +1682,14 @@ impl VfsView {
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(rows)
     }
-    fn empty(c: &Connection, parent: u64) -> Result<bool> {
+    fn empty(&self, c: &Connection, parent: u64) -> Result<bool> {
+        if self.0.v2 {
+            return Ok(c.query_row(
+                "SELECT entry_count=0 FROM directory_sizes WHERE inode=?",
+                [sql_id(parent)],
+                |r| r.get(0),
+            )?);
+        }
         let n = require_dir(c, parent)?;
         let digest = n.base.as_ref().map(|r| r.digest.as_str()).unwrap_or("");
         Ok(!c.query_row("SELECT EXISTS(SELECT 1 FROM dirents WHERE parent=? AND child IS NOT NULL UNION ALL SELECT 1 FROM inherited.directory_entries b WHERE digest=? AND NOT EXISTS(SELECT 1 FROM dirents p WHERE p.parent=? AND p.name=b.name) LIMIT 1)",params![sql_id(parent),digest,sql_id(parent)],|r|r.get::<_,bool>(0))?)
@@ -1346,7 +1704,7 @@ impl VfsView {
             if n.attr.kind != NodeKind::Directory {
                 return Err(error(libc::ENOTDIR));
             }
-            if !Self::empty(&tx, n.attr.ino)? {
+            if !self.empty(&tx, n.attr.ino)? {
                 return Err(error(libc::ENOTEMPTY));
             }
         } else if n.attr.kind == NodeKind::Directory {
@@ -1356,6 +1714,8 @@ impl VfsView {
             "INSERT OR REPLACE INTO dirents VALUES(?,?,NULL)",
             params![sql_id(parent), name],
         )?;
+        namespace::changed(&tx, parent, name)?;
+        namespace::count_delta(&tx, parent, -1)?;
         tx.execute(
             "UPDATE nodes SET nlink=CASE WHEN kind=2 THEN 0 ELSE nlink-1 END,ctime=? WHERE id=?",
             params![now(), sql_id(n.attr.ino)],
@@ -1367,6 +1727,7 @@ impl VfsView {
             )?;
         }
         Self::dirty(&tx, parent)?;
+        observation::mutation(&tx, "unlink", n.attr.ino, Some(parent), Some(name), None)?;
         tx.commit()?;
         Ok(())
     }
@@ -1389,11 +1750,14 @@ impl VfsView {
             "INSERT OR REPLACE INTO dirents VALUES(?,?,?)",
             params![sql_id(parent), name, sql_id(id)],
         )?;
+        namespace::changed(&tx, parent, name)?;
+        namespace::count_delta(&tx, parent, 1)?;
         tx.execute(
             "UPDATE nodes SET nlink=nlink+1,ctime=? WHERE id=?",
             params![now(), sql_id(id)],
         )?;
         Self::dirty(&tx, parent)?;
+        observation::mutation(&tx, "link", id, Some(parent), Some(name), None)?;
         let n = node(&tx, id)?;
         tx.commit()?;
         self.actual_attr(n)
@@ -1461,7 +1825,7 @@ impl VfsView {
                 if src.attr.kind != NodeKind::Directory && d.attr.kind == NodeKind::Directory {
                     return Err(error(libc::EISDIR));
                 }
-                if d.attr.kind == NodeKind::Directory && !Self::empty(&tx, d.attr.ino)? {
+                if d.attr.kind == NodeKind::Directory && !self.empty(&tx, d.attr.ino)? {
                     return Err(error(libc::ENOTEMPTY));
                 }
                 tx.execute(
@@ -1521,15 +1885,31 @@ impl VfsView {
             "UPDATE nodes SET nlink=nlink+? WHERE id=?",
             params![new_delta, sql_id(newparent)],
         )?;
+        namespace::changed(&tx, parent, name)?;
+        namespace::changed(&tx, newparent, newname)?;
+        if flags != 2 {
+            namespace::count_delta(&tx, parent, -1)?;
+            if dst.is_none() {
+                namespace::count_delta(&tx, newparent, 1)?;
+            }
+        }
         Self::dirty(&tx, parent)?;
         Self::dirty(&tx, newparent)?;
+        observation::mutation(
+            &tx,
+            "rename",
+            src.attr.ino,
+            Some(parent),
+            Some(name),
+            Some((newparent, newname)),
+        )?;
         tx.commit()?;
         Ok(())
     }
     pub fn entries(&self, parent: u64) -> Result<Vec<(Vec<u8>, VfsAttr)>> {
         let mut c = self.db()?;
         let tx = c.transaction()?;
-        let names = Self::names(&tx, parent)?;
+        let names = self.names(&tx, parent)?;
         let mut out = Vec::with_capacity(names.len());
         for name in names {
             let n = self.lookup_tx(&tx, parent, &name)?;
@@ -1555,7 +1935,9 @@ impl VfsView {
                 (b".".to_vec(), a.clone()),
                 (b"..".to_vec(), self.attr(a.parent)?),
             ];
-            rows.extend(self.entries(id)?);
+            if self.manager().0.remote.is_none() && flags & libc::O_NONBLOCK == 0 {
+                rows.extend(self.entries(id)?);
+            }
             Some(Arc::new(rows))
         } else {
             None
@@ -1567,11 +1949,16 @@ impl VfsView {
                 ino: id,
                 flags,
                 directory: snapshot,
+                deferred_directory: directory
+                    && (self.manager().0.remote.is_some() || flags & libc::O_NONBLOCK != 0),
             },
         );
         Ok(h)
     }
     pub fn check_handle(&self, id: u64, handle: u64, write: bool) -> Result<()> {
+        if let Some(remote) = &self.manager().0.remote {
+            remote.guard()?;
+        }
         let hs = self.0.handles.lock().map_err(|_| error(libc::EIO))?;
         let h = hs.get(&handle).ok_or_else(|| error(libc::EBADF))?;
         if h.ino != id
@@ -1584,10 +1971,89 @@ impl VfsView {
         Ok(())
     }
     pub fn directory_handle(&self, id: u64, handle: u64) -> Result<Arc<Vec<(Vec<u8>, VfsAttr)>>> {
-        let hs = self.0.handles.lock().map_err(|_| error(libc::EIO))?;
-        let h = hs.get(&handle).ok_or_else(|| error(libc::EBADF))?;
+        if self.manager().0.remote.is_some() {
+            return Err(error(libc::EOPNOTSUPP))
+                .context("remote directory handles require bounded read_directory_page");
+        }
+        let (snapshot, deferred) = {
+            let hs = self.0.handles.lock().map_err(|_| error(libc::EIO))?;
+            let h = hs.get(&handle).ok_or_else(|| error(libc::EBADF))?;
+            ensure!(h.ino == id, "handle inode mismatch");
+            (
+                h.directory.clone().context("not a directory handle")?,
+                h.deferred_directory,
+            )
+        };
+        if !deferred {
+            return Ok(snapshot);
+        }
+        let mut rows = (*snapshot).clone();
+        rows.extend(self.entries(id)?);
+        let rows = Arc::new(rows);
+        if let Some(remote) = &self.manager().0.remote {
+            remote.guard()?;
+        }
+        let mut hs = self.0.handles.lock().map_err(|_| error(libc::EIO))?;
+        let h = hs.get_mut(&handle).ok_or_else(|| error(libc::EBADF))?;
         ensure!(h.ino == id, "handle inode mismatch");
-        h.directory.clone().context("not a directory handle")
+        if h.deferred_directory {
+            h.directory = Some(rows);
+            h.deferred_directory = false;
+        }
+        h.directory.clone().context("directory handle disappeared")
+    }
+    /// Remote snapshots freeze on first readdir. Cookies are opaque per-open
+    /// handle, not byte offsets. Local handles retain their original eager snapshot.
+    pub fn read_directory_page(
+        &self,
+        id: u64,
+        handle: u64,
+        cookie: u64,
+        max_entries: usize,
+    ) -> Result<DirectoryPage> {
+        if max_entries == 0 || max_entries > readdir::DIRECTORY_PAGE_ENTRIES {
+            return Err(error(libc::EINVAL));
+        }
+        if let Some(pager) = &self.0.pager {
+            let mut c = self.db()?;
+            let handles = self.0.handles.lock().map_err(|_| error(libc::EIO))?;
+            let h = handles.get(&handle).ok_or_else(|| error(libc::EBADF))?;
+            if h.ino != id || h.directory.is_none() {
+                return Err(error(libc::EBADF));
+            }
+            return pager.lock().map_err(|_| error(libc::EIO))?.page(
+                self,
+                &mut c,
+                handle,
+                id,
+                cookie,
+                max_entries,
+            );
+        }
+        let rows = self.directory_handle(id, handle)?;
+        let skip = usize::try_from(cookie).unwrap_or(usize::MAX);
+        let entries = rows
+            .iter()
+            .enumerate()
+            .skip(skip)
+            .take(max_entries)
+            .map(|(i, (n, a))| DirectoryListingEntry {
+                name: n.clone(),
+                ino: a.ino,
+                kind: a.kind,
+                next_cookie: i as u64 + 1,
+            })
+            .collect::<Vec<_>>();
+        let eof = skip.saturating_add(entries.len()) >= rows.len();
+        Ok(DirectoryPage { entries, eof })
+    }
+    pub fn readdir_stats(&self) -> Result<Option<ReaddirStats>> {
+        let c = self.db()?;
+        self.0
+            .pager
+            .as_ref()
+            .map(|p| p.lock().map_err(|_| error(libc::EIO))?.stats(&c))
+            .transpose()
     }
     pub fn close_handle(&self, id: u64, handle: u64) -> Result<()> {
         let mut hs = self.0.handles.lock().map_err(|_| error(libc::EIO))?;
@@ -1595,6 +2061,9 @@ impl VfsView {
             hs.get(&handle).is_some_and(|h| h.ino == id),
             "invalid handle"
         );
+        if let Some(pager) = &self.0.pager {
+            pager.lock().map_err(|_| error(libc::EIO))?.close(handle)?;
+        }
         hs.remove(&handle);
         Ok(())
     }
@@ -1622,6 +2091,7 @@ impl VfsView {
         Ok(snapshot.directory)
     }
     pub fn checkpoint_snapshot_unmounted(&self) -> Result<VfsCheckpoint> {
+        self.require_local_checkpoint()?;
         ensure!(
             !self.0.mounted.load(Ordering::Acquire),
             "checkpoint requires a detached/drained FUSE session"
@@ -1645,30 +2115,45 @@ impl VfsView {
             .store()
             .begin_staging(Duration::from_secs(3600))?;
         let result = (|| {
-            let mut seen = BTreeSet::new();
-            let mut linked = BTreeMap::<u64, u64>::new();
-            let root = self.checkpoint_dir(&tx, 1, 0, &mut seen, &mut linked)?;
-            let mut groups = BTreeMap::<u64, Vec<Vec<Vec<u8>>>>::new();
-            self.collect_topology(&tx, 1, &mut Vec::new(), &mut groups)?;
-            let mut groups = groups
-                .into_values()
-                .filter(|p| p.len() > 1)
-                .collect::<Vec<_>>();
-            for g in &mut groups {
-                g.sort();
-            }
-            groups.sort();
-            let topology = HardlinkTopology {
-                format_version: 1,
-                groups: groups
-                    .into_iter()
-                    .map(|paths| HardlinkGroup {
-                        paths_hex: paths
-                            .iter()
-                            .map(|p| p.iter().map(hex::encode).collect())
-                            .collect(),
-                    })
-                    .collect(),
+            let captured = if self.0.v2 {
+                Some(namespace::capture(
+                    self,
+                    &tx,
+                    &lease.id,
+                    &ImportPolicy::default(),
+                )?)
+            } else {
+                None
+            };
+            let (root, topology) = if let Some(captured) = &captured {
+                (captured.directory.clone(), namespace::topology(self, &tx)?)
+            } else {
+                let mut seen = BTreeSet::new();
+                let mut linked = BTreeMap::<u64, u64>::new();
+                let root = self.checkpoint_dir(&tx, 1, 0, &mut seen, &mut linked)?;
+                let mut groups = BTreeMap::<u64, Vec<Vec<Vec<u8>>>>::new();
+                self.collect_topology(&tx, 1, &mut Vec::new(), &mut groups)?;
+                let mut groups = groups
+                    .into_values()
+                    .filter(|p| p.len() > 1)
+                    .collect::<Vec<_>>();
+                for g in &mut groups {
+                    g.sort();
+                }
+                groups.sort();
+                let topology = HardlinkTopology {
+                    format_version: 1,
+                    groups: groups
+                        .into_iter()
+                        .map(|paths| HardlinkGroup {
+                            paths_hex: paths
+                                .iter()
+                                .map(|p| p.iter().map(hex::encode).collect())
+                                .collect(),
+                        })
+                        .collect(),
+                };
+                (root, topology)
             };
             let hardlinks = self
                 .manager()
@@ -1698,6 +2183,9 @@ impl VfsView {
                 &root,
                 &anchors,
             )?;
+            if let Some(captured) = &captured {
+                namespace::rebase(&tx, captured)?;
+            }
             tx.execute(
                 "INSERT OR REPLACE INTO meta VALUES('latest',?)",
                 [json_ref(&root)?],
@@ -1724,6 +2212,7 @@ impl VfsView {
         }
     }
     pub fn seal(&self) -> Result<VfsCheckpoint> {
+        self.require_local_checkpoint()?;
         {
             let c = self.db()?;
             ensure!(
@@ -1758,7 +2247,7 @@ impl VfsView {
         groups: &mut BTreeMap<u64, Vec<Vec<Vec<u8>>>>,
     ) -> Result<()> {
         ensure!(prefix.len() <= MAX_DEPTH, "topology depth limit");
-        for name in Self::names(c, id)? {
+        for name in self.names(c, id)? {
             let n = self.lookup_tx(c, id, &name)?;
             prefix.push(name);
             if n.attr.kind == NodeKind::Directory {
@@ -1790,7 +2279,7 @@ impl VfsView {
             return n.base.context("clean directory has no base");
         }
         let mut entries = Vec::new();
-        for name in Self::names(c, id)? {
+        for name in self.names(c, id)? {
             let child = self.lookup_tx(c, id, &name)?;
             let object = match child.attr.kind {
                 NodeKind::Directory => EntryNode::Directory {
@@ -1840,4 +2329,71 @@ pub fn errno(e: &anyhow::Error) -> i32 {
                 .and_then(|e| e.raw_os_error())
         })
         .unwrap_or(libc::EIO)
+}
+
+#[cfg(test)]
+mod cache_tests {
+    use super::*;
+
+    #[test]
+    fn immutable_fd_admission_is_shared_and_bounded_even_while_readers_hold_arcs() {
+        let base = std::env::var_os("RUDDER_TEST_TMPDIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                if Path::new("/workspace").is_dir() {
+                    "/workspace".into()
+                } else {
+                    std::env::temp_dir()
+                }
+            });
+        let temporary = tempfile::Builder::new()
+            .prefix("rudder-vfs-fds-")
+            .tempdir_in(base)
+            .unwrap();
+        let store = LocalStore::open(temporary.path().join("cas")).unwrap();
+        let manager = VfsManager::open(temporary.path().join("manager"), store.clone()).unwrap();
+        let root = store
+            .put_directory(DirectoryManifest {
+                format_version: 1,
+                mode: 0o755,
+                entries: vec![],
+            })
+            .unwrap();
+        manager.prepare(&root).unwrap();
+        let owner = OwnerEpoch {
+            owner: "cache-test".into(),
+            epoch: 1,
+        };
+        let first = manager
+            .fork(&Uuid::new_v4().to_string(), &root, owner.clone())
+            .unwrap();
+        let second = manager
+            .fork(&Uuid::new_v4().to_string(), &root, owner)
+            .unwrap();
+        let references = (0..=MAX_IMMUTABLE_FDS)
+            .map(|number| store.put_blob(&(number as u64).to_le_bytes()).unwrap())
+            .collect::<Vec<_>>();
+        let mut held = references[..MAX_IMMUTABLE_FDS]
+            .iter()
+            .map(|reference| first.inherited_file(reference).unwrap())
+            .collect::<Vec<_>>();
+        assert!(Arc::ptr_eq(
+            &held[0],
+            &second.inherited_file(&references[0]).unwrap()
+        ));
+        assert_eq!(
+            errno(
+                &second
+                    .inherited_file(references.last().unwrap())
+                    .unwrap_err()
+            ),
+            libc::EAGAIN
+        );
+        held.pop();
+        assert!(second.inherited_file(references.last().unwrap()).is_ok());
+        assert_eq!(
+            manager.0.verified.lock().unwrap().0.len(),
+            MAX_IMMUTABLE_FDS
+        );
+    }
 }

@@ -1,0 +1,2360 @@
+{
+  "format_version": 1,
+  "provider": "Fly.io",
+  "data_plane": "paged_ranges_v2",
+  "name": "rudder-vfs-paged-747d7914",
+  "qualification": "747d7914-1118-42cf-bda8-94c9faf2d902",
+  "steps": [
+    {
+      "step": "assert-no-app-secrets",
+      "ms": 871
+    },
+    {
+      "step": "create-disposable-canary",
+      "ms": 6150
+    },
+    {
+      "step": "machine-inventory",
+      "ms": 718
+    },
+    {
+      "step": "private-network-fixture-download",
+      "ms": 2553
+    },
+    {
+      "step": "private-network-fixture-download",
+      "ms": 450
+    },
+    {
+      "step": "verify-downloaded-fixture",
+      "ms": 284
+    },
+    {
+      "step": "launch-contained-qualification",
+      "ms": 304
+    },
+    {
+      "step": "poll-contained-qualification",
+      "ms": 306
+    },
+    {
+      "step": "poll-contained-qualification",
+      "ms": 395
+    },
+    {
+      "step": "poll-contained-qualification",
+      "ms": 307
+    },
+    {
+      "step": "poll-contained-qualification",
+      "ms": 576
+    },
+    {
+      "step": "poll-contained-qualification",
+      "ms": 307
+    },
+    {
+      "step": "poll-contained-qualification",
+      "ms": 241
+    },
+    {
+      "step": "poll-contained-qualification",
+      "ms": 299
+    },
+    {
+      "step": "poll-contained-qualification",
+      "ms": 199
+    },
+    {
+      "step": "poll-contained-qualification",
+      "ms": 251
+    },
+    {
+      "step": "poll-contained-qualification",
+      "ms": 248
+    },
+    {
+      "step": "poll-contained-qualification",
+      "ms": 289
+    },
+    {
+      "step": "poll-contained-qualification",
+      "ms": 238
+    },
+    {
+      "step": "poll-contained-qualification",
+      "ms": 251
+    },
+    {
+      "step": "read-owned-report",
+      "ms": 238
+    },
+    {
+      "step": "machine-inventory",
+      "ms": 430
+    },
+    {
+      "step": "destroy-owned-canary",
+      "ms": 1409
+    },
+    {
+      "step": "machine-inventory",
+      "ms": 429
+    }
+  ],
+  "machine": "813212b92535d8",
+  "instance": "01M66Q10TJSFSWDF1K38M94JR4",
+  "region": "iad",
+  "image": {
+    "registry": "docker-hub-mirror.fly.io",
+    "repository": "library/debian",
+    "tag": "bookworm-slim",
+    "digest": "sha256:a3bba7dc7dbcc1f37c2856c51fc9a7fac96608f50cb87b1b4e4d8b8c85ae988e"
+  },
+  "guest": {
+    "cpu_kind": "shared",
+    "cpus": 2,
+    "memory_mb": 2048
+  },
+  "artifacts": {
+    "driverSha256": "a3e912699db1a01e1f7986993bbaaa9cae98b91e282fd76a5502f740a417a078",
+    "gzipSha256": "3ea425dbd5a7286aa697ed761978984bf136acb9f28ad8c6738f7435f8ec4450",
+    "driverBytes": 8787856,
+    "sourceSha256": {
+      "engine/Cargo.toml": "4836cfd30829594146071781939e3d52689627a17719a20ef2642207ca7676ef",
+      "engine/tests/vfs_mount.rs": "1b0ad5a2913653212a419b5e088767fd746035d25503f2186ac7ea1f961774de",
+      "engine/src/agent_api.rs": "dad4dea18fe7e5676e9a8962d9258753738c48a0fa5943bdf3f228550892a90a",
+      "engine/src/build/frontend.rs": "3970d0cfce2508048cdc21bc7f9c096146f9db74769f52324bfb5d8ea07414ca",
+      "engine/src/build/frontend_driver.py": "1d0d803fba3ba6bddea596e6da9f04a9da150518397b0f7fa113f82359293dda",
+      "engine/src/build/index.rs": "2d046d706b511e5c1be094f616257accce51682c478d6802b0111666aa5151dd",
+      "engine/src/build/linux_runner.py": "898121d2ab160e74dffc4d2b8fa9b45370fe472edb364eecedf994a4cea1772b",
+      "engine/src/build.rs": "9027368125004b996cbc7a35bb9ff22cb39f478ec31b9c671fbf07adab77b469",
+      "engine/src/content.rs": "dfd4950f9b169197d7e49b63b6065f14f7625408baa5479627532ffc46aacd7b",
+      "engine/src/directory.rs": "03824a16f5b1b7d51ef58641f59d6769e492ac72aea2f7b6673e35094723d25e",
+      "engine/src/execution/handoff.rs": "df6d8460db00ff23610f520765fa301e95e94b458c0af90357b31ae84837599a",
+      "engine/src/execution/linux.rs": "a54edcd5035941f3d62ca7e5aece106578581b17622ae69e973c0021df468b08",
+      "engine/src/execution/qualification_driver.rs": "fcb30a020a1bef21256fce5b009837f47eb5965903cadc9c2c4ca9163746a039",
+      "engine/src/execution/root.rs": "9c592a70b84fa166f09649854d0c7ee09b708f08bcad6d5c17744f7e141cb3c5",
+      "engine/src/execution/state.rs": "c89dec72b26461b3b6e3c744572e3837a07a2495877cde240ce101ee6e191352",
+      "engine/src/execution.rs": "fe7f50e536b438a7058d0ab0d4bd95b12bb5265cd0314af4a8dcbf709885cda2",
+      "engine/src/journal/commands.rs": "7ede2de8d913390fa9f08984409f5e2164dfc4c3d38abb647bb2371fa4a9887f",
+      "engine/src/journal/decisions.rs": "2d2c00395cf94207f02a3cd0bc6fa42d83b4da2c6a1ba3ba646dfa53338d69ba",
+      "engine/src/journal/mailbox.rs": "44f1c74408ed3cea7760a6d46018fd0f9dbb858c0bb64b97a0594623b051b536",
+      "engine/src/journal/runtime.rs": "9a1c9e8cf201e9fe900e60aa70436b4ed01fc768a70fc9272dca8578aa3629f0",
+      "engine/src/journal/schema.rs": "caab66640e5971d8e1d0d9c654772ecda600015c0f29ca0eee7ca48229ec70f7",
+      "engine/src/journal/vcs.rs": "775e8ccfc09fe461251f57efb1b93760a2cd5816fc0641330cce07021aa4fd21",
+      "engine/src/journal.rs": "7e1025b61c6642c96a3befd0e4b23ff35dc4e1d2cb04e5310aa5d61c2961a02d",
+      "engine/src/lib.rs": "fd1b254529a6917cb3e3fdaa88b2ddf4907bb4ad781bbd8915f1238da14f2744",
+      "engine/src/paths.rs": "81182d22dacb0eaa5522f7d98cf2c02ff819cc5e47c7163878a0465be98a222f",
+      "engine/src/protocol.rs": "a8a750bfa01dbb8c52410b79f92b5af2ac7832bc5335491fef15835ad271a31f",
+      "engine/src/service.rs": "87cd99e9c5155a42d0b751f2eed808c2c9af184945016f9c37a6f2947d4e921c",
+      "engine/src/snapshot.rs": "fd827d173c6234d6ad2dfb512f56754dc56b4301f6e17072315d03db61a4bf72",
+      "engine/src/store.rs": "4e4ac6ddc2112b15a28d65ce2584a4d27448fcad31b42ea07268a96ddc4aca0c",
+      "engine/src/tree.rs": "5e8f1f90b2dacd19e475494802d089710dc98f3af42d47f5d32a883e9f88ef63",
+      "engine/src/vfs/content.rs": "95050948309a928905180fd9a9597bd093b4cf5747641a8985825f2759422f43",
+      "engine/src/vfs/linux.rs": "eaa0e19a4080c48c1499032fde128078ede0effc70ae31f8c479ac01de56c07f",
+      "engine/src/vfs/namespace.rs": "d7d5e97806a123277e51ce4012912c51588e1dc8756aca1a8f570bce3bb98f2b",
+      "engine/src/vfs/observation.rs": "50f26329b8e4306d2c35255515cb7a12b7f512fd90856e81275c72789fd338b9",
+      "engine/src/vfs.rs": "147ef84ea3be23997637fad6b51af730feba5d58a688f247cd3ce4d2939971e5",
+      "engine/src/workspace/linux.rs": "0a7f6c075b1bcc97daf79115512b39387c236ef3a77c9e061100397fe7651fc9",
+      "engine/src/workspace/materialize.rs": "b429f6652d752939278a88981a1bf2de3c048c8b693292c2d0d5a2ed5cc553f4",
+      "engine/src/workspace.rs": "516cb952aec0b1f89d20d26a956bf000a7f26a9a26a64c8f924d5603cba3ad64"
+    },
+    "sourceManifestSha256": "fcf62ab06a000daf10f3384da233e9d8447f01bd0cbee4179bc451c6f49b076a",
+    "builtAt": "2026-10-30T15:32:00.882573+00:00",
+    "dataPlane": "paged_ranges_v2",
+    "profile": "release: engine thin-LTO, driver opt-level3/debug-assertions=no"
+  },
+  "fixtureTransport": "private Fly6PN HTTP; exact VM source/nonce; compressed artifact SHA256 verified before execution; no credentials",
+  "exitCode": 0,
+  "results": [
+    {
+      "details": {
+        "root": {
+          "algorithm": "sha256",
+          "digest": "2babc49ccfb6c2b0146637ae8b33ed913a0f1e934b9fbc54bcfcf3a0e59a7fe9",
+          "kind": "directory",
+          "size_bytes": 229
+        }
+      },
+      "elapsed_ns": 4945610,
+      "entries": 1,
+      "event": "vfs_stage",
+      "phase": "fixture_paged_build",
+      "timestamp_unix_ms": 1793374332450,
+      "uid": 1500
+    },
+    {
+      "details": {
+        "root": {
+          "algorithm": "sha256",
+          "digest": "2babc49ccfb6c2b0146637ae8b33ed913a0f1e934b9fbc54bcfcf3a0e59a7fe9",
+          "kind": "directory",
+          "size_bytes": 229
+        }
+      },
+      "elapsed_ns": 1539210,
+      "entries": 1,
+      "event": "vfs_stage",
+      "phase": "fixture_initial_publication",
+      "timestamp_unix_ms": 1793374332452,
+      "uid": 1500
+    },
+    {
+      "missing_device_fails_closed": true,
+      "uid": 1500
+    },
+    {
+      "details": {
+        "root": {
+          "algorithm": "sha256",
+          "digest": "39575cc01d7a9f1b90425631372c16e46ccddd559e1a7e203b2656c228feba80",
+          "kind": "directory",
+          "size_bytes": 229
+        }
+      },
+      "elapsed_ns": 5988500,
+      "entries": 1,
+      "event": "vfs_stage",
+      "phase": "fixture_paged_build",
+      "timestamp_unix_ms": 1793374332538,
+      "uid": 0
+    },
+    {
+      "details": {
+        "root": {
+          "algorithm": "sha256",
+          "digest": "39575cc01d7a9f1b90425631372c16e46ccddd559e1a7e203b2656c228feba80",
+          "kind": "directory",
+          "size_bytes": 229
+        }
+      },
+      "elapsed_ns": 6665280,
+      "entries": 1,
+      "event": "vfs_stage",
+      "phase": "fixture_initial_publication",
+      "timestamp_unix_ms": 1793374332545,
+      "uid": 0
+    },
+    {
+      "event": "vfs_range_result",
+      "result": {
+        "after_mmap_private_bytes": 131072,
+        "first_write_private_bytes": 65536,
+        "live_observation_with_open_fd": true,
+        "logical_bytes": 218103808,
+        "mmap_msync_restore": true,
+        "sibling_kernel_isolation": true,
+        "total_chunks": 52,
+        "unchanged_chunks": 50
+      },
+      "uid": 0
+    },
+    {
+      "details": {},
+      "elapsed_ns": 9130,
+      "entries": 1,
+      "event": "vfs_stage",
+      "phase": "allocate_fixture_entries",
+      "timestamp_unix_ms": 1793374332958,
+      "uid": 0
+    },
+    {
+      "details": {
+        "root": {
+          "algorithm": "sha256",
+          "digest": "efdcf303b06bd5269499c26a3ad62d25528fce0397136b6b2be16b4f1744c4c1",
+          "kind": "directory",
+          "size_bytes": 229
+        }
+      },
+      "elapsed_ns": 3697841,
+      "entries": 1,
+      "event": "vfs_stage",
+      "phase": "fixture_paged_build",
+      "timestamp_unix_ms": 1793374332963,
+      "uid": 0
+    },
+    {
+      "details": {
+        "root": {
+          "algorithm": "sha256",
+          "digest": "efdcf303b06bd5269499c26a3ad62d25528fce0397136b6b2be16b4f1744c4c1",
+          "kind": "directory",
+          "size_bytes": 229
+        }
+      },
+      "elapsed_ns": 1750650,
+      "entries": 1,
+      "event": "vfs_stage",
+      "phase": "fixture_initial_publication",
+      "timestamp_unix_ms": 1793374332965,
+      "uid": 0
+    },
+    {
+      "details": {},
+      "elapsed_ns": 6979481,
+      "entries": 1,
+      "event": "vfs_stage",
+      "phase": "construct_lower_fixture",
+      "timestamp_unix_ms": 1793374332965,
+      "uid": 0
+    },
+    {
+      "details": {
+        "root": {
+          "algorithm": "sha256",
+          "digest": "838b298d7f2cbe24d40fe9ad403ff841665485d02005a758be63984ebeaa0b62",
+          "kind": "directory",
+          "size_bytes": 229
+        }
+      },
+      "elapsed_ns": 4477180,
+      "entries": 0,
+      "event": "vfs_stage",
+      "phase": "fixture_paged_build",
+      "timestamp_unix_ms": 1793374332972,
+      "uid": 0
+    },
+    {
+      "details": {
+        "root": {
+          "algorithm": "sha256",
+          "digest": "838b298d7f2cbe24d40fe9ad403ff841665485d02005a758be63984ebeaa0b62",
+          "kind": "directory",
+          "size_bytes": 229
+        }
+      },
+      "elapsed_ns": 2263360,
+      "entries": 0,
+      "event": "vfs_stage",
+      "phase": "fixture_initial_publication",
+      "timestamp_unix_ms": 1793374332975,
+      "uid": 0
+    },
+    {
+      "details": {
+        "root": {
+          "algorithm": "sha256",
+          "digest": "b9f72f9919b180edd27257093dbd0cc29597abf64734e70e8fe8681555ca25c9",
+          "kind": "directory",
+          "size_bytes": 230
+        }
+      },
+      "elapsed_ns": 3691050,
+      "entries": 5,
+      "event": "vfs_stage",
+      "phase": "fixture_paged_build",
+      "timestamp_unix_ms": 1793374332979,
+      "uid": 0
+    },
+    {
+      "details": {
+        "root": {
+          "algorithm": "sha256",
+          "digest": "b9f72f9919b180edd27257093dbd0cc29597abf64734e70e8fe8681555ca25c9",
+          "kind": "directory",
+          "size_bytes": 230
+        }
+      },
+      "elapsed_ns": 1940400,
+      "entries": 5,
+      "event": "vfs_stage",
+      "phase": "fixture_initial_publication",
+      "timestamp_unix_ms": 1793374332981,
+      "uid": 0
+    },
+    {
+      "details": {},
+      "elapsed_ns": 7191790,
+      "entries": 1,
+      "event": "vfs_stage",
+      "phase": "prepare_retained_root",
+      "timestamp_unix_ms": 1793374332988,
+      "uid": 0
+    },
+    {
+      "details": {
+        "fork_ns": 16446181,
+        "inodes": 3,
+        "rename_ns": 4723740,
+        "trial": 0
+      },
+      "elapsed_ns": 27427291,
+      "entries": 1,
+      "event": "vfs_stage",
+      "phase": "fork_mount_rename_trial",
+      "timestamp_unix_ms": 1793374333016,
+      "uid": 0
+    },
+    {
+      "details": {
+        "fork_ns": 15510580,
+        "inodes": 3,
+        "rename_ns": 31316981,
+        "trial": 1
+      },
+      "elapsed_ns": 51069681,
+      "entries": 1,
+      "event": "vfs_stage",
+      "phase": "fork_mount_rename_trial",
+      "timestamp_unix_ms": 1793374333069,
+      "uid": 0
+    },
+    {
+      "details": {
+        "fork_ns": 15439040,
+        "inodes": 3,
+        "rename_ns": 6380080,
+        "trial": 2
+      },
+      "elapsed_ns": 28339101,
+      "entries": 1,
+      "event": "vfs_stage",
+      "phase": "fork_mount_rename_trial",
+      "timestamp_unix_ms": 1793374333097,
+      "uid": 0
+    },
+    {
+      "details": {
+        "fork_ns": 17992220,
+        "inodes": 3,
+        "rename_ns": 5593860,
+        "trial": 3
+      },
+      "elapsed_ns": 28292880,
+      "entries": 1,
+      "event": "vfs_stage",
+      "phase": "fork_mount_rename_trial",
+      "timestamp_unix_ms": 1793374333126,
+      "uid": 0
+    },
+    {
+      "details": {
+        "fork_ns": 14754891,
+        "inodes": 3,
+        "rename_ns": 5464410,
+        "trial": 4
+      },
+      "elapsed_ns": 25070631,
+      "entries": 1,
+      "event": "vfs_stage",
+      "phase": "fork_mount_rename_trial",
+      "timestamp_unix_ms": 1793374333151,
+      "uid": 0
+    },
+    {
+      "event": "vfs_scaling_result",
+      "result": {
+        "atomic_save": true,
+        "entries": 1,
+        "fork_ns": 16521460,
+        "fork_samples_ns": [
+          16446181,
+          15510580,
+          15439040,
+          17992220,
+          14754891
+        ],
+        "hardlink_restore": true,
+        "inodes_after_rename": 3,
+        "mmap_msync": true,
+        "open_fd_unlink": true,
+        "prepare_ns": 7188930,
+        "raw_names": true,
+        "rename_samples_ns": [
+          4723740,
+          31316981,
+          6380080,
+          5593860,
+          5464410
+        ],
+        "rename_syscall_ns": 6511160,
+        "strict_busy_unmount": true
+      },
+      "uid": 0
+    },
+    {
+      "details": {},
+      "elapsed_ns": 45100,
+      "entries": 100,
+      "event": "vfs_stage",
+      "phase": "allocate_fixture_entries",
+      "timestamp_unix_ms": 1793374333299,
+      "uid": 0
+    },
+    {
+      "details": {
+        "root": {
+          "algorithm": "sha256",
+          "digest": "592e20213f777b554b4c09c6845a592269f9dcb322ce301701a209cb1df29d80",
+          "kind": "directory",
+          "size_bytes": 233
+        }
+      },
+      "elapsed_ns": 9090310,
+      "entries": 100,
+      "event": "vfs_stage",
+      "phase": "fixture_paged_build",
+      "timestamp_unix_ms": 1793374333310,
+      "uid": 0
+    },
+    {
+      "details": {
+        "root": {
+          "algorithm": "sha256",
+          "digest": "592e20213f777b554b4c09c6845a592269f9dcb322ce301701a209cb1df29d80",
+          "kind": "directory",
+          "size_bytes": 233
+        }
+      },
+      "elapsed_ns": 7671350,
+      "entries": 100,
+      "event": "vfs_stage",
+      "phase": "fixture_initial_publication",
+      "timestamp_unix_ms": 1793374333317,
+      "uid": 0
+    },
+    {
+      "details": {},
+      "elapsed_ns": 17970500,
+      "entries": 100,
+      "event": "vfs_stage",
+      "phase": "construct_lower_fixture",
+      "timestamp_unix_ms": 1793374333317,
+      "uid": 0
+    },
+    {
+      "details": {
+        "root": {
+          "algorithm": "sha256",
+          "digest": "838b298d7f2cbe24d40fe9ad403ff841665485d02005a758be63984ebeaa0b62",
+          "kind": "directory",
+          "size_bytes": 229
+        }
+      },
+      "elapsed_ns": 902610,
+      "entries": 0,
+      "event": "vfs_stage",
+      "phase": "fixture_paged_build",
+      "timestamp_unix_ms": 1793374333321,
+      "uid": 0
+    },
+    {
+      "details": {
+        "root": {
+          "algorithm": "sha256",
+          "digest": "838b298d7f2cbe24d40fe9ad403ff841665485d02005a758be63984ebeaa0b62",
+          "kind": "directory",
+          "size_bytes": 229
+        }
+      },
+      "elapsed_ns": 1712100,
+      "entries": 0,
+      "event": "vfs_stage",
+      "phase": "fixture_initial_publication",
+      "timestamp_unix_ms": 1793374333322,
+      "uid": 0
+    },
+    {
+      "details": {
+        "root": {
+          "algorithm": "sha256",
+          "digest": "91b6d9ae55ee3799d9ae8ff342fdd6d6c622283eb566523cf8d2dcc858c8a565",
+          "kind": "directory",
+          "size_bytes": 230
+        }
+      },
+      "elapsed_ns": 3440170,
+      "entries": 5,
+      "event": "vfs_stage",
+      "phase": "fixture_paged_build",
+      "timestamp_unix_ms": 1793374333327,
+      "uid": 0
+    },
+    {
+      "details": {
+        "root": {
+          "algorithm": "sha256",
+          "digest": "91b6d9ae55ee3799d9ae8ff342fdd6d6c622283eb566523cf8d2dcc858c8a565",
+          "kind": "directory",
+          "size_bytes": 230
+        }
+      },
+      "elapsed_ns": 7301010,
+      "entries": 5,
+      "event": "vfs_stage",
+      "phase": "fixture_initial_publication",
+      "timestamp_unix_ms": 1793374333334,
+      "uid": 0
+    },
+    {
+      "details": {},
+      "elapsed_ns": 1670080,
+      "entries": 100,
+      "event": "vfs_stage",
+      "phase": "prepare_retained_root",
+      "timestamp_unix_ms": 1793374333336,
+      "uid": 0
+    },
+    {
+      "details": {
+        "fork_ns": 14332021,
+        "inodes": 3,
+        "rename_ns": 5345150,
+        "trial": 0
+      },
+      "elapsed_ns": 24446521,
+      "entries": 100,
+      "event": "vfs_stage",
+      "phase": "fork_mount_rename_trial",
+      "timestamp_unix_ms": 1793374333360,
+      "uid": 0
+    },
+    {
+      "details": {
+        "fork_ns": 15810230,
+        "inodes": 3,
+        "rename_ns": 6052620,
+        "trial": 1
+      },
+      "elapsed_ns": 27309601,
+      "entries": 100,
+      "event": "vfs_stage",
+      "phase": "fork_mount_rename_trial",
+      "timestamp_unix_ms": 1793374333388,
+      "uid": 0
+    },
+    {
+      "details": {
+        "fork_ns": 13234800,
+        "inodes": 3,
+        "rename_ns": 7376940,
+        "trial": 2
+      },
+      "elapsed_ns": 25617300,
+      "entries": 100,
+      "event": "vfs_stage",
+      "phase": "fork_mount_rename_trial",
+      "timestamp_unix_ms": 1793374333414,
+      "uid": 0
+    },
+    {
+      "details": {
+        "fork_ns": 55615422,
+        "inodes": 3,
+        "rename_ns": 12551390,
+        "trial": 3
+      },
+      "elapsed_ns": 73682802,
+      "entries": 100,
+      "event": "vfs_stage",
+      "phase": "fork_mount_rename_trial",
+      "timestamp_unix_ms": 1793374333488,
+      "uid": 0
+    },
+    {
+      "details": {
+        "fork_ns": 61349722,
+        "inodes": 3,
+        "rename_ns": 9824240,
+        "trial": 4
+      },
+      "elapsed_ns": 80192352,
+      "entries": 100,
+      "event": "vfs_stage",
+      "phase": "fork_mount_rename_trial",
+      "timestamp_unix_ms": 1793374333568,
+      "uid": 0
+    },
+    {
+      "event": "vfs_scaling_result",
+      "result": {
+        "entries": 100,
+        "fork_ns": 64369342,
+        "fork_samples_ns": [
+          14332021,
+          15810230,
+          13234800,
+          55615422,
+          61349722
+        ],
+        "inodes_after_rename": 3,
+        "prepare_ns": 1667060,
+        "rename_samples_ns": [
+          5345150,
+          6052620,
+          7376940,
+          12551390,
+          9824240
+        ],
+        "rename_syscall_ns": 25200180
+      },
+      "uid": 0
+    },
+    {
+      "details": {},
+      "elapsed_ns": 3997331,
+      "entries": 10000,
+      "event": "vfs_stage",
+      "phase": "allocate_fixture_entries",
+      "timestamp_unix_ms": 1793374333673,
+      "uid": 0
+    },
+    {
+      "details": {
+        "root": {
+          "algorithm": "sha256",
+          "digest": "4a1d9e682d4fb2c275531df9f330f0eca5337dfdd0b3856fc6c8f52da0308d2a",
+          "kind": "directory",
+          "size_bytes": 234
+        }
+      },
+      "elapsed_ns": 773888958,
+      "entries": 10000,
+      "event": "vfs_stage",
+      "phase": "fixture_paged_build",
+      "timestamp_unix_ms": 1793374334451,
+      "uid": 0
+    },
+    {
+      "details": {
+        "root": {
+          "algorithm": "sha256",
+          "digest": "4a1d9e682d4fb2c275531df9f330f0eca5337dfdd0b3856fc6c8f52da0308d2a",
+          "kind": "directory",
+          "size_bytes": 234
+        }
+      },
+      "elapsed_ns": 461606351,
+      "entries": 10000,
+      "event": "vfs_stage",
+      "phase": "fixture_initial_publication",
+      "timestamp_unix_ms": 1793374334913,
+      "uid": 0
+    },
+    {
+      "details": {},
+      "elapsed_ns": 1239646289,
+      "entries": 10000,
+      "event": "vfs_stage",
+      "phase": "construct_lower_fixture",
+      "timestamp_unix_ms": 1793374334913,
+      "uid": 0
+    },
+    {
+      "details": {
+        "root": {
+          "algorithm": "sha256",
+          "digest": "838b298d7f2cbe24d40fe9ad403ff841665485d02005a758be63984ebeaa0b62",
+          "kind": "directory",
+          "size_bytes": 229
+        }
+      },
+      "elapsed_ns": 782040,
+      "entries": 0,
+      "event": "vfs_stage",
+      "phase": "fixture_paged_build",
+      "timestamp_unix_ms": 1793374334915,
+      "uid": 0
+    },
+    {
+      "details": {
+        "root": {
+          "algorithm": "sha256",
+          "digest": "838b298d7f2cbe24d40fe9ad403ff841665485d02005a758be63984ebeaa0b62",
+          "kind": "directory",
+          "size_bytes": 229
+        }
+      },
+      "elapsed_ns": 1400070,
+      "entries": 0,
+      "event": "vfs_stage",
+      "phase": "fixture_initial_publication",
+      "timestamp_unix_ms": 1793374334916,
+      "uid": 0
+    },
+    {
+      "details": {
+        "root": {
+          "algorithm": "sha256",
+          "digest": "b662694748e609ac8ad08347af8aba96d86d173aa5ac9e41a49d13aec5a8a50a",
+          "kind": "directory",
+          "size_bytes": 230
+        }
+      },
+      "elapsed_ns": 2696160,
+      "entries": 5,
+      "event": "vfs_stage",
+      "phase": "fixture_paged_build",
+      "timestamp_unix_ms": 1793374334920,
+      "uid": 0
+    },
+    {
+      "details": {
+        "root": {
+          "algorithm": "sha256",
+          "digest": "b662694748e609ac8ad08347af8aba96d86d173aa5ac9e41a49d13aec5a8a50a",
+          "kind": "directory",
+          "size_bytes": 230
+        }
+      },
+      "elapsed_ns": 533481043,
+      "entries": 5,
+      "event": "vfs_stage",
+      "phase": "fixture_initial_publication",
+      "timestamp_unix_ms": 1793374335453,
+      "uid": 0
+    },
+    {
+      "details": {},
+      "elapsed_ns": 2218900,
+      "entries": 10000,
+      "event": "vfs_stage",
+      "phase": "prepare_retained_root",
+      "timestamp_unix_ms": 1793374335455,
+      "uid": 0
+    },
+    {
+      "details": {
+        "fork_ns": 23326151,
+        "inodes": 3,
+        "rename_ns": 5865070,
+        "trial": 0
+      },
+      "elapsed_ns": 34248531,
+      "entries": 10000,
+      "event": "vfs_stage",
+      "phase": "fork_mount_rename_trial",
+      "timestamp_unix_ms": 1793374335490,
+      "uid": 0
+    },
+    {
+      "details": {
+        "fork_ns": 25611520,
+        "inodes": 3,
+        "rename_ns": 12888611,
+        "trial": 1
+      },
+      "elapsed_ns": 45082781,
+      "entries": 10000,
+      "event": "vfs_stage",
+      "phase": "fork_mount_rename_trial",
+      "timestamp_unix_ms": 1793374335535,
+      "uid": 0
+    },
+    {
+      "details": {
+        "fork_ns": 18792780,
+        "inodes": 3,
+        "rename_ns": 7788481,
+        "trial": 2
+      },
+      "elapsed_ns": 32333311,
+      "entries": 10000,
+      "event": "vfs_stage",
+      "phase": "fork_mount_rename_trial",
+      "timestamp_unix_ms": 1793374335567,
+      "uid": 0
+    },
+    {
+      "details": {
+        "fork_ns": 20063230,
+        "inodes": 3,
+        "rename_ns": 6546170,
+        "trial": 3
+      },
+      "elapsed_ns": 32237770,
+      "entries": 10000,
+      "event": "vfs_stage",
+      "phase": "fork_mount_rename_trial",
+      "timestamp_unix_ms": 1793374335599,
+      "uid": 0
+    },
+    {
+      "details": {
+        "fork_ns": 21325841,
+        "inodes": 3,
+        "rename_ns": 5430960,
+        "trial": 4
+      },
+      "elapsed_ns": 31236761,
+      "entries": 10000,
+      "event": "vfs_stage",
+      "phase": "fork_mount_rename_trial",
+      "timestamp_unix_ms": 1793374335631,
+      "uid": 0
+    },
+    {
+      "event": "vfs_scaling_result",
+      "result": {
+        "entries": 10000,
+        "fork_ns": 12995641,
+        "fork_samples_ns": [
+          23326151,
+          25611520,
+          18792780,
+          20063230,
+          21325841
+        ],
+        "inodes_after_rename": 3,
+        "prepare_ns": 2216940,
+        "rename_samples_ns": [
+          5865070,
+          12888611,
+          7788481,
+          6546170,
+          5430960
+        ],
+        "rename_syscall_ns": 5248650
+      },
+      "uid": 0
+    },
+    {
+      "details": {},
+      "elapsed_ns": 45115031,
+      "entries": 100000,
+      "event": "vfs_stage",
+      "phase": "allocate_fixture_entries",
+      "timestamp_unix_ms": 1793374335704,
+      "uid": 0
+    },
+    {
+      "details": {
+        "root": {
+          "algorithm": "sha256",
+          "digest": "ff4eedc8f57086acc1eb1b3ac54915c63b24e4c21dc4fb42257932cdc73a10e1",
+          "kind": "directory",
+          "size_bytes": 235
+        }
+      },
+      "elapsed_ns": 5902396730,
+      "entries": 100000,
+      "event": "vfs_stage",
+      "phase": "fixture_paged_build",
+      "timestamp_unix_ms": 1793374341645,
+      "uid": 0
+    },
+    {
+      "details": {
+        "root": {
+          "algorithm": "sha256",
+          "digest": "ff4eedc8f57086acc1eb1b3ac54915c63b24e4c21dc4fb42257932cdc73a10e1",
+          "kind": "directory",
+          "size_bytes": 235
+        }
+      },
+      "elapsed_ns": 4755544541,
+      "entries": 100000,
+      "event": "vfs_stage",
+      "phase": "fixture_initial_publication",
+      "timestamp_unix_ms": 1793374346401,
+      "uid": 0
+    },
+    {
+      "details": {},
+      "elapsed_ns": 10696478762,
+      "entries": 100000,
+      "event": "vfs_stage",
+      "phase": "construct_lower_fixture",
+      "timestamp_unix_ms": 1793374346401,
+      "uid": 0
+    },
+    {
+      "details": {
+        "root": {
+          "algorithm": "sha256",
+          "digest": "838b298d7f2cbe24d40fe9ad403ff841665485d02005a758be63984ebeaa0b62",
+          "kind": "directory",
+          "size_bytes": 229
+        }
+      },
+      "elapsed_ns": 765660,
+      "entries": 0,
+      "event": "vfs_stage",
+      "phase": "fixture_paged_build",
+      "timestamp_unix_ms": 1793374346403,
+      "uid": 0
+    },
+    {
+      "details": {
+        "root": {
+          "algorithm": "sha256",
+          "digest": "838b298d7f2cbe24d40fe9ad403ff841665485d02005a758be63984ebeaa0b62",
+          "kind": "directory",
+          "size_bytes": 229
+        }
+      },
+      "elapsed_ns": 1444981,
+      "entries": 0,
+      "event": "vfs_stage",
+      "phase": "fixture_initial_publication",
+      "timestamp_unix_ms": 1793374346404,
+      "uid": 0
+    },
+    {
+      "details": {
+        "root": {
+          "algorithm": "sha256",
+          "digest": "d578bcc495dd1edb7dc610c3c1600e83e2ac609469d2ee3cdcc3d0e9884616d7",
+          "kind": "directory",
+          "size_bytes": 230
+        }
+      },
+      "elapsed_ns": 3654360,
+      "entries": 5,
+      "event": "vfs_stage",
+      "phase": "fixture_paged_build",
+      "timestamp_unix_ms": 1793374346409,
+      "uid": 0
+    },
+    {
+      "details": {
+        "root": {
+          "algorithm": "sha256",
+          "digest": "d578bcc495dd1edb7dc610c3c1600e83e2ac609469d2ee3cdcc3d0e9884616d7",
+          "kind": "directory",
+          "size_bytes": 230
+        }
+      },
+      "elapsed_ns": 4797504563,
+      "entries": 5,
+      "event": "vfs_stage",
+      "phase": "fixture_initial_publication",
+      "timestamp_unix_ms": 1793374351207,
+      "uid": 0
+    },
+    {
+      "details": {},
+      "elapsed_ns": 2124050,
+      "entries": 100000,
+      "event": "vfs_stage",
+      "phase": "prepare_retained_root",
+      "timestamp_unix_ms": 1793374351209,
+      "uid": 0
+    },
+    {
+      "details": {
+        "fork_ns": 14674611,
+        "inodes": 3,
+        "rename_ns": 5137400,
+        "trial": 0
+      },
+      "elapsed_ns": 24887411,
+      "entries": 100000,
+      "event": "vfs_stage",
+      "phase": "fork_mount_rename_trial",
+      "timestamp_unix_ms": 1793374351234,
+      "uid": 0
+    },
+    {
+      "details": {
+        "fork_ns": 11638540,
+        "inodes": 3,
+        "rename_ns": 7290601,
+        "trial": 1
+      },
+      "elapsed_ns": 23106871,
+      "entries": 100000,
+      "event": "vfs_stage",
+      "phase": "fork_mount_rename_trial",
+      "timestamp_unix_ms": 1793374351258,
+      "uid": 0
+    },
+    {
+      "details": {
+        "fork_ns": 11608530,
+        "inodes": 3,
+        "rename_ns": 4651830,
+        "trial": 2
+      },
+      "elapsed_ns": 20684460,
+      "entries": 100000,
+      "event": "vfs_stage",
+      "phase": "fork_mount_rename_trial",
+      "timestamp_unix_ms": 1793374351278,
+      "uid": 0
+    },
+    {
+      "details": {
+        "fork_ns": 13117360,
+        "inodes": 3,
+        "rename_ns": 5267870,
+        "trial": 3
+      },
+      "elapsed_ns": 23406001,
+      "entries": 100000,
+      "event": "vfs_stage",
+      "phase": "fork_mount_rename_trial",
+      "timestamp_unix_ms": 1793374351302,
+      "uid": 0
+    },
+    {
+      "details": {
+        "fork_ns": 12339100,
+        "inodes": 3,
+        "rename_ns": 6500310,
+        "trial": 4
+      },
+      "elapsed_ns": 22898190,
+      "entries": 100000,
+      "event": "vfs_stage",
+      "phase": "fork_mount_rename_trial",
+      "timestamp_unix_ms": 1793374351325,
+      "uid": 0
+    },
+    {
+      "event": "vfs_scaling_result",
+      "result": {
+        "entries": 100000,
+        "fork_ns": 13368161,
+        "fork_samples_ns": [
+          14674611,
+          11638540,
+          11608530,
+          13117360,
+          12339100
+        ],
+        "inodes_after_rename": 3,
+        "prepare_ns": 2122390,
+        "rename_samples_ns": [
+          5137400,
+          7290601,
+          4651830,
+          5267870,
+          6500310
+        ],
+        "rename_syscall_ns": 5474110
+      },
+      "uid": 0
+    },
+    {
+      "details": {
+        "root": {
+          "algorithm": "sha256",
+          "digest": "e68af08cc1a71997d6672a6333c7cc8b34b7604c2304f96cade555d797dae670",
+          "kind": "directory",
+          "size_bytes": 229
+        }
+      },
+      "elapsed_ns": 2005070,
+      "entries": 1,
+      "event": "vfs_stage",
+      "phase": "fixture_paged_build",
+      "timestamp_unix_ms": 1793374351355,
+      "uid": 0
+    },
+    {
+      "details": {
+        "root": {
+          "algorithm": "sha256",
+          "digest": "e68af08cc1a71997d6672a6333c7cc8b34b7604c2304f96cade555d797dae670",
+          "kind": "directory",
+          "size_bytes": 229
+        }
+      },
+      "elapsed_ns": 1303930,
+      "entries": 1,
+      "event": "vfs_stage",
+      "phase": "fixture_initial_publication",
+      "timestamp_unix_ms": 1793374351357,
+      "uid": 0
+    },
+    {
+      "active_host_modified": false,
+      "backend": "rudder-logical-fuser-0.18.0",
+      "data_plane": "paged_ranges_v2",
+      "detached_descendant_busy_then_reaped": true,
+      "gid_map": "0          0 4294967295",
+      "kernel": "6.12.114-fly",
+      "range_report": {
+        "after_mmap_private_bytes": 131072,
+        "first_write_private_bytes": 65536,
+        "live_observation_with_open_fd": true,
+        "logical_bytes": 218103808,
+        "mmap_msync_restore": true,
+        "sibling_kernel_isolation": true,
+        "total_chunks": 52,
+        "unchanged_chunks": 50
+      },
+      "scaling": [
+        {
+          "atomic_save": true,
+          "entries": 1,
+          "fork_ns": 16521460,
+          "fork_samples_ns": [
+            16446181,
+            15510580,
+            15439040,
+            17992220,
+            14754891
+          ],
+          "hardlink_restore": true,
+          "inodes_after_rename": 3,
+          "mmap_msync": true,
+          "open_fd_unlink": true,
+          "prepare_ns": 7188930,
+          "raw_names": true,
+          "rename_samples_ns": [
+            4723740,
+            31316981,
+            6380080,
+            5593860,
+            5464410
+          ],
+          "rename_syscall_ns": 6511160,
+          "strict_busy_unmount": true
+        },
+        {
+          "entries": 100,
+          "fork_ns": 64369342,
+          "fork_samples_ns": [
+            14332021,
+            15810230,
+            13234800,
+            55615422,
+            61349722
+          ],
+          "inodes_after_rename": 3,
+          "prepare_ns": 1667060,
+          "rename_samples_ns": [
+            5345150,
+            6052620,
+            7376940,
+            12551390,
+            9824240
+          ],
+          "rename_syscall_ns": 25200180
+        },
+        {
+          "entries": 10000,
+          "fork_ns": 12995641,
+          "fork_samples_ns": [
+            23326151,
+            25611520,
+            18792780,
+            20063230,
+            21325841
+          ],
+          "inodes_after_rename": 3,
+          "prepare_ns": 2216940,
+          "rename_samples_ns": [
+            5865070,
+            12888611,
+            7788481,
+            6546170,
+            5430960
+          ],
+          "rename_syscall_ns": 5248650
+        },
+        {
+          "entries": 100000,
+          "fork_ns": 13368161,
+          "fork_samples_ns": [
+            14674611,
+            11638540,
+            11608530,
+            13117360,
+            12339100
+          ],
+          "inodes_after_rename": 3,
+          "prepare_ns": 2122390,
+          "rename_samples_ns": [
+            5137400,
+            7290601,
+            4651830,
+            5267870,
+            6500310
+          ],
+          "rename_syscall_ns": 5474110
+        }
+      ],
+      "schema": 1,
+      "server_abort_recovery": true,
+      "uid": 0,
+      "uid_map": "0          0 4294967295",
+      "writeback_cache": false
+    },
+    {
+      "details": {
+        "root": {
+          "algorithm": "sha256",
+          "digest": "39575cc01d7a9f1b90425631372c16e46ccddd559e1a7e203b2656c228feba80",
+          "kind": "directory",
+          "size_bytes": 229
+        }
+      },
+      "elapsed_ns": 2670520,
+      "entries": 1,
+      "event": "vfs_stage",
+      "phase": "fixture_paged_build",
+      "timestamp_unix_ms": 1793374351436,
+      "uid": 1500
+    },
+    {
+      "details": {
+        "root": {
+          "algorithm": "sha256",
+          "digest": "39575cc01d7a9f1b90425631372c16e46ccddd559e1a7e203b2656c228feba80",
+          "kind": "directory",
+          "size_bytes": 229
+        }
+      },
+      "elapsed_ns": 6809800,
+      "entries": 1,
+      "event": "vfs_stage",
+      "phase": "fixture_initial_publication",
+      "timestamp_unix_ms": 1793374351443,
+      "uid": 1500
+    },
+    {
+      "event": "vfs_range_result",
+      "result": {
+        "after_mmap_private_bytes": 131072,
+        "first_write_private_bytes": 65536,
+        "live_observation_with_open_fd": true,
+        "logical_bytes": 218103808,
+        "mmap_msync_restore": true,
+        "sibling_kernel_isolation": true,
+        "total_chunks": 52,
+        "unchanged_chunks": 50
+      },
+      "uid": 1500
+    },
+    {
+      "details": {},
+      "elapsed_ns": 4880,
+      "entries": 1,
+      "event": "vfs_stage",
+      "phase": "allocate_fixture_entries",
+      "timestamp_unix_ms": 1793374351832,
+      "uid": 1500
+    },
+    {
+      "details": {
+        "root": {
+          "algorithm": "sha256",
+          "digest": "efdcf303b06bd5269499c26a3ad62d25528fce0397136b6b2be16b4f1744c4c1",
+          "kind": "directory",
+          "size_bytes": 229
+        }
+      },
+      "elapsed_ns": 2618560,
+      "entries": 1,
+      "event": "vfs_stage",
+      "phase": "fixture_paged_build",
+      "timestamp_unix_ms": 1793374351836,
+      "uid": 1500
+    },
+    {
+      "details": {
+        "root": {
+          "algorithm": "sha256",
+          "digest": "efdcf303b06bd5269499c26a3ad62d25528fce0397136b6b2be16b4f1744c4c1",
+          "kind": "directory",
+          "size_bytes": 229
+        }
+      },
+      "elapsed_ns": 1303230,
+      "entries": 1,
+      "event": "vfs_stage",
+      "phase": "fixture_initial_publication",
+      "timestamp_unix_ms": 1793374351837,
+      "uid": 1500
+    },
+    {
+      "details": {},
+      "elapsed_ns": 4864010,
+      "entries": 1,
+      "event": "vfs_stage",
+      "phase": "construct_lower_fixture",
+      "timestamp_unix_ms": 1793374351837,
+      "uid": 1500
+    },
+    {
+      "details": {
+        "root": {
+          "algorithm": "sha256",
+          "digest": "838b298d7f2cbe24d40fe9ad403ff841665485d02005a758be63984ebeaa0b62",
+          "kind": "directory",
+          "size_bytes": 229
+        }
+      },
+      "elapsed_ns": 2665981,
+      "entries": 0,
+      "event": "vfs_stage",
+      "phase": "fixture_paged_build",
+      "timestamp_unix_ms": 1793374351841,
+      "uid": 1500
+    },
+    {
+      "details": {
+        "root": {
+          "algorithm": "sha256",
+          "digest": "838b298d7f2cbe24d40fe9ad403ff841665485d02005a758be63984ebeaa0b62",
+          "kind": "directory",
+          "size_bytes": 229
+        }
+      },
+      "elapsed_ns": 1164390,
+      "entries": 0,
+      "event": "vfs_stage",
+      "phase": "fixture_initial_publication",
+      "timestamp_unix_ms": 1793374351842,
+      "uid": 1500
+    },
+    {
+      "details": {
+        "root": {
+          "algorithm": "sha256",
+          "digest": "b9f72f9919b180edd27257093dbd0cc29597abf64734e70e8fe8681555ca25c9",
+          "kind": "directory",
+          "size_bytes": 230
+        }
+      },
+      "elapsed_ns": 2624500,
+      "entries": 5,
+      "event": "vfs_stage",
+      "phase": "fixture_paged_build",
+      "timestamp_unix_ms": 1793374351845,
+      "uid": 1500
+    },
+    {
+      "details": {
+        "root": {
+          "algorithm": "sha256",
+          "digest": "b9f72f9919b180edd27257093dbd0cc29597abf64734e70e8fe8681555ca25c9",
+          "kind": "directory",
+          "size_bytes": 230
+        }
+      },
+      "elapsed_ns": 2036490,
+      "entries": 5,
+      "event": "vfs_stage",
+      "phase": "fixture_initial_publication",
+      "timestamp_unix_ms": 1793374351847,
+      "uid": 1500
+    },
+    {
+      "details": {},
+      "elapsed_ns": 2134980,
+      "entries": 1,
+      "event": "vfs_stage",
+      "phase": "prepare_retained_root",
+      "timestamp_unix_ms": 1793374351850,
+      "uid": 1500
+    },
+    {
+      "details": {
+        "fork_ns": 13112090,
+        "inodes": 3,
+        "rename_ns": 6867290,
+        "trial": 0
+      },
+      "elapsed_ns": 24370540,
+      "entries": 1,
+      "event": "vfs_stage",
+      "phase": "fork_mount_rename_trial",
+      "timestamp_unix_ms": 1793374351874,
+      "uid": 1500
+    },
+    {
+      "details": {
+        "fork_ns": 12140001,
+        "inodes": 3,
+        "rename_ns": 5099490,
+        "trial": 1
+      },
+      "elapsed_ns": 21966401,
+      "entries": 1,
+      "event": "vfs_stage",
+      "phase": "fork_mount_rename_trial",
+      "timestamp_unix_ms": 1793374351896,
+      "uid": 1500
+    },
+    {
+      "details": {
+        "fork_ns": 13640880,
+        "inodes": 3,
+        "rename_ns": 5021320,
+        "trial": 2
+      },
+      "elapsed_ns": 23559040,
+      "entries": 1,
+      "event": "vfs_stage",
+      "phase": "fork_mount_rename_trial",
+      "timestamp_unix_ms": 1793374351920,
+      "uid": 1500
+    },
+    {
+      "details": {
+        "fork_ns": 12434991,
+        "inodes": 3,
+        "rename_ns": 5239500,
+        "trial": 3
+      },
+      "elapsed_ns": 22309301,
+      "entries": 1,
+      "event": "vfs_stage",
+      "phase": "fork_mount_rename_trial",
+      "timestamp_unix_ms": 1793374351942,
+      "uid": 1500
+    },
+    {
+      "details": {
+        "fork_ns": 14441750,
+        "inodes": 3,
+        "rename_ns": 5308590,
+        "trial": 4
+      },
+      "elapsed_ns": 24929651,
+      "entries": 1,
+      "event": "vfs_stage",
+      "phase": "fork_mount_rename_trial",
+      "timestamp_unix_ms": 1793374351967,
+      "uid": 1500
+    },
+    {
+      "event": "vfs_scaling_result",
+      "result": {
+        "atomic_save": true,
+        "entries": 1,
+        "fork_ns": 31384800,
+        "fork_samples_ns": [
+          13112090,
+          12140001,
+          13640880,
+          12434991,
+          14441750
+        ],
+        "hardlink_restore": true,
+        "inodes_after_rename": 3,
+        "mmap_msync": true,
+        "open_fd_unlink": true,
+        "prepare_ns": 2133170,
+        "raw_names": true,
+        "rename_samples_ns": [
+          6867290,
+          5099490,
+          5021320,
+          5239500,
+          5308590
+        ],
+        "rename_syscall_ns": 6462261,
+        "strict_busy_unmount": true
+      },
+      "uid": 1500
+    },
+    {
+      "details": {},
+      "elapsed_ns": 54630,
+      "entries": 100,
+      "event": "vfs_stage",
+      "phase": "allocate_fixture_entries",
+      "timestamp_unix_ms": 1793374352340,
+      "uid": 1500
+    },
+    {
+      "details": {
+        "root": {
+          "algorithm": "sha256",
+          "digest": "592e20213f777b554b4c09c6845a592269f9dcb322ce301701a209cb1df29d80",
+          "kind": "directory",
+          "size_bytes": 233
+        }
+      },
+      "elapsed_ns": 19574380,
+      "entries": 100,
+      "event": "vfs_stage",
+      "phase": "fixture_paged_build",
+      "timestamp_unix_ms": 1793374352366,
+      "uid": 1500
+    },
+    {
+      "details": {
+        "root": {
+          "algorithm": "sha256",
+          "digest": "592e20213f777b554b4c09c6845a592269f9dcb322ce301701a209cb1df29d80",
+          "kind": "directory",
+          "size_bytes": 233
+        }
+      },
+      "elapsed_ns": 8189840,
+      "entries": 100,
+      "event": "vfs_stage",
+      "phase": "fixture_initial_publication",
+      "timestamp_unix_ms": 1793374352374,
+      "uid": 1500
+    },
+    {
+      "details": {},
+      "elapsed_ns": 34333661,
+      "entries": 100,
+      "event": "vfs_stage",
+      "phase": "construct_lower_fixture",
+      "timestamp_unix_ms": 1793374352374,
+      "uid": 1500
+    },
+    {
+      "details": {
+        "root": {
+          "algorithm": "sha256",
+          "digest": "838b298d7f2cbe24d40fe9ad403ff841665485d02005a758be63984ebeaa0b62",
+          "kind": "directory",
+          "size_bytes": 229
+        }
+      },
+      "elapsed_ns": 345580,
+      "entries": 0,
+      "event": "vfs_stage",
+      "phase": "fixture_paged_build",
+      "timestamp_unix_ms": 1793374352376,
+      "uid": 1500
+    },
+    {
+      "details": {
+        "root": {
+          "algorithm": "sha256",
+          "digest": "838b298d7f2cbe24d40fe9ad403ff841665485d02005a758be63984ebeaa0b62",
+          "kind": "directory",
+          "size_bytes": 229
+        }
+      },
+      "elapsed_ns": 6187340,
+      "entries": 0,
+      "event": "vfs_stage",
+      "phase": "fixture_initial_publication",
+      "timestamp_unix_ms": 1793374352382,
+      "uid": 1500
+    },
+    {
+      "details": {
+        "root": {
+          "algorithm": "sha256",
+          "digest": "91b6d9ae55ee3799d9ae8ff342fdd6d6c622283eb566523cf8d2dcc858c8a565",
+          "kind": "directory",
+          "size_bytes": 230
+        }
+      },
+      "elapsed_ns": 12937730,
+      "entries": 5,
+      "event": "vfs_stage",
+      "phase": "fixture_paged_build",
+      "timestamp_unix_ms": 1793374352401,
+      "uid": 1500
+    },
+    {
+      "details": {
+        "root": {
+          "algorithm": "sha256",
+          "digest": "91b6d9ae55ee3799d9ae8ff342fdd6d6c622283eb566523cf8d2dcc858c8a565",
+          "kind": "directory",
+          "size_bytes": 230
+        }
+      },
+      "elapsed_ns": 6264030,
+      "entries": 5,
+      "event": "vfs_stage",
+      "phase": "fixture_initial_publication",
+      "timestamp_unix_ms": 1793374352407,
+      "uid": 1500
+    },
+    {
+      "details": {},
+      "elapsed_ns": 6428960,
+      "entries": 100,
+      "event": "vfs_stage",
+      "phase": "prepare_retained_root",
+      "timestamp_unix_ms": 1793374352414,
+      "uid": 1500
+    },
+    {
+      "details": {
+        "fork_ns": 70343002,
+        "inodes": 3,
+        "rename_ns": 8437660,
+        "trial": 0
+      },
+      "elapsed_ns": 84624182,
+      "entries": 100,
+      "event": "vfs_stage",
+      "phase": "fork_mount_rename_trial",
+      "timestamp_unix_ms": 1793374352499,
+      "uid": 1500
+    },
+    {
+      "details": {
+        "fork_ns": 68039982,
+        "inodes": 3,
+        "rename_ns": 10332870,
+        "trial": 1
+      },
+      "elapsed_ns": 82925222,
+      "entries": 100,
+      "event": "vfs_stage",
+      "phase": "fork_mount_rename_trial",
+      "timestamp_unix_ms": 1793374352582,
+      "uid": 1500
+    },
+    {
+      "details": {
+        "fork_ns": 66828592,
+        "inodes": 3,
+        "rename_ns": 6174450,
+        "trial": 2
+      },
+      "elapsed_ns": 83952992,
+      "entries": 100,
+      "event": "vfs_stage",
+      "phase": "fork_mount_rename_trial",
+      "timestamp_unix_ms": 1793374352665,
+      "uid": 1500
+    },
+    {
+      "details": {
+        "fork_ns": 71225002,
+        "inodes": 3,
+        "rename_ns": 6213740,
+        "trial": 3
+      },
+      "elapsed_ns": 87748652,
+      "entries": 100,
+      "event": "vfs_stage",
+      "phase": "fork_mount_rename_trial",
+      "timestamp_unix_ms": 1793374352753,
+      "uid": 1500
+    },
+    {
+      "details": {
+        "fork_ns": 65035932,
+        "inodes": 3,
+        "rename_ns": 12066520,
+        "trial": 4
+      },
+      "elapsed_ns": 89422082,
+      "entries": 100,
+      "event": "vfs_stage",
+      "phase": "fork_mount_rename_trial",
+      "timestamp_unix_ms": 1793374352849,
+      "uid": 1500
+    },
+    {
+      "event": "vfs_scaling_result",
+      "result": {
+        "entries": 100,
+        "fork_ns": 60058482,
+        "fork_samples_ns": [
+          70343002,
+          68039982,
+          66828592,
+          71225002,
+          65035932
+        ],
+        "inodes_after_rename": 3,
+        "prepare_ns": 6427280,
+        "rename_samples_ns": [
+          8437660,
+          10332870,
+          6174450,
+          6213740,
+          12066520
+        ],
+        "rename_syscall_ns": 9943450
+      },
+      "uid": 1500
+    },
+    {
+      "details": {},
+      "elapsed_ns": 4288430,
+      "entries": 10000,
+      "event": "vfs_stage",
+      "phase": "allocate_fixture_entries",
+      "timestamp_unix_ms": 1793374352935,
+      "uid": 1500
+    },
+    {
+      "details": {
+        "root": {
+          "algorithm": "sha256",
+          "digest": "4a1d9e682d4fb2c275531df9f330f0eca5337dfdd0b3856fc6c8f52da0308d2a",
+          "kind": "directory",
+          "size_bytes": 234
+        }
+      },
+      "elapsed_ns": 837316100,
+      "entries": 10000,
+      "event": "vfs_stage",
+      "phase": "fixture_paged_build",
+      "timestamp_unix_ms": 1793374353777,
+      "uid": 1500
+    },
+    {
+      "details": {
+        "root": {
+          "algorithm": "sha256",
+          "digest": "4a1d9e682d4fb2c275531df9f330f0eca5337dfdd0b3856fc6c8f52da0308d2a",
+          "kind": "directory",
+          "size_bytes": 234
+        }
+      },
+      "elapsed_ns": 490989162,
+      "entries": 10000,
+      "event": "vfs_stage",
+      "phase": "fixture_initial_publication",
+      "timestamp_unix_ms": 1793374354268,
+      "uid": 1500
+    },
+    {
+      "details": {},
+      "elapsed_ns": 1333000742,
+      "entries": 10000,
+      "event": "vfs_stage",
+      "phase": "construct_lower_fixture",
+      "timestamp_unix_ms": 1793374354268,
+      "uid": 1500
+    },
+    {
+      "details": {
+        "root": {
+          "algorithm": "sha256",
+          "digest": "838b298d7f2cbe24d40fe9ad403ff841665485d02005a758be63984ebeaa0b62",
+          "kind": "directory",
+          "size_bytes": 229
+        }
+      },
+      "elapsed_ns": 390390,
+      "entries": 0,
+      "event": "vfs_stage",
+      "phase": "fixture_paged_build",
+      "timestamp_unix_ms": 1793374354269,
+      "uid": 1500
+    },
+    {
+      "details": {
+        "root": {
+          "algorithm": "sha256",
+          "digest": "838b298d7f2cbe24d40fe9ad403ff841665485d02005a758be63984ebeaa0b62",
+          "kind": "directory",
+          "size_bytes": 229
+        }
+      },
+      "elapsed_ns": 1159520,
+      "entries": 0,
+      "event": "vfs_stage",
+      "phase": "fixture_initial_publication",
+      "timestamp_unix_ms": 1793374354270,
+      "uid": 1500
+    },
+    {
+      "details": {
+        "root": {
+          "algorithm": "sha256",
+          "digest": "b662694748e609ac8ad08347af8aba96d86d173aa5ac9e41a49d13aec5a8a50a",
+          "kind": "directory",
+          "size_bytes": 230
+        }
+      },
+      "elapsed_ns": 2959650,
+      "entries": 5,
+      "event": "vfs_stage",
+      "phase": "fixture_paged_build",
+      "timestamp_unix_ms": 1793374354275,
+      "uid": 1500
+    },
+    {
+      "details": {
+        "root": {
+          "algorithm": "sha256",
+          "digest": "b662694748e609ac8ad08347af8aba96d86d173aa5ac9e41a49d13aec5a8a50a",
+          "kind": "directory",
+          "size_bytes": 230
+        }
+      },
+      "elapsed_ns": 511102902,
+      "entries": 5,
+      "event": "vfs_stage",
+      "phase": "fixture_initial_publication",
+      "timestamp_unix_ms": 1793374354786,
+      "uid": 1500
+    },
+    {
+      "details": {},
+      "elapsed_ns": 1683800,
+      "entries": 10000,
+      "event": "vfs_stage",
+      "phase": "prepare_retained_root",
+      "timestamp_unix_ms": 1793374354788,
+      "uid": 1500
+    },
+    {
+      "details": {
+        "fork_ns": 16641741,
+        "inodes": 3,
+        "rename_ns": 4790430,
+        "trial": 0
+      },
+      "elapsed_ns": 27064591,
+      "entries": 10000,
+      "event": "vfs_stage",
+      "phase": "fork_mount_rename_trial",
+      "timestamp_unix_ms": 1793374354815,
+      "uid": 1500
+    },
+    {
+      "details": {
+        "fork_ns": 14536630,
+        "inodes": 3,
+        "rename_ns": 39982461,
+        "trial": 1
+      },
+      "elapsed_ns": 60107381,
+      "entries": 10000,
+      "event": "vfs_stage",
+      "phase": "fork_mount_rename_trial",
+      "timestamp_unix_ms": 1793374354875,
+      "uid": 1500
+    },
+    {
+      "details": {
+        "fork_ns": 12850861,
+        "inodes": 3,
+        "rename_ns": 6366550,
+        "trial": 2
+      },
+      "elapsed_ns": 24749341,
+      "entries": 10000,
+      "event": "vfs_stage",
+      "phase": "fork_mount_rename_trial",
+      "timestamp_unix_ms": 1793374354900,
+      "uid": 1500
+    },
+    {
+      "details": {
+        "fork_ns": 15038230,
+        "inodes": 3,
+        "rename_ns": 7864221,
+        "trial": 3
+      },
+      "elapsed_ns": 28105281,
+      "entries": 10000,
+      "event": "vfs_stage",
+      "phase": "fork_mount_rename_trial",
+      "timestamp_unix_ms": 1793374354928,
+      "uid": 1500
+    },
+    {
+      "details": {
+        "fork_ns": 16526880,
+        "inodes": 3,
+        "rename_ns": 6427890,
+        "trial": 4
+      },
+      "elapsed_ns": 28349490,
+      "entries": 10000,
+      "event": "vfs_stage",
+      "phase": "fork_mount_rename_trial",
+      "timestamp_unix_ms": 1793374354957,
+      "uid": 1500
+    },
+    {
+      "event": "vfs_scaling_result",
+      "result": {
+        "entries": 10000,
+        "fork_ns": 16205291,
+        "fork_samples_ns": [
+          16641741,
+          14536630,
+          12850861,
+          15038230,
+          16526880
+        ],
+        "inodes_after_rename": 3,
+        "prepare_ns": 1682570,
+        "rename_samples_ns": [
+          4790430,
+          39982461,
+          6366550,
+          7864221,
+          6427890
+        ],
+        "rename_syscall_ns": 6236750
+      },
+      "uid": 1500
+    },
+    {
+      "details": {},
+      "elapsed_ns": 54208471,
+      "entries": 100000,
+      "event": "vfs_stage",
+      "phase": "allocate_fixture_entries",
+      "timestamp_unix_ms": 1793374355043,
+      "uid": 1500
+    },
+    {
+      "details": {
+        "root": {
+          "algorithm": "sha256",
+          "digest": "ff4eedc8f57086acc1eb1b3ac54915c63b24e4c21dc4fb42257932cdc73a10e1",
+          "kind": "directory",
+          "size_bytes": 235
+        }
+      },
+      "elapsed_ns": 6486093843,
+      "entries": 100000,
+      "event": "vfs_stage",
+      "phase": "fixture_paged_build",
+      "timestamp_unix_ms": 1793374361587,
+      "uid": 1500
+    },
+    {
+      "details": {
+        "root": {
+          "algorithm": "sha256",
+          "digest": "ff4eedc8f57086acc1eb1b3ac54915c63b24e4c21dc4fb42257932cdc73a10e1",
+          "kind": "directory",
+          "size_bytes": 235
+        }
+      },
+      "elapsed_ns": 4627328910,
+      "entries": 100000,
+      "event": "vfs_stage",
+      "phase": "fixture_initial_publication",
+      "timestamp_unix_ms": 1793374366214,
+      "uid": 1500
+    },
+    {
+      "details": {},
+      "elapsed_ns": 11170747045,
+      "entries": 100000,
+      "event": "vfs_stage",
+      "phase": "construct_lower_fixture",
+      "timestamp_unix_ms": 1793374366214,
+      "uid": 1500
+    },
+    {
+      "details": {
+        "root": {
+          "algorithm": "sha256",
+          "digest": "838b298d7f2cbe24d40fe9ad403ff841665485d02005a758be63984ebeaa0b62",
+          "kind": "directory",
+          "size_bytes": 229
+        }
+      },
+      "elapsed_ns": 554050,
+      "entries": 0,
+      "event": "vfs_stage",
+      "phase": "fixture_paged_build",
+      "timestamp_unix_ms": 1793374366216,
+      "uid": 1500
+    },
+    {
+      "details": {
+        "root": {
+          "algorithm": "sha256",
+          "digest": "838b298d7f2cbe24d40fe9ad403ff841665485d02005a758be63984ebeaa0b62",
+          "kind": "directory",
+          "size_bytes": 229
+        }
+      },
+      "elapsed_ns": 1824510,
+      "entries": 0,
+      "event": "vfs_stage",
+      "phase": "fixture_initial_publication",
+      "timestamp_unix_ms": 1793374366218,
+      "uid": 1500
+    },
+    {
+      "details": {
+        "root": {
+          "algorithm": "sha256",
+          "digest": "d578bcc495dd1edb7dc610c3c1600e83e2ac609469d2ee3cdcc3d0e9884616d7",
+          "kind": "directory",
+          "size_bytes": 230
+        }
+      },
+      "elapsed_ns": 5137820,
+      "entries": 5,
+      "event": "vfs_stage",
+      "phase": "fixture_paged_build",
+      "timestamp_unix_ms": 1793374366225,
+      "uid": 1500
+    },
+    {
+      "details": {
+        "root": {
+          "algorithm": "sha256",
+          "digest": "d578bcc495dd1edb7dc610c3c1600e83e2ac609469d2ee3cdcc3d0e9884616d7",
+          "kind": "directory",
+          "size_bytes": 230
+        }
+      },
+      "elapsed_ns": 4731278122,
+      "entries": 5,
+      "event": "vfs_stage",
+      "phase": "fixture_initial_publication",
+      "timestamp_unix_ms": 1793374370956,
+      "uid": 1500
+    },
+    {
+      "details": {},
+      "elapsed_ns": 2437710,
+      "entries": 100000,
+      "event": "vfs_stage",
+      "phase": "prepare_retained_root",
+      "timestamp_unix_ms": 1793374370959,
+      "uid": 1500
+    },
+    {
+      "details": {
+        "fork_ns": 13964021,
+        "inodes": 3,
+        "rename_ns": 7882620,
+        "trial": 0
+      },
+      "elapsed_ns": 26875641,
+      "entries": 100000,
+      "event": "vfs_stage",
+      "phase": "fork_mount_rename_trial",
+      "timestamp_unix_ms": 1793374370986,
+      "uid": 1500
+    },
+    {
+      "details": {
+        "fork_ns": 13139320,
+        "inodes": 3,
+        "rename_ns": 5243970,
+        "trial": 1
+      },
+      "elapsed_ns": 22951060,
+      "entries": 100000,
+      "event": "vfs_stage",
+      "phase": "fork_mount_rename_trial",
+      "timestamp_unix_ms": 1793374371009,
+      "uid": 1500
+    },
+    {
+      "details": {
+        "fork_ns": 14268671,
+        "inodes": 3,
+        "rename_ns": 7544770,
+        "trial": 2
+      },
+      "elapsed_ns": 26568641,
+      "entries": 100000,
+      "event": "vfs_stage",
+      "phase": "fork_mount_rename_trial",
+      "timestamp_unix_ms": 1793374371035,
+      "uid": 1500
+    },
+    {
+      "details": {
+        "fork_ns": 15930080,
+        "inodes": 3,
+        "rename_ns": 5439111,
+        "trial": 3
+      },
+      "elapsed_ns": 26033271,
+      "entries": 100000,
+      "event": "vfs_stage",
+      "phase": "fork_mount_rename_trial",
+      "timestamp_unix_ms": 1793374371061,
+      "uid": 1500
+    },
+    {
+      "details": {
+        "fork_ns": 14236840,
+        "inodes": 3,
+        "rename_ns": 5534040,
+        "trial": 4
+      },
+      "elapsed_ns": 24181580,
+      "entries": 100000,
+      "event": "vfs_stage",
+      "phase": "fork_mount_rename_trial",
+      "timestamp_unix_ms": 1793374371085,
+      "uid": 1500
+    },
+    {
+      "event": "vfs_scaling_result",
+      "result": {
+        "entries": 100000,
+        "fork_ns": 14815511,
+        "fork_samples_ns": [
+          13964021,
+          13139320,
+          14268671,
+          15930080,
+          14236840
+        ],
+        "inodes_after_rename": 3,
+        "prepare_ns": 2435810,
+        "rename_samples_ns": [
+          7882620,
+          5243970,
+          7544770,
+          5439111,
+          5534040
+        ],
+        "rename_syscall_ns": 5171270
+      },
+      "uid": 1500
+    },
+    {
+      "details": {
+        "root": {
+          "algorithm": "sha256",
+          "digest": "e68af08cc1a71997d6672a6333c7cc8b34b7604c2304f96cade555d797dae670",
+          "kind": "directory",
+          "size_bytes": 229
+        }
+      },
+      "elapsed_ns": 2487880,
+      "entries": 1,
+      "event": "vfs_stage",
+      "phase": "fixture_paged_build",
+      "timestamp_unix_ms": 1793374371118,
+      "uid": 1500
+    },
+    {
+      "details": {
+        "root": {
+          "algorithm": "sha256",
+          "digest": "e68af08cc1a71997d6672a6333c7cc8b34b7604c2304f96cade555d797dae670",
+          "kind": "directory",
+          "size_bytes": 229
+        }
+      },
+      "elapsed_ns": 1482190,
+      "entries": 1,
+      "event": "vfs_stage",
+      "phase": "fixture_initial_publication",
+      "timestamp_unix_ms": 1793374371119,
+      "uid": 1500
+    },
+    {
+      "active_host_modified": false,
+      "backend": "rudder-logical-fuser-0.18.0",
+      "data_plane": "paged_ranges_v2",
+      "detached_descendant_busy_then_reaped": true,
+      "gid_map": "1500       1500          1",
+      "kernel": "6.12.114-fly",
+      "range_report": {
+        "after_mmap_private_bytes": 131072,
+        "first_write_private_bytes": 65536,
+        "live_observation_with_open_fd": true,
+        "logical_bytes": 218103808,
+        "mmap_msync_restore": true,
+        "sibling_kernel_isolation": true,
+        "total_chunks": 52,
+        "unchanged_chunks": 50
+      },
+      "scaling": [
+        {
+          "atomic_save": true,
+          "entries": 1,
+          "fork_ns": 31384800,
+          "fork_samples_ns": [
+            13112090,
+            12140001,
+            13640880,
+            12434991,
+            14441750
+          ],
+          "hardlink_restore": true,
+          "inodes_after_rename": 3,
+          "mmap_msync": true,
+          "open_fd_unlink": true,
+          "prepare_ns": 2133170,
+          "raw_names": true,
+          "rename_samples_ns": [
+            6867290,
+            5099490,
+            5021320,
+            5239500,
+            5308590
+          ],
+          "rename_syscall_ns": 6462261,
+          "strict_busy_unmount": true
+        },
+        {
+          "entries": 100,
+          "fork_ns": 60058482,
+          "fork_samples_ns": [
+            70343002,
+            68039982,
+            66828592,
+            71225002,
+            65035932
+          ],
+          "inodes_after_rename": 3,
+          "prepare_ns": 6427280,
+          "rename_samples_ns": [
+            8437660,
+            10332870,
+            6174450,
+            6213740,
+            12066520
+          ],
+          "rename_syscall_ns": 9943450
+        },
+        {
+          "entries": 10000,
+          "fork_ns": 16205291,
+          "fork_samples_ns": [
+            16641741,
+            14536630,
+            12850861,
+            15038230,
+            16526880
+          ],
+          "inodes_after_rename": 3,
+          "prepare_ns": 1682570,
+          "rename_samples_ns": [
+            4790430,
+            39982461,
+            6366550,
+            7864221,
+            6427890
+          ],
+          "rename_syscall_ns": 6236750
+        },
+        {
+          "entries": 100000,
+          "fork_ns": 14815511,
+          "fork_samples_ns": [
+            13964021,
+            13139320,
+            14268671,
+            15930080,
+            14236840
+          ],
+          "inodes_after_rename": 3,
+          "prepare_ns": 2435810,
+          "rename_samples_ns": [
+            7882620,
+            5243970,
+            7544770,
+            5439111,
+            5534040
+          ],
+          "rename_syscall_ns": 5171270
+        }
+      ],
+      "schema": 1,
+      "server_abort_recovery": true,
+      "uid": 1500,
+      "uid_map": "1500       1500          1",
+      "writeback_cache": false
+    },
+    {
+      "initial_mount_namespace_unchanged": true,
+      "device_group": 1500,
+      "device_mode": "0660",
+      "setuid_helper_installed": false
+    }
+  ],
+  "ok": true,
+  "cleanupVerified": true,
+  "verifiedAt": "2026-10-30T15:32:54.859Z",
+  "qualificationScope": "Disposable Fly VM only; local CAS resolver; paged ranges opt-in; no active worker restart/default switch or remote lazy hydration proof"
+}

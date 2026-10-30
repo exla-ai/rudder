@@ -37,6 +37,7 @@ fn spec(path: &Path) -> ExecutionSpec {
         }],
         broker_directory: None,
         broker_binding: None,
+        workspace_observation: None,
         timeout_seconds: 30,
     }
 }
@@ -117,43 +118,8 @@ fn broker_projection_allows_lazy_socket_but_rejects_extra_or_symlink_identity() 
 }
 
 fn helper(path: &Path) -> std::path::PathBuf {
-    let source = path.join("handoff.rs");
-    fs::write(&source,r#"
-use rudder_engine::execution::handoff;
-fn main(){let a=std::env::args().collect::<Vec<_>>();std::thread::sleep(std::time::Duration::from_millis(150));let spec=handoff::receive(&a[1],a[2].parse().unwrap()).unwrap();assert_eq!(spec.environment["CANARY_SECRET"],"known-fixture-secret-never-argv");assert!(!std::fs::read("/proc/self/cmdline").unwrap().windows(b"known-fixture-secret-never-argv".len()).any(|s|s==b"known-fixture-secret-never-argv"));assert!(!std::fs::read("/proc/self/environ").unwrap().windows(b"known-fixture-secret-never-argv".len()).any(|s|s==b"known-fixture-secret-never-argv"));println!("handoff-ok");}
-"#).unwrap();
-    let deps = std::env::current_exe()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .to_path_buf();
-    let library = fs::read_dir(&deps)
-        .unwrap()
-        .filter_map(|e| e.ok())
-        .filter(|e| {
-            e.file_name()
-                .to_string_lossy()
-                .starts_with("librudder_engine-")
-                && e.path().extension().is_some_and(|e| e == "rlib")
-        })
-        .max_by_key(|e| e.metadata().unwrap().modified().unwrap())
-        .unwrap()
-        .path();
     let binary = path.join("handoff");
-    let r = Command::new("rustc")
-        .arg("--edition=2021")
-        .arg(source)
-        .args([
-            "--extern",
-            &format!("rudder_engine={}", library.display()),
-            "-L",
-            &format!("dependency={}", deps.display()),
-            "-o",
-        ])
-        .arg(&binary)
-        .output()
-        .unwrap();
-    assert!(r.status.success(), "{}", String::from_utf8_lossy(&r.stderr));
+    fs::copy(env!("CARGO_BIN_EXE_rudder-execution-handoff-test"), &binary).unwrap();
     binary
 }
 #[test]

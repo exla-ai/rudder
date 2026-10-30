@@ -1,15 +1,42 @@
+# syntax=docker/dockerfile:1
 FROM rust:1-bookworm AS native-builder
 WORKDIR /src
 COPY native ./native
 COPY engine ./engine
+COPY vcs-bridge ./vcs-bridge
 # The binary embeds assets (the notifier icon) with include_bytes!.
 COPY assets ./assets
 COPY Cargo.toml Cargo.lock ./
-RUN cargo build --release --manifest-path native/Cargo.toml \
+# Reuse external dependencies, but rebuild workspace crates from these exact
+# inputs. Restored source mtimes cannot validate an old cached local binary.
+# Copy outputs outside the cache mount before this RUN finishes.
+RUN --mount=type=cache,id=rudder-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=rudder-cargo-git,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,id=rudder-native-release,target=/src/target,sharing=locked \
+    cargo clean --locked --release -p rudder-engine -p rudder-native -p rudder-vcs-bridge \
+  && cargo build --release --locked -p rudder-native --bin rudder-native \
+  && cargo build --release --locked -p rudder-vcs-bridge --features cli --bin rudder-jj \
   && cp target/release/rudder-native /rudder-native \
-  || cp native/target/release/rudder-native /rudder-native
+  && cp target/release/rudder-jj /rudder-jj
 
-FROM node:22-slim
+FROM debian:bookworm-slim AS git-builder
+# Git 2.41 introduced fetch --porcelain, required by pinned jj0.40. Build the
+# current upstream release against this same Debian ABI; no foreign apt suites.
+ARG GIT_VERSION=2.56.0
+ARG GIT_SHA256=26c56c296b38c0695b26fa95f475f1d01704d2d38e73465ca30b0b2f5dc789d3
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates curl xz-utils build-essential gettext perl cargo rustc \
+    libcurl4-openssl-dev libexpat1-dev libssl-dev zlib1g-dev \
+  && rm -rf /var/lib/apt/lists/*
+RUN set -eu; \
+    curl --proto '=https' --tlsv1.2 --connect-timeout 15 --max-time 180 --retry 2 -fsSL "https://www.kernel.org/pub/software/scm/git/git-${GIT_VERSION}.tar.xz" -o /git.tar.xz; \
+    printf '%s  %s\n' "$GIT_SHA256" /git.tar.xz | sha256sum -c -; \
+    mkdir /git-src; tar -xJf /git.tar.xz -C /git-src --strip-components=1; \
+    make -C /git-src -j"$(nproc)" prefix=/usr/local NO_TCLTK=YesPlease all; \
+    make -C /git-src prefix=/usr/local NO_TCLTK=YesPlease DESTDIR=/git-runtime install; \
+    /git-runtime/usr/local/bin/git --version
+
+FROM node:22-bookworm-slim
 
 ENV RUDDER_CLOUD_WORKER=1 \
     RUDDER_DISABLE_AUTO_UPDATE=1 \
@@ -25,7 +52,7 @@ RUN apt-get update \
     ca-certificates curl wget git git-lfs openssh-client tar gzip zip unzip xz-utils bzip2 zsh \
     python3 python3-pip python3-venv python3-dev build-essential cmake pkg-config libssl-dev \
     jq ripgrep fd-find tree file less lsof procps htop tmux nano vim-tiny \
-    sqlite3 postgresql-client redis-tools \
+    sqlite3 postgresql-client redis-tools util-linux gettext-base libcurl4 libexpat1 zlib1g \
   && ln -s /usr/bin/fdfind /usr/local/bin/fd \
   && rm -rf /var/lib/apt/lists/*
 
@@ -91,6 +118,10 @@ RUN set -eux; \
     rm -rf /tmp/jj.tar.gz /tmp/jjx; \
     jj --version
 
+COPY --from=git-builder /git-runtime/usr/local/ /usr/local/
+RUN test "$(/usr/local/bin/git --version)" = "git version 2.56.0" \
+  && git --version
+
 WORKDIR /opt/rudder
 # Copy scripts BEFORE npm ci so the package's postinstall hook (scripts/postinstall.mjs)
 # resolves; RUDDER_SKIP_POSTINSTALL makes it a no-op since jj is installed above.
@@ -100,7 +131,9 @@ RUN RUDDER_SKIP_POSTINSTALL=1 npm ci --omit=dev
 COPY dist ./dist
 COPY assets ./assets
 COPY --from=native-builder /rudder-native ./dist/native/rudder-native
-RUN chmod +x ./dist/native/rudder-native && RUDDER_SKIP_POSTINSTALL=1 npm link
+COPY --from=native-builder /rudder-jj ./dist/native/rudder-jj
+RUN chmod +x ./dist/native/rudder-native ./dist/native/rudder-jj \
+  && RUDDER_SKIP_POSTINSTALL=1 npm link
 
 WORKDIR /opt/rudder-worker
 COPY cloud/worker/package.json ./package.json
@@ -123,11 +156,13 @@ COPY cloud/worker/cache-env.sh ./cache-env.sh
 COPY cloud/worker/task-launch.mjs ./task-launch.mjs
 
 COPY cloud/worker/entrypoint.sh /usr/local/bin/rudder-worker
-RUN chmod +x /usr/local/bin/rudder-worker
+COPY cloud/worker/root-bootstrap.sh /usr/local/bin/rudder-worker-root-bootstrap
+RUN chmod 0755 /usr/local/bin/rudder-worker /usr/local/bin/rudder-worker-root-bootstrap
 
 # Claude refuses --permission-mode bypassPermissions as root, so we run the
 # supervisor (and everything it spawns) as a non-root user.
-RUN useradd --create-home --shell /bin/bash --uid 1500 rudder \
+RUN groupadd --gid 1500 rudder \
+  && useradd --create-home --shell /bin/bash --uid 1500 --gid 1500 rudder \
   && mkdir -p /workspace \
   && chown -R rudder:rudder /workspace /opt/rudder-worker
 
@@ -141,4 +176,7 @@ RUN curl -fsSL https://claude.ai/install.sh | bash \
   && codex --version
 WORKDIR /workspace
 
-ENTRYPOINT ["rudder-worker"]
+# Boot root touches only the validated device, then setpriv enters UID/GID1500
+# before the existing entrypoint can read profiles, start updates or run agents.
+USER root
+ENTRYPOINT ["/usr/local/bin/rudder-worker-root-bootstrap"]

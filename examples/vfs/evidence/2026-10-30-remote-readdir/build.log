@@ -1,0 +1,3 @@
+Reused exact previously qualified release driver; no redundant Cargo build.
+Source manifest SHA256: c9e0e30ed75f8c325c4b34f8f0ddab8bdab41643197e150e66c69ecff0b6f16f
+Driver SHA256: 5d8256b3ffa8aae7719cc88eb4ea2bab9f6dbd811c968c144f139811394d27af

@@ -1,0 +1,12 @@
+{
+  "format_version": 1,
+  "verified_at": "2026-10-30T20:10:59.183074+00:00",
+  "source_manifest_sha256": "c9e0e30ed75f8c325c4b34f8f0ddab8bdab41643197e150e66c69ecff0b6f16f",
+  "source_files_compared": 182,
+  "strict_allowlist_before_source_reads": true,
+  "checkout_matches_frozen_qualification": false,
+  "changed_files": [
+    "src/fabric-remote.ts"
+  ],
+  "source_archive_sha256": "42a885ae171146b579f6a49dea224c767f2881e1d461c047f2265b03d679b108"
+}

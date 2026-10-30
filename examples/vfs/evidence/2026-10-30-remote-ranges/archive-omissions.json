@@ -1,0 +1,19 @@
+{
+  "format_version": 1,
+  "policy": "Rust source in named crate source/test/example roots and exact support assets only, excluding every hidden path component; member-name and manifest-key audit before opening allowlisted content",
+  "omitted_classes": [
+    "native/src/.ledger/** and all hidden/runtime/cache/session files",
+    "nested earlier benchmark evidence",
+    "non-build documentation and helper scripts outside the explicit asset allowlist"
+  ],
+  "removed_regular_members_from_previous_public_archive": 5,
+  "removed_directory_headers": 27,
+  "published_regular_members": 175,
+  "source_manifest_entries": 175,
+  "original_runtime_and_binary_hashes_unchanged": true,
+  "originals_modified": false,
+  "blocked_member_contents_opened": false,
+  "original_build_envelope_sha256": "c0f45f10a1fabaee7a5cbaf646a4e1c2dc5c01e93683c08e0a027bb02e8b9c0f",
+  "published_source_manifest_sha256": "bfc6be3949b156c4325a6b69c7e22664e515e003b36bd418780ab5092a50bcad",
+  "published_source_archive_sha256": "9e08a222dfc7dea2723d4f39f330974ceb3852146a2ebaa50d4b80280207fb68"
+}

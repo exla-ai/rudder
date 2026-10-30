@@ -64,6 +64,7 @@ use crate::engine_host::*;
 mod fabric_cli;
 mod fabric_runtime;
 mod execution_cli;
+mod workspace_vcs;
 mod agent_link;
 mod workspace_cli;
 mod vfs_cli;
@@ -20557,10 +20558,11 @@ What to do\n\
             self.maybe_emit_heartbeat();
         }
 
-        // Only fully drain the focused agent every tick. For unfocused agents,
-        // throttle drains to every 500ms so vt100 parsing + styled-cache
-        // invalidation cost scales with focus rather than with agent count.
+        // Watched panes receive bounded batches every tick. Limit simultaneous
+        // background parsing, choosing the oldest drain first so later rows
+        // cannot starve behind a continuously noisy earlier agent.
         const UNFOCUSED_DRAIN_INTERVAL: Duration = Duration::from_millis(500);
+        const BACKGROUND_DRAINS_PER_TICK: usize = 2;
         let focused_index = self.selected_agent;
         let now = Instant::now();
         let repo_root = self.cwd.clone();
@@ -20575,6 +20577,18 @@ What to do\n\
             .iter()
             .filter_map(|client| client.run_id.clone())
             .collect();
+        let mut background: Vec<_> = self.agents.iter().enumerate().filter_map(|(index, run)| {
+            let terminal = run.terminal.as_ref()?;
+            let priority = index == focused_index || attached_ids.contains(&run.id)
+                || (run.mode == AgentMode::RudderPlan && run.status == AgentStatus::Running)
+                || (terminal.exit_observed() && !terminal.is_output_only());
+            (!priority && terminal.has_pending_output()
+                && run.last_drain_at.is_none_or(|at| now.duration_since(at) >= UNFOCUSED_DRAIN_INTERVAL))
+                .then_some((run.last_drain_at, index))
+        }).collect();
+        background.sort_unstable();
+        let background: HashSet<_> = background.into_iter().take(BACKGROUND_DRAINS_PER_TICK)
+            .map(|(_, index)| index).collect();
         for (index, run) in self.agents.iter_mut().enumerate() {
             let mut changed = false;
             let mut worker_gone_exit: Option<u32> = None;
@@ -20593,16 +20607,18 @@ What to do\n\
             // unfocused throttle and streams smoothly.
             let is_streaming_planner =
                 run.mode == AgentMode::RudderPlan && run.status == AgentStatus::Running;
-            let due_to_drain = terminal.exit_observed()
+            let due_to_drain = (terminal.exit_observed() && !terminal.is_output_only())
                 || is_focused
                 || is_streaming_planner
                 || attached_ids.contains(&run.id)
-                || run
-                    .last_drain_at
-                    .is_none_or(|stamp| now.duration_since(stamp) >= UNFOCUSED_DRAIN_INTERVAL);
+                || (run.last_drain_at.is_none_or(|stamp| now.duration_since(stamp) >= UNFOCUSED_DRAIN_INTERVAL)
+                    && (!terminal.has_pending_output() || background.contains(&index)));
             if terminal.is_output_only() {
-                if !terminal.drain_output().is_empty() {
-                    any_dirty = true;
+                if due_to_drain {
+                    run.last_drain_at = Some(now);
+                    if !terminal.drain_output().is_empty() {
+                        any_dirty = true;
+                    }
                 }
                 continue;
             }

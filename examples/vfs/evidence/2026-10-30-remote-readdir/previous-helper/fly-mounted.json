@@ -1,0 +1,492 @@
+{
+  "format_version": 1,
+  "provider": "Fly.io",
+  "app": "rudder-workers-exla",
+  "data_plane": "remote_paged_readdir_v1",
+  "name": "vfs-readdir-153d602c-3a9",
+  "qualification": "153d602c-3a92-40b1-a755-b5133a5ec87a",
+  "startedAt": "2026-10-30T20:08:20.316Z",
+  "steps": [
+    {
+      "step": "assert-no-app-secrets",
+      "ms": 534
+    },
+    {
+      "step": "machine-inventory",
+      "ms": 491
+    },
+    {
+      "step": "create-disposable-canary",
+      "ms": 3466
+    },
+    {
+      "step": "machine-inventory",
+      "ms": 571
+    },
+    {
+      "step": "private-network-fixture-download",
+      "ms": 3507
+    },
+    {
+      "step": "private-network-fixture-download",
+      "ms": 377
+    },
+    {
+      "step": "verify-downloaded-fixture",
+      "ms": 277
+    },
+    {
+      "step": "launch-contained-qualification",
+      "ms": 296
+    },
+    {
+      "step": "poll-contained-qualification",
+      "ms": 260
+    },
+    {
+      "step": "poll-contained-qualification",
+      "ms": 845
+    },
+    {
+      "step": "poll-contained-qualification",
+      "ms": 385
+    },
+    {
+      "step": "poll-contained-qualification",
+      "ms": 310
+    },
+    {
+      "step": "poll-contained-qualification",
+      "ms": 350
+    },
+    {
+      "step": "poll-contained-qualification",
+      "ms": 244
+    },
+    {
+      "step": "poll-contained-qualification",
+      "ms": 234
+    },
+    {
+      "step": "poll-contained-qualification",
+      "ms": 296
+    },
+    {
+      "step": "poll-contained-qualification",
+      "ms": 249
+    },
+    {
+      "step": "poll-contained-qualification",
+      "ms": 288
+    },
+    {
+      "step": "poll-contained-qualification",
+      "ms": 254
+    },
+    {
+      "step": "poll-contained-qualification",
+      "ms": 348
+    },
+    {
+      "step": "poll-contained-qualification",
+      "ms": 292
+    },
+    {
+      "step": "poll-contained-qualification",
+      "ms": 366
+    },
+    {
+      "step": "poll-contained-qualification",
+      "ms": 241
+    },
+    {
+      "step": "poll-contained-qualification",
+      "ms": 230
+    },
+    {
+      "step": "poll-contained-qualification",
+      "ms": 331
+    },
+    {
+      "step": "poll-contained-qualification",
+      "ms": 320
+    },
+    {
+      "step": "poll-contained-qualification",
+      "ms": 403
+    },
+    {
+      "step": "poll-contained-qualification",
+      "ms": 249
+    },
+    {
+      "step": "poll-contained-qualification",
+      "ms": 314
+    },
+    {
+      "step": "poll-contained-qualification",
+      "ms": 499
+    },
+    {
+      "step": "poll-contained-qualification",
+      "ms": 570
+    },
+    {
+      "step": "poll-contained-qualification",
+      "ms": 441
+    },
+    {
+      "step": "poll-contained-qualification",
+      "ms": 752
+    },
+    {
+      "step": "poll-contained-qualification",
+      "ms": 279
+    },
+    {
+      "step": "poll-contained-qualification",
+      "ms": 385
+    },
+    {
+      "step": "poll-contained-qualification",
+      "ms": 840
+    },
+    {
+      "step": "poll-contained-qualification",
+      "ms": 372
+    },
+    {
+      "step": "poll-contained-qualification",
+      "ms": 316
+    },
+    {
+      "step": "poll-contained-qualification",
+      "ms": 421
+    },
+    {
+      "step": "poll-contained-qualification",
+      "ms": 388
+    },
+    {
+      "step": "poll-contained-qualification",
+      "ms": 414
+    },
+    {
+      "step": "poll-contained-qualification",
+      "ms": 372
+    },
+    {
+      "step": "read-owned-report",
+      "ms": 293
+    },
+    {
+      "step": "machine-inventory",
+      "ms": 768
+    },
+    {
+      "step": "destroy-owned-canary",
+      "ms": 1276
+    },
+    {
+      "step": "machine-inventory",
+      "ms": 481
+    }
+  ],
+  "requestedConfig": {
+    "init": {
+      "exec": [
+        "/bin/sleep",
+        "1200"
+      ]
+    },
+    "guest": {
+      "cpu_kind": "shared",
+      "cpus": 2,
+      "memory_mb": 2048
+    },
+    "env": {},
+    "services": [],
+    "restart": {
+      "policy": "no"
+    },
+    "metadata": {
+      "rudder_role": "vfs-remote-qualification",
+      "qualification": "153d602c-3a92-40b1-a755-b5133a5ec87a",
+      "purpose": "remote-paged-readdir-qualification"
+    }
+  },
+  "machine": "85192db2361d98",
+  "instance": "01M676TZB0VGDGG17866PM30RX",
+  "region": "iad",
+  "image": {
+    "registry": "docker-hub-mirror.fly.io",
+    "repository": "library/node",
+    "tag": "22-bookworm-slim",
+    "digest": "sha256:efd0ab5780c2d9ab1f0f869571a00d5edb17793bff4cce4a2792e3eb0ffc7562"
+  },
+  "guest": {
+    "cpu_kind": "shared",
+    "cpus": 2,
+    "memory_mb": 2048
+  },
+  "services": 0,
+  "volumes": 0,
+  "environmentKeys": [],
+  "artifacts": {
+    "format_version": 1,
+    "driverPath": "/workspace/home/.cache/rudder-vfs-readdir-qualification/153d602c-3a92-40b1-a755-b5133a5ec87a/payload/driver",
+    "driverSha256": "5d8256b3ffa8aae7719cc88eb4ea2bab9f6dbd811c968c144f139811394d27af",
+    "payloadPath": "/workspace/home/.cache/rudder-vfs-readdir-qualification/153d602c-3a92-40b1-a755-b5133a5ec87a/payload.tar.gz",
+    "payloadSha256": "1561b3d95d0d5b500b0880f6c335d3b3ea440e315110a1dea51dd2466a861f2d",
+    "sourceManifestSha256": "c9e0e30ed75f8c325c4b34f8f0ddab8bdab41643197e150e66c69ecff0b6f16f",
+    "sourceArchiveSha256": "42a885ae171146b579f6a49dea224c767f2881e1d461c047f2265b03d679b108",
+    "sourceArchiveFiles": 182,
+    "frozenSourceUnchangedAfterBuild": true,
+    "workspaceManifestChanged": false,
+    "buildInfo": {
+      "build_source_sha256": "c9e0e30ed75f8c325c4b34f8f0ddab8bdab41643197e150e66c69ecff0b6f16f",
+      "default": false,
+      "format_version": 1,
+      "qualification": "remote_paged_readdir_v1",
+      "ready": true
+    },
+    "helperInputs": {
+      "src/fabric-fetch.ts": "bc447c08c714db75fb209e05cf8910f57c04ebeb7a64ee610ee15eddfc081baa",
+      "src/fabric-local.ts": "b2fe724449bb32ff17f25bae7727ae23ba9a6191eecbfc5b4d87f3d68e063512",
+      "src/fabric-remote.ts": "2f6d1e4f0c6ac026ec2eaecff44095127a5109a16f61c87144c1ccc16b5ee90c",
+      "src/native-binary.ts": "16f9da98e2836e38cd152d268d9e95f556739a8d303585d49aed3c556573e7d1"
+    },
+    "releaseBuildElapsedMs": 32981
+  },
+  "fixtureTransport": "private Fly6PN HTTP; exact VM source/nonce; compressed artifact SHA256 verified before execution; no credentials",
+  "exitCode": 0,
+  "results": [
+    {
+      "build_source_sha256": "c9e0e30ed75f8c325c4b34f8f0ddab8bdab41643197e150e66c69ecff0b6f16f",
+      "default": false,
+      "format_version": 1,
+      "qualification": "remote_paged_readdir_v1",
+      "ready": true
+    },
+    {
+      "entries": 100101,
+      "phase": "fixture",
+      "uid": 0
+    },
+    {
+      "phase": "mounted_readdir",
+      "results": {
+        "close_reopen_current_snapshot": true,
+        "entries": 100101,
+        "file_or_blob_requests_during_listing": 0,
+        "getdents_calls": 985,
+        "kernel_cursor_cleanup": true,
+        "listing_ms": 25428,
+        "metadata_requests": 1114,
+        "mid_page_cookie": true,
+        "namespace_mutation_fixed_snapshot": true,
+        "stable_seek_rewind": true,
+        "stages": {
+          "cookie_ns": 761892865,
+          "cookies": 100101,
+          "cursor_commit_ns": 124555019,
+          "cursor_commits": 985,
+          "cursor_db_bytes": 5464064,
+          "identity_ns": 787849236,
+          "live_cursors": 1,
+          "namespace_checkpoint_ns": 5013369994,
+          "namespace_commit_ns": 2025160913,
+          "namespace_identity_commits": 982,
+          "overlay_bytes": 0,
+          "overlay_rows": 0,
+          "pages_served": 985,
+          "reserved_bytes": 16716837,
+          "reserved_inodes": 100101,
+          "scan_ns": 16056889791
+        }
+      },
+      "uid": 0
+    },
+    {
+      "build_source_sha256": "c9e0e30ed75f8c325c4b34f8f0ddab8bdab41643197e150e66c69ecff0b6f16f",
+      "busy_unmount_retry": true,
+      "checkpoint_and_observation_rejected": true,
+      "complete_local_pins": 0,
+      "constructor_and_fork_ms": 53,
+      "discard_checkpoint_proof": false,
+      "discard_strictly_closed": true,
+      "entries": 100101,
+      "fixture_ms": 3414,
+      "host_namespace_check_delegated_to_outer_controller": false,
+      "host_namespace_inspection_denied": false,
+      "initial_host_mount_namespace_unchanged": true,
+      "kernel": "6.12.114-fly",
+      "logical_file_bytes": 218103808,
+      "mmap_msync_fsync": true,
+      "ok": true,
+      "open_unlink": true,
+      "origin_rename": true,
+      "partial_cache_bytes": 32923563,
+      "private_copyup_bytes": 131072,
+      "profile": "remote_paged_readdir_v1",
+      "readdir": {
+        "close_reopen_current_snapshot": true,
+        "entries": 100101,
+        "file_or_blob_requests_during_listing": 0,
+        "getdents_calls": 985,
+        "kernel_cursor_cleanup": true,
+        "listing_ms": 25428,
+        "metadata_requests": 1114,
+        "mid_page_cookie": true,
+        "namespace_mutation_fixed_snapshot": true,
+        "stable_seek_rewind": true,
+        "stages": {
+          "cookie_ns": 761892865,
+          "cookies": 100101,
+          "cursor_commit_ns": 124555019,
+          "cursor_commits": 985,
+          "cursor_db_bytes": 5464064,
+          "identity_ns": 787849236,
+          "live_cursors": 1,
+          "namespace_checkpoint_ns": 5013369994,
+          "namespace_commit_ns": 2025160913,
+          "namespace_identity_commits": 982,
+          "overlay_bytes": 0,
+          "overlay_rows": 0,
+          "pages_served": 985,
+          "reserved_bytes": 16716837,
+          "reserved_inodes": 100101,
+          "scan_ns": 16056889791
+        }
+      },
+      "root_receipt_requests": 2,
+      "runtime_hardlinks": true,
+      "sibling_isolation": true,
+      "source_object_requests": 1126,
+      "source_payload_bytes": 8388608,
+      "source_payload_requests": 2,
+      "source_transport": "persistent Node helper + loopback authenticated HTTP fixture",
+      "stale_lookup_rejected": true,
+      "uid": 0
+    },
+    {
+      "owned_fixture_removed": true,
+      "uid": 0
+    },
+    {
+      "entries": 100101,
+      "phase": "fixture",
+      "uid": 1500
+    },
+    {
+      "phase": "mounted_readdir",
+      "results": {
+        "close_reopen_current_snapshot": true,
+        "entries": 100101,
+        "file_or_blob_requests_during_listing": 0,
+        "getdents_calls": 985,
+        "kernel_cursor_cleanup": true,
+        "listing_ms": 24189,
+        "metadata_requests": 1114,
+        "mid_page_cookie": true,
+        "namespace_mutation_fixed_snapshot": true,
+        "stable_seek_rewind": true,
+        "stages": {
+          "cookie_ns": 745000816,
+          "cookies": 100101,
+          "cursor_commit_ns": 131344455,
+          "cursor_commits": 985,
+          "cursor_db_bytes": 5464064,
+          "identity_ns": 784810925,
+          "live_cursors": 1,
+          "namespace_checkpoint_ns": 4019836417,
+          "namespace_commit_ns": 1712464677,
+          "namespace_identity_commits": 982,
+          "overlay_bytes": 0,
+          "overlay_rows": 0,
+          "pages_served": 985,
+          "reserved_bytes": 16716837,
+          "reserved_inodes": 100101,
+          "scan_ns": 16130184016
+        }
+      },
+      "uid": 1500
+    },
+    {
+      "build_source_sha256": "c9e0e30ed75f8c325c4b34f8f0ddab8bdab41643197e150e66c69ecff0b6f16f",
+      "busy_unmount_retry": true,
+      "checkpoint_and_observation_rejected": true,
+      "complete_local_pins": 0,
+      "constructor_and_fork_ms": 81,
+      "discard_checkpoint_proof": false,
+      "discard_strictly_closed": true,
+      "entries": 100101,
+      "fixture_ms": 3575,
+      "host_namespace_check_delegated_to_outer_controller": true,
+      "host_namespace_inspection_denied": true,
+      "initial_host_mount_namespace_unchanged": false,
+      "kernel": "6.12.114-fly",
+      "logical_file_bytes": 218103808,
+      "mmap_msync_fsync": true,
+      "ok": true,
+      "open_unlink": true,
+      "origin_rename": true,
+      "partial_cache_bytes": 32923563,
+      "private_copyup_bytes": 131072,
+      "profile": "remote_paged_readdir_v1",
+      "readdir": {
+        "close_reopen_current_snapshot": true,
+        "entries": 100101,
+        "file_or_blob_requests_during_listing": 0,
+        "getdents_calls": 985,
+        "kernel_cursor_cleanup": true,
+        "listing_ms": 24189,
+        "metadata_requests": 1114,
+        "mid_page_cookie": true,
+        "namespace_mutation_fixed_snapshot": true,
+        "stable_seek_rewind": true,
+        "stages": {
+          "cookie_ns": 745000816,
+          "cookies": 100101,
+          "cursor_commit_ns": 131344455,
+          "cursor_commits": 985,
+          "cursor_db_bytes": 5464064,
+          "identity_ns": 784810925,
+          "live_cursors": 1,
+          "namespace_checkpoint_ns": 4019836417,
+          "namespace_commit_ns": 1712464677,
+          "namespace_identity_commits": 982,
+          "overlay_bytes": 0,
+          "overlay_rows": 0,
+          "pages_served": 985,
+          "reserved_bytes": 16716837,
+          "reserved_inodes": 100101,
+          "scan_ns": 16130184016
+        }
+      },
+      "root_receipt_requests": 2,
+      "runtime_hardlinks": true,
+      "sibling_isolation": true,
+      "source_object_requests": 1126,
+      "source_payload_bytes": 8388608,
+      "source_payload_requests": 2,
+      "source_transport": "persistent Node helper + loopback authenticated HTTP fixture",
+      "stale_lookup_rejected": true,
+      "uid": 1500
+    },
+    {
+      "owned_fixture_removed": true,
+      "uid": 1500
+    },
+    {
+      "outer_initial_mount_namespace_unchanged": true,
+      "device_group": 1500,
+      "device_mode": "0660",
+      "owned_fixture_directories_absent": true,
+      "setuid_helper_installed": false
+    }
+  ],
+  "ok": true,
+  "cleanupVerified": true,
+  "verifiedAt": "2026-10-30T20:10:24.640Z"
+}

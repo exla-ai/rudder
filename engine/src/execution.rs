@@ -4,12 +4,19 @@
 //! authority stays outside the agent root. A scoped broker directory may be
 //! projected read-only; the helper never opens an agent's journal for MCP.
 use crate::{
-    protocol::{OwnerEpoch, FORMAT_VERSION},
-    vfs::VfsCheckpoint,
+    protocol::OwnerEpoch,
+    vfs::{
+        rpc::{AdoptionWitness, AttemptAuthority, ObservationBinding},
+        VfsCheckpoint,
+    },
 };
 use anyhow::{ensure, Result};
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeMap, path::PathBuf};
+use std::{
+    collections::BTreeMap,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 use uuid::Uuid;
 
 #[cfg(target_os = "linux")]
@@ -48,7 +55,237 @@ pub struct ExecutionSpec {
     /// broker.sock. Binding the directory preserves rotation/restart visibility.
     pub broker_directory: Option<PathBuf>,
     pub broker_binding: Option<BrokerBinding>,
+    /// Explicit v2 profile. Omitted v1 bytes retain their original canonical
+    /// request identity; old helpers reject this unknown field/version.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_observation: Option<WorkspaceObservationProfile>,
     pub timeout_seconds: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkspaceObservationProfile {
+    pub binding: ObservationBinding,
+    /// Trusted engine-selected short private projection. Contains only this
+    /// workspace identity and socket; no CAS or authority database is bound.
+    pub endpoint_directory: PathBuf,
+    /// Explicit v3 application. None keeps v1/v2 request bytes unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub application: Option<HelperApplicationSpec>,
+}
+
+/// A protected local file, not an object published into shared CAS. Its exact
+/// bytes are bound by the trusted sealed execution specification.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProtectedHostContextRef {
+    pub format_version: u32,
+    pub path: PathBuf,
+    pub sha256: String,
+    pub size_bytes: u64,
+}
+impl ProtectedHostContextRef {
+    pub fn validate(&self) -> Result<()> {
+        ensure!(
+            self.format_version == 1,
+            "unsupported protected context reference"
+        );
+        ensure!(
+            self.size_bytes > 0 && self.size_bytes <= 256 * 1024,
+            "protected host context exceeds256KiB"
+        );
+        ensure!(
+            self.sha256.len() == 64
+                && self
+                    .sha256
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
+            "invalid protected host context digest"
+        );
+        safe_absolute(&self.path)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HelperApplicationSpec {
+    pub format_version: u32,
+    pub kind: String,
+    pub host_context: ProtectedHostContextRef,
+    /// Dedicated private endpoint directory; never a private metadata/CAS root.
+    pub projection_directory: PathBuf,
+}
+impl HelperApplicationSpec {
+    pub fn validate(&self) -> Result<()> {
+        ensure!(
+            self.format_version == 1,
+            "unsupported helper application specification"
+        );
+        ensure!(
+            !self.kind.is_empty()
+                && self.kind.len() <= 48
+                && self
+                    .kind
+                    .bytes()
+                    .enumerate()
+                    .all(|(i, b)| b.is_ascii_lowercase()
+                        || i > 0 && (b.is_ascii_digit() || b == b'-')),
+            "invalid helper application kind"
+        );
+        self.host_context.validate()?;
+        safe_absolute(&self.projection_directory)
+    }
+    pub fn guest_directory(&self) -> String {
+        format!("/run/rudder/services/{}", self.kind)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ServiceProjectionKind {
+    File { max_size_bytes: u64 },
+    Socket,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ServiceProjectionEntry {
+    pub name: String,
+    pub node: ServiceProjectionKind,
+}
+/// Constructed by a trusted application only after its owning workspace RPC is
+/// ready. This is carried in the helper's sealed child payload, never peer data.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GuestServiceProjection {
+    pub directory: PathBuf,
+    pub entries: Vec<ServiceProjectionEntry>,
+    pub environment: BTreeMap<String, String>,
+}
+impl GuestServiceProjection {
+    pub fn validate(&self, spec: &ExecutionSpec) -> Result<()> {
+        let application = spec
+            .workspace_observation
+            .as_ref()
+            .and_then(|w| w.application.as_ref())
+            .ok_or_else(|| anyhow::anyhow!("application projection has no sealed assignment"))?;
+        ensure!(
+            self.directory == application.projection_directory,
+            "application projection changed its sealed directory"
+        );
+        ensure!(
+            !self.entries.is_empty() && self.entries.len() <= 8,
+            "application projection entry count exceeds bound"
+        );
+        let mut names = std::collections::BTreeSet::new();
+        for entry in &self.entries {
+            ensure!(
+                !entry.name.is_empty()
+                    && entry.name.len() <= 64
+                    && !entry.name.starts_with('.')
+                    && entry
+                        .name
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+                    && names.insert(&entry.name),
+                "unsafe or duplicate application projection name"
+            );
+            if let ServiceProjectionKind::File { max_size_bytes } = entry.node {
+                ensure!(
+                    max_size_bytes > 0 && max_size_bytes <= 64 * 1024,
+                    "application projection file exceeds64KiB"
+                );
+            }
+        }
+        ensure!(
+            self.environment.len() <= 8,
+            "application environment exceeds8 entries"
+        );
+        for (key, value) in &self.environment {
+            ensure!(
+                key.starts_with("RUDDER_")
+                    && key.len() <= 128
+                    && key
+                        .bytes()
+                        .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_'),
+                "application environment key is not namespaced"
+            );
+            ensure!(
+                ![
+                    "RUDDER_AGENT_",
+                    "RUDDER_WORKSPACE_",
+                    "RUDDER_EXECUTION_",
+                    "RUDDER_FABRIC_",
+                    "RUDDER_ENGINE"
+                ]
+                .iter()
+                .any(|prefix| key.starts_with(prefix)),
+                "application cannot override execution authority environment"
+            );
+            ensure!(
+                value.len() <= 4096
+                    && !value.contains('\0')
+                    && spec
+                        .environment
+                        .get(key)
+                        .is_none_or(|existing| existing == value),
+                "application environment conflicts with sealed request"
+            );
+        }
+        Ok(())
+    }
+}
+
+pub struct WorkspaceRpcReady<'a> {
+    pub binding: &'a ObservationBinding,
+    pub socket: &'a Path,
+    pub identity_file: &'a Path,
+    pub application: &'a HelperApplicationSpec,
+}
+pub trait HelperFinalizationGuard: Send {}
+impl<T: Send> HelperFinalizationGuard for T {}
+/// Implemented by trusted native code. It is not deserializable or guest
+/// selectable. The returned guard must own the actual writer fence until the
+/// checkpoint AND execution record are durably published.
+pub trait HelperApplication: Send {
+    fn start(&mut self, ready: &WorkspaceRpcReady<'_>) -> Result<GuestServiceProjection>;
+    fn close_ingress(&self);
+    fn quiesce(&mut self) -> Result<Box<dyn HelperFinalizationGuard>>;
+}
+
+fn safe_absolute(path: &Path) -> Result<()> {
+    use std::path::Component;
+    ensure!(
+        path.is_absolute()
+            && path != Path::new("/")
+            && !path.as_os_str().as_encoded_bytes().contains(&0)
+            && path
+                .components()
+                .all(|c| matches!(c, Component::RootDir | Component::Normal(_))),
+        "unsafe protected application path"
+    );
+    Ok(())
+}
+
+pub const WORKSPACE_GUEST_DIRECTORY: &str = "/run/rudder/workspace";
+pub const WORKSPACE_GUEST_SOCKET: &str = "/run/rudder/workspace/workspace.sock";
+pub const WORKSPACE_GUEST_IDENTITY: &str = "/run/rudder/workspace/identity.json";
+
+pub struct HelperServices {
+    pub workspace_authority: Arc<dyn AttemptAuthority>,
+    pub adoption_witness: Option<Arc<dyn AdoptionWitness>>,
+    pub application: Option<Box<dyn HelperApplication>>,
+}
+/// Invoked only AFTER fresh single-thread namespace entry. Constructing this
+/// closure must not spawn threads; neither may sealed-spec handoff preparation.
+pub type HelperServicesFactory = Box<dyn FnOnce(&ExecutionSpec) -> Result<HelperServices>>;
+
+pub fn workspace_scope(binding: &ObservationBinding) -> Result<String> {
+    use sha2::{Digest, Sha256};
+    binding.validate()?;
+    Ok(format!(
+        "workspace:{}",
+        hex::encode(Sha256::digest(crate::protocol::canonical_json(binding)?))
+    ))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -114,8 +351,16 @@ pub struct ExecutionIsolation {
 }
 impl ExecutionSpec {
     pub fn validate(&self) -> Result<()> {
+        let application = self
+            .workspace_observation
+            .as_ref()
+            .and_then(|w| w.application.as_ref());
         ensure!(
-            self.format_version == FORMAT_VERSION,
+            (self.format_version == 1 && self.workspace_observation.is_none())
+                || (self.format_version == 2
+                    && self.workspace_observation.is_some()
+                    && application.is_none())
+                || (self.format_version == 3 && application.is_some()),
             "unsupported execution specification"
         );
         for id in [&self.execution_id, &self.operation_id, &self.view_id] {
@@ -125,6 +370,38 @@ impl ExecutionSpec {
             );
         }
         self.owner.validate()?;
+        if let Some(workspace) = &self.workspace_observation {
+            if let Some(application) = &workspace.application {
+                application.validate()?;
+            }
+            workspace.binding.validate()?;
+            ensure!(
+                workspace.binding.attempt.execution_id == self.execution_id
+                    && workspace.binding.attempt.operation_id == self.operation_id
+                    && workspace.binding.view_id == self.view_id
+                    && workspace.binding.owner == self.owner,
+                "workspace observation binding differs from execution"
+            );
+            ensure!(
+                self.broker_directory.is_some() && self.broker_binding.is_some(),
+                "workspace observations require a current scoped agent broker"
+            );
+            ensure!(
+                workspace.endpoint_directory.is_absolute()
+                    && workspace.endpoint_directory.components().all(|c| matches!(
+                        c,
+                        std::path::Component::RootDir | std::path::Component::Normal(_)
+                    ))
+                    && workspace
+                        .endpoint_directory
+                        .join("workspace.sock")
+                        .as_os_str()
+                        .as_encoded_bytes()
+                        .len()
+                        < 100,
+                "workspace endpoint requires a short normalized absolute path"
+            );
+        }
         ensure!(
             self.broker_directory.is_some() == self.broker_binding.is_some(),
             "broker projection requires its explicit attempt binding"
@@ -197,12 +474,17 @@ pub fn capabilities() -> serde_json::Value {
     serde_json::json!({
         "format_version":1,"platform":"linux","requires":"fresh UID1500 helper + boot-granted /dev/fuse access",
         "authority":"trusted engine spec, per-view owner epoch; no journal mounted",
+        "execution_spec_versions":[1,2,3],"workspace_observation":"explicit v2 profile; v3 adds protected application context; qualified broker authorization required; default off",
         "network_isolated":false,"cgroup_limited":false,"macos_default_changed":false
     })
 }
 
 pub fn run_helper(spec: ExecutionSpec) -> Result<ExecutionOutcome> {
     spec.validate()?;
+    ensure!(
+        spec.workspace_observation.is_none(),
+        "workspace observation requires a qualified live authority factory"
+    );
     #[cfg(target_os = "linux")]
     {
         linux::run_helper(spec)
@@ -210,6 +492,22 @@ pub fn run_helper(spec: ExecutionSpec) -> Result<ExecutionOutcome> {
     #[cfg(not(target_os = "linux"))]
     {
         let _ = spec;
+        anyhow::bail!("restricted execution is supported only on qualified Linux workers")
+    }
+}
+
+pub fn run_helper_with_services(
+    spec: ExecutionSpec,
+    factory: HelperServicesFactory,
+) -> Result<ExecutionOutcome> {
+    spec.validate()?;
+    #[cfg(target_os = "linux")]
+    {
+        linux::run_helper_with_services(spec, factory)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (spec, factory);
         anyhow::bail!("restricted execution is supported only on qualified Linux workers")
     }
 }

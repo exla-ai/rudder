@@ -57,15 +57,22 @@ pub fn read_spec_fd(fd: OwnedFd) -> Result<ExecutionSpec> {
     Ok(spec)
 }
 pub fn run_helper(_spec: ExecutionSpec) -> Result<ExecutionOutcome> {
-    supervisor(_spec)
+    supervisor(_spec, None)
+}
+pub fn run_helper_with_services(
+    spec: ExecutionSpec,
+    factory: HelperServicesFactory,
+) -> Result<ExecutionOutcome> {
+    supervisor(spec, Some(factory))
 }
 
 use super::{root::Layout, state::State};
 use crate::{
     store::LocalStore,
     vfs::{
-        linux::{mount, PrivateMountNamespace},
-        VfsManager,
+        linux::{mount, MountedVfs, PrivateMountNamespace},
+        rpc::{ObservationRpc, RpcConfig, RpcLimits},
+        VfsManager, VfsView,
     },
 };
 use std::{
@@ -78,14 +85,283 @@ use std::{
         },
     },
     process::{Command, Stdio},
+    sync::atomic::{AtomicBool, Ordering},
     time::{Duration, Instant},
 };
+
+const AUTHORIZATION_POLL: Duration = Duration::from_millis(100);
+const AUTHORIZATION_SETTLE: Duration = Duration::from_secs(3);
+
+struct LiveAuthority {
+    source: Arc<dyn AttemptAuthority>,
+    binding: ObservationBinding,
+    revoked: AtomicBool,
+}
+impl AttemptAuthority for LiveAuthority {
+    fn validate(&self, binding: &ObservationBinding) -> Result<()> {
+        ensure!(
+            binding == &self.binding && !self.cancelled(),
+            "workspace attempt is no longer authorized"
+        );
+        if self.source.validate(binding).is_err() {
+            self.revoked.store(true, Ordering::Release);
+            anyhow::bail!("workspace attempt authorization failed or became unavailable");
+        }
+        ensure!(
+            !self.cancelled(),
+            "workspace attempt was revoked during authentication"
+        );
+        Ok(())
+    }
+    fn cancelled(&self) -> bool {
+        self.revoked.load(Ordering::Acquire) || self.source.cancelled()
+    }
+}
+struct AuthorityMonitor {
+    authority: Arc<LiveAuthority>,
+    stop: Arc<AtomicBool>,
+    done: std::sync::mpsc::Receiver<()>,
+}
+impl AuthorityMonitor {
+    fn start(source: Arc<dyn AttemptAuthority>, binding: ObservationBinding) -> Result<Self> {
+        let authority = Arc::new(LiveAuthority {
+            source,
+            binding,
+            revoked: AtomicBool::new(false),
+        });
+        authority.validate(&authority.binding)?;
+        let stop = Arc::new(AtomicBool::new(false));
+        let (send, done) = std::sync::mpsc::sync_channel(1);
+        let (running, stopped) = (authority.clone(), stop.clone());
+        std::thread::Builder::new()
+            .name("rudder-workspace-authority".into())
+            .spawn(move || {
+                while !stopped.load(Ordering::Acquire) {
+                    if running.source.cancelled()
+                        || running.source.validate(&running.binding).is_err()
+                    {
+                        running.revoked.store(true, Ordering::Release);
+                        break;
+                    }
+                    let deadline = Instant::now() + AUTHORIZATION_POLL;
+                    while !stopped.load(Ordering::Acquire) && Instant::now() < deadline {
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                }
+                let _ = send.send(());
+            })?;
+        Ok(Self {
+            authority,
+            stop,
+            done,
+        })
+    }
+    fn check(&self) -> Result<()> {
+        ensure!(
+            !self.authority.cancelled(),
+            "workspace authority retired; execution cannot acknowledge a checkpoint"
+        );
+        Ok(())
+    }
+    fn finish(&self) -> Result<()> {
+        self.authority.validate(&self.authority.binding)?;
+        self.stop.store(true, Ordering::Release);
+        self.done
+            .recv_timeout(AUTHORIZATION_SETTLE)
+            .context("workspace authority monitor did not settle")?;
+        self.authority.validate(&self.authority.binding)
+    }
+}
+impl Drop for AuthorityMonitor {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+    }
+}
+
+struct ExecutionMount {
+    mounted: Option<MountedVfs>,
+    rpc: Option<ObservationRpc>,
+    application: Option<ApplicationLifecycle>,
+}
+struct ApplicationLifecycle {
+    service: Box<dyn HelperApplication>,
+    settlement_attempted: bool,
+    guard: Option<Box<dyn HelperFinalizationGuard>>,
+}
+impl ApplicationLifecycle {
+    fn new(service: Box<dyn HelperApplication>) -> Self {
+        Self {
+            service,
+            settlement_attempted: false,
+            guard: None,
+        }
+    }
+    fn quiesce(&mut self) -> Result<()> {
+        self.service.close_ingress();
+        if self.guard.is_some() {
+            return Ok(());
+        }
+        ensure!(
+            !self.settlement_attempted,
+            "application settlement previously failed; finalization remains fenced"
+        );
+        self.settlement_attempted = true;
+        self.guard = Some(self.service.quiesce()?);
+        Ok(())
+    }
+}
+impl ExecutionMount {
+    fn close_application(&mut self) -> Result<()> {
+        if let Some(application) = &mut self.application {
+            application.quiesce()?;
+        }
+        Ok(())
+    }
+    fn close_rpc(&self) -> Result<()> {
+        if let Some(rpc) = &self.rpc {
+            rpc.await_closed(Duration::from_secs(35))?;
+        }
+        Ok(())
+    }
+    fn unmount(&mut self) -> Result<VfsView> {
+        self.close_application()?;
+        self.close_rpc()?;
+        self.mounted
+            .as_mut()
+            .context("execution mount absent")?
+            .unmount()
+    }
+}
+impl Drop for ExecutionMount {
+    fn drop(&mut self) {
+        if self.close_application().is_err() || self.close_rpc().is_err() {
+            // Never run a controlled unmount while an observation effect still
+            // owns the view. Leave it fenced until this fresh helper exits;
+            // kernel/process cleanup is a failure, never checkpoint proof.
+            if let Some(mounted) = self.mounted.take() {
+                std::mem::forget(mounted);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod application_lifecycle_tests {
+    use super::*;
+    use fs2::FileExt;
+    use std::sync::atomic::AtomicUsize;
+
+    struct Fence {
+        _file: File,
+        dropped: Arc<AtomicBool>,
+    }
+    impl Drop for Fence {
+        fn drop(&mut self) {
+            self.dropped.store(true, Ordering::Release);
+        }
+    }
+    struct Service {
+        file: Option<File>,
+        attempts: Arc<AtomicUsize>,
+        closed: Arc<AtomicBool>,
+        dropped: Arc<AtomicBool>,
+        fail: bool,
+    }
+    impl HelperApplication for Service {
+        fn start(&mut self, _ready: &WorkspaceRpcReady<'_>) -> Result<GuestServiceProjection> {
+            anyhow::bail!("unused without a real owning RPC")
+        }
+        fn close_ingress(&self) {
+            self.closed.store(true, Ordering::Release);
+        }
+        fn quiesce(&mut self) -> Result<Box<dyn HelperFinalizationGuard>> {
+            assert!(self.closed.load(Ordering::Acquire));
+            self.attempts.fetch_add(1, Ordering::AcqRel);
+            ensure!(!self.fail, "deliberate unsettled application");
+            let file = self.file.take().unwrap();
+            file.try_lock_exclusive()?;
+            Ok(Box::new(Fence {
+                _file: file,
+                dropped: self.dropped.clone(),
+            }))
+        }
+    }
+    #[test]
+    fn finalization_owns_real_writer_fence_until_after_durable_record() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("writer.lock");
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .unwrap();
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let closed = Arc::new(AtomicBool::new(false));
+        let dropped = Arc::new(AtomicBool::new(false));
+        let service = Service {
+            file: Some(file),
+            attempts: attempts.clone(),
+            closed: closed.clone(),
+            dropped: dropped.clone(),
+            fail: false,
+        };
+        let mut mounted = ExecutionMount {
+            mounted: None,
+            rpc: None,
+            application: Some(ApplicationLifecycle::new(Box::new(service))),
+        };
+        mounted.close_application().unwrap();
+        assert!(closed.load(Ordering::Acquire));
+        let observer = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        assert!(observer.try_lock_exclusive().is_err());
+        let record = root.path().join("execution-record.json");
+        fs::write(&record, b"{\"phase\":\"checkpointed\"}").unwrap();
+        File::open(&record).unwrap().sync_all().unwrap();
+        File::open(root.path()).unwrap().sync_all().unwrap();
+        assert!(!dropped.load(Ordering::Acquire));
+        assert!(observer.try_lock_exclusive().is_err());
+        drop(mounted);
+        assert!(dropped.load(Ordering::Acquire));
+        observer.try_lock_exclusive().unwrap();
+        assert_eq!(attempts.load(Ordering::Acquire), 1);
+    }
+    #[test]
+    fn failed_settlement_is_not_retried_or_promoted_to_success_on_drop() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let closed = Arc::new(AtomicBool::new(false));
+        let dropped = Arc::new(AtomicBool::new(false));
+        let service = Service {
+            file: None,
+            attempts: attempts.clone(),
+            closed,
+            dropped: dropped.clone(),
+            fail: true,
+        };
+        let mut mounted = ExecutionMount {
+            mounted: None,
+            rpc: None,
+            application: Some(ApplicationLifecycle::new(Box::new(service))),
+        };
+        assert!(mounted.close_application().is_err());
+        assert!(mounted.close_application().is_err());
+        drop(mounted);
+        assert_eq!(attempts.load(Ordering::Acquire), 1);
+        assert!(!dropped.load(Ordering::Acquire));
+    }
+}
 
 #[derive(Serialize, Deserialize)]
 struct ChildSpec {
     spec: ExecutionSpec,
     layout: Layout,
     nonce: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    application_projection: Option<GuestServiceProjection>,
 }
 #[derive(Serialize, Deserialize)]
 struct InitReport {
@@ -141,7 +417,10 @@ fn proof() -> ExecutionIsolation {
         cgroup_limited: false,
     }
 }
-fn supervisor(spec: ExecutionSpec) -> Result<ExecutionOutcome> {
+fn supervisor(
+    spec: ExecutionSpec,
+    factory: Option<HelperServicesFactory>,
+) -> Result<ExecutionOutcome> {
     spec.validate()?;
     ensure!(
         unsafe { libc::geteuid() } == 1500 && unsafe { libc::getegid() } == 1500,
@@ -159,6 +438,32 @@ fn supervisor(spec: ExecutionSpec) -> Result<ExecutionOutcome> {
         unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0) } == 0,
         "cannot protect supervisor descriptors"
     );
+    // Factories and all authority/FUSE/RPC threads start only after the required
+    // fresh single-thread namespace transition above. No native App enters here.
+    let mut services = if spec.workspace_observation.is_some() {
+        Some(factory.context(
+            "workspace helper lacks a qualified authority factory",
+        )?(&spec)?)
+    } else {
+        None
+    };
+    let expected_application = spec
+        .workspace_observation
+        .as_ref()
+        .and_then(|w| w.application.as_ref());
+    ensure!(
+        expected_application.is_some()
+            == services.as_ref().is_some_and(|s| s.application.is_some()),
+        "application specification has no matching trusted factory"
+    );
+    let monitor = match (&spec.workspace_observation, &services) {
+        (Some(workspace), Some(services)) => Some(AuthorityMonitor::start(
+            services.workspace_authority.clone(),
+            workspace.binding.clone(),
+        )?),
+        (None, None) => None,
+        _ => anyhow::bail!("workspace helper service/profile mismatch"),
+    };
     unsafe {
         libc::signal(libc::SIGTTOU, libc::SIG_IGN);
     }
@@ -169,6 +474,9 @@ fn supervisor(spec: ExecutionSpec) -> Result<ExecutionOutcome> {
             state.record.checkpoint.is_some(),
             "checkpointed execution lacks retained root"
         );
+        if let Some(monitor) = &monitor {
+            monitor.finish()?;
+        }
         return Ok(ExecutionOutcome {
             record: state.record,
             isolation: proof(),
@@ -195,7 +503,65 @@ fn supervisor(spec: ExecutionSpec) -> Result<ExecutionOutcome> {
         super::root::seed_home(&layout, &spec)?;
         let lease = manager.store().begin_staging(Duration::from_secs(3600))?;
         let result = (|| -> Result<ExecutionOutcome> {
-            let mut mounted = mount(view, &mountpoint, &namespace)?;
+            let mut mounted = ExecutionMount {
+                mounted: Some(mount(view.clone(), &mountpoint, &namespace)?),
+                rpc: None,
+                application: services
+                    .as_mut()
+                    .and_then(|s| s.application.take())
+                    .map(ApplicationLifecycle::new),
+            };
+            if let Some(workspace) = &spec.workspace_observation {
+                let services = services.as_ref().context("workspace services absent")?;
+                let authority = monitor
+                    .as_ref()
+                    .context("workspace monitor absent")?
+                    .authority
+                    .clone();
+                let rpc = ObservationRpc::bind(
+                    view.clone(),
+                    RpcConfig {
+                        attempt: workspace.binding.attempt.clone(),
+                        profile: workspace.binding.profile.clone(),
+                        authority,
+                        adoption_witness: services.adoption_witness.clone(),
+                        limits: RpcLimits::default(),
+                    },
+                    &workspace.endpoint_directory,
+                )?;
+                mounted.rpc = Some(rpc);
+                ensure!(
+                    mounted.rpc.as_ref().unwrap().binding() == &workspace.binding,
+                    "mounted workspace differs from the sealed observation assignment"
+                );
+                super::root::validate_workspace_projection(workspace)?;
+            }
+            let application_projection = if let Some(application) = &mut mounted.application {
+                let workspace = spec
+                    .workspace_observation
+                    .as_ref()
+                    .context("application workspace absent")?;
+                let rpc = mounted
+                    .rpc
+                    .as_ref()
+                    .context("application requires the owning workspace RPC")?;
+                let projection = application.service.start(&WorkspaceRpcReady {
+                    binding: rpc.binding(),
+                    socket: rpc.socket_path(),
+                    identity_file: &workspace.endpoint_directory.join("identity.json"),
+                    application: workspace
+                        .application
+                        .as_ref()
+                        .context("application assignment absent")?,
+                })?;
+                super::root::validate_application_projection(&spec, &projection)?;
+                if let Some(monitor) = &monitor {
+                    monitor.check()?;
+                }
+                Some(projection)
+            } else {
+                None
+            };
             let nonce = Uuid::new_v4().to_string();
             let mut projected = spec.clone();
             projected.home_files.clear();
@@ -203,6 +569,7 @@ fn supervisor(spec: ExecutionSpec) -> Result<ExecutionOutcome> {
                 spec: projected,
                 layout,
                 nonce: nonce.clone(),
+                application_projection,
             };
             let payload = sealed_payload(&childspec)?;
             let (mut receive, send) = UnixStream::pair()?;
@@ -241,6 +608,9 @@ fn supervisor(spec: ExecutionSpec) -> Result<ExecutionOutcome> {
             let began = Instant::now();
             let mut renewed = Instant::now();
             let status = loop {
+                if let Some(monitor) = &monitor {
+                    monitor.check()?;
+                }
                 if let Some(status) = child.try_wait()? {
                     guard.0 = 0;
                     break status;
@@ -279,6 +649,13 @@ fn supervisor(spec: ExecutionSpec) -> Result<ExecutionOutcome> {
                 unsafe {
                     libc::tcsetpgrp(0, libc::getpgrp());
                 }
+            }
+            // The application keeps its owned finalization guard in `mounted`
+            // through RPC/FUSE drain, retained checkpoint and record fsync.
+            mounted.close_application()?;
+            mounted.close_rpc()?;
+            if let Some(monitor) = &monitor {
+                monitor.finish()?;
             }
             let view = mounted.unmount()?;
             let checkpoint = view.checkpoint_snapshot_unmounted()?;
@@ -495,7 +872,21 @@ fn namespace_init(payload: &ChildSpec, parent: RawFd) -> Result<i32> {
     unsafe {
         libc::signal(libc::SIGTTOU, libc::SIG_IGN);
     }
-    super::root::restrict(&payload.layout, &payload.spec)?;
+    ensure!(
+        payload
+            .spec
+            .workspace_observation
+            .as_ref()
+            .and_then(|w| w.application.as_ref())
+            .is_some()
+            == payload.application_projection.is_some(),
+        "sealed application/guest projection mismatch"
+    );
+    super::root::restrict(
+        &payload.layout,
+        &payload.spec,
+        payload.application_projection.as_ref(),
+    )?;
     let mut command = Command::new(&payload.spec.command[0]);
     command
         .args(&payload.spec.command[1..])
@@ -510,8 +901,12 @@ fn namespace_init(payload: &ChildSpec, parent: RawFd) -> Result<i32> {
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
+    if let Some(application) = &payload.application_projection {
+        application.validate(&payload.spec)?;
+        command.envs(&application.environment);
+    }
     if !payload.spec.environment.contains_key("PATH") {
-        command.env("PATH", "/usr/bin:/bin");
+        command.env("PATH", "/usr/local/bin:/usr/bin:/bin");
     }
     if !payload.spec.environment.contains_key("TERM") {
         command.env("TERM", "xterm-256color");
@@ -523,6 +918,16 @@ fn namespace_init(payload: &ChildSpec, parent: RawFd) -> Result<i32> {
                 "/run/rudder/agent/broker.sock",
             )
             .env("RUDDER_AGENT_IDENTITY", "/run/rudder/agent/identity.json");
+    }
+    if let Some(workspace) = &payload.spec.workspace_observation {
+        command
+            .env("RUDDER_WORKSPACE_SOCKET", WORKSPACE_GUEST_SOCKET)
+            .env("RUDDER_WORKSPACE_IDENTITY", WORKSPACE_GUEST_IDENTITY)
+            .env(
+                "RUDDER_WORKSPACE_BINDING",
+                crate::protocol::canonical_json(&workspace.binding)
+                    .map(|bytes| String::from_utf8(bytes).expect("canonical JSON is UTF-8"))?,
+            );
     }
     unsafe {
         command.pre_exec(|| {
@@ -615,5 +1020,67 @@ impl Drop for ProcessGuard {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod authority_monitor_tests {
+    use super::*;
+    struct TestAuthority(Arc<AtomicBool>);
+    impl AttemptAuthority for TestAuthority {
+        fn validate(&self, _: &ObservationBinding) -> Result<()> {
+            ensure!(self.0.load(Ordering::Acquire), "test authority revoked");
+            Ok(())
+        }
+    }
+    fn binding() -> ObservationBinding {
+        ObservationBinding {
+            format_version: 1,
+            attempt: crate::vfs::rpc::AttemptContext {
+                execution_id: Uuid::new_v4().to_string(),
+                operation_id: Uuid::new_v4().to_string(),
+            },
+            view_id: Uuid::new_v4().to_string(),
+            owner: OwnerEpoch {
+                owner: "monitor-test".into(),
+                epoch: 1,
+            },
+            namespace: Uuid::new_v4().to_string(),
+            profile: crate::protocol::ObjectRef::from_bytes(
+                crate::protocol::ObjectKind::Blob,
+                b"test",
+            ),
+            exclusion_policy_digest: "a".repeat(64),
+        }
+    }
+    #[test]
+    fn observed_authority_loss_is_sticky_and_never_revives_the_same_attempt() {
+        // This pure monitor fixture does not enter a namespace or touch mounts.
+        // Production constructs it only from the post-entry factory path.
+        let live = Arc::new(AtomicBool::new(true));
+        let monitor =
+            AuthorityMonitor::start(Arc::new(TestAuthority(live.clone())), binding()).unwrap();
+        live.store(false, Ordering::Release);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !monitor.authority.cancelled() {
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        live.store(true, Ordering::Release);
+        assert!(monitor
+            .authority
+            .validate(&monitor.authority.binding)
+            .is_err());
+        assert!(monitor.check().is_err());
+        monitor.stop.store(true, Ordering::Release);
+        monitor.done.recv_timeout(AUTHORIZATION_SETTLE).unwrap();
+    }
+    #[test]
+    fn denied_initial_authority_cannot_start_a_monitor_or_create_an_authorized_attempt() {
+        assert!(AuthorityMonitor::start(
+            Arc::new(TestAuthority(Arc::new(AtomicBool::new(false)))),
+            binding()
+        )
+        .is_err());
     }
 }

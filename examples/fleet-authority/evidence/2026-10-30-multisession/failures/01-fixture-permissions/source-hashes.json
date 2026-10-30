@@ -1,0 +1,8 @@
+{
+  "docs/architecture/fleet-authority.md": "159365ea13d9a49c625fb8a2078b3ed4a2f6c2697a9ae70bfc6bf962f849afbe",
+  "examples/fleet-authority/schema.sql": "00be37c55bd40fbd10a4b0477a7391360c822860607e625d64c81b50727da75a",
+  "examples/fleet-authority/qualify.mjs": "0def660b62167d11e3a3804274ae1f116e40b60f5de79205bc97818efbfcde2b",
+  "examples/fleet-authority/qualify-protocol.sql": "b5c2bef25ed95c9e66554bf8257976997a62dc08d8038a5e65e7dbd199226cd2",
+  "examples/fleet-authority/qualify-guest.sh": "7b66b8d0ae0d73a46d3e31935f96f45b489ec7585bd16284ed895c35e80f68e8",
+  "documented-updates.sql": "c0dd48fbc2f66e75ad6141801bb55bfa8dceb97d88d122a9391fcdd7030cb220"
+}

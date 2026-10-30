@@ -29,14 +29,14 @@ jobs:
           path: |
             target
             ~/.cargo/registry
-          key: ${{ runner.os }}-cargo-${{ hashFiles('native/**/Cargo.toml') }}
+          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'native/Cargo.toml', 'engine/Cargo.toml', 'vcs-bridge/Cargo.toml') }}
           restore-keys: |
             ${{ runner.os }}-cargo-
 
       - run: npm ci
 
       - name: Build native debug binary
-        run: cargo build --manifest-path native/Cargo.toml
+        run: cargo build --locked --manifest-path native/Cargo.toml --bin rudder-native
 
       - name: Build CLI (dist/index.js)
         run: |

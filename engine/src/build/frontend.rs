@@ -1,5 +1,5 @@
 use super::*;
-use crate::store::{EntryNode, EnvironmentManifest, SourceManifest};
+use crate::directory::EntryNode;
 use fs2::FileExt;
 use sha2::{Digest, Sha256};
 use std::fs::{self, File, OpenOptions};
@@ -22,6 +22,10 @@ pub struct BuildRun {
     pub frontend_elapsed_ms: u64,
     pub environment_materialization_ms: u64,
     pub source_materialization_ms: u64,
+    /// Inclusive local stage wall times, separate from Buck2's own elapsed
+    /// counter. This exposes validation/publication overhead on cache hits.
+    #[serde(default)]
+    pub stage_ms: BTreeMap<String, u64>,
 }
 
 pub struct Buck2Adapter {
@@ -71,6 +75,8 @@ impl Buck2Adapter {
         prepared: &PreparedEnvironment,
         workspace: impl AsRef<Path>,
     ) -> Result<BuildRun> {
+        let build_started = Instant::now();
+        let mut stage_ms = BTreeMap::new();
         profile.validate()?;
         ensure!(
             input.hardlink_group_count() == 0,
@@ -100,16 +106,15 @@ impl Buck2Adapter {
         index.validate_prepared(prepared)?;
         let store = index.store();
         kind(source, ObjectKind::SourceRoot)?;
-        let source_manifest: SourceManifest = serde_json::from_slice(&store.read_object(source)?)?;
-        let environment: EnvironmentManifest =
-            serde_json::from_slice(&store.read_object(&prepared.root)?)?;
+        let source_directory = source_directory(store, source)?;
+        let environment = environment_content(store, &prepared.root)?;
         ensure!(
             environment.platform == profile.platform.properties(),
             "prepared environment and requested platform differ"
         );
-        let preparation: PreparationSpec =
-            decode_payload(store, &prepared.key, "prepared-environment-key-v1")?;
-        preparation.validate()?;
+        let preparation = index.preparation_spec(prepared)?;
+        stage_ms.insert("preflight".into(), millis(build_started));
+        let workspace_started = Instant::now();
         let workspace = workspace.as_ref();
         fs::create_dir_all(workspace)?;
         ensure!(
@@ -160,13 +165,20 @@ impl Buck2Adapter {
             fs::remove_file(&inflight)?;
         }
         let lease = store.begin_staging(Duration::from_secs(3600))?;
+        stage_ms.insert("workspace_setup".into(), millis(workspace_started));
         let result = (|| {
             let started = Instant::now();
             let prepared_path = materialize_environment(index, &environment.directory)?;
             let environment_materialization_ms = millis(started);
+            stage_ms.insert(
+                "environment_materialization".into(),
+                environment_materialization_ms,
+            );
             let started = Instant::now();
-            sync_inputs(store, &source_manifest.directory, &workspace)?;
+            sync_inputs(store, &source_directory, &workspace)?;
             let source_materialization_ms = millis(started);
+            stage_ms.insert("source_materialization".into(), source_materialization_ms);
+            let contract_started = Instant::now();
             for target in &profile.targets {
                 for path in &target.sources {
                     let full = workspace.join("inputs").join(path);
@@ -221,7 +233,11 @@ impl Buck2Adapter {
             // frontend. A waiting fresh graph can then obtain native REAPI
             // hits from the first builder's completed, verified uploads.
             let action_key = contract.key(store)?;
+            stage_ms.insert("contract".into(), millis(contract_started));
+            let guard_started = Instant::now();
             let _execution = index.execution_guard(&action_key)?;
+            stage_ms.insert("execution_guard_wait".into(), millis(guard_started));
+            let frontend_started = Instant::now();
             let native_contract = serde_json::json!({"format_version":FORMAT_VERSION,"environment":prepared.root,"toolchains":preparation.toolchains,"platform":platform,"policy":profile.policy,"rules":rules,"frontend":frontend_executable,"input_topology":input.hardlinks()});
             let request = serde_json::json!({"format_version":FORMAT_VERSION,"workspace":workspace,"prepared_directory":prepared_path,"buck2":self.executable,"profile":profile,"native_contract":native_contract});
             let request_path = workspace.join(".driver-request.json");
@@ -251,6 +267,8 @@ impl Buck2Adapter {
                     read_tail(&stderr, 8000).unwrap_or_default()
                 )
             })?;
+            stage_ms.insert("frontend_dispatch".into(), millis(frontend_started));
+            let capture_started = Instant::now();
             // Never reacquire an expired lease over possibly swept inputs.
             // Renew only a still-live lease before creating result objects.
             store.renew_staging(&lease.id, Duration::from_secs(3600))?;
@@ -336,7 +354,11 @@ impl Buck2Adapter {
                 outputs,
                 observation: observation.clone(),
             };
+            stage_ms.insert("result_capture".into(), millis(capture_started));
+            let index_started = Instant::now();
             let stored = index.record_build(&qualified)?;
+            stage_ms.insert("action_index".into(), millis(index_started));
+            let publication_started = Instant::now();
             let receipt = metadata(
                 store,
                 ObjectKind::ActionResult,
@@ -355,6 +377,11 @@ impl Buck2Adapter {
                 &receipt,
                 &[prepared.receipt.clone(), stored.receipt.clone()],
             )?;
+            stage_ms.insert(
+                "run_receipt_publication".into(),
+                millis(publication_started),
+            );
+            stage_ms.insert("build_total".into(), millis(build_started));
             Ok(BuildRun {
                 format_version: FORMAT_VERSION,
                 stored,
@@ -364,6 +391,7 @@ impl Buck2Adapter {
                 frontend_elapsed_ms: response.elapsed_ms,
                 environment_materialization_ms,
                 source_materialization_ms,
+                stage_ms,
             })
         })();
         if result.is_err() {
@@ -383,7 +411,7 @@ fn materialize_environment(index: &BuildIndex, root: &ObjectRef) -> Result<PathB
         if path.exists() {
             fs::remove_dir_all(&path)?;
         }
-        index.store().export_tree(root, &path)?;
+        export_unlinked_tree(index.store(), root, &path)?;
         atomic(&marker, &canonical_json(root)?)?;
     }
     ensure!(
@@ -400,7 +428,7 @@ fn sync_inputs(store: &LocalStore, root: &ObjectRef, workspace: &Path) -> Result
         return verify_directory(store, root, &path);
     }
     let staging = workspace.join(format!(".inputs-{}", Uuid::new_v4()));
-    store.export_tree(root, &staging)?;
+    export_unlinked_tree(store, root, &staging)?;
     // Apply the same input contract on first use and graph reuse. Otherwise
     // an unused source symlink could pass cold and fail only on the next run.
     verify_directory(store, root, &staging)?;
@@ -411,8 +439,51 @@ fn sync_inputs(store: &LocalStore, root: &ObjectRef, workspace: &Path) -> Result
     atomic(&marker, &canonical_json(root)?)?;
     Ok(())
 }
+fn export_unlinked_tree(store: &LocalStore, root: &ObjectRef, path: &Path) -> Result<()> {
+    // This frontend still rejects linked build inputs. Environment identity is
+    // file content, without inode topology. Export uses bounded chunk streams
+    // and fresh private files for either directory encoding.
+    let hardlinks = store.put_blob(&canonical_json(&crate::tree::HardlinkTopology {
+        format_version: 1,
+        groups: vec![],
+    })?)?;
+    crate::tree::export_quiesced(
+        store,
+        &crate::tree::TreeSnapshot {
+            format_version: 1,
+            directory: root.clone(),
+            hardlinks,
+        },
+        path,
+        &crate::tree::ImportBudget::default(),
+    )
+}
 fn verify_directory(store: &LocalStore, root: &ObjectRef, path: &Path) -> Result<()> {
-    let manifest = store.read_directory(root)?;
+    let mut entries = 0;
+    let mut logical_bytes = 0;
+    verify_directory_bounded(store, root, path, 0, &mut entries, &mut logical_bytes)
+}
+fn verify_directory_bounded(
+    store: &LocalStore,
+    root: &ObjectRef,
+    path: &Path,
+    depth: usize,
+    entries: &mut u64,
+    logical_bytes: &mut u64,
+) -> Result<()> {
+    let budget = crate::tree::ImportBudget::default();
+    ensure!(
+        depth <= budget.max_depth,
+        "materialized input exceeds depth budget"
+    );
+    let manifest = crate::tree::root_info(store, root)?;
+    *entries = entries
+        .checked_add(manifest.entry_count)
+        .context("materialized input entry count overflow")?;
+    ensure!(
+        *entries <= budget.max_entries,
+        "materialized input exceeds entry budget"
+    );
     let directory_info = fs::symlink_metadata(path)?;
     ensure!(
         directory_info.is_dir(),
@@ -426,43 +497,92 @@ fn verify_directory(store: &LocalStore, root: &ObjectRef, path: &Path) -> Result
             "materialized directory mode changed"
         );
     }
-    let actual: BTreeSet<_> = fs::read_dir(path)?
-        .map(|entry| entry.map(|entry| entry.file_name()))
-        .collect::<std::io::Result<_>>()?;
+    let mut actual = BTreeSet::new();
+    for entry in fs::read_dir(path)? {
+        ensure!(
+            actual.len() < budget.max_entries as usize,
+            "materialized directory exceeds entry budget"
+        );
+        actual.insert(entry?.file_name());
+    }
     let mut expected = BTreeSet::new();
-    for entry in manifest.entries {
-        let name = entry.name()?;
-        #[cfg(unix)]
-        let name = {
-            use std::os::unix::ffi::OsStringExt;
-            std::ffi::OsString::from_vec(name)
-        };
-        #[cfg(not(unix))]
-        let name = std::ffi::OsString::from(String::from_utf8(name)?);
-        expected.insert(name.clone());
-        let path = path.join(name);
-        match entry.node {
-            EntryNode::Directory { object } => verify_directory(store, &object, &path)?,
-            EntryNode::File { object, mode } => {
-                let info = fs::symlink_metadata(&path)?;
-                ensure!(
-                    info.is_file()
-                        && info.len() == object.size_bytes
-                        && hash_file(&path)? == object.digest,
-                    "materialized tool/source file changed"
-                );
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt;
+    let mut after = None;
+    loop {
+        let page = crate::tree::scan(store, root, after.as_deref(), 1024)?;
+        for entry in page.entries {
+            let name = entry.name()?;
+            #[cfg(unix)]
+            let name = {
+                use std::os::unix::ffi::OsStringExt;
+                std::ffi::OsString::from_vec(name)
+            };
+            #[cfg(not(unix))]
+            let name = std::ffi::OsString::from(String::from_utf8(name)?);
+            expected.insert(name.clone());
+            let path = path.join(name);
+            match entry.node {
+                EntryNode::Directory { object } => verify_directory_bounded(
+                    store,
+                    &object,
+                    &path,
+                    depth + 1,
+                    entries,
+                    logical_bytes,
+                )?,
+                EntryNode::File {
+                    object,
+                    logical_size,
+                    mode,
+                } => {
+                    *logical_bytes = logical_bytes
+                        .checked_add(logical_size)
+                        .context("materialized input length overflow")?;
                     ensure!(
-                        info.permissions().mode() & 0o777 == mode,
-                        "materialized file mode changed"
+                        *logical_bytes <= budget.max_logical_bytes,
+                        "materialized input exceeds logical byte budget"
                     );
+                    let info = fs::symlink_metadata(&path)?;
+                    ensure!(
+                        info.is_file() && info.len() == logical_size,
+                        "materialized tool/source file changed"
+                    );
+                    let mut options = OpenOptions::new();
+                    options.read(true);
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::OpenOptionsExt;
+                        options.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+                    }
+                    let mut actual = options.open(&path)?;
+                    let mut compare = FileComparison {
+                        actual: &mut actual,
+                    };
+                    ensure!(
+                        crate::content::export_file(store, &object, &mut compare)?.logical_size
+                            == logical_size,
+                        "materialized content logical size differs"
+                    );
+                    ensure!(
+                        actual.read(&mut [0u8; 1])? == 0,
+                        "materialized file has trailing data"
+                    );
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::PermissionsExt;
+                        ensure!(
+                            info.permissions().mode() & 0o777 == mode,
+                            "materialized file mode changed"
+                        );
+                    }
+                }
+                EntryNode::Symlink { .. } => {
+                    anyhow::bail!("managed compiler profile does not admit symlink inputs")
                 }
             }
-            EntryNode::Symlink { .. } => {
-                anyhow::bail!("managed compiler profile does not admit symlink inputs")
-            }
+        }
+        after = page.next_after;
+        if after.is_none() {
+            break;
         }
     }
     ensure!(
@@ -470,6 +590,27 @@ fn verify_directory(store: &LocalStore, root: &ObjectRef, path: &Path) -> Result
         "materialized input directory has undeclared entries"
     );
     Ok(())
+}
+
+struct FileComparison<'a> {
+    actual: &'a mut File,
+}
+impl Write for FileComparison<'_> {
+    fn write(&mut self, expected: &[u8]) -> std::io::Result<usize> {
+        let mut buffer = [0u8; 64 * 1024];
+        for chunk in expected.chunks(buffer.len()) {
+            self.actual.read_exact(&mut buffer[..chunk.len()])?;
+            if buffer[..chunk.len()] != *chunk {
+                return Err(std::io::Error::other(
+                    "materialized tool/source bytes changed",
+                ));
+            }
+        }
+        Ok(expected.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 fn hash_file(path: &Path) -> Result<String> {
     let mut file = File::open(path)?;
@@ -518,6 +659,80 @@ fn lock(path: &Path, shared: bool) -> Result<File> {
 }
 fn millis(started: Instant) -> u64 {
     started.elapsed().as_millis().try_into().unwrap_or(u64::MAX)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::content::{self, StagedContentStore};
+    use crate::directory::{DirectoryEntry, LocalDirectoryStore, PagedDirectory};
+    use std::io::{Seek, SeekFrom};
+
+    fn content_tree(store: &LocalStore) -> (ObjectRef, ObjectRef, usize) {
+        let lease = store.begin_staging(Duration::from_secs(60)).unwrap();
+        let bytes = vec![b'p'; content::CHUNK_BYTES + 37];
+        let file = content::import_file(
+            &StagedContentStore::new(store, &lease.id).unwrap(),
+            &mut bytes.as_slice(),
+        )
+        .unwrap();
+        assert_eq!(file.kind, ObjectKind::File);
+        assert_ne!(file.digest, hex::encode(Sha256::digest(&bytes)));
+        let adapter = LocalDirectoryStore::new(store, &lease.id);
+        let directory = PagedDirectory::new(&adapter)
+            .build(
+                0o755,
+                vec![DirectoryEntry::new(
+                    b"input",
+                    EntryNode::File {
+                        object: file.clone(),
+                        logical_size: bytes.len() as u64,
+                        mode: 0o640,
+                    },
+                )
+                .unwrap()],
+            )
+            .unwrap();
+        store
+            .publish(&lease.id, "frontend-chunked-fixture", &directory)
+            .unwrap();
+        (directory, file, bytes.len())
+    }
+
+    #[test]
+    fn paged_chunked_inputs_materialize_and_changed_tail_invalidates_reuse() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = LocalStore::open(tmp.path().join("cas")).unwrap();
+        let (directory, _, logical_size) = content_tree(&store);
+        let workspace = tmp.path().join("build");
+        fs::create_dir(&workspace).unwrap();
+        sync_inputs(&store, &directory, &workspace).unwrap();
+        let input = workspace.join("inputs/input");
+        assert_eq!(fs::metadata(&input).unwrap().len(), logical_size as u64);
+        sync_inputs(&store, &directory, &workspace).unwrap();
+        let mut changed = OpenOptions::new().write(true).open(&input).unwrap();
+        changed
+            .seek(SeekFrom::Start(content::CHUNK_BYTES as u64 + 2))
+            .unwrap();
+        changed.write_all(b"x").unwrap();
+        changed.sync_all().unwrap();
+        assert!(
+            sync_inputs(&store, &directory, &workspace).is_err(),
+            "matching root marker cannot authorize changed chunked bytes"
+        );
+    }
+
+    #[test]
+    fn paged_environment_materialization_rechecks_content_and_rejects_added_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = LocalStore::open(tmp.path().join("cas")).unwrap();
+        let (directory, _, _) = content_tree(&store);
+        let index = BuildIndex::open(tmp.path().join("index"), store).unwrap();
+        let path = materialize_environment(&index, &directory).unwrap();
+        assert_eq!(materialize_environment(&index, &directory).unwrap(), path);
+        fs::write(path.join("unmodeled"), b"new input").unwrap();
+        assert!(materialize_environment(&index, &directory).is_err());
+    }
 }
 fn bounded(command: &mut Command, timeout: Duration, stdout: &Path, stderr: &Path) -> Result<()> {
     command

@@ -130,6 +130,73 @@ test("actual HTTP handler transfers a pinned native checkpoint into a fresh inde
   assert.ok(f.requests.some((request) => request.path.endsWith("/missing")));
 });
 
+test("actual native-to-HTTP-to-native transfer preserves chunked File and paged Directory identities", { timeout: 60_000 }, async (t) => {
+  const f = await fixture(t); if (!f) return;
+  const original = await f.local("chunked-source"), target = await f.local("chunked-target");
+  const describe = (kind, value) => { const bytes = canonicalFabricMetadata(value); return { bytes, object: ref(kind, bytes) }; };
+  const firstBytes = Buffer.alloc(4 * 1024 * 1024, 0x5a), lastBytes = Buffer.from("last verified bytes");
+  const first = { bytes: firstBytes, object: ref("blob", firstBytes) }, last = { bytes: lastBytes, object: ref("blob", lastBytes) };
+  const logical_size = first.bytes.length + last.bytes.length;
+  const file = describe("file", { format_version: 1, layout: "fixed_4mib_fanout256_v1", level: 0, logical_size, children: [first.object, last.object] });
+  const entry = { name_hex: "ff", node: { type: "file", object: file.object, logical_size, mode: 0o755 } };
+  const shard = describe("directory_shard", { format_version: 1, prefix_hex: "ff",
+    summary: { entry_count: 1, subdirectory_count: 0, entries_bytes: canonicalFabricMetadata(entry).length }, node: { type: "leaf", entries: [entry] } });
+  const directory = describe("directory", { format_version: 2, mode: 0o755, entry_count: 1, subdirectory_count: 0, directory_shard: shard.object });
+  const source = describe("source_root", { format_version: 1, directory: directory.object, parents: [], consistency: "quiesced" });
+  const all = [source, directory, shard, file, first, last];
+  const stage = await original.connection.beginStaging(30_000);
+  for (const item of all) await original.connection.receive(stage.lease_id, item.object, item.bytes);
+  await original.connection.publish(stage.lease_id, "chunked-source", source.object);
+  const remote = f.client("worker-a", "workspace-a");
+  const uploaded = await remote.uploadRoot("chunked-source", source.object, original.connection);
+  assert.equal(uploaded.uploaded_objects, all.length);
+  assert.equal(uploaded.receipt.object_count, all.length);
+  const downloaded = await remote.downloadRoot("chunked-source", target.connection, "restored-chunked-source");
+  assert.equal(downloaded.downloaded_objects, all.length);
+  assert.deepEqual(downloaded.local.root, source.object);
+  assert.deepEqual((await target.connection.request({ operation: "retention" })).staging, {});
+  const pin = await target.connection.pin(source.object);
+  try {
+    const closure = await target.connection.closure(source.object);
+    assert.equal(closure.length, all.length);
+    for (const item of all) assert.deepEqual(await target.connection.read(item.object), item.bytes);
+  } finally { await target.connection.unpin(pin); }
+  assert.equal((await remote.uploadRoot("chunked-source", source.object, original.connection)).uploaded_objects, 0);
+});
+
+test("ancestry-free RunnableRoot round trip uses actual Rust and Cloud validation with a full u64 cursor", async (t) => {
+  const f = await fixture(t); if (!f) return;
+  const original = await f.local("runnable-source"), target = await f.local("runnable-target");
+  const describe = (kind, value) => { const bytes = canonicalFabricMetadata(value); return { bytes, object: ref(kind, bytes) }; };
+  const raw = (value) => { const bytes = Buffer.from(value); return { bytes, object: ref("blob", bytes) }; };
+  const shard = describe("directory_shard", { format_version: 1, prefix_hex: "", summary: { entry_count: 0, subdirectory_count: 0, entries_bytes: 0 }, node: { type: "leaf", entries: [] } });
+  const directory = describe("directory", { format_version: 2, mode: 493, entry_count: 0, subdirectory_count: 0, directory_shard: shard.object });
+  const policy = raw('{"source":"all"}'), profile = raw('{"profile":"test"}'), hardlinks = raw('{"format_version":1,"groups":[]}');
+  const source = describe("source_root", { format_version: 2, consistency: "quiesced", directory: directory.object, projection_policy: policy.object });
+  const environment = describe("environment_root", { format_version: 2, directory: directory.object, platform: { os: "linux" }, installer_inputs: [policy.object], provenance: {} });
+  const root = describe("runnable_root", { format_version: 1, consistency: "quiesced", source: source.object, environment: environment.object, view_root: directory.object, profile: profile.object, hardlinks: hardlinks.object, knowledge_cursor: (1n << 64n) - 1n });
+  const all = [root, source, environment, directory, shard, policy, profile, hardlinks];
+  const step = async (name, work) => { try { return await work(); } catch (error) { error.message = `${name}: ${error.message}`; throw error; } };
+  const stage = await original.connection.beginStaging(30_000);
+  for (const item of all) await step(`receive ${item.object.kind}`, () => original.connection.receive(stage.lease_id, item.object, item.bytes));
+  await step("source publication", () => original.connection.publish(stage.lease_id, "runnable-source", root.object));
+  const remote = f.client("user-a");
+  const uploaded = await step("remote upload", () => remote.uploadRoot("runnable", root.object, original.connection));
+  assert.equal(uploaded.receipt.object_count, all.length);
+  const restored = await step("independent download", () => remote.downloadRoot("runnable", target.connection, "runnable-restored"));
+  assert.equal(restored.downloaded_objects, all.length);
+  const pin = await target.connection.pin(root.object);
+  try {
+    assert.equal((await target.connection.closure(root.object)).length, all.length);
+    for (const item of all) assert.deepEqual(await target.connection.read(item.object), item.bytes);
+  }
+  finally { await target.connection.unpin(pin); }
+  assert.match((await remote.getObject(root.object)).toString(), /"knowledge_cursor":18446744073709551615/);
+  assert.equal(restored.local.durability, "local");
+  assert.equal(restored.receipt.durability, "replicated");
+  assert(!root.bytes.toString().includes('"durability"'), "publication levels must not rewrite a runnable identity");
+});
+
 test("actual auth callback binds user and worker credentials to accounts; caller fields cannot select another account", async (t) => {
   const f = await fixture(t); if (!f) return; const original = await source(f);
   await f.client("worker-a", "workspace-a").uploadRoot("private", original.root, original.connection);

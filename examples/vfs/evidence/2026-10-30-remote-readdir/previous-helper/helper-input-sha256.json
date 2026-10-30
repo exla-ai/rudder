@@ -1,0 +1,6 @@
+{
+  "src/fabric-fetch.ts": "bc447c08c714db75fb209e05cf8910f57c04ebeb7a64ee610ee15eddfc081baa",
+  "src/fabric-local.ts": "b2fe724449bb32ff17f25bae7727ae23ba9a6191eecbfc5b4d87f3d68e063512",
+  "src/fabric-remote.ts": "2f6d1e4f0c6ac026ec2eaecff44095127a5109a16f61c87144c1ccc16b5ee90c",
+  "src/native-binary.ts": "16f9da98e2836e38cd152d268d9e95f556739a8d303585d49aed3c556573e7d1"
+}

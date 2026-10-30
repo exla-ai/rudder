@@ -1,0 +1,9 @@
+BEGIN; INSERT INTO q_results(label,receipt) VALUES('discarded-reply',q_claim('lostreply','a','boot-a',1,'lost-reply')); COMMIT; SELECT pg_sleep(30);
+BEGIN
+INSERT 0 1
+COMMIT
+FATAL:  terminating connection due to administrator command
+server closed the connection unexpectedly
+	This probably means the server terminated abnormally
+	before or while processing the request.
+connection to server was lost

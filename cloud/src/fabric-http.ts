@@ -100,6 +100,13 @@ export function createFabricHttpHandler(options: {
         send(res, 200, await cas.renewStaging(renewal[1]!, body.ttl_ms as number));
         return;
       }
+      const staging = /^\/staging\/([a-f0-9-]+)$/.exec(route);
+      if (req.method === "DELETE" && staging) {
+        await jsonBody(req, []);
+        await cas.abandonStaging(staging[1]!);
+        send(res, 200, { format_version: 1 });
+        return;
+      }
       if (req.method === "POST" && route === "/missing") {
         const body = await jsonBody(req, ["objects"]);
         if (!Array.isArray(body.objects)) fail("invalid_body", "objects must be an array");

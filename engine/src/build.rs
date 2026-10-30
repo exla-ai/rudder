@@ -19,6 +19,80 @@ mod index;
 pub use frontend::{Buck2Adapter, BuildRun};
 pub use index::{BuildIndex, PreparedEnvironment, StoredBuild};
 
+/// Preparation encodings have separate cache keys and index categories. A
+/// retained legacy environment is never silently relabeled as ancestry-free.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PreparedContentLayout {
+    LegacyV1,
+    PagedChunkedV2,
+}
+impl PreparedContentLayout {
+    fn category(self) -> &'static str {
+        match self {
+            Self::LegacyV1 => "environment",
+            Self::PagedChunkedV2 => "environment-v2",
+        }
+    }
+    fn key_schema(self) -> &'static str {
+        match self {
+            Self::LegacyV1 => "prepared-environment-key-v1",
+            Self::PagedChunkedV2 => "prepared-environment-key-v2",
+        }
+    }
+    fn receipt_schema(self) -> &'static str {
+        match self {
+            Self::LegacyV1 => "prepared-environment-receipt-v1",
+            Self::PagedChunkedV2 => "prepared-environment-receipt-v2",
+        }
+    }
+}
+
+struct EnvironmentContent {
+    directory: ObjectRef,
+    platform: BTreeMap<String, String>,
+    provenance: BTreeMap<String, String>,
+    layout: PreparedContentLayout,
+}
+fn environment_content(store: &LocalStore, root: &ObjectRef) -> Result<EnvironmentContent> {
+    kind(root, ObjectKind::EnvironmentRoot)?;
+    let bytes = store.read_object(root)?;
+    let version: Value = serde_json::from_slice(&bytes)?;
+    if version["format_version"] == 2 {
+        let value = crate::snapshot::decode_environment(&bytes)?;
+        Ok(EnvironmentContent {
+            directory: value.directory,
+            platform: value.platform,
+            provenance: value.provenance,
+            layout: PreparedContentLayout::PagedChunkedV2,
+        })
+    } else {
+        let value: crate::store::EnvironmentManifest = serde_json::from_slice(&bytes)?;
+        ensure!(
+            value.format_version == 1,
+            "unsupported build environment format"
+        );
+        Ok(EnvironmentContent {
+            directory: value.directory,
+            platform: value.platform,
+            provenance: value.provenance,
+            layout: PreparedContentLayout::LegacyV1,
+        })
+    }
+}
+fn source_directory(store: &LocalStore, root: &ObjectRef) -> Result<ObjectRef> {
+    kind(root, ObjectKind::SourceRoot)?;
+    let bytes = store.read_object(root)?;
+    let version: Value = serde_json::from_slice(&bytes)?;
+    if version["format_version"] == 2 {
+        Ok(crate::snapshot::decode_source(&bytes)?.directory)
+    } else {
+        let value: crate::store::SourceManifest = serde_json::from_slice(&bytes)?;
+        ensure!(value.format_version == 1, "unsupported build source format");
+        Ok(value.directory)
+    }
+}
+
 /// Produced by workspace::build_input_view after validating a complete sealed
 /// checkpoint and its source/prepared partition. No peer deserializer or bare
 /// source/base-environment fallback can assert this proof.
@@ -169,7 +243,11 @@ impl PreparationSpec {
                 "toolchain name/version is required"
             );
             kind(&tool.closure, ObjectKind::Directory)?;
-            kind(&tool.executable, ObjectKind::Blob)?;
+            tool.executable.validate()?;
+            ensure!(
+                matches!(tool.executable.kind, ObjectKind::Blob | ObjectKind::File),
+                "compiler identity must reference file content"
+            );
             relative(&tool.executable_path)?;
         }
         for (path, reference) in &self.installer_inputs {
@@ -186,7 +264,23 @@ impl PreparationSpec {
         Ok(())
     }
     pub fn key(&self, store: &LocalStore) -> Result<ObjectRef> {
+        self.key_with_layout(store, PreparedContentLayout::LegacyV1)
+    }
+    pub fn key_with_layout(
+        &self,
+        store: &LocalStore,
+        layout: PreparedContentLayout,
+    ) -> Result<ObjectRef> {
         self.validate()?;
+        if layout == PreparedContentLayout::PagedChunkedV2 {
+            ensure!(
+                self.installer_inputs.values().all(|reference| matches!(
+                    reference.kind,
+                    ObjectKind::Blob | ObjectKind::File | ObjectKind::Directory
+                )),
+                "ancestry-free preparation requires content-only installer inputs"
+            );
+        }
         let mut references = vec![self.base_runtime.clone()];
         references.extend(self.installer_inputs.values().cloned());
         for tool in self.toolchains.values() {
@@ -195,7 +289,7 @@ impl PreparationSpec {
         metadata(
             store,
             ObjectKind::ActionKey,
-            "prepared-environment-key-v1",
+            layout.key_schema(),
             self,
             references,
         )
@@ -467,7 +561,11 @@ impl ActionContract {
         }
         for tool in self.toolchains.values() {
             kind(&tool.closure, ObjectKind::Directory)?;
-            kind(&tool.executable, ObjectKind::Blob)?;
+            tool.executable.validate()?;
+            ensure!(
+                matches!(tool.executable.kind, ObjectKind::Blob | ObjectKind::File),
+                "compiler identity must reference file content"
+            );
             relative(&tool.executable_path)?;
         }
         Ok(())

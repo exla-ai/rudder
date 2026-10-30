@@ -47,6 +47,13 @@ One canonical index and lock directory serves a local CAS across projects.
 Independent processes open that same directory. This SQLite index is local
 authority; it is not a replicated fleet cache catalog.
 
+The new paged/chunked profile has a separate prepared-index key and receipt.
+It accepts validated RunnableRoot inputs without importing checkpoint ancestry.
+The [frozen v2 experiment](../../examples/build-profile/evidence/2026-10-30-runnable-v2/README.md)
+measured 3.26–3.87 s whole warm requests, compared with 115–164 ms inside
+Buck2. SDK verification and frontend work remain substantial; the result is
+an eager-input baseline for the lazy VFS adapter, not an agent-launch SLA.
+
 Exact complete-contract misses use an interprocess file lock before invoking
 the frontend. With the REAPI cache configured, a second fresh workspace waits
 for the first complete upload, then obtains native cache hits. Without that
@@ -262,3 +269,15 @@ The subsequent [topology-contract rerun](../../examples/build-profile/evidence/2
 passes the same real compiler/cache matrix after that hidden-input change. Its
 whole warm build was 3.560 s under concurrent development load; the raw samples
 preserve the observed variance.
+
+Worker-image bootstrapping has a separate, reconstructible dependency cache.
+The Docker builder uses locked BuildKit mounts for Cargo's registry, Git sources
+and release artifacts. Each build cleans only the three Rudder workspace
+packages before compiling the exact current inputs and copying both executables
+outside the cache mount. External dependency artifacts can be reused; an older
+source timestamp cannot authorize a cached Rudder executable. These builder
+caches are not the distributed action cache or a durability receipt. See
+[Docker cache mounts](https://docs.docker.com/build/cache/optimize/) and
+[Cargo package-scoped cleaning](https://doc.rust-lang.org/cargo/commands/cargo-clean.html).
+The full worker image and any warm-build performance claim need their own
+recorded release qualification.

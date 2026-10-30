@@ -3,12 +3,24 @@ name = "rudder-native"
 version = "0.1.0"
 edition = "2021"
 publish = false
+default-run = "rudder-native"
+
+[[bin]]
+name = "rudder-native"
+path = "src/main.rs"
+
+[[bin]]
+name = "rudder-execution-qualifier"
+path = "../engine/src/execution/qualification_driver.rs"
+test = false
+bench = false
 
 [lib]
 name = "rudder_native"
 path = "src/lib.rs"
 
 [dependencies]
+rudder-vcs-bridge = { path = "../vcs-bridge", features = ["jj"] }
 rudder-engine = { path = "../engine" }
 fs2 = "0.4.3"
 rusqlite = { version = "0.41.1", features = ["bundled"] }
@@ -16,6 +28,7 @@ sha2 = "0.10.9"
 anyhow = "1.0"
 crossterm = { version = "0.29", features = ["serde"] }
 hdrhistogram = "7.5"
+mio = { version = "=1.2.0", features = ["net", "os-poll"] }
 portable-pty = "0.9.0"
 ratatui = "0.30"
 unicode-width = "0.2"

@@ -1,5 +1,20 @@
-#!/usr/bin/env sh
+#!/bin/sh
 set -eu
+
+# Direct/root invocations enter the same tiny boot gate before sourcing any
+# account cache/profile path or starting updates. Non-root BYOVM keeps its path.
+if [ "$(/usr/bin/id -u)" = "0" ]; then
+  exec /usr/local/bin/rudder-worker-root-bootstrap "$@"
+fi
+case "${RUDDER_WORKER_MANAGED_EXECUTION:-0}" in
+  0|1) ;;
+  *) echo "rudder-worker: RUDDER_WORKER_MANAGED_EXECUTION must be 0 or 1" >&2; exit 64 ;;
+esac
+if [ "${RUDDER_WORKER_MANAGED_EXECUTION:-0}" = "1" ]; then
+  /usr/local/bin/rudder-worker-root-bootstrap --verify-managed-execution
+  RUDDER_WORKER_FUSE_READY=1
+  export RUDDER_WORKER_FUSE_READY
+fi
 
 . /opt/rudder-worker/cache-env.sh
 

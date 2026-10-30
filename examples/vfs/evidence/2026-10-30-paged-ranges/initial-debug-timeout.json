@@ -1,0 +1,389 @@
+{
+  "format_version": 1,
+  "provider": "Fly.io",
+  "data_plane": "paged_ranges_v2",
+  "name": "rudder-vfs-paged-f0b977eb",
+  "qualification": "f0b977eb-ec89-42ad-b652-e90edda6a528",
+  "steps": [
+    {
+      "step": "assert-no-app-secrets",
+      "ms": 675
+    },
+    {
+      "step": "create-disposable-canary",
+      "ms": 3213
+    },
+    {
+      "step": "machine-inventory",
+      "ms": 522
+    },
+    {
+      "step": "private-network-fixture-download",
+      "ms": 2577
+    },
+    {
+      "step": "private-network-fixture-download",
+      "ms": 327
+    },
+    {
+      "step": "verify-downloaded-fixture",
+      "ms": 400
+    },
+    {
+      "step": "launch-contained-qualification",
+      "ms": 255
+    },
+    {
+      "step": "poll-contained-qualification",
+      "ms": 287
+    },
+    {
+      "step": "poll-contained-qualification",
+      "ms": 360
+    },
+    {
+      "step": "poll-contained-qualification",
+      "ms": 301
+    },
+    {
+      "step": "poll-contained-qualification",
+      "ms": 250
+    },
+    {
+      "step": "poll-contained-qualification",
+      "ms": 317
+    },
+    {
+      "step": "poll-contained-qualification",
+      "ms": 315
+    },
+    {
+      "step": "poll-contained-qualification",
+      "ms": 1320
+    },
+    {
+      "step": "poll-contained-qualification",
+      "ms": 395
+    },
+    {
+      "step": "poll-contained-qualification",
+      "ms": 336
+    },
+    {
+      "step": "poll-contained-qualification",
+      "ms": 258
+    },
+    {
+      "step": "poll-contained-qualification",
+      "ms": 352
+    },
+    {
+      "step": "poll-contained-qualification",
+      "ms": 225
+    },
+    {
+      "step": "poll-contained-qualification",
+      "ms": 230
+    },
+    {
+      "step": "poll-contained-qualification",
+      "ms": 593
+    },
+    {
+      "step": "poll-contained-qualification",
+      "ms": 206
+    },
+    {
+      "step": "poll-contained-qualification",
+      "ms": 282
+    },
+    {
+      "step": "poll-contained-qualification",
+      "ms": 216
+    },
+    {
+      "step": "poll-contained-qualification",
+      "ms": 237
+    },
+    {
+      "step": "poll-contained-qualification",
+      "ms": 197
+    },
+    {
+      "step": "poll-contained-qualification",
+      "ms": 411
+    },
+    {
+      "step": "poll-contained-qualification",
+      "ms": 206
+    },
+    {
+      "step": "poll-contained-qualification",
+      "ms": 261
+    },
+    {
+      "step": "poll-contained-qualification",
+      "ms": 259
+    },
+    {
+      "step": "poll-contained-qualification",
+      "ms": 245
+    },
+    {
+      "step": "poll-contained-qualification",
+      "ms": 502
+    },
+    {
+      "step": "poll-contained-qualification",
+      "ms": 587
+    },
+    {
+      "step": "poll-contained-qualification",
+      "ms": 860
+    },
+    {
+      "step": "poll-contained-qualification",
+      "ms": 257
+    },
+    {
+      "step": "poll-contained-qualification",
+      "ms": 214
+    },
+    {
+      "step": "poll-contained-qualification",
+      "ms": 417
+    },
+    {
+      "step": "poll-contained-qualification",
+      "ms": 349
+    },
+    {
+      "step": "poll-contained-qualification",
+      "ms": 223
+    },
+    {
+      "step": "poll-contained-qualification",
+      "ms": 280
+    },
+    {
+      "step": "poll-contained-qualification",
+      "ms": 206
+    },
+    {
+      "step": "poll-contained-qualification",
+      "ms": 421
+    },
+    {
+      "step": "poll-contained-qualification",
+      "ms": 231
+    },
+    {
+      "step": "poll-contained-qualification",
+      "ms": 358
+    },
+    {
+      "step": "poll-contained-qualification",
+      "ms": 529
+    },
+    {
+      "step": "poll-contained-qualification",
+      "ms": 234
+    },
+    {
+      "step": "poll-contained-qualification",
+      "ms": 273
+    },
+    {
+      "step": "poll-contained-qualification",
+      "ms": 208
+    },
+    {
+      "step": "poll-contained-qualification",
+      "ms": 270
+    },
+    {
+      "step": "poll-contained-qualification",
+      "ms": 276
+    },
+    {
+      "step": "poll-contained-qualification",
+      "ms": 357
+    },
+    {
+      "step": "poll-contained-qualification",
+      "ms": 521
+    },
+    {
+      "step": "poll-contained-qualification",
+      "ms": 520
+    },
+    {
+      "step": "poll-contained-qualification",
+      "ms": 272
+    },
+    {
+      "step": "poll-contained-qualification",
+      "ms": 366
+    },
+    {
+      "step": "poll-contained-qualification",
+      "ms": 269
+    },
+    {
+      "step": "poll-contained-qualification",
+      "ms": 360
+    },
+    {
+      "step": "poll-contained-qualification",
+      "ms": 275
+    },
+    {
+      "step": "poll-contained-qualification",
+      "ms": 284
+    },
+    {
+      "step": "poll-contained-qualification",
+      "ms": 226
+    },
+    {
+      "step": "poll-contained-qualification",
+      "ms": 566
+    },
+    {
+      "step": "poll-contained-qualification",
+      "ms": 274
+    },
+    {
+      "step": "poll-contained-qualification",
+      "ms": 517
+    },
+    {
+      "step": "poll-contained-qualification",
+      "ms": 282
+    },
+    {
+      "step": "poll-contained-qualification",
+      "ms": 354
+    },
+    {
+      "step": "poll-contained-qualification",
+      "ms": 198
+    },
+    {
+      "step": "poll-contained-qualification",
+      "ms": 360
+    },
+    {
+      "step": "poll-contained-qualification",
+      "ms": 675
+    },
+    {
+      "step": "poll-contained-qualification",
+      "ms": 518
+    },
+    {
+      "step": "poll-contained-qualification",
+      "ms": 841
+    },
+    {
+      "step": "poll-contained-qualification",
+      "ms": 360
+    },
+    {
+      "step": "poll-contained-qualification",
+      "ms": 273
+    },
+    {
+      "step": "poll-contained-qualification",
+      "ms": 363
+    },
+    {
+      "step": "poll-contained-qualification",
+      "ms": 353
+    },
+    {
+      "step": "poll-contained-qualification",
+      "ms": 279
+    },
+    {
+      "step": "poll-contained-qualification",
+      "ms": 279
+    },
+    {
+      "step": "poll-contained-qualification",
+      "ms": 274
+    },
+    {
+      "step": "poll-contained-qualification",
+      "ms": 277
+    },
+    {
+      "step": "poll-contained-qualification",
+      "ms": 279
+    },
+    {
+      "step": "poll-contained-qualification",
+      "ms": 225
+    },
+    {
+      "step": "read-owned-report",
+      "ms": 197
+    },
+    {
+      "step": "machine-inventory",
+      "ms": 412
+    },
+    {
+      "step": "destroy-owned-canary",
+      "ms": 1891
+    },
+    {
+      "step": "machine-inventory",
+      "ms": 408
+    }
+  ],
+  "machine": "873261b04ee658",
+  "instance": "01M66P4PJNQY2M9HE3RW33CNR5",
+  "region": "iad",
+  "image": {
+    "registry": "docker-hub-mirror.fly.io",
+    "repository": "library/debian",
+    "tag": "bookworm-slim",
+    "digest": "sha256:a3bba7dc7dbcc1f37c2856c51fc9a7fac96608f50cb87b1b4e4d8b8c85ae988e"
+  },
+  "guest": {
+    "cpu_kind": "shared",
+    "cpus": 2,
+    "memory_mb": 2048
+  },
+  "artifacts": {
+    "driverSha256": "f28afc1db4ad638c6878640f018984febfab225fcdb9d3173dace806cd366e72",
+    "gzipSha256": "5784ca423004aecf59c571292713ed4d51b87109110caec010f013263d57ecd3",
+    "driverBytes": 59706368,
+    "sourceSha256": {
+      "engine/src/vfs.rs": "147ef84ea3be23997637fad6b51af730feba5d58a688f247cd3ce4d2939971e5",
+      "engine/src/vfs/content.rs": "95050948309a928905180fd9a9597bd093b4cf5747641a8985825f2759422f43",
+      "engine/src/vfs/namespace.rs": "d7d5e97806a123277e51ce4012912c51588e1dc8756aca1a8f570bce3bb98f2b",
+      "engine/src/vfs/observation.rs": "50f26329b8e4306d2c35255515cb7a12b7f512fd90856e81275c72789fd338b9",
+      "engine/src/vfs/linux.rs": "eaa0e19a4080c48c1499032fde128078ede0effc70ae31f8c479ac01de56c07f",
+      "engine/tests/vfs_ranges_backend.rs": "f87402a827843008e1ceeedbabacf25e9ba6bfea09b9064d25d308ae3a6b9528",
+      "engine/tests/vfs_observation.rs": "ad9a150ae4df6b308550930661a9b785751c2017488db725d4bdf99509b6a2a9",
+      "engine/tests/vfs_mount.rs": "b4c2ce5f67722226b54656a7581e86d4989e880ede9df25483d0add1c5859dd8"
+    },
+    "builtAt": "2026-10-30T15:11:43.603Z",
+    "dataPlane": "paged_ranges_v2"
+  },
+  "fixtureTransport": "private Fly6PN HTTP; exact VM source/nonce; compressed artifact SHA256 verified before execution; no credentials",
+  "exitCode": 124,
+  "results": [
+    {
+      "missing_device_fails_closed": true,
+      "uid": 1500
+    }
+  ],
+  "ok": false,
+  "failedPhase": "read-owned-report",
+  "error": "{\"missing_device_fails_closed\":true,\"uid\":1500}\nphase=prepare count=1\nphase=mounted count=1\nphase=identity\nphase=descendant\nphase=mmap\nphase=unmount\nphase=checkpoint\nphase=restore\nphase=prepare count=100\nphase=mounted count=100\nphase=prepare count=10000\nphase=mounted count=10000\nphase=prepare count=100000\n\n\n124 !== 0\n",
+  "cleanupVerified": true,
+  "verifiedAt": "2026-10-30T15:20:46.694Z"
+}

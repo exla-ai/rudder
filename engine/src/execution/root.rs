@@ -98,6 +98,89 @@ pub(crate) fn validate(spec: &ExecutionSpec) -> Result<()> {
         .chain(spec.authority_roots.iter())
         .map(|p| normalized(p))
         .collect::<Result<Vec<_>>>()?;
+    let workspace_endpoint = spec
+        .workspace_observation
+        .as_ref()
+        .map(|workspace| normalized(&workspace.endpoint_directory))
+        .transpose()?;
+    let application = spec
+        .workspace_observation
+        .as_ref()
+        .and_then(|w| w.application.as_ref());
+    let application_endpoint = application
+        .map(|a| normalized(&a.projection_directory))
+        .transpose()?;
+    if let (Some(application), Some(endpoint)) = (application, application_endpoint.as_ref()) {
+        let context = normalized(&application.host_context.path)?;
+        ensure!(
+            spec.authority_roots
+                .iter()
+                .map(|p| normalized(p))
+                .collect::<Result<Vec<_>>>()?
+                .iter()
+                .any(|root| context.starts_with(root)),
+            "protected application context must be an explicit authority root"
+        );
+        let parent = fs::symlink_metadata(
+            endpoint
+                .parent()
+                .context("application endpoint parent absent")?,
+        )?;
+        ensure!(
+            parent.is_dir()
+                && parent.uid() == unsafe { libc::geteuid() }
+                && parent.mode() & 0o777 == 0o700,
+            "application endpoint parent must be private and owned"
+        );
+        let mut protected = denied.clone();
+        protected.push(context);
+        if let Some(workspace) = &workspace_endpoint {
+            protected.push(workspace.clone());
+        }
+        if let Some(broker) = &spec.broker_directory {
+            protected.push(normalized(broker)?);
+        }
+        ensure!(
+            protected
+                .iter()
+                .all(|p| !endpoint.starts_with(p) && !p.starts_with(endpoint)),
+            "application endpoint overlaps private state or another service"
+        );
+    }
+    if let Some(endpoint) = &workspace_endpoint {
+        let parent = endpoint
+            .parent()
+            .context("workspace endpoint parent absent")?;
+        let metadata = fs::symlink_metadata(parent)?;
+        ensure!(
+            metadata.is_dir()
+                && metadata.uid() == unsafe { libc::geteuid() }
+                && metadata.mode() & 0o777 == 0o700,
+            "workspace endpoint parent must be private and owned"
+        );
+        for authority in [&spec.manager_root, &spec.store_root]
+            .into_iter()
+            .chain(spec.authority_roots.iter())
+        {
+            let authority = normalized(authority)?;
+            ensure!(
+                !endpoint.starts_with(&authority) && !authority.starts_with(endpoint),
+                "workspace endpoint overlaps private authority state"
+            );
+        }
+        let execution = normalized(&spec.execution_root)?;
+        ensure!(
+            !execution.starts_with(endpoint),
+            "workspace endpoint cannot contain execution records"
+        );
+        if let Some(broker) = &spec.broker_directory {
+            let broker = normalized(broker)?;
+            ensure!(
+                !endpoint.starts_with(&broker) && !broker.starts_with(endpoint),
+                "workspace endpoint and agent broker projections must be separate"
+            );
+        }
+    }
     let mut guests = BTreeSet::<PathBuf>::new();
     for r in &spec.runtime {
         let guest = guest_relative(&r.guest_path)?;
@@ -134,6 +217,18 @@ pub(crate) fn validate(spec: &ExecutionSpec) -> Result<()> {
                 .all(|p| !source.starts_with(p) && !p.starts_with(&source)),
             "runtime projection overlaps private authority state"
         );
+        if let Some(endpoint) = &workspace_endpoint {
+            ensure!(
+                !source.starts_with(endpoint) && !endpoint.starts_with(&source),
+                "runtime projection overlaps workspace identity state"
+            );
+        }
+        if let Some(endpoint) = &application_endpoint {
+            ensure!(
+                !source.starts_with(endpoint) && !endpoint.starts_with(&source),
+                "runtime projection overlaps application service"
+            );
+        }
         if let Some(broker) = &spec.broker_directory {
             let broker = broker.canonicalize()?;
             ensure!(
@@ -174,6 +269,102 @@ pub(crate) fn validate(spec: &ExecutionSpec) -> Result<()> {
                 .context("broker binding absent")?,
         )?;
     }
+    Ok(())
+}
+
+pub(crate) fn validate_workspace_projection(workspace: &WorkspaceObservationProfile) -> Result<()> {
+    let path = &workspace.endpoint_directory;
+    let metadata = fs::symlink_metadata(path)?;
+    ensure!(
+        metadata.is_dir()
+            && !metadata.file_type().is_symlink()
+            && metadata.uid() == unsafe { libc::geteuid() }
+            && metadata.mode() & 0o777 == 0o700,
+        "workspace projection must be an owned private directory"
+    );
+    let mut identity_found = false;
+    let mut socket_found = false;
+    for entry in fs::read_dir(path)? {
+        let entry = entry?;
+        let metadata = fs::symlink_metadata(entry.path())?;
+        ensure!(
+            metadata.uid() == unsafe { libc::geteuid() } && metadata.mode() & 0o777 == 0o600,
+            "workspace projection has unsafe ownership/mode"
+        );
+        if entry.file_name() == "identity.json" {
+            let identity = crate::vfs::rpc::read_identity(&entry.path())?;
+            ensure!(
+                identity.binding == workspace.binding,
+                "workspace projection identity differs from execution"
+            );
+            identity_found = true;
+        } else if entry.file_name() == "workspace.sock" {
+            ensure!(
+                metadata.file_type().is_socket(),
+                "workspace endpoint must be a socket"
+            );
+            socket_found = true;
+        } else {
+            bail!("workspace projection contains an unexpected entry");
+        }
+    }
+    ensure!(
+        identity_found && socket_found,
+        "owning workspace RPC must be ready before guest launch"
+    );
+    Ok(())
+}
+
+pub(crate) fn validate_application_projection(
+    spec: &ExecutionSpec,
+    projection: &GuestServiceProjection,
+) -> Result<()> {
+    projection.validate(spec)?;
+    let metadata = fs::symlink_metadata(&projection.directory)?;
+    ensure!(
+        metadata.is_dir()
+            && !metadata.file_type().is_symlink()
+            && metadata.uid() == unsafe { libc::geteuid() }
+            && metadata.mode() & 0o777 == 0o700,
+        "application projection must be a private owned directory"
+    );
+    let mut expected: std::collections::BTreeMap<_, _> = projection
+        .entries
+        .iter()
+        .map(|e| (e.name.as_str(), &e.node))
+        .collect();
+    for entry in fs::read_dir(&projection.directory)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let name = name
+            .to_str()
+            .context("application entry name is not UTF-8")?;
+        let kind = expected
+            .remove(name)
+            .context("application projection contains an unexpected entry")?;
+        let metadata = fs::symlink_metadata(entry.path())?;
+        ensure!(
+            !metadata.file_type().is_symlink()
+                && metadata.uid() == unsafe { libc::geteuid() }
+                && metadata.mode() & 0o777 == 0o600
+                && metadata.nlink() == 1,
+            "unsafe application projection ownership/mode/link count"
+        );
+        match kind {
+            ServiceProjectionKind::File { max_size_bytes } => ensure!(
+                metadata.is_file() && metadata.len() <= *max_size_bytes,
+                "application projected file type/size differs"
+            ),
+            ServiceProjectionKind::Socket => ensure!(
+                metadata.file_type().is_socket(),
+                "application endpoint is not a socket"
+            ),
+        }
+    }
+    ensure!(
+        expected.is_empty(),
+        "application projection is missing an entry"
+    );
     Ok(())
 }
 pub(crate) fn validate_broker(path: &Path) -> Result<()> {
@@ -362,7 +553,11 @@ pub(crate) fn seed_home(layout: &Layout, spec: &ExecutionSpec) -> Result<()> {
     }
     Ok(())
 }
-pub(crate) fn restrict(layout: &Layout, spec: &ExecutionSpec) -> Result<()> {
+pub(crate) fn restrict(
+    layout: &Layout,
+    spec: &ExecutionSpec,
+    application: Option<&GuestServiceProjection>,
+) -> Result<()> {
     ensure!(
         unsafe { libc::getpid() } == 1,
         "restricted root must be constructed by private PID init"
@@ -405,6 +600,24 @@ pub(crate) fn restrict(layout: &Layout, spec: &ExecutionSpec) -> Result<()> {
     for device in ["null", "zero", "random", "urandom", "tty"] {
         target(&layout.root, &format!("/dev/{device}"), false)?;
     }
+    if spec.workspace_observation.is_some() {
+        target(&layout.root, WORKSPACE_GUEST_DIRECTORY, true)?;
+    }
+    if let Some(projection) = application {
+        validate_application_projection(spec, projection)?;
+        target(
+            &layout.root,
+            &spec
+                .workspace_observation
+                .as_ref()
+                .unwrap()
+                .application
+                .as_ref()
+                .unwrap()
+                .guest_directory(),
+            true,
+        )?;
+    }
     for r in &spec.runtime {
         let source = r.source.canonicalize()?;
         bind(
@@ -427,6 +640,32 @@ pub(crate) fn restrict(layout: &Layout, spec: &ExecutionSpec) -> Result<()> {
                 .context("broker binding absent")?,
         )?;
         bind(broker, &layout.root.join("run/rudder/agent"), true, false)?;
+    }
+    if let Some(workspace) = &spec.workspace_observation {
+        validate_workspace_projection(workspace)?;
+        bind(
+            &workspace.endpoint_directory,
+            &layout.root.join("run/rudder/workspace"),
+            true,
+            false,
+        )?;
+    }
+    if let Some(projection) = application {
+        validate_application_projection(spec, projection)?;
+        let guest = spec
+            .workspace_observation
+            .as_ref()
+            .unwrap()
+            .application
+            .as_ref()
+            .unwrap()
+            .guest_directory();
+        bind(
+            &projection.directory,
+            &layout.root.join(guest_relative(&guest)?),
+            true,
+            false,
+        )?;
     }
     for device in ["null", "zero", "random", "urandom", "tty"] {
         let source = PathBuf::from(format!("/dev/{device}"));

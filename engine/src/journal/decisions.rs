@@ -190,103 +190,145 @@ impl Journal {
         request: &IntegrationRequest,
         now_ms: i64,
     ) -> Result<IntegrationReceipt> {
-        valid_id(&request.idempotency_key)?;
-        valid_id(&request.expected_head)?;
-        valid_id(&request.new_head)?;
-        ensure!(
-            !request.evidence.checks.is_null(),
-            "integration requires verification evidence"
-        );
-        for (reference, kind) in [
-            (&request.proposed_source_root, ObjectKind::SourceRoot),
-            (&request.evidence.tested_source_root, ObjectKind::SourceRoot),
-            (
-                &request.proposed_environment_root,
-                ObjectKind::EnvironmentRoot,
-            ),
-            (
-                &request.evidence.tested_environment_root,
-                ObjectKind::EnvironmentRoot,
-            ),
-        ] {
-            reference.validate()?;
-            ensure!(reference.kind == kind, "incorrect integration root kind");
-        }
-        for reference in &request.evidence.action_results {
-            reference.validate()?;
-            ensure!(
-                reference.kind == ObjectKind::ActionResult,
-                "integration result must be an action result"
-            );
-        }
-        let body = json(request)?;
-        ensure!(
-            body.len() <= 1024 * 1024,
-            "integration evidence exceeds size limit"
-        );
+        validate_integration_shape(request)?;
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        assert_owner(&tx, owner)?;
-        ensure!(
-            request.evidence.tested_head == request.expected_head,
-            "verification evidence belongs to another integration base"
-        );
-        ensure!(
-            request.evidence.tested_source_root == request.proposed_source_root,
-            "tested source root differs from proposed source"
-        );
-        ensure!(
-            request.evidence.tested_environment_root == request.proposed_environment_root,
-            "tested environment root differs from proposed environment"
-        );
-        let duplicate:Option<(String,String)>=tx.query_row("SELECT receipt_json,request_json FROM integrations WHERE project_id=?1 AND idempotency_key=?2",params![owner.project_id,request.idempotency_key],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
-        if let Some((original, original_body)) = duplicate {
-            ensure!(
-                original_body == body,
-                "idempotency key reused with a different integration"
-            );
-            return Ok(serde_json::from_str(&original)?);
+        if let Some(receipt) = integration_duplicate(&tx, &owner.project_id, request)? {
+            return Ok(receipt);
         }
-        ensure!(
-            project_state(&tx, &owner.project_id)?.integration_head == request.expected_head,
-            "integration head changed"
-        );
-        for (topic, expected) in &request.versions {
-            ensure!(
-                topic_version(&tx, &owner.project_id, topic)? == *expected,
-                "decision or build-policy version changed: {topic}"
-            );
-        }
-        let id = Uuid::new_v4().to_string();
-        let sequence = append_event(
-            &tx,
-            &owner.project_id,
-            "integration-advanced",
-            &owner.owner_id,
-            &serde_json::json!({"integration_id":id,"owner_epoch":owner.epoch,"request":request}),
-            now_ms,
-        )?;
-        let receipt = IntegrationReceipt {
-            integration_id: id.clone(),
-            project_id: owner.project_id.clone(),
-            previous_head: request.expected_head.clone(),
-            new_head: request.new_head.clone(),
-            owner_epoch: owner.epoch,
-            proposed_source_root: request.proposed_source_root.clone(),
-            proposed_environment_root: request.proposed_environment_root.clone(),
-            versions: request.versions.clone(),
-            evidence: request.evidence.clone(),
-            sequence,
-        };
-        tx.execute(
-            "UPDATE projects SET integration_head=?1 WHERE project_id=?2",
-            params![request.new_head, owner.project_id],
-        )?;
-        tx.execute("INSERT INTO integrations(integration_id,project_id,previous_head,new_head,owner_epoch,versions_json,evidence_json,sequence,idempotency_key,request_json,receipt_json) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",params![id,owner.project_id,request.expected_head,request.new_head,sql_u64(owner.epoch)?,json(&request.versions)?,json(&request.evidence)?,sql_u64(sequence)?,request.idempotency_key,body,json(&receipt)?])?;
+        super::vcs::assert_legacy_key_unreserved(&tx, &owner.project_id, &request.idempotency_key)?;
+        validate_integration_gate(&tx, owner, request, None)?;
+        let receipt = apply_integration(&tx, owner, request, now_ms)?;
         tx.commit()?;
         Ok(receipt)
     }
+}
+
+pub(super) fn validate_integration_shape(request: &IntegrationRequest) -> Result<()> {
+    valid_id(&request.idempotency_key)?;
+    valid_id(&request.expected_head)?;
+    valid_id(&request.new_head)?;
+    ensure!(
+        !request.evidence.checks.is_null(),
+        "integration requires verification evidence"
+    );
+    for (reference, kind) in [
+        (&request.proposed_source_root, ObjectKind::SourceRoot),
+        (&request.evidence.tested_source_root, ObjectKind::SourceRoot),
+        (
+            &request.proposed_environment_root,
+            ObjectKind::EnvironmentRoot,
+        ),
+        (
+            &request.evidence.tested_environment_root,
+            ObjectKind::EnvironmentRoot,
+        ),
+    ] {
+        reference.validate()?;
+        ensure!(reference.kind == kind, "incorrect integration root kind");
+    }
+    for reference in &request.evidence.action_results {
+        reference.validate()?;
+        ensure!(
+            reference.kind == ObjectKind::ActionResult,
+            "integration result must be an action result"
+        );
+    }
+    let body = json(request)?;
+    ensure!(
+        body.len() <= 1024 * 1024,
+        "integration evidence exceeds size limit"
+    );
+    ensure!(
+        request.evidence.tested_head == request.expected_head,
+        "verification evidence belongs to another integration base"
+    );
+    ensure!(
+        request.evidence.tested_source_root == request.proposed_source_root,
+        "tested source root differs from proposed source"
+    );
+    ensure!(
+        request.evidence.tested_environment_root == request.proposed_environment_root,
+        "tested environment root differs from proposed environment"
+    );
+    Ok(())
+}
+
+pub(super) fn integration_duplicate(
+    conn: &Connection,
+    project: &str,
+    request: &IntegrationRequest,
+) -> Result<Option<IntegrationReceipt>> {
+    let duplicate: Option<(String, String)> = conn.query_row(
+        "SELECT receipt_json,request_json FROM integrations WHERE project_id=?1 AND idempotency_key=?2",
+        params![project, request.idempotency_key], |r| Ok((r.get(0)?, r.get(1)?)),
+    ).optional()?;
+    if let Some((receipt, body)) = duplicate {
+        ensure!(
+            body == json(request)?,
+            "idempotency key reused with a different integration"
+        );
+        return Ok(Some(serde_json::from_str(&receipt)?));
+    }
+    Ok(None)
+}
+
+pub(super) fn validate_integration_gate(
+    conn: &Connection,
+    owner: &OwnerFence,
+    request: &IntegrationRequest,
+    except_intent: Option<&str>,
+) -> Result<()> {
+    assert_owner(conn, owner)?;
+    super::vcs::assert_no_uncertain_integration(conn, &owner.project_id, except_intent)?;
+    ensure!(
+        project_state(conn, &owner.project_id)?.integration_head == request.expected_head,
+        "integration head changed"
+    );
+    for (topic, expected) in &request.versions {
+        ensure!(
+            topic_version(conn, &owner.project_id, topic)? == *expected,
+            "decision or build-policy version changed: {topic}"
+        );
+    }
+    Ok(())
+}
+
+pub(super) fn apply_integration(
+    tx: &Transaction<'_>,
+    owner: &OwnerFence,
+    request: &IntegrationRequest,
+    now_ms: i64,
+) -> Result<IntegrationReceipt> {
+    let body = json(request)?;
+    let id = Uuid::new_v4().to_string();
+    let sequence = append_event(
+        &tx,
+        &owner.project_id,
+        "integration-advanced",
+        &owner.owner_id,
+        &serde_json::json!({"integration_id":id,"owner_epoch":owner.epoch,"request":request}),
+        now_ms,
+    )?;
+    let receipt = IntegrationReceipt {
+        integration_id: id.clone(),
+        project_id: owner.project_id.clone(),
+        previous_head: request.expected_head.clone(),
+        new_head: request.new_head.clone(),
+        owner_epoch: owner.epoch,
+        proposed_source_root: request.proposed_source_root.clone(),
+        proposed_environment_root: request.proposed_environment_root.clone(),
+        versions: request.versions.clone(),
+        evidence: request.evidence.clone(),
+        sequence,
+    };
+    tx.execute(
+        "UPDATE projects SET integration_head=?1 WHERE project_id=?2",
+        params![request.new_head, owner.project_id],
+    )?;
+    tx.execute("INSERT INTO integrations(integration_id,project_id,previous_head,new_head,owner_epoch,versions_json,evidence_json,sequence,idempotency_key,request_json,receipt_json) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",params![id,owner.project_id,request.expected_head,request.new_head,sql_u64(owner.epoch)?,json(&request.versions)?,json(&request.evidence)?,sql_u64(sequence)?,request.idempotency_key,body,json(&receipt)?])?;
+    Ok(receipt)
 }
 
 fn topic_version(conn: &Connection, project: &str, topic: &str) -> Result<u64> {

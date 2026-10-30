@@ -1,0 +1,10 @@
+{
+  "engine/src/vfs.rs": true,
+  "engine/src/vfs/content.rs": true,
+  "engine/src/vfs/namespace.rs": true,
+  "engine/src/vfs/remote.rs": true,
+  "engine/src/vfs/remote_qualification.rs": true,
+  "engine/src/vfs/observation.rs": true,
+  "engine/src/vfs/linux.rs": true,
+  "engine/tests/vfs_remote.rs": true
+}

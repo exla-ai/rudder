@@ -1061,7 +1061,7 @@ fn durable_journal_rejects_memory_uris_and_is_private_on_unix() {
     assert_eq!(
         db.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
             .unwrap(),
-        3
+        4
     );
     assert!(rusqlite::version_number() >= 3_051_003);
     #[cfg(unix)]
@@ -1296,7 +1296,7 @@ fn schema_one_migration_preserves_receipts_and_rejects_unproven_legacy_live_effe
     let accepted=f.journal.accept_command(&f.a,&request,NOW).unwrap();
     drop(f.journal);
     let db=rusqlite::Connection::open(&f.path).unwrap();
-    db.execute_batch("DROP TABLE runtime_observations; ALTER TABLE commands DROP COLUMN capability_hash; PRAGMA user_version=1;").unwrap();
+    db.execute_batch("DROP TABLE vcs_intents; DROP TABLE runtime_observations; ALTER TABLE commands DROP COLUMN capability_hash; PRAGMA user_version=1;").unwrap();
     drop(db);
     let mut journal=Journal::open(&f.path).unwrap();
     assert_eq!(journal.agent_command_receipt(&f.a,&accepted.command_id,NOW).unwrap(),accepted);

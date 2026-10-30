@@ -110,6 +110,43 @@ objective remains the full plan.
   managed view/VCS integration and uncertain-run reconciliation remain open.
   [Execution proof and limits](worker-execution.md), including uninterruptible
   I/O limits, are separate from [VFS qualification](vfs-qualification.md).
+- The next unshipped storage track adds 4 MiB immutable chunks, bounded radix
+  directory shards and ancestry-free SourceRoot/EnvironmentRoot descriptors.
+  A frozen optimized Buck2 workload using those formats returned actual Rust
+  and TypeScript results: 6.322 s for a fresh graph and 3.261–3.872 s warm,
+  reusing an existing local prepared CAS/SDK. SDK verification remains a large
+  repeated cost; these are not download or agent-launch timings. See the
+  [exact build inputs and stage reports](../../examples/build-profile/evidence/2026-10-30-runnable-v2/README.md).
+- Scoped lazy remote sessions authorize objects through verified parent paths,
+  with bounded cache/source workers and stale-attempt rejection. Mounted Fly
+  root and UID1500 cases fetched only two data chunks from a 208 MiB file while
+  exercising private writes, mmap, rename/link/unlink and strict cleanup.
+  Constructor/fork measured 49–55 ms after fixture preparation. The source was
+  authenticated loopback HTTP, not production S3 or cross-machine latency.
+  [Frozen mounted evidence](../../examples/vfs/evidence/2026-10-30-remote-ranges/README.md).
+- The bounded remote directory pager now passed actual mounted `getdents64`,
+  tiny-buffer cookies, seeks, rewind across mutations and reopen on Fly as root
+  and UID1500. Both listed 100,101 names without File/Blob reads; first listing
+  took 24.564–25.579 s. This is a cold metadata cost to improve, separate from
+  root construction/private fork (70–115 ms in those samples). The final helper
+  matched all 182 qualified inputs and its VM was deleted. See the
+  [exact paging evidence](../../examples/vfs/evidence/2026-10-30-remote-readdir/README.md).
+- Individual-object retention and partial delta plans now preserve new bytes
+  across collection without hydrating their inherited closure. Transfer clones
+  only its own retention and preserves native receipt generations as opaque JSON.
+  The scoped upload path sends new units and lets Cloud validate the complete
+  resulting directory before issuing a replicated data receipt. Eight partial
+  retention cases, the real native wire case, 20 transfer/download cases and 51
+  Cloud CAS regressions pass. Producer checkpoint/journal integration and the
+  default launch path remain separate gates. See [partial retention](partial-retention.md).
+- The native v3 helper now composes its own protected VCS service and real
+  external capability broker, then settles its writers before finalization.
+  Mounted local-root cases exercised jj status/diff/log/new/edit, open-FD writes
+  and real journal epoch revocation. The revoked attempt produced no checkpoint;
+  all owned process descriptors settled. These were debug/stripped binaries,
+  not optimized latency or real-model/default-launch proof. See
+  [native helper evidence](../../examples/vcs/evidence/2026-10-30/native-v3/README.md)
+  and the [managed-launch next slice](managed-launch.md).
 - A pinned Buck2 profile builds real Rust and TypeScript against a real native
   REAPI cache. Archived whole-build warm samples range from 2.45 to 3.56 s.
   The latest topology-aware matrix measured a fresh-graph remote hit at 3.216 s
@@ -137,7 +174,8 @@ objective remains the full plan.
   745 ms, publication 884 ms, peak process RSS 126,623,744 bytes. That check used
   the admin default profile; deployed worker authentication is a separate gate.
   Blob limits are 256 MiB; directory metadata remains bounded at 4 MiB. Large
-  flat directories need a sharded format before general remote scale claims.
+  flat directories in that deployed baseline are not a general scale claim;
+  bounded sharded metadata is in the unshipped track above.
 - One persistent framed native helper supplies pinned source and staged target
   transfer adapters. The actual HTTP handler, 70 MiB blob and an independent
   fresh native CAS are tested together, including loss/corruption and u64

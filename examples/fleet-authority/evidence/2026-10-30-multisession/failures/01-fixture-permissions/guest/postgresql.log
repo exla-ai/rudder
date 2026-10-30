@@ -1,0 +1,6 @@
+2026-10-30 20:23:25.704 UTC [664]  LOG:  starting PostgreSQL 17.11 (Debian 17.11-1.pgdg12+2) on x86_64-pc-linux-gnu, compiled by gcc (Debian 12.2.0-14+deb12u1) 12.2.0, 64-bit
+2026-10-30 20:23:25.705 UTC [664]  LOG:  listening on Unix socket "/var/tmp/rudder-fleet-2d5073a1-fc0d-439f-bc7c-8b996419f626/socket/.s.PGSQL.55432"
+2026-10-30 20:23:25.709 UTC [667]  LOG:  database system was shut down at 2026-10-30 20:23:24 UTC
+2026-10-30 20:23:25.715 UTC [664]  LOG:  database system is ready to accept connections
+2026-10-30 20:23:25.803 UTC [664]  LOG:  received immediate shutdown request
+2026-10-30 20:23:25.806 UTC [664]  LOG:  database system is shut down

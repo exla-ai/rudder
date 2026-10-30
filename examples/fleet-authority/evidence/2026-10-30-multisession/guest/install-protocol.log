@@ -1,0 +1,263 @@
+-- Disposable qualification harness, not production functions or authentication.
+-- q_documented_* are generated verbatim from the architecture document's UPDATEs.
+-- Only synthetic fixture identities/bytes enter this isolated server.
+SET search_path = rudder_fleet_design, pg_catalog;
+SET
+CREATE FUNCTION q_id(label text) RETURNS uuid LANGUAGE sql IMMUTABLE AS
+$$ SELECT md5('rudder-fleet-qualification:' || label)::uuid $$;
+CREATE FUNCTION
+CREATE FUNCTION q_project(label text) RETURNS uuid LANGUAGE sql IMMUTABLE AS
+$$ SELECT q_id('project:' || label) $$;
+CREATE FUNCTION
+CREATE TABLE q_results(label text PRIMARY KEY, receipt jsonb NOT NULL,
+                      backend_pid integer NOT NULL DEFAULT pg_backend_pid(),
+                      observed_at timestamptz NOT NULL DEFAULT clock_timestamp());
+CREATE TABLE
+CREATE TABLE q_assertions(label text PRIMARY KEY, details jsonb NOT NULL,
+                         observed_at timestamptz NOT NULL DEFAULT clock_timestamp());
+CREATE TABLE
+CREATE FUNCTION q_assert(label text, condition boolean, details jsonb DEFAULT '{}')
+RETURNS void LANGUAGE plpgsql AS $$ BEGIN
+  IF condition IS DISTINCT FROM true THEN RAISE EXCEPTION 'assertion failed: % (%)',label,details; END IF;
+  INSERT INTO q_assertions VALUES(label,details,clock_timestamp());
+END $$;
+CREATE FUNCTION
+CREATE FUNCTION q_engine_ok(engine uuid, boot text) RETURNS boolean
+LANGUAGE plpgsql AS $$
+DECLARE found_engine engine_instances%ROWTYPE; credential authority_credentials%ROWTYPE;
+BEGIN
+  SELECT * INTO found_engine FROM engine_instances
+    WHERE account_id='fixture' AND engine_instance_id=engine;
+  IF NOT FOUND OR found_engine.machine_boot_id <> boot OR found_engine.revoked_at IS NOT NULL
+     OR found_engine.protocol_version <> 1 THEN RETURN false; END IF;
+  SELECT * INTO credential FROM authority_credentials
+    WHERE account_id='fixture' AND credential_id=found_engine.authenticated_key_id FOR SHARE;
+  RETURN FOUND AND credential.kind='engine' AND credential.revoked_at IS NULL
+     AND credential.expires_at > clock_timestamp();
+END $$;
+CREATE FUNCTION
+CREATE FUNCTION q_lock(project_label text) RETURNS projects LANGUAGE plpgsql AS $$
+DECLARE result projects%ROWTYPE;
+BEGIN
+  PERFORM 1 FROM authorities WHERE authority_id=q_id('authority') AND state='ready' FOR SHARE;
+  IF NOT FOUND THEN RAISE EXCEPTION 'fixture authority not ready'; END IF;
+  SELECT * INTO STRICT result FROM projects
+    WHERE authority_id=q_id('authority') AND account_id='fixture'
+      AND project_id=q_project(project_label) FOR UPDATE;
+  PERFORM 1 FROM project_principals WHERE authority_id=result.authority_id
+    AND account_id=result.account_id AND project_id=result.project_id
+    AND principal_id='qualifier-user' AND revoked_at IS NULL;
+  IF NOT FOUND THEN RAISE EXCEPTION 'fixture membership missing'; END IF;
+  RETURN result;
+END $$;
+CREATE FUNCTION
+CREATE FUNCTION q_prior(project uuid, operation_key text, operation_kind text, canonical bytea)
+RETURNS jsonb LANGUAGE plpgsql AS $$
+DECLARE existing idempotency%ROWTYPE;
+BEGIN
+  SELECT * INTO existing FROM idempotency WHERE authority_id=q_id('authority')
+    AND account_id='fixture' AND project_id=project AND principal_id='qualifier-user'
+    AND idempotency_key=operation_key;
+  IF NOT FOUND THEN RETURN NULL; END IF;
+  IF existing.operation_kind<>operation_kind OR existing.request_canonical<>canonical THEN
+    RETURN jsonb_build_object('status','conflict','reason','idempotency_conflict');
+  END IF;
+  RETURN existing.accepted_receipt;
+END $$;
+CREATE FUNCTION
+CREATE FUNCTION q_record(project uuid, operation_key text, operation_kind text, canonical bytea,
+                         receipt jsonb) RETURNS void LANGUAGE plpgsql AS $$
+DECLARE operation uuid := q_id(project::text || ':' || operation_key);
+        seq bigint := (receipt->>'project_seq')::bigint;
+BEGIN
+  INSERT INTO events(authority_id,account_id,project_id,project_seq,event_id,kind,principal_id,payload)
+    VALUES(q_id('authority'),'fixture',project,seq,operation,operation_kind,'qualifier-user',receipt);
+  INSERT INTO idempotency(authority_id,account_id,project_id,principal_id,idempotency_key,
+      operation_id,operation_kind,request_sha256,request_canonical,accepted_seq,accepted_receipt)
+    VALUES(q_id('authority'),'fixture',project,'qualifier-user',operation_key,operation,
+      operation_kind,encode(pg_catalog.sha256(canonical),'hex'),canonical,seq,receipt);
+  INSERT INTO outbox(authority_id,account_id,project_id,outbox_id,event_seq,kind,destination,payload,status)
+    VALUES(q_id('authority'),'fixture',project,q_id(operation::text || ':outbox'),seq,
+      operation_kind,'synthetic-sink',receipt,'pending');
+END $$;
+CREATE FUNCTION
+CREATE FUNCTION q_claim(project_label text, engine_label text, boot text,
+                        expected_epoch bigint, operation_key text, lease_ms integer DEFAULT 15000)
+RETURNS jsonb LANGUAGE plpgsql AS $$
+DECLARE p projects%ROWTYPE; at_time timestamptz; canonical bytea; prior jsonb; receipt jsonb;
+        operation uuid; engine uuid := q_id('engine:' || engine_label);
+BEGIN
+  p:=q_lock(project_label);
+  IF NOT q_engine_ok(engine,boot) THEN RETURN '{"status":"conflict","reason":"engine_boot"}'; END IF;
+  canonical:=convert_to(jsonb_build_array('claim-v1',engine,boot,expected_epoch,lease_ms)::text,'UTF8');
+  prior:=q_prior(p.project_id,operation_key,'claim',canonical);
+  IF prior IS NOT NULL THEN RETURN prior; END IF;
+  at_time:=clock_timestamp();
+  IF p.mode<>'ready' OR p.owner_epoch<>expected_epoch THEN
+    RETURN '{"status":"conflict","reason":"stale_epoch"}'; END IF;
+  IF p.owner_engine_instance IS NOT NULL AND p.lease_until>at_time THEN
+    RETURN '{"status":"conflict","reason":"owner_live"}'; END IF;
+  IF lease_ms<1 OR lease_ms>15000 THEN RAISE EXCEPTION 'fixture lease limit'; END IF;
+  operation:=q_id(p.project_id::text || ':' || operation_key);
+  UPDATE projects SET owner_epoch=owner_epoch+1,owner_engine_instance=engine,
+    lease_id=q_id(operation::text || ':lease'),lease_until=at_time+lease_ms*interval '1 millisecond',
+    renew_serial=0,event_seq=event_seq+1
+    WHERE authority_id=p.authority_id AND account_id=p.account_id AND project_id=p.project_id
+    RETURNING * INTO p;
+  INSERT INTO ownership_receipts(authority_id,account_id,project_id,owner_epoch,
+    owner_engine_instance,operation_id,cause,receipt_canonical)
+    VALUES(p.authority_id,p.account_id,p.project_id,p.owner_epoch,engine,operation,'claimed',canonical);
+  receipt:=jsonb_build_object('status','accepted','operation_id',operation,'owner_epoch',p.owner_epoch,
+    'lease_id',p.lease_id,'lease_until',p.lease_until,'project_seq',p.event_seq,'engine',engine);
+  PERFORM q_record(p.project_id,operation_key,'claim',canonical,receipt);
+  RETURN receipt;
+END $$;
+CREATE FUNCTION
+CREATE FUNCTION q_renew(project_label text, engine_label text, boot text, expected_epoch bigint,
+                        expected_serial bigint, request_label text) RETURNS jsonb LANGUAGE plpgsql AS $$
+DECLARE p projects%ROWTYPE; grant_row record; at_time timestamptz; canonical bytea;
+        existing lease_renewals%ROWTYPE; engine uuid:=q_id('engine:' || engine_label);
+        request uuid:=q_id('renewal:' || project_label || ':' || request_label);
+BEGIN
+  p:=q_lock(project_label);
+  IF NOT q_engine_ok(engine,boot) THEN RETURN '{"status":"conflict","reason":"engine_boot"}'; END IF;
+  canonical:=convert_to(jsonb_build_array('renew-v1',engine,boot,expected_epoch,p.lease_id,expected_serial)::text,'UTF8');
+  SELECT * INTO existing FROM lease_renewals WHERE authority_id=p.authority_id
+    AND account_id=p.account_id AND project_id=p.project_id AND request_id=request;
+  IF FOUND THEN
+    IF existing.request_canonical<>canonical THEN RETURN '{"status":"conflict","reason":"idempotency_conflict"}'; END IF;
+    RETURN jsonb_build_object('status','renewed','renew_serial',existing.renew_serial,
+      'lease_until',existing.lease_until,'issued_at',existing.issued_at,'lease_id',existing.lease_id);
+  END IF;
+  at_time:=clock_timestamp(); -- deliberately sampled AFTER the potentially waiting project lock
+  IF p.owner_epoch<>expected_epoch THEN RETURN '{"status":"conflict","reason":"stale_epoch"}'; END IF;
+  IF p.owner_engine_instance<>engine THEN RETURN '{"status":"conflict","reason":"engine_instance"}'; END IF;
+  SELECT * INTO grant_row FROM q_documented_renew(p.authority_id,p.account_id,p.project_id,
+    expected_epoch,engine,p.lease_id,expected_serial,at_time);
+  IF NOT FOUND THEN
+    RETURN jsonb_build_object('status','conflict','reason','expired_or_serial','checked_at',at_time,
+      'transaction_started_at',transaction_timestamp(),'lease_until',p.lease_until,
+      'transaction_clock_would_allow',p.lease_until>transaction_timestamp());
+  END IF;
+  INSERT INTO lease_renewals(authority_id,account_id,project_id,request_id,grant_kind,owner_epoch,
+    lease_id,renew_serial,engine_instance_id,request_canonical,issued_at,lease_until)
+    VALUES(p.authority_id,p.account_id,p.project_id,request,'owner',expected_epoch,
+      grant_row.lease_id,grant_row.renew_serial,engine,canonical,at_time,grant_row.lease_until);
+  RETURN jsonb_build_object('status','renewed','renew_serial',grant_row.renew_serial,
+    'lease_until',grant_row.lease_until,'issued_at',at_time,'lease_id',grant_row.lease_id);
+END $$;
+CREATE FUNCTION
+CREATE FUNCTION q_topic(project_label text, operation_key text, expected_version bigint)
+RETURNS jsonb LANGUAGE plpgsql AS $$
+DECLARE p projects%ROWTYPE; canonical bytea; prior jsonb; receipt jsonb; version bigint;
+        previous uuid; operation uuid;
+BEGIN
+  p:=q_lock(project_label);
+  canonical:=convert_to(jsonb_build_array('topic-v1','policy/verification',expected_version)::text,'UTF8');
+  prior:=q_prior(p.project_id,operation_key,'decision',canonical);
+  IF prior IS NOT NULL THEN RETURN prior; END IF;
+  SELECT t.version,t.decision_id INTO version,previous FROM topics t WHERE t.authority_id=p.authority_id
+    AND t.account_id=p.account_id AND t.project_id=p.project_id AND t.topic='policy/verification';
+  IF COALESCE(version,0)<>expected_version THEN RETURN '{"status":"conflict","reason":"topic_version"}'; END IF;
+  operation:=q_id(p.project_id::text || ':' || operation_key);
+  UPDATE projects SET event_seq=event_seq+1 WHERE authority_id=p.authority_id
+    AND account_id=p.account_id AND project_id=p.project_id RETURNING * INTO p;
+  receipt:=jsonb_build_object('status','accepted','operation_id',operation,
+    'topic_version',expected_version+1,'project_seq',p.event_seq);
+  PERFORM q_record(p.project_id,operation_key,'decision',canonical,receipt);
+  INSERT INTO decisions(authority_id,account_id,project_id,decision_id,topic,version,
+    principal_id,scope,statement,previous_id,project_seq)
+    VALUES(p.authority_id,p.account_id,p.project_id,operation,'policy/verification',expected_version+1,
+      'qualifier-user','project','{"synthetic":true}',previous,p.event_seq);
+  INSERT INTO topics(authority_id,account_id,project_id,topic,version,decision_id)
+    VALUES(p.authority_id,p.account_id,p.project_id,'policy/verification',expected_version+1,operation)
+    ON CONFLICT(authority_id,account_id,project_id,topic)
+    DO UPDATE SET version=EXCLUDED.version,decision_id=EXCLUDED.decision_id;
+  RETURN receipt;
+END $$;
+CREATE FUNCTION
+CREATE FUNCTION q_verifications(project_label text) RETURNS void LANGUAGE plpgsql AS $$
+DECLARE p projects%ROWTYPE; candidate text; current_policy bigint;
+BEGIN
+  p:=q_lock(project_label);
+  SELECT version INTO current_policy FROM topics WHERE authority_id=p.authority_id
+    AND account_id=p.account_id AND project_id=p.project_id AND topic='policy/verification';
+  FOREACH candidate IN ARRAY ARRAY['a','b'] LOOP
+    INSERT INTO verifications(authority_id,account_id,project_id,verification_id,owner_epoch,
+      base_version,base_head,tested_head,tested_source_root,tested_environment_root,gate_receipt_root,build_contract_root)
+      VALUES(p.authority_id,p.account_id,p.project_id,q_id(project_label || ':verification:' || candidate),
+        p.owner_epoch,p.integration_version,p.head_vcs_commit,'candidate-' || candidate,
+        'source-' || candidate,'environment','evidence','build-contract');
+    INSERT INTO verification_topics(authority_id,account_id,project_id,verification_id,topic,expected_version)
+      VALUES(p.authority_id,p.account_id,p.project_id,q_id(project_label || ':verification:' || candidate),
+        'policy/verification',COALESCE(current_policy,0));
+  END LOOP;
+END $$;
+CREATE FUNCTION
+CREATE FUNCTION q_integrate(project_label text, engine_label text, boot text, expected_epoch bigint,
+    candidate text, verification_candidate text, operation_key text) RETURNS jsonb LANGUAGE plpgsql AS $$
+DECLARE p projects%ROWTYPE; changed record; canonical bytea; prior jsonb; receipt jsonb;
+        engine uuid:=q_id('engine:' || engine_label); operation uuid;
+BEGIN
+  p:=q_lock(project_label);
+  IF NOT q_engine_ok(engine,boot) THEN RETURN '{"status":"conflict","reason":"engine_boot"}'; END IF;
+  canonical:=convert_to(jsonb_build_array('integration-v1',engine,boot,expected_epoch,
+    'base',0,candidate,verification_candidate)::text,'UTF8');
+  prior:=q_prior(p.project_id,operation_key,'integration',canonical);
+  IF prior IS NOT NULL THEN RETURN prior; END IF;
+  IF p.owner_engine_instance<>engine THEN RETURN '{"status":"conflict","reason":"engine_instance"}'; END IF;
+  SELECT * INTO changed FROM q_documented_integration(p.authority_id,p.account_id,p.project_id,
+    expected_epoch,engine,p.lease_id,0,'base','candidate-' || candidate,'source-' || candidate,
+    'environment',q_id(project_label || ':verification:' || verification_candidate));
+  IF NOT FOUND THEN RETURN '{"status":"conflict","reason":"cas_precondition"}'; END IF;
+  operation:=q_id(p.project_id::text || ':' || operation_key);
+  receipt:=jsonb_build_object('status','accepted','operation_id',operation,
+    'project_seq',changed.event_seq,'integration_version',changed.integration_version,
+    'new_head','candidate-' || candidate,'owner_epoch',expected_epoch);
+  PERFORM q_record(p.project_id,operation_key,'integration',canonical,receipt);
+  INSERT INTO integration_commits(authority_id,account_id,project_id,integration_id,version,previous_version,
+    owner_epoch,previous_head,new_head,source_root,environment_root,verification_id,project_seq)
+    VALUES(p.authority_id,p.account_id,p.project_id,operation,changed.integration_version,0,
+      expected_epoch,'base','candidate-' || candidate,'source-' || candidate,'environment',
+      q_id(project_label || ':verification:' || verification_candidate),changed.event_seq);
+  RETURN receipt;
+END $$;
+CREATE FUNCTION
+BEGIN;
+BEGIN
+INSERT INTO authorities(authority_id,state,protocol_version) VALUES(q_id('authority'),'ready',1);
+INSERT 0 1
+INSERT INTO authority_credentials(account_id,credential_id,principal_id,kind,token_sha256,expires_at)
+  SELECT 'fixture','key-' || label,'engine-' || label,'engine',
+    encode(pg_catalog.sha256(convert_to('public-synthetic-key-' || label,'UTF8')),'hex'),clock_timestamp()+interval '1 day'
+  FROM unnest(ARRAY['a','b','a-new-process']) label;
+INSERT 0 3
+INSERT INTO engine_instances(account_id,engine_instance_id,machine_id,machine_installation_id,
+  machine_boot_id,protocol_version,authenticated_key_id)
+  SELECT 'fixture',q_id('engine:' || label),'disposable-machine',q_id('installation'),
+    CASE WHEN label='b' THEN 'boot-b' ELSE 'boot-a' END,1,'key-' || label
+  FROM unnest(ARRAY['a','b','a-new-process']) label;
+INSERT 0 3
+INSERT INTO retained_roots(account_id,root_id,kind,algorithm,digest,size_bytes,receipt_canonical,receipt_sha256)
+  SELECT 'fixture',label,'synthetic-fixture','sha256',repeat('a',64),1,
+    convert_to('synthetic-retention','UTF8'),repeat('b',64)
+  FROM unnest(ARRAY['source-a','source-b','environment','evidence','build-contract','profile']) label;
+INSERT 0 6
+DO $$ DECLARE label text; project uuid;
+BEGIN
+  FOREACH label IN ARRAY ARRAY['acquire','renew-race','clock','head','topic','candidate',
+                               'lostreply','client-crash','server-crash'] LOOP
+    project:=q_project(label);
+    INSERT INTO projects(authority_id,account_id,project_id,project_key,mode,owner_epoch,
+      head_vcs_commit,head_source_root,head_environment_root)
+      VALUES(q_id('authority'),'fixture',project,label,'ready',1,'base','source-a','environment');
+    INSERT INTO ownership_receipts(authority_id,account_id,project_id,owner_epoch,operation_id,cause,receipt_canonical)
+      VALUES(q_id('authority'),'fixture',project,1,q_id(label || ':created'),'created','synthetic'::bytea);
+    INSERT INTO project_principals(authority_id,account_id,project_id,principal_id,principal_kind,access_version,operations,scopes)
+      VALUES(q_id('authority'),'fixture',project,'qualifier-user','user',1,
+        '["authority:claim","authority:renew","decision:accept","integration:accept"]','["project"]');
+  END LOOP;
+END $$;
+DO
+COMMIT;
+COMMIT

@@ -55,10 +55,18 @@ export function isUsableNativeBinary(
     return true;
   }
   let header: Buffer;
+  let descriptor: number | undefined;
   try {
-    header = fs.readFileSync(file);
+    // ELF and PE need only a short prefix. The bounded Mach-O fat parser below
+    // inspects at most 32 entries (1,032 bytes), never the executable body.
+    descriptor = fs.openSync(file, "r");
+    header = Buffer.alloc(4096);
+    const length = fs.readSync(descriptor, header, 0, header.length, 0);
+    header = header.subarray(0, length);
   } catch {
     return false;
+  } finally {
+    if (descriptor !== undefined) fs.closeSync(descriptor);
   }
   if (platform === "linux") {
     return isElfForArch(header, arch);

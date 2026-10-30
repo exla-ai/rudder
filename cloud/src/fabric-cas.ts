@@ -7,9 +7,13 @@ import { createHash, randomUUID } from "node:crypto";
 import { GetObjectCommand, PutObjectCommand, DeleteObjectCommand, type S3Client } from "@aws-sdk/client-s3";
 import { readFile } from "node:fs/promises";
 import { blobFileStream, checkedBlobStream, withVerifiedSpool } from "./fabric-stream.js";
+import { ContentFormatError, fileNodeReferences, decodeFileNode, validateFileChild,
+  type ContentObjectKind } from "./fabric-content.js";
+import { directoryReferences, validateDirectoryChild } from "./fabric-directory.js";
+import { snapshotReferences, validateRunnableChild } from "./fabric-snapshot.js";
 
 export const FABRIC_FORMAT_VERSION = 1;
-export type FabricObjectKind = "blob" | "directory" | "source_root" | "environment_root" | "checkpoint" | "action_key" | "action_result";
+export type FabricObjectKind = ContentObjectKind;
 export interface FabricObjectRef { kind: FabricObjectKind; algorithm: "sha256"; digest: string; size_bytes: number }
 export interface FabricLease { format_version: 1; lease_id: string; expires_at_ms: number }
 export interface FabricRootReceipt { format_version: 1; root_id: string; root: FabricObjectRef; durability: "replicated"; published_at_ms: number; object_count: number; total_bytes: number }
@@ -38,7 +42,7 @@ export class FabricCasError extends Error {
 }
 const error = (code: string, message: string, status = 400): never => { throw new FabricCasError(code, message, status); };
 const digest = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
-const kinds = new Set<FabricObjectKind>(["blob", "directory", "source_root", "environment_root", "checkpoint", "action_key", "action_result"]);
+const kinds = new Set<FabricObjectKind>(["blob", "file", "directory", "directory_shard", "source_root", "environment_root", "checkpoint", "runnable_root", "action_key", "action_result"]);
 const record = (value: unknown): Record<string, unknown> => {
   if (!value || typeof value !== "object" || Array.isArray(value)) error("invalid_metadata", "Expected an object");
   return value as Record<string, unknown>;
@@ -56,12 +60,14 @@ function integer(value: unknown, max = Number.MAX_SAFE_INTEGER): number {
 export function validateFabricObjectRef(value: unknown, maxBytes = DEFAULT_FABRIC_LIMITS.maxObjectBytes): FabricObjectRef {
   const object = exact(value, ["kind", "algorithm", "digest", "size_bytes"]);
   if (!kinds.has(object.kind as FabricObjectKind) || object.algorithm !== "sha256" || typeof object.digest !== "string" || !/^[a-f0-9]{64}$/.test(object.digest)) error("invalid_reference", "Invalid typed SHA-256 object reference");
-  return { kind: object.kind as FabricObjectKind, algorithm: "sha256", digest: object.digest as string, size_bytes: integer(object.size_bytes, maxBytes) };
+  const size_bytes = integer(object.size_bytes, maxBytes);
+  if ((object.kind === "file" || object.kind === "directory_shard" || object.kind === "runnable_root") && size_bytes > 64 * 1024) error("too_large", "Content descriptor exceeds its format byte limit", 413);
+  return { kind: object.kind as FabricObjectKind, algorithm: "sha256", digest: object.digest as string, size_bytes };
 }
 const identity = (reference: FabricObjectRef) => `${reference.kind}:${reference.digest}:${reference.size_bytes}`;
 const sameRef = (a: FabricObjectRef, b: FabricObjectRef) => identity(a) === identity(b);
 
-interface RetentionProof { children: readonly FabricObjectRef[]; weight: number }
+interface RetentionProof { children: readonly FabricObjectRef[]; metadata?: Buffer; weight: number }
 interface ProofCacheState { entries: Map<string, RetentionProof>; bytes: number; hits: number; misses: number; backends: WeakMap<FabricObjectStorage, number>; nextBackend: number; maxBytes: number }
 const proofCaches = new WeakMap<FabricVerificationCache, ProofCacheState>();
 /** Opt in ONLY after verifying immutable storage has no GC, lifecycle expiry,
@@ -83,23 +89,30 @@ function proofKey(cache: FabricVerificationCache, backend: FabricObjectStorage, 
   if (!id) { id = state.nextBackend++; state.backends.set(backend, id); }
   return `${id}:${scope}:${identity(reference)}`;
 }
-function proofRead(cache: FabricVerificationCache | undefined, backend: FabricObjectStorage, scope: string, reference: FabricObjectRef): readonly FabricObjectRef[] | undefined {
+function proofReadEntry(cache: FabricVerificationCache | undefined, backend: FabricObjectStorage, scope: string, reference: FabricObjectRef): RetentionProof | undefined {
   if (!cache) return undefined;
   const state = proofCaches.get(cache)!; const key = proofKey(cache, backend, scope, reference); const value = state.entries.get(key);
   if (!value) { state.misses++; return undefined; }
-  state.hits++; state.entries.delete(key); state.entries.set(key, value); return value.children;
+  state.hits++; state.entries.delete(key); state.entries.set(key, value); return value;
+}
+function proofRead(cache: FabricVerificationCache | undefined, backend: FabricObjectStorage, scope: string, reference: FabricObjectRef): readonly FabricObjectRef[] | undefined {
+  return proofReadEntry(cache, backend, scope, reference)?.children;
 }
 function proofForget(cache: FabricVerificationCache | undefined, backend: FabricObjectStorage, scope: string, reference: FabricObjectRef): void {
   if (!cache) return; const state = proofCaches.get(cache)!; const key = proofKey(cache, backend, scope, reference); const previous = state.entries.get(key); if (previous) { state.bytes -= previous.weight; state.entries.delete(key); }
 }
-function proofRemember(cache: FabricVerificationCache | undefined, backend: FabricObjectStorage, scope: string, reference: FabricObjectRef, children: FabricObjectRef[]): void {
+function proofRemember(cache: FabricVerificationCache | undefined, backend: FabricObjectStorage, scope: string, reference: FabricObjectRef, children: FabricObjectRef[], bytes?: Buffer): void {
   if (!cache) return;
   proofForget(cache, backend, scope, reference);
   const state = proofCaches.get(cache)!; const key = proofKey(cache, backend, scope, reference);
-  const weight = 512 + key.length * 2 + children.reduce((total, child) => total + 512 + JSON.stringify(child).length * 2, 0);
+  // Retained per-object verification is not a closure/semantic-edge proof.
+  // Bounded verified metadata lets publication check actual parent/child spans
+  // even when their raw bytes need no repeated immutable-store fetch.
+  const metadata = reference.kind !== "blob" && bytes && bytes.byteLength <= 64 * 1024 ? Buffer.from(bytes) : undefined;
+  const weight = 512 + key.length * 2 + (metadata?.byteLength ?? 0) + children.reduce((total, child) => total + 512 + JSON.stringify(child).length * 2, 0);
   if (weight > state.maxBytes) return;
   while (state.bytes + weight > state.maxBytes) { const oldest = state.entries.keys().next().value!; state.bytes -= state.entries.get(oldest)!.weight; state.entries.delete(oldest); }
-  state.entries.set(key, { weight, children: Object.freeze(children.map((child) => Object.freeze({ ...child }))) }); state.bytes += weight;
+  state.entries.set(key, { weight, metadata, children: Object.freeze(children.map((child) => Object.freeze({ ...child }))) }); state.bytes += weight;
 }
 function hexBytes(value: unknown, name = false): Buffer {
   if (typeof value !== "string" || !/^(?:[0-9a-f]{2})*$/.test(value)) error("invalid_metadata", "Byte fields must be lowercase hexadecimal");
@@ -148,7 +161,13 @@ function encodeJson(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(encodeJson).join(",")}]`;
   const object = record(value); return `{${Object.keys(object).sort((a, b) => Buffer.compare(Buffer.from(a), Buffer.from(b))).map((key) => `${JSON.stringify(key)}:${encodeJson(object[key])}`).join(",")}}`;
 }
+export { parseCanonical as parseCanonicalFabricMetadata };
 export function canonicalFabricMetadata(value: unknown): Buffer { return Buffer.from(encodeJson(value)); }
+const metadataCodec = { parseCanonical, encodeCanonical: canonicalFabricMetadata };
+function contentFormat<T>(read: () => T): T {
+  try { return read(); }
+  catch (failure) { if (failure instanceof ContentFormatError) return error("invalid_metadata", failure.message); throw failure; }
+}
 
 /** Verify schema and return all declared edges. Unknown kinds/fields fail closed. */
 export function fabricReferences(reference: FabricObjectRef, bytes: Buffer, metadataLimit = DEFAULT_FABRIC_LIMITS.maxMetadataBytes): FabricObjectRef[] {
@@ -158,7 +177,13 @@ export function fabricReferences(reference: FabricObjectRef, bytes: Buffer, meta
   if (bytes.length > metadataLimit) error("too_large", "Metadata object exceeds the byte limit", 413);
   const value = parseCanonical(bytes); const refs: FabricObjectRef[] = [];
   const ref = (value: unknown, kind?: FabricObjectKind) => { const parsed = validateFabricObjectRef(value); if (kind && parsed.kind !== kind) error("invalid_metadata", "Referenced object has the wrong kind"); refs.push(parsed); };
-  if (reference.kind === "directory") {
+  if (reference.kind === "runnable_root" || (reference.kind === "source_root" || reference.kind === "environment_root") && record(value).format_version === 2n) {
+    return contentFormat(() => snapshotReferences(reference.kind as "source_root" | "environment_root" | "runnable_root", value, metadataCodec).map((child) => validateFabricObjectRef(child)));
+  } else if (reference.kind === "file") {
+    return contentFormat(() => fileNodeReferences(bytes, metadataCodec).map((child) => validateFabricObjectRef(child)));
+  } else if (reference.kind === "directory_shard" || reference.kind === "directory" && record(value).format_version === 2n) {
+    return contentFormat(() => directoryReferences(reference.kind as "directory" | "directory_shard", value, metadataCodec).map((child) => validateFabricObjectRef(child)));
+  } else if (reference.kind === "directory") {
     const object = exact(value, ["format_version", "mode", "entries"]); version(object.format_version); mode(object.mode);
     let previous: Buffer | null = null;
     for (const item of array(object.entries)) {
@@ -228,13 +253,17 @@ export class FabricCas {
     }
     return error("lease_conflict", "Concurrent lease renewal requires retry", 409);
   }
+  /** Account-scoped and idempotent; immutable objects and roots are untouched. */
+  async abandonStaging(id: string): Promise<void> {
+    await this.options.storage.delete(this.leaseKey(id));
+  }
   async getObject(value: unknown): Promise<Buffer> {
     const reference = this.reference(value);
     try {
       const stored = await this.options.storage.get(this.objectKey(reference), reference.size_bytes);
       if (!stored) error("object_missing", "Referenced object is unavailable", 404);
       const children = fabricReferences(reference, stored!.body, this.limits.maxMetadataBytes);
-      proofRemember(this.options.verificationCache, this.options.storage, this.prefix, reference, children);
+      proofRemember(this.options.verificationCache, this.options.storage, this.prefix, reference, children, stored!.body);
       return stored!.body;
     } catch (failure) { proofForget(this.options.verificationCache, this.options.storage, this.prefix, reference); throw failure; }
   }
@@ -284,7 +313,7 @@ export class FabricCas {
     const children = fabricReferences(reference, payload, this.limits.maxMetadataBytes);
     const stored = await this.options.storage.putIfAbsent(this.objectKey(reference), payload);
     if (!stored) { const existing = await this.getObject(reference); if (!existing.equals(payload)) error("checksum_mismatch", "Existing immutable object differs", 422); }
-    else proofRemember(this.options.verificationCache, this.options.storage, this.prefix, reference, children);
+    else proofRemember(this.options.verificationCache, this.options.storage, this.prefix, reference, children, payload);
     return { stored };
   }
   async missing(values: unknown[]): Promise<FabricObjectRef[]> {
@@ -298,6 +327,38 @@ export class FabricCas {
     const controller = new AbortController(); let timer: ReturnType<typeof setTimeout> | undefined;
     try { return await Promise.race([this.verifyClosure(value, controller.signal), new Promise<never>((_, reject) => { timer = setTimeout(() => { controller.abort(); reject(new FabricCasError("verification_timeout", "Root closure verification exceeded its deadline", 503)); }, this.limits.closureTimeoutMs); })]); }
     finally { if (timer) clearTimeout(timer); }
+  }
+  private async semanticMetadata(reference: FabricObjectRef, signal: AbortSignal): Promise<Buffer> {
+    if (signal.aborted) error("verification_timeout", "Root closure verification exceeded its deadline", 503);
+    return proofReadEntry(this.options.verificationCache, this.options.storage, this.prefix, reference)?.metadata ?? this.getObject(reference);
+  }
+  private async verifySemanticEdges(reference: FabricObjectRef, signal: AbortSignal): Promise<void> {
+    if (reference.kind !== "runnable_root" && reference.kind !== "file" && reference.kind !== "directory_shard" && !(reference.kind === "directory" && reference.size_bytes <= 4096)) return;
+    const bytes = await this.semanticMetadata(reference, signal);
+    const value = parseCanonical(bytes);
+    if (reference.kind === "runnable_root") {
+      const refs = contentFormat(() => snapshotReferences("runnable_root", value, metadataCodec));
+      await parallel(refs.filter((child) => child.kind === "source_root" || child.kind === "environment_root").map((child) => this.reference(child)), this.limits.maxConcurrency, async (child) => {
+        const actual = await this.semanticMetadata(child, signal);
+        contentFormat(() => validateRunnableChild(value, child, actual, metadataCodec));
+      });
+    } else if (reference.kind === "file") {
+      const parent = contentFormat(() => decodeFileNode(bytes, metadataCodec));
+      if (parent.level === 0) return;
+      await parallel(parent.children.map((child, index) => ({ child: this.reference(child), index })), this.limits.maxConcurrency, async ({ child, index }) => {
+        const actual = parseCanonical(await this.semanticMetadata(child, signal));
+        contentFormat(() => validateFileChild(parent, index, actual));
+      });
+    } else {
+      if (reference.kind === "directory" && record(value).format_version !== 2n) return;
+      const kind = reference.kind as "directory" | "directory_shard";
+      const children = contentFormat(() => directoryReferences(kind, value, metadataCodec));
+      const unique = new Map(children.filter((child) => child.kind === "file" || child.kind === "directory_shard").map((child) => { const ref = this.reference(child); return [identity(ref), ref] as const; }));
+      await parallel([...unique.values()], this.limits.maxConcurrency, async (child) => {
+        const actual = parseCanonical(await this.semanticMetadata(child, signal));
+        contentFormat(() => validateDirectoryChild(kind, value, child, actual, metadataCodec));
+      });
+    }
   }
   private async verifyClosure(value: unknown, signal: AbortSignal): Promise<{ objects: FabricObjectRef[]; total_bytes: number }> {
     const root = this.reference(value); const pending = [root]; const objects = new Map<string, FabricObjectRef>(); const edges = new Map<string, string[]>(); let total = 0, edgeCount = 0;
@@ -328,6 +389,9 @@ export class FabricCas {
     const ready = [...indegree].filter(([, degree]) => degree === 0).map(([key]) => key); const depths = new Map([[identity(root), 0]]); let visited = 0;
     while (ready.length) { const key = ready.pop()!; visited++; const depth = depths.get(key) || 0; if (depth > this.limits.maxClosureDepth) error("too_large", "Root closure exceeds graph depth limit", 413); for (const child of edges.get(key) || []) { depths.set(child, Math.max(depths.get(child) || 0, depth + 1)); indegree.set(child, indegree.get(child)! - 1); if (indegree.get(child) === 0) ready.push(child); } }
     if (visited !== objects.size) error("invalid_metadata", "Cyclic object closure is unsupported");
+    // Admit/count/hash the graph before any additional semantic child reads.
+    // Each parent's bounded child batch owns the same global concurrency budget.
+    for (const reference of objects.values()) await this.verifySemanticEdges(reference, signal);
     return { objects: [...objects.values()].sort((a, b) => identity(a).localeCompare(identity(b))), total_bytes: total };
   }
   async getRoot(rootId: string): Promise<FabricRootReceipt | null> {

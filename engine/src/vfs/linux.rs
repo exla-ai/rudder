@@ -11,6 +11,9 @@ pub struct MountedVfs {
     view: VfsView,
     session: Option<BackgroundSession>,
     path: PathBuf,
+    // Acquired while the view is authorized. Cleanup never needs a fresh
+    // lookup through a view whose attempt has since been fenced.
+    flush_handle: Option<File>,
 }
 /// Proof minted only by an explicit fresh-helper namespace transition.
 pub struct PrivateMountNamespace {
@@ -90,23 +93,44 @@ impl MountedVfs {
     /// view can checkpoint. EBUSY leaves it mounted and fails closed.
     pub fn unmount(&mut self) -> Result<VfsView> {
         ensure!(self.session.is_some(), "FUSE session absent");
-        let f = File::open(&self.path)?;
-        if unsafe { libc::syncfs(std::os::fd::AsRawFd::as_raw_fd(&f)) } != 0 {
+        let f = self
+            .flush_handle
+            .as_ref()
+            .context("mount flush handle unavailable; cannot certify checkpoint")?;
+        if unsafe { libc::syncfs(std::os::fd::AsRawFd::as_raw_fd(f)) } != 0 {
             return Err(std::io::Error::last_os_error().into());
         }
-        drop(f);
+        self.finish_unmount(true)?;
+        Ok(self.view.clone())
+    }
+    /// Best-effort owned cleanup after failure/fencing. Success means the
+    /// strict mount/server closed, never that a checkpoint may be acknowledged.
+    /// Already acknowledged private writes retain their ordinary durability.
+    pub fn discard(&mut self) -> Result<()> {
+        ensure!(self.session.is_some(), "FUSE session absent");
+        self.finish_unmount(false)
+    }
+    fn finish_unmount(&mut self, checkpoint_barrier: bool) -> Result<()> {
+        // Our own descriptor must not keep the mount busy.
+        drop(self.flush_handle.take());
         let path = CString::new(self.path.as_os_str().as_bytes())?;
         // fuser's own unmount is lazy. A normal unmount is the barrier: no
         // busy handles, detached process references or unfinished kernel users.
         if unsafe { libc::umount2(path.as_ptr(), 0) } != 0 {
-            return Err(std::io::Error::last_os_error().into());
+            let error = std::io::Error::last_os_error();
+            if checkpoint_barrier {
+                // A busy authorized view can retry. A fenced view fails this
+                // lookup and must use discard, which mints no checkpoint proof.
+                self.flush_handle = cleanup_handle(&self.path).ok();
+            }
+            return Err(error.into());
         }
         let session = self.session.take().context("FUSE session absent")?;
         let (send, receive) = std::sync::mpsc::sync_channel(1);
         let view = self.view.clone();
         std::thread::spawn(move || {
             let result = session.join();
-            if result.is_ok() {
+            if result.is_ok() && checkpoint_barrier {
                 view.0.mounted.store(false, Ordering::Release);
                 if let Ok(mut handles) = view.0.handles.lock() {
                     handles.clear();
@@ -117,7 +141,7 @@ impl MountedVfs {
         receive
             .recv_timeout(Duration::from_secs(10))
             .context("FUSE drain deadline; view stays fenced until server confirms shutdown")??;
-        Ok(self.view.clone())
+        Ok(())
     }
 }
 impl Drop for MountedVfs {
@@ -125,7 +149,7 @@ impl Drop for MountedVfs {
         // Dropping a busy/error session may abort the kernel connection through
         // fuser's destructor. It must NEVER mint the checkpoint barrier.
         if self.session.is_some() {
-            let _ = self.unmount();
+            let _ = self.discard();
         }
     }
 }
@@ -219,16 +243,28 @@ pub fn mount(
         }
     })();
     match start {
-        Ok(session) => Ok(MountedVfs {
-            view,
-            session: Some(session),
-            path: path.to_path_buf(),
-        }),
+        Ok(session) => {
+            let mut mounted = MountedVfs {
+                view,
+                session: Some(session),
+                path: path.to_path_buf(),
+                flush_handle: None,
+            };
+            mounted.flush_handle = Some(cleanup_handle(path)?);
+            Ok(mounted)
+        }
         Err(e) => {
             view.0.mounted.store(false, Ordering::Release);
             Err(e.into())
         }
     }
+}
+
+fn cleanup_handle(path: &Path) -> Result<File> {
+    Ok(OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NONBLOCK | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(path)?)
 }
 
 struct Adapter {
@@ -508,21 +544,37 @@ impl Filesystem for Adapter {
         }
     }
     fn readdir(&self, _: &Request, i: INodeNo, h: FileHandle, offset: u64, mut r: ReplyDirectory) {
-        match self.view.directory_handle(i.0, h.0) {
-            Ok(rows) => {
-                for (idx, (n, a)) in rows.iter().enumerate().skip(offset as usize) {
-                    if r.add(
-                        INodeNo(a.ino),
-                        (idx + 1) as u64,
-                        kind(a.kind),
-                        OsStr::from_bytes(n),
-                    ) {
-                        break;
+        let mut cookie = offset;
+        loop {
+            match self.view.read_directory_page(
+                i.0,
+                h.0,
+                cookie,
+                super::readdir::DIRECTORY_PAGE_ENTRIES,
+            ) {
+                Ok(page) => {
+                    for entry in page.entries {
+                        if r.add(
+                            INodeNo(entry.ino),
+                            entry.next_cookie,
+                            kind(entry.kind),
+                            OsStr::from_bytes(&entry.name),
+                        ) {
+                            r.ok();
+                            return;
+                        }
+                        cookie = entry.next_cookie;
+                    }
+                    if page.eof {
+                        r.ok();
+                        return;
                     }
                 }
-                r.ok()
+                Err(e) => {
+                    r.error(failure(e));
+                    return;
+                }
             }
-            Err(e) => r.error(failure(e)),
         }
     }
     fn releasedir(&self, _: &Request, i: INodeNo, h: FileHandle, _: OpenFlags, r: ReplyEmpty) {

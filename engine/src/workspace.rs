@@ -12,13 +12,14 @@ use crate::protocol::{
     FORMAT_VERSION,
 };
 use crate::store::{
-    CheckpointV2Manifest, CheckpointV3Manifest, DirectoryEntry, EntryNode, EnvironmentManifest, ImportPolicy, LocalStore,
-    SourceManifest,
+    CheckpointV2Manifest, CheckpointV3Manifest, DirectoryEntry, EntryNode, EnvironmentManifest,
+    ImportPolicy, LocalStore, SourceManifest,
 };
 use anyhow::{bail, ensure, Context, Result};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::cell::{Cell, RefCell};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 #[cfg(unix)]
@@ -27,7 +28,8 @@ use std::os::unix::{
     fs::{OpenOptionsExt, PermissionsExt},
 };
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::sync::Arc;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
 #[cfg(target_os = "linux")]
@@ -258,17 +260,31 @@ pub fn build_input_view(
     let bytes = store.read_object(checkpoint)?;
     let format = serde_json::from_slice::<serde_json::Value>(&bytes)?["format_version"].as_u64();
     let (value, hardlinks, hardlink_group_count) = match format {
-        Some(2) => (serde_json::from_slice::<CheckpointV2Manifest>(&bytes)?, None, 0),
+        Some(2) => (
+            serde_json::from_slice::<CheckpointV2Manifest>(&bytes)?,
+            None,
+            0,
+        ),
         Some(3) => {
             let value: CheckpointV3Manifest = serde_json::from_slice(&bytes)?;
-            let topology = crate::vfs::validate_snapshot(store, &crate::vfs::VfsCheckpoint {
-                format_version: 1, directory: value.view_root.clone(), hardlinks: value.hardlinks.clone(),
-            })?;
+            let topology = crate::vfs::validate_snapshot(
+                store,
+                &crate::vfs::VfsCheckpoint {
+                    format_version: 1,
+                    directory: value.view_root.clone(),
+                    hardlinks: value.hardlinks.clone(),
+                },
+            )?;
             let normalized = CheckpointV2Manifest {
-                format_version: 2, source: value.source, environment: value.environment,
-                view_root: value.view_root, profile: value.profile, parents: value.parents,
+                format_version: 2,
+                source: value.source,
+                environment: value.environment,
+                view_root: value.view_root,
+                profile: value.profile,
+                parents: value.parents,
                 knowledge_cursor: value.knowledge_cursor,
-                consistency: value.consistency, durability: value.durability,
+                consistency: value.consistency,
+                durability: value.durability,
             };
             (normalized, Some(value.hardlinks), topology.groups.len())
         }
@@ -384,6 +400,795 @@ fn lookup_entry(
         directory = object;
     }
     Ok(None)
+}
+
+/// Admission limits for the explicit runnable-state adapter, separate from CAS
+/// format limits. The deadline is cooperative between bounded metadata reads;
+/// it cannot preempt a stalled local syscall. No file payload is read here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectionBudget {
+    pub max_partition_paths: usize,
+    pub max_depth: usize,
+    pub max_topology_paths: u64,
+    pub max_namespace_steps: u64,
+    pub max_metadata_bytes: u64,
+    pub max_encoded_bytes: u64,
+    pub max_elapsed_ms: u64,
+}
+impl Default for ProjectionBudget {
+    fn default() -> Self {
+        Self {
+            max_partition_paths: 4096,
+            max_depth: 256,
+            max_topology_paths: 100_000,
+            max_namespace_steps: 1_000_000,
+            max_metadata_bytes: 128 * 1024 * 1024,
+            max_encoded_bytes: 16 * 1024 * 1024,
+            max_elapsed_ms: 30_000,
+        }
+    }
+}
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct ProjectionStats {
+    pub metadata_reads: u64,
+    pub metadata_read_bytes: u64,
+    pub metadata_cache_hits: u64,
+    pub encoded_metadata_objects: u64,
+    pub encoded_metadata_bytes: u64,
+    pub namespace_steps: u64,
+    pub legacy_entries_scanned: u64,
+    pub topology_paths: u64,
+}
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct ProjectionReport {
+    pub stats: ProjectionStats,
+    pub stage_ms: BTreeMap<String, u64>,
+    pub total_ms: u64,
+}
+/// The producer owns staging and quiescence. Deriving bytes creates neither a
+/// writer barrier nor publication; retain this Directory through a typed root.
+#[derive(Debug, Clone)]
+pub struct SourceComplement {
+    pub directory: ObjectRef,
+    pub report: ProjectionReport,
+}
+#[derive(Debug)]
+struct BuildRootPin {
+    store: LocalStore,
+    id: Option<String>,
+}
+impl BuildRootPin {
+    fn release(&mut self) -> Result<()> {
+        if let Some(id) = self.id.take() {
+            self.store.unpin(&id)?;
+        }
+        Ok(())
+    }
+}
+impl Drop for BuildRootPin {
+    fn drop(&mut self) {
+        let _ = self.release();
+    }
+}
+/// A qualified data-tree binding plus its independently owned retention pin.
+/// Dropping it releases only this pin; failed cleanup conservatively leaks
+/// retention. Cloning the borrowed BuildInputView does not clone this lease.
+#[derive(Debug)]
+pub struct QualifiedRunnableBuildInput {
+    input: crate::build::BuildInputView,
+    report: ProjectionReport,
+    pin: BuildRootPin,
+}
+impl QualifiedRunnableBuildInput {
+    pub fn input(&self) -> &crate::build::BuildInputView {
+        &self.input
+    }
+    pub fn report(&self) -> &ProjectionReport {
+        &self.report
+    }
+    pub fn retention_pin_id(&self) -> &str {
+        self.pin.id.as_deref().expect("live owned build pin")
+    }
+    pub fn release(mut self) -> Result<()> {
+        self.pin.release()
+    }
+}
+
+#[derive(Clone)]
+enum ProofDirectory {
+    Legacy(crate::store::DirectoryManifest),
+    Paged,
+}
+struct ProofTree<'a> {
+    store: &'a LocalStore,
+    budget: &'a ProjectionBudget,
+    started: Instant,
+    stats: RefCell<ProjectionStats>,
+    cache: RefCell<BTreeMap<ObjectRef, Arc<Vec<u8>>>>,
+    order: RefCell<VecDeque<ObjectRef>>,
+    cache_bytes: Cell<u64>,
+    roots: RefCell<BTreeMap<ObjectRef, Arc<ProofDirectory>>>,
+    root_order: RefCell<VecDeque<ObjectRef>>,
+    encoded: RefCell<BTreeMap<ObjectRef, Vec<u8>>>,
+}
+impl<'a> ProofTree<'a> {
+    fn new(store: &'a LocalStore, budget: &'a ProjectionBudget) -> Result<Self> {
+        ensure!(
+            budget.max_elapsed_ms > 0
+                && (1..=crate::directory::MAX_PATH_DEPTH).contains(&budget.max_depth),
+            "invalid projection deadline/depth budget"
+        );
+        Ok(Self {
+            store,
+            budget,
+            started: Instant::now(),
+            stats: RefCell::new(ProjectionStats::default()),
+            cache: RefCell::new(BTreeMap::new()),
+            order: RefCell::new(VecDeque::new()),
+            cache_bytes: Cell::new(0),
+            roots: RefCell::new(BTreeMap::new()),
+            root_order: RefCell::new(VecDeque::new()),
+            encoded: RefCell::new(BTreeMap::new()),
+        })
+    }
+    fn check(&self) -> Result<()> {
+        ensure!(
+            self.started.elapsed().as_millis() < u128::from(self.budget.max_elapsed_ms),
+            "projection exceeded its cooperative deadline"
+        );
+        Ok(())
+    }
+    fn step(&self) -> Result<()> {
+        self.check()?;
+        let mut stats = self.stats.borrow_mut();
+        stats.namespace_steps = stats
+            .namespace_steps
+            .checked_add(1)
+            .context("projection step overflow")?;
+        ensure!(
+            stats.namespace_steps <= self.budget.max_namespace_steps,
+            "projection namespace-step budget exceeded"
+        );
+        Ok(())
+    }
+    fn read_metadata(&self, reference: &ObjectRef) -> Result<Vec<u8>> {
+        self.check()?;
+        reference.validate()?;
+        if let Some(bytes) = self.encoded.borrow().get(reference) {
+            return Ok(bytes.clone());
+        }
+        if let Some(bytes) = self.cache.borrow().get(reference) {
+            let mut stats = self.stats.borrow_mut();
+            stats.metadata_cache_hits = stats
+                .metadata_cache_hits
+                .checked_add(1)
+                .context("projection cache-hit overflow")?;
+            return Ok(bytes.as_ref().clone());
+        }
+        {
+            let mut stats = self.stats.borrow_mut();
+            let next = stats
+                .metadata_read_bytes
+                .checked_add(reference.size_bytes)
+                .context("projection read-byte overflow")?;
+            ensure!(
+                next <= self.budget.max_metadata_bytes,
+                "projection metadata-read budget exceeded"
+            );
+            stats.metadata_read_bytes = next;
+            stats.metadata_reads = stats
+                .metadata_reads
+                .checked_add(1)
+                .context("projection read-count overflow")?;
+        }
+        let bytes = self.store.read_object(reference)?;
+        // The encoded-byte cache is bounded independently of the work budget.
+        // Large legacy roots/topology may be parsed once without caching bytes.
+        let cap = (32 * 1024 * 1024).min(self.budget.max_metadata_bytes);
+        if reference.size_bytes <= cap {
+            while self
+                .cache_bytes
+                .get()
+                .checked_add(reference.size_bytes)
+                .is_none_or(|next| next > cap)
+            {
+                let key = self
+                    .order
+                    .borrow_mut()
+                    .pop_front()
+                    .context("projection cache accounting differs")?;
+                if let Some(old) = self.cache.borrow_mut().remove(&key) {
+                    self.cache_bytes
+                        .set(self.cache_bytes.get() - old.len() as u64);
+                }
+            }
+            self.cache
+                .borrow_mut()
+                .insert(reference.clone(), Arc::new(bytes.clone()));
+            self.order.borrow_mut().push_back(reference.clone());
+            self.cache_bytes
+                .set(self.cache_bytes.get() + reference.size_bytes);
+        }
+        Ok(bytes)
+    }
+    fn root(&self, reference: &ObjectRef) -> Result<Arc<ProofDirectory>> {
+        self.check()?;
+        ensure!(
+            reference.kind == ObjectKind::Directory,
+            "projection expects a Directory"
+        );
+        if let Some(root) = self.roots.borrow().get(reference) {
+            return Ok(root.clone());
+        }
+        ensure!(
+            reference.size_bytes <= 128 * 1024 * 1024,
+            "legacy directory exceeds128MiB adapter bound"
+        );
+        let bytes = self.read_metadata(reference)?;
+        let value: serde_json::Value = serde_json::from_slice(&bytes)?;
+        let root = match value.get("format_version").and_then(|v| v.as_u64()) {
+            Some(1) => {
+                let directory: crate::store::DirectoryManifest = serde_json::from_value(value)?;
+                ensure!(
+                    directory.mode <= 0o7777 && canonical_json(&directory)? == bytes,
+                    "invalid/noncanonical legacy directory"
+                );
+                let mut previous = None;
+                for entry in &directory.entries {
+                    entry.validate()?;
+                    let name = entry.name()?;
+                    ensure!(
+                        previous.as_ref().is_none_or(|prior| prior < &name),
+                        "legacy names unsorted/duplicate"
+                    );
+                    previous = Some(name);
+                }
+                {
+                    let mut stats = self.stats.borrow_mut();
+                    stats.legacy_entries_scanned = stats
+                        .legacy_entries_scanned
+                        .checked_add(directory.entries.len() as u64)
+                        .context("legacy entry counter overflow")?;
+                }
+                ProofDirectory::Legacy(directory)
+            }
+            Some(2) => {
+                crate::directory::decode_directory_root(&bytes)?;
+                ProofDirectory::Paged
+            }
+            _ => bail!("unsupported projection directory format"),
+        };
+        if self.roots.borrow().len() >= 1024 {
+            if let Some(old) = self.root_order.borrow_mut().pop_front() {
+                self.roots.borrow_mut().remove(&old);
+            }
+        }
+        let root = Arc::new(root);
+        self.roots
+            .borrow_mut()
+            .insert(reference.clone(), root.clone());
+        self.root_order.borrow_mut().push_back(reference.clone());
+        Ok(root)
+    }
+    fn lookup(
+        &self,
+        root: &ObjectRef,
+        name: &[u8],
+    ) -> Result<Option<crate::directory::DirectoryEntry>> {
+        self.step()?;
+        match self.root(root)?.as_ref() {
+            ProofDirectory::Legacy(directory) => {
+                let key = hex::encode(name);
+                directory
+                    .entries
+                    .binary_search_by(|entry| entry.name_hex.cmp(&key))
+                    .ok()
+                    .map(|index| {
+                        let entry = directory.entries[index].clone();
+                        let node = match entry.node {
+                            EntryNode::File { object, mode } => crate::directory::EntryNode::File {
+                                logical_size: object.size_bytes,
+                                object,
+                                mode,
+                            },
+                            EntryNode::Directory { object } => {
+                                crate::directory::EntryNode::Directory { object }
+                            }
+                            EntryNode::Symlink { target_hex } => {
+                                crate::directory::EntryNode::Symlink { target_hex }
+                            }
+                        };
+                        Ok(crate::directory::DirectoryEntry {
+                            name_hex: entry.name_hex,
+                            node,
+                        })
+                    })
+                    .transpose()
+            }
+            ProofDirectory::Paged => crate::directory::PagedDirectory::new(self).lookup(root, name),
+        }
+    }
+    fn at(&self, root: &ObjectRef, path: &RawPath) -> Result<Option<crate::directory::EntryNode>> {
+        let mut directory = root.clone();
+        for (index, name) in path.iter().enumerate() {
+            let Some(entry) = self.lookup(&directory, name)? else {
+                return Ok(None);
+            };
+            if index + 1 == path.len() {
+                return Ok(Some(entry.node));
+            }
+            let crate::directory::EntryNode::Directory { object } = entry.node else {
+                bail!("partition/topology path traverses a non-directory; no symlink expansion")
+            };
+            directory = object;
+        }
+        bail!("partition/topology path is empty")
+    }
+    fn project(&self, root: &ObjectRef, excluded: &[RawPath], depth: usize) -> Result<ObjectRef> {
+        self.check()?;
+        ensure!(
+            depth <= self.budget.max_depth,
+            "projection depth budget exceeded"
+        );
+        if excluded.is_empty() {
+            return Ok(root.clone());
+        }
+        let mut grouped = BTreeMap::<Vec<u8>, Vec<RawPath>>::new();
+        for path in excluded {
+            ensure!(!path.is_empty(), "projection cannot remove root");
+            grouped
+                .entry(path[0].clone())
+                .or_default()
+                .push(path[1..].to_vec());
+        }
+        let mut changes = BTreeMap::new();
+        for (name, tails) in grouped {
+            let prior = self.lookup(root, &name)?;
+            let replacement = if tails.iter().any(|tail| tail.is_empty()) {
+                None
+            } else {
+                match prior.as_ref().map(|entry| &entry.node) {
+                    None => None,
+                    Some(crate::directory::EntryNode::Directory { object }) => {
+                        Some(crate::directory::EntryNode::Directory {
+                            object: self.project(object, &tails, depth + 1)?,
+                        })
+                    }
+                    _ => bail!("source exclusion traverses a non-directory; no symlink expansion"),
+                }
+            };
+            if prior.as_ref().map(|entry| &entry.node) != replacement.as_ref() {
+                changes.insert(name, replacement);
+            }
+        }
+        if changes.is_empty() {
+            return Ok(root.clone());
+        }
+        match self.root(root)?.as_ref() {
+            ProofDirectory::Paged => {
+                let tree = crate::directory::PagedDirectory::new(self);
+                let mut updated = root.clone();
+                for (name, replacement) in changes {
+                    updated = tree.update(&updated, &name, replacement)?.root;
+                }
+                Ok(updated)
+            }
+            ProofDirectory::Legacy(original) => {
+                let mut directory = original.clone();
+                let mut entries = Vec::with_capacity(directory.entries.len());
+                for mut entry in directory.entries {
+                    if let Some(replacement) = changes.remove(&entry.name()?) {
+                        let Some(replacement) = replacement else {
+                            continue;
+                        };
+                        entry.node = match replacement {
+                            crate::directory::EntryNode::Directory { object } => {
+                                EntryNode::Directory { object }
+                            }
+                            crate::directory::EntryNode::File { object, mode, .. } => {
+                                EntryNode::File { object, mode }
+                            }
+                            crate::directory::EntryNode::Symlink { target_hex } => {
+                                EntryNode::Symlink { target_hex }
+                            }
+                        };
+                    }
+                    entries.push(entry);
+                }
+                ensure!(
+                    changes.is_empty(),
+                    "projection tried to add an absent source entry"
+                );
+                directory.entries = entries;
+                crate::directory::DirectoryStore::put(
+                    self,
+                    ObjectKind::Directory,
+                    &canonical_json(&directory)?,
+                )
+            }
+        }
+    }
+    fn fingerprint(&self, root: Option<&ObjectRef>, prefixes: &[RawPath]) -> Result<String> {
+        let mut prefixes = prefixes.to_vec();
+        prefixes.sort();
+        let mut selected = Vec::with_capacity(prefixes.len());
+        for prefix in prefixes {
+            let entry = if let Some(root) = root {
+                self.at(root, &prefix)?
+            } else {
+                None
+            };
+            selected.push((prefix, entry));
+        }
+        Ok(ObjectRef::from_bytes(
+            ObjectKind::Blob,
+            &canonical_json(&("prepared-data-tree-v2", selected))?,
+        )
+        .digest)
+    }
+    fn topology(&self, directory: &ObjectRef, reference: &ObjectRef) -> Result<usize> {
+        ensure!(
+            reference.kind == ObjectKind::Blob
+                && reference.size_bytes <= crate::snapshot::MAX_TOPOLOGY_BYTES,
+            "invalid runnable topology reference"
+        );
+        let bytes = self.read_metadata(reference)?;
+        let topology: crate::tree::HardlinkTopology = serde_json::from_slice(&bytes)?;
+        ensure!(
+            topology.format_version == 1
+                && topology.groups.len() <= 100_000
+                && canonical_json(&topology)? == bytes,
+            "invalid/noncanonical runnable topology"
+        );
+        let mut paths = BTreeSet::new();
+        let mut previous_group = None;
+        for group in &topology.groups {
+            ensure!(
+                (2..=100_000).contains(&group.paths_hex.len()),
+                "topology group size exceeds bound"
+            );
+            let mut previous = None;
+            let mut expected = None;
+            for encoded in &group.paths_hex {
+                ensure!(
+                    !encoded.is_empty() && encoded.len() <= self.budget.max_depth,
+                    "topology depth exceeds budget"
+                );
+                let path = encoded
+                    .iter()
+                    .map(|part| {
+                        ensure!(part.len() <= 510, "topology name exceeds255bytes");
+                        let name = hex::decode(part)?;
+                        ensure!(hex::encode(&name) == *part, "noncanonical topology name");
+                        validate_name(&name)?;
+                        ensure!(name.len() <= 255, "topology name too long");
+                        Ok(name)
+                    })
+                    .collect::<Result<RawPath>>()?;
+                ensure!(
+                    previous.as_ref().is_none_or(|prior| prior < &path)
+                        && paths.insert(path.clone()),
+                    "topology paths duplicate/unsorted"
+                );
+                if previous.is_none() {
+                    ensure!(
+                        previous_group.as_ref().is_none_or(|prior| prior < &path),
+                        "topology groups unsorted"
+                    );
+                    previous_group = Some(path.clone());
+                }
+                previous = Some(path.clone());
+                {
+                    let mut stats = self.stats.borrow_mut();
+                    stats.topology_paths = stats
+                        .topology_paths
+                        .checked_add(1)
+                        .context("topology path count overflow")?;
+                    ensure!(
+                        stats.topology_paths <= self.budget.max_topology_paths,
+                        "topology path budget exceeded"
+                    );
+                }
+                let Some(crate::directory::EntryNode::File {
+                    object,
+                    logical_size,
+                    mode,
+                }) = self.at(directory, &path)?
+                else {
+                    bail!("topology path must end at regular file")
+                };
+                let actual = match object.kind {
+                    ObjectKind::Blob => object.size_bytes,
+                    ObjectKind::File => {
+                        crate::content::decode_file_node(&self.read_metadata(&object)?)?
+                            .logical_size
+                    }
+                    _ => bail!("invalid topology file kind"),
+                };
+                ensure!(logical_size == actual, "topology file logical size differs");
+                let file = (object, logical_size, mode);
+                if let Some(expected) = &expected {
+                    ensure!(expected == &file, "topology content/mode differ");
+                } else {
+                    expected = Some(file);
+                }
+            }
+        }
+        Ok(topology.groups.len())
+    }
+    fn report(&self, stage_ms: BTreeMap<String, u64>) -> ProjectionReport {
+        ProjectionReport {
+            stats: self.stats.borrow().clone(),
+            stage_ms,
+            total_ms: elapsed_ms(self.started),
+        }
+    }
+}
+impl crate::directory::DirectoryStore for ProofTree<'_> {
+    fn read(&self, object: &ObjectRef) -> Result<Vec<u8>> {
+        ensure!(
+            matches!(
+                object.kind,
+                ObjectKind::Directory | ObjectKind::DirectoryShard
+            ),
+            "paged projection read requires directory metadata"
+        );
+        self.read_metadata(object)
+    }
+    fn put(&self, kind: ObjectKind, bytes: &[u8]) -> Result<ObjectRef> {
+        self.check()?;
+        ensure!(
+            matches!(kind, ObjectKind::Directory | ObjectKind::DirectoryShard),
+            "source projection writes metadata only"
+        );
+        let reference = ObjectRef::from_bytes(kind, bytes);
+        if let Some(prior) = self.encoded.borrow().get(&reference) {
+            ensure!(prior == bytes, "projection metadata digest collision");
+            return Ok(reference);
+        }
+        {
+            let mut stats = self.stats.borrow_mut();
+            let count = stats
+                .encoded_metadata_bytes
+                .checked_add(bytes.len() as u64)
+                .context("projection encoded-byte overflow")?;
+            ensure!(
+                count <= self.budget.max_encoded_bytes,
+                "projection encoded-metadata budget exceeded"
+            );
+            stats.encoded_metadata_bytes = count;
+            stats.encoded_metadata_objects = stats
+                .encoded_metadata_objects
+                .checked_add(1)
+                .context("projection object count overflow")?;
+        }
+        self.encoded
+            .borrow_mut()
+            .insert(reference.clone(), bytes.to_vec());
+        Ok(reference)
+    }
+}
+fn elapsed_ms(start: Instant) -> u64 {
+    start.elapsed().as_millis().min(u128::from(u64::MAX)) as u64
+}
+fn qualified_profile(bytes: &[u8], budget: &ProjectionBudget) -> Result<WorkspaceProfile> {
+    ensure!(
+        bytes.len() as u64 <= crate::snapshot::MAX_POLICY_BYTES,
+        "workspace profile exceeds format bound"
+    );
+    let profile: WorkspaceProfile = serde_json::from_slice(bytes)?;
+    ensure!(
+        canonical_json(&profile)? == bytes,
+        "workspace profile is not canonical"
+    );
+    preflight_profile(&profile, budget)?;
+    Ok(profile)
+}
+fn preflight_profile(profile: &WorkspaceProfile, budget: &ProjectionBudget) -> Result<()> {
+    ensure!(
+        profile.format_version == FORMAT_VERSION,
+        "unsupported workspace profile"
+    );
+    let count = profile
+        .prepared
+        .len()
+        .checked_add(profile.scratch.len())
+        .and_then(|n| n.checked_add(profile.vcs_local.len()))
+        .context("partition count overflow")?;
+    ensure!(
+        count <= budget.max_partition_paths,
+        "partition count exceeds projection budget"
+    );
+    let mut paths = profile
+        .prepared
+        .iter()
+        .chain(&profile.scratch)
+        .chain(&profile.vcs_local)
+        .collect::<Vec<_>>();
+    let mut raw_bytes = 0u64;
+    for path in &paths {
+        ensure!(
+            !path.is_empty() && path.len() <= budget.max_depth,
+            "partition depth exceeds projection budget"
+        );
+        for name in path.iter() {
+            validate_name(name)?;
+            ensure!(name.len() <= 255, "partition name exceeds255bytes");
+            raw_bytes = raw_bytes
+                .checked_add(name.len() as u64)
+                .context("partition byte count overflow")?;
+            ensure!(
+                raw_bytes <= crate::snapshot::MAX_POLICY_BYTES,
+                "partition byte count exceeds profile format bound"
+            );
+        }
+    }
+    // Same no-overlap rule as legacy WorkspaceProfile::validate, with sorted
+    // adjacent-prefix checks rather than quadratic pairwise work here.
+    paths.sort();
+    for pair in paths.windows(2) {
+        ensure!(
+            !pair[1].starts_with(pair[0]),
+            "workspace partitions overlap"
+        );
+    }
+    Ok(())
+}
+fn live_projection_stage(store: &LocalStore, staging_id: &str) -> Result<()> {
+    let lease = store
+        .retention()?
+        .staging
+        .get(staging_id)
+        .cloned()
+        .context("source projection requires staging lease")?;
+    let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis();
+    ensure!(
+        u128::from(lease.expires_at_ms) > now,
+        "source projection staging lease expired"
+    );
+    Ok(())
+}
+
+/// Producer-side source complement, retaining untouched subtree refs and
+/// updating only excluded paths. Legacy immediate directories retain V1
+/// encoding and its O(immediate-entry-count) cost; paged roots use path copying.
+/// This stages metadata only and does not declare any quiescence or jj policy.
+pub fn stage_source_complement(
+    store: &LocalStore,
+    staging_id: &str,
+    view_root: &ObjectRef,
+    profile: &WorkspaceProfile,
+    budget: &ProjectionBudget,
+) -> Result<SourceComplement> {
+    let began = Instant::now();
+    live_projection_stage(store, staging_id)?;
+    let mut tree = ProofTree::new(store, budget)?;
+    tree.started = began;
+    preflight_profile(profile, budget)?;
+    qualified_profile(&canonical_json(profile)?, budget)?;
+    tree.root(view_root)?;
+    let start = Instant::now();
+    let directory = tree.project(view_root, &profile.source_exclusions().excluded_paths, 0)?;
+    let projection_ms = elapsed_ms(start);
+    for (reference, bytes) in tree.encoded.borrow().iter() {
+        tree.check()?;
+        store.receive_staged(staging_id, reference, bytes)?;
+    }
+    live_projection_stage(store, staging_id)?;
+    tree.check()?;
+    let mut stages = BTreeMap::new();
+    stages.insert("source_projection".into(), projection_ms);
+    Ok(SourceComplement {
+        directory,
+        report: tree.report(stages),
+    })
+}
+
+/// A retained RunnableRoot is a byte/schema receipt, not a writer-barrier proof.
+/// The trusted execution owner supplies real quiescence and the expected opaque
+/// source-policy binding. This adapter proves the exact source complement and
+/// prepared data tree; it does not apply jj ignore/tracking rules or infer an
+/// environment hardlink baseline that EnvironmentV2 does not encode.
+pub fn runnable_build_input_view(
+    store: &LocalStore,
+    runnable: &ObjectRef,
+    expected_projection_policy: &ObjectRef,
+    budget: &ProjectionBudget,
+) -> Result<QualifiedRunnableBuildInput> {
+    ensure!(
+        runnable.kind == ObjectKind::RunnableRoot,
+        "runnable build input requires RunnableRoot"
+    );
+    let began = Instant::now();
+    let id = format!("build-input:runnable:{}", Uuid::new_v4());
+    store.pin_existing(&id, runnable)?;
+    let pin = BuildRootPin {
+        store: store.clone(),
+        id: Some(id),
+    };
+    let mut stages = BTreeMap::new();
+    stages.insert("root_pinning".into(), elapsed_ms(began));
+    let mut tree = ProofTree::new(store, budget)?;
+    tree.started = began;
+    let start = Instant::now();
+    ensure!(
+        runnable.size_bytes <= crate::snapshot::MAX_MANIFEST_BYTES as u64,
+        "runnable manifest exceeds format bound"
+    );
+    let root = crate::snapshot::decode_runnable(&tree.read_metadata(runnable)?)?;
+    ensure!(
+        root.consistency == CheckpointConsistency::Quiesced,
+        "build input requires terminal consistency metadata"
+    );
+    ensure!(
+        root.source.size_bytes <= crate::snapshot::MAX_MANIFEST_BYTES as u64,
+        "source manifest exceeds format bound"
+    );
+    let source = crate::snapshot::decode_source(&tree.read_metadata(&root.source)?)?;
+    ensure!(
+        &source.projection_policy == expected_projection_policy,
+        "runnable source policy differs from trusted expected policy"
+    );
+    let policy = tree.read_metadata(&source.projection_policy)?;
+    let value: serde_json::Value = serde_json::from_slice(&policy)?;
+    ensure!(
+        canonical_json(&value)? == policy,
+        "source policy must be canonical JSON"
+    );
+    let profile = qualified_profile(&tree.read_metadata(&root.profile)?, budget)?;
+    let environment = if let Some(reference) = &root.environment {
+        {
+            ensure!(
+                reference.size_bytes <= crate::snapshot::MAX_MANIFEST_BYTES as u64,
+                "environment manifest exceeds format bound"
+            );
+            Some(crate::snapshot::decode_environment(
+                &tree.read_metadata(reference)?,
+            )?)
+        }
+    } else {
+        None
+    };
+    stages.insert("manifests".into(), elapsed_ms(start));
+    let start = Instant::now();
+    tree.root(&root.view_root)?;
+    let derived = tree.project(
+        &root.view_root,
+        &profile.source_exclusions().excluded_paths,
+        0,
+    )?;
+    ensure!(
+        derived == source.directory,
+        "runnable source root differs from exact full-view source complement"
+    );
+    stages.insert("source_projection".into(), elapsed_ms(start));
+    let start = Instant::now();
+    let effective = tree.fingerprint(Some(&root.view_root), &profile.prepared)?;
+    let base = tree.fingerprint(
+        environment
+            .as_ref()
+            .map(|environment| &environment.directory),
+        &profile.prepared,
+    )?;
+    stages.insert("prepared_fingerprint".into(), elapsed_ms(start));
+    let start = Instant::now();
+    let groups = tree.topology(&root.view_root, &root.hardlinks)?;
+    stages.insert("topology".into(), elapsed_ms(start));
+    tree.check()?;
+    let input = crate::build::BuildInputView::from_validated_checkpoint(
+        runnable.clone(),
+        root.source,
+        root.view_root,
+        root.environment,
+        root.profile,
+        Some(root.hardlinks),
+        groups,
+        effective,
+        base,
+    );
+    let mut report = tree.report(stages);
+    report.total_ms = elapsed_ms(began);
+    Ok(QualifiedRunnableBuildInput { input, report, pin })
 }
 
 impl WorkspaceManager {

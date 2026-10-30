@@ -1,5 +1,6 @@
 use super::*;
-use crate::store::{EntryNode, EnvironmentManifest};
+use crate::directory::EntryNode;
+use crate::store::EnvironmentManifest;
 use fs2::FileExt;
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use std::fs::{self, File, OpenOptions};
@@ -75,8 +76,9 @@ impl BuildIndex {
         self.key_lock("execution", key)
     }
     pub fn validate_prepared(&self, prepared: &PreparedEnvironment) -> Result<()> {
+        let layout = environment_content(&self.store, &prepared.root)?.layout;
         ensure!(
-            self.prepared_key(&prepared.key)?.as_ref() == Some(prepared),
+            self.prepared_key_for(&prepared.key, layout)?.as_ref() == Some(prepared),
             "prepared environment lacks matching index authority"
         );
         Ok(())
@@ -86,8 +88,7 @@ impl BuildIndex {
     /// retained preparation authority. Provenance labels alone grant no hit.
     pub fn prepared_root(&self, root: &ObjectRef) -> Result<Option<PreparedEnvironment>> {
         kind(root, ObjectKind::EnvironmentRoot)?;
-        let environment: EnvironmentManifest =
-            serde_json::from_slice(&self.store.read_object(root)?)?;
+        let environment = environment_content(&self.store, root)?;
         let Some(preparation_key) = environment.provenance.get("preparation_key") else {
             return Ok(None);
         };
@@ -97,8 +98,8 @@ impl BuildIndex {
             .lock()
             .map_err(|_| anyhow::anyhow!("build index lock failed"))?
             .query_row(
-                "SELECT key_json FROM build_index WHERE category='environment' AND key_digest=?1",
-                params![preparation_key],
+                "SELECT key_json FROM build_index WHERE category=?1 AND key_digest=?2",
+                params![environment.layout.category(), preparation_key],
                 |row| row.get(0),
             )
             .optional()?;
@@ -111,7 +112,7 @@ impl BuildIndex {
             key.digest == *preparation_key,
             "prepared key provenance differs from index"
         );
-        let prepared = self.prepared_key(&key)?;
+        let prepared = self.prepared_key_for(&key, environment.layout)?;
         ensure!(
             prepared
                 .as_ref()
@@ -122,10 +123,18 @@ impl BuildIndex {
     }
 
     pub fn prepared(&self, spec: &PreparationSpec) -> Result<Option<PreparedEnvironment>> {
+        self.prepared_with_layout(spec, PreparedContentLayout::LegacyV1)
+    }
+
+    pub fn prepared_with_layout(
+        &self,
+        spec: &PreparationSpec,
+        layout: PreparedContentLayout,
+    ) -> Result<Option<PreparedEnvironment>> {
         let lease = self.store.begin_staging(Duration::from_secs(300))?;
         let result = (|| {
-            let key = spec.key(&self.store)?;
-            self.prepared_key(&key)
+            let key = spec.key_with_layout(&self.store, layout)?;
+            self.prepared_key_for(&key, layout)
         })();
         let cleanup = self.store.abandon_staging(&lease.id);
         let result = result?;
@@ -139,16 +148,28 @@ impl BuildIndex {
     where
         F: FnOnce(&LocalStore) -> Result<ObjectRef>,
     {
+        self.prepare_once_with_layout(spec, PreparedContentLayout::LegacyV1, prepare)
+    }
+
+    pub fn prepare_once_with_layout<F>(
+        &self,
+        spec: &PreparationSpec,
+        layout: PreparedContentLayout,
+        prepare: F,
+    ) -> Result<PreparedEnvironment>
+    where
+        F: FnOnce(&LocalStore) -> Result<ObjectRef>,
+    {
         let lease = self.store.begin_staging(Duration::from_secs(3600))?;
         let result = (|| {
-            let key = spec.key(&self.store)?;
-            let _lock = self.key_lock("environment", &key)?;
-            if let Some(existing) = self.prepared_key(&key)? {
+            let key = spec.key_with_layout(&self.store, layout)?;
+            let _lock = self.key_lock(layout.category(), &key)?;
+            if let Some(existing) = self.prepared_key_for(&key, layout)? {
                 self.store.abandon_staging(&lease.id)?;
                 return Ok(existing);
             }
             let directory = prepare(&self.store)?;
-            self.publish_prepared_inner(spec, &key, &directory, &lease.id)
+            self.publish_prepared_inner(spec, &key, &directory, &lease.id, layout)
         })();
         if result.is_err() {
             let _ = self.store.abandon_staging(&lease.id);
@@ -164,12 +185,36 @@ impl BuildIndex {
         self.prepare_once(spec, |_| Ok(directory.clone()))
     }
 
+    pub fn publish_prepared_with_layout(
+        &self,
+        spec: &PreparationSpec,
+        directory: &ObjectRef,
+        layout: PreparedContentLayout,
+    ) -> Result<PreparedEnvironment> {
+        self.prepare_once_with_layout(spec, layout, |_| Ok(directory.clone()))
+    }
+
+    /// Only an exact retained index receipt can supply a preparation contract.
+    pub fn preparation_spec(&self, prepared: &PreparedEnvironment) -> Result<PreparationSpec> {
+        self.validate_prepared(prepared)?;
+        let layout = environment_content(&self.store, &prepared.root)?.layout;
+        let spec: PreparationSpec =
+            decode_payload(&self.store, &prepared.key, layout.key_schema())?;
+        spec.validate()?;
+        ensure!(
+            spec.key_with_layout(&self.store, layout)? == prepared.key,
+            "preparation contract differs from indexed key"
+        );
+        Ok(spec)
+    }
+
     fn publish_prepared_inner(
         &self,
         spec: &PreparationSpec,
         key: &ObjectRef,
         directory: &ObjectRef,
         lease: &str,
+        layout: PreparedContentLayout,
     ) -> Result<PreparedEnvironment> {
         kind(directory, ObjectKind::Directory)?;
         // The requested compiler must really exist in the prepared tree. A
@@ -187,26 +232,43 @@ impl BuildIndex {
         }
         inputs.sort();
         inputs.dedup();
-        let root = self.store.put_environment(&EnvironmentManifest {
-            format_version: FORMAT_VERSION,
-            directory: directory.clone(),
-            platform: spec.platform.properties(),
-            installer_inputs: inputs,
-            provenance: [
-                ("preparation_key".into(), key.digest.clone()),
-                ("policy_version".into(), spec.policy_version.clone()),
-            ]
-            .into_iter()
-            .collect(),
-        })?;
+        let provenance = [
+            ("preparation_key".into(), key.digest.clone()),
+            ("policy_version".into(), spec.policy_version.clone()),
+        ]
+        .into_iter()
+        .collect();
+        let root = match layout {
+            PreparedContentLayout::LegacyV1 => {
+                self.store.put_environment(&EnvironmentManifest {
+                    format_version: FORMAT_VERSION,
+                    directory: directory.clone(),
+                    platform: spec.platform.properties(),
+                    installer_inputs: inputs,
+                    provenance,
+                })?
+            }
+            PreparedContentLayout::PagedChunkedV2 => crate::snapshot::stage(
+                &self.store,
+                lease,
+                ObjectKind::EnvironmentRoot,
+                &crate::snapshot::EnvironmentV2 {
+                    format_version: 2,
+                    directory: directory.clone(),
+                    platform: spec.platform.properties(),
+                    installer_inputs: inputs,
+                    provenance,
+                },
+            )?,
+        };
         let receipt = metadata(
             &self.store,
             ObjectKind::ActionResult,
-            "prepared-environment-receipt-v1",
+            layout.receipt_schema(),
             &serde_json::json!({"key":key,"root":root}),
             vec![key.clone(), root.clone()],
         )?;
-        self.publish_index("environment", key, &receipt, lease, &[])?;
+        self.publish_index(layout.category(), key, &receipt, lease, &[])?;
         Ok(PreparedEnvironment {
             key: key.clone(),
             root,
@@ -214,8 +276,12 @@ impl BuildIndex {
         })
     }
 
-    fn prepared_key(&self, key: &ObjectRef) -> Result<Option<PreparedEnvironment>> {
-        let Some(receipt) = self.lookup("environment", key)? else {
+    fn prepared_key_for(
+        &self,
+        key: &ObjectRef,
+        layout: PreparedContentLayout,
+    ) -> Result<Option<PreparedEnvironment>> {
+        let Some(receipt) = self.lookup(layout.category(), key)? else {
             return Ok(None);
         };
         #[derive(Deserialize)]
@@ -223,10 +289,13 @@ impl BuildIndex {
             key: ObjectRef,
             root: ObjectRef,
         }
-        let payload: Payload =
-            decode_payload(&self.store, &receipt, "prepared-environment-receipt-v1")?;
+        let payload: Payload = decode_payload(&self.store, &receipt, layout.receipt_schema())?;
         ensure!(payload.key == *key, "prepared key/index mismatch");
         kind(&payload.root, ObjectKind::EnvironmentRoot)?;
+        ensure!(
+            environment_content(&self.store, &payload.root)?.layout == layout,
+            "prepared layout differs from indexed category"
+        );
         Ok(Some(PreparedEnvironment {
             key: key.clone(),
             root: payload.root,
@@ -407,11 +476,7 @@ fn file_at(store: &LocalStore, directory: &ObjectRef, path: &str) -> Result<Obje
     let mut root = directory.clone();
     let parts: Vec<_> = path.split('/').collect();
     for (index, part) in parts.iter().enumerate() {
-        let entry = store
-            .read_directory(&root)?
-            .entries
-            .into_iter()
-            .find(|entry| entry.name_hex == hex::encode(part.as_bytes()))
+        let entry = crate::tree::lookup(store, &root, part.as_bytes())?
             .context("prepared tool is missing")?;
         match entry.node {
             EntryNode::Directory { object } if index + 1 < parts.len() => root = object,

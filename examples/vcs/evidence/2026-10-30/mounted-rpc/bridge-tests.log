@@ -1,0 +1,91 @@
+   Compiling rudder-vcs-bridge v0.1.0 (<QUALIFICATION_DIR>/frozen/vcs-bridge)
+warning: unused import: `jj_lib::object_id::ObjectId`
+  --> vcs-bridge/tests/working_copy.rs:10:5
+   |
+10 | use jj_lib::object_id::ObjectId;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: `rudder-vcs-bridge` (test "working_copy") generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 24.18s
+     Running unittests src/lib.rs (<CARGO_TARGET_DIR>/debug/deps/rudder_vcs_bridge-7e88530d1dfe9336)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/main.rs (<CARGO_TARGET_DIR>/debug/deps/rudder_jj-edc94b4f0d1b883e)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/identities_and_seed.rs (<CARGO_TARGET_DIR>/debug/deps/identities_and_seed-4c97327731276a3f)
+
+running 4 tests
+test real_vfs_observation_token_preserves_namespace_nonce_and_exclusion_scope ... ok
+test raw_ids_conflict_terms_and_live_vs_sealed_types_are_distinct ... ok
+test preparation_strips_executable_configuration_and_never_copies_source ... ok
+test malformed_seed_paths_symlinks_and_external_alternates_are_rejected ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.68s
+
+     Running tests/journal_integration.rs (<CARGO_TARGET_DIR>/debug/deps/journal_integration-e131e37b723a49d8)
+
+running 1 test
+test real_jj_operation_publishes_through_retained_journal_intent_and_reconciles_lost_receipt ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 22.25s
+
+     Running tests/projection.rs (<CARGO_TARGET_DIR>/debug/deps/projection-d4bd4e3b40f3d940)
+
+running 7 tests
+test a_corrupt_cas_stream_returns_error_instead_of_jj_reader_panic ... ok
+test file_directory_replacements_and_deletions_have_exact_leaf_semantics ... ok
+test current_ignore_auto_force_size_and_tracked_rules_are_evaluated_each_snapshot ... ok
+test unsupported_names_targets_submodules_and_budget_fail_before_namespace_or_history_mutation ... ok
+test conflicts_keep_raw_terms_labels_and_long_marker_receipts_across_partial_resolution ... ok
+test nonempty_files_modes_symlinks_and_utf8_paths_roundtrip_without_source_walk ... ok
+test large_chunked_and_legacy_files_stream_into_real_git_objects_with_bounded_jj_buffers ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.52s
+
+     Running tests/publication.rs (<CARGO_TARGET_DIR>/debug/deps/publication-6ad4e1952d5f5213)
+
+running 3 tests
+test prepared_records_cannot_change_intent_proof_or_raw_change_identity ... ok
+test changed_op_head_is_refused_without_merge_or_replay ... ok
+test real_jj_preparation_is_unpublished_and_exact_publication_is_idempotent ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s
+
+     Running tests/rpc_view.rs (<CARGO_TARGET_DIR>/debug/deps/rpc_view-f3e455baae076b8d)
+
+running 5 tests
+test lost_capture_reply_and_helper_restart_keep_original_root_until_explicit_safe_retirement ... ok
+test lost_adoption_reply_reconciles_same_operation_after_restart_and_old_attempt_never_adopts_new_binding ... ok
+test completed_cli_reply_loss_and_service_restart_return_same_receipt_and_stale_attempt_cannot_start ... ok
+test real_owning_rpc_projects_nonempty_source_and_adopts_actual_fsynced_wc_without_lock_recursion ... ok
+test actual_jj_cli_status_diff_new_and_single_observation_edit_use_scoped_rpc_without_guest_host_argv ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.67s
+
+     Running tests/vfs_provider.rs (<CARGO_TARGET_DIR>/debug/deps/vfs_provider-b26b904234b5de1e)
+
+running 2 tests
+test policy_identity_and_binding_fail_closed_without_an_owned_provider_receipt ... ok
+test owning_view_binds_a_real_nonempty_wc_and_snapshots_edits_with_post_commit_pin_adoption ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.51s
+
+     Running tests/working_copy.rs (<CARGO_TARGET_DIR>/debug/deps/working_copy-6a20489ed315a123)
+
+running 5 tests
+test registered_production_wc_observes_only_injected_view_and_reset_invalidates_cursor ... ok
+test metadata_reset_cannot_turn_an_unobserved_same_tree_checkout_into_success ... ok
+test a_checkout_result_without_owned_source_proof_keeps_its_uncertain_nonce ... ok
+test successful_checkout_clears_pending_only_with_durable_finish ... ok
+test unsupported_checkout_is_definite_but_started_transport_failure_remains_uncertain ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.09s

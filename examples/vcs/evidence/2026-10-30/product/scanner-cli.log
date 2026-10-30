@@ -1,0 +1,12 @@
+test_checkout_restore_and_real_git_commit_import (__main__.WorkingCopyExtension.test_checkout_restore_and_real_git_commit_import) ... ok
+test_git_version_is_not_global_gate_but_fetch_needs_porcelain (__main__.WorkingCopyExtension.test_git_version_is_not_global_gate_but_fetch_needs_porcelain) ... ok
+test_legacy_extra_metadata_is_required_and_copied_privately (__main__.WorkingCopyExtension.test_legacy_extra_metadata_is_required_and_copied_privately) ... ok
+test_private_metadata_and_object_isolation (__main__.WorkingCopyExtension.test_private_metadata_and_object_isolation) ... ok
+test_real_conflict_and_git_header_round_trip (__main__.WorkingCopyExtension.test_real_conflict_and_git_header_round_trip) ... ok
+test_registration_and_normal_commands (__main__.WorkingCopyExtension.test_registration_and_normal_commands) ... ok
+
+----------------------------------------------------------------------
+Ran 6 tests in 7.589s
+
+OK
+Report: <FIXTURE>/report.json

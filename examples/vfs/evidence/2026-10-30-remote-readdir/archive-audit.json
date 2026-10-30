@@ -1,0 +1,15 @@
+{
+  "format_version": 1,
+  "allowlist_applied_before_file_content_reads": true,
+  "member_names_validated_before_archive_content_reads": true,
+  "regular_files_only": true,
+  "archive_matches_manifests": true,
+  "source_archive_sha256": "eb6e74f27baa2a3631ec0918b76fa5ae80c312f6bbc32720a61deb0791489c00",
+  "source_archive_file_count": 182,
+  "source_manifest_sha256": "c9e0e30ed75f8c325c4b34f8f0ddab8bdab41643197e150e66c69ecff0b6f16f",
+  "qualified_source_manifest_sha256": "8fbf969b91e1150e839999aac68d2a354d16af8fb1f6def14e9bbf6671baed06",
+  "helper_manifest_sha256": "f6e80f739f999281d4886348cf07bda31bab31d1aa8c85227efb1b3e62626757",
+  "helper_file_count": 4,
+  "hidden_runtime_session_cache_files": 0,
+  "binary_and_payload_archive_published": false
+}

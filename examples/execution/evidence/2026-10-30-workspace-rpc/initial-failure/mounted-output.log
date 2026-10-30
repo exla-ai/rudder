@@ -1,0 +1,5 @@
+
+thread 'main' (3540) panicked at /workspace/rudder-execution-driver-dAuqO2/driver.rs:889:21:
+assertion failed: rudder_engine::tree::lookup(&store, &observation.directory,
+            b"node_modules").unwrap().is_none()
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace

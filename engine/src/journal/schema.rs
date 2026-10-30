@@ -2,13 +2,13 @@ use super::*;
 
 pub(super) fn initialize(conn: &mut Connection) -> Result<()> {
     let version: u32 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    ensure!(version <= 3, "journal schema is newer than this engine");
-    if version == 3 {
+    ensure!(version <= 4, "journal schema is newer than this engine");
+    if version == 4 {
         return Ok(());
     }
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let version: u32 = tx.pragma_query_value(None, "user_version", |r| r.get(0))?;
-    ensure!(version <= 3, "journal schema is newer than this engine");
+    ensure!(version <= 4, "journal schema is newer than this engine");
     if version == 0 {
         tx.execute_batch(r#"
 CREATE TABLE projects(
@@ -45,6 +45,22 @@ PRAGMA user_version=2;
     }
     if version <= 2 {
         tx.execute_batch("ALTER TABLE commands ADD COLUMN capability_hash TEXT REFERENCES capabilities(token_hash); PRAGMA user_version=3;")?;
+    }
+    if version <= 3 {
+        tx.execute_batch(r#"
+CREATE TABLE vcs_intents(
+ intent_id TEXT PRIMARY KEY,
+ project_id TEXT NOT NULL REFERENCES projects(project_id),
+ idempotency_key TEXT NOT NULL,
+ request_json TEXT NOT NULL,
+ state TEXT NOT NULL CHECK(state IN('accepted','prepared','started','uncertain','published','rejected')),
+ receipt_json TEXT NOT NULL,
+ created_at INTEGER NOT NULL,
+ updated_at INTEGER NOT NULL,
+ UNIQUE(project_id,idempotency_key));
+CREATE INDEX vcs_intents_pending ON vcs_intents(project_id,state);
+PRAGMA user_version=4;
+"#)?;
     }
     tx.commit()?;
     Ok(())

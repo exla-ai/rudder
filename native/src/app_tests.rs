@@ -29090,3 +29090,44 @@ fn managed_turns_ignore_legacy_done_and_successful_exit_without_turn_evidence() 
     assert_eq!(app.agents[0].status,AgentStatus::Paused,"local-only or unobserved process success cannot fulfill a task");
     assert!(app.agents[0].terminal.is_none());
 }
+
+#[test]
+fn background_output_bursts_keep_input_live_and_service_the_oldest_panes() {
+    let _env = env_guard();
+    let mut app = App::new();
+    std::env::set_var("RUDDER_HOME", app.cwd.join("home"));
+    let now = Instant::now();
+    app.agents = (0..8).map(|index| {
+        let mut run = test_agent_run(&format!("bounded-flood-{index}"), "output burst");
+        run.cwd = app.cwd.clone();
+        run.status = AgentStatus::Running;
+        run.plain_process = true;
+        run.last_drain_at = Some(now - Duration::from_secs(index + 1));
+        run.terminal = Some(TerminalPane::spawn_shell_or_command(
+            Some(TerminalCommand::with_args("/bin/sh", ["-c",
+                "dd if=/dev/zero bs=8192 count=128 2>/dev/null | tr '\\000' x; sleep 60",
+            ])),
+            TerminalPaneOptions { scrollback_lines: 16, ..Default::default() },
+        ).unwrap());
+        run
+    }).collect();
+    app.selected_agent = 0;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while app.agents.iter().any(|run| !run.terminal.as_ref().unwrap().has_pending_output()) {
+        assert!(Instant::now() < deadline, "flood fixtures did not produce output");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    app.poll_agents();
+    let serviced: Vec<_> = app.agents.iter().enumerate()
+        .filter(|(_, run)| run.last_drain_at.unwrap() >= now)
+        .map(|(index, _)| index).collect();
+    assert_eq!(serviced, vec![0, 6, 7], "focused plus two oldest background panes");
+    app.focus = FocusPane::Task;
+    app.task_input.clear();
+    app.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+    assert_eq!(app.task_input, "x", "pending output must leave the input loop usable");
+    for _ in 0..3 { app.poll_agents(); }
+    assert!(app.agents.iter().all(|run| run.last_drain_at.unwrap() >= now),
+        "later rows must progress while the first panes continue writing");
+    // Drop requests bounded child teardown; no actor waits for flood writers.
+}

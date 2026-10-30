@@ -1,0 +1,12 @@
+{
+  "gitBinaryProduced": false,
+  "inspection": "exact owned VM, while make was running immediately before timeout",
+  "stdout": "GIT_BINARY_NOT_PRODUCED",
+  "buildTail": [
+    "CC packfile-list.o",
+    "CC pager.o",
+    "CC parallel-checkout.o"
+  ],
+  "makeOutcome": "480-second timeout124; common object compilation terminated before Git link",
+  "cleanupVerified": true
+}

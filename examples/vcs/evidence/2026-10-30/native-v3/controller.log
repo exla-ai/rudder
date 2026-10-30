@@ -1,0 +1,4 @@
+{"at":"2026-10-30T18:02:27.244Z","step":"owned-disposable-canary","machine":"8437e2f2dd5558","state":"started"}
+{"at":"2026-10-30T18:02:39.008Z","step":"workspace-qualification-running","machine":"8437e2f2dd5558"}
+{"at":"2026-10-30T18:03:09.572Z","step":"workspace-qualification-running","machine":"8437e2f2dd5558"}
+{"at":"2026-10-30T18:03:39.795Z","step":"qualification-finished","ok":true,"cleanupVerified":true,"report":"<QUALIFICATION_DIR>/runs/61ebd2b7-e501-4946-ad32-6534377b32b4/report.json"}

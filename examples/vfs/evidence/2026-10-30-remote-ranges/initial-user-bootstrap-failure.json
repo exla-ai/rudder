@@ -1,0 +1,159 @@
+{
+  "format_version": 1,
+  "provider": "Fly.io",
+  "data_plane": "remote_paged_ranges_v1",
+  "name": "vfs-remote-50108927-b75",
+  "qualification": "50108927-b75e-4bb3-a946-01a416352906",
+  "steps": [
+    {
+      "step": "assert-no-app-secrets",
+      "ms": 569
+    },
+    {
+      "step": "create-disposable-canary",
+      "ms": 3247
+    },
+    {
+      "step": "machine-inventory",
+      "ms": 570
+    },
+    {
+      "step": "private-network-fixture-download",
+      "ms": 3375
+    },
+    {
+      "step": "private-network-fixture-download",
+      "ms": 336
+    },
+    {
+      "step": "verify-downloaded-fixture",
+      "ms": 224
+    },
+    {
+      "step": "launch-contained-qualification",
+      "ms": 393
+    },
+    {
+      "step": "poll-contained-qualification",
+      "ms": 305
+    },
+    {
+      "step": "poll-contained-qualification",
+      "ms": 295
+    },
+    {
+      "step": "read-owned-report",
+      "ms": 415
+    },
+    {
+      "step": "machine-inventory",
+      "ms": 497
+    },
+    {
+      "step": "destroy-owned-canary",
+      "ms": 841
+    },
+    {
+      "step": "machine-inventory",
+      "ms": 431
+    }
+  ],
+  "machine": "080d6e2b333778",
+  "instance": "01M66Y4F2HRNFVRAHXCNY06VK6",
+  "region": "iad",
+  "image": {
+    "registry": "docker-hub-mirror.fly.io",
+    "repository": "library/node",
+    "tag": "22-bookworm-slim",
+    "digest": "sha256:efd0ab5780c2d9ab1f0f869571a00d5edb17793bff4cce4a2792e3eb0ffc7562"
+  },
+  "guest": {
+    "cpu_kind": "shared",
+    "cpus": 2,
+    "memory_mb": 2048
+  },
+  "artifacts": {
+    "format_version": 1,
+    "driverSha256": "a49e350ad71f347cc07e5e0ec5adf5555b95e8e37aed8ec6023a74fb97e1c314",
+    "payloadSha256": "161e864a5111cee185eb003b017d72e724c6f3f12f4efd28e0f26117dcda99b6",
+    "frozenSourceUnchangedAfterBuild": true,
+    "workspaceManifestChanged": false,
+    "buildInfo": {
+      "build_source_sha256": "00098bd07ca0d4b5eaaab4d45c4b3fd72bd99592c2ea4c0268d5b745b150206c",
+      "default": false,
+      "format_version": 1,
+      "qualification": "remote_paged_ranges_v1",
+      "ready": true
+    },
+    "helperInputs": {
+      "src/native-binary.ts": "760189a686d6352071f705bd7c6c056e871d16c62b79165958ce7d721651f9f4",
+      "src/fabric-local.ts": "7519c372407132a6c14ce819d5ac55d7ab9be65352d486d0ff66595132910ead",
+      "src/fabric-remote.ts": "cc35a1ec26607a284fb2596b55431076cf131e57b1e70d4606b495a81ef3386b",
+      "src/fabric-fetch.ts": "bc447c08c714db75fb209e05cf8910f57c04ebeb7a64ee610ee15eddfc081baa"
+    },
+    "originalBuildEnvelopeSha256": "00098bd07ca0d4b5eaaab4d45c4b3fd72bd99592c2ea4c0268d5b745b150206c"
+  },
+  "fixtureTransport": "private Fly6PN HTTP; exact VM source/nonce; compressed artifact SHA256 verified before execution; no credentials",
+  "exitCode": 1,
+  "results": [
+    {
+      "build_source_sha256": "00098bd07ca0d4b5eaaab4d45c4b3fd72bd99592c2ea4c0268d5b745b150206c",
+      "default": false,
+      "format_version": 1,
+      "qualification": "remote_paged_ranges_v1",
+      "ready": true
+    },
+    {
+      "entries": 100000,
+      "phase": "fixture",
+      "uid": 0
+    },
+    {
+      "build_source_sha256": "00098bd07ca0d4b5eaaab4d45c4b3fd72bd99592c2ea4c0268d5b745b150206c",
+      "busy_unmount_retry": true,
+      "checkpoint_and_observation_rejected": true,
+      "complete_local_pins": 0,
+      "constructor_and_fork_ms": 57,
+      "discard_checkpoint_proof": false,
+      "discard_strictly_closed": true,
+      "entries": 100000,
+      "fixture_ms": 1964,
+      "host_namespace_check_delegated_to_outer_controller": false,
+      "host_namespace_inspection_denied": false,
+      "initial_host_mount_namespace_unchanged": true,
+      "kernel": "6.12.114-fly",
+      "logical_file_bytes": 218103808,
+      "mmap_msync_fsync": true,
+      "ok": true,
+      "open_unlink": true,
+      "origin_rename": true,
+      "partial_cache_bytes": 8429085,
+      "private_copyup_bytes": 131072,
+      "profile": "remote_paged_ranges_v1",
+      "root_receipt_requests": 2,
+      "runtime_hardlinks": true,
+      "sibling_isolation": true,
+      "source_object_requests": 17,
+      "source_payload_bytes": 8388608,
+      "source_payload_requests": 2,
+      "source_transport": "persistent Node helper + loopback authenticated HTTP fixture",
+      "stale_lookup_rejected": true,
+      "uid": 0
+    },
+    {
+      "owned_fixture_removed": true,
+      "uid": 0
+    },
+    {
+      "detail": "deny supplementary groups in new user namespace: Permission denied (os error 13)",
+      "error": "remote mounted qualification failed",
+      "ok": false
+    }
+  ],
+  "ok": false,
+  "failedPhase": "read-owned-report",
+  "error": "qualification failed at read-owned-report",
+  "errorCode": "ERR_ASSERTION",
+  "cleanupVerified": true,
+  "verifiedAt": "2026-10-30T17:36:28.589Z"
+}

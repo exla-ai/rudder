@@ -1,0 +1,15 @@
+kernel=6.12.114-fly
+git version 2.39.5
+0c2e212e81e26cdb9bd32fd326c7036c7111b2df5a88515e94f34bba3204cad3  /opt/runtime/qualify-vcs
+b9dae4074d34e98f7530321c6921cdcd9ce46639b5b6918e73df2189adafbdce  /opt/runtime/rudder-jj
+{"args":["status"],"kind":"guest-jj-command","stderr":"","stdout":"Working copy changes:\nM source.ts\nWorking copy  (@) : nzstpsru 606b65c6 rudder attempt 344e28d3-fe2f-4701-96bd-dd29e7c8ced3\nParent commit (@-): ksvqlryn 6117de54 (no description set)\n"}
+VCS-FIXTURE:CAPTURE_READY
+VCS-FIXTURE:CAPTURE_LATER
+{"args":["diff"],"kind":"guest-jj-command","stderr":"","stdout":"diff --git a/source.ts b/source.ts\nindex 39a36559da..880002a6fe 100644\n--- a/source.ts\n+++ b/source.ts\n@@ -1,1 +1,1 @@\n-export const n = 1;\n+export const n = 3;\n"}
+{"args":["log","--limit","5"],"kind":"guest-jj-command","stderr":"","stdout":"485630a424606bcf6f821a65cb407de56d9e1405 c076a785e383465fadd8fd4ba26b8451 rudder attempt 344e28d3-fe2f-4701-96bd-dd29e7c8ced3\n6117de5448b65fcb83149a75fc92211b72112635 f749e81cd2aa6ca83475132b47596dd8 \n0000000000000000000000000000000000000000 00000000000000000000000000000000 \n"}
+{"args":["new","--message=private mounted child"],"kind":"guest-jj-command","stderr":"Working copy  (@) now at: zpklwuvx 7fff3cf2 (empty) private mounted child\nParent commit (@-)      : nzstpsru 485630a4 rudder attempt 344e28d3-fe2f-4701-96bd-dd29e7c8ced3\n","stdout":""}
+{"args":["edit","485630a424606bcf6f821a65cb407de56d9e1405"],"kind":"guest-jj-command","stderr":"","stdout":"Selected existing change c076a785e383465fadd8fd4ba26b8451 at 485630a424606bcf6f821a65cb407de56d9e1405\n"}
+mounted VCS qualification: same-tree edit selected another commit
+{"args":["log","--limit","5"],"kind":"guest-jj-command","stderr":"","stdout":"7fff3cf29177d4afe3c8413c1e39a490aa9643f0 0afe3542efcdb471000254dc3b57a5ba private mounted child\n485630a424606bcf6f821a65cb407de56d9e1405 c076a785e383465fadd8fd4ba26b8451 rudder attempt 344e28d3-fe2f-4701-96bd-dd29e7c8ced3\n6117de5448b65fcb83149a75fc92211b72112635 f749e81cd2aa6ca83475132b47596dd8 \n0000000000000000000000000000000000000000 00000000000000000000000000000000 \n"}
+{"isolation":{"cgroup_limited":false,"inherited_authority_fds_closed":true,"kernel_pid_namespace_drained":true,"network_isolated":false,"no_new_privileges":true,"private_mount_namespace":true,"read_only_runtime":true,"restricted_root":true,"same_uid_user_namespace":true},"kind":"helper-proof","warnings":[]}
+mounted VCS qualification: host did not close ingress/hold writer lock before finalization

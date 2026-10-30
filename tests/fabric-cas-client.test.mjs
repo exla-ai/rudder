@@ -128,6 +128,55 @@ test("HTTP deadlines include an uncooperative transport and response body decodi
   await assert.rejects(body.beginStaging(), { code: "request_timeout" });
 });
 
+test("timed-out PUTs hold request admission through retries until the transport actually settles", async (t) => {
+  const bytes = Buffer.from("retained upload"); const object = ref("blob", bytes);
+  const source = sourceAdapter([{ object, bytes }]);
+  let releasePut, stalled = true, activePuts = 0, putCalls = 0, authCalls = 0;
+  const client = new FabricRemoteClient({
+    baseUrl: "https://fixture.invalid/api/rudder/fabric", concurrency: 1, requestTimeoutMs: 20,
+    authHeaders: () => { authCalls++; return {}; },
+    fetch: async (url, init) => {
+      if (init.method === "PUT") {
+        putCalls++; activePuts++;
+        try { if (stalled) await new Promise((resolve) => { releasePut = resolve; }); }
+        finally { activePuts--; }
+        return Response.json({ format_version: 1 });
+      }
+      if (url.pathname.endsWith("/missing")) return Response.json({ format_version: 1, missing: [object] });
+      if (init.method === "DELETE") return Response.json({ format_version: 1 });
+      if (url.pathname.includes("/roots/")) return Response.json({ format_version: 1, root_id: "retry", root: object, durability: "replicated", published_at_ms: Date.now(), object_count: 1, total_bytes: bytes.length });
+      return Response.json({ format_version: 1, lease_id: /\/staging\/([^/]+)\/renew$/.exec(url.pathname)?.[1] ?? randomUUID(), expires_at_ms: Date.now() + 300_000 });
+    },
+  });
+  t.after(() => releasePut?.());
+  await assert.rejects(client.uploadRoot("retry", object, source), { code: "request_timeout" });
+  assert.equal(activePuts, 1); assert.equal(source.owned.size, 0);
+  const admittedAuthCalls = authCalls;
+  for (let count = 0; count < 4; count++) {
+    await assert.rejects(client.uploadRoot("retry", object, source), { code: "request_busy" });
+    await assert.rejects(client.missing([object]), { code: "request_busy" });
+    await assert.rejects(client.getObject(object), { code: "request_busy" });
+  }
+  assert.equal(authCalls, admittedAuthCalls, "rejected admission must not start more authentication work");
+  assert.equal(putCalls, 1); assert.equal(activePuts, 1); assert.equal(source.owned.size, 0);
+  stalled = false; releasePut();
+  for (let count = 0; count < 100 && client.inFlight; count++) await sleep(1);
+  const result = await client.uploadRoot("retry", object, source);
+  assert.equal(result.uploaded_objects, 1); assert.equal(putCalls, 2); assert.equal(activePuts, 0);
+});
+
+test("request admission recovers after preflight rejection and synchronous transport failure", async () => {
+  const bytes = Buffer.from("abc"); const object = ref("blob", bytes); let calls = 0;
+  const client = new FabricRemoteClient({ baseUrl: "https://fixture.invalid/api/rudder/fabric", concurrency: 1, authHeaders: () => ({}), fetch: () => {
+    if (++calls === 1) throw new Error("private transport failure");
+    return Promise.resolve(Response.json({ format_version: 1, lease_id: randomUUID(), expires_at_ms: Date.now() + 300_000 }));
+  } });
+  await assert.rejects(client.putObject(randomUUID(), object, Buffer.from("bad")), { code: "checksum_mismatch" });
+  assert.equal(calls, 0);
+  await assert.rejects(client.beginStaging(), { code: "request_failed" });
+  assert.equal((await client.beginStaging()).format_version, 1);
+});
+
 test("server errors and auth-provider failures never echo private data", async () => {
   const options = { baseUrl: "https://fixture.invalid/api/rudder/fabric", authHeaders: () => ({ Authorization: "Bearer private-test-only" }) };
   const rejected = new FabricRemoteClient({ ...options, fetch: async () => new Response("secret server details", { status: 500 }) });
@@ -137,9 +186,12 @@ test("server errors and auth-provider failures never echo private data", async (
 });
 
 test("late authentication cannot start a POST after the request deadline", async () => {
-  let release; let calls = 0;
-  const client = new FabricRemoteClient({ baseUrl: "https://fixture.invalid/api/rudder/fabric", authHeaders: () => new Promise((resolve) => { release = resolve; }), fetch: async () => { calls++; return Response.json({}); }, requestTimeoutMs: 10 });
+  let release; let calls = 0; let stalled = true;
+  const client = new FabricRemoteClient({ baseUrl: "https://fixture.invalid/api/rudder/fabric", authHeaders: () => stalled ? new Promise((resolve) => { release = resolve; }) : {}, fetch: async () => { calls++; return Response.json({ format_version: 1, lease_id: randomUUID(), expires_at_ms: Date.now() + 300_000 }); }, requestTimeoutMs: 10 });
   await assert.rejects(client.beginStaging(), { code: "request_timeout" });
+  await assert.rejects(client.beginStaging(), { code: "request_busy" });
+  stalled = false;
   release({ Authorization: "Bearer fixture-only" }); await sleep(5);
   assert.equal(calls, 0);
+  assert.equal((await client.beginStaging()).format_version, 1); assert.equal(calls, 1);
 });

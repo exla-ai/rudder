@@ -14,12 +14,16 @@ use crate::protocol::{
 use anyhow::{bail, ensure, Context, Result};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
+
+pub mod object_sets;
+pub use object_sets::ObjectSetReceipt;
 
 #[cfg(unix)]
 use std::os::unix::{
@@ -353,6 +357,58 @@ impl LocalStore {
         self.read_locked(reference)
     }
 
+    /// Capture only the requested range during the same bounded SHA pass.
+    /// A verify-then-reread sequence could return different bytes if a file
+    /// changed between those reads. No requested bytes escape before verification.
+    pub fn read_blob_range(&self, reference: &ObjectRef, offset: u64, length: usize) -> Result<Vec<u8>> {
+        ensure!(length <= 16 * 1024 * 1024, "blob range exceeds bounded response size");
+        let end = offset.checked_add(u64::try_from(length)?).context("blob range overflow")?;
+        let wanted = usize::try_from(reference.size_bytes.saturating_sub(offset).min(length as u64))?;
+        let mut output = Vec::with_capacity(wanted);
+        let _lock = self.lock()?;
+        self.verify_blob_stream_locked(reference, |at, bytes| {
+            let chunk_end = at.checked_add(bytes.len() as u64).context("blob offset overflow")?;
+            let start = at.max(offset);
+            let stop = chunk_end.min(end);
+            if start < stop {
+                output.extend_from_slice(&bytes[usize::try_from(start - at)?..usize::try_from(stop - at)?]);
+            }
+            Ok(())
+        })?;
+        ensure!(output.len() == wanted, "verified range length differs");
+        Ok(output)
+    }
+
+    /// Stream a legacy large blob through a private unlinked verification
+    /// snapshot, then copy outside the GC lock. The writer receives no bytes
+    /// until the complete raw digest verifies. New chunked files avoid this
+    /// whole-file legacy spool and use bounded verified chunks instead.
+    pub fn copy_blob_to(&self, reference: &ObjectRef, writer: &mut dyn Write) -> Result<()> {
+        expect_kind(reference, ObjectKind::Blob)?;
+        if reference.size_bytes <= 4 * 1024 * 1024 {
+            writer.write_all(&self.read_object(reference)?)?;
+            return Ok(());
+        }
+        let mut snapshot = {
+            let _lock = self.lock()?;
+            let temporary = self.root.join("tmp").join(Uuid::new_v4().to_string());
+            let mut options = OpenOptions::new();
+            options.read(true).write(true).create_new(true);
+            #[cfg(unix)]
+            options.mode(0o600).custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+            let mut snapshot = options.open(&temporary)?;
+            fs::remove_file(&temporary)?;
+            self.verify_blob_stream_locked(reference, |_, bytes| {
+                snapshot.write_all(bytes)?;
+                Ok(())
+            })?;
+            snapshot.seek(SeekFrom::Start(0))?;
+            snapshot
+        };
+        std::io::copy(&mut snapshot, writer)?;
+        Ok(())
+    }
+
     pub fn read_directory(&self, reference: &ObjectRef) -> Result<DirectoryManifest> {
         let _lock = self.lock()?;
         self.directory_locked(reference)
@@ -544,7 +600,7 @@ impl LocalStore {
             reference.validate()?;
             if verified.contains(&reference) || !seen.insert(reference.clone()) { continue; }
             let bytes = self.read_locked(&reference)?;
-            pending.extend(references_from_bytes(reference.kind, &bytes)?);
+            pending.extend(self.validated_metadata_edges_locked(&reference, &bytes)?);
             let file = self.object_path(&reference)?;
             open_file(&file, false, false)?.sync_all()?;
             shards.insert(file.parent().unwrap().to_path_buf());
@@ -612,6 +668,11 @@ impl LocalStore {
         let mut retained = BTreeSet::new();
         for root in state.pins.values() {
             for reference in self.closure_locked(root)? {
+                retained.insert(reference.digest);
+            }
+        }
+        if state.format_version == 2 {
+            for reference in object_sets::retained_for_gc(self)? {
                 retained.insert(reference.digest);
             }
         }
@@ -714,13 +775,48 @@ impl LocalStore {
     }
 
     fn read_locked(&self, reference: &ObjectRef) -> Result<Vec<u8>> {
-        let file = self.object_path(reference)?;
-        ensure_directory(file.parent().unwrap())?;
-        let bytes = read_regular(&file)
+        let path = self.object_path(reference)?;
+        ensure_directory(path.parent().unwrap())?;
+        let file = open_file(&path, false, false)
             .with_context(|| format!("reading {:?} {}", reference.kind, reference.digest))?;
+        ensure!(file.metadata()?.len() == reference.size_bytes, "object size mismatch before read");
+        if matches!(reference.kind, ObjectKind::File | ObjectKind::DirectoryShard | ObjectKind::RunnableRoot) {
+            ensure!(reference.size_bytes <= 64 * 1024, "paged metadata exceeds byte limit");
+        }
+        let limit = reference.size_bytes.checked_add(1).context("object read size overflow")?;
+        let mut bytes = Vec::new();
+        file.take(limit).read_to_end(&mut bytes)?;
         reference.verify(&bytes)?;
         references_from_bytes(reference.kind, &bytes)?;
         Ok(bytes)
+    }
+
+    fn verify_blob_stream_locked(
+        &self,
+        reference: &ObjectRef,
+        mut consume: impl FnMut(u64, &[u8]) -> Result<()>,
+    ) -> Result<()> {
+        expect_kind(reference, ObjectKind::Blob)?;
+        reference.validate()?;
+        let path = self.object_path(reference)?;
+        ensure_directory(path.parent().context("blob shard missing")?)?;
+        let mut file = open_file(&path, false, false)?;
+        ensure!(file.metadata()?.len() == reference.size_bytes, "blob size mismatch");
+        let mut hasher = Sha256::new();
+        let mut total = 0u64;
+        let mut buffer = [0u8; 64 * 1024];
+        loop {
+            let count = file.read(&mut buffer)?;
+            if count == 0 { break; }
+            let next = total.checked_add(count as u64).context("blob size overflow")?;
+            ensure!(next <= reference.size_bytes, "blob grew during verified read");
+            hasher.update(&buffer[..count]);
+            consume(total, &buffer[..count])?;
+            total = next;
+        }
+        ensure!(total == reference.size_bytes, "blob ended before declared size");
+        ensure!(hex::encode(hasher.finalize()) == reference.digest, "blob digest mismatch");
+        Ok(())
     }
 
     fn directory_locked(&self, reference: &ObjectRef) -> Result<DirectoryManifest> {
@@ -736,7 +832,7 @@ impl LocalStore {
                 continue;
             }
             let bytes = self.read_locked(&reference)?;
-            pending.extend(references_from_bytes(reference.kind, &bytes)?);
+            pending.extend(self.validated_metadata_edges_locked(&reference, &bytes)?);
         }
         Ok(seen.into_iter().collect())
     }
@@ -748,10 +844,51 @@ impl LocalStore {
             reference.validate()?;
             if !seen.insert(reference.clone()) { continue; }
             if reference.kind != ObjectKind::Blob {
-                pending.extend(references_from_bytes(reference.kind, &self.read_locked(&reference)?)?);
+                pending.extend(self.validated_metadata_edges_locked(&reference, &self.read_locked(&reference)?)?);
             }
         }
         Ok(seen)
+    }
+
+    /// Validate NEW parent edges even when the child already has retention
+    /// authority. A retained child does not prove a parent's claimed size,
+    /// count or radix route. This helper is called under the existing lock;
+    /// pure schema helpers never reacquire it through a public store adapter.
+    fn validated_metadata_edges_locked(&self, reference: &ObjectRef, bytes: &[u8]) -> Result<Vec<ObjectRef>> {
+        let references = references_from_bytes(reference.kind, bytes)?;
+        match reference.kind {
+            ObjectKind::RunnableRoot => {
+                let parent = crate::snapshot::decode_runnable(bytes)?;
+                for child in std::iter::once(&parent.source).chain(parent.environment.as_ref()) {
+                    crate::snapshot::validate_child(bytes, child, &self.read_locked(child)?)?;
+                }
+            }
+            ObjectKind::File => {
+                let parent = crate::content::decode_file_node(bytes)?;
+                for (index, child) in parent.children.iter().enumerate() {
+                    if child.kind == ObjectKind::File {
+                        let child_bytes = self.read_locked(child)?;
+                        let node = crate::content::decode_file_node(&child_bytes)?;
+                        crate::content::validate_file_child(&parent, index, &node)?;
+                    }
+                }
+            }
+            ObjectKind::Directory | ObjectKind::DirectoryShard => {
+                let paged = reference.kind == ObjectKind::DirectoryShard
+                    || serde_json::from_slice::<serde_json::Value>(bytes)?
+                        .get("format_version").and_then(serde_json::Value::as_u64) == Some(2);
+                if paged {
+                    for child in references.iter().collect::<BTreeSet<_>>() {
+                        if matches!(child.kind, ObjectKind::DirectoryShard | ObjectKind::File) {
+                            let child_bytes = self.read_locked(child)?;
+                            crate::directory::validate_child(reference.kind, bytes, child, &child_bytes)?;
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+        Ok(references)
     }
 
     fn durable_closure_locked(&self, root: &ObjectRef) -> Result<()> {
@@ -924,9 +1061,12 @@ impl LocalStore {
             "retention state checksum mismatch; GC/publication disabled"
         );
         ensure!(
-            envelope.state.format_version == FORMAT_VERSION,
+            matches!(envelope.state.format_version, 1 | 2),
             "unsupported retention format"
         );
+        if envelope.state.format_version == 2 {
+            object_sets::validate_presence(self)?;
+        }
         for (pin, reference) in &envelope.state.pins {
             validate_pin(pin)?;
             reference.validate()?;
@@ -1029,6 +1169,15 @@ fn lease_deadline(ttl: Duration) -> Result<u64> {
     now_ms()?.checked_add(ms).context("staging TTL overflow")
 }
 
+/// Validate one metadata object's schema/canonical encoding and return its
+/// immediate typed edges. Callers must verify size/SHA against their ObjectRef
+/// first. This does not validate actual child bytes, complete reachability,
+/// retention authority or quiescence; a partial remote cache cannot mint pins
+/// from this result. Blob payloads have no metadata edges.
+pub fn metadata_references(kind: ObjectKind, bytes: &[u8]) -> Result<Vec<ObjectRef>> {
+    references_from_bytes(kind, bytes)
+}
+
 fn references_from_bytes(kind: ObjectKind, bytes: &[u8]) -> Result<Vec<ObjectRef>> {
     if kind == ObjectKind::Blob {
         return Ok(Vec::new());
@@ -1041,7 +1190,13 @@ fn references_from_bytes(kind: ObjectKind, bytes: &[u8]) -> Result<Vec<ObjectRef
     let mut references = Vec::new();
     let version;
     match kind {
+        ObjectKind::RunnableRoot => return crate::snapshot::references(kind, bytes),
+        ObjectKind::File => return crate::content::file_node_references(bytes),
+        ObjectKind::DirectoryShard => return crate::directory::references_from_bytes(kind, bytes),
         ObjectKind::Directory => {
+            if value.get("format_version").and_then(serde_json::Value::as_u64) == Some(2) {
+                return crate::directory::references_from_bytes(kind, bytes);
+            }
             let directory: DirectoryManifest = serde_json::from_value(value)?;
             version = directory.format_version;
             validate_mode(directory.mode)?;
@@ -1063,6 +1218,9 @@ fn references_from_bytes(kind: ObjectKind, bytes: &[u8]) -> Result<Vec<ObjectRef
             }
         }
         ObjectKind::SourceRoot => {
+            if value.get("format_version").and_then(serde_json::Value::as_u64) == Some(2) {
+                return crate::snapshot::references(kind, bytes);
+            }
             let source: SourceManifest = serde_json::from_value(value)?;
             version = source.format_version;
             expect_kind(&source.directory, ObjectKind::Directory)?;
@@ -1073,6 +1231,9 @@ fn references_from_bytes(kind: ObjectKind, bytes: &[u8]) -> Result<Vec<ObjectRef
             references.extend(source.parents);
         }
         ObjectKind::EnvironmentRoot => {
+            if value.get("format_version").and_then(serde_json::Value::as_u64) == Some(2) {
+                return crate::snapshot::references(kind, bytes);
+            }
             let environment: EnvironmentManifest = serde_json::from_value(value)?;
             version = environment.format_version;
             expect_kind(&environment.directory, ObjectKind::Directory)?;

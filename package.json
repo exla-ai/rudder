@@ -27,7 +27,7 @@
     "clean": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\"",
     "build": "npm run clean && tsc -p tsconfig.json && npm run build-board && npm run build-native && npm run copy-native && npm run chmod-cli",
     "build-board": "esbuild src/board/ui/index.tsx --bundle --minify --format=esm --jsx=automatic --jsx-import-source=preact --outfile=dist/board/board.js && esbuild src/board/ui/board.css --bundle --minify --outfile=dist/board/board.css",
-    "build-native": "cargo build --release --manifest-path native/Cargo.toml",
+    "build-native": "cargo build --release --locked --manifest-path native/Cargo.toml --bin rudder-native && cargo build --release --locked -p rudder-vcs-bridge --features cli --bin rudder-jj",
     "check": "tsc -p tsconfig.json --noEmit",
     "test": "tsc -p tsconfig.json && npm run chmod-cli && node --test tests/*.test.mjs",
     "test:tui": "node --test tests/tui/*.test.mjs",

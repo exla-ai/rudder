@@ -1,0 +1,13 @@
+{
+  "kind": "git-build-prerequisite-failure",
+  "gitVersion": "2.56.0",
+  "buildDeadlineSeconds": 480,
+  "cpuKind": "performance",
+  "cpus": 1,
+  "exitCode": 2,
+  "binaryProduced": false,
+  "bootAssertionsRun": false,
+  "reason": "default Git Rust library requires cargo and rustc; Bookworm builder omitted those build dependencies",
+  "cleanupVerified": true,
+  "verifiedAt": "2026-10-30T17:45:38.060Z"
+}

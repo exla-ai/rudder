@@ -90,7 +90,28 @@ fn specification(
         .iter()
         .map(|(name, path)| {
             let relative = path.as_str().unwrap();
-            let bytes = fs::read(prepared_path.join(relative)).unwrap();
+            let mut parent = directory.clone();
+            let parts: Vec<_> = relative.split('/').collect();
+            let mut executable = None;
+            for (index, part) in parts.iter().enumerate() {
+                let entry = rudder_engine::tree::lookup(store, &parent, part.as_bytes())
+                    .unwrap()
+                    .unwrap();
+                match entry.node {
+                    rudder_engine::directory::EntryNode::Directory { object }
+                        if index + 1 < parts.len() =>
+                    {
+                        parent = object
+                    }
+                    rudder_engine::directory::EntryNode::File { object, .. }
+                        if index + 1 == parts.len() =>
+                    {
+                        executable = Some(object)
+                    }
+                    _ => panic!("prepared compiler path is not an ordinary file"),
+                }
+            }
+            assert!(prepared_path.join(relative).is_file());
             (
                 name.clone(),
                 ToolchainIdentity {
@@ -100,7 +121,7 @@ fn specification(
                         .unwrap_or("prepared-runtime-v2")
                         .into(),
                     closure: directory.clone(),
-                    executable: store.put_blob(&bytes).unwrap(),
+                    executable: executable.unwrap(),
                     executable_path: relative.into(),
                     configuration: BTreeMap::new(),
                 },
@@ -176,7 +197,7 @@ fn record(
             .unwrap(),
     )
     .unwrap();
-    cases.push(json!({"case":name,"wall_ms":wall_ms,"frontend_ms":run.frontend_elapsed_ms,"environment_validation_ms":run.environment_materialization_ms,"source_materialization_ms":run.source_materialization_ms,"executed_actions":run.observation.executed_actions,"remote_cache_hits":run.observation.remote_cache_hits,"graph_reused_actions":run.frontend_graph_reused_actions,"source_action_key":run.stored.key,"prepared_output":run.stored.outputs,"run_receipt":run.run_receipt,"native_action_digests":run.observation.native_action_digests,"trace_id":run.observation.trace_id}));
+    cases.push(json!({"case":name,"wall_ms":wall_ms,"stage_ms":run.stage_ms,"frontend_ms":run.frontend_elapsed_ms,"environment_validation_ms":run.environment_materialization_ms,"source_materialization_ms":run.source_materialization_ms,"executed_actions":run.observation.executed_actions,"remote_cache_hits":run.observation.remote_cache_hits,"graph_reused_actions":run.frontend_graph_reused_actions,"source_action_key":run.stored.key,"prepared_output":run.stored.outputs,"run_receipt":run.run_receipt,"native_action_digests":run.observation.native_action_digests,"trace_id":run.observation.trace_id}));
     fs::write(
         base.join("cases-in-progress.json"),
         serde_json::to_vec_pretty(cases).unwrap(),
@@ -742,4 +763,417 @@ fn qualified_rust_typescript_cache_workload() {
     .unwrap();
     index.store().abandon_staging(&staging.id).unwrap();
     println!("workload summary: {}", base.join("summary.json").display());
+}
+
+/// Independent v2 qualification, with a fresh local index and empty real REAPI
+/// service. Its eager materialization cost remains visible in every receipt.
+#[test]
+#[ignore = "real RunnableRoot/paged/File compiler workload; requires pinned prepared tools and an owned Linux workspace"]
+fn runnable_paged_chunked_rust_typescript_cache_workload() {
+    use rudder_engine::{
+        directory::{LocalDirectoryStore, PagedDirectory},
+        protocol::{canonical_json, ObjectKind},
+        snapshot::{self, RunnableRoot, SourceV2},
+        tree,
+        workspace::{self, ProjectionBudget},
+    };
+    assert!(cfg!(target_os = "linux"));
+    let tools: Value = serde_json::from_slice(
+        &fs::read(std::env::var_os("RUDDER_BUILD_TOOLS_JSON").expect("pinned prepared tools"))
+            .unwrap(),
+    )
+    .unwrap();
+    let base = PathBuf::from(
+        std::env::var_os("RUDDER_BUILD_WORKLOAD_ROOT").expect("owned workload output directory"),
+    );
+    assert!(base.is_absolute() && !base.starts_with(std::env::temp_dir()));
+    fs::create_dir_all(&base).unwrap();
+    assert!(fs::read_dir(&base).unwrap().next().is_none());
+    // Profiling may reuse an explicitly selected, previously qualified local
+    // CAS/index. Build workspaces and the real REAPI service are still fresh;
+    // the summary records that preparation and materialization were retained.
+    let reuse = std::env::var_os("RUDDER_BUILD_REUSE_FIXTURE").map(PathBuf::from);
+    let fixture_root = reuse.as_ref().unwrap_or(&base);
+    assert!(fixture_root.is_absolute() && !fixture_root.starts_with(std::env::temp_dir()));
+    let store = LocalStore::open(fixture_root.join("cas")).unwrap();
+    let started = Instant::now();
+    let prepared_path = PathBuf::from(tools["prepared"].as_str().unwrap());
+    let profile_template =
+        BuildProfile::from_toml(include_str!("../../examples/build-profile/rudder.toml")).unwrap();
+    let mut profile = profile_template;
+    assert_eq!(
+        serde_json::to_value(profile.platform.properties()).unwrap(),
+        tools["compilers"]["platform"]
+    );
+    let (index, prepared, spec) = if reuse.is_some() {
+        let previous: Value =
+            serde_json::from_slice(&fs::read(fixture_root.join("summary.json")).unwrap()).unwrap();
+        assert_eq!(
+            previous["layout"],
+            "runnable-root-v1/source-v2/environment-v2/directory-v2/file-v1"
+        );
+        let key: ObjectRef =
+            serde_json::from_value(previous["cases"][0]["source_action_key"].clone()).unwrap();
+        let metadata: rudder_engine::store::ReferencedMetadata =
+            serde_json::from_slice(&store.read_object(&key).unwrap()).unwrap();
+        let contract: ActionContract =
+            serde_json::from_value(metadata.payload["value"].clone()).unwrap();
+        let index = BuildIndex::open(fixture_root.join("index"), store).unwrap();
+        let prepared = index
+            .prepared_root(&contract.environment_root)
+            .unwrap()
+            .expect("reused preparation must still have retained index authority");
+        let environment =
+            snapshot::decode_environment(&index.store().read_object(&prepared.root).unwrap())
+                .unwrap();
+        let spec = specification(
+            index.store(),
+            &profile,
+            &environment.directory,
+            &prepared_path,
+            &tools,
+        );
+        (index, prepared, spec)
+    } else {
+        let staging = store.begin_staging(Duration::from_secs(3600)).unwrap();
+        let imported = tree::import_quiesced(
+            &store,
+            &staging.id,
+            &prepared_path,
+            &Default::default(),
+            &Default::default(),
+        )
+        .unwrap();
+        assert!(
+            tree::validate_snapshot(&store, &imported, &Default::default())
+                .unwrap()
+                .groups
+                .is_empty(),
+            "environment inode topology needs a separate qualified baseline"
+        );
+        let spec = specification(
+            &store,
+            &profile,
+            &imported.directory,
+            &prepared_path,
+            &tools,
+        );
+        let index = BuildIndex::open(base.join("index"), store).unwrap();
+        let prepared = index
+            .publish_prepared_with_layout(
+                &spec,
+                &imported.directory,
+                PreparedContentLayout::PagedChunkedV2,
+            )
+            .unwrap();
+        index.store().abandon_staging(&staging.id).unwrap();
+        (index, prepared, spec)
+    };
+    let preparation_elapsed_ms = started.elapsed().as_millis() as u64;
+    assert!(
+        index.prepared(&spec).unwrap().is_none(),
+        "v2 preparation must not impersonate a legacy key"
+    );
+    assert_eq!(
+        index
+            .prepared_with_layout(&spec, PreparedContentLayout::PagedChunkedV2)
+            .unwrap(),
+        Some(prepared.clone())
+    );
+    assert!(index
+        .store()
+        .retained_closure(&prepared.receipt)
+        .unwrap()
+        .iter()
+        .any(|reference| reference.kind == ObjectKind::File));
+    let grpc = port();
+    let mut http = port();
+    while http == grpc {
+        http = port();
+    }
+    let log = File::create(base.join("reapi-cache.log")).unwrap();
+    let cache = Command::new(tools["bazel_remote"].as_str().unwrap())
+        .args([
+            "--dir",
+            base.join("reapi-cache").to_str().unwrap(),
+            "--max_size",
+            "1",
+            "--grpc_address",
+            &format!("127.0.0.1:{grpc}"),
+            "--http_address",
+            &format!("127.0.0.1:{http}"),
+        ])
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .stdout(Stdio::from(log.try_clone().unwrap()))
+        .stderr(Stdio::from(log))
+        .spawn()
+        .unwrap();
+    let _cache = CacheProcess(cache);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while TcpStream::connect(("127.0.0.1", grpc)).is_err() {
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    profile.buck2.remote_cache = Some(RemoteCacheConfig {
+        cas_address: format!("grpc://127.0.0.1:{grpc}"),
+        action_cache_address: format!("grpc://127.0.0.1:{grpc}"),
+        instance_name: "rudder-runnable-v2-profile".into(),
+        tls: false,
+    });
+    let binary = PathBuf::from(tools["buck2"].as_str().unwrap());
+    let adapter = Buck2Adapter::new(&binary).unwrap();
+    let mut daemons = Daemons {
+        binary,
+        workspaces: vec![],
+    };
+    let make_source = |rust: &str| {
+        let lease = index
+            .store()
+            .begin_staging(Duration::from_secs(600))
+            .unwrap();
+        let path = base.join(format!("source-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(path.join("rust")).unwrap();
+        fs::create_dir(path.join("typescript")).unwrap();
+        fs::write(path.join("rust/lib.rs"), rust).unwrap();
+        fs::write(
+            path.join("typescript/main.ts"),
+            include_str!("../../examples/build-profile/typescript/main.ts"),
+        )
+        .unwrap();
+        fs::write(
+            path.join("Cargo.lock"),
+            include_str!("../../examples/build-profile/Cargo.lock"),
+        )
+        .unwrap();
+        fs::write(
+            path.join("package-lock.json"),
+            include_str!("../../examples/build-profile/package-lock.json"),
+        )
+        .unwrap();
+        let tree = tree::import_quiesced(
+            index.store(),
+            &lease.id,
+            &path,
+            &Default::default(),
+            &Default::default(),
+        )
+        .unwrap();
+        assert!(
+            tree::validate_snapshot(index.store(), &tree, &Default::default())
+                .unwrap()
+                .groups
+                .is_empty()
+        );
+        let policy = index
+            .store()
+            .put_blob(b"{\"format_version\":1,\"projection\":\"workspace_source_complement\"}")
+            .unwrap();
+        let source = snapshot::stage(
+            index.store(),
+            &lease.id,
+            ObjectKind::SourceRoot,
+            &SourceV2 {
+                format_version: 2,
+                consistency: CheckpointConsistency::Quiesced,
+                directory: tree.directory.clone(),
+                projection_policy: policy.clone(),
+            },
+        )
+        .unwrap();
+        index
+            .store()
+            .publish(
+                &lease.id,
+                &format!("workload-source/{}", source.digest),
+                &source,
+            )
+            .unwrap();
+        (source, tree.directory, policy)
+    };
+    let make_input = |source: &ObjectRef, source_dir: &ObjectRef, policy: &ObjectRef| {
+        let lease = index
+            .store()
+            .begin_staging(Duration::from_secs(600))
+            .unwrap();
+        let environment =
+            snapshot::decode_environment(&index.store().read_object(&prepared.root).unwrap())
+                .unwrap();
+        let mut entries = vec![];
+        for directory in [source_dir, &environment.directory] {
+            let mut after = None;
+            loop {
+                let page = tree::scan(index.store(), directory, after.as_deref(), 1024).unwrap();
+                entries.extend(page.entries);
+                after = page.next_after;
+                if after.is_none() {
+                    break;
+                }
+            }
+        }
+        let mut prepared_paths = vec![];
+        let mut after = None;
+        loop {
+            let page = tree::scan(
+                index.store(),
+                &environment.directory,
+                after.as_deref(),
+                1024,
+            )
+            .unwrap();
+            prepared_paths.extend(
+                page.entries
+                    .into_iter()
+                    .map(|entry| vec![entry.name().unwrap()]),
+            );
+            after = page.next_after;
+            if after.is_none() {
+                break;
+            }
+        }
+        if !prepared_paths.contains(&vec![b"node_modules".to_vec()]) {
+            prepared_paths.push(vec![b"node_modules".to_vec()]);
+        }
+        let workspace_profile = WorkspaceProfile {
+            format_version: 1,
+            prepared: prepared_paths,
+            scratch: vec![],
+            vcs_local: vec![],
+        };
+        let root = PagedDirectory::new(&LocalDirectoryStore::new(index.store(), &lease.id))
+            .build(0o755, entries)
+            .unwrap();
+        let projected = workspace::stage_source_complement(
+            index.store(),
+            &lease.id,
+            &root,
+            &workspace_profile,
+            &ProjectionBudget::default(),
+        )
+        .unwrap();
+        assert_eq!(projected.directory, *source_dir);
+        let profile_ref = index
+            .store()
+            .put_blob(&canonical_json(&workspace_profile).unwrap())
+            .unwrap();
+        let hardlinks = index
+            .store()
+            .put_blob(b"{\"format_version\":1,\"groups\":[]}")
+            .unwrap();
+        let runnable = snapshot::stage(
+            index.store(),
+            &lease.id,
+            ObjectKind::RunnableRoot,
+            &RunnableRoot {
+                format_version: 1,
+                consistency: CheckpointConsistency::Quiesced,
+                source: source.clone(),
+                environment: Some(prepared.root.clone()),
+                view_root: root,
+                profile: profile_ref,
+                hardlinks,
+                knowledge_cursor: 0,
+            },
+        )
+        .unwrap();
+        let publication_started = Instant::now();
+        index
+            .store()
+            .publish_extending(
+                &lease.id,
+                &format!("workload-runnable/{}", runnable.digest),
+                &runnable,
+                &[source.clone(), prepared.receipt.clone()],
+            )
+            .unwrap();
+        let publication_ms = publication_started.elapsed().as_millis() as u64;
+        let input = workspace::runnable_build_input_view(
+            index.store(),
+            &runnable,
+            policy,
+            &ProjectionBudget::default(),
+        )
+        .unwrap();
+        (input, publication_ms, projected.report)
+    };
+    let source = make_source(include_str!("../../examples/build-profile/rust/lib.rs"));
+    let edited =
+        make_source(&include_str!("../../examples/build-profile/rust/lib.rs").replace("42", "43"));
+    let mut cases = vec![];
+    let mut outputs = None;
+    let mut initial_digests = None;
+    for (name, input_source, view_name, executed, hits, graph_reused) in [
+        ("cold", &source, "first-view", 2, 0, 0),
+        ("warm-same-graph", &source, "first-view", 0, 0, 2),
+        ("warm-same-graph-2", &source, "first-view", 0, 0, 2),
+        ("warm-same-graph-3", &source, "first-view", 0, 0, 2),
+        ("fresh-graph-reapi-hit", &source, "fresh-view", 0, 2, 0),
+        ("source-edit", &edited, "edited-view", 1, 1, 0),
+    ] {
+        let path = base.join(view_name);
+        if !daemons.workspaces.contains(&path) {
+            daemons.workspaces.push(path.clone());
+        }
+        let started = Instant::now();
+        let (input, publication_ms, projection) =
+            make_input(&input_source.0, &input_source.1, &input_source.2);
+        let input_ms = started.elapsed().as_millis() as u64;
+        assert!(!input.input().dirty_prepared());
+        let run = adapter
+            .build(&index, &profile, input.input(), &prepared, &path)
+            .unwrap();
+        let wall_ms = started.elapsed().as_millis() as u64;
+        assert_eq!(run.observation.executed_actions, executed);
+        assert_eq!(run.observation.remote_cache_hits, hits);
+        assert_eq!(run.frontend_graph_reused_actions, graph_reused);
+        if name == "cold" {
+            outputs = Some(run.stored.outputs.clone());
+            initial_digests = Some(run.observation.native_action_digests.clone());
+        } else if name != "source-edit" {
+            assert_eq!(Some(&run.stored.outputs), outputs.as_ref());
+            if name == "fresh-graph-reapi-hit" {
+                assert_eq!(
+                    Some(&run.observation.native_action_digests),
+                    initial_digests.as_ref()
+                );
+            }
+        } else {
+            assert_ne!(Some(&run.stored.outputs), outputs.as_ref());
+        }
+        record(&base, name, &index, &run, &mut cases, wall_ms);
+        let case = cases.last_mut().unwrap();
+        case["input_construction_ms"] = json!(input_ms);
+        case["runnable_publication_ms"] = json!(publication_ms);
+        case["source_projection"] = json!(projection);
+        case["input_qualification"] = json!(input.report());
+        input.release().unwrap();
+        if !["cold", "warm-same-graph", "warm-same-graph-2"].contains(&name) {
+            adapter.stop(&path).unwrap();
+        }
+    }
+    let smoke = base.join("artifact-smoke");
+    index
+        .store()
+        .export_tree(&outputs.unwrap(), &smoke)
+        .unwrap();
+    let rust_bytes = fs::read(smoke.join("rust/rust.rlib")).unwrap();
+    assert!(rust_bytes.starts_with(b"!<arch>\n") && rust_bytes.len() > 1024);
+    let output = Command::new(prepared_path.join("tools/node"))
+        .args([
+            "-e",
+            "process.stdout.write(String(require(process.argv[1]).answer))",
+            smoke.join("typescript/main.js").to_str().unwrap(),
+        ])
+        .env_clear()
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert_eq!(output.stdout, b"42");
+    let summary = json!({"format_version":1,"verified_at_epoch_ms":std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64,"layout":"runnable-root-v1/source-v2/environment-v2/directory-v2/file-v1","preparation_mode":if reuse.is_some(){"retained-cas-index-reuse"}else{"fresh-import-and-publication"},"preparation_elapsed_ms":preparation_elapsed_ms,"cases":cases,"artifact_smoke":{"rust_archive_valid":true,"typescript_answer":42},"scope":{"materialization":"eager streamed and fully reverified","linked_inputs_qualified":false,"remote_execution":false,"cache_protocol":"native-gRPC-REAPI-v2","cold_definition":"empty frontend graph and REAPI action cache; existing CAS/index reuse explicitly recorded; OS page cache not flushed","rust_workload":"rlib; no binary linker claim","typescript_workload":"compiled JavaScript executed with prepared Node"}});
+    fs::write(
+        base.join("summary.json"),
+        serde_json::to_vec_pretty(&summary).unwrap(),
+    )
+    .unwrap();
+    println!("{}", serde_json::to_string(&summary).unwrap());
 }

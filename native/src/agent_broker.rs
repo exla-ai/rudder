@@ -10,7 +10,7 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Read, Write};
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd};
 use std::os::unix::fs::{DirBuilderExt, FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -224,6 +224,7 @@ struct Request {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum Operation {
     Authenticate,
+    AuthorizeWorkspace { binding: rudder_engine::vfs::rpc::ObservationBinding },
     Call { tool: String, arguments: Value },
     Pending,
     Cancel { request_id: String },
@@ -669,6 +670,10 @@ fn connection_call(inner: &Arc<Inner>, mut stream: UnixStream) {
         if let Operation::Authenticate = request.operation {
             return Ok(json!({"binding":inner.binding}));
         }
+        if let Operation::AuthorizeWorkspace { ref binding } = request.operation {
+            snapshot.api.authorize_workspace(binding)?;
+            return Ok(json!({"binding":inner.binding,"workspace_scope":rudder_engine::execution::workspace_scope(binding)?}));
+        }
         if let Operation::Cancel { request_id } = request.operation {
             if let Some(cancel) = inner
                 .active
@@ -817,7 +822,56 @@ pub(crate) struct BrokerClient {
     identity: PathBuf,
     binding: BrokerBinding,
 }
+
+/// Nonblocking connect keeps a saturated Unix accept backlog from stalling the
+/// helper's authorization watchdog. mio supplies the platform-specific socket
+/// creation/readiness details, including close-on-exec on supported systems.
+fn connect_until(path: &Path, deadline: Instant) -> io::Result<UnixStream> {
+    let mut stream = loop {
+        if Instant::now() >= deadline { return Err(io::Error::new(io::ErrorKind::TimedOut, "broker connect deadline exceeded")); }
+        match mio::net::UnixStream::connect(path) {
+            Ok(stream) => break stream,
+            Err(error) if matches!(error.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted) => std::thread::sleep(Duration::from_millis(5)),
+            Err(error) => return Err(error),
+        }
+    };
+    let mut poll = mio::Poll::new()?;
+    poll.registry().register(&mut stream, mio::Token(0), mio::Interest::WRITABLE)?;
+    let mut events = mio::Events::with_capacity(4);
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() { return Err(io::Error::new(io::ErrorKind::TimedOut, "broker connect deadline exceeded")); }
+        match poll.poll(&mut events, Some(remaining)) {
+            Ok(()) if !events.is_empty() => break,
+            Ok(()) => {},
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {},
+            Err(error) => return Err(error),
+        }
+    }
+    if let Some(error) = stream.take_error()? { return Err(error); }
+    poll.registry().deregister(&mut stream)?;
+    let stream = unsafe { UnixStream::from_raw_fd(stream.into_raw_fd()) };
+    stream.set_nonblocking(false)?;
+    Ok(stream)
+}
+
 impl BrokerClient {
+    pub(crate) fn binding(&self) -> &BrokerBinding { &self.binding }
+
+    pub(crate) fn connect_workspace(socket: PathBuf, identity: PathBuf, expected: &BrokerBinding, workspace: &rudder_engine::vfs::rpc::ObservationBinding) -> Result<Self> {
+        let initial = read_identity(&identity)?;
+        ensure!(BrokerBinding::from(&initial) == *expected, "workspace broker belongs to a replacement attempt");
+        let client = Self { socket, identity, binding: expected.clone() };
+        client.authorize_workspace(workspace)?;
+        Ok(client)
+    }
+
+    pub(crate) fn authorize_workspace(&self, workspace: &rudder_engine::vfs::rpc::ObservationBinding) -> Result<()> {
+        workspace.validate()?;
+        let result = self.exchange(Operation::AuthorizeWorkspace { binding: workspace.clone() }, &AtomicBool::new(false))?;
+        ensure!(serde_json::from_value::<BrokerBinding>(result["binding"].clone())? == self.binding && result["workspace_scope"] == rudder_engine::execution::workspace_scope(workspace)?, "workspace broker authorization binding differs");
+        Ok(())
+    }
     pub(crate) fn connect(socket: PathBuf, identity: PathBuf) -> Result<Self> {
         let initial = read_identity(&identity)?;
         let client = Self {
@@ -860,29 +914,31 @@ impl BrokerClient {
         let _ = stream.shutdown(std::net::Shutdown::Write);
     }
     fn exchange(&self, operation: Operation, cancelled: &AtomicBool) -> Result<Value> {
+        let workspace_auth = matches!(operation, Operation::AuthorizeWorkspace { .. });
+        let deadline = Instant::now() + if workspace_auth { Duration::from_secs(2) } else { CONNECT_DEADLINE + CALL_DEADLINE + Duration::from_secs(1) };
         let offered = self.identity()?;
         let pending = matches!(operation, Operation::Pending);
-        let result = self.exchange_once(operation.clone(), offered.clone(), cancelled);
+        let result = self.exchange_once(operation.clone(), offered.clone(), cancelled, deadline);
         let rotation_window = result
             .as_ref()
             .err()
             .and_then(|error| error.downcast_ref::<WireError>())
             .is_some_and(|error| {
-                error.code == "unauthorized" || (pending && error.code == "rejected")
+                error.code == "unauthorized" || ((pending || workspace_auth) && error.code == "rejected")
             });
         if rotation_window {
             // Revocation precedes atomic publication. Retry only pre-dispatch
             // authentication rejection (or a read-only channel poll), and only
             // after observing a different token in this SAME attempt.
-            let deadline = Instant::now() + Duration::from_millis(500);
-            while Instant::now() < deadline {
+            let rotation_deadline = deadline.min(Instant::now() + Duration::from_millis(500));
+            while Instant::now() < rotation_deadline {
                 ensure!(
                     !cancelled.load(Ordering::Relaxed),
                     "agent request cancelled"
                 );
                 let current = self.identity()?;
                 if !token_equal(&offered.token, &current.token) {
-                    return self.exchange_once(operation, current, cancelled);
+                    return self.exchange_once(operation, current, cancelled, deadline);
                 }
                 std::thread::sleep(Duration::from_millis(10));
             }
@@ -894,14 +950,17 @@ impl BrokerClient {
         operation: Operation,
         identity: AgentIdentityFile,
         cancelled: &AtomicBool,
+        deadline: Instant,
     ) -> Result<Value> {
-        let connect_deadline = Instant::now() + CONNECT_DEADLINE;
+        let workspace_auth = matches!(operation, Operation::AuthorizeWorkspace { .. });
+        let connect_deadline = deadline.min(Instant::now() + CONNECT_DEADLINE);
         let mut stream = loop {
             ensure!(
                 !cancelled.load(Ordering::Relaxed),
                 "agent request cancelled"
             );
-            match UnixStream::connect(&self.socket) {
+            let connected = if workspace_auth { connect_until(&self.socket, connect_deadline) } else { UnixStream::connect(&self.socket) };
+            match connected {
                 Ok(stream) => break stream,
                 Err(error)
                     if matches!(
@@ -918,7 +977,8 @@ impl BrokerClient {
             }
         };
         stream.set_read_timeout(Some(Duration::from_millis(20)))?;
-        stream.set_write_timeout(Some(Duration::from_secs(1)))?;
+        ensure!(Instant::now() < deadline, "agent broker authorization deadline exceeded");
+        stream.set_write_timeout(Some(Duration::from_secs(1).min(deadline.saturating_duration_since(Instant::now()))))?;
         let id = uuid::Uuid::new_v4().to_string();
         let request = Request {
             format_version: 1,
@@ -942,7 +1002,7 @@ impl BrokerClient {
         let bytes = read_frame(
             &mut stream,
             MAX_RESPONSE,
-            Instant::now() + CALL_DEADLINE + Duration::from_secs(1),
+            deadline,
             || {
                 if cancelled.load(Ordering::Relaxed) {
                     self.cancel(&id);

@@ -1,0 +1,10 @@
+{
+  "kind": "bootstrap-fixture-failure",
+  "gitVersion": "2.56.0",
+  "gitInstalled": true,
+  "gitSha256": "1425cba34f0e170a645f7d91d7b9721a55d324bfe17853f54d8449c417bc8531",
+  "binaryProduced": true,
+  "failure": "Node getgroups includes primary GID; fixture expected only kernel supplementary groups",
+  "cleanupVerified": true,
+  "verifiedAt": "2026-10-30T17:51:36.792Z"
+}

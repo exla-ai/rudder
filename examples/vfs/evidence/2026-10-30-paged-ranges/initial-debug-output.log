@@ -1,0 +1,14 @@
+{"missing_device_fails_closed":true,"uid":1500}
+phase=prepare count=1
+phase=mounted count=1
+phase=identity
+phase=descendant
+phase=mmap
+phase=unmount
+phase=checkpoint
+phase=restore
+phase=prepare count=100
+phase=mounted count=100
+phase=prepare count=10000
+phase=mounted count=10000
+phase=prepare count=100000

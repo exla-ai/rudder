@@ -30,6 +30,15 @@ An agent reads applicable rules once. It revisits coordination when ownership
 overlaps, a relevant decision changes, or work is about to integrate. Rudder no
 longer tells every agent to reread all shared files before each significant
 step. Accepted decisions and task history remain available on demand.
+Generated recent requests are explicitly reference history: they can belong to
+other runs and do not replace the current assignment. Identical task/current
+prompt text is emitted once on each roster row.
+
+CLI startup also avoids unrelated setup for version/help, empty noninteractive
+input and private callbacks. The native platform probe reads at most 4 KiB of
+executable headers instead of loading the whole binary; the existing ELF and
+Mach-O architecture checks remain in place. These are bounded startup work
+changes, not measured model speedups.
 
 Verification covers ownership and delivery rules, discussion scope, preserved
 user tasks, planner excerpt limits, shared rule consistency, and compact prompt

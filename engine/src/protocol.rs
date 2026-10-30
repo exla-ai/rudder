@@ -10,10 +10,13 @@ pub const FORMAT_VERSION: u32 = 1;
 #[serde(rename_all = "snake_case")]
 pub enum ObjectKind {
     Blob,
+    File,
     Directory,
+    DirectoryShard,
     SourceRoot,
     EnvironmentRoot,
     Checkpoint,
+    RunnableRoot,
     ActionKey,
     ActionResult,
 }

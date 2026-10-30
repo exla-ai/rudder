@@ -124,6 +124,70 @@ impl Drop for Fixture {
 fn call(client: &BrokerClient, name: &str, args: Value) -> Result<Value> {
     client.call_with_cancel(name, args, &AtomicBool::new(false))
 }
+
+fn workspace_binding(f: &Fixture, execution_id: &str) -> rudder_engine::vfs::rpc::ObservationBinding {
+    use rudder_engine::protocol::{ObjectKind, ObjectRef, OwnerEpoch};
+    use rudder_engine::vfs::rpc::{AttemptContext, ObservationBinding};
+    ObservationBinding {
+        format_version: 1,
+        attempt: AttemptContext { execution_id: execution_id.into(), operation_id: uuid::Uuid::new_v4().to_string() },
+        view_id: uuid::Uuid::new_v4().to_string(),
+        owner: OwnerEpoch { owner: f.owner.owner_id.clone(), epoch: f.owner.epoch },
+        namespace: uuid::Uuid::new_v4().to_string(),
+        profile: ObjectRef::from_bytes(ObjectKind::Blob, b"{}"),
+        exclusion_policy_digest: "a".repeat(64),
+    }
+}
+
+#[test]
+fn workspace_authorization_requires_explicit_scope_and_current_execution() {
+    let mut f = Fixture::new();
+    let execution_id = uuid::Uuid::new_v4().to_string();
+    f.journal.observe_run_attempt(&f.owner, "a", &execution_id, 0).unwrap();
+    let binding = workspace_binding(&f, &execution_id);
+    let _broker = f.broker();
+    let client = f.client();
+    assert!(client.authorize_workspace(&binding).is_err(), "mailbox access does not grant workspace access");
+    let mut allowed = grant("a");
+    allowed.operations.insert("workspace:observe".into());
+    assert!(!allowed.scopes.contains(&rudder_engine::execution::workspace_scope(&binding).unwrap()));
+    let token = f.journal.issue_capability(&f.owner, &allowed, 0).unwrap();
+    f.a.token = token; project_identity(&f.socket, &f.a).unwrap();
+    assert!(client.authorize_workspace(&binding).is_err(), "operation alone does not grant a view");
+    allowed.scopes.insert(rudder_engine::execution::workspace_scope(&binding).unwrap());
+    f.a.token = f.journal.issue_capability(&f.owner, &allowed, 0).unwrap();
+    project_identity(&f.socket, &f.a).unwrap();
+    let bound = BrokerClient::connect_workspace(f.socket.clone(), f.socket.with_file_name("identity.json"), &BrokerBinding::from(&f.a), &binding).unwrap();
+    assert_eq!(bound.binding(), &BrokerBinding::from(&f.a));
+    let mut foreign = binding.clone(); foreign.namespace = uuid::Uuid::new_v4().to_string();
+    assert!(bound.authorize_workspace(&foreign).is_err());
+    let mut replacement = BrokerBinding::from(&f.a); replacement.run_epoch += 1;
+    assert!(BrokerClient::connect_workspace(f.socket.clone(), f.socket.with_file_name("identity.json"), &replacement, &binding).is_err());
+    f.journal.observe_run_attempt(&f.owner, "a", &uuid::Uuid::new_v4().to_string(), 1).unwrap();
+    assert!(bound.authorize_workspace(&binding).is_err(), "replacement execution fences the old helper");
+}
+
+#[test]
+fn workspace_authorization_deadline_survives_an_unaccepted_connection_backlog() {
+    let f = Fixture::new();
+    let listener = UnixListener::bind(&f.socket).unwrap();
+    assert_eq!(unsafe { libc::listen(listener.as_raw_fd(), 1) }, 0);
+    listener.set_nonblocking(true).unwrap();
+    let mut connections = Vec::new();
+    for _ in 0..16 {
+        match mio::net::UnixStream::connect(&f.socket) {
+            Ok(connection) => connections.push(connection),
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
+            Err(error) => panic!("fill private socket backlog: {error}"),
+        }
+    }
+    assert!(!connections.is_empty());
+    let binding = workspace_binding(&f, &uuid::Uuid::new_v4().to_string());
+    let started = Instant::now();
+    assert!(BrokerClient::connect_workspace(f.socket.clone(), f.socket.with_file_name("identity.json"), &BrokerBinding::from(&f.a), &binding).is_err());
+    assert!(started.elapsed() < Duration::from_secs(3), "saturated broker connect exceeded authorization bound");
+    drop(connections); drop(listener);
+}
 fn raw(
     f: &Fixture,
     identity: AgentIdentityFile,

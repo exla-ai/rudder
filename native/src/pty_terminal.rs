@@ -11,7 +11,7 @@ use std::fmt;
 use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::mpsc::{self, Receiver};
+use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 
 use crate::term_colors::{colors_generation, theme_change_report, QueryScanner};
@@ -21,6 +21,43 @@ use std::time::{Duration, Instant};
 const EXIT_OUTPUT_GRACE: Duration = Duration::from_secs(2);
 const MAX_OWNED_PTY_CHILDREN: usize = 512;
 const REAP_POLL_INTERVAL: Duration = Duration::from_millis(10);
+const PTY_READ_CHUNK_BYTES: usize = 8192;
+// Backpressure reaches the child through the PTY instead of retaining an
+// unbounded stream in the dashboard. One reader can additionally hold one chunk.
+const MAX_PTY_QUEUED_CHUNKS: usize = 32;
+const MAX_PTY_DRAIN_BYTES: usize = 64 * 1024;
+const PTY_DRAIN_BUDGET: Duration = Duration::from_millis(4);
+const OUTPUT_BACKPRESSURE_POLL: Duration = Duration::from_millis(5);
+
+fn enqueue_output(
+    sender: &SyncSender<Vec<u8>>,
+    mut chunk: Vec<u8>,
+    stopped: &AtomicBool,
+    queued: &AtomicUsize,
+) -> bool {
+    loop {
+        if stopped.load(Ordering::Acquire) {
+            return false;
+        }
+        let length = chunk.len();
+        // Publish the scheduling hint before the receiver can consume bytes.
+        queued.fetch_add(length, Ordering::AcqRel);
+        match sender.try_send(chunk) {
+            Ok(()) => return true,
+            Err(TrySendError::Disconnected(_)) => {
+                queued.fetch_sub(length, Ordering::AcqRel);
+                return false;
+            }
+            Err(TrySendError::Full(pending)) => {
+                queued.fetch_sub(length, Ordering::AcqRel);
+                chunk = pending;
+                // No UI thread waits here. Teardown stays bounded even when
+                // the consumer retains its screen without draining the queue.
+                thread::sleep(OUTPUT_BACKPRESSURE_POLL);
+            }
+        }
+    }
+}
 
 #[derive(Default)]
 struct ReapObservation {
@@ -497,6 +534,7 @@ pub struct TerminalPane {
     /// The terminal-colors generation this agent was last told about.
     theme_generation: u64,
     output_rx: Receiver<Vec<u8>>,
+    queued_output_bytes: Arc<AtomicUsize>,
     output_eof: bool,
     exit_observed: Option<(portable_pty::ExitStatus, Instant)>,
     output_only: bool,
@@ -984,7 +1022,9 @@ impl TerminalPane {
         let reply_writer = Arc::clone(&writer);
         let wants_theme_reports = Arc::new(AtomicBool::new(false));
         let reader_wants_theme_reports = Arc::clone(&wants_theme_reports);
-        let (output_tx, output_rx) = mpsc::channel();
+        let (output_tx, output_rx) = mpsc::sync_channel(MAX_PTY_QUEUED_CHUNKS);
+        let queued_output_bytes = Arc::new(AtomicUsize::new(0));
+        let reader_queued_output = queued_output_bytes.clone();
         let output_waker: Arc<Mutex<Option<PtyOutputWaker>>> = Arc::new(Mutex::new(None));
         let reader_waker = Arc::clone(&output_waker);
         let reader_stop = Arc::new(AtomicBool::new(false));
@@ -992,7 +1032,7 @@ impl TerminalPane {
         let reader_thread = thread::Builder::new()
             .name("rudder-pty-reader".to_string())
             .spawn(move || {
-                let mut buf = [0_u8; 8192];
+                let mut buf = [0_u8; PTY_READ_CHUNK_BYTES];
                 // Answered here, not on the main loop: an unfocused pane is only
                 // drained every 500ms, and an agent asking for the terminal's
                 // colors at startup gives up long before that.
@@ -1026,7 +1066,12 @@ impl TerminalPane {
                                         writer.write_all(&replies).and_then(|()| writer.flush());
                                 }
                             }
-                            if output_tx.send(buf[..n].to_vec()).is_err() {
+                            if !enqueue_output(
+                                &output_tx,
+                                buf[..n].to_vec(),
+                                &stopped,
+                                &reader_queued_output,
+                            ) {
                                 break;
                             }
                             // Nudge the main event loop so freshly-arrived bytes are
@@ -1070,6 +1115,7 @@ impl TerminalPane {
             wants_theme_reports,
             theme_generation: colors_generation(),
             output_rx,
+            queued_output_bytes,
             output_eof: false,
             exit_observed: None,
             output_only: false,
@@ -1192,16 +1238,33 @@ impl TerminalPane {
         Ok(())
     }
 
-    /// Drain all currently available process output into the terminal buffer.
+    /// A scheduling hint only; EOF and exit are independently observed.
+    pub fn has_pending_output(&self) -> bool {
+        self.queued_output_bytes.load(Ordering::Acquire) != 0
+    }
+
+    /// Drain a bounded batch of process output into the terminal buffer.
     ///
     /// The returned bytes are raw terminal output for logging/debugging. The
-    /// in-memory buffer is updated before this method returns.
+    /// in-memory buffer is updated before this method returns. Remaining bytes
+    /// stay queued in order; bounded reads let input and other panes progress
+    /// even while a command continuously writes output.
     pub fn drain_output(&mut self) -> Vec<u8> {
         self.report_theme_change();
         let mut drained = Vec::new();
-        loop {
+        let started = Instant::now();
+        while drained.len() < MAX_PTY_DRAIN_BYTES
+            && (drained.is_empty() || started.elapsed() < PTY_DRAIN_BUDGET)
+        {
             match self.output_rx.try_recv() {
                 Ok(chunk) => {
+                    // Saturation also supports test-only receiver replacement;
+                    // this hint grants no status or completion authority.
+                    let _ = self.queued_output_bytes.fetch_update(
+                        Ordering::AcqRel,
+                        Ordering::Acquire,
+                        |queued| Some(queued.saturating_sub(chunk.len())),
+                    );
                     self.process_output_chunk(&chunk);
                     self.append_output_log(&chunk);
                     drained.extend_from_slice(&chunk);
@@ -2090,6 +2153,89 @@ fn default_shell() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn full_output_queue_stops_the_producer_and_teardown_releases_it() {
+        let (sender, receiver) = mpsc::sync_channel(MAX_PTY_QUEUED_CHUNKS);
+        let stopped = Arc::new(AtomicBool::new(false));
+        let accepted = Arc::new(AtomicUsize::new(0));
+        let stop = stopped.clone();
+        let count = accepted.clone();
+        let queued = Arc::new(AtomicUsize::new(0));
+        let producer_queued = queued.clone();
+        let producer = thread::spawn(move || {
+            while enqueue_output(
+                &sender,
+                vec![b'x'; PTY_READ_CHUNK_BYTES],
+                &stop,
+                &producer_queued,
+            ) {
+                count.fetch_add(1, Ordering::Release);
+            }
+        });
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while accepted.load(Ordering::Acquire) < MAX_PTY_QUEUED_CHUNKS {
+            assert!(Instant::now() < deadline, "producer did not fill queue");
+            thread::sleep(Duration::from_millis(1));
+        }
+        thread::sleep(Duration::from_millis(30));
+        assert_eq!(accepted.load(Ordering::Acquire), MAX_PTY_QUEUED_CHUNKS);
+        stopped.store(true, Ordering::Release);
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while !producer.is_finished() {
+            assert!(
+                Instant::now() < deadline,
+                "full queue blocked reader teardown"
+            );
+            thread::sleep(Duration::from_millis(1));
+        }
+        producer.join().unwrap();
+        assert_eq!(
+            queued.load(Ordering::Acquire),
+            MAX_PTY_QUEUED_CHUNKS * PTY_READ_CHUNK_BYTES
+        );
+        assert_eq!(receiver.try_iter().count(), MAX_PTY_QUEUED_CHUNKS);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn slow_output_consumer_preserves_every_byte_and_final_unicode_tail() {
+        let mut pane = TerminalPane::spawn_shell_or_command(
+            Some(TerminalCommand::with_args("/bin/sh", ["-c",
+                "dd if=/dev/zero bs=8192 count=128 2>/dev/null | tr '\\000' x; printf '\\342\\230\\203-final-tail\\n'",
+            ])),
+            TerminalPaneOptions { scrollback_lines: 16, ..Default::default() },
+        ).unwrap();
+        // Let the real PTY producer encounter a temporarily undrained consumer.
+        thread::sleep(Duration::from_millis(80));
+        let mut raw = Vec::new();
+        let mut batches = 0;
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            let batch = pane.drain_output();
+            assert!(
+                batch.len() <= MAX_PTY_DRAIN_BYTES,
+                "one drain exceeded its byte budget"
+            );
+            if !batch.is_empty() {
+                batches += 1;
+            }
+            raw.extend_from_slice(&batch);
+            if let Some(status) = pane.try_wait_after_output().unwrap() {
+                assert!(status.success());
+                assert!(pane.output_eof, "exit skipped forwarded output");
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "bounded drains failed to make progress"
+            );
+            thread::sleep(Duration::from_millis(1));
+        }
+        assert!(batches > 1);
+        assert_eq!(&raw[..1024 * 1024], vec![b'x'; 1024 * 1024]);
+        assert_eq!(&raw[1024 * 1024..], "☃-final-tail\r\n".as_bytes());
+    }
 
     struct TestReaper(Arc<ChildReaper>);
     impl Drop for TestReaper {

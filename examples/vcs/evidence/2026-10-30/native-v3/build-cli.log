@@ -1,0 +1,3 @@
+   Compiling rudder-engine v0.1.0 (<QUALIFICATION_DIR>/frozen/engine)
+   Compiling rudder-vcs-bridge v0.1.0 (<QUALIFICATION_DIR>/frozen/vcs-bridge)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 47.05s

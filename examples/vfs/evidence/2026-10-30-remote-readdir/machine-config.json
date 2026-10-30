@@ -1,0 +1,23 @@
+{
+  "init": {
+    "exec": [
+      "/bin/sleep",
+      "1200"
+    ]
+  },
+  "guest": {
+    "cpu_kind": "shared",
+    "cpus": 2,
+    "memory_mb": 2048
+  },
+  "env": {},
+  "services": [],
+  "restart": {
+    "policy": "no"
+  },
+  "metadata": {
+    "rudder_role": "vfs-remote-qualification",
+    "qualification": "edef544c-d620-4d4d-9342-878d7698d52a",
+    "purpose": "remote-paged-readdir-qualification"
+  }
+}

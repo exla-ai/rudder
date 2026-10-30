@@ -1,0 +1,13 @@
+{
+  "format_version": 1,
+  "purpose": "Explicit public compile-time fixtures for filtered native Rust tests; not runtime executable inputs.",
+  "runtime_source_archive_unchanged": true,
+  "files": {
+    "tests/fixtures/task-routing.json": "ca7cbcbbb80f12666e531565e9ae9fd9d83c34605ed2dcab31ae5d86adff1cb0",
+    "tests/fixtures/readiness-cases.json": "517000cea4f6d9e9b36411919f4ded6d95fd8876f92305cff570446a633e3974"
+  },
+  "archive": {
+    "sha256": "e5022b1780515dee7f60e863e442df9a7bf6973b46923d1410c59792dd13b5f6",
+    "size_bytes": 1745
+  }
+}

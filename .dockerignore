@@ -11,3 +11,23 @@ native/target
 site/.vercel
 npm-debug.log
 *.tgz
+
+# Developer/runtime state is never a build input, including nested checkouts.
+**/.git
+**/.jj
+**/.rudder
+**/.ledger
+**/.claude
+**/.codex
+**/.rudder-workspaces
+**/.rudder-worktrees
+**/node_modules
+**/target
+**/RUDDER.md
+**/RUDDER_SHARED.md
+**/.env
+**/.env.*
+**/.DS_Store
+**/npm-debug.log*
+ios/build
+ios/fastlane/.asc.env

@@ -1,0 +1,40 @@
+   Compiling rudder-engine v0.1.0 (<QUALIFICATION_DIR>/frozen/engine)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 38.64s
+     Running unittests src/lib.rs (<CARGO_TARGET_DIR>/debug/deps/rudder_engine-be2949bf80d8f9fb)
+
+running 12 tests
+test execution::linux::application_lifecycle_tests::failed_settlement_is_not_retried_or_promoted_to_success_on_drop ... ok
+test execution::linux::application_lifecycle_tests::finalization_owns_real_writer_fence_until_after_durable_record ... ok
+test execution::linux::authority_monitor_tests::denied_initial_authority_cannot_start_a_monitor_or_create_an_authorized_attempt ... ok
+test execution::linux::authority_monitor_tests::observed_authority_loss_is_sticky_and_never_revives_the_same_attempt ... ok
+test paths::tests::checkout_aliases_use_one_identity ... ok
+test protocol::tests::metadata_order_is_canonical_and_floats_are_rejected ... ok
+test protocol::tests::object_paths_cannot_escape_the_content_store ... ok
+test protocol::tests::raw_blob_hashes_remain_standard ... ok
+test vfs::cache_tests::immutable_fd_admission_is_shared_and_bounded_even_while_readers_hold_arcs ... ok
+test build::frontend::tests::paged_chunked_inputs_materialize_and_changed_tail_invalidates_reuse ... ok
+test build::frontend::tests::paged_environment_materialization_rechecks_content_and_rejects_added_files ... ok
+test content::tests::frontier_carries_and_compacts_right_edges_without_padding_or_file_buffers ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 10.59s
+
+     Running tests/execution_handoff.rs (<CARGO_TARGET_DIR>/debug/deps/execution_handoff-82cbd1e3572c3b7a)
+
+running 4 tests
+test broker_projection_allows_lazy_socket_but_rejects_extra_or_symlink_identity ... ok
+test private_authority_and_home_projection_policy_fails_closed ... ok
+test sealed_payload_rejects_mutation_and_regular_file_substitution ... ok
+test only_actual_child_receives_one_use_spec_after_other_peer_rejection ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.29s
+
+     Running tests/execution_rpc.rs (<CARGO_TARGET_DIR>/debug/deps/execution_rpc-603efb275bf25f2d)
+
+running 5 tests
+test authority_factory_cannot_run_before_fresh_namespace_admission ... ok
+test v3_application_is_explicit_hash_bound_and_cannot_shadow_authority_projection ... ok
+test assignment_and_exact_capability_scope_bind_every_observation_identity_field ... ok
+test private_endpoint_paths_cannot_overlap_runtime_authority_or_other_projections ... ok
+test legacy_canonical_request_bytes_are_preserved_and_profile_versions_fail_closed ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s

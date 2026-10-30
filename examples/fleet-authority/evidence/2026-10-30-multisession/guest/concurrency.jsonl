@@ -1,0 +1,13 @@
+{"at": "2026-10-30T20:24:54.464808+00:00", "pid": 718, "blockers": [], "wait_event": "PgSleep", "application": "acquire-a", "wait_event_type": "Timeout"}
+{"at": "2026-10-30T20:24:54.4959+00:00", "pid": 745, "blockers": [718], "wait_event": "transactionid", "application": "acquire-b", "wait_event_type": "Lock"}
+{"at": "2026-10-30T20:24:56.088183+00:00", "pid": 794, "blockers": [], "wait_event": "PgSleep", "application": "clock-blocker", "wait_event_type": "Timeout"}
+{"at": "2026-10-30T20:24:56.119889+00:00", "pid": 821, "blockers": [794], "wait_event": "transactionid", "application": "clock-waiter", "wait_event_type": "Lock"}
+{"at": "2026-10-30T20:24:58.133872+00:00", "pid": 854, "blockers": [], "wait_event": "PgSleep", "application": "expired-renew", "wait_event_type": "Timeout"}
+{"at": "2026-10-30T20:24:58.16717+00:00", "pid": 880, "blockers": [854], "wait_event": "transactionid", "application": "expired-claim", "wait_event_type": "Lock"}
+{"at": "2026-10-30T20:24:59.770768+00:00", "pid": 930, "blockers": [], "wait_event": "PgSleep", "application": "head-a", "wait_event_type": "Timeout"}
+{"at": "2026-10-30T20:24:59.839824+00:00", "pid": 958, "blockers": [930], "wait_event": "transactionid", "application": "head-b", "wait_event_type": "Lock"}
+{"at": "2026-10-30T20:25:01.338058+00:00", "pid": 995, "blockers": [], "wait_event": "PgSleep", "application": "topic-writer", "wait_event_type": "Timeout"}
+{"at": "2026-10-30T20:25:01.416606+00:00", "pid": 1023, "blockers": [995], "wait_event": "transactionid", "application": "topic-integrator", "wait_event_type": "Lock"}
+{"at": "2026-10-30T20:25:02.890278+00:00", "pid": 1060, "blockers": [], "wait_event": "PgSleep", "application": "discarded-reply", "wait_event_type": "Timeout"}
+{"at": "2026-10-30T20:25:02.999063+00:00", "pid": 1100, "blockers": [], "wait_event": "PgSleep", "application": "client-crash", "wait_event_type": "Timeout"}
+{"at": "2026-10-30T20:25:03.112237+00:00", "pid": 1148, "blockers": [], "wait_event": "PgSleep", "application": "server-crash", "wait_event_type": "Timeout"}

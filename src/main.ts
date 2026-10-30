@@ -106,6 +106,13 @@ type Parsed = {
 };
 
 export async function main(): Promise<void> {
+  // This private transport owns binary stdio. Setup, notices and general flag
+  // parsing must never write into its frame stream.
+  if (process.argv[2] === "__fabric-fetch") {
+    const { runFabricFetchHelper } = await import("./fabric-fetch.js");
+    await runFabricFetchHelper();
+    return;
+  }
   // The SDK renderer owns its provider argv and stdio/control protocol. Route
   // before general flag parsing so provider options never become Rudder tasks.
   if (process.argv[2] === "__claude-sdk") {
@@ -122,28 +129,30 @@ export async function main(): Promise<void> {
   if (shouldAutoUpdateForCommand(parsed.command) && await autoUpdateAndRerunIfNeeded(process.argv.slice(2))) {
     return;
   }
-  // Capability skills (e.g. Google Cloud) for every agent Rudder launches.
-  await ensureAgentSkills();
-  // One-time disclosure, before the dashboard takes over the screen. Printing it
-  // here (rather than burying it in docs) is the deal: telemetry is on, and the
-  // user is told what it is and how to stop it the first time they run anything.
-  if (!parsed.command?.startsWith("__")) {
-    const notice = await pendingTelemetryNotice();
-    if (notice) {
-      console.log(notice);
-    }
-  }
   if (parsed.flags.version || parsed.command === "version") {
     const current = await packageVersion();
     console.log(current);
     const update = await getUpdateAvailable().catch(() => null);
     if (update && update.latest !== current) {
-      console.log(
+      console.error(
         `update available: ${update.latest} (current ${current})`,
       );
-      console.log("  npm i -g @exla/rudder");
+      console.error("  npm i -g @exla/rudder");
     }
     return;
+  }
+  // Informational and private callbacks need no agent setup. Their parent
+  // launcher already prepares the worker environment; repeating installation
+  // here turns every callback into a walk of the user's skills directory.
+  const internal = isInternalCommand(parsed.command);
+  const setup = !internal && !parsed.flags.help && parsed.command !== "help"
+    && Boolean(parsed.command || parsed.args.length > 0 || isTty());
+  if (setup) {
+    await ensureAgentSkills();
+    const notice = await pendingTelemetryNotice();
+    if (notice) {
+      process.stderr.write(`${notice}\n`);
+    }
   }
   if (parsed.flags.cwd) {
     process.chdir(parsed.flags.cwd);
@@ -151,7 +160,7 @@ export async function main(): Promise<void> {
   // jj comes with Rudder: a machine without it gets jj's own release fetched
   // into ~/.rudder/bin once (the npm postinstall usually did that already), and
   // everything started from here finds it on PATH.
-  if (!parsed.flags.help && !JJ_FREE_COMMANDS.has(parsed.command ?? "") && (parsed.command || parsed.args.length > 0 || isTty())) {
+  if (!internal && !parsed.flags.help && !JJ_FREE_COMMANDS.has(parsed.command ?? "") && (parsed.command || parsed.args.length > 0 || isTty())) {
     await ensureJjAvailable({ onInstall: (message) => process.stderr.write(`${message}\n`) });
   }
   if (!parsed.command || parsed.flags.help) {

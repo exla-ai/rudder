@@ -1,0 +1,14 @@
+{
+  "format_version": 1,
+  "allowlist_applied_before_file_content_reads": true,
+  "member_names_validated_before_archive_content_reads": true,
+  "regular_files_only": true,
+  "archive_matches_manifests": true,
+  "source_archive_sha256": "42a885ae171146b579f6a49dea224c767f2881e1d461c047f2265b03d679b108",
+  "source_archive_file_count": 182,
+  "source_manifest_sha256": "c9e0e30ed75f8c325c4b34f8f0ddab8bdab41643197e150e66c69ecff0b6f16f",
+  "helper_file_count": 4,
+  "hidden_runtime_session_cache_files": 0,
+  "preexisting_remote_range_evidence_changed": false,
+  "binary_and_payload_archive_published": false
+}

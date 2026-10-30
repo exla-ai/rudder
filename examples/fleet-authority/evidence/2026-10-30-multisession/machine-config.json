@@ -1,0 +1,25 @@
+{
+  "init": {
+    "exec": [
+      "/bin/sleep",
+      "900"
+    ]
+  },
+  "guest": {
+    "cpu_kind": "shared",
+    "cpus": 2,
+    "memory_mb": 2048
+  },
+  "env": {},
+  "services": [],
+  "mounts": [],
+  "restart": {
+    "policy": "no"
+  },
+  "auto_destroy": true,
+  "metadata": {
+    "rudder_role": "fleet-sql-qualification",
+    "qualification": "7d17e8f3-be6f-4a61-9d16-8b5a5ac354f5",
+    "purpose": "single-server-postgresql-sql-evidence"
+  }
+}

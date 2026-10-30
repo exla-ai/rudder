@@ -129,6 +129,13 @@ pub fn handle_store_on(store: &LocalStore, request: StoreRequest) -> Result<Valu
             "authority":"local-only", "checkpoint_consistency":["quiesced"],
             "checkpoint_durability":["local"], "metadata_persistent_cow":true,
             "materializers":["eager-private-export"], "lazy_materialization":false,
+            "cas_formats":{
+                "object_kinds":["blob","file","directory","directory_shard","source_root","environment_root","checkpoint","runnable_root","action_key","action_result"],
+                "source_versions":[1,2],"environment_versions":[1,2],"runnable_root_versions":[1],
+                "directory_versions":[1,2],"file_layout":crate::content::FILE_LAYOUT,
+                "file_chunk_bytes":crate::content::CHUNK_BYTES,
+                "content_descriptor_max_bytes":crate::content::MAX_FILE_NODE_BYTES,
+            },
         }),
         StoreOperation::ImportSource {
             path,
@@ -307,6 +314,21 @@ struct TransferPin {
     root: ObjectRef,
     inventory: BTreeSet<ObjectRef>,
 }
+struct PartialTransferPin {
+    receipt: crate::store::ObjectSetReceipt,
+    inventory: BTreeSet<ObjectRef>,
+}
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PartialTransferInventory {
+    pub format_version: u32,
+    pub owned_pin: String,
+    pub plan: ObjectRef,
+    pub directory: ObjectRef,
+    pub hardlinks: ObjectRef,
+    pub base: crate::remote_root::RootBinding,
+    pub objects: Vec<ObjectRef>,
+}
 
 /// One trusted local transport session. Resources allocated here are distinct
 /// from caller pins/leases and only this session's resources are cleaned up.
@@ -315,6 +337,7 @@ struct TransferPin {
 pub struct TransferSession {
     store: LocalStore,
     source_pins: BTreeMap<String, TransferPin>,
+    partial_pins: BTreeMap<String, Option<PartialTransferPin>>,
     staging: BTreeSet<String>,
 }
 impl TransferSession {
@@ -322,6 +345,7 @@ impl TransferSession {
         Ok(Self {
             store: LocalStore::open(&paths.cas)?,
             source_pins: BTreeMap::new(),
+            partial_pins: BTreeMap::new(),
             staging: BTreeSet::new(),
         })
     }
@@ -364,7 +388,10 @@ impl TransferSession {
     }
     pub fn pin_source(&mut self, root: &ObjectRef) -> Result<String> {
         transfer_reference(root)?;
-        ensure!(self.source_pins.len() < 32, "too many session source pins");
+        ensure!(
+            self.source_pins.len() + self.partial_pins.len() < 32,
+            "too many session source pins"
+        );
         let pin = format!("transfer:rpc:{}", Uuid::new_v4());
         // A direct retained root already has verification authority. A root
         // found only as a descendant must receive a fresh complete check.
@@ -389,6 +416,17 @@ impl TransferSession {
         Ok(pin)
     }
     pub fn unpin_source(&mut self, pin: &str) -> Result<()> {
+        if let Some(partial) = self.partial_pins.get(pin) {
+            let receipt = match partial {
+                Some(partial) => Some(partial.receipt.clone()),
+                None => self.store.object_set_receipt(pin)?,
+            };
+            if let Some(receipt) = receipt {
+                self.store.release_object_set(&receipt)?;
+            }
+            self.partial_pins.remove(pin);
+            return Ok(());
+        }
         ensure!(
             self.source_pins.contains_key(pin),
             "pin is outside this transfer session"
@@ -396,6 +434,72 @@ impl TransferSession {
         self.store.unpin(pin)?;
         self.source_pins.remove(pin);
         Ok(())
+    }
+    /// Transfer retention never turns a partial tree into a complete local pin.
+    /// The data plan/receipt is validated before copying its exact local units.
+    pub fn pin_partial_source(
+        &mut self,
+        record: &crate::delta::PartialTreeReceipt,
+    ) -> Result<PartialTransferInventory> {
+        ensure!(
+            self.source_pins.len() + self.partial_pins.len() < 32,
+            "too many session source pins"
+        );
+        ensure!(self.staging.len() < 32, "too many session staging leases");
+        let lease = self.store.begin_staging(Duration::from_secs(600))?;
+        self.staging.insert(lease.id.clone());
+        let mut owned_pin = None;
+        let result = (|| {
+            // The lease fences GC even if the producer retires its original pin
+            // between reading the record and committing transfer retention.
+            let plan = crate::delta::read_partial_tree(&self.store, record)?;
+            let objects = self.store.object_set_refs(&record.local)?;
+            ensure!(
+                objects.len() <= TRANSFER_MAX_OBJECTS,
+                "partial inventory exceeds object limit"
+            );
+            let mut total = 0u64;
+            for object in &objects {
+                transfer_reference(object)?;
+                total = total
+                    .checked_add(object.size_bytes)
+                    .context("partial inventory size overflow")?;
+            }
+            ensure!(
+                total <= TRANSFER_MAX_BYTES,
+                "partial inventory exceeds byte limit"
+            );
+            let pin = format!("transfer:partial:rpc:{}", Uuid::new_v4());
+            self.partial_pins.insert(pin.clone(), None);
+            owned_pin = Some(pin.clone());
+            let receipt = self.store.retain_object_set(&lease.id, &pin, &objects)?;
+            self.staging.remove(&lease.id);
+            self.partial_pins.insert(
+                pin.clone(),
+                Some(PartialTransferPin {
+                    receipt,
+                    inventory: objects.iter().cloned().collect(),
+                }),
+            );
+            Ok(PartialTransferInventory {
+                format_version: 1,
+                owned_pin: pin,
+                plan: record.plan.clone(),
+                directory: plan.directory,
+                hardlinks: plan.hardlinks,
+                base: plan.base,
+                objects,
+            })
+        })();
+        if result.is_err() {
+            if let Some(pin) = owned_pin {
+                let _ = self.unpin_source(&pin);
+            }
+            if self.store.abandon_staging(&lease.id).is_ok() {
+                self.staging.remove(&lease.id);
+            }
+        }
+        result
     }
     pub fn inventory(&mut self, root: &ObjectRef) -> Result<Vec<ObjectRef>> {
         ensure!(
@@ -433,7 +537,12 @@ impl TransferSession {
         ensure!(
             self.source_pins
                 .values()
-                .any(|pin| pin.inventory.contains(object)),
+                .any(|pin| pin.inventory.contains(object))
+                || self
+                    .partial_pins
+                    .values()
+                    .flatten()
+                    .any(|pin| pin.inventory.contains(object)),
             "object is outside retained source inventory"
         );
         self.store.read_object(object)
@@ -469,6 +578,11 @@ impl TransferSession {
                 failed = true;
             }
         }
+        for pin in self.partial_pins.keys().cloned().collect::<Vec<_>>() {
+            if self.unpin_source(&pin).is_err() {
+                failed = true;
+            }
+        }
         for lease in self.staging.iter().cloned().collect::<Vec<_>>() {
             if self.store.abandon_staging(&lease).is_ok() {
                 self.staging.remove(&lease);
@@ -485,6 +599,9 @@ impl TransferSession {
 }
 impl Drop for TransferSession {
     fn drop(&mut self) {
+        for pin in self.partial_pins.keys().cloned().collect::<Vec<_>>() {
+            let _ = self.unpin_source(&pin);
+        }
         for pin in self.source_pins.keys() {
             let _ = self.store.unpin(pin);
         }
@@ -502,6 +619,13 @@ pub fn transfer_reference(reference: &ObjectRef) -> Result<()> {
     ensure!(
         reference.kind == ObjectKind::Blob || reference.size_bytes <= TRANSFER_MAX_METADATA_BYTES,
         "transfer metadata exceeds byte limit"
+    );
+    ensure!(
+        !matches!(
+            reference.kind,
+            ObjectKind::File | ObjectKind::DirectoryShard | ObjectKind::RunnableRoot
+        ) || reference.size_bytes <= crate::content::MAX_FILE_NODE_BYTES as u64,
+        "transfer content descriptor exceeds format byte limit"
     );
     Ok(())
 }

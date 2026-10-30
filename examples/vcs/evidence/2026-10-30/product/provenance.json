@@ -1,0 +1,102 @@
+{
+  "format_version": 1,
+  "verified_at": "2026-10-30T16:13:04.220277+00:00",
+  "scope": "Feature-gated host-side VCS projection and journal semantics; no product/default activation or deployment.",
+  "source_state": "Main checkout working tree with recorded source digests; HEAD alone does not identify uncommitted implementation.",
+  "head_at_handoff": "a24bc4171d55ce9554068cdeb1b6e228b461d54d",
+  "host": {
+    "system": "Linux",
+    "architecture": "x86_64",
+    "kernel": "6.12.114-fly"
+  },
+  "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+  "git": "git version 2.39.5",
+  "jj": {
+    "jj-cli": "0.40.0",
+    "jj-lib": "0.40.0",
+    "upstream_commit": "941d0290f5511db1d1cf8e4fe7365ba7d1828ea0",
+    "gix": "0.81.0"
+  },
+  "checks": {
+    "bridge_local_development": {
+      "passed": 25,
+      "failed": 0,
+      "ignored": 1,
+      "command": "cargo test -p rudder-vcs-bridge --features local-development",
+      "log": "bridge-tests.log"
+    },
+    "journal_durability": {
+      "passed": 31,
+      "failed": 0,
+      "log": "journal-tests.log"
+    },
+    "journal_vcs": {
+      "passed": 13,
+      "failed": 0,
+      "log": "journal-tests.log"
+    },
+    "explicit_linux_readonly_fork": {
+      "passed": 1,
+      "failed": 0,
+      "parent_mount_namespace_unchanged": true,
+      "scope": "fresh user/mount namespace; actual EROFS, private fresh WC IDs, no provider snapshots/checkouts",
+      "log": "readonly-fork.log"
+    },
+    "scanner_cli": {
+      "passed": 6,
+      "failed": 0,
+      "real_commands": 82,
+      "seconds_reported_by_harness": 7.589,
+      "scope": "explicit local-development CLI compatibility only; not the production WorkspaceView provider",
+      "binary_sha256": "9c7355bbb69eeaf868337b9f6c3e1e2201d9e25618cd358b7b55f3fb3e3f3b80",
+      "log": "scanner-cli.log",
+      "raw": "scanner-cli.json"
+    },
+    "default_feature_check": {
+      "exit_code": 0,
+      "command": "cargo check -p rudder-vcs-bridge",
+      "log": "default-check.log"
+    }
+  },
+  "limits": [
+    "Mapper traverses immutable source and prior jj metadata; no O(changes)/O(1) namespace or fork/cache benchmark.",
+    "Forward normal files stream; reverse/conflict APIs use an explicit bounded full-blob profile.",
+    "Source mapping is separate from a writer barrier, verification execution and untrusted Git metadata quarantine.",
+    "Direct VfsView fixture uses actual owning methods but does not mount a kernel filesystem.",
+    "Native CLI cases explicitly use LocalWorkingCopy development compatibility; production VFS CLI is not activated.",
+    "No guest adoption RPC, mounted checkout, macOS mount, fleet launch or distributed compilation claim.",
+    "Strict WorkspaceProfile source-complement gate is unchanged; no automatic jj-selected subset derivation."
+  ],
+  "source_sha256": {
+    "vcs-bridge/src/atomic.rs": "230f2fdbaa7a19b275d2b6a7e13d363faa274b1d5db78ee6a8920dcfbf517547",
+    "vcs-bridge/src/attempt.rs": "e9b3d538ca2b031b8bffe40035afa1991f43b82a092d4789845dbe80733dea95",
+    "vcs-bridge/src/identity.rs": "6922b291d9201628f0c9f0bbb6afb42bf3d7b994f2f45bd83b2d306a42e924e0",
+    "vcs-bridge/src/journal_adapter.rs": "d68f527d45ffb198f168f5a3f3ed2b905eaee14ebca1da75594f4c67d8947ea0",
+    "vcs-bridge/src/lib.rs": "340f41b60a9847ea4cb903f33de97a22987dfe2df2186c77f46fe1cd0c0bfebf",
+    "vcs-bridge/src/local_development.rs": "690e85f5824a6ebe5d898843eedf2ca19f7e1fa8b77ed581ff4b623557c0bbb5",
+    "vcs-bridge/src/main.rs": "34eb69536353702e11d5a2f1f75381d1a7e42d60352080f87b956abfb6e1fa19",
+    "vcs-bridge/src/projection.rs": "de6625359fdaebcaaa223d0270fdf2cea0ea7ba0280bfc78b015804b0c8e69c5",
+    "vcs-bridge/src/projection_io.rs": "ef3a223241c2ddc3d62107385ad345381771fa9b63bea675b178ab05cd5ebdfd",
+    "vcs-bridge/src/publication.rs": "13f2fdf4ef986f2c244a8d472b1f4cfc293f67dd085c6f47ba7bf01d9e47572f",
+    "vcs-bridge/src/seed.rs": "0266d93d75794de7b35c5345f59510ac5bb553d87e0fa59ea473403206c1bc37",
+    "vcs-bridge/src/vfs_provider.rs": "c685a6a25618d66e68391c51c54e7a1a58fa0b971376426bf29e99707028e3a5",
+    "vcs-bridge/src/working_copy.rs": "509ea6f2a8959d955eabff1cc3cef20a18b0e928a7ddcf7d2fc87217d5b911a9",
+    "vcs-bridge/tests/identities_and_seed.rs": "a3f0f715fa99417a96b08f5b889136ce1a27bf2ad7832fd98f05652bb2ac8de2",
+    "vcs-bridge/tests/journal_integration.rs": "b63c527328ee7ece2bd0d427b075380f8bceecd298d83c8cf208bf77691c8db3",
+    "vcs-bridge/tests/projection.rs": "cc58f1c3de43ba77ceb7435b53eb3371f1d351cf486219a64f949e5ff0284a8b",
+    "vcs-bridge/tests/publication.rs": "5e44711288a108274112280bea12f294bac36af99eb22c9d4b7bc76c8a2821b3",
+    "vcs-bridge/tests/vfs_provider.rs": "80cef9146a806a7a281778e358a5c8f49bc326d83b962a7e8557276e07492cad",
+    "vcs-bridge/tests/working_copy.rs": "9bf3f012c996b77599204fe24b305edb15d1ddf3cb464f3e07f22470153eb743",
+    "vcs-bridge/tests/common/mod.rs": "86816886ac30425e3a6dd9ffd6b74716cbfde91a079000cd1d9cdbc3a819f30b",
+    "vcs-bridge/tests/qualify-cli.py": "9760f93a8869d7dd34c9f3780ca2a2695fca2dfc92fb621eb11e08dfde23e7cc",
+    "vcs-bridge/Cargo.toml": "c9a3124fd96a6c5346e13f84a17a6e0365aa203ac39d849e143908f07c8637d9",
+    "Cargo.toml": "ebacde59f86db608699bdbb8e5e9eda8761f678906fb99355abb5af3c53eb194",
+    "Cargo.lock": "dace4e3e1660ce03e5b31c875d4e8e77dcbb226707360c8f2b7ed7eecf56e1cd",
+    "engine/src/journal.rs": "7e1025b61c6642c96a3befd0e4b23ff35dc4e1d2cb04e5310aa5d61c2961a02d",
+    "engine/src/journal/schema.rs": "caab66640e5971d8e1d0d9c654772ecda600015c0f29ca0eee7ca48229ec70f7",
+    "engine/src/journal/decisions.rs": "2d2c00395cf94207f02a3cd0bc6fa42d83b4da2c6a1ba3ba646dfa53338d69ba",
+    "engine/src/journal/vcs.rs": "efa1bb7aca5ccd4ab6b8ee0b09d1462b7ee120012aa63aef7e122195e9d1186f",
+    "engine/tests/journal_vcs.rs": "20f1cc72b213162458fbba73aebbfb24802822a21856f43c1b01e2dd7011e344",
+    "engine/tests/journal_durability.rs": "6f5b179d7a9c3b7eac735c9e548b64492224e4a4a394ff1773720fbda053abc3"
+  }
+}

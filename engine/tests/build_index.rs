@@ -90,6 +90,147 @@ fn prepared_root_is_retained_reopenable_and_source_independent() {
 }
 
 #[test]
+fn preparation_layouts_have_distinct_keys_roots_and_retained_index_authority() {
+    let (dir, index, spec, directory) = fixture();
+    let old = index.publish_prepared(&spec, &directory).unwrap();
+    let new = index
+        .publish_prepared_with_layout(&spec, &directory, PreparedContentLayout::PagedChunkedV2)
+        .unwrap();
+    assert_ne!(old.key, new.key);
+    assert_ne!(old.root, new.root);
+    assert_eq!(index.prepared(&spec).unwrap(), Some(old.clone()));
+    assert_eq!(
+        index
+            .prepared_with_layout(&spec, PreparedContentLayout::PagedChunkedV2)
+            .unwrap(),
+        Some(new.clone())
+    );
+    let mut environment =
+        rudder_engine::snapshot::decode_environment(&index.store().read_object(&new.root).unwrap())
+            .unwrap();
+    assert_eq!(environment.directory, directory);
+    assert_eq!(index.preparation_spec(&new).unwrap(), spec);
+    assert_eq!(index.prepared_root(&new.root).unwrap(), Some(new.clone()));
+    environment
+        .provenance
+        .insert("policy_version".into(), "forged-v2-root".into());
+    let lease = index
+        .store()
+        .begin_staging(Duration::from_secs(60))
+        .unwrap();
+    let forged = rudder_engine::snapshot::stage(
+        index.store(),
+        &lease.id,
+        ObjectKind::EnvironmentRoot,
+        &environment,
+    )
+    .unwrap();
+    assert!(
+        index.prepared_root(&forged).is_err(),
+        "provenance cannot impersonate an indexed v2 root"
+    );
+    index.store().abandon_staging(&lease.id).unwrap();
+    index.store().gc(Duration::ZERO).unwrap();
+    drop(index);
+    let reopened = BuildIndex::open(
+        dir.path().join("index"),
+        LocalStore::open(dir.path().join("cas")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        reopened.prepared_root(&new.root).unwrap(),
+        Some(new.clone())
+    );
+    assert_eq!(reopened.preparation_spec(&new).unwrap(), spec);
+    assert_eq!(reopened.prepared(&spec).unwrap(), Some(old));
+}
+
+#[test]
+fn chunked_compiler_identity_is_checked_through_paged_paths() {
+    use rudder_engine::{
+        content::{self, StagedContentStore},
+        directory::{
+            DirectoryEntry as PagedEntry, EntryNode as PagedNode, LocalDirectoryStore,
+            PagedDirectory,
+        },
+    };
+    let (_dir, index, mut spec, _) = fixture();
+    let store = index.store();
+    let lease = store.begin_staging(Duration::from_secs(60)).unwrap();
+    let bytes = vec![b'c'; content::CHUNK_BYTES + 19];
+    let file = content::import_file(
+        &StagedContentStore::new(store, &lease.id).unwrap(),
+        &mut bytes.as_slice(),
+    )
+    .unwrap();
+    assert_eq!(file.kind, ObjectKind::File);
+    let adapter = LocalDirectoryStore::new(store, &lease.id);
+    let tools = PagedDirectory::new(&adapter)
+        .build(
+            0o755,
+            vec![PagedEntry::new(
+                b"compiler",
+                PagedNode::File {
+                    object: file.clone(),
+                    logical_size: bytes.len() as u64,
+                    mode: 0o755,
+                },
+            )
+            .unwrap()],
+        )
+        .unwrap();
+    let directory = PagedDirectory::new(&adapter)
+        .build(
+            0o755,
+            vec![PagedEntry::new(b"tools", PagedNode::Directory { object: tools }).unwrap()],
+        )
+        .unwrap();
+    store
+        .publish(&lease.id, "chunked-tool-fixture", &directory)
+        .unwrap();
+    spec.base_runtime = directory.clone();
+    let tool = spec.toolchains.get_mut("compiler").unwrap();
+    tool.closure = directory.clone();
+    tool.executable = file.clone();
+    let prepared = index
+        .publish_prepared_with_layout(&spec, &directory, PreparedContentLayout::PagedChunkedV2)
+        .unwrap();
+    assert_eq!(
+        index.preparation_spec(&prepared).unwrap().toolchains["compiler"].executable,
+        file
+    );
+    spec.toolchains.get_mut("compiler").unwrap().executable =
+        store.put_blob(b"wrong compiler").unwrap();
+    assert!(index
+        .publish_prepared_with_layout(&spec, &directory, PreparedContentLayout::PagedChunkedV2)
+        .is_err());
+    assert!(index
+        .prepared_with_layout(&spec, PreparedContentLayout::PagedChunkedV2)
+        .unwrap()
+        .is_none());
+}
+
+#[test]
+fn ancestry_free_preparation_rejects_history_inputs_before_index_publication() {
+    let (_dir, index, mut spec, directory) = fixture();
+    let history = index
+        .store()
+        .put_source(&SourceManifest {
+            format_version: 1,
+            consistency: rudder_engine::protocol::CheckpointConsistency::Quiesced,
+            directory: directory.clone(),
+            parents: vec![],
+        })
+        .unwrap();
+    spec.installer_inputs.insert("history.json".into(), history);
+    assert!(index
+        .publish_prepared_with_layout(&spec, &directory, PreparedContentLayout::PagedChunkedV2)
+        .is_err());
+    assert!(index.store().retention().unwrap().staging.is_empty());
+    assert!(index.store().retention().unwrap().pins.is_empty());
+}
+
+#[test]
 fn environment_provenance_is_not_preparation_authority() {
     let (_dir, index, spec, directory) = fixture();
     let prepared = index.publish_prepared(&spec, &directory).unwrap();
@@ -559,64 +700,154 @@ fn source_ancestor_modes_do_not_falsely_dirty_nested_prepared_partition() {
 
 #[test]
 fn v3_build_inputs_validate_and_key_hardlink_identity_separately_from_file_bytes() {
-    use rudder_engine::{protocol::{canonical_json, CheckpointConsistency, Durability}, store::CheckpointV3Manifest, vfs::{HardlinkGroup, HardlinkTopology}};
+    use rudder_engine::{
+        protocol::{canonical_json, CheckpointConsistency, Durability},
+        store::CheckpointV3Manifest,
+        vfs::{HardlinkGroup, HardlinkTopology},
+    };
     let (_dir, index, spec, tools) = fixture();
     let prepared = index.publish_prepared(&spec, &tools).unwrap();
     let store = index.store();
     let bytes = store.put_blob(b"equal content, separate identity").unwrap();
     let mut entries = vec![];
     for name in [b"a", b"b"] {
-        entries.push(DirectoryEntry::new(name, EntryNode::File { object:bytes.clone(), mode:0o644 }).unwrap());
+        entries.push(
+            DirectoryEntry::new(
+                name,
+                EntryNode::File {
+                    object: bytes.clone(),
+                    mode: 0o644,
+                },
+            )
+            .unwrap(),
+        );
     }
-    let view = store.put_directory(DirectoryManifest { format_version:1, mode:0o755, entries }).unwrap();
+    let view = store
+        .put_directory(DirectoryManifest {
+            format_version: 1,
+            mode: 0o755,
+            entries,
+        })
+        .unwrap();
     let source = source_from(store, &view);
-    let profile = store.put_blob(&canonical_json(&rudder_engine::workspace::WorkspaceProfile::source_only()).unwrap()).unwrap();
-    let topology = |groups| store.put_blob(&canonical_json(&HardlinkTopology{format_version:1,groups}).unwrap()).unwrap();
+    let profile = store
+        .put_blob(
+            &canonical_json(&rudder_engine::workspace::WorkspaceProfile::source_only()).unwrap(),
+        )
+        .unwrap();
+    let topology = |groups| {
+        store
+            .put_blob(
+                &canonical_json(&HardlinkTopology {
+                    format_version: 1,
+                    groups,
+                })
+                .unwrap(),
+            )
+            .unwrap()
+    };
     let unlinked = topology(vec![]);
-    let linked = topology(vec![HardlinkGroup{paths_hex:vec![vec![hex::encode(b"a")],vec![hex::encode(b"b")]]}]);
-    let make_checkpoint = |hardlinks| store.put_checkpoint_v3(&CheckpointV3Manifest {
-        format_version:3, source:source.clone(), environment:Some(prepared.root.clone()), parents:vec![],
-        consistency:CheckpointConsistency::Quiesced, durability:Durability::Local, knowledge_cursor:0,
-        view_root:view.clone(),profile:profile.clone(),hardlinks,
-    }).unwrap();
+    let linked = topology(vec![HardlinkGroup {
+        paths_hex: vec![vec![hex::encode(b"a")], vec![hex::encode(b"b")]],
+    }]);
+    let make_checkpoint = |hardlinks| {
+        store
+            .put_checkpoint_v3(&CheckpointV3Manifest {
+                format_version: 3,
+                source: source.clone(),
+                environment: Some(prepared.root.clone()),
+                parents: vec![],
+                consistency: CheckpointConsistency::Quiesced,
+                durability: Durability::Local,
+                knowledge_cursor: 0,
+                view_root: view.clone(),
+                profile: profile.clone(),
+                hardlinks,
+            })
+            .unwrap()
+    };
     let independent = make_checkpoint(unlinked.clone());
     let shared = make_checkpoint(linked.clone());
     let a = rudder_engine::workspace::build_input_view(store, &independent).unwrap();
     let b = rudder_engine::workspace::build_input_view(store, &shared).unwrap();
-    assert_eq!(a.view_root(), b.view_root(), "content trees are deliberately identical");
+    assert_eq!(
+        a.view_root(),
+        b.view_root(),
+        "content trees are deliberately identical"
+    );
     assert_eq!(a.source_root(), b.source_root());
     assert_eq!(a.hardlinks(), Some(&unlinked));
     assert_eq!(b.hardlinks(), Some(&linked));
     assert_eq!(b.hardlink_group_count(), 1);
-    #[cfg(target_os="linux")]
+    #[cfg(target_os = "linux")]
     {
-        let build_profile = BuildProfile::from_toml(include_str!("../../examples/build-profile/rudder.toml")).unwrap();
+        let build_profile =
+            BuildProfile::from_toml(include_str!("../../examples/build-profile/rudder.toml"))
+                .unwrap();
         let directory = _dir.path().join("must-not-materialize-linked-input");
         let frontend = _dir.path().join("not-a-qualified-frontend");
         std::fs::write(&frontend, b"unqualified frontend fixture").unwrap();
-        let error = Buck2Adapter::new(&frontend).unwrap().build(&index, &build_profile, &b, &prepared, &directory).unwrap_err();
-        assert!(error.to_string().contains("hardlink-preserving VFS input adapter"));
-        assert!(!directory.exists(), "unsupported input semantics cannot start materialization or frontend work");
+        let error = Buck2Adapter::new(&frontend)
+            .unwrap()
+            .build(&index, &build_profile, &b, &prepared, &directory)
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("hardlink-preserving VFS input adapter"));
+        assert!(
+            !directory.exists(),
+            "unsupported input semantics cannot start materialization or frontend work"
+        );
     }
     let mut contract = ActionContract {
-        format_version:1, frontend:"buck2-rudder-linux-compile-v1".into(),
-        frontend_executable:store.put_blob(b"buck2").unwrap(), rules:store.put_blob(b"trusted rules").unwrap(),
-        source_root:source, input_topology:a.hardlinks().cloned(), environment_root:prepared.root,
-        platform:spec.platform, toolchains:spec.toolchains, command:vec!["buck2".into(),"build".into()],
-        environment:Default::default(), outputs:["result".into()].into_iter().collect(),
-        policy:BuildPolicy{version:"v1".into(),environment:Default::default(),effects:Default::default()},
+        format_version: 1,
+        frontend: "buck2-rudder-linux-compile-v1".into(),
+        frontend_executable: store.put_blob(b"buck2").unwrap(),
+        rules: store.put_blob(b"trusted rules").unwrap(),
+        source_root: source,
+        input_topology: a.hardlinks().cloned(),
+        environment_root: prepared.root,
+        platform: spec.platform,
+        toolchains: spec.toolchains,
+        command: vec!["buck2".into(), "build".into()],
+        environment: Default::default(),
+        outputs: ["result".into()].into_iter().collect(),
+        policy: BuildPolicy {
+            version: "v1".into(),
+            environment: Default::default(),
+            effects: Default::default(),
+        },
     };
     let key_a = contract.key(store).unwrap();
-    contract.input_topology=b.hardlinks().cloned();
+    contract.input_topology = b.hardlinks().cloned();
     let key_b = contract.key(store).unwrap();
-    assert_ne!(key_a,key_b,"file identity must enter action identity");
+    assert_ne!(key_a, key_b, "file identity must enter action identity");
     store.pin("v3-test-action", &key_b).unwrap();
     store.pin("v3-test-checkpoint", &shared).unwrap();
     store.gc(Duration::ZERO).unwrap();
-    assert!(store.read_object(&linked).is_ok(),"topology survives through both action and checkpoint closures");
-    let forged = topology(vec![HardlinkGroup{paths_hex:vec![vec![hex::encode(b"a")],vec![hex::encode(b"missing")]]}]);
-    let invalid = store.put_checkpoint_v3(&CheckpointV3Manifest {
-        format_version:3,source:contract.source_root,environment:Some(contract.environment_root),parents:vec![],consistency:CheckpointConsistency::Quiesced,durability:Durability::Local,knowledge_cursor:0,view_root:view,profile,hardlinks:forged,
-    }).unwrap();
-    assert!(rudder_engine::workspace::build_input_view(store, &invalid).is_err(),"opaque blob retention cannot assert a valid topology");
+    assert!(
+        store.read_object(&linked).is_ok(),
+        "topology survives through both action and checkpoint closures"
+    );
+    let forged = topology(vec![HardlinkGroup {
+        paths_hex: vec![vec![hex::encode(b"a")], vec![hex::encode(b"missing")]],
+    }]);
+    let invalid = store
+        .put_checkpoint_v3(&CheckpointV3Manifest {
+            format_version: 3,
+            source: contract.source_root,
+            environment: Some(contract.environment_root),
+            parents: vec![],
+            consistency: CheckpointConsistency::Quiesced,
+            durability: Durability::Local,
+            knowledge_cursor: 0,
+            view_root: view,
+            profile,
+            hardlinks: forged,
+        })
+        .unwrap();
+    assert!(
+        rudder_engine::workspace::build_input_view(store, &invalid).is_err(),
+        "opaque blob retention cannot assert a valid topology"
+    );
 }

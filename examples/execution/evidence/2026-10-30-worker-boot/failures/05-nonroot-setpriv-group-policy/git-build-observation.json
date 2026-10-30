@@ -1,0 +1,10 @@
+{
+  "kind": "managed-byovm-preflight-failure",
+  "gitInstalled": true,
+  "gitVersion": "2.56.0",
+  "rootHomePassed": true,
+  "rootSailPassed": true,
+  "reason": "setpriv requires explicit group policy with --regid; nonroot path lacked --keep-groups",
+  "cleanupVerified": true,
+  "verifiedAt": "2026-10-30T17:57:41.092Z"
+}

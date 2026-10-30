@@ -30,6 +30,7 @@ mod decisions;
 mod mailbox;
 mod schema;
 mod runtime;
+mod vcs;
 
 pub use commands::{
     CommandReceipt, CommandRequest, CommandState, EffectClaim, Reconciliation, Recovery,
@@ -39,6 +40,11 @@ pub use decisions::{
 };
 pub use mailbox::{MailboxCursor, MessageEnvelope, MessageIntent, MessagePriority, MessageRequest};
 pub use runtime::{DiscoveredAgent, RuntimeObservation, RuntimePhase, RuntimeSnapshot, RUNTIME_MAX_AGE_MS};
+
+pub use vcs::{
+    PreparedVcsOperation, VcsIntentReceipt, VcsIntentRequest, VcsIntentState,
+    VcsPublicationObservation, VcsPublisher, VcsRunFence,
+};
 
 pub type TopicVersions = BTreeMap<String, u64>;
 
@@ -483,6 +489,25 @@ impl Journal {
             run_epoch: auth.grant.run_epoch,
             owner_epoch,
         };
+        tx.commit()?;
+        Ok(identity)
+    }
+
+    /// Read-only, exact-attempt authorization for the helper that owns a view.
+    /// This grants neither a checkpoint nor a new owner/scheduler. The scope
+    /// commits every workspace binding field, including profile and namespace.
+    pub fn authorize_workspace(&self, token: &str, binding: &crate::vfs::rpc::ObservationBinding, now_ms: i64) -> Result<CapabilityIdentity> {
+        binding.validate()?;
+        let scope = crate::execution::workspace_scope(binding)?;
+        let tx = self.conn.unchecked_transaction()?;
+        let auth = authenticate(&tx, token, now_ms)?;
+        authorize(&tx, &auth, "workspace:observe")?;
+        ensure!(auth.grant.scopes.contains(&scope), "workspace is outside capability");
+        let project = project_state(&tx, &auth.project)?;
+        ensure!(project.owner.owner_id == binding.owner.owner && project.owner.epoch == binding.owner.epoch, "workspace owner changed");
+        let instance: Option<String> = tx.query_row("SELECT instance_id FROM runs WHERE project_id=?1 AND run_id=?2", params![auth.project,auth.grant.run_id], |row| row.get(0))?;
+        ensure!(instance.as_deref() == Some(binding.attempt.execution_id.as_str()), "workspace execution attempt changed");
+        let identity = CapabilityIdentity { project_id: auth.project, principal: auth.grant.principal, run_id: auth.grant.run_id, run_epoch: auth.grant.run_epoch, owner_epoch: project.owner.epoch };
         tx.commit()?;
         Ok(identity)
     }

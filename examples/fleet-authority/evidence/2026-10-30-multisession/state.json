@@ -1,0 +1,26 @@
+{
+  "format_version": 1,
+  "name": "rudder-fleet-sql-20261030-9b68e4-r2",
+  "nonce": "7d17e8f3-be6f-4a61-9d16-8b5a5ac354f5",
+  "role": "fleet-sql-qualification",
+  "app": "rudder-workers-exla",
+  "output": "/workspace/fleet-sql-multisession-20261030-9b68e4-r2",
+  "sourceHashes": {
+    "docs/architecture/fleet-authority.md": "159365ea13d9a49c625fb8a2078b3ed4a2f6c2697a9ae70bfc6bf962f849afbe",
+    "examples/fleet-authority/schema.sql": "00be37c55bd40fbd10a4b0477a7391360c822860607e625d64c81b50727da75a",
+    "examples/fleet-authority/qualify.mjs": "334ab3a18eb93208236c42e0d5390cefe454bfa1d88c010fd1427b0f56a7ac45",
+    "examples/fleet-authority/qualify-protocol.sql": "b5c2bef25ed95c9e66554bf8257976997a62dc08d8038a5e65e7dbd199226cd2",
+    "examples/fleet-authority/qualify-guest.sh": "90fac918f2d417f8cba196bf0c0c93296f1e6bbf8a92443a97fcc3b596589123",
+    "documented-updates.sql": "c0dd48fbc2f66e75ad6141801bb55bfa8dceb97d88d122a9391fcdd7030cb220"
+  },
+  "sourceArchive": "/workspace/fleet-sql-multisession-20261030-9b68e4-r2/source.tar.gz",
+  "sourceArchiveSha256": "add521463a5068a5c4ef6126b55f6faf9111688d1ecc587b26bec7fb5156f693",
+  "image": {
+    "requested": "postgres:17-bookworm",
+    "indexDigest": "sha256:839fbb5a4942a7758dd93e18b42ea5649807491a0545b5eeeb8f0b8bb11857a5",
+    "platform": "linux/amd64",
+    "manifestDigest": "sha256:2cd2c0f809604aaeff6f0ec8f40aecbd025613107561015c69369a1a7f1d3416",
+    "image": "docker.io/library/postgres@sha256:2cd2c0f809604aaeff6f0ec8f40aecbd025613107561015c69369a1a7f1d3416",
+    "primaryDocumentation": "https://hub.docker.com/_/postgres"
+  }
+}

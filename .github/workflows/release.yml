@@ -35,18 +35,22 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Build native binary
-        run: cargo build --release --manifest-path native/Cargo.toml
+        run: |
+          cargo build --release --locked --manifest-path native/Cargo.toml --bin rudder-native
+          cargo build --release --locked -p rudder-vcs-bridge --features cli --bin rudder-jj
 
       - name: Stage native artifact
         run: |
           mkdir -p "native-dist/${{ matrix.key }}"
           cp target/release/rudder-native "native-dist/${{ matrix.key }}/rudder-native"
+          cp target/release/rudder-jj "native-dist/${{ matrix.key }}/rudder-jj"
           chmod 755 "native-dist/${{ matrix.key }}/rudder-native"
+          chmod 755 "native-dist/${{ matrix.key }}/rudder-jj"
 
       - uses: actions/upload-artifact@v4
         with:
           name: rudder-native-${{ matrix.key }}
-          path: native-dist/${{ matrix.key }}/rudder-native
+          path: native-dist/${{ matrix.key }}/
 
   publish:
     needs: native-artifacts
@@ -115,12 +119,18 @@ jobs:
       - name: Typecheck + JS tests
         run: |
           chmod +x prebuilt-native/rudder-native-darwin-arm64/rudder-native
+          chmod +x prebuilt-native/rudder-native-darwin-arm64/rudder-jj
+          prebuilt-native/rudder-native-darwin-arm64/rudder-jj --version
+          prebuilt-native/rudder-native-darwin-arm64/rudder-jj --help
           npm test
         env:
           RUDDER_NATIVE_BIN: ${{ github.workspace }}/prebuilt-native/rudder-native-darwin-arm64/rudder-native
 
       - name: Native tests
         run: cargo test --workspace
+
+      - name: Managed jj provider tests
+        run: cargo test -p rudder-vcs-bridge --features cli
 
       # Screen-level e2e: the REAL prebuilt dashboard binary in a real PTY,
       # driven by keystrokes via tui-integration-tests (which fetches its own

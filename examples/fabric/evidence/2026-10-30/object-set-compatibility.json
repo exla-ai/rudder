@@ -1,0 +1,22 @@
+{
+  "format_version": 1,
+  "verifiedAt": "2026-10-30T17:11:44.991544+00:00",
+  "old_package": "@exla/rudder@4.0.0-alpha.7",
+  "old_native_sha256": "091cc389c94537a88b626a69008671e075affaf61553afc49d9f01486476ae76",
+  "checks": {
+    "real_old_cli_refuses_schema2_before_gc": true,
+    "retained_object_unchanged": true,
+    "ack_survives_actual_abrupt_exit": true,
+    "old_exit_status": 1,
+    "old_error": "unsupported retention format"
+  },
+  "object_set_receipt": {
+    "format_version": 1,
+    "generation": 1,
+    "object_count": 1,
+    "pin_id": "crash",
+    "set_digest": "329d09dffa76462592a0d92782b86eb002164475063bea3d0e84e165c32fc6eb",
+    "staging_id": "b706ab21-ee4e-4a12-bdab-10358986ff20",
+    "total_bytes": 33
+  }
+}

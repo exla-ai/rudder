@@ -80,6 +80,7 @@ struct RpcRequest {
 enum RpcOperation {
     Store { request: StoreOperation },
     PinSource { root: ObjectRef },
+    PinPartialSource { receipt_json: String },
     UnpinSource { pin: String },
     Inventory { root: ObjectRef },
     ReadBinary { object: ObjectRef },
@@ -184,6 +185,14 @@ fn rpc() -> Result<()> {
                     request,
                 })?,
                 RpcOperation::PinSource { root } => json!({"owned_pin":session.pin_source(&root)?}),
+                RpcOperation::PinPartialSource { receipt_json } => {
+                    if receipt_json.len() > 64 * 1024 {
+                        bail!("partial receipt exceeds byte limit");
+                    }
+                    let record: rudder_engine::delta::PartialTreeReceipt =
+                        serde_json::from_str(&receipt_json)?;
+                    serde_json::to_value(session.pin_partial_source(&record)?)?
+                }
                 RpcOperation::UnpinSource { pin } => {
                     session.unpin_source(&pin)?;
                     json!({"released":true})

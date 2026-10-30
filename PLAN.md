@@ -161,6 +161,13 @@ databases are journals/replicas, not independent writers of one fleet truth.
 The current debounced SQLite-to-S3 backup path is not sufficient justification
 for acknowledging a new fleet decision as durably committed.
 
+The database deployment must preserve acknowledged commits and exclude stale
+writers during failover. SQL durability settings alone do not establish that
+provider contract. The [fleet authority design](docs/architecture/fleet-authority.md)
+defines the lease, transaction, migration and provider qualification gates.
+Fly compute can use a separately qualified PostgreSQL service; no database
+cutover is implied by the current prototype.
+
 A local-only project can designate its local engine as authority. Offline Mac
 work on a Cloud project records provisional events and branches; reconnect
 reconciles them explicitly. Offline operation does not silently create a second

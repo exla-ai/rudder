@@ -21,3 +21,24 @@ tempfile = "3"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 fuser = { version = "=0.18.0", default-features = false }
+
+# This is a disposable qualification tool, never an installed worker entrypoint.
+# Cargo supplies its exact executable to integration tests; stale hashed rlibs
+# from another checkout/build cannot silently become test dependencies.
+[[bin]]
+name = "rudder-vfs-qualifier"
+path = "src/bin/vfs_qualifier.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "rudder-execution-handoff-test"
+path = "tests/fixtures/handoff_child.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "rudder-vfs-remote-qualifier"
+path = "src/bin/vfs_remote_qualifier.rs"
+test = false
+bench = false

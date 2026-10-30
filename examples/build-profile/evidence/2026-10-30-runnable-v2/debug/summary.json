@@ -1,0 +1,535 @@
+{
+  "artifact_smoke": {
+    "rust_archive_valid": true,
+    "typescript_answer": 42
+  },
+  "cases": [
+    {
+      "case": "cold",
+      "environment_validation_ms": 25929,
+      "executed_actions": 2,
+      "frontend_ms": 2271,
+      "graph_reused_actions": 0,
+      "input_construction_ms": 1206,
+      "input_qualification": {
+        "stage_ms": {
+          "manifests": 2,
+          "prepared_fingerprint": 19,
+          "root_pinning": 1,
+          "source_projection": 32,
+          "topology": 0
+        },
+        "stats": {
+          "encoded_metadata_bytes": 15523,
+          "encoded_metadata_objects": 16,
+          "legacy_entries_scanned": 0,
+          "metadata_cache_hits": 54,
+          "metadata_read_bytes": 8190,
+          "metadata_reads": 10,
+          "namespace_steps": 27,
+          "topology_paths": 0
+        },
+        "total_ms": 56
+      },
+      "native_action_digests": [
+        {
+          "hash": "57389f2d2dbb70d8a6e0aed6a16fd5097ac983f8c09074051a85febc79320b06",
+          "size_bytes": 142
+        },
+        {
+          "hash": "734ef1ccfb8328a9a42916d0ff30e30c9ab4dbb03400e83fb1bb8dd2dcb91021",
+          "size_bytes": 142
+        }
+      ],
+      "prepared_output": {
+        "algorithm": "sha256",
+        "digest": "fce6f5a41de851ba2c1792d7764156e7dec1430e32d4682772d53d393be3bc4e",
+        "kind": "directory",
+        "size_bytes": 447
+      },
+      "remote_cache_hits": 0,
+      "run_receipt": {
+        "algorithm": "sha256",
+        "digest": "ec49351cd34bb319651cb26e51a68bd6de3f37ed14d52e34ebe2f2c4abc52339",
+        "kind": "action_result",
+        "size_bytes": 2623
+      },
+      "runnable_publication_ms": 1064,
+      "source_action_key": {
+        "algorithm": "sha256",
+        "digest": "64337bce6bf1a11f297e526bffabd997ddb627279ce199a62595704ae99cea24",
+        "kind": "action_key",
+        "size_bytes": 4688
+      },
+      "source_materialization_ms": 16,
+      "source_projection": {
+        "stage_ms": {
+          "source_projection": 30
+        },
+        "stats": {
+          "encoded_metadata_bytes": 15523,
+          "encoded_metadata_objects": 16,
+          "legacy_entries_scanned": 0,
+          "metadata_cache_hits": 19,
+          "metadata_read_bytes": 2881,
+          "metadata_reads": 2,
+          "namespace_steps": 9,
+          "topology_paths": 0
+        },
+        "total_ms": 66
+      },
+      "stage_ms": {
+        "action_index": 28,
+        "build_total": 46979,
+        "contract": 10814,
+        "environment_materialization": 25929,
+        "execution_guard_wait": 0,
+        "frontend_dispatch": 3327,
+        "preflight": 5641,
+        "result_capture": 17,
+        "run_receipt_publication": 1201,
+        "source_materialization": 16,
+        "workspace_setup": 2
+      },
+      "trace_id": "218b0aa7-e82b-4ced-8e9e-f6d25cec1d7d",
+      "wall_ms": 48186
+    },
+    {
+      "case": "warm-same-graph",
+      "environment_validation_ms": 28427,
+      "executed_actions": 0,
+      "frontend_ms": 174,
+      "graph_reused_actions": 2,
+      "input_construction_ms": 1579,
+      "input_qualification": {
+        "stage_ms": {
+          "manifests": 1,
+          "prepared_fingerprint": 18,
+          "root_pinning": 1,
+          "source_projection": 25,
+          "topology": 0
+        },
+        "stats": {
+          "encoded_metadata_bytes": 15523,
+          "encoded_metadata_objects": 16,
+          "legacy_entries_scanned": 0,
+          "metadata_cache_hits": 54,
+          "metadata_read_bytes": 8190,
+          "metadata_reads": 10,
+          "namespace_steps": 27,
+          "topology_paths": 0
+        },
+        "total_ms": 47
+      },
+      "native_action_digests": [],
+      "prepared_output": {
+        "algorithm": "sha256",
+        "digest": "fce6f5a41de851ba2c1792d7764156e7dec1430e32d4682772d53d393be3bc4e",
+        "kind": "directory",
+        "size_bytes": 447
+      },
+      "remote_cache_hits": 0,
+      "run_receipt": {
+        "algorithm": "sha256",
+        "digest": "20f9fd35e5ede4a36d40aa902aa5e008b900f7113ff49efe65576c18b3a93175",
+        "kind": "action_result",
+        "size_bytes": 2437
+      },
+      "runnable_publication_ms": 1419,
+      "source_action_key": {
+        "algorithm": "sha256",
+        "digest": "64337bce6bf1a11f297e526bffabd997ddb627279ce199a62595704ae99cea24",
+        "kind": "action_key",
+        "size_bytes": 4688
+      },
+      "source_materialization_ms": 4,
+      "source_projection": {
+        "stage_ms": {
+          "source_projection": 41
+        },
+        "stats": {
+          "encoded_metadata_bytes": 15523,
+          "encoded_metadata_objects": 16,
+          "legacy_entries_scanned": 0,
+          "metadata_cache_hits": 19,
+          "metadata_read_bytes": 2881,
+          "metadata_reads": 2,
+          "namespace_steps": 9,
+          "topology_paths": 0
+        },
+        "total_ms": 85
+      },
+      "stage_ms": {
+        "action_index": 35,
+        "build_total": 45349,
+        "contract": 11341,
+        "environment_materialization": 28427,
+        "execution_guard_wait": 0,
+        "frontend_dispatch": 856,
+        "preflight": 3336,
+        "result_capture": 25,
+        "run_receipt_publication": 1318,
+        "source_materialization": 4,
+        "workspace_setup": 2
+      },
+      "trace_id": "cb836473-99d7-4553-b6d3-6b7577f951f4",
+      "wall_ms": 46929
+    },
+    {
+      "case": "warm-same-graph-2",
+      "environment_validation_ms": 46861,
+      "executed_actions": 0,
+      "frontend_ms": 115,
+      "graph_reused_actions": 2,
+      "input_construction_ms": 1224,
+      "input_qualification": {
+        "stage_ms": {
+          "manifests": 1,
+          "prepared_fingerprint": 16,
+          "root_pinning": 2,
+          "source_projection": 26,
+          "topology": 0
+        },
+        "stats": {
+          "encoded_metadata_bytes": 15523,
+          "encoded_metadata_objects": 16,
+          "legacy_entries_scanned": 0,
+          "metadata_cache_hits": 54,
+          "metadata_read_bytes": 8190,
+          "metadata_reads": 10,
+          "namespace_steps": 27,
+          "topology_paths": 0
+        },
+        "total_ms": 47
+      },
+      "native_action_digests": [],
+      "prepared_output": {
+        "algorithm": "sha256",
+        "digest": "fce6f5a41de851ba2c1792d7764156e7dec1430e32d4682772d53d393be3bc4e",
+        "kind": "directory",
+        "size_bytes": 447
+      },
+      "remote_cache_hits": 0,
+      "run_receipt": {
+        "algorithm": "sha256",
+        "digest": "d1a4f0163ff5ee6b744743e7e186dbae4d6704832600e02f0333ed330981e8b2",
+        "kind": "action_result",
+        "size_bytes": 2437
+      },
+      "runnable_publication_ms": 1083,
+      "source_action_key": {
+        "algorithm": "sha256",
+        "digest": "64337bce6bf1a11f297e526bffabd997ddb627279ce199a62595704ae99cea24",
+        "kind": "action_key",
+        "size_bytes": 4688
+      },
+      "source_materialization_ms": 5,
+      "source_projection": {
+        "stage_ms": {
+          "source_projection": 27
+        },
+        "stats": {
+          "encoded_metadata_bytes": 15523,
+          "encoded_metadata_objects": 16,
+          "legacy_entries_scanned": 0,
+          "metadata_cache_hits": 19,
+          "metadata_read_bytes": 2881,
+          "metadata_reads": 2,
+          "namespace_steps": 9,
+          "topology_paths": 0
+        },
+        "total_ms": 67
+      },
+      "stage_ms": {
+        "action_index": 23,
+        "build_total": 62128,
+        "contract": 9821,
+        "environment_materialization": 46861,
+        "execution_guard_wait": 0,
+        "frontend_dispatch": 810,
+        "preflight": 3490,
+        "result_capture": 10,
+        "run_receipt_publication": 1092,
+        "source_materialization": 5,
+        "workspace_setup": 12
+      },
+      "trace_id": "2fdb1c9f-2d81-45db-9b11-b665840da53f",
+      "wall_ms": 63353
+    },
+    {
+      "case": "warm-same-graph-3",
+      "environment_validation_ms": 20248,
+      "executed_actions": 0,
+      "frontend_ms": 224,
+      "graph_reused_actions": 2,
+      "input_construction_ms": 1171,
+      "input_qualification": {
+        "stage_ms": {
+          "manifests": 1,
+          "prepared_fingerprint": 16,
+          "root_pinning": 2,
+          "source_projection": 24,
+          "topology": 0
+        },
+        "stats": {
+          "encoded_metadata_bytes": 15523,
+          "encoded_metadata_objects": 16,
+          "legacy_entries_scanned": 0,
+          "metadata_cache_hits": 54,
+          "metadata_read_bytes": 8190,
+          "metadata_reads": 10,
+          "namespace_steps": 27,
+          "topology_paths": 0
+        },
+        "total_ms": 45
+      },
+      "native_action_digests": [],
+      "prepared_output": {
+        "algorithm": "sha256",
+        "digest": "fce6f5a41de851ba2c1792d7764156e7dec1430e32d4682772d53d393be3bc4e",
+        "kind": "directory",
+        "size_bytes": 447
+      },
+      "remote_cache_hits": 0,
+      "run_receipt": {
+        "algorithm": "sha256",
+        "digest": "7ca03afbb1948c20bf096657a199f4479e66a41ba348ad97da4a1da09685f9f6",
+        "kind": "action_result",
+        "size_bytes": 2437
+      },
+      "runnable_publication_ms": 1053,
+      "source_action_key": {
+        "algorithm": "sha256",
+        "digest": "64337bce6bf1a11f297e526bffabd997ddb627279ce199a62595704ae99cea24",
+        "kind": "action_key",
+        "size_bytes": 4688
+      },
+      "source_materialization_ms": 3,
+      "source_projection": {
+        "stage_ms": {
+          "source_projection": 25
+        },
+        "stats": {
+          "encoded_metadata_bytes": 15523,
+          "encoded_metadata_objects": 16,
+          "legacy_entries_scanned": 0,
+          "metadata_cache_hits": 19,
+          "metadata_read_bytes": 2881,
+          "metadata_reads": 2,
+          "namespace_steps": 9,
+          "topology_paths": 0
+        },
+        "total_ms": 54
+      },
+      "stage_ms": {
+        "action_index": 44,
+        "build_total": 37950,
+        "contract": 11880,
+        "environment_materialization": 20248,
+        "execution_guard_wait": 0,
+        "frontend_dispatch": 1350,
+        "preflight": 3119,
+        "result_capture": 52,
+        "run_receipt_publication": 1247,
+        "source_materialization": 3,
+        "workspace_setup": 2
+      },
+      "trace_id": "1b4d0c16-9401-45f0-9877-5344fdeec4b6",
+      "wall_ms": 39121
+    },
+    {
+      "case": "fresh-graph-reapi-hit",
+      "environment_validation_ms": 20524,
+      "executed_actions": 0,
+      "frontend_ms": 416,
+      "graph_reused_actions": 0,
+      "input_construction_ms": 1406,
+      "input_qualification": {
+        "stage_ms": {
+          "manifests": 2,
+          "prepared_fingerprint": 15,
+          "root_pinning": 2,
+          "source_projection": 25,
+          "topology": 0
+        },
+        "stats": {
+          "encoded_metadata_bytes": 15523,
+          "encoded_metadata_objects": 16,
+          "legacy_entries_scanned": 0,
+          "metadata_cache_hits": 54,
+          "metadata_read_bytes": 8190,
+          "metadata_reads": 10,
+          "namespace_steps": 27,
+          "topology_paths": 0
+        },
+        "total_ms": 46
+      },
+      "native_action_digests": [
+        {
+          "hash": "57389f2d2dbb70d8a6e0aed6a16fd5097ac983f8c09074051a85febc79320b06",
+          "size_bytes": 142
+        },
+        {
+          "hash": "734ef1ccfb8328a9a42916d0ff30e30c9ab4dbb03400e83fb1bb8dd2dcb91021",
+          "size_bytes": 142
+        }
+      ],
+      "prepared_output": {
+        "algorithm": "sha256",
+        "digest": "fce6f5a41de851ba2c1792d7764156e7dec1430e32d4682772d53d393be3bc4e",
+        "kind": "directory",
+        "size_bytes": 447
+      },
+      "remote_cache_hits": 2,
+      "run_receipt": {
+        "algorithm": "sha256",
+        "digest": "96a22104686a9580b773d766da628ee39e82397992ed7ed674047fce2aa09ade",
+        "kind": "action_result",
+        "size_bytes": 2622
+      },
+      "runnable_publication_ms": 1259,
+      "source_action_key": {
+        "algorithm": "sha256",
+        "digest": "64337bce6bf1a11f297e526bffabd997ddb627279ce199a62595704ae99cea24",
+        "kind": "action_key",
+        "size_bytes": 4688
+      },
+      "source_materialization_ms": 20,
+      "source_projection": {
+        "stage_ms": {
+          "source_projection": 30
+        },
+        "stats": {
+          "encoded_metadata_bytes": 15523,
+          "encoded_metadata_objects": 16,
+          "legacy_entries_scanned": 0,
+          "metadata_cache_hits": 19,
+          "metadata_read_bytes": 2881,
+          "metadata_reads": 2,
+          "namespace_steps": 9,
+          "topology_paths": 0
+        },
+        "total_ms": 64
+      },
+      "stage_ms": {
+        "action_index": 27,
+        "build_total": 35960,
+        "contract": 9690,
+        "environment_materialization": 20524,
+        "execution_guard_wait": 0,
+        "frontend_dispatch": 1002,
+        "preflight": 3460,
+        "result_capture": 9,
+        "run_receipt_publication": 1221,
+        "source_materialization": 20,
+        "workspace_setup": 2
+      },
+      "trace_id": "8342d577-04d4-4651-8bb1-b778f34da5f9",
+      "wall_ms": 37366
+    },
+    {
+      "case": "source-edit",
+      "environment_validation_ms": 20717,
+      "executed_actions": 1,
+      "frontend_ms": 817,
+      "graph_reused_actions": 0,
+      "input_construction_ms": 1186,
+      "input_qualification": {
+        "stage_ms": {
+          "manifests": 1,
+          "prepared_fingerprint": 16,
+          "root_pinning": 2,
+          "source_projection": 24,
+          "topology": 0
+        },
+        "stats": {
+          "encoded_metadata_bytes": 15523,
+          "encoded_metadata_objects": 16,
+          "legacy_entries_scanned": 0,
+          "metadata_cache_hits": 54,
+          "metadata_read_bytes": 8190,
+          "metadata_reads": 10,
+          "namespace_steps": 27,
+          "topology_paths": 0
+        },
+        "total_ms": 45
+      },
+      "native_action_digests": [
+        {
+          "hash": "734ef1ccfb8328a9a42916d0ff30e30c9ab4dbb03400e83fb1bb8dd2dcb91021",
+          "size_bytes": 142
+        },
+        {
+          "hash": "fb198ef7d6ab04639e1bdaf202da4da2fc7df6cc994edddf0d75587302ffce9b",
+          "size_bytes": 142
+        }
+      ],
+      "prepared_output": {
+        "algorithm": "sha256",
+        "digest": "c54c2668b820e069f28e27c523c414a4c2fe4d8da110b90b24cac0b8290e6c2f",
+        "kind": "directory",
+        "size_bytes": 447
+      },
+      "remote_cache_hits": 1,
+      "run_receipt": {
+        "algorithm": "sha256",
+        "digest": "feafb1f7d70240e756660060548381f4b1668c0138795a1431bf6bd17a6a412d",
+        "kind": "action_result",
+        "size_bytes": 2622
+      },
+      "runnable_publication_ms": 1057,
+      "source_action_key": {
+        "algorithm": "sha256",
+        "digest": "c605e7c273960a38ecc880c8ae19719d23afacc40afb5c43208ee3959c6c882b",
+        "kind": "action_key",
+        "size_bytes": 4688
+      },
+      "source_materialization_ms": 17,
+      "source_projection": {
+        "stage_ms": {
+          "source_projection": 27
+        },
+        "stats": {
+          "encoded_metadata_bytes": 15523,
+          "encoded_metadata_objects": 16,
+          "legacy_entries_scanned": 0,
+          "metadata_cache_hits": 19,
+          "metadata_read_bytes": 2881,
+          "metadata_reads": 2,
+          "namespace_steps": 9,
+          "topology_paths": 0
+        },
+        "total_ms": 62
+      },
+      "stage_ms": {
+        "action_index": 33,
+        "build_total": 36343,
+        "contract": 9843,
+        "environment_materialization": 20717,
+        "execution_guard_wait": 0,
+        "frontend_dispatch": 1400,
+        "preflight": 3187,
+        "result_capture": 10,
+        "run_receipt_publication": 1129,
+        "source_materialization": 17,
+        "workspace_setup": 3
+      },
+      "trace_id": "d1b0f26d-84dc-4e90-8f44-2a587804e2b2",
+      "wall_ms": 37529
+    }
+  ],
+  "format_version": 1,
+  "layout": "runnable-root-v1/source-v2/environment-v2/directory-v2/file-v1",
+  "preparation_elapsed_ms": 75,
+  "preparation_mode": "retained-cas-index-reuse",
+  "scope": {
+    "cache_protocol": "native-gRPC-REAPI-v2",
+    "cold_definition": "empty frontend graph and REAPI action cache; existing CAS/index reuse explicitly recorded; OS page cache not flushed",
+    "linked_inputs_qualified": false,
+    "materialization": "eager streamed and fully reverified",
+    "remote_execution": false,
+    "rust_workload": "rlib; no binary linker claim",
+    "typescript_workload": "compiled JavaScript executed with prepared Node"
+  },
+  "verified_at_epoch_ms": 1793378725426
+}

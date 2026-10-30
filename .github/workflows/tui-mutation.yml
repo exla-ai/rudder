@@ -29,12 +29,12 @@ jobs:
           path: |
             target
             ~/.cargo/registry
-          key: mutation-${{ runner.os }}-${{ hashFiles('native/**/Cargo.toml') }}
+          key: mutation-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'native/Cargo.toml', 'engine/Cargo.toml', 'vcs-bridge/Cargo.toml') }}
 
       - run: npm ci
 
       - name: Build native (debug)
-        run: cargo build --manifest-path native/Cargo.toml
+        run: cargo build --locked --manifest-path native/Cargo.toml --bin rudder-native
 
       - name: Prefetch TUI driver
         run: node node_modules/tui-integration-tests/harness/fetch-driver.mjs

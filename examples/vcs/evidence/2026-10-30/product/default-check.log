@@ -1,0 +1,3 @@
+    Checking rudder-engine v0.1.0 (<REPOSITORY>/engine)
+    Checking rudder-vcs-bridge v0.1.0 (<REPOSITORY>/vcs-bridge)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 6.44s

@@ -2820,7 +2820,7 @@ pub(crate) fn write_rudder_context_with_history(
         .take(10)
         .collect::<Vec<_>>();
     if !instructions.is_empty() {
-        body.push_str("\n## Recent user instructions (newest first)\n");
+        body.push_str("\n## Recent user instructions (newest first)\n\nReference history; some requests belong to other runs. The current assignment sets your scope.\n");
         for instruction in instructions {
             body.push_str(&format!("- {}\n", preview_text(instruction, 200)));
         }

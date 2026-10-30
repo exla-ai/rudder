@@ -1,0 +1,36 @@
+{
+  "format_version": 1,
+  "kind": "post-proof-packaging-change",
+  "frozenDockerfile": {
+    "sha256": "108c8323fa28795ea2aa4c4c2742d2a65096c5b262b78104db911313dc016537",
+    "size_bytes": 8258
+  },
+  "currentDockerfile": {
+    "sha256": "89d10c13bb18310cd94a47faaa2b5a5035604c22189806384b997e94d0d4bfdd",
+    "size_bytes": 9098
+  },
+  "commands": [
+    "cargo build --release --locked -p rudder-native --bin rudder-native",
+    "cargo build --release --locked -p rudder-vcs-bridge --features cli --bin rudder-jj"
+  ],
+  "destinations": [
+    "/opt/rudder/dist/native/rudder-native",
+    "/opt/rudder/dist/native/rudder-jj"
+  ],
+  "stockJj": "/usr/local/bin/jj 0.40.0",
+  "managedDefaultChanged": false,
+  "fullImageBuildQualifiedByThisProof": false,
+  "cargoTargetMetadataValidated": true,
+  "frozenNativeAndControllerUnchanged": true,
+  "initialPairedPackagingDockerfile": {
+    "sha256": "f10a68bec1e688c06edae2174ff868358454130b41697a8dca2f039e2934c934",
+    "size_bytes": 8487
+  },
+  "dependencyCacheChange": {
+    "scope": "private BuildKit Cargo registry/git/release caches",
+    "sharing": "locked",
+    "workspaceArtifacts": "cargo clean --locked --release -p rudder-engine -p rudder-native -p rudder-vcs-bridge before each build",
+    "reason": "Source mtimes alone cannot authorize cached workspace binaries",
+    "imageQualificationPending": true
+  }
+}

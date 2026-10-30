@@ -1,0 +1,86 @@
+   Compiling syn v2.0.117
+   Compiling serde_core v1.0.228
+   Compiling getrandom v0.4.2
+   Compiling smallvec v1.15.1
+   Compiling syn v3.0.9
+   Compiling zerocopy v0.8.62
+   Compiling zerocopy-derive v0.8.62
+   Compiling ref-cast-impl v1.0.27
+   Compiling num_enum_derive v0.7.6
+   Compiling parking_lot_core v0.9.12
+   Compiling serde v1.0.228
+   Compiling winnow v1.0.4
+   Compiling toml_parser v1.1.5+spec-1.1.0
+   Compiling num_enum v0.7.6
+   Compiling digest v0.10.7
+   Compiling parking_lot v0.12.5
+   Compiling ref-cast v1.0.27
+   Compiling serde_derive v1.0.228
+   Compiling toml_datetime v1.1.2+spec-1.1.0
+   Compiling serde_spanned v1.1.2
+   Compiling toml_writer v1.1.3+spec-1.1.0
+   Compiling fuser v0.18.0
+   Compiling serde_json v1.0.149
+   Compiling toml v1.1.8+spec-1.1.0
+   Compiling sha2 v0.10.9
+   Compiling rusqlite v0.41.1
+   Compiling uuid v1.23.1
+   Compiling once_cell v1.21.4
+   Compiling rudder-engine v0.1.0 (<REPOSITORY>/engine)
+   Compiling tempfile v3.27.0
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 45.94s
+     Running tests/journal_durability.rs (<CARGO_TARGET_DIR>/debug/deps/journal_durability-ce361beb6aceb054)
+
+running 31 tests
+test authenticated_identity_receipts_and_topics_are_bound_to_exact_sender_attempt ... ok
+test acceptance_outbox_and_event_are_one_transaction ... ok
+test ack_holes_do_not_advance_cursor_but_other_recipient_sequence_gaps_do ... ok
+test capabilities_limit_scope_identity_discovery_and_epoch_on_every_agent_operation ... ok
+test decision_acceptance_is_idempotent_versioned_and_delegated ... ok
+test decision_invalidation_racing_integration_is_serialized_at_final_commit ... ok
+test duplicate_commands_preserve_receipt_result_and_canonical_payload ... ok
+test durable_journal_rejects_memory_uris_and_is_private_on_unix ... ok
+test command_receipts_survive_target_replacement_without_replaying_effects ... ok
+test expiry_and_explicit_skip_resolve_holes_without_erasing_history ... ok
+test explicit_safe_retry_receives_a_new_claim_and_rejects_old_completion ... ok
+test final_integration_checks_base_owner_relevant_versions_and_exact_roots ... ok
+test graceful_release_requires_explicit_new_fence_and_reminted_capabilities ... ok
+test informational_supersession_never_discards_conversations_or_other_authors ... ok
+test integration_head_race_has_one_commit_and_one_reverification_failure ... ok
+test irrelevant_topic_updates_do_not_block_integration_but_owner_changes_do ... ok
+test mailbox_send_intent_rolls_back_atomically_when_outbox_fails ... ok
+test observed_instance_changes_fence_same_engine_resumes_but_heartbeats_do_not ... ok
+test live_controls_are_rejected_before_dispatch_after_grant_sender_or_turn_changes ... ok
+test owner_transfer_fences_old_claims_tokens_and_target_epochs ... ok
+test project_recovery_does_not_mutate_other_projects ... ok
+test replies_are_durable_correlated_and_addressed_only_to_original_attempt ... ok
+test ready_projection_cannot_be_starved_by_stale_or_blocked_recovery_rows ... ok
+test schema_one_migration_preserves_receipts_and_rejects_unproven_legacy_live_effects ... ok
+test sender_message_receipts_do_not_reroute_into_a_replacement_recipient ... ok
+test simultaneous_duplicate_accepts_and_claims_have_one_winner ... ok
+test sqlite_integer_limits_fail_atomically_without_real_epoch_promotion ... ok
+test started_effect_is_uncertain_after_reopen_and_not_blindly_replayed ... ok
+test two_connections_cannot_accept_incompatible_same_topic_version ... ok
+test command_utf8_byte_quota_is_bounded_and_old_epoch_backlog_does_not_stall_new_attempt ... ok
+test bounded_mailbox_counts_bytes_and_expired_queues_release_capacity ... ok
+
+test result: ok. 31 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.89s
+
+     Running tests/journal_vcs.rs (<CARGO_TARGET_DIR>/debug/deps/journal_vcs-737196db662c3249)
+
+running 13 tests
+test ambiguous_outcome_blocks_legacy_integration_and_reconciles_without_replay ... ok
+test durable_intent_precedes_preparation_and_retains_exact_inputs_and_prepared_records ... ok
+test hard_process_crash_after_effect_preserves_started_and_current_owner_adopts_historical_fact ... ok
+test malformed_prepared_binding_and_missing_retention_never_attach ... ok
+test legacy_and_vcs_integrations_cannot_steal_each_others_idempotency_keys ... ok
+test publication_crash_child ... ok
+test decision_writer_is_serialized_until_external_effect_and_integration_receipt_commit ... ok
+test legacy_checkpoint_view_profile_and_available_topology_cannot_be_substituted ... ok
+test published_with_new_decisions_stays_uncertain_and_changed_heads_are_not_no_effect ... ok
+test projection_record_v2_requires_exact_preaccepted_typed_evidence_and_keeps_legacy_v1 ... ok
+test stored_runnable_source_environment_policy_view_profile_and_topology_must_match ... ok
+test successful_publication_and_receipts_survive_owner_and_source_restart_without_replay ... ok
+test stale_attempt_or_relevant_decision_rejects_before_external_start ... ok
+
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.29s

@@ -1,0 +1,25 @@
+{
+  "image": "debian:bookworm-slim",
+  "init": {
+    "exec": [
+      "/bin/sleep",
+      "1200"
+    ]
+  },
+  "guest": {
+    "cpu_kind": "shared",
+    "cpus": 1,
+    "memory_mb": 2048
+  },
+  "restart": {
+    "policy": "no"
+  },
+  "auto_destroy": true,
+  "services": [],
+  "mounts": [],
+  "env": {},
+  "metadata": {
+    "rudder_role": "vcs-rpc-qualification",
+    "qualification": "876af230-c7ed-4f34-a2e8-d89e6c96fd06"
+  }
+}

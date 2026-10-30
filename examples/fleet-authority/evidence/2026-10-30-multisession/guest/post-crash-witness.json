@@ -1,0 +1,1 @@
+{"at": "2026-10-30T20:25:03.472297+00:00", "receipt": {"engine": "e20f4522-a506-7b9a-17b6-c05e3ff4751d", "status": "accepted", "lease_id": "eea7e0d4-d559-7858-90e7-7e54595fe2e5", "lease_until": "2026-10-30T20:25:17.840325+00:00", "owner_epoch": 2, "project_seq": 1, "operation_id": "837bebfd-dc0c-c7d3-28a2-365a4661852b"}, "wal_lsn": "0/194E0F8"}

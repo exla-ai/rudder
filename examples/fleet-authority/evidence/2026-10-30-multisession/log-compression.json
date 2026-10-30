@@ -1,0 +1,89 @@
+{
+  "format_version": 1,
+  "purpose": "Lossless packaging of only whitespace-flagged raw logs",
+  "gzip_mtime": 0,
+  "decompressed_bytes_verified": true,
+  "frozen_guest_archive_bytes_verified": true,
+  "files": [
+    {
+      "original_path": "failures/01-fixture-permissions/guest/initdb.log",
+      "compressed_path": "failures/01-fixture-permissions/guest/initdb.log.gz",
+      "original_sha256": "e8c68df29701f35cd366545580d1b314337a0df045bce168451c87a17e775536",
+      "compressed_sha256": "d29818054698cf232fbad841c2661b6ae6e50278fe285dde7f84bd89084a1736",
+      "original_size_bytes": 910,
+      "compressed_size_bytes": 491
+    },
+    {
+      "original_path": "guest/acquire-a.log",
+      "compressed_path": "guest/acquire-a.log.gz",
+      "original_sha256": "bd97597fb46f8c8f866c19e3497125376b1e8d00d78219719fd812810316c6d6",
+      "compressed_sha256": "46695a0ea4311fe2fd1d69454bdfe15ff7b41e4c9e2c5cc27c8d78caa7f320eb",
+      "original_size_bytes": 661,
+      "compressed_size_bytes": 305
+    },
+    {
+      "original_path": "guest/candidate-setup.log",
+      "compressed_path": "guest/candidate-setup.log.gz",
+      "original_sha256": "2e6685d670a57e137eabad4d1faf7bf71377dd6aa397f4e7ba70418844b63edd",
+      "compressed_sha256": "601f946cbee666adebf7a37cf6440d797b54040679c8a8b3e78f8a52297c01cb",
+      "original_size_bytes": 386,
+      "compressed_size_bytes": 259
+    },
+    {
+      "original_path": "guest/clock-blocker.log",
+      "compressed_path": "guest/clock-blocker.log.gz",
+      "original_sha256": "1271438dc24dc365de30c71edb2eddee5b629df32a69baa402f4b42318a06444",
+      "compressed_sha256": "79577a5a8c339273cf406f0535d102226e087900ca93b8cc2e51c9add6b677f8",
+      "original_size_bytes": 827,
+      "compressed_size_bytes": 294
+    },
+    {
+      "original_path": "guest/expired-renew.log",
+      "compressed_path": "guest/expired-renew.log.gz",
+      "original_sha256": "a3e3a1daa9981cb2f6fce27391960e3ffb81cbc21588b0cf8f2e49e5569f163c",
+      "compressed_sha256": "77160ae174a8fb19fc500a5c46c33020345f781a079b1a2ad03b4f170567eea1",
+      "original_size_bytes": 949,
+      "compressed_size_bytes": 371
+    },
+    {
+      "original_path": "guest/head-a.log",
+      "compressed_path": "guest/head-a.log.gz",
+      "original_sha256": "a1713f451d5f79db07a6d4495116d731f004f5ea230b503a63a36c9e11ecfc46",
+      "compressed_sha256": "dc5095923b1b145e0eb1992e8998ba0b8558606216c000b929f24a52feae2388",
+      "original_size_bytes": 950,
+      "compressed_size_bytes": 375
+    },
+    {
+      "original_path": "guest/head-setup.log",
+      "compressed_path": "guest/head-setup.log.gz",
+      "original_sha256": "501e1ac6cf4dd705842e64a84aa1cfe2cd9be420ae838a9129446c606193a2c1",
+      "compressed_sha256": "4fcddaee3898ba36e2bd04044c2ea33bc24dcb2d5d059a449abe4e53e863dae2",
+      "original_size_bytes": 386,
+      "compressed_size_bytes": 261
+    },
+    {
+      "original_path": "guest/initdb.log",
+      "compressed_path": "guest/initdb.log.gz",
+      "original_sha256": "16dbd75a3ef597afbf42088fa245a2719f988328a32cf9e678228d17360ff15d",
+      "compressed_sha256": "11c1c06ba07818615beec00c971885aebe863b1a5a485758ebae05a5eeca2476",
+      "original_size_bytes": 910,
+      "compressed_size_bytes": 490
+    },
+    {
+      "original_path": "guest/topic-setup.log",
+      "compressed_path": "guest/topic-setup.log.gz",
+      "original_sha256": "c86a362a39737cd712bb290f68af60b5161663bde6063892cf2370818bb9b7ab",
+      "compressed_sha256": "dbff747882196ea933d9bd5661dc899151c113028d71c32cb90035b7482d49d9",
+      "original_size_bytes": 386,
+      "compressed_size_bytes": 262
+    },
+    {
+      "original_path": "guest/topic-writer.log",
+      "compressed_path": "guest/topic-writer.log.gz",
+      "original_sha256": "735990e4c42f7ef241d6ab8644fcdac74d5755bb191993a50b8904bf94d46a92",
+      "compressed_sha256": "1fd3a39b2a1274bf51a751c06ffab5cd2ae3d1749b81f2ca03dc0327486fbee8",
+      "original_size_bytes": 931,
+      "compressed_size_bytes": 366
+    }
+  ]
+}

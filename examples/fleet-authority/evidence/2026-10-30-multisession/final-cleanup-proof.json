@@ -1,0 +1,20 @@
+{
+  "observedAt": "2026-10-30T20:27:28.302Z",
+  "app": "rudder-workers-exla",
+  "method": "independent filtered machine inventory after runner completion",
+  "owned": [
+    {
+      "id": "8233e0b7242698",
+      "name": "rudder-fleet-sql-20261030-9b68e4-r2",
+      "idPresent": false,
+      "nameOrNoncePresent": false
+    },
+    {
+      "id": "867639fe1ed178",
+      "name": "rudder-fleet-sql-20261030-9b68e4",
+      "idPresent": false,
+      "nameOrNoncePresent": false
+    }
+  ],
+  "ok": true
+}

@@ -1,0 +1,11 @@
+{
+  "format_version": 1,
+  "verified_at": "2026-10-30T20:16:11.086571+00:00",
+  "source_manifest_sha256": "c9e0e30ed75f8c325c4b34f8f0ddab8bdab41643197e150e66c69ecff0b6f16f",
+  "qualified_source_manifest_sha256": "8fbf969b91e1150e839999aac68d2a354d16af8fb1f6def14e9bbf6671baed06",
+  "source_files_compared": 182,
+  "strict_allowlist_before_source_reads": true,
+  "checkout_matches_frozen_qualification": true,
+  "changed_files": [],
+  "source_archive_sha256": "eb6e74f27baa2a3631ec0918b76fa5ae80c312f6bbc32720a61deb0791489c00"
+}

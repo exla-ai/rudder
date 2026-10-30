@@ -1,0 +1,18 @@
+{
+  "format_version": 1,
+  "builtAtSourceRevision": "fbba64a5907862b6ca854f44c3b3664c2a8cafc1",
+  "workspace": "frozen uncommitted source snapshot; never a product deployment",
+  "source_file_count": 160,
+  "source_archive_sha256": "3617de38fa6d8a50e2cfe88dd77de297f5985a608455e42e369b3897b920870e",
+  "binary_sha256": "0b3ff8320ef4979ef0f55b220ef569b93b597a7a4990e6bcdc9d18c0f4e486e2",
+  "binary_bytes": 5810688,
+  "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)\nbinary: rustc\ncommit-hash: 58cf8f9c35b355199727627d07ae34a4e2846d67\ncommit-date: 2026-10-13\nhost: x86_64-unknown-linux-gnu\nrelease: 1.99.1\nLLVM version: 23.1.1",
+  "profile": "cargo test --release; thin LTO; codegen-units=1",
+  "runtime_fixture": "existing locally retained paged/chunked CAS/index; fresh frontend workspaces and REAPI service; OS page cache not flushed",
+  "scope": "Linux x86_64 Rust rlib and compiled TypeScript executed by prepared Node; no linker/general Cargo/remote-execution/cross-engine cache claim",
+  "archive_sanitation": {
+    "omitted_non_build_runtime_files": 1,
+    "compiled_source_changed": false,
+    "binary_changed": false
+  }
+}

@@ -4,6 +4,7 @@ import path from "node:path";
 
 const nativeBinaryBase = "rudder-native";
 const nativeBinaryName = process.platform === "win32" ? `${nativeBinaryBase}.exe` : nativeBinaryBase;
+const companionBinaryName = process.platform === "win32" ? "rudder-jj.exe" : "rudder-jj";
 const platformKey = `${process.platform}-${process.arch}`;
 const distNativeDir = path.join("dist", "native");
 
@@ -25,6 +26,11 @@ function copyCurrentBuild() {
     return false;
   }
   copyExecutable(src, path.join(distNativeDir, platformKey, nativeBinaryName));
+  const companion = path.join(path.dirname(src), companionBinaryName);
+  if (!fs.existsSync(companion)) {
+    throw new Error("Native build is missing rudder-jj; run npm run build-native.");
+  }
+  copyExecutable(companion, path.join(distNativeDir, platformKey, companionBinaryName));
   return true;
 }
 
@@ -53,7 +59,13 @@ function copyPrebuiltArtifacts() {
       continue;
     }
     const name = src.endsWith(".exe") ? "rudder-native.exe" : "rudder-native";
+    const companionName = src.endsWith(".exe") ? "rudder-jj.exe" : "rudder-jj";
+    const companion = path.join(path.dirname(src), companionName);
+    if (!fs.existsSync(companion)) {
+      throw new Error(`Native artifact ${key} is missing its rudder-jj companion.`);
+    }
     copyExecutable(src, path.join(distNativeDir, key, name));
+    copyExecutable(companion, path.join(distNativeDir, key, companionName));
     copied += 1;
   }
   return copied;

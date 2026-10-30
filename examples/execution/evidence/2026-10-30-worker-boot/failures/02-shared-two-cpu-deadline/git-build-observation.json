@@ -1,0 +1,12 @@
+{
+  "kind": "git-build-deadline",
+  "gitVersion": "2.56.0",
+  "buildDeadlineSeconds": 480,
+  "cpuKind": "shared",
+  "cpus": 2,
+  "exitCode": 124,
+  "binaryProduced": false,
+  "bootAssertionsRun": false,
+  "cleanupVerified": true,
+  "verifiedAt": "2026-10-30T17:41:02.006Z"
+}

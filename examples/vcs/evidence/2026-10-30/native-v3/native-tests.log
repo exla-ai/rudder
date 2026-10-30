@@ -1,0 +1,627 @@
+warning: use of deprecated method `std::sync::atomic::Atomic::<usize>::fetch_update`: renamed to `try_update` for consistency
+   --> native/src/pty_terminal.rs:113:14
+    |
+113 |             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+    |              ^^^^^^^^^^^^
+    |
+    = note: `#[warn(deprecated)]` on by default
+help: replace the use of the deprecated method
+    |
+113 -             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+113 +             .try_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+    |
+
+warning: use of deprecated method `std::sync::atomic::Atomic::<usize>::fetch_update`: renamed to `try_update` for consistency
+    --> native/src/pty_terminal.rs:1263:54
+     |
+1263 |                     let _ = self.queued_output_bytes.fetch_update(
+     |                                                      ^^^^^^^^^^^^
+     |
+help: replace the use of the deprecated method
+     |
+1263 -                     let _ = self.queued_output_bytes.fetch_update(
+1263 +                     let _ = self.queued_output_bytes.try_update(
+     |
+
+warning: `rudder-native` (lib) generated 2 warnings (run `cargo fix --lib -p rudder-native` to apply 2 suggestions)
+   Compiling rudder-native v0.1.0 (<QUALIFICATION_DIR>/frozen/native)
+warning: unnecessary parentheses around method argument
+   --> native/src/render.rs:469:16
+    |
+469 |     lines.push((Line::from(first)));
+    |                ^                 ^
+    |
+    = note: `#[warn(unused_parens)]` (part of `#[warn(unused)]`) on by default
+help: remove these parentheses
+    |
+469 -     lines.push((Line::from(first)));
+469 +     lines.push(Line::from(first));
+    |
+
+warning: unnecessary parentheses around method argument
+   --> native/src/render.rs:533:20
+    |
+533 |         lines.push((Line::from(status_line)));
+    |                    ^                       ^
+    |
+help: remove these parentheses
+    |
+533 -         lines.push((Line::from(status_line)));
+533 +         lines.push(Line::from(status_line));
+    |
+
+warning: unnecessary parentheses around method argument
+   --> native/src/render.rs:535:20
+    |
+535 |         lines.push((Line::from(status_head)));
+    |                    ^                       ^
+    |
+help: remove these parentheses
+    |
+535 -         lines.push((Line::from(status_head)));
+535 +         lines.push(Line::from(status_head));
+    |
+
+warning: unnecessary parentheses around method argument
+   --> native/src/render.rs:539:20
+    |
+539 |         lines.push((Line::from(model_line)));
+    |                    ^                      ^
+    |
+help: remove these parentheses
+    |
+539 -         lines.push((Line::from(model_line)));
+539 +         lines.push(Line::from(model_line));
+    |
+
+warning: unnecessary parentheses around method argument
+   --> native/src/render.rs:544:20
+    |
+544 |         lines.push((Line::from(integration_line)));
+    |                    ^                            ^
+    |
+help: remove these parentheses
+    |
+544 -         lines.push((Line::from(integration_line)));
+544 +         lines.push(Line::from(integration_line));
+    |
+
+warning: unnecessary parentheses around method argument
+   --> native/src/render.rs:549:20
+    |
+549 |         lines.push((Line::from(delivery_line)));
+    |                    ^                         ^
+    |
+help: remove these parentheses
+    |
+549 -         lines.push((Line::from(delivery_line)));
+549 +         lines.push(Line::from(delivery_line));
+    |
+
+warning: unnecessary parentheses around method argument
+   --> native/src/render.rs:557:20
+    |
+557 |         lines.push((Line::from(diff_line)));
+    |                    ^                     ^
+    |
+help: remove these parentheses
+    |
+557 -         lines.push((Line::from(diff_line)));
+557 +         lines.push(Line::from(diff_line));
+    |
+
+warning: unnecessary parentheses around method argument
+    --> native/src/render.rs:1067:20
+     |
+1067 |         lines.push((Line::default()));
+     |                    ^               ^
+     |
+help: remove these parentheses
+     |
+1067 -         lines.push((Line::default()));
+1067 +         lines.push(Line::default());
+     |
+
+warning: unnecessary parentheses around method argument
+    --> native/src/render.rs:1078:20
+     |
+1078 |         lines.push((Line::from(vec![
+     |                    ^
+...
+1090 |         ])));
+     |           ^
+     |
+help: remove these parentheses
+     |
+1078 ~         lines.push(Line::from(vec![
+1079 |             Span::styled(
+ ...
+1089 |             Span::styled(format!("  {chevron}"), muted_style(focused)),
+1090 ~         ]));
+     |
+
+warning: unnecessary parentheses around method argument
+    --> native/src/render.rs:1100:16
+     |
+1100 |     lines.push((Line::from(vec![
+     |                ^
+...
+1103 |     ])));
+     |       ^
+     |
+help: remove these parentheses
+     |
+1100 ~     lines.push(Line::from(vec![
+1101 |         Span::styled(header_label, header_style(focused)),
+1102 |         Span::styled(format!(" {}", members.len()), muted_style(focused)),
+1103 ~     ]));
+     |
+
+warning: unnecessary parentheses around method argument
+    --> native/src/render.rs:1184:16
+     |
+1184 |     lines.push((Line::from(line)));
+     |                ^                ^
+     |
+help: remove these parentheses
+     |
+1184 -     lines.push((Line::from(line)));
+1184 +     lines.push(Line::from(line));
+     |
+
+warning: unnecessary parentheses around method argument
+    --> native/src/render.rs:1268:20
+     |
+1268 |         lines.push((Line::default()));
+     |                    ^               ^
+     |
+help: remove these parentheses
+     |
+1268 -         lines.push((Line::default()));
+1268 +         lines.push(Line::default());
+     |
+
+warning: unnecessary parentheses around method argument
+    --> native/src/render.rs:1270:16
+     |
+1270 |     lines.push((Line::from(vec![
+     |                ^
+...
+1273 |     ])));
+     |       ^
+     |
+help: remove these parentheses
+     |
+1270 ~     lines.push(Line::from(vec![
+1271 |         Span::styled(Bucket::Todo.label(), header_style(focused)),
+1272 |         Span::styled(format!(" {}", nodes.len()), muted_style(focused)),
+1273 ~     ]));
+     |
+
+warning: unnecessary parentheses around method argument
+    --> native/src/render.rs:1277:20
+     |
+1277 |         lines.push((Line::from(Span::styled(
+     |                    ^
+...
+1280 |         ))));
+     |           ^
+     |
+help: remove these parentheses
+     |
+1277 ~         lines.push(Line::from(Span::styled(
+1278 |             "  type below to refine  ·  empty Enter approves",
+1279 |             Style::default().fg(ACCENT),
+1280 ~         )));
+     |
+
+warning: unnecessary parentheses around method argument
+    --> native/src/render.rs:1526:16
+     |
+1526 |     lines.push((Line::from(vec![
+     |                ^
+...
+1533 |     ])));
+     |       ^
+     |
+help: remove these parentheses
+     |
+1526 ~     lines.push(Line::from(vec![
+1527 |         Span::styled(marker, marker_style),
+ ...
+1532 |         ),
+1533 ~     ]));
+     |
+
+warning: unnecessary parentheses around method argument
+    --> native/src/render.rs:1584:16
+     |
+1584 |     lines.push((Line::from(vec![
+     |                ^
+...
+1591 |     ])));
+     |       ^
+     |
+help: remove these parentheses
+     |
+1584 ~     lines.push(Line::from(vec![
+1585 |         Span::raw("  "),
+ ...
+1590 |         Span::styled(phase, phase_style),
+1591 ~     ]));
+     |
+
+warning: unnecessary parentheses around method argument
+    --> native/src/render.rs:1659:13
+     |
+1659 |             (Line::from(vec![
+     |             ^
+...
+1665 |             ])),
+     |               ^
+     |
+help: remove these parentheses
+     |
+1659 ~             Line::from(vec![
+1660 |                 Span::styled("\u{2191} ", accent_style(focused)),
+ ...
+1664 |                 ),
+1665 ~             ]),
+     |
+
+warning: unnecessary parentheses around method argument
+    --> native/src/render.rs:1669:13
+     |
+1669 |             (Line::from(Span::styled(
+     |             ^
+...
+1672 |             ))),
+     |               ^
+     |
+help: remove these parentheses
+     |
+1669 ~             Line::from(Span::styled(
+1670 |                 "  npm i -g @exla/rudder",
+1671 |                 muted_style(focused),
+1672 ~             )),
+     |
+
+warning: unnecessary parentheses around method argument
+    --> native/src/render.rs:1686:13
+     |
+1686 |             (Line::from(vec![
+     |             ^
+...
+1696 |             ])),
+     |               ^
+     |
+help: remove these parentheses
+     |
+1686 ~             Line::from(vec![
+1687 |                 Span::styled("☁ ", cloud_style(app.cloud_connected, focused)),
+ ...
+1695 |                 ),
+1696 ~             ]),
+     |
+
+warning: unnecessary parentheses around method argument
+    --> native/src/render.rs:1701:13
+     |
+1701 |             (Line::from(vec![
+     |             ^
+...
+1707 |             ])),
+     |               ^
+     |
+help: remove these parentheses
+     |
+1701 ~             Line::from(vec![
+1702 |                 Span::styled("☁ ", cloud_style(app.cloud_connected, focused)),
+ ...
+1706 |                 ),
+1707 ~             ]),
+     |
+
+warning: unnecessary parentheses around method argument
+    --> native/src/render.rs:1719:16
+     |
+1719 |     lines.push((Line::default()));
+     |                ^               ^
+     |
+help: remove these parentheses
+     |
+1719 -     lines.push((Line::default()));
+1719 +     lines.push(Line::default());
+     |
+
+warning: unnecessary parentheses around method argument
+    --> native/src/render.rs:1740:20
+     |
+1740 |         lines.push((Line::from(Span::styled(
+     |                    ^
+...
+1743 |         ))));
+     |           ^
+     |
+help: remove these parentheses
+     |
+1740 ~         lines.push(Line::from(Span::styled(
+1741 |             "orchestrator",
+1742 |             header_style(focused),
+1743 ~         )));
+     |
+
+warning: unnecessary parentheses around method argument
+    --> native/src/render.rs:1749:20
+     |
+1749 |         lines.push((Line::default()));
+     |                    ^               ^
+     |
+help: remove these parentheses
+     |
+1749 -         lines.push((Line::default()));
+1749 +         lines.push(Line::default());
+     |
+
+warning: unnecessary parentheses around method argument
+    --> native/src/render.rs:1757:24
+     |
+1757 |             lines.push((Line::from(Span::styled(
+     |                        ^
+...
+1760 |             ))));
+     |               ^
+     |
+help: remove these parentheses
+     |
+1757 ~             lines.push(Line::from(Span::styled(
+1758 |                 "no agents yet  ·  type a task or /main",
+1759 |                 muted_style(focused),
+1760 ~             )));
+     |
+
+warning: unnecessary parentheses around method argument
+    --> native/src/render.rs:1778:24
+     |
+1778 |             lines.push((Line::from(vec![
+     |                        ^
+...
+1784 |             ])));
+     |               ^
+     |
+help: remove these parentheses
+     |
+1778 ~             lines.push(Line::from(vec![
+1779 |                 Span::styled(section_name, header_style(focused)),
+ ...
+1783 |                 ),
+1784 ~             ]));
+     |
+
+warning: unnecessary parentheses around method argument
+    --> native/src/render.rs:1871:24
+     |
+1871 |             lines.push((Line::from(Span::styled(
+     |                        ^
+...
+1874 |             ))));
+     |               ^
+     |
+help: remove these parentheses
+     |
+1871 ~             lines.push(Line::from(Span::styled(
+1872 |                 "no agents yet  ·  type a task or /main",
+1873 |                 muted_style(focused),
+1874 ~             )));
+     |
+
+warning: variable does not need to be mutable
+    --> native/src/fabric_runtime.rs:1125:9
+     |
+1125 |     let mut file = OpenOptions::new()
+     |         ----^^^^
+     |         |
+     |         help: remove this `mut`
+     |
+     = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `run_id`
+     --> native/src/main.rs:19394:17
+      |
+19394 |             let run_id = run.id.clone();
+      |                 ^^^^^^ help: if this is intentional, prefix it with an underscore: `_run_id`
+      |
+      = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `run_mode`
+     --> native/src/main.rs:19395:17
+      |
+19395 |             let run_mode = run.mode;
+      |                 ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_run_mode`
+
+warning: variable does not need to be mutable
+     --> native/src/app_tests.rs:25894:9
+      |
+25894 |     let mut drain = |screen: &mut vt100::Parser| {
+      |         ----^^^^^
+      |         |
+      |         help: remove this `mut`
+
+warning: constant `HOME_DELETE_LABEL_PREFIX` is never used
+   --> native/src/main.rs:317:7
+    |
+317 | const HOME_DELETE_LABEL_PREFIX: &str = "cloud home delete ";
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: variants `ChooseGamProvider`, `ChooseGamModel`, `ChooseGamGeneratorProvider`, and `ChooseGamGeneratorModel` are never constructed
+    --> native/src/main.rs:2773:5
+     |
+2758 | enum SuggestionAction {
+     |      ---------------- variants in this enum
+...
+2773 |     ChooseGamProvider(Backend),
+     |     ^^^^^^^^^^^^^^^^^
+2774 |     ChooseGamModel {
+     |     ^^^^^^^^^^^^^^
+...
+2780 |     ChooseGamGeneratorProvider(Backend),
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^
+2781 |     ChooseGamGeneratorModel {
+     |     ^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: `SuggestionAction` has a derived impl for the trait `Clone`, but this is intentionally ignored during dead code analysis
+
+warning: function `context_with_companion` is never used
+  --> native/src/workspace_vcs.rs:60:15
+   |
+60 | pub(crate) fn context_with_companion(
+   |               ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `GAM_REVIEWER_BACKENDS` is never used
+   --> native/src/models.rs:762:7
+    |
+762 | const GAM_REVIEWER_BACKENDS: [(Backend, &str); 2] =
+    |       ^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `GAM_GENERATOR_BACKENDS` is never used
+   --> native/src/models.rs:766:7
+    |
+766 | const GAM_GENERATOR_BACKENDS: [(Backend, &str); 3] = [
+    |       ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `gam_provider_rows` is never used
+   --> native/src/models.rs:775:4
+    |
+775 | fn gam_provider_rows() -> impl Iterator<Item = Suggestion> {
+    |    ^^^^^^^^^^^^^^^^^
+
+warning: function `gam_generator_provider_rows` is never used
+   --> native/src/models.rs:788:4
+    |
+788 | fn gam_generator_provider_rows() -> impl Iterator<Item = Suggestion> {
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `dashboard_gam_generator` is never used
+   --> native/src/models.rs:800:15
+    |
+800 | pub(crate) fn dashboard_gam_generator(app: &App) -> GamSide {
+    |               ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `gam_reviewer_suggestions` is never used
+   --> native/src/models.rs:824:15
+    |
+824 | pub(crate) fn gam_reviewer_suggestions(app: &App) -> Vec<Suggestion> {
+    |               ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `gam_generator_step_suggestions` is never used
+   --> native/src/models.rs:864:4
+    |
+864 | fn gam_generator_step_suggestions(app: &App, line: &str) -> Vec<Suggestion> {
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `gam_suggestions` is never used
+   --> native/src/models.rs:885:15
+    |
+885 | pub(crate) fn gam_suggestions(app: &App, rest: &str) -> Vec<Suggestion> {
+    |               ^^^^^^^^^^^^^^^
+
+warning: function `gam_picker_title` is never used
+   --> native/src/models.rs:950:15
+    |
+950 | pub(crate) fn gam_picker_title(input: &str, selected: usize, total: usize) -> String {
+    |               ^^^^^^^^^^^^^^^^
+
+warning: function `gam_provider_prefix_suggestions` is never used
+   --> native/src/models.rs:990:15
+    |
+990 | pub(crate) fn gam_provider_prefix_suggestions(query: &str) -> Vec<Suggestion> {
+    |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `gam_model_suggestions` is never used
+    --> native/src/models.rs:1011:15
+     |
+1011 | pub(crate) fn gam_model_suggestions(backend_filter: Backend, query: &str) -> Vec<Suggestion> {
+     |               ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `gam_generator_model_suggestions` is never used
+    --> native/src/models.rs:1025:15
+     |
+1025 | pub(crate) fn gam_generator_model_suggestions(
+     |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `gam_line_preview` is never used
+    --> native/src/models.rs:1043:15
+     |
+1043 | pub(crate) fn gam_line_preview(app: &App, input: &str) -> Option<String> {
+     |               ^^^^^^^^^^^^^^^^
+
+warning: method `path` is never used
+   --> native/src/attach.rs:259:19
+    |
+161 | impl AttachServer {
+    | ----------------- method in this implementation
+...
+259 |     pub(crate) fn path(&self) -> &Path {
+    |                   ^^^^
+
+warning: variant `RepoUnreadable` is never constructed
+  --> native/src/publish.rs:63:5
+   |
+54 | pub(crate) enum PublishBlocker {
+   |                 -------------- variant in this enum
+...
+63 |     RepoUnreadable(String),
+   |     ^^^^^^^^^^^^^^
+   |
+   = note: `PublishBlocker` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: function `gh_pr_list_argv` is never used
+   --> native/src/publish.rs:435:15
+    |
+435 | pub(crate) fn gh_pr_list_argv() -> Vec<String> {
+    |               ^^^^^^^^^^^^^^^
+
+warning: field `spawn_failed` is never read
+   --> native/src/publish.rs:814:16
+    |
+808 | pub(crate) struct BoundedOutput {
+    |                   ------------- field in this struct
+...
+814 |     pub(crate) spawn_failed: bool,
+    |                ^^^^^^^^^^^^
+    |
+    = note: `BoundedOutput` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: function `probe_publish_capability` is never used
+   --> native/src/publish.rs:902:15
+    |
+902 | pub(crate) fn probe_publish_capability(cwd: &Path) -> PublishState {
+    |               ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `wait_change` is never used
+     --> native/src/app_tests.rs:25546:8
+      |
+25546 |     fn wait_change(pane: &mut TerminalPane, before: &[String], timeout: Duration) -> bool {
+      |        ^^^^^^^^^^^
+
+warning: function `wait_change` is never used
+     --> native/src/app_tests.rs:25690:8
+      |
+25690 |     fn wait_change(pane: &mut TerminalPane, before: &[String], timeout: Duration) -> bool {
+      |        ^^^^^^^^^^^
+
+warning: `rudder-native` (bin "rudder-native" test) generated 53 warnings (run `cargo fix --bin "rudder-native" -p rudder-native --tests` to apply 30 suggestions)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1m 00s
+     Running unittests src/main.rs (<CARGO_TARGET_DIR>/debug/deps/rudder_native-16a7850e78ea6ef7)
+
+running 6 tests
+test workspace_vcs::tests::application_context_cannot_substitute_run_scope_cas_or_guest_runtime ... ok
+test workspace_vcs::tests::held_elf_descriptor_executes_exact_inode_after_image_path_replacement ... ok
+test workspace_vcs::tests::companion_resolution_requires_exact_sibling_and_never_uses_existing_service_binary ... ok
+test workspace_vcs::tests::protected_context_rejects_symlink_components_hardlinks_and_substituted_bytes ... ok
+test workspace_vcs::tests::sealed_context_is_immutable_canonical_hash_bound_and_private ... ok
+test workspace_vcs::tests::native_factory_uses_real_broker_scope_and_never_prepares_wc_before_rpc_ready ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 943 filtered out; finished in 0.57s

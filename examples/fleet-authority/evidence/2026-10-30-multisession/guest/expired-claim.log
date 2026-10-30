@@ -1,0 +1,2 @@
+INSERT INTO q_results(label,receipt) VALUES('expired-claim',q_claim('clock','b','boot-b',2,'replacement-claim'));
+INSERT 0 1

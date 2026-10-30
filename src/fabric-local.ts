@@ -8,9 +8,9 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { resolveNativeBinaryPath } from "./native-binary.js";
-import { FabricRemoteClient, FabricRemoteError, validateFabricReference, verifyFabricObject,
+import { FabricRemoteClient, FabricRemoteError, validateFabricReference, validateFabricPartialInventory, verifyFabricObject,
   type FabricLease, type FabricLocalReceipt, type FabricObjectRef,
-  type FabricTransferSource, type FabricTransferTarget } from "./fabric-remote.js";
+  type FabricPartialInventory, type FabricPartialSource, type FabricTransferSource, type FabricTransferTarget } from "./fabric-remote.js";
 
 const MAX_HEADER = 32 * 1024 * 1024;
 const MAX_REQUEST_HEADER = 256 * 1024;
@@ -23,7 +23,7 @@ export interface FabricLocalOptions { home?: string; nativeBinary?: string; env?
 interface Reply { result: Record<string, unknown>; bytes: Buffer }
 interface Pending { resolve: (reply: Reply) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> }
 
-export class FabricLocalClient implements FabricTransferSource, FabricTransferTarget {
+export class FabricLocalClient implements FabricTransferSource, FabricTransferTarget, FabricPartialSource {
   readonly pid: number | undefined;
   private readonly child: ChildProcessWithoutNullStreams;
   private readonly deadline: number;
@@ -123,6 +123,13 @@ export class FabricLocalClient implements FabricTransferSource, FabricTransferTa
     const { result } = await this.rpc({ operation: "pin_source", root });
     if (typeof result.owned_pin !== "string" || !/^transfer:rpc:[a-f0-9-]{36}$/.test(result.owned_pin) || this.ownedPins.has(result.owned_pin)) throw new FabricLocalError("invalid_response", "Native CAS did not allocate a new private transfer pin");
     this.ownedPins.add(result.owned_pin); return result.owned_pin;
+  }
+  async pinPartial(receiptJson: string): Promise<FabricPartialInventory> {
+    if (typeof receiptJson !== "string" || Buffer.byteLength(receiptJson) > 64 * 1024) throw new FabricLocalError("invalid_receipt", "Partial receipt exceeds its byte limit");
+    const { result } = await this.rpc({ operation: "pin_partial_source", receipt_json: receiptJson });
+    const inventory = validateFabricPartialInventory(result);
+    if (this.ownedPins.has(inventory.owned_pin)) throw new FabricLocalError("invalid_response", "Native CAS reused a transfer pin");
+    this.ownedPins.add(inventory.owned_pin); return inventory;
   }
   async unpin(pin: string): Promise<void> {
     if (!this.ownedPins.has(pin)) throw new FabricLocalError("invalid_pin", "Pin is outside this transfer connection");

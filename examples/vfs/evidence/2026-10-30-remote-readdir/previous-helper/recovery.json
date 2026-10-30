@@ -1,0 +1,17 @@
+{
+  "format_version": 1,
+  "run": "153d602c-3a92-40b1-a755-b5133a5ec87a",
+  "source_manifest_sha256": "c9e0e30ed75f8c325c4b34f8f0ddab8bdab41643197e150e66c69ecff0b6f16f",
+  "frozen_allowlisted_files": 178,
+  "frozen_source_unchanged": true,
+  "current_source_matched_at_recovery": true,
+  "prior_qualifier_build_did_not_finish": true,
+  "preexisting_driver_build_sha": "unrecorded",
+  "preexisting_driver_used": false,
+  "preexisting_vfs_canary_machines": 0,
+  "resumed_attempt_failed_before_compile_due_to_local_workspace_enospc": true,
+  "abandoned_qualifier_link_objects_removed": 64,
+  "reclaimed_qualifier_object_bytes": 7567288,
+  "source_freeze_replaced": false,
+  "product_source_changed": false
+}

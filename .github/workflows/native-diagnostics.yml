@@ -18,18 +18,22 @@ jobs:
       - name: Compile the exact native test fixture
         timeout-minutes: 20
         run: |
-          cargo test -p rudder-native --bin rudder-native --no-run --message-format=json > native-diagnostic-build.jsonl
+          cargo test -p rudder-native --no-run --message-format=json > native-diagnostic-build.jsonl
           python3 - <<'PY'
           import json
           from pathlib import Path
           binaries = []
+          libraries = []
           for line in Path('native-diagnostic-build.jsonl').read_text().splitlines():
               item = json.loads(line)
               if item.get('reason') == 'compiler-artifact' and item.get('profile', {}).get('test') and item.get('target', {}).get('name') == 'rudder-native' and item.get('executable'):
                   binaries.append(item['executable'])
-          if len(binaries) != 1:
-              raise SystemExit(f'expected one native test binary, found {len(binaries)}')
+              if item.get('reason') == 'compiler-artifact' and item.get('profile', {}).get('test') and item.get('target', {}).get('name') == 'rudder_native' and item.get('executable'):
+                  libraries.append(item['executable'])
+          if len(binaries) != 1 or len(libraries) != 1:
+              raise SystemExit(f'expected one native binary/library fixture, found {len(binaries)}/{len(libraries)}')
           Path('native-diagnostic-binary.txt').write_text(binaries[0])
+          Path('native-diagnostic-library.txt').write_text(libraries[0])
           PY
           cat > native-diagnostic-runner.py <<'PY'
           import os
@@ -39,7 +43,10 @@ jobs:
           from pathlib import Path
 
           test_filter, prefix, *extra = sys.argv[1:]
-          executable = Path('native-diagnostic-binary.txt').read_text()
+          use_library = '--library' in extra
+          if use_library:
+              extra.remove('--library')
+          executable = Path('native-diagnostic-library.txt' if use_library else 'native-diagnostic-binary.txt').read_text()
           command = [executable, test_filter, '--nocapture', '--test-threads=1', *extra]
           log = Path(prefix + '.log')
           sample = Path(prefix + '.sample.txt')
@@ -75,6 +82,12 @@ jobs:
         run: |
           python3 native-diagnostic-runner.py agent_broker::tests:: native-broker
 
+      - name: Verify PTY teardown and final-output library regressions
+        if: always()
+        timeout-minutes: 5
+        run: |
+          python3 native-diagnostic-runner.py pty_terminal::tests:: native-pty --library
+
       - name: Preserve bounded phase trace and stack sample
         if: always()
         uses: actions/upload-artifact@v4
@@ -85,4 +98,6 @@ jobs:
             native-diagnostic.sample.txt
             native-broker.log
             native-broker.sample.txt
+            native-pty.log
+            native-pty.sample.txt
           if-no-files-found: ignore

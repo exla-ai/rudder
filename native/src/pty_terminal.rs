@@ -10,15 +10,239 @@ use std::borrow::Cow;
 use std::fmt;
 use std::io::{Read, Write};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 
 use crate::term_colors::{colors_generation, theme_change_report, QueryScanner};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 const EXIT_OUTPUT_GRACE: Duration = Duration::from_secs(2);
+const MAX_OWNED_PTY_CHILDREN: usize = 512;
+const REAP_POLL_INTERVAL: Duration = Duration::from_millis(10);
+
+#[derive(Default)]
+struct ReapObservation {
+    status: Option<portable_pty::ExitStatus>,
+    error: Option<String>,
+}
+
+/// Initialized before any child is created. Admission includes live children
+/// and queued teardown; an uninterruptible child cannot grow this queue forever.
+/// The worker owns every queued handle until a nonblocking wait proves reaping.
+struct ChildReaper {
+    jobs: Mutex<Vec<ReapJob>>,
+    wake: Condvar,
+    admitted: AtomicUsize,
+    limit: usize,
+    closing: AtomicBool,
+}
+struct ChildReservation {
+    reaper: Arc<ChildReaper>,
+}
+impl Drop for ChildReservation {
+    fn drop(&mut self) {
+        self.reaper.admitted.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+struct ReapJob {
+    child: Box<dyn Child + Send + Sync>,
+    observation: Arc<Mutex<ReapObservation>>,
+    _reservation: ChildReservation,
+}
+impl ChildReaper {
+    fn start(limit: usize) -> std::io::Result<Arc<Self>> {
+        let mut jobs = Vec::new();
+        jobs.try_reserve_exact(limit)
+            .map_err(std::io::Error::other)?;
+        let reaper = Arc::new(Self {
+            jobs: Mutex::new(jobs),
+            wake: Condvar::new(),
+            admitted: AtomicUsize::new(0),
+            limit,
+            closing: AtomicBool::new(false),
+        });
+        let worker = reaper.clone();
+        // The worker has no App reference, scheduler, credentials or callbacks.
+        // Its handle is deliberately detached; no UI path joins it.
+        thread::Builder::new()
+            .name("rudder-pty-reaper".into())
+            .spawn(move || worker.run())?;
+        Ok(reaper)
+    }
+    fn reserve(self: &Arc<Self>) -> Result<ChildReservation> {
+        self.admitted
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+                (count < self.limit).then(|| count + 1)
+            })
+            .map_err(|_| {
+                anyhow!("PTY child limit reached; waiting for owned children to be reaped")
+            })?;
+        Ok(ChildReservation {
+            reaper: self.clone(),
+        })
+    }
+    fn run(&self) {
+        loop {
+            let mut jobs = self
+                .jobs
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            while jobs.is_empty() {
+                if self.closing.load(Ordering::Acquire) {
+                    return;
+                }
+                jobs = self
+                    .wake
+                    .wait(jobs)
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+            }
+            let mut index = 0;
+            while index < jobs.len() {
+                // A bad child cannot take down the owner of other child handles.
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    jobs[index].child.try_wait()
+                }));
+                match result {
+                    Ok(Ok(Some(status))) => {
+                        let job = jobs.swap_remove(index);
+                        drop(job.child);
+                        drop(job._reservation);
+                        let mut observed =
+                            job.observation.lock().unwrap_or_else(|p| p.into_inner());
+                        observed.status = Some(status);
+                        observed.error = None;
+                        drop(observed);
+                        continue;
+                    }
+                    Ok(Ok(None)) => {}
+                    Ok(Err(error)) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                    error => {
+                        let message = match error {
+                            Ok(Err(error)) => error.to_string(),
+                            _ => "PTY child status polling failed".to_string(),
+                        };
+                        jobs[index]
+                            .observation
+                            .lock()
+                            .unwrap_or_else(|p| p.into_inner())
+                            .error = Some(message);
+                        // Keep ownership and admission; an error is not reaping.
+                    }
+                }
+                index += 1;
+            }
+            drop(jobs);
+            thread::sleep(REAP_POLL_INTERVAL);
+        }
+    }
+}
+fn child_reaper() -> Result<&'static Arc<ChildReaper>> {
+    static REAPER: OnceLock<std::result::Result<Arc<ChildReaper>, String>> = OnceLock::new();
+    REAPER
+        .get_or_init(|| {
+            ChildReaper::start(MAX_OWNED_PTY_CHILDREN).map_err(|error| error.to_string())
+        })
+        .as_ref()
+        .map_err(|error| anyhow!("cannot initialize PTY child reaper: {error}"))
+}
+
+/// Own the child even if a later PTY initialization step fails. Normal polls
+/// remain direct WNOHANG calls; only explicit/implicit teardown queues a handle.
+struct OwnedPtyChild {
+    child: Option<Box<dyn Child + Send + Sync>>,
+    reservation: Option<ChildReservation>,
+    pending: Option<Arc<Mutex<ReapObservation>>>,
+    pid: Option<u32>,
+    status: Option<portable_pty::ExitStatus>,
+}
+impl OwnedPtyChild {
+    fn new(child: Box<dyn Child + Send + Sync>, reservation: ChildReservation) -> Self {
+        Self {
+            pid: child.process_id(),
+            child: Some(child),
+            reservation: Some(reservation),
+            pending: None,
+            status: None,
+        }
+    }
+    fn try_wait(&mut self) -> std::io::Result<Option<portable_pty::ExitStatus>> {
+        if let Some(status) = &self.status {
+            return Ok(Some(status.clone()));
+        }
+        let status = if let Some(child) = self.child.as_mut() {
+            child.try_wait()?
+        } else if let Some(pending) = &self.pending {
+            let observed = pending.lock().unwrap_or_else(|p| p.into_inner());
+            if let Some(error) = &observed.error {
+                return Err(std::io::Error::other(error.clone()));
+            }
+            observed.status.clone()
+        } else {
+            None
+        };
+        if let Some(status) = &status {
+            self.status = Some(status.clone());
+            self.reservation.take();
+        }
+        Ok(status)
+    }
+    fn process_id(&self) -> Option<u32> {
+        if self.status.is_some()
+            || self.pending.as_ref().is_some_and(|pending| {
+                pending
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .status
+                    .is_some()
+            })
+        {
+            None
+        } else {
+            self.pid
+        }
+    }
+    fn request_termination(&mut self) {
+        if self.child.is_none() {
+            return;
+        }
+        if matches!(self.try_wait(), Ok(Some(_))) {
+            self.child.take();
+            return;
+        }
+        let mut child = self.child.take().expect("owned PTY child");
+        #[cfg(unix)]
+        if let Some(pid) = self.pid.filter(|pid| *pid > 1) {
+            // The unreaped child still reserves its PID. Invalidate controls
+            // before this method; never signal an already reaped/reused PID.
+            unsafe {
+                libc::kill(-(pid as libc::pid_t), libc::SIGTERM);
+                libc::kill(-(pid as libc::pid_t), libc::SIGKILL);
+            }
+        }
+        let _ = child.kill();
+        let reservation = self.reservation.take().expect("live child admission");
+        let reaper = reservation.reaper.clone();
+        let observation = Arc::new(Mutex::new(ReapObservation::default()));
+        self.pending = Some(observation.clone());
+        reaper
+            .jobs
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .push(ReapJob {
+                child,
+                observation,
+                _reservation: reservation,
+            });
+        reaper.wake.notify_one();
+    }
+}
+impl Drop for OwnedPtyChild {
+    fn drop(&mut self) {
+        self.request_termination();
+    }
+}
 
 /// Wait only on the reader thread, with a bounded timeout so an inherited slave
 /// cannot keep a stopped pane's reader alive. Darwin's poll does not reliably
@@ -260,7 +484,7 @@ pub struct TerminalPane {
     agent_link_launch_json: Option<String>,
     before_terminate: Option<Arc<dyn Fn() + Send + Sync>>,
     master: Box<dyn MasterPty + Send>,
-    child: Box<dyn Child + Send + Sync>,
+    child: OwnedPtyChild,
     /// Shared with the reader thread, which answers the agent's color queries.
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
     /// The agent asked for mode 2031 (appearance-change reports).
@@ -701,6 +925,9 @@ impl TerminalPane {
         command: Option<TerminalCommand>,
         options: TerminalPaneOptions,
     ) -> Result<Self> {
+        // Reserve ownership and start the reaper before a fallible spawn can
+        // leave a real child behind. Teardown never needs to spawn a thread.
+        let child_reservation = child_reaper()?.reserve()?;
         let instance_id = command
             .as_ref()
             .and_then(|cmd| {
@@ -737,6 +964,7 @@ impl TerminalPane {
             .slave
             .spawn_command(builder)
             .context("failed to spawn command in PTY")?;
+        let child = OwnedPtyChild::new(child, child_reservation);
         drop(pair.slave);
 
         let mut reader = pair
@@ -901,6 +1129,9 @@ impl TerminalPane {
         if self.output_only {
             return Err(anyhow!("command finished; retained output is read-only"));
         }
+        if self.terminated {
+            return Err(anyhow!("process teardown requested; input unavailable"));
+        }
         let write_result = match self.writer.lock() {
             Ok(mut writer) => writer.write_all(bytes).and_then(|()| writer.flush()),
             Err(_) => Err(std::io::Error::other("PTY writer lock poisoned")),
@@ -935,7 +1166,7 @@ impl TerminalPane {
         match self.try_wait() {
             Ok(None) => true,
             Ok(Some(_)) => false,
-            Err(_) => false,
+            Err(_) => self.child.process_id().is_some(),
         }
     }
 
@@ -1398,7 +1629,7 @@ impl TerminalPane {
     }
 
     pub fn child_process_id(&self) -> Option<u32> {
-        if self.terminated || self.exit_observed.is_some() {
+        if self.exit_observed.is_some() {
             None
         } else {
             self.child.process_id()
@@ -1454,10 +1685,10 @@ impl TerminalPane {
         self.drain_output();
     }
 
-    /// Explicitly terminate and reap the PTY process group. Lifecycle callers
-    /// use this instead of relying on Drop so the state transition and process
-    /// teardown happen in a visible, deterministic order.
-    pub fn terminate_and_wait(&mut self) {
+    /// Invalidate controls and request process-group teardown without waiting
+    /// on the actor. `try_wait`/`child_process_id` report actual reaping, which
+    /// can remain pending while the OS finishes draining a terminal.
+    pub fn request_termination(&mut self) {
         self.terminate_child();
     }
 }
@@ -1740,16 +1971,12 @@ impl TerminalPane {
 
 impl Drop for TerminalPane {
     fn drop(&mut self) {
-        self.reader_stop.store(true, Ordering::Release);
         self.terminate_child();
-        // An inherited slave can delay EOF. Never join a still-running reader
-        // on the App actor: the bounded readiness wait closes its handles even if a
-        // silent descendant outlives its group. Finished threads are reaped.
-        if let Some(handle) = self.reader_thread.take() {
-            if handle.is_finished() {
-                let _ = handle.join();
-            }
-        }
+        self.reader_stop.store(true, Ordering::Release);
+        // An inherited slave can delay EOF. Never join a reader on the App
+        // actor. Its bounded readiness wait closes the remaining master handles;
+        // Darwin can then finish ttywait and the reserved reaper proves exit.
+        self.reader_thread.take();
     }
 }
 
@@ -1780,14 +2007,15 @@ pub fn describe_exit_code(code: u32) -> String {
 }
 
 impl TerminalPane {
-    /// Tear down the spawned agent and everything it spawned, then reap it.
+    /// Invalidate controls and request teardown; never wait on the actor.
     ///
     /// `portable-pty` runs `setsid()` in the child's `pre_exec`, so the child
     /// is a session/process-group leader and its pgid equals its pid. Signaling
-    /// the negative pgid hits the agent *and* its descendants (tool shells, MCP
-    /// servers, `node`), which otherwise orphan and keep holding the jj/git
-    /// workspace and the slave PTY open. We must also `wait()` the direct child
-    /// or it lingers as a zombie for the lifetime of the process.
+    /// the group is safe while the unreaped leader reserves its PID. After
+    /// leader reaping we do not signal its numeric PID again. Closing the PTY
+    /// supplies hangup, but does not prove stubborn/detached descendants stopped.
+    /// The reserved reaper owns the direct child until actual wait proof; that
+    /// proof alone is never sufficient for checkpoint/writer quiescence.
     fn terminate_child(&mut self) {
         if let Some(callback) = self.before_terminate.take() {
             callback();
@@ -1796,26 +2024,7 @@ impl TerminalPane {
             return;
         }
         self.terminated = true;
-        #[cfg(unix)]
-        {
-            if let Some(pid) = self.child.process_id() {
-                if pid > 1 {
-                    let pgid = pid as libc::pid_t;
-                    // SAFETY: a plain kill(2) on a process-group id; no memory
-                    // is touched. Errors (group already gone) are ignored.
-                    unsafe {
-                        libc::kill(-pgid, libc::SIGTERM);
-                        libc::kill(-pgid, libc::SIGKILL);
-                    }
-                }
-            }
-        }
-        let _ = self.child.kill();
-        if let Ok(status) = self.child.wait() {
-            if self.exit_observed.is_none() {
-                self.exit_observed = Some((status, Instant::now()));
-            }
-        }
+        self.child.request_termination();
     }
 }
 
@@ -1876,6 +2085,176 @@ fn default_shell() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct TestReaper(Arc<ChildReaper>);
+    impl Drop for TestReaper {
+        fn drop(&mut self) {
+            self.0.closing.store(true, Ordering::Release);
+            self.0.wake.notify_all();
+        }
+    }
+    #[derive(Debug)]
+    struct FakeChild {
+        ready: Arc<AtomicBool>,
+        polls: Arc<AtomicUsize>,
+        kills: Arc<AtomicUsize>,
+        fail_poll: Option<usize>,
+    }
+    impl portable_pty::ChildKiller for FakeChild {
+        fn kill(&mut self) -> std::io::Result<()> {
+            self.kills.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+        fn clone_killer(&self) -> Box<dyn portable_pty::ChildKiller + Send + Sync> {
+            Box::new(Self {
+                ready: self.ready.clone(),
+                polls: self.polls.clone(),
+                kills: self.kills.clone(),
+                fail_poll: None,
+            })
+        }
+    }
+    impl Child for FakeChild {
+        fn try_wait(&mut self) -> std::io::Result<Option<portable_pty::ExitStatus>> {
+            let poll = self.polls.fetch_add(1, Ordering::SeqCst);
+            if self.fail_poll == Some(poll) {
+                return Err(std::io::Error::other("fixture wait failure"));
+            }
+            Ok(self
+                .ready
+                .load(Ordering::SeqCst)
+                .then(|| portable_pty::ExitStatus::with_exit_code(17)))
+        }
+        fn wait(&mut self) -> std::io::Result<portable_pty::ExitStatus> {
+            panic!("blocking child wait is forbidden");
+        }
+        // Zero is an observation-only fixture ID; never signal a real process.
+        fn process_id(&self) -> Option<u32> {
+            Some(0)
+        }
+        #[cfg(windows)]
+        fn as_raw_handle(&self) -> Option<std::os::windows::io::RawHandle> {
+            None
+        }
+    }
+    fn fake_child(
+        reaper: &Arc<ChildReaper>,
+        fail_poll: Option<usize>,
+    ) -> (OwnedPtyChild, Arc<AtomicBool>, Arc<AtomicUsize>) {
+        let ready = Arc::new(AtomicBool::new(false));
+        let kills = Arc::new(AtomicUsize::new(0));
+        let child = FakeChild {
+            ready: ready.clone(),
+            polls: Arc::new(AtomicUsize::new(0)),
+            kills: kills.clone(),
+            fail_poll,
+        };
+        (
+            OwnedPtyChild::new(Box::new(child), reaper.reserve().unwrap()),
+            ready,
+            kills,
+        )
+    }
+
+    #[test]
+    fn reaper_admission_includes_live_and_pending_children_and_releases_only_on_proof() {
+        let reaper = TestReaper(ChildReaper::start(2).unwrap());
+        let (mut child, ready, kills) = fake_child(&reaper.0, None);
+        let unused = reaper.0.reserve().unwrap();
+        assert!(reaper.0.reserve().is_err());
+        let started = Instant::now();
+        child.request_termination();
+        assert!(started.elapsed() < Duration::from_millis(200));
+        assert_eq!(child.process_id(), Some(0), "a kill request is not reaping");
+        assert!(child.try_wait().unwrap().is_none());
+        assert!(
+            reaper.0.reserve().is_err(),
+            "pending child retains its slot"
+        );
+        child.request_termination();
+        assert_eq!(
+            kills.load(Ordering::SeqCst),
+            1,
+            "teardown cannot signal twice"
+        );
+        drop(unused);
+        ready.store(true, Ordering::SeqCst);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while child.try_wait().unwrap().is_none() {
+            assert!(Instant::now() < deadline);
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(child.try_wait().unwrap().unwrap().exit_code(), 17);
+        assert!(child.process_id().is_none());
+        assert_eq!(reaper.0.admitted.load(Ordering::Acquire), 0);
+        let _first = reaper.0.reserve().unwrap();
+        let _second = reaper.0.reserve().unwrap();
+    }
+
+    #[test]
+    fn reaper_keeps_a_faulted_child_owned_without_blocking_other_reaping() {
+        let reaper = TestReaper(ChildReaper::start(2).unwrap());
+        let (mut faulted, ready_faulted, _) = fake_child(&reaper.0, Some(1));
+        let (mut other, ready_other, _) = fake_child(&reaper.0, None);
+        faulted.request_termination();
+        other.request_termination();
+        ready_other.store(true, Ordering::SeqCst);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while other.try_wait().unwrap().is_none() || faulted.try_wait().is_ok() {
+            assert!(Instant::now() < deadline);
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(faulted.process_id(), Some(0));
+        assert_eq!(reaper.0.admitted.load(Ordering::Acquire), 1);
+        ready_faulted.store(true, Ordering::SeqCst);
+        while !matches!(faulted.try_wait(), Ok(Some(_))) {
+            assert!(Instant::now() < deadline);
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(reaper.0.admitted.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn dropping_a_stopped_reader_with_undrained_exit_output_never_waits_on_the_actor() {
+        let mut pane = TerminalPane::spawn_shell_or_command(
+            Some(TerminalCommand::with_args("/bin/sh", ["-c", "printf 'reader-ready\\n'; read -r value; printf 'undrained final proof\\n'; exit 7"])),
+            TerminalPaneOptions::default(),
+        ).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !pane.output_log.contains("reader-ready") {
+            pane.drain_output();
+            assert!(Instant::now() < deadline);
+            thread::sleep(Duration::from_millis(5));
+        }
+        pane.reader_stop.store(true, Ordering::Release);
+        while !pane.reader_thread.as_ref().unwrap().is_finished() {
+            assert!(Instant::now() < deadline);
+            thread::sleep(Duration::from_millis(5));
+        }
+        pane.write_input(b"finish\n").unwrap();
+        thread::sleep(Duration::from_millis(30));
+        let started = Instant::now();
+        pane.request_termination();
+        let pending = pane.child.pending.clone();
+        let already_reaped = pane.child.status.is_some();
+        drop(pane);
+        assert!(
+            started.elapsed() < Duration::from_millis(250),
+            "teardown blocked on undrained slave output"
+        );
+        if let Some(pending) = pending {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while pending.lock().unwrap().status.is_none() {
+                assert!(
+                    Instant::now() < deadline,
+                    "closed PTY did not permit actual child reaping"
+                );
+                thread::sleep(Duration::from_millis(5));
+            }
+        } else {
+            assert!(already_reaped);
+        }
+    }
 
     #[test]
     fn real_pty_readiness_delivers_output_and_eof_before_exit_grace() {
@@ -2041,10 +2420,16 @@ mod tests {
                 captured.fetch_add(1, Ordering::SeqCst);
             }));
             if !implicit_drop {
-                pane.terminate_and_wait();
+                pane.request_termination();
+                assert!(pane.write_input(b"must not revive teardown\n").is_err());
             }
             drop(pane);
             assert_eq!(calls.load(Ordering::SeqCst), 1);
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while unsafe { libc::kill(pid, 0) } == 0 {
+                assert!(Instant::now() < deadline, "owned child was not reaped");
+                thread::sleep(Duration::from_millis(5));
+            }
             assert_eq!(unsafe { libc::kill(pid, 0) }, -1, "owned child was reaped");
         }
     }

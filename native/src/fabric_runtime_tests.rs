@@ -238,7 +238,14 @@ impl Drop for Fixture {
     fn drop(&mut self) {
         for run in &mut self.app.agents {
             if let Some(mut terminal) = run.terminal.take() {
-                terminal.terminate_and_wait();
+                terminal.request_termination();
+                let deadline = Instant::now() + Duration::from_secs(5);
+                while terminal.try_wait().ok().flatten().is_none() && Instant::now() < deadline {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                if !std::thread::panicking() {
+                    assert!(terminal.try_wait().unwrap().is_some(), "fixture child was not reaped before removing its files");
+                }
             }
         }
         let _ = fs::remove_dir_all(&self.dir);

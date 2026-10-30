@@ -167,6 +167,22 @@ fn active(broker: &AgentBroker, count: usize) {
 }
 
 #[test]
+fn a_half_closed_socket_is_not_cancellation_but_a_closed_peer_is() {
+    let (peer, server) = UnixStream::pair().unwrap();
+    peer.shutdown(std::net::Shutdown::Write).unwrap();
+    for _ in 0..5 {
+        assert!(!disconnected(&server), "the peer can still read a response");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    drop(peer);
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while !disconnected(&server) {
+        assert!(Instant::now() < deadline, "full peer close must cancel a pending call");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+#[test]
 fn exact_identity_authentication_and_half_closed_requests_work() {
     let f = Fixture::new();
     let broker = f.broker();

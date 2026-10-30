@@ -592,6 +592,28 @@ fn write_frame(stream: &mut UnixStream, value: &impl Serialize, limit: usize) ->
     stream.flush()?;
     Ok(())
 }
+#[cfg(target_os = "macos")]
+fn disconnected(stream: &UnixStream) -> bool {
+    // Darwin reports read-half EOF as POLLHUP. A peer that finished sending
+    // its length-prefixed request may still be waiting for our response.
+    // LOCAL_PEERPID instead checks the live Unix PCB connection: XNU retains
+    // it on SHUT_WR and returns ENOTCONN after the peer fully disconnects.
+    let mut pid: libc::pid_t = 0;
+    let mut length = std::mem::size_of_val(&pid) as libc::socklen_t;
+    let result = unsafe {
+        libc::getsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_LOCAL,
+            libc::LOCAL_PEERPID,
+            (&mut pid as *mut libc::pid_t).cast(),
+            &mut length,
+        )
+    };
+    // Unknown probe errors are not proof of cancellation. Explicit cancel,
+    // broker stop and the existing call deadline still bound every operation.
+    result < 0 && io::Error::last_os_error().raw_os_error() == Some(libc::ENOTCONN)
+}
+#[cfg(not(target_os = "macos"))]
 fn disconnected(stream: &UnixStream) -> bool {
     let mut fd = libc::pollfd {
         fd: stream.as_raw_fd(),
@@ -894,14 +916,9 @@ impl BrokerClient {
                 error
             }
         })?;
-        // A request's write half may close normally; only explicit cancellation
-        // or a complete connection hangup cancels its bounded API operation.
-        stream.shutdown(std::net::Shutdown::Write).map_err(|_| {
-            problem(
-                "unavailable",
-                "agent broker connection ended without confirmation",
-            )
-        })?;
+        // The length prefix already delimits this request. Keep both halves
+        // until its response: a fast server can close before a redundant
+        // SHUT_WR, which Darwin reports as ENOTCONN despite a queued reply.
         let bytes = read_frame(
             &mut stream,
             MAX_RESPONSE,

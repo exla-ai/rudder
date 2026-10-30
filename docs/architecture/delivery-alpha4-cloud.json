@@ -1,0 +1,72 @@
+{
+  "schemaVersion": 1,
+  "milestone": "Rudder v4 engine/storage foundations; full rewrite remains open",
+  "version": "4.0.0-alpha.4",
+  "sourceRevision": "0c6e4d01c39c920d1e7bf3f0ee8f2418e0e10bbf",
+  "delivery": {
+    "kind": "web",
+    "status": "deployed",
+    "target": "Rudder Cloud control API and configured alpha.4 worker image",
+    "url": "https://rudder.exla.ai/app",
+    "provider": "Fly.io",
+    "revision": "0c6e4d01c39c920d1e7bf3f0ee8f2418e0e10bbf",
+    "deploymentId": "158",
+    "version": "4.0.0-alpha.4",
+    "verifiedAt": "2026-10-30T14:54:13.080Z",
+    "checks": [
+      {
+        "url": "https://rudder.exla.ai/app",
+        "status": 200,
+        "expected": 200,
+        "finalUrl": "https://rudder-cloud-control.fly.dev/app",
+        "ok": true
+      },
+      {
+        "url": "https://rudder-cloud-control.fly.dev/health",
+        "status": 200,
+        "expected": 200,
+        "finalUrl": "https://rudder-cloud-control.fly.dev/health",
+        "ok": true
+      },
+      {
+        "url": "https://rudder-cloud-control.fly.dev/api/app/state",
+        "status": 401,
+        "expected": 401,
+        "finalUrl": "https://rudder-cloud-control.fly.dev/api/app/state",
+        "ok": true
+      },
+      {
+        "url": "https://rudder-cloud-control.fly.dev/api/rudder/fabric/roots/unauthenticated-check",
+        "status": 401,
+        "expected": 401,
+        "finalUrl": "https://rudder-cloud-control.fly.dev/api/rudder/fabric/roots/unauthenticated-check",
+        "ok": true
+      }
+    ]
+  },
+  "control": {
+    "machine": "8911d61a434978",
+    "instance": "01M66HPBD7PPYGZWPP3YFESFGC",
+    "imageDigest": "sha256:7c85e521a7b01fd9f156243dbcf2ef3fb7be07338180e45653b43e2c2195a9c4"
+  },
+  "worker": {
+    "image": "registry.fly.io/rudder-workers-exla:4.0.0-alpha.4",
+    "imageDigest": "sha256:fdc2b1acaf17ec6fe98d9ada8ad98e4595f56429383513d19e7c50d14d2d870c",
+    "independentRestoreEvidence": "../../examples/fabric/evidence/2026-10-30/deployed-independent-workers.json",
+    "verifiedAt": "2026-10-30T14:40:53.368Z",
+    "liveHomesRestarted": false,
+    "fleetAdoptionVerified": false
+  },
+  "cli": {
+    "latestPushedVersion": "4.0.0-alpha.6",
+    "latestPushedRevision": "9772a1b845993b34075000c022eac9be2b0e30d1",
+    "status": "blocked",
+    "reason": "Mac native unit suite hangs/failures; superseded workflows cancelled for diagnosis. No alpha.4/5/6 npm publication claimed.",
+    "terminalCi": {
+      "url": "https://github.com/exla-ai/rudder/actions/runs/41071682163",
+      "passed": 59,
+      "failed": 0
+    },
+    "lastVerifiedRegistryPrerelease": "4.0.0-alpha.3"
+  }
+}

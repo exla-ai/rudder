@@ -1,0 +1,772 @@
+{
+  "format_version": 1,
+  "version": "4.0.0-alpha.4",
+  "revision": "0c6e4d01c39c920d1e7bf3f0ee8f2418e0e10bbf",
+  "provider": "Fly.io + AWS S3",
+  "scope": "deployed CAS API with temporary synthetic account/worker auth rows and two disposable workers; no user OAuth or active-home migration claim",
+  "account": "fabric-qualification-51dffd4a-9b44-4abd-84a1-9736295c4642",
+  "root": {
+    "algorithm": "sha256",
+    "digest": "4c2101d414cd19b347990c057efda64de26ab3d78c559ae56d82a23175d253e0",
+    "kind": "environment_root",
+    "size_bytes": 1728
+  },
+  "qualifierSha256": "1f25cab80a170658866fb845a80a4358f0ad5d12162b86c74d4632e5e360f1c2",
+  "steps": [
+    {
+      "step": "control-identity",
+      "ms": 453
+    },
+    {
+      "step": "no-worker-app-secrets",
+      "ms": 496
+    },
+    {
+      "step": "upload-fixture-helper",
+      "ms": 4026
+    },
+    {
+      "step": "upload-private-fixture",
+      "ms": 4176
+    },
+    {
+      "step": "auth-fixture-create",
+      "ms": 857
+    },
+    {
+      "step": "create-independent-worker-0",
+      "ms": 24175
+    },
+    {
+      "step": "wait-independent-worker-0",
+      "ms": 426
+    },
+    {
+      "step": "verify-worker-0",
+      "ms": 797
+    },
+    {
+      "step": "upload-worker-qualifier-0",
+      "ms": 7657
+    },
+    {
+      "step": "upload-worker-root-0",
+      "ms": 3651
+    },
+    {
+      "step": "worker-version-0",
+      "ms": 1215
+    },
+    {
+      "step": "launch-worker-restore-0",
+      "ms": 350
+    },
+    {
+      "step": "create-independent-worker-1",
+      "ms": 27140
+    },
+    {
+      "step": "wait-independent-worker-1",
+      "ms": 648
+    },
+    {
+      "step": "verify-worker-1",
+      "ms": 502
+    },
+    {
+      "step": "upload-worker-qualifier-1",
+      "ms": 12499
+    },
+    {
+      "step": "upload-worker-root-1",
+      "ms": 3873
+    },
+    {
+      "step": "worker-version-1",
+      "ms": 1230
+    },
+    {
+      "step": "launch-worker-restore-1",
+      "ms": 339
+    },
+    {
+      "step": "poll-worker-0",
+      "ms": 567
+    },
+    {
+      "step": "poll-worker-1",
+      "ms": 610
+    },
+    {
+      "step": "poll-worker-0",
+      "ms": 442
+    },
+    {
+      "step": "poll-worker-1",
+      "ms": 426
+    },
+    {
+      "step": "poll-worker-1",
+      "ms": 589
+    },
+    {
+      "step": "poll-worker-0",
+      "ms": 634
+    },
+    {
+      "step": "poll-worker-0",
+      "ms": 342
+    },
+    {
+      "step": "poll-worker-1",
+      "ms": 370
+    },
+    {
+      "step": "poll-worker-0",
+      "ms": 279
+    },
+    {
+      "step": "poll-worker-1",
+      "ms": 548
+    },
+    {
+      "step": "poll-worker-0",
+      "ms": 453
+    },
+    {
+      "step": "poll-worker-1",
+      "ms": 433
+    },
+    {
+      "step": "poll-worker-0",
+      "ms": 440
+    },
+    {
+      "step": "poll-worker-1",
+      "ms": 574
+    },
+    {
+      "step": "poll-worker-0",
+      "ms": 432
+    },
+    {
+      "step": "poll-worker-1",
+      "ms": 555
+    },
+    {
+      "step": "poll-worker-0",
+      "ms": 546
+    },
+    {
+      "step": "poll-worker-1",
+      "ms": 289
+    },
+    {
+      "step": "poll-worker-0",
+      "ms": 355
+    },
+    {
+      "step": "poll-worker-1",
+      "ms": 354
+    },
+    {
+      "step": "poll-worker-0",
+      "ms": 536
+    },
+    {
+      "step": "poll-worker-1",
+      "ms": 332
+    },
+    {
+      "step": "poll-worker-1",
+      "ms": 400
+    },
+    {
+      "step": "poll-worker-0",
+      "ms": 501
+    },
+    {
+      "step": "poll-worker-1",
+      "ms": 301
+    },
+    {
+      "step": "poll-worker-0",
+      "ms": 309
+    },
+    {
+      "step": "poll-worker-1",
+      "ms": 309
+    },
+    {
+      "step": "poll-worker-0",
+      "ms": 295
+    },
+    {
+      "step": "poll-worker-0",
+      "ms": 263
+    },
+    {
+      "step": "poll-worker-1",
+      "ms": 357
+    },
+    {
+      "step": "poll-worker-0",
+      "ms": 456
+    },
+    {
+      "step": "poll-worker-1",
+      "ms": 409
+    },
+    {
+      "step": "poll-worker-0",
+      "ms": 319
+    },
+    {
+      "step": "poll-worker-1",
+      "ms": 323
+    },
+    {
+      "step": "poll-worker-0",
+      "ms": 338
+    },
+    {
+      "step": "poll-worker-1",
+      "ms": 355
+    },
+    {
+      "step": "poll-worker-0",
+      "ms": 365
+    },
+    {
+      "step": "poll-worker-1",
+      "ms": 362
+    },
+    {
+      "step": "poll-worker-0",
+      "ms": 310
+    },
+    {
+      "step": "poll-worker-1",
+      "ms": 473
+    },
+    {
+      "step": "poll-worker-0",
+      "ms": 233
+    },
+    {
+      "step": "poll-worker-1",
+      "ms": 284
+    },
+    {
+      "step": "poll-worker-0",
+      "ms": 249
+    },
+    {
+      "step": "poll-worker-1",
+      "ms": 271
+    },
+    {
+      "step": "poll-worker-0",
+      "ms": 271
+    },
+    {
+      "step": "poll-worker-1",
+      "ms": 278
+    },
+    {
+      "step": "poll-worker-0",
+      "ms": 295
+    },
+    {
+      "step": "poll-worker-1",
+      "ms": 506
+    },
+    {
+      "step": "poll-worker-0",
+      "ms": 379
+    },
+    {
+      "step": "poll-worker-1",
+      "ms": 274
+    },
+    {
+      "step": "poll-worker-0",
+      "ms": 509
+    },
+    {
+      "step": "poll-worker-1",
+      "ms": 296
+    },
+    {
+      "step": "poll-worker-0",
+      "ms": 431
+    },
+    {
+      "step": "poll-worker-1",
+      "ms": 280
+    },
+    {
+      "step": "poll-worker-1",
+      "ms": 260
+    },
+    {
+      "step": "poll-worker-0",
+      "ms": 307
+    },
+    {
+      "step": "poll-worker-0",
+      "ms": 229
+    },
+    {
+      "step": "poll-worker-1",
+      "ms": 285
+    },
+    {
+      "step": "poll-worker-1",
+      "ms": 279
+    },
+    {
+      "step": "poll-worker-0",
+      "ms": 315
+    },
+    {
+      "step": "poll-worker-0",
+      "ms": 300
+    },
+    {
+      "step": "poll-worker-1",
+      "ms": 327
+    },
+    {
+      "step": "poll-worker-0",
+      "ms": 246
+    },
+    {
+      "step": "poll-worker-1",
+      "ms": 261
+    },
+    {
+      "step": "poll-worker-1",
+      "ms": 297
+    },
+    {
+      "step": "poll-worker-0",
+      "ms": 330
+    },
+    {
+      "step": "poll-worker-1",
+      "ms": 291
+    },
+    {
+      "step": "poll-worker-0",
+      "ms": 277
+    },
+    {
+      "step": "poll-worker-1",
+      "ms": 257
+    },
+    {
+      "step": "poll-worker-0",
+      "ms": 291
+    },
+    {
+      "step": "poll-worker-1",
+      "ms": 282
+    },
+    {
+      "step": "poll-worker-0",
+      "ms": 335
+    },
+    {
+      "step": "poll-worker-1",
+      "ms": 304
+    },
+    {
+      "step": "poll-worker-0",
+      "ms": 243
+    },
+    {
+      "step": "poll-worker-1",
+      "ms": 315
+    },
+    {
+      "step": "poll-worker-0",
+      "ms": 395
+    },
+    {
+      "step": "poll-worker-1",
+      "ms": 275
+    },
+    {
+      "step": "poll-worker-0",
+      "ms": 230
+    },
+    {
+      "step": "poll-worker-0",
+      "ms": 355
+    },
+    {
+      "step": "poll-worker-1",
+      "ms": 410
+    },
+    {
+      "step": "poll-worker-0",
+      "ms": 442
+    },
+    {
+      "step": "poll-worker-1",
+      "ms": 464
+    },
+    {
+      "step": "poll-worker-1",
+      "ms": 335
+    },
+    {
+      "step": "poll-worker-0",
+      "ms": 367
+    },
+    {
+      "step": "poll-worker-1",
+      "ms": 317
+    },
+    {
+      "step": "poll-worker-0",
+      "ms": 390
+    },
+    {
+      "step": "poll-worker-0",
+      "ms": 361
+    },
+    {
+      "step": "poll-worker-1",
+      "ms": 468
+    },
+    {
+      "step": "poll-worker-0",
+      "ms": 469
+    },
+    {
+      "step": "poll-worker-1",
+      "ms": 939
+    },
+    {
+      "step": "poll-worker-0",
+      "ms": 368
+    },
+    {
+      "step": "poll-worker-1",
+      "ms": 330
+    },
+    {
+      "step": "poll-worker-0",
+      "ms": 333
+    },
+    {
+      "step": "poll-worker-1",
+      "ms": 304
+    },
+    {
+      "step": "poll-worker-1",
+      "ms": 292
+    },
+    {
+      "step": "poll-worker-1",
+      "ms": 289
+    },
+    {
+      "step": "poll-worker-1",
+      "ms": 286
+    },
+    {
+      "step": "poll-worker-1",
+      "ms": 290
+    },
+    {
+      "step": "poll-worker-1",
+      "ms": 298
+    },
+    {
+      "step": "poll-worker-1",
+      "ms": 345
+    },
+    {
+      "step": "poll-worker-1",
+      "ms": 343
+    },
+    {
+      "step": "poll-worker-1",
+      "ms": 354
+    },
+    {
+      "step": "poll-worker-1",
+      "ms": 238
+    },
+    {
+      "step": "find-owned-cleanup",
+      "ms": 529
+    },
+    {
+      "step": "destroy-owned-e8204d4c635498",
+      "ms": 1508
+    },
+    {
+      "step": "destroy-owned-825473b7e6d728",
+      "ms": 2239
+    },
+    {
+      "step": "verify-independent-workers-absent",
+      "ms": 437
+    },
+    {
+      "step": "auth-fixture-cleanup",
+      "ms": 441
+    },
+    {
+      "step": "remove-owned-control-fixture-files",
+      "ms": 515
+    }
+  ],
+  "previousPublication": {
+    "receipt": {
+      "format_version": 1,
+      "root_id": "prepared-51dffd4a-9b44-4abd-84a1-9736295c4642",
+      "root": {
+        "kind": "environment_root",
+        "algorithm": "sha256",
+        "digest": "4c2101d414cd19b347990c057efda64de26ab3d78c559ae56d82a23175d253e0",
+        "size_bytes": 1728
+      },
+      "durability": "replicated",
+      "published_at_ms": 1793369306647,
+      "object_count": 1766,
+      "total_bytes": 767656523
+    },
+    "uploadMs": 294887,
+    "uploaded_objects": 1766,
+    "uploaded_bytes": 767656523
+  },
+  "control": {
+    "machine": "8911d61a434978",
+    "instance": "01M66HPBD7PPYGZWPP3YFESFGC",
+    "digest": "sha256:7c85e521a7b01fd9f156243dbcf2ef3fb7be07338180e45653b43e2c2195a9c4"
+  },
+  "authFixture": {
+    "ok": true,
+    "action": "create",
+    "account": "fabric-qualification-51dffd4a-9b44-4abd-84a1-9736295c4642",
+    "tokens": 2,
+    "workspaces": 2,
+    "verifiedAt": "2026-10-30T14:36:09.611Z"
+  },
+  "upload": {
+    "receipt": {
+      "format_version": 1,
+      "root_id": "prepared-51dffd4a-9b44-4abd-84a1-9736295c4642",
+      "root": {
+        "kind": "environment_root",
+        "algorithm": "sha256",
+        "digest": "4c2101d414cd19b347990c057efda64de26ab3d78c559ae56d82a23175d253e0",
+        "size_bytes": 1728
+      },
+      "durability": "replicated",
+      "published_at_ms": 1793369306647,
+      "object_count": 1766,
+      "total_bytes": 767656523
+    },
+    "uploaded_objects": 0,
+    "uploaded_bytes": 0
+  },
+  "uploadMs": 2358,
+  "rootId": "prepared-51dffd4a-9b44-4abd-84a1-9736295c4642",
+  "warmUpload": {
+    "receipt": {
+      "format_version": 1,
+      "root_id": "prepared-51dffd4a-9b44-4abd-84a1-9736295c4642",
+      "root": {
+        "kind": "environment_root",
+        "algorithm": "sha256",
+        "digest": "4c2101d414cd19b347990c057efda64de26ab3d78c559ae56d82a23175d253e0",
+        "size_bytes": 1728
+      },
+      "durability": "replicated",
+      "published_at_ms": 1793369306647,
+      "object_count": 1766,
+      "total_bytes": 767656523
+    },
+    "uploaded_objects": 0,
+    "uploaded_bytes": 0
+  },
+  "warmUploadMs": 1713,
+  "accountIsolation": {
+    "otherAccount": 404,
+    "mismatchedWorker": 401
+  },
+  "workers": [
+    {
+      "machine": "e8204d4c635498",
+      "instance": "01M66KTTX6HWTZF9M2M60HFDRH",
+      "region": "iad",
+      "digest": "sha256:fdc2b1acaf17ec6fe98d9ada8ad98e4595f56429383513d19e7c50d14d2d870c",
+      "result": {
+        "format_version": 1,
+        "kind": "independent-worker-prepared-restore",
+        "machine": "e8204d4c635498",
+        "qualifierSha256": "1f25cab80a170658866fb845a80a4358f0ad5d12162b86c74d4632e5e360f1c2",
+        "checks": [
+          "fresh independent native CAS has no retained roots",
+          "deployed worker authentication resolves the expected account-scoped root",
+          "every reachable object verifies before durable local publication",
+          "restored pinned Rust compiler builds a real library and compiles a dependent library through its metadata/API",
+          "restored Node and TypeScript compiler build and run a real program returning 42",
+          "transfer staging cleared; complete environment remains pinned"
+        ],
+        "uid": 1500,
+        "downloadMs": 152040,
+        "receipt": {
+          "format_version": 1,
+          "root_id": "prepared-51dffd4a-9b44-4abd-84a1-9736295c4642",
+          "root": {
+            "kind": "environment_root",
+            "algorithm": "sha256",
+            "digest": "4c2101d414cd19b347990c057efda64de26ab3d78c559ae56d82a23175d253e0",
+            "size_bytes": 1728
+          },
+          "durability": "replicated",
+          "published_at_ms": 1793369306647,
+          "object_count": 1766,
+          "total_bytes": 767656523
+        },
+        "local": {
+          "format_version": 1,
+          "root": {
+            "kind": "environment_root",
+            "algorithm": "sha256",
+            "digest": "4c2101d414cd19b347990c057efda64de26ab3d78c559ae56d82a23175d253e0",
+            "size_bytes": 1728
+          },
+          "pin": "qualified-prepared-environment",
+          "generation": 3,
+          "durability": "local"
+        },
+        "downloadedObjects": 1766,
+        "downloadedBytes": 767656523,
+        "exportMs": 48575,
+        "compilerProfile": {
+          "sourceProfile": "rudder-linux-rust-typescript-v1",
+          "preparationRevision": 2,
+          "rust": "build rlib and compile a dependent rlib through --extern; no native executable or Rust runtime execution",
+          "typescript": "compile with restored TypeScript and run JavaScript with restored Node",
+          "binaryLinking": "not qualified; preparation revision 2 omits the self-contained linker, so the original unsupported binary check failed without implying corrupt restored bytes"
+        },
+        "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+        "node": "v22.23.4",
+        "rustLibrary": {
+          "bytes": 21064,
+          "sha256": "71878bac6730edda417b26461d1b51bd3c530aee43652f52acc6e01aa7b757b6"
+        },
+        "rustConsumer": {
+          "bytes": 9732,
+          "sha256": "0de6582a1a1803a97b0b192c0c01ffbebba1ae9b98f641a50e796b1a67f9bf29"
+        },
+        "rustCompileMs": 100,
+        "typescriptCompileMs": 711,
+        "nodePeakRssBytes": 474271744,
+        "nativePeakRssBytes": 228413440,
+        "limits": "Full eager restore/export on disposable Linux VM; Rust library build/consumption only and TypeScript build/run. Separate process peak RSS values. No Rust executable/linker, lazy hydration, remote action hit, end-to-end agent-start or fleet durability claim.",
+        "ok": true,
+        "verifiedAt": "2026-10-30T14:40:15.676Z"
+      }
+    },
+    {
+      "machine": "825473b7e6d728",
+      "instance": "01M66KW1TBKEF5PEW361CW9H9X",
+      "region": "iad",
+      "digest": "sha256:fdc2b1acaf17ec6fe98d9ada8ad98e4595f56429383513d19e7c50d14d2d870c",
+      "result": {
+        "format_version": 1,
+        "kind": "independent-worker-prepared-restore",
+        "machine": "825473b7e6d728",
+        "qualifierSha256": "1f25cab80a170658866fb845a80a4358f0ad5d12162b86c74d4632e5e360f1c2",
+        "checks": [
+          "fresh independent native CAS has no retained roots",
+          "deployed worker authentication resolves the expected account-scoped root",
+          "every reachable object verifies before durable local publication",
+          "restored pinned Rust compiler builds a real library and compiles a dependent library through its metadata/API",
+          "restored Node and TypeScript compiler build and run a real program returning 42",
+          "transfer staging cleared; complete environment remains pinned"
+        ],
+        "uid": 1500,
+        "downloadMs": 132115,
+        "receipt": {
+          "format_version": 1,
+          "root_id": "prepared-51dffd4a-9b44-4abd-84a1-9736295c4642",
+          "root": {
+            "kind": "environment_root",
+            "algorithm": "sha256",
+            "digest": "4c2101d414cd19b347990c057efda64de26ab3d78c559ae56d82a23175d253e0",
+            "size_bytes": 1728
+          },
+          "durability": "replicated",
+          "published_at_ms": 1793369306647,
+          "object_count": 1766,
+          "total_bytes": 767656523
+        },
+        "local": {
+          "format_version": 1,
+          "root": {
+            "kind": "environment_root",
+            "algorithm": "sha256",
+            "digest": "4c2101d414cd19b347990c057efda64de26ab3d78c559ae56d82a23175d253e0",
+            "size_bytes": 1728
+          },
+          "pin": "qualified-prepared-environment",
+          "generation": 3,
+          "durability": "local"
+        },
+        "downloadedObjects": 1766,
+        "downloadedBytes": 767656523,
+        "exportMs": 48840,
+        "compilerProfile": {
+          "sourceProfile": "rudder-linux-rust-typescript-v1",
+          "preparationRevision": 2,
+          "rust": "build rlib and compile a dependent rlib through --extern; no native executable or Rust runtime execution",
+          "typescript": "compile with restored TypeScript and run JavaScript with restored Node",
+          "binaryLinking": "not qualified; preparation revision 2 omits the self-contained linker, so the original unsupported binary check failed without implying corrupt restored bytes"
+        },
+        "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+        "node": "v22.23.4",
+        "rustLibrary": {
+          "bytes": 21064,
+          "sha256": "71878bac6730edda417b26461d1b51bd3c530aee43652f52acc6e01aa7b757b6"
+        },
+        "rustConsumer": {
+          "bytes": 9732,
+          "sha256": "0de6582a1a1803a97b0b192c0c01ffbebba1ae9b98f641a50e796b1a67f9bf29"
+        },
+        "rustCompileMs": 85,
+        "typescriptCompileMs": 1041,
+        "nodePeakRssBytes": 477376512,
+        "nativePeakRssBytes": 228388864,
+        "limits": "Full eager restore/export on disposable Linux VM; Rust library build/consumption only and TypeScript build/run. Separate process peak RSS values. No Rust executable/linker, lazy hydration, remote action hit, end-to-end agent-start or fleet durability claim.",
+        "ok": true,
+        "verifiedAt": "2026-10-30T14:40:44.557Z"
+      }
+    }
+  ],
+  "ok": true,
+  "cleanup": {
+    "workersAbsent": true,
+    "authRows": {
+      "ok": true,
+      "action": "cleanup",
+      "account": "fabric-qualification-51dffd4a-9b44-4abd-84a1-9736295c4642",
+      "tokens": 0,
+      "workspaces": 0,
+      "verifiedAt": "2026-10-30T14:40:52.800Z"
+    },
+    "revokedTokenStatus": 401,
+    "controlFixtureFilesRemoved": true,
+    "verified": true
+  },
+  "verifiedAt": "2026-10-30T14:40:53.368Z"
+}

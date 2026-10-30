@@ -69,3 +69,20 @@ stores, a file-backed streaming adapter, a 70 MiB blob, an above-2^53 u64
 checkpoint cursor, source-store deletion, user/worker account isolation,
 tampered downloads and interrupted uploads. They verify local/API semantics;
 live S3 and independent-worker delivery evidence are recorded separately.
+
+The deployed full-transfer check passed on two fresh Fly workers at
+`2026-10-30T14:40:53.368Z`: each restored and locally retained the same 768 MB
+prepared environment, compiled a Rust library and a dependent library, and
+compiled/ran TypeScript. The supported Rust profile has no executable linker.
+Cold download was 132–152 s, followed by about 49 s of eager export; this is the
+baseline the lazy data plane must improve. See the
+[safe report](../../examples/fabric/evidence/2026-10-30/deployed-independent-workers.json)
+and [qualification details](../../examples/fabric/evidence/2026-10-30/README.md).
+
+The next source formats add chunked File descriptors and paged Directory v2,
+plus ancestry-free RunnableRoot metadata. They remain an explicit development
+path until caller migration and deployment are recorded. Hashes still identify
+encoded metadata bytes; a File descriptor's byte size is not its logical file
+length. Publication validates actual child spans, page counts/ranges and
+runnable child versions even when immutable verification proofs are cached.
+Old roots retain their strong history edges unchanged.

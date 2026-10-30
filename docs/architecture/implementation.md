@@ -50,7 +50,7 @@ the three architecture documents already contained this session's planning work.
 | Private previews | Persisted Tailscale login, actual readiness, bounded async probes, exact project ownership, ready links and local open | E13 subset implemented; real userspace/Serve check passed; laptop/phone access remains untested |
 | Terminal stream | Shared home/sail helper, short output batching, bounded backpressure, connection fencing, UTF-8 and repaint recovery | E13 subset deployed in the worker image; real WS/PTY VM checks passed; existing homes adopt when idle |
 | Startup/download caches | Background CLI update, persistent account-local npm/pnpm/uv cache defaults, explicit overrides retained | Behavior tests pass; no distributed action-cache claim |
-| Full storage/engine rewrite | Milestones below | Local engine/CAS/VFS/build foundations implemented in the unreleased continuation below; fleet/migration gates remain open |
+| Full storage/engine rewrite | Milestones below | Initial engine/CAS/VFS/build foundations are in alpha.4 source and Cloud release 158; CLI publication, defaults, fleet and migration gates remain open |
 
 The current native simple-execution path remains an isolated worker; explicit
 main-checkout mode remains available. The initial automatic DAG path retains
@@ -65,11 +65,12 @@ dashboard in its place without task identity/approval/completion tracking would
 misreport completion. Local `/cloud` task forwarding still reaches that legacy
 path, so this is a stated alpha limitation, not complete Cloud routing parity.
 
-## Unreleased continuation, 2026-10-30
+## V4 foundations and current continuation, 2026-10-30
 
-This is source and qualification evidence after alpha.3. A new release, Cloud
-API rollout and worker adoption must be recorded separately before calling it
-shipped. The active objective remains the full plan.
+Alpha.4 source is committed and the Cloud API is deployed as release 158.
+Newer source work below remains explicit and unshipped unless delivery evidence
+says otherwise. CLI publication and worker adoption are separate facts. The
+active objective remains the full plan.
 
 - `engine/` provides typed immutable roots, local checksummed CAS, staged
   publication, retained closures and conservative collection. Source,
@@ -126,7 +127,9 @@ shipped. The active objective remains the full plan.
   At `2026-10-30T13:09:26.122Z`, the actual Fly OIDC role passed a loopback test
   of the current HTTP handler: fresh miss, conditional upload, hit, root
   publication/read, identical download and immutable-delete denial. Deployed
-  login/worker authentication remains a separate rollout gate. [Safe reports](../../examples/fabric/evidence/2026-10-30/README.md).
+  login/worker authentication subsequently passed against the deployed API on
+  two independent workers at `2026-10-30T14:40:53.368Z`.
+  [Safe reports](../../examples/fabric/evidence/2026-10-30/README.md).
 - The Cloud CAS API streams large downloads and spools uploads privately before
   checksum-verified conditional S3 writes. A real 70 MiB S3 round trip and strict
   root publication passed at `2026-10-30T12:14:20.550Z`: upload 964 ms, download
@@ -137,8 +140,12 @@ shipped. The active objective remains the full plan.
 - One persistent framed native helper supplies pinned source and staged target
   transfer adapters. The actual HTTP handler, 70 MiB blob and an independent
   fresh native CAS are tested together, including loss/corruption and u64
-  checkpoint cursors. Live independent-worker restore remains a rollout gate.
-  See [transfer contracts](fabric-transfer.md).
+  checkpoint cursors. Two fresh alpha.4 Fly workers restored the same
+  767,656,523-byte prepared environment through the deployed API, then built a
+  Rust library/dependent library and compiled/ran TypeScript. Cold download was
+  132–152 s; eager export took about 49 s. This is the full-transfer baseline,
+  not a lazy-launch claim. Both VMs and temporary credentials were removed.
+  See [transfer contracts and proof](fabric-transfer.md).
 - Startup prompt and generated guidance now request relevant context on demand.
   The main role contract is 1,167 bytes, worker contract 915 bytes, and Rudder's
   own always-loaded `AGENTS.md` is 5,820 bytes, down from 193,536. Full reference
@@ -146,8 +153,12 @@ shipped. The active objective remains the full plan.
   [prompt context](prompt-context.md).
 
 The primary npm package's alpha.3 `next` tag now resolves successfully. The
-previous registry-processing blocker has cleared. No alpha.4 delivery is
-asserted by this source record.
+previous registry-processing blocker has cleared. Cloud alpha.4 delivery is
+recorded in [the current Cloud proof](delivery-alpha4-cloud.json). Alpha.4/5/6
+npm publication is blocked: the Mac native unit suite exposed a hanging
+final-output regression and broker test failures. Superseded release workflows
+were canceled for diagnosis. All 59 Mac terminal journeys pass on alpha.6;
+that is separate from the remaining unit-suite gate.
 
 The alpha.4 release candidate passed the production and Cloud builds, 1,063
 Rust tests (16 ignored), 577 Node tests (8 additional optional skips), and all 59
@@ -211,7 +222,35 @@ revision, version, CI workflow result, published npm dist-tag, worker image
 digest, Fly release/deployment identity, canonical URL, UTC verification time,
 checks and active-home adoption state. A pushed commit is not a Cloud rollout.
 
-### Latest delivery checkpoint
+### Current Cloud delivery and CLI blocker
+
+[Cloud release 158](delivery-alpha4-cloud.json) runs alpha.4 revision
+`0c6e4d01c39c920d1e7bf3f0ee8f2418e0e10bbf`. The canonical app/health return
+200 and unauthenticated app/CAS access returns 401, verified at
+`2026-10-30T14:54:13.080Z`. The worker pin is alpha.4, with actual two-worker
+restore/compiler proof and cleanup at `14:40:53.368Z`. Existing active homes
+were not restarted; fleet adoption is not asserted.
+
+Main also contains the narrow alpha.5/6 macOS readiness/socket/frame-test fixes.
+The alpha.6 native artifacts build on all three platforms and its separate Mac
+terminal suite passes 59/59. The full native unit suite still hangs in the held
+final-output regression and has three broker failures. Release workflows were
+canceled to expose their logs. No alpha.4/5/6 npm upload is claimed. A bounded
+Mac diagnostic branch contains only test instrumentation; it does not include
+the next storage/VCS working-tree changes. Finish actual Mac verification and
+the versioned main release before reporting a newer CLI installation.
+
+The next uncommitted slice adds bounded File chunks, paged directories, explicit
+V1/V2 streaming tree adapters and ancestry-free RunnableRoot metadata. New roots
+require SourceRoot v2 with a projection policy and EnvironmentRoot v2 with
+content-only installer inputs. They cannot pull checkpoint/source ancestry into
+launch; history pins stay explicit. Rust/Cloud validators and a real
+native→HTTP→native round trip cover these formats, but default consumers and
+deployment remain open. Private block writes/live observations and the embedded
+jj provider/journal publication bridge are being integrated in separate owned
+files. These are not yet the qualified default agent-launch path.
+
+### Earlier alpha.3 delivery checkpoint
 
 Runtime source: `f1403d43b739a4ef61caa7c76ce7cee6fcab0eec`, tag
 `v4.0.0-alpha.3`, on `origin/main`. The
@@ -257,11 +296,13 @@ ext4 volume, with empty initial uppers and scoped parent/sibling write isolation
 native reflinking did not. Namespace startup, agents, jj, real compilation,
 network, remote hydration and durability are outside these mount timings.
 
-Next: reproduce real end-to-end E0 workloads; qualify larger prepared roots and
-filesystem behavior; run E2 across two independent workers; compare candidate
-materializers; ratify identities/durability contracts before broad engine/VFS
-migration. The persistent Rust engine, distributed CAS/CoW, branch-aware build
-integration and durable general peer messaging remain required v4 work.
+This earlier baseline has since been extended by the custom VFS, persistent
+project engine, real peer adapters, build-profile and two-worker restore
+evidence above. Next: finish the Mac release gate, qualify private block writes
+and lazy remote hydration with the VCS provider, wire managed agent launch and
+exact-tree publication, then complete fleet authority, migration, representative
+build workloads and scale/recovery gates. A project-local engine is not yet the
+final machine-wide/fleet architecture.
 
 Release preference was asked asynchronously: v4 prereleases on `next` versus
 3.x foundations or waiting for all gates. The user confirmed continuing to

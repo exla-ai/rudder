@@ -258,98 +258,439 @@ impl WorkspaceRpc {
     }
 }
 
-struct LivePartialAuthority {
+// All partial source checks share one actual callback worker. A request or
+// caller timeout never releases its charge until that worker settles it.
+const PARTIAL_SOURCE_ADMISSIONS: usize = 4;
+const PARTIAL_SOURCE_IDLE_POLL: Duration = Duration::from_millis(500);
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PartialSourceThreadStage {
+    Observer,
+    Worker,
+}
+type PartialSourceWork = Box<dyn FnOnce() + Send + 'static>;
+struct PartialSourceState {
     source: Arc<dyn PartialAttemptAuthority>,
     binding: PartialBinding,
     revoked: AtomicBool,
+    closing: AtomicBool,
+    admitted: std::sync::atomic::AtomicUsize,
+    active: std::sync::atomic::AtomicUsize,
+    budget: std::sync::Mutex<Option<super::finalization_budget::FinalizationBudget>>,
+}
+impl PartialSourceState {
+    fn fence(&self) {
+        self.revoked.store(true, Ordering::Release);
+    }
+    fn observe_budget(
+        &self,
+        budget: Option<&super::finalization_budget::FinalizationBudget>,
+    ) -> Result<()> {
+        if let Some(budget) = budget {
+            let mut owned = self
+                .budget
+                .lock()
+                .map_err(|_| anyhow::anyhow!("partial source budget unavailable"))?;
+            if let Some(previous) = owned.as_ref() {
+                ensure!(
+                    previous.constraint() == budget.constraint(),
+                    "partial source budget cannot restart"
+                );
+            } else {
+                *owned = Some(budget.clone());
+            }
+        }
+        Ok(())
+    }
+    fn check(&self) -> Result<()> {
+        let budget = self
+            .budget
+            .lock()
+            .map_err(|_| anyhow::anyhow!("partial source budget unavailable"))?
+            .clone();
+        if let Some(budget) = budget {
+            if budget.remaining().is_err() {
+                self.fence();
+            }
+        }
+        // Caller-side checks invoke no source trait hooks. Actual Native
+        // cancellation is a trusted local clock/Atomic check, but even a bad
+        // hook must run only inside the charged callback worker.
+        ensure!(
+            !self.revoked.load(Ordering::Acquire) && !self.closing.load(Ordering::Acquire),
+            "partial source authorization retired"
+        );
+        Ok(())
+    }
+    fn actual(&self) -> Result<()> {
+        self.check()?;
+        self.active.fetch_add(1, Ordering::AcqRel);
+        struct Active<'a>(&'a PartialSourceState);
+        impl Drop for Active<'_> {
+            fn drop(&mut self) {
+                self.0.active.fetch_sub(1, Ordering::AcqRel);
+                if std::thread::panicking() {
+                    self.0.fence();
+                }
+            }
+        }
+        let _active = Active(self);
+        if self.source.cancelled() {
+            self.fence();
+        }
+        self.check()?;
+        if self.source.validate(&self.binding).is_err() {
+            self.fence();
+        }
+        if self.source.cancelled() {
+            self.fence();
+        }
+        self.check()
+    }
+}
+struct PartialSourceAdmission(Arc<PartialSourceState>);
+impl Drop for PartialSourceAdmission {
+    fn drop(&mut self) {
+        self.0.admitted.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+struct PartialSourceCheck {
+    reply: std::sync::mpsc::SyncSender<bool>,
+    deadline: Instant,
+    budget: Option<super::finalization_budget::FinalizationBudget>,
+    _admission: PartialSourceAdmission,
+}
+impl PartialSourceCheck {
+    fn remaining(&self) -> Result<Duration> {
+        let remaining = self.deadline.saturating_duration_since(Instant::now());
+        ensure!(!remaining.is_zero(), "partial source check timed out");
+        Ok(match &self.budget {
+            Some(b) => remaining.min(b.remaining()?),
+            None => remaining,
+        })
+    }
+}
+struct LivePartialAuthority {
+    state: Arc<PartialSourceState>,
+    requests: std::sync::mpsc::SyncSender<PartialSourceCheck>,
+}
+impl LivePartialAuthority {
+    fn current(
+        &self,
+        budget: Option<&super::finalization_budget::FinalizationBudget>,
+    ) -> Result<()> {
+        let result = (|| {
+            self.state.observe_budget(budget)?;
+            let budget = self
+                .state
+                .budget
+                .lock()
+                .map_err(|_| anyhow::anyhow!("partial source budget unavailable"))?
+                .clone();
+            self.state.check()?;
+            let phase = match budget.as_ref() {
+                Some(b) => b.phase_limit(AUTHORIZATION_SETTLE)?,
+                None => AUTHORIZATION_SETTLE,
+            };
+            self.state
+                .admitted
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+                    (n < PARTIAL_SOURCE_ADMISSIONS).then_some(n + 1)
+                })
+                .map_err(|_| anyhow::anyhow!("partial source validation busy"))?;
+            let admission = PartialSourceAdmission(self.state.clone());
+            let deadline = Instant::now()
+                .checked_add(phase)
+                .context("partial source deadline overflow")?;
+            let (reply, receive) = std::sync::mpsc::sync_channel(1);
+            self.requests
+                .try_send(PartialSourceCheck {
+                    reply,
+                    deadline,
+                    budget: budget.clone(),
+                    _admission: admission,
+                })
+                .map_err(|_| anyhow::anyhow!("partial source queue unavailable"))?;
+            loop {
+                self.state.check()?;
+                let mut remaining = deadline.saturating_duration_since(Instant::now());
+                if let Some(b) = budget.as_ref() {
+                    remaining = remaining.min(b.remaining()?);
+                }
+                ensure!(
+                    !remaining.is_zero(),
+                    "partial source validation did not settle"
+                );
+                match receive.recv_timeout(remaining.min(Duration::from_millis(10))) {
+                    Ok(true) => {
+                        self.state.check()?;
+                        if let Some(b) = budget.as_ref() {
+                            b.remaining()?;
+                        }
+                        ensure!(Instant::now() < deadline, "late partial source reply");
+                        return Ok(());
+                    }
+                    Ok(false) => anyhow::bail!("partial source authorization denied"),
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                    Err(_) => anyhow::bail!("partial source worker unavailable"),
+                }
+            }
+        })();
+        if result.is_err() {
+            self.state.fence();
+        }
+        result
+    }
 }
 impl PartialAttemptAuthority for LivePartialAuthority {
     fn validate(&self, binding: &PartialBinding) -> Result<()> {
-        ensure!(
-            binding == &self.binding && !self.cancelled(),
-            "partial attempt retired"
-        );
-        if self.source.validate(binding).is_err() {
-            self.revoked.store(true, Ordering::Release);
-            anyhow::bail!("partial attempt unavailable or revoked");
+        if binding != &self.state.binding {
+            self.state.fence();
         }
-        ensure!(
-            !self.cancelled(),
-            "partial attempt retired during authentication"
-        );
-        Ok(())
+        self.current(None)
     }
     fn cancelled(&self) -> bool {
-        self.revoked.load(Ordering::Acquire) || self.source.cancelled()
+        self.state.check().is_err()
     }
+}
+struct PartialSourceJoin {
+    // The fixed observer performs the REAL worker join, including TLS. No
+    // deadline waiter joins this observer; its custody remains retained.
+    _observer: std::thread::JoinHandle<()>,
+    done: std::sync::mpsc::Receiver<bool>,
+    joined: bool,
+    failed: bool,
 }
 struct PartialAuthorityMonitor {
     authority: Arc<LivePartialAuthority>,
-    stop: Arc<AtomicBool>,
-    done: std::sync::mpsc::Receiver<()>,
-    thread: std::sync::Mutex<Option<std::thread::JoinHandle<()>>>,
+    join: std::sync::Mutex<PartialSourceJoin>,
 }
 impl PartialAuthorityMonitor {
     fn start(source: Arc<dyn PartialAttemptAuthority>, binding: PartialBinding) -> Result<Self> {
-        let authority = Arc::new(LivePartialAuthority {
+        Self::start_with_spawn(source, binding, |stage, work| {
+            std::thread::Builder::new()
+                .name(
+                    match stage {
+                        PartialSourceThreadStage::Observer => "rudder-partial-source-join",
+                        PartialSourceThreadStage::Worker => "rudder-partial-source",
+                    }
+                    .into(),
+                )
+                .spawn(work)
+        })
+    }
+    fn start_with_spawn(
+        source: Arc<dyn PartialAttemptAuthority>,
+        binding: PartialBinding,
+        mut spawn: impl FnMut(
+            PartialSourceThreadStage,
+            PartialSourceWork,
+        ) -> std::io::Result<std::thread::JoinHandle<()>>,
+    ) -> Result<Self> {
+        binding.validate()?;
+        let state = Arc::new(PartialSourceState {
             source,
             binding,
             revoked: AtomicBool::new(false),
+            closing: AtomicBool::new(false),
+            admitted: std::sync::atomic::AtomicUsize::new(0),
+            active: std::sync::atomic::AtomicUsize::new(0),
+            budget: std::sync::Mutex::new(None),
         });
-        authority.validate(&authority.binding)?;
-        let stop = Arc::new(AtomicBool::new(false));
+        let (requests, receive) =
+            std::sync::mpsc::sync_channel::<PartialSourceCheck>(PARTIAL_SOURCE_ADMISSIONS);
+        let (transfer, owned_worker) =
+            std::sync::mpsc::sync_channel::<std::thread::JoinHandle<()>>(1);
         let (send, done) = std::sync::mpsc::sync_channel(1);
-        let (running, stopped) = (authority.clone(), stop.clone());
-        let thread = std::thread::Builder::new()
-            .name("rudder-partial-authority".into())
-            .spawn(move || {
-                while !stopped.load(Ordering::Acquire) {
-                    if running.validate(&running.binding).is_err() {
-                        break;
-                    }
-                    let deadline = Instant::now() + AUTHORIZATION_POLL;
-                    while !stopped.load(Ordering::Acquire) && Instant::now() < deadline {
-                        std::thread::sleep(Duration::from_millis(10));
+        let retained = state.clone();
+        // Spawn the fixed owner FIRST. Before receiving the actual JoinHandle
+        // it executes no source/cancellation callback or user cleanup.
+        let observer = spawn(
+            PartialSourceThreadStage::Observer,
+            Box::new(move || {
+                let success = match owned_worker.recv() {
+                    Ok(worker) => worker.join().is_ok(),
+                    Err(_) => false,
+                };
+                if !success {
+                    retained.fence();
+                }
+                drop(retained);
+                let _ = send.send(success);
+            }),
+        )?;
+        let (release_start, may_start) = std::sync::mpsc::sync_channel::<()>(1);
+        let running = state.clone();
+        let worker = spawn(
+            PartialSourceThreadStage::Worker,
+            Box::new(move || {
+                // No callback (including cancelled) can run before recoverable
+                // ownership transfer. Closing this gate on failure is inert.
+                if may_start.recv().is_err() {
+                    return;
+                }
+                struct Exit(Arc<PartialSourceState>);
+                impl Drop for Exit {
+                    fn drop(&mut self) {
+                        if std::thread::panicking() {
+                            self.0.fence();
+                        }
                     }
                 }
-                let _ = send.send(());
-            })?;
-        Ok(Self {
-            authority,
-            stop,
-            done,
-            thread: std::sync::Mutex::new(Some(thread)),
-        })
+                let _exit = Exit(running.clone());
+                while running.check().is_ok() {
+                    match receive.recv_timeout(PARTIAL_SOURCE_IDLE_POLL) {
+                        Ok(request) => {
+                            let granted = request.remaining().is_ok()
+                                && running.actual().is_ok()
+                                && request.remaining().is_ok()
+                                && running.check().is_ok();
+                            if !granted {
+                                running.fence();
+                            }
+                            let _ = request.reply.try_send(granted);
+                        }
+                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                            if running.actual().is_err() {
+                                break;
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
+                while let Ok(request) = receive.try_recv() {
+                    let _ = request.reply.try_send(false);
+                }
+            }),
+        );
+        let worker = match worker {
+            Ok(worker) => worker,
+            Err(error) => {
+                state.closing.store(true, Ordering::Release);
+                drop(release_start);
+                drop(transfer); // Observer has no worker/callback to wait on.
+                                // Only known startup channel code ran; no callback/TLS user
+                                // work was admitted. Reap the actual observer on this failure.
+                let _ = observer.join();
+                return Err(error.into());
+            }
+        };
+        if let Err(error) = transfer.try_send(worker) {
+            state.closing.store(true, Ordering::Release);
+            drop(release_start);
+            // Recover and reap the ACTUAL handle. Its startup gate was never
+            // released, so neither callbacks nor their TLS could have run.
+            let worker = match error {
+                std::sync::mpsc::TrySendError::Full(worker)
+                | std::sync::mpsc::TrySendError::Disconnected(worker) => worker,
+            };
+            let _ = worker.join();
+            drop(transfer);
+            let _ = observer.join();
+            anyhow::bail!("partial source worker ownership transfer failed");
+        }
+        drop(transfer);
+        let monitor = Self {
+            authority: Arc::new(LivePartialAuthority { state, requests }),
+            join: std::sync::Mutex::new(PartialSourceJoin {
+                _observer: observer,
+                done,
+                joined: false,
+                failed: false,
+            }),
+        };
+        release_start
+            .try_send(())
+            .map_err(|_| anyhow::anyhow!("partial source startup gate failed"))?;
+        monitor.validate_current()?;
+        Ok(monitor)
+    }
+    fn observe_budget(
+        &self,
+        budget: Option<&super::finalization_budget::FinalizationBudget>,
+    ) -> Result<()> {
+        let result = self.authority.state.observe_budget(budget);
+        if result.is_err() {
+            self.authority.state.fence();
+        }
+        result
     }
     fn check(&self) -> Result<()> {
-        ensure!(!self.authority.cancelled(), "partial authority retired");
-        Ok(())
+        self.authority.state.check()
     }
     fn validate_current(&self) -> Result<()> {
-        self.authority.validate(&self.authority.binding)
+        self.authority.current(None)
     }
-    fn finish(&self) -> Result<()> {
-        self.validate_current()?;
-        self.stop.store(true, Ordering::Release);
-        self.done
-            .recv_timeout(AUTHORIZATION_SETTLE)
-            .context("partial authority monitor has not settled")?;
-        if let Some(thread) = self
-            .thread
-            .lock()
-            .map_err(|_| anyhow::anyhow!("partial monitor ownership unavailable"))?
-            .take()
-        {
-            thread
-                .join()
-                .map_err(|_| anyhow::anyhow!("partial authority monitor failed"))?;
+    fn current(
+        &self,
+        budget: Option<&super::finalization_budget::FinalizationBudget>,
+    ) -> Result<()> {
+        self.authority.current(budget)
+    }
+    fn close(&self) {
+        self.authority.state.closing.store(true, Ordering::Release);
+    }
+    fn settle(
+        &self,
+        limit: Duration,
+        budget: Option<&super::finalization_budget::FinalizationBudget>,
+    ) -> Result<()> {
+        self.close();
+        let limit = match budget {
+            Some(b) => b.phase_limit(limit)?,
+            None => limit,
+        };
+        let deadline = Instant::now()
+            .checked_add(limit)
+            .context("partial source settle deadline overflow")?;
+        let mut join = self
+            .join
+            .try_lock()
+            .map_err(|_| anyhow::anyhow!("partial source join owner unavailable"))?;
+        ensure!(!join.failed, "partial source worker failed");
+        while !join.joined {
+            let mut remaining = deadline.saturating_duration_since(Instant::now());
+            if let Some(b) = budget {
+                remaining = remaining.min(b.remaining()?);
+            }
+            ensure!(!remaining.is_zero(), "partial source work still owned");
+            match join
+                .done
+                .recv_timeout(remaining.min(Duration::from_millis(10)))
+            {
+                Ok(true) => join.joined = true,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                _ => {
+                    join.failed = true;
+                    anyhow::bail!("partial source worker failed");
+                }
+            }
         }
-        self.validate_current()
+        ensure!(
+            self.authority.state.active.load(Ordering::Acquire) == 0
+                && self.authority.state.admitted.load(Ordering::Acquire) == 0,
+            "partial source work has not settled"
+        );
+        Ok(())
     }
 }
 impl Drop for PartialAuthorityMonitor {
     fn drop(&mut self) {
-        self.stop.store(true, Ordering::Release);
+        self.close();
+    }
+}
+struct SourceFinalizationOwner {
+    monitor: PartialAuthorityMonitor,
+    budget: Option<super::finalization_budget::FinalizationBudget>,
+}
+impl SourceFinalizationOwner {
+    fn current(&self) -> Result<()> {
+        self.monitor.current(self.budget.as_ref())
+    }
+    fn during<T>(&self, effect: impl FnOnce() -> Result<T>) -> Result<T> {
+        self.current()?;
+        let value = effect()?;
+        self.current()?;
+        Ok(value)
     }
 }
 enum WorkspaceMonitor {
@@ -372,7 +713,9 @@ impl WorkspaceMonitor {
     fn finish(&self) -> Result<()> {
         match self {
             Self::Complete(m) => m.finish(),
-            Self::Partial(m) => m.finish(),
+            Self::Partial(_) => {
+                anyhow::bail!("partial source owner must survive publication and receipt")
+            }
         }
     }
 }
@@ -453,8 +796,26 @@ pub(super) struct OwnedExecutionDrain {
     network: Option<super::network_phase::OwnedNetworkReady>,
     workspace_view: VfsView,
     frozen: Option<crate::vfs::FrozenRemoteView>,
+    source: Option<SourceFinalizationOwner>,
+    _source_workspace: Option<Arc<OwnedHelperWorkspace>>,
 }
 impl OwnedExecutionDrain {
+    fn source_current(&self) -> Result<()> {
+        if let Some(source) = &self.source {
+            ensure!(
+                self._source_workspace.is_some(),
+                "partial source resources are not owned"
+            );
+            source.current()?;
+        }
+        Ok(())
+    }
+    fn source_effect<T>(&self, effect: impl FnOnce() -> Result<T>) -> Result<T> {
+        match &self.source {
+            Some(source) => source.during(effect),
+            None => effect(),
+        }
+    }
     pub(super) fn authenticated_stop(&self) -> Result<&super::StopAndCheckpoint> {
         self.stop
             .as_ref()
@@ -469,6 +830,11 @@ impl OwnedExecutionDrain {
         workspace: &OwnedHelperWorkspace,
     ) -> Result<Vec<u8>> {
         use sha2::{Digest, Sha256};
+        self.source_current()?;
+        ensure!(
+            self.source.is_some(),
+            "remote drain lacks live source ownership"
+        );
         ensure!(
             record.format_version() == 2
                 && record.phase() == ExecutionPhase::Running
@@ -539,6 +905,11 @@ impl OwnedExecutionDrain {
             network.validate_retained()?;
         }
         if matches!(record.checkpoint(), Some(CheckpointRef::PartialRemote(_))) {
+            ensure!(
+                self.source.is_some() && self._source_workspace.is_some(),
+                "partial commit lacks actual source/resource ownership"
+            );
+            self.source_current()?;
             self._mount
                 .rpc
                 .as_ref()
@@ -562,6 +933,7 @@ impl OwnedExecutionDrain {
         &self,
         committed: &super::CommittedExecutionRecord,
     ) -> Result<()> {
+        self.source_current()?;
         self.validate_commit(committed)?;
         if let Some(CheckpointRef::PartialRemote(checkpoint)) = committed.record().checkpoint() {
             let frozen = self
@@ -575,6 +947,7 @@ impl OwnedExecutionDrain {
                 "partial publication differs from the owned frozen intent"
             );
         }
+        self.source_current()?;
         Ok(())
     }
 }
@@ -812,7 +1185,7 @@ fn supervisor(
             .map(|profile| profile.partial_binding())
             .transpose()?
             .flatten();
-        let monitor = match (&spec.workspace_observation, &services) {
+        let mut monitor = match (&spec.workspace_observation, &services) {
             (Some(workspace), Some(services)) => Some(match &services.workspace {
                 HelperWorkspaceServices::Complete { authority, .. } => {
                     ensure!(
@@ -839,12 +1212,14 @@ fn supervisor(
         unsafe {
             libc::signal(libc::SIGTTOU, libc::SIG_IGN);
         }
-        let workspace = state.open_workspace(
-            &spec,
-            services
-                .as_mut()
-                .and_then(|services| services.workspace_factory.take()),
-        )?;
+        let workspace = Arc::new(
+            state.open_workspace(
+                &spec,
+                services
+                    .as_mut()
+                    .and_then(|services| services.workspace_factory.take()),
+            )?,
+        );
         if partial_binding.is_some() {
             ensure!(
                 workspace.checkpoint_capability() == CheckpointCapability::PartialRemoteFinalizable,
@@ -1053,7 +1428,11 @@ fn supervisor(
                     monitor.check()?;
                 }
                 if let Some(control) = &mut control {
-                    if control.poll_stop()? && !stop_sent {
+                    let stopping = control.poll_stop()?;
+                    if let Some(WorkspaceMonitor::Partial(source)) = &monitor {
+                        source.observe_budget(control.finalization_budget().as_ref())?;
+                    }
+                    if stopping && !stop_sent {
                         supervisor_control.write_all(b"S")?;
                         stop_sent = true;
                     }
@@ -1138,6 +1517,18 @@ fn supervisor(
                 monitor.check()?;
             }
             let _view = mounted.unmount()?;
+            let source = match monitor.take() {
+                Some(WorkspaceMonitor::Partial(source)) => Some(SourceFinalizationOwner {
+                    monitor: source,
+                    budget: control
+                        .as_ref()
+                        .and_then(|control| control.finalization_budget()),
+                }),
+                other => {
+                    monitor = other;
+                    None
+                }
+            };
             let mut owned_drain = OwnedExecutionDrain {
                 _wrapper: child,
                 _mount: mounted,
@@ -1151,6 +1542,8 @@ fn supervisor(
                 network: network_ready,
                 workspace_view: view.clone(),
                 frozen: None,
+                source,
+                _source_workspace: partial_binding.as_ref().map(|_| workspace.clone()),
             };
             if let Some(monitor) = &monitor {
                 monitor.validate_current()?;
@@ -1185,11 +1578,14 @@ fn supervisor(
             if let Some(monitor) = &monitor {
                 monitor.finish()?;
             }
-            state.verify_commit_current(&committed)?;
+            owned_drain.source_effect(|| state.verify_commit_current(&committed))?;
             owned_drain.validate_publication(&committed)?;
             if let Some(control) = &mut control {
-                control.shutdown_receipt(&committed, &owned_drain)?;
+                // A sent packet remains provisional for the parent. Loss during
+                // send makes this helper return Err; it cannot recall bytes.
+                owned_drain.source_effect(|| control.shutdown_receipt(&committed, &owned_drain))?;
             }
+            owned_drain.source_current()?;
             let mut isolation = proof();
             isolation.network_isolated = owned_drain.network.is_some();
             ExecutionOutcome::from_drained(committed, isolation, Vec::new(), owned_drain)
@@ -1952,5 +2348,618 @@ mod authority_monitor_tests {
             binding()
         )
         .is_err());
+    }
+}
+
+#[cfg(test)]
+mod partial_source_lifetime_tests {
+    use super::*;
+    use fs2::FileExt;
+    use std::{
+        fs::OpenOptions,
+        os::unix::fs::{MetadataExt, OpenOptionsExt},
+        sync::{atomic::AtomicUsize, mpsc, Mutex},
+    };
+
+    struct Block {
+        started: mpsc::SyncSender<()>,
+        release: mpsc::Receiver<()>,
+    }
+    struct Release {
+        started: mpsc::Receiver<()>,
+        release: Option<mpsc::SyncSender<()>>,
+    }
+    impl Release {
+        fn wait(&self) {
+            self.started.recv_timeout(Duration::from_secs(2)).unwrap();
+        }
+        fn release(&mut self) {
+            if let Some(send) = self.release.take() {
+                let _ = send.send(());
+            }
+        }
+    }
+    impl Drop for Release {
+        fn drop(&mut self) {
+            self.release();
+        }
+    }
+    struct HeldAuthority {
+        owner: File,
+        path: std::path::PathBuf,
+        binding: PartialBinding,
+        block: Mutex<Option<Block>>,
+        calls: AtomicUsize,
+        calls_at: Mutex<Vec<Instant>>,
+        cancel_block: Mutex<Option<Block>>,
+    }
+    impl HeldAuthority {
+        fn block_next(&self) -> Release {
+            let (started, observed) = mpsc::sync_channel(1);
+            let (release, wait) = mpsc::sync_channel(1);
+            *self.block.lock().unwrap() = Some(Block {
+                started,
+                release: wait,
+            });
+            Release {
+                started: observed,
+                release: Some(release),
+            }
+        }
+        fn block_cancel_next(&self) -> Release {
+            let (started, observed) = mpsc::sync_channel(1);
+            let (release, wait) = mpsc::sync_channel(1);
+            *self.cancel_block.lock().unwrap() = Some(Block {
+                started,
+                release: wait,
+            });
+            Release {
+                started: observed,
+                release: Some(release),
+            }
+        }
+        fn revoke(&self) {
+            fs::rename(&self.path, self.path.with_extension("retired")).unwrap();
+            OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&self.path)
+                .unwrap();
+        }
+    }
+    impl PartialAttemptAuthority for HeldAuthority {
+        fn validate(&self, binding: &PartialBinding) -> Result<()> {
+            self.calls.fetch_add(1, Ordering::AcqRel);
+            {
+                let mut times = self.calls_at.lock().unwrap();
+                assert!(times.len() < 256, "synthetic callback trace bounded");
+                times.push(Instant::now());
+            }
+            let block = self.block.lock().unwrap().take();
+            if let Some(block) = block {
+                let _ = block.started.send(());
+                let _ = block.release.recv();
+            }
+            let held = self.owner.metadata()?;
+            let named = fs::symlink_metadata(&self.path)?;
+            ensure!(
+                binding == &self.binding
+                    && held.is_file()
+                    && named.is_file()
+                    && held.dev() == named.dev()
+                    && held.ino() == named.ino()
+                    && named.nlink() == 1,
+                "actual source owner FD was replaced"
+            );
+            Ok(())
+        }
+        fn cancelled(&self) -> bool {
+            let block = self.cancel_block.lock().unwrap().take();
+            if let Some(block) = block {
+                let _ = block.started.send(());
+                let _ = block.release.recv();
+            }
+            false
+        }
+    }
+    fn binding() -> PartialBinding {
+        let view_id = Uuid::new_v4().to_string();
+        let execution_id = Uuid::new_v4().to_string();
+        let operation_id = Uuid::new_v4().to_string();
+        let owner = OwnerEpoch {
+            owner: "source-lifetime".into(),
+            epoch: 1,
+        };
+        PartialBinding {
+            protocol: crate::vfs::partial_rpc::PROTOCOL.into(),
+            format_version: 1,
+            launch_request_digest: "b".repeat(64),
+            root: crate::remote_root::RootBinding {
+                scope: crate::remote_cache::CacheScope {
+                    provider_id: "fixture".into(),
+                    tenant_id: Uuid::new_v4().to_string(),
+                },
+                root_id: "source".into(),
+                root: crate::protocol::ObjectRef::from_bytes(
+                    crate::protocol::ObjectKind::RunnableRoot,
+                    b"fixture",
+                ),
+            },
+            attempt: crate::remote_root::AttemptBinding {
+                project_id: "project".into(),
+                run_id: "run".into(),
+                run_epoch: 1,
+                owner: owner.clone(),
+                execution_id: execution_id.clone(),
+                operation_id: operation_id.clone(),
+                view_id: view_id.clone(),
+            },
+            observation: ObservationBinding {
+                format_version: 1,
+                attempt: crate::vfs::rpc::AttemptContext {
+                    execution_id,
+                    operation_id,
+                },
+                view_id,
+                owner,
+                namespace: Uuid::new_v4().to_string(),
+                profile: crate::protocol::ObjectRef::from_bytes(
+                    crate::protocol::ObjectKind::Blob,
+                    b"profile",
+                ),
+                exclusion_policy_digest: crate::vfs::exclusion_policy_digest(
+                    &crate::store::ImportPolicy::default(),
+                )
+                .unwrap(),
+            },
+        }
+    }
+    struct Fixture {
+        root: tempfile::TempDir,
+        authority: Arc<HeldAuthority>,
+        contender: File,
+    }
+    impl Fixture {
+        fn new() -> Self {
+            let root = tempfile::tempdir().unwrap();
+            let path = root.path().join("owner.lock");
+            let owner = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&path)
+                .unwrap();
+            owner.lock_exclusive().unwrap();
+            let contender = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&path)
+                .unwrap();
+            Self {
+                root,
+                authority: Arc::new(HeldAuthority {
+                    owner,
+                    path,
+                    binding: binding(),
+                    block: Mutex::new(None),
+                    calls: AtomicUsize::new(0),
+                    calls_at: Mutex::new(Vec::new()),
+                    cancel_block: Mutex::new(None),
+                }),
+                contender,
+            }
+        }
+        fn owner(
+            &self,
+            budget: Option<super::super::finalization_budget::FinalizationBudget>,
+        ) -> SourceFinalizationOwner {
+            let monitor = PartialAuthorityMonitor::start(
+                self.authority.clone(),
+                self.authority.binding.clone(),
+            )
+            .unwrap();
+            monitor.observe_budget(budget.as_ref()).unwrap();
+            SourceFinalizationOwner { monitor, budget }
+        }
+    }
+    fn wait_for(check: impl Fn() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !check() {
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+    #[test]
+    fn loss_before_final_check_prevents_effect_without_a_saved_grace_permission() {
+        let fixture = Fixture::new();
+        let owner = fixture.owner(None);
+        owner.current().unwrap();
+        fixture.authority.revoke();
+        let ack = fixture.root.path().join("ack");
+        assert!(owner
+            .during(|| {
+                fs::write(&ack, b"forbidden")?;
+                Ok(())
+            })
+            .is_err());
+        assert!(!ack.exists());
+        owner.monitor.settle(Duration::from_secs(2), None).unwrap();
+    }
+    #[test]
+    fn source_loss_during_durable_final_check_retains_candidate_but_refuses_ack() {
+        let fixture = Fixture::new();
+        let owner = fixture.owner(None);
+        let candidate = fixture.root.path().join("candidate");
+        let ack = fixture.root.path().join("ack");
+        let checked = owner.during(|| {
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&candidate)?;
+            file.write_all(b"retained candidate data")?;
+            file.sync_all()?;
+            fixture.authority.revoke();
+            Ok(())
+        });
+        if checked.is_ok() {
+            fs::write(&ack, b"not permitted").unwrap();
+        }
+        assert!(checked.is_err());
+        assert_eq!(fs::read(candidate).unwrap(), b"retained candidate data");
+        assert!(!ack.exists());
+        owner.monitor.settle(Duration::from_secs(2), None).unwrap();
+    }
+    #[test]
+    fn packet_already_sent_is_provisional_and_loss_during_send_refuses_final_success() {
+        let fixture = Fixture::new();
+        let owner = fixture.owner(None);
+        let (mut writer, mut reader) = UnixStream::pair().unwrap();
+        reader
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        let result = owner.during(|| {
+            writer.write_all(b"provisional-record2")?;
+            fixture.authority.revoke();
+            Ok(())
+        });
+        let mut packet = [0; 19];
+        reader.read_exact(&mut packet).unwrap();
+        assert_eq!(&packet, b"provisional-record2");
+        assert!(
+            result.is_err(),
+            "packet bytes must never imply final source authority"
+        );
+        // The future Binding4 parent must still join actual successful helper
+        // exit +fresh issuer custody. This fixture claims no packet recall.
+        assert!(fixture
+            .authority
+            .validate(&fixture.authority.binding)
+            .is_err());
+        owner.monitor.settle(Duration::from_secs(2), None).unwrap();
+    }
+    #[test]
+    fn early_monitor_retirement_negative_control_leaks_an_unchecked_packet() {
+        let old = Fixture::new();
+        let monitor =
+            PartialAuthorityMonitor::start(old.authority.clone(), old.authority.binding.clone())
+                .unwrap();
+        monitor.validate_current().unwrap();
+        monitor.settle(Duration::from_secs(2), None).unwrap();
+        old.authority.revoke();
+        let (mut writer, mut reader) = UnixStream::pair().unwrap();
+        reader
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        // Reproduce the old ordering: monitor is retired, later write has no
+        // actual source gate. Current held-FD authority already rejects it.
+        assert!(old.authority.validate(&old.authority.binding).is_err());
+        writer.write_all(b"bad").unwrap();
+        let mut bytes = [0; 3];
+        reader.read_exact(&mut bytes).unwrap();
+        assert_eq!(&bytes, b"bad");
+        let fixed = Fixture::new();
+        let owner = fixed.owner(None);
+        fixed.authority.revoke();
+        assert!(owner
+            .during(|| {
+                writer.write_all(b"ack")?;
+                Ok(())
+            })
+            .is_err());
+        owner.monitor.settle(Duration::from_secs(2), None).unwrap();
+    }
+    #[test]
+    fn timed_out_actual_callback_keeps_charge_fd_and_join_owner_until_real_release() {
+        use super::super::finalization_budget::FinalizationBudget;
+        let fixture = Fixture::new();
+        let mut owner = fixture.owner(None);
+        let mut blocked = fixture.authority.block_next();
+        // Let the existing single background callback enter first. Start the
+        // authenticated time constraint only after its actual admission is held.
+        blocked.wait();
+        owner.budget = Some(FinalizationBudget::begin(Duration::from_millis(40)).unwrap());
+        let calling = owner.monitor.authority.clone();
+        let budget = owner.budget.clone();
+        let request = std::thread::spawn(move || calling.current(budget.as_ref()));
+        assert!(request.join().unwrap().is_err());
+        let state = &owner.monitor.authority.state;
+        assert_eq!(state.active.load(Ordering::Acquire), 1);
+        assert_eq!(state.admitted.load(Ordering::Acquire), 1);
+        assert!(fixture.contender.try_lock_exclusive().is_err());
+        assert!(owner
+            .monitor
+            .settle(Duration::from_millis(20), None)
+            .is_err());
+        assert!(!owner.monitor.join.lock().unwrap().joined);
+        blocked.release();
+        owner.monitor.settle(Duration::from_secs(2), None).unwrap();
+        assert_eq!(state.active.load(Ordering::Acquire), 0);
+        assert_eq!(state.admitted.load(Ordering::Acquire), 0);
+        assert!(owner.current().is_err());
+    }
+    #[test]
+    fn bounded_queue_does_not_replace_or_forget_an_actual_stalled_callback() {
+        let fixture = Fixture::new();
+        let owner = fixture.owner(None);
+        let mut blocked = fixture.authority.block_next();
+        let mut callers = Vec::new();
+        for _ in 0..PARTIAL_SOURCE_ADMISSIONS {
+            let authority = owner.monitor.authority.clone();
+            callers.push(std::thread::spawn(move || authority.current(None)));
+        }
+        blocked.wait();
+        wait_for(|| {
+            owner
+                .monitor
+                .authority
+                .state
+                .admitted
+                .load(Ordering::Acquire)
+                == PARTIAL_SOURCE_ADMISSIONS
+        });
+        assert!(owner.current().is_err());
+        assert_eq!(
+            owner.monitor.authority.state.active.load(Ordering::Acquire),
+            1
+        );
+        assert_eq!(
+            owner
+                .monitor
+                .authority
+                .state
+                .admitted
+                .load(Ordering::Acquire),
+            PARTIAL_SOURCE_ADMISSIONS
+        );
+        assert!(fixture.contender.try_lock_exclusive().is_err());
+        blocked.release();
+        for caller in callers {
+            assert!(caller.join().unwrap().is_err());
+        }
+        owner.monitor.settle(Duration::from_secs(2), None).unwrap();
+        assert_eq!(
+            owner
+                .monitor
+                .authority
+                .state
+                .admitted
+                .load(Ordering::Acquire),
+            0
+        );
+    }
+    #[test]
+    fn original_budget_cannot_be_restarted_at_publication_even_with_a_live_owner_fd() {
+        use super::super::finalization_budget::FinalizationBudget;
+        let fixture = Fixture::new();
+        let owner = fixture.owner(Some(
+            FinalizationBudget::begin(Duration::from_millis(20)).unwrap(),
+        ));
+        let calls = fixture.authority.calls.load(Ordering::Acquire);
+        std::thread::sleep(Duration::from_millis(25));
+        assert!(owner.current().is_err());
+        assert_eq!(fixture.authority.calls.load(Ordering::Acquire), calls);
+        assert!(fixture.contender.try_lock_exclusive().is_err());
+        assert!(owner.monitor.validate_current().is_err());
+        owner.monitor.settle(Duration::from_secs(2), None).unwrap();
+    }
+    #[test]
+    fn source_handle_stays_owned_through_final_effect_and_actual_monitor_settlement() {
+        let fixture = Fixture::new();
+        let root = fixture.root;
+        let weak = Arc::downgrade(&fixture.authority);
+        let monitor = PartialAuthorityMonitor::start(
+            fixture.authority.clone(),
+            fixture.authority.binding.clone(),
+        )
+        .unwrap();
+        let owner = SourceFinalizationOwner {
+            monitor,
+            budget: None,
+        };
+        drop(fixture.authority);
+        owner
+            .during(|| {
+                fs::write(root.path().join("receipt-phase"), b"candidate")?;
+                Ok(())
+            })
+            .unwrap();
+        assert!(fixture.contender.try_lock_exclusive().is_err());
+        assert!(weak.upgrade().is_some());
+        owner.monitor.settle(Duration::from_secs(2), None).unwrap();
+        assert!(weak.upgrade().is_some());
+        drop(owner);
+        wait_for(|| weak.upgrade().is_none());
+        fixture.contender.try_lock_exclusive().unwrap();
+        FileExt::unlock(&fixture.contender).unwrap();
+    }
+    #[derive(Clone, Copy)]
+    enum StartupFailure {
+        Observer,
+        Worker,
+        Transfer,
+    }
+    fn failed_start(fixture: &Fixture, failure: StartupFailure) {
+        let started = Arc::new(AtomicUsize::new(0));
+        let exited = Arc::new(AtomicUsize::new(0));
+        let observed = started.clone();
+        let completed = exited.clone();
+        let result = PartialAuthorityMonitor::start_with_spawn(
+            fixture.authority.clone(),
+            fixture.authority.binding.clone(),
+            move |stage, work| {
+                if matches!(
+                    (failure, stage),
+                    (StartupFailure::Observer, PartialSourceThreadStage::Observer)
+                        | (StartupFailure::Worker, PartialSourceThreadStage::Worker)
+                ) {
+                    return Err(std::io::Error::other("synthetic startup spawn refusal"));
+                }
+                let work: PartialSourceWork = if matches!(
+                    (failure, stage),
+                    (StartupFailure::Transfer, PartialSourceThreadStage::Observer)
+                ) {
+                    // Drop the REAL receiver before transfer, then run a real
+                    // inert observer thread. The recovered worker remains gated.
+                    drop(work);
+                    Box::new(|| {})
+                } else {
+                    work
+                };
+                let started = observed.clone();
+                let exited = completed.clone();
+                std::thread::Builder::new()
+                    .name("synthetic-source-startup".into())
+                    .spawn(move || {
+                        struct Exit(Arc<AtomicUsize>);
+                        impl Drop for Exit {
+                            fn drop(&mut self) {
+                                self.0.fetch_add(1, Ordering::AcqRel);
+                            }
+                        }
+                        let _exit = Exit(exited);
+                        started.fetch_add(1, Ordering::AcqRel);
+                        work();
+                    })
+            },
+        );
+        assert!(result.is_err());
+        let expected = match failure {
+            StartupFailure::Observer => 0,
+            StartupFailure::Worker => 1,
+            StartupFailure::Transfer => 2,
+        };
+        assert_eq!(started.load(Ordering::Acquire), expected);
+        assert_eq!(exited.load(Ordering::Acquire), expected);
+        assert_eq!(fixture.authority.calls.load(Ordering::Acquire), 0);
+        assert_eq!(
+            Arc::strong_count(&fixture.authority),
+            1,
+            "no detached startup thread may retain a lost source owner"
+        );
+        assert!(fixture.contender.try_lock_exclusive().is_err());
+    }
+    #[test]
+    fn observer_spawn_failure_creates_no_worker_and_invokes_no_source_callback() {
+        let fixture = Fixture::new();
+        failed_start(&fixture, StartupFailure::Observer);
+    }
+    #[test]
+    fn worker_spawn_failure_reaps_inert_observer_without_a_source_callback() {
+        let fixture = Fixture::new();
+        failed_start(&fixture, StartupFailure::Worker);
+    }
+    #[test]
+    fn failed_handle_transfer_recovers_and_reaps_the_actual_gated_worker() {
+        let fixture = Fixture::new();
+        failed_start(&fixture, StartupFailure::Transfer);
+    }
+    #[test]
+    fn normal_finalization_twenty_seven_fresh_checks_are_an_unslept_measured_burst() {
+        use super::super::finalization_budget::FinalizationBudget;
+        let fixture = Fixture::new();
+        let owner = fixture.owner(None);
+        let budget = FinalizationBudget::begin(Duration::from_secs(10)).unwrap();
+        owner.monitor.observe_budget(Some(&budget)).unwrap();
+        let before = fixture.authority.calls.load(Ordering::Acquire);
+        let start = Instant::now();
+        // Exact normal path: pre-freeze1 +State12 +outer verify2 +publication3
+        // +receipt5 +last current1 +outcome3. This load fixture executes fresh
+        // callbacks, not a fake drain, namespace or simulated successful ACK.
+        for _ in 0..27 {
+            owner.monitor.current(Some(&budget)).unwrap();
+        }
+        let elapsed = start.elapsed();
+        let callbacks = fixture.authority.calls.load(Ordering::Acquire) - before;
+        assert!(
+            callbacks >= 27,
+            "no freshness check may use a cached positive"
+        );
+        let times = fixture.authority.calls_at.lock().unwrap();
+        let maximum = times
+            .iter()
+            .enumerate()
+            .map(|(index, began)| {
+                times[index..]
+                    .iter()
+                    .take_while(|at| at.duration_since(*began) < Duration::from_secs(1))
+                    .count()
+            })
+            .max()
+            .unwrap();
+        eprintln!("synthetic finalization load: foreground=27 actual_callbacks={callbacks} elapsed_us={} max_one_second={maximum}", elapsed.as_micros());
+        // Root's distinct host endpoint is to preserve16/s average with64 burst;
+        // actual Native token-bucket/transport integration is a separate check.
+        assert!(maximum <= 64);
+        drop(times);
+        assert!(fixture.contender.try_lock_exclusive().is_err());
+        owner.monitor.settle(Duration::from_secs(2), None).unwrap();
+    }
+    #[test]
+    fn blocked_cancellation_hook_runs_only_on_the_actual_charged_worker() {
+        use super::super::finalization_budget::FinalizationBudget;
+        let fixture = Fixture::new();
+        let owner = fixture.owner(None);
+        let mut blocked = fixture.authority.block_cancel_next();
+        // A real background callback now blocks INSIDE cancelled(), not on a
+        // caller-side check. It still owns the fixed callback worker and FD.
+        blocked.wait();
+        let budget = FinalizationBudget::begin(Duration::from_millis(40)).unwrap();
+        assert!(owner.monitor.current(Some(&budget)).is_err());
+        assert_eq!(
+            owner.monitor.authority.state.active.load(Ordering::Acquire),
+            1
+        );
+        assert_eq!(
+            owner
+                .monitor
+                .authority
+                .state
+                .admitted
+                .load(Ordering::Acquire),
+            1
+        );
+        assert!(fixture.contender.try_lock_exclusive().is_err());
+        assert!(owner
+            .monitor
+            .settle(Duration::from_millis(20), None)
+            .is_err());
+        blocked.release();
+        owner.monitor.settle(Duration::from_secs(2), None).unwrap();
+        assert_eq!(
+            owner.monitor.authority.state.active.load(Ordering::Acquire),
+            0
+        );
+        assert_eq!(
+            owner
+                .monitor
+                .authority
+                .state
+                .admitted
+                .load(Ordering::Acquire),
+            0
+        );
     }
 }

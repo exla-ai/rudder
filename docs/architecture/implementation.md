@@ -38,6 +38,15 @@ Accepted architecture:
   The existing relay remains available; direct networking does not replace
   authorization. Responsive terminal transport has bounded queues/recovery.
 
+## Execution efficiency, 2026-10-31
+
+Read the independent agent-efficiency README and session report in the research
+worktree (research/agent-efficiency, local commit e684468). Apply short edit/check
+loops, bounded output, scoped fresh worker briefs and one result handoff. Avoid
+repeated unchanged-input checks, polling-only turns and speculative expansion.
+Finish the current integration batch before adding another lane. The research
+worktree stays on its own branch and is not edited by this implementation owner.
+
 ## Current implementation track
 
 Base: `91579cf631b1d9d78afbbd786a6dc1f8120cc1ca` on `origin/main` at start.
@@ -50,7 +59,7 @@ the three architecture documents already contained this session's planning work.
 | Private previews | Persisted Tailscale login, actual readiness, bounded async probes, exact project ownership, ready links and local open | E13 subset implemented; real userspace/Serve check passed; laptop/phone access remains untested |
 | Terminal stream | Shared home/sail helper, short output batching, bounded backpressure, connection fencing, UTF-8 and repaint recovery | E13 subset deployed in the worker image; real WS/PTY VM checks passed; existing homes adopt when idle |
 | Startup/download caches | Background CLI update, persistent account-local npm/pnpm/uv cache defaults, explicit overrides retained | Behavior tests pass; no distributed action-cache claim |
-| Full storage/engine rewrite | Milestones below | Cloud release 164 / worker alpha.13 is deployed and verified; npm remains alpha.7 after the alpha.13 Mac test failure. Default workspace integration, fleet and migration gates remain open |
+| Full storage/engine rewrite | Milestones below | Cloud release 165 / worker alpha.14 is deployed and verified; alpha.14 npm CI failed twice on the same Darwin fixture race; both next tags still name alpha.7. Default workspace integration, fleet and migration gates remain open |
 
 The current native simple-execution path remains an isolated worker; explicit
 main-checkout mode remains available. The initial automatic DAG path retains
@@ -67,7 +76,100 @@ path, so this is a stated alpha limitation, not complete Cloud routing parity.
 
 ## V4 foundations and current continuation, 2026-10-31
 
-Cloud alpha.13 is deployed as release 164 from
+Cloud alpha.14 is live as release 165 from tagged revision
+`13889d1e0860b5a806f5513d32cf0f215747759f`. Canonical app/health/authentication,
+database integrity, source and compiled runtime hashes pass at
+`2026-10-31T04:43:15Z`. The active home retains its original instance/image.
+The actual S3 checkpoint DATA publication and fresh stock14 native-CAS restore
+pass at `2026-10-31T04:51:07Z`: nine new uploads, thirteen exact objects/12,953
+bytes, opaque high-u64 values, zero-upload same-ID retry, and retention across
+two settled Native helpers. All three alpha14 canaries and both synthetic
+credential rows are independently absent at `2026-10-31T04:53:47Z`.
+See [delivery proof](delivery-alpha14.json) and
+[tagged runtime evidence](../../examples/execution/evidence/2026-10-31-alpha14-runtime/README.md).
+
+All three native alpha.14 platform artifacts pass CI. The first publish
+attempt passed JavaScript checks, then failed one Darwin fixture setup race:
+994 Native tests passed, one failed and11 were ignored. Peer rejection can
+close the client before the test server sets its read timeout. Managed jj/TUI
+and publication were skipped. The single failed-job retry failed on the same fixture against the unchanged
+immutable tag. No more retries are planned; the next source release adds the
+server-ready barrier that passes the local merged Native suite.
+Registry publication and isolated npm installations remain open. Both npm
+`next` tags still name alpha.7; `latest` remains 3.9.13. Do not retag or
+hand-publish. See the runtime evidence ci.json and registry.json.
+The real S3 controller needed an exact archived-source exception and a
+top-level-await correction. Its failed canary/credential were removed; the
+corrected serialized-preload negative control and subsequent real run pass.
+
+After the alpha.14 source boundary, main has the following uncommitted work.
+These changes are absent from the deployed immutable tag:
+
+- Host-only Journal source authorization uses a distinct purpose, operation and
+  domain-separated exact-binding scope. Its non-Serde result is identity/expiry
+  DATA from one read transaction. Thirteen actual SQLite/golden/expiry tests,
+  five guest-partial compatibility cases and one current-attempt case pass.
+  The Native issuer must still hold actual EngineOwnership and clamp expiry
+  against fresh post-query and original sent time.
+- Actual Fabric EngineOwnership now supplies an opaque source lease retaining
+  the real checkout lock through callback settlement. Retirement revokes before
+  fallible writes; stopping retains existing leases and denies new acquisition.
+  Thirty-three focused cases pass, including nine new lifetime tests and ten
+  fresh-process OS-lock probes. This is local held custody, not a source grant
+  or active remote session.
+- Six Native CLI/prompt files provide five primary slash choices, shared help,
+  truthful historical Gam notices and one conductor contract. Focused coverage
+  passes 170 unique tests with one pre-existing simulation ignored. Legacy
+  dispatch/recovery and combined nudge behavior are retained; source-authorizer
+  module wiring is deferred until the transport review settles.
+- The accidentally tracked legacy Native `.ledger` session is removed from
+  future source, with an exact mode0600 private copy retained outside the repo.
+  The directory was already ignored. Tagged source/history are unchanged.
+
+The Native source-authorizer transport is now applied and compiled. Its
+24 actual Unix fixtures pass, including request/reply MAC authentication, exact
+post-query expiry clamping, issuer-peer checks, conservative pathname retention,
+callback panic retirement and an actual TLS-destructor timeout/retry. The fixed
+join coordinator retains actual workers and only reports their real settlement;
+its own final teardown is excluded from that endpoint-only receipt. Independent
+source review passes. A merged Native test executable passes1,054 tests with
+13 explicit ignores; its proof binds the exact compiled foundations and does
+not claim the later budget module was linked into that executable.
+
+A shared finalization budget now provides one suspend-aware host deadline,
+original-deadline adoption constraints, per-phase remaining-time caps and
+absorbing expiry/cancellation. Four library tests pass, including actual stalled
+Unix I/O and exact decimal nanoseconds above JavaScript's integer range. This
+is a time constraint, never shutdown or checkpoint authority. New managed stop
+wire dispatch and phase plumbing remain to be integrated.
+
+The controller witness and actual Journal source issuer are integrated. The
+SQLite-owned keeper passes70 focused cases, including cross-process writer
+exclusion, checkpoints and fresh writes; the unsafe raw-descriptor preparation
+and two fixture/compiler failures are retained privately as superseded evidence.
+The real cleared-environment child composition passes: authenticated3FD
+handoff, retained controller witness after control close, actual guest token
+rotation/broker closure, continuing host authorization and sticky denial after
+host revocation. Its first fixture attempt blocked on the retired guest probe;
+that probe now runs after the active source exchange.
+
+The integrated foundations pass1,204 library/Native tests with15 explicit
+ignores. Final source-lifetime and live-fleet patches are applied;82 affected
+checks pass with one explicit child-helper ignore. The13 source-lifetime cases
+include actual blocked callbacks, observer-first spawn failure, source loss
+around fsync/packet delivery, original deadlines and an unslept27-query burst.
+The endpoint uses a bounded token bucket: default16 requests/second with64 burst
+credits, fixed workers/admissions unchanged. Legacy helper-observed finalization
+starts one30s budget and does not renew for duplicate packets; original parent
+queue time still needs the new stop wire. Fleet notes no longer start unavailable
+workers, and deferred Enter is bound to the same terminal instance. Explicit
+resume is preserved. Production build, Node/TUI verification, versioning and
+actual delivery are next. No new user feature flag is added. Source authority,
+guest ingress closure, provisional shutdown packet, successful helper exit,
+fresh final authorization and accepted history remain separate facts. The new
+managed family must join them before default adoption.
+
+Cloud alpha.13 was deployed as release 164 from
 `030ebeff621089649c0cfb50e55f8fc9c7642d61`, verified at
 `2026-10-31T03:13:36Z`. The canonical app, health/authentication, database and
 unchanged active home pass. Its stock worker boot and S3-to-fresh-native-CAS
@@ -132,11 +234,12 @@ an alpha.14 tag/deployment or provider inference. See
 
 The immutable archive test setup needed the shared Cargo target and SQLite/PTY
 native dependencies. Failed/stopped setup runs remain private; final checks bind
-the unchanged source and fresh binaries. Mac CI, both npm publications, tagged
-Fly images/control deployment and the new real S3 checkpoint DATA smoke remain
-the alpha.14 delivery gates. Host-only source authorization and source-grace
-transport are prepared as private patches, uncompiled/unapplied until after the
-alpha.14 source boundary. Managed defaults, private-jj acceptance, production
+the unchanged source and fresh binaries. Tagged Fly images, deployment and the
+real S3 checkpoint DATA smoke now pass as recorded above. Mac test CI, both npm
+publications and isolated installs remain the alpha.14 delivery gates.
+Host-only Journal authorization and Native CLI cleanup are applied/tested after
+the tag; the source transport remains private pending corrections. Managed
+defaults, private-jj acceptance, production
 build-cache adoption, fleet/migration and the remaining command cleanup remain
 full v4 work.
 

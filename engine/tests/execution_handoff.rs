@@ -160,3 +160,170 @@ fn only_actual_child_receives_one_use_spec_after_other_peer_rejection() {
     receipt.wait(Duration::from_secs(2)).unwrap();
     assert!(UnixStream::connect_addr(&address).is_err());
 }
+
+// Only this test helper owns the spawned fixture; failure reaps it before the
+// temporary routing/spec files are removed. No production process is signaled.
+struct ControllerFixtureChild(Option<std::process::Child>);
+impl ControllerFixtureChild {
+    fn output(mut self) -> std::process::Output {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while self.0.as_mut().unwrap().try_wait().unwrap().is_none() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "managed controller fixture did not exit before deadline"
+            );
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        self.0.take().unwrap().wait_with_output().unwrap()
+    }
+}
+impl Drop for ControllerFixtureChild {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.0.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
+#[test]
+fn managed_handoff_retains_actual_controller_witness_after_control_close() {
+    use rudder_engine::{
+        execution::{
+            handoff::ManagedExecutionHandoff, BrokerBinding, HelperApplicationSpec,
+            ManagedExecutionBinding, ManagedFrontendStart, ProtectedHostContextRef,
+            WorkspaceObservationProfile,
+        },
+        protocol::{ObjectKind, ObjectRef},
+        vfs::rpc::{AttemptContext, ObservationBinding},
+    };
+    use std::os::{
+        linux::net::SocketAddrExt,
+        unix::{
+            fs::PermissionsExt,
+            net::{SocketAddr, UnixListener},
+        },
+    };
+    let temp = tempfile::Builder::new()
+        .prefix("controller-witness-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    let mut value = spec(temp.path());
+    value.format_version = 3;
+    let broker = temp.path().join("broker");
+    fs::create_dir(&broker).unwrap();
+    fs::set_permissions(&broker, fs::Permissions::from_mode(0o700)).unwrap();
+    fs::write(broker.join("identity.json"), br#"{"format_version":1,"project_id":"p","run_id":"r","run_epoch":1,"owner_epoch":1,"token":"fixture-token-never-authorized"}"#).unwrap();
+    fs::set_permissions(
+        broker.join("identity.json"),
+        fs::Permissions::from_mode(0o600),
+    )
+    .unwrap();
+    value.broker_directory = Some(broker);
+    value.broker_binding = Some(BrokerBinding {
+        project_id: "p".into(),
+        run_id: "r".into(),
+        run_epoch: 1,
+        owner_epoch: value.owner.epoch,
+    });
+    let authority = temp.path().join("journal");
+    fs::create_dir(&authority).unwrap();
+    fs::set_permissions(&authority, fs::Permissions::from_mode(0o700)).unwrap();
+    let context = authority.join("context.json");
+    fs::write(&context, b"{}").unwrap();
+    fs::set_permissions(&context, fs::Permissions::from_mode(0o600)).unwrap();
+    value.workspace_observation = Some(WorkspaceObservationProfile {
+        binding: ObservationBinding {
+            format_version: 1,
+            attempt: AttemptContext {
+                execution_id: value.execution_id.clone(),
+                operation_id: value.operation_id.clone(),
+            },
+            view_id: value.view_id.clone(),
+            owner: value.owner.clone(),
+            namespace: Uuid::new_v4().to_string(),
+            profile: ObjectRef::from_bytes(ObjectKind::Blob, b"handoff-only fixture profile"),
+            exclusion_policy_digest: "a".repeat(64),
+        },
+        endpoint_directory: temp.path().join("workspace"),
+        application: Some(HelperApplicationSpec {
+            format_version: 1,
+            kind: "handoff-fixture-v1".into(),
+            host_context: ProtectedHostContextRef {
+                format_version: 1,
+                path: context,
+                sha256: ObjectRef::from_bytes(ObjectKind::Blob, b"{}").digest,
+                size_bytes: 2,
+            },
+            projection_directory: temp.path().join("application"),
+        }),
+    });
+    let binding = ManagedExecutionBinding {
+        format_version: 2,
+        request_id: Uuid::new_v4().to_string(),
+        run_id: "r".into(),
+        run_epoch: 1,
+        execution_id: value.execution_id.clone(),
+        operation_id: value.operation_id.clone(),
+        view_id: value.view_id.clone(),
+        owner: value.owner.clone(),
+        execution_profile: "claude-sdk".into(),
+        frontend_start: ManagedFrontendStart::Immediate,
+        server_command: None,
+        guest_socket: "/tmp/cx.sock".into(),
+        profile: None,
+    };
+    value.validate().unwrap();
+    let handoff = ManagedExecutionHandoff::new(&value, binding).unwrap();
+    let args = handoff.helper_args();
+    let peer_name = format!("rudder-controller-witness-{}", Uuid::new_v4());
+    let listener = UnixListener::bind_addr(
+        &SocketAddr::from_abstract_name(peer_name.as_bytes()).unwrap(),
+    )
+    .unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let child = ControllerFixtureChild(Some(
+        Command::new(env!("CARGO_BIN_EXE_rudder-execution-handoff-test"))
+            .args([
+                args[4].as_str(),
+                args[6].as_str(),
+                "managed-controller",
+                peer_name.as_str(),
+            ])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap(),
+    ));
+    let (receipt, handle) = handoff.activate(child.0.as_ref().unwrap().id()).unwrap();
+    receipt.wait(Duration::from_secs(2)).unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let _stream = loop {
+        match listener.accept() {
+            Ok((stream, _)) => {
+                stream.set_nonblocking(false).unwrap();
+                break stream;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "fixture did not connect to the actual controller"
+                );
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            Err(error) => panic!("controller witness fixture accept failed: {error}"),
+        }
+    };
+    let output = child.output();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap().trim(),
+        "managed-controller-witness-ok"
+    );
+    drop(handle);
+}

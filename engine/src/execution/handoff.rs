@@ -2,6 +2,7 @@
 //! inherited FDs. Socket names are not credentials: kernel peer PID/UID plus
 //! held pidfds authenticate both ends. No JSON spec enters argv/env/PTY/disk.
 use super::*;
+use super::finalization_budget::{FinalizationBudget, FINALIZATION_POLICY_LIMIT};
 use crate::protocol::ObjectKind;
 use anyhow::{bail, Context};
 use std::{
@@ -15,6 +16,38 @@ use std::{
     sync::mpsc,
     time::{Duration, Instant},
 };
+
+/// The actual controller process authenticated by a successful managed handoff.
+/// Construction stays private to `receive_managed`: a saved PID, pathname, raw
+/// descriptor or serialized context cannot recreate this witness.
+///
+/// This proves kernel process lifetime and exact socket peer identity only. It
+/// does not grant owner/run authority or prove a held engine lease. Keep it on
+/// the trusted helper/supervisor side; never project it or its pidfd into the
+/// guest. CLOEXEC does not replace the child FD allowlist or protection before
+/// a same-UID guest can inspect the trusted process through `/proc`.
+pub struct ControllerProcessWitness {
+    lifetime: OwnedFd,
+    pid: u32,
+}
+impl ControllerProcessWitness {
+    pub fn check_current(&self) -> Result<()> {
+        ensure!(
+            !exited(&self.lifetime)?,
+            "managed controller process exited"
+        );
+        Ok(())
+    }
+    pub fn verify_peer(&self, stream: &UnixStream) -> Result<()> {
+        self.check_current()?;
+        let actual = peer(stream)?;
+        ensure!(
+            actual.pid == self.pid as i32 && actual.uid == unsafe { libc::geteuid() },
+            "controller socket does not belong to the authenticated parent"
+        );
+        self.check_current()
+    }
+}
 
 /// A kernel lifetime witness received only through an owned helper FD. It has
 /// no Deserialize implementation; a saved PID or guest JSON cannot recreate it.
@@ -708,11 +741,26 @@ fn validate_shutdown_artifact(
 
 pub struct ManagedControl {
     pub binding: ManagedExecutionBinding,
+    controller: Arc<ControllerProcessWitness>,
+    finalization: Option<FinalizationBudget>,
     stream: UnixStream,
     pub(crate) request: Option<StopAndCheckpoint>,
     pub(crate) authenticated: bool,
 }
 impl ManagedControl {
+    /// Clone the held controller identity from the successful authenticated
+    /// handoff. Only trusted host services may retain this witness. It remains
+    /// a process witness after control close, never a current owner/run grant.
+    pub fn controller_process(&self) -> Arc<ControllerProcessWitness> {
+        Arc::clone(&self.controller)
+    }
+    /// One helper-observed deadline after the first authenticated legacy stop.
+    /// Repeated packets never renew it. Legacy wire bytes cannot account for
+    /// queue time before reception; the new stop family must carry the original
+    /// parent's constraint. This value supplies time bounds, not drain proof.
+    pub(crate) fn finalization_budget(&self) -> Option<FinalizationBudget> {
+        self.finalization.clone()
+    }
     pub(crate) fn poll_stop(&mut self) -> Result<bool> {
         if packet_available(&self.stream)? {
             let (command, descriptor): (ParentCommand, _) =
@@ -728,6 +776,9 @@ impl ManagedControl {
                         self.request.as_ref().is_none_or(|prior| *prior == request),
                         "shutdown request changed"
                     );
+                    if self.request.is_none() {
+                        self.finalization = Some(FinalizationBudget::begin(FINALIZATION_POLICY_LIMIT)?);
+                    }
                     self.request = Some(request);
                 }
                 ParentCommand::BackendAuthenticated { request } => {
@@ -1209,10 +1260,19 @@ pub fn receive_managed(name: &str, parent: u32) -> Result<(ExecutionSpec, Manage
     )?;
     let spec = super::linux::read_spec_fd(descriptors.pop().unwrap())?;
     binding.validate(&spec)?;
+    // Retain this already-open kernel identity, not a PID reopened from saved
+    // binding data. No additional descriptor is transferred over the wire.
+    let controller = Arc::new(ControllerProcessWitness {
+        lifetime,
+        pid: actual.pid as u32,
+    });
+    controller.verify_peer(&stream)?;
     Ok((
         spec,
         ManagedControl {
             binding,
+            controller,
+            finalization: None,
             stream: control,
             request: None,
             authenticated: false,
@@ -1223,6 +1283,86 @@ pub fn receive_managed(name: &str, parent: u32) -> Result<(ExecutionSpec, Manage
 #[cfg(test)]
 mod managed_tests {
     use super::*;
+    // Test-only construction for isolated control-packet fixtures. Production
+    // construction occurs solely after receive_managed authenticates the peer,
+    // three descriptors, sealed spec and exact managed binding.
+    fn controller_test_fixture() -> Arc<ControllerProcessWitness> {
+        Arc::new(ControllerProcessWitness {
+            lifetime: pidfd(std::process::id()).unwrap(),
+            pid: std::process::id(),
+        })
+    }
+    #[test]
+    fn repeated_authenticated_stop_preserves_one_budget_and_cannot_revive_it() {
+        let binding = binding();
+        let (mut parent, helper) = UnixStream::pair().unwrap();
+        let mut control = ManagedControl {
+            binding: binding.clone(),
+            controller: controller_test_fixture(),
+            finalization: None,
+            stream: helper,
+            request: None,
+            authenticated: false,
+        };
+        assert!(control.finalization_budget().is_none());
+        let request = stop(&binding);
+        send_control_packet(&mut parent, &ParentCommand::Stop { request: request.clone() }, None).unwrap();
+        assert!(control.poll_stop().unwrap());
+        let budget = control.finalization_budget().unwrap();
+        let original = budget.constraint();
+        send_control_packet(&mut parent, &ParentCommand::Stop { request: request.clone() }, None).unwrap();
+        assert!(control.poll_stop().unwrap());
+        assert_eq!(control.finalization_budget().unwrap().constraint(), original);
+        let mut changed = request.clone();
+        changed.request_id = Uuid::new_v4().to_string();
+        send_control_packet(&mut parent, &ParentCommand::Stop { request: changed }, None).unwrap();
+        assert!(control.poll_stop().is_err());
+        assert_eq!(control.finalization_budget().unwrap().constraint(), original);
+        budget.cancel();
+        send_control_packet(&mut parent, &ParentCommand::Stop { request }, None).unwrap();
+        assert!(control.poll_stop().unwrap());
+        assert!(control.finalization_budget().unwrap().remaining().is_err());
+    }
+    #[test]
+    fn controller_witness_clones_retain_the_same_cloexec_kernel_identity() {
+        fn send_sync<T: Send + Sync>() {}
+        send_sync::<ControllerProcessWitness>();
+        let controller = controller_test_fixture();
+        let retained = Arc::clone(&controller);
+        assert!(Arc::ptr_eq(&controller, &retained));
+        let flags = unsafe { libc::fcntl(controller.lifetime.as_raw_fd(), libc::F_GETFD) };
+        assert!(flags >= 0 && flags & libc::FD_CLOEXEC != 0);
+        let (stream, _other) = UnixStream::pair().unwrap();
+        controller.verify_peer(&stream).unwrap();
+        drop(controller);
+        retained.check_current().unwrap();
+        retained.verify_peer(&stream).unwrap();
+    }
+    #[test]
+    fn controller_witness_rejects_wrong_process_and_stays_fenced_after_exit() {
+        let mut child = std::process::Command::new("/bin/sleep")
+            .arg("10")
+            .spawn()
+            .unwrap();
+        // This private unit fixture exercises the kernel lifetime after exit;
+        // the integration test obtains its witness through the real handoff.
+        let controller = ControllerProcessWitness {
+            lifetime: pidfd(child.id()).unwrap(),
+            pid: child.id(),
+        };
+        controller.check_current().unwrap();
+        let (wrong_peer, _other) = UnixStream::pair().unwrap();
+        assert!(controller.verify_peer(&wrong_peer).is_err());
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert!(controller.check_current().is_err());
+        assert!(controller.verify_peer(&wrong_peer).is_err());
+        // A different current process/socket cannot revive the original held
+        // pidfd. No lookup or reopening by stored PID occurs during a check.
+        let current = controller_test_fixture();
+        current.verify_peer(&wrong_peer).unwrap();
+        assert!(controller.check_current().is_err());
+    }
     fn binding() -> ManagedExecutionBinding {
         ManagedExecutionBinding {
             format_version: 2,
@@ -1260,6 +1400,8 @@ mod managed_tests {
         let (mut parent, helper) = UnixStream::pair().unwrap();
         let mut control = ManagedControl {
             binding: binding.clone(),
+            controller: controller_test_fixture(),
+            finalization: None,
             stream: helper,
             request: None,
             authenticated: false,
@@ -1321,6 +1463,8 @@ mod managed_tests {
         let (mut parent, helper) = UnixStream::pair().unwrap();
         let mut control = ManagedControl {
             binding: binding.clone(),
+            controller: controller_test_fixture(),
+            finalization: None,
             stream: helper,
             request: None,
             authenticated: false,
@@ -1505,6 +1649,8 @@ mod managed_tests {
             let (mut parent, helper) = UnixStream::pair().unwrap();
             let mut control = ManagedControl {
                 binding: binding.clone(),
+                controller: controller_test_fixture(),
+            finalization: None,
                 stream: helper,
                 request: None,
                 authenticated: false,

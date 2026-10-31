@@ -3,26 +3,77 @@ use super::*;
 #[test]
 fn owned_backend_peer_is_verified_before_any_protocol_bytes_are_sent() {
     use std::io::Read;
-    struct RefusedPeer(AtomicBool);
+    struct RefusedPeer {
+        checked: AtomicBool,
+        server_ready: Mutex<mpsc::Receiver<()>>,
+    }
     impl OwnedPeerProcess for RefusedPeer {
         fn verify_peer(&self, _: &UnixStream) -> Result<()> {
-            self.0.store(true, Ordering::Release);
+            // Keep connect's actual client descriptor alive until the accepted
+            // peer has configured its timeouts. XNU rejects setsockopt after a
+            // full peer close; rejecting immediately used to race this setup.
+            self.server_ready
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(2))
+                .context("fixture server did not finish socket setup")?;
+            self.checked.store(true, Ordering::Release);
             anyhow::bail!("fixture belongs to another actual backend process")
         }
-        fn check_current(&self) -> Result<()> { Ok(()) }
+        fn check_current(&self) -> Result<()> {
+            Ok(())
+        }
     }
     let directory = Scratch::new();
     let path = directory.0.join("cx.sock");
     let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let (server_ready, ready) = mpsc::sync_channel(1);
     let server = std::thread::spawn(move || {
-        let (mut stream, _) = listener.accept().unwrap(); stream.set_nonblocking(false).unwrap();
-        stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
-        stream.set_write_timeout(Some(Duration::from_secs(2))).unwrap();
-        let mut byte = [0]; assert_eq!(stream.read(&mut byte).unwrap(), 0, "unowned peer must never receive initialize/handshake bytes");
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut stream = loop {
+            match listener.accept() {
+                Ok((stream, _)) => break stream,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    assert!(
+                        Instant::now() < deadline,
+                        "fixture connection was not accepted"
+                    );
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(error) => panic!("fixture accept: {error}"),
+            }
+        };
+        stream.set_nonblocking(false).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        stream
+            .set_write_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        server_ready.send(()).unwrap();
+        let mut byte = [0];
+        assert_eq!(
+            stream.read(&mut byte).unwrap(),
+            0,
+            "unowned peer must never receive initialize/handshake bytes"
+        );
     });
-    let process = RefusedPeer(AtomicBool::new(false));
-    assert!(connect(&path, &AtomicBool::new(false), Some(&process)).is_err());
-    assert!(process.0.load(Ordering::Acquire));
+    let process = RefusedPeer {
+        checked: AtomicBool::new(false),
+        server_ready: Mutex::new(ready),
+    };
+    let error = connect(&path, &AtomicBool::new(false), Some(&process))
+        .err()
+        .expect("an unowned backend was accepted");
+    assert!(
+        error
+            .to_string()
+            .contains("fixture belongs to another actual backend process"),
+        "{error:#}"
+    );
+    assert!(process.checked.load(Ordering::Acquire));
     server.join().unwrap();
 }
 use std::os::unix::net::UnixListener;

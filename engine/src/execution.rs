@@ -24,6 +24,7 @@ pub mod handoff;
 #[cfg(target_os = "linux")]
 pub mod linux;
 pub mod network;
+pub mod finalization_budget;
 #[cfg(target_os = "linux")]
 mod network_phase;
 mod profile;

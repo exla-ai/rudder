@@ -2,12 +2,14 @@
 //! terminal views. This is one project owner, not yet the multi-project engine.
 use super::*;
 use fs2::FileExt;
-use rudder_engine::journal::{Journal, OwnerFence};
+use rudder_engine::journal::{
+    HeldJournalFile, Journal, OwnerFence, ReadOnlyJournal,
+};
 use rudder_engine::paths::{local_project_id, FabricPaths};
 use serde::{Deserialize, Serialize};
 use std::fs::{File, OpenOptions};
 use std::io::BufReader;
-use std::os::unix::fs::{FileTypeExt, OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -81,7 +83,7 @@ impl OwnerRecord {
 /// The OS lock fences compatible native owners, including legacy mode. The
 /// journal CAS supplies the persisted epoch. A PID is informational only.
 pub(crate) struct EngineOwnership {
-    _lock: CheckoutLock,
+    lifetime: Arc<EngineOwnerLifetime>,
     journal: Journal,
     fence: OwnerFence,
     record: OwnerRecord,
@@ -89,6 +91,98 @@ pub(crate) struct EngineOwnership {
     released: bool,
     identity_home: PathBuf,
     managed_store: Option<crate::managed_store::ManagedStore>,
+}
+
+/// Private, actual process-local custody. Only successful EngineOwnership
+/// acquisition constructs this value; saved projections cannot recreate it.
+struct EngineOwnerLifetime {
+    lock: CheckoutLock,
+    repo: PathBuf,
+    owner: OwnerFence,
+    authority: NativeAuthority,
+    process_id: u32,
+    revoked: AtomicBool,
+}
+
+impl EngineOwnerLifetime {
+    fn revoke(&self) {
+        self.revoked.store(true, Ordering::Release);
+    }
+
+    fn check_active(&self) -> Result<()> {
+        anyhow::ensure!(
+            !self.revoked.load(Ordering::Acquire),
+            "native owner lifetime is retired"
+        );
+        if self.process_id != std::process::id() {
+            self.revoke();
+            bail!("native owner lifetime belongs to another process");
+        }
+        Ok(())
+    }
+
+    fn check_custody(&self) -> Result<()> {
+        let result = (|| -> Result<()> {
+            self.check_active()?;
+            let held = self.lock.metadata()?;
+            let named = fs::symlink_metadata(self.repo.join(".rudder/engine/owner.lock"))?;
+            anyhow::ensure!(
+                held.is_file()
+                    && named.file_type().is_file()
+                    && held.dev() == named.dev()
+                    && held.ino() == named.ino()
+                    && held.nlink() == 1
+                    && named.nlink() == 1
+                    && held.uid() == unsafe { libc::geteuid() },
+                "native owner checkout lock custody changed"
+            );
+            self.check_active()
+        })();
+        if result.is_err() {
+            self.revoke();
+        }
+        result
+    }
+}
+
+/// Host-held local owner lifetime only, with no serialized constructor. The
+/// actual checkout lock remains held until every outstanding lease is dropped,
+/// including after retirement. Retirement revokes checks immediately; retaining
+/// this lease never retains a Journal/run grant or source/history acceptance.
+pub(crate) struct EngineSourceLease {
+    // Close the actual Journal anchor descriptors before the final lock holder.
+    database: HeldJournalFile,
+    lifetime: Arc<EngineOwnerLifetime>,
+}
+
+impl EngineSourceLease {
+    pub(crate) fn owner(&self) -> &OwnerFence {
+        &self.lifetime.owner
+    }
+
+    /// Off-App filesystem checks of local held custody, not database authority.
+    /// The later source adapter must independently authorize the exact current
+    /// Journal binding using a bounded connection and fresh trusted time.
+    pub(crate) fn check_current(&self) -> Result<()> {
+        let result = (|| {
+            self.lifetime.check_custody()?;
+            self.database.check_current()?;
+            self.lifetime.check_active()
+        })();
+        if result.is_err() {
+            self.lifetime.revoke();
+        }
+        result
+    }
+
+    /// Off-App, bounded existing read-only Journal derived from this actual
+    /// EngineOwnership connection. No caller-supplied database path is accepted.
+    pub(crate) fn open_journal(&self, busy_timeout: Duration) -> Result<ReadOnlyJournal<'_>> {
+        self.check_current()?;
+        let result = self.database.open_read_only(busy_timeout);
+        self.check_current()?;
+        result
+    }
 }
 
 impl EngineOwnership {
@@ -224,8 +318,16 @@ impl EngineOwnership {
         };
         let record_path = directory.join("owner.json");
         write_owner_record(&record_path, &record)?;
+        let lifetime = Arc::new(EngineOwnerLifetime {
+            lock,
+            repo: record.repo.clone(),
+            owner: fence.clone(),
+            authority: mode,
+            process_id: std::process::id(),
+            revoked: AtomicBool::new(false),
+        });
         Ok(Self {
-            _lock: lock,
+            lifetime,
             journal,
             fence,
             record,
@@ -283,27 +385,74 @@ impl EngineOwnership {
     }
 
     pub(crate) fn assert_current(&self) -> Result<()> {
-        let state = self.journal.project_state(&self.fence.project_id)?;
+        self.lifetime.check_active()?;
+        let result = (|| -> Result<()> {
+            let state = self.journal.project_state(&self.fence.project_id)?;
+            anyhow::ensure!(
+                state.owner_active
+                    && state.owner.epoch == self.fence.epoch
+                    && state.owner.owner_id == self.fence.owner_id,
+                "native ownership epoch changed; stopping this owner"
+            );
+            Ok(())
+        })();
+        if result.is_err() {
+            self.lifetime.revoke();
+        }
+        result
+    }
+
+    /// Off-App. Requires this actual live Fabric owner and an exact expected
+    /// fence; it does not issue a source capability. Existing leases survive
+    /// graceful stopping until finish, but no new lease is admitted then.
+    pub(crate) fn source_lease(&self, expected: &OwnerFence) -> Result<EngineSourceLease> {
         anyhow::ensure!(
-            state.owner_active
-                && state.owner.epoch == self.fence.epoch
-                && state.owner.owner_id == self.fence.owner_id,
-            "native ownership epoch changed; stopping this owner"
+            self.lifetime.authority == NativeAuthority::Fabric,
+            "host source leases require a Fabric engine owner"
         );
-        Ok(())
+        anyhow::ensure!(
+            expected == &self.fence && expected == &self.lifetime.owner,
+            "host source lease owner fence mismatch"
+        );
+        anyhow::ensure!(
+            !self.released && matches!(self.record.state.as_str(), "starting" | "ready"),
+            "native owner no longer admits host source leases"
+        );
+        self.assert_current()?;
+        let database = self.journal.hold_database_file().map_err(|error| {
+            self.lifetime.revoke();
+            error
+        })?;
+        let lease = EngineSourceLease {
+            lifetime: Arc::clone(&self.lifetime),
+            database,
+        };
+        lease.check_current()?;
+        Ok(lease)
     }
 
     pub(crate) fn ready(&mut self, control: Option<&Path>) -> Result<serde_json::Value> {
+        self.lifetime.check_active()?;
+        anyhow::ensure!(
+            matches!(self.record.state.as_str(), "starting" | "ready"),
+            "native owner cannot become ready after stopping"
+        );
         self.record.control_socket = control.map(Path::to_path_buf);
         self.record.state = "ready".into();
         if control.is_some() {
             self.record.control_nonce = Some(uuid::Uuid::new_v4().to_string());
         }
-        write_owner_record(&self.record_path, &self.record)?;
+        if let Err(error) = write_owner_record(&self.record_path, &self.record) {
+            self.lifetime.revoke();
+            return Err(error);
+        }
         Ok(self.record.public(true))
     }
 
     pub(crate) fn finish(&mut self, clean: bool) -> Result<()> {
+        // Revoke before any fallible persistence or Journal release. Outstanding
+        // callbacks retain the lock, but can never revive this owner lifetime.
+        self.lifetime.revoke();
         self.record.state = if clean { "stopped" } else { "uncertain" }.into();
         write_owner_record(&self.record_path, &self.record)?;
         if clean {
@@ -319,6 +468,14 @@ impl EngineOwnership {
 
     pub(crate) fn journal_parts(&mut self) -> (&mut Journal, &OwnerFence) {
         (&mut self.journal, &self.fence)
+    }
+}
+
+impl Drop for EngineOwnership {
+    fn drop(&mut self) {
+        // No filesystem/SQLite work here. The last actual lease/owner drop
+        // performs CheckoutLock's existing bounded explicit unlock.
+        self.lifetime.revoke();
     }
 }
 

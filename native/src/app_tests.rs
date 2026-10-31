@@ -6806,6 +6806,57 @@ fn slash_commands_rank_closest_matches() {
 }
 
 #[test]
+fn slash_palette_keeps_five_canonical_entries_and_preserves_typed_aliases() {
+    let mut app = App::new();
+    app.task_input = "/".into();
+    let labels: Vec<String> = suggestions_for(&app).into_iter().map(|s| s.label).collect();
+    assert_eq!(labels, ["/model", "/main", "/resume", "/cloud", "/help"]);
+    for input in ["/m", "/m inspect the checkout", "/gam again", "/nudge status", "/plan inspect only"] {
+        app.task_input = input.into();
+        app.task_cursor = app.task_input.chars().count();
+        assert!(!app.handle_picker_key(KeyEvent::from(KeyCode::Enter)), "{input} must reach its handler unchanged");
+        assert_eq!(app.task_input, input);
+    }
+    assert!(app.agents.is_empty(), "discovering commands does not start work");
+}
+
+#[test]
+fn help_command_and_palette_share_truthful_scope_without_launching_work() {
+    let mut app = App::new();
+    let mut retained = test_agent_run("retained", "historical inspection");
+    retained.mode = AgentMode::GamAdversarial;
+    retained.status = AgentStatus::Stopped;
+    retained.session_id = Some("saved-review-session".into());
+    app.agents.push(retained);
+    assert!(app.handle_command("/help"));
+    let typed = app.notice.clone().expect("help notice");
+    for expected in ["isolated mergeable worker", "jj workspace", "wait for approval", "shared checkout", "owning agent's pane"] {
+        assert!(typed.contains(expected), "missing {expected}: {typed}");
+    }
+    for retired in ["/gam", "/nudge", "/plan"] {
+        assert!(!typed.contains(retired), "retired command advertised: {typed}");
+    }
+    app.focus = FocusPane::Task;
+    app.task_input = "/he".into();
+    app.task_cursor = 3;
+    assert!(app.handle_picker_key(KeyEvent::from(KeyCode::Enter)));
+    assert_eq!(app.notice.as_deref(), Some(typed.as_str()));
+    assert!(app.task_input.is_empty());
+    assert_eq!(app.agents.len(), 1);
+    assert_eq!(app.agents[0].mode, AgentMode::GamAdversarial);
+    assert_eq!(app.agents[0].status, AgentStatus::Stopped);
+    assert_eq!(app.agents[0].session_id.as_deref(), Some("saved-review-session"));
+    assert!(app.agents[0].terminal.is_none());
+    for width in [80, 120] {
+        let screen = render_screen(&mut app, width, 30);
+        for action in ["/main", "/model", "/resume", "/cloud"] {
+            assert!(screen.contains(action), "{action} missing at width {width}:\n{screen}");
+        }
+        assert!(!screen.contains("/gam again"));
+    }
+}
+
+#[test]
 fn model_picker_uses_ranked_provider_and_effort_matches() {
     assert_eq!(
         provider_suggestions("cdx")
@@ -12283,11 +12334,66 @@ fn orchestrator_prompts_include_global_monitoring_contract() {
     assert!(codex_prompt.contains("Active local Rudder agents"));
     assert!(codex_prompt.contains("Ready local Rudder agents"));
     assert!(codex_prompt.contains("Completed local Rudder agents"));
-    assert!(codex_prompt.contains("Active as live or waiting only"));
+    assert!(codex_prompt.contains("Active local Rudder agents are live or waiting"));
     assert!(codex_prompt.contains("RUDDER_RUN <task>"));
     assert!(codex_prompt.contains("RUDDER_RESUME <node-or-run-id>"));
     assert!(codex_prompt.contains("RUDDER_CLOUD_MIGRATE"));
     assert!(codex_prompt.contains("monitor the current threads"));
+}
+
+#[test]
+fn conductor_launch_keeps_one_contract_and_the_complete_first_request() {
+    let task = "Objective: fix the reader\nDone when: boundary checks pass\n\nKeep the existing public wire bytes.";
+    for backend in [Backend::Claude, Backend::Codex] {
+        for swarm in [false, true] {
+            let command = if swarm {
+                swarm_orchestrator_command(backend, "", None, task, None, true)
+            } else {
+                agent_command_with_orchestrator_mode(backend, "", None, task, AgentMode::RudderPlan, None, true)
+            };
+            let combined = command.args.join("\n");
+            assert_eq!(combined.matches(task).count(), 1, "one whole request for {backend:?}, swarm={swarm}");
+            assert_eq!(combined.matches("PROJECT RULES:").count(), 1, "one bootstrap contract");
+            assert_eq!(combined.matches("RUDDER_GENERATED_START").count(), 1);
+            for marker in ["RUDDER_PLAN_TASKS_START", "RUDDER_PLAN_TASKS_END", "RUDDER_APPROVE_PLAN", "RUDDER_INJECT"] {
+                assert!(combined.contains(marker), "missing {marker} for {backend:?}");
+            }
+            assert!(combined.contains("Never") && combined.contains("preemptively"), "approval remains explicit");
+            assert!(combined.contains("Only ever Edit/Write"), "product files stay read-only");
+            if backend == Backend::Claude {
+                let system = command.args.windows(2).find(|pair| pair[0] == "--append-system-prompt").expect("Claude system arg");
+                assert!(!system[1].contains(task));
+                assert!(command.args.last().unwrap().ends_with(task));
+                assert!(!command.args.last().unwrap().contains("PROJECT RULES:"));
+            } else {
+                assert!(!command.args.iter().any(|arg| arg == "--append-system-prompt"));
+                assert!(command.args.last().unwrap().contains("PROJECT RULES:"));
+                assert!(command.args.last().unwrap().ends_with(task));
+            }
+        }
+    }
+    assert!(!rudder_orchestrator_prompt("").contains("RUDDER_APPROVE_PLAN"));
+    assert!(rudder_orchestrator_prompt("").contains("Wait"));
+    println!("conductor contract bytes={}, first-turn framing bytes={}", orchestrator_system_prompt().len(), rudder_orchestrator_prompt("x").len() - 1);
+}
+
+#[test]
+fn conductor_guidance_separates_live_send_from_authorized_resume() {
+    let repo = unique_test_repo("conductor-skill-guidance");
+    ensure_orchestrator_skills(&repo).expect("generate actual Claude skills");
+    let skill = fs::read_to_string(repo.join(".claude/skills/rudder-worker-control/SKILL.md")).unwrap();
+    for text in [orchestrator_system_prompt(), codex_orchestrator_prompt("check the active workers"), skill] {
+        assert!(text.contains("RUDDER_INJECT <node-or-run-id> <message>"));
+        assert!(text.contains("live worker"));
+        assert!(text.contains("RUDDER_RESUME <node-or-run-id>"));
+        assert!(text.contains("authorized resumption"));
+        assert!(text.contains("Keep stopped work stopped"));
+        assert!(!text.contains("RUDDER_NUDGE_ALL"), "legacy fleet marker is not recommended");
+    }
+    // Its compatibility dispatch is deliberately still recognized. Guidance
+    // does not physically fence old callers or change that handler's semantics.
+    assert!(is_orchestrator_skill_marker("RUDDER_NUDGE_ALL keep going"));
+    let _ = fs::remove_dir_all(repo);
 }
 
 #[test]
@@ -19399,83 +19505,274 @@ fn the_pre_flight_keeps_its_hands_off_a_live_resolver() {
     let _ = fs::remove_dir_all(&dir);
 }
 
-#[test]
-fn nudge_targets_skip_finished_work_and_the_orchestrator() {
-    // A fleet nudge ("keep going, my connection dropped") must reach work still
-    // in flight and NOTHING else. Restarting a merged worker would redo landed
-    // work, and the orchestrator is the row issuing the nudge.
-    let mut app = App::new();
-
-    let mut orchestrator = test_agent_run("orch", "plan it");
-    orchestrator.mode = AgentMode::RudderPlan;
-    orchestrator.status = AgentStatus::Running;
-
-    let mut running = test_agent_run("running", "n0");
-    running.status = AgentStatus::Running;
-
-    let mut merged = test_agent_run("merged", "n1");
-    merged.status = AgentStatus::Merged;
-
-    let mut done = test_agent_run("done", "n2");
-    done.status = AgentStatus::Done;
-
-    let mut failed = test_agent_run("failed", "n3");
-    failed.status = AgentStatus::Failed;
-
-    app.agents = vec![orchestrator, running, merged, done, failed];
-
-    let targets = app.nudge_targets();
-    let ids: Vec<&str> = targets
-        .iter()
-        .map(|(index, _)| app.agents[*index].id.as_str())
-        .collect();
-    assert_eq!(ids, vec!["running", "failed"]);
+// Actual shell/PTY fixtures only. No SDK, model, provider or network is invoked.
+#[cfg(not(windows))]
+fn fleet_note_terminal(repo: &std::path::Path, label: &str) -> TerminalPane {
+    let ready = format!("{label}-ready");
+    let capture = format!("{label}-input");
+    let command = TerminalCommand::with_args(
+        "/bin/sh",
+        vec![
+            "-c".to_string(),
+            "stty -echo; printf ready > \"$1\"; IFS= read -r line; printf '%s\\n' \"$line\" > \"$2\"; IFS= read -r rest".to_string(),
+            "fleet-note-fixture".to_string(),
+            repo.join(&ready).to_string_lossy().into_owned(),
+            repo.join(&capture).to_string_lossy().into_owned(),
+        ],
+    );
+    let terminal = TerminalPane::spawn_shell_or_command(
+        Some(command),
+        TerminalPaneOptions {
+            size: TerminalSize { rows: 10, cols: 80 },
+            cwd: Some(repo.to_path_buf()),
+            ..Default::default()
+        },
+    )
+    .expect("spawn fleet fixture PTY");
+    assert_eq!(wait_for_log(repo, &ready, "ready"), "ready");
+    terminal
 }
 
-#[test]
-fn nudge_resumes_workers_whose_process_died_and_injects_into_live_ones() {
-    // The connection-drop case: a row still marked Running whose PTY is gone
-    // cannot be typed into, so it has to be resumed in its own workspace. A row
-    // that still holds a terminal takes the message as a normal turn instead,
-    // which preserves its context.
+#[cfg(not(windows))]
+fn fleet_note_app(repo: &std::path::Path) -> (EnvGuard, App) {
+    let guard = env_guard();
+    let home = repo.join("home");
+    fs::create_dir_all(&home).unwrap();
+    std::env::set_var("HOME", &home);
+    std::env::set_var("RUDDER_HOME", &home);
+    let provider = repo.join("fake-provider.sh");
+    write_fake_bin(&provider, "#!/bin/sh\nprintf started > \"$0.called\"\nsleep 5\n");
+    std::env::set_var("RUDDER_CLAUDE_BIN", &provider);
+    std::env::set_var("RUDDER_CODEX_BIN", &provider);
+    let cli = repo.join("fake-cli.sh");
+    write_fake_bin(&cli, "#!/bin/sh\nexit 0\n");
+    std::env::set_var("RUDDER_CLI", &cli);
+    std::env::remove_var("RUDDER_CLOUD_RUNTIME");
     let mut app = App::new();
+    app.cwd = repo.to_path_buf();
+    (guard, app)
+}
 
-    let mut live = test_agent_run("live", "n0");
-    live.status = AgentStatus::Running;
-    live.terminal = Some(
-        TerminalPane::spawn_shell_or_command(
-            Some(TerminalCommand::with_args("/bin/sh", ["-c", "sleep 5"])),
-            TerminalPaneOptions {
-                size: TerminalSize { rows: 10, cols: 40 },
-                scrollback_lines: 50,
-                ..Default::default()
-            },
-        )
-        .expect("spawn nudge pty"),
+fn fleet_note_state(app: &App) -> serde_json::Value {
+    serde_json::Value::Array(app.agents.iter().map(|run| serde_json::json!({
+        "id": run.id, "status": run.status.as_str(), "task": run.task,
+        "currentPrompt": run.current_prompt, "sessionId": run.session_id,
+        "backend": run.backend.as_str(), "model": run.model,
+        "cwd": run.cwd, "workspace": run.workspace_path,
+        "completedAt": format!("{:?}", run.completed_at), "error": run.last_error,
+        "lastWorkerInput": format!("{:?}", run.last_worker_input_at),
+        "needsPermission": run.needs_permission, "needsInput": run.needs_user_input,
+        "turns": run.turns.iter().map(|turn| (&turn.ts, &turn.prompt, &turn.source)).collect::<Vec<_>>(),
+        "terminal": run.terminal.as_ref().map(TerminalPane::instance_id),
+    })).collect())
+}
+
+#[cfg(not(windows))]
+#[test]
+fn fleet_nudge_status_and_keep_going_preserve_unavailable_runs_until_explicit_resume() {
+    let repo = unique_test_repo("fleet-live-only");
+    let (_env, mut app) = fleet_note_app(&repo);
+    let provider = repo.join("fake-provider.sh");
+    for (id, status) in [
+        ("fleet-running-missing", AgentStatus::Running),
+        ("fleet-paused", AgentStatus::Paused),
+        ("fleet-stopped", AgentStatus::Stopped),
+        ("fleet-failed", AgentStatus::Failed),
+        ("fleet-orphaned", AgentStatus::Orphaned),
+        ("fleet-done", AgentStatus::Done),
+        ("fleet-merged", AgentStatus::Merged),
+        ("fleet-migrated", AgentStatus::Migrated),
+    ] {
+        let mut run = test_agent_run(id, "original objective and success criteria");
+        run.cwd = repo.clone();
+        run.node_id = Some(id.to_string());
+        run.session_id = Some(format!("saved-{id}"));
+        run.status = status;
+        run.last_error = Some("retained historical note".to_string());
+        save_native_run_record(&repo, &run).unwrap();
+        app.agents.push(run);
+    }
+    let before = fleet_note_state(&app);
+    let files = app.agents.iter().map(|run| {
+        let path = native_run_dir(&repo, &run.id).join("run.json");
+        (path.clone(), fs::read(path).unwrap())
+    }).collect::<Vec<_>>();
+    let status = app.build_mirror_payload();
+    let _screen = render_screen(&mut app, 100, 30);
+    assert_eq!(fleet_note_state(&app), before, "status/render must not change attempts");
+    assert_eq!(app.build_mirror_payload(), status);
+
+    app.handle_orchestrator_skill_marker("RUDDER_NUDGE_ALL status check");
+    assert_eq!(app.notice.as_deref(), Some("no live workers to nudge"));
+    let inbox = repo.join(".rudder/steer");
+    fs::create_dir_all(&inbox).unwrap();
+    fs::write(inbox.join("0001.json"), serde_json::to_vec(&serde_json::json!({
+        "requestId":"fleet-note-request-0001", "kind":"nudge-all",
+        "taskId":"fleet", "instruction":"keep going",
+    })).unwrap()).unwrap();
+    app.poll_steer_inbox();
+    let receipt: serde_json::Value = serde_json::from_slice(&fs::read(
+        repo.join(".rudder/steer-receipts/fleet-note-request-0001.json")
+    ).unwrap()).unwrap();
+    assert_eq!(receipt["status"], "failed");
+    assert_eq!(receipt["error"], "no live workers to nudge");
+    assert!(!inbox.join("0001.json").exists());
+    assert_eq!(fleet_note_state(&app), before, "a generic message cannot resume or rewrite history");
+    assert_eq!(app.build_mirror_payload(), status);
+    assert!(app.pending_enters.is_empty());
+    assert!(!provider.with_extension("sh.called").exists(), "no provider process was started");
+    for (path, bytes) in files {
+        assert_eq!(fs::read(path).unwrap(), bytes, "saved run bytes must be retained");
+    }
+
+    // An addressed, explicit resume remains the existing authorized operation.
+    app.handle_orchestrator_skill_marker(
+        "RUDDER_RESUME fleet-stopped codex gpt-5.6 high authorized continuation",
     );
+    let resumed = app.agents.iter_mut().find(|run| run.id == "fleet-stopped").unwrap();
+    assert_eq!(resumed.status, AgentStatus::Running);
+    assert_eq!(resumed.current_prompt, "authorized continuation");
+    assert!(resumed.terminal.as_mut().is_some_and(|terminal| matches!(terminal.try_wait(), Ok(None))));
+    assert_eq!(wait_for_log(&repo, "fake-provider.sh.called", "started"), "started");
+    resumed.terminal = None;
+    for run in &app.agents {
+        if run.id != "fleet-stopped" {
+            assert!(run.terminal.is_none(), "explicit resume must stay addressed");
+        }
+    }
+    drop(app);
+    let _ = fs::remove_dir_all(repo);
+}
 
-    let mut dead = test_agent_run("dead", "n1");
-    dead.status = AgentStatus::Running;
-    dead.terminal = None;
+#[cfg(not(windows))]
+#[test]
+fn fleet_nudge_sends_to_the_same_live_claude_and_codex_attempt() {
+    for (backend, status) in [
+        (Backend::Claude, AgentStatus::Running),
+        (Backend::Codex, AgentStatus::Running),
+        (Backend::Claude, AgentStatus::Paused),
+        (Backend::Codex, AgentStatus::Paused),
+    ] {
+        let repo = unique_test_repo("fleet-same-attempt");
+        let (_env, mut app) = fleet_note_app(&repo);
+        let pane = fleet_note_terminal(&repo, "live");
+        let instance = pane.instance_id().to_string();
+        let mut run = test_agent_run_with_terminal(&app, pane);
+        run.backend = backend;
+        run.status = status;
+        run.session_id = Some("retained-fixture-session".to_string());
+        app.agents.push(run);
+        app.handle_orchestrator_skill_marker("RUDDER_NUDGE_ALL status without restart");
+        assert_eq!(app.notice.as_deref(), Some("sent to 1 live worker"));
+        assert_eq!(app.pending_enters.len(), 1);
+        for pending in &mut app.pending_enters {
+            pending.due = Instant::now() - Duration::from_millis(1);
+        }
+        app.flush_pending_enters();
+        let input = wait_for_log(&repo, "live-input", "status without restart");
+        assert_eq!(input.matches("status without restart").count(), 1, "actual PTY received one note: {input:?}");
+        let run = &mut app.agents[0];
+        assert_eq!(run.terminal.as_ref().unwrap().instance_id(), instance);
+        assert!(matches!(run.terminal.as_mut().unwrap().try_wait(), Ok(None)));
+        assert_eq!(run.status, status, "live sending never resumes the row");
+        assert_eq!(run.session_id.as_deref(), Some("retained-fixture-session"));
+        assert_eq!(app.agents.len(), 1);
+        assert!(app.pending_enters.is_empty());
+        app.agents[0].terminal = None;
+        drop(app);
+        let _ = fs::remove_dir_all(repo);
+    }
+}
 
-    let mut stopped = test_agent_run("stopped", "n2");
-    stopped.status = AgentStatus::Stopped;
+#[cfg(not(windows))]
+#[test]
+fn fleet_nudge_reports_partial_failure_without_replacing_a_dead_attempt() {
+    let repo = unique_test_repo("fleet-dead-attempt");
+    let (_env, mut app) = fleet_note_app(&repo);
+    let mut live = test_agent_run_with_terminal(&app, fleet_note_terminal(&repo, "live"));
+    live.id = "live".to_string();
+    let pane = TerminalPane::spawn_shell_or_command(
+        Some(TerminalCommand::with_args("/bin/sh", ["-c", "exit 0"])),
+        TerminalPaneOptions::default(),
+    ).unwrap();
+    let mut dead = test_agent_run_with_terminal(&app, pane);
+    dead.id = "dead".to_string();
+    let dead_instance = dead.terminal.as_ref().unwrap().instance_id().to_string();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        if matches!(dead.terminal.as_mut().unwrap().try_wait(), Ok(Some(_))) { break; }
+        assert!(Instant::now() < deadline, "fixture process did not exit");
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    app.agents = vec![live, dead];
+    let result = app.deliver_nudge_all_request("check live work only");
+    assert!(matches!(result, SteerDelivery::Failed(ref error)
+        if error == "sent to 1 live worker; 1 could not be reached"));
+    assert_eq!(app.pending_enters.len(), 1, "dead pane must not acquire a submit");
+    assert_eq!(app.agents[1].terminal.as_ref().unwrap().instance_id(), dead_instance);
+    assert_eq!(app.agents[1].status, AgentStatus::Running, "a note does not rewrite a stale row");
+    assert!(app.agents[1].last_worker_input_at.is_none());
+    for pending in &mut app.pending_enters {
+        pending.due = Instant::now() - Duration::from_millis(1);
+    }
+    app.flush_pending_enters();
+    assert!(wait_for_log(&repo, "live-input", "check live work only").contains("check live work only"),
+        "a partial failure must still disclose an actual successful send");
+    app.agents[0].terminal = None;
+    app.agents[1].terminal = None;
+    drop(app);
+    let _ = fs::remove_dir_all(repo);
+}
 
-    app.agents = vec![live, dead, stopped];
+#[cfg(not(windows))]
+#[test]
+fn fleet_nudge_excludes_finished_orchestrator_and_stopped_rows_even_with_a_terminal() {
+    let repo = unique_test_repo("fleet-excluded-live");
+    let (_env, mut app) = fleet_note_app(&repo);
+    for (label, status, orchestrator) in [
+        ("done", AgentStatus::Done, false),
+        ("stopped", AgentStatus::Stopped, false),
+        ("orchestrator", AgentStatus::Running, true),
+    ] {
+        let mut run = test_agent_run_with_terminal(&app, fleet_note_terminal(&repo, label));
+        run.id = label.to_string();
+        run.status = status;
+        if orchestrator { run.mode = AgentMode::RudderPlan; }
+        app.agents.push(run);
+    }
+    let before = fleet_note_state(&app);
+    assert!(matches!(app.deliver_nudge_all_request("keep going"), SteerDelivery::Failed(_)));
+    assert_eq!(fleet_note_state(&app), before);
+    assert!(app.pending_enters.is_empty());
+    for run in &mut app.agents { run.terminal = None; }
+    drop(app);
+    let _ = fs::remove_dir_all(repo);
+}
 
-    let targets = app.nudge_targets();
-    let by_id: Vec<(&str, NudgeDelivery)> = targets
-        .iter()
-        .map(|(index, delivery)| (app.agents[*index].id.as_str(), *delivery))
-        .collect();
-    assert_eq!(
-        by_id,
-        vec![
-            ("live", NudgeDelivery::Inject),
-            ("dead", NudgeDelivery::Resume),
-            ("stopped", NudgeDelivery::Resume),
-        ]
-    );
+#[cfg(not(windows))]
+#[test]
+fn pending_enter_cannot_submit_to_a_replacement_attempt_with_the_same_run_id() {
+    let repo = unique_test_repo("fleet-stale-submit");
+    let (_env, mut app) = fleet_note_app(&repo);
+    let mut run = test_agent_run_with_terminal(&app, fleet_note_terminal(&repo, "old"));
+    run.id = "same-run".to_string();
+    app.agents.push(run);
+    assert!(app.live_inject_at(0, "message for the old attempt"));
+    let old = app.agents[0].terminal.as_ref().unwrap().instance_id().to_string();
+    app.agents[0].terminal = Some(fleet_note_terminal(&repo, "replacement"));
+    assert_ne!(app.agents[0].terminal.as_ref().unwrap().instance_id(), old);
+    for pending in &mut app.pending_enters {
+        pending.due = Instant::now() - Duration::from_millis(1);
+    }
+    app.flush_pending_enters();
+    assert!(app.pending_enters.is_empty());
+    // Deterministic detector: a stale CR would finish the first read with an
+    // empty line BEFORE this actual control input arrives, leaving an empty file.
+    app.agents[0].terminal.as_mut().unwrap().write_input(b"replacement-control\r").unwrap();
+    assert_eq!(wait_for_log(&repo, "replacement-input", "replacement-control"), "replacement-control\n");
+    app.agents[0].terminal = None;
+    drop(app);
+    let _ = fs::remove_dir_all(repo);
 }
 
 #[test]
@@ -19620,7 +19917,7 @@ fn a_rejected_marker_is_recorded_as_a_failure_not_silently_swallowed() {
             // Only the orchestrator is present, and it is never a nudge target.
             (
                 "RUDDER_NUDGE_ALL keep going",
-                "no in-flight workers to nudge"
+                "no live workers to nudge"
             ),
         ],
         "both rejections survive as outcomes the conductor can read"
@@ -22188,7 +22485,7 @@ fn a_generator_that_stops_making_progress_ends_the_pair() {
     assert!(
         app.notice
             .as_deref()
-            .is_some_and(|n| n.contains("gam stalled") && n.contains("/gam again")),
+            .is_some_and(|n| n.contains("gam stalled") && n.contains("follow-up in the generator pane") && !n.contains("/gam again")),
         "and it must ask the human: {:?}",
         app.notice
     );
@@ -27674,11 +27971,14 @@ fn cloud_claude_settings_carry_the_phone_permission_hook() {
 }
 
 #[test]
-fn sync_is_suggested_with_its_move_and_all_forms() {
+fn sync_subcommands_appear_only_in_the_named_family() {
     let mut app = App::new();
     app.task_input = "/syn".to_string();
     let labels: Vec<String> = suggestions_for(&app).into_iter().map(|s| s.label).collect();
     assert_eq!(labels.first().map(String::as_str), Some("/sync"));
+    assert!(!labels.iter().any(|l| l == "/sync move" || l == "/sync all"));
+    app.task_input = "/sync ".to_string();
+    let labels: Vec<String> = suggestions_for(&app).into_iter().map(|s| s.label).collect();
     assert!(labels.iter().any(|l| l == "/sync move"));
     assert!(labels.iter().any(|l| l == "/sync all"));
 }
@@ -28041,7 +28341,18 @@ fn gam_status_bar_states_each_outcome_and_the_next_step() {
     let accepted = gam_bar_text(&app, 200);
     assert!(accepted.contains("✓ accepted"), "{accepted}");
     assert!(accepted.contains("satisfies the task"), "{accepted}");
-    assert!(accepted.contains("/gam again"), "{accepted}");
+    assert!(accepted.contains("the changes are in this checkout"), "{accepted}");
+    assert!(!accepted.contains("m merges it"), "main-checkout work is already here: {accepted}");
+    assert!(accepted.contains("start a new task"), "{accepted}");
+    assert!(!accepted.contains("/gam again"), "{accepted}");
+
+    app.agents[0].workspace_path = Some(dir.join("isolated-generator"));
+    let isolated = gam_bar_text(&app, 200);
+    assert!(isolated.contains("m merges it"), "isolated work still needs integration: {isolated}");
+    assert!(isolated.contains("start a new task"), "{isolated}");
+    assert!(!isolated.contains("the changes are in this checkout"));
+    assert!(!isolated.contains("/gam again"));
+    app.agents[0].workspace_path = None;
 
     gam_set_phase(
         &mut app,
@@ -28068,7 +28379,7 @@ fn gam_status_bar_states_each_outcome_and_the_next_step() {
     let stalled = gam_bar_text(&app, 200);
     assert!(stalled.starts_with("stalled"), "{stalled}");
     assert!(stalled.contains("same diff two rounds running"), "{stalled}");
-    assert!(stalled.contains("nudge the generator"), "{stalled}");
+    assert!(stalled.contains("follow-up in the generator pane"), "{stalled}");
 
     gam_set_phase(&mut app, GamPhase::Settled(GamOutcome::StoppedByUser));
     let stopped = gam_bar_text(&app, 200);
@@ -28087,7 +28398,8 @@ fn gam_status_bar_states_each_outcome_and_the_next_step() {
         .flat_map(|line| line.spans.iter().map(|span| span.content.to_string()))
         .collect::<Vec<_>>()
         .join(" ");
-    assert!(joined.contains("/gam again"), "{joined}");
+    assert!(joined.contains("answer in either pane"), "{joined}");
+    assert!(!joined.contains("/gam again"), "{joined}");
     let _ = fs::remove_dir_all(&dir);
 }
 

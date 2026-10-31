@@ -279,6 +279,345 @@ fn checkout_release_unlocks_even_while_an_inherited_descriptor_remains_open() {
     assert!(!ownership_lock_held(&scratch.0).unwrap());
 }
 
+fn source_owner_fixture(
+    scratch: &Scratch,
+    authority: NativeAuthority,
+) -> (PathBuf, PathBuf, EngineOwnership) {
+    let repo = scratch.0.join("source-repo");
+    let home = scratch.0.join("source-home");
+    fs::create_dir(&repo).unwrap();
+    fs::DirBuilder::new().mode(0o700).create(&home).unwrap();
+    let owner = EngineOwnership::acquire_in_home(&repo, authority, &home).unwrap();
+    (repo, home, owner)
+}
+
+fn probe_source_owner_lock_in_fresh_process(repo: &Path, held: bool) {
+    struct ProbeChild(std::process::Child);
+    impl Drop for ProbeChild {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let mut child = ProbeChild(
+        Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "engine_host::tests::source_owner_lease_lock_child",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env_clear()
+            .env("RUDDER_TEST_SOURCE_OWNER_LOCK_REPO", repo)
+            .env(
+                "RUDDER_TEST_SOURCE_OWNER_LOCK_HELD",
+                if held { "yes" } else { "no" },
+            )
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let status = loop {
+        if let Some(status) = child.0.try_wait().unwrap() {
+            break status;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "fresh source-owner lock probe did not settle"
+        );
+        thread::sleep(Duration::from_millis(5));
+    };
+    assert!(
+        status.success(),
+        "fresh process did not observe checkout lock held={held}: {status}"
+    );
+}
+
+#[test]
+#[ignore = "private bounded self-exec helper for actual checkout lock tests"]
+fn source_owner_lease_lock_child() {
+    let repo = PathBuf::from(
+        std::env::var_os("RUDDER_TEST_SOURCE_OWNER_LOCK_REPO")
+            .expect("explicit disposable checkout required"),
+    );
+    match std::env::var("RUDDER_TEST_SOURCE_OWNER_LOCK_HELD")
+        .unwrap()
+        .as_str()
+    {
+        "yes" => {
+            assert!(acquire_checkout_lock(&repo).is_err());
+            assert!(ownership_lock_held(&repo).unwrap());
+        }
+        "no" => {
+            let lock = acquire_checkout_lock(&repo).unwrap();
+            assert!(ownership_lock_held(&repo).unwrap());
+            drop(lock);
+            assert!(!ownership_lock_held(&repo).unwrap());
+        }
+        _ => panic!("explicit lock expectation required"),
+    }
+}
+
+#[test]
+fn source_owner_lease_requires_exact_live_fabric_fence() {
+    fn assert_callback_safe<T: Send + Sync>() {}
+    assert_callback_safe::<EngineSourceLease>();
+    let scratch = Scratch::new();
+    let (_repo, _home, mut owner) = source_owner_fixture(&scratch, NativeAuthority::Fabric);
+    let expected = owner.fence.clone();
+    let lease = owner.source_lease(&expected).unwrap();
+    assert_eq!(lease.owner(), &expected);
+    lease.check_current().unwrap();
+    for field in 0..3 {
+        let mut wrong = expected.clone();
+        match field {
+            0 => wrong.project_id.push_str("-foreign"),
+            1 => wrong.owner_id.push_str("-foreign"),
+            _ => wrong.epoch += 1,
+        }
+        assert!(owner.source_lease(&wrong).is_err());
+        lease.check_current().unwrap();
+    }
+    owner.ready(None).unwrap();
+    owner
+        .source_lease(&expected)
+        .unwrap()
+        .check_current()
+        .unwrap();
+}
+
+#[test]
+fn source_owner_lease_refuses_a_legacy_owner_without_changing_legacy_lifecycle() {
+    let scratch = Scratch::new();
+    let (repo, home, mut owner) = source_owner_fixture(&scratch, NativeAuthority::Legacy);
+    assert!(owner.source_lease(&owner.fence).is_err());
+    owner.assert_current().unwrap();
+    owner.ready(None).unwrap();
+    owner.finish(true).unwrap();
+    drop(owner);
+    assert!(!ownership_lock_held(&repo).unwrap());
+    let replacement =
+        EngineOwnership::acquire_in_home(&repo, NativeAuthority::Legacy, &home).unwrap();
+    replacement.assert_current().unwrap();
+}
+
+#[test]
+fn source_owner_lease_survives_graceful_stopping_without_new_admission() {
+    let scratch = Scratch::new();
+    let (_repo, _home, mut owner) = source_owner_fixture(&scratch, NativeAuthority::Fabric);
+    owner.ready(None).unwrap();
+    let expected = owner.fence.clone();
+    let lease = owner.source_lease(&expected).unwrap();
+    // This is EngineControl::poll's existing graceful shutdown transition.
+    owner.record.state = "stopping".into();
+    owner.assert_current().unwrap();
+    lease.check_current().unwrap();
+    assert!(owner.source_lease(&expected).is_err());
+    assert!(
+        owner.ready(None).is_err(),
+        "a heartbeat cannot reopen stopping admission"
+    );
+    lease.check_current().unwrap();
+    assert!(owner.source_lease(&expected).is_err());
+    owner.finish(true).unwrap();
+    assert!(lease.check_current().is_err());
+}
+
+#[test]
+fn source_owner_lease_finish_retains_actual_lock_until_callback_settlement() {
+    struct CallbackGuard {
+        settle: Option<mpsc::SyncSender<()>>,
+        worker: Option<thread::JoinHandle<()>>,
+    }
+    impl Drop for CallbackGuard {
+        fn drop(&mut self) {
+            if let Some(settle) = self.settle.take() {
+                let _ = settle.send(());
+            }
+            if let Some(worker) = self.worker.take() {
+                let _ = worker.join();
+            }
+        }
+    }
+    for clean in [true, false] {
+        let scratch = Scratch::new();
+        let (repo, home, mut owner) = source_owner_fixture(&scratch, NativeAuthority::Fabric);
+        let expected = owner.fence.clone();
+        let lease = owner.source_lease(&expected).unwrap();
+        let callback_lease = owner.source_lease(&expected).unwrap();
+        let (entered_tx, entered_rx) = mpsc::sync_channel(1);
+        let (settle_tx, settle_rx) = mpsc::sync_channel(1);
+        let worker = thread::spawn(move || {
+            callback_lease.check_current().unwrap();
+            entered_tx.send(()).unwrap();
+            settle_rx.recv_timeout(Duration::from_secs(30)).unwrap();
+            assert!(callback_lease.check_current().is_err());
+            drop(callback_lease);
+        });
+        let mut callback = CallbackGuard {
+            settle: Some(settle_tx),
+            worker: Some(worker),
+        };
+        entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        probe_source_owner_lock_in_fresh_process(&repo, true);
+        owner.finish(clean).unwrap();
+        assert!(lease.check_current().is_err());
+        assert!(owner.source_lease(&expected).is_err());
+        assert!(
+            owner.ready(None).is_err(),
+            "ready cannot revive a retired lifetime"
+        );
+        assert!(owner.assert_current().is_err());
+        drop(owner);
+        assert!(EngineOwnership::acquire_in_home(&repo, NativeAuthority::Fabric, &home).is_err());
+        drop(lease);
+        probe_source_owner_lock_in_fresh_process(&repo, true);
+        callback.settle.take().unwrap().send(()).unwrap();
+        callback.worker.take().unwrap().join().unwrap();
+        probe_source_owner_lock_in_fresh_process(&repo, false);
+        let mut replacement =
+            EngineOwnership::acquire_in_home(&repo, NativeAuthority::Fabric, &home).unwrap();
+        assert_ne!(replacement.fence, expected);
+        replacement
+            .source_lease(&replacement.fence)
+            .unwrap()
+            .check_current()
+            .unwrap();
+        replacement.finish(true).unwrap();
+    }
+}
+
+#[test]
+fn source_owner_lease_drop_revokes_and_preserves_lock_until_last_lease_drop() {
+    let scratch = Scratch::new();
+    let (repo, home, owner) = source_owner_fixture(&scratch, NativeAuthority::Fabric);
+    let expected = owner.fence.clone();
+    let lease = owner.source_lease(&expected).unwrap();
+    let state = owner.journal.project_state(&expected.project_id).unwrap();
+    drop(owner);
+    assert!(lease.check_current().is_err());
+    probe_source_owner_lock_in_fresh_process(&repo, true);
+    assert_eq!(
+        Journal::open(home.join("fabric/journal.sqlite"))
+            .unwrap()
+            .project_state(&expected.project_id)
+            .unwrap(),
+        state,
+        "dropping the owner must leave uncertain Journal authority for reconciliation"
+    );
+    assert!(EngineOwnership::acquire_in_home(&repo, NativeAuthority::Fabric, &home).is_err());
+    drop(lease);
+    probe_source_owner_lock_in_fresh_process(&repo, false);
+    let replacement =
+        EngineOwnership::acquire_in_home(&repo, NativeAuthority::Fabric, &home).unwrap();
+    assert_ne!(replacement.fence, expected);
+}
+
+#[test]
+fn source_owner_lease_revokes_before_failed_retirement_write() {
+    for clean in [true, false] {
+        let scratch = Scratch::new();
+        let (repo, _home, mut owner) = source_owner_fixture(&scratch, NativeAuthority::Fabric);
+        let expected = owner.fence.clone();
+        let lease = owner.source_lease(&expected).unwrap();
+        let original_record = fs::read(&owner.record_path).unwrap();
+        owner.record_path = repo.join("absent-parent/owner.json");
+        assert!(owner.finish(clean).is_err());
+        assert!(lease.check_current().is_err());
+        assert!(owner.source_lease(&expected).is_err());
+        assert!(owner.ready(None).is_err());
+        assert_eq!(
+            fs::read(repo.join(".rudder/engine/owner.json")).unwrap(),
+            original_record
+        );
+        assert!(
+            owner
+                .journal
+                .project_state(&expected.project_id)
+                .unwrap()
+                .owner_active,
+            "failed projection write must not pretend Journal release settled"
+        );
+        drop(owner);
+        assert!(ownership_lock_held(&repo).unwrap());
+        drop(lease);
+        assert!(!ownership_lock_held(&repo).unwrap());
+    }
+}
+
+#[test]
+fn source_owner_lease_failed_ready_publication_cannot_be_retried_into_authority() {
+    let scratch = Scratch::new();
+    let (repo, _home, mut owner) = source_owner_fixture(&scratch, NativeAuthority::Fabric);
+    let expected = owner.fence.clone();
+    let lease = owner.source_lease(&expected).unwrap();
+    let original_path = owner.record_path.clone();
+    let original_record = fs::read(&original_path).unwrap();
+    owner.record_path = repo.join("absent-parent/owner.json");
+    assert!(owner.ready(None).is_err());
+    assert!(lease.check_current().is_err());
+    owner.record_path = original_path;
+    assert!(owner.ready(None).is_err());
+    assert!(owner.source_lease(&expected).is_err());
+    assert_eq!(fs::read(&owner.record_path).unwrap(), original_record);
+    drop(owner);
+    assert!(ownership_lock_held(&repo).unwrap());
+    drop(lease);
+    assert!(!ownership_lock_held(&repo).unwrap());
+}
+
+#[test]
+fn source_owner_lease_assert_current_failure_is_absorbing() {
+    let scratch = Scratch::new();
+    let (repo, home, mut owner) = source_owner_fixture(&scratch, NativeAuthority::Fabric);
+    let expected = owner.fence.clone();
+    let lease = owner.source_lease(&expected).unwrap();
+    Journal::open(home.join("fabric/journal.sqlite"))
+        .unwrap()
+        .release_owner(&expected, epoch_ms())
+        .unwrap();
+    assert!(owner.assert_current().is_err());
+    assert!(lease.check_current().is_err());
+    assert!(owner.ready(None).is_err());
+    assert!(owner.source_lease(&expected).is_err());
+    assert!(owner.assert_current().is_err());
+    drop(owner);
+    assert!(ownership_lock_held(&repo).unwrap());
+    drop(lease);
+    assert!(!ownership_lock_held(&repo).unwrap());
+}
+
+#[test]
+fn source_owner_lease_lock_replacement_refuses_even_after_original_path_is_restored() {
+    let scratch = Scratch::new();
+    let (repo, _home, mut owner) = source_owner_fixture(&scratch, NativeAuthority::Fabric);
+    let expected = owner.fence.clone();
+    let lease = owner.source_lease(&expected).unwrap();
+    let named = repo.join(".rudder/engine/owner.lock");
+    let retained = repo.join(".rudder/engine/retained-owner.lock");
+    let original_inode = fs::metadata(&named).unwrap().ino();
+    fs::rename(&named, &retained).unwrap();
+    File::create(&named).unwrap();
+    assert!(lease.check_current().is_err());
+    fs::remove_file(&named).unwrap();
+    fs::rename(&retained, &named).unwrap();
+    assert_eq!(fs::metadata(&named).unwrap().ino(), original_inode);
+    assert!(
+        lease.check_current().is_err(),
+        "restoring a pathname cannot revive a revoked lifetime"
+    );
+    assert!(owner.assert_current().is_err());
+    assert!(owner.ready(None).is_err());
+    assert!(owner.source_lease(&expected).is_err());
+    drop(owner);
+    probe_source_owner_lock_in_fresh_process(&repo, true);
+    drop(lease);
+    probe_source_owner_lock_in_fresh_process(&repo, false);
+}
+
 #[test]
 fn old_legacy_attach_owner_is_refused_before_journal_or_app_start() {
     let scratch = Scratch::new();

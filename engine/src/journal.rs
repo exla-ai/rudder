@@ -32,6 +32,13 @@ mod schema;
 mod runtime;
 mod vcs;
 mod managed;
+mod host_source;
+mod readonly;
+pub use readonly::{HeldJournalFile, ReadOnlyJournal, READ_ONLY_MAX_BUSY_TIMEOUT};
+
+pub use host_source::{
+    host_source_scope, HostSourceAuthorization, HOST_SOURCE_PURPOSE, HOST_SOURCE_REQUIRED_OPERATION,
+};
 
 pub use commands::{
     CommandReceipt, CommandRequest, CommandState, EffectClaim, Reconciliation, Recovery,

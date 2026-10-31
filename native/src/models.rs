@@ -241,12 +241,26 @@ pub(crate) fn suggestions_for(app: &App) -> Vec<Suggestion> {
 
     // Retired standalone workflows and the hidden /plan compatibility alias
     // must not take over Enter or advertise another way to start ordinary work.
-    if ["/gam", "/nudge", "/plan"].iter().any(|command| {
+    if ["/gam", "/nudge", "/plan", "/m"].iter().any(|command| {
         input == *command || input.strip_prefix(command).is_some_and(|rest| rest.starts_with(char::is_whitespace))
     }) {
         return Vec::new();
     }
-    rank_suggestions(command_suggestions(), input.trim_start_matches('/'))
+    if input == "/" {
+        return command_suggestions();
+    }
+    // Keep existing commands discoverable when searched. Named Cloud/Sync
+    // subcommands belong to that family's drill-down, not the global palette.
+    let family = input.split_whitespace().next().unwrap_or_default();
+    let has_separator = input.contains(char::is_whitespace);
+    let suggestions = searchable_command_suggestions().into_iter().filter(|suggestion| {
+        if suggestion.label.starts_with("/cloud ") || suggestion.label.starts_with("/sync ") {
+            has_separator && suggestion.label.split_whitespace().next() == Some(family)
+        } else {
+            true
+        }
+    }).collect();
+    rank_suggestions(suggestions, input.trim_start_matches('/'))
 }
 
 /// `/resume` (and its `/handoff` alias) with whatever follows it, or None when this
@@ -525,6 +539,22 @@ pub(crate) fn bounded_edit_distance(left: &str, right: &str, max_distance: usize
 }
 
 pub(crate) fn command_suggestions() -> Vec<Suggestion> {
+    let commands = searchable_command_suggestions();
+    ["/model", "/main", "/resume", "/cloud", "/help"].into_iter()
+        .filter_map(|label| commands.iter().find(|command| command.label == label).cloned())
+        .collect()
+}
+
+pub(crate) fn dashboard_help() -> &'static str {
+    concat!(
+        "plain input -> one isolated mergeable worker in its own jj workspace; multi-part implementation plans wait for approval. ",
+        "/main [task] -> agent in this shared checkout. Send follow-ups in the owning agent's pane. ",
+        "/model chooses model/effort · /resume continues a conversation · /cloud changes new-task location · /help shortcuts. ",
+        "Option-1/2/3/4 or ^W panes · Enter start/focus · R review all · M merge all · m merge · x stop · $ command opens a shell in this checkout."
+    )
+}
+
+fn searchable_command_suggestions() -> Vec<Suggestion> {
     vec![
         Suggestion {
             label: "/model".to_string(),
@@ -556,23 +586,8 @@ pub(crate) fn command_suggestions() -> Vec<Suggestion> {
         },
         Suggestion {
             label: "/main".to_string(),
-            detail: "spawn a main-branch agent (uses current model)".to_string(),
+            detail: "start an agent in this shared checkout; add task text for its first prompt".to_string(),
             action: SuggestionAction::RunCommand("/main".to_string()),
-        },
-        Suggestion {
-            label: "/m".to_string(),
-            detail: "alias for /main".to_string(),
-            action: SuggestionAction::RunCommand("/m".to_string()),
-        },
-        Suggestion {
-            label: "/main <prompt>".to_string(),
-            detail: "main-branch agent with a custom first prompt".to_string(),
-            action: SuggestionAction::Insert("/main ".to_string()),
-        },
-        Suggestion {
-            label: "/m <prompt>".to_string(),
-            detail: "alias for /main <prompt>".to_string(),
-            action: SuggestionAction::Insert("/m ".to_string()),
         },
         Suggestion {
             label: "/goal <text>".to_string(),

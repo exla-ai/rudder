@@ -67,6 +67,10 @@ mod execution_cli;
 mod workspace_vcs;
 #[cfg(target_os = "linux")]
 mod remote_workspace;
+mod source_authorizer;
+mod source_issuer;
+#[cfg(target_os = "linux")]
+mod source_controller;
 mod managed_launch;
 mod managed_app;
 mod managed_store;
@@ -126,6 +130,9 @@ const ENTER_SUBMIT_DELAY: Duration = Duration::from_millis(150);
 /// `App::pending_enters`).
 struct PendingEnter {
     run_id: String,
+    // A run can resume in a different process while its old submit is queued.
+    // None never authorizes a later terminal that happens to reuse the run id.
+    instance_id: Option<String>,
     due: Instant,
 }
 
@@ -2422,15 +2429,6 @@ struct MergeConflictPrompt {
 struct ControlResult {
     marker: String,
     outcome: String,
-}
-
-/// How a fleet-wide nudge reaches one worker. A worker with a live terminal takes
-/// the message as a normal turn; one whose process is gone has to be resumed in
-/// its own workspace with the message as the new direction.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum NudgeDelivery {
-    Inject,
-    Resume,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -6490,10 +6488,7 @@ impl App {
                 self.task_input.clear();
                 self.task_cursor = 0;
                 self.picker_index = 0;
-                self.notice = Some(
-                    "Option-1/2/3/4 or ^W pane  Enter start/focus  wheel scrolls worker  R review all  M merge all"
-                        .to_string(),
-                );
+                self.notice = Some(dashboard_help().to_string());
             }
         }
     }
@@ -7860,8 +7855,15 @@ impl App {
     /// must be separate writes with a gap, or Claude's paste detection absorbs
     /// the CR into the paste and the prompt sits unsubmitted.
     fn queue_enter_for(&mut self, run_id: &str) {
+        let instance_id = self
+            .agents
+            .iter()
+            .find(|run| run.id == run_id)
+            .and_then(|run| run.terminal.as_ref())
+            .map(|terminal| terminal.instance_id().to_string());
         self.pending_enters.push(PendingEnter {
             run_id: run_id.to_string(),
+            instance_id,
             due: Instant::now() + ENTER_SUBMIT_DELAY,
         });
     }
@@ -7881,9 +7883,15 @@ impl App {
                 if !managed_app::accepts_input(self, index) { continue; }
                 let run = &mut self.agents[index];
                 if let Some(terminal) = run.terminal.as_mut() {
-                    let _ = terminal.write_input(b"\r");
-                    run.last_worker_input_at = Some(Instant::now());
-                    self.dirty = true;
+                    if pending.instance_id.as_deref() != Some(terminal.instance_id())
+                        || !matches!(terminal.try_wait(), Ok(None))
+                    {
+                        continue;
+                    }
+                    if terminal.write_input(b"\r").is_ok() {
+                        run.last_worker_input_at = Some(Instant::now());
+                        self.dirty = true;
+                    }
                 }
             }
         }
@@ -9753,7 +9761,7 @@ finished work: fold it into what you are doing. If it is wrong, say why inside \
     /// which is indistinguishable from Rudder having forgotten about it.
     fn settle_gam_pair_with_notice(&mut self, generator_index: usize, reason: &str) {
         self.record_activity(format!("gam: stopped — {reason}"));
-        self.notice = Some(format!("gam needs you: {reason}. Both panes stay live: answer in either one (^w a swaps), or /gam again."));
+        self.notice = Some(format!("gam needs you: {reason}. Both panes stay live: answer in either one (^w a swaps)."));
         self.settle_gam_pair(generator_index, GamOutcome::Escalated(reason.to_string()));
     }
 
@@ -9833,7 +9841,7 @@ finished work: fold it into what you are doing. If it is wrong, say why inside \
                 "the generator stopped making progress: same diff and same reply as the last round";
             self.record_activity(format!("gam: stalled · {reason}"));
             self.notice = Some(format!(
-                "gam stalled: {reason}. Nudge the generator yourself (^w a), or /gam again with another pair."
+                "gam stalled: {reason}. Send a follow-up in the generator pane (^w a swaps)."
             ));
             self.settle_gam_pair(generator_index, GamOutcome::Stalled(reason.to_string()));
             return;
@@ -9966,7 +9974,7 @@ finished work: fold it into what you are doing. If it is wrong, say why inside \
                     if in_main {
                         "the changes are in this checkout"
                     } else {
-                        "m merges it · /gam again reruns the pair"
+                        "m merges it · start a new task for more work"
                     }
                 ));
                 for side in [generator_index, peer_index] {
@@ -10028,7 +10036,7 @@ Address the objection directly. If you disagree, say why inside \
                     "gam: stopped after {next_round} round(s) — {reason}"
                 ));
                 self.notice =
-                    Some(format!("gam needs you: {reason}. Both panes stay live: answer in either one (^w a swaps), or /gam again."));
+                    Some(format!("gam needs you: {reason}. Both panes stay live: answer in either one (^w a swaps)."));
                 self.settle_gam_pair(generator_index, GamOutcome::Escalated(reason));
             }
             None => {
@@ -12166,10 +12174,7 @@ Address the objection directly. If you disagree, say why inside \
                 true
             }
             Some("/help") => {
-                self.notice = Some(
-                    "plain input -> one isolated mergeable worker in its own jj workspace · /plan <task> -> an orchestrator that plans and runs a DAG · /swarm [n] <task> -> n competing experiments at one goal, proposed by a planner you can talk to, launched on Enter, none merges on its own · /gam [model] <task> -> generator + adversarial reviewer pair; the reviewer can steer the generator mid-turn and stop it outright (split panes, ^W a toggles sides, ^W t shows the dialogue) · /main|/m <task> -> another agent in this shared checkout · $ <command> -> a shell in this checkout running it ($ alone opens a shell) · panes: Option-1/2/3/4 (4 = diff panel) or ^W · keys: j/k select · Option-[ / Option-] step agents from any pane · Enter focus · m merge · u undo a merge · M merge all · R review all · H move running agents to the home machine · g nest · ⌥d diff panel (n/p files, j/k scroll) · ⌥g god's view (every agent tiled; arrows move, Enter focuses) · o web ui · U usage dashboard · x stop · b branch chat · dd delete · cc clear merged · P model; · /handoff -> the selected agent moves to the home machine and resumes there; commands: /model /fast /sound /notify /color /main /plan /swarm /gam /resume /restore /handoff /share /usage /goal /cloud /sync /web /feedback"
-                        .to_string(),
-                );
+                self.notice = Some(dashboard_help().to_string());
                 true
             }
             Some("/login") => {
@@ -14384,92 +14389,72 @@ Address the objection directly. If you disagree, say why inside \
         }
     }
 
-    /// Which rows a fleet-wide nudge targets, and how each one must be reached.
-    /// Pure so the selection rule is testable without a PTY or a live App.
-    ///
-    /// Finished work (Done/Merged/Migrated) is NEVER a target: a nudge is a
-    /// "carry on" to work still in flight, and restarting a merged worker would
-    /// redo landed work. The orchestrator is excluded because it is the thing
-    /// issuing the nudge.
-    fn nudge_targets(&self) -> Vec<(usize, NudgeDelivery)> {
+    /// Candidate rows for a fleet note. Finished, stopped and missing-process
+    /// rows are left alone; an idle Paused row is eligible only when its actual
+    /// terminal still exists. Delivery rechecks process/composer admission and
+    /// never restarts an unavailable worker. Selection itself has no effects.
+    fn nudge_targets(&self) -> Vec<usize> {
         self.agents
             .iter()
             .enumerate()
-            .filter(|(_, run)| !run.is_orchestrator())
-            .filter_map(|(index, run)| {
-                let delivery = match run.status {
-                    AgentStatus::Running | AgentStatus::Paused => {
-                        // A live PTY takes the note as a normal turn, which keeps
-                        // the worker's context. Without one the process is gone
-                        // (this is the connection-drop case), so resuming its
-                        // session in the same workspace is the only way through.
-                        if run.terminal.is_some() {
-                            NudgeDelivery::Inject
-                        } else {
-                            NudgeDelivery::Resume
-                        }
-                    }
-                    AgentStatus::Stopped | AgentStatus::Failed | AgentStatus::Orphaned => {
-                        NudgeDelivery::Resume
-                    }
-                    AgentStatus::Done | AgentStatus::Merged | AgentStatus::Migrated => {
-                        return None;
-                    }
-                };
-                // `restart_agent_at` refuses the main-checkout row, so a main
-                // worker with no terminal cannot be nudged at all.
-                if delivery == NudgeDelivery::Resume && run.is_main() {
-                    return None;
-                }
-                Some((index, delivery))
+            .filter(|(_, run)| {
+                !run.is_orchestrator()
+                    && matches!(run.status, AgentStatus::Running | AgentStatus::Paused)
+                    && run.terminal.is_some()
             })
+            .map(|(index, _)| index)
             .collect()
     }
 
-    /// Send one message to every in-flight worker: typed into the ones still
-    /// live, and used as the resume direction for the ones whose process died.
-    /// This is the "I lost my connection, everyone keep going" action.
-    fn nudge_all_workers(&mut self, message: &str) {
-        let message = message.trim();
+    /// Send to existing live attempts only. A connection loss or failed send
+    /// does not authorize resume, re-goal or a new process. Explicit addressed
+    /// resume remains a separate action.
+    fn nudge_all_workers(&mut self, message: &str) -> SteerDelivery {
+        let message = sanitize_steer_instruction(message);
         if message.is_empty() {
-            self.notice = Some("RUDDER_NUDGE_ALL requires a message".to_string());
-            return;
+            let error = "RUDDER_NUDGE_ALL requires a message".to_string();
+            self.notice = Some(error.clone());
+            return SteerDelivery::Failed(error);
         }
         let targets = self.nudge_targets();
         if targets.is_empty() {
-            self.notice = Some("no in-flight workers to nudge".to_string());
-            return;
+            let error = "no live workers to nudge".to_string();
+            self.notice = Some(error.clone());
+            return SteerDelivery::Failed(error);
         }
-        let mut injected = 0usize;
-        let mut resumed = 0usize;
+        let mut sent = 0usize;
         let mut failed = 0usize;
-        for (index, delivery) in targets {
-            let ok = match delivery {
-                NudgeDelivery::Inject => self.live_inject_at(index, message),
-                NudgeDelivery::Resume => self.restart_agent_at(index, message, None),
-            };
-            if !ok {
-                failed += 1;
-            } else if delivery == NudgeDelivery::Inject {
-                injected += 1;
+        for index in targets {
+            let live = self.agents[index]
+                .terminal
+                .as_mut()
+                .is_some_and(|terminal| matches!(terminal.try_wait(), Ok(None)));
+            if live
+                && self.composer_blocked_at(index).is_none()
+                && self.live_inject_at(index, &message)
+            {
+                sent += 1;
             } else {
-                resumed += 1;
+                failed += 1;
             }
         }
-        let reached = injected + resumed;
         let mut summary = format!(
-            "nudged {reached} worker{}",
-            if reached == 1 { "" } else { "s" }
+            "sent to {sent} live worker{}",
+            if sent == 1 { "" } else { "s" }
         );
-        if resumed > 0 {
-            summary.push_str(&format!(" ({injected} live, {resumed} resumed)"));
-        }
         if failed > 0 {
             summary.push_str(&format!("; {failed} could not be reached"));
         }
         self.push_activity(summary.clone());
-        self.notice = Some(summary);
+        self.notice = Some(summary.clone());
         self.dirty = true;
+        if failed == 0 {
+            SteerDelivery::Delivered
+        } else {
+            // Some writes may have succeeded. Preserve that exact partial count
+            // instead of reporting that the whole fleet accepted this request.
+            SteerDelivery::Failed(summary)
+        }
     }
 
     fn evaluate_completed_plan(&mut self, index: usize) {
@@ -15239,8 +15224,8 @@ Address the objection directly. If you disagree, say why inside \
             let result = match kind.as_str() {
                 "cancel" => self.deliver_cancel_request(&task_id),
                 "merge" => self.deliver_merge_request(&task_id),
-                // Fleet-wide nudge: one message to every in-flight worker, with
-                // no task id. Same at-most-once ledger as a single steer.
+                // Fleet note: existing live attempts only, never automatic
+                // resume. Same at-most-once ledger as a single steer.
                 "nudge-all" => self.deliver_nudge_all_request(&instruction),
                 // Raw keys for a live agent (the phone's key strip): what a
                 // picker opened by `/model` or `/resume` waits for.
@@ -15515,13 +15500,9 @@ Address the objection directly. If you disagree, say why inside \
     }
 
     fn deliver_nudge_all_request(&mut self, instruction: &str) -> SteerDelivery {
-        // As with merge, a stale notice would masquerade as this nudge's error.
+        // As with merge, a stale notice would masquerade as this note's result.
         self.notice = None;
-        if self.nudge_targets().is_empty() {
-            return SteerDelivery::Failed("no in-flight workers to nudge".to_string());
-        }
-        self.nudge_all_workers(instruction);
-        SteerDelivery::Delivered
+        self.nudge_all_workers(instruction)
     }
 
     /// Approve a plan from outside the dashboard. `plan_id` names the plan; empty

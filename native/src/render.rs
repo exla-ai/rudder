@@ -4221,9 +4221,9 @@ pub(crate) fn gam_status_bar_line(
                             .map(|message| format!(": {}", message.text.trim().replace('\n', " ")))
                             .unwrap_or_default();
                         let next = if in_main {
-                            "the changes are in this checkout · /gam again reruns"
+                            "the changes are in this checkout · start a new task for more work"
                         } else {
-                            "next: m merges it · /gam again reruns"
+                            "next: m merges it · start a new task for more work"
                         };
                         (
                             "✓ accepted".to_string(),
@@ -4235,7 +4235,7 @@ pub(crate) fn gam_status_bar_line(
                         "needs you".to_string(),
                         Style::default().fg(RUNNING_COLOR),
                         format!(
-                            "{} · answer in either pane, or /gam again",
+                            "{} · answer in either pane",
                             if reason.trim().is_empty() {
                                 "the pair ended without agreeing".to_string()
                             } else {
@@ -4247,7 +4247,7 @@ pub(crate) fn gam_status_bar_line(
                         "✗ the reviewer stopped it".to_string(),
                         error_style(),
                         format!(
-                            "{} · ask it why in its pane · /gam again reruns",
+                            "{} · ask it why in the reviewer pane",
                             if reason.trim().is_empty() {
                                 "no reason recorded".to_string()
                             } else {
@@ -4259,7 +4259,7 @@ pub(crate) fn gam_status_bar_line(
                         "stalled".to_string(),
                         Style::default().fg(RUNNING_COLOR),
                         format!(
-                            "{} · nudge the generator yourself, or /gam again with another pair",
+                            "{} · send a follow-up in the generator pane",
                             if reason.trim().is_empty() {
                                 "the generator stopped making progress".to_string()
                             } else {
@@ -4274,7 +4274,7 @@ pub(crate) fn gam_status_bar_line(
                             "you ended the loop after {} · both panes stay live · {}",
                             rounds(gam.round),
                             if in_main {
-                                "/gam again reruns"
+                                "start a new task for more work"
                             } else {
                                 "m merges what is there"
                             }

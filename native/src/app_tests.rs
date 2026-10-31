@@ -5689,6 +5689,9 @@ fn collects_rudder_plan_output_from_codex_session_messages() {
 #[test]
 fn finds_latest_codex_session_id_for_matching_cwd() {
     let repo = unique_test_repo("codex-session-cwd");
+    // A fresh SDK process records its physical cwd, even when its launcher
+    // supplied a symlinked TMPDIR. Keep the alias as the lookup input below.
+    let session_cwd = repo.canonicalize().expect("resolve disposable process cwd");
     let root = unique_test_repo("codex-session-root");
     let shard = root.join("2026").join("06");
     fs::create_dir_all(&shard).expect("create codex sessions dir");
@@ -5698,7 +5701,7 @@ fn finds_latest_codex_session_id_for_matching_cwd() {
         &old,
         format!(
             "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"old-session\",\"cwd\":\"{}\"}}}}\n",
-            repo.display()
+            session_cwd.display()
         ),
     )
     .expect("write old session");
@@ -5718,7 +5721,7 @@ fn finds_latest_codex_session_id_for_matching_cwd() {
         &newest,
         format!(
             "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"newest-session\",\"cwd\":\"{}\"}}}}\n",
-            repo.display()
+            session_cwd.display()
         ),
     )
     .expect("write newest session");
@@ -5726,6 +5729,10 @@ fn finds_latest_codex_session_id_for_matching_cwd() {
     let found = latest_codex_session_id_in_dir(&root, &repo);
 
     assert_eq!(found.as_deref(), Some("newest-session"));
+    assert_eq!(
+        latest_codex_session_id_in_dir(&root, &session_cwd).as_deref(),
+        Some("newest-session")
+    );
     let _ = fs::remove_dir_all(&root);
     let _ = fs::remove_dir_all(&repo);
 }

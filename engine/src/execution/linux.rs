@@ -108,6 +108,33 @@ use std::{
     time::{Duration, Instant},
 };
 
+// Every phase borrows the same authenticated deadline. None preserves legacy
+// Binding2/3 behavior. Blocking filesystem/application calls cannot be killed by
+// this guard: they are fenced before and after, and late effects remain recovery
+// candidates rather than successful finalization.
+#[derive(Clone, Default)]
+struct FinalizationPhases(Option<super::finalization_budget::FinalizationBudget>);
+impl FinalizationPhases {
+    fn check(&self) -> Result<()> {
+        if let Some(budget) = &self.0 {
+            budget.remaining()?;
+        }
+        Ok(())
+    }
+    fn limit(&self, upper: Duration) -> Result<Duration> {
+        match &self.0 {
+            Some(budget) => budget.phase_limit(upper),
+            None => Ok(upper),
+        }
+    }
+    fn during<T>(&self, effect: impl FnOnce() -> Result<T>) -> Result<T> {
+        self.check()?;
+        let value = effect()?;
+        self.check()?;
+        Ok(value)
+    }
+}
+
 const AUTHORIZATION_POLL: Duration = Duration::from_millis(100);
 const AUTHORIZATION_SETTLE: Duration = Duration::from_secs(3);
 
@@ -201,6 +228,7 @@ impl Drop for AuthorityMonitor {
 }
 
 struct ExecutionMount {
+    finalization: FinalizationPhases,
     mounted: Option<MountedVfs>,
     rpc: Option<WorkspaceRpc>,
     application: Option<ApplicationLifecycle>,
@@ -213,15 +241,15 @@ enum WorkspaceRpc {
     },
 }
 impl WorkspaceRpc {
-    fn close(&self) -> Result<()> {
-        match self {
-            Self::Complete(rpc) => rpc.await_closed(Duration::from_secs(35)),
+    fn close_with_budget(&self, phases: &FinalizationPhases) -> Result<()> {
+        phases.during(|| match self {
+            Self::Complete(rpc) => rpc.await_closed(phases.limit(Duration::from_secs(35))?),
             Self::Partial { rpc, settled } => {
                 let mut receipt = settled
                     .lock()
                     .map_err(|_| anyhow::anyhow!("partial settlement ownership unavailable"))?;
                 if receipt.is_none() {
-                    *receipt = Some(rpc.await_closed(Duration::from_secs(35))?);
+                    *receipt = Some(rpc.await_closed(phases.limit(Duration::from_secs(35))?)?);
                 }
                 ensure!(
                     receipt.as_ref().unwrap().binding_digest() == rpc.binding().digest()?,
@@ -229,7 +257,7 @@ impl WorkspaceRpc {
                 );
                 Ok(())
             }
-        }
+        })
     }
     fn partial_settlement(&self) -> Result<(String, String)> {
         let Self::Partial { rpc, settled } = self else {
@@ -755,22 +783,35 @@ impl ExecutionMount {
     }
     fn close_rpc(&self) -> Result<()> {
         if let Some(rpc) = &self.rpc {
-            rpc.close()?;
+            rpc.close_with_budget(&self.finalization)?;
         }
         Ok(())
     }
-    fn unmount(&mut self) -> Result<VfsView> {
-        self.close_application()?;
-        self.close_rpc()?;
-        self.mounted
-            .as_mut()
-            .context("execution mount absent")?
-            .unmount()
+    fn close_rpc_with_budget(&self, phases: &FinalizationPhases) -> Result<()> {
+        phases.during(|| {
+            if let Some(rpc) = &self.rpc {
+                rpc.close_with_budget(phases)?;
+            }
+            Ok(())
+        })
+    }
+    fn unmount(&mut self, phases: &FinalizationPhases) -> Result<VfsView> {
+        phases.during(|| self.close_application())?;
+        self.close_rpc_with_budget(phases)?;
+        phases.during(|| {
+            self.mounted
+                .as_mut()
+                .context("execution mount absent")?
+                .unmount()
+        })
     }
 }
 impl Drop for ExecutionMount {
     fn drop(&mut self) {
-        if self.close_application().is_err() || self.close_rpc().is_err() {
+        let finalization = self.finalization.clone();
+        if finalization.during(|| self.close_application()).is_err() || self.close_rpc().is_err() {
+            // An expired budget also takes this retained-mount failure path;
+            // cleanup cannot start a fresh application settlement interval.
             // Never run a controlled unmount while an observation effect still
             // owns the view. Leave it fenced until this fresh helper exits;
             // kernel/process cleanup is a failure, never checkpoint proof.
@@ -796,11 +837,13 @@ pub(super) struct OwnedExecutionDrain {
     network: Option<super::network_phase::OwnedNetworkReady>,
     workspace_view: VfsView,
     frozen: Option<crate::vfs::FrozenRemoteView>,
+    finalization: FinalizationPhases,
     source: Option<SourceFinalizationOwner>,
     _source_workspace: Option<Arc<OwnedHelperWorkspace>>,
 }
 impl OwnedExecutionDrain {
     fn source_current(&self) -> Result<()> {
+        self.finalization.check()?;
         if let Some(source) = &self.source {
             ensure!(
                 self._source_workspace.is_some(),
@@ -808,13 +851,13 @@ impl OwnedExecutionDrain {
             );
             source.current()?;
         }
-        Ok(())
+        self.finalization.check()
     }
     fn source_effect<T>(&self, effect: impl FnOnce() -> Result<T>) -> Result<T> {
-        match &self.source {
+        self.finalization.during(|| match &self.source {
             Some(source) => source.during(effect),
             None => effect(),
-        }
+        })
     }
     pub(super) fn authenticated_stop(&self) -> Result<&super::StopAndCheckpoint> {
         self.stop
@@ -1014,6 +1057,7 @@ mod application_lifecycle_tests {
             fail: false,
         };
         let mut mounted = ExecutionMount {
+            finalization: FinalizationPhases::default(),
             mounted: None,
             rpc: None,
             application: Some(ApplicationLifecycle::new(Box::new(service))),
@@ -1038,6 +1082,37 @@ mod application_lifecycle_tests {
         assert_eq!(attempts.load(Ordering::Acquire), 1);
     }
     #[test]
+    fn expired_drop_budget_never_starts_application_settlement() {
+        use super::super::finalization_budget::FinalizationBudget;
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let closed = Arc::new(AtomicBool::new(false));
+        let budget = FinalizationBudget::begin(Duration::from_millis(1)).unwrap();
+        let mounted = ExecutionMount {
+            finalization: FinalizationPhases(Some(budget.clone())),
+            mounted: None,
+            rpc: None,
+            application: Some(ApplicationLifecycle::new(Box::new(Service {
+                file: None,
+                attempts: attempts.clone(),
+                closed: closed.clone(),
+                dropped: Arc::new(AtomicBool::new(false)),
+                fail: true,
+            }))),
+        };
+        let guard = Instant::now() + Duration::from_secs(2);
+        while budget.remaining().is_ok() {
+            assert!(
+                Instant::now() < guard,
+                "host finalization clock failed to expire"
+            );
+            std::thread::yield_now();
+        }
+        drop(mounted);
+        assert_eq!(attempts.load(Ordering::Acquire), 0);
+        assert!(!closed.load(Ordering::Acquire));
+    }
+
+    #[test]
     fn failed_settlement_is_not_retried_or_promoted_to_success_on_drop() {
         let attempts = Arc::new(AtomicUsize::new(0));
         let closed = Arc::new(AtomicBool::new(false));
@@ -1050,6 +1125,7 @@ mod application_lifecycle_tests {
             fail: true,
         };
         let mut mounted = ExecutionMount {
+            finalization: FinalizationPhases::default(),
             mounted: None,
             rpc: None,
             application: Some(ApplicationLifecycle::new(Box::new(service))),
@@ -1136,6 +1212,12 @@ fn supervisor(
     factory: Option<HelperServicesFactory>,
     mut control: Option<super::handoff::ManagedControl>,
 ) -> Result<ExecutionOutcome> {
+    // Codec support grants no execution authority. Keep Spec5 out of legacy
+    // dispatch before namespace entry, factories or any execution effects.
+    ensure!(
+        spec.format_version != 5,
+        "execution specification5 awaits owned source and shutdown lifetimes"
+    );
     spec.validate()?;
     if spec.format_version == 4 {
         ensure!(
@@ -1198,11 +1280,19 @@ fn supervisor(
                     )?)
                 }
                 HelperWorkspaceServices::Partial { authority } => {
+                    ensure!(spec.format_version == 4, "shared partial authority requires specification4");
                     WorkspaceMonitor::Partial(PartialAuthorityMonitor::start(
                         authority.clone(),
                         partial_binding
                             .clone()
                             .context("partial authority requires a sealed remote selection")?,
+                    )?)
+                }
+                HelperWorkspaceServices::PartialSeparated { source, .. } => {
+                    ensure!(spec.format_version == 5, "separated source authority requires specification5");
+                    WorkspaceMonitor::Partial(PartialAuthorityMonitor::start(
+                        source.clone(),
+                        partial_binding.clone().context("host source requires a sealed remote selection")?,
                     )?)
                 }
             }),
@@ -1247,6 +1337,7 @@ fn supervisor(
         let lease = manager.store().begin_staging(Duration::from_secs(3600))?;
         let result = (|| -> Result<ExecutionOutcome> {
             let mut mounted = ExecutionMount {
+                finalization: FinalizationPhases::default(),
                 mounted: Some(mount(view.clone(), &mountpoint, &namespace)?),
                 rpc: None,
                 application: services
@@ -1308,6 +1399,20 @@ fn supervisor(
                             rpc,
                             settled: std::sync::Mutex::new(None),
                         });
+                    }
+                    (
+                        HelperWorkspaceServices::PartialSeparated { ingress, .. },
+                        WorkspaceMonitor::Partial(_),
+                    ) => {
+                        ensure!(spec.format_version == 5, "separated ingress requires specification5");
+                        let rpc = PartialRpc::bind(
+                            view.clone(),
+                            PartialRpcConfig { authority: ingress.clone(), limits: PartialRpcLimits::default() },
+                            &workspace.endpoint_directory,
+                        )?;
+                        ensure!(Some(rpc.binding()) == partial_binding.as_ref(), "partial ingress differs from sealed selection");
+                        super::root::validate_partial_workspace_projection(workspace, rpc.binding())?;
+                        mounted.rpc = Some(WorkspaceRpc::Partial { rpc, settled: std::sync::Mutex::new(None) });
                     }
                     _ => anyhow::bail!("workspace authority family differs from the owned monitor"),
                 }
@@ -1429,6 +1534,11 @@ fn supervisor(
                 }
                 if let Some(control) = &mut control {
                     let stopping = control.poll_stop()?;
+                    if control.binding.format_version == 4 {
+                        // Retain the same deadline on failure cleanup too; Drop
+                        // must not restart a fresh 35-second RPC close wait.
+                        mounted.finalization = FinalizationPhases(control.finalization_budget());
+                    }
                     if let Some(WorkspaceMonitor::Partial(source)) = &monitor {
                         source.observe_budget(control.finalization_budget().as_ref())?;
                     }
@@ -1511,12 +1621,20 @@ fn supervisor(
             }
             // The application keeps its owned finalization guard in `mounted`
             // through RPC/FUSE drain, retained checkpoint and record fsync.
-            mounted.close_application()?;
-            mounted.close_rpc()?;
+            let finalization = FinalizationPhases(match control.as_ref() {
+                Some(control) if control.binding.format_version == 4 => Some(
+                    control
+                        .finalization_budget()
+                        .context("authenticated finalization budget absent")?,
+                ),
+                _ => None,
+            });
+            finalization.during(|| mounted.close_application())?;
+            mounted.close_rpc_with_budget(&finalization)?;
             if let Some(monitor) = &monitor {
                 monitor.check()?;
             }
-            let _view = mounted.unmount()?;
+            let _view = mounted.unmount(&finalization)?;
             let source = match monitor.take() {
                 Some(WorkspaceMonitor::Partial(source)) => Some(SourceFinalizationOwner {
                     monitor: source,
@@ -1542,6 +1660,7 @@ fn supervisor(
                 network: network_ready,
                 workspace_view: view.clone(),
                 frozen: None,
+                finalization,
                 source,
                 _source_workspace: partial_binding.as_ref().map(|_| workspace.clone()),
             };
@@ -1549,28 +1668,38 @@ fn supervisor(
                 monitor.validate_current()?;
             }
             let committed = if partial_binding.is_some() {
-                owned_drain.validate_remote_finalization(state.record(), &workspace)?;
-                let request = crate::vfs::RemoteFreezeRequest {
-                    format_version: 1,
-                    intent_id: Uuid::new_v4().to_string(),
-                    capture: crate::vfs::PartialCaptureRequest {
-                        nonce: owned_drain.authenticated_stop()?.request_id.clone(),
-                        expected_begin: view.dirty_cursor()?,
-                        expected_head: view.partial_capture_head()?.map(|head| head.request_nonce),
-                    },
-                };
-                let mut frozen = view.freeze_remote(&request, Duration::from_secs(35))?;
-                let committed = state.finalize_remote(
-                    &workspace,
-                    &owned_drain,
-                    &mut frozen,
-                    crate::vfs::PartialCaptureBudget::default(),
-                )?;
-                frozen.check_for(view)?;
+                let (committed, frozen) = owned_drain.source_effect(|| {
+                    owned_drain.validate_remote_finalization(state.record(), &workspace)?;
+                    let request = crate::vfs::RemoteFreezeRequest {
+                        format_version: 1,
+                        intent_id: Uuid::new_v4().to_string(),
+                        capture: crate::vfs::PartialCaptureRequest {
+                            nonce: owned_drain.authenticated_stop()?.request_id.clone(),
+                            expected_begin: view.dirty_cursor()?,
+                            expected_head: view
+                                .partial_capture_head()?
+                                .map(|head| head.request_nonce),
+                        },
+                    };
+                    let mut frozen = owned_drain.finalization.during(|| {
+                        view.freeze_remote(
+                            &request,
+                            owned_drain.finalization.limit(Duration::from_secs(35))?,
+                        )
+                    })?;
+                    let committed = state.finalize_remote(
+                        &workspace,
+                        &owned_drain,
+                        &mut frozen,
+                        crate::vfs::PartialCaptureBudget::default(),
+                    )?;
+                    frozen.check_for(view)?;
+                    Ok((committed, frozen))
+                })?;
                 owned_drain.frozen = Some(frozen);
                 committed
             } else {
-                state.finalize_local(&workspace, drain.agent_exit)?
+                owned_drain.source_effect(|| state.finalize_local(&workspace, drain.agent_exit))?
             };
             if let Some(monitor) = &monitor {
                 monitor.validate_current()?;
@@ -1601,6 +1730,9 @@ fn supervisor(
                             "checkpoint committed; execution staging cleanup needs reconciliation"
                                 .into(),
                         );
+                }
+                if let ExecutionOutcome::Finalized(finalized) = &value {
+                    finalized._drain.finalization.check()?;
                 }
                 Ok(value)
             }
@@ -2961,5 +3093,86 @@ mod partial_source_lifetime_tests {
                 .load(Ordering::Acquire),
             0
         );
+    }
+}
+
+#[cfg(test)]
+mod finalization_phase_tests {
+    use super::super::finalization_budget::FinalizationBudget;
+    use super::*;
+
+    #[test]
+    fn legacy_phases_keep_existing_timeout_and_effect_result() {
+        let phases = FinalizationPhases::default();
+        assert_eq!(
+            phases.limit(Duration::from_secs(35)).unwrap(),
+            Duration::from_secs(35)
+        );
+        assert_eq!(phases.during(|| Ok(17)).unwrap(), 17);
+    }
+
+    #[test]
+    fn shared_cancellation_blocks_later_phase_before_any_effect() {
+        let budget = FinalizationBudget::begin(Duration::from_secs(1)).unwrap();
+        let phases = FinalizationPhases(Some(budget.clone()));
+        assert!(phases.limit(Duration::from_secs(35)).unwrap() <= Duration::from_secs(1));
+        budget.cancel();
+        let mut called = false;
+        assert!(phases
+            .during(|| {
+                called = true;
+                Ok(())
+            })
+            .is_err());
+        assert!(!called);
+        assert!(phases.limit(Duration::from_secs(35)).is_err());
+    }
+
+    #[test]
+    fn filesystem_effect_survives_late_fence_but_cannot_certify_success() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("candidate");
+        let budget = FinalizationBudget::begin(Duration::from_secs(1)).unwrap();
+        let phases = FinalizationPhases(Some(budget.clone()));
+        assert!(phases
+            .during(|| {
+                fs::write(&path, b"candidate")?;
+                File::open(&path)?.sync_all()?;
+                budget.cancel();
+                Ok(())
+            })
+            .is_err());
+        assert_eq!(fs::read(path).unwrap(), b"candidate");
+        assert!(phases.check().is_err());
+    }
+
+    #[test]
+    fn real_stalled_wait_consumes_original_budget_and_blocks_next_phase() {
+        let budget = FinalizationBudget::begin(Duration::from_millis(60)).unwrap();
+        let phases = FinalizationPhases(Some(budget.clone()));
+        let original = budget.constraint();
+        let (mut reader, _held_writer) = UnixStream::pair().unwrap();
+        let began = Instant::now();
+        // Socket waits use the same cap as RPC close/freeze. Early interrupted
+        // waits must sample again; none may restart the deadline.
+        while phases.check().is_ok() {
+            let result = phases.during(|| {
+                reader.set_read_timeout(Some(phases.limit(Duration::from_secs(35))?))?;
+                reader.read_exact(&mut [0])?;
+                Ok(())
+            });
+            assert!(result.is_err());
+            assert!(began.elapsed() < Duration::from_secs(2));
+        }
+        assert_eq!(original, budget.constraint());
+        assert!(phases.limit(Duration::from_secs(35)).is_err());
+        let mut next = false;
+        assert!(phases
+            .during(|| {
+                next = true;
+                Ok(())
+            })
+            .is_err());
+        assert!(!next);
     }
 }

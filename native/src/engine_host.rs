@@ -156,6 +156,11 @@ pub(crate) struct EngineSourceLease {
 }
 
 impl EngineSourceLease {
+    /// App-safe process-local retirement check only. Fresh database authority
+    /// and held-file custody must have been checked by the actual join worker.
+    pub(crate) fn check_active_for_adoption(&self) -> Result<()> {
+        self.lifetime.check_active()
+    }
     pub(crate) fn owner(&self) -> &OwnerFence {
         &self.lifetime.owner
     }

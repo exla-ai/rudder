@@ -62,6 +62,7 @@ use crate::task_routing::*;
 mod engine_host;
 use crate::engine_host::*;
 mod fabric_cli;
+mod cloud_build_profile_cli;
 mod fabric_runtime;
 mod execution_cli;
 mod workspace_vcs;
@@ -69,6 +70,8 @@ mod workspace_vcs;
 mod remote_workspace;
 mod source_authorizer;
 mod source_issuer;
+#[cfg(target_os = "linux")]
+mod source_shutdown_join;
 #[cfg(target_os = "linux")]
 mod source_controller;
 mod managed_launch;

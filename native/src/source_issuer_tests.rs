@@ -168,6 +168,49 @@ fn grant(
     }
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn shutdown_join_uses_exact_current_journal_and_original_budget() {
+    use rudder_engine::execution::finalization_budget::FinalizationBudget;
+    let mut f = Fixture::new(None);
+    let budget = FinalizationBudget::begin(Duration::from_secs(2)).unwrap();
+    f.issuer().authorize_shutdown_join(&f.binding, &budget).unwrap();
+    // Prior successful authorization is not reusable process/Journal proof.
+    let fence = f.fence.clone(); let token = f.token.clone();
+    f.journal().revoke_capability(&fence, &token, trusted_query_time().unwrap()).unwrap();
+    assert!(f.issuer().authorize_shutdown_join(&f.binding, &budget).is_err());
+
+    let f = Fixture::new(None);
+    let budget = FinalizationBudget::begin(Duration::from_secs(2)).unwrap();
+    let mut changed = f.binding.clone(); changed.launch_request_digest = "b".repeat(64);
+    assert!(f.issuer().authorize_shutdown_join(&changed, &budget).is_err());
+
+    let f = Fixture::new(None);
+    let budget = FinalizationBudget::begin(Duration::from_secs(2)).unwrap();
+    budget.cancel();
+    assert!(f.issuer().authorize_shutdown_join(&f.binding, &budget).is_err());
+    f.owner.as_ref().unwrap().assert_current().unwrap();
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn shutdown_join_adoption_rechecks_real_expiry_and_absorbing_local_retirement() {
+    use rudder_engine::execution::finalization_budget::FinalizationBudget;
+    let f = Fixture::new(None);
+    let budget = FinalizationBudget::begin(Duration::from_secs(2)).unwrap();
+    let mut auth = f.issuer().authorize_shutdown_join(&f.binding, &budget).unwrap();
+    auth.check_adoption(f.issuer(), &budget).unwrap();
+    // True-expiry boundary and expired freshness are denied by the local gate.
+    auth.expires_at_ms = Some(trusted_query_time().unwrap());
+    assert!(auth.check_adoption(f.issuer(), &budget).is_err());
+    let mut auth = f.issuer().authorize_shutdown_join(&f.binding, &budget).unwrap();
+    auth.valid_for = Duration::ZERO;
+    assert!(auth.check_adoption(f.issuer(), &budget).is_err());
+    let auth = f.issuer().authorize_shutdown_join(&f.binding, &budget).unwrap();
+    f.issuer().denied.store(true, Ordering::Release);
+    assert!(auth.check_adoption(f.issuer(), &budget).is_err());
+}
+
 #[test]
 fn actual_issuer_queries_current_host_grant_and_survives_only_guest_rotation() {
     let mut f = Fixture::new(None);

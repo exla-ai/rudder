@@ -1141,6 +1141,9 @@ fn await_ready(
                 ManagedExecutionEvent::Shutdown(_) => {
                     bail!("shutdown arrived before an authenticated stop")
                 }
+                ManagedExecutionEvent::SourceShutdown(_) => {
+                    bail!("source shutdown arrived in a binding3 qualification")
+                }
                 ManagedExecutionEvent::Uncertain => {
                     bail!("managed helper readiness became uncertain")
                 }
@@ -1184,6 +1187,9 @@ fn await_shutdown(
                     bail!("backend readiness repeated after stop")
                 }
                 ManagedExecutionEvent::Uncertain => bail!("managed shutdown became uncertain"),
+                ManagedExecutionEvent::SourceShutdown(_) => {
+                    bail!("binding3 qualification cannot adopt provisional source shutdown")
+                }
             }
         }
         // The real receiver drains a final frame after pidfd readiness. Do not
@@ -1402,6 +1408,7 @@ fn run_case(context: &HostContext) -> Result<Value> {
             !matches!(
                 event,
                 ManagedExecutionEvent::BackendReady { .. } | ManagedExecutionEvent::Shutdown(_)
+                    | ManagedExecutionEvent::SourceShutdown(_)
             ),
             "historical retry emitted current process or shutdown authority"
         );

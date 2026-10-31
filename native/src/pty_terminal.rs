@@ -19,6 +19,9 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 const EXIT_OUTPUT_GRACE: Duration = Duration::from_secs(2);
+#[cfg(all(test, target_os = "linux"))]
+#[path = "source_shutdown_exit_tests.rs"]
+mod source_shutdown_exit_tests;
 const MAX_OWNED_PTY_CHILDREN: usize = 512;
 const REAP_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const PTY_READ_CHUNK_BYTES: usize = 8192;
@@ -188,6 +191,8 @@ fn child_reaper() -> Result<&'static Arc<ChildReaper>> {
 /// Own the child even if a later PTY initialization step fails. Normal polls
 /// remain direct WNOHANG calls; only explicit/implicit teardown queues a handle.
 struct OwnedPtyChild {
+    #[cfg(target_os = "linux")]
+    identity: Arc<()>,
     child: Option<Box<dyn Child + Send + Sync>>,
     reservation: Option<ChildReservation>,
     pending: Option<Arc<Mutex<ReapObservation>>>,
@@ -197,6 +202,8 @@ struct OwnedPtyChild {
 impl OwnedPtyChild {
     fn new(child: Box<dyn Child + Send + Sync>, reservation: ChildReservation) -> Self {
         Self {
+            #[cfg(target_os = "linux")]
+            identity: Arc::new(()),
             pid: child.process_id(),
             child: Some(child),
             reservation: Some(reservation),
@@ -569,6 +576,33 @@ pub struct TerminalPane {
     /// Optional waker shared with the reader thread. Kept behind a mutex so the
     /// app can install it after the pane is spawned (see [`set_output_waker`]).
     output_waker: Arc<Mutex<Option<PtyOutputWaker>>>,
+}
+
+/// Created only from this pane's actual owned child wait. This carries neither
+/// a caller status nor a saved/reopened PID. No Serde/Clone/public constructor.
+#[cfg(target_os = "linux")]
+pub struct SuccessfulManagedHelperExit {
+    instance_id: String,
+    pid: u32,
+    child: Arc<()>,
+}
+/// Capture once from the actual live pane during initial owned activation and
+/// retain in Live. A replacement pane cannot reproduce this child identity.
+#[cfg(target_os = "linux")]
+pub struct ManagedHelperCustody {
+    instance_id: String,
+    pid: u32,
+    child: Arc<()>,
+}
+#[cfg(target_os = "linux")]
+impl SuccessfulManagedHelperExit {
+    pub fn matches(&self, custody: &ManagedHelperCustody, provisional: &rudder_engine::execution::handoff::source_shutdown::ProvisionalSourceShutdown) -> Result<()> {
+        anyhow::ensure!(Arc::ptr_eq(&self.child, &custody.child)
+            && self.instance_id == custody.instance_id && self.pid == custody.pid
+            && provisional.matches_helper(&self.instance_id, self.pid),
+            "owned helper exit differs from provisional source receipt");
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1766,6 +1800,24 @@ impl TerminalPane {
 
     pub fn exit_observed(&self) -> bool {
         self.exit_observed.is_some()
+    }
+
+    #[cfg(target_os = "linux")]
+    pub fn retain_managed_helper_custody(&self) -> Result<ManagedHelperCustody> {
+        let pid = self.child_process_id().context("managed helper is no longer live")?;
+        anyhow::ensure!(pid > 1, "invalid owned managed helper identity");
+        Ok(ManagedHelperCustody { instance_id: self.instance_id.clone(), pid, child: self.child.identity.clone() })
+    }
+
+    /// App-only nonblocking observation. Agent exit is independent data in the
+    /// receipt; this separately requires successful physical helper process exit.
+    #[cfg(target_os = "linux")]
+    pub fn successful_managed_helper_exit(&mut self) -> Result<Option<SuccessfulManagedHelperExit>> {
+        let Some(status) = self.try_wait_after_output()? else { return Ok(None); };
+        anyhow::ensure!(status.success(), "owned managed helper exited unsuccessfully");
+        let pid = self.child.pid.context("owned managed helper has no process identity")?;
+        anyhow::ensure!(pid > 1, "invalid owned managed helper process identity");
+        Ok(Some(SuccessfulManagedHelperExit { instance_id: self.instance_id.clone(), pid, child: self.child.identity.clone() }))
     }
     pub fn is_output_only(&self) -> bool {
         self.output_only

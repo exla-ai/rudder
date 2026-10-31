@@ -1,8 +1,14 @@
 //! One-use sealed-spec descriptor transfer after portable-pty has closed all
 //! inherited FDs. Socket names are not credentials: kernel peer PID/UID plus
 //! held pidfds authenticate both ends. No JSON spec enters argv/env/PTY/disk.
+pub mod source_shutdown;
+#[cfg(test)]
+#[path = "handoff/source_shutdown_tests.rs"]
+mod source_shutdown_tests;
+use super::finalization_budget::{
+    FinalizationBudget, FinalizationConstraint, FINALIZATION_POLICY_LIMIT,
+};
 use super::*;
-use super::finalization_budget::{FinalizationBudget, FINALIZATION_POLICY_LIMIT};
 use crate::protocol::ObjectKind;
 use anyhow::{bail, Context};
 use std::{
@@ -143,6 +149,7 @@ impl BackendProcessWitness {
 pub enum ManagedExecutionEvent {
     BackendReady { process: Arc<BackendProcessWitness> },
     Shutdown(ValidatedManagedShutdown),
+    SourceShutdown(source_shutdown::ProvisionalSourceShutdown),
     Uncertain,
 }
 /// Constructed only by the owned FD receiver after exact receipt/process checks.
@@ -265,22 +272,68 @@ impl<'de> Deserialize<'de> for ControlEvent {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "command", rename_all = "snake_case", deny_unknown_fields)]
 enum ParentCommand {
-    Stop { request: StopAndCheckpoint },
-    BackendAuthenticated { request: StopAndCheckpoint },
+    Stop {
+        request: StopAndCheckpoint,
+    },
+    StopV4 {
+        request: StopAndCheckpoint,
+        constraint: FinalizationConstraint,
+    },
+    BackendAuthenticated {
+        request: StopAndCheckpoint,
+    },
+}
+
+// The process-local queue retains the actual budget capability. Only `wire`
+// crosses the socket; deserialized time constraints cannot recreate this clone.
+struct QueuedCommand {
+    wire: ParentCommand,
+    budget: Option<FinalizationBudget>,
+}
+impl std::fmt::Debug for QueuedCommand {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Debug::fmt(&self.wire, formatter)
+    }
+}
+impl From<ParentCommand> for QueuedCommand {
+    fn from(wire: ParentCommand) -> Self {
+        Self { wire, budget: None }
+    }
+}
+#[cfg(test)]
+fn queued_test_command(wire: ParentCommand) -> QueuedCommand {
+    let budget = match &wire {
+        ParentCommand::StopV4 { constraint, .. } => {
+            Some(FinalizationBudget::from_constraint(constraint).unwrap())
+        }
+        _ => None,
+    };
+    QueuedCommand { wire, budget }
+}
+
+struct PendingStopV4 {
+    request: StopAndCheckpoint,
+    budget: FinalizationBudget,
+    admitted: bool,
 }
 
 /// App operations only enqueue/read bounded typed messages. IO and process
 /// lifetime checks run on its bounded owned worker, never the App thread.
 pub struct ManagedExecutionHandle {
     binding: ManagedExecutionBinding,
-    commands: mpsc::SyncSender<ParentCommand>,
+    commands: mpsc::SyncSender<QueuedCommand>,
     events: mpsc::Receiver<ManagedExecutionEvent>,
     pending: std::cell::RefCell<Option<StopAndCheckpoint>>,
+    stop_v4: std::cell::RefCell<Option<PendingStopV4>>,
     authenticated: std::cell::Cell<bool>,
     closed: Arc<std::sync::atomic::AtomicBool>,
 }
 impl ManagedExecutionHandle {
     pub fn stop_and_checkpoint(&self, request: StopAndCheckpoint) -> Result<()> {
+        ensure!(
+            self.binding.format_version != 4,
+            "binding4 requires stop_v4"
+        );
         request.validate(&self.binding)?;
         ensure!(
             !self.closed.load(std::sync::atomic::Ordering::Acquire),
@@ -295,12 +348,58 @@ impl ManagedExecutionHandle {
             return Ok(());
         }
         self.commands
-            .try_send(ParentCommand::Stop {
-                request: request.clone(),
-            })
+            .try_send(
+                ParentCommand::Stop {
+                    request: request.clone(),
+                }
+                .into(),
+            )
             .context("managed shutdown control admission failed")?;
         *pending = Some(request);
         Ok(())
+    }
+    /// Start the policy clock before queue admission. Retries retain that clock,
+    /// including when the bounded queue initially refuses admission. Time alone
+    /// supplies no owner, source, drain or checkpoint authority.
+    pub fn stop_and_checkpoint_v4(&self, request: StopAndCheckpoint) -> Result<FinalizationBudget> {
+        ensure!(
+            self.binding.format_version == 4,
+            "stop_v4 requires binding4"
+        );
+        request.validate(&self.binding)?;
+        ensure!(
+            !self.closed.load(std::sync::atomic::Ordering::Acquire),
+            "managed execution control closed"
+        );
+        let mut stored = self.stop_v4.borrow_mut();
+        if stored.is_none() {
+            *stored = Some(PendingStopV4 {
+                request: request.clone(),
+                budget: FinalizationBudget::begin(FINALIZATION_POLICY_LIMIT)?,
+                admitted: false,
+            });
+        }
+        let prior = stored.as_mut().unwrap();
+        ensure!(
+            prior.request == request,
+            "managed shutdown already has another request"
+        );
+        prior.budget.remaining()?;
+        if !prior.admitted {
+            self.commands
+                .try_send(QueuedCommand {
+                    wire: ParentCommand::StopV4 {
+                        request: request.clone(),
+                        constraint: prior.budget.constraint(),
+                    },
+                    budget: Some(prior.budget.clone()),
+                })
+                .context("managed shutdown control admission failed")?;
+            prior.admitted = true;
+            *self.pending.borrow_mut() = Some(request);
+        }
+        prior.budget.remaining()?;
+        Ok(prior.budget.clone())
     }
     pub fn try_event(&self) -> Option<ManagedExecutionEvent> {
         self.events.try_recv().ok()
@@ -309,6 +408,7 @@ impl ManagedExecutionHandle {
         ensure!(
             self.binding.frontend_start == ManagedFrontendStart::AfterHostApiKeyV1
                 && self.pending.borrow().is_none()
+                && self.stop_v4.borrow().is_none()
                 && !self.closed.load(std::sync::atomic::Ordering::Acquire),
             "managed frontend authentication is no longer admissible"
         );
@@ -325,7 +425,7 @@ impl ManagedExecutionHandle {
             owner: self.binding.owner.clone(),
         };
         self.commands
-            .try_send(ParentCommand::BackendAuthenticated { request })
+            .try_send(ParentCommand::BackendAuthenticated { request }.into())
             .context("managed frontend authentication admission failed")?;
         self.authenticated.set(true);
         Ok(())
@@ -394,6 +494,7 @@ impl ManagedExecutionHandoff {
             commands,
             events,
             pending: std::cell::RefCell::new(None),
+            stop_v4: std::cell::RefCell::new(None),
             authenticated: std::cell::Cell::new(false),
             closed: closed.clone(),
         };
@@ -478,25 +579,62 @@ fn managed_client_loop(
     request_digest: &str,
     helper_pid: u32,
     lifetime: &OwnedFd,
-    commands: mpsc::Receiver<ParentCommand>,
+    commands: mpsc::Receiver<QueuedCommand>,
     events: &mpsc::SyncSender<ManagedExecutionEvent>,
     closed: &std::sync::atomic::AtomicBool,
 ) -> Result<()> {
     stream.set_read_timeout(Some(Duration::from_secs(2)))?;
     stream.set_write_timeout(Some(Duration::from_secs(2)))?;
     let mut pending: Option<StopAndCheckpoint> = None;
+    let mut finalization: Option<FinalizationBudget> = None;
     let mut backend: Option<Arc<BackendProcessWitness>> = None;
     loop {
         ensure!(
             !closed.load(std::sync::atomic::Ordering::Acquire),
             "managed control retired"
         );
-        if let Ok(command) = commands.try_recv() {
+        if let Some(budget) = &finalization {
+            budget.remaining()?;
+        }
+        if let Ok(queued) = commands.try_recv() {
+            let command = queued.wire;
             match &command {
                 ParentCommand::Stop { request } => {
+                    ensure!(binding.format_version != 4, "binding4 requires stop_v4");
                     request.validate(binding)?;
                     ensure!(pending.is_none(), "duplicate managed shutdown write");
                     pending = Some(request.clone());
+                }
+                ParentCommand::StopV4 {
+                    request,
+                    constraint,
+                } => {
+                    ensure!(binding.format_version == 4, "stop_v4 requires binding4");
+                    request.validate(binding)?;
+                    let queued_budget = queued
+                        .budget
+                        .context("stop_v4 lacks its original local budget")?;
+                    ensure!(
+                        queued_budget.constraint() == *constraint,
+                        "queued shutdown constraint changed"
+                    );
+                    queued_budget.remaining()?;
+                    if let Some(budget) = &finalization {
+                        ensure!(
+                            pending.as_ref() == Some(request) && budget.constraint() == *constraint,
+                            "shutdown request or constraint changed"
+                        );
+                    } else {
+                        ensure!(pending.is_none(), "duplicate managed shutdown write");
+                        finalization = Some(queued_budget);
+                        pending = Some(request.clone());
+                    }
+                    stream.set_write_timeout(Some(
+                        finalization
+                            .as_ref()
+                            .unwrap()
+                            .phase_limit(Duration::from_secs(2))?,
+                    ))?;
                 }
                 ParentCommand::BackendAuthenticated { request } => {
                     request.validate(binding)?;
@@ -509,11 +647,32 @@ fn managed_client_loop(
                     );
                 }
             }
-            send_control_packet(&mut stream, &command, None)?;
+            if let Some(budget) = &finalization {
+                budget.remaining()?;
+            }
+            if let Some(budget) = &finalization {
+                send_control_packet_budgeted(&mut stream, &command, budget)?;
+            } else {
+                send_control_packet(&mut stream, &command, None)?;
+            }
+            if let Some(budget) = &finalization {
+                budget.remaining()?;
+            }
+        }
+        if let Some(budget) = &finalization {
+            budget.remaining()?;
         }
         if packet_available(&stream)? {
-            let (event, mut descriptors): (ControlEvent, _) =
-                receive_control_packet_fds(&mut stream)?;
+            let (event, mut descriptors): (ControlEvent, _) = if let Some(budget) = &finalization {
+                receive_control_packet_budgeted(&mut stream, budget)?
+            } else if binding.format_version == 4 {
+                receive_control_packet_budgeted(
+                    &mut stream,
+                    &FinalizationBudget::begin(Duration::from_secs(2))?,
+                )?
+            } else {
+                receive_control_packet_fds(&mut stream)?
+            };
             match event {
                 ControlEvent::BackendReady {
                     protocol_version,
@@ -607,7 +766,7 @@ fn managed_client_loop(
                         "managed shutdown receipt is unproved or belongs to another attempt"
                     );
                     validate_shutdown_artifact(binding, request_digest, &receipt)?;
-                    if binding.format_version == 3 {
+                    if matches!(binding.format_version, 3 | 4) {
                         ensure!(
                             backend
                                 .as_ref()
@@ -623,10 +782,16 @@ fn managed_client_loop(
                             .unwrap_or(true),
                         "managed shutdown receipt arrived while the owned backend is alive"
                     );
+                    let event = if binding.format_version == 4 {
+                        ManagedExecutionEvent::SourceShutdown(source_shutdown::ProvisionalSourceShutdown::received(
+                            binding, request_digest, helper_pid, receipt,
+                            finalization.as_ref().context("source shutdown lost its original local budget")?.clone(),
+                        )?)
+                    } else {
+                        ManagedExecutionEvent::Shutdown(ValidatedManagedShutdown { receipt })
+                    };
                     events
-                        .try_send(ManagedExecutionEvent::Shutdown(ValidatedManagedShutdown {
-                            receipt,
-                        }))
+                        .try_send(event)
                         .context("managed receipt queue full")?;
                     return Ok(());
                 }
@@ -641,7 +806,11 @@ fn managed_client_loop(
             );
             continue;
         }
-        std::thread::sleep(Duration::from_millis(5));
+        let pause = match &finalization {
+            Some(budget) => budget.phase_limit(Duration::from_millis(5))?,
+            None => Duration::from_millis(5),
+        };
+        std::thread::sleep(pause);
     }
 }
 
@@ -698,7 +867,7 @@ fn validate_shutdown_artifact(
         return validate_local_checkpoint(checkpoint);
     }
     ensure!(
-        binding.format_version == 3,
+        matches!(binding.format_version, 3 | 4),
         "unknown managed shutdown protocol"
     );
     let profile = binding
@@ -716,6 +885,34 @@ fn validate_shutdown_artifact(
             && record.identity.run_epoch == binding.run_epoch,
         "record2 shutdown changed project/request/run identity"
     );
+    if binding.format_version == 4 {
+        ensure!(binding.execution_profile == "offline-command-v1"
+            && binding.frontend_start == ManagedFrontendStart::Immediate
+            && binding.server_command.is_none()
+            && profile.request_id == binding.request_id
+            && profile.format_version == 1
+            && profile.network.binding.request_id == binding.request_id
+            && profile.network.binding.execution_id == binding.execution_id
+            && profile.network.binding.operation_id == binding.operation_id
+            && profile.network.binding.view_id == binding.view_id
+            && profile.network.binding.run_id == binding.run_id
+            && profile.network.binding.run_epoch.value() == binding.run_epoch
+            && profile.network.binding.owner == binding.owner.owner
+            && profile.network.binding.owner_epoch.value() == binding.owner.epoch
+            && profile.network.mode == super::network::NetworkMode::OfflineV1,
+            "binding4 source shutdown changed its sealed execution family");
+        let partial = profile.partial_binding()?.context("binding4 requires remote-only source")?;
+        ensure!(partial.attempt.project_id == record.identity.project_id
+            && partial.attempt.run_id == binding.run_id && partial.attempt.run_epoch == binding.run_epoch
+            && partial.attempt.execution_id == binding.execution_id && partial.attempt.operation_id == binding.operation_id
+            && partial.attempt.view_id == binding.view_id && partial.attempt.owner == binding.owner,
+            "binding4 source shutdown changed its sealed attempt");
+        let Some(CheckpointRef::PartialRemote(checkpoint)) = receipt.record.checkpoint() else {
+            anyhow::bail!("binding4 source shutdown requires partial checkpoint");
+        };
+        ensure!(checkpoint.observation == partial.observation && checkpoint.capture.base == partial.root
+            && checkpoint.capture.attempt == partial.attempt, "binding4 checkpoint differs from full source binding");
+    }
     match (&profile.workspace, receipt.record.checkpoint()) {
         (
             ExecutionWorkspaceSelectionV4::LocalComplete {},
@@ -725,6 +922,10 @@ fn validate_shutdown_artifact(
             ExecutionWorkspaceSelectionV4::RemoteSourceOnly { selection, .. },
             Some(CheckpointRef::PartialRemote(checkpoint)),
         ) => {
+            if binding.format_version == 4 {
+                ensure!(selection.request_id == binding.request_id,
+                    "binding4 source selection changed sealed launch request");
+            }
             ensure!(
                 checkpoint.stop == receipt.request
                     && checkpoint.execution_request_digest == request_digest
@@ -754,32 +955,76 @@ impl ManagedControl {
     pub fn controller_process(&self) -> Arc<ControllerProcessWitness> {
         Arc::clone(&self.controller)
     }
-    /// One helper-observed deadline after the first authenticated legacy stop.
-    /// Repeated packets never renew it. Legacy wire bytes cannot account for
-    /// queue time before reception; the new stop family must carry the original
-    /// parent's constraint. This value supplies time bounds, not drain proof.
+    /// Clone the actual stored budget. Legacy stops begin at helper reception;
+    /// stop_v4 retains the parent's deadline, including queue and transport time.
+    /// This value supplies time bounds, not drain or checkpoint proof.
     pub(crate) fn finalization_budget(&self) -> Option<FinalizationBudget> {
         self.finalization.clone()
     }
     pub(crate) fn poll_stop(&mut self) -> Result<bool> {
         if packet_available(&self.stream)? {
-            let (command, descriptor): (ParentCommand, _) =
-                receive_control_packet(&mut self.stream)?;
+            let (command, descriptors): (ParentCommand, _) = if self.binding.format_version == 4 {
+                self.controller.check_current()?;
+                let frame_budget = match &self.finalization {
+                    Some(budget) => budget.clone(),
+                    // Until the first frame reveals its parent's constraint,
+                    // cap framing itself. This creates no stored stop budget.
+                    None => FinalizationBudget::begin(Duration::from_secs(2))?,
+                };
+                receive_control_packet_budgeted(&mut self.stream, &frame_budget)?
+            } else {
+                receive_control_packet_fds(&mut self.stream)?
+            };
             ensure!(
-                descriptor.is_none(),
+                descriptors.is_empty(),
                 "shutdown request supplied a descriptor"
             );
             match command {
                 ParentCommand::Stop { request } => {
+                    ensure!(
+                        self.binding.format_version != 4,
+                        "binding4 requires stop_v4"
+                    );
                     request.validate(&self.binding)?;
                     ensure!(
                         self.request.as_ref().is_none_or(|prior| *prior == request),
                         "shutdown request changed"
                     );
                     if self.request.is_none() {
-                        self.finalization = Some(FinalizationBudget::begin(FINALIZATION_POLICY_LIMIT)?);
+                        self.finalization =
+                            Some(FinalizationBudget::begin(FINALIZATION_POLICY_LIMIT)?);
                     }
                     self.request = Some(request);
+                }
+                ParentCommand::StopV4 {
+                    request,
+                    constraint,
+                } => {
+                    ensure!(
+                        self.binding.format_version == 4,
+                        "stop_v4 requires binding4"
+                    );
+                    self.controller.check_current()?;
+                    request.validate(&self.binding)?;
+                    if let Some(prior) = &self.request {
+                        ensure!(*prior == request, "shutdown request changed");
+                        let budget = self
+                            .finalization
+                            .as_ref()
+                            .context("shutdown budget absent")?;
+                        ensure!(
+                            budget.constraint() == constraint,
+                            "shutdown constraint changed"
+                        );
+                        budget.remaining()?;
+                    } else {
+                        let budget = FinalizationBudget::from_constraint(&constraint)?;
+                        self.controller.check_current()?;
+                        budget.remaining()?;
+                        self.finalization = Some(budget);
+                        self.request = Some(request);
+                    }
+                    self.controller.check_current()?;
                 }
                 ParentCommand::BackendAuthenticated { request } => {
                     request.validate(&self.binding)?;
@@ -793,6 +1038,13 @@ impl ManagedControl {
                     self.authenticated = true;
                 }
             }
+        }
+        if self.binding.format_version == 4 && self.request.is_some() {
+            self.controller.check_current()?;
+            self.finalization
+                .as_ref()
+                .context("shutdown budget absent")?
+                .remaining()?;
         }
         Ok(self.request.is_some())
     }
@@ -852,20 +1104,34 @@ impl ManagedControl {
         committed: &CommittedExecutionRecord,
         drain: &super::linux::OwnedExecutionDrain,
     ) -> Result<()> {
+        let budget = if self.binding.format_version == 4 {
+            self.controller.check_current()?;
+            let budget = self
+                .finalization
+                .as_ref()
+                .context("shutdown budget absent")?;
+            budget.remaining()?;
+            Some(budget)
+        } else {
+            None
+        };
         drain.validate_publication(committed)?;
         if let Some(request) = &self.request {
             drain.validate_stop(request)?;
-            send_control_packet(
-                &mut self.stream,
-                &ControlEvent::Shutdown {
-                    receipt: ManagedShutdownReceipt {
-                        request: request.clone(),
-                        record: committed.record().clone(),
-                        kernel_drained: true,
-                    },
+            let event = ControlEvent::Shutdown {
+                receipt: ManagedShutdownReceipt {
+                    request: request.clone(),
+                    record: committed.record().clone(),
+                    kernel_drained: true,
                 },
-                None,
-            )?;
+            };
+            if let Some(budget) = budget {
+                send_control_packet_budgeted(&self.stream, &event, budget)?;
+                self.controller.check_current()?;
+                budget.remaining()?;
+            } else {
+                send_control_packet(&mut self.stream, &event, None)?;
+            }
         }
         Ok(())
     }
@@ -944,6 +1210,115 @@ pub(crate) fn receive_control_packet_fds<T: serde::de::DeserializeOwned>(
     let mut bytes = vec![0; size];
     stream.read_exact(&mut bytes)?;
     Ok((serde_json::from_slice(&bytes)?, descriptors))
+}
+
+// Nonblocking syscalls plus short, suspend-aware waits preserve the one
+// deadline across partial frames, interrupted calls and trickling peers.
+fn wait_control_io(stream: &UnixStream, budget: &FinalizationBudget, events: i16) -> Result<()> {
+    let pause = budget.phase_limit(Duration::from_millis(5))?;
+    let timeout = libc::timespec {
+        tv_sec: pause.as_secs() as _,
+        tv_nsec: pause.subsec_nanos() as _,
+    };
+    let mut fd = libc::pollfd {
+        fd: stream.as_raw_fd(),
+        events,
+        revents: 0,
+    };
+    let result = unsafe { libc::ppoll(&mut fd, 1, &timeout, std::ptr::null()) };
+    budget.remaining()?;
+    if result < 0 {
+        let error = io::Error::last_os_error();
+        if error.kind() != io::ErrorKind::Interrupted {
+            return Err(error.into());
+        }
+    }
+    Ok(())
+}
+fn control_bytes_budgeted(
+    stream: &UnixStream,
+    mut bytes: &mut [u8],
+    budget: &FinalizationBudget,
+    writing: bool,
+) -> Result<()> {
+    while !bytes.is_empty() {
+        budget.remaining()?;
+        let count = unsafe {
+            if writing {
+                libc::send(
+                    stream.as_raw_fd(),
+                    bytes.as_ptr().cast(),
+                    bytes.len(),
+                    libc::MSG_DONTWAIT | libc::MSG_NOSIGNAL,
+                )
+            } else {
+                libc::recv(
+                    stream.as_raw_fd(),
+                    bytes.as_mut_ptr().cast(),
+                    bytes.len(),
+                    libc::MSG_DONTWAIT,
+                )
+            }
+        };
+        budget.remaining()?;
+        if count > 0 {
+            bytes = &mut bytes[count as usize..];
+            continue;
+        }
+        ensure!(count != 0, "managed budgeted control channel closed");
+        let error = io::Error::last_os_error();
+        match error.kind() {
+            io::ErrorKind::Interrupted => continue,
+            io::ErrorKind::WouldBlock => wait_control_io(
+                stream,
+                budget,
+                if writing { libc::POLLOUT } else { libc::POLLIN },
+            )?,
+            _ => return Err(error.into()),
+        }
+    }
+    budget.remaining()?;
+    Ok(())
+}
+fn send_control_packet_budgeted(
+    stream: &UnixStream,
+    value: &impl Serialize,
+    budget: &FinalizationBudget,
+) -> Result<()> {
+    budget.remaining()?;
+    let bytes = crate::protocol::canonical_json(value)?;
+    ensure!(
+        bytes.len() <= 64 * 1024,
+        "managed control frame exceeds bound"
+    );
+    let mut frame = Vec::with_capacity(bytes.len() + 5);
+    frame.push(0);
+    frame.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
+    frame.extend_from_slice(&bytes);
+    control_bytes_budgeted(stream, &mut frame, budget, true)
+}
+fn receive_control_packet_budgeted<T: serde::de::DeserializeOwned>(
+    stream: &UnixStream,
+    budget: &FinalizationBudget,
+) -> Result<(T, Vec<OwnedFd>)> {
+    let (tag, descriptors) = receive_descriptors_with_budget(stream, Some(budget))?;
+    ensure!(
+        (tag == 0 && descriptors.is_empty())
+            || (tag == 1 && !descriptors.is_empty() && descriptors.len() <= 3),
+        "invalid managed control descriptor frame"
+    );
+    let mut size = [0; 4];
+    control_bytes_budgeted(stream, &mut size, budget, false)?;
+    let size = u32::from_be_bytes(size) as usize;
+    ensure!(
+        size > 0 && size <= 64 * 1024,
+        "managed control frame exceeds bound"
+    );
+    let mut bytes = vec![0; size];
+    control_bytes_budgeted(stream, &mut bytes, budget, false)?;
+    let value = serde_json::from_slice(&bytes)?;
+    budget.remaining()?;
+    Ok((value, descriptors))
 }
 
 pub struct ExecutionHandoff {
@@ -1195,6 +1570,12 @@ pub fn receive(name: &str, parent: u32) -> Result<ExecutionSpec> {
 }
 
 fn receive_descriptors(stream: &UnixStream) -> Result<(u8, Vec<OwnedFd>)> {
+    receive_descriptors_with_budget(stream, None)
+}
+fn receive_descriptors_with_budget(
+    stream: &UnixStream,
+    budget: Option<&FinalizationBudget>,
+) -> Result<(u8, Vec<OwnedFd>)> {
     let mut byte = [0u8];
     let mut iov = libc::iovec {
         iov_base: byte.as_mut_ptr().cast(),
@@ -1206,7 +1587,29 @@ fn receive_descriptors(stream: &UnixStream) -> Result<(u8, Vec<OwnedFd>)> {
     header.msg_iovlen = 1;
     header.msg_control = ancillary.as_mut_ptr().cast();
     header.msg_controllen = mem::size_of_val(&ancillary);
-    let count = unsafe { libc::recvmsg(stream.as_raw_fd(), &mut header, libc::MSG_CMSG_CLOEXEC) };
+    let count = loop {
+        if let Some(budget) = budget {
+            budget.remaining()?;
+        }
+        let flags = libc::MSG_CMSG_CLOEXEC
+            | if budget.is_some() {
+                libc::MSG_DONTWAIT
+            } else {
+                0
+            };
+        header.msg_controllen = mem::size_of_val(&ancillary);
+        header.msg_flags = 0;
+        let count = unsafe { libc::recvmsg(stream.as_raw_fd(), &mut header, flags) };
+        if count >= 0 || budget.is_none() {
+            break count;
+        }
+        let error = io::Error::last_os_error();
+        match error.kind() {
+            io::ErrorKind::Interrupted => continue,
+            io::ErrorKind::WouldBlock => wait_control_io(stream, budget.unwrap(), libc::POLLIN)?,
+            _ => return Err(error.into()),
+        }
+    };
     let mut descriptors = Vec::new();
     unsafe {
         let mut c = libc::CMSG_FIRSTHDR(&header);
@@ -1222,6 +1625,9 @@ fn receive_descriptors(stream: &UnixStream) -> Result<(u8, Vec<OwnedFd>)> {
             }
             c = libc::CMSG_NXTHDR(&header, c);
         }
+    }
+    if let Some(budget) = budget {
+        budget.remaining()?;
     }
     ensure!(
         count == 1 && header.msg_flags & libc::MSG_CTRUNC == 0,
@@ -1292,6 +1698,506 @@ mod managed_tests {
             pid: std::process::id(),
         })
     }
+    fn v4_handle(capacity: usize) -> (ManagedExecutionHandle, mpsc::Receiver<QueuedCommand>) {
+        let mut binding = binding();
+        binding.format_version = 4;
+        let (commands, receive) = mpsc::sync_channel(capacity);
+        let (_, events) = mpsc::sync_channel(1);
+        (
+            ManagedExecutionHandle {
+                binding,
+                commands,
+                events,
+                pending: std::cell::RefCell::new(None),
+                stop_v4: std::cell::RefCell::new(None),
+                authenticated: std::cell::Cell::new(false),
+                closed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            },
+            receive,
+        )
+    }
+    fn control_fixture(binding: ManagedExecutionBinding) -> (UnixStream, ManagedControl) {
+        let (parent, helper) = UnixStream::pair().unwrap();
+        (
+            parent,
+            ManagedControl {
+                binding,
+                controller: controller_test_fixture(),
+                finalization: None,
+                stream: helper,
+                request: None,
+                authenticated: false,
+            },
+        )
+    }
+    #[test]
+    fn stop_v4_handle_retries_share_the_original_budget_and_one_admission() {
+        let (handle, receive) = v4_handle(1);
+        let request = stop(&handle.binding);
+        let budget = handle.stop_and_checkpoint_v4(request.clone()).unwrap();
+        let copy = handle.stop_and_checkpoint_v4(request.clone()).unwrap();
+        assert_eq!(budget.constraint(), copy.constraint());
+        assert!(
+            matches!(receive.try_recv().unwrap().wire, ParentCommand::StopV4 { request: actual, constraint }
+            if actual == request && constraint == budget.constraint())
+        );
+        assert!(receive.try_recv().is_err());
+        let changed = stop(&handle.binding);
+        assert!(handle.stop_and_checkpoint_v4(changed).is_err());
+        budget.cancel();
+        assert!(copy.remaining().is_err());
+        assert!(handle.stop_and_checkpoint_v4(request).is_err());
+    }
+    #[test]
+    fn stop_v4_queue_refusal_retains_original_deadline_for_retry() {
+        let (handle, receive) = v4_handle(1);
+        let request = stop(&handle.binding);
+        handle
+            .commands
+            .try_send(queued_test_command(ParentCommand::Stop {
+                request: request.clone(),
+            }))
+            .unwrap();
+        assert!(handle.stop_and_checkpoint_v4(request.clone()).is_err());
+        let original = handle.stop_v4.borrow().as_ref().unwrap().budget.clone();
+        receive.try_recv().unwrap().wire;
+        let retry = handle.stop_and_checkpoint_v4(request.clone()).unwrap();
+        assert_eq!(original.constraint(), retry.constraint());
+        original.cancel();
+        assert!(retry.remaining().is_err());
+        assert!(handle.stop_and_checkpoint_v4(request).is_err());
+    }
+    #[test]
+    fn stop_v4_expired_admission_retry_and_duplicate_cannot_renew_the_budget() {
+        let (handle, receive) = v4_handle(1);
+        let request = stop(&handle.binding);
+        let budget = FinalizationBudget::begin(Duration::from_millis(100)).unwrap();
+        // Private short-clock fixture uses the same stored admission state as
+        // the production 30-second policy, without a 30-second test wait.
+        *handle.stop_v4.borrow_mut() = Some(PendingStopV4 {
+            request: request.clone(),
+            budget: budget.clone(),
+            admitted: false,
+        });
+        handle
+            .commands
+            .try_send(queued_test_command(ParentCommand::Stop {
+                request: request.clone(),
+            }))
+            .unwrap();
+        assert!(handle.stop_and_checkpoint_v4(request.clone()).is_err());
+        receive.try_recv().unwrap().wire;
+        let command = ParentCommand::StopV4 {
+            request: request.clone(),
+            constraint: budget.constraint(),
+        };
+        let (mut parent, mut control) = control_fixture(handle.binding.clone());
+        send_control_packet(&mut parent, &command, None).unwrap();
+        assert!(control.poll_stop().unwrap());
+        std::thread::sleep(Duration::from_millis(150));
+        assert!(handle.stop_and_checkpoint_v4(request).is_err());
+        assert!(receive.try_recv().is_err());
+        send_control_packet(&mut parent, &command, None).unwrap();
+        assert!(control.poll_stop().is_err());
+        assert_eq!(
+            control.finalization_budget().unwrap().constraint(),
+            budget.constraint()
+        );
+    }
+    #[test]
+    fn stop_v4_worker_reconciles_exact_duplicates_and_refuses_a_changed_constraint() {
+        let (handle, receive) = v4_handle(3);
+        let request = stop(&handle.binding);
+        let budget = handle.stop_and_checkpoint_v4(request.clone()).unwrap();
+        handle
+            .commands
+            .try_send(queued_test_command(ParentCommand::StopV4 {
+                request: request.clone(),
+                constraint: budget.constraint(),
+            }))
+            .unwrap();
+        handle
+            .commands
+            .try_send(queued_test_command(ParentCommand::StopV4 {
+                request: request.clone(),
+                constraint: FinalizationBudget::begin(Duration::from_secs(1))
+                    .unwrap()
+                    .constraint(),
+            }))
+            .unwrap();
+        let (parent, mut helper) = UnixStream::pair().unwrap();
+        helper
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let (events, _) = mpsc::sync_channel(1);
+        let binding = handle.binding.clone();
+        let worker = std::thread::spawn(move || {
+            managed_client_loop(
+                parent,
+                &binding,
+                "unused",
+                std::process::id(),
+                &pidfd(std::process::id()).unwrap(),
+                receive,
+                &events,
+                &std::sync::atomic::AtomicBool::new(false),
+            )
+        });
+        for _ in 0..2 {
+            let (actual, descriptor): (ParentCommand, _) =
+                receive_control_packet(&mut helper).unwrap();
+            assert!(descriptor.is_none());
+            assert!(
+                matches!(actual, ParentCommand::StopV4 { request: actual, constraint }
+                if actual == request && constraint == budget.constraint())
+            );
+        }
+        assert!(worker.join().unwrap().is_err());
+        assert!(receive_control_packet::<ParentCommand>(&mut helper).is_err());
+    }
+    #[test]
+    fn stop_v4_worker_refuses_cross_family_before_writing_and_legacy_bytes_stay_exact() {
+        let (mut handle, _) = v4_handle(1);
+        let request = stop(&handle.binding);
+        let legacy = ParentCommand::Stop {
+            request: request.clone(),
+        };
+        assert_eq!(
+            crate::protocol::canonical_json(&legacy).unwrap(),
+            crate::protocol::canonical_json(
+                &serde_json::json!({"command":"stop", "request":request})
+            )
+            .unwrap()
+        );
+        for version in [2, 3, 4] {
+            handle.binding.format_version = version;
+            if version != 4 {
+                assert!(handle.stop_and_checkpoint_v4(request.clone()).is_err());
+            }
+            let (commands, receive) = mpsc::sync_channel(1);
+            commands
+                .try_send(queued_test_command(if version == 4 {
+                    legacy.clone()
+                } else {
+                    ParentCommand::StopV4 {
+                        request: request.clone(),
+                        constraint: FinalizationBudget::begin(FINALIZATION_POLICY_LIMIT)
+                            .unwrap()
+                            .constraint(),
+                    }
+                }))
+                .unwrap();
+            let (parent, mut helper) = UnixStream::pair().unwrap();
+            let (events, _) = mpsc::sync_channel(1);
+            assert!(managed_client_loop(
+                parent,
+                &handle.binding,
+                "unused",
+                std::process::id(),
+                &pidfd(std::process::id()).unwrap(),
+                receive,
+                &events,
+                &std::sync::atomic::AtomicBool::new(false)
+            )
+            .is_err());
+            assert!(receive_control_packet::<ParentCommand>(&mut helper).is_err());
+        }
+    }
+    #[test]
+    fn stop_v4_packets_retain_parent_time_and_absorbing_cancellation() {
+        let (handle, receive) = v4_handle(1);
+        let request = stop(&handle.binding);
+        let parent_budget = handle.stop_and_checkpoint_v4(request.clone()).unwrap();
+        let command = receive.try_recv().unwrap().wire;
+        let (mut parent, mut control) = control_fixture(handle.binding.clone());
+        send_control_packet(&mut parent, &command, None).unwrap();
+        assert!(control.poll_stop().unwrap());
+        let budget = control.finalization_budget().unwrap();
+        assert_eq!(budget.constraint(), parent_budget.constraint());
+        send_control_packet(&mut parent, &command, None).unwrap();
+        assert!(control.poll_stop().unwrap());
+        budget.cancel();
+        send_control_packet(&mut parent, &command, None).unwrap();
+        assert!(control.poll_stop().is_err());
+        assert!(control.finalization_budget().unwrap().remaining().is_err());
+    }
+    #[test]
+    fn stop_v4_refuses_changed_constraints_requests_and_controller_exit() {
+        let (handle, receive) = v4_handle(1);
+        let request = stop(&handle.binding);
+        let original = handle.stop_and_checkpoint_v4(request.clone()).unwrap();
+        let command = receive.try_recv().unwrap().wire;
+        let (mut parent, mut control) = control_fixture(handle.binding.clone());
+        send_control_packet(&mut parent, &command, None).unwrap();
+        assert!(control.poll_stop().unwrap());
+        for command in [
+            ParentCommand::StopV4 {
+                request: request.clone(),
+                constraint: FinalizationBudget::begin(Duration::from_secs(1))
+                    .unwrap()
+                    .constraint(),
+            },
+            ParentCommand::StopV4 {
+                request: stop(&handle.binding),
+                constraint: original.constraint(),
+            },
+        ] {
+            send_control_packet(&mut parent, &command, None).unwrap();
+            assert!(control.poll_stop().is_err());
+            assert_eq!(
+                control.finalization_budget().unwrap().constraint(),
+                original.constraint()
+            );
+        }
+        let mut child = std::process::Command::new("/bin/sleep")
+            .arg("10")
+            .spawn()
+            .unwrap();
+        control.controller = Arc::new(ControllerProcessWitness {
+            lifetime: pidfd(child.id()).unwrap(),
+            pid: child.id(),
+        });
+        child.kill().unwrap();
+        child.wait().unwrap();
+        send_control_packet(&mut parent, &command, None).unwrap();
+        assert!(control.poll_stop().is_err());
+    }
+    #[test]
+    fn stop_v4_cross_family_and_reflected_packets_refuse_without_a_budget() {
+        let (handle, _) = v4_handle(1);
+        let request = stop(&handle.binding);
+        assert!(handle.stop_and_checkpoint(request.clone()).is_err());
+        let constraint = FinalizationBudget::begin(FINALIZATION_POLICY_LIMIT)
+            .unwrap()
+            .constraint();
+        for version in [2, 3, 4] {
+            let mut binding = handle.binding.clone();
+            binding.format_version = version;
+            let (mut parent, mut control) = control_fixture(binding);
+            let command = if version == 4 {
+                ParentCommand::Stop {
+                    request: request.clone(),
+                }
+            } else {
+                ParentCommand::StopV4 {
+                    request: request.clone(),
+                    constraint: constraint.clone(),
+                }
+            };
+            send_control_packet(&mut parent, &command, None).unwrap();
+            assert!(control.poll_stop().is_err());
+            assert!(control.request.is_none() && control.finalization_budget().is_none());
+        }
+        let (mut parent, mut control) = control_fixture(handle.binding.clone());
+        send_control_packet(
+            &mut parent,
+            &serde_json::json!({"event":"stop_v4", "request":request,"constraint":constraint}),
+            None,
+        )
+        .unwrap();
+        assert!(control.poll_stop().is_err());
+        assert!(control.finalization_budget().is_none());
+    }
+    #[test]
+    fn stop_v4_expired_queue_and_transit_time_cannot_start_a_new_deadline() {
+        for expired in [false, true] {
+            let (handle, receive) = v4_handle(1);
+            let request = stop(&handle.binding);
+            let budget = FinalizationBudget::begin(Duration::from_millis(100)).unwrap();
+            let command = ParentCommand::StopV4 {
+                request: request.clone(),
+                constraint: budget.constraint(),
+            };
+            handle
+                .commands
+                .try_send(queued_test_command(command))
+                .unwrap();
+            if expired {
+                std::thread::sleep(Duration::from_millis(150));
+            }
+            let (parent, mut helper) = UnixStream::pair().unwrap();
+            let (events, _) = mpsc::sync_channel(1);
+            let closed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let worker_closed = closed.clone();
+            let binding = handle.binding.clone();
+            let worker = std::thread::spawn(move || {
+                managed_client_loop(
+                    parent,
+                    &binding,
+                    "unused",
+                    std::process::id(),
+                    &pidfd(std::process::id()).unwrap(),
+                    receive,
+                    &events,
+                    &worker_closed,
+                )
+            });
+            if expired {
+                assert!(worker.join().unwrap().is_err());
+                assert!(receive_control_packet::<ParentCommand>(&mut helper).is_err());
+            } else {
+                // Delivery occurs before the parent deadline; helper adoption
+                // after the deadline must still refuse the original packet.
+                helper
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
+                let (command, descriptor): (ParentCommand, _) =
+                    receive_control_packet(&mut helper).unwrap();
+                assert!(descriptor.is_none());
+                std::thread::sleep(Duration::from_millis(150));
+                let (mut sender, mut control) = control_fixture(handle.binding.clone());
+                send_control_packet(&mut sender, &command, None).unwrap();
+                assert!(control.poll_stop().is_err());
+                assert!(control.finalization_budget().is_none());
+                closed.store(true, std::sync::atomic::Ordering::Release);
+                assert!(worker.join().unwrap().is_err());
+            }
+        }
+    }
+    #[test]
+    fn stop_v4_budgeted_receive_caps_partial_headers_bodies_and_trickle() {
+        for prefix in [vec![0, 0], vec![0, 0, 0, 0, 100, b'{']] {
+            let (mut sender, receiver) = UnixStream::pair().unwrap();
+            sender.write_all(&prefix).unwrap();
+            let budget = FinalizationBudget::begin(Duration::from_millis(80)).unwrap();
+            let started = Instant::now();
+            assert!(receive_control_packet_budgeted::<ParentCommand>(&receiver, &budget).is_err());
+            assert!(started.elapsed() < Duration::from_millis(500));
+        }
+        let (mut sender, receiver) = UnixStream::pair().unwrap();
+        sender.write_all(&[0, 0, 0, 1, 0]).unwrap();
+        let trickle = std::thread::spawn(move || {
+            for _ in 0..256 {
+                if sender.write_all(b" ").is_err() {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        });
+        let budget = FinalizationBudget::begin(Duration::from_millis(80)).unwrap();
+        let started = Instant::now();
+        assert!(receive_control_packet_budgeted::<ParentCommand>(&receiver, &budget).is_err());
+        assert!(started.elapsed() < Duration::from_millis(500));
+        drop(receiver);
+        trickle.join().unwrap();
+    }
+    #[test]
+    fn stop_v4_budgeted_send_caps_repeated_partial_writes() {
+        let (sender, mut receiver) = UnixStream::pair().unwrap();
+        let size: libc::c_int = 4096;
+        assert_eq!(
+            unsafe {
+                libc::setsockopt(
+                    sender.as_raw_fd(),
+                    libc::SOL_SOCKET,
+                    libc::SO_SNDBUF,
+                    (&size as *const libc::c_int).cast(),
+                    mem::size_of_val(&size) as _,
+                )
+            },
+            0
+        );
+        let drain = std::thread::spawn(move || {
+            let mut byte = [0];
+            for _ in 0..30 {
+                if receiver.read(&mut byte).unwrap_or(0) == 0 {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        });
+        let budget = FinalizationBudget::begin(Duration::from_millis(80)).unwrap();
+        let started = Instant::now();
+        assert!(send_control_packet_budgeted(&sender, &"x".repeat(60_000), &budget).is_err());
+        assert!(started.elapsed() < Duration::from_millis(500));
+        drop(sender);
+        drain.join().unwrap();
+    }
+    #[test]
+    fn stop_v4_helper_duplicate_partial_frame_uses_its_stored_deadline() {
+        let (handle, _) = v4_handle(1);
+        let request = stop(&handle.binding);
+        let budget = FinalizationBudget::begin(Duration::from_millis(100)).unwrap();
+        let (mut parent, mut control) = control_fixture(handle.binding.clone());
+        send_control_packet(
+            &mut parent,
+            &ParentCommand::StopV4 {
+                request,
+                constraint: budget.constraint(),
+            },
+            None,
+        )
+        .unwrap();
+        assert!(control.poll_stop().unwrap());
+        parent.write_all(&[0, 0]).unwrap();
+        let started = Instant::now();
+        assert!(control.poll_stop().is_err());
+        assert!(started.elapsed() < Duration::from_millis(500));
+        assert!(control.finalization_budget().unwrap().remaining().is_err());
+    }
+    #[test]
+    fn stop_v4_worker_idle_and_partial_frames_observe_original_expiry_and_cancellation() {
+        for cancel in [false, true] {
+            for partial in [false, true] {
+                let (handle, receive) = v4_handle(1);
+                let request = stop(&handle.binding);
+                let budget = FinalizationBudget::begin(Duration::from_millis(if cancel {
+                    1000
+                } else {
+                    100
+                }))
+                .unwrap();
+                *handle.stop_v4.borrow_mut() = Some(PendingStopV4 {
+                    request: request.clone(),
+                    budget: budget.clone(),
+                    admitted: false,
+                });
+                let returned = handle.stop_and_checkpoint_v4(request).unwrap();
+                let (parent, mut helper) = UnixStream::pair().unwrap();
+                helper
+                    .set_read_timeout(Some(Duration::from_secs(1)))
+                    .unwrap();
+                let binding = handle.binding.clone();
+                let (events, receive_events) = mpsc::sync_channel(1);
+                let (done, completion) = mpsc::sync_channel(1);
+                let worker = std::thread::spawn(move || {
+                    let result = managed_client_loop(
+                        parent,
+                        &binding,
+                        "unused",
+                        std::process::id(),
+                        &pidfd(std::process::id()).unwrap(),
+                        receive,
+                        &events,
+                        &std::sync::atomic::AtomicBool::new(false),
+                    );
+                    if result.is_err() {
+                        events.try_send(ManagedExecutionEvent::Uncertain).unwrap();
+                    }
+                    done.send(result).unwrap();
+                });
+                receive_control_packet::<ParentCommand>(&mut helper).unwrap();
+                if partial {
+                    helper.write_all(&[0, 0]).unwrap();
+                }
+                let started = Instant::now();
+                if cancel {
+                    returned.cancel();
+                }
+                assert!(completion
+                    .recv_timeout(Duration::from_millis(500))
+                    .unwrap()
+                    .is_err());
+                assert!(started.elapsed() < Duration::from_millis(500));
+                assert!(matches!(
+                    receive_events.try_recv().unwrap(),
+                    ManagedExecutionEvent::Uncertain
+                ));
+                assert!(budget.remaining().is_err());
+                worker.join().unwrap();
+            }
+        }
+    }
     #[test]
     fn repeated_authenticated_stop_preserves_one_budget_and_cannot_revive_it() {
         let binding = binding();
@@ -1306,18 +2212,38 @@ mod managed_tests {
         };
         assert!(control.finalization_budget().is_none());
         let request = stop(&binding);
-        send_control_packet(&mut parent, &ParentCommand::Stop { request: request.clone() }, None).unwrap();
+        send_control_packet(
+            &mut parent,
+            &ParentCommand::Stop {
+                request: request.clone(),
+            },
+            None,
+        )
+        .unwrap();
         assert!(control.poll_stop().unwrap());
         let budget = control.finalization_budget().unwrap();
         let original = budget.constraint();
-        send_control_packet(&mut parent, &ParentCommand::Stop { request: request.clone() }, None).unwrap();
+        send_control_packet(
+            &mut parent,
+            &ParentCommand::Stop {
+                request: request.clone(),
+            },
+            None,
+        )
+        .unwrap();
         assert!(control.poll_stop().unwrap());
-        assert_eq!(control.finalization_budget().unwrap().constraint(), original);
+        assert_eq!(
+            control.finalization_budget().unwrap().constraint(),
+            original
+        );
         let mut changed = request.clone();
         changed.request_id = Uuid::new_v4().to_string();
         send_control_packet(&mut parent, &ParentCommand::Stop { request: changed }, None).unwrap();
         assert!(control.poll_stop().is_err());
-        assert_eq!(control.finalization_budget().unwrap().constraint(), original);
+        assert_eq!(
+            control.finalization_budget().unwrap().constraint(),
+            original
+        );
         budget.cancel();
         send_control_packet(&mut parent, &ParentCommand::Stop { request }, None).unwrap();
         assert!(control.poll_stop().unwrap());
@@ -1520,9 +2446,9 @@ mod managed_tests {
             let lifetime = pidfd(std::process::id()).unwrap();
             let (commands, receive) = mpsc::sync_channel(1);
             commands
-                .send(ParentCommand::Stop {
+                .send(queued_test_command(ParentCommand::Stop {
                     request: request.clone(),
-                })
+                }))
                 .unwrap();
             let (events, receive_events) = mpsc::sync_channel(4);
             let worker_binding = binding.clone();
@@ -1650,7 +2576,7 @@ mod managed_tests {
             let mut control = ManagedControl {
                 binding: binding.clone(),
                 controller: controller_test_fixture(),
-            finalization: None,
+                finalization: None,
                 stream: helper,
                 request: None,
                 authenticated: false,

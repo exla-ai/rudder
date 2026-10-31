@@ -1,7 +1,7 @@
 import fsp from "node:fs/promises";
 import path from "node:path";
 import type { RunRecord, SpecContract, VerificationResult } from "./types.js";
-import { currentBranch, currentCommit, runHasChanges, workspaceDiff, workspaceStatus } from "./git.js";
+import { currentBranch, currentCommit, runHasChanges, workspaceStatus } from "./git.js";
 import { pathExists, readJson, runCommand, writeJson } from "./util.js";
 import { agentContextPath, specPath, verifierPath } from "./state.js";
 import { PROPAGATION_RULES } from "./surfaces.js";
@@ -144,7 +144,8 @@ export async function verifyRun(
   run: RunRecord,
   options: { transcriptFrom?: number } = {},
 ): Promise<VerificationResult> {
-  const diff = await workspaceDiff(run);
+  // Status already answers whether this pass produced changes. Building a full
+  // patch adds work and jj snapshots without contributing verification evidence.
   const changed = await runHasChanges(run);
   const outputPath = path.join(run.repoRoot, ".rudder", "runs", run.id, "output.txt");
   const whole = await fsp.readFile(outputPath).catch(() => Buffer.alloc(0));
@@ -160,7 +161,7 @@ export async function verifyRun(
       satisfied.push("No file changes were needed for this prompt.");
     }
   } else {
-    satisfied.push(diff.trim() ? "The run produced a git diff." : "The run produced git status changes.");
+    satisfied.push("The run produced file changes.");
   }
   // Verify against the node's own contract, not a keyword scan: the old
   // /test|spec|check/ mention-regex passed a transcript that literally said

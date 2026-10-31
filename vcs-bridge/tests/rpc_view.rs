@@ -92,7 +92,7 @@ impl Fixture {
         let data = tempfile::tempdir().unwrap();
         let endpoint = tempfile::Builder::new()
             .prefix("rv-")
-            .tempdir_in("/tmp")
+            .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
             .unwrap();
         fs::set_permissions(endpoint.path(), fs::Permissions::from_mode(0o700)).unwrap();
         let metadata = data.path().join("private-jj");
@@ -445,7 +445,7 @@ impl Drop for DropReplyProxy {
 fn inherited_nonblocking_proxy_delivers_large_reply_under_backpressure() {
     let endpoint = tempfile::Builder::new()
         .prefix("rv-nb-")
-        .tempdir_in("/tmp")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
         .unwrap();
     let target = endpoint.path().join("target.sock");
     let listener = UnixListener::bind(&target).unwrap();

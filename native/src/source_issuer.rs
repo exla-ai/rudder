@@ -12,6 +12,37 @@ use std::{
 };
 
 const QUERY_BUSY_TIMEOUT: Duration = Duration::from_millis(100);
+#[cfg(target_os = "linux")]
+const SHUTDOWN_QUERY_FRESHNESS: Duration = Duration::from_secs(3);
+
+/// Only the actual final query constructs this local adoption gate. Its true
+/// grant expiry and freshness stay bounded by the ORIGINAL suspend-aware clock.
+#[cfg(target_os = "linux")]
+pub(crate) struct SourceShutdownAuthorization {
+    remaining_at_query_start: Duration,
+    valid_for: Duration,
+    after_query_ms: i64,
+    expires_at_ms: Option<i64>,
+}
+#[cfg(target_os = "linux")]
+impl SourceShutdownAuthorization {
+    /// App-safe clocks/atomics only. This is bounded result adoption, not an
+    /// atomic Journal commit or protection against a subsequent revocation.
+    pub(crate) fn check_adoption(&self, issuer: &HostSourceIssuer,
+        budget: &rudder_engine::execution::finalization_budget::FinalizationBudget) -> Result<()> {
+        let remaining = budget.remaining()?;
+        let age = self.remaining_at_query_start.checked_sub(remaining)
+            .context("shutdown query clock changed")?;
+        ensure!(age < self.valid_for, "shutdown query is no longer fresh");
+        let now = trusted_query_time()?;
+        ensure!(now >= self.after_query_ms && self.expires_at_ms.is_none_or(|expiry| now < expiry),
+            "shutdown host source authorization expired or clock regressed");
+        ensure!(!issuer.denied.load(Ordering::Acquire), "host source issuer is fenced");
+        issuer.lease.check_active_for_adoption()?;
+        budget.remaining()?;
+        Ok(())
+    }
+}
 
 /// Private capability storage, deliberately no Debug/Serde/display/accessor.
 struct HostSourceToken(String);
@@ -27,6 +58,36 @@ pub(crate) struct HostSourceIssuer {
 }
 
 impl HostSourceIssuer {
+    /// Final join must query the actual Journal again, after the parent's owned
+    /// helper wait. A transport freshness receipt/snapshot never substitutes.
+    /// Off-App; caller retains this Arc and the original budget through result
+    /// settlement. A delayed query cannot renew either time or host grant.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn authorize_shutdown_join(
+        &self,
+        binding: &PartialBinding,
+        budget: &rudder_engine::execution::finalization_budget::FinalizationBudget,
+    ) -> Result<SourceShutdownAuthorization> {
+        let remaining_at_query_start = budget.remaining()?;
+        let authorization = self.authorize_using(binding, trusted_query_time)?;
+        budget.remaining()?;
+        let after = trusted_query_time()?;
+        ensure!(after >= authorization.validated_at_ms
+            && authorization.expires_at_ms.is_none_or(|expiry| after < expiry),
+            "host source grant expired or clock changed during shutdown join");
+        self.check_current()?;
+        budget.remaining()?;
+        let valid_for = match authorization.expires_at_ms {
+            Some(expiry) => Duration::from_millis(u64::try_from(expiry.checked_sub(authorization.validated_at_ms)
+                .context("shutdown grant expiry overflow")?).context("shutdown grant expired")?)
+                .min(SHUTDOWN_QUERY_FRESHNESS),
+            None => SHUTDOWN_QUERY_FRESHNESS,
+        };
+        let result = SourceShutdownAuthorization { remaining_at_query_start, valid_for,
+            after_query_ms: after, expires_at_ms: authorization.expires_at_ms };
+        result.check_adoption(self, budget)?;
+        Ok(result)
+    }
     /// Off-App preparation. Binding/token are expectations until an actual
     /// per-request Journal query succeeds. No alternate database can be supplied.
     pub(crate) fn new(

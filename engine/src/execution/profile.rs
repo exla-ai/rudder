@@ -66,6 +66,17 @@ impl ExecutionProfileV4 {
             .as_ref()
             .context("v4 profile requires workspace authority")?;
         self.validated_network(spec)?;
+        // Spec5 is a separate remote-only metadata family. Admission still
+        // requires owned source/controller lifetimes outside this codec.
+        if spec.format_version == 5 {
+            ensure!(
+                matches!(
+                    self.workspace,
+                    ExecutionWorkspaceSelectionV4::RemoteSourceOnly { .. }
+                ),
+                "execution specification5 requires remote source-only workspace"
+            );
+        }
         if let ExecutionWorkspaceSelectionV4::RemoteSourceOnly {
             selection,
             host_context,

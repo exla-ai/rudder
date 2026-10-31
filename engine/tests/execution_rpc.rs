@@ -122,14 +122,9 @@ fn legacy_canonical_request_bytes_are_preserved_and_profile_versions_fail_closed
     assert!(value.validate().is_err());
 }
 
-#[test]
-fn explicit_v4_offline_profile_binds_all_ids_and_cannot_fall_back_to_legacy_control() {
-    use execution::{
-        ExecutionProfileV4, ExecutionWorkspaceSelectionV4, ManagedExecutionBinding,
-        ManagedFrontendStart,
-    };
-    let temp = fixture();
-    let mut value = spec(temp.path());
+fn profiled_spec(path: &Path) -> ExecutionSpec {
+    use execution::{ExecutionProfileV4, ExecutionWorkspaceSelectionV4};
+    let mut value = spec(path);
     let request_id = Uuid::new_v4().to_string();
     let network: execution::network::NetworkProfileV1 = serde_json::from_value(serde_json::json!({
         "format_version":1,"execution_profile":"cloud_uid1500_linux_v1",
@@ -148,10 +143,13 @@ fn explicit_v4_offline_profile_binds_all_ids_and_cannot_fall_back_to_legacy_cont
         network,
         workspace: ExecutionWorkspaceSelectionV4::LocalComplete {},
     });
-    value.validate().unwrap();
-    let binding = ManagedExecutionBinding {
+    value
+}
+
+fn managed_binding(value: &ExecutionSpec) -> execution::ManagedExecutionBinding {
+    execution::ManagedExecutionBinding {
         format_version: 3,
-        request_id,
+        request_id: value.profile.as_ref().unwrap().request_id.clone(),
         run_id: "r".into(),
         run_epoch: 1,
         execution_id: value.execution_id.clone(),
@@ -159,11 +157,20 @@ fn explicit_v4_offline_profile_binds_all_ids_and_cannot_fall_back_to_legacy_cont
         view_id: value.view_id.clone(),
         owner: value.owner.clone(),
         execution_profile: "offline-command-v1".into(),
-        frontend_start: ManagedFrontendStart::Immediate,
+        frontend_start: execution::ManagedFrontendStart::Immediate,
         server_command: None,
         guest_socket: "/tmp/cx.sock".into(),
         profile: value.profile.clone(),
-    };
+    }
+}
+
+#[test]
+fn explicit_v4_offline_profile_binds_all_ids_and_cannot_fall_back_to_legacy_control() {
+    use execution::ExecutionWorkspaceSelectionV4;
+    let temp = fixture();
+    let value = profiled_spec(temp.path());
+    value.validate().unwrap();
+    let binding = managed_binding(&value);
     binding.validate(&value).unwrap();
     let mut old = binding.clone();
     old.format_version = 2;
@@ -423,4 +430,298 @@ fn authority_factory_cannot_run_before_fresh_namespace_admission() {
     )
     .is_err());
     assert!(!invoked.load(Ordering::Acquire));
+}
+
+fn remote_spec(path: &Path) -> ExecutionSpec {
+    use execution::{ExecutionWorkspaceSelectionV4, ProtectedHostContextRef};
+    use rudder_engine::{
+        remote_cache::CacheScope,
+        remote_root::{AttemptBinding, RootBinding},
+        store::ImportPolicy,
+        vfs::{exclusion_policy_digest, remote_launch::RemoteLaunchRequest},
+    };
+    let mut value = profiled_spec(path);
+    value.format_version = 5;
+    let observation = value.workspace_observation.as_mut().unwrap();
+    observation.binding.exclusion_policy_digest =
+        exclusion_policy_digest(&ImportPolicy::default()).unwrap();
+    let selection = RemoteLaunchRequest {
+        format_version: 1,
+        request_id: value.profile.as_ref().unwrap().request_id.clone(),
+        root: RootBinding {
+            scope: CacheScope {
+                provider_id: "codec-fixture".into(),
+                tenant_id: "tenant".into(),
+            },
+            root_id: "root".into(),
+            root: ObjectRef::from_bytes(ObjectKind::RunnableRoot, b"metadata only"),
+        },
+        attempt: AttemptBinding {
+            project_id: "p".into(),
+            run_id: "r".into(),
+            run_epoch: 1,
+            owner: value.owner.clone(),
+            execution_id: value.execution_id.clone(),
+            operation_id: value.operation_id.clone(),
+            view_id: value.view_id.clone(),
+        },
+        observation: observation.binding.clone(),
+        projection_policy: ObjectRef::from_bytes(ObjectKind::Blob, b"policy"),
+        accepted_source: ObjectRef::from_bytes(ObjectKind::SourceRoot, b"source"),
+        accepted_seed: ObjectRef::from_bytes(ObjectKind::Directory, b"seed"),
+    };
+    let authority = path.join("authority");
+    fs::create_dir(&authority).unwrap();
+    let context = authority.join("context.json");
+    fs::write(&context, b"{}").unwrap();
+    value.profile.as_mut().unwrap().workspace = ExecutionWorkspaceSelectionV4::RemoteSourceOnly {
+        selection,
+        host_context: ProtectedHostContextRef {
+            format_version: 1,
+            path: context,
+            sha256: ObjectRef::from_bytes(ObjectKind::Blob, b"{}").digest,
+            size_bytes: 2,
+        },
+    };
+    value
+}
+
+#[test]
+fn spec5_binding4_are_remote_offline_metadata_and_never_reach_a_factory() {
+    use execution::{ExecutionWorkspaceSelectionV4, ManagedFrontendStart};
+    let temp = fixture();
+    let value = remote_spec(temp.path());
+    value.validate().unwrap();
+    let mut binding = managed_binding(&value);
+    binding.format_version = 4;
+    binding.validate(&value).unwrap();
+    for spec_version in 1..=5 {
+        for binding_version in 2..=4 {
+            let mut s = value.clone();
+            let mut b = binding.clone();
+            s.format_version = spec_version;
+            b.format_version = binding_version;
+            assert_eq!(
+                b.validate(&s).is_ok(),
+                matches!((spec_version, binding_version), (4, 3) | (5, 4))
+            );
+        }
+    }
+    for pointer in [
+        "/profile",
+        "/profile/workspace",
+        "/profile/workspace/selection",
+        "/profile/workspace/host_context",
+        "/profile/network",
+    ] {
+        let mut wire = serde_json::to_value(&value).unwrap();
+        wire.pointer_mut(pointer)
+            .unwrap()
+            .as_object_mut()
+            .unwrap()
+            .insert("unknown".into(), true.into());
+        assert!(
+            serde_json::from_value::<ExecutionSpec>(wire).is_err(),
+            "{pointer}"
+        );
+    }
+    let mut wire = serde_json::to_value(&binding).unwrap();
+    wire["unknown"] = true.into();
+    assert!(serde_json::from_value::<execution::ManagedExecutionBinding>(wire).is_err());
+    for kind in ["profile", "local", "connected", "context", "application"] {
+        let mut s = value.clone();
+        match kind {
+            "profile" => s.profile = None,
+            "local" => {
+                s.profile.as_mut().unwrap().workspace =
+                    ExecutionWorkspaceSelectionV4::LocalComplete {}
+            }
+            "connected" => {
+                s.profile.as_mut().unwrap().network.mode =
+                    execution::network::NetworkMode::QualificationHttpsConnectV1
+            }
+            "context" => {
+                if let ExecutionWorkspaceSelectionV4::RemoteSourceOnly { host_context, .. } =
+                    &mut s.profile.as_mut().unwrap().workspace
+                {
+                    host_context.format_version = 2;
+                }
+            }
+            _ => {
+                s.workspace_observation.as_mut().unwrap().application =
+                    Some(execution::HelperApplicationSpec {
+                        format_version: 1,
+                        kind: "vcs".into(),
+                        host_context: match &s.profile.as_ref().unwrap().workspace {
+                            ExecutionWorkspaceSelectionV4::RemoteSourceOnly {
+                                host_context,
+                                ..
+                            } => host_context.clone(),
+                            _ => unreachable!(),
+                        },
+                        projection_directory: temp.path().join("vcs"),
+                    })
+            }
+        }
+        assert!(s.validate().is_err(), "{kind}");
+    }
+    // Mutate every shared assignment identity on the remote side alone.
+    for pointer in [
+        "/request_id",
+        "/attempt/project_id",
+        "/attempt/run_id",
+        "/attempt/run_epoch",
+        "/attempt/owner/owner",
+        "/attempt/owner/epoch",
+        "/attempt/execution_id",
+        "/attempt/operation_id",
+        "/attempt/view_id",
+        "/observation/profile/digest",
+    ] {
+        let mut wire = serde_json::to_value(&value).unwrap();
+        let slot = wire
+            .pointer_mut(&format!("/profile/workspace/selection{pointer}"))
+            .unwrap();
+        *slot = if slot.is_number() {
+            99.into()
+        } else if pointer.ends_with("digest") {
+            "b".repeat(64).into()
+        } else {
+            Uuid::new_v4().to_string().into()
+        };
+        let s: ExecutionSpec = serde_json::from_value(wire).unwrap();
+        assert!(s.validate().is_err(), "{pointer}");
+    }
+    for kind in [
+        "profile",
+        "different-profile",
+        "request",
+        "server",
+        "start",
+        "backend",
+        "codex",
+    ] {
+        let mut b = binding.clone();
+        match kind {
+            "profile" => b.profile = None,
+            "different-profile" => {
+                b.profile.as_mut().unwrap().network.readiness_nonce = Uuid::new_v4().to_string()
+            }
+            "request" => b.request_id = Uuid::new_v4().to_string(),
+            "server" => b.server_command = Some(vec!["/bin/true".into()]),
+            "start" => b.frontend_start = ManagedFrontendStart::AfterHostApiKeyV1,
+            "codex" => {
+                b.execution_profile = "codex-app-server".into();
+                b.frontend_start = ManagedFrontendStart::AfterHostApiKeyV1;
+                b.server_command = Some(vec!["/bin/true".into()]);
+            }
+            _ => b.execution_profile = "claude-sdk".into(),
+        }
+        assert!(b.validate(&value).is_err(), "{kind}");
+    }
+    let invoked = Arc::new(AtomicBool::new(false));
+    let counter = invoked.clone();
+    let result = execution::run_helper_with_services(
+        value,
+        Box::new(move |_| {
+            counter.store(true, Ordering::Release);
+            anyhow::bail!("Spec5 must never invoke services")
+        }),
+    );
+    let error = match result {
+        Err(error) => error,
+        Ok(_) => panic!("Spec5 was admitted"),
+    };
+    assert!(error
+        .to_string()
+        .contains("specification5 awaits owned source"));
+    assert!(!invoked.load(Ordering::Acquire));
+}
+
+#[test]
+fn old_spec_and_binding_canonical_bytes_match_frozen_schema_snapshots() {
+    use execution::{HelperApplicationSpec, ProtectedHostContextRef};
+    use sha2::{Digest, Sha256};
+    fn normalized(value: &mut serde_json::Value, root: &str) {
+        match value {
+            serde_json::Value::String(text) => {
+                if Uuid::parse_str(text).is_ok() {
+                    *text = Uuid::nil().to_string();
+                } else if text.starts_with(root) {
+                    *text = text.replacen(root, "/fixture", 1);
+                }
+            }
+            serde_json::Value::Array(items) => {
+                for item in items {
+                    normalized(item, root);
+                }
+            }
+            serde_json::Value::Object(items) => {
+                for item in items.values_mut() {
+                    normalized(item, root);
+                }
+            }
+            _ => {}
+        }
+    }
+    let temp = fixture();
+    let v4 = profiled_spec(temp.path());
+    let mut snapshots = Vec::new();
+    for version in 1..=4 {
+        let mut s = v4.clone();
+        s.format_version = version;
+        if version < 4 {
+            s.profile = None;
+        }
+        if version == 1 {
+            s.workspace_observation = None;
+        }
+        if version == 3 {
+            s.workspace_observation.as_mut().unwrap().application = Some(HelperApplicationSpec {
+                format_version: 1,
+                kind: "fixture-v1".into(),
+                host_context: ProtectedHostContextRef {
+                    format_version: 1,
+                    path: temp.path().join("authority/context.json"),
+                    sha256: "a".repeat(64),
+                    size_bytes: 2,
+                },
+                projection_directory: temp.path().join("application"),
+            });
+        }
+        s.validate().unwrap();
+        let bytes = canonical_json(&s).unwrap();
+        let parsed: ExecutionSpec = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(canonical_json(&parsed).unwrap(), bytes);
+        snapshots.push(serde_json::to_value(s).unwrap());
+    }
+    for version in 2..=3 {
+        let mut b = managed_binding(&v4);
+        b.format_version = version;
+        if version == 2 {
+            b.profile = None;
+            b.execution_profile = "claude-sdk".into();
+        }
+        let bytes = canonical_json(&b).unwrap();
+        let parsed: execution::ManagedExecutionBinding = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(canonical_json(&parsed).unwrap(), bytes);
+        snapshots.push(serde_json::to_value(b).unwrap());
+    }
+    // SHA256 of the original Spec1..4 and Binding2..3 fixture encodings,
+    // with only random UUIDs and the temporary root normalized for stability.
+    let expected = [
+        "fbb141d4c3a2a24d7c72863666b98f5ef9e4cb66fb920f471d97bcf017487cf4",
+        "6144d01f51fbfb3fee830983a0513d927b749cd31fe54f38ac1d466772b4cc9f",
+        "cee28f21592a94e13702ffe39edbe817bb5a07176e3ea11b9cf3887008be028c",
+        "17c857c36085df16978106986c248c9a202b008d19678c6efe7b9d6f5f91b12e",
+        "a6074028749b2ddda3555b9b52ddec973d5a887d7c1dc264d63139a61a16dc46",
+        "d48f6879536d074c6df77a34c7b6a5806b89f19cd6bf622894a34f39a52bdfed",
+    ];
+    for (mut wire, expected) in snapshots.into_iter().zip(expected) {
+        normalized(&mut wire, temp.path().to_str().unwrap());
+        assert_eq!(
+            hex::encode(Sha256::digest(canonical_json(&wire).unwrap())),
+            expected
+        );
+    }
 }

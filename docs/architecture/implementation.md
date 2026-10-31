@@ -52,14 +52,16 @@ worktree stays on its own branch and is not edited by this implementation owner.
 The combined pre-join Rust check passed 1,276 tests with zero failures. Context2
 passed 12 focused tests after using a joined refresh owner only during fixture
 startup. StopV4 carries the original parent deadline through queueing, framed I/O
-and finalization phases. The verifier uses one status decision; its 17 regression
+and finalization phases. The verifier uses one status decision; its 16 regression
 cases passed. Launch effort/compaction defaults remain behind E14.
 
 The next merged changes add an opaque provisional source receipt, actual helper
 exit custody and a fresh off-App issuer query. They also add a local build DATA
 helper/client using the retained RunnableRoot, snapshot profile, preparation
-index and existing Buck2 adapter. Their integrated checks and actual-source cold /
-restored-output qualification are pending. Runtime5 is still refused; do not
+index and existing Buck2 adapter. Their 62 focused Rust checks and 22 TS/client regressions passed. The actual-source qualification passed for `src/agent-attention.ts`: cold execution1,
+fresh-scratch REAPI restore1 with no execution, identical outputs and independent
+compiler/behavior checks. Debug walls75.502s/71.689s expose setup/verification
+costs; this is neither a full-app nor production-speed result. Runtime5 is still refused; do not
 count these interfaces as default migration or complete v4 delivery.
 
 ## Current implementation track

@@ -59,6 +59,88 @@ struct HostContext {
     cache_root: PathBuf,
     registry_root: PathBuf,
 }
+// A separate closed schema keeps context1 strict and prevents downgrade.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HostContextV2 {
+    format_version: u32,
+    kind: String,
+    launch_request_digest: String,
+    node: RuntimeFile,
+    cli_script: RuntimeFile,
+    source: SourceContext,
+    cache_root: PathBuf,
+    registry_root: PathBuf,
+    source_authorizer_directory: PathBuf,
+}
+fn read_host_context(
+    reference: &ProtectedHostContextRef,
+    spec: &ExecutionSpec,
+    selection: &RemoteLaunchRequest,
+) -> Result<(HostContext, PathBuf)> {
+    ensure!(spec.format_version == 5, "host source requires spec5");
+    let bytes = reference.read_bytes().map_err(|_| fault())?;
+    let value: serde_json::Value = serde_json::from_slice(&bytes).map_err(|_| fault())?;
+    ensure!(
+        canonical_json(&value)? == bytes,
+        "private remote context must be canonical"
+    );
+    let context: HostContextV2 = serde_json::from_value(value).map_err(|_| fault())?;
+    ensure!(context.format_version == 2, "host source requires context2");
+    let directory = context.source_authorizer_directory;
+    ensure!(
+        normalized(&directory)
+            && spec
+                .authority_roots
+                .iter()
+                .any(|root| normalized(root) && directory.starts_with(root))
+            && [&context.cache_root, &context.registry_root]
+                .iter()
+                .all(|root| !directory.starts_with(root) && !root.starts_with(&directory))
+            && spec
+                .broker_directory
+                .as_ref()
+                .is_none_or(|root| !directory.starts_with(root) && !root.starts_with(&directory)),
+        "host source directory requires separate protected authority root"
+    );
+    // Existing exact directory only; do not create or follow a replacement link.
+    ensure!(
+        directory.canonicalize().map_err(|_| fault())? == directory,
+        "host source directory changed"
+    );
+    let mut held = File::open("/").map_err(|_| fault())?;
+    for component in directory.components() {
+        if let Component::Normal(name) = component {
+            let name = std::ffi::CString::new(name.as_bytes()).map_err(|_| fault())?;
+            let fd = unsafe {
+                libc::openat(
+                    held.as_raw_fd(),
+                    name.as_ptr(),
+                    libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_DIRECTORY,
+                )
+            };
+            ensure!(fd >= 0, "host source directory unavailable");
+            held = unsafe { File::from_raw_fd(fd) };
+        }
+    }
+    let metadata = held.metadata().map_err(|_| fault())?;
+    ensure!(
+        metadata.uid() == unsafe { libc::geteuid() } && metadata.mode() & 0o7777 == 0o700,
+        "host source directory must be private and owned"
+    );
+    let source = HostContext {
+        format_version: 1,
+        kind: context.kind,
+        launch_request_digest: context.launch_request_digest,
+        node: context.node,
+        cli_script: context.cli_script,
+        source: context.source,
+        cache_root: context.cache_root,
+        registry_root: context.registry_root,
+    };
+    validate_context(&source, spec, selection, TransportProfile::Https)?;
+    Ok((source, directory))
+}
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RuntimeFile {
@@ -122,6 +204,7 @@ fn read_context(
     spec: &ExecutionSpec,
     selection: &RemoteLaunchRequest,
 ) -> Result<HostContext> {
+    ensure!(spec.format_version == 4, "legacy source requires spec4");
     let bytes = reference
         .read_bytes()
         .map_err(|_| anyhow::anyhow!("private remote context unavailable"))?;
@@ -379,6 +462,7 @@ struct AuthorityState {
     fenced: AtomicBool,
     freshness: Mutex<Freshness>,
     tracker: Weak<SessionTracker>,
+    host: Option<Arc<dyn BrokerAuthorization>>,
 }
 struct Authorization {
     serial: u64,
@@ -397,10 +481,14 @@ impl AuthorityState {
                 accepted: 0,
             }),
             tracker: Arc::downgrade(tracker),
+            host: None,
         })
     }
     fn fence(&self) {
         self.fenced.store(true, Ordering::Release);
+        if let Some(host) = &self.host {
+            host.invalidate();
+        }
         if let Some(tracker) = self.tracker.upgrade() {
             if let Ok(session) = tracker.0.lock() {
                 if let Some(session) = session.as_ref() {
@@ -467,6 +555,11 @@ impl AuthorityState {
     }
     fn check(&self) -> Result<()> {
         let result: Result<()> = (|| {
+            // The host client's true expiry may be much shorter than our
+            // legacy three-second mirror. Consult it on every cache/root check.
+            if let Some(host) = &self.host {
+                host.check_current()?;
+            }
             let mut state = self.freshness.lock().map_err(|_| fault())?;
             self.sample(&mut state, false)?;
             Ok(())
@@ -487,6 +580,46 @@ impl AuthorityState {
 }
 trait BrokerAuthorization: Send + Sync {
     fn authorize(&self, binding: &PartialBinding) -> Result<()>;
+    fn check_current(&self) -> Result<()> {
+        Ok(())
+    }
+    fn invalidate(&self) {}
+}
+impl BrokerAuthorization for crate::source_authorizer::SourceAuthorizerClient {
+    fn authorize(&self, binding: &PartialBinding) -> Result<()> {
+        self.authorize(binding)
+    }
+    fn check_current(&self) -> Result<()> {
+        self.check_current()
+    }
+    fn invalidate(&self) {
+        self.invalidate();
+    }
+}
+// A rejected/closed/rotated guest broker retires ingress alone. Host failure
+// retires both, through the source state and actual registered RemoteSession.
+struct SeparatedIngress {
+    broker: Arc<dyn BrokerAuthorization>,
+    source: Arc<AuthorityState>,
+    fenced: AtomicBool,
+}
+impl PartialAttemptAuthority for SeparatedIngress {
+    fn validate(&self, binding: &PartialBinding) -> Result<()> {
+        let result = (|| {
+            ensure!(!self.fenced.load(Ordering::Acquire), "ingress fenced");
+            self.source.check()?;
+            ensure!(*binding == self.source.binding, "ingress binding differs");
+            self.broker.authorize(binding)?;
+            self.source.check()
+        })();
+        if result.is_err() {
+            self.fenced.store(true, Ordering::Release);
+        }
+        result.map_err(|_| fault())
+    }
+    fn cancelled(&self) -> bool {
+        self.fenced.load(Ordering::Acquire) || self.source.check().is_err()
+    }
 }
 impl BrokerAuthorization for crate::agent_broker::BrokerClient {
     fn authorize(&self, binding: &PartialBinding) -> Result<()> {
@@ -508,7 +641,11 @@ impl PartialAttemptAuthority for PartialAuthority {
             self.state.fence();
             return Err(fault());
         }
-        self.state.accept(request)
+        self.state.accept(request)?;
+        if self.state.host.is_some() {
+            self.state.check()?;
+        }
+        Ok(())
     }
     fn cancelled(&self) -> bool {
         self.state.check().is_err()
@@ -662,16 +799,37 @@ fn open_workspace(
 }
 
 pub(crate) fn services(spec: &ExecutionSpec) -> Result<HelperServices> {
+    #[cfg(target_os = "linux")]
+    {
+        services_inner(spec, None)
+    }
     #[cfg(not(target_os = "linux"))]
-    return Err(anyhow::anyhow!(
-        "remote source execution requires qualified Linux"
-    ));
+    {
+        let _ = spec;
+        Err(anyhow::anyhow!(
+            "remote source execution requires qualified Linux"
+        ))
+    }
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn services_host_source(
+    spec: &ExecutionSpec,
+    controller: Arc<rudder_engine::execution::handoff::ControllerProcessWitness>,
+) -> Result<HelperServices> {
+    services_inner(spec, Some(controller))
+}
+#[cfg(target_os = "linux")]
+fn services_inner(
+    spec: &ExecutionSpec,
+    controller: Option<Arc<rudder_engine::execution::handoff::ControllerProcessWitness>>,
+) -> Result<HelperServices> {
     let profile = spec
         .profile
         .as_ref()
         .context("remote execution profile absent")?;
     ensure!(
-        spec.format_version == 4
+        spec.format_version == if controller.is_some() { 5 } else { 4 }
             && profile.format_version == 1
             && profile.network.mode == rudder_engine::execution::network::NetworkMode::OfflineV1,
         "remote source factory requires sealed offline profile4"
@@ -704,7 +862,12 @@ pub(crate) fn services(spec: &ExecutionSpec) -> Result<HelperServices> {
             && selection.attempt.owner == spec.owner,
         "remote source execution binding differs"
     );
-    let context = read_context(host_context, spec, selection)?;
+    let (context, host_directory) = if controller.is_some() {
+        let (context, directory) = read_host_context(host_context, spec, selection)?;
+        (context, Some(directory))
+    } else {
+        (read_context(host_context, spec, selection)?, None)
+    };
     let node = PinnedRuntime::open(&context.node, true, RuntimeTrust::Image)?;
     let script = PinnedRuntime::open(&context.cli_script, false, RuntimeTrust::Image)?;
     let binding = expected_binding(selection)?;
@@ -733,9 +896,31 @@ pub(crate) fn services(spec: &ExecutionSpec) -> Result<HelperServices> {
             .map(|value| value.nanoseconds())
             .map_err(|_| fault())
     });
-    let state = AuthorityState::new(binding, clock, &tracker);
+    let mut state = AuthorityState::new(binding.clone(), clock, &tracker);
+    let broker: Arc<dyn BrokerAuthorization> = Arc::new(broker);
+    let source_broker: Arc<dyn BrokerAuthorization> = if let Some(controller) = controller {
+        let host = Arc::new(
+            crate::source_authorizer::SourceAuthorizerClient::connect(
+                host_directory.as_ref().ok_or_else(fault)?,
+                binding,
+                controller,
+            )
+            .map_err(|_| fault())?,
+        );
+        Arc::get_mut(&mut state).ok_or_else(fault)?.host = Some(host.clone());
+        host
+    } else {
+        broker.clone()
+    };
+    let ingress = state.host.as_ref().map(|_| {
+        Arc::new(SeparatedIngress {
+            broker,
+            source: state.clone(),
+            fenced: AtomicBool::new(false),
+        })
+    });
     let authority = Arc::new(PartialAuthority {
-        broker: Arc::new(broker),
+        broker: source_broker,
         state,
     });
     authority.validate(&authority.state.binding)?;
@@ -743,7 +928,14 @@ pub(crate) fn services(spec: &ExecutionSpec) -> Result<HelperServices> {
     let expected_spec = hex_digest(canonical_json(spec)?);
     let for_factory = authority.clone();
     Ok(HelperServices {
-        workspace: HelperWorkspaceServices::Partial { authority },
+        workspace: if let Some(ingress) = ingress {
+            HelperWorkspaceServices::PartialSeparated {
+                ingress,
+                source: authority,
+            }
+        } else {
+            HelperWorkspaceServices::Partial { authority }
+        },
         application: None,
         workspace_factory: Some(Box::new(move |request| {
             ensure!(

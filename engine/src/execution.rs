@@ -19,12 +19,12 @@ use std::{
 };
 use uuid::Uuid;
 
+pub mod finalization_budget;
 #[cfg(target_os = "linux")]
 pub mod handoff;
 #[cfg(target_os = "linux")]
 pub mod linux;
 pub mod network;
-pub mod finalization_budget;
 #[cfg(target_os = "linux")]
 mod network_phase;
 mod profile;
@@ -342,6 +342,12 @@ pub enum HelperWorkspaceServices {
     Partial {
         authority: Arc<dyn crate::vfs::partial_rpc::PartialAttemptAuthority>,
     },
+    /// Spec5 keeps guest RPC ingress independent of host source finalization.
+    /// Trusted factories supply both actual lifetimes; parsed metadata cannot.
+    PartialSeparated {
+        ingress: Arc<dyn crate::vfs::partial_rpc::PartialAttemptAuthority>,
+        source: Arc<dyn crate::vfs::partial_rpc::PartialAttemptAuthority>,
+    },
 }
 pub struct HelperServices {
     pub workspace: HelperWorkspaceServices,
@@ -402,6 +408,10 @@ impl ManagedExecutionBinding {
                 || self.format_version == 3
                     && spec.format_version == 4
                     && self.profile.is_some()
+                    && self.profile == spec.profile
+                || self.format_version == 4
+                    && spec.format_version == 5
+                    && self.profile.is_some()
                     && self.profile == spec.profile)
                 && self.execution_id == spec.execution_id
                 && self.operation_id == spec.operation_id
@@ -413,8 +423,12 @@ impl ManagedExecutionBinding {
                 && (matches!(
                     self.execution_profile.as_str(),
                     "codex-app-server" | "claude-sdk"
-                ) || self.format_version == 3
+                ) || matches!(self.format_version, 3 | 4)
                     && self.execution_profile == "offline-command-v1")
+                && (self.format_version != 4
+                    || self.execution_profile == "offline-command-v1"
+                        && self.frontend_start == ManagedFrontendStart::Immediate
+                        && self.server_command.is_none())
                 && self.guest_socket == Path::new("/tmp/cx.sock"),
             "managed execution differs from the reserved local assignment"
         );
@@ -623,7 +637,7 @@ impl ExecutionSpec {
                         && self.workspace_observation.is_some()
                         && application.is_none())
                     || (self.format_version == 3 && application.is_some())))
-                || (self.format_version == 4
+                || (matches!(self.format_version, 4 | 5)
                     && self.profile.is_some()
                     && self.workspace_observation.is_some()
                     && application.is_none()),

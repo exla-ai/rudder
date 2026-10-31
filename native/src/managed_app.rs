@@ -403,6 +403,9 @@ mod local {
                             } else { live.uncertain = true; }
                         }
                         ManagedExecutionEvent::BackendReady { .. } => {}
+                        // Source-only launches require their explicit process/
+                        // issuer join. Legacy Live cannot adopt this receipt.
+                        ManagedExecutionEvent::SourceShutdown(_) => live.uncertain = true,
                         ManagedExecutionEvent::Uncertain => live.uncertain = true,
                     }
                 }

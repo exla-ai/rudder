@@ -1,4 +1,3 @@
-#![cfg(target_os = "linux")]
 use super::*;
 use rudder_engine::{
     protocol::{ObjectKind, ObjectRef, OwnerEpoch},
@@ -394,6 +393,7 @@ fn graph() -> (
     };
     (graph, selection, receipt)
 }
+#[cfg(target_os = "linux")]
 struct HttpFixture {
     url: String,
     stop: Arc<AtomicBool>,
@@ -404,6 +404,7 @@ struct HttpFixture {
     incomplete_connections: Arc<AtomicUsize>,
     rejected_routes: Arc<AtomicUsize>,
 }
+#[cfg(target_os = "linux")]
 impl HttpFixture {
     fn new(
         graph: Arc<Graph>,
@@ -533,6 +534,7 @@ impl HttpFixture {
         }
     }
 }
+#[cfg(target_os = "linux")]
 impl Drop for HttpFixture {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Release);
@@ -541,6 +543,7 @@ impl Drop for HttpFixture {
         }
     }
 }
+#[cfg(target_os = "linux")]
 fn runtime_reference(path: PathBuf) -> RuntimeFile {
     let mut file = File::open(&path).unwrap();
     let size_bytes = file.metadata().unwrap().len();
@@ -559,6 +562,7 @@ fn runtime_reference(path: PathBuf) -> RuntimeFile {
         size_bytes,
     }
 }
+#[cfg(target_os = "linux")]
 fn fixture_runtime(root: &Path) -> (RuntimeFile, RuntimeFile) {
     let repository = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     let output = std::process::Command::new("node")
@@ -621,6 +625,108 @@ fn context_spec(root: &Path) -> ExecutionSpec {
 #[cfg(target_os = "linux")]
 fn actual_source_factory_registers_real_session_and_broker_loss_invalidates_it_without_profile_hydration(
 ) {
+    actual_source_factory(0);
+}
+#[test]
+#[cfg(target_os = "linux")]
+fn actual_host_source_survives_guest_denial_and_fences_real_session_on_host_revocation() {
+    actual_source_factory(1);
+}
+#[test]
+#[cfg(target_os = "linux")]
+fn actual_host_client_expiry_within_outer_window_fences_real_session_stickily() {
+    actual_source_factory(2);
+}
+#[cfg(target_os = "linux")]
+struct TestHostPeer;
+#[cfg(target_os = "linux")]
+impl crate::source_authorizer::HostSourceIssuerPeer for TestHostPeer {
+    fn check_current(&self) -> Result<()> {
+        Ok(())
+    }
+    fn check_peer(&self, stream: &std::os::unix::net::UnixStream) -> Result<()> {
+        let mut peer: libc::ucred = unsafe { std::mem::zeroed() };
+        let mut size = std::mem::size_of_val(&peer) as libc::socklen_t;
+        ensure!(
+            unsafe {
+                libc::getsockopt(
+                    stream.as_raw_fd(),
+                    libc::SOL_SOCKET,
+                    libc::SO_PEERCRED,
+                    (&mut peer as *mut libc::ucred).cast(),
+                    &mut size,
+                )
+            } == 0
+                && peer.pid == std::process::id() as i32
+                && peer.uid == unsafe { libc::geteuid() },
+            "fixture peer differs"
+        );
+        Ok(())
+    }
+}
+#[cfg(target_os = "linux")]
+struct TestHostIssuer {
+    deny: AtomicBool,
+    expires: bool,
+}
+#[cfg(target_os = "linux")]
+impl crate::source_authorizer::HostSourceAuthority for TestHostIssuer {
+    fn authorize(
+        &self,
+        binding: &PartialBinding,
+    ) -> Result<rudder_engine::journal::HostSourceAuthorization> {
+        ensure!(!self.deny.load(Ordering::Acquire), "fixture host revoked");
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_millis() as i64;
+        Ok(rudder_engine::journal::HostSourceAuthorization {
+            identity: rudder_engine::journal::CapabilityIdentity {
+                project_id: binding.attempt.project_id.clone(),
+                principal: "host-fixture".into(),
+                run_id: binding.attempt.run_id.clone(),
+                run_epoch: binding.attempt.run_epoch,
+                owner_epoch: binding.attempt.owner.epoch,
+            },
+            validated_at_ms: now,
+            expires_at_ms: self.expires.then_some(now + 500),
+        })
+    }
+}
+// Model the production source monitor while the factory hashes pinned runtime
+// files and opens the real source. Cached grants are never extended locally.
+#[cfg(target_os = "linux")]
+struct HostRefresh {
+    stop: Arc<AtomicBool>,
+    worker: Option<std::thread::JoinHandle<()>>,
+}
+#[cfg(target_os = "linux")]
+impl HostRefresh {
+    fn start(authority: Arc<PartialAuthority>) -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
+        let stopping = stop.clone();
+        let worker = std::thread::spawn(move || {
+            while !stopping.load(Ordering::Acquire) {
+                if authority.validate(&authority.state.binding).is_err() {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(150));
+            }
+        });
+        Self {
+            stop,
+            worker: Some(worker),
+        }
+    }
+}
+#[cfg(target_os = "linux")]
+impl Drop for HostRefresh {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        self.worker.take().unwrap().join().unwrap();
+    }
+}
+#[cfg(target_os = "linux")]
+fn actual_source_factory(mode: u8) {
     use rudder_engine::vfs::{NodeKind, PartialCaptureBudget, PartialCaptureRequest};
     let base = temporary_in(if Path::new("/workspace").is_dir() {
         Path::new("/workspace")
@@ -660,7 +766,7 @@ fn actual_source_factory_registers_real_session_and_broker_loss_invalidates_it_w
     let tracker = Arc::new(SessionTracker(Mutex::new(None)));
     let clock = Arc::new(AtomicU64::new(1));
     let now = clock.clone();
-    let state = AuthorityState::new(
+    let mut state = AuthorityState::new(
         expected_binding(&selection).unwrap(),
         Arc::new(move || Ok(now.load(Ordering::Acquire) as u128)),
         &tracker,
@@ -670,11 +776,47 @@ fn actual_source_factory_registers_real_session_and_broker_loss_invalidates_it_w
         deny: AtomicBool::new(false),
         advance: Mutex::new(None),
     });
-    let authority = Arc::new(PartialAuthority {
+    let host_issuer = Arc::new(TestHostIssuer {
+        deny: AtomicBool::new(false),
+        expires: mode == 2,
+    });
+    let mut host_server = (mode != 0).then(|| {
+        crate::source_authorizer::SourceAuthorizerServer::bind(
+            &base.path().join("host"),
+            state.binding.clone(),
+            host_issuer.clone(),
+            crate::source_authorizer::Limits::default(),
+        )
+        .unwrap()
+    });
+    let host_client = host_server.as_ref().map(|server| {
+        Arc::new(
+            crate::source_authorizer::SourceAuthorizerClient::connect(
+                server.directory(),
+                state.binding.clone(),
+                Arc::new(TestHostPeer),
+            )
+            .unwrap(),
+        )
+    });
+    if let Some(host) = &host_client {
+        Arc::get_mut(&mut state).unwrap().host = Some(host.clone());
+    }
+    let ingress = SeparatedIngress {
         broker: broker.clone(),
+        source: state.clone(),
+        fenced: AtomicBool::new(false),
+    };
+    let source_broker: Arc<dyn BrokerAuthorization> = match &host_client {
+        Some(host) => host.clone(),
+        None => broker.clone(),
+    };
+    let authority = Arc::new(PartialAuthority {
+        broker: source_broker,
         state,
     });
     authority.validate(&authority.state.binding).unwrap();
+    let refresh = (mode != 0).then(|| HostRefresh::start(authority.clone()));
     let context = HostContext {
         format_version: 1,
         kind: KIND.into(),
@@ -752,9 +894,33 @@ fn actual_source_factory_registers_real_session_and_broker_loss_invalidates_it_w
         )
         .unwrap();
     let retained = workspace.manager().store().retention().unwrap().pins;
-    broker.deny.store(true, Ordering::Release);
-    assert!(authority.validate(&authority.state.binding).is_err());
+    drop(refresh);
+    if mode == 1 {
+        ingress.validate(&authority.state.binding).unwrap();
+        broker.deny.store(true, Ordering::Release);
+        assert!(ingress.validate(&authority.state.binding).is_err());
+        session.check_current().unwrap();
+        authority.validate(&authority.state.binding).unwrap();
+        broker.deny.store(false, Ordering::Release);
+        assert!(ingress.validate(&authority.state.binding).is_err());
+        session.check_current().unwrap();
+        host_issuer.deny.store(true, Ordering::Release);
+        assert!(authority.validate(&authority.state.binding).is_err());
+    } else if mode == 2 {
+        std::thread::sleep(Duration::from_millis(510));
+        // Outer mirror has not expired: only actual host-client expiry can fence.
+        assert!(authority.state.freshness.lock().unwrap().until.unwrap() > 1);
+        assert!(session.check_current().is_err());
+    } else {
+        broker.deny.store(true, Ordering::Release);
+        assert!(authority.validate(&authority.state.binding).is_err());
+    }
     assert!(session.check_current().is_err());
+    if let Some(host) = host_client {
+        assert!(host.check_current().is_err());
+        assert!(host.authorize(&authority.state.binding).is_err());
+        assert!(ingress.cancelled());
+    }
     assert!(workspace.view().dirty_cursor().is_err());
     assert_eq!(
         workspace.manager().store().retention().unwrap().pins,
@@ -776,6 +942,9 @@ fn actual_source_factory_registers_real_session_and_broker_loss_invalidates_it_w
         std::thread::sleep(Duration::from_millis(5));
     }
     assert!(source.stats().unwrap().child_exited);
+    if let Some(server) = &mut host_server {
+        server.await_closed(Duration::from_secs(2)).unwrap();
+    }
     // This establishes owned-child exit only, not a whole transport/thread drain.
 }
 
@@ -800,6 +969,60 @@ fn protected_source_context_rejects_unknown_duplicate_wrong_scope_http_and_unpro
     };
     let reference = write(canonical_json(&value).unwrap());
     read_context(&reference, &spec, &selection).unwrap();
+    let mut spec5 = context_spec(base.path());
+    spec5.format_version = 5;
+    assert!(read_host_context(&reference, &spec5, &selection).is_err());
+    assert!(read_context(&reference, &spec5, &selection).is_err());
+    let directory = base.path().join("host-authorizer");
+    private_directory(&directory).unwrap();
+    let mut v2 = value.clone();
+    v2["format_version"] = serde_json::json!(2);
+    v2["source_authorizer_directory"] = serde_json::json!(directory);
+    let reference2 = write(canonical_json(&v2).unwrap());
+    read_host_context(&reference2, &spec5, &selection).unwrap();
+    assert!(read_context(&reference2, &spec, &selection).is_err());
+    assert!(read_host_context(&reference2, &spec, &selection).is_err());
+    for change in 0..8 {
+        let mut bad = v2.clone();
+        match change {
+            0 => bad["extra"] = serde_json::json!(true),
+            1 => bad["format_version"] = serde_json::json!(1),
+            2 => {
+                bad.as_object_mut()
+                    .unwrap()
+                    .remove("source_authorizer_directory");
+            }
+            3 => bad["source_authorizer_directory"] = serde_json::json!(base.path().join("absent")),
+            4 => bad["source_authorizer_directory"] = bad["cache_root"].clone(),
+            5 => bad["source_authorizer_directory"] = serde_json::json!("/unprotected/host"),
+            6 => bad["source"]["base_url"] = serde_json::json!("http://127.0.0.1:1234"),
+            7 => bad["source"]["scope"]["tenant_id"] = serde_json::json!("other"),
+            _ => unreachable!(),
+        }
+        assert!(
+            read_host_context(&write(canonical_json(&bad).unwrap()), &spec5, &selection).is_err()
+        );
+    }
+    for mode in [0o755, 0o1700] {
+        fs::set_permissions(&directory, fs::Permissions::from_mode(mode)).unwrap();
+        assert!(
+            read_host_context(&write(canonical_json(&v2).unwrap()), &spec5, &selection).is_err()
+        );
+    }
+    fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).unwrap();
+    let linked = base.path().join("host-link");
+    std::os::unix::fs::symlink(&directory, &linked).unwrap();
+    let mut linked_context = v2.clone();
+    linked_context["source_authorizer_directory"] = serde_json::json!(linked);
+    assert!(read_host_context(
+        &write(canonical_json(&linked_context).unwrap()),
+        &spec5,
+        &selection
+    )
+    .is_err());
+    let canonical2 = String::from_utf8(canonical_json(&v2).unwrap()).unwrap();
+    let duplicate2 = format!("{{\"format_version\":2,{}", &canonical2[1..]);
+    assert!(read_host_context(&write(duplicate2.into_bytes()), &spec5, &selection).is_err());
     for change in 0..5 {
         let mut bad = value.clone();
         match change {
@@ -826,4 +1049,53 @@ fn protected_source_context_rejects_unknown_duplicate_wrong_scope_http_and_unpro
     let mut reference = write(canonical_json(&value).unwrap());
     reference.sha256 = "f".repeat(64);
     assert!(read_context(&reference, &spec, &selection).is_err());
+}
+
+// A one millisecond cached capability must not inherit the legacy three second
+// mirror. This clock is deterministic; actual-client/session coverage is above.
+#[test]
+fn host_cached_checks_gate_each_root_and_expiry_is_absorbing() {
+    struct ShortHost {
+        time: Arc<AtomicU64>,
+        retired: AtomicBool,
+    }
+    impl BrokerAuthorization for ShortHost {
+        fn authorize(&self, _: &PartialBinding) -> Result<()> {
+            self.check_current()
+        }
+        fn check_current(&self) -> Result<()> {
+            ensure!(
+                !self.retired.load(Ordering::Acquire)
+                    && self.time.load(Ordering::Acquire) < 1_000_001,
+                "short host expired"
+            );
+            Ok(())
+        }
+        fn invalidate(&self) {
+            self.retired.store(true, Ordering::Release);
+        }
+    }
+    let (legacy, _clock, tracker, _) = fixture_authority();
+    let time = Arc::new(AtomicU64::new(1));
+    let host = Arc::new(ShortHost {
+        time: time.clone(),
+        retired: AtomicBool::new(false),
+    });
+    let mut state = AuthorityState::new(legacy.state.binding.clone(), Arc::new(|| Ok(1)), &tracker);
+    Arc::get_mut(&mut state).unwrap().host = Some(host.clone());
+    let authority = PartialAuthority {
+        broker: host.clone(),
+        state: state.clone(),
+    };
+    authority.validate(&state.binding).unwrap();
+    let root = RootAuthority(state.clone());
+    root.validate(&state.binding.attempt, &state.binding.root)
+        .unwrap();
+    time.store(1_000_001, Ordering::Release);
+    assert!(root
+        .validate(&state.binding.attempt, &state.binding.root)
+        .is_err());
+    assert!(host.retired.load(Ordering::Acquire));
+    time.store(1, Ordering::Release);
+    assert!(authority.validate(&state.binding).is_err());
 }

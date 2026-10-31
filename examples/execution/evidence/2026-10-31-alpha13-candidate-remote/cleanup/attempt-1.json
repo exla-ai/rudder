@@ -1,0 +1,10 @@
+{
+  "formatVersion": 1,
+  "id": "7846d55c04d238",
+  "name": "rudder-alpha13-remotequal-757c095a",
+  "nonce": "757c095a-c4a3-420a-a4ca-c428d9c5f232",
+  "role": "alpha13-remote-execution-qualification",
+  "absentByIdNameNonce": true,
+  "independentInventoryAbsent": true,
+  "verifiedAt": "2026-10-31T02:23:51.365Z"
+}

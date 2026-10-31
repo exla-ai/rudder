@@ -1,0 +1,201 @@
+{
+  "baseRevision": "c04b4c632206068900df9717b51c4120516e268e",
+  "boot": {
+    "credentialEnvironmentFields": 0,
+    "fields": {
+      "CapAmb": "0000000000000000",
+      "CapBnd": "0000000000000000",
+      "CapEff": "0000000000000000",
+      "CapInh": "0000000000000000",
+      "CapPrm": "0000000000000000",
+      "Gid": "1500\t1500\t1500\t1500",
+      "Groups": "",
+      "NoNewPrivs": "1",
+      "Uid": "1500\t1500\t1500\t1500"
+    },
+    "gid": 1500,
+    "kernel": "6.12.114-fly",
+    "node": "v22.23.4",
+    "uid": 1500,
+    "workerPackage": {
+      "gid": 0,
+      "mode": 436,
+      "nlink": 1,
+      "sha256": "8b326745d1206f7ae5d744e1720bd17feb89c17b904dc7ed25ded50a2ef95304",
+      "size": 2889,
+      "uid": 0
+    },
+    "workerVersion": "4.0.0-alpha.12"
+  },
+  "capture": {
+    "artifact": "partial_remote",
+    "capture_consistency": "live_best_effort",
+    "capture_format": 1,
+    "capture_retention": {
+      "format_version": 1,
+      "local": {
+        "format_version": 1,
+        "generation": 2,
+        "object_count": 5,
+        "pin_id": "vfs:partial:8c46d90b-9e60-49a6-8c99-04d210a781b8:5b3c722b-0c14-4abc-b670-9533ffcb2b48",
+        "set_digest": "95df328c0804412a9c57046f90a3da200c6d51c63786baf7d3fbc9bca484c816",
+        "staging_id": "b20f5df3-743c-420d-8d15-e4aa6841390a",
+        "total_bytes": 3145
+      },
+      "plan": {
+        "algorithm": "sha256",
+        "digest": "823d422c6901fe7d47fb94e1b431b9e01f464662d3c64b205dc6630a420e384c",
+        "kind": "blob",
+        "size_bytes": 1888
+      }
+    },
+    "complete_pins": 0,
+    "drain_bytes_sha256": "becc26d2f31bd3268f2df97535e2ec9e5fffa926b207e08fe4ba17b77db8030d",
+    "drain_record": {
+      "algorithm": "sha256",
+      "digest": "becc26d2f31bd3268f2df97535e2ec9e5fffa926b207e08fe4ba17b77db8030d",
+      "kind": "blob",
+      "size_bytes": 1250
+    },
+    "evidence_retention": {
+      "format_version": 1,
+      "generation": 1,
+      "object_count": 2,
+      "pin_id": "execution:evidence:780cc4d8-b718-4e44-9a3d-5f1bec42f43b:be1b87ac-8634-4be4-aa22-67fa92cd7f9f",
+      "set_digest": "6d5db8f056598dc3e8a37bed54c7c230d806ff1fc9be0dbaef29acd5c6eb99c3",
+      "staging_id": "a6d3327e-2996-42c1-8c3a-6d92704faa57",
+      "total_bytes": 1703
+    },
+    "freeze_bytes_sha256": "773c9b753036cc6715289b3d1aa997d3352132fa3da78a25a8d2e36c89bcfa85",
+    "freeze_intent": {
+      "algorithm": "sha256",
+      "digest": "773c9b753036cc6715289b3d1aa997d3352132fa3da78a25a8d2e36c89bcfa85",
+      "kind": "blob",
+      "size_bytes": 453
+    },
+    "gc": {
+      "blocked_by_staging": false,
+      "generation": 7,
+      "removed_bytes": 0,
+      "removed_objects": 0,
+      "retained_objects": 7
+    },
+    "local_objects": 5,
+    "new_file_bytes": 52,
+    "new_file_sha256": "77a0c68cfb244eb86395bbc3d79007f7b9e641ae48120a155b8ecc5b5c2c1075",
+    "partial_directory": {
+      "algorithm": "sha256",
+      "digest": "a342e3d9b30ca10e71f0a43d7f15d800398c4048b11c490c7fc019e2cafe78bf",
+      "kind": "directory",
+      "size_bytes": 234
+    },
+    "producer_objects": 4,
+    "record_format": 2,
+    "remote_boundaries": 2,
+    "stop_nonce": "5b3c722b-0c14-4abc-b670-9533ffcb2b48"
+  },
+  "controllerElapsedMs": 70429,
+  "controllerVerifiedAt": "2026-10-31T02:44:12.961Z",
+  "counts": {
+    "failed": 0,
+    "historicalReopensPassed": 1,
+    "physicalRemoteCasesPassed": 1,
+    "qualified": 1,
+    "unsupported": 0
+  },
+  "formatVersion": 1,
+  "guest": {
+    "interfaces": [
+      "lo"
+    ],
+    "marker": {
+      "descendant_started": true,
+      "entries": 100101,
+      "interfaces": [
+        "lo"
+      ],
+      "logical_bytes": 218103808,
+      "mmap_open": true,
+      "no_new_privileges": true,
+      "open_fd": true,
+      "private_paths_absent": true,
+      "request_id": "623261b7-4309-437a-87f4-9041af2d9e46",
+      "zero_capabilities": true
+    },
+    "noNewPrivileges": true,
+    "uid": 1500,
+    "zeroFiveCapabilitySets": true
+  },
+  "guestProofSha256": "01652b2bffc7c6415afb6cef6292e0718d55455da3367558774ef266b8472752",
+  "historicalRetry": {
+    "current_shutdown_authority": false,
+    "factory_calls": 1,
+    "new_source": false,
+    "outcome": "historical",
+    "stderr": {
+      "bytes": 0,
+      "retained_bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "truncated": false
+    },
+    "stdout": {
+      "bytes": 163,
+      "retained_bytes": 163,
+      "sha256": "72b0d7e4c5ddb59c62ed9b5ddc5406018152278fcb1cf9be7d38359d1b505c1b",
+      "truncated": false
+    }
+  },
+  "imageDigest": "sha256:bfabbd1adb158a90556b4070dccaf9979ad66fe307a4b240feab8a8f67702293",
+  "kind": "source-bound-remote-execution-candidate",
+  "parentNamespacesAndStatusUnchanged": true,
+  "physicalChecks": {
+    "backend_ready_authenticated": true,
+    "guest_marker_checked": true,
+    "mmap_and_open_fd_and_descendant": true,
+    "shutdown_typed_and_authenticated": true
+  },
+  "protocols": {
+    "artifact": "partial_remote",
+    "capture": 1,
+    "captureConsistency": "live_best_effort",
+    "executionSpec": 4,
+    "managedBinding": 3,
+    "namespaceSchema": 5,
+    "networkReadiness": 3,
+    "record": 2
+  },
+  "qualifiedLimits": {
+    "acceptanceQualified": false,
+    "actualBrokerGraceQualified": false,
+    "productionWired": false,
+    "providerUploadQualified": false,
+    "ptyQualified": false,
+    "supervisorModuleEvaluated": false
+  },
+  "qualifierElapsedMs": 21262,
+  "qualifierSha256": "ac6c32b3b0259a47171891ad11845b2153b02e57f213cf29e77d6a698c70a9a2",
+  "recordSha256": "1d90f518085f05f02fc4988707b943490ef190f82ab303ecd6a310e4568fe0a4",
+  "sourceEnvelopeSha256": "7a7f663e89e2b846483399921ed01a6dc788760cc741b665f78bdd7c117ac0e1",
+  "sourceFixture": {
+    "chunkBytes": 4194304,
+    "eachInheritedFileLogicalBytes": 218103808,
+    "entries": 100101,
+    "repeatedChunkRefs": 52,
+    "sharedImmutableFileDescriptor": true,
+    "syntheticGraphBytes": 28728388,
+    "syntheticGraphObjects": 1123
+  },
+  "sourceKind": "candidate",
+  "sourceReads": {
+    "accepted_seed_requests": 0,
+    "active_fetches": 0,
+    "fetch_calls": 1120,
+    "fetched_bytes": 24533714,
+    "file_metadata_requests": 1,
+    "maximum_active_fetches": 1,
+    "root_admissions": 1,
+    "unchanged_payload_requests": 0
+  },
+  "status": "passed",
+  "utc": "2026-10-31T02:44:05Z"
+}

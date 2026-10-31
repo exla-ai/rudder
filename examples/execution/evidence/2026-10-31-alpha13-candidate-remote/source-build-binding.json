@@ -1,0 +1,127 @@
+{
+  "archiveMembers": 1683,
+  "archiveSha256": "20b6e41f8facceb9e97572f119b39a8970baf6aac6285f65ef20d84d6e3d66f1",
+  "baseRevision": "c04b4c632206068900df9717b51c4120516e268e",
+  "binary": {
+    "included": false,
+    "name": "rudder-remote-execution-qualifier",
+    "sha256": "ac6c32b3b0259a47171891ad11845b2153b02e57f213cf29e77d6a698c70a9a2",
+    "size": 7383984
+  },
+  "build": {
+    "command": [
+      "cargo",
+      "build",
+      "--release",
+      "--workspace",
+      "--locked",
+      "--features",
+      "rudder-vcs-bridge/cli",
+      "--bin",
+      "rudder-remote-execution-qualifier"
+    ],
+    "exitCode": 0,
+    "finishedAt": "2026-10-31T02:20:26.231367+00:00",
+    "guardTerminated": false,
+    "minimumFreeBytes": 11362365440,
+    "startedAt": "2026-10-31T02:17:53.993413+00:00"
+  },
+  "formatVersion": 1,
+  "image": {
+    "baseWorkerDigest": "sha256:2ebaf5f8124bbbe1b51850e6dcf60ccd6a6841d0bde92a5bb3afe77db1ba2420",
+    "digest": "sha256:bfabbd1adb158a90556b4070dccaf9979ad66fe307a4b240feab8a8f67702293",
+    "directBaseDigest": "sha256:2ebaf5f8124bbbe1b51850e6dcf60ccd6a6841d0bde92a5bb3afe77db1ba2420",
+    "exitCode": 0,
+    "finishedAt": "2026-10-31T02:21:53.217512+00:00",
+    "image": "registry.fly.io/rudder-workers-exla:4.0.0-alpha.13-remote-candidate-38479d6d",
+    "inputs": {
+      "Dockerfile": {
+        "sha256": "4ef6cc429d73b2f129e33efcd9a6c5e00de33fa068e0f2c0a52afa00af560eae",
+        "size": 427
+      },
+      "fly.toml": {
+        "sha256": "d96efec164ce4641478352977921d96e46ea6630dfa94863c6e1b8ab2874f255",
+        "size": 80
+      },
+      "remote-execution-provenance.json": {
+        "sha256": "76d5044b9dcd50e9786702f6f1ee6e6cbd1262ef70baf70e1c6f0e3f38753a4d",
+        "size": 641
+      },
+      "rudder-remote-execution-qualifier": {
+        "sha256": "ac6c32b3b0259a47171891ad11845b2153b02e57f213cf29e77d6a698c70a9a2",
+        "size": 7383984
+      }
+    },
+    "pushed": true,
+    "startedAt": "2026-10-31T02:21:09.227836+00:00"
+  },
+  "kind": "source-bound-remote-execution-candidate",
+  "limitations": [
+    "The full envelope map checksum was recomputed; only the two selected Rust source files were compared independently to Git.",
+    "The reported archive SHA is retained build metadata; archive bytes were not reread in this packaging step.",
+    "Pinned Dockerfile, image build receipt, resolved machine digest, root-owned provenance and actual binary SHA form the retained build binding; metadata alone does not prove a new build.",
+    "This package is a candidate qualification record, with proposed version13 and actual worker/package version12. No tagged alpha13 delivery or production activation is asserted."
+  ],
+  "packageVersion": "4.0.0-alpha.12",
+  "proposedVersion": "4.0.0-alpha.13",
+  "rootImageProbe": {
+    "formatVersion": 1,
+    "nonce": "d6673623-124e-4fbd-8c3c-953707fdcc1e",
+    "packageMetadata": {
+      "gid": 0,
+      "mode": 436,
+      "nlink": 1,
+      "sha256": "8b326745d1206f7ae5d744e1720bd17feb89c17b904dc7ed25ded50a2ef95304",
+      "size": 2889,
+      "uid": 0
+    },
+    "provenance": {
+      "baseRevision": "c04b4c632206068900df9717b51c4120516e268e",
+      "baseWorkerDigest": "sha256:2ebaf5f8124bbbe1b51850e6dcf60ccd6a6841d0bde92a5bb3afe77db1ba2420",
+      "directBaseDigest": "sha256:2ebaf5f8124bbbe1b51850e6dcf60ccd6a6841d0bde92a5bb3afe77db1ba2420",
+      "formatVersion": 1,
+      "kind": "alpha13-remote-execution-qualification",
+      "proposedVersion": "4.0.0-alpha.13",
+      "qualifierSha256": "ac6c32b3b0259a47171891ad11845b2153b02e57f213cf29e77d6a698c70a9a2",
+      "revision": null,
+      "sourceEnvelopeSha256": "7a7f663e89e2b846483399921ed01a6dc788760cc741b665f78bdd7c117ac0e1",
+      "sourceKind": "candidate",
+      "workerVersion": "4.0.0-alpha.12"
+    },
+    "provenanceSha256": "76d5044b9dcd50e9786702f6f1ee6e6cbd1262ef70baf70e1c6f0e3f38753a4d",
+    "qualifierSha256": "ac6c32b3b0259a47171891ad11845b2153b02e57f213cf29e77d6a698c70a9a2",
+    "status": "passed",
+    "uid": 0
+  },
+  "sourceBytes": 50335705,
+  "sourceEnvelopeEncoding": "sha256 of sorted compact JSON path-to-sha256 map",
+  "sourceEnvelopeSha256": "7a7f663e89e2b846483399921ed01a6dc788760cc741b665f78bdd7c117ac0e1",
+  "sourceFiles": 1446,
+  "sourceKind": "candidate",
+  "sourceManifests": {
+    "candidate-image-inputs.json": "f9173a51424ba167104babf9143739ca4c81123524614d6e853eddd68b6a2677",
+    "candidate-image.json": "d0181450c7a38543dc4b8e3a88030cfce1a42c77fcb9575655941c1bc02e6829",
+    "candidate-qualifier-build.json": "872b4c342724581f1494a5c236f8379f59759b53070a1cbac206b61a420a4002",
+    "candidate-source.json": "af9297ef2185b6dae306fd8084b0eb4b09c4ea017bc0bedc7235af283df9b189"
+  },
+  "validation": {
+    "archiveBytesIndependentlyRead": false,
+    "fullEnvelopeMapHashRecomputed": true,
+    "fullSourceTreeRewalked": false,
+    "selectedFilesComparedToGitBaseRevision": [
+      {
+        "bytes": 65639,
+        "gitBlobAtBaseRevisionMatches": true,
+        "repositoryPath": "engine/src/execution/remote_qualification.rs",
+        "sha256": "a6c6f6ed51338cfd51d15c92866917afe537a2006c229aba64b0551a6c11459a"
+      },
+      {
+        "bytes": 436,
+        "gitBlobAtBaseRevisionMatches": true,
+        "repositoryPath": "engine/src/bin/remote_execution_qualifier.rs",
+        "sha256": "552f8112338bef3726e473f7a0b38428d3986e10275884eb4c69aa91178580ee"
+      }
+    ]
+  },
+  "workerPackageSha256": "8b326745d1206f7ae5d744e1720bd17feb89c17b904dc7ed25ded50a2ef95304"
+}

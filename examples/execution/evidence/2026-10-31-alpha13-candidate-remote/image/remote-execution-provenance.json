@@ -1,0 +1,13 @@
+{
+  "formatVersion": 1,
+  "kind": "alpha13-remote-execution-qualification",
+  "proposedVersion": "4.0.0-alpha.13",
+  "workerVersion": "4.0.0-alpha.12",
+  "sourceKind": "candidate",
+  "baseRevision": "c04b4c632206068900df9717b51c4120516e268e",
+  "revision": null,
+  "sourceEnvelopeSha256": "7a7f663e89e2b846483399921ed01a6dc788760cc741b665f78bdd7c117ac0e1",
+  "baseWorkerDigest": "sha256:2ebaf5f8124bbbe1b51850e6dcf60ccd6a6841d0bde92a5bb3afe77db1ba2420",
+  "directBaseDigest": "sha256:2ebaf5f8124bbbe1b51850e6dcf60ccd6a6841d0bde92a5bb3afe77db1ba2420",
+  "qualifierSha256": "ac6c32b3b0259a47171891ad11845b2153b02e57f213cf29e77d6a698c70a9a2"
+}

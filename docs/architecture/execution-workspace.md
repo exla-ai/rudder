@@ -82,5 +82,9 @@ The alpha.13 candidate wires them into explicit offline Spec4. The parent
 corroborates received NSFS descriptors against its owned wrapper pidfd before
 allowing the PID fork, then verifies the actual backend namespaces and zero
 capabilities before managed readiness. The witness remains owned through
-finalization. Physical qualification is pending. DNS, proxy/packet transport,
-connected provider inference and general/default activation remain open.
+finalization. One actual UID1500 offline source-only case passed on Fly from the
+frozen alpha.13 candidate, including open FD/mmap/descendant shutdown, partial
+capture retention and historical reopen. Its source is synthetic and it uses
+owned pipes. See [exact proof and boundaries](../../examples/execution/evidence/2026-10-31-alpha13-candidate-remote/README.md).
+DNS, proxy/packet transport, connected provider inference, real broker grace,
+replicated checkpoint publication and general/default activation remain open.

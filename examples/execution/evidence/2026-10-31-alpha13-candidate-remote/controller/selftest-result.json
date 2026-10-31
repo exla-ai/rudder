@@ -1,0 +1,40 @@
+{
+  "controllerSha256": "9c3f708ad249a1edbd6c5d29ecf242face54b58a38664107ad3336b44beed01e",
+  "note": "Mock parser/ownership/diagnostic tests plus real read-only local/proc checks; independent from the actual Fly guest case.",
+  "result": {
+    "actualRemoteGuestQualification": false,
+    "actualSerializedHeldFdStatfsWitnesses": 3,
+    "actualSerializedProcStatusPassed": true,
+    "atomicGateNoReplacement": true,
+    "binaryAndProvenancePinsUnchanged": true,
+    "candidateIdentityHonest": true,
+    "controllerMainRunExecuted": false,
+    "dataUrlFramesCompactedBeforePrivateCap": true,
+    "defaultAndDescribeNoRun": true,
+    "diagnosticFailureStillRequiresCleanup": 3,
+    "directBaseVsWorkerAncestrySeparate": true,
+    "flyNormalizedTagDigestAccepted": true,
+    "guestNonzeroExitClassified": true,
+    "kind": "alpha13-remote-execution-controller-selftest",
+    "mockedPreloadScenarios": 32,
+    "ownedExecPipesPersistBeforeParse": true,
+    "ownershipMismatchRejections": 26,
+    "packageFixtureRejections": 11,
+    "packageMode0664RootGroupExactHashPasses": true,
+    "positiveMockCounts": {
+      "failed": 0,
+      "historicalReopensPassed": 1,
+      "physicalRemoteCasesPassed": 1,
+      "qualified": 1,
+      "unsupported": 0
+    },
+    "privateDiagnosticReaderScenarios": 13,
+    "privateFailureNotExposed": true,
+    "proofMismatchRejections": 45,
+    "providerCalls": 0,
+    "realTabNewlineFixtures": 4,
+    "wrongExpectedDigestStillOwned": true
+  },
+  "selftestSha256": "7c14b1ab4a7b7c50fa80c98db6e3b93fb80bd4709643c3314796bca8174e15b8",
+  "verifiedAt": "2026-10-31T02:49:54.132756+00:00"
+}

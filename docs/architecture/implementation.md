@@ -91,8 +91,10 @@ preflight passed on both actual Mac platforms and Linux, and publication's
 JavaScript checks passed. Native tests then found one more Mac path fixture:
 the journal getter returns canonical `/private/var`, while the test expected
 lexical `/var`. The next tag canonicalizes only that expected temporary path.
-Both npm publish steps were skipped. Full Rust and Node validation under a
-symlinked TMPDIR remains a gate for the next candidate.
+Both npm publish steps were skipped. The alpha.13 candidate has since passed
+the affected full Rust targets under a symlinked TMPDIR, 712 JavaScript tests
+and all 59 terminal journeys against its newly built production pair. Actual macOS CI,
+registry availability and fresh installation remain separate release gates.
 
 All three alpha.11 native artifacts and separate Mac/iOS and TUI CI passed.
 The publication job failed four macOS board fixtures before either npm publish
@@ -156,8 +158,29 @@ units, 4 handoff and 7 RPC integrations passed; partial RPC/journal checks passe
 18 cases, Native source factory 9 cases and broker 16 cases (one existing ignored
 exporter). Corrected test-only file modes, missing imports, temporary-directory
 helpers and HTTP fixture routing retain their original failure logs. No product
-authorization checks were weakened. Full test/build and actual offline guest
-qualification remain the candidate's release gates.
+authorization checks were weakened. Aggregate Rust coverage now passes 1,540
+unique tests with 17 existing ignored cases. The original full commands found
+two test-only timing/path assumptions; controlled corrections and full affected
+target reruns pass. This is composed coverage, not one successful full-workspace
+command. Production TS/board and the paired native build pass, along with 712
+JavaScript tests (nine optional skips) and all 59 real terminal journeys. These
+checks use a symlinked TMPDIR. [Local check identities and coverage](../../examples/execution/evidence/2026-10-31-alpha13-foundations/local-checks.json)
+remain separate from tagged CI and delivery.
+
+One actual offline remote guest passed on Fly at `2026-10-31T02:44:05Z`, from
+the frozen candidate `c04b4c632206068900df9717b51c4120516e268e`. It scanned
+100,101 names, statted a shared 208 MiB logical File, kept a changed file open
+and mmap-held in a descendant, then returned the authenticated partial Record2
+after real process/RPC/FUSE drain. No unchanged payload or accepted seed was
+fetched. Five capture objects and two evidence objects survived GC; complete
+local pins remained zero. A second helper returned historical data without
+another factory or current shutdown authority. The caller's namespace/status
+witnesses stayed unchanged. All four owned canaries, including three earlier
+controller fixture failures, were independently absent at
+`2026-10-31T02:46:57Z`; the active home's instance/image stayed unchanged.
+See [candidate source, image, exact proof and limitations](../../examples/execution/evidence/2026-10-31-alpha13-candidate-remote/README.md).
+This derived image uses the stock alpha.12 worker plus the pinned candidate
+qualifier. It is not tagged alpha.13 delivery or a build/agent-start benchmark.
 
 Current composition:
 

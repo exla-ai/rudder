@@ -1,0 +1,201 @@
+{
+  "formatVersion": 1,
+  "version": "4.0.0-alpha.13",
+  "status": "local-candidate-checks-passed",
+  "sourceRevision": "f3a0df9be3949576ffa8895b15cf3bcc4693a495",
+  "runtimeSourceRevision": "c04b4c632206068900df9717b51c4120516e268e",
+  "recordedAt": "2026-10-31T03:01:56.380742+00:00",
+  "rust": {
+    "formatVersion": 1,
+    "kind": "alpha13-local-rust-composed-coverage",
+    "verifiedAt": "2026-10-31T02:53:14.674075+00:00",
+    "sourceRevision": "f3a0df9be3949576ffa8895b15cf3bcc4693a495",
+    "runtimeSourceRevision": "c04b4c632206068900df9717b51c4120516e268e",
+    "onlyChangesSincePhysicalCandidate": {
+      "engine/tests/remote_cache.rs": "980c287319cfdb000786ed34494783416ed8ddd7dcad13b1806a4f2afe87f92c",
+      "native/src/app_tests.rs": "7421355a716e3ebd7dc7bfc5ca0d38b327af509204780b1069afc1f1d728d03e"
+    },
+    "oneFullCommandPassed": false,
+    "coverage": {
+      "engine": {
+        "passed": 465,
+        "ignored": 5,
+        "source": "full-rust-02.log; all engine targets passed before Native fixture failure"
+      },
+      "native": {
+        "passed": 1042,
+        "ignored": 12,
+        "source": "rudder-alpha13-codex-cwd-full-01.log; actual full binary and library after canonical cwd fixture correction"
+      },
+      "bridgeAndNativeTerminalIntegration": {
+        "passed": 33,
+        "ignored": 0,
+        "source": "rudder-alpha13-bridge-remaining-02.log; all8 bridge integration suites, buddy bin and Native term_colors_pane"
+      },
+      "workspaceLibrariesAndDocs": {
+        "passed": 100,
+        "ignored": 0,
+        "note": "Duplicate engine/native library coverage;0 bridge unit tests and0 doctests"
+      }
+    },
+    "uniquePassed": 1540,
+    "uniqueIgnored": 17,
+    "logs": [
+      {
+        "log": "full-rust-02.log",
+        "sha256": "7ca108c4aba8aaca265061d3fc0795177d72a8f12962b221498c0cad0e7a128d",
+        "passed": 1506,
+        "failed": 1,
+        "ignored": 17,
+        "suites": 39
+      },
+      {
+        "log": "rudder-alpha13-codex-cwd-full-01.log",
+        "sha256": "fd1bfbcb6e7e1fb1897f3a1cae4468f6b57640470f22ac20d66813396a169e61",
+        "passed": 1113,
+        "failed": 0,
+        "ignored": 12,
+        "suites": 4
+      },
+      {
+        "log": "rudder-alpha13-bridge-remaining-02.log",
+        "sha256": "85ec23fb6090976b07a62677e7edd498467da47dc7295d91b8c78171bc2f4e7b",
+        "passed": 33,
+        "failed": 0,
+        "ignored": 0,
+        "suites": 10
+      },
+      {
+        "log": "rudder-alpha13-remaining-libs.log",
+        "sha256": "bd82f22b3b560240c49e9e83b0cec4c1e50d1c90ee76952d74f08bdb9a60984c",
+        "passed": 100,
+        "failed": 0,
+        "ignored": 0,
+        "suites": 3
+      },
+      {
+        "log": "rudder-alpha13-remaining-docs.log",
+        "sha256": "a2addc29b120e697702e2a62e264de217a901d8aa2d5159edab2d8430c20fa87",
+        "passed": 0,
+        "failed": 0,
+        "ignored": 0,
+        "suites": 3
+      }
+    ],
+    "environment": {
+      "TMPDIR": "/workspace/rudder-alpha13-full-tmp-alias",
+      "physicalTMPDIR": "/workspace/rudder-alpha13-full-tmp",
+      "CARGO_INCREMENTAL": "0",
+      "CARGO_BUILD_JOBS": "2",
+      "features": "rudder-vcs-bridge/cli"
+    },
+    "limitations": [
+      "Aggregate coverage across exact focused/full-target commands, not one terminal0 workspace command.",
+      "Original full cache/Native fixture failures retained separately; the two corrections are test-only.",
+      "The first standalone bridge invocation was interrupted by disk guard before tests; corrected workspace-feature invocation passed.",
+      "An invalid combined --lib --doc invocation performed no tests; separate commands passed.",
+      "Actual Darwin qualification and npm publication require new tagged CI."
+    ]
+  },
+  "productionBuild": {
+    "startedAt": "2026-10-31T02:50:38.576288+00:00",
+    "finishedAt": "2026-10-31T02:58:39.800251+00:00",
+    "command": [
+      "npm",
+      "run",
+      "build"
+    ],
+    "exitCode": 0,
+    "minimumObservedFreeBytes": 6546849792,
+    "diskGuardGiB": 3.25,
+    "stoppedForDiskBudget": false,
+    "scope": "Full current candidate production TS/board and paired native Cargo build before version-only tag commit"
+  },
+  "productionPair": {
+    "formatVersion": 1,
+    "sourceRevision": "f3a0df9be3949576ffa8895b15cf3bcc4693a495",
+    "builtAt": "2026-10-31T02:59:19.450018+00:00",
+    "files": {
+      "target/release/rudder-native": {
+        "sha256": "51beba34fb26e78fd8296c6d58cc25eb3e5e74a24f41282afa5e296918cf6bec",
+        "bytes": 26541320
+      },
+      "target/release/rudder-jj": {
+        "sha256": "01aaf98c3290cfb151b1e02031356bc223dc0d475c28b6e3b03d08fae56a103f",
+        "bytes": 30910560
+      },
+      "dist/native/linux-x64/rudder-native": {
+        "sha256": "51beba34fb26e78fd8296c6d58cc25eb3e5e74a24f41282afa5e296918cf6bec",
+        "bytes": 26541320
+      },
+      "dist/native/linux-x64/rudder-jj": {
+        "sha256": "01aaf98c3290cfb151b1e02031356bc223dc0d475c28b6e3b03d08fae56a103f",
+        "bytes": 30910560
+      }
+    }
+  },
+  "node": {
+    "startedAt": "2026-10-31T02:58:59.896670+00:00",
+    "finishedAt": "2026-10-31T03:01:21.954376+00:00",
+    "command": [
+      "npm",
+      "test"
+    ],
+    "exitCode": 0,
+    "minimumObservedFreeBytes": 6320865280,
+    "diskGuardGiB": 3.25,
+    "stoppedForDiskBudget": false,
+    "scope": "Full current Node suite with newly built Native/buddy pair",
+    "passed": 712,
+    "optionalSkipped": 9,
+    "failed": 0,
+    "logSha256": "73d8e9df09c807e22e47899e5c0bded8c63c7a19fb88aa4ed52d8d3f202b1a82"
+  },
+  "terminal": {
+    "startedAt": "2026-10-31T02:59:17.832372+00:00",
+    "finishedAt": "2026-10-31T03:00:32.871265+00:00",
+    "command": [
+      "npm",
+      "run",
+      "test:tui"
+    ],
+    "exitCode": 0,
+    "minimumObservedFreeBytes": 6325551104,
+    "diskGuardGiB": 3.25,
+    "stoppedForDiskBudget": false,
+    "scope": "Real terminal journeys using newly built Native/buddy pair",
+    "passed": 59,
+    "failed": 0,
+    "skipped": 0,
+    "logSha256": "f39ceb68544b7cfbe0a66ce9f19c2e645f1ab9970780553f0af6ad29b1bfcf2d"
+  },
+  "cloudBuild": {
+    "passed": true,
+    "sourceRevision": "c04b4c632206068900df9717b51c4120516e268e",
+    "logSha256": "2cfc37097f4576d5e7a4f98ca1acfd34b6e64ec4258d6ecb87df02ce30814a87"
+  },
+  "independentCandidateCleanup": {
+    "formatVersion": 1,
+    "kind": "alpha13-candidate-independent-cleanup",
+    "verifiedAt": "2026-10-31T02:46:57.366161+00:00",
+    "ownedCanariesAbsent": [
+      "7846d55c04d238",
+      "8051d1c6e416d8",
+      "83974dc7e1e098",
+      "d8d050eb517248"
+    ],
+    "home": {
+      "id": "8edd225a7d0378",
+      "state": "started",
+      "instance_id": "01M670MG4A8E0DWE9GA1C0PQ92"
+    },
+    "homeDigest": "sha256:404f46396aca77324d9b53c55d2824a5401af56ba5362d0bdae67e16108fc245",
+    "inventorySha256": "3104288a47887799f728e363a8bd05813a7fd2b21b989b1246067058463b9e11"
+  },
+  "limits": [
+    "No tagged CI, registry availability, fresh installation or new Cloud rollout is claimed by these local checks.",
+    "Rust total is composed across exact target reruns after two test-only fixes; it is not one successful full-workspace command.",
+    "Actual offline Fly guest evidence is linked separately; it is a candidate qualifier on stock alpha12, not default production activation.",
+    "No completed-build, fork-latency or agent-start performance improvement is inferred from correctness checks."
+  ]
+}

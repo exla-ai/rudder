@@ -1,0 +1,88 @@
+{
+  "formatVersion": 1,
+  "inputs": {
+    "candidate-image-inputs.json": {
+      "bytes": 1270,
+      "sha256": "f9173a51424ba167104babf9143739ca4c81123524614d6e853eddd68b6a2677"
+    },
+    "candidate-image.json": {
+      "bytes": 1444,
+      "sha256": "d0181450c7a38543dc4b8e3a88030cfce1a42c77fcb9575655941c1bc02e6829"
+    },
+    "candidate-image/Dockerfile": {
+      "bytes": 427,
+      "sha256": "4ef6cc429d73b2f129e33efcd9a6c5e00de33fa068e0f2c0a52afa00af560eae"
+    },
+    "candidate-image/remote-execution-provenance.json": {
+      "bytes": 641,
+      "sha256": "76d5044b9dcd50e9786702f6f1ee6e6cbd1262ef70baf70e1c6f0e3f38753a4d"
+    },
+    "candidate-qualifier-build.json": {
+      "bytes": 891,
+      "sha256": "872b4c342724581f1494a5c236f8379f59759b53070a1cbac206b61a420a4002"
+    },
+    "candidate-source.json": {
+      "bytes": 190420,
+      "sha256": "af9297ef2185b6dae306fd8084b0eb4b09c4ea017bc0bedc7235af283df9b189"
+    },
+    "qualify-remote-execution.mjs": {
+      "bytes": 60585,
+      "sha256": "9c3f708ad249a1edbd6c5d29ecf242face54b58a38664107ad3336b44beed01e"
+    },
+    "remote-execution-4.0.0-alpha.13-757c095a-c4a3-420a-a4ca-c428d9c5f232/cleanup.json": {
+      "bytes": 315,
+      "sha256": "f17a17b2877a78f9bc1731517fda37e8c92a55ae4967f105e071aa604be57a01"
+    },
+    "remote-execution-4.0.0-alpha.13-757c095a-c4a3-420a-a4ca-c428d9c5f232/report.json": {
+      "bytes": 6684,
+      "sha256": "7f387e6a8526d3a94febdefeb475cbb5ce6d61a8d4898eaf980d0bcde715d97e"
+    },
+    "remote-execution-4.0.0-alpha.13-7e8b8676-5635-4e38-a8d0-efd1e93e707f/cleanup.json": {
+      "bytes": 315,
+      "sha256": "2bebc73a4d35aeaa89bc37905e8bc2cb7e66e633eadfdd5784e5b84f6c495131"
+    },
+    "remote-execution-4.0.0-alpha.13-7e8b8676-5635-4e38-a8d0-efd1e93e707f/report.json": {
+      "bytes": 15984,
+      "sha256": "e7d0960a5d5dfddc2dca239cd34e3eeea361fce4da5c0481294ac70cd811b884"
+    },
+    "remote-execution-4.0.0-alpha.13-b4295b18-2bb3-4f7f-80d7-0e472945c285/cleanup.json": {
+      "bytes": 315,
+      "sha256": "1332aacbe865532f2b442885d03963f59502fb29fb7d16092caf228f78315d31"
+    },
+    "remote-execution-4.0.0-alpha.13-b4295b18-2bb3-4f7f-80d7-0e472945c285/report.json": {
+      "bytes": 11329,
+      "sha256": "b4227bc7154ed88e045ba4169527ae36d3a2917758060348088bc1bcaac60a58"
+    },
+    "remote-execution-4.0.0-alpha.13-d6673623-124e-4fbd-8c3c-953707fdcc1e/cleanup.json": {
+      "bytes": 315,
+      "sha256": "a0a7e9a21af1426db03f548472c5eaae6a1b8043ad46389fb86af702faac4cab"
+    },
+    "remote-execution-4.0.0-alpha.13-d6673623-124e-4fbd-8c3c-953707fdcc1e/guest-proof.json": {
+      "bytes": 9809,
+      "sha256": "01652b2bffc7c6415afb6cef6292e0718d55455da3367558774ef266b8472752"
+    },
+    "remote-execution-4.0.0-alpha.13-d6673623-124e-4fbd-8c3c-953707fdcc1e/report.json": {
+      "bytes": 22907,
+      "sha256": "ab16284e2581c8dc18eac7315987fd3d9da7d50dfe6df9d2eb90f778e8cb3ad9"
+    },
+    "selftest.mjs": {
+      "bytes": 45168,
+      "sha256": "7c14b1ab4a7b7c50fa80c98db6e3b93fb80bd4709643c3314796bca8174e15b8"
+    }
+  },
+  "scope": "explicit allowlist only; no raw private logs/inventories/profiles or binary included",
+  "selectedSource": [
+    {
+      "bytes": 65639,
+      "gitBlobAtBaseRevisionMatches": true,
+      "repositoryPath": "engine/src/execution/remote_qualification.rs",
+      "sha256": "a6c6f6ed51338cfd51d15c92866917afe537a2006c229aba64b0551a6c11459a"
+    },
+    {
+      "bytes": 436,
+      "gitBlobAtBaseRevisionMatches": true,
+      "repositoryPath": "engine/src/bin/remote_execution_qualifier.rs",
+      "sha256": "552f8112338bef3726e473f7a0b38428d3986e10275884eb4c69aa91178580ee"
+    }
+  ]
+}

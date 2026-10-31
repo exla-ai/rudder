@@ -56,7 +56,18 @@
   "typescript": "passed",
   "cloudBuild": "passed",
   "physicalSource5Evidence": "../../examples/execution/evidence/2026-10-31-source5/qualification.json",
-  "releaseMatrix": "pending",
-  "delivery": "pending",
-  "fullV4Complete": false
+  "releaseMatrix": {
+    "status": "passed",
+    "workflow": "https://github.com/exla-ai/rudder/actions/runs/41204624886",
+    "revision": "dffce8075ecd9a5ed34de9a32e9f9e337cbcb0b2"
+  },
+  "delivery": "Cloud deployed, both npm next packages published and fresh installations verified",
+  "fullV4Complete": false,
+  "candidateRevision": "b98dcd6451b51b2e56bf1e3a2068bd59efab4834",
+  "taggedRevision": "dffce8075ecd9a5ed34de9a32e9f9e337cbcb0b2",
+  "releaseCheck": {
+    "status": "passed",
+    "workflow": "https://github.com/exla-ai/rudder/actions/runs/41201715752"
+  },
+  "deliveryRecord": "delivery-alpha19.json"
 }

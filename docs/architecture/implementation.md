@@ -98,9 +98,9 @@ isolated installation, CLI/native/jj checks and archive/manifest verification at
 health and authentication smoke checks on 2026-10-31T10:12Z. The live home was
 not restarted. See [delivery](delivery-alpha18.json) for exact identities.
 
-## Owned source execution, alpha.19 candidate
+## Owned source execution, alpha.19
 
-The candidate adds Binding4 readiness and helper custody, source preparation,
+This milestone adds Binding4 readiness and helper custody, source preparation,
 context2 writer/runtime APIs, bounded startup and grant expiry, and explicit
 owned Runtime5 dispatch. The source-preparation checks
 cover endpoint authority layout, broker projection/validation order and pending
@@ -145,8 +145,16 @@ retaining runtime bytes and dependency caches. The JavaScript suite encountered
 the known cold broker-fixture compile timeout. After one serialized prebuild,
 the full JavaScript suite passed 762 tests with zero failures and nine skips.
 The real Native terminal suite passed 59 tests with zero failures. TypeScript
-checking and the Cloud build also passed. The release-check matrix and shipping
-remain pending.
+checking and the Cloud build also passed. The pre-tag release-check matrix
+passed. Cloud release169 runs the tagged alpha.19 control image and pins the
+verified stock alpha.19 worker. Its seven UID1500 smoke commands passed and
+the test VM was destroyed with two fresh absence checks. The canonical app,
+health, authentication boundary, runtime code hashes and database passed at
+13:35:07.936Z. The live home instance and alpha.7 image stayed unchanged.
+The tag release matrix, Mac, iOS and TUI workflows passed. Both npm next tags
+name alpha.19; stable stays3.9.13. Both packages passed isolated fresh installs,
+CLI/native/jj smoke and all-platform artifact/revision checks at13:55:43.717Z.
+See the [delivery record](delivery-alpha19.json).
 
 ## Current implementation track
 
@@ -160,7 +168,7 @@ the three architecture documents already contained this session's planning work.
 | Private previews | Persisted Tailscale login, actual readiness, bounded async probes, exact project ownership, ready links and local open | E13 subset implemented; real userspace/Serve check passed; laptop/phone access remains untested |
 | Terminal stream | Shared home/sail helper, short output batching, bounded backpressure, connection fencing, UTF-8 and repaint recovery | E13 subset deployed in the worker image; real WS/PTY VM checks passed; existing homes adopt when idle |
 | Startup/download caches | Background CLI update, persistent account-local npm/pnpm/uv cache defaults, explicit overrides retained | Behavior tests pass; no distributed action-cache claim |
-| Full storage/engine rewrite | Milestones below | Cloud release168 / worker alpha.18 is deployed and verified; the alpha.18 release matrix passed and both npm next tags name alpha.18. Both packages passed isolated installation, CLI/native/jj smoke checks and all-platform artifact verification. Default workspace integration, fleet and migration gates remain open |
+| Full storage/engine rewrite | Milestones below | Cloud release169 / worker alpha.19 is deployed and verified; its stock worker smoke and full release matrix passed. Both npm next tags name alpha.19 and both packages passed isolated installs and all-platform artifact checks. Default workspace integration, remote captured publication, connected models, fleet and migration gates remain open |
 
 The current native simple-execution path remains an isolated worker; explicit
 main-checkout mode remains available. The initial automatic DAG path retains

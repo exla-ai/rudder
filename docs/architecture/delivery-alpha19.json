@@ -1,0 +1,404 @@
+{
+  "schemaVersion": 1,
+  "milestone": "Owned source execution, Binding4 readiness and helper custody, original startup constraints and explicit Runtime5 dispatch; full v4 continues",
+  "version": "4.0.0-alpha.19",
+  "sourceRevision": "dffce8075ecd9a5ed34de9a32e9f9e337cbcb0b2",
+  "delivery": {
+    "kind": "web",
+    "status": "deployed",
+    "target": "Rudder Cloud control plane and verified stock alpha19 worker image",
+    "url": "https://rudder.exla.ai/app",
+    "provider": "Fly.io",
+    "revision": "dffce8075ecd9a5ed34de9a32e9f9e337cbcb0b2",
+    "deploymentId": "169",
+    "version": "4.0.0-alpha.19",
+    "verifiedAt": "2026-10-31T13:35:07.936Z",
+    "checks": [
+      {
+        "url": "https://rudder.exla.ai/app",
+        "status": 200,
+        "expected": 200,
+        "finalUrl": "https://rudder-cloud-control.fly.dev/app",
+        "ok": true
+      },
+      {
+        "url": "https://rudder-cloud-control.fly.dev/health",
+        "status": 200,
+        "expected": 200,
+        "finalUrl": "https://rudder-cloud-control.fly.dev/health",
+        "ok": true,
+        "health": {
+          "ok": true,
+          "s3": true,
+          "fabric": true,
+          "fly": true,
+          "byoVm": true,
+          "state": true,
+          "secrets": true,
+          "auth": {
+            "google": true,
+            "github": true,
+            "githubDevice": true
+          }
+        }
+      },
+      {
+        "url": "https://rudder-cloud-control.fly.dev/api/app/state",
+        "status": 401,
+        "expected": 401,
+        "finalUrl": "https://rudder-cloud-control.fly.dev/api/app/state",
+        "ok": true
+      },
+      {
+        "url": "https://rudder-cloud-control.fly.dev/api/rudder/fabric/roots/unauthenticated-alpha19-smoke",
+        "status": 401,
+        "expected": 401,
+        "finalUrl": "https://rudder-cloud-control.fly.dev/api/rudder/fabric/roots/unauthenticated-alpha19-smoke",
+        "ok": true
+      }
+    ]
+  },
+  "release": {
+    "id": "YgoYklRLL8Xo3fB8YN001PAOG",
+    "version": 169,
+    "status": "complete",
+    "createdAt": "2026-10-31T13:34:28Z"
+  },
+  "control": {
+    "id": "8911d61a434978",
+    "instance": "01M692PFGBVFQKYF97MW2D8BAN",
+    "state": "started",
+    "image": "registry.fly.io/rudder-cloud-control:4.0.0-alpha.19",
+    "digest": "sha256:cc4bedad9ffe065a458d7ae6aabe2e0d74c6a3e7337ce7cd30baa04e59cc9f92",
+    "revision": "dffce8075ecd9a5ed34de9a32e9f9e337cbcb0b2"
+  },
+  "controlImage": {
+    "image": "registry.fly.io/rudder-cloud-control:4.0.0-alpha.19",
+    "digest": "sha256:cc4bedad9ffe065a458d7ae6aabe2e0d74c6a3e7337ce7cd30baa04e59cc9f92",
+    "sourceManifestSha256": "5213c99aae60d6689cb0a4ce75118c5b7d59ae3ece5155e4b230f2538b725cea",
+    "logSha256": "92f54e03b9081af006e5724cf71685a62aa62c5708ffd034983050e9f34ddbb2"
+  },
+  "database": {
+    "integrity": "ok",
+    "counts": {
+      "workspaces": 52,
+      "sails": 14
+    },
+    "homeRetained": true,
+    "serverSha256": "96e6392705d1ac86949c09b5e69eb6ced86d53c1f8f820225df2cb7ceb3f4770"
+  },
+  "actualRuntimeCodeSha256": {
+    "src/server.ts": "96e6392705d1ac86949c09b5e69eb6ced86d53c1f8f820225df2cb7ceb3f4770",
+    "src/fabric-cas.ts": "4c158d2746a4c6511c7f9262db386ef81a2368df42c361eddbce01138e47b7ca",
+    "src/fabric-partial-checkpoint.ts": "b5f5e6ce35eba3af10034c5caa7214fe6cddb47c59ee24f840d30ee2f33d03f0",
+    "dist/server.js": "d548970543d355e9626435c0a22899485e097405ad0ef6aedbfb738ad39639a2",
+    "dist/fabric-cas.js": "98e7bc5d7f60ed9d05b2b908a19ed39659d993e26dc9eac01cb5e7980945457a",
+    "dist/fabric-partial-checkpoint.js": "224c151b296315966304751cf0c51b6d6d2e81e5f8037d2f208246775fe8d5dd"
+  },
+  "inactiveAuthority": {
+    "inactiveStats": {
+      "active": 0,
+      "queued": 0
+    },
+    "pgVersion": "8.23.1",
+    "indexSha256": "ac25e862b4d1debcf8b0d80dbdb1af1edcc38987bb1d4633ed4102352373e8ef"
+  },
+  "worker": {
+    "image": "registry.fly.io/rudder-workers-exla:4.0.0-alpha.19",
+    "digest": "sha256:e4b9022478e44afbfae1446e7c18aee261e1d0d5e142b3d36d88f6a60bab2cdb",
+    "revision": "dffce8075ecd9a5ed34de9a32e9f9e337cbcb0b2",
+    "sourceManifestSha256": "5213c99aae60d6689cb0a4ce75118c5b7d59ae3ece5155e4b230f2538b725cea",
+    "logSha256": "316c833c323e0e9de4fbd955c050a1a48d8c45b727421934ebaa3e798ead75b3"
+  },
+  "activeHome": {
+    "id": "8edd225a7d0378",
+    "instance": "01M670MG4A8E0DWE9GA1C0PQ92",
+    "state": "started",
+    "image": "registry.fly.io/rudder-workers-exla:4.0.0-alpha.7",
+    "digest": "sha256:404f46396aca77324d9b53c55d2824a5401af56ba5362d0bdae67e16108fc245",
+    "unchanged": true
+  },
+  "workerStockSmoke": {
+    "status": "passed",
+    "verifiedAt": "2026-10-31T13:34:17.125Z",
+    "machine": {
+      "id": "82237ec73d0768",
+      "instance": "01M692N5F8E18T0H3SFFKH8WT4",
+      "digest": "sha256:e4b9022478e44afbfae1446e7c18aee261e1d0d5e142b3d36d88f6a60bab2cdb",
+      "revisionLabel": "dffce8075ecd9a5ed34de9a32e9f9e337cbcb0b2"
+    },
+    "identity": {
+      "uid": 1500,
+      "gid": 1500,
+      "groups": [],
+      "noNewPrivs": 1,
+      "capabilities": {
+        "CapEff": "0000000000000000",
+        "CapPrm": "0000000000000000",
+        "CapInh": "0000000000000000",
+        "CapAmb": "0000000000000000",
+        "CapBnd": "0000000000000000"
+      }
+    },
+    "artifacts": {
+      "node": {
+        "path": "/usr/local/bin/node",
+        "bytes": 124902584,
+        "sha256": "94efd062ed066c1a0b332e18249859c905e920eeada5df55d24c99b919629a90"
+      },
+      "native": {
+        "path": "/opt/rudder/dist/native/rudder-native",
+        "bytes": 27849048,
+        "sha256": "e4b1f84221642ee26d604a236a2888273febaa786e03eab3f697a9d38c33a9c5"
+      },
+      "buddy": {
+        "path": "/opt/rudder/dist/native/rudder-jj",
+        "bytes": 30907648,
+        "sha256": "3b713e51d8fcaad7d77d18e4591026eec16445efdfdc58005c2d3b8c1f848287"
+      },
+      "cli": {
+        "path": "/opt/rudder/dist/index.js",
+        "bytes": 2940,
+        "sha256": "bef76b6a2e5b19e840998d50b4f88688ade163d0e5263c69f2a8bcbcede6e96d"
+      },
+      "package": {
+        "path": "/opt/rudder/package.json",
+        "bytes": 2889,
+        "sha256": "db1f7ad5f0d13e8a44d37517c9130b6b377186774e6db4105080ca6807ec0aac"
+      }
+    },
+    "commands": [
+      {
+        "label": "cli-version",
+        "argv": [
+          "/usr/local/bin/node",
+          "/opt/rudder/dist/index.js",
+          "--version"
+        ],
+        "child": {
+          "code": 0,
+          "signal": null,
+          "exitObserved": true,
+          "settled": true,
+          "failure": null
+        }
+      },
+      {
+        "label": "native-smoke",
+        "argv": [
+          "/opt/rudder/dist/native/rudder-native",
+          "--smoke"
+        ],
+        "child": {
+          "code": 0,
+          "signal": null,
+          "exitObserved": true,
+          "settled": true,
+          "failure": null
+        }
+      },
+      {
+        "label": "native-execution",
+        "argv": [
+          "/opt/rudder/dist/native/rudder-native",
+          "fabric",
+          "execution",
+          "capabilities"
+        ],
+        "child": {
+          "code": 0,
+          "signal": null,
+          "exitObserved": true,
+          "settled": true,
+          "failure": null
+        }
+      },
+      {
+        "label": "buddy-version",
+        "argv": [
+          "/opt/rudder/dist/native/rudder-jj",
+          "--version"
+        ],
+        "child": {
+          "code": 0,
+          "signal": null,
+          "exitObserved": true,
+          "settled": true,
+          "failure": null
+        }
+      },
+      {
+        "label": "buddy-capabilities",
+        "argv": [
+          "/opt/rudder/dist/native/rudder-jj",
+          "rudder-capabilities"
+        ],
+        "child": {
+          "code": 0,
+          "signal": null,
+          "exitObserved": true,
+          "settled": true,
+          "failure": null
+        }
+      },
+      {
+        "label": "git-version",
+        "argv": [
+          "/usr/local/bin/git",
+          "--version"
+        ],
+        "child": {
+          "code": 0,
+          "signal": null,
+          "exitObserved": true,
+          "settled": true,
+          "failure": null
+        }
+      },
+      {
+        "label": "jj-version",
+        "argv": [
+          "/usr/local/bin/jj",
+          "--version"
+        ],
+        "child": {
+          "code": 0,
+          "signal": null,
+          "exitObserved": true,
+          "settled": true,
+          "failure": null
+        }
+      }
+    ],
+    "ownedDestruction": true,
+    "twoFreshAbsenceObservations": true,
+    "withinLifetimeBound": true,
+    "modelCalls": false,
+    "defaultRuntimeAdoption": false,
+    "proofSha256": "f32b1e98cf594815e372103e6075bf03b97655b6c019e3247e9aa53a5c184626"
+  },
+  "cli": {
+    "status": "published",
+    "workflow": "https://github.com/exla-ai/rudder/actions/runs/41204624886",
+    "registry": {
+      "observedAt": "2026-10-31T13:55:43.720402Z",
+      "@exla/rudder": {
+        "latest": "3.9.13",
+        "next": "4.0.0-alpha.19"
+      },
+      "@viraatdas/rudder": {
+        "latest": "3.9.13",
+        "next": "4.0.0-alpha.19"
+      }
+    }
+  },
+  "qualification": {
+    "source5": "../../examples/execution/evidence/2026-10-31-source5/qualification.json",
+    "readiness4": "../../examples/execution/evidence/2026-10-31-readiness4/qualification.json",
+    "scope": "Disposable explicit owned Runtime5; captured objects verified in local CAS before VM destruction; remote captured publication, connected models and default rollout remain open"
+  },
+  "openGates": [
+    "remote publication and retention of captured delta and evidence",
+    "connected model-provider execution and default launch adoption",
+    "private jj source/history acceptance",
+    "production distributed build-cache caller and speed",
+    "fleet authority and default migration",
+    "E14 measured launch efficiency",
+    "real laptop/phone Tailscale continuity"
+  ],
+  "fullV4Complete": false,
+  "freshInstall": {
+    "status": "verified",
+    "verifiedAt": "2026-10-31T13:55:43.720402Z",
+    "sourceRevision": "dffce8075ecd9a5ed34de9a32e9f9e337cbcb0b2",
+    "proofSha256": "c84183b5a9a6c8944e750bdc9625014a65a348fc333050d0db4c47426928aa3c",
+    "packages": {
+      "@exla/rudder": {
+        "status": "passed",
+        "version": "4.0.0-alpha.19",
+        "checks": [
+          "buddy-capabilities",
+          "buddy-version",
+          "cli-help",
+          "cli-version",
+          "installation",
+          "native-execution",
+          "native-fabric",
+          "native-smoke",
+          "native-vfs",
+          "native-workspace",
+          "postinstall_jj",
+          "reviewed_archive"
+        ]
+      },
+      "@viraatdas/rudder": {
+        "status": "passed",
+        "version": "4.0.0-alpha.19",
+        "checks": [
+          "buddy-capabilities",
+          "buddy-version",
+          "cli-help",
+          "cli-version",
+          "installation",
+          "native-execution",
+          "native-fabric",
+          "native-smoke",
+          "native-vfs",
+          "native-workspace",
+          "postinstall_jj",
+          "reviewed_archive"
+        ]
+      }
+    },
+    "aliasComparison": {
+      "native_pairs_identical": true,
+      "package_metadata_except_name_identical": true
+    },
+    "scope": "private homes/cwd/config/cache and cleared child env, not an OS sandbox; no provider calls, TUI, Cloud or global install; npm provenance signatures not verified"
+  },
+  "ci": {
+    "observedAt": "2026-10-31T13:52:48.905574+00:00",
+    "runs": [
+      {
+        "id": 41201715752,
+        "name": "Release",
+        "status": "completed",
+        "conclusion": "success",
+        "head_sha": "b98dcd6451b51b2e56bf1e3a2068bd59efab4834",
+        "html_url": "https://github.com/exla-ai/rudder/actions/runs/41201715752"
+      },
+      {
+        "id": 41204624429,
+        "name": "TUI e2e",
+        "status": "completed",
+        "conclusion": "success",
+        "head_sha": "dffce8075ecd9a5ed34de9a32e9f9e337cbcb0b2",
+        "html_url": "https://github.com/exla-ai/rudder/actions/runs/41204624429"
+      },
+      {
+        "id": 41204624871,
+        "name": "Mac",
+        "status": "completed",
+        "conclusion": "success",
+        "head_sha": "dffce8075ecd9a5ed34de9a32e9f9e337cbcb0b2",
+        "html_url": "https://github.com/exla-ai/rudder/actions/runs/41204624871"
+      },
+      {
+        "id": 41204624842,
+        "name": "iOS",
+        "status": "completed",
+        "conclusion": "success",
+        "head_sha": "dffce8075ecd9a5ed34de9a32e9f9e337cbcb0b2",
+        "html_url": "https://github.com/exla-ai/rudder/actions/runs/41204624842"
+      },
+      {
+        "id": 41204624886,
+        "name": "Release",
+        "status": "completed",
+        "conclusion": "success",
+        "head_sha": "dffce8075ecd9a5ed34de9a32e9f9e337cbcb0b2",
+        "html_url": "https://github.com/exla-ai/rudder/actions/runs/41204624886"
+      }
+    ]
+  }
+}

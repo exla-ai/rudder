@@ -18,9 +18,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
     fs::{self, File, OpenOptions},
-    io::{Read, Write},
+    io::{self, Read, Write},
     os::{
-        fd::{AsRawFd, FromRawFd},
+        fd::{AsRawFd, FromRawFd, OwnedFd, RawFd},
         unix::{
             fs::{FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt},
             net::{UnixListener, UnixStream},
@@ -862,9 +862,9 @@ fn execute(inner: &Inner, id: &str, command: SemanticCommand) -> Result<CommandR
         read_private_file(&empty_config, 1024)?.is_empty(),
         "managed user configuration must remain empty"
     );
-    let inherited = unsafe { libc::fcntl(writer.as_raw_fd(), libc::F_DUPFD, 3) };
-    ensure!(inherited >= 3, "cannot retain private writer ownership");
-    let inherited = unsafe { std::os::fd::OwnedFd::from_raw_fd(inherited) };
+    let inherited = duplicate_writer_for_child(&writer)
+        .context("cannot retain private writer ownership")?;
+    let inherited_fd = inherited.as_raw_fd();
     let mut child = Command::new(&config.binary);
     child
         .args(context.argv())
@@ -879,7 +879,7 @@ fn execute(inner: &Inner, id: &str, command: SemanticCommand) -> Result<CommandR
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("GIT_TERMINAL_PROMPT", "0")
         .env(HOST_CONTEXT_ENV, &context_path)
-        .env(INHERITED_LOCK_ENV, inherited.as_raw_fd().to_string())
+        .env(INHERITED_LOCK_ENV, inherited_fd.to_string())
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -899,6 +899,9 @@ fn execute(inner: &Inner, id: &str, command: SemanticCommand) -> Result<CommandR
             }
             #[cfg(not(target_os = "linux"))]
             let _ = expected_parent;
+            // Only this fork child may inherit the canonical writer through
+            // exec. Its synchronous descendants retain the same open-file lock.
+            clear_cloexec_for_child(inherited_fd)?;
             Ok(())
         });
     }
@@ -1016,6 +1019,22 @@ fn execute(inner: &Inner, id: &str, command: SemanticCommand) -> Result<CommandR
     }
     let _ = fs::remove_file(context_path);
     Ok(receipt)
+}
+fn duplicate_writer_for_child(writer: &File) -> io::Result<OwnedFd> {
+    // Atomic CLOEXEC is required: an inheritable parent duplicate could escape
+    // through a concurrent CLI/test fork and outlive our actual reaped child.
+    let fd = unsafe { libc::fcntl(writer.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 3) };
+    if fd < 0 { return Err(io::Error::last_os_error()); }
+    Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+}
+/// Call only in the designated child's pre_exec, never in the parent. Both
+/// fcntl operations are async-signal-safe and change this child's FD table only.
+fn clear_cloexec_for_child(fd: RawFd) -> io::Result<()> {
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+    if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
 }
 struct OwnedCommandChild {
     child: std::process::Child,
@@ -1340,3 +1359,7 @@ fn same_peer_user(stream: &UnixStream) -> bool {
             && uid == unsafe { libc::geteuid() }
     }
 }
+
+#[cfg(test)]
+#[path = "command_writer_fd_tests.rs"]
+mod writer_fd_tests;

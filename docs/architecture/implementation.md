@@ -309,7 +309,17 @@ compiler inputs after restoring the recorded file modes. See the
 [transport evidence](../../examples/execution/evidence/2026-10-31-alpha22-connected/README.md)
 and [verification](verification-alpha22.json). This remains standalone transport
 evidence: physical expiry/fencing, native App execution, managed connected models,
-normal source startup and accepted history remain unqualified. Alpha.22 has not
+normal source startup and accepted history remain unqualified.
+
+The first macOS qualification failed when a completed Status was followed by a
+Diff that found the canonical writer still busy. The server briefly duplicated
+the writer with an inheritable FD; a concurrent CLI fork could retain that lock
+after the intended child exited. The duplicate is now atomically CLOEXEC in the
+parent and cleared only in the designated child immediately before exec. Actual
+process regressions reproduce the old leak, exclude unrelated execs after the
+fix, and preserve the fence through synchronous descendants. The full VCS package
+checks passed, including the original failing RPC case. The initial CI failure
+remains recorded; renewed complete qualification is pending. Alpha.22 has not
 shipped yet.
 
 ## Current implementation track

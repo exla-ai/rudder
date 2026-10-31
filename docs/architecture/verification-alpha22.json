@@ -25,7 +25,9 @@
       "passed": 1828,
       "failed": 0,
       "ignored": 29,
-      "suites": 60
+      "suites": 60,
+      "sourceRevision": "a4ad7f590db29368eb52655885aded02b916cb54",
+      "scope": "full workspace before follow-up canonical writer descriptor fix; targeted VCS checks and renewed CI cover the follow-up"
     },
     "javascript": {
       "status": "passed",
@@ -126,8 +128,12 @@
     "testOnlyMock": false
   },
   "releaseCheckCi": {
-    "status": "not_started",
-    "branch": "release-check/4.0.0-alpha.22"
+    "status": "failed",
+    "runId": 41235210937,
+    "revision": "a4ad7f590db29368eb52655885aded02b916cb54",
+    "failedStep": "Native tests on macOS",
+    "failure": "sequential jj RPC returned private-command busy",
+    "action": "fix inherited writer FD window; append candidate commit and run complete qualification again"
   },
   "delivery": {
     "status": "not_started"
@@ -138,5 +144,23 @@
     "connected Codex/Claude authentication and runtime attachment",
     "normal source selection, startup and recovery routing",
     "accepted jj history, fleet ownership, distributed cache and migration"
-  ]
+  ],
+  "followupWriterFix": {
+    "behavior": "parent duplicate CLOEXEC, cleared only by designated child pre_exec; intended synchronous descendants retain canonical writer fence",
+    "focusedRegressions": {
+      "passed": 3,
+      "failed": 0,
+      "ignoredFixture": 1
+    },
+    "vcsPackageGate": {
+      "status": "passed",
+      "passed": 35,
+      "failed": 0,
+      "ignored": 1,
+      "suites": 11,
+      "completedAt": "2026-10-31T20:19:47.040816+00:00",
+      "receiptSha256": "3f85110eba99cb3b4b9b07fda63ccd955327fd28817284b763e32f87ddda6328",
+      "originalFailingRpcTest": "passed"
+    }
+  }
 }

@@ -4,9 +4,16 @@
 #[cfg(target_os = "linux")]
 #[path = "managed_source_prepare.rs"]
 pub(crate) mod source_prepare;
+#[path = "managed_backend_prepare.rs"]
+pub(crate) mod backend_prepare;
+pub(crate) use backend_prepare::{SelectedCredentials, ManagedCodexApiKey,
+    ManagedBackendProfile, ManagedReportMapping};
+use backend_prepare::{selected_protected_roots, validate_runtime_program};
+#[cfg(test)]
+use backend_prepare::prepare_backend;
 use anyhow::{ensure, Context, Result};
 use rudder_engine::{
-    execution::{ExecutionSpec, ProtectedHostContextRef, HomeFile, ReadOnlyRuntime,
+    execution::{ExecutionSpec, ProtectedHostContextRef, ReadOnlyRuntime,
         BrokerBinding, WorkspaceObservationProfile, HelperApplicationSpec},
     journal::{Journal, OwnerFence},
     protocol::{canonical_json, ObjectKind, ObjectRef, OwnerEpoch},
@@ -239,71 +246,6 @@ fn read_assignment_record(home: &Path, fence: &ManagedLaunchFence, exact_request
     Ok(Some(assignment))
 }
 
-/// No Debug/Serialize implementation: values belong only in a sealed spec.
-pub(crate) struct SelectedCredentials {
-    profile_id: String,
-    backend: super::Backend,
-    environment: std::collections::BTreeMap<String, String>,
-}
-
-/// One selected host-owned key. Never Debug/Serde, guest env, home JSON or CAS.
-pub(crate) struct ManagedCodexApiKey(String);
-impl ManagedCodexApiKey {
-    pub(crate) fn expose_for_login(&self) -> &str { &self.0 }
-}
-impl Drop for ManagedCodexApiKey {
-    fn drop(&mut self) { unsafe { self.0.as_bytes_mut().fill(0); } }
-}
-impl SelectedCredentials {
-    /// The selected profile loader supplies exactly one key, never its HOME or
-    /// inherited environment. API keys have no refresh/writeback semantics.
-    pub(crate) fn api_key(profile_id: String, backend: super::Backend, secret: String) -> Result<Self> {
-        ensure!(!profile_id.is_empty() && profile_id.len() <= 256 && !profile_id.chars().any(char::is_control), "invalid selected credential profile");
-        ensure!(!secret.is_empty() && secret.len() <= 16 * 1024 && !secret.contains(['\0', '\r', '\n']), "invalid selected provider credential");
-        let key = match backend {
-            super::Backend::Codex => "OPENAI_API_KEY",
-            super::Backend::Claude => "ANTHROPIC_API_KEY",
-            _ => anyhow::bail!("managed provider profile is unsupported"),
-        };
-        Ok(Self { profile_id, backend, environment: [(key.into(), secret)].into() })
-    }
-    /// Ordinary CLI profiles do not participate in a shared refresh lease.
-    /// Refuse before reading/copying a refresh token or invalidating a live login.
-    pub(crate) fn oauth_profile(_profile_id: &str) -> Result<Self> {
-        Err(std::io::Error::new(std::io::ErrorKind::Unsupported,
-            "managed OAuth requires a qualified exclusive refresh and protected writeback adapter").into())
-    }
-    pub(crate) fn take_host_codex_key(&mut self) -> Result<Option<ManagedCodexApiKey>> {
-        if self.backend != super::Backend::Codex { return Ok(None); }
-        ensure!(self.environment.len() == 1, "managed Codex requires exactly its selected API key");
-        Ok(Some(ManagedCodexApiKey(self.environment.remove("OPENAI_API_KEY")
-            .context("selected Codex profile has no API key")?)))
-    }
-}
-impl Drop for SelectedCredentials {
-    fn drop(&mut self) {
-        for value in self.environment.values_mut() { unsafe { value.as_bytes_mut().fill(0); } }
-    }
-}
-
-/// Explicit backend process layout. Both commands contain guest paths only.
-/// The helper launches the server directly and reports its held kernel identity.
-pub(crate) enum ManagedBackendProfile {
-    CodexAppServer { program: String, arguments: Vec<String> },
-    ClaudeSdk { node: String, rudder_cli: String, claude: String,
-        arguments: Vec<String>, initial_prompt: Option<String> },
-}
-impl ManagedBackendProfile {
-    pub(crate) fn backend(&self) -> super::Backend {
-        match self { Self::CodexAppServer { .. } => super::Backend::Codex,
-            Self::ClaudeSdk { .. } => super::Backend::Claude }
-    }
-    pub(crate) fn execution_profile(&self) -> &'static str {
-        match self { Self::CodexAppServer { .. } => "codex-app-server",
-            Self::ClaudeSdk { .. } => "claude-sdk" }
-    }
-}
-
 pub(crate) struct ManagedLocalLaunchRequest {
     pub fence: ManagedLaunchFence,
     pub journal: PathBuf,
@@ -379,17 +321,6 @@ pub(crate) struct ManagedTransportMapping {
     pub guest_cwd: PathBuf,
 }
 
-/// Guest-owned candidate reports. These paths convey no backend/process,
-/// acknowledgment, writer-barrier or checkpoint authority.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct ManagedReportMapping {
-    pub host_done_file: PathBuf,
-    pub guest_done_file: PathBuf,
-    pub host_signal_file: PathBuf,
-    pub guest_signal_file: PathBuf,
-}
-
 struct ManagedEndpoints { root:PathBuf, marker:Vec<u8>, backend_target:PathBuf }
 fn validate_endpoint_parent(parent: &Path, fence: &ManagedLaunchFence) -> Result<PathBuf> {
     fence.validate()?;
@@ -427,20 +358,12 @@ fn retire_endpoints(endpoints:ManagedEndpoints) -> Result<()> {
         "managed endpoint binding changed; retain for recovery");
     fs::remove_dir_all(&endpoints.root)?; File::open(parent)?.sync_all()?; Ok(())
 }
-impl ManagedReportMapping {
-    fn for_execution(home: &Path) -> Self {
-        Self { host_done_file: home.join(".rudder-reports/done.json"),
-            guest_done_file: "/home/agent/.rudder-reports/done.json".into(),
-            host_signal_file: home.join(".rudder-reports/signal.json"),
-            guest_signal_file: "/home/agent/.rudder-reports/signal.json".into() }
-    }
-}
-
 pub(crate) struct PreparedManagedLaunch {
     pub assignment: WorkspaceAssignment,
     pub transport: ManagedTransportMapping,
     pub reports: ManagedReportMapping,
     pub execution_profile: String,
+    frontend_start: rudder_engine::execution::ManagedFrontendStart,
     pub identity_home: PathBuf,
     pub identity_journal: PathBuf,
     pub managed_run: crate::managed_store::ManagedRunLocation,
@@ -464,8 +387,7 @@ impl PreparedManagedLaunch {
                 run_epoch: self.assignment.fence.run_epoch, execution_id: spec.execution_id.clone(),
                 operation_id: spec.operation_id.clone(), view_id: spec.view_id.clone(), owner: spec.owner.clone(),
                 execution_profile: self.execution_profile.clone(), server_command: self.server_command.clone(),
-                frontend_start: if self.execution_profile == "codex-app-server" { rudder_engine::execution::ManagedFrontendStart::AfterHostApiKeyV1 }
-                    else { rudder_engine::execution::ManagedFrontendStart::Immediate },
+                frontend_start: self.frontend_start,
                 guest_socket: self.transport.guest_socket.clone() })
     }
     pub(crate) fn link_launch(&self) -> crate::agent_link::AgentLinkLaunch {
@@ -570,16 +492,11 @@ pub(crate) fn prepare_local(mut request: ManagedLocalLaunchRequest, cancelled: A
     ensure!(request.private_root.parent() == Some(request.managed_store.binding().directory.join("preparations").as_path()),
         "managed preparation must remain inside its permanent private namespace");
     ensure!((1..=24 * 60 * 60).contains(&request.timeout_seconds), "invalid managed execution timeout");
-    ensure!(request.backend.backend() == request.credentials.backend,
-        "selected credential profile belongs to another backend");
+    request.credentials.check_backend(&request.backend)?;
     let protected_roots = selected_protected_roots(&request.home, &request.protected_credential_roots)?;
     let codex_api_key = request.credentials.take_host_codex_key()?;
-    let mut programs = vec![request.native_guest.as_str(), request.jj_guest.as_str()];
-    match &request.backend {
-        ManagedBackendProfile::CodexAppServer { program, .. } => programs.push(program),
-        ManagedBackendProfile::ClaudeSdk { node, rudder_cli, claude, .. } => programs.extend([node.as_str(), rudder_cli.as_str(), claude.as_str()]),
-    }
-    for program in programs { validate_runtime_program(program, &request.runtime)?; }
+    request.backend.validate_runtime(&request.runtime,
+        &[request.native_guest.as_str(), request.jj_guest.as_str()])?;
     ensure!(request.runnable_root.kind == ObjectKind::RunnableRoot, "managed local launch requires a RunnableRoot");
     let seed_ref = request.seed.retained_seed().context("managed local launch requires a retained private seed")?.clone();
     let retained = request.store.retention()?;
@@ -655,14 +572,13 @@ pub(crate) fn prepare_local(mut request: ManagedLocalLaunchRequest, cancelled: A
         let host_socket = transient.join("backend.sock");
         ensure!(host_socket.as_os_str().as_encoded_bytes().len() < 100, "managed backend socket exceeds portable path bound");
         let guest_socket = PathBuf::from("/tmp/cx.sock");
-        let (command, server_command, home_files) = prepare_backend(&request.fence, &request.backend, &request.native_guest, &guest_socket)?;
-        let reports = ManagedReportMapping::for_execution(&execution_root.join("runs").join(&request.fence.attempt_id).join("home"));
+        let backend_prepare::ManagedBackendLayout { command, server_command, home_files, reports,
+            execution_profile, frontend_start } = backend_prepare::prepare_layout(&request.fence,
+                &request.backend, &request.native_guest, &guest_socket,
+                &execution_root.join("runs").join(&request.fence.attempt_id).join("home"))?;
         let broker = crate::agent_broker::socket_path(&request.home, &request.fence.owner.project_id,
             &request.fence.run_id, &request.fence.attempt_id);
-        let mut environment = request.credentials.environment.clone();
-        environment.extend([("RUDDER_FABRIC_ATTEMPT_ID".into(), request.fence.attempt_id.clone()),
-            ("RUDDER_DONE_FILE".into(), reports.guest_done_file.display().to_string()),
-            ("CODEX_HOME".into(), "/home/agent/.codex".into())]);
+        let environment = request.credentials.guest_environment(&request.fence, &reports)?;
         let mut authority_roots = vec![private, request.private_root.join("context"), request.private_root.join("state"),
             request.private_root.join("projections"), request.journal.clone()];
         authority_roots.extend(protected_roots);
@@ -683,84 +599,12 @@ pub(crate) fn prepare_local(mut request: ManagedLocalLaunchRequest, cancelled: A
         File::open(request.private_root.parent().context("managed root parent absent")?)?.sync_all()?;
         Ok(PreparedManagedLaunch { assignment, transport: ManagedTransportMapping { host_socket, guest_socket, guest_cwd: "/workspace".into() }, reports,
             managed_run,
-            execution_profile: request.backend.execution_profile().into(), identity_home: request.home.clone(),
+            execution_profile: execution_profile.into(), frontend_start, identity_home: request.home.clone(),
             identity_journal: request.journal.clone(), server_command, codex_api_key, spec: Some(spec), retirement: None })
     })();
     match prepared {
         Ok(mut prepared) => { prepared.retirement = Some(retirement); Ok(prepared) }
         Err(error) => { let _ = retire_unused(retirement); Err(error) }
-    }
-}
-
-fn selected_protected_roots(identity_home: &Path, additional: &[PathBuf]) -> Result<Vec<PathBuf>> {
-    ensure!(additional.len() <= 32, "managed protected credential roots exceed bound");
-    let roots: Vec<_> = std::iter::once(identity_home.to_path_buf()).chain(additional.iter().cloned()).collect();
-    for root in &roots {
-        ensure!(root.is_absolute() && root != Path::new("/") && root.components().all(|component|matches!(component,
-            std::path::Component::RootDir | std::path::Component::Normal(_))), "managed protected roots must be explicit normalized host paths");
-    }
-    Ok(roots)
-}
-
-fn validate_runtime_program(program: &str, runtime: &[ReadOnlyRuntime]) -> Result<()> {
-    let path = Path::new(program);
-    ensure!(path.is_absolute() && path.components().all(|component|matches!(component,
-        std::path::Component::RootDir | std::path::Component::Normal(_)))
-        && runtime.iter().any(|projection|path.starts_with(&projection.guest_path)),
-        "managed programs must belong to the declared read-only image runtime");
-    Ok(())
-}
-
-fn prepare_backend(fence: &ManagedLaunchFence, backend: &ManagedBackendProfile, native_guest: &str,
-    socket: &Path) -> Result<(Vec<String>, Option<Vec<String>>, Vec<HomeFile>)> {
-    let broker_args = vec!["fabric", "mcp", "--identity-file", "/run/rudder/agent/identity.json", "--broker-socket", "/run/rudder/agent/broker.sock"];
-    let config = canonical_json(&serde_json::json!({"mcpServers":{"rudder_agents":{"type":"stdio",
-        "command":native_guest,"args":broker_args}}}))?;
-    let signal = Path::new("/home/agent/.rudder-reports/signal.json");
-    let mut files = vec![HomeFile { relative_path: ".rudder/mcp.json".into(), contents: config },
-        HomeFile { relative_path: ".rudder-reports/assignment.json".into(), contents: canonical_json(fence)? }];
-    let mut codex_configs = vec!["-c".into(), format!("mcp_servers.rudder_agents.command={}", serde_json::to_string(native_guest)?),
-        "-c".into(), format!("mcp_servers.rudder_agents.args={}", serde_json::to_string(&broker_args)?),
-        "-c".into(), "mcp_servers.rudder_agents.enabled=true".into(),
-        "-c".into(), "notify=[\"/bin/sh\",\"/home/agent/.rudder/notify.sh\"]".into(),
-        "-c".into(), "cli_auth_credentials_store=\"ephemeral\"".into()];
-    match backend {
-        ManagedBackendProfile::CodexAppServer { program, arguments } => {
-            ensure!(Path::new(program).is_absolute() && !arguments.iter().any(|a| matches!(a.as_str(), "exec" | "app-server" | "--remote") || a.starts_with("--remote=")), "invalid explicit Codex interactive profile");
-            files.push(HomeFile { relative_path: ".rudder/notify.sh".into(), contents: crate::signals::codex_notify_script(signal).into_bytes() });
-            files.push(HomeFile { relative_path:".codex/config.toml".into(), contents:b"cli_auth_credentials_store = \"ephemeral\"\n".to_vec() });
-            let mut server = vec![program.clone()];
-            // The server owns MCP and lifecycle configuration. Preserve explicit
-            // root options before applying this attempt's guest-only overrides.
-            let mut at = 0;
-            while at < arguments.len() {
-                let arg = &arguments[at];
-                if arg == "--" { break; }
-                if matches!(arg.as_str(), "-c" | "--config" | "--enable" | "--disable" | "--profile" | "-p") {
-                    let value = arguments.get(at + 1).context("Codex root option is missing its value")?;
-                    server.extend([arg.clone(), value.clone()]); at += 2;
-                } else if ["--config=", "--enable=", "--disable=", "--profile="].iter().any(|prefix| arg.starts_with(prefix)) {
-                    server.push(arg.clone()); at += 1;
-                } else { at += 1; }
-            }
-            server.append(&mut codex_configs);
-            server.extend(["app-server".into(), "--listen".into(), format!("unix://{}", socket.display())]);
-            let mut terminal = vec![program.clone(), "--remote".into(), format!("unix://{}", socket.display())];
-            terminal.extend(arguments.clone());
-            let before_prompt = terminal.iter().position(|arg|arg == "--").unwrap_or(terminal.len());
-            terminal.splice(before_prompt..before_prompt, ["-c".into(), "cli_auth_credentials_store=\"ephemeral\"".into()]);
-            Ok((terminal, Some(server), files))
-        }
-        ManagedBackendProfile::ClaudeSdk { node, rudder_cli, claude, arguments, initial_prompt } => {
-            for path in [node, rudder_cli, claude] { ensure!(Path::new(path).is_absolute(), "managed Claude programs must use explicit guest paths"); }
-            files.push(HomeFile { relative_path: ".rudder/claude-settings.json".into(), contents: crate::signals::claude_settings_json(signal, false).into_bytes() });
-            let mut arguments = arguments.clone(); arguments.extend(["--mcp-config".into(), "/home/agent/.rudder/mcp.json".into(),
-                "--settings".into(), "/home/agent/.rudder/claude-settings.json".into()]);
-            files.push(HomeFile { relative_path: ".rudder/claude-launch.json".into(), contents: canonical_json(&serde_json::json!({
-                "format_version":1,"run_id":fence.run_id,"attempt_id":fence.attempt_id,"socket_path":socket,
-                "claude_program":claude,"claude_args":arguments,"initial_prompt":initial_prompt}))? });
-            Ok((vec![node.clone(), rudder_cli.clone(), "__claude-sdk".into(), "--launch-file".into(), "/home/agent/.rudder/claude-launch.json".into()], None, files))
-        }
     }
 }
 

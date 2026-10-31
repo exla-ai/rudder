@@ -265,6 +265,28 @@ pub struct ReadOnlyJournal<'a> {
 }
 
 impl ReadOnlyJournal<'_> {
+    /// Uses this actual held existing Journal and one fresh read transaction.
+    /// No caller-supplied path, CREATE, migration, issuance or renewal is used.
+    #[cfg(target_os = "linux")]
+    pub fn authorize_host_connect(
+        &self,
+        token: &str,
+        binding: &crate::execution::network::connected::ConnectBinding,
+        expected_expiry_ms: i64,
+        now_ms: i64,
+    ) -> Result<HostConnectAuthorization> {
+        self.held.check_current()?;
+        check_sqlite_file_current(&self.journal.conn)?;
+        let tx = self.journal.conn.unchecked_transaction()?;
+        validate_existing_schema(&tx)?;
+        let result = Journal::authorize_host_connect_transaction(
+            &tx, token, binding, expected_expiry_ms, now_ms);
+        check_sqlite_file_current(&tx)?;
+        self.held.check_current()?;
+        tx.commit()?;
+        result
+    }
+
     pub fn authorize_host_source(
         &self,
         token: &str,

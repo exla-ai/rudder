@@ -1,0 +1,26 @@
+{
+  "formatVersion": 1,
+  "kind": "actual-fly-remote-build-receipt-v1",
+  "image": "registry.fly.io/rudder-workers-exla:alpha22-connect-canary-4944c914-9303-47b9-b1c4-a12df26f6959",
+  "exitCode": 0,
+  "digest": "sha256:0f8d074a93b7b3b4140b4833f164c2a063f9a32e6e2fefc1e0adf6a5a4c9f706",
+  "observedAt": "2026-10-31T19:31:38.447749+00:00",
+  "logSha256": "b5dc969217c4cdf89073618a103fd068cd444eeed2cc556abc5f60dab4cc6f00",
+  "command": [
+    "/workspace/home/.fly/bin/flyctl",
+    "deploy",
+    ".",
+    "--config",
+    "/workspace/home/.cache/rudder-release-build/alpha21-checks/worker-fly.toml",
+    "--dockerfile",
+    "Dockerfile",
+    "--app",
+    "rudder-workers-exla",
+    "--build-only",
+    "--push",
+    "--remote-only",
+    "--image-label",
+    "alpha22-connect-canary-4944c914-9303-47b9-b1c4-a12df26f6959"
+  ],
+  "sourceKind": "frozen-working-tree"
+}

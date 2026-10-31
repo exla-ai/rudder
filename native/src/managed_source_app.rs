@@ -836,6 +836,7 @@ mod linux {
         }
     }
     pub(crate) fn poll(app: &mut App, owner: &OwnerFence) {
+        if app.managed_source.entries.is_empty() { return; }
         let mut state = std::mem::take(&mut app.managed_source);
         state.poll(app, owner);
         app.managed_source = state;

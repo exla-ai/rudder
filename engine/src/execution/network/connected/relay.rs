@@ -1,7 +1,8 @@
 use super::{
     resolver::ResolverPool,
     socket::{self, HostNetworkAnchor, ListenerAdmission, ListenerWitnesses},
-    ConnectAuthority, ConnectBinding, ConnectError as Error, ConnectErrorKind as Kind,
+    ConnectAuthority, ConnectBinding, ConnectQuery, ConnectValidation,
+    ConnectError as Error, ConnectErrorKind as Kind,
     ConnectResult as Result, ResolverProgram, MAX_LIFETIME_CONNECTIONS,
 };
 use crate::execution::network::{HostIpv4DenySet, ValidatedNetworkProfile};
@@ -90,50 +91,93 @@ impl ConnectRequest {
     }
 }
 
+type WorkerPanic = Box<dyn std::any::Any + Send + 'static>;
+struct JoinState {
+    worker: Option<JoinHandle<()>>,
+    joined: bool,
+    uncertain: bool,
+    panic: Option<WorkerPanic>,
+}
+struct JoinObserver { _thread:JoinHandle<()>, done:mpsc::Receiver<()>, notified:bool }
 pub(crate) struct Worker {
-    join: Option<JoinHandle<()>>,
-    done: mpsc::Receiver<()>,
+    // Remains Some through observer spawn failure, actual join/TLS blocking and
+    // uncertain results. The observer takes only the contained actual handle.
+    join: Option<Arc<Mutex<JoinState>>>,
+    observer: Option<JoinObserver>,
     failed: bool,
 }
 impl Worker {
     pub(crate) fn spawn(name: &str, work: impl FnOnce() + Send + 'static) -> Result<Self> {
+        #[cfg(test)]
+        let probe = tests::lifecycle::before_spawn(name)?;
+        let state = Arc::new(Mutex::new(JoinState { worker:None, joined:false, uncertain:false, panic:None }));
+        let join = thread::Builder::new().name(name.into()).spawn(move || {
+            #[cfg(test)]
+            tests::lifecycle::install_probe(probe);
+            work();
+        }).map_err(|_|Error::new(Kind::ResourceLimit))?;
+        state.lock().unwrap().worker = Some(join); // No callback can access this new state.
+        Ok(Self { join:Some(state), observer:None, failed:false })
+    }
+    fn launch_observer_with(&mut self, spawn:impl FnOnce(Box<dyn FnOnce() + Send>) -> std::io::Result<JoinHandle<()>>) -> Result<()> {
+        if self.observer.is_some() { return Ok(()); }
+        let state = self.join.as_ref().ok_or_else(||Error::new(Kind::Unsettled))?.clone();
         let (done, receiver) = mpsc::sync_channel(1);
-        let join = thread::Builder::new()
-            .name(name.into())
-            .spawn(move || {
-                // Even a panic cannot manufacture successful settlement: a dropped
-                // sender is distinguished from a normal completion message.
-                work();
-                let _ = done.send(());
-            })
-            .map_err(|_| Error::new(Kind::ResourceLimit))?;
-        Ok(Self {
-            join: Some(join),
-            done: receiver,
-            failed: false,
-        })
+        // The actual handle stays in self.join's shared slot if spawn fails or
+        // drops this closure. Neither path can detach it or run its panic Drop.
+        let work = Box::new(move || {
+            let worker = {
+                let mut stored = state.lock().unwrap_or_else(|error| {
+                    let mut stored = error.into_inner(); stored.uncertain = true; stored
+                });
+                stored.worker.take()
+            };
+            if let Some(worker) = worker {
+                let result = worker.join(); // Actual OS join, including original worker TLS.
+                let mut stored = state.lock().unwrap_or_else(|error| {
+                    let mut stored = error.into_inner(); stored.uncertain = true; stored
+                });
+                if let Err(payload) = result {
+                    stored.uncertain = true; // Set BEFORE moving any raw panic payload.
+                    stored.panic = Some(payload); // Retain; no user payload Drop here.
+                }
+                stored.joined = true;
+            } else {
+                state.lock().unwrap_or_else(|error|error.into_inner()).uncertain = true;
+            }
+            let _ = done.send(()); // A notification only AFTER the actual original join.
+        });
+        let observer = spawn(work).map_err(|_|Error::new(Kind::ResourceLimit))?;
+        self.observer = Some(JoinObserver { _thread:observer, done:receiver, notified:false });
+        Ok(())
     }
     fn settle(&mut self, deadline: Instant) -> Result<()> {
-        if self.failed {
-            return Err(Error::new(Kind::Unsettled));
+        if self.failed { return Err(Error::new(Kind::Unsettled)); }
+        if self.join.is_none() { return Ok(()); }
+        self.launch_observer_with(|work|thread::Builder::new().name("rudder-connect-join".into()).spawn(work))?;
+        let observer = self.observer.as_mut().unwrap();
+        if !observer.notified {
+            match observer.done.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+                Ok(()) => observer.notified = true,
+                Err(mpsc::RecvTimeoutError::Timeout) => return Err(Error::new(Kind::Unsettled)),
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    self.failed = true; // Retain state/observer; no unknown insert/retry success.
+                    return Err(Error::new(Kind::Unsettled));
+                }
+            }
         }
-        if self.join.is_none() {
-            return Ok(());
-        }
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        match self.done.recv_timeout(remaining) {
-            Ok(()) => {}
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                let _ = self.join.take().unwrap().join();
+        if Instant::now() >= deadline { return Err(Error::new(Kind::Unsettled)); }
+        {
+            let state = self.join.as_ref().unwrap().lock().unwrap_or_else(|error| {
+                let mut state = error.into_inner(); state.uncertain = true; state
+            });
+            if !state.joined || state.uncertain || state.panic.is_some() {
                 self.failed = true;
                 return Err(Error::new(Kind::Unsettled));
             }
-            Err(mpsc::RecvTimeoutError::Timeout) => return Err(Error::new(Kind::Unsettled)),
         }
-        self.join.take().unwrap().join().map_err(|_| {
-            self.failed = true;
-            Error::new(Kind::Unsettled)
-        })
+        self.join.take(); // Empty actual-handle slot; observer stays held for audit.
+        Ok(())
     }
 }
 
@@ -171,26 +215,15 @@ pub(crate) struct Runtime {
     witnesses: Mutex<Option<Arc<ListenerWitnesses>>>,
     cancelled: AtomicBool,
     admission_ready: AtomicBool,
-    authority_until: AtomicU64,
+    validation: Mutex<Option<Arc<ConnectValidation>>>,
     failure: Mutex<Option<Kind>>,
+    startup_panic: Mutex<Option<WorkerPanic>>,
     sockets: Mutex<BTreeMap<u64, RawFd>>,
     socket_serial: AtomicU64,
     pub(crate) dns_serial: AtomicU64,
     pub(crate) resolver_ready: AtomicUsize,
     pub(crate) stats: Stats,
     remaining_bytes: AtomicU64,
-}
-fn boottime_ms() -> u64 {
-    let mut now = libc::timespec {
-        tv_sec: 0,
-        tv_nsec: 0,
-    };
-    if unsafe { libc::clock_gettime(libc::CLOCK_BOOTTIME, &mut now) } != 0 {
-        return u64::MAX;
-    }
-    (now.tv_sec as u64)
-        .saturating_mul(1000)
-        .saturating_add(now.tv_nsec as u64 / 1_000_000)
 }
 impl Runtime {
     pub(crate) fn cancelled(&self) -> bool {
@@ -203,11 +236,21 @@ impl Runtime {
             Ok(())
         }
     }
+    fn validation(&self) -> Result<Arc<ConnectValidation>> {
+        self.validation.lock().map_err(|_|Error::new(Kind::Unsettled))?
+            .as_ref().cloned().ok_or_else(||Error::new(Kind::AuthorityDenied))
+    }
     pub(crate) fn check(&self) -> Result<()> {
         self.check_cancelled()?;
-        if boottime_ms() >= self.authority_until.load(Ordering::Acquire) {
-            return Err(Error::new(Kind::AuthorityDenied));
-        }
+        // Clone under the slot mutex, then run any authority/inventory callback
+        // AFTER releasing it. The fixed IO worker owns this Arc until return.
+        self.validation()?.check_current()?;
+        self.check_cancelled()?;
+        self.check_guest()
+    }
+    fn check_bounds(&self) -> Result<()> {
+        self.check_cancelled()?;
+        self.validation()?.check_bounds()?; // Callback-free independent watchdog.
         self.check_guest()
     }
     fn check_guest(&self) -> Result<()> {
@@ -220,47 +263,58 @@ impl Runtime {
             .verify_live()
     }
     fn keep_admitted(&self) -> bool {
-        if self.check().is_ok() {
+        if self.check_bounds().is_ok() {
             true
         } else {
             self.cancel();
             false
         }
     }
-    fn grant(&self) -> Result<HostIpv4DenySet> {
+    fn grant(&self) -> Result<Arc<ConnectValidation>> {
         self.check_cancelled()?;
-        let answer = self.authority.validate(&self.binding);
+        let query = match ConnectQuery::begin(&self.binding) {
+            Ok(query) => query, Err(error) => { self.fail(Kind::AuthorityDenied); return Err(error); }
+        };
+        let identity = query.identity();
+        // Query time starts BEFORE this potentially blocking callback. Runtime
+        // holds no IO/validation mutex while it runs. No clock is restarted.
+        let answer = self.authority.clone().validate(query);
         self.check_cancelled()?;
-        match answer {
-            Ok(host) => {
-                // A refreshed inventory is also a revocation input for OPEN
-                // tunnels. Conservatively fence the entire proxy if any sealed
-                // pin became host/NAT-denied, before publishing fresh validity.
-                let allowed = self.profile.policy().is_some_and(|policy| {
-                    policy.origins.iter().all(|origin| {
-                        origin.ipv4_addresses.iter().all(|address| {
-                            self.profile
-                                .check_destination(
-                                    &origin.host,
-                                    origin.port,
-                                    IpAddr::V4(*address),
-                                    &host,
-                                )
-                                .is_ok()
-                        })
-                    })
-                });
-                if !allowed {
-                    self.fail(Kind::AuthorityDenied);
-                    return Err(Error::new(Kind::AuthorityDenied));
-                }
-                Ok(host)
+        let result = (|| {
+            let validation = answer?;
+            if !validation.matches(&self.binding, &identity) {
+                return Err(Error::new(Kind::BindingMismatch));
             }
-            Err(_) => {
-                self.fail(Kind::AuthorityDenied);
-                Err(Error::new(Kind::AuthorityDenied))
-            }
-        }
+            let host = validation.check_adoption()?;
+            // A refreshed inventory also revokes OPEN tunnels if any sealed
+            // pin became host/NAT-denied, before adopting the actual result.
+            let allowed = self.profile.policy().is_some_and(|policy| {
+                policy.origins.iter().all(|origin| origin.ipv4_addresses.iter().all(|address|
+                    self.profile.check_destination(&origin.host, origin.port, IpAddr::V4(*address), host).is_ok()))
+            });
+            if !allowed { return Err(Error::new(Kind::AuthorityDenied)); }
+            validation.check_adoption()?;
+            self.check_cancelled()?;
+            Ok(Arc::new(validation))
+        })();
+        if result.is_err() { self.fail(Kind::AuthorityDenied); }
+        result
+    }
+    fn adopt_grant(&self, validation: Arc<ConnectValidation>) -> Result<()> {
+        let result = (|| {
+            validation.check_adoption()?;
+            self.check_cancelled()?;
+            let previous = {
+                let mut current = self.validation.lock().map_err(|_|Error::new(Kind::Unsettled))?;
+                self.check_cancelled()?;
+                validation.check_adoption_bounds()?; // Syscalls only while locked.
+                current.replace(validation)
+            };
+            drop(previous); // Actual owner destructors also run OUTSIDE the mutex.
+            Ok(())
+        })();
+        if result.is_err() { self.fail(Kind::AuthorityDenied); }
+        result
     }
     pub(crate) fn fail(&self, kind: Kind) {
         let mut failure = self.failure.lock().unwrap();
@@ -338,8 +392,15 @@ impl OwnedConnectProxy {
         let deadline = Instant::now()
             .checked_add(timeout)
             .ok_or_else(|| Error::new(Kind::Deadline))?;
+        let mut failure = None;
         for worker in &mut self.workers {
-            worker.settle(deadline)?;
+            // A sticky panic in one worker must not starve actual cleanup of
+            // other workers. Every observer uses the SAME original deadline.
+            if let Err(error) = worker.settle(deadline) { failure.get_or_insert(error); }
+        }
+        if let Some(error) = failure { return Err(error); }
+        if self.shared.startup_panic.lock().map_err(|_|Error::new(Kind::Unsettled))?.is_some() {
+            return Err(Error::new(Kind::Unsettled)); // Actual panic owner remains retained, never normal settlement.
         }
         let snapshot = self.shared.snapshot();
         if snapshot.active_connections != 0
@@ -356,6 +417,7 @@ impl OwnedConnectProxy {
             binding: self.shared.binding.clone(),
             snapshot,
             _owner: Arc::clone(&self.shared),
+            _workers: std::mem::take(&mut self.workers),
         })
     }
 }
@@ -370,6 +432,8 @@ pub struct ConnectedSettlement {
     binding: ConnectBinding,
     snapshot: ProxySnapshot,
     _owner: Arc<Runtime>,
+    // Actual original workers joined; retain their engine-only join observers.
+    _workers: Vec<Worker>,
 }
 impl ConnectedSettlement {
     pub fn binding(&self) -> &ConnectBinding {
@@ -380,13 +444,18 @@ impl ConnectedSettlement {
     }
 }
 
-pub(crate) fn start(
+/// OFF-APP. Caller retains this slot before entry and on EVERY Err/unwind.
+/// None after an early error means no worker was started; Some is actual cleanup
+/// ownership, not startup/ACK. Never flatten a failed Some owner into a bare Err.
+pub(crate) fn start_retaining(
     profile: ValidatedNetworkProfile,
     admission: ListenerAdmission,
     host: HostNetworkAnchor,
     authority: Arc<dyn ConnectAuthority>,
     resolver: ResolverProgram,
-) -> Result<OwnedConnectProxy> {
+    retained: &mut Option<OwnedConnectProxy>,
+) -> Result<()> {
+    if retained.is_some() { return Err(Error::new(Kind::InvalidConfiguration)); }
     let binding = ConnectBinding::for_profile(&profile)?;
     if binding != admission.binding || host.check_current().is_err() {
         return Err(Error::new(Kind::BindingMismatch));
@@ -402,8 +471,9 @@ pub(crate) fn start(
         witnesses: Mutex::new(Some(admission.witnesses)),
         cancelled: AtomicBool::new(false),
         admission_ready: AtomicBool::new(false),
-        authority_until: AtomicU64::new(0),
+        validation: Mutex::new(None),
         failure: Mutex::new(None),
+        startup_panic: Mutex::new(None),
         sockets: Mutex::new(BTreeMap::new()),
         socket_serial: AtomicU64::new(1),
         dns_serial: AtomicU64::new(1),
@@ -412,16 +482,18 @@ pub(crate) fn start(
         remaining_bytes: AtomicU64::new(bytes),
     });
     let (ready, receiver) = mpsc::sync_channel(1);
-    let mut owner = OwnedConnectProxy {
+    let capacity = usize::from(shared.profile.budgets().max_connections);
+    let worker_capacity = capacity + usize::from(shared.profile.budgets().max_dns_jobs) + 2;
+    *retained = Some(OwnedConnectProxy {
         shared: Arc::clone(&shared),
-        workers: Vec::new(),
+        workers: Vec::with_capacity(worker_capacity),
         ready: Some(receiver),
         settled: false,
-    };
-    let (dns, dns_workers) = ResolverPool::start(&shared, resolver)?;
-    owner.workers.extend(dns_workers);
-    let dns = Arc::new(dns);
-    let capacity = usize::from(shared.profile.budgets().max_connections);
+    });
+    provision_retaining(retained.as_mut().unwrap(), |owner| {
+    // ResolverPool must borrow this vector too; a resolver-local temporary Vec
+    // would lose partial startup ownership before our outer catch can see it.
+    let dns = Arc::new(ResolverPool::start_retaining(&shared, resolver, &mut owner.workers)?);
     let (queue, incoming) = mpsc::sync_channel::<Connection>(capacity);
     let incoming = Arc::new(Mutex::new(incoming));
     for _ in 0..capacity {
@@ -465,7 +537,7 @@ pub(crate) fn start(
                     let _ = ready.try_send(Err(Error::new(Kind::Cancelled)));
                     return;
                 }
-                if monitor.grant().is_err() {
+                if monitor.grant().and_then(|validation|monitor.adopt_grant(validation)).is_err() {
                     let _ = ready.try_send(Err(Error::new(Kind::AuthorityDenied)));
                     return;
                 }
@@ -474,9 +546,6 @@ pub(crate) fn start(
                     let _ = ready.try_send(Err(Error::new(Kind::Deadline)));
                     return;
                 }
-                monitor
-                    .authority_until
-                    .store(boottime_ms().saturating_add(500), Ordering::Release);
                 if monitor.resolver_ready.load(Ordering::Acquire)
                     == usize::from(monitor.profile.budgets().max_dns_jobs)
                 {
@@ -502,17 +571,17 @@ pub(crate) fn start(
             monitor.admission_ready.store(true, Ordering::Release);
             let _ = ready.try_send(Ok(()));
             while !monitor.cancelled() {
+                // 200 ms maximum adoption +50 ms cadence +200 ms next adoption
+                // fits inside the original 500 ms staleness bound. Scheduling
+                // overrun still fences; late delivery never buys fresh time.
                 thread::sleep(Duration::from_millis(50));
                 if monitor.check_guest().is_err() {
                     monitor.cancel();
                     break;
                 }
-                if monitor.grant().is_err() {
+                if monitor.grant().and_then(|validation|monitor.adopt_grant(validation)).is_err() {
                     break;
                 }
-                monitor
-                    .authority_until
-                    .store(boottime_ms().saturating_add(500), Ordering::Release);
             }
         })?);
     let accept = Arc::clone(&shared);
@@ -572,7 +641,25 @@ pub(crate) fn start(
             // authority callback stalls: close every admitted socket immediately.
             accept.cancel();
         })?);
-    Ok(owner)
+    Ok(())
+    })
+}
+
+fn provision_retaining(owner:&mut OwnedConnectProxy, provision:impl FnOnce(&mut OwnedConnectProxy) -> Result<()>) -> Result<()> {
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(||provision(owner)));
+    let result = match result {
+        Ok(result) => result,
+        Err(payload) => {
+            // Store before any later failure/drop can run arbitrary panic Drop.
+            *owner.shared.startup_panic.lock().unwrap_or_else(|error|error.into_inner()) = Some(payload);
+            Err(Error::new(Kind::Unsettled))
+        }
+    };
+    if let Err(error) = result {
+        owner.ready.take(); // No failed/partial startup can later produce a readiness ACK.
+        owner.shared.fail(error.kind());
+    }
+    result
 }
 
 struct TrackedStream {
@@ -652,6 +739,7 @@ impl Meter<'_> {
         }
     }
     fn read(&mut self, socket: &mut TcpStream, target: &mut [u8]) -> Result<Option<usize>> {
+        self.shared.check()?;
         let reserved = self.reserve(target.len())?;
         let result = socket.read(&mut target[..reserved]);
         let used = result.as_ref().copied().unwrap_or(0);
@@ -673,6 +761,7 @@ impl Meter<'_> {
         }
     }
     fn own_write(&mut self, socket: &mut TcpStream, bytes: &[u8]) -> Result<Option<usize>> {
+        self.shared.check()?;
         let reserved = self.reserve(bytes.len())?;
         let result = socket.write(&bytes[..reserved]);
         let used = result.as_ref().copied().unwrap_or(0);
@@ -757,20 +846,20 @@ fn serve(connection: &mut Connection, shared: &Arc<Runtime>, dns: &ResolverPool)
         connect_deadline.min(idle + Duration::from_millis(u64::from(budget.idle_timeout_ms)));
     let addresses = dns.resolve(&request.host, network_deadline, shared)?;
     let host = shared.grant()?;
-    validate_answers(&shared.profile, &request, &addresses, &host)?;
+    validate_answers(&shared.profile, &request, &addresses, host.check_current()?)?;
     let mut upstream = None;
     for address in addresses {
         deadlines(shared, total, idle)?;
         let host = shared.grant()?;
         shared
             .profile
-            .check_destination(&request.host, request.port, IpAddr::V4(address), &host)
+            .check_destination(&request.host, request.port, IpAddr::V4(address), host.check_current()?)
             .map_err(|_| Error::new(Kind::DestinationDenied))?;
         if let Ok(stream) = dial(address, request.port, network_deadline, shared) {
             let host = shared.grant()?;
             shared
                 .profile
-                .check_destination(&request.host, request.port, IpAddr::V4(address), &host)
+                .check_destination(&request.host, request.port, IpAddr::V4(address), host.check_current()?)
                 .map_err(|_| Error::new(Kind::DestinationDenied))?;
             upstream = Some(stream);
             break;
@@ -932,6 +1021,7 @@ fn relay_pair(
             (&mut *guest, &mut u, &*input),
         ] {
             if direction.start < direction.end {
+                meter.shared.check()?;
                 match target.write(&bytes[direction.start..direction.end]) {
                     Ok(0) => return Err(Error::new(Kind::Io)),
                     Ok(count) => {
@@ -947,6 +1037,7 @@ fn relay_pair(
                 }
             }
             if direction.eof && direction.start == direction.end && !direction.shutdown {
+                meter.shared.check()?;
                 unsafe {
                     libc::shutdown(target.as_raw_fd(), libc::SHUT_WR);
                 }
@@ -994,11 +1085,16 @@ mod tests {
         net::Shutdown,
         process::{Child, Command, Stdio},
     };
-    struct TestAuthority;
+    use super::super::{ConnectDeadline, ConnectValidationGuard, validity::qualifier_deadline};
+    struct TestAuthority { fixed:ConnectDeadline }
+    impl ConnectValidationGuard for TestAuthority {
+        fn check_current(&self) -> Result<()> { Ok(()) }
+    }
     impl ConnectAuthority for TestAuthority {
-        fn validate(&self, _: &ConnectBinding) -> Result<HostIpv4DenySet> {
-            HostIpv4DenySet::from_trusted_host_inventory([Ipv4Addr::LOCALHOST])
-                .map_err(|_| Error::new(Kind::AuthorityDenied))
+        fn validate(self:Arc<Self>, query:ConnectQuery) -> Result<ConnectValidation> {
+            let host = HostIpv4DenySet::from_trusted_host_inventory([Ipv4Addr::LOCALHOST])
+                .map_err(|_|Error::new(Kind::AuthorityDenied))?;
+            ConnectValidation::new(query, host, self.fixed, self.fixed, self.fixed, self)
         }
     }
     struct Fixture {
@@ -1021,12 +1117,13 @@ mod tests {
                 binding: ConnectBinding::for_profile(&profile).unwrap(),
                 profile,
                 host: HostNetworkAnchor::capture().unwrap(),
-                authority: Arc::new(TestAuthority),
+                authority: Arc::new(TestAuthority { fixed:qualifier_deadline(60_000) }),
                 witnesses: Mutex::new(Some(socket::test_witness(&mut child))),
                 cancelled: AtomicBool::new(false),
                 admission_ready: AtomicBool::new(true),
-                authority_until: AtomicU64::new(boottime_ms() + 60000),
+                validation: Mutex::new(None),
                 failure: Mutex::new(None),
+                startup_panic: Mutex::new(None),
                 sockets: Mutex::new(BTreeMap::new()),
                 socket_serial: AtomicU64::new(1),
                 dns_serial: AtomicU64::new(1),
@@ -1034,6 +1131,7 @@ mod tests {
                 stats: Stats::default(),
                 remaining_bytes: AtomicU64::new(bytes),
             });
+            shared.adopt_grant(shared.grant().unwrap()).unwrap();
             Self { shared, child }
         }
     }
@@ -1206,11 +1304,23 @@ mod tests {
             .unwrap();
         assert!(worker.join.is_none());
     }
+    fn expire_original_grant(fixture: &Fixture) {
+        let query = ConnectQuery::begin(&fixture.shared.binding).unwrap();
+        let fixed = qualifier_deadline(100);
+        let owner = Arc::new(TestAuthority { fixed });
+        let host = HostIpv4DenySet::from_trusted_host_inventory([Ipv4Addr::LOCALHOST]).unwrap();
+        let result = Arc::new(ConnectValidation::new(query, host, fixed, fixed, fixed, owner).unwrap());
+        fixture.shared.adopt_grant(result.clone()).unwrap();
+        let end = Instant::now() + Duration::from_secs(1);
+        while result.check_bounds().is_ok() {
+            assert!(Instant::now() < end); thread::sleep(Duration::from_millis(1));
+        }
+    }
     #[test]
     fn expired_actual_authority_window_denies_traffic_without_refresh() {
         let fixture = Fixture::new();
         fixture.shared.check().unwrap();
-        fixture.shared.authority_until.store(0, Ordering::Release);
+        expire_original_grant(&fixture);
         assert_eq!(
             fixture.shared.check().unwrap_err().kind(),
             Kind::AuthorityDenied
@@ -1289,7 +1399,7 @@ mod tests {
         let fixture = Fixture::new();
         let (mut peer, proxy) = pair();
         let _stream = TrackedStream::new(proxy, &fixture.shared);
-        fixture.shared.authority_until.store(0, Ordering::Release);
+        expire_original_grant(&fixture);
         assert!(!fixture.shared.keep_admitted());
         assert!(fixture.shared.cancelled());
         assert_eq!(peer.read(&mut [0u8; 1]).unwrap(), 0);
@@ -1313,17 +1423,21 @@ mod tests {
     }
     #[test]
     fn refreshed_host_deny_closes_open_relay_before_renewal_and_retains_worker_until_settlement() {
-        struct ChangingAuthority(Mutex<Vec<Ipv4Addr>>);
+        struct ChangingAuthority { addresses:Mutex<Vec<Ipv4Addr>>, fixed:ConnectDeadline }
+        impl ConnectValidationGuard for ChangingAuthority {
+            fn check_current(&self) -> Result<()> { Ok(()) }
+        }
         impl ConnectAuthority for ChangingAuthority {
-            fn validate(&self, _: &ConnectBinding) -> Result<HostIpv4DenySet> {
-                HostIpv4DenySet::from_trusted_host_inventory(self.0.lock().unwrap().clone())
-                    .map_err(|_| Error::new(Kind::AuthorityDenied))
+            fn validate(self:Arc<Self>, query:ConnectQuery) -> Result<ConnectValidation> {
+                let host = HostIpv4DenySet::from_trusted_host_inventory(self.addresses.lock().unwrap().clone())
+                    .map_err(|_|Error::new(Kind::AuthorityDenied))?;
+                ConnectValidation::new(query, host, self.fixed, self.fixed, self.fixed, self)
             }
         }
         let mut fixture = Fixture::new();
-        let authority = Arc::new(ChangingAuthority(Mutex::new(vec![Ipv4Addr::LOCALHOST])));
+        let authority = Arc::new(ChangingAuthority { addresses:Mutex::new(vec![Ipv4Addr::LOCALHOST]), fixed:qualifier_deadline(60_000) });
         Arc::get_mut(&mut fixture.shared).unwrap().authority = authority.clone();
-        fixture.shared.grant().unwrap();
+        fixture.shared.adopt_grant(fixture.shared.grant().unwrap()).unwrap();
         let (mut guest, guest_proxy) = pair();
         let (mut origin, upstream_proxy) = pair();
         origin
@@ -1374,19 +1488,11 @@ mod tests {
         let mut reply = [0u8; 5];
         guest.read_exact(&mut reply).unwrap();
         assert_eq!(&reply, b"reply");
-        *authority.0.lock().unwrap() = vec![Ipv4Addr::LOCALHOST, Ipv4Addr::new(93, 184, 216, 34)];
-        let previous = fixture.shared.authority_until.load(Ordering::Acquire);
-        let refresh = fixture.shared.grant();
-        // This is the monitor's real publication condition. With the old
-        // discarded-inventory behavior the following bytes reach the peer.
-        if refresh.is_ok() {
-            fixture
-                .shared
-                .authority_until
-                .store(boottime_ms() + 500, Ordering::Release);
-        }
+        *authority.addresses.lock().unwrap() = vec![Ipv4Addr::LOCALHOST, Ipv4Addr::new(93, 184, 216, 34)];
+        let previous = fixture.shared.validation().unwrap();
+        let refresh = fixture.shared.grant().and_then(|validation|fixture.shared.adopt_grant(validation));
         let cancelled_before_close = fixture.shared.cancelled();
-        let validity_after_refresh = fixture.shared.authority_until.load(Ordering::Acquire);
+        let validity_after_refresh = fixture.shared.validation().unwrap();
         let _ = guest.write_all(b"AFTER");
         let mut after = [0u8; 5];
         let peer_read = origin.read(&mut after);
@@ -1412,10 +1518,7 @@ mod tests {
             "open tunnel forwarded after its sealed pin became host-denied"
         );
         assert!(cancelled_before_close && refresh.is_err());
-        assert_eq!(
-            validity_after_refresh, previous,
-            "denied refresh published new validity"
-        );
+        assert!(Arc::ptr_eq(&validity_after_refresh, &previous), "denied refresh published a different owner");
         assert!(matches!(early, Err(error) if error.kind() == Kind::Unsettled));
         assert!(still_owned);
         assert!(matches!(
@@ -1425,4 +1528,10 @@ mod tests {
         assert_eq!(settled.snapshot().active_connections, 0);
         assert!(fixture.shared.sockets.lock().unwrap().is_empty());
     }
+    include!("validity_relay_tests.rs");
+    pub(crate) mod lifecycle {
+        use super::*;
+        include!("relay_lifecycle_tests.rs");
+    }
+
 }

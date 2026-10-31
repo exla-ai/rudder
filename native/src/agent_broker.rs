@@ -288,6 +288,8 @@ struct Inner {
     stopped: AtomicBool,
     closed: AtomicBool,
     owned_calls: Option<Arc<OwnedBrokerCalls>>,
+    #[cfg(test)]
+    api_probe: Mutex<Option<owned_thread_tests::ApiProbe>>,
 }
 impl Inner {
     fn authenticate(&self, offered: &AgentIdentityFile) -> Result<Arc<Snapshot>> {
@@ -437,6 +439,8 @@ impl AgentBroker {
             stopped: AtomicBool::new(false),
             closed: AtomicBool::new(false),
             owned_calls: owner.as_ref().map(|owner| Arc::clone(&owner.calls)),
+            #[cfg(test)]
+            api_probe: Mutex::new(None),
         });
         if let Some(owner) = owner.as_mut() { owner.inner = Some(Arc::clone(&inner)); }
         inner.authenticate(&identity)?;
@@ -582,13 +586,13 @@ struct OwnedBrokerCalls {
     uncertain: AtomicBool,
     // Retain panic payloads rather than running arbitrary payload Drop while
     // other request handles are being joined. A panic stops further admission;
-    // at most the bounded handlers plus the acceptor can contribute a payload.
+    // each bounded handler/API worker plus the acceptor can retain a payload.
     panics: Mutex<Vec<BrokerPanic>>,
 }
 impl OwnedBrokerCalls {
     fn new() -> Self {
         Self { handles:Mutex::new(Vec::with_capacity(MAX_OWNED_UNJOINED)),
-            uncertain:AtomicBool::new(false), panics:Mutex::new(Vec::with_capacity(MAX_OWNED_UNJOINED + 1)) }
+            uncertain:AtomicBool::new(false), panics:Mutex::new(Vec::with_capacity(2 * MAX_OWNED_UNJOINED + 1)) }
     }
     fn record_panic(&self, payload: BrokerPanic) {
         self.uncertain.store(true, Ordering::Release);
@@ -708,7 +712,7 @@ impl Drop for BrokerThreadOwner {
     }
 }
 struct BrokerJoin { _thread:std::thread::JoinHandle<()>, done:mpsc::Receiver<bool>, joined:bool, failed:bool }
-/// Proves actual acceptor and request joins including request TLS destruction.
+/// Proves actual acceptor, request and nested API joins, including their TLS.
 /// The fixed join observer itself remains held here, matching source settlement.
 pub(crate) struct BrokerThreadsSettled { _inner:Option<Arc<Inner>>, _joiner:Option<BrokerJoin> }
 
@@ -798,7 +802,54 @@ fn disconnected(stream: &UnixStream) -> bool {
     (unsafe { libc::poll(&mut fd, 1, 0) }) >= 0
         && fd.revents & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) != 0
 }
-fn connection_call(inner: &Arc<Inner>, mut stream: UnixStream) {
+fn connection_call(inner: &Arc<Inner>, stream: UnixStream) {
+    let Some(calls) = &inner.owned_calls else {
+        connection_request(inner, stream, None);
+        return;
+    };
+    // This carrier is OUTSIDE the unwind boundary. Once an API worker exists,
+    // neither a reply, error, disconnect nor handler panic may detach it.
+    let mut api = OwnedApiCall::default();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        connection_request(inner, stream, Some(&mut api));
+    }));
+    if let Err(payload) = result {
+        calls.record_panic(payload);
+        inner.stop();
+    }
+    api.join(inner, calls); // OFF-APP actual join, including API-worker TLS.
+}
+
+#[derive(Default)]
+struct OwnedApiCall {
+    worker: Option<std::thread::JoinHandle<()>>,
+    active_id: Option<String>,
+    cancel: Option<Arc<AtomicBool>>,
+}
+impl OwnedApiCall {
+    fn join(&mut self, inner: &Inner, calls: &OwnedBrokerCalls) {
+        if let Some(cancel) = &self.cancel { cancel.store(true, Ordering::Relaxed); }
+        if let Some(worker) = self.worker.take() {
+            if let Err(payload) = worker.join() {
+                calls.record_panic(payload);
+                inner.stop();
+            }
+        }
+        if let Some(id) = self.active_id.take() {
+            let clean = match inner.active.lock() {
+                Ok(mut active) => { active.remove(&id); true }
+                Err(poison) => {
+                    calls.uncertain.store(true, Ordering::Release);
+                    poison.into_inner().remove(&id);
+                    false
+                }
+            };
+            if !clean { inner.stop(); }
+        }
+    }
+}
+
+fn connection_request(inner: &Arc<Inner>, mut stream: UnixStream, mut api_owner: Option<&mut OwnedApiCall>) {
     // BSD accept() inherits the listener's O_NONBLOCK flag; Linux does not.
     // Our per-connection worker uses blocking I/O with bounded timeouts. Without
     // clearing the flag, a response larger than the socket buffer is truncated
@@ -879,15 +930,26 @@ fn connection_call(inner: &Arc<Inner>, mut stream: UnixStream) {
             if active.len() >= MAX_CALLS {
                 return Err(problem("busy", "too many active agent broker calls"));
             }
+            if let Some(owner) = api_owner.as_deref_mut() {
+                owner.active_id = Some(id.clone());
+                owner.cancel = Some(cancel.clone());
+            }
             active.insert(id.clone(), cancel.clone());
         }
         let (tx, rx) = mpsc::sync_channel(1);
         let running = inner.clone();
         let running_id = id.clone();
         let running_cancel = cancel.clone();
+        let retained = api_owner.is_some();
+        #[cfg(test)]
+        let api_probe = if retained { inner.api_probe.lock().unwrap().take() } else { None };
+        #[cfg(test)]
+        let panic_request = api_probe.as_ref().is_some_and(|probe|probe.panic_request);
         let spawned = std::thread::Builder::new()
             .name("rudder-agent-api".into())
             .spawn(move || {
+                #[cfg(test)]
+                if let Some(probe) = api_probe { owned_thread_tests::install_api_probe(probe); }
                 let result = match request.operation {
                     Operation::Call { tool, arguments } => {
                         snapshot
@@ -901,21 +963,24 @@ fn connection_call(inner: &Arc<Inner>, mut stream: UnixStream) {
                     _ => unreachable!(),
                 };
                 let _ = tx.send(result);
-                if let Ok(mut active) = running.active.lock() {
-                    active.remove(&running_id);
+                if !retained {
+                    if let Ok(mut active) = running.active.lock() {
+                        active.remove(&running_id);
+                    }
                 }
             });
-        if spawned.is_err() {
-            inner
-                .active
-                .lock()
-                .ok()
-                .map(|mut active| active.remove(&id));
-            return Err(problem(
-                "busy",
-                "agent broker could not start a bounded call",
-            ));
+        match spawned {
+            Ok(worker) => {
+                if let Some(owner) = api_owner.as_deref_mut() { owner.worker = Some(worker); }
+                else { drop(worker); } // Preserve ordinary legacy detached behavior.
+            }
+            Err(_) => {
+                if !retained { inner.active.lock().ok().map(|mut active| active.remove(&id)); }
+                return Err(problem("busy", "agent broker could not start a bounded call"));
+            }
         }
+        #[cfg(test)]
+        if panic_request { panic!("injected owned request failure after actual API spawn"); }
         let deadline = Instant::now() + CALL_DEADLINE;
         loop {
             if inner.stopped.load(Ordering::Relaxed) || disconnected(&stream) {
@@ -1285,6 +1350,108 @@ mod tests;
 mod owned_thread_tests {
     use super::*;
     use std::cell::RefCell;
+    pub(super) struct ApiProbe {
+        tls: ApiTls,
+        pub(super) panic_request: bool,
+        panic_api: bool,
+    }
+    struct ApiTls {
+        entered:mpsc::Sender<()>, release:mpsc::Receiver<()>,
+        ended:Arc<AtomicBool>, expired:Arc<AtomicBool>,
+    }
+    impl Drop for ApiTls {
+        fn drop(&mut self) {
+            let _ = self.entered.send(());
+            if self.release.recv_timeout(Duration::from_secs(5)).is_err() {
+                self.expired.store(true, Ordering::Release);
+            }
+            self.ended.store(true, Ordering::Release);
+        }
+    }
+    thread_local! { static API_TLS: RefCell<Option<ApiTls>> = const { RefCell::new(None) }; }
+    pub(super) fn install_api_probe(probe: ApiProbe) {
+        let ApiProbe { tls, panic_api, .. } = probe;
+        API_TLS.with(|slot| *slot.borrow_mut() = Some(tls));
+        if panic_api { panic!("injected actual API-worker failure"); }
+    }
+    struct ApiRelease(Option<mpsc::Sender<()>>);
+    impl ApiRelease { fn open(&mut self) { self.0.take().unwrap().send(()).unwrap(); } }
+    impl Drop for ApiRelease {
+        fn drop(&mut self) { if let Some(release) = self.0.take() { let _ = release.send(()); } }
+    }
+    struct RpcRoot(PathBuf);
+    impl Drop for RpcRoot { fn drop(&mut self) { let _ = fs::remove_dir_all(&self.0); } }
+
+    fn actual_rpc_api_tls(panic_request:bool, panic_api:bool) {
+        use rudder_engine::journal::{CapabilityGrant, Journal};
+        use std::collections::BTreeSet;
+        let root = RpcRoot(Path::new("/tmp").canonicalize().unwrap()
+            .join(format!("rba-{}", &uuid::Uuid::new_v4().simple().to_string()[..12])));
+        private_directory(&root.0).unwrap();
+        let journal_path = root.0.join("journal.sqlite");
+        let mut journal = Journal::open(&journal_path).unwrap();
+        let fence = journal.create_project("p", "owner", "base", 0).unwrap();
+        journal.register_run(&fence, "run", 0).unwrap();
+        let token = journal.issue_capability(&fence, &CapabilityGrant {
+            principal:"agent".into(), run_id:"run".into(), run_epoch:1,
+            operations:BTreeSet::from(["agents:find".into()]), recipients:BTreeMap::new(),
+            scopes:BTreeSet::new(), topics:BTreeSet::new(), expires_at_ms:None,
+        }, 0).unwrap();
+        let socket = socket_path(&root.0, "p", "run", "attempt");
+        let identity_file = project_identity(&socket, &AgentIdentityFile { format_version:1,
+            project_id:"p".into(), run_id:"run".into(), run_epoch:1, owner_epoch:1, token }).unwrap();
+        let mut owner = BrokerThreadOwner::new();
+        let broker = AgentBroker::spawn_retaining(BrokerConfig { journal_path, identity_file:identity_file.clone(),
+            socket_path:socket.clone() }, &mut owner).unwrap();
+        let client = BrokerClient::connect(socket, identity_file).unwrap();
+        let (entered, wait) = mpsc::channel(); let (release, gate) = mpsc::channel();
+        let mut release = ApiRelease(Some(release));
+        let ended = Arc::new(AtomicBool::new(false)); let expired = Arc::new(AtomicBool::new(false));
+        *broker.inner.api_probe.lock().unwrap() = Some(ApiProbe { panic_request, panic_api,
+            tls:ApiTls { entered, release:gate, ended:ended.clone(), expired:expired.clone() } });
+        // Actual framed RPC, authentication and AgentApi query. A successful
+        // reply is available before the API worker's TLS teardown completes.
+        let result = client.exchange(Operation::Call { tool:"agents_find".into(), arguments:json!({}) }, &AtomicBool::new(false));
+        if panic_request || panic_api { assert!(result.is_err()); }
+        else { assert!(result.unwrap()["agents"].is_array()); }
+        wait.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert!(!ended.load(Ordering::Acquire));
+        assert_eq!(broker.inner.active.lock().unwrap().len(), 1, "API TLS still owns its call permit");
+        assert!(broker.inner.count.load(Ordering::Acquire) > 0);
+        assert!(owner.await_closed(Duration::from_millis(20)).is_err());
+        assert!(owner.joiner.is_some() && !owner.settled);
+        let joining = owner.joiner.as_ref().unwrap()._thread.thread().id();
+        assert!(!ended.load(Ordering::Acquire));
+        assert!(!broker.inner.active.lock().unwrap().is_empty());
+        release.open();
+        let settled = owner.await_closed(Duration::from_secs(2));
+        assert!(ended.load(Ordering::Acquire));
+        assert!(!expired.load(Ordering::Acquire), "API TLS fixture fuse expired instead of release");
+        assert_eq!(broker.inner.count.load(Ordering::Acquire), 0);
+        assert!(broker.inner.active.lock().unwrap().is_empty());
+        assert!(broker.inner.connections.lock().unwrap().is_empty());
+        if panic_request || panic_api {
+            assert!(settled.is_err() && !owner.settled);
+            assert!(owner.calls.uncertain.load(Ordering::Acquire));
+            assert_eq!(owner.calls.panics.lock().unwrap().len(), 1);
+            assert_eq!(owner.joiner.as_ref().unwrap()._thread.thread().id(), joining);
+            assert!(owner.await_closed(Duration::from_millis(1)).is_err());
+        } else {
+            let proof = settled.unwrap();
+            assert_eq!(proof._joiner.as_ref().unwrap()._thread.thread().id(), joining);
+            assert!(owner.settled && owner.calls.handles().is_empty());
+            assert!(owner.calls.panics.lock().unwrap().is_empty());
+        }
+    }
+    #[test]
+    fn owned_actual_rpc_reply_cannot_settle_before_api_worker_tls_join() {
+        actual_rpc_api_tls(false, false);
+    }
+    #[test]
+    fn owned_actual_rpc_handler_or_api_panic_retains_nested_tls_and_uncertainty() {
+        actual_rpc_api_tls(true, false);
+        actual_rpc_api_tls(false, true);
+    }
     struct BlockTls { entered:mpsc::Sender<()>, release:mpsc::Receiver<()> }
     impl Drop for BlockTls {
         fn drop(&mut self) { let _ = self.entered.send(()); let _ = self.release.recv(); }

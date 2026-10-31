@@ -71,14 +71,14 @@ pub(crate) struct ResolverPool {
     sender: mpsc::SyncSender<Job>,
 }
 impl ResolverPool {
-    pub(crate) fn start(
+    pub(crate) fn start_retaining(
         shared: &Arc<Runtime>,
         program: ResolverProgram,
-    ) -> Result<(Self, Vec<Worker>)> {
+        workers: &mut Vec<Worker>,
+    ) -> Result<Self> {
         let count = usize::from(shared.profile.budgets().max_dns_jobs);
         let (sender, receiver) = mpsc::sync_channel::<Job>(count);
         let receiver = Arc::new(Mutex::new(receiver));
-        let mut workers = Vec::with_capacity(count);
         for _ in 0..count {
             let shared = Arc::clone(shared);
             let receiver = Arc::clone(&receiver);
@@ -117,7 +117,7 @@ impl ResolverPool {
                 helper.kill_and_reap();
             })?);
         }
-        Ok((Self { sender }, workers))
+        Ok(Self { sender })
     }
     pub(crate) fn resolve(
         &self,

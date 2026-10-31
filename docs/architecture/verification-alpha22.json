@@ -1,0 +1,142 @@
+{
+  "formatVersion": 1,
+  "version": "4.0.0-alpha.22",
+  "sourceKind": "working-tree candidate; physical qualification has an explicit compiler-input envelope",
+  "baseRevision": "20942911a060e41bb97e480b5177ae147db7992e",
+  "checks": {
+    "rust": {
+      "status": "passed",
+      "completedAt": "2026-10-31T19:20:11.347253+00:00",
+      "command": [
+        "python3",
+        "/workspace/home/.cache/rudder-release-build/alpha22-checks/without-rudder-env.py",
+        "env",
+        "CARGO_PROFILE_DEV_DEBUG=0",
+        "CARGO_PROFILE_TEST_DEBUG=0",
+        "cargo",
+        "test",
+        "--locked",
+        "--workspace",
+        "--features",
+        "rudder-vcs-bridge/cli",
+        "--no-fail-fast"
+      ],
+      "receiptSha256": "f7b102022b9ee35242e6e97b29c12d0c716ad019ab84e08c20878b2c9abbe176",
+      "passed": 1828,
+      "failed": 0,
+      "ignored": 29,
+      "suites": 60
+    },
+    "javascript": {
+      "status": "passed",
+      "completedAt": "2026-10-31T19:33:34.895847+00:00",
+      "command": [
+        "python3",
+        "/workspace/home/.cache/rudder-release-build/alpha22-checks/without-rudder-env.py",
+        "npm",
+        "test"
+      ],
+      "receiptSha256": "1b6d72e8b5bd34ac32ee3cf40c71d884ab139d1c239fd706d95cb2a8e2569f1b",
+      "tests": 771,
+      "pass": 762,
+      "fail": 0,
+      "skipped": 9
+    },
+    "terminal": {
+      "status": "passed",
+      "completedAt": "2026-10-31T19:35:17.781229+00:00",
+      "command": [
+        "python3",
+        "/workspace/home/.cache/rudder-release-build/alpha22-checks/without-rudder-env.py",
+        "env",
+        "RUDDER_NATIVE_BIN=/workspace/rudder-alpha22-connect-canary/frozen-4944c914-9303-47b9-b1c4-a12df26f6959/artifacts/rudder-native",
+        "npm",
+        "run",
+        "test:tui"
+      ],
+      "receiptSha256": "b81a1a8922408410eec531d3279c3e683ab5f7107eda5eb5d5ccf145fc8a9e18",
+      "tests": 59,
+      "pass": 59,
+      "fail": 0,
+      "skipped": 0
+    },
+    "typescript": {
+      "status": "passed",
+      "completedAt": "2026-10-31T19:38:01.900529+00:00",
+      "command": [
+        "python3",
+        "/workspace/home/.cache/rudder-release-build/alpha22-checks/without-rudder-env.py",
+        "npm",
+        "run",
+        "check"
+      ],
+      "receiptSha256": "b68728c5897331935daac489a35bbd518d21579f4d84f5c221f52a8b96cbcd6c"
+    },
+    "cloudBuild": {
+      "status": "passed",
+      "completedAt": "2026-10-31T19:38:02.606238+00:00",
+      "command": [
+        "python3",
+        "/workspace/home/.cache/rudder-release-build/alpha22-checks/without-rudder-env.py",
+        "npm",
+        "--prefix",
+        "cloud",
+        "run",
+        "build"
+      ],
+      "receiptSha256": "ea3d345d36dec9de98b18126fada5db542c5ffb9d1bb3e8795d85730999e3f5a"
+    },
+    "cloudWorkerPin": {
+      "status": "passed",
+      "completedAt": "2026-10-31T19:37:40.640533+00:00",
+      "command": [
+        "python3",
+        "/workspace/home/.cache/rudder-release-build/alpha22-checks/without-rudder-env.py",
+        "node",
+        "--test",
+        "tests/cloud-build-profile.test.mjs"
+      ],
+      "receiptSha256": "639295b70ba07dec7e28c08443c9b1fb16284e71d4220554c5fc539ff9a980f4"
+    }
+  },
+  "localTestBuildPolicy": {
+    "CARGO_PROFILE_DEV_DEBUG": "0",
+    "CARGO_PROFILE_TEST_DEBUG": "0",
+    "releaseProfileUnchanged": true
+  },
+  "earlierAttempts": [
+    "full Rust17 stopped at disk floor; audited unused debug-symbol cleanup; full Rust19 passed",
+    "source reconstruction matched every byte; archive modes needed explicit restoration from envelope before complete validation"
+  ],
+  "physicalConnected": {
+    "status": "qualified standalone transport",
+    "evidence": "../../examples/execution/evidence/2026-10-31-alpha22-connected/report.json",
+    "verifiedAt": "2026-10-31T19:33:37.227Z",
+    "sourceEnvelopeSha256": "55689d60232ad30dc0bc9f99d2a473b9cb1ba5f58883820072faea2849254628",
+    "sourceTreeSha256": "7ab50e40d358c68b1ecf1b048d5e1bffdf751308d84df4153f3cc82f39ba515a",
+    "imageDigest": "sha256:0f8d074a93b7b3b4140b4833f164c2a063f9a32e6e2fefc1e0adf6a5a4c9f706",
+    "reportSha256": "e7f978fceb9875b20beff0da85ff4b03fb6f030515af7afe54a4a153d0ff9af3",
+    "cleanupVerified": true,
+    "independentAbsence": true,
+    "actualProviderCalls": 15,
+    "expiryFencingPhysicalQualified": false,
+    "nativeBinaryExecuted": false,
+    "managedConnectedExecutionQualified": false,
+    "modelCalls": false,
+    "testOnlyMock": false
+  },
+  "releaseCheckCi": {
+    "status": "not_started",
+    "branch": "release-check/4.0.0-alpha.22"
+  },
+  "delivery": {
+    "status": "not_started"
+  },
+  "fullV4Complete": false,
+  "remainingGates": [
+    "production trusted inventory and actual custody",
+    "connected Codex/Claude authentication and runtime attachment",
+    "normal source selection, startup and recovery routing",
+    "accepted jj history, fleet ownership, distributed cache and migration"
+  ]
+}

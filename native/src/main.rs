@@ -71,6 +71,8 @@ mod remote_workspace;
 mod source_authorizer;
 mod source_issuer;
 #[cfg(target_os = "linux")]
+mod source_connect_authority;
+#[cfg(target_os = "linux")]
 mod source_shutdown_join;
 #[cfg(target_os = "linux")]
 mod source_controller;

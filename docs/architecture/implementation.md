@@ -268,6 +268,50 @@ remain open. The independent CONNECT prototype still needs a trusted inventory
 covering public/NAT addresses and an expiry-bound authorization interface before
 managed model activation.
 
+## Retained CONNECT authority, alpha.22 working batch
+
+CONNECT validation now retains the exact Engine query created before its callback,
+the actual authority guard, and the original grant, inventory and producer bounds.
+A late callback cannot renew those bounds. Engine admission remains bounded at
+200 ms and staleness at 500 ms; the native adapter preserves its stricter original
+250 ms producer cutoff. The accept worker independently closes sockets when
+validation expires, including when an authority callback stalls.
+
+The native adapter holds the original prepared capability issuance and actual
+Engine lease. Its dedicated finite grant binds project, owner/run epochs, attempt
+and network identity. A database observation cannot recreate the original issue
+acknowledgment. Normal clock-mutex contention serializes the short clock read;
+poison, clock regression and expired authority remain failures. The trusted
+inventory type deliberately has no production constructor yet.
+
+Proxy startup installs an owner in the caller's retained slot before spawning.
+Partial resolver/relay startup keeps every actual worker. Settlement observes
+actual joins under one deadline, retains the same observer on timeout and keeps
+panic uncertainty explicit while attempting cleanup of the other workers. The
+standalone qualifier now also attempts settlement after failed startup/readiness.
+Owned broker handlers join their nested API workers, including TLS teardown,
+before releasing capacity. Shared backend command preparation preserves selected
+credentials, Codex host-key startup and Claude's Immediate startup contract.
+
+Focused checks passed: 181 Engine tests, ten native authority tests, seven owned
+broker tests and five relay lifecycle regressions. The full Rust workspace gate
+then passed 1,828 tests with zero failures and 29 ignored across 60 suites. Its
+first attempt stopped at the disk floor; that outcome and the subsequent generated
+debug-symbol cleanup remain audited. The successful retry uses local dev/test
+debug-symbol level0 and one compiler queue. JavaScript passed 762 tests with nine
+skipped, and all 59 terminal tests passed against the sealed release native.
+
+The frozen-input release build and disposable CONNECT canary passed. The actual
+UID1500 worker qualified public certificate-verified TLS, guest/resolver reaping
+and proxy settlement at 2026-10-31T19:33:37.227Z. Its two independent cleanup
+inventories passed. The exact base-plus-patch reconstruction matches all 272
+compiler inputs after restoring the recorded file modes. See the
+[transport evidence](../../examples/execution/evidence/2026-10-31-alpha22-connected/README.md)
+and [verification](verification-alpha22.json). This remains standalone transport
+evidence: physical expiry/fencing, native App execution, managed connected models,
+normal source startup and accepted history remain unqualified. Alpha.22 has not
+shipped yet.
+
 ## Current implementation track
 
 Base: `91579cf631b1d9d78afbbd786a6dc1f8120cc1ca` on `origin/main` at start.

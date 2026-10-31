@@ -1,0 +1,3498 @@
+diff --git a/engine/src/execution/network/connected.rs b/engine/src/execution/network/connected.rs
+index 0fe6a28..7e133a6 100644
+--- a/engine/src/execution/network/connected.rs
++++ b/engine/src/execution/network/connected.rs
+@@ -15,10 +15,12 @@ pub mod qualification;
+ mod relay;
+ mod resolver;
+ mod socket;
++mod validity;
+ 
+ pub use relay::{ConnectRequest, ConnectedSettlement, OwnedConnectProxy, ProxySnapshot};
+ pub use resolver::run_resolver_process;
+ pub use socket::{HostNetworkAnchor, ListenerAdmission, ListenerFrame};
++pub use validity::{ConnectDeadline, ConnectQuery, ConnectValidation, ConnectValidationGuard};
+ 
+ pub const CONNECT_TRANSPORT_VERSION: u32 = 1;
+ pub const CONNECT_TRANSPORT_PROTOCOL: &str = "rudder_connect_transport_v1";
+@@ -61,6 +63,8 @@ impl ConnectError {
+             errno: std::io::Error::last_os_error().raw_os_error(),
+         }
+     }
++    /// Static conversion for a trusted native authority; never expose its private error.
++    pub fn authority_denied() -> Self { Self::new(ConnectErrorKind::AuthorityDenied) }
+     pub fn kind(self) -> ConnectErrorKind {
+         self.kind
+     }
+@@ -86,6 +90,21 @@ pub struct ConnectBinding {
+     pub profile_sha256: String,
+ }
+ impl ConnectBinding {
++    /// Bounded configuration validation only. This creates neither host network
++    /// custody nor a current owner/run/attempt or inventory authorization.
++    pub fn validate(&self) -> ConnectResult<()> {
++        if self.format_version != CONNECT_TRANSPORT_VERSION
++            || self.protocol != CONNECT_TRANSPORT_PROTOCOL
++            || self.network.validate().is_err()
++            || self.profile_sha256.len() != 64
++            || !self.profile_sha256.bytes().all(|byte|
++                byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
++        {
++            return Err(ConnectError::new(ConnectErrorKind::InvalidConfiguration));
++        }
++        Ok(())
++    }
++
+     pub fn for_profile(profile: &ValidatedNetworkProfile) -> ConnectResult<Self> {
+         if profile.mode() != NetworkMode::QualificationHttpsConnectV1 {
+             return Err(ConnectError::new(ConnectErrorKind::InvalidConfiguration));
+@@ -99,13 +118,12 @@ impl ConnectBinding {
+     }
+ }
+ 
+-/// An actual host-held current grant. A saved binding, cancellation flag or
+-/// caller-supplied boolean is not an implementation. Implementations must check
+-/// the current owner/attempt and return a fresh trusted host-address inventory.
+-/// Calls may outlive a deadline: their fixed worker and owner remain charged
+-/// until they return, and no settlement receipt is minted in the meantime.
++/// Actual host authority returning retained validation of the EXACT original
++/// query. Metadata/address lists/booleans alone cannot supply that owner.
++/// A callback keeps its fixed worker and actual authority charged through its
++/// real return/join, even when the original adoption deadline has passed.
+ pub trait ConnectAuthority: Send + Sync + 'static {
+-    fn validate(&self, binding: &ConnectBinding) -> ConnectResult<HostIpv4DenySet>;
++    fn validate(self: Arc<Self>, query: ConnectQuery) -> ConnectResult<ConnectValidation>;
+ }
+ 
+ /// Launch recipe only, not a live resolver or permission. The executable must
+@@ -146,16 +164,18 @@ impl ResolverProgram {
+ }
+ 
+ impl OwnedConnectProxy {
+-    /// All resources remain owned while startup runs. Call await_ready before
+-    /// sending the child its admission ACK; start alone is not admission.
+-    pub fn start(
++    /// Retain this slot across errors, panic and settlement retries. Partial
++    /// startup leaves its actual worker owner here. Call await_ready before
++    /// sending the child its admission ACK; startup alone is not admission.
++    pub fn start_retaining(
+         profile: ValidatedNetworkProfile,
+         listener: ListenerAdmission,
+         host: HostNetworkAnchor,
+         authority: Arc<dyn ConnectAuthority>,
+         resolver: ResolverProgram,
+-    ) -> ConnectResult<Self> {
+-        relay::start(profile, listener, host, authority, resolver)
++        retained: &mut Option<Self>,
++    ) -> ConnectResult<()> {
++        relay::start_retaining(profile, listener, host, authority, resolver, retained)
+     }
+     /// Network endpoint settlement only. It proves neither stopped guest PIDs
+     /// nor RPC/FUSE/data durability, and is never a checkpoint authority.
+diff --git a/engine/src/execution/network/connected/qualification.rs b/engine/src/execution/network/connected/qualification.rs
+index e901100..b3b9805 100644
+--- a/engine/src/execution/network/connected/qualification.rs
++++ b/engine/src/execution/network/connected/qualification.rs
+@@ -124,13 +124,27 @@ fn private_failure(path: &Path, errors: &[u8], output: &[u8]) -> std::io::Result
+ struct FixedAuthority {
+     binding: ConnectBinding,
+     active: AtomicBool,
++    original_end: ConnectDeadline,
++}
++impl FixedAuthority {
++    fn new(binding:ConnectBinding) -> Self {
++        // Only the explicit synthetic qualifier. Fixed before any inventory/
++        // validation callback; not a production authenticated inventory lease.
++        Self { binding, active:AtomicBool::new(true), original_end:super::validity::qualifier_deadline(60_000) }
++    }
++}
++impl ConnectValidationGuard for FixedAuthority {
++    fn check_current(&self) -> ConnectResult<()> {
++        if self.active.load(Ordering::Acquire) { Ok(()) }
++        else { Err(ConnectError::new(ConnectErrorKind::AuthorityDenied)) }
++    }
+ }
+ impl ConnectAuthority for FixedAuthority {
+-    fn validate(&self, binding: &ConnectBinding) -> ConnectResult<HostIpv4DenySet> {
+-        if binding != &self.binding || !self.active.load(Ordering::Acquire) {
+-            return Err(ConnectError::new(ConnectErrorKind::AuthorityDenied));
+-        }
+-        trusted_interface_inventory()
++    fn validate(self:Arc<Self>, query:ConnectQuery) -> ConnectResult<ConnectValidation> {
++        if query.binding() != &self.binding { return Err(ConnectError::new(ConnectErrorKind::AuthorityDenied)); }
++        self.check_current()?;
++        let inventory = trusted_interface_inventory()?;
++        ConnectValidation::new(query, inventory, self.original_end, self.original_end, self.original_end, self)
+     }
+ }
+ /// Trusted local interface inventory. In production this must also include
+@@ -679,10 +693,7 @@ fn qualify(base: &Path, host: &str, addresses: Vec<Ipv4Addr>) -> ConnectResult<V
+     let profile = validate_profile(raw_profile.clone())?;
+     let digest = hex::encode(profile.profile_digest());
+     let binding = ConnectBinding::for_profile(&profile)?;
+-    let authority = Arc::new(FixedAuthority {
+-        binding,
+-        active: AtomicBool::new(true),
+-    });
++    let authority = Arc::new(FixedAuthority::new(binding));
+     let host_anchor = HostNetworkAnchor::capture()?;
+     let [control, remote] = channel()?;
+     let mut child = OwnedChild::spawn(&remote)?;
+@@ -709,15 +720,15 @@ fn qualify(base: &Path, host: &str, addresses: Vec<Ipv4Addr>) -> ConnectResult<V
+         .map_err(|_| ConnectError::new(ConnectErrorKind::InvalidNamespace))?
+         .identity();
+     let port = admission.port();
+-    let mut proxy = OwnedConnectProxy::start(
+-        profile,
+-        admission,
+-        host_anchor,
+-        authority.clone(),
+-        ResolverProgram::current_executable()?,
+-    )?;
+-    proxy.await_ready(Duration::from_secs(10))?;
++    let mut retained_proxy = None;
+     let result = (|| {
++        OwnedConnectProxy::start_retaining(
++            profile, admission, host_anchor, authority.clone(),
++            ResolverProgram::current_executable()?, &mut retained_proxy,
++        )?;
++        let proxy = retained_proxy.as_mut()
++            .ok_or_else(|| ConnectError::new(ConnectErrorKind::Unsettled))?;
++        proxy.await_ready(Duration::from_secs(10))?;
+         send_packet(control.as_raw_fd(), b"ADMIT1", &[], deadline)?;
+         let (bytes, descriptors) = receive_child(control.as_raw_fd(), deadline)?;
+         if bytes != b"ZERO5-NNP1" || !descriptors.is_empty() {
+@@ -752,10 +763,13 @@ fn qualify(base: &Path, host: &str, addresses: Vec<Ipv4Addr>) -> ConnectResult<V
+         }
+         Ok(result)
+     })();
+-    // Always try actual network settlement before returning the original error.
+-    let settlement = proxy.close_and_settle(Duration::from_secs(8));
++    // Include partial startup and failed readiness in the settlement attempt.
++    // This standalone CLI never reports qualification on unsettled ownership.
++    let settlement = retained_proxy.as_mut()
++        .map(|proxy| proxy.close_and_settle(Duration::from_secs(8))).transpose();
+     let client = result?;
+-    let settlement = settlement?;
++    let settlement = settlement?
++        .ok_or_else(|| ConnectError::new(ConnectErrorKind::Unsettled))?;
+     let counters = settlement.snapshot();
+     if counters.upstream_connections != 1
+         || counters.dns_jobs != 1
+@@ -1076,16 +1090,14 @@ mod tests {
+         )
+         .unwrap();
+         let binding = ConnectBinding::for_profile(&profile).unwrap();
+-        let authority = FixedAuthority {
+-            binding: binding.clone(),
+-            active: AtomicBool::new(true),
+-        };
+-        authority.validate(&binding).unwrap();
++        let authority = Arc::new(FixedAuthority::new(binding.clone()));
++        let validation = authority.clone().validate(ConnectQuery::begin(&binding).unwrap()).unwrap();
+         let mut wrong = binding.clone();
+         wrong.network.owner = "other".into();
+-        assert!(authority.validate(&wrong).is_err());
++        assert!(authority.clone().validate(ConnectQuery::begin(&wrong).unwrap()).is_err());
+         authority.active.store(false, Ordering::Release);
+-        assert!(authority.validate(&binding).is_err());
++        assert!(validation.check_current().is_err());
++        assert!(authority.clone().validate(ConnectQuery::begin(&binding).unwrap()).is_err());
+     }
+     #[test]
+     fn private_failure_is_bounded_private_and_never_opens_an_existing_fifo_or_symlink() {
+diff --git a/engine/src/execution/network/connected/relay.rs b/engine/src/execution/network/connected/relay.rs
+index 64c79bc..4215498 100644
+--- a/engine/src/execution/network/connected/relay.rs
++++ b/engine/src/execution/network/connected/relay.rs
+@@ -1,7 +1,8 @@
+ use super::{
+     resolver::ResolverPool,
+     socket::{self, HostNetworkAnchor, ListenerAdmission, ListenerWitnesses},
+-    ConnectAuthority, ConnectBinding, ConnectError as Error, ConnectErrorKind as Kind,
++    ConnectAuthority, ConnectBinding, ConnectQuery, ConnectValidation,
++    ConnectError as Error, ConnectErrorKind as Kind,
+     ConnectResult as Result, ResolverProgram, MAX_LIFETIME_CONNECTIONS,
+ };
+ use crate::execution::network::{HostIpv4DenySet, ValidatedNetworkProfile};
+@@ -90,50 +91,93 @@ impl ConnectRequest {
+     }
+ }
+ 
++type WorkerPanic = Box<dyn std::any::Any + Send + 'static>;
++struct JoinState {
++    worker: Option<JoinHandle<()>>,
++    joined: bool,
++    uncertain: bool,
++    panic: Option<WorkerPanic>,
++}
++struct JoinObserver { _thread:JoinHandle<()>, done:mpsc::Receiver<()>, notified:bool }
+ pub(crate) struct Worker {
+-    join: Option<JoinHandle<()>>,
+-    done: mpsc::Receiver<()>,
++    // Remains Some through observer spawn failure, actual join/TLS blocking and
++    // uncertain results. The observer takes only the contained actual handle.
++    join: Option<Arc<Mutex<JoinState>>>,
++    observer: Option<JoinObserver>,
+     failed: bool,
+ }
+ impl Worker {
+     pub(crate) fn spawn(name: &str, work: impl FnOnce() + Send + 'static) -> Result<Self> {
++        #[cfg(test)]
++        let probe = tests::lifecycle::before_spawn(name)?;
++        let state = Arc::new(Mutex::new(JoinState { worker:None, joined:false, uncertain:false, panic:None }));
++        let join = thread::Builder::new().name(name.into()).spawn(move || {
++            #[cfg(test)]
++            tests::lifecycle::install_probe(probe);
++            work();
++        }).map_err(|_|Error::new(Kind::ResourceLimit))?;
++        state.lock().unwrap().worker = Some(join); // No callback can access this new state.
++        Ok(Self { join:Some(state), observer:None, failed:false })
++    }
++    fn launch_observer_with(&mut self, spawn:impl FnOnce(Box<dyn FnOnce() + Send>) -> std::io::Result<JoinHandle<()>>) -> Result<()> {
++        if self.observer.is_some() { return Ok(()); }
++        let state = self.join.as_ref().ok_or_else(||Error::new(Kind::Unsettled))?.clone();
+         let (done, receiver) = mpsc::sync_channel(1);
+-        let join = thread::Builder::new()
+-            .name(name.into())
+-            .spawn(move || {
+-                // Even a panic cannot manufacture successful settlement: a dropped
+-                // sender is distinguished from a normal completion message.
+-                work();
+-                let _ = done.send(());
+-            })
+-            .map_err(|_| Error::new(Kind::ResourceLimit))?;
+-        Ok(Self {
+-            join: Some(join),
+-            done: receiver,
+-            failed: false,
+-        })
++        // The actual handle stays in self.join's shared slot if spawn fails or
++        // drops this closure. Neither path can detach it or run its panic Drop.
++        let work = Box::new(move || {
++            let worker = {
++                let mut stored = state.lock().unwrap_or_else(|error| {
++                    let mut stored = error.into_inner(); stored.uncertain = true; stored
++                });
++                stored.worker.take()
++            };
++            if let Some(worker) = worker {
++                let result = worker.join(); // Actual OS join, including original worker TLS.
++                let mut stored = state.lock().unwrap_or_else(|error| {
++                    let mut stored = error.into_inner(); stored.uncertain = true; stored
++                });
++                if let Err(payload) = result {
++                    stored.uncertain = true; // Set BEFORE moving any raw panic payload.
++                    stored.panic = Some(payload); // Retain; no user payload Drop here.
++                }
++                stored.joined = true;
++            } else {
++                state.lock().unwrap_or_else(|error|error.into_inner()).uncertain = true;
++            }
++            let _ = done.send(()); // A notification only AFTER the actual original join.
++        });
++        let observer = spawn(work).map_err(|_|Error::new(Kind::ResourceLimit))?;
++        self.observer = Some(JoinObserver { _thread:observer, done:receiver, notified:false });
++        Ok(())
+     }
+     fn settle(&mut self, deadline: Instant) -> Result<()> {
+-        if self.failed {
+-            return Err(Error::new(Kind::Unsettled));
+-        }
+-        if self.join.is_none() {
+-            return Ok(());
++        if self.failed { return Err(Error::new(Kind::Unsettled)); }
++        if self.join.is_none() { return Ok(()); }
++        self.launch_observer_with(|work|thread::Builder::new().name("rudder-connect-join".into()).spawn(work))?;
++        let observer = self.observer.as_mut().unwrap();
++        if !observer.notified {
++            match observer.done.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
++                Ok(()) => observer.notified = true,
++                Err(mpsc::RecvTimeoutError::Timeout) => return Err(Error::new(Kind::Unsettled)),
++                Err(mpsc::RecvTimeoutError::Disconnected) => {
++                    self.failed = true; // Retain state/observer; no unknown insert/retry success.
++                    return Err(Error::new(Kind::Unsettled));
++                }
++            }
+         }
+-        let remaining = deadline.saturating_duration_since(Instant::now());
+-        match self.done.recv_timeout(remaining) {
+-            Ok(()) => {}
+-            Err(mpsc::RecvTimeoutError::Disconnected) => {
+-                let _ = self.join.take().unwrap().join();
++        if Instant::now() >= deadline { return Err(Error::new(Kind::Unsettled)); }
++        {
++            let state = self.join.as_ref().unwrap().lock().unwrap_or_else(|error| {
++                let mut state = error.into_inner(); state.uncertain = true; state
++            });
++            if !state.joined || state.uncertain || state.panic.is_some() {
+                 self.failed = true;
+                 return Err(Error::new(Kind::Unsettled));
+             }
+-            Err(mpsc::RecvTimeoutError::Timeout) => return Err(Error::new(Kind::Unsettled)),
+         }
+-        self.join.take().unwrap().join().map_err(|_| {
+-            self.failed = true;
+-            Error::new(Kind::Unsettled)
+-        })
++        self.join.take(); // Empty actual-handle slot; observer stays held for audit.
++        Ok(())
+     }
+ }
+ 
+@@ -171,8 +215,9 @@ pub(crate) struct Runtime {
+     witnesses: Mutex<Option<Arc<ListenerWitnesses>>>,
+     cancelled: AtomicBool,
+     admission_ready: AtomicBool,
+-    authority_until: AtomicU64,
++    validation: Mutex<Option<Arc<ConnectValidation>>>,
+     failure: Mutex<Option<Kind>>,
++    startup_panic: Mutex<Option<WorkerPanic>>,
+     sockets: Mutex<BTreeMap<u64, RawFd>>,
+     socket_serial: AtomicU64,
+     pub(crate) dns_serial: AtomicU64,
+@@ -180,18 +225,6 @@ pub(crate) struct Runtime {
+     pub(crate) stats: Stats,
+     remaining_bytes: AtomicU64,
+ }
+-fn boottime_ms() -> u64 {
+-    let mut now = libc::timespec {
+-        tv_sec: 0,
+-        tv_nsec: 0,
+-    };
+-    if unsafe { libc::clock_gettime(libc::CLOCK_BOOTTIME, &mut now) } != 0 {
+-        return u64::MAX;
+-    }
+-    (now.tv_sec as u64)
+-        .saturating_mul(1000)
+-        .saturating_add(now.tv_nsec as u64 / 1_000_000)
+-}
+ impl Runtime {
+     pub(crate) fn cancelled(&self) -> bool {
+         self.cancelled.load(Ordering::Acquire)
+@@ -203,11 +236,21 @@ impl Runtime {
+             Ok(())
+         }
+     }
++    fn validation(&self) -> Result<Arc<ConnectValidation>> {
++        self.validation.lock().map_err(|_|Error::new(Kind::Unsettled))?
++            .as_ref().cloned().ok_or_else(||Error::new(Kind::AuthorityDenied))
++    }
+     pub(crate) fn check(&self) -> Result<()> {
+         self.check_cancelled()?;
+-        if boottime_ms() >= self.authority_until.load(Ordering::Acquire) {
+-            return Err(Error::new(Kind::AuthorityDenied));
+-        }
++        // Clone under the slot mutex, then run any authority/inventory callback
++        // AFTER releasing it. The fixed IO worker owns this Arc until return.
++        self.validation()?.check_current()?;
++        self.check_cancelled()?;
++        self.check_guest()
++    }
++    fn check_bounds(&self) -> Result<()> {
++        self.check_cancelled()?;
++        self.validation()?.check_bounds()?; // Callback-free independent watchdog.
+         self.check_guest()
+     }
+     fn check_guest(&self) -> Result<()> {
+@@ -220,47 +263,58 @@ impl Runtime {
+             .verify_live()
+     }
+     fn keep_admitted(&self) -> bool {
+-        if self.check().is_ok() {
++        if self.check_bounds().is_ok() {
+             true
+         } else {
+             self.cancel();
+             false
+         }
+     }
+-    fn grant(&self) -> Result<HostIpv4DenySet> {
++    fn grant(&self) -> Result<Arc<ConnectValidation>> {
+         self.check_cancelled()?;
+-        let answer = self.authority.validate(&self.binding);
++        let query = match ConnectQuery::begin(&self.binding) {
++            Ok(query) => query, Err(error) => { self.fail(Kind::AuthorityDenied); return Err(error); }
++        };
++        let identity = query.identity();
++        // Query time starts BEFORE this potentially blocking callback. Runtime
++        // holds no IO/validation mutex while it runs. No clock is restarted.
++        let answer = self.authority.clone().validate(query);
+         self.check_cancelled()?;
+-        match answer {
+-            Ok(host) => {
+-                // A refreshed inventory is also a revocation input for OPEN
+-                // tunnels. Conservatively fence the entire proxy if any sealed
+-                // pin became host/NAT-denied, before publishing fresh validity.
+-                let allowed = self.profile.policy().is_some_and(|policy| {
+-                    policy.origins.iter().all(|origin| {
+-                        origin.ipv4_addresses.iter().all(|address| {
+-                            self.profile
+-                                .check_destination(
+-                                    &origin.host,
+-                                    origin.port,
+-                                    IpAddr::V4(*address),
+-                                    &host,
+-                                )
+-                                .is_ok()
+-                        })
+-                    })
+-                });
+-                if !allowed {
+-                    self.fail(Kind::AuthorityDenied);
+-                    return Err(Error::new(Kind::AuthorityDenied));
+-                }
+-                Ok(host)
+-            }
+-            Err(_) => {
+-                self.fail(Kind::AuthorityDenied);
+-                Err(Error::new(Kind::AuthorityDenied))
++        let result = (|| {
++            let validation = answer?;
++            if !validation.matches(&self.binding, &identity) {
++                return Err(Error::new(Kind::BindingMismatch));
+             }
+-        }
++            let host = validation.check_adoption()?;
++            // A refreshed inventory also revokes OPEN tunnels if any sealed
++            // pin became host/NAT-denied, before adopting the actual result.
++            let allowed = self.profile.policy().is_some_and(|policy| {
++                policy.origins.iter().all(|origin| origin.ipv4_addresses.iter().all(|address|
++                    self.profile.check_destination(&origin.host, origin.port, IpAddr::V4(*address), host).is_ok()))
++            });
++            if !allowed { return Err(Error::new(Kind::AuthorityDenied)); }
++            validation.check_adoption()?;
++            self.check_cancelled()?;
++            Ok(Arc::new(validation))
++        })();
++        if result.is_err() { self.fail(Kind::AuthorityDenied); }
++        result
++    }
++    fn adopt_grant(&self, validation: Arc<ConnectValidation>) -> Result<()> {
++        let result = (|| {
++            validation.check_adoption()?;
++            self.check_cancelled()?;
++            let previous = {
++                let mut current = self.validation.lock().map_err(|_|Error::new(Kind::Unsettled))?;
++                self.check_cancelled()?;
++                validation.check_adoption_bounds()?; // Syscalls only while locked.
++                current.replace(validation)
++            };
++            drop(previous); // Actual owner destructors also run OUTSIDE the mutex.
++            Ok(())
++        })();
++        if result.is_err() { self.fail(Kind::AuthorityDenied); }
++        result
+     }
+     pub(crate) fn fail(&self, kind: Kind) {
+         let mut failure = self.failure.lock().unwrap();
+@@ -338,8 +392,15 @@ impl OwnedConnectProxy {
+         let deadline = Instant::now()
+             .checked_add(timeout)
+             .ok_or_else(|| Error::new(Kind::Deadline))?;
++        let mut failure = None;
+         for worker in &mut self.workers {
+-            worker.settle(deadline)?;
++            // A sticky panic in one worker must not starve actual cleanup of
++            // other workers. Every observer uses the SAME original deadline.
++            if let Err(error) = worker.settle(deadline) { failure.get_or_insert(error); }
++        }
++        if let Some(error) = failure { return Err(error); }
++        if self.shared.startup_panic.lock().map_err(|_|Error::new(Kind::Unsettled))?.is_some() {
++            return Err(Error::new(Kind::Unsettled)); // Actual panic owner remains retained, never normal settlement.
+         }
+         let snapshot = self.shared.snapshot();
+         if snapshot.active_connections != 0
+@@ -356,6 +417,7 @@ impl OwnedConnectProxy {
+             binding: self.shared.binding.clone(),
+             snapshot,
+             _owner: Arc::clone(&self.shared),
++            _workers: std::mem::take(&mut self.workers),
+         })
+     }
+ }
+@@ -370,6 +432,8 @@ pub struct ConnectedSettlement {
+     binding: ConnectBinding,
+     snapshot: ProxySnapshot,
+     _owner: Arc<Runtime>,
++    // Actual original workers joined; retain their engine-only join observers.
++    _workers: Vec<Worker>,
+ }
+ impl ConnectedSettlement {
+     pub fn binding(&self) -> &ConnectBinding {
+@@ -380,13 +444,18 @@ impl ConnectedSettlement {
+     }
+ }
+ 
+-pub(crate) fn start(
++/// OFF-APP. Caller retains this slot before entry and on EVERY Err/unwind.
++/// None after an early error means no worker was started; Some is actual cleanup
++/// ownership, not startup/ACK. Never flatten a failed Some owner into a bare Err.
++pub(crate) fn start_retaining(
+     profile: ValidatedNetworkProfile,
+     admission: ListenerAdmission,
+     host: HostNetworkAnchor,
+     authority: Arc<dyn ConnectAuthority>,
+     resolver: ResolverProgram,
+-) -> Result<OwnedConnectProxy> {
++    retained: &mut Option<OwnedConnectProxy>,
++) -> Result<()> {
++    if retained.is_some() { return Err(Error::new(Kind::InvalidConfiguration)); }
+     let binding = ConnectBinding::for_profile(&profile)?;
+     if binding != admission.binding || host.check_current().is_err() {
+         return Err(Error::new(Kind::BindingMismatch));
+@@ -402,8 +471,9 @@ pub(crate) fn start(
+         witnesses: Mutex::new(Some(admission.witnesses)),
+         cancelled: AtomicBool::new(false),
+         admission_ready: AtomicBool::new(false),
+-        authority_until: AtomicU64::new(0),
++        validation: Mutex::new(None),
+         failure: Mutex::new(None),
++        startup_panic: Mutex::new(None),
+         sockets: Mutex::new(BTreeMap::new()),
+         socket_serial: AtomicU64::new(1),
+         dns_serial: AtomicU64::new(1),
+@@ -412,16 +482,18 @@ pub(crate) fn start(
+         remaining_bytes: AtomicU64::new(bytes),
+     });
+     let (ready, receiver) = mpsc::sync_channel(1);
+-    let mut owner = OwnedConnectProxy {
++    let capacity = usize::from(shared.profile.budgets().max_connections);
++    let worker_capacity = capacity + usize::from(shared.profile.budgets().max_dns_jobs) + 2;
++    *retained = Some(OwnedConnectProxy {
+         shared: Arc::clone(&shared),
+-        workers: Vec::new(),
++        workers: Vec::with_capacity(worker_capacity),
+         ready: Some(receiver),
+         settled: false,
+-    };
+-    let (dns, dns_workers) = ResolverPool::start(&shared, resolver)?;
+-    owner.workers.extend(dns_workers);
+-    let dns = Arc::new(dns);
+-    let capacity = usize::from(shared.profile.budgets().max_connections);
++    });
++    provision_retaining(retained.as_mut().unwrap(), |owner| {
++    // ResolverPool must borrow this vector too; a resolver-local temporary Vec
++    // would lose partial startup ownership before our outer catch can see it.
++    let dns = Arc::new(ResolverPool::start_retaining(&shared, resolver, &mut owner.workers)?);
+     let (queue, incoming) = mpsc::sync_channel::<Connection>(capacity);
+     let incoming = Arc::new(Mutex::new(incoming));
+     for _ in 0..capacity {
+@@ -465,7 +537,7 @@ pub(crate) fn start(
+                     let _ = ready.try_send(Err(Error::new(Kind::Cancelled)));
+                     return;
+                 }
+-                if monitor.grant().is_err() {
++                if monitor.grant().and_then(|validation|monitor.adopt_grant(validation)).is_err() {
+                     let _ = ready.try_send(Err(Error::new(Kind::AuthorityDenied)));
+                     return;
+                 }
+@@ -474,9 +546,6 @@ pub(crate) fn start(
+                     let _ = ready.try_send(Err(Error::new(Kind::Deadline)));
+                     return;
+                 }
+-                monitor
+-                    .authority_until
+-                    .store(boottime_ms().saturating_add(500), Ordering::Release);
+                 if monitor.resolver_ready.load(Ordering::Acquire)
+                     == usize::from(monitor.profile.budgets().max_dns_jobs)
+                 {
+@@ -502,17 +571,17 @@ pub(crate) fn start(
+             monitor.admission_ready.store(true, Ordering::Release);
+             let _ = ready.try_send(Ok(()));
+             while !monitor.cancelled() {
++                // 200 ms maximum adoption +50 ms cadence +200 ms next adoption
++                // fits inside the original 500 ms staleness bound. Scheduling
++                // overrun still fences; late delivery never buys fresh time.
+                 thread::sleep(Duration::from_millis(50));
+                 if monitor.check_guest().is_err() {
+                     monitor.cancel();
+                     break;
+                 }
+-                if monitor.grant().is_err() {
++                if monitor.grant().and_then(|validation|monitor.adopt_grant(validation)).is_err() {
+                     break;
+                 }
+-                monitor
+-                    .authority_until
+-                    .store(boottime_ms().saturating_add(500), Ordering::Release);
+             }
+         })?);
+     let accept = Arc::clone(&shared);
+@@ -572,7 +641,25 @@ pub(crate) fn start(
+             // authority callback stalls: close every admitted socket immediately.
+             accept.cancel();
+         })?);
+-    Ok(owner)
++    Ok(())
++    })
++}
++
++fn provision_retaining(owner:&mut OwnedConnectProxy, provision:impl FnOnce(&mut OwnedConnectProxy) -> Result<()>) -> Result<()> {
++    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(||provision(owner)));
++    let result = match result {
++        Ok(result) => result,
++        Err(payload) => {
++            // Store before any later failure/drop can run arbitrary panic Drop.
++            *owner.shared.startup_panic.lock().unwrap_or_else(|error|error.into_inner()) = Some(payload);
++            Err(Error::new(Kind::Unsettled))
++        }
++    };
++    if let Err(error) = result {
++        owner.ready.take(); // No failed/partial startup can later produce a readiness ACK.
++        owner.shared.fail(error.kind());
++    }
++    result
+ }
+ 
+ struct TrackedStream {
+@@ -652,6 +739,7 @@ impl Meter<'_> {
+         }
+     }
+     fn read(&mut self, socket: &mut TcpStream, target: &mut [u8]) -> Result<Option<usize>> {
++        self.shared.check()?;
+         let reserved = self.reserve(target.len())?;
+         let result = socket.read(&mut target[..reserved]);
+         let used = result.as_ref().copied().unwrap_or(0);
+@@ -673,6 +761,7 @@ impl Meter<'_> {
+         }
+     }
+     fn own_write(&mut self, socket: &mut TcpStream, bytes: &[u8]) -> Result<Option<usize>> {
++        self.shared.check()?;
+         let reserved = self.reserve(bytes.len())?;
+         let result = socket.write(&bytes[..reserved]);
+         let used = result.as_ref().copied().unwrap_or(0);
+@@ -757,20 +846,20 @@ fn serve(connection: &mut Connection, shared: &Arc<Runtime>, dns: &ResolverPool)
+         connect_deadline.min(idle + Duration::from_millis(u64::from(budget.idle_timeout_ms)));
+     let addresses = dns.resolve(&request.host, network_deadline, shared)?;
+     let host = shared.grant()?;
+-    validate_answers(&shared.profile, &request, &addresses, &host)?;
++    validate_answers(&shared.profile, &request, &addresses, host.check_current()?)?;
+     let mut upstream = None;
+     for address in addresses {
+         deadlines(shared, total, idle)?;
+         let host = shared.grant()?;
+         shared
+             .profile
+-            .check_destination(&request.host, request.port, IpAddr::V4(address), &host)
++            .check_destination(&request.host, request.port, IpAddr::V4(address), host.check_current()?)
+             .map_err(|_| Error::new(Kind::DestinationDenied))?;
+         if let Ok(stream) = dial(address, request.port, network_deadline, shared) {
+             let host = shared.grant()?;
+             shared
+                 .profile
+-                .check_destination(&request.host, request.port, IpAddr::V4(address), &host)
++                .check_destination(&request.host, request.port, IpAddr::V4(address), host.check_current()?)
+                 .map_err(|_| Error::new(Kind::DestinationDenied))?;
+             upstream = Some(stream);
+             break;
+@@ -932,6 +1021,7 @@ fn relay_pair(
+             (&mut *guest, &mut u, &*input),
+         ] {
+             if direction.start < direction.end {
++                meter.shared.check()?;
+                 match target.write(&bytes[direction.start..direction.end]) {
+                     Ok(0) => return Err(Error::new(Kind::Io)),
+                     Ok(count) => {
+@@ -947,6 +1037,7 @@ fn relay_pair(
+                 }
+             }
+             if direction.eof && direction.start == direction.end && !direction.shutdown {
++                meter.shared.check()?;
+                 unsafe {
+                     libc::shutdown(target.as_raw_fd(), libc::SHUT_WR);
+                 }
+@@ -994,11 +1085,16 @@ mod tests {
+         net::Shutdown,
+         process::{Child, Command, Stdio},
+     };
+-    struct TestAuthority;
++    use super::super::{ConnectDeadline, ConnectValidationGuard, validity::qualifier_deadline};
++    struct TestAuthority { fixed:ConnectDeadline }
++    impl ConnectValidationGuard for TestAuthority {
++        fn check_current(&self) -> Result<()> { Ok(()) }
++    }
+     impl ConnectAuthority for TestAuthority {
+-        fn validate(&self, _: &ConnectBinding) -> Result<HostIpv4DenySet> {
+-            HostIpv4DenySet::from_trusted_host_inventory([Ipv4Addr::LOCALHOST])
+-                .map_err(|_| Error::new(Kind::AuthorityDenied))
++        fn validate(self:Arc<Self>, query:ConnectQuery) -> Result<ConnectValidation> {
++            let host = HostIpv4DenySet::from_trusted_host_inventory([Ipv4Addr::LOCALHOST])
++                .map_err(|_|Error::new(Kind::AuthorityDenied))?;
++            ConnectValidation::new(query, host, self.fixed, self.fixed, self.fixed, self)
+         }
+     }
+     struct Fixture {
+@@ -1021,12 +1117,13 @@ mod tests {
+                 binding: ConnectBinding::for_profile(&profile).unwrap(),
+                 profile,
+                 host: HostNetworkAnchor::capture().unwrap(),
+-                authority: Arc::new(TestAuthority),
++                authority: Arc::new(TestAuthority { fixed:qualifier_deadline(60_000) }),
+                 witnesses: Mutex::new(Some(socket::test_witness(&mut child))),
+                 cancelled: AtomicBool::new(false),
+                 admission_ready: AtomicBool::new(true),
+-                authority_until: AtomicU64::new(boottime_ms() + 60000),
++                validation: Mutex::new(None),
+                 failure: Mutex::new(None),
++                startup_panic: Mutex::new(None),
+                 sockets: Mutex::new(BTreeMap::new()),
+                 socket_serial: AtomicU64::new(1),
+                 dns_serial: AtomicU64::new(1),
+@@ -1034,6 +1131,7 @@ mod tests {
+                 stats: Stats::default(),
+                 remaining_bytes: AtomicU64::new(bytes),
+             });
++            shared.adopt_grant(shared.grant().unwrap()).unwrap();
+             Self { shared, child }
+         }
+     }
+@@ -1206,11 +1304,23 @@ mod tests {
+             .unwrap();
+         assert!(worker.join.is_none());
+     }
++    fn expire_original_grant(fixture: &Fixture) {
++        let query = ConnectQuery::begin(&fixture.shared.binding).unwrap();
++        let fixed = qualifier_deadline(100);
++        let owner = Arc::new(TestAuthority { fixed });
++        let host = HostIpv4DenySet::from_trusted_host_inventory([Ipv4Addr::LOCALHOST]).unwrap();
++        let result = Arc::new(ConnectValidation::new(query, host, fixed, fixed, fixed, owner).unwrap());
++        fixture.shared.adopt_grant(result.clone()).unwrap();
++        let end = Instant::now() + Duration::from_secs(1);
++        while result.check_bounds().is_ok() {
++            assert!(Instant::now() < end); thread::sleep(Duration::from_millis(1));
++        }
++    }
+     #[test]
+     fn expired_actual_authority_window_denies_traffic_without_refresh() {
+         let fixture = Fixture::new();
+         fixture.shared.check().unwrap();
+-        fixture.shared.authority_until.store(0, Ordering::Release);
++        expire_original_grant(&fixture);
+         assert_eq!(
+             fixture.shared.check().unwrap_err().kind(),
+             Kind::AuthorityDenied
+@@ -1289,7 +1399,7 @@ mod tests {
+         let fixture = Fixture::new();
+         let (mut peer, proxy) = pair();
+         let _stream = TrackedStream::new(proxy, &fixture.shared);
+-        fixture.shared.authority_until.store(0, Ordering::Release);
++        expire_original_grant(&fixture);
+         assert!(!fixture.shared.keep_admitted());
+         assert!(fixture.shared.cancelled());
+         assert_eq!(peer.read(&mut [0u8; 1]).unwrap(), 0);
+@@ -1313,17 +1423,21 @@ mod tests {
+     }
+     #[test]
+     fn refreshed_host_deny_closes_open_relay_before_renewal_and_retains_worker_until_settlement() {
+-        struct ChangingAuthority(Mutex<Vec<Ipv4Addr>>);
++        struct ChangingAuthority { addresses:Mutex<Vec<Ipv4Addr>>, fixed:ConnectDeadline }
++        impl ConnectValidationGuard for ChangingAuthority {
++            fn check_current(&self) -> Result<()> { Ok(()) }
++        }
+         impl ConnectAuthority for ChangingAuthority {
+-            fn validate(&self, _: &ConnectBinding) -> Result<HostIpv4DenySet> {
+-                HostIpv4DenySet::from_trusted_host_inventory(self.0.lock().unwrap().clone())
+-                    .map_err(|_| Error::new(Kind::AuthorityDenied))
++            fn validate(self:Arc<Self>, query:ConnectQuery) -> Result<ConnectValidation> {
++                let host = HostIpv4DenySet::from_trusted_host_inventory(self.addresses.lock().unwrap().clone())
++                    .map_err(|_|Error::new(Kind::AuthorityDenied))?;
++                ConnectValidation::new(query, host, self.fixed, self.fixed, self.fixed, self)
+             }
+         }
+         let mut fixture = Fixture::new();
+-        let authority = Arc::new(ChangingAuthority(Mutex::new(vec![Ipv4Addr::LOCALHOST])));
++        let authority = Arc::new(ChangingAuthority { addresses:Mutex::new(vec![Ipv4Addr::LOCALHOST]), fixed:qualifier_deadline(60_000) });
+         Arc::get_mut(&mut fixture.shared).unwrap().authority = authority.clone();
+-        fixture.shared.grant().unwrap();
++        fixture.shared.adopt_grant(fixture.shared.grant().unwrap()).unwrap();
+         let (mut guest, guest_proxy) = pair();
+         let (mut origin, upstream_proxy) = pair();
+         origin
+@@ -1374,19 +1488,11 @@ mod tests {
+         let mut reply = [0u8; 5];
+         guest.read_exact(&mut reply).unwrap();
+         assert_eq!(&reply, b"reply");
+-        *authority.0.lock().unwrap() = vec![Ipv4Addr::LOCALHOST, Ipv4Addr::new(93, 184, 216, 34)];
+-        let previous = fixture.shared.authority_until.load(Ordering::Acquire);
+-        let refresh = fixture.shared.grant();
+-        // This is the monitor's real publication condition. With the old
+-        // discarded-inventory behavior the following bytes reach the peer.
+-        if refresh.is_ok() {
+-            fixture
+-                .shared
+-                .authority_until
+-                .store(boottime_ms() + 500, Ordering::Release);
+-        }
++        *authority.addresses.lock().unwrap() = vec![Ipv4Addr::LOCALHOST, Ipv4Addr::new(93, 184, 216, 34)];
++        let previous = fixture.shared.validation().unwrap();
++        let refresh = fixture.shared.grant().and_then(|validation|fixture.shared.adopt_grant(validation));
+         let cancelled_before_close = fixture.shared.cancelled();
+-        let validity_after_refresh = fixture.shared.authority_until.load(Ordering::Acquire);
++        let validity_after_refresh = fixture.shared.validation().unwrap();
+         let _ = guest.write_all(b"AFTER");
+         let mut after = [0u8; 5];
+         let peer_read = origin.read(&mut after);
+@@ -1412,10 +1518,7 @@ mod tests {
+             "open tunnel forwarded after its sealed pin became host-denied"
+         );
+         assert!(cancelled_before_close && refresh.is_err());
+-        assert_eq!(
+-            validity_after_refresh, previous,
+-            "denied refresh published new validity"
+-        );
++        assert!(Arc::ptr_eq(&validity_after_refresh, &previous), "denied refresh published a different owner");
+         assert!(matches!(early, Err(error) if error.kind() == Kind::Unsettled));
+         assert!(still_owned);
+         assert!(matches!(
+@@ -1425,4 +1528,10 @@ mod tests {
+         assert_eq!(settled.snapshot().active_connections, 0);
+         assert!(fixture.shared.sockets.lock().unwrap().is_empty());
+     }
++    include!("validity_relay_tests.rs");
++    pub(crate) mod lifecycle {
++        use super::*;
++        include!("relay_lifecycle_tests.rs");
++    }
++
+ }
+diff --git a/engine/src/execution/network/connected/relay_lifecycle_tests.rs b/engine/src/execution/network/connected/relay_lifecycle_tests.rs
+new file mode 100644
+index 0000000..65ae6f8
+--- /dev/null
++++ b/engine/src/execution/network/connected/relay_lifecycle_tests.rs
+@@ -0,0 +1,183 @@
++use std::cell::RefCell;
++
++pub(crate) struct SpawnProbe {
++    entered:mpsc::SyncSender<()>, release:mpsc::Receiver<()>,
++    ended:Arc<AtomicBool>, expired:Arc<AtomicBool>,
++}
++struct TlsHold(SpawnProbe);
++impl Drop for TlsHold {
++    fn drop(&mut self) {
++        let _ = self.0.entered.send(());
++        if self.0.release.recv_timeout(Duration::from_secs(5)).is_err() {
++            self.0.expired.store(true, Ordering::Release);
++        }
++        self.0.ended.store(true, Ordering::Release);
++    }
++}
++thread_local! {
++    static TLS:RefCell<Option<TlsHold>> = const { RefCell::new(None) };
++    static PLAN:RefCell<Option<Plan>> = const { RefCell::new(None) };
++}
++struct Release(Option<mpsc::SyncSender<()>>);
++impl Release { fn open(&mut self) { self.0.take().unwrap().send(()).unwrap(); } }
++impl Drop for Release { fn drop(&mut self) { if let Some(send) = self.0.take() { let _ = send.try_send(()); } } }
++struct PanicData { may_panic:Arc<AtomicBool>, dropped:Arc<AtomicBool> }
++impl Drop for PanicData {
++    fn drop(&mut self) {
++        self.dropped.store(true, Ordering::Release);
++        assert!(!self.may_panic.load(Ordering::Acquire), "raw panic payload must remain retained");
++    }
++}
++struct Plan { name:&'static str, calls:usize, fail_on:usize, first:Option<SpawnProbe>, panic:Option<PanicData> }
++struct Scope(Option<Plan>);
++impl Scope {
++    fn install(plan:Plan) -> Self { Self(PLAN.with(|slot|slot.replace(Some(plan)))) }
++}
++impl Drop for Scope { fn drop(&mut self) { PLAN.with(|slot| { slot.replace(self.0.take()); }); } }
++// Caller-thread scoped, cfg(test) only. No environment/global runtime backdoor.
++// The common Worker::spawn seam is also used by ResolverPool's real startup.
++pub(crate) fn before_spawn(name:&str) -> Result<Option<SpawnProbe>> {
++    PLAN.with(|slot| {
++        let mut slot = slot.borrow_mut();
++        let Some(plan) = slot.as_mut().filter(|plan|plan.name == name) else { return Ok(None); };
++        plan.calls += 1;
++        if plan.calls == plan.fail_on {
++            if let Some(payload) = plan.panic.take() { std::panic::panic_any(payload); }
++            return Err(Error::new(Kind::ResourceLimit));
++        }
++        Ok(plan.first.take())
++    })
++}
++pub(crate) fn install_probe(probe:Option<SpawnProbe>) {
++    if let Some(probe) = probe { TLS.with(|slot|*slot.borrow_mut() = Some(TlsHold(probe))); }
++}
++fn probe() -> (SpawnProbe, Release, mpsc::Receiver<()>, Arc<AtomicBool>, Arc<AtomicBool>) {
++    let (entered,wait) = mpsc::sync_channel(1); let (send,release) = mpsc::sync_channel(1);
++    let ended = Arc::new(AtomicBool::new(false)); let expired = Arc::new(AtomicBool::new(false));
++    (SpawnProbe { entered, release, ended:ended.clone(), expired:expired.clone() }, Release(Some(send)), wait, ended, expired)
++}
++fn owner(shared:Arc<Runtime>) -> OwnedConnectProxy {
++    let (_send,ready) = mpsc::sync_channel(1);
++    OwnedConnectProxy { shared, workers:Vec::with_capacity(8), ready:Some(ready), settled:false }
++}
++
++#[test]
++fn body_returned_but_actual_tls_join_times_out_and_retries_same_observer() {
++    let fixture = Fixture::new(); let (probe,mut release,entered,ended,expired) = probe();
++    let worker = Worker::spawn("connect-lifecycle-tls", move ||install_probe(Some(probe))).unwrap();
++    entered.recv_timeout(Duration::from_secs(2)).unwrap();
++    let mut owner = owner(fixture.shared.clone()); owner.workers.push(worker);
++    let started = Instant::now();
++    assert!(matches!(owner.close_and_settle(Duration::from_millis(20)), Err(error) if error.kind() == Kind::Unsettled));
++    assert!(started.elapsed() < Duration::from_millis(500));
++    assert!(owner.workers[0].join.is_some() && !ended.load(Ordering::Acquire));
++    assert!(fixture.shared.witnesses.lock().unwrap().is_some());
++    let original = owner.workers[0].observer.as_ref().unwrap()._thread.thread().id();
++    release.open(); let proof = owner.close_and_settle(Duration::from_secs(1)).unwrap();
++    assert!(ended.load(Ordering::Acquire) && !expired.load(Ordering::Acquire));
++    assert_eq!(proof._workers[0].observer.as_ref().unwrap()._thread.thread().id(), original);
++    assert!(proof._workers[0].join.is_none());
++    assert!(fixture.shared.witnesses.lock().unwrap().is_none());
++}
++
++#[test]
++fn observer_spawn_failure_retains_the_original_actual_handle_and_retry() {
++    let (probe,mut release,entered,ended,expired) = probe();
++    let mut worker = Worker::spawn("connect-lifecycle-observer", move ||install_probe(Some(probe))).unwrap();
++    entered.recv_timeout(Duration::from_secs(2)).unwrap();
++    let original = worker.join.as_ref().unwrap().lock().unwrap().worker.as_ref().unwrap().thread().id();
++    let error = worker.launch_observer_with(|work| {
++        drop(work); // The same closure-drop behavior as an actual failed spawn.
++        Err(std::io::Error::from_raw_os_error(libc::EAGAIN))
++    }).unwrap_err();
++    assert_eq!(error.kind(), Kind::ResourceLimit); assert!(worker.observer.is_none());
++    assert_eq!(worker.join.as_ref().unwrap().lock().unwrap().worker.as_ref().unwrap().thread().id(), original);
++    assert!(!ended.load(Ordering::Acquire)); release.open();
++    worker.settle(Instant::now() + Duration::from_secs(1)).unwrap();
++    assert!(ended.load(Ordering::Acquire) && !expired.load(Ordering::Acquire));
++}
++
++#[test]
++fn panicking_payload_is_retained_and_cannot_turn_a_retry_into_success() {
++    let may_panic = Arc::new(AtomicBool::new(true)); let dropped = Arc::new(AtomicBool::new(false));
++    let payload = PanicData { may_panic:may_panic.clone(), dropped:dropped.clone() };
++    let mut worker = Worker::spawn("connect-lifecycle-panic", move ||std::panic::panic_any(payload)).unwrap();
++    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(||worker.settle(Instant::now() + Duration::from_secs(1))));
++    let retained = !dropped.load(Ordering::Acquire);
++    may_panic.store(false, Ordering::Release); // Bounded safe test cleanup even on a negative control.
++    assert!(matches!(result, Ok(Err(error)) if error.kind() == Kind::Unsettled));
++    assert!(retained && worker.failed && worker.join.is_some());
++    assert!(worker.settle(Instant::now() + Duration::from_secs(1)).is_err());
++    assert!(!dropped.load(Ordering::Acquire)); drop(worker);
++    let end = Instant::now() + Duration::from_secs(1);
++    while !dropped.load(Ordering::Acquire) { assert!(Instant::now() < end); thread::yield_now(); }
++}
++
++fn two_dns(fixture:&mut Fixture) {
++    use crate::execution::network::ExpectedNetworkBinding;
++    // Revalidate exact configuration/digest; do not mutate a validated budget.
++    let mut raw = fixture.shared.profile.profile.clone(); raw.budgets.max_dns_jobs = 2;
++    let binding = raw.binding.clone(); let nonce = raw.readiness_nonce.clone();
++    let expected = ExpectedNetworkBinding { project_id:&binding.project_id, owner:&binding.owner,
++        owner_epoch:binding.owner_epoch.value(), run_id:&binding.run_id, run_epoch:binding.run_epoch.value(),
++        request_id:&binding.request_id, execution_id:&binding.execution_id, operation_id:&binding.operation_id,
++        view_id:&binding.view_id, network_id:&binding.network_id, readiness_nonce:&nonce };
++    let host = HostIpv4DenySet::from_trusted_host_inventory([Ipv4Addr::LOCALHOST]).unwrap();
++    let profile = raw.validate(&expected, Some(&host)).unwrap();
++    let shared = Arc::get_mut(&mut fixture.shared).unwrap();
++    shared.binding = ConnectBinding::for_profile(&profile).unwrap(); shared.profile = profile;
++    fixture.shared.adopt_grant(fixture.shared.grant().unwrap()).unwrap();
++}
++
++#[test]
++fn partial_resolver_spawn_error_or_panic_retains_actual_first_worker_until_join() {
++    for panic in [false,true] {
++        let mut fixture = Fixture::new(); two_dns(&mut fixture);
++        let (probe,mut release,entered,ended,expired) = probe();
++        let may_panic = Arc::new(AtomicBool::new(panic)); let dropped = Arc::new(AtomicBool::new(false));
++        let payload = panic.then(||PanicData { may_panic:may_panic.clone(), dropped:dropped.clone() });
++        let _scope = Scope::install(Plan { name:"rudder-connect-dns", calls:0, fail_on:2, first:Some(probe), panic:payload });
++        let mut retained = Some(owner(fixture.shared.clone()));
++        let shared = fixture.shared.clone();
++        // Real ResolverPool startup plus a pinned no-network ELF. Its first
++        // real helper is reaped by the real resolver worker before gated TLS.
++        let program = ResolverProgram { executable:Arc::new(std::fs::File::open("/usr/bin/true").unwrap()) };
++        let result = provision_retaining(retained.as_mut().unwrap(), |owner| {
++            ResolverPool::start_retaining(&shared, program, &mut owner.workers).map(|_|())
++        });
++        let owner = retained.as_mut().unwrap();
++        let raw_retained = !dropped.load(Ordering::Acquire);
++        may_panic.store(false, Ordering::Release); // Prevent a test failure from panicking again during cleanup.
++        assert_eq!(result.unwrap_err().kind(), if panic { Kind::Unsettled } else { Kind::ResourceLimit });
++        assert!(Arc::ptr_eq(&owner.shared, &shared)); assert_eq!(owner.workers.len(), 1);
++        assert!(owner.await_ready(Duration::from_millis(1)).is_err());
++        entered.recv_timeout(Duration::from_secs(2)).unwrap();
++        assert!(owner.close_and_settle(Duration::from_millis(20)).is_err());
++        assert!(!ended.load(Ordering::Acquire) && owner.workers[0].join.is_some());
++        assert!(shared.witnesses.lock().unwrap().is_some()); release.open();
++        let settled = owner.close_and_settle(Duration::from_secs(1));
++        assert!(ended.load(Ordering::Acquire) && !expired.load(Ordering::Acquire));
++        if panic {
++            assert!(raw_retained && settled.is_err() && !owner.settled);
++            assert!(owner.workers[0].join.is_none()); // Actual thread joined; uncertainty still retained.
++            assert!(shared.startup_panic.lock().unwrap().is_some());
++            assert!(!dropped.load(Ordering::Acquire));
++        } else { assert!(settled.is_ok()); }
++    }
++}
++
++#[test]
++fn one_panicked_worker_cannot_starve_cleanup_of_another_actual_worker() {
++    let fixture = Fixture::new(); let (probe,mut release,entered,ended,expired) = probe();
++    let mut owner = owner(fixture.shared.clone());
++    let mut first = Worker::spawn("connect-lifecycle-first-panic", ||panic!("first worker failed")).unwrap();
++    assert!(first.settle(Instant::now() + Duration::from_secs(1)).is_err());
++    assert!(first.failed); owner.workers.push(first);
++    owner.workers.push(Worker::spawn("connect-lifecycle-second-tls", move ||install_probe(Some(probe))).unwrap());
++    entered.recv_timeout(Duration::from_secs(2)).unwrap();
++    assert!(owner.close_and_settle(Duration::from_millis(20)).is_err());
++    assert!(owner.workers[0].failed && owner.workers[1].observer.is_some());
++    release.open(); assert!(owner.close_and_settle(Duration::from_secs(1)).is_err());
++    assert!(ended.load(Ordering::Acquire) && !expired.load(Ordering::Acquire));
++    assert!(owner.workers[1].join.is_none()); assert!(!owner.settled);
++}
+diff --git a/engine/src/execution/network/connected/resolver.rs b/engine/src/execution/network/connected/resolver.rs
+index a30a59f..ac93aff 100644
+--- a/engine/src/execution/network/connected/resolver.rs
++++ b/engine/src/execution/network/connected/resolver.rs
+@@ -71,14 +71,14 @@ pub(crate) struct ResolverPool {
+     sender: mpsc::SyncSender<Job>,
+ }
+ impl ResolverPool {
+-    pub(crate) fn start(
++    pub(crate) fn start_retaining(
+         shared: &Arc<Runtime>,
+         program: ResolverProgram,
+-    ) -> Result<(Self, Vec<Worker>)> {
++        workers: &mut Vec<Worker>,
++    ) -> Result<Self> {
+         let count = usize::from(shared.profile.budgets().max_dns_jobs);
+         let (sender, receiver) = mpsc::sync_channel::<Job>(count);
+         let receiver = Arc::new(Mutex::new(receiver));
+-        let mut workers = Vec::with_capacity(count);
+         for _ in 0..count {
+             let shared = Arc::clone(shared);
+             let receiver = Arc::clone(&receiver);
+@@ -117,7 +117,7 @@ impl ResolverPool {
+                 helper.kill_and_reap();
+             })?);
+         }
+-        Ok((Self { sender }, workers))
++        Ok(Self { sender })
+     }
+     pub(crate) fn resolve(
+         &self,
+diff --git a/engine/src/execution/network/connected/validity.rs b/engine/src/execution/network/connected/validity.rs
+new file mode 100644
+index 0000000..ca78cd4
+--- /dev/null
++++ b/engine/src/execution/network/connected/validity.rs
+@@ -0,0 +1,163 @@
++//! Actual retained validation, separate from its non-authorizing time DATA.
++use super::{ConnectBinding, ConnectError as Error, ConnectErrorKind as Kind,
++    ConnectResult as Result, HostIpv4DenySet};
++use std::sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}};
++
++const NS_PER_MS: u128 = 1_000_000;
++pub(crate) const ADOPTION_LIMIT_MS: i64 = 200;
++pub(crate) const MAX_STALENESS_MS: i64 = 500;
++
++#[derive(Clone, Copy)]
++struct Sample { wall_ms:i64, boot_ns:u128 }
++impl Sample {
++    fn now() -> Result<Self> {
++        let mut boot = libc::timespec { tv_sec:0, tv_nsec:0 };
++        let mut wall = libc::timespec { tv_sec:0, tv_nsec:0 };
++        if unsafe { libc::clock_gettime(libc::CLOCK_BOOTTIME, &mut boot) } != 0
++            || unsafe { libc::clock_gettime(libc::CLOCK_REALTIME, &mut wall) } != 0
++            || boot.tv_sec < 0 || wall.tv_sec < 0
++            || !(0..1_000_000_000).contains(&boot.tv_nsec)
++            || !(0..1_000_000_000).contains(&wall.tv_nsec) {
++            return Err(Error::new(Kind::AuthorityDenied));
++        }
++        Ok(Self { wall_ms:i64::try_from(wall.tv_sec).ok()
++                .and_then(|s|s.checked_mul(1000)).and_then(|s|s.checked_add(wall.tv_nsec as i64 / 1_000_000))
++                .ok_or_else(||Error::new(Kind::AuthorityDenied))?,
++            boot_ns:(boot.tv_sec as u128) * 1_000_000_000 + boot.tv_nsec as u128 })
++    }
++}
++
++/// Original absolute wall/BOOTTIME bounds, DATA only. The trusted adapter must
++/// copy the grant/inventory producer's original bounds, never now + a TTL.
++/// No Serde, wall-only conversion or engine constructor can grant authority.
++#[derive(Clone, Copy)]
++pub struct ConnectDeadline { wall_ms:i64, boot_ns:u128 }
++impl ConnectDeadline {
++    pub fn from_original(wall_ms:i64, boot_ns:u128) -> Result<Self> {
++        if wall_ms <= 0 || boot_ns == 0 { return Err(Error::new(Kind::InvalidConfiguration)); }
++        Ok(Self { wall_ms, boot_ns })
++    }
++    fn after(start: Sample, ms:i64) -> Result<Self> {
++        Self::from_original(start.wall_ms.checked_add(ms).ok_or_else(||Error::new(Kind::Deadline))?,
++            start.boot_ns.checked_add(ms as u128 * NS_PER_MS).ok_or_else(||Error::new(Kind::Deadline))?)
++    }
++    fn check(self, sample: Sample) -> Result<()> {
++        if sample.wall_ms >= self.wall_ms || sample.boot_ns >= self.boot_ns {
++            Err(Error::new(Kind::AuthorityDenied))
++        } else { Ok(()) }
++    }
++}
++
++/// Created only by Runtime BEFORE calling the trusted authority. The private
++/// identity prevents returning another query's validation for matching DATA.
++/// Adoption and continuing max-staleness are distinct original deadlines.
++pub struct ConnectQuery {
++    binding:ConnectBinding,
++    identity:Arc<()>,
++    started:Sample,
++    adopt_by:ConnectDeadline,
++    stale_at:ConnectDeadline,
++}
++impl ConnectQuery {
++    pub(crate) fn begin(binding: &ConnectBinding) -> Result<Self> {
++        let started = Sample::now()?;
++        Ok(Self { binding:binding.clone(), identity:Arc::new(()), started,
++            adopt_by:ConnectDeadline::after(started, ADOPTION_LIMIT_MS)?,
++            stale_at:ConnectDeadline::after(started, MAX_STALENESS_MS)? })
++    }
++    pub fn binding(&self) -> &ConnectBinding { &self.binding }
++    pub(crate) fn identity(&self) -> Arc<()> { self.identity.clone() }
++}
++
++/// Retains actual host authority/inventory custody. Implementations check their
++/// original owner/revision/clocks and never mint or renew a grant here. Calls
++/// can block: fixed caller workers remain owned until their ACTUAL joins.
++/// The independent watchdog uses only ConnectValidation's immutable bounds.
++pub trait ConnectValidationGuard: Send + Sync + 'static {
++    fn check_current(&self) -> Result<()>;
++}
++
++/// Neither Clone nor Serde. Runtime retains an Arc to this actual result, not
++/// its address list or a receiver-created expiry. Time errors are absorbing.
++pub struct ConnectValidation {
++    query:ConnectQuery,
++    grant:ConnectDeadline,
++    inventory:ConnectDeadline,
++    producer_current_until:ConnectDeadline,
++    addresses:HostIpv4DenySet,
++    owner:Arc<dyn ConnectValidationGuard>,
++    last:Mutex<Sample>,
++    denied:AtomicBool,
++}
++impl std::fmt::Debug for ConnectValidation {
++    fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
++        out.write_str("ConnectValidation([retained custody])")
++    }
++}
++impl ConnectValidation {
++    /// Trusted Rust adapter seam only. Retain the original native validation as
++    /// owner; do not wrap JSON, a boolean, inventory metadata or grant expiry as
++    /// live authority. Also retain ANY stricter original producer validation
++    /// cutoff (for example native's current 250 ms query-as-lifetime contract).
++    /// Caller retains its issuance/lifecycle owner separately.
++    pub fn new(query:ConnectQuery, addresses:HostIpv4DenySet, grant:ConnectDeadline,
++        inventory:ConnectDeadline, producer_current_until:ConnectDeadline,
++        owner:Arc<dyn ConnectValidationGuard>) -> Result<Self> {
++        let last = Mutex::new(query.started);
++        let value = Self { query, grant, inventory, producer_current_until, addresses, owner, last, denied:AtomicBool::new(false) };
++        value.check_adoption()?;
++        Ok(value)
++    }
++    pub(crate) fn matches(&self, binding: &ConnectBinding, identity: &Arc<()>) -> bool {
++        self.query.binding == *binding && Arc::ptr_eq(&self.query.identity, identity)
++    }
++    fn sample(&self, adoption: bool) -> Result<()> {
++        let result = (|| {
++            if self.denied.load(Ordering::Acquire) { return Err(Error::new(Kind::AuthorityDenied)); }
++            // Only clock syscalls/arithmetic under this mutex; NEVER callbacks.
++            let mut last = self.last.lock().map_err(|_|Error::new(Kind::AuthorityDenied))?;
++            let now = Sample::now()?;
++            if now.wall_ms < last.wall_ms || now.boot_ns < last.boot_ns {
++                return Err(Error::new(Kind::AuthorityDenied));
++            }
++            self.grant.check(now)?; self.inventory.check(now)?;
++            self.producer_current_until.check(now)?; self.query.stale_at.check(now)?;
++            if adoption { self.query.adopt_by.check(now)?; }
++            *last = now;
++            Ok(())
++        })();
++        if result.is_err() { self.denied.store(true, Ordering::Release); }
++        result
++    }
++    /// No arbitrary callback or authority IO: safe for the independent socket
++    /// expiry watchdog even while a validation callback is still blocked.
++    pub(crate) fn check_bounds(&self) -> Result<()> { self.sample(false) }
++    pub(crate) fn check_adoption_bounds(&self) -> Result<()> { self.sample(true) }
++    pub(crate) fn check_adoption(&self) -> Result<&HostIpv4DenySet> {
++        self.checked(true)
++    }
++    pub fn check_current(&self) -> Result<&HostIpv4DenySet> { self.checked(false) }
++    fn checked(&self, adoption: bool) -> Result<&HostIpv4DenySet> {
++        let result = (|| {
++            self.sample(adoption)?;
++            self.owner.check_current()?; // No engine IO/clock mutex is held.
++            self.sample(adoption)?; // Callback delay cannot manufacture time.
++            Ok(&self.addresses)
++        })();
++        if result.is_err() { self.denied.store(true, Ordering::Release); }
++        result
++    }
++}
++
++// Explicit standalone qualifier/test fixture only; not a public/native inventory
++// constructor. Its synthetic finite lifetime starts BEFORE any callback.
++pub(super) fn qualifier_deadline(ms:i64) -> ConnectDeadline {
++    assert!((1..=60_000).contains(&ms), "qualification-only finite lifetime");
++    ConnectDeadline::after(Sample::now().unwrap(), ms).unwrap()
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    include!("validity_tests.rs");
++}
+diff --git a/engine/src/execution/network/connected/validity_relay_tests.rs b/engine/src/execution/network/connected/validity_relay_tests.rs
+new file mode 100644
+index 0000000..e1c0f7b
+--- /dev/null
++++ b/engine/src/execution/network/connected/validity_relay_tests.rs
+@@ -0,0 +1,129 @@
++// Included in relay::tests; all authorities here are synthetic retained test
++// owners, never production inventory/grant constructors.
++struct Release(Option<mpsc::SyncSender<()>>);
++impl Release { fn open(&mut self) { self.0.take().unwrap().send(()).unwrap(); } }
++impl Drop for Release { fn drop(&mut self) { if let Some(send) = self.0.take() { let _ = send.try_send(()); } } }
++
++struct DelayedAuthority {
++    grant:ConnectDeadline, inventory:ConnectDeadline, producer:ConnectDeadline,
++    entered:mpsc::SyncSender<()>, release:Mutex<mpsc::Receiver<()>>,
++}
++impl ConnectValidationGuard for DelayedAuthority {
++    fn check_current(&self) -> Result<()> { Ok(()) }
++}
++impl ConnectAuthority for DelayedAuthority {
++    fn validate(self:Arc<Self>, query:ConnectQuery) -> Result<ConnectValidation> {
++        let host = HostIpv4DenySet::from_trusted_host_inventory([Ipv4Addr::LOCALHOST]).unwrap();
++        let validation = ConnectValidation::new(query, host, self.grant, self.inventory, self.producer, self.clone())?;
++        self.entered.send(()).map_err(|_|Error::authority_denied())?;
++        self.release.lock().unwrap().recv_timeout(Duration::from_secs(2)).map_err(|_|Error::authority_denied())?;
++        Ok(validation) // Was valid before blocking. Runtime must recheck on return.
++    }
++}
++
++#[test]
++fn delayed_callback_cannot_adopt_after_original_query_grant_inventory_or_producer_expiry() {
++    // 0: engine adoption; 1: original grant; 2: inventory; 3: producer query.
++    for expired in 0..4 {
++        let mut fixture = Fixture::new();
++        let (entered, wait) = mpsc::sync_channel(1); let (release, gate) = mpsc::sync_channel(1);
++        let mut release = Release(Some(release));
++        let fixed = qualifier_deadline(60_000); let shorter = qualifier_deadline(100);
++        let authority = Arc::new(DelayedAuthority { grant:if expired == 1 { shorter } else { fixed },
++            inventory:if expired == 2 { shorter } else { fixed }, producer:if expired == 3 { shorter } else { fixed },
++            entered, release:Mutex::new(gate) });
++        Arc::get_mut(&mut fixture.shared).unwrap().authority = authority.clone();
++        let previous = fixture.shared.validation().unwrap();
++        let shared = fixture.shared.clone(); let (returned, result) = mpsc::sync_channel(1);
++        let mut worker = Worker::spawn("connect-delayed-valid-result", move || {
++            let answer = shared.grant().and_then(|validation|shared.adopt_grant(validation));
++            returned.send(answer).unwrap();
++        }).unwrap();
++        wait.recv_timeout(Duration::from_secs(1)).unwrap();
++        assert_eq!(worker.settle(Instant::now() + Duration::from_millis(10)).unwrap_err().kind(), Kind::Unsettled);
++        assert!(worker.join.is_some() && Arc::strong_count(&authority) >= 3);
++        thread::sleep(Duration::from_millis(if expired == 0 { 225 } else { 125 }));
++        release.open();
++        assert_eq!(result.recv_timeout(Duration::from_secs(1)).unwrap().unwrap_err().kind(), Kind::AuthorityDenied);
++        worker.settle(Instant::now() + Duration::from_secs(1)).unwrap();
++        assert!(worker.join.is_none() && fixture.shared.cancelled());
++        assert!(Arc::ptr_eq(&previous, &fixture.shared.validation().unwrap()));
++        assert_eq!(fixture.shared.stats.upstreams.load(Ordering::Acquire), 0);
++    }
++}
++
++#[test]
++fn returning_a_different_original_query_cannot_substitute_matching_metadata() {
++    struct Substitute(Mutex<Option<ConnectQuery>>, ConnectDeadline);
++    impl ConnectValidationGuard for Substitute { fn check_current(&self) -> Result<()> { Ok(()) } }
++    impl ConnectAuthority for Substitute {
++        fn validate(self:Arc<Self>, _actual:ConnectQuery) -> Result<ConnectValidation> {
++            let other = self.0.lock().unwrap().take().unwrap();
++            let host = HostIpv4DenySet::from_trusted_host_inventory([Ipv4Addr::LOCALHOST]).unwrap();
++            ConnectValidation::new(other, host, self.1, self.1, self.1, self)
++        }
++    }
++    let mut fixture = Fixture::new(); let previous = fixture.shared.validation().unwrap();
++    let other = ConnectQuery::begin(&fixture.shared.binding).unwrap();
++    Arc::get_mut(&mut fixture.shared).unwrap().authority = Arc::new(Substitute(Mutex::new(Some(other)), qualifier_deadline(60_000)));
++    assert_eq!(fixture.shared.grant().unwrap_err().kind(), Kind::BindingMismatch);
++    assert!(fixture.shared.cancelled());
++    assert!(Arc::ptr_eq(&previous, &fixture.shared.validation().unwrap()));
++}
++
++struct BlockingGuard {
++    block:AtomicBool, entered:mpsc::SyncSender<()>, release:Mutex<mpsc::Receiver<()>>,
++}
++impl ConnectValidationGuard for BlockingGuard {
++    fn check_current(&self) -> Result<()> {
++        if self.block.swap(false, Ordering::AcqRel) {
++            self.entered.send(()).map_err(|_|Error::authority_denied())?;
++            self.release.lock().unwrap().recv_timeout(Duration::from_secs(2)).map_err(|_|Error::authority_denied())?;
++        }
++        Ok(())
++    }
++}
++
++#[test]
++fn callback_free_watchdog_closes_sockets_while_effect_guard_stalls_and_keeps_actual_worker_owned() {
++    let fixture = Fixture::new();
++    let (entered, wait) = mpsc::sync_channel(1); let (release, gate) = mpsc::sync_channel(1);
++    let mut release = Release(Some(release));
++    let guard = Arc::new(BlockingGuard { block:AtomicBool::new(false), entered, release:Mutex::new(gate) });
++    let query = ConnectQuery::begin(&fixture.shared.binding).unwrap();
++    let host = HostIpv4DenySet::from_trusted_host_inventory([Ipv4Addr::LOCALHOST]).unwrap();
++    let validation = Arc::new(ConnectValidation::new(query, host, qualifier_deadline(60_000), qualifier_deadline(150), qualifier_deadline(60_000), guard.clone()).unwrap());
++    fixture.shared.adopt_grant(validation.clone()).unwrap();
++    let (mut peer, proxy) = pair();
++    fixture.shared.stats.active.store(1, Ordering::Release);
++    let connection = Connection { stream:TrackedStream::new(proxy, &fixture.shared),
++        _permit:ActivePermit(fixture.shared.clone()), accepted:Instant::now() };
++    let shared = fixture.shared.clone();
++    guard.block.store(true, Ordering::Release);
++    let worker = Worker::spawn("connect-blocked-effect-guard", move || {
++        let mut connection = connection;
++        let mut meter = Meter { shared:&shared, used:0 };
++        assert!(meter.read(&mut connection.stream.stream, &mut [0u8;1]).is_err());
++    }).unwrap();
++    let mut owner = OwnedConnectProxy { shared:fixture.shared.clone(), workers:vec![worker], ready:None, settled:false };
++    wait.recv_timeout(Duration::from_secs(1)).unwrap();
++    // These actual IO ownership locks must remain free during the arbitrary
++    // callback, independently of its worker's continued custody/charge.
++    assert!(fixture.shared.validation.try_lock().is_ok());
++    assert!(fixture.shared.sockets.try_lock().is_ok());
++    let end = Instant::now() + Duration::from_secs(1);
++    while validation.check_bounds().is_ok() {
++        assert!(Instant::now() < end); thread::sleep(Duration::from_millis(1));
++    }
++    assert!(!fixture.shared.keep_admitted());
++    assert_eq!(peer.read(&mut [0u8;1]).unwrap(), 0); // Independent real socket shutdown.
++    assert!(matches!(owner.close_and_settle(Duration::from_millis(10)), Err(error) if error.kind() == Kind::Unsettled));
++    assert_eq!(fixture.shared.stats.active.load(Ordering::Acquire), 1);
++    assert!(fixture.shared.witnesses.lock().unwrap().is_some());
++    assert!(owner.workers[0].join.is_some());
++    release.open();
++    let settled = owner.close_and_settle(Duration::from_secs(1)).unwrap();
++    assert_eq!(settled.snapshot().active_connections, 0);
++    assert!(fixture.shared.sockets.lock().unwrap().is_empty());
++    assert!(fixture.shared.witnesses.lock().unwrap().is_none());
++}
+diff --git a/engine/src/execution/network/connected/validity_tests.rs b/engine/src/execution/network/connected/validity_tests.rs
+new file mode 100644
+index 0000000..55a4e18
+--- /dev/null
++++ b/engine/src/execution/network/connected/validity_tests.rs
+@@ -0,0 +1,82 @@
++struct HeldGuard(AtomicBool);
++impl ConnectValidationGuard for HeldGuard {
++    fn check_current(&self) -> Result<()> {
++        if self.0.load(Ordering::Acquire) { Ok(()) }
++        else { Err(Error::authority_denied()) }
++    }
++}
++fn binding() -> ConnectBinding {
++    ConnectBinding::for_profile(&super::super::qualification::test_profile()).unwrap()
++}
++fn host() -> HostIpv4DenySet {
++    HostIpv4DenySet::from_trusted_host_inventory([std::net::Ipv4Addr::LOCALHOST]).unwrap()
++}
++fn validation() -> ConnectValidation {
++    let query = ConnectQuery::begin(&binding()).unwrap(); let fixed = qualifier_deadline(60_000);
++    ConnectValidation::new(query, host(), fixed, fixed, fixed, Arc::new(HeldGuard(AtomicBool::new(true)))).unwrap()
++}
++fn until(mut ready: impl FnMut() -> bool) {
++    let end = std::time::Instant::now() + std::time::Duration::from_secs(2);
++    while !ready() {
++        assert!(std::time::Instant::now() < end, "original bound did not expire");
++        std::thread::sleep(std::time::Duration::from_millis(1));
++    }
++}
++
++#[test]
++fn exact_original_query_identity_cannot_be_replaced_by_matching_binding_data() {
++    let binding = binding(); let query = ConnectQuery::begin(&binding).unwrap(); let key = query.identity();
++    let other = ConnectQuery::begin(&binding).unwrap(); let fixed = qualifier_deadline(60_000);
++    let value = ConnectValidation::new(query, host(), fixed, fixed, fixed, Arc::new(HeldGuard(AtomicBool::new(true)))).unwrap();
++    assert!(value.matches(&binding, &key)); assert!(!value.matches(&binding, &other.identity()));
++    let mut wrong = binding; wrong.network.owner = "different-owner".into();
++    assert!(!value.matches(&wrong, &key));
++}
++
++#[test]
++fn adoption_cutoff_is_distinct_from_the_original_continuing_window() {
++    let value = validation();
++    let original = value.query.stale_at;
++    until(|| value.query.adopt_by.check(Sample::now().unwrap()).is_err());
++    value.check_current().unwrap(); // An already-adopted fast query can continue.
++    assert_eq!(value.query.stale_at.wall_ms, original.wall_ms);
++    assert_eq!(value.query.stale_at.boot_ns, original.boot_ns);
++    assert!(value.check_adoption().is_err()); // Same late value cannot be adopted now.
++    assert!(value.check_current().is_err()); // Refusal is absorbing, never renewed.
++}
++
++#[test]
++fn original_grant_inventory_and_producer_each_refuse_either_expired_clock_at_creation() {
++    for expired_component in 0..3 {
++        for wall_expired in [false, true] {
++            let query = ConnectQuery::begin(&binding()).unwrap(); let now = Sample::now().unwrap();
++            let live = qualifier_deadline(60_000);
++            let expired = ConnectDeadline::from_original(
++                if wall_expired { now.wall_ms - 1 } else { live.wall_ms },
++                if wall_expired { live.boot_ns } else { now.boot_ns - 1 }).unwrap();
++            let grant = if expired_component == 0 { expired } else { live };
++            let inventory = if expired_component == 1 { expired } else { live };
++            let producer = if expired_component == 2 { expired } else { live };
++            assert!(ConnectValidation::new(query, host(), grant, inventory, producer,
++                Arc::new(HeldGuard(AtomicBool::new(true)))).is_err());
++        }
++    }
++}
++
++#[test]
++fn clock_regression_and_live_guard_denial_cannot_be_repaired_on_the_same_result() {
++    for wall in [false, true] {
++        let value = validation(); let actual = Sample::now().unwrap();
++        { let mut last = value.last.lock().unwrap();
++            if wall { last.wall_ms = actual.wall_ms + 60_000; }
++            else { last.boot_ns = actual.boot_ns + 60_000 * NS_PER_MS; } }
++        assert!(value.check_bounds().is_err());
++        *value.last.lock().unwrap() = actual;
++        assert!(value.check_current().is_err());
++    }
++    let query = ConnectQuery::begin(&binding()).unwrap(); let fixed = qualifier_deadline(60_000);
++    let owner = Arc::new(HeldGuard(AtomicBool::new(true)));
++    let value = ConnectValidation::new(query, host(), fixed, fixed, fixed, owner.clone()).unwrap();
++    owner.0.store(false, Ordering::Release); assert!(value.check_current().is_err());
++    owner.0.store(true, Ordering::Release); assert!(value.check_current().is_err());
++}
+diff --git a/engine/src/journal.rs b/engine/src/journal.rs
+index 0146ed6..325c93a 100644
+--- a/engine/src/journal.rs
++++ b/engine/src/journal.rs
+@@ -33,6 +33,8 @@ mod runtime;
+ mod vcs;
+ mod managed;
+ mod host_source;
++#[cfg(target_os = "linux")]
++mod host_connect;
+ mod readonly;
+ mod capability_issue;
+ pub use capability_issue::{PreparedCapabilityIssuance, CapabilityIssuanceObservation};
+@@ -41,6 +43,11 @@ pub use readonly::{HeldJournalFile, ReadOnlyJournal, READ_ONLY_MAX_BUSY_TIMEOUT}
+ pub use host_source::{
+     host_source_scope, HostSourceAuthorization, HOST_SOURCE_PURPOSE, HOST_SOURCE_REQUIRED_OPERATION,
+ };
++#[cfg(target_os = "linux")]
++pub use host_connect::{
++    host_connect_principal, host_connect_scope, HostConnectAuthorization,
++    HOST_CONNECT_PURPOSE, HOST_CONNECT_REQUIRED_OPERATION,
++};
+ 
+ pub use commands::{
+     CommandReceipt, CommandRequest, CommandState, EffectClaim, Reconciliation, Recovery,
+diff --git a/engine/src/journal/host_connect.rs b/engine/src/journal/host_connect.rs
+new file mode 100644
+index 0000000..43fcde1
+--- /dev/null
++++ b/engine/src/journal/host_connect.rs
+@@ -0,0 +1,106 @@
++//! Host-only HTTPS CONNECT authorization. No endpoint, inventory witness, owner,
++//! token issuance, model admission or Source5 protocol activation happens here.
++use super::*;
++use crate::{execution::network::connected::ConnectBinding, protocol::canonical_json};
++
++pub const HOST_CONNECT_PURPOSE: &str = "https_connect_egress_v1";
++pub const HOST_CONNECT_REQUIRED_OPERATION: &str = "network:host:connect";
++const SCOPE_DOMAIN: &[u8] = b"rudder_host_connect_authorization_v1\0";
++
++/// A transaction snapshot, never a live grant or reusable readiness receipt.
++/// Adapters must recheck trusted time and original local deadline AFTER the
++/// query, and must not derive a new deadline from this result's arrival time.
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub struct HostConnectAuthorization {
++    pub identity: CapabilityIdentity,
++    pub validated_at_ms: i64,
++    pub issued_at_ms: i64,
++    pub expires_at_ms: i64,
++}
++
++/// Domain-separated exact sealed configuration, including profile digest,
++/// project/owner/run epochs, request, execution, operation, view and network.
++/// The profile digest covers pinned destinations, budgets and readiness nonce.
++pub fn host_connect_scope(binding: &ConnectBinding) -> Result<String> {
++    binding.validate()?;
++    let bytes = canonical_json(binding)?;
++    ensure!(bytes.len() <= 4096, "host connect binding exceeds4KiB");
++    let mut hash = Sha256::new();
++    hash.update(SCOPE_DOMAIN);
++    hash.update(HOST_CONNECT_PURPOSE.as_bytes());
++    hash.update([0]);
++    hash.update(bytes);
++    Ok(format!("host-connect:{}", hex::encode(hash.finalize())))
++}
++
++/// A dedicated host principal. This grants no authority by itself.
++pub fn host_connect_principal(binding: &ConnectBinding) -> Result<String> {
++    binding.validate()?;
++    Ok(format!("host-connect:{}", binding.network.request_id))
++}
++
++impl Journal {
++    /// Fresh read-only capability/current-attempt authorization. expected_expiry
++    /// is fixed by the actual issuer before adapter construction. Finite grants
++    /// are mandatory; the same token cannot silently acquire a later expiry.
++    pub fn authorize_host_connect(
++        &self,
++        token: &str,
++        binding: &ConnectBinding,
++        expected_expiry_ms: i64,
++        now_ms: i64,
++    ) -> Result<HostConnectAuthorization> {
++        let tx = self.conn.unchecked_transaction()?;
++        let result = Self::authorize_host_connect_transaction(
++            &tx, token, binding, expected_expiry_ms, now_ms)?;
++        tx.commit()?;
++        Ok(result)
++    }
++
++    pub(super) fn authorize_host_connect_transaction(
++        tx: &Transaction<'_>,
++        token: &str,
++        binding: &ConnectBinding,
++        expected_expiry_ms: i64,
++        now_ms: i64,
++    ) -> Result<HostConnectAuthorization> {
++        ensure!(now_ms >= 0 && expected_expiry_ms > now_ms,
++            "host connect time or original grant expiry is invalid");
++        let scope = host_connect_scope(binding)?;
++        let auth = authenticate(tx, token, now_ms)?;
++        authorize(tx, &auth, HOST_CONNECT_REQUIRED_OPERATION)?;
++        // Host egress is a separate token, never an added guest tool operation.
++        ensure!(auth.grant.operations.len() == 1
++            && auth.grant.scopes.len() == 1 && auth.grant.scopes.contains(&scope)
++            && auth.grant.recipients.is_empty() && auth.grant.topics.is_empty()
++            && auth.grant.principal == host_connect_principal(binding)?
++            && auth.grant.expires_at_ms == Some(expected_expiry_ms),
++            "host connect requires its exact dedicated finite capability");
++        let network = &binding.network;
++        ensure!(auth.project == network.project_id
++            && auth.grant.run_id == network.run_id
++            && auth.grant.run_epoch == network.run_epoch.value(),
++            "host connect belongs to another project/run");
++        let project = project_state(tx, &auth.project)?;
++        ensure!(project.owner_active && project.owner.owner_id == network.owner
++            && project.owner.epoch == network.owner_epoch.value(),
++            "host connect owner changed");
++        let instance: Option<String> = tx.query_row(
++            "SELECT instance_id FROM runs WHERE project_id=?1 AND run_id=?2",
++            params![auth.project, auth.grant.run_id], |row| row.get(0))?;
++        ensure!(instance.as_deref() == Some(network.execution_id.as_str()),
++            "host connect execution changed");
++        // Sample supplied by the trusted host must not precede actual issuance.
++        let issued_at_ms: i64 = tx.query_row(
++            "SELECT issued_at FROM capabilities WHERE token_hash=?1",
++            [token_hash(token)], |row| row.get(0))?;
++        ensure!(issued_at_ms >= 0 && now_ms >= issued_at_ms,
++            "host connect clock precedes capability issuance");
++        Ok(HostConnectAuthorization {
++            identity: CapabilityIdentity { project_id: auth.project,
++                principal: auth.grant.principal, run_id: auth.grant.run_id,
++                run_epoch: auth.grant.run_epoch, owner_epoch: project.owner.epoch },
++            validated_at_ms: now_ms, issued_at_ms, expires_at_ms: expected_expiry_ms,
++        })
++    }
++}
+diff --git a/engine/src/journal/readonly.rs b/engine/src/journal/readonly.rs
+index 8a47a65..926731f 100644
+--- a/engine/src/journal/readonly.rs
++++ b/engine/src/journal/readonly.rs
+@@ -265,6 +265,28 @@ pub struct ReadOnlyJournal<'a> {
+ }
+ 
+ impl ReadOnlyJournal<'_> {
++    /// Uses this actual held existing Journal and one fresh read transaction.
++    /// No caller-supplied path, CREATE, migration, issuance or renewal is used.
++    #[cfg(target_os = "linux")]
++    pub fn authorize_host_connect(
++        &self,
++        token: &str,
++        binding: &crate::execution::network::connected::ConnectBinding,
++        expected_expiry_ms: i64,
++        now_ms: i64,
++    ) -> Result<HostConnectAuthorization> {
++        self.held.check_current()?;
++        check_sqlite_file_current(&self.journal.conn)?;
++        let tx = self.journal.conn.unchecked_transaction()?;
++        validate_existing_schema(&tx)?;
++        let result = Journal::authorize_host_connect_transaction(
++            &tx, token, binding, expected_expiry_ms, now_ms);
++        check_sqlite_file_current(&tx)?;
++        self.held.check_current()?;
++        tx.commit()?;
++        result
++    }
++
+     pub fn authorize_host_source(
+         &self,
+         token: &str,
+diff --git a/engine/tests/host_connect.rs b/engine/tests/host_connect.rs
+new file mode 100644
+index 0000000..7381718
+--- /dev/null
++++ b/engine/tests/host_connect.rs
+@@ -0,0 +1,146 @@
++#![cfg(target_os = "linux")]
++//! Exact host egress grants. No sockets, credentials or model calls.
++use rudder_engine::{
++    execution::network::{connected::{ConnectBinding, CONNECT_TRANSPORT_PROTOCOL},
++        NetworkBinding, NetworkEpoch},
++    journal::{host_connect_principal, host_connect_scope, CapabilityGrant, Journal,
++        OwnerFence, HOST_CONNECT_REQUIRED_OPERATION},
++};
++use std::{collections::{BTreeMap, BTreeSet}, time::Duration};
++use uuid::Uuid;
++use std::os::unix::fs::PermissionsExt;
++
++const ISSUED: i64 = 1_000;
++const EXPIRY: i64 = 10_000;
++struct Fixture {
++    journal: Journal,
++    owner: OwnerFence,
++    binding: ConnectBinding,
++    grant: CapabilityGrant,
++    token: String,
++    _directory: tempfile::TempDir,
++}
++fn fixture() -> Fixture {
++    let directory = tempfile::tempdir().unwrap();
++    std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
++    let mut journal = Journal::open(directory.path().join("journal.sqlite")).unwrap();
++    let owner = journal.create_project("p", "owner", "base", 0).unwrap();
++    let execution_id = Uuid::new_v4().to_string();
++    let epoch = journal.observe_run_attempt(&owner, "run", &execution_id, 0).unwrap();
++    let binding = ConnectBinding { format_version: 1, protocol: CONNECT_TRANSPORT_PROTOCOL.into(),
++        profile_sha256: "a".repeat(64), network: NetworkBinding {
++            project_id: owner.project_id.clone(), owner: owner.owner_id.clone(),
++            owner_epoch: NetworkEpoch::new(owner.epoch).unwrap(), run_id: "run".into(),
++            run_epoch: NetworkEpoch::new(epoch).unwrap(), request_id: Uuid::new_v4().to_string(),
++            execution_id, operation_id: Uuid::new_v4().to_string(),
++            view_id: Uuid::new_v4().to_string(), network_id: Uuid::new_v4().to_string(),
++        } };
++    let grant = CapabilityGrant { principal: host_connect_principal(&binding).unwrap(),
++        run_id: "run".into(), run_epoch: epoch,
++        operations: [HOST_CONNECT_REQUIRED_OPERATION.into()].into(),
++        recipients: BTreeMap::new(), scopes: [host_connect_scope(&binding).unwrap()].into(),
++        topics: BTreeSet::new(), expires_at_ms: Some(EXPIRY) };
++    let token = journal.issue_capability(&owner, &grant, ISSUED).unwrap();
++    Fixture { _directory: directory, journal, owner, binding, grant, token }
++}
++
++#[test]
++fn held_readonly_connection_authorizes_exact_finite_snapshot_and_sees_fresh_revocation() {
++    let mut fixture = fixture();
++    let held = fixture.journal.hold_database_file().unwrap();
++    let read = held.open_read_only(Duration::from_millis(20)).unwrap();
++    let before_sequence = fixture.journal.project_state("p").unwrap().sequence;
++    let authorization = read.authorize_host_connect(&fixture.token, &fixture.binding, EXPIRY, 1_001).unwrap();
++    assert_eq!(authorization.identity.project_id, "p");
++    assert_eq!(authorization.identity.run_id, "run");
++    assert_eq!(authorization.validated_at_ms, 1_001);
++    assert_eq!(authorization.issued_at_ms, ISSUED);
++    assert_eq!(authorization.expires_at_ms, EXPIRY);
++    assert_eq!(fixture.journal.project_state("p").unwrap().sequence, before_sequence);
++    fixture.journal.revoke_capability(&fixture.owner, &fixture.token, 1_002).unwrap();
++    assert!(read.authorize_host_connect(&fixture.token, &fixture.binding, EXPIRY, 1_003).is_err());
++}
++
++#[test]
++fn all_sealed_network_and_profile_fields_change_the_host_scope() {
++    let fixture = fixture();
++    let original = host_connect_scope(&fixture.binding).unwrap();
++    for key in ["project_id", "owner", "run_id", "request_id", "execution_id", "operation_id", "view_id", "network_id"] {
++        let mut wire = serde_json::to_value(&fixture.binding).unwrap();
++        wire["network"][key] = Uuid::new_v4().to_string().into();
++        let changed: ConnectBinding = serde_json::from_value(wire).unwrap();
++        assert_ne!(original, host_connect_scope(&changed).unwrap(), "{key}");
++    }
++    for key in ["owner_epoch", "run_epoch", "profile_sha256"] {
++        let mut changed = fixture.binding.clone();
++        match key {
++            "owner_epoch" => changed.network.owner_epoch = NetworkEpoch::new(2).unwrap(),
++            "run_epoch" => changed.network.run_epoch = NetworkEpoch::new(2).unwrap(),
++            _ => changed.profile_sha256 = "b".repeat(64),
++        }
++        assert_ne!(original, host_connect_scope(&changed).unwrap(), "{key}");
++    }
++    for key in ["protocol", "format_version", "digest_encoding"] {
++        let mut changed = fixture.binding.clone();
++        match key {
++            "protocol" => changed.protocol = "partial-workspace".into(),
++            "format_version" => changed.format_version = 2,
++            _ => changed.profile_sha256 = "A".repeat(64),
++        }
++        assert!(host_connect_scope(&changed).is_err(), "{key}");
++    }
++}
++
++#[test]
++fn guest_source_mixed_nonfinite_and_wrong_expiry_grants_do_not_authorize_egress() {
++    let mut fixture = fixture();
++    for kind in ["guest", "source", "mixed", "wrong_scope", "wrong_principal", "unbounded", "renewed"] {
++        let mut grant = fixture.grant.clone();
++        match kind {
++            "guest" => grant.operations = ["workspace:partial".into()].into(),
++            "source" => grant.operations = ["source:host:authorize".into()].into(),
++            "mixed" => { grant.operations.insert("message:send".into()); }
++            "wrong_scope" => grant.scopes = ["host-connect:wrong".into()].into(),
++            "wrong_principal" => grant.principal = "guest".into(),
++            "unbounded" => grant.expires_at_ms = None,
++            _ => grant.expires_at_ms = Some(EXPIRY + 1),
++        }
++        let token = fixture.journal.issue_capability(&fixture.owner, &grant, ISSUED).unwrap();
++        assert!(fixture.journal.authorize_host_connect(&token, &fixture.binding, EXPIRY, ISSUED).is_err(), "{kind}");
++    }
++    for now in [-1, ISSUED - 1, EXPIRY, EXPIRY + 1] {
++        assert!(fixture.journal.authorize_host_connect(&fixture.token, &fixture.binding, EXPIRY, now).is_err(), "{now}");
++    }
++    assert!(fixture.journal.authorize_host_connect(&fixture.token, &fixture.binding, EXPIRY + 1, ISSUED).is_err());
++}
++
++#[test]
++fn exact_scope_alone_cannot_override_current_owner_or_execution_or_epoch() {
++    for kind in ["owner", "execution", "run_epoch", "owner_epoch"] {
++        let mut fixture = fixture();
++        let mut binding = fixture.binding.clone();
++        match kind {
++            "owner" => binding.network.owner = "other-owner".into(),
++            "execution" => binding.network.execution_id = Uuid::new_v4().to_string(),
++            "run_epoch" => binding.network.run_epoch = NetworkEpoch::new(2).unwrap(),
++            _ => binding.network.owner_epoch = NetworkEpoch::new(2).unwrap(),
++        }
++        let mut grant = fixture.grant.clone();
++        grant.scopes = [host_connect_scope(&binding).unwrap()].into();
++        let token = fixture.journal.issue_capability(&fixture.owner, &grant, ISSUED).unwrap();
++        assert!(fixture.journal.authorize_host_connect(&token, &binding, EXPIRY, ISSUED).is_err(), "{kind}");
++    }
++    for action in ["replace_attempt", "release_owner", "transfer_owner", "run_epoch"] {
++        let mut fixture = fixture();
++        let held = fixture.journal.hold_database_file().unwrap();
++        let read = held.open_read_only(Duration::from_millis(20)).unwrap();
++        read.authorize_host_connect(&fixture.token, &fixture.binding, EXPIRY, ISSUED).unwrap();
++        match action {
++            "replace_attempt" => { fixture.journal.observe_run_attempt(&fixture.owner, "run", &Uuid::new_v4().to_string(), ISSUED + 1).unwrap(); }
++            "release_owner" => fixture.journal.release_owner(&fixture.owner, ISSUED + 1).unwrap(),
++            "transfer_owner" => { fixture.journal.transfer_owner(&fixture.owner, "other-owner", ISSUED + 1).unwrap(); }
++            _ => { fixture.journal.advance_run_epoch(&fixture.owner, "run", fixture.grant.run_epoch, ISSUED + 1).unwrap(); }
++        }
++        assert!(read.authorize_host_connect(&fixture.token, &fixture.binding, EXPIRY, ISSUED + 2).is_err(), "{action}");
++    }
++}
+diff --git a/native/src/agent_broker.rs b/native/src/agent_broker.rs
+index 59001ae..7328798 100644
+--- a/native/src/agent_broker.rs
++++ b/native/src/agent_broker.rs
+@@ -288,6 +288,8 @@ struct Inner {
+     stopped: AtomicBool,
+     closed: AtomicBool,
+     owned_calls: Option<Arc<OwnedBrokerCalls>>,
++    #[cfg(test)]
++    api_probe: Mutex<Option<owned_thread_tests::ApiProbe>>,
+ }
+ impl Inner {
+     fn authenticate(&self, offered: &AgentIdentityFile) -> Result<Arc<Snapshot>> {
+@@ -437,6 +439,8 @@ impl AgentBroker {
+             stopped: AtomicBool::new(false),
+             closed: AtomicBool::new(false),
+             owned_calls: owner.as_ref().map(|owner| Arc::clone(&owner.calls)),
++            #[cfg(test)]
++            api_probe: Mutex::new(None),
+         });
+         if let Some(owner) = owner.as_mut() { owner.inner = Some(Arc::clone(&inner)); }
+         inner.authenticate(&identity)?;
+@@ -582,13 +586,13 @@ struct OwnedBrokerCalls {
+     uncertain: AtomicBool,
+     // Retain panic payloads rather than running arbitrary payload Drop while
+     // other request handles are being joined. A panic stops further admission;
+-    // at most the bounded handlers plus the acceptor can contribute a payload.
++    // each bounded handler/API worker plus the acceptor can retain a payload.
+     panics: Mutex<Vec<BrokerPanic>>,
+ }
+ impl OwnedBrokerCalls {
+     fn new() -> Self {
+         Self { handles:Mutex::new(Vec::with_capacity(MAX_OWNED_UNJOINED)),
+-            uncertain:AtomicBool::new(false), panics:Mutex::new(Vec::with_capacity(MAX_OWNED_UNJOINED + 1)) }
++            uncertain:AtomicBool::new(false), panics:Mutex::new(Vec::with_capacity(2 * MAX_OWNED_UNJOINED + 1)) }
+     }
+     fn record_panic(&self, payload: BrokerPanic) {
+         self.uncertain.store(true, Ordering::Release);
+@@ -708,7 +712,7 @@ impl Drop for BrokerThreadOwner {
+     }
+ }
+ struct BrokerJoin { _thread:std::thread::JoinHandle<()>, done:mpsc::Receiver<bool>, joined:bool, failed:bool }
+-/// Proves actual acceptor and request joins including request TLS destruction.
++/// Proves actual acceptor, request and nested API joins, including their TLS.
+ /// The fixed join observer itself remains held here, matching source settlement.
+ pub(crate) struct BrokerThreadsSettled { _inner:Option<Arc<Inner>>, _joiner:Option<BrokerJoin> }
+ 
+@@ -798,7 +802,54 @@ fn disconnected(stream: &UnixStream) -> bool {
+     (unsafe { libc::poll(&mut fd, 1, 0) }) >= 0
+         && fd.revents & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) != 0
+ }
+-fn connection_call(inner: &Arc<Inner>, mut stream: UnixStream) {
++fn connection_call(inner: &Arc<Inner>, stream: UnixStream) {
++    let Some(calls) = &inner.owned_calls else {
++        connection_request(inner, stream, None);
++        return;
++    };
++    // This carrier is OUTSIDE the unwind boundary. Once an API worker exists,
++    // neither a reply, error, disconnect nor handler panic may detach it.
++    let mut api = OwnedApiCall::default();
++    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
++        connection_request(inner, stream, Some(&mut api));
++    }));
++    if let Err(payload) = result {
++        calls.record_panic(payload);
++        inner.stop();
++    }
++    api.join(inner, calls); // OFF-APP actual join, including API-worker TLS.
++}
++
++#[derive(Default)]
++struct OwnedApiCall {
++    worker: Option<std::thread::JoinHandle<()>>,
++    active_id: Option<String>,
++    cancel: Option<Arc<AtomicBool>>,
++}
++impl OwnedApiCall {
++    fn join(&mut self, inner: &Inner, calls: &OwnedBrokerCalls) {
++        if let Some(cancel) = &self.cancel { cancel.store(true, Ordering::Relaxed); }
++        if let Some(worker) = self.worker.take() {
++            if let Err(payload) = worker.join() {
++                calls.record_panic(payload);
++                inner.stop();
++            }
++        }
++        if let Some(id) = self.active_id.take() {
++            let clean = match inner.active.lock() {
++                Ok(mut active) => { active.remove(&id); true }
++                Err(poison) => {
++                    calls.uncertain.store(true, Ordering::Release);
++                    poison.into_inner().remove(&id);
++                    false
++                }
++            };
++            if !clean { inner.stop(); }
++        }
++    }
++}
++
++fn connection_request(inner: &Arc<Inner>, mut stream: UnixStream, mut api_owner: Option<&mut OwnedApiCall>) {
+     // BSD accept() inherits the listener's O_NONBLOCK flag; Linux does not.
+     // Our per-connection worker uses blocking I/O with bounded timeouts. Without
+     // clearing the flag, a response larger than the socket buffer is truncated
+@@ -879,15 +930,26 @@ fn connection_call(inner: &Arc<Inner>, mut stream: UnixStream) {
+             if active.len() >= MAX_CALLS {
+                 return Err(problem("busy", "too many active agent broker calls"));
+             }
++            if let Some(owner) = api_owner.as_deref_mut() {
++                owner.active_id = Some(id.clone());
++                owner.cancel = Some(cancel.clone());
++            }
+             active.insert(id.clone(), cancel.clone());
+         }
+         let (tx, rx) = mpsc::sync_channel(1);
+         let running = inner.clone();
+         let running_id = id.clone();
+         let running_cancel = cancel.clone();
++        let retained = api_owner.is_some();
++        #[cfg(test)]
++        let api_probe = if retained { inner.api_probe.lock().unwrap().take() } else { None };
++        #[cfg(test)]
++        let panic_request = api_probe.as_ref().is_some_and(|probe|probe.panic_request);
+         let spawned = std::thread::Builder::new()
+             .name("rudder-agent-api".into())
+             .spawn(move || {
++                #[cfg(test)]
++                if let Some(probe) = api_probe { owned_thread_tests::install_api_probe(probe); }
+                 let result = match request.operation {
+                     Operation::Call { tool, arguments } => {
+                         snapshot
+@@ -901,21 +963,24 @@ fn connection_call(inner: &Arc<Inner>, mut stream: UnixStream) {
+                     _ => unreachable!(),
+                 };
+                 let _ = tx.send(result);
+-                if let Ok(mut active) = running.active.lock() {
+-                    active.remove(&running_id);
++                if !retained {
++                    if let Ok(mut active) = running.active.lock() {
++                        active.remove(&running_id);
++                    }
+                 }
+             });
+-        if spawned.is_err() {
+-            inner
+-                .active
+-                .lock()
+-                .ok()
+-                .map(|mut active| active.remove(&id));
+-            return Err(problem(
+-                "busy",
+-                "agent broker could not start a bounded call",
+-            ));
++        match spawned {
++            Ok(worker) => {
++                if let Some(owner) = api_owner.as_deref_mut() { owner.worker = Some(worker); }
++                else { drop(worker); } // Preserve ordinary legacy detached behavior.
++            }
++            Err(_) => {
++                if !retained { inner.active.lock().ok().map(|mut active| active.remove(&id)); }
++                return Err(problem("busy", "agent broker could not start a bounded call"));
++            }
+         }
++        #[cfg(test)]
++        if panic_request { panic!("injected owned request failure after actual API spawn"); }
+         let deadline = Instant::now() + CALL_DEADLINE;
+         loop {
+             if inner.stopped.load(Ordering::Relaxed) || disconnected(&stream) {
+@@ -1285,6 +1350,108 @@ mod tests;
+ mod owned_thread_tests {
+     use super::*;
+     use std::cell::RefCell;
++    pub(super) struct ApiProbe {
++        tls: ApiTls,
++        pub(super) panic_request: bool,
++        panic_api: bool,
++    }
++    struct ApiTls {
++        entered:mpsc::Sender<()>, release:mpsc::Receiver<()>,
++        ended:Arc<AtomicBool>, expired:Arc<AtomicBool>,
++    }
++    impl Drop for ApiTls {
++        fn drop(&mut self) {
++            let _ = self.entered.send(());
++            if self.release.recv_timeout(Duration::from_secs(5)).is_err() {
++                self.expired.store(true, Ordering::Release);
++            }
++            self.ended.store(true, Ordering::Release);
++        }
++    }
++    thread_local! { static API_TLS: RefCell<Option<ApiTls>> = const { RefCell::new(None) }; }
++    pub(super) fn install_api_probe(probe: ApiProbe) {
++        let ApiProbe { tls, panic_api, .. } = probe;
++        API_TLS.with(|slot| *slot.borrow_mut() = Some(tls));
++        if panic_api { panic!("injected actual API-worker failure"); }
++    }
++    struct ApiRelease(Option<mpsc::Sender<()>>);
++    impl ApiRelease { fn open(&mut self) { self.0.take().unwrap().send(()).unwrap(); } }
++    impl Drop for ApiRelease {
++        fn drop(&mut self) { if let Some(release) = self.0.take() { let _ = release.send(()); } }
++    }
++    struct RpcRoot(PathBuf);
++    impl Drop for RpcRoot { fn drop(&mut self) { let _ = fs::remove_dir_all(&self.0); } }
++
++    fn actual_rpc_api_tls(panic_request:bool, panic_api:bool) {
++        use rudder_engine::journal::{CapabilityGrant, Journal};
++        use std::collections::BTreeSet;
++        let root = RpcRoot(Path::new("/tmp").canonicalize().unwrap()
++            .join(format!("rba-{}", &uuid::Uuid::new_v4().simple().to_string()[..12])));
++        private_directory(&root.0).unwrap();
++        let journal_path = root.0.join("journal.sqlite");
++        let mut journal = Journal::open(&journal_path).unwrap();
++        let fence = journal.create_project("p", "owner", "base", 0).unwrap();
++        journal.register_run(&fence, "run", 0).unwrap();
++        let token = journal.issue_capability(&fence, &CapabilityGrant {
++            principal:"agent".into(), run_id:"run".into(), run_epoch:1,
++            operations:BTreeSet::from(["agents:find".into()]), recipients:BTreeMap::new(),
++            scopes:BTreeSet::new(), topics:BTreeSet::new(), expires_at_ms:None,
++        }, 0).unwrap();
++        let socket = socket_path(&root.0, "p", "run", "attempt");
++        let identity_file = project_identity(&socket, &AgentIdentityFile { format_version:1,
++            project_id:"p".into(), run_id:"run".into(), run_epoch:1, owner_epoch:1, token }).unwrap();
++        let mut owner = BrokerThreadOwner::new();
++        let broker = AgentBroker::spawn_retaining(BrokerConfig { journal_path, identity_file:identity_file.clone(),
++            socket_path:socket.clone() }, &mut owner).unwrap();
++        let client = BrokerClient::connect(socket, identity_file).unwrap();
++        let (entered, wait) = mpsc::channel(); let (release, gate) = mpsc::channel();
++        let mut release = ApiRelease(Some(release));
++        let ended = Arc::new(AtomicBool::new(false)); let expired = Arc::new(AtomicBool::new(false));
++        *broker.inner.api_probe.lock().unwrap() = Some(ApiProbe { panic_request, panic_api,
++            tls:ApiTls { entered, release:gate, ended:ended.clone(), expired:expired.clone() } });
++        // Actual framed RPC, authentication and AgentApi query. A successful
++        // reply is available before the API worker's TLS teardown completes.
++        let result = client.exchange(Operation::Call { tool:"agents_find".into(), arguments:json!({}) }, &AtomicBool::new(false));
++        if panic_request || panic_api { assert!(result.is_err()); }
++        else { assert!(result.unwrap()["agents"].is_array()); }
++        wait.recv_timeout(Duration::from_secs(2)).unwrap();
++        assert!(!ended.load(Ordering::Acquire));
++        assert_eq!(broker.inner.active.lock().unwrap().len(), 1, "API TLS still owns its call permit");
++        assert!(broker.inner.count.load(Ordering::Acquire) > 0);
++        assert!(owner.await_closed(Duration::from_millis(20)).is_err());
++        assert!(owner.joiner.is_some() && !owner.settled);
++        let joining = owner.joiner.as_ref().unwrap()._thread.thread().id();
++        assert!(!ended.load(Ordering::Acquire));
++        assert!(!broker.inner.active.lock().unwrap().is_empty());
++        release.open();
++        let settled = owner.await_closed(Duration::from_secs(2));
++        assert!(ended.load(Ordering::Acquire));
++        assert!(!expired.load(Ordering::Acquire), "API TLS fixture fuse expired instead of release");
++        assert_eq!(broker.inner.count.load(Ordering::Acquire), 0);
++        assert!(broker.inner.active.lock().unwrap().is_empty());
++        assert!(broker.inner.connections.lock().unwrap().is_empty());
++        if panic_request || panic_api {
++            assert!(settled.is_err() && !owner.settled);
++            assert!(owner.calls.uncertain.load(Ordering::Acquire));
++            assert_eq!(owner.calls.panics.lock().unwrap().len(), 1);
++            assert_eq!(owner.joiner.as_ref().unwrap()._thread.thread().id(), joining);
++            assert!(owner.await_closed(Duration::from_millis(1)).is_err());
++        } else {
++            let proof = settled.unwrap();
++            assert_eq!(proof._joiner.as_ref().unwrap()._thread.thread().id(), joining);
++            assert!(owner.settled && owner.calls.handles().is_empty());
++            assert!(owner.calls.panics.lock().unwrap().is_empty());
++        }
++    }
++    #[test]
++    fn owned_actual_rpc_reply_cannot_settle_before_api_worker_tls_join() {
++        actual_rpc_api_tls(false, false);
++    }
++    #[test]
++    fn owned_actual_rpc_handler_or_api_panic_retains_nested_tls_and_uncertainty() {
++        actual_rpc_api_tls(true, false);
++        actual_rpc_api_tls(false, true);
++    }
+     struct BlockTls { entered:mpsc::Sender<()>, release:mpsc::Receiver<()> }
+     impl Drop for BlockTls {
+         fn drop(&mut self) { let _ = self.entered.send(()); let _ = self.release.recv(); }
+diff --git a/native/src/main.rs b/native/src/main.rs
+index 34a7378..55a7c81 100644
+--- a/native/src/main.rs
++++ b/native/src/main.rs
+@@ -71,6 +71,8 @@ mod remote_workspace;
+ mod source_authorizer;
+ mod source_issuer;
+ #[cfg(target_os = "linux")]
++mod source_connect_authority;
++#[cfg(target_os = "linux")]
+ mod source_shutdown_join;
+ #[cfg(target_os = "linux")]
+ mod source_controller;
+diff --git a/native/src/managed_backend_prepare.rs b/native/src/managed_backend_prepare.rs
+new file mode 100644
+index 0000000..69ca10d
+--- /dev/null
++++ b/native/src/managed_backend_prepare.rs
+@@ -0,0 +1,227 @@
++//! Pure managed model-backend preparation, independent of workspace ownership.
++//! Call only for an explicitly selected profile and already reserved fence.
++//! No profile lookup, inherited environment, IO, model call, scheduler or readiness.
++use anyhow::{ensure, Context, Result};
++use rudder_engine::{execution::{HomeFile, ManagedFrontendStart, ReadOnlyRuntime},
++    protocol::canonical_json};
++use serde::{Deserialize, Serialize};
++use std::{collections::BTreeMap, path::{Path, PathBuf}};
++use super::ManagedLaunchFence;
++
++/// No Debug/Serialize implementation: values belong only in a sealed spec.
++pub(crate) struct SelectedCredentials {
++    pub(super) profile_id: String,
++    backend: crate::Backend,
++    pub(super) environment: std::collections::BTreeMap<String, String>,
++}
++
++/// One selected host-owned key. Never Debug/Serde, guest env, home JSON or CAS.
++pub(crate) struct ManagedCodexApiKey(String);
++impl ManagedCodexApiKey {
++    pub(crate) fn expose_for_login(&self) -> &str { &self.0 }
++}
++impl Drop for ManagedCodexApiKey {
++    fn drop(&mut self) { unsafe { self.0.as_bytes_mut().fill(0); } }
++}
++impl SelectedCredentials {
++    pub(crate) fn check_backend(&self, backend: &ManagedBackendProfile) -> Result<()> {
++        ensure!(backend.backend() == self.backend,
++            "selected credential profile belongs to another backend");
++        Ok(())
++    }
++    /// Copy only this selected API-key environment into the private sealed spec.
++    /// Codex's key must already have moved into its zeroizing host-only owner.
++    pub(crate) fn guest_environment(&self, fence: &ManagedLaunchFence,
++        reports: &ManagedReportMapping) -> Result<BTreeMap<String, String>> {
++        ensure!(self.backend != crate::Backend::Codex || self.environment.is_empty(),
++            "selected Codex API key must move to host custody before guest preparation");
++        let mut environment = self.environment.clone();
++        environment.extend([("RUDDER_FABRIC_ATTEMPT_ID".into(), fence.attempt_id.clone()),
++            ("RUDDER_DONE_FILE".into(), reports.guest_done_file.display().to_string()),
++            ("CODEX_HOME".into(), "/home/agent/.codex".into())]);
++        Ok(environment)
++    }
++    /// The selected profile loader supplies exactly one key, never its HOME or
++    /// inherited environment. API keys have no refresh/writeback semantics.
++    pub(crate) fn api_key(profile_id: String, backend: crate::Backend, secret: String) -> Result<Self> {
++        ensure!(!profile_id.is_empty() && profile_id.len() <= 256 && !profile_id.chars().any(char::is_control), "invalid selected credential profile");
++        ensure!(!secret.is_empty() && secret.len() <= 16 * 1024 && !secret.contains(['\0', '\r', '\n']), "invalid selected provider credential");
++        let key = match backend {
++            crate::Backend::Codex => "OPENAI_API_KEY",
++            crate::Backend::Claude => "ANTHROPIC_API_KEY",
++            _ => anyhow::bail!("managed provider profile is unsupported"),
++        };
++        Ok(Self { profile_id, backend, environment: [(key.into(), secret)].into() })
++    }
++    /// Ordinary CLI profiles do not participate in a shared refresh lease.
++    /// Refuse before reading/copying a refresh token or invalidating a live login.
++    pub(crate) fn oauth_profile(_profile_id: &str) -> Result<Self> {
++        Err(std::io::Error::new(std::io::ErrorKind::Unsupported,
++            "managed OAuth requires a qualified exclusive refresh and protected writeback adapter").into())
++    }
++    pub(crate) fn take_host_codex_key(&mut self) -> Result<Option<ManagedCodexApiKey>> {
++        if self.backend != crate::Backend::Codex { return Ok(None); }
++        ensure!(self.environment.len() == 1, "managed Codex requires exactly its selected API key");
++        Ok(Some(ManagedCodexApiKey(self.environment.remove("OPENAI_API_KEY")
++            .context("selected Codex profile has no API key")?)))
++    }
++}
++impl Drop for SelectedCredentials {
++    fn drop(&mut self) {
++        for value in self.environment.values_mut() { unsafe { value.as_bytes_mut().fill(0); } }
++    }
++}
++
++/// Explicit backend process layout. Both commands contain guest paths only.
++/// The helper launches the server directly and reports its held kernel identity.
++pub(crate) enum ManagedBackendProfile {
++    CodexAppServer { program: String, arguments: Vec<String> },
++    ClaudeSdk { node: String, rudder_cli: String, claude: String,
++        arguments: Vec<String>, initial_prompt: Option<String> },
++}
++impl ManagedBackendProfile {
++    /// A launch layout is not readiness or authority to send this packet.
++    pub(crate) fn frontend_start(&self) -> ManagedFrontendStart {
++        match self { Self::CodexAppServer { .. } => ManagedFrontendStart::AfterHostApiKeyV1,
++            Self::ClaudeSdk { .. } => ManagedFrontendStart::Immediate }
++    }
++    /// Preserve the caller's companion order, then validate this explicit profile.
++    /// No command inspection can promote an offline command into this enum.
++    pub(crate) fn validate_runtime(&self, runtime: &[ReadOnlyRuntime],
++        companion_programs: &[&str]) -> Result<()> {
++        for program in companion_programs { validate_runtime_program(program, runtime)?; }
++        match self {
++            Self::CodexAppServer { program, .. } => validate_runtime_program(program, runtime),
++            Self::ClaudeSdk { node, rudder_cli, claude, .. } => {
++                for program in [node, rudder_cli, claude] { validate_runtime_program(program, runtime)?; }
++                Ok(())
++            }
++        }
++    }
++    pub(crate) fn backend(&self) -> crate::Backend {
++        match self { Self::CodexAppServer { .. } => crate::Backend::Codex,
++            Self::ClaudeSdk { .. } => crate::Backend::Claude }
++    }
++    pub(crate) fn execution_profile(&self) -> &'static str {
++        match self { Self::CodexAppServer { .. } => "codex-app-server",
++            Self::ClaudeSdk { .. } => "claude-sdk" }
++    }
++}
++
++/// Guest-owned candidate reports. These paths convey no backend/process,
++/// acknowledgment, writer-barrier or checkpoint authority.
++#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
++#[serde(deny_unknown_fields)]
++pub(crate) struct ManagedReportMapping {
++    pub host_done_file: PathBuf,
++    pub guest_done_file: PathBuf,
++    pub host_signal_file: PathBuf,
++    pub guest_signal_file: PathBuf,
++}
++
++impl ManagedReportMapping {
++    pub(crate) fn for_execution(home: &Path) -> Self {
++        Self { host_done_file: home.join(".rudder-reports/done.json"),
++            guest_done_file: "/home/agent/.rudder-reports/done.json".into(),
++            host_signal_file: home.join(".rudder-reports/signal.json"),
++            guest_signal_file: "/home/agent/.rudder-reports/signal.json".into() }
++    }
++}
++
++/// Private launch material. No Debug/Serde: home files may include a prompt.
++/// No process, ACK, source grant or readiness witness is created here.
++pub(crate) struct ManagedBackendLayout {
++    pub command: Vec<String>,
++    pub server_command: Option<Vec<String>>,
++    pub home_files: Vec<HomeFile>,
++    pub reports: ManagedReportMapping,
++    pub execution_profile: &'static str,
++    pub frontend_start: ManagedFrontendStart,
++}
++
++/// Pure preparation for both the existing local owner and a future qualified
++/// source-model owner. The latter must supply its own assignment/authority,
++/// runtime validation, sealed-spec family and live auth/readiness integration.
++pub(crate) fn prepare_layout(fence: &ManagedLaunchFence, backend: &ManagedBackendProfile,
++    native_guest: &str, socket: &Path, execution_home: &Path) -> Result<ManagedBackendLayout> {
++    let (command, server_command, home_files) = prepare_backend(fence, backend, native_guest, socket)?;
++    Ok(ManagedBackendLayout { command, server_command, home_files,
++        reports: ManagedReportMapping::for_execution(execution_home),
++        execution_profile: backend.execution_profile(), frontend_start: backend.frontend_start() })
++}
++
++pub(crate) fn selected_protected_roots(identity_home: &Path, additional: &[PathBuf]) -> Result<Vec<PathBuf>> {
++    ensure!(additional.len() <= 32, "managed protected credential roots exceed bound");
++    let roots: Vec<_> = std::iter::once(identity_home.to_path_buf()).chain(additional.iter().cloned()).collect();
++    for root in &roots {
++        ensure!(root.is_absolute() && root != Path::new("/") && root.components().all(|component|matches!(component,
++            std::path::Component::RootDir | std::path::Component::Normal(_))), "managed protected roots must be explicit normalized host paths");
++    }
++    Ok(roots)
++}
++
++pub(crate) fn validate_runtime_program(program: &str, runtime: &[ReadOnlyRuntime]) -> Result<()> {
++    let path = Path::new(program);
++    ensure!(path.is_absolute() && path.components().all(|component|matches!(component,
++        std::path::Component::RootDir | std::path::Component::Normal(_)))
++        && runtime.iter().any(|projection|path.starts_with(&projection.guest_path)),
++        "managed programs must belong to the declared read-only image runtime");
++    Ok(())
++}
++
++pub(super) fn prepare_backend(fence: &ManagedLaunchFence, backend: &ManagedBackendProfile, native_guest: &str,
++    socket: &Path) -> Result<(Vec<String>, Option<Vec<String>>, Vec<HomeFile>)> {
++    let broker_args = vec!["fabric", "mcp", "--identity-file", "/run/rudder/agent/identity.json", "--broker-socket", "/run/rudder/agent/broker.sock"];
++    let config = canonical_json(&serde_json::json!({"mcpServers":{"rudder_agents":{"type":"stdio",
++        "command":native_guest,"args":broker_args}}}))?;
++    let signal = Path::new("/home/agent/.rudder-reports/signal.json");
++    let mut files = vec![HomeFile { relative_path: ".rudder/mcp.json".into(), contents: config },
++        HomeFile { relative_path: ".rudder-reports/assignment.json".into(), contents: canonical_json(fence)? }];
++    let mut codex_configs = vec!["-c".into(), format!("mcp_servers.rudder_agents.command={}", serde_json::to_string(native_guest)?),
++        "-c".into(), format!("mcp_servers.rudder_agents.args={}", serde_json::to_string(&broker_args)?),
++        "-c".into(), "mcp_servers.rudder_agents.enabled=true".into(),
++        "-c".into(), "notify=[\"/bin/sh\",\"/home/agent/.rudder/notify.sh\"]".into(),
++        "-c".into(), "cli_auth_credentials_store=\"ephemeral\"".into()];
++    match backend {
++        ManagedBackendProfile::CodexAppServer { program, arguments } => {
++            ensure!(Path::new(program).is_absolute() && !arguments.iter().any(|a| matches!(a.as_str(), "exec" | "app-server" | "--remote") || a.starts_with("--remote=")), "invalid explicit Codex interactive profile");
++            files.push(HomeFile { relative_path: ".rudder/notify.sh".into(), contents: crate::signals::codex_notify_script(signal).into_bytes() });
++            files.push(HomeFile { relative_path:".codex/config.toml".into(), contents:b"cli_auth_credentials_store = \"ephemeral\"\n".to_vec() });
++            let mut server = vec![program.clone()];
++            // The server owns MCP and lifecycle configuration. Preserve explicit
++            // root options before applying this attempt's guest-only overrides.
++            let mut at = 0;
++            while at < arguments.len() {
++                let arg = &arguments[at];
++                if arg == "--" { break; }
++                if matches!(arg.as_str(), "-c" | "--config" | "--enable" | "--disable" | "--profile" | "-p") {
++                    let value = arguments.get(at + 1).context("Codex root option is missing its value")?;
++                    server.extend([arg.clone(), value.clone()]); at += 2;
++                } else if ["--config=", "--enable=", "--disable=", "--profile="].iter().any(|prefix| arg.starts_with(prefix)) {
++                    server.push(arg.clone()); at += 1;
++                } else { at += 1; }
++            }
++            server.append(&mut codex_configs);
++            server.extend(["app-server".into(), "--listen".into(), format!("unix://{}", socket.display())]);
++            let mut terminal = vec![program.clone(), "--remote".into(), format!("unix://{}", socket.display())];
++            terminal.extend(arguments.clone());
++            let before_prompt = terminal.iter().position(|arg|arg == "--").unwrap_or(terminal.len());
++            terminal.splice(before_prompt..before_prompt, ["-c".into(), "cli_auth_credentials_store=\"ephemeral\"".into()]);
++            Ok((terminal, Some(server), files))
++        }
++        ManagedBackendProfile::ClaudeSdk { node, rudder_cli, claude, arguments, initial_prompt } => {
++            for path in [node, rudder_cli, claude] { ensure!(Path::new(path).is_absolute(), "managed Claude programs must use explicit guest paths"); }
++            files.push(HomeFile { relative_path: ".rudder/claude-settings.json".into(), contents: crate::signals::claude_settings_json(signal, false).into_bytes() });
++            let mut arguments = arguments.clone(); arguments.extend(["--mcp-config".into(), "/home/agent/.rudder/mcp.json".into(),
++                "--settings".into(), "/home/agent/.rudder/claude-settings.json".into()]);
++            files.push(HomeFile { relative_path: ".rudder/claude-launch.json".into(), contents: canonical_json(&serde_json::json!({
++                "format_version":1,"run_id":fence.run_id,"attempt_id":fence.attempt_id,"socket_path":socket,
++                "claude_program":claude,"claude_args":arguments,"initial_prompt":initial_prompt}))? });
++            Ok((vec![node.clone(), rudder_cli.clone(), "__claude-sdk".into(), "--launch-file".into(), "/home/agent/.rudder/claude-launch.json".into()], None, files))
++        }
++    }
++}
++
++#[cfg(test)]
++#[path = "managed_backend_prepare_tests.rs"]
++mod tests;
+diff --git a/native/src/managed_backend_prepare_tests.rs b/native/src/managed_backend_prepare_tests.rs
+new file mode 100644
+index 0000000..f76d7f6
+--- /dev/null
++++ b/native/src/managed_backend_prepare_tests.rs
+@@ -0,0 +1,105 @@
++use super::*;
++use rudder_engine::journal::OwnerFence;
++
++fn fence() -> ManagedLaunchFence {
++    ManagedLaunchFence {
++        owner: OwnerFence { project_id: "project".into(), owner_id: "owner".into(), epoch: 3 },
++        run_id: "reserved-run".into(), run_epoch: 7,
++        attempt_id: "e3eb83c7-9aa4-4585-adeb-2be31c7f6adc".into(),
++        request_id: "1b683899-9fab-4f20-a0d0-148ef23530de".into(),
++    }
++}
++
++#[test]
++fn codex_layout_defers_frontend_and_requires_selected_key_to_stay_host_only() {
++    let fence = fence();
++    let backend = ManagedBackendProfile::CodexAppServer {
++        program: "/opt/runtime/codex".into(),
++        arguments: vec!["--model".into(), "chosen-model".into(), "--".into(), "literal prompt".into()],
++    };
++    let mut selected = SelectedCredentials::api_key(
++        "selected-codex".into(), crate::Backend::Codex, "fixture-host-only-key".into()).unwrap();
++    selected.check_backend(&backend).unwrap();
++    let layout = prepare_layout(&fence, &backend, "/opt/runtime/native",
++        Path::new("/tmp/cx.sock"), Path::new("/owned/run/home")).unwrap();
++
++    // The newly shared environment boundary refuses accidental pre-login copy.
++    assert!(selected.guest_environment(&fence, &layout.reports).is_err());
++    let key = selected.take_host_codex_key().unwrap().unwrap();
++    assert_eq!(key.expose_for_login(), "fixture-host-only-key");
++    assert_eq!(layout.execution_profile, "codex-app-server");
++    assert_eq!(layout.frontend_start, ManagedFrontendStart::AfterHostApiKeyV1);
++    assert_eq!(layout.command, ["/opt/runtime/codex", "--remote", "unix:///tmp/cx.sock",
++        "--model", "chosen-model", "-c", "cli_auth_credentials_store=\"ephemeral\"",
++        "--", "literal prompt"].map(str::to_owned).to_vec());
++    let server = layout.server_command.as_ref().unwrap();
++    assert_eq!(&server[server.len()-3..], ["app-server", "--listen", "unix:///tmp/cx.sock"]);
++    assert!(!server.iter().any(|arg| arg == "literal prompt"));
++    let environment = selected.guest_environment(&fence, &layout.reports).unwrap();
++    assert_eq!(environment, BTreeMap::from([
++        ("RUDDER_FABRIC_ATTEMPT_ID".into(), fence.attempt_id.clone()),
++        ("RUDDER_DONE_FILE".into(), "/home/agent/.rudder-reports/done.json".into()),
++        ("CODEX_HOME".into(), "/home/agent/.codex".into()),
++    ]));
++    for file in &layout.home_files {
++        assert!(!file.contents.windows(key.expose_for_login().len())
++            .any(|bytes| bytes == key.expose_for_login().as_bytes()));
++    }
++    assert!(selected.take_host_codex_key().is_err(), "one selected key transfers only once");
++}
++
++#[test]
++fn claude_layout_keeps_selected_key_and_existing_guest_environment_with_immediate_frontend() {
++    let fence = fence();
++    let backend = ManagedBackendProfile::ClaudeSdk {
++        node: "/usr/bin/node".into(), rudder_cli: "/opt/rudder/main.js".into(),
++        claude: "/opt/runtime/claude".into(), arguments: vec!["--model".into(), "chosen-model".into()],
++        initial_prompt: Some("exact initial prompt".into()),
++    };
++    let mut selected = SelectedCredentials::api_key(
++        "selected-claude".into(), crate::Backend::Claude, "fixture-claude-key".into()).unwrap();
++    selected.check_backend(&backend).unwrap();
++    assert!(selected.take_host_codex_key().unwrap().is_none());
++    let home = Path::new("/owned/execution/runs/execution/home");
++    let layout = prepare_layout(&fence, &backend, "/opt/runtime/native",
++        Path::new("/tmp/cx.sock"), home).unwrap();
++    assert_eq!(layout.execution_profile, "claude-sdk");
++    assert_eq!(layout.frontend_start, ManagedFrontendStart::Immediate);
++    assert!(layout.server_command.is_none());
++    assert_eq!(layout.command, ["/usr/bin/node", "/opt/rudder/main.js", "__claude-sdk",
++        "--launch-file", "/home/agent/.rudder/claude-launch.json"].map(str::to_owned).to_vec());
++    assert_eq!(layout.reports.host_done_file, home.join(".rudder-reports/done.json"));
++    assert_eq!(layout.reports.host_signal_file, home.join(".rudder-reports/signal.json"));
++    let environment = selected.guest_environment(&fence, &layout.reports).unwrap();
++    assert_eq!(environment, BTreeMap::from([
++        ("ANTHROPIC_API_KEY".into(), "fixture-claude-key".into()),
++        ("RUDDER_FABRIC_ATTEMPT_ID".into(), fence.attempt_id.clone()),
++        ("RUDDER_DONE_FILE".into(), "/home/agent/.rudder-reports/done.json".into()),
++        ("CODEX_HOME".into(), "/home/agent/.codex".into()),
++    ]), "preserve the existing Claude environment, including explicit CODEX_HOME");
++    let launch = &layout.home_files.iter().find(|file|
++        file.relative_path == ".rudder/claude-launch.json").unwrap().contents;
++    let launch: serde_json::Value = serde_json::from_slice(launch).unwrap();
++    assert_eq!(launch["initial_prompt"], "exact initial prompt");
++    assert_eq!(launch["attempt_id"], fence.attempt_id);
++    assert!(!launch.to_string().contains("fixture-claude-key"));
++}
++
++#[test]
++fn mismatch_and_unsupported_oauth_cannot_select_an_alternate_credential() {
++    let fence = fence();
++    let backend = ManagedBackendProfile::CodexAppServer {
++        program: "/opt/runtime/codex".into(), arguments: Vec::new(),
++    };
++    let selected = SelectedCredentials::api_key(
++        "explicit-claude".into(), crate::Backend::Claude, "fixture-original-key".into()).unwrap();
++    let reports = ManagedReportMapping::for_execution(Path::new("/owned/home"));
++    let before = selected.guest_environment(&fence, &reports).unwrap();
++    assert!(selected.check_backend(&backend).is_err());
++    let error = match SelectedCredentials::oauth_profile("unsupported-oauth") {
++        Ok(_) => panic!("OAuth selection must remain unsupported"), Err(error) => error,
++    };
++    assert_eq!(error.downcast_ref::<std::io::Error>().unwrap().kind(),
++        std::io::ErrorKind::Unsupported);
++    assert_eq!(selected.guest_environment(&fence, &reports).unwrap(), before);
++}
+diff --git a/native/src/managed_launch.rs b/native/src/managed_launch.rs
+index 21ff196..e694c8b 100644
+--- a/native/src/managed_launch.rs
++++ b/native/src/managed_launch.rs
+@@ -4,9 +4,16 @@
+ #[cfg(target_os = "linux")]
+ #[path = "managed_source_prepare.rs"]
+ pub(crate) mod source_prepare;
++#[path = "managed_backend_prepare.rs"]
++pub(crate) mod backend_prepare;
++pub(crate) use backend_prepare::{SelectedCredentials, ManagedCodexApiKey,
++    ManagedBackendProfile, ManagedReportMapping};
++use backend_prepare::{selected_protected_roots, validate_runtime_program};
++#[cfg(test)]
++use backend_prepare::prepare_backend;
+ use anyhow::{ensure, Context, Result};
+ use rudder_engine::{
+-    execution::{ExecutionSpec, ProtectedHostContextRef, HomeFile, ReadOnlyRuntime,
++    execution::{ExecutionSpec, ProtectedHostContextRef, ReadOnlyRuntime,
+         BrokerBinding, WorkspaceObservationProfile, HelperApplicationSpec},
+     journal::{Journal, OwnerFence},
+     protocol::{canonical_json, ObjectKind, ObjectRef, OwnerEpoch},
+@@ -239,71 +246,6 @@ fn read_assignment_record(home: &Path, fence: &ManagedLaunchFence, exact_request
+     Ok(Some(assignment))
+ }
+ 
+-/// No Debug/Serialize implementation: values belong only in a sealed spec.
+-pub(crate) struct SelectedCredentials {
+-    profile_id: String,
+-    backend: super::Backend,
+-    environment: std::collections::BTreeMap<String, String>,
+-}
+-
+-/// One selected host-owned key. Never Debug/Serde, guest env, home JSON or CAS.
+-pub(crate) struct ManagedCodexApiKey(String);
+-impl ManagedCodexApiKey {
+-    pub(crate) fn expose_for_login(&self) -> &str { &self.0 }
+-}
+-impl Drop for ManagedCodexApiKey {
+-    fn drop(&mut self) { unsafe { self.0.as_bytes_mut().fill(0); } }
+-}
+-impl SelectedCredentials {
+-    /// The selected profile loader supplies exactly one key, never its HOME or
+-    /// inherited environment. API keys have no refresh/writeback semantics.
+-    pub(crate) fn api_key(profile_id: String, backend: super::Backend, secret: String) -> Result<Self> {
+-        ensure!(!profile_id.is_empty() && profile_id.len() <= 256 && !profile_id.chars().any(char::is_control), "invalid selected credential profile");
+-        ensure!(!secret.is_empty() && secret.len() <= 16 * 1024 && !secret.contains(['\0', '\r', '\n']), "invalid selected provider credential");
+-        let key = match backend {
+-            super::Backend::Codex => "OPENAI_API_KEY",
+-            super::Backend::Claude => "ANTHROPIC_API_KEY",
+-            _ => anyhow::bail!("managed provider profile is unsupported"),
+-        };
+-        Ok(Self { profile_id, backend, environment: [(key.into(), secret)].into() })
+-    }
+-    /// Ordinary CLI profiles do not participate in a shared refresh lease.
+-    /// Refuse before reading/copying a refresh token or invalidating a live login.
+-    pub(crate) fn oauth_profile(_profile_id: &str) -> Result<Self> {
+-        Err(std::io::Error::new(std::io::ErrorKind::Unsupported,
+-            "managed OAuth requires a qualified exclusive refresh and protected writeback adapter").into())
+-    }
+-    pub(crate) fn take_host_codex_key(&mut self) -> Result<Option<ManagedCodexApiKey>> {
+-        if self.backend != super::Backend::Codex { return Ok(None); }
+-        ensure!(self.environment.len() == 1, "managed Codex requires exactly its selected API key");
+-        Ok(Some(ManagedCodexApiKey(self.environment.remove("OPENAI_API_KEY")
+-            .context("selected Codex profile has no API key")?)))
+-    }
+-}
+-impl Drop for SelectedCredentials {
+-    fn drop(&mut self) {
+-        for value in self.environment.values_mut() { unsafe { value.as_bytes_mut().fill(0); } }
+-    }
+-}
+-
+-/// Explicit backend process layout. Both commands contain guest paths only.
+-/// The helper launches the server directly and reports its held kernel identity.
+-pub(crate) enum ManagedBackendProfile {
+-    CodexAppServer { program: String, arguments: Vec<String> },
+-    ClaudeSdk { node: String, rudder_cli: String, claude: String,
+-        arguments: Vec<String>, initial_prompt: Option<String> },
+-}
+-impl ManagedBackendProfile {
+-    pub(crate) fn backend(&self) -> super::Backend {
+-        match self { Self::CodexAppServer { .. } => super::Backend::Codex,
+-            Self::ClaudeSdk { .. } => super::Backend::Claude }
+-    }
+-    pub(crate) fn execution_profile(&self) -> &'static str {
+-        match self { Self::CodexAppServer { .. } => "codex-app-server",
+-            Self::ClaudeSdk { .. } => "claude-sdk" }
+-    }
+-}
+-
+ pub(crate) struct ManagedLocalLaunchRequest {
+     pub fence: ManagedLaunchFence,
+     pub journal: PathBuf,
+@@ -379,17 +321,6 @@ pub(crate) struct ManagedTransportMapping {
+     pub guest_cwd: PathBuf,
+ }
+ 
+-/// Guest-owned candidate reports. These paths convey no backend/process,
+-/// acknowledgment, writer-barrier or checkpoint authority.
+-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+-#[serde(deny_unknown_fields)]
+-pub(crate) struct ManagedReportMapping {
+-    pub host_done_file: PathBuf,
+-    pub guest_done_file: PathBuf,
+-    pub host_signal_file: PathBuf,
+-    pub guest_signal_file: PathBuf,
+-}
+-
+ struct ManagedEndpoints { root:PathBuf, marker:Vec<u8>, backend_target:PathBuf }
+ fn validate_endpoint_parent(parent: &Path, fence: &ManagedLaunchFence) -> Result<PathBuf> {
+     fence.validate()?;
+@@ -427,20 +358,12 @@ fn retire_endpoints(endpoints:ManagedEndpoints) -> Result<()> {
+         "managed endpoint binding changed; retain for recovery");
+     fs::remove_dir_all(&endpoints.root)?; File::open(parent)?.sync_all()?; Ok(())
+ }
+-impl ManagedReportMapping {
+-    fn for_execution(home: &Path) -> Self {
+-        Self { host_done_file: home.join(".rudder-reports/done.json"),
+-            guest_done_file: "/home/agent/.rudder-reports/done.json".into(),
+-            host_signal_file: home.join(".rudder-reports/signal.json"),
+-            guest_signal_file: "/home/agent/.rudder-reports/signal.json".into() }
+-    }
+-}
+-
+ pub(crate) struct PreparedManagedLaunch {
+     pub assignment: WorkspaceAssignment,
+     pub transport: ManagedTransportMapping,
+     pub reports: ManagedReportMapping,
+     pub execution_profile: String,
++    frontend_start: rudder_engine::execution::ManagedFrontendStart,
+     pub identity_home: PathBuf,
+     pub identity_journal: PathBuf,
+     pub managed_run: crate::managed_store::ManagedRunLocation,
+@@ -464,8 +387,7 @@ impl PreparedManagedLaunch {
+                 run_epoch: self.assignment.fence.run_epoch, execution_id: spec.execution_id.clone(),
+                 operation_id: spec.operation_id.clone(), view_id: spec.view_id.clone(), owner: spec.owner.clone(),
+                 execution_profile: self.execution_profile.clone(), server_command: self.server_command.clone(),
+-                frontend_start: if self.execution_profile == "codex-app-server" { rudder_engine::execution::ManagedFrontendStart::AfterHostApiKeyV1 }
+-                    else { rudder_engine::execution::ManagedFrontendStart::Immediate },
++                frontend_start: self.frontend_start,
+                 guest_socket: self.transport.guest_socket.clone() })
+     }
+     pub(crate) fn link_launch(&self) -> crate::agent_link::AgentLinkLaunch {
+@@ -570,16 +492,11 @@ pub(crate) fn prepare_local(mut request: ManagedLocalLaunchRequest, cancelled: A
+     ensure!(request.private_root.parent() == Some(request.managed_store.binding().directory.join("preparations").as_path()),
+         "managed preparation must remain inside its permanent private namespace");
+     ensure!((1..=24 * 60 * 60).contains(&request.timeout_seconds), "invalid managed execution timeout");
+-    ensure!(request.backend.backend() == request.credentials.backend,
+-        "selected credential profile belongs to another backend");
++    request.credentials.check_backend(&request.backend)?;
+     let protected_roots = selected_protected_roots(&request.home, &request.protected_credential_roots)?;
+     let codex_api_key = request.credentials.take_host_codex_key()?;
+-    let mut programs = vec![request.native_guest.as_str(), request.jj_guest.as_str()];
+-    match &request.backend {
+-        ManagedBackendProfile::CodexAppServer { program, .. } => programs.push(program),
+-        ManagedBackendProfile::ClaudeSdk { node, rudder_cli, claude, .. } => programs.extend([node.as_str(), rudder_cli.as_str(), claude.as_str()]),
+-    }
+-    for program in programs { validate_runtime_program(program, &request.runtime)?; }
++    request.backend.validate_runtime(&request.runtime,
++        &[request.native_guest.as_str(), request.jj_guest.as_str()])?;
+     ensure!(request.runnable_root.kind == ObjectKind::RunnableRoot, "managed local launch requires a RunnableRoot");
+     let seed_ref = request.seed.retained_seed().context("managed local launch requires a retained private seed")?.clone();
+     let retained = request.store.retention()?;
+@@ -655,14 +572,13 @@ pub(crate) fn prepare_local(mut request: ManagedLocalLaunchRequest, cancelled: A
+         let host_socket = transient.join("backend.sock");
+         ensure!(host_socket.as_os_str().as_encoded_bytes().len() < 100, "managed backend socket exceeds portable path bound");
+         let guest_socket = PathBuf::from("/tmp/cx.sock");
+-        let (command, server_command, home_files) = prepare_backend(&request.fence, &request.backend, &request.native_guest, &guest_socket)?;
+-        let reports = ManagedReportMapping::for_execution(&execution_root.join("runs").join(&request.fence.attempt_id).join("home"));
++        let backend_prepare::ManagedBackendLayout { command, server_command, home_files, reports,
++            execution_profile, frontend_start } = backend_prepare::prepare_layout(&request.fence,
++                &request.backend, &request.native_guest, &guest_socket,
++                &execution_root.join("runs").join(&request.fence.attempt_id).join("home"))?;
+         let broker = crate::agent_broker::socket_path(&request.home, &request.fence.owner.project_id,
+             &request.fence.run_id, &request.fence.attempt_id);
+-        let mut environment = request.credentials.environment.clone();
+-        environment.extend([("RUDDER_FABRIC_ATTEMPT_ID".into(), request.fence.attempt_id.clone()),
+-            ("RUDDER_DONE_FILE".into(), reports.guest_done_file.display().to_string()),
+-            ("CODEX_HOME".into(), "/home/agent/.codex".into())]);
++        let environment = request.credentials.guest_environment(&request.fence, &reports)?;
+         let mut authority_roots = vec![private, request.private_root.join("context"), request.private_root.join("state"),
+             request.private_root.join("projections"), request.journal.clone()];
+         authority_roots.extend(protected_roots);
+@@ -683,7 +599,7 @@ pub(crate) fn prepare_local(mut request: ManagedLocalLaunchRequest, cancelled: A
+         File::open(request.private_root.parent().context("managed root parent absent")?)?.sync_all()?;
+         Ok(PreparedManagedLaunch { assignment, transport: ManagedTransportMapping { host_socket, guest_socket, guest_cwd: "/workspace".into() }, reports,
+             managed_run,
+-            execution_profile: request.backend.execution_profile().into(), identity_home: request.home.clone(),
++            execution_profile: execution_profile.into(), frontend_start, identity_home: request.home.clone(),
+             identity_journal: request.journal.clone(), server_command, codex_api_key, spec: Some(spec), retirement: None })
+     })();
+     match prepared {
+@@ -692,78 +608,6 @@ pub(crate) fn prepare_local(mut request: ManagedLocalLaunchRequest, cancelled: A
+     }
+ }
+ 
+-fn selected_protected_roots(identity_home: &Path, additional: &[PathBuf]) -> Result<Vec<PathBuf>> {
+-    ensure!(additional.len() <= 32, "managed protected credential roots exceed bound");
+-    let roots: Vec<_> = std::iter::once(identity_home.to_path_buf()).chain(additional.iter().cloned()).collect();
+-    for root in &roots {
+-        ensure!(root.is_absolute() && root != Path::new("/") && root.components().all(|component|matches!(component,
+-            std::path::Component::RootDir | std::path::Component::Normal(_))), "managed protected roots must be explicit normalized host paths");
+-    }
+-    Ok(roots)
+-}
+-
+-fn validate_runtime_program(program: &str, runtime: &[ReadOnlyRuntime]) -> Result<()> {
+-    let path = Path::new(program);
+-    ensure!(path.is_absolute() && path.components().all(|component|matches!(component,
+-        std::path::Component::RootDir | std::path::Component::Normal(_)))
+-        && runtime.iter().any(|projection|path.starts_with(&projection.guest_path)),
+-        "managed programs must belong to the declared read-only image runtime");
+-    Ok(())
+-}
+-
+-fn prepare_backend(fence: &ManagedLaunchFence, backend: &ManagedBackendProfile, native_guest: &str,
+-    socket: &Path) -> Result<(Vec<String>, Option<Vec<String>>, Vec<HomeFile>)> {
+-    let broker_args = vec!["fabric", "mcp", "--identity-file", "/run/rudder/agent/identity.json", "--broker-socket", "/run/rudder/agent/broker.sock"];
+-    let config = canonical_json(&serde_json::json!({"mcpServers":{"rudder_agents":{"type":"stdio",
+-        "command":native_guest,"args":broker_args}}}))?;
+-    let signal = Path::new("/home/agent/.rudder-reports/signal.json");
+-    let mut files = vec![HomeFile { relative_path: ".rudder/mcp.json".into(), contents: config },
+-        HomeFile { relative_path: ".rudder-reports/assignment.json".into(), contents: canonical_json(fence)? }];
+-    let mut codex_configs = vec!["-c".into(), format!("mcp_servers.rudder_agents.command={}", serde_json::to_string(native_guest)?),
+-        "-c".into(), format!("mcp_servers.rudder_agents.args={}", serde_json::to_string(&broker_args)?),
+-        "-c".into(), "mcp_servers.rudder_agents.enabled=true".into(),
+-        "-c".into(), "notify=[\"/bin/sh\",\"/home/agent/.rudder/notify.sh\"]".into(),
+-        "-c".into(), "cli_auth_credentials_store=\"ephemeral\"".into()];
+-    match backend {
+-        ManagedBackendProfile::CodexAppServer { program, arguments } => {
+-            ensure!(Path::new(program).is_absolute() && !arguments.iter().any(|a| matches!(a.as_str(), "exec" | "app-server" | "--remote") || a.starts_with("--remote=")), "invalid explicit Codex interactive profile");
+-            files.push(HomeFile { relative_path: ".rudder/notify.sh".into(), contents: crate::signals::codex_notify_script(signal).into_bytes() });
+-            files.push(HomeFile { relative_path:".codex/config.toml".into(), contents:b"cli_auth_credentials_store = \"ephemeral\"\n".to_vec() });
+-            let mut server = vec![program.clone()];
+-            // The server owns MCP and lifecycle configuration. Preserve explicit
+-            // root options before applying this attempt's guest-only overrides.
+-            let mut at = 0;
+-            while at < arguments.len() {
+-                let arg = &arguments[at];
+-                if arg == "--" { break; }
+-                if matches!(arg.as_str(), "-c" | "--config" | "--enable" | "--disable" | "--profile" | "-p") {
+-                    let value = arguments.get(at + 1).context("Codex root option is missing its value")?;
+-                    server.extend([arg.clone(), value.clone()]); at += 2;
+-                } else if ["--config=", "--enable=", "--disable=", "--profile="].iter().any(|prefix| arg.starts_with(prefix)) {
+-                    server.push(arg.clone()); at += 1;
+-                } else { at += 1; }
+-            }
+-            server.append(&mut codex_configs);
+-            server.extend(["app-server".into(), "--listen".into(), format!("unix://{}", socket.display())]);
+-            let mut terminal = vec![program.clone(), "--remote".into(), format!("unix://{}", socket.display())];
+-            terminal.extend(arguments.clone());
+-            let before_prompt = terminal.iter().position(|arg|arg == "--").unwrap_or(terminal.len());
+-            terminal.splice(before_prompt..before_prompt, ["-c".into(), "cli_auth_credentials_store=\"ephemeral\"".into()]);
+-            Ok((terminal, Some(server), files))
+-        }
+-        ManagedBackendProfile::ClaudeSdk { node, rudder_cli, claude, arguments, initial_prompt } => {
+-            for path in [node, rudder_cli, claude] { ensure!(Path::new(path).is_absolute(), "managed Claude programs must use explicit guest paths"); }
+-            files.push(HomeFile { relative_path: ".rudder/claude-settings.json".into(), contents: crate::signals::claude_settings_json(signal, false).into_bytes() });
+-            let mut arguments = arguments.clone(); arguments.extend(["--mcp-config".into(), "/home/agent/.rudder/mcp.json".into(),
+-                "--settings".into(), "/home/agent/.rudder/claude-settings.json".into()]);
+-            files.push(HomeFile { relative_path: ".rudder/claude-launch.json".into(), contents: canonical_json(&serde_json::json!({
+-                "format_version":1,"run_id":fence.run_id,"attempt_id":fence.attempt_id,"socket_path":socket,
+-                "claude_program":claude,"claude_args":arguments,"initial_prompt":initial_prompt}))? });
+-            Ok((vec![node.clone(), rudder_cli.clone(), "__claude-sdk".into(), "--launch-file".into(), "/home/agent/.rudder/claude-launch.json".into()], None, files))
+-        }
+-    }
+-}
+-
+ #[cfg(test)]
+ #[path = "managed_launch_tests.rs"]
+ mod tests;
+diff --git a/native/src/managed_source_app.rs b/native/src/managed_source_app.rs
+index deaf3f1..457ed4d 100644
+--- a/native/src/managed_source_app.rs
++++ b/native/src/managed_source_app.rs
+@@ -836,6 +836,7 @@ mod linux {
+         }
+     }
+     pub(crate) fn poll(app: &mut App, owner: &OwnerFence) {
++        if app.managed_source.entries.is_empty() { return; }
+         let mut state = std::mem::take(&mut app.managed_source);
+         state.poll(app, owner);
+         app.managed_source = state;
+diff --git a/native/src/source_connect_authority.rs b/native/src/source_connect_authority.rs
+new file mode 100644
+index 0000000..859a908
+--- /dev/null
++++ b/native/src/source_connect_authority.rs
+@@ -0,0 +1,393 @@
++#![cfg(target_os = "linux")]
++//! Retained host CONNECT authority. No source/profile activation or scheduler.
++//! FlyVmNoIngressV1 still lacks an authenticated complete inventory producer and
++//! real boot/NET custody. There is deliberately no production inventory constructor.
++//! The application must retain issuance/inventory plus its bounded worker charge
++//! through actual callback/proxy joins. Fence admission, retire the capability
++//! while its original Engine owner/run is current, then join off-App before
++//! releasing Engine ownership. Capability retirement alone proves no stopped worker.
++//! Current checks are observations, not atomic synchronization with later revocation.
++use crate::engine_host::EngineSourceLease;
++use rudder_engine::{
++    execution::network::{connected::{ConnectAuthority, ConnectBinding, ConnectDeadline,
++        ConnectError, ConnectQuery, ConnectResult, ConnectValidation, ConnectValidationGuard},
++        HostIpv4DenySet},
++    fleet_lease::{HostClock, SuspendAwareClock},
++    journal::{host_connect_principal, host_connect_scope, CapabilityGrant,
++        CapabilityIssuanceObservation, HostConnectAuthorization, Journal, OwnerFence,
++        PreparedCapabilityIssuance, HOST_CONNECT_REQUIRED_OPERATION},
++};
++use std::{sync::{atomic::{AtomicBool, Ordering}, Arc, Mutex, RwLock, TryLockError},
++    time::{Duration, SystemTime, UNIX_EPOCH}};
++
++const QUERY_BUSY_TIMEOUT: Duration = Duration::from_millis(100);
++const PRODUCER_LIMIT_MS: i64 = 250;
++const NS_PER_MS: u128 = 1_000_000;
++
++/// Static diagnostics only; never expose a token, Journal error or inventory.
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub(crate) enum HostConnectError { Fenced, Binding, Journal, Inventory, Clock, Deadline, Unsettled }
++impl std::fmt::Display for HostConnectError {
++    fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
++        write!(out, "host CONNECT authorization failed ({:?})", self)
++    }
++}
++impl std::error::Error for HostConnectError {}
++type Result<T> = std::result::Result<T, HostConnectError>;
++
++#[derive(Clone, Copy)]
++struct Sample { wall_ms: i64, boot_ns: u128 }
++#[derive(Clone, Copy)]
++struct Deadline { wall_ms: i64, boot_ns: u128 }
++impl Deadline {
++    fn producer(start: Sample, fixed: Self) -> Result<Self> {
++        Ok(Self {
++            wall_ms: start.wall_ms.checked_add(PRODUCER_LIMIT_MS)
++                .ok_or(HostConnectError::Clock)?.min(fixed.wall_ms),
++            boot_ns: start.boot_ns.checked_add(PRODUCER_LIMIT_MS as u128 * NS_PER_MS)
++                .ok_or(HostConnectError::Clock)?.min(fixed.boot_ns),
++        })
++    }
++    fn check(self, at: Sample) -> Result<()> {
++        if at.wall_ms >= self.wall_ms || at.boot_ns >= self.boot_ns {
++            return Err(HostConnectError::Deadline);
++        }
++        Ok(())
++    }
++    fn engine(self) -> ConnectResult<ConnectDeadline> {
++        ConnectDeadline::from_original(self.wall_ms, self.boot_ns)
++    }
++}
++struct Clock { source: HostClock, last: Sample, fixed: Deadline, failed: bool }
++impl Clock {
++    fn begin(lifetime: Duration) -> Result<Self> {
++        let ms = i64::try_from(lifetime.as_millis()).map_err(|_| HostConnectError::Clock)?;
++        if !(1..=86_400_000).contains(&ms) { return Err(HostConnectError::Deadline); }
++        let source = HostClock::new().map_err(|_| HostConnectError::Clock)?;
++        // BOOTTIME precedes wall capture, so the original local lifetime is conservative.
++        let boot_ns = source.read().map_err(|_| HostConnectError::Clock)?.nanoseconds();
++        let wall_ms = wall_ms()?;
++        let fixed = Deadline { wall_ms: wall_ms.checked_add(ms).ok_or(HostConnectError::Clock)?,
++            boot_ns: boot_ns.checked_add(ms as u128 * NS_PER_MS).ok_or(HostConnectError::Clock)? };
++        Ok(Self { source, last: Sample { wall_ms, boot_ns }, fixed, failed: false })
++    }
++    fn sample(&mut self) -> Result<Sample> {
++        if self.failed { return Err(HostConnectError::Clock); }
++        let result = (|| {
++            let wall_ms = wall_ms()?;
++            let boot_ns = self.source.read().map_err(|_| HostConnectError::Clock)?.nanoseconds();
++            if wall_ms < self.last.wall_ms || boot_ns < self.last.boot_ns {
++                return Err(HostConnectError::Clock);
++            }
++            let at = Sample { wall_ms, boot_ns };
++            self.fixed.check(at)?;
++            self.last = at;
++            Ok(at)
++        })();
++        if result.is_err() { self.failed = true; }
++        result
++    }
++}
++fn wall_ms() -> Result<i64> {
++    i64::try_from(SystemTime::now().duration_since(UNIX_EPOCH)
++        .map_err(|_| HostConnectError::Clock)?.as_millis()).map_err(|_| HostConnectError::Clock)
++}
++
++/// Begin before preparing/issuing the selected grant. No saved-time constructor,
++/// Clone or Serde: this same owner crosses preparation, issue and uncertainty.
++pub(crate) struct OriginalHostConnectLifetime {
++    binding: ConnectBinding,
++    issued_at_ms: i64,
++    clock: Clock,
++}
++impl OriginalHostConnectLifetime {
++    pub(crate) fn begin_issuance(binding: &ConnectBinding, lifetime: Duration) -> Result<Self> {
++        binding.validate().map_err(|_| HostConnectError::Binding)?;
++        let clock = Clock::begin(lifetime)?;
++        Ok(Self { binding: binding.clone(), issued_at_ms: clock.last.wall_ms, clock })
++    }
++    pub(crate) fn expires_at_ms(&self) -> i64 { self.clock.fixed.wall_ms }
++}
++
++/// The actual issuance owner, held BEFORE invoking issue. No token injection or
++/// token accessor exists. Err/panic retains the prepared capability and lease;
++/// observing Present DATA cannot restore the native original acknowledgment.
++#[must_use = "retain through exact capability retirement and actual callback/worker settlement"]
++pub(crate) struct HostConnectIssuance {
++    lease: EngineSourceLease,
++    binding: ConnectBinding,
++    prepared: RwLock<PreparedCapabilityIssuance>,
++    clock: Mutex<Clock>,
++    issued_at_ms: i64,
++    grant_end: Deadline,
++    attempted: AtomicBool,
++    acknowledged: AtomicBool,
++    denied: AtomicBool,
++    retired: AtomicBool,
++}
++struct DenyOnUnwind<'a>(&'a HostConnectIssuance);
++impl Drop for DenyOnUnwind<'_> {
++    fn drop(&mut self) { if std::thread::panicking() { self.0.deny(); } }
++}
++impl HostConnectIssuance {
++    /// OFF-APP. Every fallible operation precedes transferring the input slots.
++    /// The writer must belong to this actual held Engine owner and Journal.
++    pub(crate) fn prepare_retaining(lease: &mut Option<EngineSourceLease>, journal: &Journal,
++        binding: ConnectBinding, selected: &CapabilityGrant,
++        original: &mut Option<OriginalHostConnectLifetime>) -> Result<Arc<Self>> {
++        binding.validate().map_err(|_| HostConnectError::Binding)?;
++        let held = lease.as_ref().ok_or(HostConnectError::Fenced)?;
++        let lifetime = original.as_mut().ok_or(HostConnectError::Clock)?;
++        let owner = held.owner();
++        if lifetime.binding != binding || owner.project_id != binding.network.project_id
++            || owner.owner_id != binding.network.owner
++            || owner.epoch != binding.network.owner_epoch.value()
++            || selected.principal != host_connect_principal(&binding).map_err(|_| HostConnectError::Binding)?
++            || selected.run_id != binding.network.run_id
++            || selected.run_epoch != binding.network.run_epoch.value()
++            || selected.operations.len() != 1 || !selected.operations.contains(HOST_CONNECT_REQUIRED_OPERATION)
++            || selected.scopes.len() != 1
++            || !selected.scopes.contains(&host_connect_scope(&binding).map_err(|_| HostConnectError::Binding)?)
++            || !selected.recipients.is_empty() || !selected.topics.is_empty()
++            || selected.expires_at_ms != Some(lifetime.expires_at_ms()) {
++            return Err(HostConnectError::Binding);
++        }
++        let issued_at_ms = lifetime.issued_at_ms;
++        lifetime.clock.sample()?;
++        held.check_journal(journal).map_err(|_| HostConnectError::Journal)?;
++        if journal.current_run_attempt(owner, &binding.network.run_id, binding.network.run_epoch.value())
++            .map_err(|_| HostConnectError::Journal)? != binding.network.execution_id {
++            return Err(HostConnectError::Binding);
++        }
++        let prepared = journal.prepare_capability_issuance(owner, selected, issued_at_ms)
++            .map_err(|_| HostConnectError::Journal)?;
++        lifetime.clock.sample()?;
++        held.check_current().map_err(|_| HostConnectError::Fenced)?;
++        let clock = original.take().unwrap().clock;
++        Ok(Arc::new(Self { lease: lease.take().unwrap(), binding, issued_at_ms,
++            grant_end: clock.fixed, clock: Mutex::new(clock), prepared: RwLock::new(prepared),
++            attempted: AtomicBool::new(false), acknowledged: AtomicBool::new(false),
++            denied: AtomicBool::new(false), retired: AtomicBool::new(false) }))
++    }
++    fn deny(&self) { self.denied.store(true, Ordering::Release); }
++    /// App-safe local denial only. This neither revokes the durable capability
++    /// nor proves proxy/callback settlement. Retire before releasing Engine ownership.
++    pub(crate) fn fence_admission(&self) { self.deny(); }
++    fn sample(&self) -> Result<Sample> {
++        if self.denied.load(Ordering::Acquire) { return Err(HostConnectError::Fenced); }
++        // Relay and monitor checks share this short clock-only section. Ordinary
++        // contention is not clock uncertainty and must not retire healthy grants.
++        let mut clock = self.clock.lock().map_err(|_| HostConnectError::Clock)?;
++        if self.denied.load(Ordering::Acquire) { return Err(HostConnectError::Fenced); }
++        clock.sample() // Recheck the original expiry after acquiring the lock.
++    }
++    fn check_at(&self, deadline: Deadline) -> Result<Sample> {
++        if !self.acknowledged.load(Ordering::Acquire) { return Err(HostConnectError::Fenced); }
++        self.lease.check_current().map_err(|_| HostConnectError::Fenced)?;
++        let at = self.sample()?;
++        deadline.check(at)?;
++        Ok(at)
++    }
++    /// OFF-APP; invoke only after the caller has retained this owner/charge.
++    pub(crate) fn issue(&self, journal: &mut Journal) -> Result<()> {
++        self.issue_inner(journal, || Ok(()))
++    }
++    fn issue_inner(&self, journal: &mut Journal, after_write: impl FnOnce() -> Result<()>) -> Result<()> {
++        let _unwind = DenyOnUnwind(self);
++        let result = (|| {
++            if self.attempted.swap(true, Ordering::AcqRel) { return Err(HostConnectError::Fenced); }
++            self.lease.check_journal(journal).map_err(|_| HostConnectError::Journal)?;
++            let at = self.sample()?;
++            let mut prepared = self.prepared.try_write().map_err(|_| HostConnectError::Unsettled)?;
++            journal.issue_prepared_capability(&mut prepared, at.wall_ms).map_err(|_| HostConnectError::Journal)?;
++            after_write()?; // Private committed-but-unacknowledged/panic test seam.
++            self.sample()?;
++            self.lease.check_current().map_err(|_| HostConnectError::Fenced)?;
++            self.acknowledged.store(true, Ordering::Release);
++            Ok(())
++        })();
++        if result.is_err() { self.deny(); }
++        result
++    }
++    /// Current DATA only. Expired/denied owners may reconcile, never reactivate.
++    pub(crate) fn observe(&self, journal: &Journal) -> Result<CapabilityIssuanceObservation> {
++        let result = (|| {
++            self.lease.check_journal(journal).map_err(|_| HostConnectError::Journal)?;
++            let prepared = match self.prepared.try_read() {
++                Ok(value) => value, Err(TryLockError::Poisoned(error)) => error.into_inner(),
++                Err(TryLockError::WouldBlock) => return Err(HostConnectError::Unsettled),
++            };
++            journal.observe_prepared_capability(&prepared).map_err(|_| HostConnectError::Journal)
++        })();
++        if result.is_err() { self.deny(); }
++        result
++    }
++    /// OFF-APP retryable cleanup, including after expiry or an issue panic. A
++    /// busy reader/failed write retains the SAME owner. This proves only exact
++    /// capability retirement, never proxy/helper/writer or callback settlement.
++    pub(crate) fn retire(&self, journal: &mut Journal) -> Result<CapabilityIssuanceObservation> {
++        self.deny();
++        self.acknowledged.store(false, Ordering::Release);
++        self.lease.check_journal(journal).map_err(|_| HostConnectError::Journal)?;
++        let mut prepared = match self.prepared.try_write() {
++            Ok(value) => value, Err(TryLockError::Poisoned(error)) => error.into_inner(),
++            Err(TryLockError::WouldBlock) => return Err(HostConnectError::Unsettled),
++        };
++        let result = journal.retire_prepared_capability(&mut prepared, wall_ms()?)
++            .map_err(|_| HostConnectError::Journal)?;
++        self.retired.store(prepared.is_retired(), Ordering::Release);
++        self.lease.check_current().map_err(|_| HostConnectError::Fenced)?;
++        Ok(result)
++    }
++    pub(crate) fn capability_is_retired(&self) -> bool { self.retired.load(Ordering::Acquire) }
++    fn authorize(&self, binding: &ConnectBinding, deadline: Deadline) -> Result<()> {
++        if binding != &self.binding { return Err(HostConnectError::Binding); }
++        self.check_at(deadline)?;
++        let journal = self.lease.open_journal(QUERY_BUSY_TIMEOUT).map_err(|_| HostConnectError::Journal)?;
++        let at = self.check_at(deadline)?;
++        // Borrow the original token from actual issuance custody. Concurrent
++        // read-only checks can coexist; retirement fences before trying write.
++        let prepared = self.prepared.try_read().map_err(|_| HostConnectError::Unsettled)?;
++        let token = prepared.acknowledged_token().map_err(|_| HostConnectError::Fenced)?;
++        let authorization = journal.authorize_host_connect(token, binding, self.grant_end.wall_ms, at.wall_ms);
++        self.check_at(deadline)?;
++        self.exact_snapshot(authorization.map_err(|_| HostConnectError::Journal)?, at.wall_ms)
++    }
++    fn exact_snapshot(&self, authorization: HostConnectAuthorization, query_ms: i64) -> Result<()> {
++        let identity = authorization.identity;
++        if identity.project_id != self.binding.network.project_id
++            || identity.principal != host_connect_principal(&self.binding).map_err(|_| HostConnectError::Binding)?
++            || identity.run_id != self.binding.network.run_id
++            || identity.run_epoch != self.binding.network.run_epoch.value()
++            || identity.owner_epoch != self.lease.owner().epoch
++            || authorization.validated_at_ms != query_ms || authorization.issued_at_ms != self.issued_at_ms
++            || authorization.expires_at_ms != self.grant_end.wall_ms {
++            return Err(HostConnectError::Journal);
++        }
++        Ok(())
++    }
++}
++
++/// Sealed seam. Only an authenticated complete inventory producer INSIDE this
++/// module may eventually mint custody. JSON, getifaddrs, host labels and caller
++/// callbacks cannot mint it. FlyVmNoIngressV1 production custody is missing.
++mod inventory {
++    use super::*;
++    pub(super) trait InventoryCustody: Send + Sync {
++        // Capture revision and original authenticated response bounds before
++        // callback work; invalidate before any uncertain/address-change window.
++        fn snapshot(&self, owner: &OwnerFence, binding: &ConnectBinding, at: Sample) -> Result<InventorySnapshot>;
++        fn check_revision(&self, revision: u64) -> Result<()>;
++    }
++    pub(crate) struct TrustedHostInventoryLease { custody: Arc<dyn InventoryCustody> }
++    pub(super) struct InventorySnapshot {
++        pub(super) addresses: HostIpv4DenySet,
++        pub(super) revision: u64,
++        /// Original authenticated response admission bounds, never callback-arrival time.
++        pub(super) end: Deadline,
++    }
++    impl TrustedHostInventoryLease {
++        pub(super) fn snapshot(&self, owner: &OwnerFence, binding: &ConnectBinding, at: Sample) -> Result<InventorySnapshot> {
++            self.custody.snapshot(owner, binding, at)
++        }
++        pub(super) fn check_revision(&self, revision: u64) -> Result<()> { self.custody.check_revision(revision) }
++    }
++    impl InventorySnapshot {
++        pub(super) fn check(&self, at: Sample) -> Result<()> {
++            if self.revision == 0 { return Err(HostConnectError::Inventory); }
++            self.end.check(at).map_err(|_| HostConnectError::Inventory)
++        }
++    }
++    #[cfg(test)]
++    pub(super) fn fixture(custody: Arc<dyn InventoryCustody>) -> TrustedHostInventoryLease {
++        TrustedHostInventoryLease { custody }
++    }
++}
++pub(crate) use inventory::TrustedHostInventoryLease;
++
++pub(crate) struct HostConnectAuthority {
++    issuance: Arc<HostConnectIssuance>,
++    inventory: TrustedHostInventoryLease,
++}
++struct HostConnectGuard {
++    authority: Arc<HostConnectAuthority>,
++    revision: u64,
++    inventory_end: Deadline,
++    producer_end: Deadline,
++}
++struct NativeValidation { guard: Arc<HostConnectGuard>, addresses: HostIpv4DenySet }
++impl HostConnectAuthority {
++    /// OFF-APP. Failed construction leaves both retained owners in their slots.
++    /// No raw token, serialized grant or saved expiry can construct this value.
++    pub(crate) fn new_retaining(issuance: &mut Option<Arc<HostConnectIssuance>>,
++        inventory: &mut Option<TrustedHostInventoryLease>) -> Result<Arc<Self>> {
++        let held = issuance.as_ref().ok_or(HostConnectError::Fenced)?;
++        let result = (|| {
++            if inventory.is_none() { return Err(HostConnectError::Inventory); }
++            held.check_at(held.grant_end)?;
++            Ok(())
++        })();
++        if result.is_err() { held.deny(); }
++        result?;
++        Ok(Arc::new(Self { issuance: issuance.take().unwrap(), inventory: inventory.take().unwrap() }))
++    }
++    fn validate_current(self: &Arc<Self>, binding: &ConnectBinding) -> Result<NativeValidation> {
++        let _unwind = DenyOnUnwind(&self.issuance);
++        let result = (|| {
++            // Capture BEFORE filesystem, SQLite or inventory work. Preserve this
++            // same strict 250ms producer bound for admission AND continuing use.
++            let start = self.issuance.sample()?;
++            let producer_end = Deadline::producer(start, self.issuance.grant_end)?;
++            self.issuance.authorize(binding, producer_end)?;
++            let snapshot = self.inventory.snapshot(self.issuance.lease.owner(), binding,
++                self.issuance.check_at(producer_end)?)?;
++            snapshot.check(self.issuance.check_at(producer_end)?)?;
++            self.inventory.check_revision(snapshot.revision)?;
++            snapshot.check(self.issuance.check_at(producer_end)?)?;
++            Ok(NativeValidation { guard: Arc::new(HostConnectGuard { authority: self.clone(),
++                revision: snapshot.revision, inventory_end: snapshot.end, producer_end }), addresses: snapshot.addresses })
++        })();
++        if result.is_err() { self.issuance.deny(); }
++        result
++    }
++}
++impl HostConnectGuard {
++    fn check_native(&self) -> Result<()> {
++        let _unwind = DenyOnUnwind(&self.authority.issuance);
++        let result = (|| {
++            let held = &self.authority.issuance;
++            self.inventory_end.check(held.check_at(self.producer_end)?)
++                .map_err(|_| HostConnectError::Inventory)?;
++            held.authorize(&held.binding, self.producer_end)?;
++            self.inventory_end.check(held.check_at(self.producer_end)?)
++                .map_err(|_| HostConnectError::Inventory)?;
++            self.authority.inventory.check_revision(self.revision)?;
++            self.inventory_end.check(held.check_at(self.producer_end)?)
++                .map_err(|_| HostConnectError::Inventory)
++        })();
++        if result.is_err() { self.authority.issuance.deny(); }
++        result
++    }
++}
++impl ConnectValidationGuard for HostConnectGuard {
++    fn check_current(&self) -> ConnectResult<()> { self.check_native().map_err(|_| ConnectError::authority_denied()) }
++}
++impl ConnectAuthority for HostConnectAuthority {
++    fn validate(self: Arc<Self>, query: ConnectQuery) -> ConnectResult<ConnectValidation> {
++        let result = (|| {
++            let native = self.validate_current(query.binding()).map_err(|_| ConnectError::authority_denied())?;
++            // Move the EXACT engine query, including its private identity. Copy
++            // only original absolute bounds; neither callback return nor guard
++            // adoption grants any new time. Engine independently retains 200ms
++            // admission/500ms staleness; this producer stays stricter at 250ms.
++            ConnectValidation::new(query, native.addresses, self.issuance.grant_end.engine()?,
++                native.guard.inventory_end.engine()?, native.guard.producer_end.engine()?, native.guard)
++        })();
++        if result.is_err() { self.issuance.deny(); }
++        result
++    }
++}
++
++#[cfg(test)]
++#[path = "source_connect_authority_tests.rs"]
++mod tests;
+diff --git a/native/src/source_connect_authority_tests.rs b/native/src/source_connect_authority_tests.rs
+new file mode 100644
+index 0000000..ebd1c95
+--- /dev/null
++++ b/native/src/source_connect_authority_tests.rs
+@@ -0,0 +1,384 @@
++use super::*;
++use crate::engine_host::{EngineOwnership, NativeAuthority};
++use rudder_engine::execution::network::{NetworkBinding, NetworkEpoch};
++use std::{collections::{BTreeMap, BTreeSet}, fs::{self, File, OpenOptions},
++    net::Ipv4Addr, os::unix::fs::{DirBuilderExt, MetadataExt}, path::{Path, PathBuf},
++    sync::{atomic::AtomicU64, mpsc, Condvar}, thread};
++
++struct Temporary(PathBuf);
++impl Temporary {
++    fn new() -> Self {
++        let root = Path::new("/tmp").canonicalize().unwrap()
++            .join(format!("rca-{}", uuid::Uuid::new_v4().simple()));
++        fs::DirBuilder::new().mode(0o700).create(&root).unwrap();
++        Self(root)
++    }
++}
++impl Drop for Temporary { fn drop(&mut self) { let _ = fs::remove_dir_all(&self.0); } }
++struct Fixture {
++    owner: Option<EngineOwnership>,
++    writer: Journal,
++    issuance: Arc<HostConnectIssuance>,
++    binding: ConnectBinding,
++    repo: PathBuf,
++    temporary: Temporary,
++}
++fn grant(binding: &ConnectBinding, expiry: i64) -> CapabilityGrant {
++    CapabilityGrant { principal: host_connect_principal(binding).unwrap(),
++        run_id: binding.network.run_id.clone(), run_epoch: binding.network.run_epoch.value(),
++        operations: BTreeSet::from([HOST_CONNECT_REQUIRED_OPERATION.into()]),
++        recipients: BTreeMap::new(), scopes: BTreeSet::from([host_connect_scope(binding).unwrap()]),
++        topics: BTreeSet::new(), expires_at_ms: Some(expiry) }
++}
++impl Fixture {
++    fn prepared() -> Self {
++        Self::prepared_with_lifetime(Duration::from_secs(10))
++    }
++    fn prepared_with_lifetime(lifetime: Duration) -> Self {
++        let temporary = Temporary::new();
++        let repo = temporary.0.join("repo"); let home = temporary.0.join("home");
++        for directory in [&repo, &home] { fs::DirBuilder::new().mode(0o700).create(directory).unwrap(); }
++        let mut owner = EngineOwnership::acquire_in_home(&repo, NativeAuthority::Fabric, &home).unwrap();
++        let execution_id = uuid::Uuid::new_v4().to_string();
++        let (journal, fence) = owner.journal_parts(); let fence = fence.clone();
++        let epoch = journal.observe_run_attempt(&fence, "run", &execution_id, 0).unwrap();
++        let binding = ConnectBinding { format_version: 1,
++            protocol: rudder_engine::execution::network::connected::CONNECT_TRANSPORT_PROTOCOL.into(),
++            profile_sha256: "a".repeat(64), network: NetworkBinding {
++                project_id: fence.project_id.clone(), owner: fence.owner_id.clone(),
++                owner_epoch: NetworkEpoch::new(fence.epoch).unwrap(), run_id: "run".into(),
++                run_epoch: NetworkEpoch::new(epoch).unwrap(), execution_id,
++                request_id: uuid::Uuid::new_v4().to_string(), operation_id: uuid::Uuid::new_v4().to_string(),
++                view_id: uuid::Uuid::new_v4().to_string(), network_id: uuid::Uuid::new_v4().to_string(),
++            } };
++        // The writer factory is minted from this actual owner, never its saved path.
++        let writer_factory = owner.source_journal_factory(&fence).unwrap();
++        let writer = writer_factory().unwrap();
++        let mut lease = Some(owner.source_lease(&fence).unwrap());
++        let mut original = Some(OriginalHostConnectLifetime::begin_issuance(&binding, lifetime).unwrap());
++        let selected = grant(&binding, original.as_ref().unwrap().expires_at_ms());
++        let issuance = HostConnectIssuance::prepare_retaining(&mut lease, &writer,
++            binding.clone(), &selected, &mut original).unwrap();
++        assert!(lease.is_none() && original.is_none());
++        Self { owner: Some(owner), writer, issuance, binding, repo, temporary }
++    }
++    fn issued() -> Self { let mut value = Self::prepared(); value.issuance.issue(&mut value.writer).unwrap(); value }
++    fn inventory(&self, lifetime: Duration) -> Arc<FixtureInventory> {
++        FixtureInventory::new(self.issuance.lease.owner().clone(), self.binding.clone(), lifetime)
++    }
++    fn authority(&self, inventory: Arc<FixtureInventory>) -> Arc<HostConnectAuthority> {
++        let mut issuance = Some(self.issuance.clone()); let mut inventory = Some(inventory::fixture(inventory));
++        HostConnectAuthority::new_retaining(&mut issuance, &mut inventory).unwrap()
++    }
++}
++
++/// Actual held namespace/file custody, but SYNTHETIC address coverage only.
++/// This cannot supply FlyVmNoIngressV1 local/public/NAT production provenance.
++struct FixtureInventory {
++    owner: OwnerFence,
++    binding: ConnectBinding,
++    namespace: File,
++    boot_id: Vec<u8>,
++    end: Deadline,
++    revision: AtomicU64,
++    gate: Mutex<Option<Arc<Gate>>>,
++}
++struct Gate { entered: mpsc::SyncSender<()>, released: Mutex<bool>, changed: Condvar }
++impl Gate {
++    fn release(&self) { *self.released.lock().unwrap() = true; self.changed.notify_all(); }
++}
++struct CallbackWorker {
++    gate: Arc<Gate>,
++    handle: Option<thread::JoinHandle<Result<NativeValidation>>>,
++}
++impl CallbackWorker {
++    fn is_finished(&self) -> bool { self.handle.as_ref().unwrap().is_finished() }
++    fn join(mut self) -> thread::Result<Result<NativeValidation>> {
++        self.gate.release();
++        self.handle.take().unwrap().join()
++    }
++}
++impl Drop for CallbackWorker {
++    fn drop(&mut self) {
++        self.gate.release();
++        if let Some(handle) = self.handle.take() { let _ = handle.join(); }
++    }
++}
++impl FixtureInventory {
++    fn new(owner: OwnerFence, binding: ConnectBinding, lifetime: Duration) -> Arc<Self> {
++        let clock = Clock::begin(lifetime).unwrap();
++        Arc::new(Self { owner, binding, namespace: File::open("/proc/thread-self/ns/net").unwrap(),
++            boot_id: fs::read("/proc/sys/kernel/random/boot_id").unwrap(), end: clock.fixed,
++            revision: AtomicU64::new(1), gate: Mutex::new(None) })
++    }
++    fn custody(&self) -> Result<()> {
++        let held = self.namespace.metadata().map_err(|_| HostConnectError::Inventory)?;
++        let current = fs::metadata("/proc/thread-self/ns/net").map_err(|_| HostConnectError::Inventory)?;
++        if (held.dev(), held.ino()) != (current.dev(), current.ino())
++            || fs::read("/proc/sys/kernel/random/boot_id").map_err(|_| HostConnectError::Inventory)? != self.boot_id {
++            return Err(HostConnectError::Inventory);
++        }
++        Ok(())
++    }
++}
++impl inventory::InventoryCustody for FixtureInventory {
++    fn snapshot(&self, owner: &OwnerFence, binding: &ConnectBinding, at: Sample) -> Result<inventory::InventorySnapshot> {
++        self.custody()?;
++        if owner != &self.owner || binding != &self.binding { return Err(HostConnectError::Inventory); }
++        self.end.check(at).map_err(|_| HostConnectError::Inventory)?;
++        let revision = self.revision.load(Ordering::Acquire);
++        let gate = self.gate.lock().unwrap().clone();
++        if let Some(gate) = gate {
++            gate.entered.send(()).map_err(|_| HostConnectError::Inventory)?;
++            let mut released = gate.released.lock().unwrap();
++            while !*released { released = gate.changed.wait(released).unwrap(); }
++        }
++        self.custody()?;
++        Ok(inventory::InventorySnapshot {
++            addresses: HostIpv4DenySet::from_trusted_host_inventory([Ipv4Addr::LOCALHOST]).unwrap(),
++            revision, end: self.end,
++        })
++    }
++    fn check_revision(&self, revision: u64) -> Result<()> {
++        self.custody()?;
++        if revision != self.revision.load(Ordering::Acquire) { return Err(HostConnectError::Inventory); }
++        Ok(())
++    }
++}
++
++#[test]
++fn exact_real_owner_grant_and_bounded_readonly_checks_retain_original_clocks() {
++    fn implements_engine_authority<T: ConnectAuthority>() {}
++    implements_engine_authority::<HostConnectAuthority>();
++    let mut fixture = Fixture::issued();
++    let inventory = fixture.inventory(Duration::from_secs(5)); let end = inventory.end;
++    let authority = fixture.authority(inventory);
++    let validated = authority.validate_current(&fixture.binding).unwrap();
++    assert!(validated.addresses.contains(Ipv4Addr::LOCALHOST));
++    assert_eq!(validated.guard.inventory_end.wall_ms, end.wall_ms);
++    assert_eq!(validated.guard.inventory_end.boot_ns, end.boot_ns);
++    assert!(validated.guard.producer_end.wall_ms <= fixture.issuance.grant_end.wall_ms);
++    validated.guard.check_native().unwrap();
++    assert_eq!(fixture.issuance.observe(&fixture.writer).unwrap(), CapabilityIssuanceObservation::Present);
++    assert_eq!(fixture.issuance.retire(&mut fixture.writer).unwrap(), CapabilityIssuanceObservation::Revoked);
++    assert!(fixture.issuance.capability_is_retired());
++    assert!(validated.guard.check_native().is_err());
++}
++
++#[test]
++fn concurrent_guard_clock_sampling_waits_without_fencing_healthy_authority() {
++    let fixture = Fixture::issued();
++    let authority = fixture.authority(fixture.inventory(Duration::from_secs(5)));
++    let validation = authority.validate_current(&fixture.binding).unwrap();
++    let clock = fixture.issuance.clock.lock().unwrap();
++    let (entered, ready) = mpsc::channel();
++    let (finished, result) = mpsc::channel();
++    let worker = thread::spawn(move || {
++        entered.send(()).unwrap();
++        finished.send(validation.guard.check_native()).unwrap();
++    });
++    ready.recv_timeout(Duration::from_secs(1)).unwrap();
++    assert!(matches!(result.recv_timeout(Duration::from_millis(20)), Err(mpsc::RecvTimeoutError::Timeout)));
++    drop(clock);
++    result.recv_timeout(Duration::from_secs(1)).unwrap().unwrap();
++    worker.join().unwrap();
++    assert!(!fixture.issuance.denied.load(Ordering::Acquire));
++}
++
++#[test]
++fn mixed_wrong_scope_nonfinite_and_renewed_grants_leave_actual_inputs_retained() {
++    let fixture = Fixture::prepared();
++    for kind in ["mixed", "scope", "principal", "source", "unbounded", "renewed"] {
++        let mut original = Some(OriginalHostConnectLifetime::begin_issuance(&fixture.binding, Duration::from_secs(5)).unwrap());
++        let mut selected = grant(&fixture.binding, original.as_ref().unwrap().expires_at_ms());
++        match kind {
++            "mixed" => { selected.operations.insert("message:send".into()); }
++            "scope" => { selected.scopes = BTreeSet::from(["host-connect:other".into()]); }
++            "principal" => selected.principal = "guest".into(),
++            "source" => selected.operations = BTreeSet::from(["source:host:authorize".into()]),
++            "unbounded" => selected.expires_at_ms = None,
++            _ => selected.expires_at_ms = selected.expires_at_ms.map(|at| at + 1),
++        }
++        let mut lease = Some(fixture.owner.as_ref().unwrap().source_lease(fixture.issuance.lease.owner()).unwrap());
++        assert!(HostConnectIssuance::prepare_retaining(&mut lease, &fixture.writer,
++            fixture.binding.clone(), &selected, &mut original).is_err(), "{kind}");
++        assert!(lease.is_some() && original.is_some());
++    }
++}
++
++#[test]
++fn actual_revocation_and_replaced_execution_fence_existing_guards() {
++    for action in ["revoke", "attempt", "owner"] {
++        let mut fixture = Fixture::issued();
++        let authority = fixture.authority(fixture.inventory(Duration::from_secs(5)));
++        let validated = authority.validate_current(&fixture.binding).unwrap();
++        match action {
++            "revoke" => {
++                let prepared = fixture.issuance.prepared.read().unwrap();
++                fixture.writer.revoke_capability(fixture.issuance.lease.owner(),
++                    prepared.acknowledged_token().unwrap(), wall_ms().unwrap()).unwrap();
++            }
++            "attempt" => { fixture.writer.observe_run_attempt(fixture.issuance.lease.owner(), "run",
++                &uuid::Uuid::new_v4().to_string(), wall_ms().unwrap()).unwrap(); }
++            _ => { fixture.owner.as_mut().unwrap().finish(false).unwrap(); }
++        }
++        assert!(validated.guard.check_native().is_err(), "{action}");
++        assert!(authority.validate_current(&fixture.binding).is_err(), "denial stays absorbing");
++    }
++}
++
++#[test]
++fn changed_binding_revision_and_actual_lock_custody_are_absorbing() {
++    for action in ["binding", "revision", "lock"] {
++        let fixture = Fixture::issued(); let inventory = fixture.inventory(Duration::from_secs(5));
++        let authority = fixture.authority(inventory.clone());
++        let validated = authority.validate_current(&fixture.binding).unwrap();
++        match action {
++            "binding" => {
++                let mut changed = fixture.binding.clone(); changed.profile_sha256 = "b".repeat(64);
++                assert!(authority.validate_current(&changed).is_err());
++            }
++            "revision" => { inventory.revision.fetch_add(1, Ordering::AcqRel); }
++            _ => {
++                let lock = fixture.repo.join(".rudder/engine/owner.lock");
++                fs::rename(&lock, lock.with_extension("old")).unwrap();
++                fs::create_dir(&lock).unwrap();
++            }
++        }
++        assert!(validated.guard.check_native().is_err(), "{action}");
++        assert!(authority.validate_current(&fixture.binding).is_err());
++    }
++}
++
++#[test]
++fn late_callback_keeps_actual_owner_charged_until_real_return_and_join() {
++    for drop_owner in [false, true] {
++        let mut fixture = Fixture::issued(); let inventory = fixture.inventory(Duration::from_secs(5));
++        let (entered, entered_rx) = mpsc::sync_channel(1);
++        let gate = Arc::new(Gate { entered, released: Mutex::new(false), changed: Condvar::new() });
++        *inventory.gate.lock().unwrap() = Some(gate.clone());
++        let authority = fixture.authority(inventory); let weak = Arc::downgrade(&authority);
++        let binding = fixture.binding.clone();
++        let worker = CallbackWorker { gate: gate.clone(),
++            handle: Some(thread::spawn(move || authority.validate_current(&binding))) };
++        entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
++        thread::sleep(Duration::from_millis(PRODUCER_LIMIT_MS as u64 + 25));
++        // No local time-out releases the actual callback, issuance, or owner lock.
++        assert!(!worker.is_finished()); assert!(weak.upgrade().is_some());
++        if !drop_owner {
++            gate.release();
++            assert!(matches!(worker.join().unwrap(), Err(HostConnectError::Deadline)),
++                "a live owner cannot give the late callback a fresh producer cutoff");
++            fixture.owner.as_ref().unwrap().assert_current().unwrap();
++            assert!(fixture.issuance.denied.load(Ordering::Acquire));
++            fixture.issuance.retire(&mut fixture.writer).unwrap();
++            continue;
++        }
++        let lock = OpenOptions::new().read(true).write(true)
++            .open(fixture.repo.join(".rudder/engine/owner.lock")).unwrap();
++        fixture.issuance.retire(&mut fixture.writer).unwrap();
++        assert!(fixture.issuance.capability_is_retired());
++        assert!(!worker.is_finished(), "capability retirement is not callback settlement");
++        drop(fixture.owner.take()); drop(fixture.issuance);
++        assert!(fs2::FileExt::try_lock_exclusive(&lock).is_err());
++        gate.release();
++        assert!(worker.join().unwrap().is_err());
++        assert!(weak.upgrade().is_none());
++        fs2::FileExt::try_lock_exclusive(&lock).unwrap(); fs2::FileExt::unlock(&lock).unwrap();
++        // Keep the fixture directory until after the actual retained writer closes.
++        drop(fixture.writer); drop(fixture.temporary);
++    }
++}
++
++#[test]
++fn local_fencing_and_busy_retirement_do_not_claim_capability_or_callback_settlement() {
++    let mut fixture = Fixture::issued();
++    let authority = fixture.authority(fixture.inventory(Duration::from_secs(5)));
++    let validated = authority.validate_current(&fixture.binding).unwrap();
++    fixture.issuance.fence_admission();
++    assert!(validated.guard.check_native().is_err());
++    assert_eq!(fixture.issuance.observe(&fixture.writer).unwrap(), CapabilityIssuanceObservation::Present);
++    assert!(!fixture.issuance.capability_is_retired());
++    let reader = fixture.issuance.prepared.read().unwrap();
++    assert_eq!(fixture.issuance.retire(&mut fixture.writer), Err(HostConnectError::Unsettled));
++    assert!(!fixture.issuance.capability_is_retired());
++    drop(reader);
++    assert_eq!(fixture.issuance.retire(&mut fixture.writer).unwrap(), CapabilityIssuanceObservation::Revoked);
++    assert!(fixture.issuance.capability_is_retired());
++}
++
++#[test]
++fn committed_error_and_panic_keep_actual_issuance_for_observe_and_retryable_retirement() {
++    for panic in [false, true] {
++        let mut fixture = Fixture::prepared();
++        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
++            fixture.issuance.issue_inner(&mut fixture.writer, || {
++                if panic { panic!("synthetic native ACK loss after actual commit"); }
++                Err(HostConnectError::Unsettled)
++            })
++        }));
++        assert!(!matches!(result, Ok(Ok(()))));
++        assert_eq!(fixture.issuance.observe(&fixture.writer).unwrap(), CapabilityIssuanceObservation::Present);
++        assert!(!fixture.issuance.acknowledged.load(Ordering::Acquire));
++        assert!(fixture.issuance.issue(&mut fixture.writer).is_err());
++        let mut issuance = Some(fixture.issuance.clone());
++        let mut inventory = Some(inventory::fixture(fixture.inventory(Duration::from_secs(5))));
++        assert!(HostConnectAuthority::new_retaining(&mut issuance, &mut inventory).is_err());
++        assert!(issuance.is_some() && inventory.is_some());
++        assert_eq!(fixture.issuance.retire(&mut fixture.writer).unwrap(), CapabilityIssuanceObservation::Revoked);
++        assert_eq!(fixture.issuance.retire(&mut fixture.writer).unwrap(), CapabilityIssuanceObservation::Revoked);
++        assert!(fixture.issuance.capability_is_retired());
++    }
++}
++
++#[test]
++fn expired_original_grant_or_inventory_cannot_gain_a_callback_lifetime() {
++    let mut fixture = Fixture::issued();
++    let inventory = fixture.inventory(Duration::from_millis(1));
++    let original_end = inventory.end;
++    thread::sleep(Duration::from_millis(5));
++    let authority = fixture.authority(inventory.clone());
++    assert!(authority.validate_current(&fixture.binding).is_err());
++    assert_eq!(original_end.wall_ms, inventory.end.wall_ms);
++    // Cleanup is independent of the failed/expired authorization clock.
++    assert_eq!(fixture.issuance.retire(&mut fixture.writer).unwrap(), CapabilityIssuanceObservation::Revoked);
++
++    let mut fixture = Fixture::prepared_with_lifetime(Duration::from_secs(1));
++    fixture.issuance.issue(&mut fixture.writer).unwrap();
++    let original_end = fixture.issuance.grant_end;
++    thread::sleep(Duration::from_millis(1_025));
++    let mut issuance = Some(fixture.issuance.clone());
++    let mut inventory = Some(inventory::fixture(fixture.inventory(Duration::from_secs(5))));
++    assert!(HostConnectAuthority::new_retaining(&mut issuance, &mut inventory).is_err());
++    assert!(issuance.is_some() && inventory.is_some());
++    assert_eq!(fixture.issuance.grant_end.wall_ms, original_end.wall_ms);
++    assert_eq!(fixture.issuance.observe(&fixture.writer).unwrap(), CapabilityIssuanceObservation::Present);
++    assert_eq!(fixture.issuance.retire(&mut fixture.writer).unwrap(), CapabilityIssuanceObservation::Revoked);
++}
++
++#[test]
++fn clock_regression_is_absorbing_and_original_issuance_time_cannot_shift_on_prepare_retry() {
++    let fixture = Fixture::prepared();
++    let other = Fixture::prepared();
++    let mut original = Some(OriginalHostConnectLifetime::begin_issuance(&fixture.binding, Duration::from_secs(5)).unwrap());
++    let issued = original.as_ref().unwrap().issued_at_ms;
++    let selected = grant(&fixture.binding, original.as_ref().unwrap().expires_at_ms());
++    let mut lease = Some(fixture.owner.as_ref().unwrap().source_lease(fixture.issuance.lease.owner()).unwrap());
++    assert!(HostConnectIssuance::prepare_retaining(&mut lease, &other.writer,
++        fixture.binding.clone(), &selected, &mut original).is_err());
++    assert!(lease.is_some() && original.is_some());
++    assert_eq!(original.as_ref().unwrap().issued_at_ms, issued);
++    let retried = HostConnectIssuance::prepare_retaining(&mut lease, &fixture.writer,
++        fixture.binding.clone(), &selected, &mut original).unwrap();
++    assert_eq!(retried.issued_at_ms, issued);
++    assert_eq!(retried.grant_end.wall_ms, selected.expires_at_ms.unwrap());
++    // Exercise both absolute expiry axes without a wall-only/arrival-time conversion.
++    let now = retried.clock.lock().unwrap().last;
++    assert!(Deadline { wall_ms: now.wall_ms, boot_ns: now.boot_ns + NS_PER_MS }.check(now).is_err());
++    assert!(Deadline { wall_ms: now.wall_ms + 1, boot_ns: now.boot_ns }.check(now).is_err());
++    let mut clock = Clock::begin(Duration::from_secs(1)).unwrap();
++    clock.last.boot_ns = u128::MAX;
++    assert!(clock.sample().is_err());
++    clock.last.boot_ns = 0;
++    assert!(clock.sample().is_err(), "a corrected sample cannot revive a failed clock");
++}

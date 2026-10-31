@@ -33,6 +33,8 @@ mod runtime;
 mod vcs;
 mod managed;
 mod host_source;
+#[cfg(target_os = "linux")]
+mod host_connect;
 mod readonly;
 mod capability_issue;
 pub use capability_issue::{PreparedCapabilityIssuance, CapabilityIssuanceObservation};
@@ -40,6 +42,11 @@ pub use readonly::{HeldJournalFile, ReadOnlyJournal, READ_ONLY_MAX_BUSY_TIMEOUT}
 
 pub use host_source::{
     host_source_scope, HostSourceAuthorization, HOST_SOURCE_PURPOSE, HOST_SOURCE_REQUIRED_OPERATION,
+};
+#[cfg(target_os = "linux")]
+pub use host_connect::{
+    host_connect_principal, host_connect_scope, HostConnectAuthorization,
+    HOST_CONNECT_PURPOSE, HOST_CONNECT_REQUIRED_OPERATION,
 };
 
 pub use commands::{

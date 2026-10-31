@@ -133,5 +133,23 @@ test("broker MCP keeps malformed input, call admission and cancellation bounded"
   const rejected = await a.request("tools/call", { name: "agents_await", arguments: { timeout_ms: 30000 } }).promise; assert.equal(rejected.error.code, -32000);
   for (const request of pending) a.write({ jsonrpc: "2.0", method: "notifications/cancelled", params: { requestId: request.id } });
   for (const reply of await Promise.all(pending.map((request) => request.promise))) { assert.equal(reply.result.isError, true); assert.match(reply.result.content[0].text, /cancelled/); }
-  await sleep(30); assert.deepEqual((await a.request("ping").promise).result, {}); assert.equal((await a.tool("agents_inbox")).messages.length, 0); await a.close();
+  assert.deepEqual((await a.request("ping").promise).result, {});
+  // The proxy's cancellation reply can precede the host call's actual return.
+  // Probe read-only admission until it settles; busy capacity is still owned.
+  const deadline = Date.now() + 5000;
+  for (;;) {
+    const reply = await a.request("tools/call", { name: "agents_inbox", arguments: {} }).promise;
+    if (reply.result?.isError === false) {
+      assert.equal(reply.result.structuredContent.messages.length, 0); break;
+    }
+    if (reply.error) {
+      assert.equal(reply.error.code, -32000);
+      assert.equal(reply.error.message, "too many active tool calls");
+    } else {
+      assert.match(reply.result?.content?.[0]?.text ?? "", /too many active agent broker calls/);
+    }
+    assert(Date.now() < deadline, "cancelled host calls did not release broker admission");
+    await sleep(10);
+  }
+  await a.close();
 });

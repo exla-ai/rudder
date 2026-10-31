@@ -1,0 +1,187 @@
+{
+  "formatVersion": 1,
+  "kind": "alpha22-connected-network-qualification",
+  "nonce": "4944c914-9303-47b9-b1c4-a12df26f6959",
+  "provenance": {
+    "formatVersion": 1,
+    "kind": "rudder-connected-network-qualifier-image",
+    "proposedVersion": "4.0.0-alpha.22",
+    "workerVersion": "4.0.0-alpha.21",
+    "sourceKind": "frozen-working-tree",
+    "revision": "20942911a060e41bb97e480b5177ae147db7992e",
+    "sourceBaseRevision": "20942911a060e41bb97e480b5177ae147db7992e",
+    "baseRevisionIsCallerDeclared": true,
+    "sourceEnvelopeSha256": "55689d60232ad30dc0bc9f99d2a473b9cb1ba5f58883820072faea2849254628",
+    "sourceTreeSha256": "7ab50e40d358c68b1ecf1b048d5e1bffdf751308d84df4153f3cc82f39ba515a",
+    "compilerReceiptSha256": "6e5673e591f9c738cc408253b3e11510f009273aefe3bc5132c813bd8431e9fd",
+    "qualifierSha256": "58d8a496ac9e75ecec68b530fa8c8439accdecec34d5a3c873f11a3d11e4a0a7",
+    "nativeSha256": "07b1b6ea2518c1125dedf3bf2bd45f44f48eabd8dc840a6a3438798966386607",
+    "nativeBinaryExecuted": false,
+    "parentDigest": "sha256:53c763d9e5886cadc262fa03631e5d08338c44486e2f3ffbb8e0afba4c21d89f"
+  },
+  "supervisorModuleEvaluated": false,
+  "productionWired": false,
+  "managedConnectedExecutionQualified": false,
+  "modelProviderAccountCalls": false,
+  "modelCalls": false,
+  "sourceAcceptanceQualified": false,
+  "transportOnly": true,
+  "expiryFencingPhysicalQualified": false,
+  "completed": true,
+  "qualified": true,
+  "attempted": 1,
+  "admittedAfterResolvedDigest": true,
+  "boot": {
+    "uid": 1500,
+    "gid": 1500,
+    "fields": {
+      "Uid": "1500\t1500\t1500\t1500",
+      "Gid": "1500\t1500\t1500\t1500",
+      "Groups": "",
+      "NoNewPrivs": "1",
+      "CapEff": "0000000000000000",
+      "CapPrm": "0000000000000000",
+      "CapInh": "0000000000000000",
+      "CapAmb": "0000000000000000",
+      "CapBnd": "0000000000000000"
+    },
+    "node": "v22.23.4",
+    "kernel": "6.12.114-fly",
+    "credentialEnvironmentFields": 0
+  },
+  "runtime": {
+    "qualifierSha256": "58d8a496ac9e75ecec68b530fa8c8439accdecec34d5a3c873f11a3d11e4a0a7",
+    "qualifierBytes": 1225800,
+    "provenanceSha256": "dca0f5df7100895263419f8703bb007cc7e34fd3fc17acf9ffc1dc1e6cc47535",
+    "workerVersion": "4.0.0-alpha.21",
+    "workerPackageSha256": "7fc15f580fe7d333c1417dec19ac5bc8c7a1c781656c62d89a0ac4e3e1775508"
+  },
+  "parentBefore": {
+    "user": {
+      "device": "4",
+      "inode": "4026531837"
+    },
+    "net": {
+      "device": "4",
+      "inode": "4026531840"
+    },
+    "mnt": {
+      "device": "4",
+      "inode": "4026531841"
+    }
+  },
+  "sealedTarget": {
+    "host": "rudder.exla.ai",
+    "port": 443,
+    "ipv4": [
+      "76.76.21.21"
+    ],
+    "lookupCalls": 1,
+    "searchSuffixExpansion": false
+  },
+  "child": {
+    "status": 0,
+    "signal": null,
+    "failure": null,
+    "settled": true,
+    "stdout": {
+      "bytes": 1546,
+      "sha256": "ec7b8578f8935155265239ac48b72930753638849356b5a9bd4848e9c0cd7df6",
+      "retainedBytes": 1546,
+      "truncated": false
+    },
+    "stderr": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "retainedBytes": 0,
+      "truncated": false
+    }
+  },
+  "parentAfter": {
+    "user": {
+      "device": "4",
+      "inode": "4026531837"
+    },
+    "net": {
+      "device": "4",
+      "inode": "4026531840"
+    },
+    "mnt": {
+      "device": "4",
+      "inode": "4026531841"
+    }
+  },
+  "parentNamespacesAndStatusUnchanged": true,
+  "counts": {
+    "qualified": 1,
+    "unsupported": 0,
+    "failed": 0,
+    "publicHttpsConnectCasesPassed": 1
+  },
+  "summary": {
+    "client": {
+      "certificateVerified": true,
+      "httpStatus": 200,
+      "kind": "public-tls-head-v1",
+      "responseHeaderBytes": 507,
+      "tlsVersion": "TLSv1.3"
+    },
+    "counters": {
+      "accepted": 1,
+      "active_connections": 0,
+      "active_dns_jobs": 0,
+      "cancellation_requested": true,
+      "charged_bytes": 6042,
+      "completed": 1,
+      "dns_jobs": 1,
+      "maximum_active_connections": 1,
+      "maximum_active_dns_jobs": 1,
+      "rejected": 0,
+      "upstream_connections": 1
+    },
+    "guestNetwork": {
+      "device": "4",
+      "inode": "4026532225"
+    },
+    "guestUser": {
+      "device": "4",
+      "inode": "4026532224"
+    },
+    "kind": "connected-network-qualification-v1",
+    "limitations": [
+      "standalone synthetic current grant; no managed connected execution activation",
+      "public no-key Python TLS HEAD; no Claude/Codex/model/account calls",
+      "local interface inventory only; production needs authenticated public/NAT host inventory",
+      "IPv4 HTTPS CONNECT only; tunnel contents and inner TLS authority are not inspected",
+      "no private root, PID namespace, PTY, filesystem, VCS or checkpoint claim"
+    ],
+    "limits": {
+      "combinedBufferBytesPerConnection": 32768,
+      "connectionTotalMs": 20000,
+      "connectionWorkers": 2,
+      "dnsProcesses": 1,
+      "lifetimeConnections": 32,
+      "totalBytes": 2097152
+    },
+    "listenerPort": 37671,
+    "networkProfileVersion": 1,
+    "physical": {
+      "actualGuestReaped": true,
+      "allFiveCapabilitiesZero": true,
+      "listenerRemovedBeforeExec": true,
+      "loOnly": true,
+      "noNewPrivileges": true,
+      "proxyWorkersJoined": true,
+      "resolverChildrenReaped": true,
+      "separateNetwork": true,
+      "separateUser": true,
+      "socketNamespaceIoctl": true,
+      "uid": 1500
+    },
+    "profileSha256": "556f5eff62120efef781c61343ccd5a324feb6095de472104b797d3709b5a0bb",
+    "status": "passed",
+    "transportVersion": 1
+  },
+  "summarySha256": "6b7106286b981a799e9b3fd3f2b58065d740a481eb202f8b9652cb6650459a7c",
+  "verifiedAt": "2026-10-31T19:33:32.584Z"
+}

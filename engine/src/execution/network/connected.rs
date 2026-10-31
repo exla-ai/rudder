@@ -15,10 +15,12 @@ pub mod qualification;
 mod relay;
 mod resolver;
 mod socket;
+mod validity;
 
 pub use relay::{ConnectRequest, ConnectedSettlement, OwnedConnectProxy, ProxySnapshot};
 pub use resolver::run_resolver_process;
 pub use socket::{HostNetworkAnchor, ListenerAdmission, ListenerFrame};
+pub use validity::{ConnectDeadline, ConnectQuery, ConnectValidation, ConnectValidationGuard};
 
 pub const CONNECT_TRANSPORT_VERSION: u32 = 1;
 pub const CONNECT_TRANSPORT_PROTOCOL: &str = "rudder_connect_transport_v1";
@@ -61,6 +63,8 @@ impl ConnectError {
             errno: std::io::Error::last_os_error().raw_os_error(),
         }
     }
+    /// Static conversion for a trusted native authority; never expose its private error.
+    pub fn authority_denied() -> Self { Self::new(ConnectErrorKind::AuthorityDenied) }
     pub fn kind(self) -> ConnectErrorKind {
         self.kind
     }
@@ -86,6 +90,21 @@ pub struct ConnectBinding {
     pub profile_sha256: String,
 }
 impl ConnectBinding {
+    /// Bounded configuration validation only. This creates neither host network
+    /// custody nor a current owner/run/attempt or inventory authorization.
+    pub fn validate(&self) -> ConnectResult<()> {
+        if self.format_version != CONNECT_TRANSPORT_VERSION
+            || self.protocol != CONNECT_TRANSPORT_PROTOCOL
+            || self.network.validate().is_err()
+            || self.profile_sha256.len() != 64
+            || !self.profile_sha256.bytes().all(|byte|
+                byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(ConnectError::new(ConnectErrorKind::InvalidConfiguration));
+        }
+        Ok(())
+    }
+
     pub fn for_profile(profile: &ValidatedNetworkProfile) -> ConnectResult<Self> {
         if profile.mode() != NetworkMode::QualificationHttpsConnectV1 {
             return Err(ConnectError::new(ConnectErrorKind::InvalidConfiguration));
@@ -99,13 +118,12 @@ impl ConnectBinding {
     }
 }
 
-/// An actual host-held current grant. A saved binding, cancellation flag or
-/// caller-supplied boolean is not an implementation. Implementations must check
-/// the current owner/attempt and return a fresh trusted host-address inventory.
-/// Calls may outlive a deadline: their fixed worker and owner remain charged
-/// until they return, and no settlement receipt is minted in the meantime.
+/// Actual host authority returning retained validation of the EXACT original
+/// query. Metadata/address lists/booleans alone cannot supply that owner.
+/// A callback keeps its fixed worker and actual authority charged through its
+/// real return/join, even when the original adoption deadline has passed.
 pub trait ConnectAuthority: Send + Sync + 'static {
-    fn validate(&self, binding: &ConnectBinding) -> ConnectResult<HostIpv4DenySet>;
+    fn validate(self: Arc<Self>, query: ConnectQuery) -> ConnectResult<ConnectValidation>;
 }
 
 /// Launch recipe only, not a live resolver or permission. The executable must
@@ -146,16 +164,18 @@ impl ResolverProgram {
 }
 
 impl OwnedConnectProxy {
-    /// All resources remain owned while startup runs. Call await_ready before
-    /// sending the child its admission ACK; start alone is not admission.
-    pub fn start(
+    /// Retain this slot across errors, panic and settlement retries. Partial
+    /// startup leaves its actual worker owner here. Call await_ready before
+    /// sending the child its admission ACK; startup alone is not admission.
+    pub fn start_retaining(
         profile: ValidatedNetworkProfile,
         listener: ListenerAdmission,
         host: HostNetworkAnchor,
         authority: Arc<dyn ConnectAuthority>,
         resolver: ResolverProgram,
-    ) -> ConnectResult<Self> {
-        relay::start(profile, listener, host, authority, resolver)
+        retained: &mut Option<Self>,
+    ) -> ConnectResult<()> {
+        relay::start_retaining(profile, listener, host, authority, resolver, retained)
     }
     /// Network endpoint settlement only. It proves neither stopped guest PIDs
     /// nor RPC/FUSE/data durability, and is never a checkpoint authority.

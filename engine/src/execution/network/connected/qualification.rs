@@ -124,13 +124,27 @@ fn private_failure(path: &Path, errors: &[u8], output: &[u8]) -> std::io::Result
 struct FixedAuthority {
     binding: ConnectBinding,
     active: AtomicBool,
+    original_end: ConnectDeadline,
+}
+impl FixedAuthority {
+    fn new(binding:ConnectBinding) -> Self {
+        // Only the explicit synthetic qualifier. Fixed before any inventory/
+        // validation callback; not a production authenticated inventory lease.
+        Self { binding, active:AtomicBool::new(true), original_end:super::validity::qualifier_deadline(60_000) }
+    }
+}
+impl ConnectValidationGuard for FixedAuthority {
+    fn check_current(&self) -> ConnectResult<()> {
+        if self.active.load(Ordering::Acquire) { Ok(()) }
+        else { Err(ConnectError::new(ConnectErrorKind::AuthorityDenied)) }
+    }
 }
 impl ConnectAuthority for FixedAuthority {
-    fn validate(&self, binding: &ConnectBinding) -> ConnectResult<HostIpv4DenySet> {
-        if binding != &self.binding || !self.active.load(Ordering::Acquire) {
-            return Err(ConnectError::new(ConnectErrorKind::AuthorityDenied));
-        }
-        trusted_interface_inventory()
+    fn validate(self:Arc<Self>, query:ConnectQuery) -> ConnectResult<ConnectValidation> {
+        if query.binding() != &self.binding { return Err(ConnectError::new(ConnectErrorKind::AuthorityDenied)); }
+        self.check_current()?;
+        let inventory = trusted_interface_inventory()?;
+        ConnectValidation::new(query, inventory, self.original_end, self.original_end, self.original_end, self)
     }
 }
 /// Trusted local interface inventory. In production this must also include
@@ -679,10 +693,7 @@ fn qualify(base: &Path, host: &str, addresses: Vec<Ipv4Addr>) -> ConnectResult<V
     let profile = validate_profile(raw_profile.clone())?;
     let digest = hex::encode(profile.profile_digest());
     let binding = ConnectBinding::for_profile(&profile)?;
-    let authority = Arc::new(FixedAuthority {
-        binding,
-        active: AtomicBool::new(true),
-    });
+    let authority = Arc::new(FixedAuthority::new(binding));
     let host_anchor = HostNetworkAnchor::capture()?;
     let [control, remote] = channel()?;
     let mut child = OwnedChild::spawn(&remote)?;
@@ -709,15 +720,15 @@ fn qualify(base: &Path, host: &str, addresses: Vec<Ipv4Addr>) -> ConnectResult<V
         .map_err(|_| ConnectError::new(ConnectErrorKind::InvalidNamespace))?
         .identity();
     let port = admission.port();
-    let mut proxy = OwnedConnectProxy::start(
-        profile,
-        admission,
-        host_anchor,
-        authority.clone(),
-        ResolverProgram::current_executable()?,
-    )?;
-    proxy.await_ready(Duration::from_secs(10))?;
+    let mut retained_proxy = None;
     let result = (|| {
+        OwnedConnectProxy::start_retaining(
+            profile, admission, host_anchor, authority.clone(),
+            ResolverProgram::current_executable()?, &mut retained_proxy,
+        )?;
+        let proxy = retained_proxy.as_mut()
+            .ok_or_else(|| ConnectError::new(ConnectErrorKind::Unsettled))?;
+        proxy.await_ready(Duration::from_secs(10))?;
         send_packet(control.as_raw_fd(), b"ADMIT1", &[], deadline)?;
         let (bytes, descriptors) = receive_child(control.as_raw_fd(), deadline)?;
         if bytes != b"ZERO5-NNP1" || !descriptors.is_empty() {
@@ -752,10 +763,13 @@ fn qualify(base: &Path, host: &str, addresses: Vec<Ipv4Addr>) -> ConnectResult<V
         }
         Ok(result)
     })();
-    // Always try actual network settlement before returning the original error.
-    let settlement = proxy.close_and_settle(Duration::from_secs(8));
+    // Include partial startup and failed readiness in the settlement attempt.
+    // This standalone CLI never reports qualification on unsettled ownership.
+    let settlement = retained_proxy.as_mut()
+        .map(|proxy| proxy.close_and_settle(Duration::from_secs(8))).transpose();
     let client = result?;
-    let settlement = settlement?;
+    let settlement = settlement?
+        .ok_or_else(|| ConnectError::new(ConnectErrorKind::Unsettled))?;
     let counters = settlement.snapshot();
     if counters.upstream_connections != 1
         || counters.dns_jobs != 1
@@ -1076,16 +1090,14 @@ mod tests {
         )
         .unwrap();
         let binding = ConnectBinding::for_profile(&profile).unwrap();
-        let authority = FixedAuthority {
-            binding: binding.clone(),
-            active: AtomicBool::new(true),
-        };
-        authority.validate(&binding).unwrap();
+        let authority = Arc::new(FixedAuthority::new(binding.clone()));
+        let validation = authority.clone().validate(ConnectQuery::begin(&binding).unwrap()).unwrap();
         let mut wrong = binding.clone();
         wrong.network.owner = "other".into();
-        assert!(authority.validate(&wrong).is_err());
+        assert!(authority.clone().validate(ConnectQuery::begin(&wrong).unwrap()).is_err());
         authority.active.store(false, Ordering::Release);
-        assert!(authority.validate(&binding).is_err());
+        assert!(validation.check_current().is_err());
+        assert!(authority.clone().validate(ConnectQuery::begin(&binding).unwrap()).is_err());
     }
     #[test]
     fn private_failure_is_bounded_private_and_never_opens_an_existing_fifo_or_symlink() {

@@ -1,0 +1,106 @@
+{
+  "formatVersion": 1,
+  "version": "4.0.0-alpha.15",
+  "revision": "a048aad42734dcb87b6c3ccfecabba1377b19764",
+  "mode": "verify",
+  "control": {
+    "id": "8911d61a434978",
+    "instance": "01M68A32A934GQXJJT05SFYCR8",
+    "state": "started",
+    "image": "registry.fly.io/rudder-cloud-control:4.0.0-alpha.15",
+    "digest": "sha256:04df77dee7afab479eb323f2c19b114c3ca985c7418ff35369b7b5dc6598fe0b",
+    "revision": "a048aad42734dcb87b6c3ccfecabba1377b19764"
+  },
+  "home": {
+    "id": "8edd225a7d0378",
+    "instance": "01M670MG4A8E0DWE9GA1C0PQ92",
+    "state": "started",
+    "image": "registry.fly.io/rudder-workers-exla:4.0.0-alpha.7",
+    "digest": "sha256:404f46396aca77324d9b53c55d2824a5401af56ba5362d0bdae67e16108fc245"
+  },
+  "database": {
+    "integrity": "ok",
+    "counts": {
+      "workspaces": 52,
+      "sails": 14
+    },
+    "homeRetained": true,
+    "serverSha256": "96e6392705d1ac86949c09b5e69eb6ced86d53c1f8f820225df2cb7ceb3f4770"
+  },
+  "verifiedAt": "2026-10-31T06:24:56.617Z",
+  "homeUnchangedAcrossDeploy": true,
+  "actualRuntimeCodeSha256": {
+    "src/server.ts": "96e6392705d1ac86949c09b5e69eb6ced86d53c1f8f820225df2cb7ceb3f4770",
+    "src/fabric-cas.ts": "4c158d2746a4c6511c7f9262db386ef81a2368df42c361eddbce01138e47b7ca",
+    "src/fabric-partial-checkpoint.ts": "b5f5e6ce35eba3af10034c5caa7214fe6cddb47c59ee24f840d30ee2f33d03f0",
+    "dist/server.js": "d548970543d355e9626435c0a22899485e097405ad0ef6aedbfb738ad39639a2",
+    "dist/fabric-cas.js": "98e7bc5d7f60ed9d05b2b908a19ed39659d993e26dc9eac01cb5e7980945457a",
+    "dist/fabric-partial-checkpoint.js": "224c151b296315966304751cf0c51b6d6d2e81e5f8037d2f208246775fe8d5dd"
+  },
+  "inactiveAuthority": {
+    "inactiveStats": {
+      "active": 0,
+      "queued": 0
+    },
+    "pgVersion": "8.23.1",
+    "indexSha256": "ac25e862b4d1debcf8b0d80dbdb1af1edcc38987bb1d4633ed4102352373e8ef"
+  },
+  "checks": [
+    {
+      "url": "https://rudder.exla.ai/app",
+      "status": 200,
+      "expected": 200,
+      "finalUrl": "https://rudder-cloud-control.fly.dev/app",
+      "ok": true
+    },
+    {
+      "url": "https://rudder-cloud-control.fly.dev/health",
+      "status": 200,
+      "expected": 200,
+      "finalUrl": "https://rudder-cloud-control.fly.dev/health",
+      "ok": true,
+      "health": {
+        "ok": true,
+        "s3": true,
+        "fabric": true,
+        "fly": true,
+        "byoVm": true,
+        "state": true,
+        "secrets": true,
+        "auth": {
+          "google": true,
+          "github": true,
+          "githubDevice": true
+        }
+      }
+    },
+    {
+      "url": "https://rudder-cloud-control.fly.dev/api/app/state",
+      "status": 401,
+      "expected": 401,
+      "finalUrl": "https://rudder-cloud-control.fly.dev/api/app/state",
+      "ok": true
+    },
+    {
+      "url": "https://rudder-cloud-control.fly.dev/api/rudder/fabric/roots/unauthenticated-alpha15-smoke",
+      "status": 401,
+      "expected": 401,
+      "finalUrl": "https://rudder-cloud-control.fly.dev/api/rudder/fabric/roots/unauthenticated-alpha15-smoke",
+      "ok": true
+    }
+  ],
+  "releases": [
+    {
+      "id": "p2xOXzMKKYnx1Cz3ZBalJo5y",
+      "version": 166,
+      "status": "complete",
+      "createdAt": "2026-10-31T06:24:26Z"
+    },
+    {
+      "id": "akRvx4BJJDKR8umXPgv1D8xyk",
+      "version": 165,
+      "status": "complete",
+      "createdAt": "2026-10-31T04:42:20Z"
+    }
+  ]
+}

@@ -1,0 +1,55 @@
+{
+  "tag": "v4.0.0-alpha.15",
+  "revision": "a048aad42734dcb87b6c3ccfecabba1377b19764",
+  "codeSha256": {
+    "Cargo.lock": "94702cbc29ec6bd9cfd49baebba36c5a87519844171b170b74b74a9ae576127d",
+    "cloud/fly.toml": "5ff1dc8294704bb6bcb4177e19355a598b0f8769d98767dba154f0dedc8246fa",
+    "engine/src/execution.rs": "7c80180e5e462751369cd7e5cb58c240fa8f3b44b0148ee4ac693fa93909a211",
+    "engine/src/execution/finalization_budget.rs": "b3268266087db941bc27ef9885f284be141f5ed873de899ae95559ac54545feb",
+    "engine/src/execution/handoff.rs": "c63dccfbd00f8c5e794916702763aa12e936c308d5986dbeedd5b9c2c1825861",
+    "engine/src/execution/linux.rs": "d075e704b8f4f825ec2653784c4a27d9d82323c9460d56745e71f112ad1f222e",
+    "engine/src/journal.rs": "00845e41e36bf3ef23abc27902af39d7f0ffbd725eb5e5775afc2c31de731f46",
+    "engine/src/journal/host_source.rs": "f30083c7cbd6b9d45943415413377a09b4fa0dd68032b482186d472e75f139db",
+    "engine/src/journal/readonly.rs": "8dc3774af76245784859096bdbc510c6e373a42dd765220c444245fb20908bab",
+    "engine/src/journal/readonly_tests.rs": "36284e43275208f78584d9571737e81aaa5a024499731b40c0f4b4dc807740bc",
+    "engine/tests/execution_handoff.rs": "76868cc1abeae1bdfda5297df3b0839f440dccf8fea1c669c9ab50216aa4ab98",
+    "engine/tests/fixtures/handoff_child.rs": "0250c79fc91176ab0626c9169e85703f936384f6bd0cb1dbe887a097cfcaecbc",
+    "engine/tests/journal_host_source.rs": "ed1ff910f796861918e67d1e0f2db5c61f83b3b736432d19c549d2e961b06af2",
+    "native/Cargo.toml": "77c74df765a4f1f28dfbc8abb7a489be478403975130349f675788362c7837e9",
+    "native/src/agent_link_tests.rs": "8e366859403427ba8e961486f9a017123e483103024d739926125c363aa58863",
+    "native/src/app_tests.rs": "8d94fc658e4f07c4bbb9ec23bd261d99f385fd65797dea1caa80313b952bd6a8",
+    "native/src/engine_host.rs": "e7ad55c128a38ea6a706a5f82519d60d9abee4501f342ad2eeb41f193fd3209a",
+    "native/src/engine_host_tests.rs": "46e1b7fad1ada2f91a2aadbe39474b9e537d6fe4d712548f0d67476a11ab1a37",
+    "native/src/launch.rs": "1bb225426365f811677ddc04fa751b4a216ae0c5cb7dc75e861fc93c9d6a4893",
+    "native/src/main.rs": "6e8c26259bda7613ef3312660766e855a40b7f831be5b1055e10ffe21004dad4",
+    "native/src/models.rs": "24f8ff8277c511a5d82470428a8c2910d9ed14f21f8826a8d9ea4c621de74b28",
+    "native/src/render.rs": "94dd6680b0036a0b35b198b99d1336841c648c4ec6f9cc4d9824ffd3d2f2a412",
+    "native/src/source_authorizer.rs": "1d9caeecd42a69f1a6ddeefc75d7bfc9f058dfa01a10839b26f12f5c98d0390f",
+    "native/src/source_authorizer_tests.rs": "eb0ffec1de7000d692943ae7441be13346ed6778772e1ccc43baca112502e1ce",
+    "native/src/source_controller.rs": "b62d729a99986248ae072447222c9404db7fe2f8b6c8ac14f63b94179001c3f0",
+    "native/src/source_issuer.rs": "208ef6a5efc9df63b7e980be73c71554c3b97205001e2ccf5fccf801a531af84",
+    "native/src/source_issuer_tests.rs": "cf2ced04c94f3737ca44530ef0c57997a5c4c8d8c9f9404d19fc5a5c73357cd7",
+    "native/src/tasks.rs": "70220d146d9bdd8004eae819be1b0737468104610d06c5007d13995b7aecb072",
+    "package-lock.json": "868cfb35a3c27087e4eac59e70b9c7e1273c6b02b548e1f0fb52437f8cd972bf",
+    "package.json": "9036987922b35854c98311f46658b76a5678cd14566445cb3cd3af1b51161b1e"
+  },
+  "localProductionBuild": {
+    "builtSourceRevision": "30658fa394ae2ba76ed273bcc476607ee5bce26e",
+    "version": "4.0.0-alpha.15",
+    "artifacts": {
+      "rudder-native": {
+        "sha256": "67863754ca5ea154612b8967bd09793d98d49b44be0f401b1b7cba434facff34",
+        "bytes": 26825520
+      },
+      "rudder-jj": {
+        "sha256": "4b6f398cdeca333258771f59dd5396a207e7a98b5f8aad74d6c0296e88b5e424",
+        "bytes": 30911552
+      }
+    },
+    "scope": "real local production build; subsequent config-only Fly pin correction does not change Native/TS source bytes"
+  },
+  "configOnlyCorrectionAfterLocalBuild": [
+    "cloud/fly.toml"
+  ],
+  "limits": "Local build uses the original candidate revision stamp; CI and Fly build the exact final tagged archive. No published tag was replaced."
+}

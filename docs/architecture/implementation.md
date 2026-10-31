@@ -59,7 +59,7 @@ the three architecture documents already contained this session's planning work.
 | Private previews | Persisted Tailscale login, actual readiness, bounded async probes, exact project ownership, ready links and local open | E13 subset implemented; real userspace/Serve check passed; laptop/phone access remains untested |
 | Terminal stream | Shared home/sail helper, short output batching, bounded backpressure, connection fencing, UTF-8 and repaint recovery | E13 subset deployed in the worker image; real WS/PTY VM checks passed; existing homes adopt when idle |
 | Startup/download caches | Background CLI update, persistent account-local npm/pnpm/uv cache defaults, explicit overrides retained | Behavior tests pass; no distributed action-cache claim |
-| Full storage/engine rewrite | Milestones below | Cloud release 165 / worker alpha.14 is deployed and verified; alpha.14 npm CI failed twice on the same Darwin fixture race; both next tags still name alpha.7. Default workspace integration, fleet and migration gates remain open |
+| Full storage/engine rewrite | Milestones below | Cloud release166 / worker alpha.15 is deployed and verified; all three alpha.15 native release builds passed; npm awaits release tests and publication; both next tags still name alpha.7. Default workspace integration, fleet and migration gates remain open |
 
 The current native simple-execution path remains an isolated worker; explicit
 main-checkout mode remains available. The initial automatic DAG path retains
@@ -73,6 +73,39 @@ home/dashboard alternative until that adapter migrates. Starting a permanent
 dashboard in its place without task identity/approval/completion tracking would
 misreport completion. Local `/cloud` task forwarding still reaches that legacy
 path, so this is a stated alpha limitation, not complete Cloud routing parity.
+
+## Latest delivery and next implementation, alpha.15
+
+Main/tag `v4.0.0-alpha.15` is revision `a048aad42734dcb87b6c3ccfecabba1377b19764`.
+Fly release166 is deployed: canonical app/health/authentication, exact runtime
+hashes and SQLite integrity pass at2026-10-31T06:24:56Z. Active home instance/image
+are unchanged. Fresh stock15 S3/Native-CAS DATA restore passes06:26:25Z; a separate
+digest-pinned exact-source qualifier passes actual UID1500/FUSE/offline-source
+finalization and historical reopen at06:26:33Z. Both canaries and the synthetic
+credential row are independently absent at06:27:15Z. These are synthetic
+source/grant qualification cases, not managed-default or model-provider claims.
+See [delivery](delivery-alpha15.json),
+[local checks](../../examples/execution/evidence/2026-10-31-alpha15-foundations/README.md)
+and [runtime proof](../../examples/execution/evidence/2026-10-31-alpha15-runtime/README.md).
+
+Local verification:1,204 baseline Rust tests,82 final affected tests,25 separate
+execution compatibility cases, JavaScript739passed/9skipped and real-binary
+TUI59passed. The local production build stamped candidate30658fa; the final tag's
+only later change is the Fly image pin. Exact-tag CI/Fly builds are separate.
+The original unpublished local15 tag was corrected before any push. Intel Mac
+CI is still building; Linux and Apple Silicon artifacts pass. Npm remains
+unpublished with both next tags stillalpha.7 at06:28:32Z. Follow release run
+41176059172 and verify both registry names/fresh installations after publication.
+
+The next local batch implements the Spec5 / Binding4 codec, a parent-clocked stop protocol and host context2 with separate guest and source lifetimes. Runtime5 remains refused while shutdown and launch ownership are connected. The verifier also replaces redundant full-patch generation with one status check. Remaining integration starts with joint Spec5 /
+Binding4, protected context2 and actual host-source client/controller witness;
+separate guest ingress from source finalization, carry the original parent
+stop deadline, and join provisional receipt +successful helper exit +fresh
+issuer authorization. Then compose the qualified connected transport and run
+physical/model checks before default migration. Private-jj partial projection /
+acceptance, a production build-cache caller with independent speed trials,
+fleet authority and real-device Tailscale continuity remain open. Do not mark
+the full v4 goal complete at this release.
 
 ## V4 foundations and current continuation, 2026-10-31
 

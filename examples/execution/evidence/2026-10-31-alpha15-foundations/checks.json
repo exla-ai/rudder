@@ -1,0 +1,62 @@
+{
+  "version": "4.0.0-alpha.15",
+  "revision": "a048aad42734dcb87b6c3ccfecabba1377b19764",
+  "scope": "composed baseline and affected coverage, not one final full workspace run",
+  "baselineRust": {
+    "exitCode": 0,
+    "seconds": 105.24,
+    "logSha256": "e415d452e5db864c16eea9db2864b04facffb1e914c9157a8015345851ec6c96",
+    "diskGuardTriggered": false,
+    "passed": 1204,
+    "ignored": 15
+  },
+  "finalAffectedRust": {
+    "exitCode": 0,
+    "seconds": 128.281,
+    "logSha256": "cb4653c58505566dbf4677e06319afe33f7b749011aee4aeff61c399dec9e30c",
+    "diskGuardTriggered": false,
+    "passed": 82,
+    "ignored": 1
+  },
+  "executionCompatibility": {
+    "exitCode": 0,
+    "seconds": 51.353,
+    "logSha256": "c15bcb94effdea9587a3ad22e15ce9b3d9c0896ea112e03ab105f4f75cbcb8e5",
+    "diskGuardTriggered": false,
+    "passed": 25,
+    "ignored": 0
+  },
+  "javascript": {
+    "exitCode": 0,
+    "seconds": 188.859,
+    "logSha256": "9b78c3fb8b0f7e20243797e23581382d595bcb9ca313ba69d0d6af5ff93e2954",
+    "diskGuardTriggered": false,
+    "tests": 748,
+    "pass": 739,
+    "fail": 0,
+    "skipped": 9
+  },
+  "tui": {
+    "exitCode": 0,
+    "seconds": 109.001,
+    "logSha256": "bd69dfa8f0480707a595a016baadd4d2343a40afa63dc1dd56f887c465391f0a",
+    "diskGuardTriggered": false,
+    "tests": 59,
+    "pass": 59,
+    "fail": 0,
+    "skipped": 0
+  },
+  "productionBuild": {
+    "exitCode": 0,
+    "seconds": 531.522,
+    "logSha256": "a53ad9004b4bbc7ceec4e6900cac3ab2175fd7ecca71b3cc083fc93cef996809",
+    "diskGuardTriggered": false
+  },
+  "typecheckPassed": true,
+  "cloudBuildPassed": true,
+  "crossProcessSourceAuthorizationPassed": true,
+  "managedSourceDefaultActivated": false,
+  "newManagedStopWireQualified": false,
+  "modelProviderCalls": false,
+  "sourceOrHistoryAcceptanceQualified": false
+}

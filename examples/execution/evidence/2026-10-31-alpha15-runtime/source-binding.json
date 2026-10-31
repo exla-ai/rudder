@@ -1,0 +1,16 @@
+{
+  "formatVersion": 1,
+  "createdAt": "2026-10-31T06:15:07.055042+00:00",
+  "version": "4.0.0-alpha.15",
+  "packageVersion": "4.0.0-alpha.15",
+  "revision": "a048aad42734dcb87b6c3ccfecabba1377b19764",
+  "sourceKind": "tagged",
+  "archiveMembers": 1792,
+  "sourceFiles": 1545,
+  "sourceBytes": 51864592,
+  "archiveSha256": "f59d44453e414ea503470f73c338cc49c35d8b9cd0312ccdfe9caad77c2b1009",
+  "sourceEnvelopeSha256": "a2b00dbece9cc17b7695f54c2d7f02a6185f80622b43fd699b5a70ca6499d88f",
+  "sourceEnvelopeEncoding": "sha256 of sorted compact JSON path-to-sha256 map",
+  "configuredSecretValuesScanned": 2,
+  "matches": 0
+}

@@ -1,0 +1,458 @@
+{
+  "schemaVersion": 1,
+  "milestone": "Host source ownership, source-finalization lifetime and live-only steering; full v4 continues",
+  "version": "4.0.0-alpha.15",
+  "sourceRevision": "a048aad42734dcb87b6c3ccfecabba1377b19764",
+  "delivery": {
+    "kind": "web",
+    "status": "deployed",
+    "target": "Rudder Cloud control plane and configured alpha15 worker image",
+    "url": "https://rudder.exla.ai/app",
+    "provider": "Fly.io",
+    "revision": "a048aad42734dcb87b6c3ccfecabba1377b19764",
+    "deploymentId": "166",
+    "version": "4.0.0-alpha.15",
+    "verifiedAt": "2026-10-31T06:24:56.617Z",
+    "checks": [
+      {
+        "url": "https://rudder.exla.ai/app",
+        "status": 200,
+        "expected": 200,
+        "finalUrl": "https://rudder-cloud-control.fly.dev/app",
+        "ok": true
+      },
+      {
+        "url": "https://rudder-cloud-control.fly.dev/health",
+        "status": 200,
+        "expected": 200,
+        "finalUrl": "https://rudder-cloud-control.fly.dev/health",
+        "ok": true,
+        "health": {
+          "ok": true,
+          "s3": true,
+          "fabric": true,
+          "fly": true,
+          "byoVm": true,
+          "state": true,
+          "secrets": true,
+          "auth": {
+            "google": true,
+            "github": true,
+            "githubDevice": true
+          }
+        }
+      },
+      {
+        "url": "https://rudder-cloud-control.fly.dev/api/app/state",
+        "status": 401,
+        "expected": 401,
+        "finalUrl": "https://rudder-cloud-control.fly.dev/api/app/state",
+        "ok": true
+      },
+      {
+        "url": "https://rudder-cloud-control.fly.dev/api/rudder/fabric/roots/unauthenticated-alpha15-smoke",
+        "status": 401,
+        "expected": 401,
+        "finalUrl": "https://rudder-cloud-control.fly.dev/api/rudder/fabric/roots/unauthenticated-alpha15-smoke",
+        "ok": true
+      }
+    ]
+  },
+  "release": {
+    "ID": "p2xOXzMKKYnx1Cz3ZBalJo5y",
+    "Version": 166,
+    "Status": "complete",
+    "CreatedAt": "2026-10-31T06:24:26Z"
+  },
+  "control": {
+    "id": "8911d61a434978",
+    "instance": "01M68A32A934GQXJJT05SFYCR8",
+    "state": "started",
+    "image": "registry.fly.io/rudder-cloud-control:4.0.0-alpha.15",
+    "digest": "sha256:04df77dee7afab479eb323f2c19b114c3ca985c7418ff35369b7b5dc6598fe0b",
+    "revision": "a048aad42734dcb87b6c3ccfecabba1377b19764"
+  },
+  "database": {
+    "integrity": "ok",
+    "counts": {
+      "workspaces": 52,
+      "sails": 14
+    },
+    "homeRetained": true,
+    "serverSha256": "96e6392705d1ac86949c09b5e69eb6ced86d53c1f8f820225df2cb7ceb3f4770"
+  },
+  "actualRuntimeCodeSha256": {
+    "src/server.ts": "96e6392705d1ac86949c09b5e69eb6ced86d53c1f8f820225df2cb7ceb3f4770",
+    "src/fabric-cas.ts": "4c158d2746a4c6511c7f9262db386ef81a2368df42c361eddbce01138e47b7ca",
+    "src/fabric-partial-checkpoint.ts": "b5f5e6ce35eba3af10034c5caa7214fe6cddb47c59ee24f840d30ee2f33d03f0",
+    "dist/server.js": "d548970543d355e9626435c0a22899485e097405ad0ef6aedbfb738ad39639a2",
+    "dist/fabric-cas.js": "98e7bc5d7f60ed9d05b2b908a19ed39659d993e26dc9eac01cb5e7980945457a",
+    "dist/fabric-partial-checkpoint.js": "224c151b296315966304751cf0c51b6d6d2e81e5f8037d2f208246775fe8d5dd"
+  },
+  "worker": {
+    "image": "registry.fly.io/rudder-workers-exla:4.0.0-alpha.15",
+    "revision": "a048aad42734dcb87b6c3ccfecabba1377b19764",
+    "sourceEnvelopeSha256": "a2b00dbece9cc17b7695f54c2d7f02a6185f80622b43fd699b5a70ca6499d88f",
+    "startedAt": "2026-10-31T06:18:48.800634+00:00",
+    "observedAt": "2026-10-31T06:24:14.022421+00:00",
+    "exitCode": 0,
+    "pushManifestDone": true,
+    "digest": "sha256:56080379b91b3d3114bec8bb7f2f9f60018edd1005397c7c2699d2417fd94003",
+    "logSha256": "b9b9243a8a0fc1232ea314943c2add4f5adfa24772b9de7549c81c13056fb6c2",
+    "sourceUnchanged": true
+  },
+  "activeHome": {
+    "id": "8edd225a7d0378",
+    "instance": "01M670MG4A8E0DWE9GA1C0PQ92",
+    "state": "started",
+    "digest": "sha256:404f46396aca77324d9b53c55d2824a5401af56ba5362d0bdae67e16108fc245",
+    "unchanged": true
+  },
+  "partialCheckpointData": {
+    "qualified": true,
+    "verifiedAt": "2026-10-31T06:26:25.945Z",
+    "name": "rudder-alpha15-pcd-25e90e8b",
+    "nonce": "25e90e8b-e5fe-4dc7-8298-84b8020f67d1",
+    "version": "4.0.0-alpha.15",
+    "revision": "a048aad42734dcb87b6c3ccfecabba1377b19764",
+    "requestedImage": "registry.fly.io/rudder-workers-exla:4.0.0-alpha.15",
+    "expectedDigest": "sha256:56080379b91b3d3114bec8bb7f2f9f60018edd1005397c7c2699d2417fd94003",
+    "sourceEnvelopeSha256": "a2b00dbece9cc17b7695f54c2d7f02a6185f80622b43fd699b5a70ca6499d88f",
+    "publication": {
+      "status": "passed",
+      "kind": "synthetic-checkpoint-data-publication",
+      "bundle": {
+        "format_version": 1,
+        "root_id": "pcd1-d4d1b0f86ddecc1ccfece776c952d74cda45da96a6d9aafb1427ff50bb7e49f2",
+        "root": {
+          "kind": "action_result",
+          "algorithm": "sha256",
+          "digest": "60c3d5c59bc97d546a4b66239b199d23ecab416bcdcbf03c0f6a5f58ace88dd7",
+          "size_bytes": 4698
+        },
+        "durability": "replicated",
+        "published_at_ms": 1793427944957,
+        "object_count": 13,
+        "total_bytes": 12953
+      },
+      "base": {
+        "format_version": 1,
+        "root_id": "base-fixture",
+        "root": {
+          "kind": "runnable_root",
+          "algorithm": "sha256",
+          "digest": "1bff9001b3ad0b064e9825b221816b378fec36aba283f03ef75d52882d5a978f",
+          "size_bytes": 673
+        },
+        "durability": "replicated",
+        "published_at_ms": 1793427943500,
+        "object_count": 7,
+        "total_bytes": 1416
+      },
+      "uploadedObjects": 9,
+      "exactObjectReads": 13,
+      "rawReceiptSha256": "353b62901d7fa989cf4f4d7073d7392e7000ac723c76db2689cef97c3deccb84",
+      "opaqueHighU64Receipt": true,
+      "sameIdGetReconciled": true,
+      "syntheticDataOnly": true,
+      "activeProducerReceiptQualified": false,
+      "currentGrantQualified": false
+    },
+    "cleanupVerified": true,
+    "independentAbsence": true,
+    "syntheticCredentialRemoved": true,
+    "independentCredentialAbsence": true,
+    "native": {
+      "status": "passed",
+      "kind": "fresh-native-checkpoint-data-retention",
+      "publicationId": "pcd1-d4d1b0f86ddecc1ccfece776c952d74cda45da96a6d9aafb1427ff50bb7e49f2",
+      "publication": {
+        "algorithm": "sha256",
+        "digest": "60c3d5c59bc97d546a4b66239b199d23ecab416bcdcbf03c0f6a5f58ace88dd7",
+        "kind": "action_result",
+        "size_bytes": 4698
+      },
+      "closureObjects": 13,
+      "closureBytes": 12953,
+      "exactAllObjectBytes": true,
+      "rawQBytes": true,
+      "rawRunnableBytes": true,
+      "highU64Preserved": true,
+      "retainedAcrossNativeRestart": true,
+      "nativeHelpersSettled": 2,
+      "syntheticDataOnly": true,
+      "activeProducerReceiptQualified": false,
+      "currentGrantQualified": false,
+      "sourceAcceptanceQualified": false,
+      "runnableExecutionQualified": false,
+      "nativeCredentialEnvironmentFields": 0
+    },
+    "boot": {
+      "uid": 1500,
+      "gid": 1500,
+      "fields": {
+        "Uid": "1500\t1500\t1500\t1500",
+        "Gid": "1500\t1500\t1500\t1500",
+        "Groups": "",
+        "NoNewPrivs": "1",
+        "CapEff": "0000000000000000",
+        "CapPrm": "0000000000000000",
+        "CapInh": "0000000000000000",
+        "CapAmb": "0000000000000000",
+        "CapBnd": "0000000000000000"
+      },
+      "kernel": "6.12.114-fly",
+      "node": "v22.23.4",
+      "syntheticCredentialFields": 1,
+      "otherCredentialFields": 0
+    },
+    "parentNamespacesAndStatusUnchanged": true
+  },
+  "physicalSourceFinalization": {
+    "qualified": true,
+    "verifiedAt": "2026-10-31T06:26:33.858Z",
+    "name": "rudder-alpha15-remotequal-185a6eaa",
+    "nonce": "185a6eaa-e5d5-4f4a-a30f-f52a02599de0",
+    "requestedImage": "registry.fly.io/rudder-workers-exla:4.0.0-alpha.15-remote-source-cef05557c8",
+    "expectedDigest": "sha256:2b6d6a056b2357f356863cdcbd93d3c84d15108d6c9228ae799886447a2d0a68",
+    "provenance": {
+      "formatVersion": 1,
+      "kind": "alpha15-remote-execution-qualification",
+      "proposedVersion": "4.0.0-alpha.15",
+      "workerVersion": "4.0.0-alpha.15",
+      "sourceKind": "committed-release",
+      "baseRevision": null,
+      "revision": "a048aad42734dcb87b6c3ccfecabba1377b19764",
+      "sourceEnvelopeSha256": "a2b00dbece9cc17b7695f54c2d7f02a6185f80622b43fd699b5a70ca6499d88f",
+      "baseWorkerDigest": "sha256:56080379b91b3d3114bec8bb7f2f9f60018edd1005397c7c2699d2417fd94003",
+      "directBaseDigest": "sha256:56080379b91b3d3114bec8bb7f2f9f60018edd1005397c7c2699d2417fd94003",
+      "qualifierSha256": "cef05557c891c7453156d93b158e9d1558c346f8c58069a45b563b1339bac995"
+    },
+    "counts": {
+      "qualified": 1,
+      "unsupported": 0,
+      "failed": 0,
+      "physicalRemoteCasesPassed": 1,
+      "historicalReopensPassed": 1
+    },
+    "cleanupVerified": true,
+    "independentAbsence": true,
+    "productionWired": false,
+    "sourceAcceptanceQualified": false,
+    "actualBrokerGraceQualified": false,
+    "providerUploadQualified": false,
+    "boot": {
+      "uid": 1500,
+      "gid": 1500,
+      "fields": {
+        "Uid": "1500\t1500\t1500\t1500",
+        "Gid": "1500\t1500\t1500\t1500",
+        "Groups": "",
+        "NoNewPrivs": "1",
+        "CapEff": "0000000000000000",
+        "CapPrm": "0000000000000000",
+        "CapInh": "0000000000000000",
+        "CapAmb": "0000000000000000",
+        "CapBnd": "0000000000000000"
+      },
+      "node": "v22.23.4",
+      "kernel": "6.12.114-fly",
+      "workerVersion": "4.0.0-alpha.15",
+      "workerPackage": {
+        "uid": 0,
+        "gid": 0,
+        "mode": 436,
+        "nlink": 1,
+        "size": 2889,
+        "sha256": "9036987922b35854c98311f46658b76a5678cd14566445cb3cd3af1b51161b1e"
+      },
+      "credentialEnvironmentFields": 0
+    },
+    "parentNamespacesAndStatusUnchanged": true,
+    "summary": {
+      "status": "passed",
+      "entries": 100101,
+      "data": {
+        "artifact": "partial_remote",
+        "capture_consistency": "live_best_effort",
+        "capture_format": 1,
+        "capture_retention": {
+          "format_version": 1,
+          "local": {
+            "format_version": 1,
+            "generation": 2,
+            "object_count": 5,
+            "pin_id": "vfs:partial:bb5a2d57-5055-47b2-b7bc-290b5dee3ee2:7674b4e8-22b4-4e2e-8244-6a868198c79a",
+            "set_digest": "10409df84502f7a40d56830f5a4782c54d88190d3cb98e2257b9fb425a1b6ed7",
+            "staging_id": "5ecc8263-4da3-4211-8e45-09d1fe7e1899",
+            "total_bytes": 3145
+          },
+          "plan": {
+            "algorithm": "sha256",
+            "digest": "68874b4b5d7f208caa66858530cd45b14bdb5efa19888a4f74931b437fa8515f",
+            "kind": "blob",
+            "size_bytes": 1888
+          }
+        },
+        "complete_pins": 0,
+        "drain_bytes_sha256": "adeac92f8db9a343023e59992c8cce0fc0bbcba6f4c531eac9fc28a4b8ce7e79",
+        "drain_record": {
+          "algorithm": "sha256",
+          "digest": "adeac92f8db9a343023e59992c8cce0fc0bbcba6f4c531eac9fc28a4b8ce7e79",
+          "kind": "blob",
+          "size_bytes": 1250
+        },
+        "evidence_retention": {
+          "format_version": 1,
+          "generation": 1,
+          "object_count": 2,
+          "pin_id": "execution:evidence:b9a5ab8b-5864-40e4-9ba5-ef7059ae8a7f:710b804e-6a3c-4975-9e1a-9709376e191d",
+          "set_digest": "724d0f94786ccee963da7ffedbd313fad115ff24823a194896df69921771bf66",
+          "staging_id": "7210d738-220b-4757-a538-7a1a45359407",
+          "total_bytes": 1703
+        },
+        "freeze_bytes_sha256": "7d50b0f4dcca636ffc24806eb1e7b9eacbbf1cbd6f413789a430735701671178",
+        "freeze_intent": {
+          "algorithm": "sha256",
+          "digest": "7d50b0f4dcca636ffc24806eb1e7b9eacbbf1cbd6f413789a430735701671178",
+          "kind": "blob",
+          "size_bytes": 453
+        },
+        "gc": {
+          "blocked_by_staging": false,
+          "generation": 7,
+          "removed_bytes": 0,
+          "removed_objects": 0,
+          "retained_objects": 7
+        },
+        "local_objects": 5,
+        "new_file_bytes": 52,
+        "new_file_sha256": "3f694cf6cd7590e061b8bf0b1a2f36df2555696d76d9562f01bf55edc286bf22",
+        "partial_directory": {
+          "algorithm": "sha256",
+          "digest": "3e73795a6cded7505587ecef3c1abedc1094994a3a2307a5b56b13d73b3c4c91",
+          "kind": "directory",
+          "size_bytes": 234
+        },
+        "producer_objects": 4,
+        "record_format": 2,
+        "remote_boundaries": 2,
+        "stop_nonce": "7674b4e8-22b4-4e2e-8244-6a868198c79a"
+      },
+      "io": "owned_pipes",
+      "limits": {
+        "capture_budget": "unchanged default producer and delta limits",
+        "case_timeout_seconds": 180,
+        "complete_pin_or_acceptance": false,
+        "host_fallback": false,
+        "log_failure_bytes_per_pipe": 1048576,
+        "log_retained_bytes_per_pipe": 65536,
+        "max_entries": 100101,
+        "process_alarm_seconds": 240,
+        "remote_receipt": "synthetic immutable source only",
+        "source_fetch_calls": 4096,
+        "source_fetched_bytes": 67108864
+      },
+      "source": {
+        "accepted_seed_requests": 0,
+        "active_fetches": 0,
+        "fetch_calls": 1120,
+        "fetched_bytes": 24533714,
+        "file_metadata_requests": 1,
+        "maximum_active_fetches": 1,
+        "root_admissions": 1,
+        "unchanged_payload_requests": 0
+      },
+      "empty_topology": true,
+      "environment_free": true,
+      "source_only": true,
+      "synthetic_authority": true,
+      "namespace_schema": 5,
+      "network": "actual_private_offline_namespace",
+      "network_readiness_protocol": 3,
+      "shutdown_typed_and_authenticated": true,
+      "historical_retry": {
+        "current_shutdown_authority": false,
+        "factory_calls": 1,
+        "new_source": false,
+        "outcome": "historical",
+        "stderr": {
+          "bytes": 0,
+          "retained_bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "truncated": false
+        },
+        "stdout": {
+          "bytes": 163,
+          "retained_bytes": 163,
+          "sha256": "70b9d8b6d7f4202d725bb7645d1e619db6773feb458bbc2c104e06095ef03ffa",
+          "truncated": false
+        }
+      },
+      "mmap_and_open_fd_and_descendant": true,
+      "record_sha256": "0565a85982cf3e384371b0f472b42d0b14a3df806d08ab14d53a5ba9446f1959",
+      "elapsed_ms": 21736
+    }
+  },
+  "independentCleanup": {
+    "formatVersion": 1,
+    "canaries": [
+      {
+        "id": "8dd9e2fed26298",
+        "name": "rudder-alpha15-remotequal-185a6eaa",
+        "nonce": "185a6eaa-e5d5-4f4a-a30f-f52a02599de0"
+      },
+      {
+        "id": "28655379c46058",
+        "name": "rudder-alpha15-pcd-25e90e8b",
+        "nonce": "25e90e8b-e5fe-4dc7-8298-84b8020f67d1"
+      }
+    ],
+    "absent": true,
+    "database": {
+      "syntheticCredentialRows": [
+        {
+          "id": "qualification-alpha15-pcd-25e90e8b-e5fe-4dc7-8298-84b8020f67d1",
+          "rows": 0
+        }
+      ],
+      "integrity": "ok",
+      "homeRetained": true
+    },
+    "parsedDatabaseReadAttempts": 1,
+    "home": {
+      "id": "8edd225a7d0378",
+      "instance": "01M670MG4A8E0DWE9GA1C0PQ92",
+      "state": "started",
+      "digest": "sha256:404f46396aca77324d9b53c55d2824a5401af56ba5362d0bdae67e16108fc245",
+      "unchanged": true
+    },
+    "verifiedAt": "2026-10-31T06:27:15.296Z"
+  },
+  "localEvidence": "examples/execution/evidence/2026-10-31-alpha15-foundations/checks.json",
+  "runtimeEvidence": "examples/execution/evidence/2026-10-31-alpha15-runtime/README.md",
+  "cli": {
+    "status": "ci-pending",
+    "workflow": "https://github.com/exla-ai/rudder/actions/runs/41176059172",
+    "registry": {
+      "observedAt": "2026-10-31T06:28:32.047936+00:00",
+      "@exla/rudder": {
+        "latest": "3.9.13",
+        "next": "4.0.0-alpha.7"
+      },
+      "@viraatdas/rudder": {
+        "latest": "3.9.13",
+        "next": "4.0.0-alpha.7"
+      }
+    },
+    "freshInstall": "pending actual registry publication"
+  },
+  "openGates": [
+    "new managed host context and parent-sent stop wire",
+    "connected model-provider execution",
+    "private-jj source/history acceptance",
+    "production distributed build-cache caller and speed",
+    "fleet authority and default migration",
+    "real laptop/phone Tailscale continuity"
+  ]
+}

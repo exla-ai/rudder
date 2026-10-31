@@ -1,0 +1,186 @@
+{
+  "qualified": true,
+  "verifiedAt": "2026-10-31T06:26:33.858Z",
+  "name": "rudder-alpha15-remotequal-185a6eaa",
+  "nonce": "185a6eaa-e5d5-4f4a-a30f-f52a02599de0",
+  "requestedImage": "registry.fly.io/rudder-workers-exla:4.0.0-alpha.15-remote-source-cef05557c8",
+  "expectedDigest": "sha256:2b6d6a056b2357f356863cdcbd93d3c84d15108d6c9228ae799886447a2d0a68",
+  "provenance": {
+    "formatVersion": 1,
+    "kind": "alpha15-remote-execution-qualification",
+    "proposedVersion": "4.0.0-alpha.15",
+    "workerVersion": "4.0.0-alpha.15",
+    "sourceKind": "committed-release",
+    "baseRevision": null,
+    "revision": "a048aad42734dcb87b6c3ccfecabba1377b19764",
+    "sourceEnvelopeSha256": "a2b00dbece9cc17b7695f54c2d7f02a6185f80622b43fd699b5a70ca6499d88f",
+    "baseWorkerDigest": "sha256:56080379b91b3d3114bec8bb7f2f9f60018edd1005397c7c2699d2417fd94003",
+    "directBaseDigest": "sha256:56080379b91b3d3114bec8bb7f2f9f60018edd1005397c7c2699d2417fd94003",
+    "qualifierSha256": "cef05557c891c7453156d93b158e9d1558c346f8c58069a45b563b1339bac995"
+  },
+  "counts": {
+    "qualified": 1,
+    "unsupported": 0,
+    "failed": 0,
+    "physicalRemoteCasesPassed": 1,
+    "historicalReopensPassed": 1
+  },
+  "cleanupVerified": true,
+  "independentAbsence": true,
+  "productionWired": false,
+  "sourceAcceptanceQualified": false,
+  "actualBrokerGraceQualified": false,
+  "providerUploadQualified": false,
+  "boot": {
+    "uid": 1500,
+    "gid": 1500,
+    "fields": {
+      "Uid": "1500\t1500\t1500\t1500",
+      "Gid": "1500\t1500\t1500\t1500",
+      "Groups": "",
+      "NoNewPrivs": "1",
+      "CapEff": "0000000000000000",
+      "CapPrm": "0000000000000000",
+      "CapInh": "0000000000000000",
+      "CapAmb": "0000000000000000",
+      "CapBnd": "0000000000000000"
+    },
+    "node": "v22.23.4",
+    "kernel": "6.12.114-fly",
+    "workerVersion": "4.0.0-alpha.15",
+    "workerPackage": {
+      "uid": 0,
+      "gid": 0,
+      "mode": 436,
+      "nlink": 1,
+      "size": 2889,
+      "sha256": "9036987922b35854c98311f46658b76a5678cd14566445cb3cd3af1b51161b1e"
+    },
+    "credentialEnvironmentFields": 0
+  },
+  "parentNamespacesAndStatusUnchanged": true,
+  "summary": {
+    "status": "passed",
+    "entries": 100101,
+    "data": {
+      "artifact": "partial_remote",
+      "capture_consistency": "live_best_effort",
+      "capture_format": 1,
+      "capture_retention": {
+        "format_version": 1,
+        "local": {
+          "format_version": 1,
+          "generation": 2,
+          "object_count": 5,
+          "pin_id": "vfs:partial:bb5a2d57-5055-47b2-b7bc-290b5dee3ee2:7674b4e8-22b4-4e2e-8244-6a868198c79a",
+          "set_digest": "10409df84502f7a40d56830f5a4782c54d88190d3cb98e2257b9fb425a1b6ed7",
+          "staging_id": "5ecc8263-4da3-4211-8e45-09d1fe7e1899",
+          "total_bytes": 3145
+        },
+        "plan": {
+          "algorithm": "sha256",
+          "digest": "68874b4b5d7f208caa66858530cd45b14bdb5efa19888a4f74931b437fa8515f",
+          "kind": "blob",
+          "size_bytes": 1888
+        }
+      },
+      "complete_pins": 0,
+      "drain_bytes_sha256": "adeac92f8db9a343023e59992c8cce0fc0bbcba6f4c531eac9fc28a4b8ce7e79",
+      "drain_record": {
+        "algorithm": "sha256",
+        "digest": "adeac92f8db9a343023e59992c8cce0fc0bbcba6f4c531eac9fc28a4b8ce7e79",
+        "kind": "blob",
+        "size_bytes": 1250
+      },
+      "evidence_retention": {
+        "format_version": 1,
+        "generation": 1,
+        "object_count": 2,
+        "pin_id": "execution:evidence:b9a5ab8b-5864-40e4-9ba5-ef7059ae8a7f:710b804e-6a3c-4975-9e1a-9709376e191d",
+        "set_digest": "724d0f94786ccee963da7ffedbd313fad115ff24823a194896df69921771bf66",
+        "staging_id": "7210d738-220b-4757-a538-7a1a45359407",
+        "total_bytes": 1703
+      },
+      "freeze_bytes_sha256": "7d50b0f4dcca636ffc24806eb1e7b9eacbbf1cbd6f413789a430735701671178",
+      "freeze_intent": {
+        "algorithm": "sha256",
+        "digest": "7d50b0f4dcca636ffc24806eb1e7b9eacbbf1cbd6f413789a430735701671178",
+        "kind": "blob",
+        "size_bytes": 453
+      },
+      "gc": {
+        "blocked_by_staging": false,
+        "generation": 7,
+        "removed_bytes": 0,
+        "removed_objects": 0,
+        "retained_objects": 7
+      },
+      "local_objects": 5,
+      "new_file_bytes": 52,
+      "new_file_sha256": "3f694cf6cd7590e061b8bf0b1a2f36df2555696d76d9562f01bf55edc286bf22",
+      "partial_directory": {
+        "algorithm": "sha256",
+        "digest": "3e73795a6cded7505587ecef3c1abedc1094994a3a2307a5b56b13d73b3c4c91",
+        "kind": "directory",
+        "size_bytes": 234
+      },
+      "producer_objects": 4,
+      "record_format": 2,
+      "remote_boundaries": 2,
+      "stop_nonce": "7674b4e8-22b4-4e2e-8244-6a868198c79a"
+    },
+    "io": "owned_pipes",
+    "limits": {
+      "capture_budget": "unchanged default producer and delta limits",
+      "case_timeout_seconds": 180,
+      "complete_pin_or_acceptance": false,
+      "host_fallback": false,
+      "log_failure_bytes_per_pipe": 1048576,
+      "log_retained_bytes_per_pipe": 65536,
+      "max_entries": 100101,
+      "process_alarm_seconds": 240,
+      "remote_receipt": "synthetic immutable source only",
+      "source_fetch_calls": 4096,
+      "source_fetched_bytes": 67108864
+    },
+    "source": {
+      "accepted_seed_requests": 0,
+      "active_fetches": 0,
+      "fetch_calls": 1120,
+      "fetched_bytes": 24533714,
+      "file_metadata_requests": 1,
+      "maximum_active_fetches": 1,
+      "root_admissions": 1,
+      "unchanged_payload_requests": 0
+    },
+    "empty_topology": true,
+    "environment_free": true,
+    "source_only": true,
+    "synthetic_authority": true,
+    "namespace_schema": 5,
+    "network": "actual_private_offline_namespace",
+    "network_readiness_protocol": 3,
+    "shutdown_typed_and_authenticated": true,
+    "historical_retry": {
+      "current_shutdown_authority": false,
+      "factory_calls": 1,
+      "new_source": false,
+      "outcome": "historical",
+      "stderr": {
+        "bytes": 0,
+        "retained_bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "truncated": false
+      },
+      "stdout": {
+        "bytes": 163,
+        "retained_bytes": 163,
+        "sha256": "70b9d8b6d7f4202d725bb7645d1e619db6773feb458bbc2c104e06095ef03ffa",
+        "truncated": false
+      }
+    },
+    "mmap_and_open_fd_and_descendant": true,
+    "record_sha256": "0565a85982cf3e384371b0f472b42d0b14a3df806d08ab14d53a5ba9446f1959",
+    "elapsed_ms": 21736
+  }
+}

@@ -1,0 +1,35 @@
+{
+  "formatVersion": 1,
+  "canaries": [
+    {
+      "id": "8dd9e2fed26298",
+      "name": "rudder-alpha15-remotequal-185a6eaa",
+      "nonce": "185a6eaa-e5d5-4f4a-a30f-f52a02599de0"
+    },
+    {
+      "id": "28655379c46058",
+      "name": "rudder-alpha15-pcd-25e90e8b",
+      "nonce": "25e90e8b-e5fe-4dc7-8298-84b8020f67d1"
+    }
+  ],
+  "absent": true,
+  "database": {
+    "syntheticCredentialRows": [
+      {
+        "id": "qualification-alpha15-pcd-25e90e8b-e5fe-4dc7-8298-84b8020f67d1",
+        "rows": 0
+      }
+    ],
+    "integrity": "ok",
+    "homeRetained": true
+  },
+  "parsedDatabaseReadAttempts": 1,
+  "home": {
+    "id": "8edd225a7d0378",
+    "instance": "01M670MG4A8E0DWE9GA1C0PQ92",
+    "state": "started",
+    "digest": "sha256:404f46396aca77324d9b53c55d2824a5401af56ba5362d0bdae67e16108fc245",
+    "unchanged": true
+  },
+  "verifiedAt": "2026-10-31T06:27:15.296Z"
+}

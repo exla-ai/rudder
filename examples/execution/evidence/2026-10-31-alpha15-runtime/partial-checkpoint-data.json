@@ -1,0 +1,100 @@
+{
+  "qualified": true,
+  "verifiedAt": "2026-10-31T06:26:25.945Z",
+  "name": "rudder-alpha15-pcd-25e90e8b",
+  "nonce": "25e90e8b-e5fe-4dc7-8298-84b8020f67d1",
+  "version": "4.0.0-alpha.15",
+  "revision": "a048aad42734dcb87b6c3ccfecabba1377b19764",
+  "requestedImage": "registry.fly.io/rudder-workers-exla:4.0.0-alpha.15",
+  "expectedDigest": "sha256:56080379b91b3d3114bec8bb7f2f9f60018edd1005397c7c2699d2417fd94003",
+  "sourceEnvelopeSha256": "a2b00dbece9cc17b7695f54c2d7f02a6185f80622b43fd699b5a70ca6499d88f",
+  "publication": {
+    "status": "passed",
+    "kind": "synthetic-checkpoint-data-publication",
+    "bundle": {
+      "format_version": 1,
+      "root_id": "pcd1-d4d1b0f86ddecc1ccfece776c952d74cda45da96a6d9aafb1427ff50bb7e49f2",
+      "root": {
+        "kind": "action_result",
+        "algorithm": "sha256",
+        "digest": "60c3d5c59bc97d546a4b66239b199d23ecab416bcdcbf03c0f6a5f58ace88dd7",
+        "size_bytes": 4698
+      },
+      "durability": "replicated",
+      "published_at_ms": 1793427944957,
+      "object_count": 13,
+      "total_bytes": 12953
+    },
+    "base": {
+      "format_version": 1,
+      "root_id": "base-fixture",
+      "root": {
+        "kind": "runnable_root",
+        "algorithm": "sha256",
+        "digest": "1bff9001b3ad0b064e9825b221816b378fec36aba283f03ef75d52882d5a978f",
+        "size_bytes": 673
+      },
+      "durability": "replicated",
+      "published_at_ms": 1793427943500,
+      "object_count": 7,
+      "total_bytes": 1416
+    },
+    "uploadedObjects": 9,
+    "exactObjectReads": 13,
+    "rawReceiptSha256": "353b62901d7fa989cf4f4d7073d7392e7000ac723c76db2689cef97c3deccb84",
+    "opaqueHighU64Receipt": true,
+    "sameIdGetReconciled": true,
+    "syntheticDataOnly": true,
+    "activeProducerReceiptQualified": false,
+    "currentGrantQualified": false
+  },
+  "cleanupVerified": true,
+  "independentAbsence": true,
+  "syntheticCredentialRemoved": true,
+  "independentCredentialAbsence": true,
+  "native": {
+    "status": "passed",
+    "kind": "fresh-native-checkpoint-data-retention",
+    "publicationId": "pcd1-d4d1b0f86ddecc1ccfece776c952d74cda45da96a6d9aafb1427ff50bb7e49f2",
+    "publication": {
+      "algorithm": "sha256",
+      "digest": "60c3d5c59bc97d546a4b66239b199d23ecab416bcdcbf03c0f6a5f58ace88dd7",
+      "kind": "action_result",
+      "size_bytes": 4698
+    },
+    "closureObjects": 13,
+    "closureBytes": 12953,
+    "exactAllObjectBytes": true,
+    "rawQBytes": true,
+    "rawRunnableBytes": true,
+    "highU64Preserved": true,
+    "retainedAcrossNativeRestart": true,
+    "nativeHelpersSettled": 2,
+    "syntheticDataOnly": true,
+    "activeProducerReceiptQualified": false,
+    "currentGrantQualified": false,
+    "sourceAcceptanceQualified": false,
+    "runnableExecutionQualified": false,
+    "nativeCredentialEnvironmentFields": 0
+  },
+  "boot": {
+    "uid": 1500,
+    "gid": 1500,
+    "fields": {
+      "Uid": "1500\t1500\t1500\t1500",
+      "Gid": "1500\t1500\t1500\t1500",
+      "Groups": "",
+      "NoNewPrivs": "1",
+      "CapEff": "0000000000000000",
+      "CapPrm": "0000000000000000",
+      "CapInh": "0000000000000000",
+      "CapAmb": "0000000000000000",
+      "CapBnd": "0000000000000000"
+    },
+    "kernel": "6.12.114-fly",
+    "node": "v22.23.4",
+    "syntheticCredentialFields": 1,
+    "otherCredentialFields": 0
+  },
+  "parentNamespacesAndStatusUnchanged": true
+}

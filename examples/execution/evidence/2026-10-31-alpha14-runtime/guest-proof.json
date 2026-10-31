@@ -1,0 +1,112 @@
+{
+  "formatVersion": 1,
+  "kind": "alpha14-partial-checkpoint-data-smoke",
+  "nonce": "32ee1346-4603-4564-9ae0-2f070d97a330",
+  "version": "4.0.0-alpha.14",
+  "revision": "13889d1e0860b5a806f5513d32cf0f215747759f",
+  "completed": true,
+  "qualified": true,
+  "syntheticDataOnly": true,
+  "activeProducerReceiptQualified": false,
+  "currentGrantQualified": false,
+  "sourceAcceptanceQualified": false,
+  "runnableExecutionQualified": false,
+  "supervisorModuleEvaluated": false,
+  "modelCalls": false,
+  "providerAccountCalls": false,
+  "admittedAfterResolvedDigest": true,
+  "boot": {
+    "uid": 1500,
+    "gid": 1500,
+    "fields": {
+      "Uid": "1500\t1500\t1500\t1500",
+      "Gid": "1500\t1500\t1500\t1500",
+      "Groups": "",
+      "NoNewPrivs": "1",
+      "CapEff": "0000000000000000",
+      "CapPrm": "0000000000000000",
+      "CapInh": "0000000000000000",
+      "CapAmb": "0000000000000000",
+      "CapBnd": "0000000000000000"
+    },
+    "kernel": "6.12.114-fly",
+    "node": "v22.23.4",
+    "syntheticCredentialFields": 1,
+    "otherCredentialFields": 0
+  },
+  "runtime": {
+    "workerVersion": "4.0.0-alpha.14",
+    "packageSha256": "2adb97ab38e2eb19cf356b00887c196bbebc93e6d99d0240706982042d8ca6b2",
+    "moduleHashes": {
+      "dist/fabric-remote.js": "89053566dd502535af6f36a38e8042f1e4674fbbe5d1e2baf745b835ab238272",
+      "dist/fabric-local.js": "d04405d47aec91f421766a9db418d5ae90547721843d67ed7d5134087b785aa8",
+      "dist/native-binary.js": "3dbb1f66403743b96801639ab4424c3f6a69e0e8216a888bb56159611e17b75a"
+    },
+    "nativeSha256": "6d77914c414a4f7b0614b75862b2d78c45e0fca52d7932acd5e82eac901ba523",
+    "nativeBytes": 26740728
+  },
+  "parentBefore": {
+    "user": {
+      "device": "4",
+      "inode": "4026531837"
+    },
+    "net": {
+      "device": "4",
+      "inode": "4026531840"
+    },
+    "mnt": {
+      "device": "4",
+      "inode": "4026531841"
+    }
+  },
+  "child": {
+    "settled": true,
+    "exit": 0,
+    "signal": null,
+    "failure": null,
+    "stdoutBytes": 704,
+    "stderrBytes": 0,
+    "stdoutSha256": "b7d157dd010973c49dff2573ccce06d3dea9fa3224d2e61609186f2f7f7e9670",
+    "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "parentAfter": {
+    "user": {
+      "device": "4",
+      "inode": "4026531837"
+    },
+    "net": {
+      "device": "4",
+      "inode": "4026531840"
+    },
+    "mnt": {
+      "device": "4",
+      "inode": "4026531841"
+    }
+  },
+  "parentNamespacesAndStatusUnchanged": true,
+  "summary": {
+    "status": "passed",
+    "kind": "fresh-native-checkpoint-data-retention",
+    "publicationId": "pcd1-d4d1b0f86ddecc1ccfece776c952d74cda45da96a6d9aafb1427ff50bb7e49f2",
+    "publication": {
+      "algorithm": "sha256",
+      "digest": "60c3d5c59bc97d546a4b66239b199d23ecab416bcdcbf03c0f6a5f58ace88dd7",
+      "kind": "action_result",
+      "size_bytes": 4698
+    },
+    "closureObjects": 13,
+    "closureBytes": 12953,
+    "exactAllObjectBytes": true,
+    "rawQBytes": true,
+    "rawRunnableBytes": true,
+    "highU64Preserved": true,
+    "retainedAcrossNativeRestart": true,
+    "nativeHelpersSettled": 2,
+    "syntheticDataOnly": true,
+    "activeProducerReceiptQualified": false,
+    "currentGrantQualified": false,
+    "sourceAcceptanceQualified": false,
+    "runnableExecutionQualified": false,
+    "nativeCredentialEnvironmentFields": 0
+  }
+}

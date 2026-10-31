@@ -1,0 +1,44 @@
+{
+  "formatVersion": 1,
+  "canaries": [
+    {
+      "id": "48ee093c4d0e48",
+      "name": "rudder-alpha14-connectqual-609f7c8b",
+      "nonce": "609f7c8b-9be1-4365-b2c6-129788ed75d5"
+    },
+    {
+      "id": "819e44f9d75478",
+      "name": "rudder-alpha14-pcd-60e600f9",
+      "nonce": "60e600f9-d68a-4108-ae32-4fb13a87a0c4"
+    },
+    {
+      "id": "d8d991d5a92208",
+      "name": "rudder-alpha14-pcd-32ee1346",
+      "nonce": "32ee1346-4603-4564-9ae0-2f070d97a330"
+    }
+  ],
+  "absent": true,
+  "database": {
+    "syntheticCredentialRows": [
+      {
+        "id": "qualification-alpha14-pcd-60e600f9-d68a-4108-ae32-4fb13a87a0c4",
+        "rows": 0
+      },
+      {
+        "id": "qualification-alpha14-pcd-32ee1346-4603-4564-9ae0-2f070d97a330",
+        "rows": 0
+      }
+    ],
+    "integrity": "ok",
+    "homeRetained": true
+  },
+  "parsedDatabaseReadAttempts": 1,
+  "home": {
+    "id": "8edd225a7d0378",
+    "instance": "01M670MG4A8E0DWE9GA1C0PQ92",
+    "state": "started",
+    "digest": "sha256:404f46396aca77324d9b53c55d2824a5401af56ba5362d0bdae67e16108fc245",
+    "unchanged": true
+  },
+  "verifiedAt": "2026-10-31T04:53:47.361Z"
+}

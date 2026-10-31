@@ -1,0 +1,47 @@
+{
+  "formatVersion": 1,
+  "observedAt": "2026-10-31T05:42:01.604360+00:00",
+  "workflow": "https://github.com/exla-ai/rudder/actions/runs/41169123460",
+  "revision": "13889d1e0860b5a806f5513d32cf0f215747759f",
+  "initialAttempt": {
+    "status": "failed",
+    "publishJob": 124447389266,
+    "nativePlatforms": [
+      "linux-x64",
+      "darwin-arm64",
+      "darwin-x64"
+    ],
+    "nativePlatformBuilds": "passed",
+    "typecheckAndJavascript": "passed",
+    "nativeBinaryTests": {
+      "passed": 994,
+      "failed": 1,
+      "ignored": 11,
+      "test": "agent_link::tests::owned_backend_peer_is_verified_before_any_protocol_bytes_are_sent",
+      "failure": "test server set_read_timeout after rejected client may already have closed; Darwin returned EINVAL",
+      "location": "native/src/agent_link_tests.rs:19:63"
+    },
+    "subsequentManagedJjTuiAndPublication": "skipped",
+    "fullPrivateLogSha256": "4686a931668f33cb33a48c4accd176c5b8b9350c355d92e818656eda05c449f4"
+  },
+  "retry": {
+    "requested": true,
+    "status": "failed",
+    "scope": "failed publish job only; immutable tag/source unchanged",
+    "reason": "confirmed scheduling race in fixture; permanent server-ready synchronization prepared for subsequent source release",
+    "publishJob": 124451255730,
+    "finishedAt": "2026-10-31T05:29:56.210826Z",
+    "nativeBinaryTests": {
+      "passed": 994,
+      "failed": 1,
+      "ignored": 11,
+      "failure": "same Darwin set_read_timeout fixture race at agent_link_tests.rs:19:63"
+    },
+    "fullPrivateLogSha256": "06c3ee4b5f454462c8bc58dc6dab5779e8bf80faaa640c5042c05c554ac4e52b",
+    "furtherRetriesPlanned": false,
+    "permanentFixtureFixSourceSha256": "8e366859403427ba8e961486f9a017123e483103024d739926125c363aa58863",
+    "permanentFixNextSourceRelease": true
+  },
+  "npmPublished": false,
+  "macosRuntimeQualified": false
+}

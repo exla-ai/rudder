@@ -1,0 +1,66 @@
+{
+  "taggedSource": {
+    "formatVersion": 1,
+    "createdAt": "2026-10-31T04:34:35.220321+00:00",
+    "version": "4.0.0-alpha.14",
+    "packageVersion": "4.0.0-alpha.14",
+    "revision": "13889d1e0860b5a806f5513d32cf0f215747759f",
+    "sourceKind": "tagged",
+    "archiveMembers": 1765,
+    "sourceFiles": 1517,
+    "sourceBytes": 51378683,
+    "archiveSha256": "586afe1dc534873c4c909bfe066a2c51ae049eeb1738d528b808b6525c97d462",
+    "sourceEnvelopeSha256": "5a9d885a30c91d60e130f3ee0e93d0bb0bfb5aba315ce18a6aef1f645910ce1b",
+    "sourceEnvelopeEncoding": "sha256 of sorted compact JSON path-to-sha256 map",
+    "configuredSecretValuesScanned": 2,
+    "matches": 0
+  },
+  "controllerCopies": {
+    "qualify-partial-cloud.mjs": {
+      "executedSha256": "a36d49940e9680013f0d2c854746d953c543a6451dc37dd1a2f126b3ed30bffe",
+      "publishedSha256": "a36d49940e9680013f0d2c854746d953c543a6451dc37dd1a2f126b3ed30bffe",
+      "trailingLfBytesRemoved": 0
+    },
+    "helpers.mjs": {
+      "executedSha256": "17e22543db4cb84a00c142f00b7cdd7690ff3b00d74b10b67033c2d9e632c79c",
+      "publishedSha256": "fd2b69b653e0cb6b9ba4be0c3503d55846cdac3b4f9bba5f5ab5caf84593e5a5",
+      "trailingLfBytesRemoved": 1
+    },
+    "selftest.mjs": {
+      "executedSha256": "c4d279de280eff95a13392b666f96e604a636e0beaa4975781f3123b7b34ed9b",
+      "publishedSha256": "c4d279de280eff95a13392b666f96e604a636e0beaa4975781f3123b7b34ed9b",
+      "trailingLfBytesRemoved": 0
+    },
+    "fixture-v1.json": {
+      "executedSha256": "5a47a7321952d5064734d9667bf3ddd2ed66f96ada4f871cfb7e0e47530ae76f",
+      "publishedSha256": "64f7b011f730c3591e79b49cfc2e5f1523b8e008e50de1aa85688d187515a5b1",
+      "trailingLfBytesRemoved": -1
+    }
+  },
+  "archivedSourceAmendment": {
+    "reason": "explicit known archived Git source file, hashed only within immutable tagged allowlist; no live runtime/session traversal",
+    "relativePath": "native/src/.ledger/sessions/5c81b5ca-653d-48a2-b42a-0f8d8a3d1c3a.jsonl",
+    "expectedSha256": "b8a4eac658f835a1ba68c82cdac38aaa2e99b8e1f2ffd064f77acb9a68cfe3bb",
+    "controllerBeforeSha256": "709466e5ffcc69723815a57a57f348c9ccdd72406cf5853d81d18ae8e67b121f",
+    "controllerAfterSha256": "9cdfd104b5cdb535c795dea9e9c4f7c413241ad3e141c5f3e4eda11c8aca9ae0"
+  },
+  "preloadAwaitAmendment": {
+    "at": "2026-10-31T04:50:46.824636+00:00",
+    "reason": "actual Node import must await async preload; ordinary home evaluated early without TLA",
+    "originalWithArchivedLedgerSha256": "9cdfd104b5cdb535c795dea9e9c4f7c413241ad3e141c5f3e4eda11c8aca9ae0",
+    "fixedControllerSha256": "a36d49940e9680013f0d2c854746d953c543a6451dc37dd1a2f126b3ed30bffe",
+    "selftestSha256": "c4d279de280eff95a13392b666f96e604a636e0beaa4975781f3123b7b34ed9b",
+    "negativeExpectedExit": 1,
+    "negativeErrorSha256": "ab7998387f6d4faeea358450eaed55546f3ffa5f603823746b2a0b067bdcc70e",
+    "positiveSummary": "{\"status\":\"passed\",\"cases\":16,\"lifecycleScenarios\":19,\"providerCalls\":0,\"dnsCalls\":0,\"providerQualified\":false,\"report\":\"/workspace/home/.cache/rudder-release-build/alpha14-checks/partial-cloud-controller/selftest-d40a26c0-d5bf-4ba9-b383-69158b216c53.json\"}",
+    "failedProviderRun": "run-60e600f9-d68a-4108-ae32-4fb13a87a0c4",
+    "failedRunCleanupConfirmed": true,
+    "changes": [
+      "Await actual serialized guest preload before ordinary Node entry",
+      "Observe actual evaluation Promise in regression",
+      "Reject stopped canary immediately with cleanup"
+    ]
+  },
+  "originalDataReportSha256": "8cce70c4c9853ce21b89b1ca2ea450ea96cb691e959c438aac2a289d0c2dc837",
+  "originalGuestProofSha256": "6a1c5532fcf17d27e6e30c706fa10fe65562678943ad8b0fdc5a11434c6ff8a9"
+}

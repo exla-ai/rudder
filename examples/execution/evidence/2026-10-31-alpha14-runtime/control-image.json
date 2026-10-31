@@ -1,0 +1,12 @@
+{
+  "image": "registry.fly.io/rudder-cloud-control:4.0.0-alpha.14",
+  "revision": "13889d1e0860b5a806f5513d32cf0f215747759f",
+  "sourceEnvelopeSha256": "5a9d885a30c91d60e130f3ee0e93d0bb0bfb5aba315ce18a6aef1f645910ce1b",
+  "startedAt": "2026-10-31T04:36:24.110066+00:00",
+  "observedAt": "2026-10-31T04:36:48.874453+00:00",
+  "exitCode": 0,
+  "pushManifestDone": true,
+  "digest": "sha256:c4281b278a01a39c37f1fa76717634e3843c97d9927d946e4d29cd0a8a425eb9",
+  "logSha256": "b796ca3f2904962c1f9d46186a709c290fa751c7198d5e879021bfb5615f2000",
+  "sourceUnchanged": true
+}

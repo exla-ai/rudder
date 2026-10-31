@@ -1,0 +1,332 @@
+{
+  "schemaVersion": 1,
+  "milestone": "Retained partial checkpoint DATA publication and bounded connected transport; full v4 continues",
+  "version": "4.0.0-alpha.14",
+  "sourceRevision": "13889d1e0860b5a806f5513d32cf0f215747759f",
+  "delivery": {
+    "kind": "web",
+    "status": "deployed",
+    "target": "Rudder Cloud control plane and configured alpha.14 worker image",
+    "url": "https://rudder.exla.ai/app",
+    "provider": "Fly.io",
+    "revision": "13889d1e0860b5a806f5513d32cf0f215747759f",
+    "deploymentId": "165",
+    "version": "4.0.0-alpha.14",
+    "verifiedAt": "2026-10-31T04:43:15.124Z",
+    "checks": [
+      {
+        "url": "https://rudder.exla.ai/app",
+        "status": 200,
+        "expected": 200,
+        "finalUrl": "https://rudder-cloud-control.fly.dev/app",
+        "ok": true
+      },
+      {
+        "url": "https://rudder-cloud-control.fly.dev/health",
+        "status": 200,
+        "expected": 200,
+        "finalUrl": "https://rudder-cloud-control.fly.dev/health",
+        "ok": true,
+        "health": {
+          "ok": true,
+          "s3": true,
+          "fabric": true,
+          "fly": true,
+          "byoVm": true,
+          "state": true,
+          "secrets": true,
+          "auth": {
+            "google": true,
+            "github": true,
+            "githubDevice": true
+          }
+        }
+      },
+      {
+        "url": "https://rudder-cloud-control.fly.dev/api/app/state",
+        "status": 401,
+        "expected": 401,
+        "finalUrl": "https://rudder-cloud-control.fly.dev/api/app/state",
+        "ok": true
+      },
+      {
+        "url": "https://rudder-cloud-control.fly.dev/api/rudder/fabric/roots/unauthenticated-alpha14-smoke",
+        "status": 401,
+        "expected": 401,
+        "finalUrl": "https://rudder-cloud-control.fly.dev/api/rudder/fabric/roots/unauthenticated-alpha14-smoke",
+        "ok": true
+      }
+    ]
+  },
+  "control": {
+    "id": "8911d61a434978",
+    "instance": "01M684832S9DNCE5EM4V749HH1",
+    "state": "started",
+    "image": "registry.fly.io/rudder-cloud-control:4.0.0-alpha.14",
+    "digest": "sha256:c4281b278a01a39c37f1fa76717634e3843c97d9927d946e4d29cd0a8a425eb9",
+    "revision": "13889d1e0860b5a806f5513d32cf0f215747759f",
+    "release": {
+      "id": "akRvx4BJJDKR8umXPgv1D8xyk",
+      "version": 165,
+      "status": "complete",
+      "createdAt": "2026-10-31T04:42:20Z"
+    },
+    "database": {
+      "integrity": "ok",
+      "counts": {
+        "workspaces": 52,
+        "sails": 14
+      },
+      "homeRetained": true,
+      "serverSha256": "96e6392705d1ac86949c09b5e69eb6ced86d53c1f8f820225df2cb7ceb3f4770"
+    },
+    "actualRuntimeCodeSha256": {
+      "src/server.ts": "96e6392705d1ac86949c09b5e69eb6ced86d53c1f8f820225df2cb7ceb3f4770",
+      "src/fabric-cas.ts": "4c158d2746a4c6511c7f9262db386ef81a2368df42c361eddbce01138e47b7ca",
+      "src/fabric-partial-checkpoint.ts": "b5f5e6ce35eba3af10034c5caa7214fe6cddb47c59ee24f840d30ee2f33d03f0",
+      "dist/server.js": "d548970543d355e9626435c0a22899485e097405ad0ef6aedbfb738ad39639a2",
+      "dist/fabric-cas.js": "98e7bc5d7f60ed9d05b2b908a19ed39659d993e26dc9eac01cb5e7980945457a",
+      "dist/fabric-partial-checkpoint.js": "224c151b296315966304751cf0c51b6d6d2e81e5f8037d2f208246775fe8d5dd"
+    },
+    "inactiveAuthority": {
+      "inactiveStats": {
+        "active": 0,
+        "queued": 0
+      },
+      "pgVersion": "8.23.1",
+      "indexSha256": "ac25e862b4d1debcf8b0d80dbdb1af1edcc38987bb1d4633ed4102352373e8ef"
+    }
+  },
+  "worker": {
+    "image": "registry.fly.io/rudder-workers-exla:4.0.0-alpha.14",
+    "revision": "13889d1e0860b5a806f5513d32cf0f215747759f",
+    "sourceEnvelopeSha256": "5a9d885a30c91d60e130f3ee0e93d0bb0bfb5aba315ce18a6aef1f645910ce1b",
+    "startedAt": "2026-10-31T04:36:24.106651+00:00",
+    "observedAt": "2026-10-31T04:41:56.545806+00:00",
+    "exitCode": 0,
+    "pushManifestDone": true,
+    "digest": "sha256:f7ebfb44d0c453df84a1c9e1a33725d5ed523a8aaee35b1e723739b2b5b859ec",
+    "logSha256": "cae65a77dec83d772564dde0f4b6c4367525b923b3ceba40df7d063e7ce2de9d",
+    "sourceUnchanged": true,
+    "activeHome": {
+      "id": "8edd225a7d0378",
+      "instance": "01M670MG4A8E0DWE9GA1C0PQ92",
+      "state": "started",
+      "image": "registry.fly.io/rudder-workers-exla:4.0.0-alpha.7",
+      "digest": "sha256:404f46396aca77324d9b53c55d2824a5401af56ba5362d0bdae67e16108fc245",
+      "unchangedAcrossDeploy": true,
+      "adoption": "when idle; never forcibly restarted"
+    },
+    "runtime": {
+      "workerVersion": "4.0.0-alpha.14",
+      "packageSha256": "2adb97ab38e2eb19cf356b00887c196bbebc93e6d99d0240706982042d8ca6b2",
+      "moduleHashes": {
+        "dist/fabric-remote.js": "89053566dd502535af6f36a38e8042f1e4674fbbe5d1e2baf745b835ab238272",
+        "dist/fabric-local.js": "d04405d47aec91f421766a9db418d5ae90547721843d67ed7d5134087b785aa8",
+        "dist/native-binary.js": "3dbb1f66403743b96801639ab4424c3f6a69e0e8216a888bb56159611e17b75a"
+      },
+      "nativeSha256": "6d77914c414a4f7b0614b75862b2d78c45e0fca52d7932acd5e82eac901ba523",
+      "nativeBytes": 26740728
+    },
+    "boot": {
+      "uid": 1500,
+      "gid": 1500,
+      "fields": {
+        "Uid": "1500\t1500\t1500\t1500",
+        "Gid": "1500\t1500\t1500\t1500",
+        "Groups": "",
+        "NoNewPrivs": "1",
+        "CapEff": "0000000000000000",
+        "CapPrm": "0000000000000000",
+        "CapInh": "0000000000000000",
+        "CapAmb": "0000000000000000",
+        "CapBnd": "0000000000000000"
+      },
+      "kernel": "6.12.114-fly",
+      "node": "v22.23.4",
+      "syntheticCredentialFields": 1,
+      "otherCredentialFields": 0
+    }
+  },
+  "partialCheckpointData": {
+    "evidence": "examples/execution/evidence/2026-10-31-alpha14-runtime/partial-checkpoint-data.json",
+    "verifiedAt": "2026-10-31T04:51:07.368Z",
+    "machine": {
+      "id": "d8d991d5a92208",
+      "name": "rudder-alpha14-pcd-32ee1346",
+      "nonce": "32ee1346-4603-4564-9ae0-2f070d97a330",
+      "role": "alpha14-partial-checkpoint-data-smoke",
+      "revision": "13889d1e0860b5a806f5513d32cf0f215747759f",
+      "requestedImage": "registry.fly.io/rudder-workers-exla:4.0.0-alpha.14",
+      "observedDigest": "sha256:f7ebfb44d0c453df84a1c9e1a33725d5ed523a8aaee35b1e723739b2b5b859ec",
+      "instance": "01M684Q03Q4GYXHC91KP3KVXJT"
+    },
+    "publication": {
+      "status": "passed",
+      "kind": "synthetic-checkpoint-data-publication",
+      "bundle": {
+        "format_version": 1,
+        "root_id": "pcd1-d4d1b0f86ddecc1ccfece776c952d74cda45da96a6d9aafb1427ff50bb7e49f2",
+        "root": {
+          "kind": "action_result",
+          "algorithm": "sha256",
+          "digest": "60c3d5c59bc97d546a4b66239b199d23ecab416bcdcbf03c0f6a5f58ace88dd7",
+          "size_bytes": 4698
+        },
+        "durability": "replicated",
+        "published_at_ms": 1793422227140,
+        "object_count": 13,
+        "total_bytes": 12953
+      },
+      "base": {
+        "format_version": 1,
+        "root_id": "base-fixture",
+        "root": {
+          "kind": "runnable_root",
+          "algorithm": "sha256",
+          "digest": "1bff9001b3ad0b064e9825b221816b378fec36aba283f03ef75d52882d5a978f",
+          "size_bytes": 673
+        },
+        "durability": "replicated",
+        "published_at_ms": 1793422225678,
+        "object_count": 7,
+        "total_bytes": 1416
+      },
+      "uploadedObjects": 9,
+      "exactObjectReads": 13,
+      "rawReceiptSha256": "353b62901d7fa989cf4f4d7073d7392e7000ac723c76db2689cef97c3deccb84",
+      "opaqueHighU64Receipt": true,
+      "sameIdGetReconciled": true,
+      "syntheticDataOnly": true,
+      "activeProducerReceiptQualified": false,
+      "currentGrantQualified": false
+    },
+    "native": {
+      "status": "passed",
+      "kind": "fresh-native-checkpoint-data-retention",
+      "publicationId": "pcd1-d4d1b0f86ddecc1ccfece776c952d74cda45da96a6d9aafb1427ff50bb7e49f2",
+      "publication": {
+        "algorithm": "sha256",
+        "digest": "60c3d5c59bc97d546a4b66239b199d23ecab416bcdcbf03c0f6a5f58ace88dd7",
+        "kind": "action_result",
+        "size_bytes": 4698
+      },
+      "closureObjects": 13,
+      "closureBytes": 12953,
+      "exactAllObjectBytes": true,
+      "rawQBytes": true,
+      "rawRunnableBytes": true,
+      "highU64Preserved": true,
+      "retainedAcrossNativeRestart": true,
+      "nativeHelpersSettled": 2,
+      "syntheticDataOnly": true,
+      "activeProducerReceiptQualified": false,
+      "currentGrantQualified": false,
+      "sourceAcceptanceQualified": false,
+      "runnableExecutionQualified": false,
+      "nativeCredentialEnvironmentFields": 0
+    },
+    "cleanupVerified": true,
+    "independentAbsence": true,
+    "syntheticCredentialRemoved": true,
+    "independentCredentialAbsence": true,
+    "syntheticDataOnly": true,
+    "currentGrantQualified": false,
+    "sourceAcceptanceQualified": false,
+    "runnableExecutionQualified": false,
+    "immutableSyntheticS3ObjectsRetained": true
+  },
+  "connectedTransport": {
+    "evidence": "examples/execution/evidence/2026-10-31-alpha14-connected/report.json",
+    "sourceKind": "candidate",
+    "revision": "96c7b25db02fd559052ad92c072da98c2621ae0d",
+    "verifiedAt": "2026-10-31T04:18:26.112Z",
+    "stockParentVersion": "4.0.0-alpha.13",
+    "qualified": true,
+    "managedConnectedExecutionQualified": false,
+    "modelProviderAccountCalls": false,
+    "modelCalls": false
+  },
+  "cli": {
+    "status": "ci-failed-unpublished",
+    "releaseWorkflow": "https://github.com/exla-ai/rudder/actions/runs/41169123460",
+    "registry": {
+      "observedAt": "2026-10-31T05:42:01.604360+00:00",
+      "@exla/rudder": {
+        "latest": "3.9.13",
+        "next": "4.0.0-alpha.7"
+      },
+      "@viraatdas/rudder": {
+        "latest": "3.9.13",
+        "next": "4.0.0-alpha.7"
+      }
+    },
+    "freshInstall": "not run while alpha.14 remains unpublished",
+    "ciEvidence": "examples/execution/evidence/2026-10-31-alpha14-runtime/ci.json",
+    "initialAttempt": "failed in one Darwin socket fixture before assertion;994 passed,1 failed,11 ignored; publication skipped",
+    "retry": "failed on the same Darwin fixture; immutable tag retained; subsequent source release carries permanent synchronization fix"
+  },
+  "localChecks": {
+    "evidence": "examples/execution/evidence/2026-10-31-alpha14-foundations/local-checks.json",
+    "javascriptFullPassed": 737,
+    "javascriptFullSkipped": 11,
+    "formerlySkippedWorkerCasesSeparatelyPassed": 2,
+    "remainingOptionalSkips": 9,
+    "terminalJourneysPassed": 59,
+    "freshProductionNativeRpcPassed": 1,
+    "productionBuild": "passed",
+    "rust": "composed coverage; full1139 library/dashboard baseline plus corrected network17+5 and targeted checkpoint/retention compatibility"
+  },
+  "independentCleanup": {
+    "formatVersion": 1,
+    "canaries": [
+      {
+        "id": "48ee093c4d0e48",
+        "name": "rudder-alpha14-connectqual-609f7c8b",
+        "nonce": "609f7c8b-9be1-4365-b2c6-129788ed75d5"
+      },
+      {
+        "id": "819e44f9d75478",
+        "name": "rudder-alpha14-pcd-60e600f9",
+        "nonce": "60e600f9-d68a-4108-ae32-4fb13a87a0c4"
+      },
+      {
+        "id": "d8d991d5a92208",
+        "name": "rudder-alpha14-pcd-32ee1346",
+        "nonce": "32ee1346-4603-4564-9ae0-2f070d97a330"
+      }
+    ],
+    "absent": true,
+    "database": {
+      "syntheticCredentialRows": [
+        {
+          "id": "qualification-alpha14-pcd-60e600f9-d68a-4108-ae32-4fb13a87a0c4",
+          "rows": 0
+        },
+        {
+          "id": "qualification-alpha14-pcd-32ee1346-4603-4564-9ae0-2f070d97a330",
+          "rows": 0
+        }
+      ],
+      "integrity": "ok",
+      "homeRetained": true
+    },
+    "parsedDatabaseReadAttempts": 1,
+    "home": {
+      "id": "8edd225a7d0378",
+      "instance": "01M670MG4A8E0DWE9GA1C0PQ92",
+      "state": "started",
+      "digest": "sha256:404f46396aca77324d9b53c55d2824a5401af56ba5362d0bdae67e16108fc245",
+      "unchanged": true
+    },
+    "verifiedAt": "2026-10-31T04:53:47.361Z"
+  },
+  "limits": [
+    "Full PLAN.md remains active; future main-checkout source-authorizer and CLI work is absent from this frozen tag.",
+    "S3 producer adapter is synthetic DATA; generic replicated receipt does not establish current owner/attempt, active producer pins, execution permission or accepted jj history.",
+    "Actual source-grace/managed connected integration, private-jj partial acceptance, production build-cache adoption and physical legacy migration remain open.",
+    "Connected physical case used the exact candidate release qualifier over stock13, no model/SDK/account credentials.",
+    "PostgreSQL authority adapter is inactive; no fleet HA/failover/RPO claim.",
+    "No local macOS installation or public Mac release is claimed."
+  ]
+}

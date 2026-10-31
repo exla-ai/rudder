@@ -1,0 +1,14 @@
+{
+  "nonce": "32ee1346-4603-4564-9ae0-2f070d97a330",
+  "name": "rudder-alpha14-pcd-32ee1346",
+  "role": "alpha14-partial-checkpoint-data-smoke",
+  "ownedId": "d8d991d5a92208",
+  "creationAttempted": true,
+  "authAttempted": true,
+  "canaryAbsent": true,
+  "independentCanaryAbsent": true,
+  "syntheticCredentialRemoved": true,
+  "independentCredentialAbsence": true,
+  "immutableS3ObjectsRetained": true,
+  "verifiedAt": "2026-10-31T04:51:07.368Z"
+}

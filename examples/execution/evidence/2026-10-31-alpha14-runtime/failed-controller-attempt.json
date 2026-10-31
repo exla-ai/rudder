@@ -1,0 +1,21 @@
+{
+  "qualified": false,
+  "failurePhase": "worker-inventory",
+  "errorCode": "ERR_ASSERTION",
+  "createdDescriptor": {
+    "id": "819e44f9d75478",
+    "name": "rudder-alpha14-pcd-60e600f9",
+    "nonce": "60e600f9-d68a-4108-ae32-4fb13a87a0c4",
+    "role": "alpha14-partial-checkpoint-data-smoke",
+    "revision": "13889d1e0860b5a806f5513d32cf0f215747759f",
+    "requestedImage": "registry.fly.io/rudder-workers-exla:4.0.0-alpha.14",
+    "observedDigest": "sha256:f7ebfb44d0c453df84a1c9e1a33725d5ed523a8aaee35b1e723739b2b5b859ec",
+    "instance": "01M684ENATSPYGX4HCHY92V31G"
+  },
+  "cleanupVerified": true,
+  "independentAbsence": true,
+  "syntheticCredentialRemoved": true,
+  "independentCredentialAbsence": true,
+  "verifiedAt": "2026-10-31T04:49:07.258Z",
+  "diagnosis": "Generated preload lacked top-level await, allowing ordinary home evaluation. Corrected private controller with real evaluation-Promise negative control; no product correction."
+}

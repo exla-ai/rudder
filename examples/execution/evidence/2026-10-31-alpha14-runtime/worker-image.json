@@ -1,0 +1,12 @@
+{
+  "image": "registry.fly.io/rudder-workers-exla:4.0.0-alpha.14",
+  "revision": "13889d1e0860b5a806f5513d32cf0f215747759f",
+  "sourceEnvelopeSha256": "5a9d885a30c91d60e130f3ee0e93d0bb0bfb5aba315ce18a6aef1f645910ce1b",
+  "startedAt": "2026-10-31T04:36:24.106651+00:00",
+  "observedAt": "2026-10-31T04:41:56.545806+00:00",
+  "exitCode": 0,
+  "pushManifestDone": true,
+  "digest": "sha256:f7ebfb44d0c453df84a1c9e1a33725d5ed523a8aaee35b1e723739b2b5b859ec",
+  "logSha256": "cae65a77dec83d772564dde0f4b6c4367525b923b3ceba40df7d063e7ce2de9d",
+  "sourceUnchanged": true
+}

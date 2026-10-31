@@ -1,7 +1,7 @@
 {
   "formatVersion": 1,
   "version": "4.0.0-alpha.23",
-  "sourceKind": "uncommitted working-tree candidate before version bump",
+  "sourceKind": "candidate; local tests precede version/pin metadata update; exact-source CI pending",
   "baseRevision": "d660d32bc308e65f03fc9f1ad63c69d4e7a79067",
   "checks": {
     "rust": {
@@ -60,6 +60,11 @@
       "pass": 59,
       "fail": 0,
       "skipped": 0
+    },
+    "cloudWorkerPin": {
+      "status": "passed",
+      "completedAt": "2026-10-31T21:39:11.820256+00:00",
+      "receiptSha256": "0412ccd63ae221f64f437a0139036230615bc9d03666500811de7c843eb011cf"
     }
   },
   "components": {
@@ -102,5 +107,10 @@
     "current source selection, accepted jj history and normal engine startup/recovery",
     "distributed source/dependency/action caches on normal launch path and measured cold/warm speed",
     "fleet ownership, migration and complete macOS/Cloud end-to-end qualification"
-  ]
+  ],
+  "releaseCheckCi": {
+    "status": "not_started",
+    "branch": "release-check/4.0.0-alpha.23",
+    "requireExactVersionCommit": true
+  }
 }

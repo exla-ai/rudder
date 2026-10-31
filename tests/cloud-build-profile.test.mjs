@@ -35,7 +35,10 @@ const result=${JSON.stringify(response(req))}; result.runnable=req.runnable; res
   const captured = JSON.parse(await fs.readFile(path.join(root, "received.json"), "utf8"));
   assert.deepEqual(captured.args, ["fabric", "build-profile"]);
   assert.deepEqual(captured.req, request(root));
-  assert.deepEqual(captured.keys, ["PATH"]);
+  // macOS CoreFoundation adds __CF_USER_TEXT_ENCODING to every process; it is
+  // not inherited from Rudder and carries no credentials.
+  const keys = captured.keys.filter((key) => !(process.platform === "darwin" && key === "__CF_USER_TEXT_ENCODING"));
+  assert.deepEqual(keys, ["PATH"]);
 });
 
 test("response requires current frontend evidence, exact input and verified outputs", () => {

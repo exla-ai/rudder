@@ -1514,9 +1514,16 @@ failure mode that left `1.0.70`–`1.0.73` on npm but never in git).
 Cut a release from a clean, pushed `main`:
 
 ```bash
-npm version patch          # bumps package.json + package-lock, commits, tags vX.Y.Z
+git push origin HEAD:release-check/X.Y.Z # full Release matrix, tag and publish steps skipped
+npm version patch          # after release-check is green: bumps package.json + package-lock, commits, tags vX.Y.Z
 git push origin main vX.Y.Z # push main and only the newly created release tag
 ```
+
+The `release-check/**` branch runs every Release job on the candidate commit
+(three native builds, macOS JS, native, jj and TUI tests) and skips the tag
+check and both npm publishes. Before 4.0.0-alpha.18 the only way to run the
+macOS tests was to tag, so several alphas between alpha.9 and alpha.17 were
+spent on platform-only failures.
 
 Prerelease versions (for example `npm version 4.0.0-alpha.1`) publish to the
 `next` dist-tag; stable versions publish to `latest`. Both package names use the

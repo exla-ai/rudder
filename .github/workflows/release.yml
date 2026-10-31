@@ -5,6 +5,7 @@ name: Release
 # registry drift.
 #
 # Release flow (from a clean, pushed main):
+#   git push origin HEAD:release-check/<version>  # full platform matrix, no publish
 #   npm version patch        # bumps package.json + lock, commits, tags vX.Y.Z
 #   git push origin main vX.Y.Z  # explicitly push main and only the newly created tag
 #
@@ -16,6 +17,11 @@ on:
   push:
     tags:
       - "v*"
+    # Every platform check, without the tag and publish steps, so a failure
+    # costs a branch push instead of a version (several alphas between
+    # alpha.9 and alpha.17 failed only after tagging).
+    branches:
+      - "release-check/**"
 
 jobs:
   native-artifacts:
@@ -85,6 +91,7 @@ jobs:
         run: node scripts/native-artifacts.mjs verify --root prebuilt-native --revision "$GITHUB_SHA"
 
       - name: Verify tag matches package.json version
+        if: github.ref_type == 'tag'
         run: |
           TAG_VERSION="${GITHUB_REF_NAME#v}"
           PKG_VERSION="$(node -p "require('./package.json').version")"
@@ -95,6 +102,7 @@ jobs:
           fi
 
       - name: Select npm release channel
+        if: github.ref_type == 'tag'
         id: channel
         run: |
           node --input-type=module <<'NODE'
@@ -171,6 +179,7 @@ jobs:
       # bypassed only after all three source-bound binary pairs verify again;
       # copy-native rehashes while staging the downloaded artifacts.
       - name: Publish to npm
+        if: github.ref_type == 'tag'
         id: publish
         continue-on-error: true
         run: npm publish --provenance --access public --tag "${{ steps.channel.outputs.tag }}"
@@ -184,6 +193,7 @@ jobs:
       # (src/version-check.ts moveToRenamedPackage). Runs even if the new name
       # failed, so old installs keep getting fixes; the job still fails below.
       - name: Publish under the old name
+        if: github.ref_type == 'tag'
         run: |
           node -e 'const fs=require("fs");const p=JSON.parse(fs.readFileSync("package.json"));p.name="@viraatdas/rudder";fs.writeFileSync("package.json",JSON.stringify(p,null,2)+"\n")'
           npm publish --provenance --access public --tag "${{ steps.channel.outputs.tag }}"
@@ -194,7 +204,7 @@ jobs:
           RUDDER_NATIVE_SOURCE_REVISION: ${{ github.sha }}
 
       - name: Fail when the new name did not publish
-        if: steps.publish.outcome != 'success'
+        if: github.ref_type == 'tag' && steps.publish.outcome != 'success'
         run: |
           echo "::error::npm publish of @exla/rudder failed (is viraatdas a publisher in the exla npm org, and can NPM_TOKEN publish to it?)"
           exit 1

@@ -319,8 +319,18 @@ parent and cleared only in the designated child immediately before exec. Actual
 process regressions reproduce the old leak, exclude unrelated execs after the
 fix, and preserve the fence through synchronous descendants. The full VCS package
 checks passed, including the original failing RPC case. The initial CI failure
-remains recorded; renewed complete qualification is pending. Alpha.22 has not
-shipped yet.
+remains recorded. Renewed complete qualification passed at `b78fd62`; main and
+`v4.0.0-alpha.22` were pushed at `d660d32bc308e65f03fc9f1ad63c69d4e7a79067`.
+Cloud alpha.22 is deployed on Fly.io, release172, deployment
+`nRqjnzJmmaOq8HzPvDL29bk26`, at https://rudder.exla.ai/app. Runtime hashes,
+health/auth boundaries, database integrity and the actual UID1500 stock-worker
+smoke passed at 2026-10-31T21:07:15.681Z. The live alpha.7 home retained its exact
+instance/image. Exact-tag Release CI passed on its first attempt; both package
+names are available on npm next. Fresh private Linux installs, CLI/native/jj
+smoke checks and all three platform manifests passed at
+2026-10-31T21:37:08.560356Z. Alias binaries and package metadata match apart from
+the name. Initial registry lookups lagged successful publication; no republish
+was attempted. The full v4 rewrite remains incomplete.
 
 ## Current implementation track
 

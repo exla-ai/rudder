@@ -356,8 +356,12 @@ A tag may reuse only a complete successful qualification at that identical SHA.
 Producer archive digests, qualified native seals and source revisions are checked
 before certification and again at publication. Missing or uncertain eligibility
 runs the full pipeline. The older native/test origin remains explicit in artifact
-provenance. Local fixtures and review passed; actual Actions execution remains
-unverified until the candidate runs.
+provenance. All three native builds passed in the first Actions attempt, but
+qualification failed before the test jobs. The output validator rejected the
+required `proof_sha256` key because its name contained digits. The correction
+permits digits after the first character and adds an output-file regression;
+all nineteen release fixtures pass. The corrected candidate still requires a
+complete exact-source Actions qualification before publication.
 
 The local combined gate passed 1,841 Rust tests, 812 JavaScript tests and all 59
 terminal tests, with zero failures. Cloud compilation passed; thirty Rust fixtures
@@ -372,6 +376,16 @@ integrating verified changes. Production bootstrap/routing custody, connected
 model profiles, accepted jj history/current source selection, fleet migration and
 measured normal-path distributed-cache performance remain required. This candidate
 does not switch normal agent startup to v4 or complete the rewrite.
+
+The shorter opt-in milestone uses the existing managed-local Spec3/Binding2 path
+with ordinary worker networking. Task admission, immutable preparation reuse and
+checkpoint-to-jj acceptance are private drafts pending combined qualification.
+Current selected user profiles use OAuth; this path currently accepts only API
+keys and must not silently switch billing. Hosted ChatGPT-plan support needs the
+separate [Sign in with ChatGPT integration](https://developers.openai.com/siwc);
+the user confirmed that Rudder has no registered client ID yet. This external
+dependency does not block engine/cache implementation, and local/OSS CLI auth
+has a separate adapter and refresh/writeback qualification gate.
 
 ## Current implementation track
 

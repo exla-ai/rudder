@@ -5,9 +5,31 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { PLATFORMS, NATIVE_STEPS, QUALIFY_STEPS, selectReuse, readReceiptZip,
-  validateReuseProof, checkNativeSeal, githubClient, authenticateNativeArchives, main } from '../scripts/release-reuse.mjs';
+  validateReuseProof, checkNativeSeal, githubClient, authenticateNativeArchives, main, output } from '../scripts/release-reuse.mjs';
 
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
+test('Actions outputs accept the SHA256 proof key and reject output-file injection', async () => {
+  const temporary = await fs.mkdtemp(path.join(os.tmpdir(), 'release-output-test-'));
+  const file = path.join(temporary, 'outputs'), saved = process.env.GITHUB_OUTPUT;
+  process.env.GITHUB_OUTPUT = file;
+  try {
+    const proof = hash('authenticated original archives');
+    await output('proof_sha256', proof);
+    await output('native_ids', '300,301,302');
+    await output('found', 'true');
+    const expected = `proof_sha256=${proof}\nnative_ids=300,301,302\nfound=true\n`;
+    assert.equal(await fs.readFile(file, 'utf8'), expected);
+    for (const [key, value] of [['proof_sha256\nfound', proof], ['1proof', proof],
+      ['proof=sha256', proof], ['proof_sha256', `${proof}\nfound=true`]]) {
+      await assert.rejects(output(key, value), { message: 'RELEASE_EVIDENCE_REJECTED' });
+    }
+    assert.equal(await fs.readFile(file, 'utf8'), expected);
+  } finally {
+    if (saved === undefined) delete process.env.GITHUB_OUTPUT; else process.env.GITHUB_OUTPUT = saved;
+    await fs.rm(temporary, { recursive: true, force: true });
+  }
+});
+
 function zip(files) {
   const entries=[]; const directory=[]; let offset=0;
   for (const [name,raw] of files) {

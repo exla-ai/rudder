@@ -106,11 +106,26 @@
     "real connected Codex/Claude execution with authenticated native/Fly/bootstrap and routing custody",
     "current source selection, accepted jj history and normal engine startup/recovery",
     "distributed source/dependency/action caches on normal launch path and measured cold/warm speed",
-    "fleet ownership, migration and complete macOS/Cloud end-to-end qualification"
+    "fleet ownership, migration and complete macOS/Cloud end-to-end qualification",
+    "selected OAuth profiles; hosted ChatGPT-plan support additionally requires SIWC client registration (user has none)"
   ],
   "releaseCheckCi": {
-    "status": "not_started",
+    "status": "corrected_candidate_pending",
     "branch": "release-check/4.0.0-alpha.23",
-    "requireExactVersionCommit": true
+    "requireExactVersionCommit": true,
+    "priorFailedQualification": {
+      "runId": 41244607627,
+      "revision": "6eda67f267c51699bba2a74a971530ccec25caf0",
+      "nativeBuilds": "all_three_passed",
+      "failedStep": "Authenticate original native archives before extraction",
+      "cause": "Actions output key validator rejected digits in proof_sha256",
+      "publication": "skipped"
+    },
+    "correction": {
+      "releaseFixturesPassed": 19,
+      "failed": 0,
+      "skipped": 0,
+      "scope": "allow digits after the first output-key character; retain output-file injection guards"
+    }
   }
 }

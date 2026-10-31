@@ -294,7 +294,7 @@ async function writeJson(file, value) {
   await fs.mkdir(path.dirname(file),{recursive:true}); const bytes=Buffer.from(`${JSON.stringify(value,null,2)}\n`);
   must(bytes.length <= 128*1024); await fs.writeFile(file,bytes,{flag:'wx',mode:0o600}); return hash(bytes);
 }
-const output=async (key,value)=> { must(/^[a-z_]+$/.test(key) && /^[A-Za-z0-9,._-]*$/.test(String(value)));
+export const output=async (key,value)=> { must(/^[a-z_][a-z0-9_]*$/.test(key) && /^[A-Za-z0-9,._-]*$/.test(String(value)));
   await fs.appendFile(process.env.GITHUB_OUTPUT,`${key}=${value}\n`); };
 async function verifiedNative(root,ctx,record) {
   const {verifyNativeArtifacts}=await import('./native-artifacts.mjs');

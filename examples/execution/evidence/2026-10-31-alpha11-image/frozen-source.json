@@ -1,0 +1,12 @@
+{
+  "revision": "30f6db4c4806a8f65c695d235a43d599ae23c080",
+  "version": "4.0.0-alpha.11",
+  "sourceFiles": 1371,
+  "sourceBytes": 49346282,
+  "archiveMembers": 1601,
+  "configuredSecretValuesScanned": 2,
+  "matches": 0,
+  "sourceEnvelopeEncoding": "sha256 of sorted compact JSON path-to-sha256 map",
+  "sourceEnvelopeSha256": "4a34c56d5b9dd97ea19322168a2cf6849f2f1935a33ec2563d0b9e4fd4efae7a",
+  "at": "2026-10-30T23:53:16.297454+00:00"
+}

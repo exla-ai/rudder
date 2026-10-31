@@ -1,0 +1,321 @@
+{
+  "schemaVersion": 1,
+  "milestone": "Private managed recovery, authenticated board access and one verified native build graph; full v4 remains active",
+  "version": "4.0.0-alpha.11",
+  "sourceRevision": "30f6db4c4806a8f65c695d235a43d599ae23c080",
+  "delivery": {
+    "kind": "web",
+    "status": "deployed",
+    "target": "Rudder Cloud control API and configured alpha.11 worker image",
+    "url": "https://rudder.exla.ai/app",
+    "provider": "Fly.io",
+    "revision": "30f6db4c4806a8f65c695d235a43d599ae23c080",
+    "deploymentId": "162",
+    "version": "4.0.0-alpha.11",
+    "verifiedAt": "2026-10-31T00:06:17.567Z",
+    "checks": [
+      {
+        "url": "https://rudder.exla.ai/app",
+        "status": 200,
+        "expected": 200,
+        "finalUrl": "https://rudder-cloud-control.fly.dev/app",
+        "ok": true
+      },
+      {
+        "url": "https://rudder-cloud-control.fly.dev/health",
+        "status": 200,
+        "expected": 200,
+        "finalUrl": "https://rudder-cloud-control.fly.dev/health",
+        "ok": true,
+        "health": {
+          "ok": true,
+          "s3": true,
+          "fabric": true,
+          "fly": true,
+          "byoVm": true,
+          "state": true,
+          "secrets": true,
+          "auth": {
+            "google": true,
+            "github": true,
+            "githubDevice": true
+          }
+        }
+      },
+      {
+        "url": "https://rudder-cloud-control.fly.dev/api/app/state",
+        "status": 401,
+        "expected": 401,
+        "finalUrl": "https://rudder-cloud-control.fly.dev/api/app/state",
+        "ok": true
+      },
+      {
+        "url": "https://rudder-cloud-control.fly.dev/api/rudder/fabric/roots/unauthenticated-alpha11-smoke",
+        "status": 401,
+        "expected": 401,
+        "finalUrl": "https://rudder-cloud-control.fly.dev/api/rudder/fabric/roots/unauthenticated-alpha11-smoke",
+        "ok": true
+      }
+    ]
+  },
+  "control": {
+    "id": "8911d61a434978",
+    "instance": "01M67MD816FXXNERHAFQTZW5EF",
+    "state": "started",
+    "image": "registry.fly.io/rudder-cloud-control:4.0.0-alpha.11",
+    "digest": "sha256:8102d9f090291d9bc64d496b59f136e48fa9bfcbc5f56604687fa9749a00c5a6",
+    "revision": "30f6db4c4806a8f65c695d235a43d599ae23c080",
+    "release": {
+      "id": "nRqjnzJmmaOq8HpkN6VjO86w6",
+      "version": 162,
+      "status": "complete",
+      "createdAt": "2026-10-31T00:05:31Z"
+    },
+    "database": {
+      "integrity": "ok",
+      "counts": {
+        "workspaces": 49,
+        "sails": 14
+      },
+      "homeRetained": true,
+      "serverSha256": "96e6392705d1ac86949c09b5e69eb6ced86d53c1f8f820225df2cb7ceb3f4770"
+    },
+    "inactiveAuthority": {
+      "inactiveStats": {
+        "active": 0,
+        "queued": 0
+      },
+      "pgVersion": "8.23.1",
+      "indexSha256": "ac25e862b4d1debcf8b0d80dbdb1af1edcc38987bb1d4633ed4102352373e8ef"
+    }
+  },
+  "worker": {
+    "image": "registry.fly.io/rudder-workers-exla:4.0.0-alpha.11",
+    "imageDigest": "sha256:06bf0ea6a1c95e15a992a1a7fe04fe0eadb0599a71c3a523475f6d33e92347f0",
+    "imageSmoke": {
+      "machine": "85759ef4124328",
+      "instance": "01M67MB1N5KRTXTMS22KFQMY2K",
+      "checks": {
+        "kind": "alpha11-full-image-boot-smoke",
+        "ok": true,
+        "uid": 1500,
+        "gid": 1500,
+        "nnp": "1",
+        "zeroCapabilities": true,
+        "supplementaryGroups": "",
+        "fuseGranted": true,
+        "fuseOpen": true,
+        "cacheOwnedByUser": true,
+        "rootReentryDenied": true,
+        "realBootstrapAndEntrypoint": true,
+        "supervisorModuleEvaluated": false,
+        "packageVersion": "4.0.0-alpha.11",
+        "version": "4.0.0-alpha.11",
+        "node": "v22.23.4",
+        "kernel": "6.12.114-fly",
+        "claude": "2.1.314 (Claude Code)",
+        "codex": "codex-cli 0.166.0",
+        "tailscale": "1.104.4",
+        "jj": "jj 0.40.0-941d0290f5511db1d1cf8e4fe7365ba7d1828ea0",
+        "git": "git version 2.56.0",
+        "jjFetchChangedFileRemote": true,
+        "capabilities": {
+          "authority": "local-only",
+          "format_version": 1,
+          "metadata_encoding": "canonical-json-v1",
+          "object_hash": "sha256",
+          "scheduler": false
+        },
+        "bridge": {
+          "automatic_jj_replacement": false,
+          "format_version": 1,
+          "jj_version": "0.40.0",
+          "local_development": false,
+          "vfs_default": false,
+          "vfs_provider_required": true
+        },
+        "auxiliary": {
+          "bun": "1.4.4",
+          "acpx": "0.21.1",
+          "hunkdiffHelp": true
+        },
+        "nativeSha256": "2b111b67482e49c00d20b163b3a19675186d6e4dd7f5df71b820766f78609c6a",
+        "buddySha256": "2ef449b9355be8c7b53e31240f75cccc518bf113089349682f6ac6cae3712a88",
+        "verifiedAt": "2026-10-31T00:05:00.909Z"
+      },
+      "cleanupVerified": true,
+      "verifiedAt": "2026-10-31T00:05:06.600Z"
+    },
+    "cloudFormatRestore": {
+      "evidence": "examples/fabric/evidence/2026-10-31-alpha11-cloud/report.json",
+      "machine": "8d31e5fe957118",
+      "instance": "01M67MGN5CH6W7NSW5KPDQF8EH",
+      "root": {
+        "kind": "runnable_root",
+        "algorithm": "sha256",
+        "digest": "d06491c1e51245fbfd57f938d2a83252f10f68ce17a435b42abdf8243712210c",
+        "size_bytes": 814
+      },
+      "replicated": {
+        "format_version": 1,
+        "root_id": "alpha11-runnable-ddb6e692-a209-40b5-80e8-cdd85183416e",
+        "root": {
+          "kind": "runnable_root",
+          "algorithm": "sha256",
+          "digest": "d06491c1e51245fbfd57f938d2a83252f10f68ce17a435b42abdf8243712210c",
+          "size_bytes": 814
+        },
+        "durability": "replicated",
+        "published_at_ms": 1793405242921,
+        "object_count": 15,
+        "total_bytes": 9440515
+      },
+      "checks": {
+        "ok": true,
+        "uid": 1500,
+        "node": "v22.23.4",
+        "root": {
+          "kind": "runnable_root",
+          "algorithm": "sha256",
+          "digest": "d06491c1e51245fbfd57f938d2a83252f10f68ce17a435b42abdf8243712210c",
+          "size_bytes": 814
+        },
+        "downloadedObjects": 15,
+        "downloadedBytes": 9440515,
+        "smallFixtureElapsedMs": 4646,
+        "nativeRestore": true,
+        "retainedAcrossNativeRestart": true,
+        "secondRestoreDownloadedObjects": 15,
+        "exactU64Bytes": true,
+        "chunkedFileSha256": "9b2c07acf4335bf58ea9192e7439190c02ea07bdc5e3a193486f1656a4f7f4f2",
+        "rawNameMetadata": true,
+        "fileModeMetadata": true,
+        "symlinkMetadata": true,
+        "filesystemMaterialization": false
+      },
+      "cleanupVerified": true,
+      "syntheticCredentialRemoved": true,
+      "verifiedAt": "2026-10-31T00:08:07.567Z"
+    },
+    "existingActiveHome": {
+      "id": "8edd225a7d0378",
+      "instance": "01M670MG4A8E0DWE9GA1C0PQ92",
+      "state": "started",
+      "image": "registry.fly.io/rudder-workers-exla:4.0.0-alpha.7",
+      "digest": "sha256:404f46396aca77324d9b53c55d2824a5401af56ba5362d0bdae67e16108fc245",
+      "unchangedAcrossDeploy": true
+    },
+    "liveHomesRestarted": false,
+    "fleetAdoptionVerified": false
+  },
+  "cli": {
+    "status": "publication-pending",
+    "version": "4.0.0-alpha.11",
+    "releaseWorkflow": "https://github.com/exla-ai/rudder/actions/runs/41147002410",
+    "lastRegistryObservation": {
+      "at": "2026-10-31T00:09:12.402796Z",
+      "packages": [
+        {
+          "name": "@exla/rudder",
+          "tags": {
+            "latest": "3.9.13",
+            "next": "4.0.0-alpha.7"
+          }
+        },
+        {
+          "name": "@viraatdas/rudder",
+          "tags": {
+            "latest": "3.9.13",
+            "next": "4.0.0-alpha.7"
+          }
+        }
+      ]
+    },
+    "nativePlatformStatus": {
+      "linux-x64": "success",
+      "darwin-arm64": "success",
+      "darwin-x64": "in-progress"
+    },
+    "macAppCI": "success",
+    "iosCI": "success",
+    "tuiCI": "success"
+  },
+  "localChecks": {
+    "engine": {
+      "passed": 350,
+      "ignored": 5,
+      "suites": 33,
+      "sourceChangedAfterEngineIntegration": "Only Native app_tests.rs EOF-aware fixture correction; engine199 envelope unchanged"
+    },
+    "native": {
+      "passed": 1030,
+      "ignored": 12,
+      "source": "workspace-unit-tests.log"
+    },
+    "bridgeIntegration": {
+      "passed": 32,
+      "ignored": 0,
+      "suites": 8
+    },
+    "docTests": "passed (3 crates/0 examples)",
+    "priorFullCommand": "Preserved exit101 for obsolete Native fixture, corrected without runtime change; all unaffected engine suites passed and Native+bridge/doc suites rerun",
+    "fullPlanGoal": "active",
+    "node": {
+      "passed": 711,
+      "optionalSkipped": 9
+    },
+    "terminalJourneysPassed": 59,
+    "productionBuild": "passed",
+    "typecheck": "passed",
+    "cloudBuild": "passed",
+    "contextAuditFindings": 0,
+    "fixtureExportsReusedCompiledBinaries": true,
+    "credentialScanMatches": 0,
+    "configuredAwsSecretValuesScanned": 2
+  },
+  "frozenSource": {
+    "revision": "30f6db4c4806a8f65c695d235a43d599ae23c080",
+    "version": "4.0.0-alpha.11",
+    "sourceFiles": 1371,
+    "sourceBytes": 49346282,
+    "archiveMembers": 1601,
+    "configuredSecretValuesScanned": 2,
+    "matches": 0,
+    "sourceEnvelopeEncoding": "sha256 of sorted compact JSON path-to-sha256 map",
+    "sourceEnvelopeSha256": "4a34c56d5b9dd97ea19322168a2cf6849f2f1935a33ec2563d0b9e4fd4efae7a",
+    "at": "2026-10-30T23:53:16.297454+00:00"
+  },
+  "independentCleanup": {
+    "formatVersion": 1,
+    "canaryIds": [
+      "85759ef4124328",
+      "8d31e5fe957118"
+    ],
+    "canaryNames": [
+      "rudder-alpha11-boot-b3df28e0",
+      "rudder-alpha11-cas-ddb6e692"
+    ],
+    "absent": true,
+    "database": {
+      "syntheticCredentialRows": 0,
+      "workspaces": 49,
+      "integrity": "ok"
+    },
+    "home": {
+      "id": "8edd225a7d0378",
+      "instance": "01M670MG4A8E0DWE9GA1C0PQ92",
+      "state": "started",
+      "unchanged": true
+    },
+    "verifiedAt": "2026-10-31T00:08:26.420Z"
+  },
+  "limits": [
+    "Full PLAN.md remains active; Alpha12 main-checkout work is not in these immutable images.",
+    "Managed launch/default activation, OAuth/provider inference, controlled general networking, source acceptance and physical legacy retirement remain gates.",
+    "Private floors are cooperative; TypeScript/alternate homes are not physically fenced.",
+    "Partial captures are live best-effort data, not quiescence or accepted source.",
+    "PostgreSQL authority/native leases remain inactive; no provider HA/RPO or fleet migration claim.",
+    "Active homes adopt when idle; no local macOS app installation is claimed.",
+    "The repeat eager S3 restore still downloads all15 objects; no incremental/lazy-S3 performance claim."
+  ]
+}

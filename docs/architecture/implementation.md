@@ -1,6 +1,6 @@
 # Rudder v4 implementation and restart record
 
-Updated: 2026-10-30. Read with [the plan](../../PLAN.md),
+Updated: 2026-10-31. Read with [the plan](../../PLAN.md),
 [research](research.md), [gates](experiments.md) and repository `AGENTS.md`.
 This file preserves the working agreement across context compaction. An entry
 here is not deployment proof; record exact checks and delivery identities below.
@@ -50,7 +50,7 @@ the three architecture documents already contained this session's planning work.
 | Private previews | Persisted Tailscale login, actual readiness, bounded async probes, exact project ownership, ready links and local open | E13 subset implemented; real userspace/Serve check passed; laptop/phone access remains untested |
 | Terminal stream | Shared home/sail helper, short output batching, bounded backpressure, connection fencing, UTF-8 and repaint recovery | E13 subset deployed in the worker image; real WS/PTY VM checks passed; existing homes adopt when idle |
 | Startup/download caches | Background CLI update, persistent account-local npm/pnpm/uv cache defaults, explicit overrides retained | Behavior tests pass; no distributed action-cache claim |
-| Full storage/engine rewrite | Milestones below | Cloud release 161 / worker alpha.10 is deployed and verified; npm remains alpha.7 after the release-test failure recorded below. Default workspace integration, fleet and migration gates remain open |
+| Full storage/engine rewrite | Milestones below | Cloud release 162 / worker alpha.11 is deployed and verified; npm remains alpha.7 while alpha.11 release CI runs. Default workspace integration, fleet and migration gates remain open |
 
 The current native simple-execution path remains an isolated worker; explicit
 main-checkout mode remains available. The initial automatic DAG path retains
@@ -65,26 +65,32 @@ dashboard in its place without task identity/approval/completion tracking would
 misreport completion. Local `/cloud` task forwarding still reaches that legacy
 path, so this is a stated alpha limitation, not complete Cloud routing parity.
 
-## V4 foundations and current continuation, 2026-10-30
+## V4 foundations and current continuation, 2026-10-31
 
-Cloud alpha.10 is deployed as release 161 from
-`56f825ea3c1d6136b1a20b3031f835ef33f870cd`; the canonical app, health,
+Cloud alpha.11 is deployed as release 162 from
+`30f6db4c4806a8f65c695d235a43d599ae23c080`; the canonical app, health,
 authentication, database integrity and unchanged active-home instance were
-verified at `2026-10-30T22:48:32Z`. Its complete worker image passed an owned
-Fly bootstrap/runtime smoke. A fresh worker restored the synthetic RunnableRoot
-from deployed S3 and retained it across native restart. Both owned canaries and
-the temporary credential row were independently absent at `2026-10-30T22:56:14Z`.
-See [exact delivery evidence](delivery-alpha10.json).
-The active home keeps its running alpha.7 image until idle.
+verified at `2026-10-31T00:06:17Z`. Its complete worker image passed an owned
+Fly bootstrap/runtime smoke, including packaged CLI/native/buddy, changed-remote
+Git/jj fetch and auxiliary tool entrypoints. A fresh worker restored the synthetic
+RunnableRoot from deployed S3 into its native CAS and retained it across helper
+restart. Both canaries and the temporary credential row were independently
+absent at `2026-10-31T00:08:26Z`.
+See [exact delivery evidence](delivery-alpha11.json).
+The active home keeps its running alpha.7 image until idle. This CAS-format
+round trip does not establish filesystem materialization or agent-launch latency.
 
-Both npm `next` tags still point to alpha.7, verified at `2026-10-30T23:11:06Z`.
+Both npm `next` tags still point to alpha.7, verified at `2026-10-31T00:09:12Z`.
+Alpha.11 Linux and ARM Mac artifacts passed; the Intel Mac build remains in
+progress. Its Mac/iOS and TUI CI passed. Registry availability and fresh installs
+are still separate gates.
 All three alpha.10 native platform builds, Mac/iOS and TUI CI passed. Its
 publication job then stopped on two managed-guard test path assertions. A
 symlinked TMPDIR reproduces both failures on Linux: child process.cwd() resolves
 the parent while the fixture compared its original spelling. Canonicalizing only
 the disposable fixture identity preserves exact refusal checks and changes that
 controlled run from 1 pass / 2 failures to 3 passes. The correction is in the
-alpha.11 working tree; alpha.10 remains unpublished. Alpha.9 publication failed twice in
+alpha.11 tag; alpha.10 remains unpublished. Alpha.9 publication failed twice in
 the macOS remote-root HTTP fixture before npm publication. Darwin inherits a
 listener's nonblocking flag, while the fixture assumed blocking full-body
 writes. Alpha.10 normalizes accepted streams and adds forced
@@ -93,13 +99,14 @@ alpha.9, publish by hand or treat its Cloud deployment as npm availability.
 
 The shorter startup context from alpha.4 is included. Partial-capture namespace4,
 the inactive PostgreSQL authority adapter and explicit internal managed App
-composition are included in Cloud alpha.10. New alpha.11 working-tree changes
-add private managed storage/protocol floors, board capabilities and verified
-paired build artifacts. Those changes are unshipped. CLI publication, configured
-worker image and live worker adoption remain separate facts. The active
-objective is the full plan.
+composition are included in Cloud alpha.11, alongside private managed storage,
+writer floors, board capabilities and paired native build artifacts. Alpha.12
+main-checkout work is underway in the execution-factory, strict remote-selection
+and network-primitive seams; it is not in these frozen images. CLI publication,
+configured worker image and live adoption remain separate facts. The active
+objective remains the full plan.
 
-Alpha.11 local integration adds:
+Alpha.11 includes:
 
 - [Private managed storage](managed-storage.md), explicit journal schema5 opt-in,
   receipt-scoped recovery and pre-startup Native refusal. Focused checks cover
@@ -121,7 +128,7 @@ Alpha.11 local integration adds:
   terminal journeys, production/Cloud builds and the context audit. The prior
   full-workspace command exposed an obsolete test that bypassed production's
   EOF-aware PTY wait; its summary assertion was retained and the corrected
-  Native/unit suites passed. Registry and rollout verification remain pending.
+  Native/unit suites passed. Cloud rollout is verified; registry/fresh-install verification remains pending.
 
 The separate owned NEWNET/TUN observation is in
 [the networking gate](managed-network-isolation.md). It changes no product
@@ -372,7 +379,7 @@ revision, version, CI workflow result, published npm dist-tag, worker image
 digest, Fly release/deployment identity, canonical URL, UTC verification time,
 checks and active-home adoption state. A pushed commit is not a Cloud rollout.
 
-### Current alpha.7 CLI and Cloud delivery
+### Earlier alpha.7 CLI and Cloud delivery checkpoint
 
 [Cloud release 159](delivery-alpha7.json) runs alpha.7 revision
 `a24bc4171d55ce9554068cdeb1b6e228b461d54d`. The canonical app/health returned

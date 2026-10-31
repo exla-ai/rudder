@@ -1,0 +1,115 @@
+{
+  "format_version": 1,
+  "provider": "Fly.io",
+  "version": "4.0.0-alpha.11",
+  "revision": "30f6db4c4806a8f65c695d235a43d599ae23c080",
+  "image": "registry.fly.io/rudder-workers-exla:4.0.0-alpha.11",
+  "expectedDigest": "sha256:06bf0ea6a1c95e15a992a1a7fe04fe0eadb0599a71c3a523475f6d33e92347f0",
+  "nonce": "b3df28e0-d560-49e0-a8b4-bde1ba3abd21",
+  "name": "rudder-alpha11-boot-b3df28e0",
+  "steps": [
+    {
+      "step": "assert-no-app-secrets",
+      "ms": 1051
+    },
+    {
+      "step": "create-owned-smoke",
+      "ms": 29801
+    },
+    {
+      "step": "inventory",
+      "ms": 517
+    },
+    {
+      "step": "read-bounded-proof",
+      "ms": 851
+    },
+    {
+      "step": "read-bounded-proof",
+      "ms": 697
+    },
+    {
+      "step": "read-bounded-proof",
+      "ms": 691
+    },
+    {
+      "step": "read-bounded-proof",
+      "ms": 861
+    },
+    {
+      "step": "read-bounded-proof",
+      "ms": 1315
+    },
+    {
+      "step": "inventory",
+      "ms": 700
+    },
+    {
+      "step": "destroy-owned-smoke",
+      "ms": 1711
+    },
+    {
+      "step": "inventory",
+      "ms": 562
+    }
+  ],
+  "limits": [
+    "The real image bootstrap, cache setup and entrypoint execute. An image-owned-node preload probes and holds before supervisor module evaluation.",
+    "No model call, account vault, worker credential, live home or production workspace is used.",
+    "Managed execution remains opt-in; this does not prove full backend, fleet or remote-build admission."
+  ],
+  "machine": "85759ef4124328",
+  "instance": "01M67MB1N5KRTXTMS22KFQMY2K",
+  "region": "sjc",
+  "checks": {
+    "kind": "alpha11-full-image-boot-smoke",
+    "ok": true,
+    "uid": 1500,
+    "gid": 1500,
+    "nnp": "1",
+    "zeroCapabilities": true,
+    "supplementaryGroups": "",
+    "fuseGranted": true,
+    "fuseOpen": true,
+    "cacheOwnedByUser": true,
+    "rootReentryDenied": true,
+    "realBootstrapAndEntrypoint": true,
+    "supervisorModuleEvaluated": false,
+    "packageVersion": "4.0.0-alpha.11",
+    "version": "4.0.0-alpha.11",
+    "node": "v22.23.4",
+    "kernel": "6.12.114-fly",
+    "claude": "2.1.314 (Claude Code)",
+    "codex": "codex-cli 0.166.0",
+    "tailscale": "1.104.4",
+    "jj": "jj 0.40.0-941d0290f5511db1d1cf8e4fe7365ba7d1828ea0",
+    "git": "git version 2.56.0",
+    "jjFetchChangedFileRemote": true,
+    "capabilities": {
+      "authority": "local-only",
+      "format_version": 1,
+      "metadata_encoding": "canonical-json-v1",
+      "object_hash": "sha256",
+      "scheduler": false
+    },
+    "bridge": {
+      "automatic_jj_replacement": false,
+      "format_version": 1,
+      "jj_version": "0.40.0",
+      "local_development": false,
+      "vfs_default": false,
+      "vfs_provider_required": true
+    },
+    "auxiliary": {
+      "bun": "1.4.4",
+      "acpx": "0.21.1",
+      "hunkdiffHelp": true
+    },
+    "nativeSha256": "2b111b67482e49c00d20b163b3a19675186d6e4dd7f5df71b820766f78609c6a",
+    "buddySha256": "2ef449b9355be8c7b53e31240f75cccc518bf113089349682f6ac6cae3712a88",
+    "verifiedAt": "2026-10-31T00:05:00.909Z"
+  },
+  "ok": true,
+  "cleanupVerified": true,
+  "verifiedAt": "2026-10-31T00:05:06.600Z"
+}

@@ -78,10 +78,12 @@ pub struct RemoteStats {
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Binding {
+pub(super) struct Binding {
     format_version: u32,
-    root: RootBinding,
-    attempt: AttemptBinding,
+    pub(super) root: RootBinding,
+    pub(super) attempt: AttemptBinding,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    launch: Option<super::remote_launch::RemoteLaunchRequest>,
 }
 struct Cache {
     objects: BTreeMap<String, LoadedObject>,
@@ -111,6 +113,21 @@ fn mapped<T>(value: std::result::Result<T, RootError>) -> Result<T> {
 }
 impl Resolver {
     fn new(session: RemoteSession, expected: &ObjectRef, options: RemoteOptions) -> Result<Self> {
+        Self::new_inner(session, expected, options, None)
+    }
+    pub(super) fn for_launch(
+        session: RemoteSession,
+        expected: &super::remote_launch::RemoteLaunchRequest,
+        options: RemoteOptions,
+    ) -> Result<Self> {
+        Self::new_inner(session, &expected.root.root, options, Some(expected))
+    }
+    fn new_inner(
+        session: RemoteSession,
+        expected: &ObjectRef,
+        options: RemoteOptions,
+        launch: Option<&super::remote_launch::RemoteLaunchRequest>,
+    ) -> Result<Self> {
         options.validate()?;
         ensure!(
             session.binding().root == *expected && expected.kind == ObjectKind::RunnableRoot,
@@ -118,6 +135,7 @@ impl Resolver {
         );
         let mut bytes = 0u64;
         let mut objects = 0usize;
+        let launch_deadline = Instant::now() + options.request_timeout;
         let initial =
             |handle: ObjectHandle, bytes: &mut u64, objects: &mut usize| -> Result<LoadedObject> {
                 if handle.reference().size_bytes > 64 * 1024 {
@@ -133,19 +151,55 @@ impl Resolver {
                 if *bytes > options.max_initial_bytes || *objects > options.max_initial_objects {
                     return Err(error(libc::EAGAIN));
                 }
-                mapped(
-                    mapped(session.request(&handle, Instant::now() + options.request_timeout))?
-                        .wait(),
-                )
+                let deadline = if launch.is_some() {
+                    launch_deadline
+                } else {
+                    Instant::now() + options.request_timeout
+                };
+                mapped(mapped(session.request(&handle, deadline))?.wait())
             };
         let root = initial(mapped(session.root())?, &mut bytes, &mut objects)?;
         let manifest = mapped(root.with_bytes(snapshot::decode_runnable))??;
+        if let Some(expected) = launch {
+            if manifest.environment.is_some() {
+                return Err(error(libc::EOPNOTSUPP))
+                    .context("remote launch does not support environment composition");
+            }
+            ensure!(
+                manifest.source == expected.accepted_source
+                    && manifest.profile == expected.observation.profile,
+                "remote launch source/profile differs from the expected selection"
+            );
+        }
         let source = initial(
             mapped(root.child(&manifest.source))?,
             &mut bytes,
             &mut objects,
         )?;
-        mapped(source.with_bytes(snapshot::decode_source))??;
+        let source_manifest = mapped(source.with_bytes(snapshot::decode_source))??;
+        if let Some(expected) = launch {
+            if source_manifest.directory != manifest.view_root {
+                return Err(error(libc::EOPNOTSUPP))
+                    .context("remote launch source directory must equal runnable view root");
+            }
+            ensure!(
+                source_manifest.projection_policy == expected.projection_policy,
+                "remote launch projection policy differs from the expected selection"
+            );
+            let policy = initial(
+                mapped(source.child(&source_manifest.projection_policy))?,
+                &mut bytes,
+                &mut objects,
+            )?;
+            mapped(policy.with_bytes(|bytes| -> Result<()> {
+                let value: serde_json::Value = serde_json::from_slice(bytes)?;
+                ensure!(
+                    value.is_object() && canonical_json(&value)? == bytes,
+                    "remote launch policy must be canonical metadata"
+                );
+                Ok(())
+            }))??;
+        }
         if let Some(reference) = &manifest.environment {
             let env = initial(mapped(root.child(reference))?, &mut bytes, &mut objects)?;
             mapped(env.with_bytes(snapshot::decode_environment))??;
@@ -169,6 +223,10 @@ impl Resolver {
                 profile.validate()?;
                 Ok(profile)
             }))??;
+        if launch.is_some() && profile != WorkspaceProfile::source_only() {
+            return Err(error(libc::EOPNOTSUPP))
+                .context("remote launch requires source-only profile without partitions");
+        }
         let topology = initial(
             mapped(root.child(&manifest.hardlinks))?,
             &mut bytes,
@@ -200,10 +258,14 @@ impl Resolver {
             &mut bytes,
             &mut objects,
         )?;
+        if launch.is_some() && Instant::now() >= launch_deadline {
+            return Err(error(libc::ETIMEDOUT));
+        }
         let binding = Binding {
-            format_version: 1,
+            format_version: if launch.is_some() { 2 } else { 1 },
             root: session.binding().clone(),
             attempt: session.attempt().clone(),
+            launch: launch.cloned(),
         };
         Ok(Self {
             session,
@@ -226,6 +288,39 @@ impl Resolver {
     }
     pub(super) fn guard(&self) -> Result<()> {
         mapped(self.root.with_bytes(|_| ()))
+    }
+    pub(super) fn profile(&self) -> &WorkspaceProfile {
+        &self.profile
+    }
+    pub(super) fn launch_request(&self) -> Option<&super::remote_launch::RemoteLaunchRequest> {
+        self.binding.launch.as_ref()
+    }
+    /// Persisted metadata is checked only against this actual current resolver;
+    /// parsing a saved binding never creates a session or grants permission.
+    pub(super) fn persisted_binding(&self, bytes: &str, namespace: &str) -> Result<Binding> {
+        self.guard()?;
+        ensure!(bytes.len() <= 64 * 1024, "remote binding exceeds 64 KiB");
+        let binding: Binding = serde_json::from_str(bytes)?;
+        match (binding.format_version, &binding.launch) {
+            (1, None) => {}
+            (2, Some(request)) => {
+                request.validate()?;
+                ensure!(
+                    request.root == binding.root
+                        && request.attempt == binding.attempt
+                        && request.observation.namespace == namespace
+                        && request.observation.profile == self.manifest.profile
+                        && request.accepted_source == self.manifest.source,
+                    "persisted launch binding differs from namespace/root/attempt/profile"
+                );
+            }
+            _ => anyhow::bail!("unknown remote capture binding"),
+        }
+        ensure!(
+            binding == self.binding && bytes == self.serialized_binding()?.as_str(),
+            "persisted remote capture binding differs from the actual current resolver"
+        );
+        Ok(binding)
     }
     pub(super) fn serialized_binding(&self) -> Result<String> {
         Ok(serde_json::to_string(&self.binding)?)
@@ -755,6 +850,22 @@ impl Resolver {
     }
 }
 impl VfsManager {
+    pub(super) fn open_remote_selection(
+        root: impl AsRef<Path>,
+        store: LocalStore,
+        resolver: Arc<Resolver>,
+    ) -> Result<Self> {
+        resolver.guard()?;
+        ensure!(
+            resolver.launch_request().is_some(),
+            "remote selection lacks validated launch binding"
+        );
+        let mut manager = Self::open(root, store)?;
+        Arc::get_mut(&mut manager.0)
+            .context("remote manager unexpectedly shared")?
+            .remote = Some(resolver);
+        Ok(manager)
+    }
     /// Explicit partial-root profile; inherited CAS is never imported/pinned.
     /// The supplied LocalStore is private local-delta authority only. The
     /// session is fresh/current and binds this exact view UUID and owner.
@@ -773,12 +884,32 @@ impl VfsManager {
         Ok(manager)
     }
     pub fn fork_remote(&self) -> Result<VfsView> {
+        self.fork_remote_inner(None)
+    }
+    /// Reserved namespaces are available only on a validated launch selection.
+    /// The exact namespace is included in immutable fork request bytes and the
+    /// v2 remote binding; neither retry nor reopen can mint a replacement.
+    pub fn fork_remote_with_namespace(&self, namespace: &str) -> Result<VfsView> {
+        self.fork_remote_inner(Some(namespace))
+    }
+    fn fork_remote_inner(&self, namespace: Option<&str>) -> Result<VfsView> {
         let remote = self
             .0
             .remote
             .as_ref()
             .context("manager has no remote root")?;
         remote.guard()?;
+        match (remote.launch_request(), namespace) {
+            (None, None) => {}
+            (Some(request), Some(namespace)) => ensure!(
+                namespace == request.observation.namespace,
+                "remote fork differs from reserved observation namespace"
+            ),
+            _ => {
+                return Err(error(libc::EOPNOTSUPP))
+                    .context("remote reserved fork requires its validated selection")
+            }
+        }
         let (mode, entries, subdirectories) = remote.header;
         ensure!(
             entries <= i64::MAX as u64
@@ -797,12 +928,13 @@ impl VfsManager {
                 sql_id(subdirectories)
             ],
         )?;
-        self.fork_inner(
+        self.fork_inner_with_namespace(
             remote.view_id(),
             remote.base(),
             None,
             remote.owner().clone(),
             true,
+            namespace,
         )
     }
     pub fn open_remote_view(&self) -> Result<VfsView> {

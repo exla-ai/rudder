@@ -35,6 +35,7 @@ mod namespace;
 mod observation;
 mod readdir;
 mod remote;
+pub mod remote_launch;
 pub mod rpc;
 pub use capture::{
     PartialCaptureBudget, PartialCaptureReceipt, PartialCaptureRequest, PartialCaptureStatus,
@@ -724,7 +725,24 @@ impl VfsManager {
         owner: OwnerEpoch,
         v2: bool,
     ) -> Result<VfsView> {
+        self.fork_inner_with_namespace(id, root, topology, owner, v2, None)
+    }
+    fn fork_inner_with_namespace(
+        &self,
+        id: &str,
+        root: &ObjectRef,
+        topology: Option<&ObjectRef>,
+        owner: OwnerEpoch,
+        v2: bool,
+        observation_namespace: Option<&str>,
+    ) -> Result<VfsView> {
         ensure!(Uuid::parse_str(id).is_ok(), "view id must be a UUID");
+        if let Some(namespace) = observation_namespace {
+            ensure!(
+                v2 && Uuid::parse_str(namespace)?.to_string() == namespace,
+                "reserved observation namespace requires canonical paged profile"
+            );
+        }
         owner.validate()?;
         if let Some(remote) = &self.0.remote {
             remote.guard()?;
@@ -757,10 +775,36 @@ impl VfsManager {
         if let Some(remote) = &self.0.remote {
             request["remote_binding"] = serde_json::from_str(&remote.serialized_binding()?)?;
         }
+        if let Some(namespace) = observation_namespace {
+            request["observation_namespace"] = serde_json::Value::String(namespace.into());
+        }
         let request = canonical_json(&request)?;
         if reservation.exists() {
+            let saved = if observation_namespace.is_some() {
+                let mut input = OpenOptions::new()
+                    .read(true)
+                    .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
+                    .open(&reservation)?;
+                let meta = input.metadata()?;
+                ensure!(
+                    meta.is_file() && meta.uid() == unsafe { libc::geteuid() }
+                        && meta.mode() & 0o077 == 0 && meta.nlink() == 1,
+                    "unsafe reserved remote fork request"
+                );
+                if meta.len() > 64 * 1024 {
+                    return Err(error(libc::EFBIG)).context("remote fork request exceeds 64 KiB");
+                }
+                let mut bytes = Vec::new();
+                Read::by_ref(&mut input).take(64 * 1024 + 1).read_to_end(&mut bytes)?;
+                if bytes.len() > 64 * 1024 {
+                    return Err(error(libc::EFBIG)).context("remote fork request grew beyond 64 KiB");
+                }
+                bytes
+            } else {
+                fs::read(&reservation)?
+            };
             ensure!(
-                fs::read(&reservation)? == request,
+                saved == request,
                 "view id already reserved for different fork inputs"
             );
         } else {
@@ -814,7 +858,11 @@ impl VfsManager {
         if v2 {
             content::initialize(&db)?;
             namespace::initialize(&db, entries)?;
-            observation::initialize(&db)?;
+            if let Some(namespace) = observation_namespace {
+                observation::initialize_reserved(&db, namespace)?;
+            } else {
+                observation::initialize(&db)?;
+            }
         }
         if self.0.remote.is_some() {
             readdir::initialize(&db)?;
@@ -926,7 +974,7 @@ impl VfsManager {
         );
         let v2 = version == "2" || version == "3" || version == "4";
         if version == "4" {
-            capture::validate_schema(&db)?;
+            capture::validate_schema(&db, self.0.remote.as_deref())?;
         }
         ensure!(
             db.query_row("SELECT value FROM meta WHERE key='view_id'", [], |r| r
@@ -935,6 +983,15 @@ impl VfsManager {
             ))? == id,
             "view id mismatch"
         );
+        if let Some(request) = self.0.remote.as_ref().and_then(|remote| remote.launch_request()) {
+            let namespace: String = db.query_row(
+                "SELECT namespace FROM observation_state WHERE singleton=1", [], |row| row.get(0),
+            )?;
+            ensure!(
+                namespace == request.observation.namespace,
+                "persisted remote observation namespace differs from reserved launch"
+            );
+        }
         db.execute(
             "ATTACH DATABASE ? AS inherited",
             [self

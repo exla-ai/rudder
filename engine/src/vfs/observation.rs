@@ -170,11 +170,15 @@ impl<'a> WorkMeter<'a> {
 }
 
 pub(super) fn initialize(c: &Connection) -> Result<()> {
+    initialize_reserved(c, &Uuid::new_v4().to_string())
+}
+pub(super) fn initialize_reserved(c: &Connection, namespace: &str) -> Result<()> {
+    ensure!(
+        Uuid::parse_str(namespace)?.to_string() == namespace,
+        "observation namespace must be canonical UUID"
+    );
     c.execute_batch("CREATE TABLE observation_state(singleton INTEGER PRIMARY KEY CHECK(singleton=1),namespace TEXT NOT NULL,generation INTEGER NOT NULL CHECK(generation>=0));CREATE TABLE dirty_events(generation INTEGER PRIMARY KEY,body TEXT NOT NULL);CREATE TABLE observations(nonce TEXT PRIMARY KEY,policy TEXT NOT NULL,generation INTEGER NOT NULL,namespace TEXT NOT NULL,pin TEXT NOT NULL,status TEXT NOT NULL,result TEXT);")?;
-    c.execute(
-        "INSERT INTO observation_state VALUES(1,?,0)",
-        [Uuid::new_v4().to_string()],
-    )?;
+    c.execute("INSERT INTO observation_state VALUES(1,?,0)", [namespace])?;
     Ok(())
 }
 pub(super) fn mutation(

@@ -261,7 +261,7 @@ impl crate::directory::DirectoryStore for Collector<'_> {
     }
 }
 
-pub(super) fn validate_schema(c: &Connection) -> Result<()> {
+pub(super) fn validate_schema(c: &Connection, expected: Option<&remote::Resolver>) -> Result<()> {
     let count: u64 = c.query_row("SELECT count(*) FROM sqlite_master WHERE type='table' AND name IN ('partial_captures','partial_capture_head')", [], |r| read_id(r,0))?;
     ensure!(
         count == 2,
@@ -282,20 +282,14 @@ pub(super) fn validate_schema(c: &Connection) -> Result<()> {
         [],
         |r| r.get(0),
     )?;
-    #[derive(Deserialize)]
-    #[serde(deny_unknown_fields)]
-    struct RemoteBinding {
-        format_version: u32,
-        root: RootBinding,
-        attempt: AttemptBinding,
-    }
     let remote: String = c.query_row(
         "SELECT value FROM meta WHERE key='remote_binding'",
         [],
         |r| r.get(0),
     )?;
-    let remote: RemoteBinding = serde_json::from_str(&remote)?;
-    ensure!(remote.format_version == 1, "unknown remote capture binding");
+    let remote = expected
+        .ok_or_else(|| error(libc::EOPNOTSUPP))?
+        .persisted_binding(&remote, &namespace)?;
     let mut q = c.prepare("SELECT nonce,binding,stage,pin,candidate,retention,result,release_receipt FROM partial_captures")?;
     let mut rows = q.query([])?;
     while let Some(row) = rows.next()? {
@@ -386,7 +380,7 @@ pub(super) fn validate_schema(c: &Connection) -> Result<()> {
     head(c)?;
     Ok(())
 }
-fn existing_schema(c: &Connection) -> Result<bool> {
+fn existing_schema(c: &Connection, expected: Option<&remote::Resolver>) -> Result<bool> {
     let version: String = c.query_row(
         "SELECT value FROM meta WHERE key='format_version'",
         [],
@@ -394,7 +388,7 @@ fn existing_schema(c: &Connection) -> Result<bool> {
     )?;
     match version.as_str() {
         "4" => {
-            validate_schema(c)?;
+            validate_schema(c, expected)?;
             Ok(true)
         }
         "3" => {
@@ -408,8 +402,8 @@ fn existing_schema(c: &Connection) -> Result<bool> {
         _ => Err(error(libc::EOPNOTSUPP)).context("partial capture requires remote namespace3/4"),
     }
 }
-fn activate(c: &Connection) -> Result<()> {
-    if existing_schema(c)? {
+fn activate(c: &Connection, expected: Option<&remote::Resolver>) -> Result<()> {
+    if existing_schema(c, expected)? {
         return Ok(());
     }
     let tx = c.unchecked_transaction()?;
@@ -576,7 +570,7 @@ impl VfsView {
         let meter = WorkMeter::cancellable(&budget.work, cancelled)?;
         let mut c = self.db()?;
         mutable(&c)?;
-        if !existing_schema(&c)? {
+        if !existing_schema(&c, self.manager().0.remote.as_deref())? {
             ensure!(
                 self.observation_cursor(&c)? == request.expected_begin,
                 "capture begin cursor differs"
@@ -586,7 +580,7 @@ impl VfsView {
                 "unactivated capture namespace has no head"
             );
         }
-        activate(&c)?;
+        activate(&c, self.manager().0.remote.as_deref())?;
         let binding = Binding {
             request: request.clone(),
             policy: digest,
@@ -879,7 +873,7 @@ impl VfsView {
     pub fn inspect_partial_capture(&self, nonce: &str) -> Result<Option<PartialCaptureStatus>> {
         canonical_nonce(nonce)?;
         let c = self.db()?;
-        if !existing_schema(&c)? {
+        if !existing_schema(&c, self.manager().0.remote.as_deref())? {
             return Ok(None);
         }
         let row: Option<(String, String, Option<String>, Option<String>)> = c
@@ -928,7 +922,7 @@ impl VfsView {
     pub fn partial_capture_head(&self) -> Result<Option<PartialCaptureReceipt>> {
         let nonce = {
             let c = self.db()?;
-            if !existing_schema(&c)? {
+            if !existing_schema(&c, self.manager().0.remote.as_deref())? {
                 return Ok(None);
             }
             head(&c)?.map(|h| h.0)
@@ -944,7 +938,10 @@ impl VfsView {
     pub fn release_partial_capture(&self, nonce: &str) -> Result<()> {
         canonical_nonce(nonce)?;
         let mut c = self.db()?;
-        ensure!(existing_schema(&c)?, "unknown partial capture");
+        ensure!(
+            existing_schema(&c, self.manager().0.remote.as_deref())?,
+            "unknown partial capture"
+        );
         let tx = c.transaction()?;
         ensure!(
             !head(&tx)?.is_some_and(|h| h.0 == nonce),

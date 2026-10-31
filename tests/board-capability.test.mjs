@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import http from "node:http";
 import test from "node:test";
+import { boardHostFiles } from "./board-fixture.mjs";
 const { startBoardDaemon } = await import("../src/board/daemon.ts");
 const { requestBoardBootstrap } = await import("../src/board/host-access.ts");
 const { registerProject } = await import("../src/state.ts");
@@ -116,10 +117,9 @@ test("browser exchanges the fragment privately, stores by origin/instance, survi
   const count = requests.length; await assert.rejects(browser.fetch("https://elsewhere.invalid/api/projects")); assert.equal(requests.length, count);
   const reloaded = new BrowserBoardAccess({ ...env, href: server.url + "/usage" }); t.after(() => reloaded.close());
   await reloaded.initialize(); assert.equal((await reloaded.fetch("/api/usage/machine")).status, 200);
-  for (const name of await fs.readdir(path.join(root, "home", "board"))) if (name.endsWith(".json")) {
-    const file = path.join(root, "home", "board", name);
-    assert.equal((await fs.stat(file)).mode & 0o077, 0); assert.doesNotMatch(await fs.readFile(file, "utf8"), /ticket|Bearer|token/);
-  }
+  const { descriptor } = await boardHostFiles(repo, path.join(root, "home"));
+  assert.equal((await fs.stat(descriptor)).mode & 0o077, 0);
+  assert.doesNotMatch(await fs.readFile(descriptor, "utf8"), /ticket|Bearer|token/);
   const restarted = new BrowserBoardAccess({ ...env, href: server.url + "/rudder", fetch: async () => new Response(JSON.stringify({
     format_version: 1, origin: server.url, instance_id: "11111111-1111-4111-8111-111111111111" }), { headers: { "content-type": "application/json" } }) });
   await assert.rejects(restarted.initialize(), /Open this board/); assert.equal(saved.length, 0); restarted.close();

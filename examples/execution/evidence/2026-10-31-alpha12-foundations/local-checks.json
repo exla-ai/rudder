@@ -1,0 +1,34 @@
+{
+  "formatVersion": 1,
+  "candidateVersion": "4.0.0-alpha.12",
+  "checkedAt": "2026-10-31T00:55:29.368201+00:00",
+  "sourceStillFrozen": true,
+  "productionBuild": {
+    "exitCode": 0,
+    "seconds": 426.28
+  },
+  "rust": {
+    "passed": 1466,
+    "failed": 0,
+    "ignored": 19,
+    "suites": 54,
+    "logSha256": "9bcb3da54aaadede272505a6b52929438f151cc140c5b23b2741228ce956f1cb"
+  },
+  "node": {
+    "tests": 721,
+    "pass": 712,
+    "fail": 0,
+    "skipped": 9
+  },
+  "terminalJourneys": {
+    "passed": 59,
+    "failed": 0
+  },
+  "typecheck": "passed",
+  "cloudSource": "unchanged from verified alpha11; Docker/frozen cloud build remains a separate release check",
+  "limits": [
+    "Ignored and host-unsupported cases are not positive runtime qualification.",
+    "Tagged CI, npm publication/installs and Fly runtime checks remain separate gates.",
+    "No remote guest/default activation, accepted-history or full-v4 completion claim."
+  ]
+}

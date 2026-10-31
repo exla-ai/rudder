@@ -1,0 +1,6 @@
+{
+  "mode": "namespace-baseline",
+  "exitCode": 0,
+  "stdout": "{\"error\":\"ForeignNamespace\",\"hostFallback\":false,\"kind\":\"namespace-baseline-refusal\",\"status\":\"verified_no_namespace_change\"}\n",
+  "stderr": ""
+}

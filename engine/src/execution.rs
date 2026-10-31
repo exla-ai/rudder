@@ -27,6 +27,12 @@ pub mod linux;
 mod root;
 #[cfg(target_os = "linux")]
 mod state;
+pub mod network;
+pub mod workspace;
+pub use workspace::{
+    read_execution_recovery, CheckpointCapability, HelperWorkspaceFactory, HelperWorkspaceResources,
+    HistoricalExecution, NewExecution, OwnedHelperWorkspace,
+};
 
 /// Caller is the trusted engine ingress, not an agent-supplied mount request.
 /// Secrets are never Debug formatted or persisted with the execution receipt.
@@ -274,6 +280,9 @@ pub struct HelperServices {
     pub workspace_authority: Arc<dyn AttemptAuthority>,
     pub adoption_witness: Option<Arc<dyn AdoptionWitness>>,
     pub application: Option<Box<dyn HelperApplication>>,
+    /// Invoked only for a new, locked execution after services authorization.
+    /// None preserves the existing complete local manager/open_view path.
+    pub workspace_factory: Option<HelperWorkspaceFactory>,
 }
 /// Invoked only AFTER fresh single-thread namespace entry. Constructing this
 /// closure must not spawn threads; neither may sealed-spec handoff preparation.

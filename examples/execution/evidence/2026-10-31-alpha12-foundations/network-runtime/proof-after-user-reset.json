@@ -1,0 +1,6 @@
+{
+  "mode": "proof-after-user-reset",
+  "exitCode": 0,
+  "stdout": "{\"hostFallback\":false,\"kind\":\"capability-proof-reset\",\"status\":\"verified_reset_refused\"}\n",
+  "stderr": ""
+}

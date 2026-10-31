@@ -1,0 +1,165 @@
+{
+  "format_version": 1,
+  "slice": "alpha12-execution-pre-mount-workspace-seam",
+  "frozen_at_utc": "2026-10-31T00:31:33Z",
+  "source": [
+    {
+      "path": "engine/src/execution.rs",
+      "sha256": "08a73baad797c69726a72934743e6e5b6297c591f153dc7558d9766b690dd87f"
+    },
+    {
+      "path": "engine/src/execution/linux.rs",
+      "sha256": "a3a54690dd06002fda930893baaf6eeffd0480bffd7c241c422638b7d511568f"
+    },
+    {
+      "path": "engine/src/execution/state.rs",
+      "sha256": "62b56579f6f922c1fae09702ba6d31f7cd8c077b89bd641d5f99328450ea832a"
+    },
+    {
+      "path": "engine/src/execution/workspace.rs",
+      "sha256": "0ba7c66ea093e92a2b5fd6068a8177a4403fd3efe1e5c2397041f6cc51662373"
+    },
+    {
+      "path": "native/src/workspace_vcs.rs",
+      "sha256": "5e9d82c1fe20f2e475c4c65224c29dce2615e00de994862ff576457bdab8fa01"
+    },
+    {
+      "path": "vcs-bridge/examples/mounted_rpc/services.rs",
+      "sha256": "7b59109d6b78be2a3a299aebb2995d46ebc1cc84e2d4bbd8a3dec0d80957f8e1"
+    }
+  ],
+  "source_manifest": {
+    "path": "/workspace/rudder-alpha12-execution-source.sha256",
+    "sha256": "21b029735338b25ef8290bd1bff097e193695708bcc94064dfbdbaf52d91028c"
+  },
+  "api": {
+    "preflight": "Actual held execution state is reserved or reconciled before service/workspace factories; incomplete prior effects never replay.",
+    "new_execution": "Borrowed non-serializable lock witness with exact spec/directory/manager/store/request digest.",
+    "workspace": "One-shot HelperWorkspaceFactory returns OwnedHelperWorkspace retaining view/manager/external resources through local finalization and record fsync.",
+    "local": "workspace_factory=None preserves existing LocalStore/VfsManager/open_view selection; no checkout inference/fork/hydration fallback.",
+    "remote": "Opaque validated RemoteLaunchWorkspace can only produce PartialRemoteUnavailable; supervisor rejects before layout/home/mount/guest effects.",
+    "authority_lifetime": "Monitor remains alive through application/RPC/FUSE drain, local checkpoint, record fsync and authenticated receipt.",
+    "historical": "read_execution_recovery is bounded and read-only, returning historical data without locks/services/views/session/grants.",
+    "checkpoint_custody": "State::checkpoint_workspace checks actual lock/directory/sidecar before and after local checkpoint effects; the supervisor has no separate unfenced owned-workspace checkpoint helper."
+  },
+  "compatibility": {
+    "execution_spec_versions": [
+      1,
+      2,
+      3
+    ],
+    "execution_record_version": 1,
+    "spec_and_record_fields_unchanged": true,
+    "new_reservations": "Private immutable lock-identity format1 binds exact request/IDs/owner, actual lock+directory device/inode and random nonce; fsync before factories.",
+    "checks": "Held FD and named path/type/owner/private mode/nlink/nonce/sidecar rechecked around factories and record saves.",
+    "old_or_damaged": "Missing/pre-sidecar/mismatched/backup-restored identity remains historical recovery-only. No automatic repair/unlink/replace/delete; original records/checkpoints/pins retained.",
+    "relocation": "Device/inode changes require explicit recovery; persisted identity is never liveness or a current grant."
+  },
+  "checks": [
+    {
+      "kind": "pre-checkpoint-custody baseline execution unit",
+      "passed": 26,
+      "failed": 0,
+      "new_workspace_state_cases": 15,
+      "existing_handoff_lifecycle_cases": 11
+    },
+    {
+      "kind": "execution_handoff",
+      "passed": 4,
+      "failed": 0
+    },
+    {
+      "kind": "execution_rpc",
+      "passed": 5,
+      "failed": 0,
+      "includes": "legacy canonical request bytes and version fail-closed checks"
+    },
+    {
+      "kind": "remote_launch baseline",
+      "passed": 14,
+      "failed": 0,
+      "seconds": 45.22,
+      "includes": "unchanged-byte 100k/208MiB logical fixture and actual source/transport lifetime"
+    },
+    {
+      "kind": "remote canonicality affected rerun",
+      "passed": 12,
+      "failed": 1,
+      "unchanged_large_case_skipped": 1,
+      "failure": "New old-fork test assumed pending instead of the prior immutable candidate; corrected test-only with no product change."
+    },
+    {
+      "kind": "corrected exact old-fork regression",
+      "passed": 1,
+      "failed": 0
+    },
+    {
+      "kind": "Native lib/bin and bridge mounted-RPC example CLI-feature cargo check",
+      "exit_code": 0,
+      "seconds": 49.67
+    },
+    {
+      "kind": "owned diff check and six-file manifest verification",
+      "exit_code": 0
+    },
+    {
+      "kind": "final affected workspace/state suite",
+      "passed": 16,
+      "failed": 0,
+      "seconds": 0.2,
+      "includes": "real dirty local view plus late named-lock replacement; exact unchanged retention generation/pins/staging, CAS bytes and execution record"
+    },
+    {
+      "kind": "pager-owned existing capture/observation compatibility",
+      "passed_capture": 11,
+      "passed_observation": 5,
+      "failed": 0,
+      "reported_by": "pager_handoff"
+    }
+  ],
+  "logs": [
+    {
+      "path": "/workspace/rudder-alpha12-execution-unit-tests.log",
+      "sha256": "94e5d983a2363d36d59c9a575745dbf848e7db605733e40bc82b3479288f1193"
+    },
+    {
+      "path": "/workspace/rudder-alpha12-execution-integration-final.log",
+      "sha256": "00e29a822839517f855b973888a7e0ea81e804ff6d182e6a6cce1a82ad3b2697"
+    },
+    {
+      "path": "/workspace/rudder-alpha12-remote-canonicality-rerun.log",
+      "sha256": "c373d15d0452757c2669812889fa575d8fb694804207d0503fbf8c43d2fe3070"
+    },
+    {
+      "path": "/workspace/rudder-alpha12-remote-v1-fixture-final.log",
+      "sha256": "4af4e9cec520d67f498b03dbf34d71fd43b20573727278c3991b5e6d98647e09"
+    },
+    {
+      "path": "/workspace/rudder-alpha12-execution-mechanical-check.log",
+      "sha256": "37058520f57c6ce0632d8c69a42df81c1b94e87b730191c0e62818d75d9c719f"
+    },
+    {
+      "path": "/workspace/rudder-alpha12-execution-checkpoint-custody-tests.log",
+      "sha256": "83d77144d3d38fe9abed8370422e1850a66f16dbb5606c8dc565ca6cbf2aa1c7"
+    },
+    {
+      "path": "/workspace/rudder-alpha12-vfs-capture-compatibility.log",
+      "sha256": "6094cb900b41d64ef10b3505356e2bb3d5c6e34a5fdbaa3762bcbff99e2f267f"
+    },
+    {
+      "path": "/workspace/rudder-alpha12-vfs-observation-compatibility.log",
+      "sha256": "e2ea001c56331146df7b6ed29c56b1e62feee8d62c493b8a3efcff61756827fe"
+    }
+  ],
+  "qualification_limits": [
+    "No actual guest execution/mount/provider inference/OAuth/default activation qualification performed.",
+    "Remote quiescent partial finalization/checkpoint acceptance remains unavailable.",
+    "No ExecutionSpec outer version greater than3 allocated and no NEWNET wiring added.",
+    "No Darwin runtime or cross-compile executed."
+  ],
+  "target_handoff": {
+    "at_utc": "2026-10-31T00:31:33Z",
+    "next": "root full integrated workspace checks/production build",
+    "further_cargo_from_this_lane": false
+  }
+}

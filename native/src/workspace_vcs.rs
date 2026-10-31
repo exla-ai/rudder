@@ -516,6 +516,7 @@ pub(crate) fn services(spec: &ExecutionSpec) -> Result<HelperServices> {
             }),
             adoption_witness: None,
             application: None,
+            workspace_factory: None,
         });
     };
     let context = read_context(&application.host_context)?;
@@ -537,6 +538,7 @@ pub(crate) fn services(spec: &ExecutionSpec) -> Result<HelperServices> {
             executable,
             service: None,
         })),
+        workspace_factory: None,
     })
 }
 

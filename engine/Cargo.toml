@@ -42,3 +42,9 @@ name = "rudder-vfs-remote-qualifier"
 path = "src/bin/vfs_remote_qualifier.rs"
 test = false
 bench = false
+
+[[bin]]
+name = "rudder-network-qualifier"
+path = "src/execution/network/qualifier.rs"
+test = false
+bench = false

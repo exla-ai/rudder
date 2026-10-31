@@ -1,0 +1,6 @@
+{
+  "mode": "namespace-setup",
+  "exitCode": 0,
+  "stdout": "{\"afterDrop\":{\"ambient\":\"0000000000000000\",\"bounding\":\"0000000000000000\",\"effective\":\"0000000000000000\",\"inheritable\":\"0000000000000000\",\"noNewPrivileges\":true,\"permitted\":\"0000000000000000\",\"supportedBits\":41},\"allowedNamespaceWitnesses\":2,\"beforeDrop\":{\"ambient\":\"0000000000000000\",\"bounding\":\"000001ffffffffff\",\"effective\":\"000001ffffffffff\",\"inheritable\":\"0000000000000000\",\"noNewPrivileges\":true,\"permitted\":\"000001ffffffffff\",\"supportedBits\":41},\"childNet\":{\"device\":\"4\",\"inode\":\"4026532235\",\"kind\":\"Network\"},\"childUser\":{\"device\":\"4\",\"inode\":\"4026532234\",\"kind\":\"User\"},\"egressQualified\":false,\"hostFallback\":false,\"kind\":\"namespace-setup\",\"liveAttemptAuthorized\":false,\"loopbackVerified\":true,\"parentNet\":{\"device\":\"4\",\"inode\":\"4026531840\",\"kind\":\"Network\"},\"parentUser\":{\"device\":\"4\",\"inode\":\"4026531837\",\"kind\":\"User\"},\"parentWitnessesClosed\":true,\"status\":\"qualified_kernel_primitives_only\",\"uid\":1500}\n",
+  "stderr": ""
+}

@@ -1,0 +1,104 @@
+{
+  "utc": "2026-10-31T00:28:45.245271+00:00",
+  "status": "implemented-local-compatibility-passed-source-frozen",
+  "source_manifest": "/workspace/rudder-remote-launch-source.sha256",
+  "source_manifest_sha256": "3a44204ad4c645412d53b348d06f6a101d25ea2210328557fd2f4d5c9159f657",
+  "inputs": [
+    {
+      "path": "engine/src/vfs.rs",
+      "sha256": "509bfe3d31aadc0717522bee76d1588fd8ec7c857488adda4efa9b2e36f8d60c",
+      "size": 94505
+    },
+    {
+      "path": "engine/src/vfs/remote_launch.rs",
+      "sha256": "a91bb9eaeaf2d70187344142a7176ee5383bc6ff27aa2102d056a727f093d8a6",
+      "size": 8191
+    },
+    {
+      "path": "engine/src/vfs/remote.rs",
+      "sha256": "cc7a356445f782246993e115c5765bd47993184c0d4d9f3ab413dc79b4a0960c",
+      "size": 37718
+    },
+    {
+      "path": "engine/src/vfs/observation.rs",
+      "sha256": "d15f8bcea32619009c7cff317802fa0db03bad3485c5ebcf10911b7a8996e61a",
+      "size": 20560
+    },
+    {
+      "path": "engine/src/vfs/capture.rs",
+      "sha256": "b3e888c89959f3e9d636b56d520490e9baa89888c10c1074eb6314f9a933ddcb",
+      "size": 39955
+    },
+    {
+      "path": "engine/tests/remote_launch.rs",
+      "sha256": "907b2cf7553852500a118bed91e631a95a1526d32b2d15da9628041f8e579c65",
+      "size": 42613
+    }
+  ],
+  "proof": [
+    {
+      "role": "initial-failure",
+      "path": "/workspace/rudder-alpha12-remote-launch-initial-failure.log",
+      "sha256": "18dd7a81a3dccb0522363083afc816b0af9b4b5030a6f0dbf903daaef8c43f94",
+      "bytes": 3244,
+      "result": "preserved12/13;namespace4 reader failure fixed"
+    },
+    {
+      "role": "baseline",
+      "path": "/workspace/rudder-alpha12-execution-integration-final.log",
+      "sha256": "00e29a822839517f855b973888a7e0ea81e804ff6d182e6a6cce1a82ad3b2697",
+      "bytes": 2764,
+      "result": "remote_launch14/14;execution_handoff4/4;execution_rpc5/5"
+    },
+    {
+      "role": "canonicality-rerun",
+      "path": "/workspace/rudder-alpha12-remote-canonicality-rerun.log",
+      "sha256": "c373d15d0452757c2669812889fa575d8fb694804207d0503fbf8c43d2fe3070",
+      "bytes": 1963,
+      "result": "12/13;100k skipped;fixture-state assertion corrected"
+    },
+    {
+      "role": "final-affected-test",
+      "path": "/workspace/rudder-alpha12-remote-v1-fixture-final.log",
+      "sha256": "4af4e9cec520d67f498b03dbf34d71fd43b20573727278c3991b5e6d98647e09",
+      "bytes": 424,
+      "result": "1/1 original v1 exact-byte/corruption regression passed"
+    },
+    {
+      "role": "mechanical-compile",
+      "path": "/workspace/rudder-alpha12-execution-mechanical-check.log",
+      "sha256": "37058520f57c6ce0632d8c69a42df81c1b94e87b730191c0e62818d75d9c719f",
+      "bytes": 48066,
+      "result": "Native lib/bin and mounted-RPC example check exit0;no runtime claim"
+    },
+    {
+      "role": "capture-compatibility",
+      "path": "/workspace/rudder-alpha12-vfs-capture-compatibility.log",
+      "sha256": "6094cb900b41d64ef10b3505356e2bb3d5c6e34a5fdbaa3762bcbff99e2f267f",
+      "bytes": 1285,
+      "result": "11/11 passed57.38s;18 unrelated cases filtered"
+    },
+    {
+      "role": "local-observation-compatibility",
+      "path": "/workspace/rudder-alpha12-vfs-observation-compatibility.log",
+      "sha256": "e2ea001c56331146df7b6ed29c56b1e62feee8d62c493b8a3efcff61756827fe",
+      "bytes": 789,
+      "result": "5/5 passed16.21s"
+    }
+  ],
+  "api": {
+    "request": "RemoteLaunchRequest v1 holds expected identities only",
+    "validate": "validate_selection(actual RemoteSession,expected request,RemoteOptions)->opaque ValidatedRemoteSelection",
+    "open": "ValidatedRemoteSelection::open(manager_root,delta_store)->RemoteLaunchWorkspace",
+    "parts": "into_parts()->(VfsManager,VfsView,RemoteLaunchRequest);manager/view retain actual resource chain",
+    "formats": "original binding1 preserved;strict binding2 includes full immutable request;namespace3/4 unchanged"
+  },
+  "limits": [
+    "local engine fixtures only;no actual remote guest launch",
+    "remote complete checkpoint,observe,acceptance and execution activation remain unsupported",
+    "accepted seed/source are expected identities;host retained seed/current head/history validation remains independent",
+    "external resources not owned by supplied source require execution factory resource guard",
+    "no commits,releases,resources,provider calls or VM actions"
+  ],
+  "shared_cargo_target": "explicitly handed to storage_review after both compatibility commands exited0"
+}

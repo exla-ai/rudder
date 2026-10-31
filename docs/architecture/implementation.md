@@ -112,6 +112,19 @@ and network-primitive seams; it is not in these frozen images. CLI publication,
 configured worker image and live adoption remain separate facts. The active
 objective remains the full plan.
 
+The next alpha.12 candidate adds the
+[execution workspace ownership contract](execution-workspace.md), strict
+source-only remote selection and explicit network configuration/kernel
+primitives. It also corrects the Mac board fixtures and runs them before native
+compilation in each platform release job. Cross-review caught and closed a late
+checkpoint-custody gap: State now verifies its actual lock/directory/sidecar
+before and after checkpoint retention. Production build, all 1,466 Rust tests, 712 JavaScript tests and 59 terminal
+journeys passed; 19 Rust cases and 9 optional Node cases were skipped.
+[Exact local evidence](../../examples/execution/evidence/2026-10-31-alpha12-foundations/local-checks.json)
+keeps host-unsupported qualification separate. Tagged CI, npm availability and
+Fly runtime checks remain release gates. Remote activation and the new partial
+checkpoint/transfer protocols remain open.
+
 Alpha.11 includes:
 
 - [Private managed storage](managed-storage.md), explicit journal schema5 opt-in,

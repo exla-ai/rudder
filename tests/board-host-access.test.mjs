@@ -7,14 +7,15 @@ import { spawnSync } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { boardHostFiles } from "./board-fixture.mjs";
 const { BoardAuthority } = await import("../src/board/authority.ts");
 const { serveBoardHostAccess, requestBoardOpen, requestBoardBootstrap, inspectBoardHostAccess, openBoardBrowser } = await import("../src/board/host-access.ts");
 const { ensureBoardRunning, daemonPidPath } = await import("../src/daemon.ts");
 const { writeJson } = await import("../src/util.ts");
 
-async function fixture(t) {
+async function fixture(t, longHome = false) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "rudder-board-host-"));
-  const repo = path.join(root, "repo"), home = path.join(root, "home"); await fs.mkdir(repo);
+  const repo = path.join(root, "repo"), home = path.join(root, longHome ? "long-home-" + "x".repeat(100) : "home"); await fs.mkdir(repo);
   const previous = process.env.RUDDER_HOME; process.env.RUDDER_HOME = home;
   t.after(async () => {
     if (previous === undefined) delete process.env.RUDDER_HOME; else process.env.RUDDER_HOME = previous;
@@ -32,14 +33,13 @@ function raw(socketPath, body) {
   });
 }
 
-test("private host callbacks bind the project and instance, mint fixed targets and return no browser secret", async (t) => {
-  const { repo, home } = await fixture(t); const opened = [];
+for (const longHome of [false, true]) test(`private host callbacks bind the project and instance, mint fixed targets and return no browser secret (${longHome ? "long" : "default"} home)`, async (t) => {
+  const { repo, home } = await fixture(t, longHome); const opened = [];
   const authority = new BoardAuthority("owner", "projector"); authority.bindOrigin("http://127.0.0.1:4774");
   const service = await serveBoardHostAccess(repo, authority, (url) => { opened.push(url); });
   t.after(async () => { await service.close(); authority.close(); });
-  const names = await fs.readdir(path.join(home, "board"));
-  const file = path.join(home, "board", names.find((name) => name.endsWith(".json")));
-  const socket = file.replace(/\.json$/, ".sock");
+  const { descriptor: file, socket } = await boardHostFiles(repo, home);
+  if (longHome) assert.equal(path.dirname(file), `/tmp/rudder-board-${process.getuid()}`);
   assert.equal((await fs.stat(file)).mode & 0o077, 0); assert.equal((await fs.stat(socket)).mode & 0o077, 0);
   const info = await inspectBoardHostAccess(repo); assert.equal(info.instance_id, authority.instanceId);
   assert.deepEqual(Object.keys(info).sort(), ["control_mode", "format_version", "instance_id", "origin"]);
@@ -76,7 +76,7 @@ test("a private FIFO descriptor settles without a writer and regular-file growth
   const authority = new BoardAuthority("owner", "projector"); authority.bindOrigin("http://127.0.0.1:4774");
   const service = await serveBoardHostAccess(repo, authority, () => {});
   t.after(async () => { await service.close(); authority.close(); });
-  const file = path.join(home, "board", (await fs.readdir(path.join(home, "board"))).find((name) => name.endsWith(".json")));
+  const { descriptor: file } = await boardHostFiles(repo, home);
   const original = await fs.readFile(file);
   await fs.unlink(file);
   assert.equal(spawnSync("mkfifo", ["-m", "600", file], { stdio: "ignore" }).status, 0);
@@ -121,13 +121,20 @@ test("daemon reuse requires the matching private capability protocol and preserv
   const reused = await ensureBoardRunning(repo, { port: 0, scheduler: false, open: false });
   assert.equal(reused.started, false); assert.equal(reused.port, first.port);
   const bin = path.join(root, "bin"), opened = path.join(root, "opened"); await fs.mkdir(bin);
-  await fs.writeFile(path.join(bin, "xdg-open"), `#!${process.execPath}\nimport fs from 'node:fs';\nconst url = new URL(process.argv[2]);\nif (!/^#rudder-board-ticket=[a-f0-9]{64}$/.test(url.hash) || Object.keys(process.env).some(k => /BOARD.*(?:TOKEN|TICKET|SESSION)/i.test(k))) process.exit(1);\nfs.writeFileSync(${JSON.stringify(opened)}, 'opened');\n`, { mode: 0o700 });
+  const opener = `#!${process.execPath}\nconst fs = require('node:fs');\nconst url = new URL(process.argv[2]);\nif (!/^#rudder-board-ticket=[a-f0-9]{64}$/.test(url.hash) || Object.keys(process.env).some(k => /BOARD.*(?:TOKEN|TICKET|SESSION)/i.test(k))) process.exit(1);\nfs.appendFileSync(${JSON.stringify(opened)}, JSON.stringify({ path: url.pathname }) + '\\n');\n`;
+  for (const name of ["open", "xdg-open"]) await fs.writeFile(path.join(bin, name), opener, { mode: 0o700 });
   const previous = process.env.PATH; process.env.PATH = bin + path.delimiter + (previous ?? "");
   try {
     await ensureBoardRunning(repo, { scheduler: false, open: true });
     await requestBoardOpen(repo, "usage");
-    for (let i = 0; i < 40 && !(await fs.stat(opened).catch(() => null)); i++) await new Promise((resolve) => setTimeout(resolve, 25));
-    assert.equal(await fs.readFile(opened, "utf8"), "opened");
+    let calls = [];
+    for (let i = 0; i < 80; i++) {
+      calls = (await fs.readFile(opened, "utf8").catch((error) => { if (error.code === "ENOENT") return ""; throw error; }))
+        .trim().split("\n").filter(Boolean).map((line) => JSON.parse(line));
+      if (calls.length === 2) break;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    assert.deepEqual(calls.map((call) => call.path).sort(), ["/usage", first.projectUrl.slice(first.url.length)].sort());
   } finally { if (previous === undefined) delete process.env.PATH; else process.env.PATH = previous; }
   const pidPath = daemonPidPath(repo); const current = JSON.parse(await fs.readFile(pidPath, "utf8"));
   await writeJson(pidPath, { ...current, boardAccessVersion: 0 });

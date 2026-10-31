@@ -1,7 +1,9 @@
-# Proposed execution network profile
+# Execution network profile
 
-Status: Alpha.12 implementation gate, 2026-10-30. Proposed interfaces only;
-no Rust, product defaults or network activation changes. This narrows the next
+Status: alpha.12 candidate, 2026-10-31. Strict configuration validation and
+child-only Rust namespace/capability primitives are implemented; execution
+wiring, egress, live network ownership and default activation remain proposed.
+See [the ownership boundary](execution-workspace.md). This narrows the next
 slice of [managed networking](managed-network-isolation.md).
 
 ## Measured privilege boundary
@@ -43,8 +45,12 @@ no host namespace FD, host AF_INET socket or route into the host network.
 
 ## Sealed request and live ownership
 
-Add a strict, bounded `ExecutionNetworkProfile` with its own `format_version:1`
-inside an explicitly new execution-spec version greater than3. Allocate that
+`NetworkProfileV1` validates strict bounded `format_version:1` configuration.
+Its offline mode requires empty policy and zero egress budgets; the qualification
+mode checks canonical policy, exact expected identities and a trusted host deny
+inventory. It opens no connection and grants no current-attempt permission.
+The next execution wiring embeds it inside an explicitly new spec version
+greater than3. Allocate that
 outer version together with remote composition; do not independently reserve4.
 Existing v1-v3 canonical request bytes and unmanaged behavior stay unchanged.
 Old helpers must reject the new version. Missing or invalid configuration for a
@@ -53,7 +59,7 @@ requested new profile is Unsupported before selected-key login or inference.
 | Field | Proposed contract |
 | --- | --- |
 | `binding` | Exact current owner, run ID/epoch, request/execution/operation/view IDs and per-attempt network UUID; cross-check sealed spec, managed binding and broker binding |
-| `transport` | Initially only `qualification_https_connect_v1`; no general/default packet mode |
+| `mode` | `offline_v1` or `qualification_https_connect_v1`; no general/default packet mode |
 | `policy` | Bounded canonical bytes with a SHA256 digest, explicit public HTTPS qualification origins/ports and IPv4-only destination policy; host recomputes digest |
 | `budgets` | Positive host-capped connection/DNS-job counts, parser/buffer bounds, byte ceilings and connect/idle/total deadlines; checked arithmetic and no unbounded queues |
 | `readiness_nonce` | Fresh one-use challenge for the existing private owned helper channel; no credential in argv, terminal input, public logs or persisted grants |

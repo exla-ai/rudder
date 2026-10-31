@@ -1,0 +1,20 @@
+{
+  "formatVersion": 1,
+  "files": {
+    "engine/src/execution/network.rs": "7b81e9ecad4fb12013dcca97cbd083f1cecec7ed209aba9ada8c4e0a2d21269c",
+    "engine/src/execution/network/linux.rs": "b88fe61f51af9b8513bb97cd452cbb718d2eb57ec010ae0c5b8ee933e1bbf432",
+    "engine/src/execution/network/qualifier.rs": "57412dc3118a96a55d6794de69f4d0e90a2d4d7a64b760d1bff608095962f6a3",
+    "engine/tests/execution_network.rs": "5426ff018c511e291e9ed52a0da42d9efa42f5c28e70d1cc82c5daa6ba2c8394",
+    "engine/Cargo.toml": "1d2cd4cb05cf06adcbb8df4131cb492d8321dc5aa750876cb308d29dd6db9491"
+  },
+  "qualifierSha256": "dfc5388fb35807601e5b0103e88e30790f29b08eb2824919fcc1d8c6648831c3",
+  "testLogSha256": "bbd60cdc91c64947440dd19385a829cf6b57d51e8d639b3be24f4f59dc0ace73",
+  "testCommand": "cargo test --workspace --locked --features rudder-vcs-bridge/cli --test execution_network -- --nocapture",
+  "testsPassed": 21,
+  "testsFailed": 0,
+  "plainCapabilityModesUnsupported": 2,
+  "connectedEgressQualified": false,
+  "productionWired": false,
+  "sourceDate": "2026-10-31T00:26:10.142Z",
+  "runtimeDirectory": "/workspace/rudder-alpha12-network-runtime"
+}

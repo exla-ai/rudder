@@ -1,7 +1,10 @@
 # Remote managed launch and quiescent partial checkpoints
 
-Status: proposed next implementation slice, 2026-10-30. These remote APIs and
-proposed format floors are not implemented or activated. They compose the existing
+Status: implementation in progress, 2026-10-31. The alpha.12 candidate implements
+the held-state workspace factory, strict remote selection and reserved namespaces;
+see [the implemented ownership contract](execution-workspace.md). Remote guest
+activation, quiescent finalization and the proposed format floors below remain
+unimplemented. They compose the existing
 [partial capture](partial-retention.md) and [managed launch](managed-launch.md)
 contracts toward [PLAN §§4–6 and 8](../../PLAN.md). Existing qualification does
 not establish remote managed launch, remote source acceptance or fleet latency.
@@ -27,20 +30,20 @@ profile, policy and accepted seed/source identity. Credentials use a separate
 host-only protected or sealed payload, never guest environment or shared CAS.
 Preparation does not start a RemoteSession that later crosses the namespace.
 
-The exact hook is in execution/linux.rs: after
-PrivateMountNamespace::enter_for_current_user and authenticated services setup,
-before the current VfsManager::open and manager.open_view calls. Extend
-HelperServices with a trusted HelperWorkspaceFactory returning
-OwnedHelperWorkspace { manager, view, resources }; retain the local implementation.
-The post-RPC HelperApplication::start callback is too late. Reconcile existing
-execution records before new view or guest effects.
+The implemented hook is in execution/linux.rs: after the fresh private USER/MNT
+transition, state::preflight reserves or reconciles the held execution before
+services or workspace factories. HelperServices carries a trusted one-shot
+HelperWorkspaceFactory returning OwnedHelperWorkspace with the actual manager,
+view and resource owners. None preserves the local implementation. The post-RPC
+HelperApplication::start callback is too late for workspace construction.
 
-The remote factory creates NodeRemoteSource, RemoteCache, RemoteRootRegistry,
-fresh admit, VfsManager::open_remote and the exact bound view. Bounded startup
-metadata checks the actual manifest/profile/policy/topology against the sealed
-selection. Add an explicit-namespace remote fork API: the reserved UUID belongs
-in immutable fork-request bytes and observation_state, rather than being minted
-inside observation::initialize. Reopening mismatched inputs fails closed.
+The production remote factory still needs to create NodeRemoteSource,
+RemoteCache, RemoteRootRegistry and a fresh admitted session. Implemented
+validate_selection checks its actual manifest/profile/policy/topology against
+the sealed expectation under startup budgets. The opaque result opens its exact
+bound view through a reserved-namespace fork. The reserved UUID is included in
+immutable fork-request bytes and observation_state; reopening mismatched inputs
+fails closed. This selection does not establish accepted history or seed custody.
 
 OwnedHelperWorkspace.resources retains source/cache/registry/session through
 FUSE drain, capture retention and execution-record fsync, outside the guest and
@@ -53,7 +56,9 @@ monitor refreshes an expiring grant bound to the exact root and attempt; expired
 unavailable or revoked authority denies further byte exposure and invalidates
 the session. Invalidating interest does not free admission or payload ownership
 until the actual transport settles. Polling continues through final receipt
-publication; the existing early monitor.finish must be split accordingly.
+publication. The implemented workspace monitor now spans checkpoint retention,
+record fsync and the authenticated receipt; remote-grant refresh still needs its
+own current-authority composition.
 
 Graceful stop withdraws exact guest network admission, streams and helpers; it
 retains the exact workspace/remote-root finalization authority and refresh

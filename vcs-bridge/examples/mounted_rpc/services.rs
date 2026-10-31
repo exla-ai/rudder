@@ -79,6 +79,7 @@ pub fn factory() -> HelperServicesFactory {
             workspace_authority: authority,
             adoption_witness: Some(witness),
             application: None,
+            workspace_factory: None,
         })
     })
 }

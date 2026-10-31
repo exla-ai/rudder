@@ -78,13 +78,12 @@ pub fn run_helper_with_managed_services(spec: ExecutionSpec, factory: HelperServ
     supervisor(spec, Some(factory), Some(control))
 }
 
-use super::{root::Layout, state::State};
+use super::{root::Layout, state::{self, Preflight}};
 use crate::{
-    store::LocalStore,
     vfs::{
         linux::{mount, MountedVfs, PrivateMountNamespace},
         rpc::{ObservationRpc, RpcConfig, RpcLimits},
-        VfsManager, VfsView,
+        VfsView,
     },
 };
 use std::{
@@ -174,6 +173,9 @@ impl AuthorityMonitor {
             "workspace authority retired; execution cannot acknowledge a checkpoint"
         );
         Ok(())
+    }
+    fn validate_current(&self) -> Result<()> {
+        self.authority.validate(&self.authority.binding)
     }
     fn finish(&self) -> Result<()> {
         self.authority.validate(&self.authority.binding)?;
@@ -457,57 +459,50 @@ fn supervisor(
         unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0) } == 0,
         "cannot protect supervisor descriptors"
     );
-    // Factories and all authority/FUSE/RPC threads start only after the required
-    // fresh single-thread namespace transition above. No native App enters here.
-    let mut services = if spec.workspace_observation.is_some() {
-        Some(factory.context(
-            "workspace helper lacks a qualified authority factory",
-        )?(&spec)?)
-    } else {
-        None
-    };
-    let expected_application = spec
-        .workspace_observation
-        .as_ref()
-        .and_then(|w| w.application.as_ref());
-    ensure!(
-        expected_application.is_some()
-            == services.as_ref().is_some_and(|s| s.application.is_some()),
-        "application specification has no matching trusted factory"
-    );
-    let monitor = match (&spec.workspace_observation, &services) {
-        (Some(workspace), Some(services)) => Some(AuthorityMonitor::start(
-            services.workspace_authority.clone(),
-            workspace.binding.clone(),
-        )?),
-        (None, None) => None,
-        _ => anyhow::bail!("workspace helper service/profile mismatch"),
-    };
-    unsafe {
-        libc::signal(libc::SIGTTOU, libc::SIG_IGN);
-    }
-    let manager = VfsManager::open(&spec.manager_root, LocalStore::open(&spec.store_root)?)?;
-    let mut state = State::open(&spec)?;
-    if state.record.phase == ExecutionPhase::Checkpointed {
-        ensure!(
-            state.record.checkpoint.is_some(),
-            "checkpointed execution lacks retained root"
-        );
-        if let Some(monitor) = &monitor {
-            monitor.finish()?;
+    // Hold and reconcile actual execution state before any services/workspace
+    // factory starts authority, source/cache, VFS or application effects.
+    let (mut state, mut services) = match state::preflight(&spec, factory)? {
+        Preflight::Recovered(state) => {
+            return Ok(ExecutionOutcome {
+                record: state.record.clone(),
+                isolation: proof(),
+                warnings: Vec::new(),
+            })
         }
-        return Ok(ExecutionOutcome {
-            record: state.record,
-            isolation: proof(),
-            warnings: Vec::new(),
-        });
-    }
-    ensure!(
-        state.is_new,
-        "execution has uncertain prior effects; reconcile its orphan before retry"
-    );
+        Preflight::New { state, services } => (state, services),
+    };
     let result = (|| -> Result<ExecutionOutcome> {
-        let view = manager.open_view(&spec.view_id, &spec.owner)?;
+        let expected_application = spec
+            .workspace_observation
+            .as_ref()
+            .and_then(|w| w.application.as_ref());
+        ensure!(
+            expected_application.is_some()
+                == services.as_ref().is_some_and(|s| s.application.is_some()),
+            "application specification has no matching trusted factory"
+        );
+        let monitor = match (&spec.workspace_observation, &services) {
+            (Some(workspace), Some(services)) => Some(AuthorityMonitor::start(
+                services.workspace_authority.clone(),
+                workspace.binding.clone(),
+            )?),
+            (None, None) => None,
+            _ => anyhow::bail!("workspace helper service/profile mismatch"),
+        };
+        unsafe {
+            libc::signal(libc::SIGTTOU, libc::SIG_IGN);
+        }
+        let workspace = state.open_workspace(
+            &spec,
+            services
+                .as_mut()
+                .and_then(|services| services.workspace_factory.take()),
+        )?;
+        workspace.require_supported_execution()?;
+        // Keep this owner outside the guest namespaces through mount/application
+        // drain, retained checkpoint, record fsync and authenticated receipt.
+        let manager = workspace.manager();
+        let view = workspace.view();
         let mountpoint = manager.root().join("mounts").join(&spec.view_id);
         let layout = Layout {
             root: state.directory.join("root"),
@@ -599,7 +594,10 @@ fn supervisor(
             receive.set_read_timeout(Some(Duration::from_secs(3)))?;
             let fd3 = duplicate_high(payload.as_raw_fd())?;
             let fd4 = duplicate_high(send.as_raw_fd())?;
-            let fd5 = control.as_ref().map(|_|duplicate_high(init_control.as_raw_fd())).transpose()?;
+            let fd5 = control
+                .as_ref()
+                .map(|_| duplicate_high(init_control.as_raw_fd()))
+                .transpose()?;
             let mut command = Command::new("/proc/self/exe");
             command
                 .args(["fabric", "execution", "child"])
@@ -610,12 +608,20 @@ fn supervisor(
                 command.pre_exec(move || {
                     if libc::dup2(fd3.as_raw_fd(), 3) < 0
                         || libc::dup2(fd4.as_raw_fd(), 4) < 0
-                        || fd5.as_ref().is_some_and(|fd|libc::dup2(fd.as_raw_fd(), 5) < 0)
+                        || fd5
+                            .as_ref()
+                            .is_some_and(|fd| libc::dup2(fd.as_raw_fd(), 5) < 0)
                         || libc::setpgid(0, 0) != 0
                     {
                         return Err(std::io::Error::last_os_error());
                     }
-                    if libc::syscall(libc::SYS_close_range, if fd5.is_some() { 6u32 } else { 5u32 }, u32::MAX, 4u32) != 0 {
+                    if libc::syscall(
+                        libc::SYS_close_range,
+                        if fd5.is_some() { 6u32 } else { 5u32 },
+                        u32::MAX,
+                        4u32,
+                    ) != 0
+                    {
                         return Err(std::io::Error::last_os_error());
                     }
                     Ok(())
@@ -642,16 +648,31 @@ fn supervisor(
                 }
                 if let Some(control) = &mut control {
                     if control.poll_stop()? && !stop_sent {
-                        supervisor_control.write_all(b"S")?; stop_sent = true;
+                        supervisor_control.write_all(b"S")?;
+                        stop_sent = true;
                     }
                     if control.authenticated && !authenticated_sent && !stop_sent {
-                        supervisor_control.write_all(b"A")?; authenticated_sent = true;
+                        supervisor_control.write_all(b"A")?;
+                        authenticated_sent = true;
                     }
-                    let mut poll = libc::pollfd { fd: supervisor_control.as_raw_fd(), events: libc::POLLIN, revents: 0 };
-                    if unsafe { libc::poll(&mut poll, 1, 0) } > 0 && poll.revents & libc::POLLIN != 0 && !backend_ready {
-                        let (execution, descriptor): (String, _) = super::handoff::receive_control_packet(&mut supervisor_control)?;
-                        ensure!(execution == spec.execution_id, "backend readiness belongs to another execution");
-                        control.backend_ready(&descriptor.context("backend readiness lacks actual pidfd")?)?;
+                    let mut poll = libc::pollfd {
+                        fd: supervisor_control.as_raw_fd(),
+                        events: libc::POLLIN,
+                        revents: 0,
+                    };
+                    if unsafe { libc::poll(&mut poll, 1, 0) } > 0
+                        && poll.revents & libc::POLLIN != 0
+                        && !backend_ready
+                    {
+                        let (execution, descriptor): (String, _) =
+                            super::handoff::receive_control_packet(&mut supervisor_control)?;
+                        ensure!(
+                            execution == spec.execution_id,
+                            "backend readiness belongs to another execution"
+                        );
+                        control.backend_ready(
+                            &descriptor.context("backend readiness lacks actual pidfd")?,
+                        )?;
                         backend_ready = true;
                     }
                 }
@@ -690,8 +711,10 @@ fn supervisor(
                 "execution namespace-drain proof mismatch"
             );
             if let Some(control) = &control {
-                ensure!(drain.managed_stop && control.request.is_some(),
-                    "kernel shutdown has no matching authenticated parent request");
+                ensure!(
+                    drain.managed_stop && control.request.is_some(),
+                    "kernel shutdown has no matching authenticated parent request"
+                );
             }
             if unsafe { libc::isatty(0) } == 1 {
                 unsafe {
@@ -703,15 +726,26 @@ fn supervisor(
             mounted.close_application()?;
             mounted.close_rpc()?;
             if let Some(monitor) = &monitor {
-                monitor.finish()?;
+                monitor.check()?;
             }
-            let view = mounted.unmount()?;
-            let checkpoint = view.checkpoint_snapshot_unmounted()?;
+            let _view = mounted.unmount()?;
+            let checkpoint = state.checkpoint_workspace(&workspace)?;
+            if let Some(monitor) = &monitor {
+                monitor.validate_current()?;
+            }
             state.record.phase = ExecutionPhase::Checkpointed;
             state.record.agent_exit = Some(drain.agent_exit);
             state.record.checkpoint = Some(checkpoint);
             state.save()?;
-            if let Some(control) = &mut control { control.shutdown_receipt(&state.record)?; }
+            if let Some(monitor) = &monitor {
+                monitor.validate_current()?;
+            }
+            if let Some(control) = &mut control {
+                control.shutdown_receipt(&state.record)?;
+            }
+            if let Some(monitor) = &monitor {
+                monitor.finish()?;
+            }
             Ok(ExecutionOutcome {
                 record: state.record.clone(),
                 isolation: proof(),

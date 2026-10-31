@@ -38,6 +38,13 @@ jobs:
         with:
           node-version: "22"
 
+      # These host/browser fixtures need no Rust artifacts. Check platform
+      # paths and opener behavior before spending time compiling the pair.
+      - name: Board host access preflight
+        run: |
+          npm ci --ignore-scripts
+          node --test tests/board-capability.test.mjs tests/board-host-access.test.mjs
+
       - name: Build native pair
         run: node scripts/build-native.mjs
 

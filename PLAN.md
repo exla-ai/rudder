@@ -1067,3 +1067,49 @@ checks support specific filesystem and retention contracts. See the
 limits and current release state. Fleet authority, restricted worker roots,
 default VFS agent launch, machine-wide ownership, Mac qualification and complete
 surface migration retain their own gates.
+
+
+## 20. Agent efficiency and trace-derived memory
+
+The independent research on this v4 session found model time and accumulated
+context to be the main costs. The main agent spent about 2% of active time
+blocked on tools. High reasoning output and large contexts correlated with
+slower steps; this is observational evidence, not a controlled causal result.
+The local research source is `research/agent-efficiency` at `e684468` in the
+separate research checkout. Preserve that checkout and its branch.
+
+Make efficiency part of the engine and adapter contract:
+
+- Launch settings come from one shared policy for native and TS callers.
+  Evaluate a Codex compaction limit near 150K tokens, bounded tool output and
+  high rather than maximum default reasoning effort. Verify support in the
+  shipped adapter and adopt defaults only after E14. Preserve explicit user
+  choices and model capability limits. Claude uses its supported equivalents.
+- After compaction, supply the current task, constraints, open obligations and
+  recent changes. Retrieve relevant context instead of growing the initial
+  prompt. Use fresh, scoped worker briefs and one result handoff.
+- Normal verification asks for status once. It does not generate a patch to
+  test whether changes exist. Review requests can still retrieve exact diffs.
+- Wait on jobs and releases through bounded asynchronous subscriptions. Return
+  one settled result or a named timeout instead of requiring repeated polling.
+  Keep the App loop responsive and retain actual worker admission until exit.
+- Use affected checks between milestones and a shared compiler/action cache.
+  Avoid competing Cargo writers and duplicated complete build directories.
+  Release checks still cover the supported platform matrix.
+- Record per-step token usage, context size, model/tool latency, output size,
+  effort, repeated failures and coordination/wait share. Read only supported
+  transcript fields; redact before storage and keep raw transcripts private.
+  Telemetry supplies evidence, never scheduling or completion authority.
+- Derive short scoped lessons from traces and accepted outcomes. Each lesson
+  carries provenance, relevance, expiry/recheck conditions and a rejection
+  path. Share retrieval across Codex and Claude. Never inject an unbounded
+  memory dump or promote a lesson into an authorization rule.
+- Through the app-server adapter, evaluate lower effort for routine reads and
+  known checks, and higher effort for architecture and difficult debugging.
+  Steering uses the existing authenticated mailbox and interrupt semantics.
+  A steering message is not an acknowledgment that behavior changed.
+
+E14 compares accepted changes, failures, review outcomes, token cost, wall clock,
+context and re-read rates on a fixed task set. Ship the already independently
+verifiable status-only improvement first. Select launch defaults from measured
+results, then add engine telemetry, adaptive effort and trace-derived memory.

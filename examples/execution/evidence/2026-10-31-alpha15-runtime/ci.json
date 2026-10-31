@@ -1,0 +1,12 @@
+{
+  "workflow": "https://github.com/exla-ai/rudder/actions/runs/41176059172",
+  "job": 124466622715,
+  "step": "Native tests",
+  "testsFailed": 7,
+  "file": "vcs-bridge/tests/rpc_view.rs",
+  "line": 241,
+  "reason": "short /tmp fixture path compared against canonical /private/tmp socket path",
+  "nativeArtifacts": "darwin-arm64, darwin-x64 and linux-x64 builds passed",
+  "logSha256": "c3cceb9fc4e003516a22edd71e26a90b745cba4db83e9aae5c08e081b2abd523",
+  "publishSteps": "both skipped"
+}

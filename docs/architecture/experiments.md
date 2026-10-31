@@ -419,3 +419,21 @@ The first implementation backlog after accepting the architecture is:
 
 This backlog specifies follow-on work; this research change does not provision
 workers, install filesystems, convert projects or migrate running agents.
+
+
+## E14. Agent efficiency without quality regression
+
+Compare the current launch policy with bounded output, earlier compaction and
+lower default reasoning effort on the same fixed repository tasks. Pin source,
+model/backend versions, hardware, task inputs and warm/cold cache state. Retain
+failure and review results, not just successful samples.
+
+Measure tokens and cost per accepted change; wall clock and model-step p50/p95;
+mean/p95 context; coordination/wait share; repeated reads after compaction;
+failed checks, review rejections and release attempts. Test Codex and Claude
+adapters independently and retain explicit user settings.
+
+Adopt launch defaults only when tokens and wall clock improve without increased
+failed checks, review rejection or re-read rate. A session correlation or one
+synthetic test does not pass this gate. Status-only verification has its own
+regression checks and does not depend on changing model settings.

@@ -17,7 +17,7 @@ They do not yet change the default execution path.
 | `EngineSourceLease` | Actual process-local Fabric ownership and held checkout lock custody; retirement is absorbing |
 | Host-source Journal result | Current capability, owner, run epoch, execution and exact binding from one read transaction, with its original expiry |
 | Authenticated endpoint exchange | An actual request/reply under the endpoint key, purpose, instance, nonce, serial and complete binding |
-| Controller process witness | Actual retained kernel process custody from the authenticated helper handoff; its adapter is being integrated |
+| Controller process witness | Actual retained kernel process custody from the authenticated helper handoff; the adapter verifies the retained controller witness |
 | `RemoteSession` | A newly registered source session under the live source authority; saved responses cannot reconstruct it |
 | Finalization constraint | A fixed host clock deadline limiting all phases; it supplies no execution or drain permission |
 | Checkpoint DATA receipt | Retention/publication of exact objects; it supplies no accepted source, jj history or runnable launch grant |
@@ -78,3 +78,37 @@ separately report successful finalization; otherwise an agent's nonzero exit
 cannot be distinguished from source loss after a packet was sent. Existing
 execution specifications and managed bindings retain their original wire and
 exit semantics. The new family requires its own qualified dispatch.
+
+
+## Next managed source protocol
+
+The local Spec5/Binding4 family selects offline remote source execution with a
+protected context2. The context reference remains format1; its private payload
+selects context2 and the separate host source endpoint. Context1 remains strict
+for the legacy family. Neither payload is a launch grant.
+
+Guest RPC ingress and host source authorization have separate actual lifetimes.
+Guest denial or broker rotation retires ingress. Host denial retires source and
+its registered session. A cached root still checks the host client's true expiry
+on every use; the outer cache window cannot extend a short grant.
+
+StopV4 starts one 30-second parent BOOTTIME budget before queue admission. The
+process-local queue carries the same cancellation state. The wire carries its
+constraint, which an authenticated helper adopts without restarting time.
+Nonblocking framed I/O, idle control waits, RPC close and freeze use the original
+deadline. Filesystem operations are fenced before and after; these checks do
+not make filesystem I/O interruptible or roll back late durable effects.
+
+A source shutdown packet remains provisional. The parent must join the exact
+receipt with successful exit observed from its actual owned helper, the retained
+initial child custody, and a fresh host issuer query off the App loop. Agent exit
+status remains separate record DATA. Adoption checks original budget, real grant
+expiry, bounded freshness and local owner retirement. The query is a point in
+time; an atomic final effect with Journal revocation requires a query-and-effect
+transaction, not a stronger claim about this local receipt.
+
+These interfaces are under integration. Runtime5 remains explicitly refused.
+Binding4 still requires actual readiness, whose current receiver admits only
+Binding3. The Native App cannot yet prepare this new source family. No default
+migration, positive managed source launch, connected model or accepted jj history
+is established by codec and unit tests.

@@ -397,3 +397,16 @@ compaction rather than treating a watch stream as permanent history.
 These missing facts are the phase-0/early-phase experiments, not prerequisites
 for writing down the logical architecture. No claimed Rudder speedup is measured
 by this document.
+
+
+## Agent efficiency follow-up, 2026-10-31
+
+The independent local research checkout contains
+`research/agent-efficiency/README.md` and
+`reports/2026-10-31-sol-v4-session.md`, branch `research/agent-efficiency`, commit
+`e684468`. Its session analysis identifies accumulated context, reasoning
+output, coordination and large tool results as costs. The timing fit is
+observational; it does not establish a causal effect of effort or compaction.
+[Plan section 20](../../PLAN.md#20-agent-efficiency-and-trace-derived-memory)
+and E14 define the implementation and comparison gate. The research worktree
+remains separate and unchanged by the main implementation owner.

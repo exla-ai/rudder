@@ -47,6 +47,21 @@ repeated unchanged-input checks, polling-only turns and speculative expansion.
 Finish the current integration batch before adding another lane. The research
 worktree stays on its own branch and is not edited by this implementation owner.
 
+## Current local batch after alpha.15
+
+The combined pre-join Rust check passed 1,276 tests with zero failures. Context2
+passed 12 focused tests after using a joined refresh owner only during fixture
+startup. StopV4 carries the original parent deadline through queueing, framed I/O
+and finalization phases. The verifier uses one status decision; its 17 regression
+cases passed. Launch effort/compaction defaults remain behind E14.
+
+The next merged changes add an opaque provisional source receipt, actual helper
+exit custody and a fresh off-App issuer query. They also add a local build DATA
+helper/client using the retained RunnableRoot, snapshot profile, preparation
+index and existing Buck2 adapter. Their integrated checks and actual-source cold /
+restored-output qualification are pending. Runtime5 is still refused; do not
+count these interfaces as default migration or complete v4 delivery.
+
 ## Current implementation track
 
 Base: `91579cf631b1d9d78afbbd786a6dc1f8120cc1ca` on `origin/main` at start.
@@ -92,10 +107,12 @@ Local verification:1,204 baseline Rust tests,82 final affected tests,25 separate
 execution compatibility cases, JavaScript739passed/9skipped and real-binary
 TUI59passed. The local production build stamped candidate30658fa; the final tag's
 only later change is the Fly image pin. Exact-tag CI/Fly builds are separate.
-The original unpublished local15 tag was corrected before any push. Intel Mac
-CI is still building; Linux and Apple Silicon artifacts pass. Npm remains
-unpublished with both next tags stillalpha.7 at06:28:32Z. Follow release run
-41176059172 and verify both registry names/fresh installations after publication.
+The original unpublished local15 tag was corrected before any push. All three
+native release builds passed. Release run41176059172 then failed seven tests
+at the same macOS rpc_view fixture assertion: `/tmp` was compared against its
+canonical `/private/tmp` form. Both npm publication steps were skipped. The
+fixture now creates its short root under canonical `/tmp`; verify the next
+release before claiming registry availability. Cloud release166 stays verified.
 
 The next local batch implements the Spec5 / Binding4 codec, a parent-clocked stop protocol and host context2 with separate guest and source lifetimes. Runtime5 remains refused while shutdown and launch ownership are connected. The verifier also replaces redundant full-patch generation with one status check. Remaining integration starts with joint Spec5 /
 Binding4, protected context2 and actual host-source client/controller witness;

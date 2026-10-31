@@ -432,20 +432,30 @@
   "localEvidence": "examples/execution/evidence/2026-10-31-alpha15-foundations/checks.json",
   "runtimeEvidence": "examples/execution/evidence/2026-10-31-alpha15-runtime/README.md",
   "cli": {
-    "status": "ci-pending",
+    "status": "ci-failed",
     "workflow": "https://github.com/exla-ai/rudder/actions/runs/41176059172",
     "registry": {
-      "observedAt": "2026-10-31T06:28:32.047936+00:00",
+      "observedAt": "2026-10-31T06:50:11.598723+00:00",
       "@exla/rudder": {
-        "latest": "3.9.13",
-        "next": "4.0.0-alpha.7"
+        "next": "4.0.0-alpha.7",
+        "latest": "3.9.13"
       },
       "@viraatdas/rudder": {
-        "latest": "3.9.13",
-        "next": "4.0.0-alpha.7"
+        "next": "4.0.0-alpha.7",
+        "latest": "3.9.13"
       }
     },
-    "freshInstall": "pending actual registry publication"
+    "freshInstall": "not run: publication skipped after macOS fixture failures",
+    "failure": {
+      "job": 124466622715,
+      "step": "Native tests",
+      "testsFailed": 7,
+      "file": "vcs-bridge/tests/rpc_view.rs",
+      "line": 241,
+      "reason": "short /tmp fixture path compared against canonical /private/tmp socket path",
+      "nativeArtifacts": "darwin-arm64, darwin-x64 and linux-x64 builds passed",
+      "logSha256": "c3cceb9fc4e003516a22edd71e26a90b745cba4db83e9aae5c08e081b2abd523"
+    }
   },
   "openGates": [
     "new managed host context and parent-sent stop wire",

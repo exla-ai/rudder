@@ -1,0 +1,90 @@
+{
+  "formatVersion": 1,
+  "version": "4.0.0-alpha.20",
+  "sourceKind": "working-tree candidate",
+  "checks": {
+    "rust": {
+      "status": "passed",
+      "completedAt": "2026-10-31T14:50:20.579033+00:00",
+      "command": [
+        "python3",
+        "/workspace/home/.cache/rudder-release-build/alpha20-checks/without-rudder-env.py",
+        "cargo",
+        "test",
+        "--locked",
+        "--workspace",
+        "--features",
+        "rudder-vcs-bridge/cli",
+        "--no-fail-fast"
+      ],
+      "receiptSha256": "c9af56089c7bd3e74fd90604584798dac4d236114de792331b396eeccb0ea617",
+      "passed": 1762,
+      "failed": 0,
+      "ignored": 28,
+      "suites": 59
+    },
+    "typescript": {
+      "status": "passed",
+      "completedAt": "2026-10-31T14:51:18.403032+00:00",
+      "command": [
+        "python3",
+        "/workspace/home/.cache/rudder-release-build/alpha20-checks/without-rudder-env.py",
+        "npm",
+        "run",
+        "check"
+      ],
+      "receiptSha256": "d093d5e9808942ddfd73577863ed9981276db21e3a61a9b224435614f744a087"
+    },
+    "cloudBuild": {
+      "status": "passed",
+      "completedAt": "2026-10-31T14:51:28.738158+00:00",
+      "command": [
+        "python3",
+        "/workspace/home/.cache/rudder-release-build/alpha20-checks/without-rudder-env.py",
+        "npm",
+        "--prefix",
+        "cloud",
+        "run",
+        "build"
+      ],
+      "receiptSha256": "25995f34d96eec4a54dd8287048ee741295183f77925d0ce33c96a232b5e3eb3"
+    },
+    "javascript": {
+      "status": "passed",
+      "completedAt": "2026-10-31T14:54:19.333115+00:00",
+      "command": [
+        "python3",
+        "/workspace/home/.cache/rudder-release-build/alpha20-checks/without-rudder-env.py",
+        "npm",
+        "test"
+      ],
+      "receiptSha256": "1c8059aecb15b42d954f3c8da129ac3fc6fe2f2b7c6c16b464dfcd21ddcd40e2",
+      "tests": 771,
+      "pass": 762,
+      "fail": 0,
+      "skipped": 9
+    },
+    "terminal": {
+      "status": "passed",
+      "completedAt": "2026-10-31T14:55:39.066955+00:00",
+      "command": [
+        "python3",
+        "/workspace/home/.cache/rudder-release-build/alpha20-checks/without-rudder-env.py",
+        "env",
+        "RUDDER_NATIVE_BIN=/workspace/code/exla-ai-rudder/target/debug/rudder-native",
+        "npm",
+        "run",
+        "test:tui"
+      ],
+      "receiptSha256": "5267afc381678d8107d5e3ccff80fd78b00c5b5a8d86e94008262ef044366a7c",
+      "tests": 59,
+      "pass": 59,
+      "fail": 0,
+      "skipped": 0
+    }
+  },
+  "physicalSource5PublicationEvidence": "../../examples/execution/evidence/2026-10-31-source5-publication/qualification.json",
+  "releaseMatrix": "pending",
+  "delivery": "pending",
+  "fullV4Complete": false
+}

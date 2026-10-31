@@ -156,7 +156,7 @@ name alpha.19; stable stays3.9.13. Both packages passed isolated fresh installs,
 CLI/native/jj smoke and all-platform artifact/revision checks at13:55:43.717Z.
 See the [delivery record](delivery-alpha19.json).
 
-## Owned checkpoint DATA durability, after alpha.19
+## Owned checkpoint DATA durability, alpha.20 candidate
 
 The opt-in source5 fixture now prepares retained checkpoint DATA from its actual
 joined Record2, persists the original Q/template/intent, reconciles a lost local
@@ -177,6 +177,17 @@ This is current working-tree qualification, not a product deployment or default
 launch change. The normal RPC uses the same session loop with a host-selected
 store; no request can choose a store. Connected model execution, App adoption,
 accepted jj history, fleet and migration remain open.
+
+The next run exercised production source records in one complete case at
+2026-10-31T14:29:47.174Z. It persisted assignment2, original recovery inputs and the opaque
+current-DATA receipt, then passed upload/reconciliation, producer destruction,
+independent HTTPS readback and credential cleanup. The original source DATA is
+portable to macOS recovery; only Linux can execute this profile. Managed-state
+verification passed76 tests with zero failures and four explicit ignores. The
+normal native helper also built successfully. The full local release gate passed:
+1,762 Rust tests, 762 JavaScript tests and 59 terminal tests, with zero failures;
+TypeScript and Cloud build also passed. The pre-tag matrix and delivery remain
+pending. See [verification](verification-alpha20.json).
 
 ## Current implementation track
 

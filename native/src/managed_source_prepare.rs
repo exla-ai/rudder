@@ -249,15 +249,7 @@ impl ManagedSourcePrepareRequest {
     }
 }
 
-/// Durable expectations only. No Deserialize path can construct a live result.
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct RemoteSourceAssignment {
-    pub format_version: u32,
-    pub fence: ManagedLaunchFence,
-    pub selection: RemoteLaunchRequest,
-    pub host_context: ProtectedHostContextRef,
-}
+pub(crate) use super::RemoteSourceAssignment;
 
 /// Pending ingress consumes an existing charged server worker, with a deadline
 /// shorter than the client's two-second request budget. It performs no Journal
@@ -824,7 +816,10 @@ pub(crate) fn prepare(
             selection,
             host_context,
         };
+        assignment.validate(&fence)?;
         // Immutable assignment is durable BEFORE the guest capability is issued.
+        startup.check_preparation()?;
+        managed_run.persist_source_assignment(&assignment)?;
         startup.check_preparation()?;
         write_new(
             &root.join("assignment2.json"),

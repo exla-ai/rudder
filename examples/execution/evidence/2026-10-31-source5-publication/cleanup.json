@@ -1,17 +1,1 @@
-{
-  "formatVersion": 1,
-  "producer": {
-    "id": "8e27ddb774ed58",
-    "instance": "01M694QW3B7QJGN0VWMHFEZ946",
-    "digest": "sha256:ef0216643692b880c81cbc0803e4ae37533ab0390621299490b85dc829f9d7eb"
-  },
-  "producerAbsent": true,
-  "independentProducerAbsence": true,
-  "originalCredentialRemoved": true,
-  "originalIndependentCredentialAbsence": true,
-  "continuationCredentialRemoved": true,
-  "continuationIndependentCredentialAbsence": true,
-  "continuationFreshProducerAbsences": true,
-  "homeUnchanged": true,
-  "verifiedAt": "2026-10-31T14:14:46.837Z"
-}
+{"nonce":"e6a2cd21-304e-4727-bc6d-2be5e39dcba7","machine":{"id":"89017ea6695568","instance":"01M695S6ACYCV98R83NRMDD6JV","digest":"sha256:35a05784b30a80ca463c1fb35ec94d52ae53c016a8ceffe1436a0e24d39052c3"},"canaryAbsent":true,"independentCanaryAbsent":true,"credentialRemoved":true,"independentCredentialAbsence":true,"utc":"2026-10-31T14:29:47.174Z"}

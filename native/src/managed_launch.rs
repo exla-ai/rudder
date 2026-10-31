@@ -10,7 +10,7 @@ use rudder_engine::{
         BrokerBinding, WorkspaceObservationProfile, HelperApplicationSpec},
     journal::{Journal, OwnerFence},
     protocol::{canonical_json, ObjectKind, ObjectRef, OwnerEpoch},
-    vfs::{rpc::{ObservationBinding, AttemptContext}, VfsManager, VfsCheckpoint},
+    vfs::{remote_launch::RemoteLaunchRequest, rpc::{ObservationBinding, AttemptContext}, VfsManager, VfsCheckpoint},
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -81,6 +81,33 @@ impl WorkspaceAssignment {
     }
 }
 
+/// Remote assignment DATA is portable; Linux live custody stays in source_prepare.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RemoteSourceAssignment {
+    pub format_version: u32,
+    pub fence: ManagedLaunchFence,
+    pub selection: RemoteLaunchRequest,
+    pub host_context: ProtectedHostContextRef,
+}
+impl RemoteSourceAssignment {
+    pub(crate) fn validate(&self, fence: &ManagedLaunchFence) -> Result<()> {
+        fence.validate()?;
+        self.selection.validate()?;
+        self.host_context.validate()?;
+        let selection = &self.selection;
+        let attempt = &selection.attempt;
+        ensure!(self.format_version == 2 && self.fence == *fence
+            && selection.request_id == fence.request_id
+            && attempt.project_id == fence.owner.project_id
+            && attempt.owner == fence.owner_epoch()
+            && attempt.run_id == fence.run_id && attempt.run_epoch == fence.run_epoch
+            && attempt.execution_id == fence.attempt_id,
+            "remote source assignment differs from reserved owner/run/attempt");
+        Ok(())
+    }
+}
+
 /// Durable source identity only. Restored records are recovery evidence, never
 /// a live owner grant or permission to reopen a checkout-backed conversation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -88,6 +115,7 @@ impl WorkspaceAssignment {
 pub(crate) enum ManagedRunSource {
     Reserved { fence: ManagedLaunchFence, runnable_root: ObjectRef },
     Assigned { assignment: Box<WorkspaceAssignment> },
+    SourceAssigned { assignment: Box<RemoteSourceAssignment> },
     /// A malformed persisted marker remains visibly managed and quarantined.
     /// It cannot be supplied as an alternate valid public launch format.
     #[serde(skip_deserializing)]
@@ -102,18 +130,20 @@ impl ManagedRunSource {
                 fence
             }
             Self::Assigned { assignment } => { assignment.validate(&assignment.fence)?; &assignment.fence }
+            Self::SourceAssigned { assignment } => { assignment.validate(&assignment.fence)?; &assignment.fence }
             Self::Quarantined => anyhow::bail!("managed source marker requires explicit recovery"),
         };
         fence.validate()?;
         ensure!(fence.run_id == run_id, "managed source marker belongs to another run"); Ok(())
     }
     pub(crate) fn fence(&self) -> Option<&ManagedLaunchFence> {
-        match self { Self::Reserved { fence, .. } => Some(fence), Self::Assigned { assignment } => Some(&assignment.fence), Self::Quarantined => None }
+        match self { Self::Reserved { fence, .. } => Some(fence), Self::Assigned { assignment } => Some(&assignment.fence), Self::SourceAssigned { assignment } => Some(&assignment.fence), Self::Quarantined => None }
     }
     pub(crate) fn matches_reservation(&self, reservation: &Self) -> bool {
         let Self::Reserved { fence, runnable_root } = reservation else { return false; };
         match self { Self::Reserved { fence:actual, runnable_root:root } => actual == fence && root == runnable_root,
             Self::Assigned { assignment } => assignment.fence == *fence && assignment.runnable_root == *runnable_root,
+            Self::SourceAssigned { assignment } => assignment.fence == *fence && assignment.selection.root.root == *runnable_root,
             Self::Quarantined => false }
     }
 }

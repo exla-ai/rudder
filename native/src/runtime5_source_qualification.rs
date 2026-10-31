@@ -434,7 +434,7 @@ fn actual_https_source5_owned_stop_checkpoint_join_and_settlement() {
         let Some(CheckpointRef::PartialRemote(q)) = joined.provisional().unwrap().record().checkpoint() else {
             panic!("source5 checkpoint DATA required")
         };
-        checkpoint_transfer::publish(transfer, &input, selection, q, &spec.store_root, fixture.directory())
+        checkpoint_transfer::publish(transfer, &input, selection, q, &spec.store_root, &prepared.managed_run, fixture.directory())
             .unwrap_or_else(|error| panic!("actual checkpoint DATA publication failed: {error}"))
     });
     let proof = serde_json::json!({"format_version":1,"kind":"private-runtime5-source-qualification", "status":"qualified",

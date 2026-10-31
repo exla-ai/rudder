@@ -41,6 +41,7 @@ pub(super) fn publish(
     selection: RemoteLaunchRequest,
     q: &QuiescedPartialCheckpointV1,
     store_root: &Path,
+    managed_run: &crate::managed_store::ManagedRunLocation,
     private_root: &Path,
 ) -> Result<serde_json::Value> {
     use std::os::unix::fs::MetadataExt;
@@ -63,20 +64,27 @@ pub(super) fn publish(
     q.validate_data()?;
     let directory = private_root.join("transfer");
     new_private(&directory)?;
-    // These exact original bytes survive any uncertain producer ACK below.
-    write_new(&directory.join("q.json"), &canonical_json(q)?)?;
-    write_new(&directory.join("template.json"), &canonical_json(&template)?)?;
     let store = LocalStore::open(store_root)?;
     let stage = store.begin_staging(Duration::from_secs(600))?;
     let prepared = partial_checkpoint::prepare_partial_checkpoint_data(&store, &stage.id, q, &template)?;
     let intent = prepared.intent()?;
-    write_new(&directory.join("intent.json"), &canonical_json(&intent)?)?;
+    let assignment = managed_run.source_assignment(&template.selection.attempt.execution_id)?
+        .context("durable source assignment absent before checkpoint retention")?;
+    let inputs = crate::managed_store::SourceCheckpointInputs::from_prepared(
+        assignment.fence.clone(), q.clone(), template.clone(), &prepared)?;
+    managed_run.persist_source_checkpoint_inputs(&inputs)?;
     // Exercise a lost local ACK. Never use that reply as cleanup authority.
     drop(prepared.retain(&store)?);
     let current = partial_checkpoint::reconcile_partial_checkpoint_data(&store, &intent, q, &template)?
         .context("producer DATA reconciliation found no retained bytes")?;
     let opaque_receipt = current.transfer_receipt_json()?;
-    write_new(&directory.join("receipt.json"), opaque_receipt.as_bytes())?;
+    managed_run.persist_source_checkpoint_receipt(&assignment.fence, &opaque_receipt)?;
+    let recovered = managed_run.source_checkpoint_inputs(&assignment.fence.attempt_id)?
+        .context("durable source checkpoint inputs absent")?;
+    ensure!(canonical_json(&recovered.q)? == canonical_json(q)?
+        && recovered.template == template && recovered.intent == intent
+        && managed_run.source_checkpoint_receipt(&assignment.fence.attempt_id)?.as_deref() == Some(opaque_receipt.as_str()),
+        "source checkpoint recovery changed original inputs/opaque DATA receipt");
 
     // Actual managed CAS, without copying objects or allowing frames to choose
     // a path. The same RPC implementation backs the normal native helper.
@@ -162,6 +170,7 @@ pub(super) fn publish(
         "transfer changed producer capture retention");
     Ok(serde_json::json!({"format_version":1,"status":"passed","local_ack_reconciled":true,
         "original_inputs_persisted":true,"transfer_rpc_settled":true,"producer_retention_unchanged":true,
+        "durable_source_assignment":true,"durable_checkpoint_recovery_inputs":true,"opaque_current_data_receipt_persisted":true,
         "capture_consistency":q.capture.consistency,"publication_id":current.publication_id(),
         "publication":current.publication(),"transfer":result}))
 }

@@ -1,0 +1,61 @@
+{
+  "formatVersion": 1,
+  "kind": "owned-source5-retained-checkpoint-publication",
+  "qualified": true,
+  "mode": "producer-and-separate-retained-readback",
+  "verifiedAt": "2026-10-31T14:14:46.837Z",
+  "sourceKind": "working-tree",
+  "baseRevision": "536bf4d2a0b70617b686d4414f25c82a3d97a813",
+  "sourceEnvelopeSha256": "62c9edcd3c013759e55862afbab17c0f334eda2d521c97618e0b332a9cf126e6",
+  "image": "registry.fly.io/rudder-workers-exla:source5-publish-20261031-12abb7-593bed-02",
+  "imageDigest": "sha256:ef0216643692b880c81cbc0803e4ae37533ab0390621299490b85dc829f9d7eb",
+  "nativeSha256": "12abb7ee8a6039a0f7b613571ce33c578dc90527cb50336e274b824a8b72acce",
+  "libtestSha256": "593bede52d1254e1d458c67d59140bde262669ac8e504417ccc43bdea66973c9",
+  "immutableBaseWorker": "sha256:0d52fd93e5adbf09352110c0ec74dd98db22ba6f6df3ea16b1d4e0277f2efad9",
+  "producer": {
+    "id": "8e27ddb774ed58",
+    "instance": "01M694QW3B7QJGN0VWMHFEZ946",
+    "digest": "sha256:ef0216643692b880c81cbc0803e4ae37533ab0390621299490b85dc829f9d7eb"
+  },
+  "control": {
+    "id": "8911d61a434978",
+    "instance": "01M692PFGBVFQKYF97MW2D8BAN",
+    "digest": "sha256:cc4bedad9ffe065a458d7ae6aabe2e0d74c6a3e7337ce7cd30baa04e59cc9f92",
+    "revision": "dffce8075ecd9a5ed34de9a32e9f9e337cbcb0b2"
+  },
+  "producerCompletedAt": "2026-10-31T14:11:37.793Z",
+  "producerElapsedMs": 101776,
+  "producerChecks": {
+    "actualSource5AndBinding4": true,
+    "successfulHelperExitAndFreshIssuerJoin": true,
+    "sourceCallbacksSettledBeforeTransfer": true,
+    "originalQTemplateIntentPersisted": true,
+    "lostLocalAckReconciled": true,
+    "actualManagedStoreTransfer": true,
+    "lostPublicationResponseSettledAndReconciled": true,
+    "retryGetOnlyAndZeroUpload": true,
+    "producerRetentionUnchanged": true
+  },
+  "originalRun": {
+    "qualified": false,
+    "reason": "independent post-destruction reader rejected without a useful diagnostic; exact cause undetermined",
+    "producerAndTransferPassed": true,
+    "cleanupPassed": true
+  },
+  "readbackContinuation": {
+    "qualified": true,
+    "verifiedAt": "2026-10-31T14:14:46.837Z",
+    "elapsedMs": 4965,
+    "readerSha256": "a13b4ae4f44aa68553453fe287db7527c9718c76e0728f10d349c4857d5fd98a",
+    "newSyntheticCredentialSameAccount": true,
+    "twoFreshProducerAbsences": true,
+    "twoFreshCredentialAbsences": true,
+    "homeUnchanged": true,
+    "metadataReadsSequential": true
+  },
+  "scope": "Replicated checkpoint DATA read after producer destruction; no accepted source/seed, history, model execution or default rollout",
+  "captureConsistency": "live_best_effort",
+  "modelCalls": false,
+  "acceptedHistory": false,
+  "defaultRollout": false
+}

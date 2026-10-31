@@ -1,0 +1,17 @@
+{
+  "formatVersion": 1,
+  "producer": {
+    "id": "8e27ddb774ed58",
+    "instance": "01M694QW3B7QJGN0VWMHFEZ946",
+    "digest": "sha256:ef0216643692b880c81cbc0803e4ae37533ab0390621299490b85dc829f9d7eb"
+  },
+  "producerAbsent": true,
+  "independentProducerAbsence": true,
+  "originalCredentialRemoved": true,
+  "originalIndependentCredentialAbsence": true,
+  "continuationCredentialRemoved": true,
+  "continuationIndependentCredentialAbsence": true,
+  "continuationFreshProducerAbsences": true,
+  "homeUnchanged": true,
+  "verifiedAt": "2026-10-31T14:14:46.837Z"
+}

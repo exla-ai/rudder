@@ -1,6 +1,9 @@
 //! Private managed-project recovery state. All filesystem APIs here are
 //! off-App; only location cloning and bounded projection admission are pure
 //! App operations. A prepared floor/receipt never authorizes a new execution.
+#[path = "managed_source_records.rs"]
+mod source_records;
+pub(crate) use source_records::SourceCheckpointInputs;
 use crate::managed_launch::{ManagedLaunchFence, ManagedRunSource, WorkspaceAssignment};
 use anyhow::{ensure, Context, Result};
 use rudder_engine::{
@@ -930,6 +933,8 @@ impl ManagedRunLocation {
         let reservation = self
             .reservation(&assignment.fence.attempt_id)?
             .context("managed assignment has no durable reservation")?;
+        ensure!(matches!(fs::symlink_metadata(self.attempt_directory(&assignment.fence.attempt_id)?.join("assignment2.json")),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound), "managed assignment family collision");
         ensure!(
             ManagedRunSource::Assigned {
                 assignment: Box::new(assignment.clone())
@@ -948,6 +953,8 @@ impl ManagedRunLocation {
         let reservation = self
             .reservation(attempt)?
             .context("managed reservation missing")?;
+        ensure!(matches!(fs::symlink_metadata(self.attempt_directory(attempt)?.join("assignment2.json")),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound), "managed assignment family collision");
         let assignment: Option<WorkspaceAssignment> =
             read_record(&self.attempt_directory(attempt)?.join("assignment.json"))?;
         if let Some(assignment) = &assignment {
@@ -970,7 +977,16 @@ impl ManagedRunLocation {
         let reserved = self
             .reservation(&identity.attempt_id)?
             .context("managed reservation missing")?;
-        let assigned = self.assignment(&identity.attempt_id)?;
+        let remote_present = match fs::symlink_metadata(self.attempt_directory(&identity.attempt_id)?.join("assignment2.json")) {
+            Ok(_) => true,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+            Err(error) => return Err(error.into()),
+        };
+        let (assigned, source_assigned) = if remote_present {
+            (None, self.source_assignment(&identity.attempt_id)?)
+        } else {
+            (self.assignment(&identity.attempt_id)?, None)
+        };
         let projection = (|| -> Result<Option<Projection>> {
             let Some(bytes) =
                 read_bytes(&self.directory().join("projection.json"), PROJECTION_LIMIT)?
@@ -991,13 +1007,20 @@ impl ManagedRunLocation {
                     "managed projected assignment evidence missing"
                 );
             }
+            if let ManagedRunSource::SourceAssigned { assignment } = &record.source {
+                ensure!(source_assigned.as_ref() == Some(assignment.as_ref()),
+                    "managed projected source assignment evidence missing");
+            }
             Ok(Some(record))
         })();
         let source = match &assigned {
             Some(assignment) => ManagedRunSource::Assigned {
                 assignment: Box::new(assignment.clone()),
             },
-            None => reserved,
+            None => match source_assigned {
+                Some(assignment) => ManagedRunSource::SourceAssigned { assignment: Box::new(assignment) },
+                None => reserved,
+            },
         };
         match projection {
             Ok(record) => Ok(RecoveredManagedRun {
@@ -1035,6 +1058,10 @@ impl ManagedRunLocation {
                 self.assignment(&fence.attempt_id)?.as_ref() == Some(assignment.as_ref()),
                 "managed projection assignment missing"
             );
+        }
+        if let ManagedRunSource::SourceAssigned { assignment } = source {
+            ensure!(self.source_assignment(&fence.attempt_id)?.as_ref() == Some(assignment.as_ref()),
+                "managed projected source assignment missing");
         }
         let bytes = canonical_json(&Projection {
             format_version: 1,

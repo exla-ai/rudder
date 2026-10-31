@@ -152,11 +152,11 @@ the test VM was destroyed with two fresh absence checks. The canonical app,
 health, authentication boundary, runtime code hashes and database passed at
 13:35:07.936Z. The live home instance and alpha.7 image stayed unchanged.
 The tag release matrix, Mac, iOS and TUI workflows passed. Both npm next tags
-name alpha.19; stable stays3.9.13. Both packages passed isolated fresh installs,
+name alpha.19; stable stays 3.9.13. Both packages passed isolated fresh installs,
 CLI/native/jj smoke and all-platform artifact/revision checks at13:55:43.717Z.
 See the [delivery record](delivery-alpha19.json).
 
-## Owned checkpoint DATA durability, alpha.20 candidate
+## Owned checkpoint DATA durability, alpha.20
 
 The opt-in source5 fixture now prepares retained checkpoint DATA from its actual
 joined Record2, persists the original Q/template/intent, reconciles a lost local
@@ -186,8 +186,17 @@ portable to macOS recovery; only Linux can execute this profile. Managed-state
 verification passed76 tests with zero failures and four explicit ignores. The
 normal native helper also built successfully. The full local release gate passed:
 1,762 Rust tests, 762 JavaScript tests and 59 terminal tests, with zero failures;
-TypeScript and Cloud build also passed. The pre-tag matrix and delivery remain
-pending. See [verification](verification-alpha20.json).
+TypeScript and Cloud build also passed. The full pre-tag and tag matrices passed; Cloud and both npm packages are
+verified. See [verification](verification-alpha20.json).
+
+Cloud release170 runs tagged alpha.20 revision85168a9. The exact stock worker
+passed seven UID1500 smoke commands and was destroyed with independent absence
+checks. Canonical app, health/auth, database and code-hash checks passed at
+15:41:34.918Z; the active home instance and image stayed unchanged. The full tag
+matrix, Mac, iOS and TUI workflows passed. Both npm next tags name alpha.20;
+stable stays 3.9.13. Both packages passed isolated installs, CLI/native/jj smoke
+and all-platform artifact/revision checks at 2026-10-31T16:11:35.964957Z. See
+[delivery](delivery-alpha20.json).
 
 ## Current implementation track
 
@@ -201,7 +210,7 @@ the three architecture documents already contained this session's planning work.
 | Private previews | Persisted Tailscale login, actual readiness, bounded async probes, exact project ownership, ready links and local open | E13 subset implemented; real userspace/Serve check passed; laptop/phone access remains untested |
 | Terminal stream | Shared home/sail helper, short output batching, bounded backpressure, connection fencing, UTF-8 and repaint recovery | E13 subset deployed in the worker image; real WS/PTY VM checks passed; existing homes adopt when idle |
 | Startup/download caches | Background CLI update, persistent account-local npm/pnpm/uv cache defaults, explicit overrides retained | Behavior tests pass; no distributed action-cache claim |
-| Full storage/engine rewrite | Milestones below | Cloud release169 / worker alpha.19 is deployed and verified; its stock worker smoke and full release matrix passed. Both npm next tags name alpha.19 and both packages passed isolated installs and all-platform artifact checks. Default workspace integration, remote captured publication, connected models, fleet and migration gates remain open |
+| Full storage/engine rewrite | Milestones below | Cloud release170 / worker alpha.20 is deployed and verified; its stock worker smoke and full release matrix passed. Both npm next tags name alpha.20; both packages passed isolated installs and all-platform artifact verification. Captured checkpoint DATA passed independent HTTPS readback after producer destruction. Default workspace integration, connected models, history, fleet and migration gates remain open |
 
 The current native simple-execution path remains an isolated worker; explicit
 main-checkout mode remains available. The initial automatic DAG path retains

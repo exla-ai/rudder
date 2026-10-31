@@ -84,7 +84,19 @@
     }
   },
   "physicalSource5PublicationEvidence": "../../examples/execution/evidence/2026-10-31-source5-publication/qualification.json",
-  "releaseMatrix": "pending",
-  "delivery": "pending",
-  "fullV4Complete": false
+  "releaseMatrix": {
+    "status": "passed",
+    "workflow": "https://github.com/exla-ai/rudder/actions/runs/41215271164",
+    "revision": "85168a910976a70c3a77422c8a8f257f67934466"
+  },
+  "delivery": "Cloud deployed, both npm next packages published and fresh installations verified",
+  "fullV4Complete": false,
+  "candidateRevision": "3a100637bed871fe72f805430bf2a06624d4fbd3",
+  "taggedRevision": "85168a910976a70c3a77422c8a8f257f67934466",
+  "preTagQualification": {
+    "status": "passed",
+    "workflow": "https://github.com/exla-ai/rudder/actions/runs/41212464693",
+    "candidateRevision": "3a100637bed871fe72f805430bf2a06624d4fbd3"
+  },
+  "deliveryRecord": "delivery-alpha20.json"
 }

@@ -50,7 +50,7 @@ the three architecture documents already contained this session's planning work.
 | Private previews | Persisted Tailscale login, actual readiness, bounded async probes, exact project ownership, ready links and local open | E13 subset implemented; real userspace/Serve check passed; laptop/phone access remains untested |
 | Terminal stream | Shared home/sail helper, short output batching, bounded backpressure, connection fencing, UTF-8 and repaint recovery | E13 subset deployed in the worker image; real WS/PTY VM checks passed; existing homes adopt when idle |
 | Startup/download caches | Background CLI update, persistent account-local npm/pnpm/uv cache defaults, explicit overrides retained | Behavior tests pass; no distributed action-cache claim |
-| Full storage/engine rewrite | Milestones below | Cloud release 162 / worker alpha.11 is deployed and verified; npm remains alpha.7 while alpha.11 release CI runs. Default workspace integration, fleet and migration gates remain open |
+| Full storage/engine rewrite | Milestones below | Cloud release 162 / worker alpha.11 is deployed and verified; npm remains alpha.7 after the alpha.11 publication test failure. Default workspace integration, fleet and migration gates remain open |
 
 The current native simple-execution path remains an isolated worker; explicit
 main-checkout mode remains available. The initial automatic DAG path retains
@@ -80,10 +80,16 @@ See [exact delivery evidence](delivery-alpha11.json).
 The active home keeps its running alpha.7 image until idle. This CAS-format
 round trip does not establish filesystem materialization or agent-launch latency.
 
-Both npm `next` tags still point to alpha.7, verified at `2026-10-31T00:09:12Z`.
-Alpha.11 Linux and ARM Mac artifacts passed; the Intel Mac build remains in
-progress. Its Mac/iOS and TUI CI passed. Registry availability and fresh installs
-are still separate gates.
+Both npm `next` tags still point to alpha.7, verified at `2026-10-31T00:24:13.343Z`.
+All three alpha.11 native artifacts and separate Mac/iOS and TUI CI passed.
+The publication job failed four macOS board fixtures before either npm publish
+step: three assumed a short socket path and one mocked only Linux's opener.
+A controlled long-TMPDIR run reproduces the old fixtures' three path failures;
+the corrected fixtures pass all ten cases, including an explicit long-home
+case. The Darwin opener selection also passes an isolated branch check on
+Linux; actual Darwin qualification remains the next tag's CI gate.
+See [fixture correction evidence](../../examples/board/evidence/2026-10-31-ci-fixtures/report.json).
+Registry availability and fresh installs remain separate gates.
 All three alpha.10 native platform builds, Mac/iOS and TUI CI passed. Its
 publication job then stopped on two managed-guard test path assertions. A
 symlinked TMPDIR reproduces both failures on Linux: child process.cwd() resolves

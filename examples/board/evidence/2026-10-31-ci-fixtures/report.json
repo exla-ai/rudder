@@ -1,0 +1,58 @@
+{
+  "formatVersion": 1,
+  "longTmpdirBytes": 172,
+  "checks": [
+    {
+      "name": "tag11-before",
+      "exitCode": 1,
+      "durationMs": 1372,
+      "sha256": "de683f6836e2f9b064baeb5b062588d9008cef69a3c49d3b5995bd1a780e8352",
+      "summary": [
+        "not ok 3 - browser exchanges the fragment privately, stores by origin/instance, survives reload and clears stale state",
+        "not ok 6 - private host callbacks bind the project and instance, mint fixed targets and return no browser secret",
+        "not ok 8 - a private FIFO descriptor settles without a writer and regular-file growth cannot bypass the read cap",
+        "# tests 9",
+        "# pass 6",
+        "# fail 3"
+      ]
+    },
+    {
+      "name": "main-after",
+      "exitCode": 0,
+      "durationMs": 1131,
+      "sha256": "e16585ad395635ed98f448e1f4fd13005750a900f5554e17ad7319fe3cde3d57",
+      "summary": [
+        "# tests 10",
+        "# pass 10",
+        "# fail 0"
+      ]
+    },
+    {
+      "name": "Linux exercise of Darwin opener selection only",
+      "exitCode": 0,
+      "sha256": "dd6c0ea9c53034cd9ae0ae20df42e03a809f51645a1ee0c50587039a7a873b02",
+      "summary": [
+        "# tests 1",
+        "# pass 1",
+        "# fail 0"
+      ]
+    }
+  ],
+  "darwinKernelQualification": false,
+  "at": "2026-10-31T00:24:13.343Z",
+  "baselineRevision": "30f6db4c4806a8f65c695d235a43d599ae23c080",
+  "workflow": "https://github.com/exla-ai/rudder/actions/runs/41147002410",
+  "failedPublishJob": 124379602605,
+  "actualDarwinFailureCount": 4,
+  "bothNpmPublishSteps": "skipped",
+  "candidateSourceFiles": {
+    "tests/board-capability.test.mjs": "87ae33a17ce2ce2aa096e32889fe31629f7a240ae9b9b2a7323663741c732881",
+    "tests/board-host-access.test.mjs": "f2486b9268be787b0cff9ef3b43376b492e758d564ddf0a8b5c203a4e6d3b3a5",
+    "tests/board-fixture.mjs": "c8ee6d283f189d71a83082746087eaa7e0d2b1bab6fe179942e102683b5f9b03"
+  },
+  "limits": [
+    "Branch check exercises platform selection only, not the Darwin kernel.",
+    "No production board implementation changed.",
+    "Full v4 implementation remains active."
+  ]
+}

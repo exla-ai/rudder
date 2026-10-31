@@ -209,11 +209,11 @@
     "fleetAdoptionVerified": false
   },
   "cli": {
-    "status": "publication-pending",
+    "status": "publication-failed",
     "version": "4.0.0-alpha.11",
     "releaseWorkflow": "https://github.com/exla-ai/rudder/actions/runs/41147002410",
     "lastRegistryObservation": {
-      "at": "2026-10-31T00:09:12.402796Z",
+      "at": "2026-10-31T00:24:13.343Z",
       "packages": [
         {
           "name": "@exla/rudder",
@@ -234,11 +234,22 @@
     "nativePlatformStatus": {
       "linux-x64": "success",
       "darwin-arm64": "success",
-      "darwin-x64": "in-progress"
+      "darwin-x64": "success"
     },
     "macAppCI": "success",
     "iosCI": "success",
-    "tuiCI": "success"
+    "tuiCI": "success",
+    "publicationFailure": {
+      "job": "https://github.com/exla-ai/rudder/actions/runs/41147002410/job/124379602605",
+      "step": "Typecheck + JS tests",
+      "failedTests": 4,
+      "fixtureCauses": [
+        "Three tests assumed the descriptor always lived in RUDDER_HOME/board; Darwin long temporary homes correctly use the private Unix-socket fallback.",
+        "The opener fixture only supplied xdg-open; Darwin selects open."
+      ],
+      "bothNpmPublishSteps": "skipped",
+      "correctionEvidence": "examples/board/evidence/2026-10-31-ci-fixtures/report.json"
+    }
   },
   "localChecks": {
     "engine": {

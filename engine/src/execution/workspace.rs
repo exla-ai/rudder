@@ -359,7 +359,7 @@ impl OwnedHelperWorkspace {
         Ok(Self {
             view,
             manager,
-            kind: if spec.format_version == 4 && spec.profile.is_some() {
+            kind: if matches!(spec.format_version, 4 | 5) && spec.profile.is_some() {
                 Kind::RemoteFinalizable(remote)
             } else {
                 Kind::Remote(remote)

@@ -155,6 +155,8 @@ fn fixture() -> (ManagedExecutionBinding, ManagedShutdownReceipt) {
         guest_socket: "/tmp/cx.sock".into(),
         profile: Some(ExecutionProfileV4 {
             format_version: 1,
+            startup: Some(super::super::startup_budget::StartupConstraint::begin(
+                super::super::startup_budget::STARTUP_POLICY_LIMIT).unwrap()),
             request_id: id.request_id.clone(),
             network: NetworkProfileV1 {
                 format_version: 1,

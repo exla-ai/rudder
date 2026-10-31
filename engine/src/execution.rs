@@ -20,6 +20,7 @@ use std::{
 use uuid::Uuid;
 
 pub mod finalization_budget;
+pub mod startup_budget;
 #[cfg(target_os = "linux")]
 pub mod handoff;
 #[cfg(target_os = "linux")]

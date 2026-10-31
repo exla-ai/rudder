@@ -1,0 +1,84 @@
+{
+  "formatVersion": 1,
+  "kind": "owned-source5-composition",
+  "status": "qualified",
+  "verifiedAt": "2026-10-31T11:23:21.936Z",
+  "sourceKind": "working-tree",
+  "baseRevision": "2025e4b87aea803bc8d5aa3cc582eadbc1a22ae8",
+  "sourceEnvelopeSha256": "aeb6f37824c5d5a4c6a0cb5978064ff8c0892a8cc446f02d7525dc9de5a43286",
+  "provider": "Fly.io",
+  "image": "registry.fly.io/rudder-workers-exla:source5-20261031-567ed5-91c6cc-04",
+  "imageDigest": "sha256:5b3956d9dcdb27fcdccd6eff50b2ddea317b1b4245324b4f82f1f86c80f98649",
+  "stockWorkerBaseDigest": "sha256:0d52fd93e5adbf09352110c0ec74dd98db22ba6f6df3ea16b1d4e0277f2efad9",
+  "nativeSha256": "567ed52cac117b167053f56a3b4b68c33c1e3dda30debf15559acd97d8f72220",
+  "libtestSha256": "91c6cc3f4228983dfebe2ae03542f1e928191a870f0873ad3472c79ee78a1a77",
+  "node": {
+    "resolvedPath": "/usr/local/bin/node",
+    "sha256": "94efd062ed066c1a0b332e18249859c905e920eeada5df55d24c99b919629a90"
+  },
+  "workerCli": "/opt/rudder/dist/index.js",
+  "fixtureSha256": "2198c88e2645598be81314a657cc4ca2f6916cc2d7413b2c81e0af9bcbed7066",
+  "machine": {
+    "id": "8275e0f7e60938",
+    "instance": "01M68V4W66C93S7TYRT83AG2XH",
+    "digest": "sha256:5b3956d9dcdb27fcdccd6eff50b2ddea317b1b4245324b4f82f1f86c80f98649"
+  },
+  "control": {
+    "id": "8911d61a434978",
+    "instance": "01M68NNEJD8173ZAABMBHPBNDT",
+    "revision": "243728b94f55fd3bd40be22c44abf8ccae9f34a6",
+    "digest": "sha256:f574e9e0859706b7835466707a8b264a5f2feebf49c33e0002b645090141953e"
+  },
+  "runtimeManifestSha256": "8f53586762d4667534022ddaa1c0ea8c957ce3f9c5e4f9fecf2671d1b90c32ac",
+  "controllerSourceSha256": {
+    "controller.mjs": "01eadb5ac43d752a8d8a394e52aa5ae1e37e91aa9fa849591c43ceaf256dd31e",
+    "guest.mjs": "66f3e99320030b4c7b991b1cda9ee05567a06e498ea26b2503e86d55b67d8cf8",
+    "ownership.mjs": "076c599ecb7dda8ef53ab0d3caa6a6d93257fcdc909f7265b6b6b935c952bd38",
+    "helpers.mjs": "17e22543db4cb84a00c142f00b7cdd7690ff3b00d74b10b67033c2d9e632c79c",
+    "lifecycle.mjs": "31afb120e81c31c13dfd043a3fcdf06e384297077b4319efdb52a149309007d8",
+    "controller-extension.mjs": "bed3e1547aa7f87930d09f37191a37f949303d7a378a94e48950b5ba7fadbd50",
+    "fixture-v2.json": "2198c88e2645598be81314a657cc4ca2f6916cc2d7413b2c81e0af9bcbed7066",
+    "runtime-inputs.json": "8f53586762d4667534022ddaa1c0ea8c957ce3f9c5e4f9fecf2671d1b90c32ac"
+  },
+  "publication": {
+    "status": "published",
+    "receipt": {
+      "format_version": 1,
+      "root_id": "runtime5-source-c5188403-c623-4d78-a76c-3079e10555b2",
+      "root": {
+        "kind": "runnable_root",
+        "algorithm": "sha256",
+        "digest": "bf4577fcd42ebd27aaa8f89763b82313f44cbe827a8d541d5e0cdf6ab6ecd8e5",
+        "size_bytes": 658
+      },
+      "durability": "replicated",
+      "published_at_ms": 1793445750162,
+      "object_count": 8,
+      "total_bytes": 1753
+    },
+    "exactObjectReads": 8
+  },
+  "elapsedMs": 55740,
+  "checks": {
+    "actual_backend_ready": true,
+    "actual_fresh_issuer_join": true,
+    "actual_https_source": true,
+    "actual_server_callbacks_settled": true,
+    "actual_stop_v4": true,
+    "actual_successful_helper_exit": true,
+    "actual_uid1500_fuse_offline_namespace": true,
+    "captured_mmap_bytes_verified": true
+  },
+  "nativeProofSha256": "62c68ea19f4f34bdb54db4828dbc9227e6b30f9583b39dfe80759bfd2d437a64",
+  "privateReportSha256": "f0afd3afe75578c5f0c0d31951d84c291e163ba8c9db97cb6d1f854ea5bfc954",
+  "claimsExcluded": [
+    "default launch adoption",
+    "model execution",
+    "accepted jj history",
+    "remote persistence of captured delta/evidence",
+    "quiesced consistency label",
+    "production release deployment"
+  ],
+  "checkpointStorage": "local CAS retention verified before disposable VM destruction",
+  "captureConsistency": "live_best_effort"
+}

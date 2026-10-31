@@ -1,4 +1,25 @@
 use super::*;
+
+#[test]
+fn workspace_startup_diagnostics_keep_stage_and_remove_private_causes() {
+    let secret = "Bearer private-fixture-credential";
+    let error = workspace_step::<(), _>(
+        "remote root admission",
+        Err(anyhow::anyhow!("HTTP failure with {secret}")),
+    )
+    .unwrap_err();
+    let diagnostic = format!("{:#}", workspace_failure(error));
+    assert_eq!(
+        diagnostic,
+        "remote source workspace preparation failed during remote root admission"
+    );
+    assert!(!diagnostic.contains(secret));
+    let unknown = workspace_failure(anyhow::anyhow!("unclassified failure with {secret}"));
+    assert_eq!(
+        format!("{unknown:#}"),
+        "remote source workspace preparation failed"
+    );
+}
 use rudder_engine::{
     protocol::{ObjectKind, ObjectRef, OwnerEpoch},
     store::ImportPolicy,
@@ -855,6 +876,7 @@ fn actual_source_factory(mode: u8) {
         node,
         script,
         TransportProfile::LoopbackHttpTest,
+        None,
     )
     .unwrap();
     assert_eq!(
@@ -1098,4 +1120,39 @@ fn host_cached_checks_gate_each_root_and_expiry_is_absorbing() {
     assert!(host.retired.load(Ordering::Acquire));
     time.store(1, Ordering::Release);
     assert!(authority.validate(&state.binding).is_err());
+}
+
+#[test]
+fn runtime_hash_budget_is_checked_between_chunks_and_before_open() {
+    use std::cell::Cell;
+    let base = temporary().unwrap();
+    let path = base.path().join("runtime.js");
+    fs::write(&path, vec![b'x'; 256 * 1024]).unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o400)).unwrap();
+    let reference = runtime_reference(path);
+    let calls = Cell::new(0);
+    let cancelled = || -> Result<()> {
+        let call = calls.get() + 1;
+        calls.set(call);
+        ensure!(call < 5, "budget retired");
+        Ok(())
+    };
+    assert!(
+        PinnedRuntime::open_checked(&reference, false, RuntimeTrust::Fixture, &cancelled).is_err()
+    );
+    assert_eq!(calls.get(), 5);
+    let mut pin = PinnedRuntime::open(&reference, false, RuntimeTrust::Fixture).unwrap();
+    calls.set(0);
+    assert!(pin.verify_checked(&cancelled).is_err());
+    assert_eq!(calls.get(), 5);
+    let never = || -> Result<()> { anyhow::bail!("budget retired") };
+    let missing = RuntimeFile {
+        path: base.path().join("absent"),
+        sha256: "0".repeat(64),
+        size_bytes: 0,
+    };
+    let error = PinnedRuntime::open_checked(&missing, false, RuntimeTrust::Fixture, &never)
+        .err()
+        .unwrap();
+    assert!(error.to_string().contains("budget retired"));
 }

@@ -50,6 +50,10 @@ impl ExitedSourceShutdown {
     }
 }
 impl JoinedSourceShutdown {
+    /// Identity of the actual issuer retained through the successful join.
+    pub(crate) fn matches_issuer(&self, issuer: &Arc<HostSourceIssuer>) -> bool {
+        Arc::ptr_eq(&self.joined.issuer, issuer)
+    }
     /// Bounded local check on App adoption. Keep this value through settlement;
     /// never convert its existence into accepted history or deployment proof.
     pub(crate) fn provisional(&self) -> Result<&ProvisionalSourceShutdown> {

@@ -1,0 +1,22 @@
+{
+  "formatVersion": 1,
+  "verifiedAt": "2026-10-31T12:21:58.470Z",
+  "machine": {
+    "id": "7812322f674028",
+    "instance": "01M68YFEMA8BF8H2ZJYXN7MCXQ",
+    "digest": "sha256:ef0641de645300062fdfe06fcebfbdebdf71a73e9b27ec2269519f9ead62923e"
+  },
+  "cleanupVerified": true,
+  "independentAbsence": true,
+  "syntheticCredentialRemoved": true,
+  "independentCredentialAbsence": true,
+  "withinLifetimeBound": true,
+  "protectedHome": {
+    "id": "8edd225a7d0378",
+    "instance": "01M670MG4A8E0DWE9GA1C0PQ92",
+    "state": "started",
+    "digest": "sha256:404f46396aca77324d9b53c55d2824a5401af56ba5362d0bdae67e16108fc245"
+  },
+  "protectedHomeUnchangedAcrossInventories": true,
+  "protectedHomeInventorySamples": 20
+}

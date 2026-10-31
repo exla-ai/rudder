@@ -17,6 +17,9 @@ pub struct ExecutionProfileV4 {
     pub request_id: String,
     pub network: NetworkProfileV1,
     pub workspace: ExecutionWorkspaceSelectionV4,
+    /// Spec5's original startup constraint. Omission preserves Spec4 bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub startup: Option<super::startup_budget::StartupConstraint>,
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -69,6 +72,8 @@ impl ExecutionProfileV4 {
         // Spec5 is a separate remote-only metadata family. Admission still
         // requires owned source/controller lifetimes outside this codec.
         if spec.format_version == 5 {
+            self.startup.as_ref().context("source specification requires its original startup constraint")?
+                .validate()?;
             ensure!(
                 matches!(
                     self.workspace,
@@ -76,6 +81,8 @@ impl ExecutionProfileV4 {
                 ),
                 "execution specification5 requires remote source-only workspace"
             );
+        } else {
+            ensure!(self.startup.is_none(), "legacy specification cannot carry a source startup constraint");
         }
         if let ExecutionWorkspaceSelectionV4::RemoteSourceOnly {
             selection,

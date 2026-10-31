@@ -6,6 +6,7 @@ use rudder_engine::{
     execution::{
         ExecutionSpec, ExecutionWorkspaceSelectionV4, HelperServices, HelperWorkspaceServices,
         OwnedHelperWorkspace, ProtectedHostContextRef,
+        startup_budget::StartupBudget,
     },
     fleet_lease::{HostClock, SuspendAwareClock},
     protocol::canonical_json,
@@ -22,7 +23,7 @@ use rudder_engine::{
         RemoteOptions,
     },
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
@@ -60,7 +61,7 @@ struct HostContext {
     registry_root: PathBuf,
 }
 // A separate closed schema keeps context1 strict and prevents downgrade.
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct HostContextV2 {
     format_version: u32,
@@ -141,23 +142,142 @@ fn read_host_context(
     validate_context(&source, spec, selection, TransportProfile::Https)?;
     Ok((source, directory))
 }
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-struct RuntimeFile {
-    path: PathBuf,
-    sha256: String,
-    size_bytes: u64,
+pub(crate) struct RuntimeFile {
+    pub(crate) path: PathBuf,
+    pub(crate) sha256: String,
+    pub(crate) size_bytes: u64,
 }
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-struct SourceContext {
-    scope: CacheScope,
-    base_url: String,
-    auth_headers: BTreeMap<String, String>,
+pub(crate) struct SourceContext {
+    pub(crate) scope: CacheScope,
+    pub(crate) base_url: String,
+    pub(crate) auth_headers: BTreeMap<String, String>,
+}
+
+/// Trusted off-App selection. No Debug/Serde container and no guest projection.
+pub(crate) struct RemoteContextInputs {
+    pub(crate) node: RuntimeFile,
+    pub(crate) cli_script: RuntimeFile,
+    pub(crate) source: SourceContext,
+    pub(crate) cache_root: PathBuf,
+    pub(crate) registry_root: PathBuf,
+}
+pub(crate) struct PreparedContextRuntime {
+    node: PinnedRuntime,
+    cli_script: PinnedRuntime,
+}
+impl PreparedContextRuntime {
+    pub(crate) fn check_current_checked(&mut self, check: &dyn Fn() -> Result<()>) -> Result<()> {
+        self.node.verify_checked(check)?;
+        self.cli_script.verify_checked(check)
+    }
+}
+/// Creates only a new immutable protected context. Full schema, protected-root
+/// and actual image-runtime validation uses the same helper readers below.
+pub(crate) fn write_context2_checked(
+    path: &Path,
+    selection: &RemoteLaunchRequest,
+    inputs: RemoteContextInputs,
+    authorizer: &Path,
+    check: &dyn Fn() -> Result<()>,
+) -> Result<ProtectedHostContextRef> {
+    check()?;
+    use std::{io::Write, os::unix::fs::OpenOptionsExt};
+    selection.validate()?;
+    ensure!(normalized(path), "invalid protected remote context path");
+    let parent = path.parent().context("remote context parent absent")?;
+    ensure!(
+        parent.canonicalize()? == parent,
+        "remote context parent changed"
+    );
+    let metadata = fs::symlink_metadata(parent)?;
+    ensure!(
+        metadata.is_dir()
+            && metadata.uid() == unsafe { libc::geteuid() }
+            && metadata.mode() & 0o7777 == 0o700,
+        "remote context parent must be private"
+    );
+    let context = HostContextV2 {
+        format_version: 2,
+        kind: KIND.into(),
+        launch_request_digest: hex_digest(canonical_json(selection)?),
+        node: inputs.node,
+        cli_script: inputs.cli_script,
+        source: inputs.source,
+        cache_root: inputs.cache_root,
+        registry_root: inputs.registry_root,
+        source_authorizer_directory: authorizer.into(),
+    };
+    let mut bytes = canonical_json(&context)?;
+    let reference = ProtectedHostContextRef {
+        format_version: 1,
+        path: path.into(),
+        sha256: hex_digest(&bytes),
+        size_bytes: bytes.len() as u64,
+    };
+    let result = (|| {
+        reference.validate()?;
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(path)?;
+        file.write_all(&bytes)?;
+        file.sync_all()?;
+        File::open(parent)?.sync_all()?;
+        check()?;
+        Ok(reference)
+    })();
+    bytes.fill(0);
+    result
+}
+pub(crate) fn prepare_context2_runtime_checked(
+    reference: &ProtectedHostContextRef,
+    spec: &ExecutionSpec,
+    selection: &RemoteLaunchRequest,
+    check: &dyn Fn() -> Result<()>,
+) -> Result<PreparedContextRuntime> {
+    check()?;
+    let (context, _) = read_host_context(reference, spec, selection)?;
+    check()?;
+    Ok(PreparedContextRuntime {
+        node: PinnedRuntime::open_checked(&context.node, true, RuntimeTrust::Image, check)?,
+        cli_script: PinnedRuntime::open_checked(
+            &context.cli_script,
+            false,
+            RuntimeTrust::Image,
+            check,
+        )?,
+    })
 }
 
 fn fault() -> anyhow::Error {
     anyhow::anyhow!("remote workspace authorization unavailable")
+}
+
+#[derive(Debug)]
+struct WorkspacePreparationFailure(&'static str);
+impl std::fmt::Display for WorkspacePreparationFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.0)
+    }
+}
+impl std::error::Error for WorkspacePreparationFailure {}
+
+// Report only trusted stage names. Transport and context errors may contain
+// private paths or credentials and must never become terminal error causes.
+fn workspace_step<T, E>(stage: &'static str, result: std::result::Result<T, E>) -> Result<T> {
+    result.map_err(|_| WorkspacePreparationFailure(stage).into())
+}
+fn workspace_failure(error: anyhow::Error) -> anyhow::Error {
+    match error.downcast_ref::<WorkspacePreparationFailure>() {
+        Some(stage) => anyhow::anyhow!("remote source workspace preparation failed during {stage}"),
+        None => anyhow::anyhow!("remote source workspace preparation failed"),
+    }
 }
 fn encoded_hex(value: impl AsRef<[u8]>) -> String {
     value
@@ -389,6 +509,15 @@ struct PinnedRuntime {
 }
 impl PinnedRuntime {
     fn open(reference: &RuntimeFile, executable: bool, trust: RuntimeTrust) -> Result<Self> {
+        Self::open_checked(reference, executable, trust, &|| Ok(()))
+    }
+    fn open_checked(
+        reference: &RuntimeFile,
+        executable: bool,
+        trust: RuntimeTrust,
+        check: &dyn Fn() -> Result<()>,
+    ) -> Result<Self> {
+        check()?;
         let file = open_runtime(&reference.path, trust)?;
         let observed = identity(&file)?;
         ensure!(
@@ -405,16 +534,21 @@ impl PinnedRuntime {
             identity: observed,
             trust,
         };
-        this.verify()?;
+        this.verify_checked(check)?;
         if executable {
             let mut magic = [0; 4];
             this.file.seek(SeekFrom::Start(0))?;
             this.file.read_exact(&mut magic)?;
             ensure!(&magic == b"\x7fELF", "remote Node must be pinned Linux ELF");
         }
+        check()?;
         Ok(this)
     }
     fn verify(&mut self) -> Result<()> {
+        self.verify_checked(&|| Ok(()))
+    }
+    fn verify_checked(&mut self, check: &dyn Fn() -> Result<()>) -> Result<()> {
+        check()?;
         ensure!(
             identity(&self.file)? == self.identity,
             "held remote runtime changed"
@@ -424,7 +558,9 @@ impl PinnedRuntime {
         let mut buffer = [0; 65536];
         let mut size = 0u64;
         loop {
+            check()?;
             let count = self.file.read(&mut buffer)?;
+            check()?;
             if count == 0 {
                 break;
             }
@@ -444,6 +580,7 @@ impl PinnedRuntime {
             identity(&open_runtime(&self.path, self.trust)?)? == self.identity,
             "named remote runtime changed"
         );
+        check()?;
         Ok(())
     }
 }
@@ -463,6 +600,7 @@ struct AuthorityState {
     freshness: Mutex<Freshness>,
     tracker: Weak<SessionTracker>,
     host: Option<Arc<dyn BrokerAuthorization>>,
+    startup: Mutex<Option<StartupBudget>>,
 }
 struct Authorization {
     serial: u64,
@@ -482,6 +620,7 @@ impl AuthorityState {
             }),
             tracker: Arc::downgrade(tracker),
             host: None,
+            startup: Mutex::new(None),
         })
     }
     fn fence(&self) {
@@ -517,6 +656,7 @@ impl AuthorityState {
     }
     fn begin(&self) -> Result<Authorization> {
         let result: Result<Authorization> = (|| {
+            self.check_startup()?;
             let mut state = self.freshness.lock().map_err(|_| fault())?;
             let sent = self.sample(&mut state, true)?;
             state.next = state
@@ -555,6 +695,7 @@ impl AuthorityState {
     }
     fn check(&self) -> Result<()> {
         let result: Result<()> = (|| {
+            self.check_startup()?;
             // The host client's true expiry may be much shorter than our
             // legacy three-second mirror. Consult it on every cache/root check.
             if let Some(host) = &self.host {
@@ -568,6 +709,18 @@ impl AuthorityState {
             self.fence();
         }
         result.map_err(|_| fault())
+    }
+    fn check_startup(&self) -> Result<()> {
+        if let Some(startup) = self.startup.lock().map_err(|_| fault())?.as_ref() {
+            startup.remaining()?;
+        }
+        Ok(())
+    }
+    fn finish_startup(&self) -> Result<()> {
+        let mut startup = self.startup.lock().map_err(|_| fault())?;
+        if let Some(budget) = startup.as_ref() { budget.remaining()?; }
+        startup.take();
+        Ok(())
     }
     fn register(&self, tracker: &SessionTracker, session: &RemoteSession) -> Result<()> {
         *tracker.0.lock().map_err(|_| fault())? = Some(session.clone());
@@ -732,23 +885,51 @@ fn open_workspace(
     mut node: PinnedRuntime,
     mut script: PinnedRuntime,
     transport: TransportProfile,
+    admission: Option<StartupBudget>,
 ) -> Result<(remote_launch::RemoteLaunchWorkspace, Resources)> {
-    authority.validate(&authority.state.binding)?;
-    node.verify()?;
-    script.verify()?;
-    private_directory(&context.cache_root)?;
-    private_directory(&context.registry_root)?;
+    let check = || -> Result<()> {
+        if let Some(admission) = &admission { admission.remaining()?; }
+        Ok(())
+    };
+    macro_rules! stage {
+        ($name:expr, $work:expr) => {{
+            workspace_step("source startup deadline", check())?;
+            let result = workspace_step($name, $work)?;
+            workspace_step("source startup deadline", check())?;
+            result
+        }};
+    }
+    stage!(
+        "initial source authorization",
+        authority.validate(&authority.state.binding)
+    );
+    stage!("Node runtime verification", node.verify_checked(&check));
+    stage!("CLI runtime verification", script.verify_checked(&check));
+    stage!(
+        "cache directory preparation",
+        private_directory(&context.cache_root)
+    );
+    stage!(
+        "registry directory preparation",
+        private_directory(&context.registry_root)
+    );
     let mut config = NodeSourceConfig::new(
         context.source.scope,
         context.source.base_url,
         context.source.auth_headers,
     );
     config.transport = transport;
+    if let Some(admission) = &admission {
+        config.handshake_timeout = admission.phase_limit(config.handshake_timeout)?;
+    }
     let source = Arc::new(
-        NodeRemoteSource::spawn(&node.path, &script.path, config).map_err(|_| {
-            authority.state.fence();
-            anyhow::anyhow!("private source startup failed")
-        })?,
+        stage!(
+            "source process startup",
+            NodeRemoteSource::spawn(&node.path, &script.path, config).map_err(|error| {
+                authority.state.fence();
+                error
+            })
+        )
     );
     // Keep an owned source guard on every later error path; shutdown is a
     // request only and pending admission remains charged until actual settle.
@@ -762,28 +943,57 @@ fn open_workspace(
         }
     }
     let mut startup = Startup(Some(source.clone()), authority.state.clone());
-    node.verify()?;
-    script.verify()?;
-    authority.state.check()?;
-    let cache = RemoteCache::open(&context.cache_root, source.clone(), CacheLimits::default())?;
-    let registry = RemoteRootRegistry::open(
-        &context.registry_root,
-        cache.clone(),
-        source.clone(),
-        Arc::new(RootAuthority(authority.state.clone())),
-        RootLimits::default(),
-    )?;
-    let session = registry.admit(
-        &selection.attempt,
-        &selection.root.root_id,
-        &selection.root.root,
-        &SourceRequestControl::new(Instant::now() + Duration::from_secs(10)),
-    )?;
-    authority.state.register(&tracker, &session)?;
-    let workspace =
-        remote_launch::validate_selection(session, selection, RemoteOptions::default())?
-            .open_finalizable(manager_root, LocalStore::open(store_root)?)?;
-    authority.validate(&authority.state.binding)?;
+    stage!("started Node runtime verification", node.verify_checked(&check));
+    stage!("started CLI runtime verification", script.verify_checked(&check));
+    stage!("started source authority", authority.state.check());
+    let cache = stage!(
+        "cache opening",
+        RemoteCache::open(&context.cache_root, source.clone(), CacheLimits::default())
+    );
+    let registry = stage!(
+        "registry opening",
+        RemoteRootRegistry::open(
+            &context.registry_root,
+            cache.clone(),
+            source.clone(),
+            Arc::new(RootAuthority(authority.state.clone())),
+            RootLimits::default(),
+        )
+    );
+    let root_timeout = match &admission {
+        Some(budget) => budget.phase_limit(Duration::from_secs(10))?,
+        None => Duration::from_secs(10),
+    };
+    let session = stage!(
+        "remote root admission",
+        registry.admit(
+            &selection.attempt,
+            &selection.root.root_id,
+            &selection.root.root,
+            &SourceRequestControl::new(Instant::now() + root_timeout),
+        )
+    );
+    stage!(
+        "source session registration",
+        authority.state.register(&tracker, &session)
+    );
+    let validated = stage!(
+        "remote selection validation",
+        remote_launch::validate_selection(session, selection, RemoteOptions::default())
+    );
+    let store = stage!("checkpoint store opening", LocalStore::open(store_root));
+    let workspace = stage!(
+        "workspace opening",
+        validated.open_finalizable(manager_root, store)
+    );
+    stage!(
+        "prepared source authorization",
+        authority.validate(&authority.state.binding)
+    );
+    // Source preparation has settled. The engine/child still enforce the SAME
+    // sealed constraint through actual backend admission, then execution owns
+    // its separate timeout and the host grant's finalization allowance.
+    authority.state.finish_startup()?;
     let resources = Resources {
         source,
         _cache: cache,
@@ -824,6 +1034,12 @@ fn services_inner(
     spec: &ExecutionSpec,
     controller: Option<Arc<rudder_engine::execution::handoff::ControllerProcessWitness>>,
 ) -> Result<HelperServices> {
+    let admission = spec.startup_budget()?;
+    let check = || -> Result<()> {
+        if let Some(admission) = &admission { admission.remaining()?; }
+        Ok(())
+    };
+    check()?;
     let profile = spec
         .profile
         .as_ref()
@@ -868,8 +1084,8 @@ fn services_inner(
     } else {
         (read_context(host_context, spec, selection)?, None)
     };
-    let node = PinnedRuntime::open(&context.node, true, RuntimeTrust::Image)?;
-    let script = PinnedRuntime::open(&context.cli_script, false, RuntimeTrust::Image)?;
+    let node = PinnedRuntime::open_checked(&context.node, true, RuntimeTrust::Image, &check)?;
+    let script = PinnedRuntime::open_checked(&context.cli_script, false, RuntimeTrust::Image, &check)?;
     let binding = expected_binding(selection)?;
     let expected = crate::agent_broker::BrokerBinding {
         project_id: broker_binding.project_id.clone(),
@@ -897,6 +1113,7 @@ fn services_inner(
             .map_err(|_| fault())
     });
     let mut state = AuthorityState::new(binding.clone(), clock, &tracker);
+    *state.startup.lock().map_err(|_| fault())? = admission.clone();
     let broker: Arc<dyn BrokerAuthorization> = Arc::new(broker);
     let source_broker: Arc<dyn BrokerAuthorization> = if let Some(controller) = controller {
         let host = Arc::new(
@@ -952,8 +1169,9 @@ fn services_inner(
                 node,
                 script,
                 TransportProfile::Https,
+                admission,
             )
-            .map_err(|_| anyhow::anyhow!("remote source workspace preparation failed"))?;
+            .map_err(workspace_failure)?;
             OwnedHelperWorkspace::from_remote(request, workspace, resources)
         })),
     })

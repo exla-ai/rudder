@@ -152,10 +152,27 @@ impl EngineOwnerLifetime {
 pub(crate) struct EngineSourceLease {
     // Close the actual Journal anchor descriptors before the final lock holder.
     database: HeldJournalFile,
+    journal_identity: (u64, u64),
     lifetime: Arc<EngineOwnerLifetime>,
 }
 
 impl EngineSourceLease {
+    /// Off-App. Validate the supplied writer's actual SQLite connection before
+    /// comparing its inode with the anchor minted by this owner. A matching
+    /// filename or copied database is insufficient; neither check opens an
+    /// independent raw SQLite file descriptor.
+    pub(crate) fn check_journal(&self, journal: &Journal) -> Result<()> {
+        self.check_current()?;
+        let supplied = journal.hold_database_file()?;
+        let metadata = std::fs::symlink_metadata(journal.database_path()?)?;
+        anyhow::ensure!(
+            (metadata.dev(), metadata.ino()) == self.journal_identity,
+            "source preparation Journal differs from the actual owner connection"
+        );
+        supplied.check_current()?;
+        self.check_current()
+    }
+
     /// App-safe process-local retirement check only. Fresh database authority
     /// and held-file custody must have been checked by the actual join worker.
     pub(crate) fn check_active_for_adoption(&self) -> Result<()> {
@@ -428,9 +445,13 @@ impl EngineOwnership {
             self.lifetime.revoke();
             error
         })?;
+        let metadata = std::fs::symlink_metadata(self.journal.database_path()?)?;
+        let journal_identity = (metadata.dev(), metadata.ino());
+        database.check_current()?;
         let lease = EngineSourceLease {
             lifetime: Arc::clone(&self.lifetime),
             database,
+            journal_identity,
         };
         lease.check_current()?;
         Ok(lease)

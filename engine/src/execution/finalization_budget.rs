@@ -35,6 +35,10 @@ pub struct FinalizationConstraint {
 }
 
 impl FinalizationConstraint {
+    pub(super) fn maximum(&self) -> Result<Duration> {
+        self.deadline()?;
+        Ok(Duration::from_millis(u64::from(self.maximum_milliseconds)))
+    }
     pub fn from_json(bytes: &[u8]) -> Result<Self> {
         ensure!(
             bytes.len() <= MAX_CONSTRAINT_BYTES,
@@ -133,6 +137,21 @@ impl FinalizationBudget {
         Ok(self.remaining()?.min(upper_bound))
     }
 
+    /// Capture checked absolute clock data before fork. The child must never
+    /// reconstruct this deadline from a later clock sample plus remaining time.
+    #[cfg(target_os = "linux")]
+    pub(super) fn admission_clock_bounds(&self) -> Result<(u64, u64)> {
+        self.remaining()?;
+        let result = (|| {
+            let last = self.0.last.lock().map_err(|_| fault())?;
+            ensure!(!self.0.fenced.load(Ordering::Acquire), "finalization budget retired");
+            Ok((u64::try_from(self.0.deadline).map_err(|_| fault())?,
+                u64::try_from(*last).map_err(|_| fault())?))
+        })();
+        if result.is_err() { self.cancel(); }
+        result
+    }
+
     fn host_clock() -> Result<Clock> {
         let clock = HostClock::new().map_err(|_| fault())?;
         Ok(Arc::new(move || {
@@ -143,7 +162,7 @@ impl FinalizationBudget {
         }))
     }
 
-    fn begin_with_clock(maximum: Duration, clock: Clock) -> Result<Self> {
+    pub(super) fn begin_with_clock(maximum: Duration, clock: Clock) -> Result<Self> {
         ensure!(
             !maximum.is_zero() && maximum <= FINALIZATION_POLICY_LIMIT,
             "finalization budget exceeds bounded policy"
@@ -167,7 +186,7 @@ impl FinalizationBudget {
         Self::from_sample(constraint, clock, now)
     }
 
-    fn adopt_with_clock(constraint: FinalizationConstraint, clock: Clock) -> Result<Self> {
+    pub(super) fn adopt_with_clock(constraint: FinalizationConstraint, clock: Clock) -> Result<Self> {
         let now = clock().map_err(|_| fault())?;
         Self::from_sample(constraint, clock, now)
     }
@@ -296,13 +315,16 @@ mod tests {
     #[test]
     fn actual_stalled_io_consumes_budget_before_a_second_phase_can_start() {
         use std::{io::Read, os::unix::net::UnixStream, time::Instant};
-        let budget = FinalizationBudget::begin(Duration::from_millis(80)).unwrap();
         let (mut reader, _held_writer) = UnixStream::pair().unwrap();
+        let timeout = Duration::from_millis(80);
+        reader.set_read_timeout(Some(timeout)).unwrap();
+        let budget = FinalizationBudget::begin(timeout).unwrap();
         let guard = Instant::now() + Duration::from_secs(2);
         let mut attempts = 0;
-        while let Ok(remaining) = budget.remaining() {
-            assert!(Instant::now() < guard, "actual host budget did not expire");
-            reader.set_read_timeout(Some(remaining)).unwrap();
+        loop {
+            // Always perform the stalled read this test is about. Scheduling
+            // can consume the short budget before the first loop condition;
+            // late IO must still withhold permission for the next phase.
             let error = reader.read(&mut [0]).unwrap_err();
             assert!(matches!(
                 error.kind(),
@@ -311,6 +333,9 @@ mod tests {
                     | std::io::ErrorKind::Interrupted
             ));
             attempts += 1;
+            let Ok(remaining) = budget.remaining() else { break; };
+            assert!(Instant::now() < guard, "actual host budget did not expire");
+            reader.set_read_timeout(Some(remaining)).unwrap();
         }
         assert!(attempts > 0);
         assert!(budget.phase_limit(Duration::from_secs(35)).is_err());

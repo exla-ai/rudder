@@ -1,0 +1,96 @@
+{
+  "formatVersion": 1,
+  "kind": "owned-source5-composition",
+  "status": "qualified",
+  "verifiedAt": "2026-10-31T12:21:58.470Z",
+  "sourceKind": "working-tree",
+  "baseRevision": "2025e4b87aea803bc8d5aa3cc582eadbc1a22ae8",
+  "sourceEnvelopeSha256": "66d76fd4aaaf87b8d222d6c7434ad966c8f4d341e099deec50e349d4fcbb222d",
+  "provider": "Fly.io",
+  "image": "registry.fly.io/rudder-workers-exla:source5-20261031-4b33f0-c48823-05",
+  "imageDigest": "sha256:ef0641de645300062fdfe06fcebfbdebdf71a73e9b27ec2269519f9ead62923e",
+  "stockWorkerBaseDigest": "sha256:0d52fd93e5adbf09352110c0ec74dd98db22ba6f6df3ea16b1d4e0277f2efad9",
+  "nativeSha256": "4b33f0c7015d6428501ada3a60bda1525f3a061485e809c0ab705e333e6b8cc1",
+  "libtestSha256": "c48823db5a6717fc720502526123d62b8874d49492d6bbb195dcdc1d48b20461",
+  "node": {
+    "resolvedPath": "/usr/local/bin/node",
+    "sha256": "94efd062ed066c1a0b332e18249859c905e920eeada5df55d24c99b919629a90"
+  },
+  "workerCli": "/opt/rudder/dist/index.js",
+  "fixtureSha256": "2198c88e2645598be81314a657cc4ca2f6916cc2d7413b2c81e0af9bcbed7066",
+  "machine": {
+    "id": "7812322f674028",
+    "instance": "01M68YFEMA8BF8H2ZJYXN7MCXQ",
+    "digest": "sha256:ef0641de645300062fdfe06fcebfbdebdf71a73e9b27ec2269519f9ead62923e"
+  },
+  "control": {
+    "id": "8911d61a434978",
+    "instance": "01M68NNEJD8173ZAABMBHPBNDT",
+    "revision": "243728b94f55fd3bd40be22c44abf8ccae9f34a6",
+    "digest": "sha256:f574e9e0859706b7835466707a8b264a5f2feebf49c33e0002b645090141953e"
+  },
+  "runtimeManifestSha256": "8f53586762d4667534022ddaa1c0ea8c957ce3f9c5e4f9fecf2671d1b90c32ac",
+  "controllerSourceSha256": {
+    "controller.mjs": "202e77556dbebf1e1fd10e416020aed49d5917ce489d761eb39ca14a604d1467",
+    "guest.mjs": "66f3e99320030b4c7b991b1cda9ee05567a06e498ea26b2503e86d55b67d8cf8",
+    "ownership.mjs": "076c599ecb7dda8ef53ab0d3caa6a6d93257fcdc909f7265b6b6b935c952bd38",
+    "helpers.mjs": "17e22543db4cb84a00c142f00b7cdd7690ff3b00d74b10b67033c2d9e632c79c",
+    "lifecycle.mjs": "31afb120e81c31c13dfd043a3fcdf06e384297077b4319efdb52a149309007d8",
+    "controller-extension.mjs": "bed3e1547aa7f87930d09f37191a37f949303d7a378a94e48950b5ba7fadbd50",
+    "fixture-v2.json": "2198c88e2645598be81314a657cc4ca2f6916cc2d7413b2c81e0af9bcbed7066",
+    "runtime-inputs.json": "8f53586762d4667534022ddaa1c0ea8c957ce3f9c5e4f9fecf2671d1b90c32ac",
+    "prepare.mjs": "79d451fce82183a675c8583d0961508acb3cb384efb5d2d22a28cf9d10d1231b"
+  },
+  "publication": {
+    "status": "published",
+    "receipt": {
+      "format_version": 1,
+      "root_id": "runtime5-source-2d22b75e-1b6a-438c-b12e-07977058a7e2",
+      "root": {
+        "kind": "runnable_root",
+        "algorithm": "sha256",
+        "digest": "bf4577fcd42ebd27aaa8f89763b82313f44cbe827a8d541d5e0cdf6ab6ecd8e5",
+        "size_bytes": 658
+      },
+      "durability": "replicated",
+      "published_at_ms": 1793449239872,
+      "object_count": 8,
+      "total_bytes": 1753
+    },
+    "exactObjectReads": 8
+  },
+  "elapsedMs": 83541,
+  "checks": {
+    "actual_backend_ready": true,
+    "actual_fresh_issuer_join": true,
+    "actual_helper_alive_after_idle_window": true,
+    "actual_https_source": true,
+    "actual_server_callbacks_settled": true,
+    "actual_stop_v4": true,
+    "actual_successful_helper_exit": true,
+    "actual_uid1500_fuse_offline_namespace": true,
+    "captured_mmap_bytes_verified": true,
+    "idle_source_freshness_window_ms": 4000
+  },
+  "nativeProofSha256": "d5de3883d91053dd718b9d78293fc18b03aba8fd678c442fde428e3b590aaac4",
+  "privateReportSha256": "7b26682e01e128de53ed462fdac2823bcdeb5119471cc2860a3ae06952b8a523",
+  "claimsExcluded": [
+    "default launch adoption",
+    "model execution",
+    "accepted jj history",
+    "remote persistence of captured delta/evidence",
+    "quiesced consistency label",
+    "production release deployment"
+  ],
+  "checkpointStorage": "local CAS retention verified before disposable VM destruction",
+  "captureConsistency": "live_best_effort",
+  "startupConstraint": "original suspend-aware deadline and wall bound sealed into Spec5; checked through actual exec and parent readiness",
+  "rustVerification": {
+    "status": "passed",
+    "passed": 1752,
+    "failed": 0,
+    "ignored": 28,
+    "completedAt": "2026-10-31T12:20:05.840938+00:00",
+    "receiptSha256": "d193c0a339fddc04bc2ca4b9a2caeb9c623e2a012763340e7c6e6fba8325c01a"
+  }
+}

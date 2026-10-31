@@ -955,6 +955,7 @@ fn execution_spec(
     };
     let profile = ExecutionProfileV4 {
         format_version: 1,
+        startup: None,
         request_id: request.request_id.clone(),
         network,
         workspace: ExecutionWorkspaceSelectionV4::RemoteSourceOnly {

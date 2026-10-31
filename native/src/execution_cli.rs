@@ -53,9 +53,15 @@ pub(crate) fn run(args: &[String]) -> Result<()> {
                 rudder_engine::execution::handoff::receive_managed(&args[2], args[4].parse()?)?;
             let host_source = spec.format_version == 5;
             let factory = services_factory(Some(control.controller_process()));
-            let outcome = rudder_engine::execution::linux::run_helper_with_managed_services(
-                spec, factory, control,
-            )?;
+            let outcome = if host_source {
+                rudder_engine::execution::linux::run_helper_with_managed_host_source_services(
+                    spec, factory, control,
+                )?
+            } else {
+                rudder_engine::execution::linux::run_helper_with_managed_services(
+                    spec, factory, control,
+                )?
+            };
             // Spec5 helper status proves finalization, while the record retains
             // the separate agent status. Historical reopen is not fresh proof.
             let exit = if host_source {

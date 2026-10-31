@@ -1,0 +1,23 @@
+{
+  "kind": "readiness4-physical-canary",
+  "nonce": "fb9bc4d0-396b-4c6e-9e18-6b9972b29345",
+  "digest": "sha256:f4ccbcface6270afeb32ecbf2788893a110320e4879a5a79e7c35497520d100a",
+  "binarySha256": "90a1a3a7f49b2c6698b4fe15e3139af33c0788924906a3a5edc526051f37b6d0",
+  "sourceEnvelopeSha256": "ef8a6c9285dc7fd8341081d695cb64962bb7a053d8fb3c758eef9b3f7783c7e6",
+  "revision": "2025e4b87aea803bc8d5aa3cc582eadbc1a22ae8",
+  "requestedImage": "registry.fly.io/rudder-workers-exla:readiness4-20261031-90a1a3a7f4",
+  "qualified": true,
+  "cleanupVerified": true,
+  "independentAbsence": true,
+  "maxLifetimeSeconds": 420,
+  "machine": {
+    "id": "d8d0505f4d0298",
+    "instance": "01M68RV5291QNM896VYSEEMGAS",
+    "digest": "sha256:f4ccbcface6270afeb32ecbf2788893a110320e4879a5a79e7c35497520d100a"
+  },
+  "elapsedMs": 45181,
+  "withinLifetimeBound": true,
+  "utc": "2026-10-31T10:42:57.492Z",
+  "sourceKind": "working-tree",
+  "revisionMeaning": "baseline commit; source envelope and retained patch identify uncommitted test/runtime code"
+}

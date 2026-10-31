@@ -905,7 +905,7 @@ fn initial_record(spec: &ExecutionSpec, request_digest: String) -> Result<Execut
             agent_exit: None,
             checkpoint: None,
         }),
-        4 => {
+        4 | 5 => {
             let profile = spec
                 .profile
                 .as_ref()
@@ -943,7 +943,7 @@ fn validate_spec_record(
 ) -> Result<()> {
     let expected_version = match spec.format_version {
         1..=3 => 1,
-        4 => 2,
+        4 | 5 => 2,
         _ => anyhow::bail!("unsupported execution record selection"),
     };
     ensure!(

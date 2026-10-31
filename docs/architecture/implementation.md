@@ -98,13 +98,55 @@ isolated installation, CLI/native/jj checks and archive/manifest verification at
 health and authentication smoke checks on 2026-10-31T10:12Z. The live home was
 not restarted. See [delivery](delivery-alpha18.json) for exact identities.
 
-The next runtime batch is uncommitted: Binding4 readiness and helper custody,
-source preparation, missing context2 writer/runtime APIs and bounded startup /
-grant expiry. The 15 source-preparation tests pass after correcting endpoint
-authority layout, broker projection/validation order and pending activation.
-The original startup budget now bounds preparation and activation and covers
-execution plus finalization in the fixed grant expiry. Runtime5 stays refused until
-owned launch, actual kernel readiness and shutdown composition are qualified.
+## Owned source execution, alpha.19 candidate
+
+The candidate adds Binding4 readiness and helper custody, source preparation,
+context2 writer/runtime APIs, bounded startup and grant expiry, and explicit
+owned Runtime5 dispatch. The source-preparation checks
+cover endpoint authority layout, broker projection/validation order and pending
+activation. One original startup budget bounds preparation and activation;
+the source grant covers execution plus finalization. The combined affected
+suite passed 69 tests with zero failures, including an actual parent/helper
+source exchange. The normal Native helper also builds successfully.
+
+Binding4 readiness passed on a fresh Fly worker with actual private USER/NET
+descriptors, a live backend pidfd, all five capability sets zero, no-new-privs,
+and old-family rejection. Machine destruction and independent absence checks
+passed. See the [kernel evidence](../../examples/execution/evidence/2026-10-31-readiness4/README.md).
+Generic helpers still refuse Runtime5; the explicit owned entry requires the
+current managed controller and separated source services. Actual HTTPS/FUSE,
+mapped-write checkpoint readback, StopV4, successful helper exit, fresh issuer
+join and source callback settlement passed on Fly at 12:21:58.470Z, including
+a four-second idle source-freshness window. The actual
+test machine and temporary credential were removed with independent absence
+checks. Twenty inventories retained the same live home instance and image.
+See the [source5 evidence](../../examples/execution/evidence/2026-10-31-source5/README.md).
+
+Bounded local probes corrected the harness CLI entrypoint (`dist/index.js`),
+its executable file mode, and a legacy flat-directory fixture. The passing
+graph has eight objects with current paged directories. The stage diagnostics
+retain trusted startup names while removing private error causes. Captured
+delta/evidence retention was checked locally before VM destruction; remote
+publication and stronger consistency are not established by this case. The
+default App path, connected models and accepted jj history remain separate gates.
+
+Final review found that source preparation after helper activation could outlast
+the original startup allowance. Spec5 now carries that original suspend-aware
+deadline and wall-clock bound through helper preparation, namespace entry,
+actual exec and parent readiness. The child exec guard uses an immutable clock
+snapshot and clock syscalls. No handoff renews the allowance or extends a grant.
+The first immediate-stop proof is preserved as historical evidence; the current
+case runs the carried constraint and idle window.
+
+Full Rust verification passed 1,752 tests with zero failures and 28 explicitly
+ignored cases. Earlier attempts stopped at the disk guard; unused incremental
+state and debug symbols in inactive generated executables were reclaimed while
+retaining runtime bytes and dependency caches. The JavaScript suite encountered
+the known cold broker-fixture compile timeout. After one serialized prebuild,
+the full JavaScript suite passed 762 tests with zero failures and nine skips.
+The real Native terminal suite passed 59 tests with zero failures. TypeScript
+checking and the Cloud build also passed. The release-check matrix and shipping
+remain pending.
 
 ## Current implementation track
 

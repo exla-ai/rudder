@@ -64,13 +64,13 @@ pub(crate) fn read_sealed_bytes(fd: OwnedFd) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 pub fn run_helper(_spec: ExecutionSpec) -> Result<ExecutionOutcome> {
-    supervisor(_spec, None, None)
+    supervisor(_spec, None, None, ServiceFamily::Legacy)
 }
 pub fn run_helper_with_services(
     spec: ExecutionSpec,
     factory: HelperServicesFactory,
 ) -> Result<ExecutionOutcome> {
-    supervisor(spec, Some(factory), None)
+    supervisor(spec, Some(factory), None, ServiceFamily::Legacy)
 }
 pub fn run_helper_with_managed_services(
     spec: ExecutionSpec,
@@ -78,13 +78,134 @@ pub fn run_helper_with_managed_services(
     control: super::handoff::ManagedControl,
 ) -> Result<ExecutionOutcome> {
     control.binding.validate(&spec)?;
-    supervisor(spec, Some(factory), Some(control))
+    supervisor(spec, Some(factory), Some(control), ServiceFamily::Legacy)
+}
+
+/// Trusted fresh-process host entry. The caller must supply the native host
+/// source factory with the actual controller witness from this handoff. Rust
+/// factories are trusted code; this API does not authenticate their implementation.
+pub fn run_helper_with_managed_host_source_services(
+    spec: ExecutionSpec,
+    factory: HelperServicesFactory,
+    control: super::handoff::ManagedControl,
+) -> Result<ExecutionOutcome> {
+    control.binding.validate(&spec)?;
+    supervisor(
+        spec,
+        Some(factory),
+        Some(control),
+        ServiceFamily::HostSource,
+    )
+}
+
+#[derive(Clone, Copy)]
+enum ServiceFamily {
+    Legacy,
+    HostSource,
+}
+
+fn require_host_source_services(services: Option<&HelperServices>) -> Result<()> {
+    ensure!(
+        services.is_some_and(|services| {
+            matches!(
+                services.workspace,
+                HelperWorkspaceServices::PartialSeparated { .. }
+            ) && services.application.is_none()
+                && services.workspace_factory.is_some()
+        }),
+        "host source requires separated source and ingress with an owned workspace factory"
+    );
+    Ok(())
+}
+
+fn admit_services(
+    spec: &ExecutionSpec,
+    factory: &Option<HelperServicesFactory>,
+    control: Option<&super::handoff::ManagedControl>,
+    family: ServiceFamily,
+) -> Result<()> {
+    match family {
+        ServiceFamily::Legacy => ensure!(
+            spec.format_version != 5,
+            "execution specification5 awaits owned source and shutdown lifetimes"
+        ),
+        ServiceFamily::HostSource => {
+            ensure!(
+                spec.format_version == 5,
+                "host source entry requires specification5"
+            );
+            ensure!(
+                factory.is_some(),
+                "host source entry requires its trusted factory"
+            );
+            let control =
+                control.context("host source entry requires its owned managed controller")?;
+            ensure!(
+                control.binding.format_version == 4,
+                "host source entry requires binding4"
+            );
+            control.binding.validate(spec)?;
+            control.controller_process().check_current()?;
+        }
+    }
+    spec.validate()?;
+    if spec.format_version == 4 {
+        ensure!(
+            control.is_some_and(|control| control.binding.format_version == 3),
+            "v4 execution requires its owned managed shutdown controller"
+        );
+    }
+    Ok(())
 }
 
 use super::{
     root::Layout,
     state::{self, Preflight},
+    startup_budget::StartupBudget,
 };
+
+fn check_startup(startup: Option<&StartupBudget>) -> Result<()> {
+    if let Some(startup) = startup { startup.remaining()?; }
+    Ok(())
+}
+fn startup_limit(startup: Option<&StartupBudget>, maximum: Duration) -> Result<Duration> {
+    match startup { Some(startup) => startup.phase_limit(maximum), None => Ok(maximum) }
+}
+fn guard_startup_exec(command: &mut Command, startup: Option<&StartupBudget>) -> Result<()> {
+    if let Some(startup) = startup {
+        let snapshot = startup.exec_admission_snapshot()?;
+        // The pre-exec child uses immutable clock DATA and clock_gettime only.
+        // Absorbing cancellation/clock checks stay on the normal parent path.
+        unsafe {
+            command.pre_exec(move || snapshot.check_before_exec());
+        }
+    }
+    Ok(())
+}
+#[cfg(test)]
+mod startup_admission_tests {
+    use super::*;
+    use crate::execution::startup_budget::StartupConstraint;
+
+    #[test]
+    fn expiry_after_parent_admission_refuses_actual_exec_and_guest_effects() {
+        let directory = tempfile::tempdir().unwrap();
+        let marker = directory.path().join("must-not-run");
+        let constraint = StartupConstraint::begin(Duration::from_millis(200)).unwrap();
+        let budget = StartupBudget::from_constraint(&constraint).unwrap();
+        check_startup(Some(&budget)).unwrap();
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "printf started > \"$1\"", "startup-fixture"]).arg(&marker);
+        guard_startup_exec(&mut command, Some(&budget)).unwrap();
+        // Model root/fork scheduling after the parent's successful admission.
+        std::thread::sleep(Duration::from_millis(250));
+        let error = command.spawn().err().expect("expired backend executed");
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+        assert!(!marker.exists(), "expired startup admitted guest effects");
+        assert!(StartupBudget::from_constraint(&constraint).is_err(),
+            "reopening a sealed constraint renewed startup time");
+    }
+}
 use crate::vfs::{
     linux::{mount, MountedVfs, PrivateMountNamespace},
     partial_rpc::{
@@ -1211,22 +1332,12 @@ fn supervisor(
     spec: ExecutionSpec,
     factory: Option<HelperServicesFactory>,
     mut control: Option<super::handoff::ManagedControl>,
+    family: ServiceFamily,
 ) -> Result<ExecutionOutcome> {
-    // Codec support grants no execution authority. Keep Spec5 out of legacy
-    // dispatch before namespace entry, factories or any execution effects.
-    ensure!(
-        spec.format_version != 5,
-        "execution specification5 awaits owned source and shutdown lifetimes"
-    );
-    spec.validate()?;
-    if spec.format_version == 4 {
-        ensure!(
-            control
-                .as_ref()
-                .is_some_and(|control| control.binding.format_version == 3),
-            "v4 execution requires its owned managed shutdown controller"
-        );
-    }
+    // No namespace, factory or reservation effects before owned admission.
+    admit_services(&spec, &factory, control.as_ref(), family)?;
+    let startup = spec.startup_budget()?;
+    check_startup(startup.as_ref())?;
     ensure!(
         unsafe { libc::geteuid() } == 1500 && unsafe { libc::getegid() } == 1500,
         "execution profile requires worker UID/GID1500"
@@ -1238,6 +1349,7 @@ fn supervisor(
     let parent = unsafe { libc::getppid() } as u32;
     let lifetime = arm_parent(parent)?;
     let namespace = PrivateMountNamespace::enter_for_current_user()?;
+    check_startup(startup.as_ref())?;
     check_lifetime(lifetime.as_raw_fd())?;
     ensure!(
         unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0) } == 0,
@@ -1245,6 +1357,15 @@ fn supervisor(
     );
     // Hold and reconcile actual execution state before any services/workspace
     // factory starts authority, source/cache, VFS or application effects.
+    let factory = factory.map(|factory| {
+        let startup = startup.clone();
+        Box::new(move |spec: &ExecutionSpec| {
+            check_startup(startup.as_ref())?;
+            let services = factory(spec)?;
+            check_startup(startup.as_ref())?;
+            Ok(services)
+        }) as HelperServicesFactory
+    });
     let (mut state, mut services) = match state::preflight(&spec, factory)? {
         Preflight::Recovered(state) => {
             return Ok(ExecutionOutcome::Historical(state.into_historical()))
@@ -1252,10 +1373,14 @@ fn supervisor(
         Preflight::New { state, services } => (state, services),
     };
     let result = (|| -> Result<ExecutionOutcome> {
+        check_startup(startup.as_ref())?;
         let expected_application = spec
             .workspace_observation
             .as_ref()
             .and_then(|w| w.application.as_ref());
+        if spec.format_version == 5 {
+            require_host_source_services(services.as_ref())?;
+        }
         ensure!(
             expected_application.is_some()
                 == services.as_ref().is_some_and(|s| s.application.is_some()),
@@ -1302,6 +1427,7 @@ fn supervisor(
         unsafe {
             libc::signal(libc::SIGTTOU, libc::SIG_IGN);
         }
+        check_startup(startup.as_ref())?;
         let workspace = Arc::new(
             state.open_workspace(
                 &spec,
@@ -1310,6 +1436,7 @@ fn supervisor(
                     .and_then(|services| services.workspace_factory.take()),
             )?,
         );
+        check_startup(startup.as_ref())?;
         if partial_binding.is_some() {
             ensure!(
                 workspace.checkpoint_capability() == CheckpointCapability::PartialRemoteFinalizable,
@@ -1336,6 +1463,7 @@ fn supervisor(
         super::root::seed_home(&layout, &spec)?;
         let lease = manager.store().begin_staging(Duration::from_secs(3600))?;
         let result = (|| -> Result<ExecutionOutcome> {
+            check_startup(startup.as_ref())?;
             let mut mounted = ExecutionMount {
                 finalization: FinalizationPhases::default(),
                 mounted: Some(mount(view.clone(), &mountpoint, &namespace)?),
@@ -1445,6 +1573,7 @@ fn supervisor(
                 None
             };
             let nonce = Uuid::new_v4().to_string();
+            check_startup(startup.as_ref())?;
             let mut projected = spec.clone();
             projected.home_files.clear();
             let childspec = ChildSpec {
@@ -1496,6 +1625,7 @@ fn supervisor(
                 });
             }
             state.mark_running()?;
+            check_startup(startup.as_ref())?;
             let mut child = command
                 .spawn()
                 .context("spawn restricted execution init wrapper")?;
@@ -1504,8 +1634,9 @@ fn supervisor(
             drop(payload);
             drop(init_control);
             let mut guard = ProcessGuard(child.id() as i32);
+            check_startup(startup.as_ref())?;
             let network_ready = if spec.profile.is_some() {
-                supervisor_control.set_read_timeout(Some(Duration::from_secs(10)))?;
+                supervisor_control.set_read_timeout(Some(startup_limit(startup.as_ref(), Duration::from_secs(10))?))?;
                 let (frame, descriptors): (super::network_phase::NetworkReadyFrame, _) =
                     super::handoff::receive_control_packet_fds(&mut supervisor_control)?;
                 let process = super::handoff::pidfd(child.id())?;
@@ -1517,6 +1648,7 @@ fn supervisor(
                     child.id(),
                     descriptors,
                 )?;
+                check_startup(startup.as_ref())?;
                 supervisor_control.write_all(b"N")?;
                 supervisor_control.set_read_timeout(Some(Duration::from_secs(2)))?;
                 Some(witness)
@@ -1529,6 +1661,7 @@ fn supervisor(
             let mut backend_ready = false;
             let mut authenticated_sent = false;
             let status = loop {
+                if !backend_ready { check_startup(startup.as_ref())?; }
                 if let Some(monitor) = &monitor {
                     monitor.check()?;
                 }
@@ -1566,10 +1699,13 @@ fn supervisor(
                             "backend readiness belongs to another execution"
                         );
                         let process = descriptor.context("backend readiness lacks actual pidfd")?;
-                        if let Some(network) = &network_ready {
-                            control.backend_ready_network(&process, network)?;
-                        } else {
-                            control.backend_ready(&process)?;
+                        match control.binding.format_version {
+                            3 | 4 => control.backend_ready_network(
+                                &process,
+                                network_ready.as_ref().context("managed backend lacks owned network readiness")?,
+                            )?,
+                            2 => control.backend_ready(&process)?,
+                            _ => anyhow::bail!("unsupported managed backend readiness family"),
                         }
                         backend_ready = true;
                     }
@@ -1807,6 +1943,8 @@ pub fn run_child() -> Result<()> {
         "execution child wrapper must be fresh"
     );
     let payload = read_payload(unsafe { OwnedFd::from_raw_fd(3) })?;
+    let startup = payload.spec.startup_budget()?;
+    check_startup(startup.as_ref())?;
     payload.spec.validate()?;
     if let Some(binding) = &payload.managed {
         binding.validate(&payload.spec)?;
@@ -1828,6 +1966,7 @@ pub fn run_child() -> Result<()> {
         None
     };
     let _namespace = PrivateMountNamespace::enter_for_current_user()?;
+    check_startup(startup.as_ref())?;
     let network = network_baseline
         .map(|baseline| unsafe { baseline.enter_after_new_user() })
         .transpose()?;
@@ -1835,8 +1974,8 @@ pub fn run_child() -> Result<()> {
         let control = init_control
             .as_mut()
             .context("offline wrapper has no private control")?;
-        control.set_read_timeout(Some(Duration::from_secs(10)))?;
-        control.set_write_timeout(Some(Duration::from_secs(2)))?;
+        control.set_read_timeout(Some(startup_limit(startup.as_ref(), Duration::from_secs(10))?))?;
+        control.set_write_timeout(Some(startup_limit(startup.as_ref(), Duration::from_secs(2))?))?;
         let frame = super::network_phase::NetworkReadyFrame::from_child(
             &payload.spec,
             &payload.nonce,
@@ -1853,6 +1992,7 @@ pub fn run_child() -> Result<()> {
         );
         network.verify_current()?;
     }
+    check_startup(startup.as_ref())?;
     check_lifetime(lifetime.as_raw_fd())?;
     ensure!(
         unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0) } == 0,
@@ -1962,6 +2102,8 @@ fn namespace_init(
     mut control: Option<UnixStream>,
     network: Option<&super::network::linux::OwnedChildNetwork>,
 ) -> Result<(i32, bool)> {
+    let startup = payload.spec.startup_budget()?;
+    check_startup(startup.as_ref())?;
     ensure!(
         unsafe { libc::getpid() } == 1,
         "execution is not private PID namespace init"
@@ -1997,6 +2139,7 @@ fn namespace_init(
         &payload.spec,
         payload.application_projection.as_ref(),
     )?;
+    check_startup(startup.as_ref())?;
     ensure!(
         payload.spec.profile.is_some() == network.is_some(),
         "init network ownership differs from sealed profile"
@@ -2137,9 +2280,12 @@ fn namespace_init(
     } else {
         None
     };
+    check_startup(startup.as_ref())?;
+    guard_startup_exec(&mut command, startup.as_ref())?;
     let mut child = command
         .spawn()
         .context("launch command in restricted root")?;
+    check_startup(startup.as_ref())?;
     if let Some(binding) = &payload.managed {
         if server.is_none() {
             if binding.execution_profile != "offline-command-v1"
@@ -2166,6 +2312,7 @@ fn namespace_init(
             libc::kill(-(child.id() as i32), libc::SIGCONT);
         }
     }
+    check_startup(startup.as_ref())?;
     let began = Instant::now();
     let mut managed_stop = false;
     let exit = loop {
@@ -2926,6 +3073,106 @@ mod partial_source_lifetime_tests {
         wait_for(|| weak.upgrade().is_none());
         fixture.contender.try_lock_exclusive().unwrap();
         FileExt::unlock(&fixture.contender).unwrap();
+    }
+    #[test]
+    fn host_source_admission_missing_custody_never_invokes_factory_or_reserves_state() {
+        let fixture = Fixture::new();
+        let root = fixture.root.path();
+        // Intentionally incomplete profile: ownership checks must fail first.
+        let mut spec = ExecutionSpec {
+            format_version: 5,
+            execution_id: Uuid::new_v4().to_string(),
+            operation_id: Uuid::new_v4().to_string(),
+            view_id: Uuid::new_v4().to_string(),
+            owner: OwnerEpoch {
+                owner: "admission".into(),
+                epoch: 1,
+            },
+            execution_root: root.join("executions"),
+            manager_root: root.join("manager"),
+            store_root: root.join("store"),
+            authority_roots: vec![],
+            command: vec!["/usr/bin/true".into()],
+            environment: Default::default(),
+            runtime: vec![],
+            home_files: vec![],
+            broker_directory: None,
+            broker_binding: None,
+            workspace_observation: None,
+            profile: None,
+            timeout_seconds: 1,
+        };
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counter = calls.clone();
+        let factory: Option<HelperServicesFactory> = Some(Box::new(move |_| {
+            counter.fetch_add(1, Ordering::AcqRel);
+            anyhow::bail!("factory must not run before owned admission")
+        }));
+        for (family, factory, expected) in [
+            (ServiceFamily::Legacy, &factory, "awaits owned source"),
+            (
+                ServiceFamily::HostSource,
+                &None,
+                "requires its trusted factory",
+            ),
+            (
+                ServiceFamily::HostSource,
+                &factory,
+                "requires its owned managed controller",
+            ),
+        ] {
+            let error = admit_services(&spec, factory, None, family).unwrap_err();
+            assert!(error.to_string().contains(expected), "{error}");
+        }
+        let error = supervisor(spec.clone(), factory, None, ServiceFamily::HostSource)
+            .err().unwrap();
+        assert!(error.to_string().contains("requires its owned managed controller"));
+        spec.format_version = 4;
+        let error = admit_services(&spec, &None, None, ServiceFamily::HostSource).unwrap_err();
+        assert!(error.to_string().contains("requires specification5"));
+        assert_eq!(calls.load(Ordering::Acquire), 0);
+        for path in [&spec.execution_root, &spec.manager_root, &spec.store_root] {
+            assert!(!path.exists());
+        }
+    }
+    #[test]
+    fn host_source_family_requires_separated_owners_before_workspace_factory() {
+        let fixture = Fixture::new();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let make = |workspace| {
+            let calls = calls.clone();
+            HelperServices {
+                workspace,
+                application: None,
+                workspace_factory: Some(Box::new(move |_| {
+                    calls.fetch_add(1, Ordering::AcqRel);
+                    anyhow::bail!("workspace must not open in family admission")
+                })),
+            }
+        };
+        assert!(require_host_source_services(None).is_err());
+        struct NoCompleteAuthority;
+        impl AttemptAuthority for NoCompleteAuthority {
+            fn validate(&self, _: &ObservationBinding) -> Result<()> {
+                anyhow::bail!("complete authority must not be invoked")
+            }
+        }
+        let complete = make(HelperWorkspaceServices::Complete {
+            authority: Arc::new(NoCompleteAuthority), adoption_witness: None,
+        });
+        assert!(require_host_source_services(Some(&complete)).is_err());
+        let shared = make(HelperWorkspaceServices::Partial {
+            authority: fixture.authority.clone(),
+        });
+        assert!(require_host_source_services(Some(&shared)).is_err());
+        let mut separated = make(HelperWorkspaceServices::PartialSeparated {
+            ingress: fixture.authority.clone(),
+            source: fixture.authority.clone(),
+        });
+        require_host_source_services(Some(&separated)).unwrap();
+        separated.workspace_factory = None;
+        assert!(require_host_source_services(Some(&separated)).is_err());
+        assert_eq!(calls.load(Ordering::Acquire), 0);
     }
     #[derive(Clone, Copy)]
     enum StartupFailure {

@@ -535,3 +535,60 @@ fn historical_partial_data_cannot_disagree_with_reserved_freeze_cursor_or_previo
     fs::write(&path, encode_envelope(&original).unwrap()).unwrap();
     assert!(fixture.history().remote_evidence().is_some());
 }
+
+#[test]
+fn spec5_selects_record2_and_exact_reopen_preserves_legacy_record_bytes() {
+    let fixture = Fixture::new();
+    let ExecutionRecord::V2(record) = &fixture.state.record else {
+        unreachable!()
+    };
+    let id = &record.identity;
+    let mut spec = ExecutionSpec {
+        format_version: 4,
+        execution_id: id.execution_id.clone(), operation_id: id.operation_id.clone(),
+        view_id: id.view_id.clone(), owner: id.owner.clone(),
+        execution_root: fixture.root.join("execution-metadata"),
+        manager_root: fixture.root.join("manager-metadata"),
+        store_root: fixture.root.join("store-metadata"), authority_roots: vec![],
+        command: vec!["/usr/bin/true".into()], environment: Default::default(),
+        runtime: vec![], home_files: vec![], broker_directory: None,
+        broker_binding: Some(BrokerBinding {
+            project_id: id.project_id.clone(), run_id: id.run_id.clone(),
+            run_epoch: id.run_epoch, owner_epoch: id.owner.epoch,
+        }),
+        workspace_observation: None, timeout_seconds: 1,
+        // This is deliberately only a record codec fixture, never live admission.
+        profile: Some(ExecutionProfileV4 {
+            startup: None,
+            format_version: 1, request_id: id.request_id.clone(),
+            workspace: ExecutionWorkspaceSelectionV4::LocalComplete {},
+            network: serde_json::from_value(serde_json::json!({
+                "format_version":1,"execution_profile":"cloud_uid1500_linux_v1",
+                "binding":{"project_id":"p","owner":"o","owner_epoch":"1",
+                    "run_id":"r","run_epoch":"1","request_id":Uuid::new_v4().to_string(),
+                    "execution_id":Uuid::new_v4().to_string(),"operation_id":Uuid::new_v4().to_string(),
+                    "view_id":Uuid::new_v4().to_string(),"network_id":Uuid::new_v4().to_string()},
+                "mode":"offline_v1","policy":null,"policy_sha256":null,
+                "budgets":{"max_connections":0,"max_dns_jobs":0,"max_request_bytes":0,
+                    "max_buffer_bytes":0,"max_bytes_per_connection":0,"max_total_bytes":0,
+                    "connect_timeout_ms":0,"idle_timeout_ms":0,"total_timeout_ms":0},
+                "readiness_nonce":Uuid::new_v4().to_string()
+            })).unwrap(),
+        }),
+    };
+    let digest = "e".repeat(64);
+    let legacy = initial_record(&spec, digest.clone()).unwrap();
+    let legacy_bytes = encode_envelope(&legacy).unwrap();
+    validate_spec_record(&spec, &digest, &decode_envelope(&legacy_bytes).unwrap()).unwrap();
+    spec.format_version = 5;
+    let source = initial_record(&spec, digest.clone()).unwrap();
+    assert_eq!(source.format_version(), 2);
+    assert_eq!(encode_envelope(&source).unwrap(), legacy_bytes);
+    validate_spec_record(&spec, &digest, &decode_envelope(&legacy_bytes).unwrap()).unwrap();
+    assert!(validate_spec_record(&spec, &"f".repeat(64), &source).is_err());
+    spec.format_version = 4;
+    assert_eq!(
+        encode_envelope(&initial_record(&spec, digest).unwrap()).unwrap(),
+        legacy_bytes
+    );
+}

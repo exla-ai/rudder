@@ -1,0 +1,16 @@
+{
+  "test": "execution::handoff::readiness_tests::positive_kernel::managed_binding4_accepts_real_private_backend_and_rejects_old_family",
+  "qualified": true,
+  "productionRuntimeQualified": false,
+  "modelCalls": false,
+  "supervisorLoaded": false,
+  "admittedAfterResolvedDigest": true,
+  "child": {
+    "code": 0,
+    "signal": null,
+    "failure": null,
+    "settled": true
+  },
+  "utc": "2026-10-31T10:42:52.308Z",
+  "privateGuestProofSha256": "6480594c629b01227ff353ecc5a93b3757cffa6d09b924adb68d62e64caac967"
+}

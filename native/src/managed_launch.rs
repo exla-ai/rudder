@@ -1,6 +1,9 @@
 //! Explicit local launch preparation. Every API doing IO runs off the App loop.
 //! Persisted assignments contain no provider material; execution specs remain
 //! private in memory and cross the one-use sealed descriptor handoff only.
+#[cfg(target_os = "linux")]
+#[path = "managed_source_prepare.rs"]
+pub(crate) mod source_prepare;
 use anyhow::{ensure, Context, Result};
 use rudder_engine::{
     execution::{ExecutionSpec, ProtectedHostContextRef, HomeFile, ReadOnlyRuntime,

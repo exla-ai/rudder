@@ -139,6 +139,7 @@ fn profiled_spec(path: &Path) -> ExecutionSpec {
     value.format_version = 4;
     value.profile = Some(ExecutionProfileV4 {
         format_version: 1,
+        startup: None,
         request_id: request_id.clone(),
         network,
         workspace: ExecutionWorkspaceSelectionV4::LocalComplete {},
@@ -442,6 +443,9 @@ fn remote_spec(path: &Path) -> ExecutionSpec {
     };
     let mut value = profiled_spec(path);
     value.format_version = 5;
+    value.profile.as_mut().unwrap().startup = Some(
+        execution::startup_budget::StartupConstraint::begin(
+            execution::startup_budget::STARTUP_POLICY_LIMIT).unwrap());
     let observation = value.workspace_observation.as_mut().unwrap();
     observation.binding.exclusion_policy_digest =
         exclusion_policy_digest(&ImportPolicy::default()).unwrap();
@@ -501,6 +505,10 @@ fn spec5_binding4_are_remote_offline_metadata_and_never_reach_a_factory() {
             let mut b = binding.clone();
             s.format_version = spec_version;
             b.format_version = binding_version;
+            if spec_version != 5 {
+                s.profile.as_mut().unwrap().startup = None;
+                b.profile.as_mut().unwrap().startup = None;
+            }
             assert_eq!(
                 b.validate(&s).is_ok(),
                 matches!((spec_version, binding_version), (4, 3) | (5, 4))
@@ -513,6 +521,8 @@ fn spec5_binding4_are_remote_offline_metadata_and_never_reach_a_factory() {
         "/profile/workspace/selection",
         "/profile/workspace/host_context",
         "/profile/network",
+        "/profile/startup",
+        "/profile/startup/original",
     ] {
         let mut wire = serde_json::to_value(&value).unwrap();
         wire.pointer_mut(pointer)
@@ -528,10 +538,11 @@ fn spec5_binding4_are_remote_offline_metadata_and_never_reach_a_factory() {
     let mut wire = serde_json::to_value(&binding).unwrap();
     wire["unknown"] = true.into();
     assert!(serde_json::from_value::<execution::ManagedExecutionBinding>(wire).is_err());
-    for kind in ["profile", "local", "connected", "context", "application"] {
+    for kind in ["profile", "local", "connected", "context", "application", "startup"] {
         let mut s = value.clone();
         match kind {
             "profile" => s.profile = None,
+            "startup" => s.profile.as_mut().unwrap().startup = None,
             "local" => {
                 s.profile.as_mut().unwrap().workspace =
                     ExecutionWorkspaceSelectionV4::LocalComplete {}
@@ -636,6 +647,30 @@ fn spec5_binding4_are_remote_offline_metadata_and_never_reach_a_factory() {
         .to_string()
         .contains("specification5 awaits owned source"));
     assert!(!invoked.load(Ordering::Acquire));
+}
+
+#[test]
+fn startup_constraint_is_mandatory_for_spec5_and_absent_from_legacy_profile_bytes() {
+    use execution::startup_budget::{StartupConstraint, STARTUP_POLICY_LIMIT};
+    let temp = fixture();
+    let legacy = profiled_spec(temp.path());
+    let legacy_wire = serde_json::to_value(&legacy).unwrap();
+    let mut keys = legacy_wire["profile"].as_object().unwrap().keys().map(String::as_str).collect::<Vec<_>>();
+    keys.sort_unstable();
+    assert_eq!(keys, ["format_version", "network", "request_id", "workspace"]);
+    let legacy_binding = managed_binding(&legacy);
+    assert!(serde_json::to_value(&legacy_binding).unwrap()["profile"].get("startup").is_none());
+    legacy_binding.validate(&legacy).unwrap();
+    let mut wrong_family = legacy;
+    wrong_family.profile.as_mut().unwrap().startup = Some(StartupConstraint::begin(STARTUP_POLICY_LIMIT).unwrap());
+    assert!(wrong_family.validate().is_err());
+
+    let temp = fixture();
+    let mut source = remote_spec(temp.path());
+    source.validate().unwrap();
+    source.profile.as_mut().unwrap().startup = None;
+    let decoded: ExecutionSpec = serde_json::from_slice(&canonical_json(&source).unwrap()).unwrap();
+    assert!(decoded.validate().is_err(), "Spec5 omitted its original startup constraint");
 }
 
 #[test]

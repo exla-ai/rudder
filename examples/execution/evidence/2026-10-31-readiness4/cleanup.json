@@ -1,0 +1,10 @@
+{
+  "nonce": "fb9bc4d0-396b-4c6e-9e18-6b9972b29345",
+  "role": "readiness4-physical-canary",
+  "id": "d8d0505f4d0298",
+  "instance": "01M68RV5291QNM896VYSEEMGAS",
+  "digest": "sha256:f4ccbcface6270afeb32ecbf2788893a110320e4879a5a79e7c35497520d100a",
+  "absentByIdNameNonce": true,
+  "independentInventoryAbsent": true,
+  "utc": "2026-10-31T10:42:57.491Z"
+}

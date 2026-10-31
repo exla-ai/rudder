@@ -91,6 +91,12 @@ pub(crate) trait HostSourceIssuerPeer: Send + Sync + 'static {
     fn check_peer(&self, stream: &UnixStream) -> Result<()>;
 }
 
+/// Request-side custody of the actual owned helper supervisor. Production
+/// adapters require a handoff-owned process witness, never a saved PID or UID.
+pub(crate) trait HostSourceRequestPeer: Send + Sync + 'static {
+    fn check_peer(&self, stream: &UnixStream) -> Result<()>;
+}
+
 #[derive(Clone)]
 pub(crate) struct Limits {
     pub workers: usize,
@@ -628,6 +634,7 @@ struct State {
     binding_digest: String,
     context: ContextV1,
     authority: Arc<dyn HostSourceAuthority>,
+    request_peer: Option<Arc<dyn HostSourceRequestPeer>>,
     limits: Limits,
     directory: Directory,
     stopped: AtomicBool,
@@ -809,12 +816,31 @@ impl SourceAuthorizerServer {
     ) -> Result<Self> {
         Self::with_wall_clock(path, binding, authority, limits, Arc::new(wall_nanoseconds))
     }
+    pub(crate) fn bind_with_request_peer(
+        path: &Path,
+        binding: PartialBinding,
+        authority: Arc<dyn HostSourceAuthority>,
+        limits: Limits,
+        peer: Arc<dyn HostSourceRequestPeer>,
+    ) -> Result<Self> {
+        Self::bind_inner(path, binding, authority, limits, Arc::new(wall_nanoseconds), Some(peer))
+    }
     fn with_wall_clock(
         path: &Path,
         binding: PartialBinding,
         authority: Arc<dyn HostSourceAuthority>,
         limits: Limits,
         wall_clock: Clock,
+    ) -> Result<Self> {
+        Self::bind_inner(path, binding, authority, limits, wall_clock, None)
+    }
+    fn bind_inner(
+        path: &Path,
+        binding: PartialBinding,
+        authority: Arc<dyn HostSourceAuthority>,
+        limits: Limits,
+        wall_clock: Clock,
+        request_peer: Option<Arc<dyn HostSourceRequestPeer>>,
     ) -> Result<Self> {
         limits.validate()?;
         binding.validate().map_err(|_| fault())?;
@@ -875,6 +901,7 @@ impl SourceAuthorizerServer {
             binding_digest,
             context,
             authority,
+            request_peer,
             limits: limits.clone(),
             directory,
             stopped: AtomicBool::new(false),
@@ -1031,6 +1058,12 @@ fn call(state: &Arc<State>, stream: &mut UnixStream, connection_id: u64) -> Resu
         peer_uid(stream)? == unsafe { libc::geteuid() },
         "host source peer rejected"
     );
+    // Refuse an unbound or foreign supervisor before reading the request or
+    // invoking Journal authority. A failed peer is not source revocation.
+    if let Some(peer) = &state.request_peer {
+        let checked = catch_unwind(AssertUnwindSafe(|| peer.check_peer(stream)));
+        ensure!(matches!(checked, Ok(Ok(()))), "host source supervisor rejected");
+    }
     let deadline = Instant::now() + state.limits.request_timeout;
     let request: Request = receive(stream, MAX_FRAME, deadline, || state.check())?;
     let body = &request.body;
@@ -1087,6 +1120,10 @@ fn call(state: &Arc<State>, stream: &mut UnixStream, connection_id: u64) -> Resu
         "host source callback returned late"
     );
     let authorized = reply(state, &request, true, valid_for_ns)?;
+    if let Some(peer) = &state.request_peer {
+        let checked = catch_unwind(AssertUnwindSafe(|| peer.check_peer(stream)));
+        ensure!(matches!(checked, Ok(Ok(()))), "host source supervisor custody changed");
+    }
     send(stream, &authorized, MAX_REPLY, deadline, || state.check())
 }
 

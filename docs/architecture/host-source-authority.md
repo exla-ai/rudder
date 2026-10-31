@@ -107,8 +107,36 @@ expiry, bounded freshness and local owner retirement. The query is a point in
 time; an atomic final effect with Journal revocation requires a query-and-effect
 transaction, not a stronger claim about this local receipt.
 
-These interfaces are under integration. Runtime5 remains explicitly refused.
-Binding4 still requires actual readiness, whose current receiver admits only
-Binding3. The Native App cannot yet prepare this new source family. No default
-migration, positive managed source launch, connected model or accepted jj history
-is established by codec and unit tests.
+The generic and legacy helpers refuse Runtime5. The Native managed helper has
+an explicit Rust-only entry for Spec5, a live Binding4 controller and the owned
+source factory. It checks those requirements before namespace or workspace
+effects, then requires separate source/ingress services and an owned workspace
+factory. Selecting a version in serialized DATA cannot supply those objects.
+
+Binding4 readiness has passed an actual private USER/NET/pidfd check on a fresh
+Fly canary; see the [readiness proof](../../examples/execution/evidence/2026-10-31-readiness4/README.md).
+Its source/FUSE execution composition passed on a disposable Fly worker; see
+the [source5 proof](../../examples/execution/evidence/2026-10-31-source5/README.md).
+Preparation runs
+off the App loop with an actual source lease and held Journal file. It retains
+separate guest and source grants, charges pending activation to the original
+startup budget, and checks pinned runtime bytes throughout preparation. The
+source grant also covers execution and the finalization reserve. Helper custody
+becomes current only after actual descriptor transfer; a provisional shutdown
+packet does not retire a still-live helper's source access.
+
+Spec5 also seals the original startup constraint into its execution profile and
+managed binding. Helper preparation, namespace setup, actual exec and parent
+readiness consume the same suspend-aware deadline and original wall-clock bound.
+The exec callback checks an immutable snapshot with clock syscalls only. No
+handoff starts a fresh allowance. Startup checks end at backend admission;
+execution and finalization keep their own budgets. Spec4 omits the field and
+retains its wire shape. This constraint supplies no source or process authority.
+
+The passing case verifies inherited HTTPS reads, mapped writes in the partial
+checkpoint, StopV4, actual successful helper exit, fresh issuer join and settled
+source callbacks. It verifies local retention before destroying the test VM;
+it does not publish the captured delta/evidence remotely or promote the capture's
+`live_best_effort` consistency label. The default Native App launch has not
+adopted this family. Default migration, connected models and accepted jj history
+remain separate gates.

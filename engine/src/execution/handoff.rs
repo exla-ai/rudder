@@ -1,6 +1,10 @@
 //! One-use sealed-spec descriptor transfer after portable-pty has closed all
 //! inherited FDs. Socket names are not credentials: kernel peer PID/UID plus
 //! held pidfds authenticate both ends. No JSON spec enters argv/env/PTY/disk.
+#[cfg(test)]
+#[path = "handoff/readiness_tests.rs"]
+mod readiness_tests;
+pub mod helper_process;
 pub mod source_shutdown;
 #[cfg(test)]
 #[path = "handoff/source_shutdown_tests.rs"]
@@ -8,7 +12,15 @@ mod source_shutdown_tests;
 use super::finalization_budget::{
     FinalizationBudget, FinalizationConstraint, FINALIZATION_POLICY_LIMIT,
 };
+use super::startup_budget::StartupBudget;
 use super::*;
+
+fn binding_startup(binding: &ManagedExecutionBinding) -> Result<Option<StartupBudget>> {
+    if binding.format_version != 4 { return Ok(None); }
+    let constraint = binding.profile.as_ref().and_then(|profile| profile.startup.as_ref())
+        .context("binding4 requires its original startup constraint")?;
+    Ok(Some(StartupBudget::from_constraint(constraint)?))
+}
 use crate::protocol::ObjectKind;
 use anyhow::{bail, Context};
 use std::{
@@ -184,6 +196,15 @@ enum ControlEvent {
         network: super::network_phase::NetworkReadyFrame,
         partial_binding_digest: Option<String>,
     },
+    BackendReadyV4 {
+        protocol_version: u32,
+        frontend_start: ManagedFrontendStart,
+        execution_id: String,
+        operation_id: String,
+        view_id: String,
+        network: super::network_phase::NetworkReadyFrame,
+        partial_binding_digest: String,
+    },
     Shutdown {
         receipt: ManagedShutdownReceipt,
     },
@@ -242,6 +263,32 @@ impl<'de> Deserialize<'de> for ControlEvent {
                 let value: Ready =
                     serde_json::from_str(raw.get()).map_err(serde::de::Error::custom)?;
                 Ok(Self::BackendReadyV3 {
+                    protocol_version: value.protocol_version,
+                    frontend_start: value.frontend_start,
+                    execution_id: value.execution_id,
+                    operation_id: value.operation_id,
+                    view_id: value.view_id,
+                    network: value.network,
+                    partial_binding_digest: value.partial_binding_digest,
+                })
+            }
+            "backend_ready_v4" => {
+                #[derive(Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct Ready {
+                    #[serde(rename = "event")]
+                    _event: String,
+                    protocol_version: u32,
+                    frontend_start: ManagedFrontendStart,
+                    execution_id: String,
+                    operation_id: String,
+                    view_id: String,
+                    network: super::network_phase::NetworkReadyFrame,
+                    partial_binding_digest: String,
+                }
+                let value: Ready =
+                    serde_json::from_str(raw.get()).map_err(serde::de::Error::custom)?;
+                Ok(Self::BackendReadyV4 {
                     protocol_version: value.protocol_version,
                     frontend_start: value.frontend_start,
                     execution_id: value.execution_id,
@@ -320,6 +367,7 @@ struct PendingStopV4 {
 /// App operations only enqueue/read bounded typed messages. IO and process
 /// lifetime checks run on its bounded owned worker, never the App thread.
 pub struct ManagedExecutionHandle {
+    helper_process: Arc<helper_process::HelperProcessWitness>,
     binding: ManagedExecutionBinding,
     commands: mpsc::SyncSender<QueuedCommand>,
     events: mpsc::Receiver<ManagedExecutionEvent>,
@@ -329,6 +377,10 @@ pub struct ManagedExecutionHandle {
     closed: Arc<std::sync::atomic::AtomicBool>,
 }
 impl ManagedExecutionHandle {
+    /// Opaque custody remains pending until the actual sealed three-FD handoff.
+    pub fn helper_process_witness(&self) -> Arc<helper_process::HelperProcessWitness> {
+        self.helper_process.clone()
+    }
     pub fn stop_and_checkpoint(&self, request: StopAndCheckpoint) -> Result<()> {
         ensure!(
             self.binding.format_version != 4,
@@ -433,6 +485,7 @@ impl ManagedExecutionHandle {
 }
 impl Drop for ManagedExecutionHandle {
     fn drop(&mut self) {
+        self.helper_process.revoke();
         self.closed
             .store(true, std::sync::atomic::Ordering::Release);
     }
@@ -473,6 +526,7 @@ impl ManagedExecutionHandoff {
         args
     }
     pub fn activate(self, child: u32) -> Result<(HandoffReceipt, ManagedExecutionHandle)> {
+        let startup = binding_startup(&self.binding)?;
         ensure!(
             child > 1 && child != self.handoff.parent,
             "invalid managed handoff child"
@@ -489,7 +543,11 @@ impl ManagedExecutionHandoff {
         let (commands, receive_commands) = mpsc::sync_channel(2);
         let (send_events, events) = mpsc::sync_channel(4);
         let closed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let helper_process = Arc::new(helper_process::HelperProcessWitness::pending(
+            lifetime.try_clone()?, child, handoff.uid, binding.clone(),
+        ));
         let handle = ManagedExecutionHandle {
+            helper_process: helper_process.clone(),
             binding: binding.clone(),
             commands,
             events,
@@ -499,6 +557,7 @@ impl ManagedExecutionHandoff {
             closed: closed.clone(),
         };
         let (send, result) = mpsc::sync_channel(1);
+        let worker_helper = helper_process.clone();
         std::thread::Builder::new()
             .name("rudder-managed-control".into())
             .spawn(move || {
@@ -506,6 +565,7 @@ impl ManagedExecutionHandoff {
                     let deadline = Instant::now() + Duration::from_secs(10);
                     let mut rejected = 0;
                     loop {
+                        if let Some(startup) = &startup { startup.remaining()?; }
                         ensure!(
                             Instant::now() < deadline && !exited(&lifetime)?,
                             "managed handoff deadline/lifetime ended"
@@ -531,6 +591,8 @@ impl ManagedExecutionHandoff {
                                         helper_control.as_raw_fd(),
                                     ],
                                 )?;
+                                if let Some(startup) = &startup { startup.remaining()?; }
+                                worker_helper.transferred()?;
                                 return Ok(());
                             }
                             Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
@@ -541,6 +603,7 @@ impl ManagedExecutionHandoff {
                     }
                 })();
                 let success = ready.is_ok();
+                if !success { worker_helper.revoke(); }
                 let _ = send.send(ready.map_err(|_| "managed descriptor handoff failed".into()));
                 drop(handoff);
                 drop(binding_fd);
@@ -559,12 +622,14 @@ impl ManagedExecutionHandoff {
                     &send_events,
                     &closed,
                 );
+                worker_helper.control_finished(&run);
                 if run.is_err() {
                     let _ = send_events.try_send(ManagedExecutionEvent::Uncertain);
                 }
             })?;
         Ok((
             HandoffReceipt {
+                helper_process: Some(helper_process),
                 result,
                 completed: std::cell::Cell::new(false),
             },
@@ -583,12 +648,16 @@ fn managed_client_loop(
     events: &mpsc::SyncSender<ManagedExecutionEvent>,
     closed: &std::sync::atomic::AtomicBool,
 ) -> Result<()> {
+    let startup = binding_startup(binding)?;
     stream.set_read_timeout(Some(Duration::from_secs(2)))?;
     stream.set_write_timeout(Some(Duration::from_secs(2)))?;
     let mut pending: Option<StopAndCheckpoint> = None;
     let mut finalization: Option<FinalizationBudget> = None;
     let mut backend: Option<Arc<BackendProcessWitness>> = None;
     loop {
+        if backend.is_none() {
+            if let Some(startup) = &startup { startup.remaining()?; }
+        }
         ensure!(
             !closed.load(std::sync::atomic::Ordering::Acquire),
             "managed control retired"
@@ -703,41 +772,14 @@ fn managed_client_loop(
                         .context("managed readiness queue full")?;
                     backend = Some(process);
                 }
-                ControlEvent::BackendReadyV3 {
-                    protocol_version,
-                    frontend_start,
-                    execution_id,
-                    operation_id,
-                    view_id,
-                    network,
-                    partial_binding_digest,
-                } => {
-                    ensure!(
-                        binding.format_version == 3
-                            && protocol_version == 3
-                            && frontend_start == binding.frontend_start
-                            && backend.is_none()
-                            && execution_id == binding.execution_id
-                            && operation_id == binding.operation_id
-                            && view_id == binding.view_id,
-                        "v4 backend readiness differs from the sealed assignment"
-                    );
-                    let expected = binding
-                        .profile
-                        .as_ref()
-                        .context("v4 backend lacks profile")?
-                        .partial_binding()?
-                        .map(|binding| binding.digest())
-                        .transpose()?;
-                    ensure!(
-                        partial_binding_digest == expected,
-                        "v4 backend readiness changed workspace protocol"
-                    );
-                    let process = Arc::new(BackendProcessWitness::received_network(
+                event @ (ControlEvent::BackendReadyV3 { .. }
+                | ControlEvent::BackendReadyV4 { .. }) => {
+                    ensure!(backend.is_none(), "duplicate managed backend readiness");
+                    let process = Arc::new(receive_network_backend(
+                        event,
                         descriptors,
                         binding,
                         request_digest,
-                        network,
                     )?);
                     events
                         .try_send(ManagedExecutionEvent::BackendReady {
@@ -814,6 +856,80 @@ fn managed_client_loop(
     }
 }
 
+// Both sender and receiver preserve separate protocol families. This only
+// validates sealed metadata; the receiver must still inspect every kernel FD.
+fn receive_network_backend(
+    event: ControlEvent,
+    descriptors: Vec<OwnedFd>,
+    binding: &ManagedExecutionBinding,
+    request_digest: &str,
+) -> Result<BackendProcessWitness> {
+    let startup = binding_startup(binding)?;
+    let (family, protocol, start, execution, operation, view, network, partial_digest) = match event
+    {
+        ControlEvent::BackendReadyV3 {
+            protocol_version,
+            frontend_start,
+            execution_id,
+            operation_id,
+            view_id,
+            network,
+            partial_binding_digest,
+        } => (
+            3,
+            protocol_version,
+            frontend_start,
+            execution_id,
+            operation_id,
+            view_id,
+            network,
+            partial_binding_digest,
+        ),
+        ControlEvent::BackendReadyV4 {
+            protocol_version,
+            frontend_start,
+            execution_id,
+            operation_id,
+            view_id,
+            network,
+            partial_binding_digest,
+        } => (
+            4,
+            protocol_version,
+            frontend_start,
+            execution_id,
+            operation_id,
+            view_id,
+            network,
+            Some(partial_binding_digest),
+        ),
+        _ => bail!("expected network backend readiness"),
+    };
+    ensure!(
+        binding.format_version == family
+            && protocol == family
+            && start == binding.frontend_start
+            && execution == binding.execution_id
+            && operation == binding.operation_id
+            && view == binding.view_id,
+        "backend readiness differs from the sealed protocol family or assignment"
+    );
+    let expected = binding
+        .profile
+        .as_ref()
+        .context("backend lacks profile")?
+        .partial_binding()?
+        .map(|binding| binding.digest())
+        .transpose()?;
+    ensure!(
+        partial_digest == expected,
+        "backend readiness changed full workspace binding"
+    );
+    let process = BackendProcessWitness::received_network(descriptors, binding, request_digest, network)?;
+    if let Some(startup) = startup { startup.remaining()?; }
+    Ok(process)
+}
+
 fn validate_network_frame(
     binding: &ManagedExecutionBinding,
     request_digest: &str,
@@ -825,7 +941,7 @@ fn validate_network_frame(
         .as_ref()
         .context("v4 readiness lacks sealed network profile")?;
     ensure!(
-        binding.format_version == 3
+        matches!(binding.format_version, 3 | 4)
             && frame.format_version == 1
             && profile.network.mode == super::network::NetworkMode::OfflineV1
             && frame.execution_id == binding.execution_id
@@ -838,6 +954,40 @@ fn validate_network_frame(
                 .is_ok_and(|id| id.to_string() == frame.child_nonce),
         "v4 readiness changed its sealed network assignment"
     );
+    if binding.format_version == 4 {
+        let network = &profile.network.binding;
+        let ExecutionWorkspaceSelectionV4::RemoteSourceOnly { selection, .. } = &profile.workspace
+        else {
+            bail!("binding4 readiness requires remote source-only workspace")
+        };
+        let partial = profile
+            .partial_binding()?
+            .context("binding4 readiness lacks source binding")?;
+        ensure!(
+            binding.execution_profile == "offline-command-v1"
+                && binding.frontend_start == ManagedFrontendStart::Immediate
+                && binding.server_command.is_none()
+                && profile.format_version == 1
+                && profile.request_id == binding.request_id
+                && selection.request_id == binding.request_id
+                && network.request_id == binding.request_id
+                && network.execution_id == binding.execution_id
+                && network.operation_id == binding.operation_id
+                && network.view_id == binding.view_id
+                && network.run_id == binding.run_id
+                && network.run_epoch.value() == binding.run_epoch
+                && network.owner == binding.owner.owner
+                && network.owner_epoch.value() == binding.owner.epoch
+                && partial.attempt.project_id == network.project_id
+                && partial.attempt.run_id == binding.run_id
+                && partial.attempt.run_epoch == binding.run_epoch
+                && partial.attempt.execution_id == binding.execution_id
+                && partial.attempt.operation_id == binding.operation_id
+                && partial.attempt.view_id == binding.view_id
+                && partial.attempt.owner == binding.owner,
+            "binding4 readiness changed its sealed offline source family"
+        );
+    }
     Ok(())
 }
 fn validate_local_checkpoint(checkpoint: &VfsCheckpoint) -> Result<()> {
@@ -1070,6 +1220,7 @@ impl ManagedControl {
         process: &OwnedFd,
         network: &super::network_phase::OwnedNetworkReady,
     ) -> Result<()> {
+        let startup = binding_startup(&self.binding)?;
         validate_network_frame(
             &self.binding,
             &network.frame().execution_request_digest,
@@ -1085,9 +1236,8 @@ impl ManagedControl {
             .map(|binding| binding.digest())
             .transpose()?;
         let ns = network.descriptors();
-        send_control_packet_fds(
-            &mut self.stream,
-            &ControlEvent::BackendReadyV3 {
+        let event = match self.binding.format_version {
+            3 => ControlEvent::BackendReadyV3 {
                 protocol_version: 3,
                 frontend_start: self.binding.frontend_start,
                 execution_id: self.binding.execution_id.clone(),
@@ -1096,9 +1246,27 @@ impl ManagedControl {
                 network: network.frame().clone(),
                 partial_binding_digest,
             },
+            4 => ControlEvent::BackendReadyV4 {
+                protocol_version: 4,
+                frontend_start: self.binding.frontend_start,
+                execution_id: self.binding.execution_id.clone(),
+                operation_id: self.binding.operation_id.clone(),
+                view_id: self.binding.view_id.clone(),
+                network: network.frame().clone(),
+                partial_binding_digest: partial_binding_digest
+                    .context("binding4 requires full source binding")?,
+            },
+            _ => bail!("unsupported backend network readiness family"),
+        };
+        send_control_packet_fds(
+            &mut self.stream,
+            &event,
             &[process.as_raw_fd(), ns[0], ns[1]],
-        )
+        )?;
+        if let Some(startup) = startup { startup.remaining()?; }
+        Ok(())
     }
+
     pub(super) fn shutdown_receipt(
         &mut self,
         committed: &CommittedExecutionRecord,
@@ -1329,6 +1497,7 @@ pub struct ExecutionHandoff {
     uid: u32,
 }
 pub struct HandoffReceipt {
+    helper_process: Option<Arc<helper_process::HelperProcessWitness>>,
     result: mpsc::Receiver<std::result::Result<(), String>>,
     completed: std::cell::Cell<bool>,
 }
@@ -1342,10 +1511,16 @@ impl HandoffReceipt {
         match self.result.try_recv() {
             Ok(r) => {
                 self.completed.set(true);
+                if r.is_err() {
+                    if let Some(helper) = &self.helper_process { helper.revoke(); }
+                }
+                // Successful transfer is a past fact. Live source activation
+                // independently checks its actual helper witness.
                 Some(r)
             }
             Err(mpsc::TryRecvError::Empty) => None,
             Err(mpsc::TryRecvError::Disconnected) => {
+                if let Some(helper) = &self.helper_process { helper.revoke(); }
                 self.completed.set(true);
                 Some(Err(
                     "execution handoff closed without acknowledgement".into()
@@ -1354,10 +1529,12 @@ impl HandoffReceipt {
         }
     }
     pub fn wait(self, timeout: Duration) -> Result<()> {
-        self.result
-            .recv_timeout(timeout)
-            .context("execution handoff deadline")?
-            .map_err(anyhow::Error::msg)
+        let result = self.result.recv_timeout(timeout).context("execution handoff deadline")
+            .and_then(|result| result.map_err(anyhow::Error::msg));
+        if result.is_err() {
+            if let Some(helper) = &self.helper_process { helper.revoke(); }
+        }
+        result
     }
 }
 impl ExecutionHandoff {
@@ -1428,6 +1605,7 @@ impl ExecutionHandoff {
             let _ = send.send(r.map_err(|e| e.to_string()));
         });
         Ok(HandoffReceipt {
+            helper_process: None,
             result,
             completed: std::cell::Cell::new(false),
         })
@@ -1699,12 +1877,14 @@ mod managed_tests {
         })
     }
     fn v4_handle(capacity: usize) -> (ManagedExecutionHandle, mpsc::Receiver<QueuedCommand>) {
-        let mut binding = binding();
-        binding.format_version = 4;
+        let binding = readiness_tests::binding();
         let (commands, receive) = mpsc::sync_channel(capacity);
         let (_, events) = mpsc::sync_channel(1);
         (
             ManagedExecutionHandle {
+                helper_process: Arc::new(helper_process::HelperProcessWitness::pending(
+                    pidfd(std::process::id()).unwrap(), std::process::id(), unsafe { libc::geteuid() }, binding.clone(),
+                )),
                 binding,
                 commands,
                 events,
@@ -1729,6 +1909,38 @@ mod managed_tests {
                 authenticated: false,
             },
         )
+    }
+    #[test]
+    fn host_source_entry_rejects_wrong_control_family_before_factory_or_state_effects() {
+        let root = tempfile::tempdir().unwrap();
+        let mut binding = binding();
+        binding.format_version = 3;
+        let spec = ExecutionSpec {
+            format_version: 5,
+            execution_id: binding.execution_id.clone(),
+            operation_id: binding.operation_id.clone(), view_id: binding.view_id.clone(),
+            owner: binding.owner.clone(),
+            execution_root: root.path().join("execution"),
+            manager_root: root.path().join("manager"), store_root: root.path().join("store"),
+            authority_roots: vec![], command: vec!["/usr/bin/true".into()],
+            environment: Default::default(), runtime: vec![], home_files: vec![],
+            broker_directory: None, broker_binding: None, workspace_observation: None,
+            profile: None, timeout_seconds: 1,
+        };
+        let (_peer, control) = control_fixture(binding);
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = calls.clone();
+        let result = super::super::linux::run_helper_with_managed_host_source_services(
+            spec.clone(), Box::new(move |_| {
+                counted.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+                anyhow::bail!("wrong family must not invoke factory")
+            }), control,
+        );
+        assert!(result.is_err());
+        assert_eq!(calls.load(std::sync::atomic::Ordering::Acquire), 0);
+        for path in [&spec.execution_root, &spec.manager_root, &spec.store_root] {
+            assert!(!path.exists());
+        }
     }
     #[test]
     fn stop_v4_handle_retries_share_the_original_budget_and_one_admission() {

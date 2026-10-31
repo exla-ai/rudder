@@ -1,0 +1,9 @@
+{
+  "at": "2026-10-31T01:24:22.309139+00:00",
+  "cause": "portable-pty0.9 uses HOME as default cwd when TerminalPaneOptions has no explicit cwd; /nonexistent made spawn return ENOENT",
+  "primaryLocalSource": "portable-pty-0.9.0/src/cmdbuilder.rs:501",
+  "changed": "Only the credential-free qualifier child HOME now points to the existing owned /workspace in its disposable VM",
+  "controllerSha256": "d7b8c1f41ebe965649c29fc20c2216b60b74f7bad52d14721a51792015af77ba",
+  "driverAssertionsChanged": false,
+  "workerImageChanged": false
+}

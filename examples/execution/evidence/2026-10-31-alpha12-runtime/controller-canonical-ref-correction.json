@@ -1,0 +1,15 @@
+{
+  "at": "2026-10-31T01:20:22.085381+00:00",
+  "reason": "Actual Fly API normalizes config.image to requested-tag@resolved-digest",
+  "atomicGatePublication": true,
+  "source": [
+    {
+      "path": "qualify-network.mjs",
+      "sha256": "7212ab66b4655877c5f65df3e270d9bcff62363ad0a03b36baef83a9e160d761"
+    },
+    {
+      "path": "qualify-local-execution.mjs",
+      "sha256": "a93874485d6aa62db7d438f20da2b1d62076a1bf3784c523c98078a05961ea03"
+    }
+  ]
+}

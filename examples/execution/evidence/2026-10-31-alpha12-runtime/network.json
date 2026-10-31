@@ -1,0 +1,108 @@
+{
+  "formatVersion": 1,
+  "kind": "alpha12-network-qualification",
+  "nonce": "3928e2dd-d346-488c-af73-0038139be662",
+  "name": "rudder-alpha12-netqual-3928e2dd",
+  "requestedImage": "registry.fly.io/rudder-workers-exla:4.0.0-alpha.12-qualification-09068d9e",
+  "expectedDigest": "sha256:afcfc5a54d5eeb72bc7d19ef445559b814d4908d2a7151fc06d221b2a84c3022",
+  "provenance": {
+    "formatVersion": 1,
+    "version": "4.0.0-alpha.12",
+    "revision": "f609730d27ee7d02b1886eb343477d1c09aa7255",
+    "baseWorkerImage": "registry.fly.io/rudder-workers-exla:4.0.0-alpha.12",
+    "baseWorkerDigest": "sha256:2ebaf5f8124bbbe1b51850e6dcf60ccd6a6841d0bde92a5bb3afe77db1ba2420",
+    "qualifierSha256": "81709e768d5fa8e541f4f510d75dfcc770aa15bada327a68ccb6715e6d5ce72e"
+  },
+  "startedAt": "2026-10-31T01:20:56.706Z",
+  "steps": [
+    {
+      "step": "assert-empty-app-secrets",
+      "ms": 618
+    },
+    {
+      "step": "filtered-inventory",
+      "ms": 450
+    },
+    {
+      "step": "create-owned-qualification",
+      "ms": 25067
+    },
+    {
+      "step": "filtered-inventory",
+      "ms": 661
+    },
+    {
+      "step": "recheck-empty-app-secrets",
+      "ms": 656
+    },
+    {
+      "step": "release-after-verified-derived-digest",
+      "ms": 825
+    },
+    {
+      "step": "read-bounded-generated-proof",
+      "ms": 989
+    },
+    {
+      "step": "filtered-inventory",
+      "ms": 614
+    },
+    {
+      "step": "destroy-exact-owned-qualification",
+      "ms": 2209
+    },
+    {
+      "step": "filtered-inventory",
+      "ms": 1008
+    },
+    {
+      "step": "filtered-inventory",
+      "ms": 453
+    }
+  ],
+  "productionWired": false,
+  "egressQualified": false,
+  "liveAttemptAuthorized": false,
+  "limits": [
+    "Owned disposable only; no services/mounts/app secrets, user/provider/workspace credentials or models.",
+    "Real managed image bootstrap runs; Node preload never evaluates home/supervisor modules.",
+    "Derived image digest is checked before host-written admission gate permits namespace probes.",
+    "Baked provenance plus binary hash checked; base ancestry still requires retained pinned-FROM build evidence.",
+    "Kernel/config primitives only, not connected guest networking, public egress, packet transport or previews."
+  ],
+  "controllerSha256": "7212ab66b4655877c5f65df3e270d9bcff62363ad0a03b36baef83a9e160d761",
+  "preloadSha256": "89a24b11dbe1abb4c7ea6928aacbf45368accd4f9bd70b3904a69d053748028f",
+  "configSha256": "5e1f5cc79b7d1495d7b7224819f9844256906c4e4a8259ec531e120a8146dce1",
+  "createdDescriptor": {
+    "id": "876de9b045e718",
+    "name": "rudder-alpha12-netqual-3928e2dd",
+    "nonce": "3928e2dd-d346-488c-af73-0038139be662",
+    "role": "alpha12-network-qualification",
+    "revision": "f609730d27ee7d02b1886eb343477d1c09aa7255",
+    "requestedImage": "registry.fly.io/rudder-workers-exla:4.0.0-alpha.12-qualification-09068d9e",
+    "observedDigest": "sha256:afcfc5a54d5eeb72bc7d19ef445559b814d4908d2a7151fc06d221b2a84c3022",
+    "services": 0,
+    "mounts": 0,
+    "files": 0
+  },
+  "machine": {
+    "id": "876de9b045e718",
+    "name": "rudder-alpha12-netqual-3928e2dd",
+    "nonce": "3928e2dd-d346-488c-af73-0038139be662",
+    "role": "alpha12-network-qualification",
+    "instance": "01M67RQC8QJ5BTR7VB86VBD7M4",
+    "region": "sjc",
+    "digest": "sha256:afcfc5a54d5eeb72bc7d19ef445559b814d4908d2a7151fc06d221b2a84c3022"
+  },
+  "proofSha256": "fef203f5ed90cc38b5c0bf4be7dec90f2dc06b2b6c4bd68603ccb2d3dd772bb5",
+  "completed": true,
+  "qualified": true,
+  "counts": {
+    "qualified": 6,
+    "unsupported": 0,
+    "failed": 0
+  },
+  "cleanupVerified": true,
+  "independentAbsence": true,
+  "verifiedAt": "2026-10-31T01:21:30.275Z"
+}

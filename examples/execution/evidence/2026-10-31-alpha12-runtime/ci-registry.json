@@ -1,0 +1,310 @@
+{
+  "observedAt": "2026-10-31T01:34:20.560258+00:00",
+  "@exla/rudder": {
+    "latest": "3.9.13",
+    "next": "4.0.0-alpha.7"
+  },
+  "@viraatdas/rudder": {
+    "latest": "3.9.13",
+    "next": "4.0.0-alpha.7"
+  },
+  "release": [
+    {
+      "id": 124392865603,
+      "name": "Native darwin-x64",
+      "conclusion": "success",
+      "steps": [
+        {
+          "number": 1,
+          "name": "Set up job",
+          "conclusion": "success"
+        },
+        {
+          "number": 2,
+          "name": "Run actions/checkout@v4",
+          "conclusion": "success"
+        },
+        {
+          "number": 3,
+          "name": "Run actions/setup-node@v4",
+          "conclusion": "success"
+        },
+        {
+          "number": 4,
+          "name": "Board host access preflight",
+          "conclusion": "success"
+        },
+        {
+          "number": 5,
+          "name": "Build native pair",
+          "conclusion": "success"
+        },
+        {
+          "number": 6,
+          "name": "Stage native artifact",
+          "conclusion": "success"
+        },
+        {
+          "number": 7,
+          "name": "Run actions/upload-artifact@v4",
+          "conclusion": "success"
+        },
+        {
+          "number": 13,
+          "name": "Post Run actions/setup-node@v4",
+          "conclusion": "success"
+        },
+        {
+          "number": 14,
+          "name": "Post Run actions/checkout@v4",
+          "conclusion": "success"
+        },
+        {
+          "number": 15,
+          "name": "Complete job",
+          "conclusion": "success"
+        }
+      ]
+    },
+    {
+      "id": 124392865860,
+      "name": "Native linux-x64",
+      "conclusion": "success",
+      "steps": [
+        {
+          "number": 1,
+          "name": "Set up job",
+          "conclusion": "success"
+        },
+        {
+          "number": 2,
+          "name": "Run actions/checkout@v4",
+          "conclusion": "success"
+        },
+        {
+          "number": 3,
+          "name": "Run actions/setup-node@v4",
+          "conclusion": "success"
+        },
+        {
+          "number": 4,
+          "name": "Board host access preflight",
+          "conclusion": "success"
+        },
+        {
+          "number": 5,
+          "name": "Build native pair",
+          "conclusion": "success"
+        },
+        {
+          "number": 6,
+          "name": "Stage native artifact",
+          "conclusion": "success"
+        },
+        {
+          "number": 7,
+          "name": "Run actions/upload-artifact@v4",
+          "conclusion": "success"
+        },
+        {
+          "number": 13,
+          "name": "Post Run actions/setup-node@v4",
+          "conclusion": "success"
+        },
+        {
+          "number": 14,
+          "name": "Post Run actions/checkout@v4",
+          "conclusion": "success"
+        },
+        {
+          "number": 15,
+          "name": "Complete job",
+          "conclusion": "success"
+        }
+      ]
+    },
+    {
+      "id": 124392865876,
+      "name": "Native darwin-arm64",
+      "conclusion": "success",
+      "steps": [
+        {
+          "number": 1,
+          "name": "Set up job",
+          "conclusion": "success"
+        },
+        {
+          "number": 2,
+          "name": "Run actions/checkout@v4",
+          "conclusion": "success"
+        },
+        {
+          "number": 3,
+          "name": "Run actions/setup-node@v4",
+          "conclusion": "success"
+        },
+        {
+          "number": 4,
+          "name": "Board host access preflight",
+          "conclusion": "success"
+        },
+        {
+          "number": 5,
+          "name": "Build native pair",
+          "conclusion": "success"
+        },
+        {
+          "number": 6,
+          "name": "Stage native artifact",
+          "conclusion": "success"
+        },
+        {
+          "number": 7,
+          "name": "Run actions/upload-artifact@v4",
+          "conclusion": "success"
+        },
+        {
+          "number": 13,
+          "name": "Post Run actions/setup-node@v4",
+          "conclusion": "success"
+        },
+        {
+          "number": 14,
+          "name": "Post Run actions/checkout@v4",
+          "conclusion": "success"
+        },
+        {
+          "number": 15,
+          "name": "Complete job",
+          "conclusion": "success"
+        }
+      ]
+    },
+    {
+      "id": 124397706455,
+      "name": "publish",
+      "conclusion": "failure",
+      "steps": [
+        {
+          "number": 1,
+          "name": "Set up job",
+          "conclusion": "success"
+        },
+        {
+          "number": 2,
+          "name": "Run actions/checkout@v4",
+          "conclusion": "success"
+        },
+        {
+          "number": 3,
+          "name": "Run actions/download-artifact@v4",
+          "conclusion": "success"
+        },
+        {
+          "number": 4,
+          "name": "Run actions/setup-node@v4",
+          "conclusion": "success"
+        },
+        {
+          "number": 5,
+          "name": "Verify complete native artifacts and source revision",
+          "conclusion": "success"
+        },
+        {
+          "number": 6,
+          "name": "Verify tag matches package.json version",
+          "conclusion": "success"
+        },
+        {
+          "number": 7,
+          "name": "Select npm release channel",
+          "conclusion": "success"
+        },
+        {
+          "number": 8,
+          "name": "Configure git (rebase-first test creates temp repos)",
+          "conclusion": "success"
+        },
+        {
+          "number": 9,
+          "name": "Install jj",
+          "conclusion": "success"
+        },
+        {
+          "number": 10,
+          "name": "Run npm ci",
+          "conclusion": "success"
+        },
+        {
+          "number": 11,
+          "name": "Install + build cloud test fixtures",
+          "conclusion": "success"
+        },
+        {
+          "number": 12,
+          "name": "Compile engine and native test fixtures",
+          "conclusion": "success"
+        },
+        {
+          "number": 13,
+          "name": "Typecheck + JS tests",
+          "conclusion": "success"
+        },
+        {
+          "number": 14,
+          "name": "Native tests",
+          "conclusion": "failure"
+        },
+        {
+          "number": 15,
+          "name": "Managed jj provider tests",
+          "conclusion": "skipped"
+        },
+        {
+          "number": 16,
+          "name": "TUI end-to-end tests",
+          "conclusion": "skipped"
+        },
+        {
+          "number": 17,
+          "name": "Upload TUI report",
+          "conclusion": "success"
+        },
+        {
+          "number": 18,
+          "name": "Publish to npm",
+          "conclusion": "skipped"
+        },
+        {
+          "number": 19,
+          "name": "Publish under the old name",
+          "conclusion": "skipped"
+        },
+        {
+          "number": 20,
+          "name": "Fail when the new name did not publish",
+          "conclusion": "skipped"
+        },
+        {
+          "number": 39,
+          "name": "Post Run actions/setup-node@v4",
+          "conclusion": "skipped"
+        },
+        {
+          "number": 40,
+          "name": "Post Run actions/checkout@v4",
+          "conclusion": "success"
+        },
+        {
+          "number": 41,
+          "name": "Complete job",
+          "conclusion": "success"
+        }
+      ]
+    }
+  ],
+  "tui": {
+    "conclusion": "success",
+    "status": "completed"
+  }
+}

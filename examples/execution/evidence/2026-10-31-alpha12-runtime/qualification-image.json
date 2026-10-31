@@ -1,0 +1,25 @@
+{
+  "version": "4.0.0-alpha.12",
+  "revision": "f609730d27ee7d02b1886eb343477d1c09aa7255",
+  "image": "registry.fly.io/rudder-workers-exla:4.0.0-alpha.12-qualification-09068d9e",
+  "label": "4.0.0-alpha.12-qualification-09068d9e",
+  "baseWorkerDigest": "sha256:2ebaf5f8124bbbe1b51850e6dcf60ccd6a6841d0bde92a5bb3afe77db1ba2420",
+  "dockerfileSha256": "ba539d94777aab4bb46bb0d8527012dd40344f6c7f6df9dbcb611dc6d4766b4d",
+  "sourceEnvelopeSha256": "412f26036853481d7f1cbafef7d5ec36170c81c75b205f9ae8e0545032bd799c",
+  "binaries": {
+    "rudder-network-qualifier": {
+      "sha256": "81709e768d5fa8e541f4f510d75dfcc770aa15bada327a68ccb6715e6d5ce72e",
+      "size": 767280
+    },
+    "rudder-execution-qualifier": {
+      "sha256": "a2f66eddb1910d0e155812c46b236fde37930cea7a2345093917f5decff36fb8",
+      "size": 5547040
+    }
+  },
+  "fixtureSupplements": [
+    "busybox-static",
+    "/usr/bin/node alias to existing base /usr/local/bin/node if absent"
+  ],
+  "createdAt": "2026-10-31T01:11:20.186541+00:00",
+  "digest": "sha256:afcfc5a54d5eeb72bc7d19ef445559b814d4908d2a7151fc06d221b2a84c3022"
+}

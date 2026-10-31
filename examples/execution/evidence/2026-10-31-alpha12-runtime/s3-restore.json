@@ -1,0 +1,180 @@
+{
+  "format_version": 1,
+  "provider": "Fly.io / AWS S3",
+  "version": "4.0.0-alpha.12",
+  "revision": "f609730d27ee7d02b1886eb343477d1c09aa7255",
+  "name": "rudder-alpha12-cas-70c0f63a",
+  "nonce": "70c0f63a-065b-46d4-93a4-98b1a5231cb5",
+  "image": "registry.fly.io/rudder-workers-exla:4.0.0-alpha.12",
+  "imageDigest": "sha256:2ebaf5f8124bbbe1b51850e6dcf60ccd6a6841d0bde92a5bb3afe77db1ba2420",
+  "rootId": "alpha12-runnable-70c0f63a-065b-46d4-93a4-98b1a5231cb5",
+  "steps": [
+    {
+      "step": "no-app-secrets",
+      "ms": 1405
+    },
+    {
+      "step": "create-synthetic-worker-auth",
+      "ms": 293
+    },
+    {
+      "step": "inventory",
+      "ms": 564
+    },
+    {
+      "step": "inventory",
+      "ms": 502
+    },
+    {
+      "step": "inventory",
+      "ms": 467
+    },
+    {
+      "step": "inventory",
+      "ms": 575
+    },
+    {
+      "step": "inventory",
+      "ms": 522
+    },
+    {
+      "step": "inventory",
+      "ms": 475
+    },
+    {
+      "step": "inventory",
+      "ms": 472
+    },
+    {
+      "step": "inventory",
+      "ms": 953
+    },
+    {
+      "step": "inventory",
+      "ms": 650
+    },
+    {
+      "step": "inventory",
+      "ms": 485
+    },
+    {
+      "step": "inventory",
+      "ms": 592
+    },
+    {
+      "step": "inventory",
+      "ms": 510
+    },
+    {
+      "step": "inventory",
+      "ms": 392
+    },
+    {
+      "step": "inventory",
+      "ms": 472
+    },
+    {
+      "step": "inventory",
+      "ms": 593
+    },
+    {
+      "step": "inventory",
+      "ms": 467
+    },
+    {
+      "step": "inventory",
+      "ms": 472
+    },
+    {
+      "step": "read-owned-proof",
+      "ms": 822
+    },
+    {
+      "step": "read-owned-proof",
+      "ms": 945
+    },
+    {
+      "step": "inventory",
+      "ms": 457
+    },
+    {
+      "step": "destroy-owned-worker",
+      "ms": 2047
+    },
+    {
+      "step": "inventory",
+      "ms": 727
+    },
+    {
+      "step": "remove-synthetic-worker-auth",
+      "ms": 346
+    }
+  ],
+  "limits": [
+    "Small synthetic immutable fixture, not a cold-host performance workload or agent launch.",
+    "Producer bytes are a bounded in-memory fixture; worker restore uses the shipped native CAS and durable publication.",
+    "Only a generated synthetic account/workspace credential is used. No user account, vault or AWS key enters the canary.",
+    "Published synthetic immutable objects remain retained by the fabric no-GC policy."
+  ],
+  "fixture": {
+    "root": {
+      "kind": "runnable_root",
+      "algorithm": "sha256",
+      "digest": "1dae0b4ace97b7308e09023d51ff8b9838ca5507036222b6349396d98b79bd85",
+      "size_bytes": 814
+    },
+    "logicalFileBytes": 9437184,
+    "objects": 15,
+    "encodedBytes": 9440515,
+    "largeFileSha256": "9b2c07acf4335bf58ea9192e7439190c02ea07bdc5e3a193486f1656a4f7f4f2",
+    "rawNameHex": "ff61"
+  },
+  "publication": {
+    "receipt": {
+      "format_version": 1,
+      "root_id": "alpha12-runnable-70c0f63a-065b-46d4-93a4-98b1a5231cb5",
+      "root": {
+        "kind": "runnable_root",
+        "algorithm": "sha256",
+        "digest": "1dae0b4ace97b7308e09023d51ff8b9838ca5507036222b6349396d98b79bd85",
+        "size_bytes": 814
+      },
+      "durability": "replicated",
+      "published_at_ms": 1793410117000,
+      "object_count": 15,
+      "total_bytes": 9440515
+    },
+    "uploaded_objects": 15,
+    "uploaded_bytes": 9440515
+  },
+  "createError": "Searching for image 'registry.fly.io/rudder-workers-exla:4.0.0-alpha.12' remotely...\nimage found: img_3xdk4xx955914go0\nError: machine failed to reach desired start state, and restart policy was set to no restart\n",
+  "machine": "869e5efe2931e8",
+  "instance": "01M67S5CXPZ4HPY290D6XW5QKR",
+  "worker": {
+    "ok": true,
+    "uid": 1500,
+    "node": "v22.23.4",
+    "root": {
+      "kind": "runnable_root",
+      "algorithm": "sha256",
+      "digest": "1dae0b4ace97b7308e09023d51ff8b9838ca5507036222b6349396d98b79bd85",
+      "size_bytes": 814
+    },
+    "downloadedObjects": 15,
+    "downloadedBytes": 9440515,
+    "smallFixtureElapsedMs": 4930,
+    "nativeRestore": true,
+    "retainedAcrossNativeRestart": true,
+    "secondRestoreDownloadedObjects": 15,
+    "exactU64Bytes": true,
+    "chunkedFileSha256": "9b2c07acf4335bf58ea9192e7439190c02ea07bdc5e3a193486f1656a4f7f4f2",
+    "rawNameMetadata": true,
+    "fileModeMetadata": true,
+    "symlinkMetadata": true,
+    "filesystemMaterialization": false
+  },
+  "ok": true,
+  "cleanupVerified": true,
+  "syntheticCredentialRemoved": true,
+  "verifiedAt": "2026-10-31T01:30:43.241Z"
+}

@@ -50,7 +50,7 @@ the three architecture documents already contained this session's planning work.
 | Private previews | Persisted Tailscale login, actual readiness, bounded async probes, exact project ownership, ready links and local open | E13 subset implemented; real userspace/Serve check passed; laptop/phone access remains untested |
 | Terminal stream | Shared home/sail helper, short output batching, bounded backpressure, connection fencing, UTF-8 and repaint recovery | E13 subset deployed in the worker image; real WS/PTY VM checks passed; existing homes adopt when idle |
 | Startup/download caches | Background CLI update, persistent account-local npm/pnpm/uv cache defaults, explicit overrides retained | Behavior tests pass; no distributed action-cache claim |
-| Full storage/engine rewrite | Milestones below | Cloud release 162 / worker alpha.11 is deployed and verified; npm remains alpha.7 after the alpha.11 publication test failure. Default workspace integration, fleet and migration gates remain open |
+| Full storage/engine rewrite | Milestones below | Cloud release 163 / worker alpha.12 is deployed and verified; npm remains alpha.7 after the alpha.12 Mac test failure. Default workspace integration, fleet and migration gates remain open |
 
 The current native simple-execution path remains an isolated worker; explicit
 main-checkout mode remains available. The initial automatic DAG path retains
@@ -67,20 +67,33 @@ path, so this is a stated alpha limitation, not complete Cloud routing parity.
 
 ## V4 foundations and current continuation, 2026-10-31
 
-Cloud alpha.11 is deployed as release 162 from
-`30f6db4c4806a8f65c695d235a43d599ae23c080`; the canonical app, health,
+Cloud alpha.12 is deployed as release 163 from
+`f609730d27ee7d02b1886eb343477d1c09aa7255`; the canonical app, health,
 authentication, database integrity and unchanged active-home instance were
-verified at `2026-10-31T00:06:17Z`. Its complete worker image passed an owned
+verified at `2026-10-31T01:28:36Z`. Its complete worker image passed an owned
 Fly bootstrap/runtime smoke, including packaged CLI/native/buddy, changed-remote
 Git/jj fetch and auxiliary tool entrypoints. A fresh worker restored the synthetic
 RunnableRoot from deployed S3 into its native CAS and retained it across helper
-restart. Both canaries and the temporary credential row were independently
-absent at `2026-10-31T00:08:26Z`.
-See [exact delivery evidence](delivery-alpha11.json).
+restart. Six separate network primitive modes and five local execution plus
+four RPC cases passed on the explicitly supplemented qualification image.
+All seven canaries, including three earlier refused/failed fixture attempts,
+and the temporary credential row were independently absent at
+`2026-10-31T01:34:09Z`. The frozen Fly config still names alpha.11; the deployment
+explicitly overrides its worker image to alpha.12, verified in runtime config.
+See [exact delivery evidence](delivery-alpha12.json) and
+[runtime provenance](../../examples/execution/evidence/2026-10-31-alpha12-runtime/README.md).
 The active home keeps its running alpha.7 image until idle. This CAS-format
 round trip does not establish filesystem materialization or agent-launch latency.
 
-Both npm `next` tags still point to alpha.7, verified at `2026-10-31T00:24:13.343Z`.
+Both npm `next` tags still point to alpha.7, verified at `2026-10-31T01:34:20Z`.
+All three alpha.12 native artifacts and separate TUI CI passed. The board host
+preflight passed on both actual Mac platforms and Linux, and publication's
+JavaScript checks passed. Native tests then found one more Mac path fixture:
+the journal getter returns canonical `/private/var`, while the test expected
+lexical `/var`. The next tag canonicalizes only that expected temporary path.
+Both npm publish steps were skipped. Full Rust and Node validation under a
+symlinked TMPDIR remains a gate for the next candidate.
+
 All three alpha.11 native artifacts and separate Mac/iOS and TUI CI passed.
 The publication job failed four macOS board fixtures before either npm publish
 step: three assumed a short socket path and one mocked only Linux's opener.
@@ -105,14 +118,14 @@ alpha.9, publish by hand or treat its Cloud deployment as npm availability.
 
 The shorter startup context from alpha.4 is included. Partial-capture namespace4,
 the inactive PostgreSQL authority adapter and explicit internal managed App
-composition are included in Cloud alpha.11, alongside private managed storage,
-writer floors, board capabilities and paired native build artifacts. Alpha.12
-main-checkout work is underway in the execution-factory, strict remote-selection
-and network-primitive seams; it is not in these frozen images. CLI publication,
+composition are included in Cloud alpha.12, alongside private managed storage,
+writer floors, board capabilities and paired native build artifacts. Alpha.13
+main-checkout work joins logical freeze, distinct partial RPC and Record2 data
+with physical execution drain; it is not in these frozen images. CLI publication,
 configured worker image and live adoption remain separate facts. The active
 objective remains the full plan.
 
-The next alpha.12 candidate adds the
+The deployed alpha.12 adds the
 [execution workspace ownership contract](execution-workspace.md), strict
 source-only remote selection and explicit network configuration/kernel
 primitives. It also corrects the Mac board fixtures and runs them before native
@@ -121,8 +134,8 @@ checkpoint-custody gap: State now verifies its actual lock/directory/sidecar
 before and after checkpoint retention. Production build, all 1,466 Rust tests, 712 JavaScript tests and 59 terminal
 journeys passed; 19 Rust cases and 9 optional Node cases were skipped.
 [Exact local evidence](../../examples/execution/evidence/2026-10-31-alpha12-foundations/local-checks.json)
-keeps host-unsupported qualification separate. Tagged CI, npm availability and
-Fly runtime checks remain release gates. Remote activation and the new partial
+keeps host-unsupported qualification separate. Npm availability remains blocked
+by the Mac journal fixture above. Remote activation and the new partial
 checkpoint/transfer protocols remain open.
 
 Alpha.11 includes:

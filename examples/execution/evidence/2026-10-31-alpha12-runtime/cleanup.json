@@ -1,0 +1,54 @@
+{
+  "formatVersion": 1,
+  "canaries": [
+    {
+      "id": "8d31e6fe733218",
+      "name": "rudder-alpha12-boot-5cdd11b4",
+      "nonce": "5cdd11b4-f85d-45e8-98e1-74faea554034"
+    },
+    {
+      "id": "781232eb1e25d8",
+      "name": "rudder-alpha12-netqual-e712d8bc",
+      "nonce": "e712d8bc-7cc3-4482-a7ef-bb03bb01c677"
+    },
+    {
+      "id": "48e06e5aed1348",
+      "name": "rudder-alpha12-execqual-9649812c",
+      "nonce": "9649812c-925d-4c9d-bc06-807a52bd71bc"
+    },
+    {
+      "id": "876de9b045e718",
+      "name": "rudder-alpha12-netqual-3928e2dd",
+      "nonce": "3928e2dd-d346-488c-af73-0038139be662"
+    },
+    {
+      "id": "863791fe991348",
+      "name": "rudder-alpha12-execqual-405d980e",
+      "nonce": "405d980e-c5cd-4057-ac8d-87115e4a5119"
+    },
+    {
+      "id": "823d11b7934918",
+      "name": "rudder-alpha12-execqual-f061abd9",
+      "nonce": "f061abd9-ff30-4d6e-952d-27681fbf35b2"
+    },
+    {
+      "id": "869e5efe2931e8",
+      "name": "rudder-alpha12-cas-70c0f63a",
+      "nonce": "70c0f63a-065b-46d4-93a4-98b1a5231cb5"
+    }
+  ],
+  "absent": true,
+  "database": {
+    "syntheticCredentialRows": 0,
+    "workspaces": 49,
+    "integrity": "ok"
+  },
+  "parsedDatabaseReadAttempts": 1,
+  "home": {
+    "id": "8edd225a7d0378",
+    "instance": "01M670MG4A8E0DWE9GA1C0PQ92",
+    "state": "started",
+    "unchanged": true
+  },
+  "verifiedAt": "2026-10-31T01:34:09.641Z"
+}

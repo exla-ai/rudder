@@ -1,0 +1,39 @@
+{
+  "attempts": [
+    {
+      "directory": "network-4.0.0-alpha.12-e712d8bc-7cc3-4482-a7ef-bb03bb01c677",
+      "reportSha256": "21446550759d40cb92804f82e0958608feedb59092f21c1d479c50a4590a1bf9",
+      "reason": "Controller initially refused Fly canonical tag@digest spelling; admission gate never released.",
+      "machine": null,
+      "cleanupVerified": true,
+      "qualified": false
+    },
+    {
+      "directory": "local-execution-4.0.0-alpha.12-9649812c-925d-4c9d-bc06-807a52bd71bc",
+      "reportSha256": "8a7201d24bb5181fe370625e5b85004090138996bb574067b78c1b55bf1f3b7e",
+      "reason": "Same canonical image spelling refusal before guest execution.",
+      "machine": null,
+      "cleanupVerified": false,
+      "qualified": false
+    },
+    {
+      "directory": "local-execution-4.0.0-alpha.12-405d980e-c5cd-4057-ac8d-87115e4a5119",
+      "reportSha256": "7d1071b2bde540b695c9417ccd3440a76e5feff4e0004c7274cf646091780866",
+      "reason": "Fixture HOME=/nonexistent became portable-pty default cwd; spawn failed before backend execution. Disposable fixture HOME changed to existing /workspace.",
+      "machine": {
+        "id": "863791fe991348",
+        "name": "rudder-alpha12-execqual-405d980e",
+        "nonce": "405d980e-c5cd-4057-ac8d-87115e4a5119",
+        "role": "alpha12-local-execution-qualification",
+        "instance": "01M67RQCRXCDWS3CERXXP028BX",
+        "region": "sjc",
+        "digest": "sha256:afcfc5a54d5eeb72bc7d19ef445559b814d4908d2a7151fc06d221b2a84c3022"
+      },
+      "cleanupVerified": true,
+      "qualified": false
+    }
+  ],
+  "allCanariesIndependentlyAbsent": true,
+  "proof": "cleanup.json",
+  "productionSourceChangedForControllerCorrections": false
+}

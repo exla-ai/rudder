@@ -1,0 +1,18 @@
+{
+  "at": "2026-10-31T01:02:55.745259+00:00",
+  "revision": "f609730d27ee7d02b1886eb343477d1c09aa7255",
+  "sourceEnvelopeSha256": "412f26036853481d7f1cbafef7d5ec36170c81c75b205f9ae8e0545032bd799c",
+  "archiveStillMatches": true,
+  "buildCwd": "/workspace/home/.cache/rudder-release-build/alpha12-f609730",
+  "targetDirectory": "/workspace/code/exla-ai-rudder/target",
+  "binaries": {
+    "rudder-network-qualifier": {
+      "sha256": "81709e768d5fa8e541f4f510d75dfcc770aa15bada327a68ccb6715e6d5ce72e",
+      "size": 767280
+    },
+    "rudder-execution-qualifier": {
+      "sha256": "a2f66eddb1910d0e155812c46b236fde37930cea7a2345093917f5decff36fb8",
+      "size": 5547040
+    }
+  }
+}

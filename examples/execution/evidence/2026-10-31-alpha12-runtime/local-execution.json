@@ -1,0 +1,139 @@
+{
+  "formatVersion": 1,
+  "kind": "alpha12-local-execution-qualification",
+  "nonce": "f061abd9-ff30-4d6e-952d-27681fbf35b2",
+  "name": "rudder-alpha12-execqual-f061abd9",
+  "requestedImage": "registry.fly.io/rudder-workers-exla:4.0.0-alpha.12-qualification-09068d9e",
+  "expectedDigest": "sha256:afcfc5a54d5eeb72bc7d19ef445559b814d4908d2a7151fc06d221b2a84c3022",
+  "provenance": {
+    "formatVersion": 1,
+    "version": "4.0.0-alpha.12",
+    "revision": "f609730d27ee7d02b1886eb343477d1c09aa7255",
+    "baseWorkerImage": "registry.fly.io/rudder-workers-exla:4.0.0-alpha.12",
+    "baseWorkerDigest": "sha256:2ebaf5f8124bbbe1b51850e6dcf60ccd6a6841d0bde92a5bb3afe77db1ba2420",
+    "qualifierSha256": "a2f66eddb1910d0e155812c46b236fde37930cea7a2345093917f5decff36fb8"
+  },
+  "startedAt": "2026-10-31T01:24:22.789Z",
+  "steps": [
+    {
+      "step": "assert-empty-app-secrets",
+      "ms": 637
+    },
+    {
+      "step": "filtered-inventory",
+      "ms": 457
+    },
+    {
+      "step": "create-owned-qualification",
+      "ms": 21581
+    },
+    {
+      "step": "filtered-inventory",
+      "ms": 653
+    },
+    {
+      "step": "recheck-empty-app-secrets",
+      "ms": 568
+    },
+    {
+      "step": "release-after-verified-derived-digest",
+      "ms": 875
+    },
+    {
+      "step": "read-bounded-generated-proof",
+      "ms": 796
+    },
+    {
+      "step": "read-bounded-generated-proof",
+      "ms": 804
+    },
+    {
+      "step": "read-bounded-generated-proof",
+      "ms": 776
+    },
+    {
+      "step": "filtered-inventory",
+      "ms": 531
+    },
+    {
+      "step": "destroy-exact-owned-qualification",
+      "ms": 2533
+    },
+    {
+      "step": "filtered-inventory",
+      "ms": 417
+    },
+    {
+      "step": "filtered-inventory",
+      "ms": 422
+    }
+  ],
+  "productionWired": false,
+  "egressQualified": false,
+  "liveAttemptAuthorized": false,
+  "networkQualificationSeparate": true,
+  "specVersions": [
+    1,
+    2
+  ],
+  "remoteExecutionQualified": false,
+  "allFiveGuestCapabilitiesQualified": false,
+  "guest": {
+    "cpu_kind": "performance",
+    "cpus": 1,
+    "memory_mb": 2048
+  },
+  "maxPreloadLifetimeSeconds": 1200,
+  "fixtureSupplements": [
+    "busybox-static in derived image only",
+    "/usr/bin/node alias to /usr/local/bin/node in derived image only"
+  ],
+  "limits": [
+    "Owned disposable only; no services/mounts/app secrets, user/provider/workspace credentials or models.",
+    "Real managed image bootstrap runs; Node preload never evaluates home/supervisor modules.",
+    "Derived image digest is checked before host-written admission gate permits namespace probes.",
+    "Baked provenance plus binary hash checked; base ancestry still requires retained pinned-FROM build evidence.",
+    "Legacy local Spec1/2 fixture only; not all-five guest capabilities, network isolation, general packet egress, remote execution or production authority.",
+    "Derived-image-only busybox-static and /usr/bin/node alias supplement fixture tools; stock SDK/default profile is not qualified.",
+    "Generated fixture own-auth/OWN_API_KEY/broker tokens are disposable random test values, never user/provider credentials.",
+    "Network six-mode qualification is a separate controller/report; optional Git fixture is disabled here.",
+    "Performance1/2048MiB matches prior execution fixture evidence; this does not qualify shared CPU scheduling or stock profile tool availability."
+  ],
+  "controllerSha256": "d7b8c1f41ebe965649c29fc20c2216b60b74f7bad52d14721a51792015af77ba",
+  "preloadSha256": "a5a0fea26b172e52a73fb5fab98141a4563cdda73013d7d407a12dd378a9f126",
+  "configSha256": "88857fff7e89402ce6064b6b7bdcb0bcaa9ae573b7da918d6c67c78337d757f4",
+  "createdDescriptor": {
+    "id": "823d11b7934918",
+    "name": "rudder-alpha12-execqual-f061abd9",
+    "nonce": "f061abd9-ff30-4d6e-952d-27681fbf35b2",
+    "role": "alpha12-local-execution-qualification",
+    "revision": "f609730d27ee7d02b1886eb343477d1c09aa7255",
+    "requestedImage": "registry.fly.io/rudder-workers-exla:4.0.0-alpha.12-qualification-09068d9e",
+    "observedDigest": "sha256:afcfc5a54d5eeb72bc7d19ef445559b814d4908d2a7151fc06d221b2a84c3022",
+    "services": 0,
+    "mounts": 0,
+    "files": 0
+  },
+  "machine": {
+    "id": "823d11b7934918",
+    "name": "rudder-alpha12-execqual-f061abd9",
+    "nonce": "f061abd9-ff30-4d6e-952d-27681fbf35b2",
+    "role": "alpha12-local-execution-qualification",
+    "instance": "01M67RXNJEM2K2QC77T6299RG4",
+    "region": "sjc",
+    "digest": "sha256:afcfc5a54d5eeb72bc7d19ef445559b814d4908d2a7151fc06d221b2a84c3022"
+  },
+  "proofSha256": "1fbf17c02d543954f0847a92123f1b42d6f24e77b469a60812b13698cdeb1f68",
+  "completed": true,
+  "qualified": true,
+  "counts": {
+    "qualified": 2,
+    "unsupported": 0,
+    "failed": 0,
+    "localExecutionCasesPassed": 5,
+    "workspaceRpcCasesPassed": 4
+  },
+  "cleanupVerified": true,
+  "independentAbsence": true,
+  "verifiedAt": "2026-10-31T01:24:57.857Z"
+}

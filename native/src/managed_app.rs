@@ -481,6 +481,7 @@ mod local {
     }
 
     pub(crate) fn stop(app: &mut App, index: usize) -> Option<bool> {
+        if let Some(stopped) = crate::managed_source_app::stop(app, index) { return Some(stopped); }
         let run = app.agents.get_mut(index)?;
         run.managed_local.as_ref()?;
         app.pending_enters.retain(|pending|pending.run_id != run.id);
@@ -518,6 +519,7 @@ mod local {
     }
 
     pub(crate) fn accepts_input(app: &App, index: usize) -> bool {
+        if let Some(accepts) = crate::managed_source_app::accepts_input(app, index) { return accepts; }
         let Some(run) = app.agents.get(index) else { return false; };
         if run.managed_local.is_none() { return true; }
         app.managed_local.live.get(&run.id).is_some_and(|live|live.backend_ready && !live.uncertain && live.stop.is_none()

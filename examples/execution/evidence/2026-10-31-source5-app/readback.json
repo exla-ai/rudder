@@ -1,0 +1,180 @@
+{
+  "formatVersion": 1,
+  "kind": "source5-retained-readback-continuation",
+  "producer": {
+    "id": "78460d7c513d78",
+    "instance": "01M69E06CQ1Y2CF9Q81N916GNQ",
+    "digest": "sha256:8298b0e98965bc9eb0fdb21c11cc17e1b2f86fc84060840d5bf1a558554d0234"
+  },
+  "qualified": true,
+  "readbackPassed": true,
+  "credentialRemoved": true,
+  "providerCalls": 12,
+  "twoFreshProducerAbsences": true,
+  "homeUnchanged": true,
+  "readerSha256": "9a42954d28c5941beabda8e7c56cac4cd0a242ea0ea6811dac5003c4d5799700",
+  "readback": {
+    "status": "passed",
+    "after_producer_destruction": true,
+    "publication_id": "pcd1-172b3d4ebf306f9850e458c1afd7cf7504b93b37a835e9b5debb0fbd85a6eb6d",
+    "publication": {
+      "algorithm": "sha256",
+      "digest": "e8762bc95a5c00108b40a65ccf089fa31796b975f9310af6d13b1c9103a58ca8",
+      "kind": "action_result",
+      "size_bytes": 4786
+    },
+    "q": {
+      "algorithm": "sha256",
+      "digest": "061212547f179ea592eb97c063b2ac3085d5d49907cd4b6bf7bc4a9345a82afa",
+      "kind": "blob",
+      "size_bytes": 3517
+    },
+    "plan": {
+      "algorithm": "sha256",
+      "digest": "bc6659d42d71e3e3f0f3df52da7f2bc0919a3a17578b6515cb66483d6c2ec3ca",
+      "kind": "blob",
+      "size_bytes": 1769
+    },
+    "freeze_intent": {
+      "algorithm": "sha256",
+      "digest": "cdc614d35bd7b1067b066921348988fd11e18626af7edf32ab6f2f7bcdf48ad2",
+      "kind": "blob",
+      "size_bytes": 473
+    },
+    "drain_record": {
+      "algorithm": "sha256",
+      "digest": "d0009e2b7ec86dd43de931c49d5e613f0eeb7d9204a6b37b922ae8039820aabf",
+      "kind": "blob",
+      "size_bytes": 1272
+    },
+    "source": {
+      "algorithm": "sha256",
+      "digest": "04f1b97575ab4622e8cf20c7af1b406c13ef9c0e948b8b7e07774d8032272e73",
+      "kind": "source_root",
+      "size_bytes": 341
+    },
+    "runnable": {
+      "algorithm": "sha256",
+      "digest": "fc9b7b86bbfd669dece5bc543a3883f439c42ae702a434f7a2b0c6fc4b28e1ec",
+      "kind": "runnable_root",
+      "size_bytes": 658
+    },
+    "receipt": {
+      "format_version": 1,
+      "root_id": "pcd1-172b3d4ebf306f9850e458c1afd7cf7504b93b37a835e9b5debb0fbd85a6eb6d",
+      "root": {
+        "kind": "action_result",
+        "algorithm": "sha256",
+        "digest": "e8762bc95a5c00108b40a65ccf089fa31796b975f9310af6d13b1c9103a58ca8",
+        "size_bytes": 4786
+      },
+      "durability": "replicated",
+      "published_at_ms": 1793465608000,
+      "object_count": 14,
+      "total_bytes": 13846
+    },
+    "base": {
+      "root": {
+        "algorithm": "sha256",
+        "digest": "bf4577fcd42ebd27aaa8f89763b82313f44cbe827a8d541d5e0cdf6ab6ecd8e5",
+        "kind": "runnable_root",
+        "size_bytes": 658
+      },
+      "root_id": "runtime5-source-a4745866-e4d4-42d8-99d3-29a7a5ea15ab",
+      "scope": {
+        "provider_id": "fixture-provider",
+        "tenant_id": "fixture-tenant"
+      }
+    },
+    "original_q_exact": true,
+    "exact_attempt_observation_stop": true,
+    "capture_consistency": "live_best_effort",
+    "closure_objects": 14,
+    "closure_bytes": 13846,
+    "object_reads": 16,
+    "read_bytes": 14845,
+    "files": [
+      {
+        "path": "/runtime5-qualified.txt",
+        "reference": {
+          "algorithm": "sha256",
+          "digest": "9165d1dcdaebdca2477487a0c5cbf2aa6af0ae297a5dc7fd7416791620f5ad57",
+          "kind": "blob",
+          "size_bytes": 32
+        },
+        "bytes": 32,
+        "sha256": "9165d1dcdaebdca2477487a0c5cbf2aa6af0ae297a5dc7fd7416791620f5ad57",
+        "exact_content_verified": true
+      },
+      {
+        "path": "/old",
+        "reference": {
+          "algorithm": "sha256",
+          "digest": "6a9030387b1fcad0cde231223f5a57b996d99ab2f49ca2de71e9deacddbbb495",
+          "kind": "blob",
+          "size_bytes": 27
+        },
+        "bytes": 27,
+        "sha256": "6a9030387b1fcad0cde231223f5a57b996d99ab2f49ca2de71e9deacddbbb495",
+        "exact_content_verified": true
+      }
+    ],
+    "model_calls": false,
+    "accepted_history": false
+  },
+  "twoFreshCredentialAbsences": true,
+  "verifiedAt": "2026-10-31T16:54:26.760Z",
+  "elapsedMs": 6147,
+  "originalArtifactSha256": "646bbc642890a97ce8422613a84145892dda999732ba4442578c18e88d9860c2",
+  "originalProducerCaseId": "a4745866-e4d4-42d8-99d3-29a7a5ea15ab",
+  "process": {
+    "settled": true,
+    "status": 0,
+    "signal": null,
+    "failure": null,
+    "stdoutSha256": "5445d2e57aa884ac390290ccfc243e15180a885de10d6aed894021f11955c2cb",
+    "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "stdoutBytes": 2611,
+    "stderrBytes": 0
+  },
+  "freshSyntheticCredentialForSameAccount": true,
+  "sameWorkspace": true,
+  "preservedHome": {
+    "id": "8edd225a7d0378",
+    "instance": "01M670MG4A8E0DWE9GA1C0PQ92",
+    "state": "started",
+    "image": "registry.fly.io/rudder-workers-exla:4.0.0-alpha.7",
+    "digest": "sha256:404f46396aca77324d9b53c55d2824a5401af56ba5362d0bdae67e16108fc245"
+  },
+  "freshProducerAbsenceEvidence": [
+    {
+      "artifact": "001-producer-absence-0.stdout.private",
+      "originalArtifactSha256": "bab4df304b2872c0a8dd93a224791cb365e58adc8197ae0ff6b5b4e5362950a2",
+      "producerAbsent": true,
+      "homeUnchanged": true
+    },
+    {
+      "artifact": "002-producer-absence-1.stdout.private",
+      "originalArtifactSha256": "8fd5cb88c7ff64819dab9f797a9e9fde1b2a7ce694c7a1db7f08c6e4751e2376",
+      "producerAbsent": true,
+      "homeUnchanged": true
+    }
+  ],
+  "freshCredentialAbsenceEvidence": [
+    {
+      "artifact": "010-auth-absence-0.stdout.private",
+      "originalArtifactSha256": "3e3965da3c5356a53e0ba7081a81536f2febb9935b5bdae660012a55a6f5e555",
+      "status": "absent"
+    },
+    {
+      "artifact": "012-auth-absence-1.stdout.private",
+      "originalArtifactSha256": "3e3965da3c5356a53e0ba7081a81536f2febb9935b5bdae660012a55a6f5e555",
+      "status": "absent"
+    }
+  ],
+  "readerModulePin": {
+    "release": "4.0.0-alpha.20",
+    "module": "dist/fabric-remote.js",
+    "sha256": "89053566dd502535af6f36a38e8042f1e4674fbbe5d1e2baf745b835ab238272"
+  }
+}

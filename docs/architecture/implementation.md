@@ -198,6 +198,60 @@ stable stays 3.9.13. Both packages passed isolated installs, CLI/native/jj smoke
 and all-platform artifact/revision checks at 2026-10-31T16:11:35.964957Z. See
 [delivery](delivery-alpha20.json).
 
+## Source ownership in App, alpha.21 candidate
+
+The explicit Linux source App adapter retains preparation, helper, Journal and
+checkpoint ownership through bounded worker and join supervision. Two reserved
+lifetime slots survive cancellation, lost notifications, stale rows, failed
+cleanup and thread-local teardown. Actual joins run off App; the App alone owns
+and reaps PTYs. Guest revocation and callback settlement use the original StopV4
+budget. A shutdown guard refuses to discard unresolved source ownership.
+
+Capability issuance now has a retained one-shot owner before the Journal write.
+A lost issuance acknowledgment can be inspected and retired with its original
+custody; a current database observation cannot reconstruct the original ACK.
+The source writer opens the actual held database without CREATE, migration or
+permission repair. Broker admission reaps actual completed request threads and
+bounds currently unjoined handlers instead of imposing a lifetime request cap.
+
+The original checkpointed Record2 is canonical, immutable and fsynced before
+source retirement. This recovery DATA remains separate from join authority,
+retention acknowledgments, publication and accepted history. Completed worker
+results retain the actual exit packet and checkpoint through supervisor
+adoption, including queue refusal and stale rows.
+
+Real App qualification exposed a race that unit coverage had missed: source
+activation saw a PENDING helper witness before descriptor transfer completed.
+App now observes the successful handoff receipt before requesting activation.
+Two real PTY regressions exercise delayed transfer and early child exit without
+extending the original startup constraint.
+
+The corrected disposable UID1500 source5 run passed actual App readiness,
+StopV4, durable checkpoint readback, helper exit, source retirement, off-App
+joins and Cloud transfer. Its first independent reader refused a stale harness
+module pin. The original run remains unqualified as a whole; a separately
+recorded continuation verified the same retained publication after two fresh
+producer-absence checks at 2026-10-31T16:54:26.760Z. All 14 objects, mapped write,
+inherited file and original Q matched. Both credentials were removed with
+independent checks, and the live home stayed unchanged. See the
+[App evidence](../../examples/execution/evidence/2026-10-31-source5-app/README.md).
+
+The local release gate passed 1,797 Rust tests, 762 JavaScript tests and all 59
+terminal tests, with zero failures. TypeScript and the Cloud build also passed.
+The JavaScript run first exposed a fixture socket-readiness race; its connector
+now waits for the actual WebSocket connection under the original five-second
+bound, and the focused and full reruns passed. See
+[verification](verification-alpha21.json).
+
+This candidate has not shipped. Normal managed-project startup still requires
+its explicit migration and ownership gates; the legacy startup guard remains.
+The qualified source profile is offline-command-v1 with Immediate startup.
+Connected Codex/Claude execution, authenticated transport attachment, accepted
+jj history, normal source selection, fleet and full shutdown/recovery routing
+remain open. The independent CONNECT prototype still needs a trusted inventory
+covering public/NAT addresses and an expiry-bound authorization interface before
+managed model activation.
+
 ## Current implementation track
 
 Base: `91579cf631b1d9d78afbbd786a6dc1f8120cc1ca` on `origin/main` at start.

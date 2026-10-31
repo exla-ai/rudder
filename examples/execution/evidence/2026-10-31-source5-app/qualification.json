@@ -1,0 +1,98 @@
+{
+  "formatVersion": 1,
+  "kind": "source5-app-composite-physical-evidence",
+  "qualified": true,
+  "verifiedAt": "2026-10-31T16:54:26.760Z",
+  "qualificationMode": "original-qualified-native-producer-plus-separate-corrected-retained-readback",
+  "originalProducerCaseId": "a4745866-e4d4-42d8-99d3-29a7a5ea15ab",
+  "originalControllerQualified": false,
+  "nativeProducerQualified": true,
+  "correctedReadbackQualified": true,
+  "sourceKind": "working-tree",
+  "baseRevision": "cf6324cce9eb61f7a502c4722ea6b343a9d3c90a",
+  "sourceEnvelopeSha256": "a0833503321145e88628f1b121f1de4b26a0cf62223b6f2c02e2b2d0d1c5fa41",
+  "sourcePatchSha256": "8742bf7c12b394de9e76262a4678b7e4cdc6e4d03409f25e371133e8dd523526",
+  "nativeSha256": "fede63a06d7735eda7d3da6c8ebade6a06266c7813e1708e858f849a8080af00",
+  "libtestSha256": "f6d558ec921c03ef28666e2eb18c4942bd79cdde0f77e641a3a5a095b9701999",
+  "imageDigest": "sha256:8298b0e98965bc9eb0fdb21c11cc17e1b2f86fc84060840d5bf1a558554d0234",
+  "checks": {
+    "actual_app_owned_lifecycle": true,
+    "actual_app_cancellation_gate": true,
+    "actual_backend_ready": true,
+    "actual_owner_bound_writer": true,
+    "actual_https_source": true,
+    "actual_uid1500_fuse_offline_namespace": true,
+    "actual_helper_alive_after_idle_window": true,
+    "actual_stop_v4": true,
+    "actual_successful_helper_exit": true,
+    "actual_fresh_issuer_join": true,
+    "actual_server_callbacks_settled": true,
+    "actual_off_app_owner_and_supervisor_join": true,
+    "original_checkpoint_durable_before_retirement": true,
+    "captured_mmap_bytes_verified": true
+  },
+  "checkpointPublication": {
+    "publication_id": "pcd1-172b3d4ebf306f9850e458c1afd7cf7504b93b37a835e9b5debb0fbd85a6eb6d",
+    "publication": {
+      "algorithm": "sha256",
+      "digest": "e8762bc95a5c00108b40a65ccf089fa31796b975f9310af6d13b1c9103a58ca8",
+      "kind": "action_result",
+      "size_bytes": 4786
+    },
+    "q": {
+      "algorithm": "sha256",
+      "digest": "061212547f179ea592eb97c063b2ac3085d5d49907cd4b6bf7bc4a9345a82afa",
+      "kind": "blob",
+      "size_bytes": 3517
+    },
+    "receipt": {
+      "format_version": 1,
+      "root_id": "pcd1-172b3d4ebf306f9850e458c1afd7cf7504b93b37a835e9b5debb0fbd85a6eb6d",
+      "root": {
+        "kind": "action_result",
+        "algorithm": "sha256",
+        "digest": "e8762bc95a5c00108b40a65ccf089fa31796b975f9310af6d13b1c9103a58ca8",
+        "size_bytes": 4786
+      },
+      "durability": "replicated",
+      "published_at_ms": 1793465608000,
+      "object_count": 14,
+      "total_bytes": 13846
+    },
+    "producerTransferPassed": true,
+    "originalQExact": true,
+    "originalAttemptObservationStopExact": true,
+    "captureConsistency": "live_best_effort",
+    "closureObjects": 14,
+    "closureBytes": 13846,
+    "postDestructionReadbackPassed": true
+  },
+  "cleanup": {
+    "exactOwnedProducerDestroyed": true,
+    "originalProducerAbsenceCheckedTwice": true,
+    "originalCredentialAbsenceCheckedTwice": true,
+    "replayProducerAbsenceCheckedTwice": true,
+    "replayCredentialAbsenceCheckedTwice": true,
+    "homeUnchanged": true
+  },
+  "scope": {
+    "backend": "offline-command-v1",
+    "captureConsistency": "live_best_effort",
+    "acceptedJjHistory": false,
+    "modelExecution": false,
+    "defaultRollout": false,
+    "productionRootQualified": false,
+    "rawLiveGrantQualified": false,
+    "releaseQualification": false
+  },
+  "artifacts": {
+    "runtimeProof": "runtime-proof.json",
+    "originalRun": "original-run.json",
+    "correctedReadback": "readback.json",
+    "cleanup": "cleanup.json",
+    "earlierFailures": "failures.json",
+    "provenance": "provenance.json",
+    "sourceEnvelope": "source-envelope.json",
+    "sourcePatch": "working-tree-source.patch"
+  }
+}

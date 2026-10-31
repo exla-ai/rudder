@@ -1809,6 +1809,13 @@ impl TerminalPane {
         Ok(ManagedHelperCustody { instance_id: self.instance_id.clone(), pid, child: self.child.identity.clone() })
     }
 
+    /// Pure App-side identity check. Matching text or a reused PID is insufficient.
+    #[cfg(target_os = "linux")]
+    pub fn matches_managed_helper_custody(&self, custody: &ManagedHelperCustody) -> bool {
+        self.instance_id == custody.instance_id && self.child.pid == Some(custody.pid)
+            && Arc::ptr_eq(&self.child.identity, &custody.child)
+    }
+
     /// App-only nonblocking observation. Agent exit is independent data in the
     /// receipt; this separately requires successful physical helper process exit.
     #[cfg(target_os = "linux")]
@@ -2251,6 +2258,39 @@ fn default_shell() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn managed_helper_custody_rejects_replacement_even_when_ids_are_copied() {
+        let spawn = || TerminalPane::spawn_shell_or_command(
+            Some(TerminalCommand::with_args("/bin/sh", ["-c", "read -r value"])),
+            TerminalPaneOptions::default(),
+        ).unwrap();
+        let mut original = spawn();
+        let mut replacement = spawn();
+        let custody = original.retain_managed_helper_custody().unwrap();
+        assert!(original.matches_managed_helper_custody(&custody));
+        assert!(!replacement.matches_managed_helper_custody(&custody));
+        let copied_ids = ManagedHelperCustody {
+            instance_id: replacement.instance_id.clone(),
+            pid: replacement.child_process_id().unwrap(),
+            child: custody.child.clone(),
+        };
+        assert!(!replacement.matches_managed_helper_custody(&copied_ids));
+        original.write_input(b"done\n").unwrap();
+        replacement.write_input(b"done\n").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while original.try_wait_after_output().unwrap().is_none()
+            || replacement.try_wait_after_output().unwrap().is_none() {
+            assert!(Instant::now() < deadline);
+            original.drain_output();
+            replacement.drain_output();
+            thread::sleep(Duration::from_millis(5));
+        }
+        // Custody identifies the same owned child after reap; it is not a
+        // substitute for a current-process or successful-exit witness.
+        assert!(original.matches_managed_helper_custody(&custody));
+    }
 
     #[test]
     fn full_output_queue_stops_the_producer_and_teardown_releases_it() {

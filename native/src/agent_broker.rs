@@ -287,6 +287,7 @@ struct Inner {
     sequence: AtomicU64,
     stopped: AtomicBool,
     closed: AtomicBool,
+    owned_calls: Option<Arc<OwnedBrokerCalls>>,
 }
 impl Inner {
     fn authenticate(&self, offered: &AgentIdentityFile) -> Result<Arc<Snapshot>> {
@@ -369,6 +370,15 @@ pub(crate) struct AgentBroker {
 }
 impl AgentBroker {
     pub(crate) fn spawn(config: BrokerConfig) -> Result<Self> {
+        Self::spawn_inner(config, None)
+    }
+    /// Opt-in source preparation only. The preexisting owner keeps partially
+    /// constructed state and every actual thread handle on failure/panic.
+    pub(crate) fn spawn_retaining(config: BrokerConfig, owner: &mut BrokerThreadOwner) -> Result<Self> {
+        ensure!(owner.inner.is_none(), "broker thread owner already used");
+        Self::spawn_inner(config, Some(owner))
+    }
+    fn spawn_inner(config: BrokerConfig, mut owner: Option<&mut BrokerThreadOwner>) -> Result<Self> {
         let parent = endpoint_directory(&config.socket_path)?;
         // Keep ownership outside the mounted two-entry projection. The lock
         // serializes stale-socket removal against concurrent broker restarts.
@@ -426,7 +436,9 @@ impl AgentBroker {
             sequence: AtomicU64::new(0),
             stopped: AtomicBool::new(false),
             closed: AtomicBool::new(false),
+            owned_calls: owner.as_ref().map(|owner| Arc::clone(&owner.calls)),
         });
+        if let Some(owner) = owner.as_mut() { owner.inner = Some(Arc::clone(&inner)); }
         inner.authenticate(&identity)?;
         if let Ok(metadata) = fs::symlink_metadata(&config.socket_path) {
             ensure!(
@@ -452,11 +464,23 @@ impl AgentBroker {
         let owned = (metadata.dev(), metadata.ino());
         listener.set_nonblocking(true)?;
         let worker = inner.clone();
-        std::thread::Builder::new()
+        let acceptor = std::thread::Builder::new()
             .name("rudder-agent-broker".into())
             .spawn(move || {
                 let _ownership = ownership;
                 while !worker.stopped.load(Ordering::Relaxed) {
+                    if let Some(calls) = &worker.owned_calls {
+                        match calls.reap_finished() {
+                            Ok(true) => {}
+                            Ok(false) => {
+                                // TLS/unjoined handlers still own every slot.
+                                // Leave new connections in the bounded backlog.
+                                std::thread::sleep(Duration::from_millis(5));
+                                continue;
+                            }
+                            Err(_) => { worker.stop(); break; }
+                        }
+                    }
                     match listener.accept() {
                         Ok((stream, _)) => {
                             if worker.count.fetch_add(1, Ordering::Relaxed) >= MAX_CONNECTIONS {
@@ -488,11 +512,18 @@ impl AgentBroker {
                                     }
                                     connection.count.fetch_sub(1, Ordering::Relaxed);
                                 });
-                            if spawned.is_err() {
-                                if let Ok(mut connections) = worker.connections.lock() {
-                                    connections.remove(&id);
+                            match spawned {
+                                Ok(handle) => {
+                                    if let Some(calls) = &worker.owned_calls {
+                                        // The sole acceptor reserved capacity above.
+                                        // Poison still retains this new actual handle.
+                                        if !calls.track(handle) { worker.stop(); }
+                                    }
                                 }
-                                worker.count.fetch_sub(1, Ordering::Relaxed);
+                                Err(_) => {
+                                    if let Ok(mut connections) = worker.connections.lock() { connections.remove(&id); }
+                                    worker.count.fetch_sub(1, Ordering::Relaxed);
+                                }
                             }
                         }
                         Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
@@ -510,6 +541,7 @@ impl AgentBroker {
                 }
                 worker.closed.store(true, Ordering::Relaxed);
             })?;
+        if let Some(owner) = owner { owner.acceptor = Some(acceptor); }
         Ok(Self { inner })
     }
     pub(crate) fn socket_path(&self) -> &Path {
@@ -535,9 +567,150 @@ impl AgentBroker {
 }
 impl Drop for AgentBroker {
     fn drop(&mut self) {
-        self.close();
+        if self.inner.owned_calls.is_some() {
+            self.inner.stopped.store(true, Ordering::Release);
+        } else { self.close(); }
     }
 }
+
+// Bound currently unjoined requests, including request TLS teardown. The sole
+// acceptor reaps before admission, so sequential requests have no lifetime cap.
+const MAX_OWNED_UNJOINED: usize = MAX_CONNECTIONS;
+type BrokerPanic = Box<dyn std::any::Any + Send + 'static>;
+struct OwnedBrokerCalls {
+    handles: Mutex<Vec<std::thread::JoinHandle<()>>>,
+    uncertain: AtomicBool,
+    // Retain panic payloads rather than running arbitrary payload Drop while
+    // other request handles are being joined. A panic stops further admission;
+    // at most the bounded handlers plus the acceptor can contribute a payload.
+    panics: Mutex<Vec<BrokerPanic>>,
+}
+impl OwnedBrokerCalls {
+    fn new() -> Self {
+        Self { handles:Mutex::new(Vec::with_capacity(MAX_OWNED_UNJOINED)),
+            uncertain:AtomicBool::new(false), panics:Mutex::new(Vec::with_capacity(MAX_OWNED_UNJOINED + 1)) }
+    }
+    fn record_panic(&self, payload: BrokerPanic) {
+        self.uncertain.store(true, Ordering::Release);
+        self.panics.lock().unwrap_or_else(|p|p.into_inner()).push(payload);
+    }
+    fn handles(&self) -> std::sync::MutexGuard<'_, Vec<std::thread::JoinHandle<()>>> {
+        self.handles.lock().unwrap_or_else(|poison| {
+            self.uncertain.store(true, Ordering::Release);
+            poison.into_inner()
+        })
+    }
+    /// Only the actual acceptor calls this, off-App. is_finished selects a
+    /// candidate; the real join (possibly blocked by TLS) retains its slot on
+    /// the acceptor's stack. Shutdown must join that acceptor before draining.
+    fn reap_finished(&self) -> Result<bool> {
+        loop {
+            ensure!(!self.uncertain.load(Ordering::Acquire), "broker thread ownership uncertain");
+            let candidate = {
+                let mut handles = self.handles();
+                ensure!(!self.uncertain.load(Ordering::Acquire), "broker thread ownership poisoned");
+                match handles.iter().position(|handle|handle.is_finished()) {
+                    Some(index) => handles.swap_remove(index),
+                    None => return Ok(handles.len() < MAX_OWNED_UNJOINED),
+                }
+            };
+            if let Err(payload) = candidate.join() {
+                self.record_panic(payload);
+                anyhow::bail!("reaped broker handler panicked; explicit recovery required");
+            }
+        }
+    }
+    /// Called only after the sole acceptor established a slot. No allocation
+    /// or fallible lock step may discard the newly spawned request handle.
+    fn track(&self, handle: std::thread::JoinHandle<()>) -> bool {
+        self.handles().push(handle);
+        !self.uncertain.load(Ordering::Acquire)
+    }
+    fn join_remaining(&self) -> bool {
+        let handles = std::mem::take(&mut *self.handles());
+        for handle in handles {
+            if let Err(payload) = handle.join() { self.record_panic(payload); }
+        }
+        !self.uncertain.load(Ordering::Acquire)
+    }
+}
+#[must_use = "retain through explicit off-App await_closed"]
+pub(crate) struct BrokerThreadOwner {
+    inner: Option<Arc<Inner>>,
+    calls: Arc<OwnedBrokerCalls>,
+    acceptor: Option<std::thread::JoinHandle<()>>,
+    joiner: Option<BrokerJoin>,
+    settled: bool,
+}
+impl BrokerThreadOwner {
+    pub(crate) fn new() -> Self {
+        Self { inner: None, calls: Arc::new(OwnedBrokerCalls::new()),
+            acceptor: None, joiner: None, settled: false }
+    }
+    pub(crate) fn close(&self) { if let Some(inner) = &self.inner { inner.stop(); } }
+    pub(crate) fn await_closed(&mut self, timeout: Duration) -> Result<BrokerThreadsSettled> {
+        ensure!(!self.settled, "broker settlement already returned");
+        self.close();
+        if self.acceptor.is_none() && self.joiner.is_none() {
+            // No thread was successfully spawned; setup IO has already returned.
+            ensure!(self.calls.handles().is_empty(),
+                "broker call without acceptor ownership");
+            ensure!(!self.calls.uncertain.load(Ordering::Acquire), "broker thread settlement is uncertain");
+            self.settled = true;
+            return Ok(BrokerThreadsSettled { _inner:self.inner.clone(), _joiner:None });
+        }
+        let end = Instant::now().checked_add(timeout).context("broker settlement overflow")?;
+        if self.joiner.is_none() {
+            let acceptor = Arc::new(Mutex::new(self.acceptor.take()));
+            let joining = Arc::clone(&acceptor); let calls = Arc::clone(&self.calls);
+            let (send, done) = mpsc::sync_channel(1);
+            let thread = std::thread::Builder::new().name("rudder-source-broker-join".into()).spawn(move || {
+                let acceptor = joining.lock().unwrap_or_else(|p|p.into_inner()).take().unwrap();
+                if let Err(payload) = acceptor.join() { calls.record_panic(payload); }
+                // The actual acceptor join proves no more request handles can appear.
+                let success = calls.join_remaining();
+                let _ = send.send(success);
+            });
+            match thread {
+                Ok(thread) => self.joiner = Some(BrokerJoin { _thread:thread, done, joined:false, failed:false }),
+                Err(error) => { self.acceptor = acceptor.lock().unwrap_or_else(|p|p.into_inner()).take(); return Err(error.into()); }
+            }
+        }
+        let joiner = self.joiner.as_mut().unwrap();
+        ensure!(!joiner.failed, "broker thread panic requires explicit recovery");
+        if !joiner.joined {
+            match joiner.done.recv_timeout(end.saturating_duration_since(Instant::now())) {
+                Ok(true) => joiner.joined = true,
+                Err(mpsc::RecvTimeoutError::Timeout) => anyhow::bail!("broker callbacks/threads remain owned"),
+                _ => { joiner.failed = true; anyhow::bail!("broker thread settlement is uncertain"); }
+            }
+        }
+        if let Some(inner) = &self.inner {
+            ensure!(inner.count.load(Ordering::Acquire) == 0
+                && inner.connections.lock().map_err(|_| {
+                    self.calls.uncertain.store(true, Ordering::Release);
+                    anyhow::anyhow!("broker connection state poisoned")
+                })?.is_empty()
+                && inner.active.lock().map_err(|_| {
+                    self.calls.uncertain.store(true, Ordering::Release);
+                    anyhow::anyhow!("broker call state poisoned")
+                })?.is_empty(),
+                "broker requests remain owned");
+        }
+        ensure!(!self.calls.uncertain.load(Ordering::Acquire), "broker thread settlement is uncertain");
+        self.settled = true;
+        Ok(BrokerThreadsSettled { _inner:self.inner.clone(), _joiner:self.joiner.take() })
+    }
+}
+impl Drop for BrokerThreadOwner {
+    fn drop(&mut self) {
+        if let Some(inner) = &self.inner { inner.stopped.store(true, Ordering::Release); }
+    }
+}
+struct BrokerJoin { _thread:std::thread::JoinHandle<()>, done:mpsc::Receiver<bool>, joined:bool, failed:bool }
+/// Proves actual acceptor and request joins including request TLS destruction.
+/// The fixed join observer itself remains held here, matching source settlement.
+pub(crate) struct BrokerThreadsSettled { _inner:Option<Arc<Inner>>, _joiner:Option<BrokerJoin> }
 
 fn read_exact_until(
     stream: &mut UnixStream,
@@ -1107,3 +1280,129 @@ pub(crate) fn run(args: &[String]) -> Result<()> {
 #[cfg(test)]
 #[path = "agent_broker_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod owned_thread_tests {
+    use super::*;
+    use std::cell::RefCell;
+    struct BlockTls { entered:mpsc::Sender<()>, release:mpsc::Receiver<()> }
+    impl Drop for BlockTls {
+        fn drop(&mut self) { let _ = self.entered.send(()); let _ = self.release.recv(); }
+    }
+    thread_local! { static TLS: RefCell<Option<BlockTls>> = const { RefCell::new(None) }; }
+    #[test]
+    fn owned_broker_retains_request_tls_join_on_timeout_and_retries_same_owner() {
+        let (entered, wait) = mpsc::channel(); let (release, blocked) = mpsc::channel();
+        let call = std::thread::spawn(move || TLS.with(|tls| *tls.borrow_mut() = Some(BlockTls { entered, release:blocked })));
+        wait.recv_timeout(Duration::from_secs(2)).unwrap();
+        let mut owner = BrokerThreadOwner::new();
+        owner.acceptor = Some(std::thread::spawn(|| {}));
+        owner.calls.handles().push(call);
+        assert!(owner.await_closed(Duration::from_millis(10)).is_err());
+        assert!(owner.joiner.is_some()); assert!(!owner.settled);
+        release.send(()).unwrap();
+        let proof = owner.await_closed(Duration::from_secs(2)).unwrap();
+        assert!(proof._joiner.is_some()); assert!(owner.settled);
+        assert!(owner.await_closed(Duration::from_millis(1)).is_err());
+    }
+
+    #[test]
+    fn owned_broker_sequential_requests_exceed_old_lifetime_cap_with_bounded_handles() {
+        use rudder_engine::journal::{CapabilityGrant, Journal};
+        use std::collections::{BTreeMap, BTreeSet};
+        let root = Path::new("/tmp").canonicalize().unwrap()
+            .join(format!("rbc-{}", &uuid::Uuid::new_v4().simple().to_string()[..12]));
+        private_directory(&root).unwrap();
+        let journal_path = root.join("journal.sqlite");
+        let mut journal = Journal::open(&journal_path).unwrap();
+        let fence = journal.create_project("p", "owner", "base", 0).unwrap();
+        journal.register_run(&fence, "run", 0).unwrap();
+        let token = journal.issue_capability(&fence, &CapabilityGrant {
+            principal:"agent".into(), run_id:"run".into(), run_epoch:1,
+            operations:BTreeSet::from(["agents:find".into()]), recipients:BTreeMap::new(),
+            scopes:BTreeSet::new(), topics:BTreeSet::new(), expires_at_ms:None,
+        }, 0).unwrap();
+        let socket = socket_path(&root, "p", "run", "attempt");
+        project_identity(&socket, &AgentIdentityFile { format_version:1, project_id:"p".into(),
+            run_id:"run".into(), run_epoch:1, owner_epoch:1, token }).unwrap();
+        let mut owner = BrokerThreadOwner::new();
+        let broker = AgentBroker::spawn_retaining(BrokerConfig { journal_path,
+            identity_file:socket.with_file_name("identity.json"), socket_path:socket.clone() }, &mut owner).unwrap();
+        let client = BrokerClient::connect(socket.clone(), socket.with_file_name("identity.json")).unwrap();
+        for _ in 0..1030 {
+            client.exchange(Operation::Authenticate, &AtomicBool::new(false)).unwrap();
+            let handles = owner.calls.handles();
+            assert!(handles.len() <= MAX_OWNED_UNJOINED);
+            assert!(handles.capacity() <= MAX_OWNED_UNJOINED);
+            assert!(!broker.is_closed());
+        }
+        assert!(broker.inner.sequence.load(Ordering::Acquire) > 1024);
+        let proof = owner.await_closed(Duration::from_secs(2)).unwrap();
+        assert!(proof._joiner.is_some());
+        drop(proof); drop(client); drop(broker); drop(owner); drop(journal);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn owned_broker_blocked_tls_keeps_unjoined_capacity_until_actual_join() {
+        let mut owner = BrokerThreadOwner::new();
+        let mut releases = Vec::new();
+        for _ in 0..MAX_OWNED_UNJOINED {
+            let (entered, wait) = mpsc::channel(); let (release, blocked) = mpsc::channel();
+            let call = std::thread::spawn(move || TLS.with(|tls|
+                *tls.borrow_mut() = Some(BlockTls { entered, release:blocked })));
+            wait.recv_timeout(Duration::from_secs(2)).unwrap();
+            owner.calls.track(call); releases.push(release);
+        }
+        let calls = Arc::clone(&owner.calls);
+        let (polled, poll) = mpsc::channel();
+        owner.acceptor = Some(std::thread::spawn(move || {
+            let _ = polled.send(calls.reap_finished());
+        }));
+        // A platform may report no finished candidate, or its finished hint
+        // may lead the actual join into blocked TLS. Neither permits admission.
+        match poll.recv_timeout(Duration::from_millis(10)) {
+            Ok(result) => assert!(!result.unwrap()),
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(_) => panic!("owned reaper exited without its result"),
+        }
+        assert!(owner.calls.handles().len() <= MAX_OWNED_UNJOINED);
+        assert!(owner.await_closed(Duration::from_millis(10)).is_err());
+        assert!(!owner.settled);
+        for release in releases { release.send(()).unwrap(); }
+        owner.await_closed(Duration::from_secs(2)).unwrap();
+        assert!(owner.settled);
+    }
+
+    #[test]
+    fn owned_broker_reaped_panic_stays_uncertain_after_handle_vector_is_empty() {
+        let mut owner = BrokerThreadOwner::new();
+        let call = std::thread::spawn(|| panic!("injected broker handler panic"));
+        let end = Instant::now() + Duration::from_secs(2);
+        while !call.is_finished() && Instant::now() < end { std::thread::yield_now(); }
+        assert!(call.is_finished());
+        owner.calls.track(call);
+        assert!(owner.calls.reap_finished().is_err());
+        assert!(owner.calls.handles().is_empty());
+        assert!(owner.calls.reap_finished().is_err());
+        owner.acceptor = Some(std::thread::spawn(|| {}));
+        assert!(owner.await_closed(Duration::from_secs(2)).is_err());
+        assert!(!owner.settled);
+        assert_eq!(owner.calls.panics.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn owned_broker_poison_stays_uncertain_even_if_mutex_is_later_cleared() {
+        let mut owner = BrokerThreadOwner::new();
+        let calls = Arc::clone(&owner.calls);
+        assert!(std::thread::spawn(move || {
+            let _held = calls.handles.lock().unwrap(); panic!("injected tracked handles poison");
+        }).join().is_err());
+        assert!(owner.calls.reap_finished().is_err());
+        owner.calls.handles.clear_poison();
+        assert!(owner.calls.handles().is_empty());
+        assert!(owner.calls.reap_finished().is_err());
+        assert!(owner.await_closed(Duration::from_millis(10)).is_err());
+        assert!(!owner.settled);
+    }
+}

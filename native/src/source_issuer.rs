@@ -91,31 +91,29 @@ impl HostSourceIssuer {
     /// Off-App preparation. Binding/token are expectations until an actual
     /// per-request Journal query succeeds. No alternate database can be supplied.
     pub(crate) fn new(
-        lease: EngineSourceLease,
-        binding: PartialBinding,
-        token: String,
+        lease: EngineSourceLease, binding: PartialBinding, token: String,
     ) -> Result<Arc<Self>> {
+        let mut lease = Some(lease);
+        Self::new_retaining(&mut lease, binding, token)
+    }
+
+    /// Failed construction returns the SAME actual lease, including failures
+    /// after a capability was issued. No serialized identity recreates it.
+    pub(crate) fn new_retaining(
+        lease: &mut Option<EngineSourceLease>, binding: PartialBinding, token: String,
+    ) -> Result<Arc<Self>> {
+        let held = lease.as_ref().context("host source construction lease absent")?;
         binding.validate()?;
-        ensure!(
-            lease.owner().project_id == binding.attempt.project_id
-                && lease.owner().owner_id == binding.attempt.owner.owner
-                && lease.owner().epoch == binding.attempt.owner.epoch,
-            "host source binding differs from the actual owner"
-        );
-        ensure!(
-            token.len() == 64
-                && token
-                    .bytes()
-                    .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()),
-            "invalid private host source capability"
-        );
-        lease.check_current()?;
-        Ok(Arc::new(Self {
-            lease,
-            binding,
-            token: HostSourceToken(token),
-            denied: AtomicBool::new(false),
-        }))
+        ensure!(held.owner().project_id == binding.attempt.project_id
+            && held.owner().owner_id == binding.attempt.owner.owner
+            && held.owner().epoch == binding.attempt.owner.epoch,
+            "host source binding differs from the actual owner");
+        ensure!(token.len() == 64 && token.bytes().all(|b|
+            b.is_ascii_hexdigit() && !b.is_ascii_uppercase()), "invalid private host source capability");
+        held.check_current()?;
+        // All fallible checks precede this sole transfer into the actual issuer.
+        Ok(Arc::new(Self { lease:lease.take().unwrap(), binding,
+            token:HostSourceToken(token), denied:AtomicBool::new(false) }))
     }
 
     /// Off-App local held custody only; exact Journal/run authority is queried

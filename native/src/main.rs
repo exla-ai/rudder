@@ -76,6 +76,7 @@ mod source_shutdown_join;
 mod source_controller;
 mod managed_launch;
 mod managed_app;
+mod managed_source_app;
 mod managed_store;
 mod board_access;
 mod agent_link;
@@ -1893,6 +1894,7 @@ struct App {
     agents: Vec<AgentRun>,
     fabric_runtime: fabric_runtime::RuntimeState,
     managed_local: managed_app::ManagedAppState,
+    managed_source: managed_source_app::ManagedSourceAppState,
     /// Every live plan, in the order its `/plan` was started. Several orchestrators
     /// may run at once and each owns exactly one entry, so plan state is per-plan
     /// rather than global. NEVER empty: `App::new` seeds one plan (holding whatever
@@ -3192,6 +3194,7 @@ impl App {
         Self {
             fabric_runtime: fabric_runtime::RuntimeState::default(),
             managed_local: managed_app::ManagedAppState::default(),
+            managed_source: managed_source_app::ManagedSourceAppState::default(),
             gam_links: HashMap::new(),
             gam_signals: HashMap::new(),
             gam_link_tx,
@@ -21326,6 +21329,7 @@ What to do\n\
     }
 
     fn shutdown_with_reason(&mut self, reason: &str) -> Result<()> {
+        self.ensure_managed_source_shutdown_ready()?;
         self.close_attach_clients(reason);
         let mut failures = Vec::new();
         for run in &mut self.agents {
@@ -21881,6 +21885,7 @@ fn run_app_loop(mut terminal: Option<&mut Tui>, mut ownership: EngineOwnership) 
             }
             if ownership.is_fabric() {
                 let (journal, owner) = ownership.journal_parts();
+                managed_source_app::poll(&mut app, owner);
                 managed_app::poll(&mut app, journal, owner)?;
                 fabric_runtime::poll(&mut app, journal, owner)?;
             }

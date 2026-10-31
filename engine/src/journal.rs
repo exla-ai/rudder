@@ -34,6 +34,8 @@ mod vcs;
 mod managed;
 mod host_source;
 mod readonly;
+mod capability_issue;
+pub use capability_issue::{PreparedCapabilityIssuance, CapabilityIssuanceObservation};
 pub use readonly::{HeldJournalFile, ReadOnlyJournal, READ_ONLY_MAX_BUSY_TIMEOUT};
 
 pub use host_source::{

@@ -18,6 +18,32 @@ pub(crate) struct JoinedSourceShutdown {
 }
 
 impl ExitedSourceShutdown {
+    /// Validate by borrow before moving the exact exit witnesses. An error or
+    /// unwinding authorization caller must retain these original owning slots.
+    pub(crate) fn new_retaining(
+        provisional: &mut Option<ProvisionalSourceShutdown>,
+        issuer: Arc<HostSourceIssuer>,
+        custody: &mut Option<ManagedHelperCustody>,
+        exit: &mut Option<SuccessfulManagedHelperExit>,
+    ) -> Result<Self> {
+        let pending = provisional.as_ref().ok_or_else(||anyhow::anyhow!("source provisional exit absent"))?;
+        let actual_custody = custody.as_ref().ok_or_else(||anyhow::anyhow!("source helper custody absent"))?;
+        let actual_exit = exit.as_ref().ok_or_else(||anyhow::anyhow!("source helper exit absent"))?;
+        pending.budget().remaining()?;
+        actual_exit.matches(actual_custody, pending)?;
+        Ok(Self { provisional: provisional.take().unwrap(), issuer,
+            _exit: exit.take().unwrap(), _custody: custody.take().unwrap() })
+    }
+
+    /// Off-App authorization borrows the original packet. Query failure or
+    /// panic leaves the actual exit/custody/issuer owned by its outer carrier.
+    pub(crate) fn join_retaining(pending: &mut Option<Self>) -> Result<JoinedSourceShutdown> {
+        let exited = pending.as_ref().ok_or_else(||anyhow::anyhow!("source exit packet absent"))?;
+        let authorization = exited.issuer.authorize_shutdown_join(
+            exited.provisional.binding(), exited.provisional.budget())?;
+        Ok(JoinedSourceShutdown { joined: pending.take().unwrap(), authorization })
+    }
+
     /// App calls after the exact owned child has actually been reaped. The
     /// witness constructor and its status stay private to pty_terminal.
     pub(crate) fn new(

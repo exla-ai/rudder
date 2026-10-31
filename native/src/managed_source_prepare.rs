@@ -3,7 +3,7 @@
 //! Records/paths/PIDs cannot construct the lease, peer or joined shutdown proof.
 use super::ManagedLaunchFence;
 use crate::{
-    agent_broker::{self, AgentBroker, BrokerConfig},
+    agent_broker::{self, AgentBroker, BrokerConfig, BrokerThreadOwner, BrokerThreadsSettled},
     engine_host::EngineSourceLease,
     managed_store::{ManagedRunLocation, ManagedStore},
     remote_workspace::{self, PreparedContextRuntime, RemoteContextInputs},
@@ -25,7 +25,7 @@ use rudder_engine::{
         ProtectedHostContextRef, ReadOnlyRuntime, WorkspaceObservationProfile,
     },
     journal::{
-        host_source_scope, CapabilityGrant, HeldJournalFile, Journal,
+        host_source_scope, CapabilityGrant, HeldJournalFile, Journal, PreparedCapabilityIssuance,
         HOST_SOURCE_REQUIRED_OPERATION,
     },
     protocol::canonical_json,
@@ -220,6 +220,15 @@ pub(crate) struct ManagedSourceInputs {
     pub timeout_seconds: u64,
 }
 impl ManagedSourcePrepareRequest {
+    pub(crate) fn fence(&self) -> &ManagedLaunchFence { &self.fence }
+    pub(crate) fn selection(&self) -> &RemoteLaunchRequest { &self.selection }
+    pub(crate) fn managed_run(&self) -> Result<ManagedRunLocation> {
+        self.inputs.managed_store.run(&self.fence.run_id)
+    }
+    pub(crate) fn journal_path(&self) -> &Path {
+        &self.inputs.managed_store.binding().journal
+    }
+
     /// Pure typed construction. An actual lease is consumed; no saved owner or
     /// database path is accepted in its place. IO/issuance happens in prepare.
     pub(crate) fn new(
@@ -406,9 +415,13 @@ struct SourceResources {
     issuer: Arc<HostSourceIssuer>,
     server: SourceAuthorizerServer,
     guest: AgentBroker,
+    guest_threads: BrokerThreadOwner,
+    guest_settled: Option<BrokerThreadsSettled>,
     peer: Arc<ActivationPeer>,
     host_token: Secret,
     guest_token: Secret,
+    host_issue: PreparedCapabilityIssuance,
+    guest_issue: PreparedCapabilityIssuance,
     runtime: PreparedContextRuntime,
     context: HeldContext,
     source_paths: OwnedLeaves,
@@ -495,9 +508,24 @@ impl PreparedManagedSource {
             now_ms()?,
         )
     }
+    /// Off-App, after StopV4 was queued. This proves actual guest callback/
+    /// acceptor/TLS settlement under the ORIGINAL finalization budget. The
+    /// opaque proof stays inside this exact prepared owner for joined retirement.
+    pub(crate) fn settle_guest(&mut self, journal: &mut Journal, budget: &FinalizationBudget) -> Result<()> {
+        budget.remaining()?;
+        self.stop_guest(journal)?;
+        let timeout = budget.remaining()?.min(Duration::from_secs(2));
+        let resources = self.resources.as_mut().context("source preparation retired")?;
+        journal.retire_prepared_capability(&mut resources.guest_issue, now_ms()?)?;
+        if resources.guest_settled.is_none() {
+            resources.guest_settled = Some(resources.guest_threads.await_closed(timeout)?);
+        }
+        budget.remaining()?;
+        Ok(())
+    }
     pub(crate) fn retire_unused(&mut self, journal: &mut Journal) -> Result<()> {
         ensure!(!self.adopted, "adopted source requires joined finalization");
-        self.retire(journal)
+        self.retire(journal, None)
     }
     /// Off-App, after App joined the exact provisional packet, its actually
     /// reaped successful helper and fresh issuer query under the original budget.
@@ -522,29 +550,37 @@ impl PreparedManagedSource {
                         .unwrap(),
             "joined source shutdown differs from this actual preparation"
         );
-        self.retire(journal)
+        self.retire(journal, Some(joined.provisional()?.budget()))
     }
-    fn retire(&mut self, journal: &mut Journal) -> Result<()> {
+    fn retire(&mut self, journal: &mut Journal, budget: Option<&FinalizationBudget>) -> Result<()> {
+        let remaining = || -> Result<Duration> {
+            match budget { Some(b) => Ok(b.remaining()?.min(Duration::from_secs(2))),
+                None => Ok(Duration::from_secs(2)) }
+        };
+        remaining()?;
         self.stop_guest(journal)?;
         let resources = self
             .resources
             .as_mut()
             .context("source preparation retired")?;
+        journal.retire_prepared_capability(&mut resources.guest_issue, now_ms()?)?;
+        // Neither acceptor closure nor counters prove request/TLS settlement.
+        if resources.guest_settled.is_none() {
+            resources.guest_settled = Some(resources.guest_threads.await_closed(remaining()?)?);
+        }
         // Never infer settlement from close, cancellation, timeout or a record.
         // A failed wait leaves this owner and its handles available for retry.
         if resources.settled.is_none() {
-            resources.settled = Some(resources.server.await_closed(Duration::from_secs(2))?);
+            resources.settled = Some(resources.server.await_closed(remaining()?)?);
         }
         if !resources.host_revoked {
-            journal.revoke_capability(
-                &self.assignment.fence.owner,
-                &resources.host_token.0,
-                now_ms()?,
-            )?;
+            journal.retire_prepared_capability(&mut resources.host_issue, now_ms()?)?;
             resources.host_revoked = true;
         }
+        remaining()?;
         resources.source_paths.remove()?;
         resources.context_paths.remove()?;
+        remaining()?;
         self.resources.take();
         Ok(())
     }
@@ -602,25 +638,166 @@ fn grant(
 
 /// No App access, PTY/provider calls, RemoteSession creation or accepted-history
 /// mutation. The actual helper creates its session after the namespace change.
-pub(crate) fn prepare(
-    request: ManagedSourcePrepareRequest,
-    journal: &mut Journal,
-    cancelled: &AtomicBool,
-) -> Result<PreparedManagedSource> {
-    let ManagedSourcePrepareRequest {
-        lease,
-        fence,
-        selection,
-        inputs,
-    } = request;
+/// Typed ownership, deliberately NOT std::error::Error: converting a failed
+/// owner into anyhow would discard its only explicit settlement/retry handle.
+#[must_use = "retain this owner and its admission until is_settled"]
+pub(crate) struct ManagedSourcePrepareFailure {
+    _cause: anyhow::Error,
+    resources: Option<PreparationResources>,
+}
+impl std::fmt::Debug for ManagedSourcePrepareFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ManagedSourcePrepareFailure").field("diagnostic", &self.diagnostic())
+            .field("settled", &self.is_settled()).finish()
+    }
+}
+impl std::fmt::Display for ManagedSourcePrepareFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.write_str(self.diagnostic()) }
+}
+impl ManagedSourcePrepareFailure {
+    pub(crate) fn diagnostic(&self) -> &'static str {
+        match self.resources.as_ref() {
+            None => "source preparation failed; no effects or explicitly settled",
+            Some(r) if r.issuance_uncertain => "source capability issuance uncertain; retained recovery required",
+            Some(_) => "source preparation failed; actual owned cleanup remains",
+        }
+    }
+    pub(crate) fn is_settled(&self) -> bool { self.resources.is_none() }
+    /// Off-App, retryable on this SAME value. Each wait bounds cleanup only;
+    /// it never restarts startup/finalization clocks or grants source authority.
+    pub(crate) fn settle_unused(&mut self, journal: &mut Journal) -> Result<()> {
+        let Some(r) = self.resources.as_mut() else { return Ok(()) };
+        r.settle_unused(journal)?;
+        self.resources.take();
+        Ok(())
+    }
+}
+
+/// This carrier is allocated OUTSIDE construction/catch_unwind. Constructors
+/// write live owners into its slots before any subsequent fallible operation.
+/// Drop only requests retirement; it is never settlement/admission release.
+struct PreparationResources {
+    fence: ManagedLaunchFence,
+    effects_started: bool,
+    issuance_uncertain: bool,
+    host_issue: Option<PreparedCapabilityIssuance>,
+    guest_issue: Option<PreparedCapabilityIssuance>,
+    selection: Option<RemoteLaunchRequest>,
+    startup: Option<Arc<SourceStartupBudget>>,
+    lease: Option<EngineSourceLease>,
+    journal: Option<HeldJournalFile>,
+    journal_path: Option<PathBuf>,
+    journal_identity: Option<(u64,u64)>,
+    issuer: Option<Arc<HostSourceIssuer>>,
+    server: Option<SourceAuthorizerServer>,
+    settled: Option<SourceAuthorizerSettled>,
+    guest: Option<AgentBroker>,
+    guest_threads: BrokerThreadOwner,
+    guest_settled: Option<BrokerThreadsSettled>,
+    peer: Option<Arc<ActivationPeer>>,
+    host_token: Option<Secret>, guest_token: Option<Secret>,
+    host_revoked: bool, guest_revoked: bool,
+    runtime: Option<PreparedContextRuntime>, context: Option<HeldContext>,
+    source_paths: Option<OwnedLeaves>, context_paths: Option<OwnedLeaves>,
+    permanent: Option<PathBuf>, endpoint: Option<PathBuf>,
+}
+impl PreparationResources {
+    fn new(lease: EngineSourceLease, fence: ManagedLaunchFence) -> Self {
+        Self { fence, effects_started:false, issuance_uncertain:false, host_issue:None, guest_issue:None, selection:None, startup:None,
+            lease:Some(lease), journal:None, journal_path:None, journal_identity:None,
+            issuer:None, server:None, settled:None, guest:None, guest_threads:BrokerThreadOwner::new(),
+            guest_settled:None, peer:None, host_token:None, guest_token:None,
+            host_revoked:false, guest_revoked:false, runtime:None, context:None,
+            source_paths:None, context_paths:None, permanent:None, endpoint:None }
+    }
+    fn require_complete(&self) -> Result<()> {
+        ensure!(self.journal.is_some() && self.journal_identity.is_some() && self.issuer.is_some()
+            && self.server.is_some() && self.guest.is_some() && self.peer.is_some()
+            && self.host_token.is_some() && self.guest_token.is_some() && self.runtime.is_some()
+            && self.context.is_some() && self.source_paths.is_some() && self.context_paths.is_some()
+            && self.host_issue.is_some() && self.guest_issue.is_some()
+            && !self.issuance_uncertain, "source preparation resource slot incomplete");
+        Ok(())
+    }
+    fn request_retirement(&self) {
+        if let Some(startup) = &self.startup { startup.budget.cancel(); }
+        if let Some(peer) = &self.peer { peer.0.fail(); }
+        if let Some(server) = &self.server { server.close(); }
+        if let Some(guest) = &self.guest { guest.close(); }
+        self.guest_threads.close();
+    }
+    fn settle_unused(&mut self, journal: &mut Journal) -> Result<()> {
+        self.request_retirement();
+        // Even wrong/stale Journal cleanup cannot authorize or discard live
+        // handles. Actual owned endpoints may still be closed/joined first.
+        if self.guest_settled.is_none() {
+            self.guest_settled = Some(self.guest_threads.await_closed(Duration::from_secs(2))?);
+        }
+        if self.settled.is_none() {
+            if let Some(server) = self.server.as_mut() {
+                self.settled = Some(server.await_closed(Duration::from_secs(2))?);
+            }
+        }
+        self.journal.as_ref().context("original source Journal anchor absent")?.check_current()?;
+        ensure!(self.journal_path.as_deref() == Some(journal.database_path()?),
+            "failed preparation cleanup requires original Journal path");
+        let supplied = journal.hold_database_file()?;
+        let m = fs::symlink_metadata(journal.database_path()?)?;
+        ensure!(Some((m.dev(),m.ino())) == self.journal_identity,
+            "failed preparation cleanup Journal identity changed");
+        supplied.check_current()?;
+        self.fence.check_current(journal)?;
+        if !self.guest_revoked {
+            if let Some(issue) = self.guest_issue.as_mut() { journal.retire_prepared_capability(issue, now_ms()?)?; }
+            else if let Some(token) = &self.guest_token { journal.revoke_capability(&self.fence.owner, &token.0, now_ms()?)?; }
+            self.guest_revoked = true;
+        }
+        if !self.host_revoked {
+            if let Some(issue) = self.host_issue.as_mut() { journal.retire_prepared_capability(issue, now_ms()?)?; }
+            else if let Some(token) = &self.host_token { journal.revoke_capability(&self.fence.owner, &token.0, now_ms()?)?; }
+            self.host_revoked = true;
+        }
+        ensure!(!self.issuance_uncertain || self.host_issue.is_some() || self.guest_issue.is_some(),
+            "unknown capability issuance lacks a retained identity; not settled");
+        self.issuance_uncertain = false;
+        // No pathname, immutable assignment, cache, staging or producer pin is
+        // removed. Preserve all durable/uncertain effects for explicit recovery.
+        Ok(())
+    }
+    fn finish(mut self) -> SourceResources {
+        // require_complete ran before construction returned. Taking these slots
+        // has no fallible IO/callback between transfer and its new owner.
+        SourceResources { journal:self.journal.take().unwrap(), journal_identity:self.journal_identity.unwrap(),
+            issuer:self.issuer.take().unwrap(), server:self.server.take().unwrap(), guest:self.guest.take().unwrap(),
+            guest_threads:self.guest_threads, guest_settled:None,
+            peer:self.peer.take().unwrap(), host_token:self.host_token.take().unwrap(), guest_token:self.guest_token.take().unwrap(),
+            host_issue:self.host_issue.take().unwrap(), guest_issue:self.guest_issue.take().unwrap(),
+            runtime:self.runtime.take().unwrap(), context:self.context.take().unwrap(),
+            source_paths:self.source_paths.take().unwrap(), context_paths:self.context_paths.take().unwrap(),
+            settled:None, host_revoked:false }
+    }
+}
+
+/// Existing callers keep the successful API shape, with an owned failure they
+/// must explicitly route off-App instead of flattening into a diagnostic Err.
+pub(crate) use prepare_owned as prepare;
+pub(crate) fn prepare_owned(
+    request: ManagedSourcePrepareRequest, journal: &mut Journal, cancelled: &AtomicBool,
+) -> std::result::Result<PreparedManagedSource, ManagedSourcePrepareFailure> {
+    let ManagedSourcePrepareRequest { lease, fence, selection, inputs } = request;
+    let mut pending = PreparationResources::new(lease, fence.clone());
+    pending.selection = Some(selection.clone());
+    // No live handles are locals inside this unwind boundary after acquisition.
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<_> {
     let startup = SourceStartupBudget::begin(inputs.timeout_seconds)?;
+    pending.startup = Some(startup.clone());
     let check = || -> Result<()> {
         startup.check_preparation()?;
         ensure!(
             !cancelled.load(Ordering::Acquire),
             "remote source preparation cancelled"
         );
-        lease.check_journal(journal)?;
+        pending.lease.as_ref().context("source lease absent before issuer")?.check_journal(journal)?;
         fence.check_current(journal)?;
         startup.check_preparation()
     };
@@ -629,6 +806,9 @@ pub(crate) fn prepare(
     let metadata = fs::symlink_metadata(journal.database_path()?)?;
     let journal_identity = (metadata.dev(), metadata.ino());
     journal_anchor.check_current()?;
+    pending.journal_path = Some(journal.database_path()?.to_path_buf());
+    pending.journal = Some(journal_anchor);
+    pending.journal_identity = Some(journal_identity);
     let namespace = inputs.managed_store.binding();
     ensure!(
         namespace.project_id == fence.owner.project_id
@@ -650,6 +830,7 @@ pub(crate) fn prepare(
         .join("preparations")
         .join(&fence.request_id);
     let endpoint = super::validate_endpoint_parent(&inputs.endpoint_parent, &fence)?;
+    pending.permanent = Some(root.clone()); pending.endpoint = Some(endpoint.clone());
     ensure!(
         inputs.context.cache_root == root.join("cache")
             && inputs.context.registry_root == root.join("registry"),
@@ -667,30 +848,19 @@ pub(crate) fn prepare(
         observation: selection.observation.clone(),
     };
     binding.validate()?;
-    // The writable Journal is a privileged parameter, never opened from request
-    // DATA. The issuer's fresh read through the ACTUAL lease independently joins
-    // the random newly issued grant to the real owned Journal before endpoints.
+    let host_grant = grant(&fence, HOST_SOURCE_REQUIRED_OPERATION,
+        host_source_scope(&binding)?, startup.bounds.host_expiry_ms);
     startup.check_preparation()?;
-    let now = now_ms()?;
-    let host_token = Secret(journal.issue_capability(
-        &fence.owner,
-        &grant(
-            &fence,
-            HOST_SOURCE_REQUIRED_OPERATION,
-            host_source_scope(&binding)?,
-            startup.bounds.host_expiry_ms,
-        ),
-        now,
-    )?);
-    let issuer = match HostSourceIssuer::new(lease, binding.clone(), host_token.0.clone()) {
-        Ok(issuer) => issuer,
-        Err(error) => {
-            let _ = journal.revoke_capability(&fence.owner, &host_token.0, now_ms()?);
-            return Err(error);
-        }
-    };
-    let mut issued_guest = None;
-    let result = (|| -> Result<PreparedManagedSource> {
+    let issue_time = now_ms()?;
+    pending.host_issue = Some(journal.prepare_capability_issuance(&fence.owner, &host_grant, issue_time)?);
+    pending.effects_started = true;
+    pending.issuance_uncertain = true;
+    journal.issue_prepared_capability(pending.host_issue.as_mut().unwrap(), issue_time)?;
+    let host_token = Secret(pending.host_issue.as_ref().unwrap().acknowledged_token()?.to_owned());
+    pending.host_token = Some(Secret(host_token.0.clone()));
+    pending.issuance_uncertain = false;
+    let issuer = HostSourceIssuer::new_retaining(&mut pending.lease, binding.clone(), host_token.0.clone())?;
+    pending.issuer = Some(issuer.clone());
         startup.check_preparation()?;
         issuer.authorize(&binding)?;
         fence.check_current(journal)?;
@@ -717,22 +887,18 @@ pub(crate) fn prepare(
             )?,
         )?;
         startup.check_preparation()?;
-        let peer = Arc::new(ActivationPeer(ActivationSlot::with_startup(
-            startup.clone(),
-        )?));
-        let server = SourceAuthorizerServer::bind_with_request_peer(
-            &endpoint.join("source"),
-            binding.clone(),
-            issuer.clone(),
-            Limits::default(),
-            peer.clone(),
-        )?;
+        let peer = Arc::new(ActivationPeer(ActivationSlot::with_startup(startup.clone())?));
+        pending.peer = Some(peer.clone());
+        SourceAuthorizerServer::bind_with_request_peer_retaining(
+            &endpoint.join("source"), binding.clone(), issuer.clone(), Limits::default(),
+            peer.clone(), &mut pending.server)?;
+        let authorizer_directory = pending.server.as_ref().unwrap().directory().to_path_buf();
         startup.check_preparation()?;
         let host_context = remote_workspace::write_context2_checked(
             &root.join("context/source.json"),
             &selection,
             inputs.context,
-            server.directory(),
+            &authorizer_directory,
             &|| startup.check_preparation(),
         )?;
         let profile = ExecutionProfileV4 {
@@ -785,15 +951,14 @@ pub(crate) fn prepare(
             timeout_seconds: inputs.timeout_seconds,
         };
         startup.check_preparation()?;
-        let mut runtime = remote_workspace::prepare_context2_runtime_checked(
+        pending.runtime = Some(remote_workspace::prepare_context2_runtime_checked(
             &host_context,
             &spec,
             &selection,
             &|| startup.check_preparation(),
-        )?;
+        )?);
         startup.check_preparation()?;
-        let mut held_context =
-            HeldContext::open_checked(&host_context, &|| startup.check_preparation())?;
+        pending.context = Some(HeldContext::open_checked(&host_context, &|| startup.check_preparation())?);
         let managed_binding = ManagedExecutionBinding {
             format_version: 4,
             request_id: fence.request_id.clone(),
@@ -826,18 +991,16 @@ pub(crate) fn prepare(
             &canonical_json(&assignment)?,
         )?;
         startup.check_preparation()?;
-        let guest_token = Secret(journal.issue_capability(
-            &fence.owner,
-            &grant(
-                &fence,
-                REQUIRED_OPERATION,
-                partial_scope(&binding)?,
-                startup.bounds.guest_expiry_ms,
-            ),
-            now_ms()?,
-        )?);
-        issued_guest = Some(Secret(guest_token.0.clone()));
-        let make_guest = || -> Result<AgentBroker> {
+        let guest_grant = grant(&fence, REQUIRED_OPERATION, partial_scope(&binding)?,
+            startup.bounds.guest_expiry_ms);
+        let issue_time = now_ms()?;
+        pending.guest_issue = Some(journal.prepare_capability_issuance(&fence.owner, &guest_grant, issue_time)?);
+        pending.issuance_uncertain = true;
+        journal.issue_prepared_capability(pending.guest_issue.as_mut().unwrap(), issue_time)?;
+        let guest_token = Secret(pending.guest_issue.as_ref().unwrap().acknowledged_token()?.to_owned());
+        pending.guest_token = Some(Secret(guest_token.0.clone()));
+        pending.issuance_uncertain = false;
+        let mut make_guest = || -> Result<AgentBroker> {
             let identity = AgentIdentityFile {
                 format_version: 1,
                 project_id: fence.owner.project_id.clone(),
@@ -847,68 +1010,50 @@ pub(crate) fn prepare(
                 token: guest_token.0.clone(),
             };
             let identity_file = agent_broker::project_identity(&guest_socket, &identity)?;
-            AgentBroker::spawn(BrokerConfig {
-                journal_path: namespace.journal.clone(),
-                identity_file,
-                socket_path: guest_socket.clone(),
-            })
+            AgentBroker::spawn_retaining(BrokerConfig {
+                journal_path: namespace.journal.clone(), identity_file, socket_path: guest_socket.clone(),
+            }, &mut pending.guest_threads)
         };
-        let guest = match make_guest() {
-            Ok(guest) => guest,
-            Err(error) => {
-                let _ = journal.revoke_capability(&fence.owner, &guest_token.0, now_ms()?);
-                return Err(error);
-            }
-        };
+        pending.guest = Some(make_guest()?);
         // Full filesystem validation requires the actual projected broker
         // identity. Its grant is issued only after the immutable assignment.
         startup.check_preparation()?;
         spec.validate()
             .context("validate prepared source execution")?;
         startup.check_preparation()?;
-        runtime.check_current_checked(&|| startup.check_preparation())?;
-        held_context.check_current_checked(&|| startup.check_preparation())?;
+        pending.runtime.as_mut().unwrap().check_current_checked(&|| startup.check_preparation())?;
+        pending.context.as_mut().unwrap().check_current_checked(&|| startup.check_preparation())?;
         issuer.authorize(&binding)?;
         fence.check_current(journal)?;
         ensure!(
             !cancelled.load(Ordering::Acquire),
             "source preparation cancelled after effects"
         );
-        let source_paths = OwnedLeaves::capture(server.directory())?;
-        let context_paths = OwnedLeaves::capture(&root.join("context"))?;
+        pending.source_paths = Some(OwnedLeaves::capture(&authorizer_directory)?);
+        pending.context_paths = Some(OwnedLeaves::capture(&root.join("context"))?);
         startup.finish_preparation()?;
-        Ok(PreparedManagedSource {
-            assignment,
-            spec,
-            binding: managed_binding,
-            managed_run,
-            adopted: false,
-            resources: Some(SourceResources {
-                journal: journal_anchor,
-                journal_identity,
-                issuer: issuer.clone(),
-                server,
-                guest,
-                peer,
-                host_token: Secret(host_token.0.clone()),
-                guest_token,
-                runtime,
-                context: held_context,
-                source_paths,
-                context_paths,
-                settled: None,
-                host_revoked: false,
-            }),
-        })
-    })();
-    if result.is_err() {
-        let _ = journal.revoke_capability(&fence.owner, &host_token.0, now_ms()?);
-        if let Some(guest) = issued_guest {
-            let _ = journal.revoke_capability(&fence.owner, &guest.0, now_ms()?);
+        pending.require_complete()?;
+        Ok((assignment, spec, managed_binding, managed_run))
+    }));
+    match result {
+        Ok(Ok((assignment, spec, binding, managed_run))) => Ok(PreparedManagedSource {
+            assignment, spec, binding, managed_run, adopted:false, resources:Some(pending.finish()),
+        }),
+        outcome => {
+            let cause = match outcome {
+                Ok(Err(error)) => error,
+                Err(_) => anyhow::anyhow!("source preparation worker panicked"),
+                Ok(Ok(_)) => unreachable!(),
+            };
+            // No-effect failures release only this unused lease/descriptor set.
+            // Every effectful failure returns its actual owner, even after panic.
+            pending.request_retirement();
+            let resources = if pending.effects_started { Some(pending) } else { None };
+            Err(ManagedSourcePrepareFailure { _cause:cause, resources })
         }
     }
-    result
 }
+
 use sha2::{Digest, Sha256};
 
 /// Retain the actual protected context inode through helper shutdown. The
@@ -1041,4 +1186,86 @@ impl OwnedLeaves {
 
 #[cfg(test)]
 #[path = "managed_source_prepare_tests.rs"]
-mod tests;
+pub(crate) mod tests;
+
+#[cfg(test)]
+mod failed_preparation_tests {
+    use super::*;
+    use crate::source_issuer::SourceIssuerFixture;
+    fn pending(fixture: &mut SourceIssuerFixture) -> PreparationResources {
+        let fence = ManagedLaunchFence { owner:fixture.fence.clone(), run_id:fixture.binding.attempt.run_id.clone(),
+            run_epoch:fixture.binding.attempt.run_epoch, attempt_id:fixture.binding.attempt.execution_id.clone(),
+            request_id:uuid::Uuid::new_v4().to_string() };
+        let lease = fixture.owner.as_ref().unwrap().source_lease(&fence.owner).unwrap();
+        let mut resources = PreparationResources::new(lease, fence);
+        let journal = fixture.journal();
+        resources.journal = Some(journal.hold_database_file().unwrap());
+        resources.journal_path = Some(journal.database_path().unwrap().to_path_buf());
+        let m = fs::symlink_metadata(journal.database_path().unwrap()).unwrap();
+        resources.journal_identity = Some((m.dev(),m.ino()));
+        resources
+    }
+    #[test]
+    fn failed_preparation_carrier_retains_actual_lease_and_capability_through_panic() {
+        let mut fixture = SourceIssuerFixture::new(None);
+        let mut resources = pending(&mut fixture);
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            resources.effects_started = true;
+            resources.host_token = Some(Secret(fixture.token.clone()));
+            panic!("injected preparation failure after effect");
+        }));
+        assert!(panic.is_err());
+        resources.lease.as_ref().unwrap().check_journal(fixture.journal()).unwrap();
+        let mut failure = ManagedSourcePrepareFailure { _cause:anyhow::anyhow!("private diagnostic"), resources:Some(resources) };
+        assert!(!failure.is_settled());
+        failure.settle_unused(fixture.journal()).unwrap();
+        assert!(failure.is_settled());
+        assert!(!format!("{failure:?}").contains("private diagnostic"));
+    }
+    #[test]
+    fn retained_issuance_cleanup_needs_no_raw_token_and_preserves_other_grants() {
+        let mut fixture = SourceIssuerFixture::new(None);
+        let mut resources = pending(&mut fixture);
+        let original_token = fixture.token.clone();
+        let binding = fixture.binding.clone();
+        let now = now_ms().unwrap();
+        let expected = grant(&resources.fence, HOST_SOURCE_REQUIRED_OPERATION,
+            host_source_scope(&binding).unwrap(), now + 60_000);
+        resources.host_issue = Some(fixture.journal().prepare_capability_issuance(
+            &resources.fence.owner, &expected, now).unwrap());
+        resources.effects_started = true;
+        resources.issuance_uncertain = true;
+        fixture.journal().issue_prepared_capability(resources.host_issue.as_mut().unwrap(), now).unwrap();
+        assert!(resources.host_token.is_none());
+        resources.settle_unused(fixture.journal()).unwrap();
+        let issue = resources.host_issue.as_ref().unwrap();
+        assert!(issue.is_retired());
+        assert_eq!(fixture.journal().observe_prepared_capability(issue).unwrap(),
+            rudder_engine::journal::CapabilityIssuanceObservation::Revoked);
+        fixture.journal().authorize_host_source(&original_token, &binding, now).unwrap();
+    }
+    #[test]
+    fn failed_preparation_wrong_journal_and_epoch_keep_owner_for_exact_retry() {
+        let mut fixture = SourceIssuerFixture::new(None);
+        let mut resources = pending(&mut fixture);
+        resources.effects_started = true; resources.host_token = Some(Secret(fixture.token.clone()));
+        let mut failure = ManagedSourcePrepareFailure { _cause:anyhow::anyhow!("injected"), resources:Some(resources) };
+        let mut foreign = Journal::open(fixture.directory().join("foreign.sqlite")).unwrap();
+        assert!(failure.settle_unused(&mut foreign).is_err()); assert!(!failure.is_settled());
+        failure.resources.as_mut().unwrap().fence.run_epoch += 1;
+        assert!(failure.settle_unused(fixture.journal()).is_err()); assert!(!failure.is_settled());
+        failure.resources.as_mut().unwrap().fence.run_epoch -= 1;
+        failure.settle_unused(fixture.journal()).unwrap(); assert!(failure.is_settled());
+    }
+    #[test]
+    fn unknown_token_issuance_never_becomes_settled_from_close_or_empty_threads() {
+        let mut fixture = SourceIssuerFixture::new(None);
+        let mut resources = pending(&mut fixture);
+        resources.effects_started = true; resources.issuance_uncertain = true;
+        let mut failure = ManagedSourcePrepareFailure { _cause:anyhow::anyhow!("unknown commit"), resources:Some(resources) };
+        assert!(failure.settle_unused(fixture.journal()).is_err());
+        assert!(!failure.is_settled());
+        assert!(failure.diagnostic().contains("issuance uncertain"));
+        assert!(failure.resources.as_ref().unwrap().lease.is_some());
+    }
+}

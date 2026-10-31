@@ -12,6 +12,8 @@ use rudder_native::pty_terminal::{TerminalCommand, TerminalPane, TerminalPaneOpt
 
 #[path = "runtime5_checkpoint_transfer.rs"]
 mod checkpoint_transfer;
+#[path = "runtime5_source_app_qualification.rs"]
+mod app_qualification;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -35,6 +37,8 @@ struct Input {
     proof: PathBuf,
     #[serde(default)]
     checkpoint_transfer: Option<checkpoint_transfer::Input>,
+    #[serde(default)]
+    app_lifecycle: bool,
 }
 
 const GUEST: &str = r#"import json,mmap,os,socket,sys,time
@@ -57,6 +61,7 @@ if child==0:
     while True:time.sleep(1)
 fd2=os.open('/scratch/runtime5-ready',os.O_CREAT|os.O_EXCL|os.O_WRONLY,0o600)
 os.write(fd2,b'uid1500;caps0;lo;private-absent;fuse-read;mmap;descendant');os.fsync(fd2);os.close(fd2)
+print('source5-app-ready',flush=True)
 while True:time.sleep(1)
 "#;
 
@@ -213,6 +218,7 @@ fn actual_https_source5_owned_stop_checkpoint_join_and_settlement() {
             && input.cli_script.is_absolute()
             && input.proof.is_absolute()
     );
+    if input.app_lifecycle { app_qualification::run(&input); return; }
     let (mut fixture, request) = qualified_request(&input);
     let mut prepared = prepare(request, fixture.journal(), &AtomicBool::new(false)).unwrap();
     let selection = prepared.assignment().selection.clone();
@@ -328,6 +334,7 @@ fn actual_https_source5_owned_stop_checkpoint_join_and_settlement() {
         owner: binding.owner.clone(),
     };
     let budget = handle.stop_and_checkpoint_v4(stop.clone()).unwrap();
+    prepared.settle_guest(fixture.journal(), &budget).unwrap();
     let mut provisional = None;
     let mut exited = None;
     while provisional.is_none() || exited.is_none() {

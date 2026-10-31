@@ -1,5 +1,5 @@
-//! Existing Journal reads without initialization or writer authority. Held file
-//! identity is local custody only; it grants no project/run/source permission.
+//! Existing Journal connections without initialization. Held file identity is
+//! local custody only; it grants no project/run/source permission.
 use super::*;
 use std::{
     fs::{self, File, Metadata, OpenOptions},
@@ -164,6 +164,43 @@ impl HeldJournalFile {
             held: self,
         })
     }
+
+    /// Off-App privileged connection for this actual held database. No CREATE,
+    /// schema initialization/migration, chmod or journal-mode change is allowed.
+    /// FULL and foreign_keys are enforced only on this new connection. The
+    /// caller must separately retain/check its actual owner/run authority.
+    pub fn open_existing_writer(&self, busy_timeout: Duration) -> Result<Journal> {
+        ensure!(busy_timeout <= READ_ONLY_MAX_BUSY_TIMEOUT,
+            "existing writer Journal busy timeout exceeds250ms");
+        ensure!(rusqlite::version_number() >= 3_051_003,
+            "SQLite >= 3.51.3 is required for WAL safety");
+        self.check_current()?;
+        let flags = rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE
+            | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW
+            | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX
+            | rusqlite::OpenFlags::SQLITE_OPEN_PRIVATE_CACHE;
+        // SQLite owns all database/WAL/SHM descriptors and deferred closes.
+        // Never independently open/close their inodes to inspect custody.
+        let conn = Connection::open_with_flags(&self.database.path, flags)?;
+        conn.busy_timeout(busy_timeout)?;
+        check_sqlite_file_current(&conn)?;
+        self.check_current()?;
+        ensure!(!conn.is_readonly(rusqlite::MAIN_DB)? && conn.is_autocommit(),
+            "existing Journal did not open as an idle writable connection");
+        validate_existing_schema(&conn)?;
+        // Both settings are connection-local. In particular, do not issue
+        // PRAGMA journal_mode=WAL, which could mutate an unexpected database.
+        conn.execute_batch("PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;")?;
+        let synchronous: i64 = conn.pragma_query_value(None, "synchronous", |row|row.get(0))?;
+        let foreign_keys: bool = conn.pragma_query_value(None, "foreign_keys", |row|row.get(0))?;
+        let query_only: bool = conn.pragma_query_value(None, "query_only", |row|row.get(0))?;
+        ensure!(synchronous == 2 && foreign_keys && !query_only && conn.is_autocommit(),
+            "existing Journal writer requires FULL synchronous and foreign keys");
+        validate_existing_schema(&conn)?;
+        check_sqlite_file_current(&conn)?;
+        self.check_current()?;
+        Ok(Journal { conn })
+    }
 }
 
 fn open_existing_connection(path: &Path, busy_timeout: Duration) -> Result<Connection> {
@@ -186,12 +223,12 @@ fn open_existing_connection(path: &Path, busy_timeout: Duration) -> Result<Conne
         "existing Journal did not open read-only"
     );
     conn.execute_batch("PRAGMA query_only=ON; PRAGMA foreign_keys=ON;")?;
-    validate_read_only_schema(&conn)?;
+    validate_existing_schema(&conn)?;
     check_sqlite_file_current(&conn)?;
     Ok(conn)
 }
 
-fn validate_read_only_schema(conn: &Connection) -> Result<()> {
+fn validate_existing_schema(conn: &Connection) -> Result<()> {
     let version: u32 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
     ensure!(
         matches!(version, 4 | 5),
@@ -237,7 +274,7 @@ impl ReadOnlyJournal<'_> {
         self.held.check_current()?;
         check_sqlite_file_current(&self.journal.conn)?;
         let tx = self.journal.conn.unchecked_transaction()?;
-        validate_read_only_schema(&tx)?;
+        validate_existing_schema(&tx)?;
         let result = Journal::authorize_host_source_transaction(&tx, token, binding, now_ms);
         check_sqlite_file_current(&tx)?;
         self.held.check_current()?;
@@ -249,3 +286,7 @@ impl ReadOnlyJournal<'_> {
 #[cfg(test)]
 #[path = "readonly_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "existing_writer_tests.rs"]
+mod writer_tests;

@@ -1,0 +1,132 @@
+{
+  "formatVersion": 1,
+  "kind": "source5-original-producer-controller-result",
+  "caseId": "a4745866-e4d4-42d8-99d3-29a7a5ea15ab",
+  "classification": "native-producer-qualified-independent-reader-input-rejected",
+  "originalArtifactSha256": "c76c7317771186c71fc1ed77ac54922906e8e45dcf339645feaced70757bf109",
+  "originalReport": {
+    "kind": "source5-physical-canary",
+    "nonce": "a4745866-e4d4-42d8-99d3-29a7a5ea15ab",
+    "digest": "sha256:8298b0e98965bc9eb0fdb21c11cc17e1b2f86fc84060840d5bf1a558554d0234",
+    "nativeSha256": "fede63a06d7735eda7d3da6c8ebade6a06266c7813e1708e858f849a8080af00",
+    "libtestSha256": "f6d558ec921c03ef28666e2eb18c4942bd79cdde0f77e641a3a5a095b9701999",
+    "sourceEnvelopeSha256": "a0833503321145e88628f1b121f1de4b26a0cf62223b6f2c02e2b2d0d1c5fa41",
+    "revision": "cf6324cce9eb61f7a502c4722ea6b343a9d3c90a",
+    "qualified": false,
+    "testOnlyMock": false,
+    "cleanupVerified": true,
+    "independentAbsence": true,
+    "syntheticCredentialRemoved": true,
+    "independentCredentialAbsence": true,
+    "runtimeManifestSha256": "5687f989f1e5ef55e4d4ee38a669b04653d49b1316015bf27d46a9d60442ff3d",
+    "productionRootQualified": false,
+    "rawLiveGrantQualified": false,
+    "immutableDATAObjectsRetained": true,
+    "proofReadFailures": [],
+    "nativeCheckpointPublicationValidated": true,
+    "exactOwnedDestroyIssued": true,
+    "postDestructionReadFailed": true,
+    "mockPassed": false,
+    "elapsedMs": 101306,
+    "withinLifetimeBound": true,
+    "providerCalls": 60,
+    "utc": "2026-10-31T16:53:34.444Z",
+    "creationAttempted": true,
+    "authCreationAttempted": true,
+    "cleanupRequired": false
+  },
+  "producer": {
+    "id": "78460d7c513d78",
+    "instance": "01M69E06CQ1Y2CF9Q81N916GNQ",
+    "digest": "sha256:8298b0e98965bc9eb0fdb21c11cc17e1b2f86fc84060840d5bf1a558554d0234"
+  },
+  "control": {
+    "id": "8911d61a434978",
+    "instance": "01M699Y2PQ6D1ED1PDGRDJJ9MN",
+    "digest": "sha256:f3784d539e3cef525aa5277be89898b7e3f7d3241f55c67875e9cb5af60ac180",
+    "image": "registry.fly.io/rudder-cloud-control:4.0.0-alpha.20",
+    "revision": "85168a910976a70c3a77422c8a8f257f67934466",
+    "status": "passed",
+    "hashes": {
+      "cloud/dist/server.js": "d548970543d355e9626435c0a22899485e097405ad0ef6aedbfb738ad39639a2",
+      "cloud/dist/fabric-cas.js": "98e7bc5d7f60ed9d05b2b908a19ed39659d993e26dc9eac01cb5e7980945457a",
+      "cloud/dist/fabric-partial-checkpoint.js": "224c151b296315966304751cf0c51b6d6d2e81e5f8037d2f208246775fe8d5dd"
+    },
+    "durableStoreEnabled": true
+  },
+  "guestProof": {
+    "formatVersion": 1,
+    "kind": "source5-physical-canary",
+    "nonce": "a4745866-e4d4-42d8-99d3-29a7a5ea15ab",
+    "digest": "sha256:8298b0e98965bc9eb0fdb21c11cc17e1b2f86fc84060840d5bf1a558554d0234",
+    "nativeSha256": "fede63a06d7735eda7d3da6c8ebade6a06266c7813e1708e858f849a8080af00",
+    "libtestSha256": "f6d558ec921c03ef28666e2eb18c4942bd79cdde0f77e641a3a5a095b9701999",
+    "sourceEnvelopeSha256": "a0833503321145e88628f1b121f1de4b26a0cf62223b6f2c02e2b2d0d1c5fa41",
+    "revision": "cf6324cce9eb61f7a502c4722ea6b343a9d3c90a",
+    "test": "managed_launch::source_prepare::tests::runtime5_source_qualification::actual_https_source5_owned_stop_checkpoint_join_and_settlement",
+    "qualified": true,
+    "productionRootQualified": false,
+    "rawLiveGrantQualified": false,
+    "modelCalls": false,
+    "supervisorLoaded": false,
+    "admittedAfterResolvedDigest": true,
+    "child": {
+      "code": 0,
+      "signal": null,
+      "failure": null,
+      "settled": true
+    },
+    "utc": "2026-10-31T16:53:28.510Z",
+    "originalArtifactSha256": "09f9382ed89a7b05c16471cce93926028fae2dbd9ba98867be3a731bce68c32f",
+    "stdout": {
+      "bytes": 261,
+      "sha256": "0afdfc0a34330c34b2dca94ddb8284a269f14cc60d0fc7b9f5e25fbe68b63e05",
+      "selectedLines": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1143 filtered out; finished in 35.82s"
+      ]
+    },
+    "stderr": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "selectedLines": []
+    }
+  },
+  "runtimeProof": {
+    "file": "runtime-proof.json",
+    "bytes": 9657,
+    "sha256": "8d50725600501c81ca8f80fdc2c71e0eba01524fae1feaa3aeec1a118059cb59",
+    "originalBytesPreserved": true
+  },
+  "failedReader": {
+    "process": {
+      "settled": true,
+      "status": 1,
+      "signal": null,
+      "failure": null,
+      "stdoutSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stderrSha256": "82f0903d9afc99bb747780977d26ca87d771a05614e56e68d8b8f85e0b723b16",
+      "stdoutBytes": 0,
+      "stderrBytes": 191
+    },
+    "failure": {
+      "status": "failed",
+      "failure": "SOURCE5_POST_DESTROY_READ_REJECTED",
+      "stage": "input",
+      "error_code": "ERR_ASSERTION",
+      "reader_frames": [
+        {
+          "line": 104,
+          "column": 226
+        }
+      ]
+    },
+    "classification": "reader-hardcoded-module-path-mismatch-before-module-import",
+    "hardcodedExpectedRelease": "4.0.0-alpha.19",
+    "actualInputRelease": "4.0.0-alpha.20",
+    "originalReaderSha256": "a13b4ae4f44aa68553453fe287db7527c9718c76e0728f10d349c4857d5fd98a",
+    "correctedReaderSha256": "9a42954d28c5941beabda8e7c56cac4cd0a242ea0ea6811dac5003c4d5799700",
+    "actualModuleSha256": "89053566dd502535af6f36a38e8042f1e4674fbbe5d1e2baf745b835ab238272",
+    "correction": "Only the hardcoded module-path expectation changed from the alpha19 cache path to the actual alpha20 cache path; the original input already pinned alpha20.",
+    "originalResultPreserved": true
+  }
+}

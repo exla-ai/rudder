@@ -1,10 +1,10 @@
-//! Off-App immutable source-assignment and publication recovery DATA only.
+//! Off-App immutable source-assignment, joined-checkpoint and publication DATA.
 //! These records never reconstruct a grant, producer ACK, active retention,
 //! shutdown join or permission to launch. Unknown ACKs require reconciliation.
 use super::*;
 use crate::managed_launch::RemoteSourceAssignment;
 use rudder_engine::{
-    execution::QuiescedPartialCheckpointV1,
+    execution::{CheckpointRef, ExecutionRecord, QuiescedPartialCheckpointV1},
     partial_checkpoint::{
         PartialCheckpointDataIntent, PartialCheckpointDataReceipt,
         PartialCheckpointPublicationV1, PartialCheckpointTemplateV1, PreparedPartialCheckpointData,
@@ -13,11 +13,12 @@ use rudder_engine::{
     protocol::{ObjectKind, ObjectRef},
 };
 
-// The bundle includes the original Q, template and intent, plus the bounded
-// publication envelope needed to recheck their immutable identity without CAS.
+// Bound both original joined checkpoint DATA and the publication bundle (Q,
+// template, intent and envelope) without consulting CAS or restoring authority.
 const SOURCE_RECORD_LIMIT: usize = 256 * 1024;
 const INPUTS_FILE: &str = "checkpoint-data-inputs.json";
 const RECEIPT_FILE: &str = "checkpoint-data-receipt.json";
+const JOINED_FILE: &str = "joined-checkpoint-data.json";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -104,6 +105,14 @@ struct SourceCheckpointReceiptData {
     // and intentional whitespace. It is never replaced by reserialized JSON.
     receipt_json: String,
 }
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SourceJoinedCheckpointData {
+    format_version: u32,
+    data_only: bool,
+    fence: ManagedLaunchFence,
+    record: ExecutionRecord,
+}
 fn hex_digest(bytes: &[u8]) -> String {
     Sha256::digest(bytes).iter().map(|byte| format!("{byte:02x}")).collect()
 }
@@ -169,6 +178,52 @@ impl ManagedRunLocation {
             self.check_source_assignment(value)?;
         }
         Ok(assignment)
+    }
+    fn check_source_joined_checkpoint(&self, fence: &ManagedLaunchFence, record: &ExecutionRecord) -> Result<PathBuf> {
+        self.check_fence(fence)?;
+        let assignment = self.source_assignment(&fence.attempt_id)?
+            .context("joined source checkpoint assignment missing")?;
+        ensure!(assignment.fence == *fence, "joined source checkpoint fence differs from assignment");
+        let ExecutionRecord::V2(record2) = record else {
+            anyhow::bail!("joined source checkpoint requires record2 DATA")
+        };
+        // This validates metadata, terminal state and Q's own audit bindings.
+        // It deliberately constructs no actual process/join/retention proof.
+        let CheckpointRef::PartialRemote(q) = record.checkpointed_data()? else {
+            anyhow::bail!("joined source checkpoint requires partial remote DATA")
+        };
+        let identity = &record2.identity;
+        let selection = &assignment.selection;
+        ensure!(identity.project_id == fence.owner.project_id
+            && identity.request_id == fence.request_id
+            && identity.run_id == fence.run_id && identity.run_epoch == fence.run_epoch
+            && identity.execution_id == fence.attempt_id && identity.owner == fence.owner_epoch()
+            && identity.operation_id == selection.attempt.operation_id && identity.view_id == selection.attempt.view_id
+            && q.capture.attempt == selection.attempt && q.capture.base == selection.root
+            && q.observation == selection.observation,
+            "joined source checkpoint differs from exact reserved source/attempt");
+        self.attempt_directory(&fence.attempt_id)
+    }
+    /// Off-App, before retiring the live preparation. Returns only after file
+    /// and parent fsync. An uncertain write is reconciled by exact immutable
+    /// re-read/replay, never by treating saved DATA as the original join/ACK.
+    pub(crate) fn persist_source_joined_checkpoint(&self, fence: &ManagedLaunchFence, record: &ExecutionRecord) -> Result<()> {
+        let directory = self.check_source_joined_checkpoint(fence, record)?;
+        immutable_source(&directory.join(JOINED_FILE), &SourceJoinedCheckpointData {
+            format_version: 1, data_only: true, fence: fence.clone(), record: record.clone(),
+        })
+    }
+    /// Original checkpoint DATA only. Presence cannot reconstruct the actual
+    /// shutdown join, retained-object ACK, grant or App adoption authority.
+    pub(crate) fn source_joined_checkpoint(&self, attempt: &str) -> Result<Option<ExecutionRecord>> {
+        self.source_assignment(attempt)?.context("joined source checkpoint assignment missing")?;
+        let saved: Option<SourceJoinedCheckpointData> = read_source_record(&self.attempt_directory(attempt)?.join(JOINED_FILE))?;
+        saved.map(|saved| {
+            ensure!(saved.format_version == 1 && saved.data_only && saved.fence.attempt_id == attempt,
+                "joined source checkpoint DATA envelope differs");
+            self.check_source_joined_checkpoint(&saved.fence, &saved.record)?;
+            Ok(saved.record)
+        }).transpose()
     }
     fn check_source_inputs(&self, inputs: &SourceCheckpointInputs) -> Result<PathBuf> {
         inputs.validate()?;
@@ -361,5 +416,10 @@ mod tests {
         let oversized = directory.join("oversized-source-data.json");
         assert!(immutable_source(&oversized, &"x".repeat(SOURCE_RECORD_LIMIT)).is_err());
         assert!(!oversized.exists());
+    }
+
+    mod joined_checkpoint_tests {
+        use super::*;
+        include!("managed_source_joined_tests.rs");
     }
 }

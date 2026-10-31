@@ -1,0 +1,182 @@
+{
+  "formatVersion": 1,
+  "version": "4.0.0-alpha.21",
+  "sourceKind": "working-tree candidate",
+  "checks": {
+    "rust": {
+      "status": "passed",
+      "completedAt": "2026-10-31T17:12:05.408050+00:00",
+      "command": [
+        "python3",
+        "/workspace/home/.cache/rudder-release-build/alpha21-checks/without-rudder-env.py",
+        "cargo",
+        "test",
+        "--locked",
+        "--workspace",
+        "--features",
+        "rudder-vcs-bridge/cli",
+        "--no-fail-fast"
+      ],
+      "receiptSha256": "ed2f599ca0e1ea069b0e6c31f1c70bbf5ae492405ae15e17136f1b17e016f0d7",
+      "passed": 1797,
+      "failed": 0,
+      "ignored": 29,
+      "suites": 59
+    },
+    "typescript": {
+      "status": "passed",
+      "completedAt": "2026-10-31T16:56:10.924774+00:00",
+      "command": [
+        "python3",
+        "/workspace/home/.cache/rudder-release-build/alpha21-checks/without-rudder-env.py",
+        "npm",
+        "run",
+        "check"
+      ],
+      "receiptSha256": "9c78b90f890727b907d367e1714ecba2e18afe7bf81b278c71787c1f1fc35455"
+    },
+    "cloudBuild": {
+      "status": "passed",
+      "completedAt": "2026-10-31T17:00:47.450216+00:00",
+      "command": [
+        "python3",
+        "/workspace/home/.cache/rudder-release-build/alpha21-checks/without-rudder-env.py",
+        "npm",
+        "--prefix",
+        "cloud",
+        "run",
+        "build"
+      ],
+      "receiptSha256": "d5ca8c03edb38d25a25666b55dc00df9403f8279d76dd6c3efe058e55b547233"
+    },
+    "javascript": {
+      "status": "passed",
+      "completedAt": "2026-10-31T17:19:50.836015+00:00",
+      "command": [
+        "python3",
+        "/workspace/home/.cache/rudder-release-build/alpha21-checks/without-rudder-env.py",
+        "npm",
+        "test"
+      ],
+      "receiptSha256": "2b7aeb9afddde2d179fd54d96eec66eb8dff85cc66340b8d552ce49c9f6b9130",
+      "passed": 762,
+      "failed": 0,
+      "skipped": 9,
+      "total": 771
+    },
+    "terminal": {
+      "status": "passed",
+      "completedAt": "2026-10-31T17:21:07.083805+00:00",
+      "command": [
+        "python3",
+        "/workspace/home/.cache/rudder-release-build/alpha21-checks/without-rudder-env.py",
+        "env",
+        "RUDDER_NATIVE_BIN=/workspace/code/exla-ai-rudder/target/debug/rudder-native",
+        "npm",
+        "run",
+        "test:tui"
+      ],
+      "receiptSha256": "cd041491e7b6f1d38f37baa7357013b8e5bd585823dc13421f49c046f3e171d0",
+      "passed": 59,
+      "failed": 0,
+      "skipped": 0,
+      "total": 59
+    }
+  },
+  "focusedRegressions": {
+    "existingJournalWriter": {
+      "status": "passed",
+      "completedAt": "2026-10-31T16:24:32.981676+00:00",
+      "command": [
+        "python3",
+        "/workspace/home/.cache/rudder-release-build/alpha21-checks/without-rudder-env.py",
+        "cargo",
+        "test",
+        "--locked",
+        "-p",
+        "rudder-engine",
+        "--lib",
+        "journal::readonly::writer_tests",
+        "--",
+        "--test-threads=1"
+      ],
+      "receiptSha256": "58f20effa8aed20111272cacd7d4d606fbffc6e5d6c26597eed25287bb8c5d90",
+      "passed": 5,
+      "failed": 0,
+      "ignored": 0,
+      "suites": 1
+    },
+    "sourceAppAndSupervisor": {
+      "status": "passed",
+      "completedAt": "2026-10-31T16:50:10.807502+00:00",
+      "command": [
+        "python3",
+        "/workspace/home/.cache/rudder-release-build/alpha21-checks/without-rudder-env.py",
+        "cargo",
+        "test",
+        "--locked",
+        "-p",
+        "rudder-native",
+        "--bin",
+        "rudder-native",
+        "--features",
+        "rudder-vcs-bridge/cli",
+        "managed_source_app::",
+        "--no-fail-fast"
+      ],
+      "receiptSha256": "268a3dc0fcf4471722fd249bbf80f1257ec24e72778229492715a5fa13c8f743",
+      "passed": 10,
+      "failed": 0,
+      "ignored": 1,
+      "suites": 1
+    },
+    "claudeBridgeReadiness": {
+      "status": "passed",
+      "completedAt": "2026-10-31T17:16:50.655129+00:00",
+      "command": [
+        "python3",
+        "/workspace/home/.cache/rudder-release-build/alpha21-checks/without-rudder-env.py",
+        "node",
+        "--test",
+        "tests/claude-sdk-bridge.test.mjs"
+      ],
+      "receiptSha256": "a49b89e3733f1ae41a3d92fd017d8ffb25ca5db192d2f41b0a959afb7389e4a2",
+      "counts": {
+        "tests": 5,
+        "pass": 5,
+        "fail": 0,
+        "cancelled": 0,
+        "skipped": 0
+      }
+    }
+  },
+  "physicalSourceApp": {
+    "status": "qualified-composite",
+    "evidence": "../../examples/execution/evidence/2026-10-31-source5-app/qualification.json",
+    "verifiedAt": "2026-10-31T16:54:26.760Z",
+    "originalControllerQualified": false,
+    "nativeProducerQualified": true,
+    "separateReadbackQualified": true,
+    "sourceKind": "working-tree",
+    "baseRevision": "cf6324cce9eb61f7a502c4722ea6b343a9d3c90a",
+    "sourceEnvelopeSha256": "a0833503321145e88628f1b121f1de4b26a0cf62223b6f2c02e2b2d0d1c5fa41",
+    "imageDigest": "sha256:8298b0e98965bc9eb0fdb21c11cc17e1b2f86fc84060840d5bf1a558554d0234",
+    "captureConsistency": "live_best_effort",
+    "acceptedHistory": false,
+    "modelExecution": false
+  },
+  "releaseCheckCi": {
+    "status": "not_started",
+    "branch": "release-check/4.0.0-alpha.21"
+  },
+  "delivery": {
+    "status": "not_started"
+  },
+  "fullV4Complete": false,
+  "remainingGates": [
+    "normal managed/source startup and recovery routing",
+    "authenticated connected Codex/Claude profiles and runtime attachment",
+    "current source selection and accepted jj history",
+    "fleet ownership, distributed caches and migration"
+  ]
+}

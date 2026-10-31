@@ -1,0 +1,110 @@
+{
+  "formatVersion": 1,
+  "sourceKind": "working-tree",
+  "baseRevision": "cf6324cce9eb61f7a502c4722ea6b343a9d3c90a",
+  "frozenSource": {
+    "sourceEnvelope": "source-envelope.json",
+    "sourceEnvelopeSha256": "a0833503321145e88628f1b121f1de4b26a0cf62223b6f2c02e2b2d0d1c5fa41",
+    "sourcePatch": "working-tree-source.patch",
+    "sourcePatchSha256": "8742bf7c12b394de9e76262a4678b7e4cdc6e4d03409f25e371133e8dd523526",
+    "manifestFileCount": 1628
+  },
+  "frozenBinaryManifest": {
+    "originalArtifactSha256": "01662f2cdc822968897b4db4c51d41d80ffe41a5e6e9335a936464d01712251f",
+    "native": {
+      "sha256": "fede63a06d7735eda7d3da6c8ebade6a06266c7813e1708e858f849a8080af00",
+      "sizeBytes": 96595856,
+      "sourceSha256": "28c2270e1b1ae92f6334e3dd7179e5a59fb69b076be23f33b7bb2b909475bafc"
+    },
+    "libtest": {
+      "sha256": "f6d558ec921c03ef28666e2eb18c4942bd79cdde0f77e641a3a5a095b9701999",
+      "sizeBytes": 100208848,
+      "sourceSha256": "61d33b346242e199d3d9b8fbbb3d3bf2be1b16bb7f3a214fb19e45ee478949a4"
+    },
+    "buildEvidenceReceipt": "source-activation-regressions18.json",
+    "sourceSha256Meaning": "The original freeze manifest records sourceSha256 separately from each frozen image artifact sha256. These values are preserved as distinct fingerprints."
+  },
+  "image": {
+    "originalArtifactSha256": "e2f799dd5b64d14ba58e9b60ef5550868fc53fab6a9c8b15eec8f1411dda78e4",
+    "formatVersion": 1,
+    "kind": "source5-physical-canary",
+    "driverSha256": "875dc8cb19d0632a5de7ae175c994d8b4d96dcd5c8daebb608eba69c1f1930b3",
+    "baseDigest": "sha256:0d52fd93e5adbf09352110c0ec74dd98db22ba6f6df3ea16b1d4e0277f2efad9",
+    "nativeSha256": "fede63a06d7735eda7d3da6c8ebade6a06266c7813e1708e858f849a8080af00",
+    "libtestSha256": "f6d558ec921c03ef28666e2eb18c4942bd79cdde0f77e641a3a5a095b9701999",
+    "sourceEnvelopeSha256": "a0833503321145e88628f1b121f1de4b26a0cf62223b6f2c02e2b2d0d1c5fa41",
+    "revision": "cf6324cce9eb61f7a502c4722ea6b343a9d3c90a",
+    "producerDigest": "sha256:8298b0e98965bc9eb0fdb21c11cc17e1b2f86fc84060840d5bf1a558554d0234"
+  },
+  "buildAndFocusedRegressionReceipts": [
+    {
+      "receipt": "source-activation-native17.json",
+      "originalReceiptSha256": "cfb26dd80f8411efe075588d11c639c335b3d821a9f2851625a149441d9036e0",
+      "completedAt": "2026-10-31T16:46:29.506516+00:00",
+      "command": [
+        "python3",
+        "without-rudder-env.py",
+        "cargo",
+        "build",
+        "--locked",
+        "-p",
+        "rudder-native",
+        "--bin",
+        "rudder-native",
+        "--features",
+        "rudder-vcs-bridge/cli"
+      ],
+      "exitCode": 0,
+      "stopReason": null,
+      "elapsedSeconds": 53.111,
+      "log": {
+        "artifact": "source-activation-native17.log",
+        "sha256": "2d8e94646437d6d12346b05ca26071fc4629485c7b405f824424afb53facf7c6",
+        "bytes": 106465,
+        "selectedResultLines": [
+          "    Finished `dev` profile [unoptimized + debuginfo] target(s) in 52.69s"
+        ]
+      }
+    },
+    {
+      "receipt": "source-activation-regressions18.json",
+      "originalReceiptSha256": "268a3dc0fcf4471722fd249bbf80f1257ec24e72778229492715a5fa13c8f743",
+      "completedAt": "2026-10-31T16:50:10.807502+00:00",
+      "command": [
+        "python3",
+        "without-rudder-env.py",
+        "cargo",
+        "test",
+        "--locked",
+        "-p",
+        "rudder-native",
+        "--bin",
+        "rudder-native",
+        "--features",
+        "rudder-vcs-bridge/cli",
+        "managed_source_app::",
+        "--no-fail-fast"
+      ],
+      "exitCode": 0,
+      "stopReason": null,
+      "elapsedSeconds": 55.102,
+      "log": {
+        "artifact": "source-activation-regressions18.log",
+        "sha256": "c0fc400d992ef5a72ff05201e64d521162d5a01cd7663f9d61d0b14c853bd1ef",
+        "bytes": 33500,
+        "selectedResultLines": [
+          "    Finished `test` profile [unoptimized + debuginfo] target(s) in 54.39s",
+          "test result: ok. 10 passed; 0 failed; 1 ignored; 0 measured; 1133 filtered out; finished in 0.41s"
+        ]
+      },
+      "testCounts": {
+        "passed": 10,
+        "failed": 0,
+        "ignored": 1,
+        "filteredOut": 1133
+      }
+    }
+  ],
+  "classification": "Working-tree physical-canary evidence. The exact frozen source patch/envelope and image binaries are identified; this is not commit-only or final release qualification.",
+  "excludedBroaderChecks": "The earlier full native13 run predates the activation fix. The interrupted whole-Rust19 run and pending broader checks are not passed evidence here."
+}

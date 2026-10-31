@@ -806,6 +806,7 @@ pub(crate) struct SourceAuthorizerServer {
     workers: Vec<Worker>,
     joiner: Option<JoinCoordinator>,
     settled: bool,
+    request_only_drop: bool,
 }
 impl SourceAuthorizerServer {
     pub(crate) fn bind(
@@ -825,6 +826,16 @@ impl SourceAuthorizerServer {
     ) -> Result<Self> {
         Self::bind_inner(path, binding, authority, limits, Arc::new(wall_nanoseconds), Some(peer))
     }
+    /// The caller creates this ownership slot before construction. Every
+    /// successfully spawned worker stays in it even when later startup fails.
+    pub(crate) fn bind_with_request_peer_retaining(
+        path: &Path, binding: PartialBinding, authority: Arc<dyn HostSourceAuthority>,
+        limits: Limits, peer: Arc<dyn HostSourceRequestPeer>,
+        owner: &mut Option<Self>,
+    ) -> Result<()> {
+        Self::bind_inner_retaining(path, binding, authority, limits,
+            Arc::new(wall_nanoseconds), Some(peer), owner)
+    }
     fn with_wall_clock(
         path: &Path,
         binding: PartialBinding,
@@ -842,6 +853,19 @@ impl SourceAuthorizerServer {
         wall_clock: Clock,
         request_peer: Option<Arc<dyn HostSourceRequestPeer>>,
     ) -> Result<Self> {
+        let mut owner = None;
+        Self::bind_inner_retaining(path, binding, authority, limits, wall_clock,
+            request_peer, &mut owner)?;
+        let mut server = owner.take().unwrap();
+        server.request_only_drop = false;
+        Ok(server)
+    }
+    fn bind_inner_retaining(
+        path: &Path, binding: PartialBinding, authority: Arc<dyn HostSourceAuthority>,
+        limits: Limits, wall_clock: Clock,
+        request_peer: Option<Arc<dyn HostSourceRequestPeer>>, owner: &mut Option<Self>,
+    ) -> Result<()> {
+        ensure!(owner.is_none(), "host source construction slot already owns resources");
         limits.validate()?;
         binding.validate().map_err(|_| fault())?;
         let binding_digest = binding.digest().map_err(|_| fault())?;
@@ -914,12 +938,11 @@ impl SourceAuthorizerServer {
             wall_clock,
             last_wall: Mutex::new(None),
         });
-        let mut server = Self {
-            state: Arc::clone(&state),
-            workers: Vec::new(),
-            joiner: None,
-            settled: false,
-        };
+        *owner = Some(Self {
+            state: Arc::clone(&state), workers: Vec::with_capacity(limits.workers + 1),
+            joiner: None, settled: false, request_only_drop: true,
+        });
+        let server = owner.as_mut().unwrap();
         let (send, receive) = mpsc::sync_channel::<Connection>(limits.max_admitted);
         let receive = Arc::new(Mutex::new(receive));
         for _ in 0..limits.workers {
@@ -966,7 +989,7 @@ impl SourceAuthorizerServer {
                 drop(listener);
                 exit.completed = true;
             })?);
-        Ok(server)
+        Ok(())
     }
     pub(crate) fn directory(&self) -> &Path {
         &self.state.directory.path
@@ -1002,7 +1025,10 @@ impl SourceAuthorizerServer {
 }
 impl Drop for SourceAuthorizerServer {
     fn drop(&mut self) {
-        self.close();
+        // Destruction requests retirement only. Explicit off-App await_closed
+        // owns socket shutdown/locks, actual worker joins and settlement proof.
+        if self.request_only_drop { self.state.stopped.store(true, Ordering::Release); }
+        else { self.close(); }
     }
 }
 /// Endpoint-only actual settlement, not pathname cleanup, source transport,

@@ -24,7 +24,7 @@ fn pin(path: &str) -> remote_workspace::RuntimeFile {
         size_bytes: bytes.len() as u64,
     }
 }
-fn request() -> (SourceIssuerFixture, ManagedSourcePrepareRequest) {
+pub(crate) fn request() -> (SourceIssuerFixture, ManagedSourcePrepareRequest) {
     let mut fixture = SourceIssuerFixture::new(None);
     let owner = fixture.owner.as_mut().unwrap();
     let fence = ManagedLaunchFence {
@@ -137,6 +137,14 @@ fn request() -> (SourceIssuerFixture, ManagedSourcePrepareRequest) {
     };
     let request = ManagedSourcePrepareRequest::new(lease, fence, selection, inputs).unwrap();
     (fixture, request)
+}
+
+/// Startup-only fixture cleanup after the test actually reaps its successful
+/// child and drops control. This is no runtime/checkpoint settlement witness.
+pub(crate) fn retire_reaped_startup_fixture(
+    prepared: &mut PreparedManagedSource, journal: &mut Journal,
+) -> Result<()> {
+    prepared.retire(journal, None)
 }
 
 #[test]
@@ -831,7 +839,7 @@ fn actual_prepared_source_startup_authenticates_helper_and_retires_custody() {
         drop(handle);
         // Private fixture cleanup after actual reap. This deliberately does not
         // manufacture JoinedSourceShutdown or claim a successful execution.
-        prepared.retire(fixture.journal()).unwrap();
+        prepared.retire(fixture.journal(), None).unwrap();
         assert!(fixture
             .journal()
             .authorize_host_source(&host_token, &binding, now_ms().unwrap(),)

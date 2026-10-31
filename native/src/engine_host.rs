@@ -205,9 +205,28 @@ impl EngineSourceLease {
         self.check_current()?;
         result
     }
+
+    /// Off-App existing writer, anchored to the actual owner's held database.
+    /// Opening it creates neither a project nor a scheduler or source grant.
+    #[cfg(target_os = "linux")]
+    fn open_source_writer(&self) -> Result<Journal> {
+        self.check_current()?;
+        let journal = self.database.open_existing_writer(Duration::from_millis(100))?;
+        self.check_journal(&journal)?;
+        self.check_current()?;
+        Ok(journal)
+    }
 }
 
 impl EngineOwnership {
+    /// Off-App bootstrap. Captures actual held owner custody, never a path from
+    /// an agent request. The source worker opens its own bounded connection.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn source_journal_factory(&self, expected: &OwnerFence)
+        -> Result<crate::managed_source_app::SourceJournalFactory> {
+        let lease = self.source_lease(expected)?;
+        Ok(Box::new(move || lease.open_source_writer()))
+    }
     pub(crate) fn acquire(repo: &Path, mode: NativeAuthority) -> Result<Self> {
         Self::acquire_inner(repo, mode, None, None)
     }

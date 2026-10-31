@@ -78,8 +78,25 @@ process.on('SIGTERM',()=>{fs.writeFileSync('provider-shutdown','graceful');proce
 }
 
 async function connect(t, f) {
-  const socket = new WebSocket("ws://localhost/", { createConnection: () => net.connect(f.socket) });
-  await once(socket, "open");
+  // bind creates the pathname before listen makes it connectable. Retain the
+  // actual successful controller connection instead of treating stat as ready.
+  const deadline = Date.now() + 5000;
+  let socket;
+  for (;;) {
+    assert(f.child.exitCode === null && f.child.signalCode === null,
+      `Bridge exited before controller readiness: ${f.stderr()} ${f.stdout()}`);
+    const candidate = new WebSocket("ws://localhost/", {
+      createConnection: () => net.connect(f.socket),
+      handshakeTimeout: Math.max(1, deadline - Date.now()),
+    });
+    candidate.on("error", () => {});
+    try { await once(candidate, "open"); socket = candidate; break; }
+    catch (error) {
+      candidate.terminate();
+      if (!["ENOENT", "ECONNREFUSED"].includes(error.code) || Date.now() >= deadline) throw error;
+      await delay(10);
+    }
+  }
   const messages = [], waiters = new Set(); let next = 0;
   socket.on("message", (data) => { messages.push(JSON.parse(data.toString())); for (const wake of [...waiters]) wake(); });
   function waitFor(predicate, timeout = 5000) {

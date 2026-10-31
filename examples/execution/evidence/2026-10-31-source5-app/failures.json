@@ -1,0 +1,201 @@
+{
+  "formatVersion": 1,
+  "kind": "source5-app-original-failed-attempts",
+  "allOriginalReportsRemainFailed": true,
+  "cases": [
+    {
+      "caseId": "ae665693-79bc-4345-a490-22231833ce34",
+      "family": "rudder-source5-app-canary-20261031",
+      "classification": "pre-admission-guard-refusal",
+      "detail": "No producer or credential creation was attempted; this report establishes no native backend outcome.",
+      "originalArtifactSha256": "91bec89df66e1052f60b6253eb4409a1deadb522347e74fbf4c6a702ddfb3429",
+      "report": {
+        "kind": "source5-physical-canary",
+        "nonce": "ae665693-79bc-4345-a490-22231833ce34",
+        "digest": "sha256:75cf6e51308e64ad7b4537cc4dd06e71c6ef9333c272c60866206131cf39ebe7",
+        "nativeSha256": "4c1984d3ce610339fe2a6539e9acd2855b650b752ffb2c62bc838993a59ded1a",
+        "libtestSha256": "26365ca4fafdccf64d20d721cadad202fd36b5388930be0fc2fe833437bb9bcd",
+        "sourceEnvelopeSha256": "94f1607ba4b8b685e8ec56fd64b2fda58d075cf87ffaa6eace764673ae2b71b1",
+        "revision": "cf6324cce9eb61f7a502c4722ea6b343a9d3c90a",
+        "qualified": false,
+        "errorCode": "ERR_ASSERTION",
+        "creationAttempted": false,
+        "authCreationAttempted": false,
+        "cleanupVerified": true,
+        "independentAbsence": true,
+        "syntheticCredentialRemoved": true,
+        "independentCredentialAbsence": true,
+        "elapsedMs": 3467,
+        "providerCalls": 7,
+        "utc": "2026-10-31T16:33:40.341Z"
+      },
+      "guestProofPresent": false
+    },
+    {
+      "caseId": "86d932c4-e69c-4862-9987-8bf6e57d27a5",
+      "family": "rudder-source5-app-canary-20261031",
+      "classification": "actual-app-lifecycle-timeout",
+      "detail": "Actual native child failed with an App lifecycle timeout. Subsequent diagnosis identified the activation handoff race; this first panic did not include the later diagnostic state.",
+      "originalArtifactSha256": "4004ba66194db0af46da255483eaea465df92407d386ac97939fa408029f31ab",
+      "report": {
+        "kind": "source5-physical-canary",
+        "nonce": "86d932c4-e69c-4862-9987-8bf6e57d27a5",
+        "digest": "sha256:75cf6e51308e64ad7b4537cc4dd06e71c6ef9333c272c60866206131cf39ebe7",
+        "nativeSha256": "4c1984d3ce610339fe2a6539e9acd2855b650b752ffb2c62bc838993a59ded1a",
+        "libtestSha256": "26365ca4fafdccf64d20d721cadad202fd36b5388930be0fc2fe833437bb9bcd",
+        "sourceEnvelopeSha256": "94f1607ba4b8b685e8ec56fd64b2fda58d075cf87ffaa6eace764673ae2b71b1",
+        "revision": "cf6324cce9eb61f7a502c4722ea6b343a9d3c90a",
+        "qualified": false,
+        "errorCode": "ERR_ASSERTION",
+        "creationAttempted": true,
+        "authCreationAttempted": true,
+        "cleanupVerified": true,
+        "independentAbsence": true,
+        "syntheticCredentialRemoved": true,
+        "independentCredentialAbsence": true,
+        "exactOwnedDestroyIssued": true,
+        "elapsedMs": 84170,
+        "providerCalls": 57,
+        "utc": "2026-10-31T16:36:40.681Z"
+      },
+      "guestProofPresent": true,
+      "guestProof": {
+        "formatVersion": 1,
+        "kind": "source5-physical-canary",
+        "nonce": "86d932c4-e69c-4862-9987-8bf6e57d27a5",
+        "digest": "sha256:75cf6e51308e64ad7b4537cc4dd06e71c6ef9333c272c60866206131cf39ebe7",
+        "nativeSha256": "4c1984d3ce610339fe2a6539e9acd2855b650b752ffb2c62bc838993a59ded1a",
+        "libtestSha256": "26365ca4fafdccf64d20d721cadad202fd36b5388930be0fc2fe833437bb9bcd",
+        "sourceEnvelopeSha256": "94f1607ba4b8b685e8ec56fd64b2fda58d075cf87ffaa6eace764673ae2b71b1",
+        "revision": "cf6324cce9eb61f7a502c4722ea6b343a9d3c90a",
+        "test": "managed_launch::source_prepare::tests::runtime5_source_qualification::actual_https_source5_owned_stop_checkpoint_join_and_settlement",
+        "qualified": false,
+        "productionRootQualified": false,
+        "rawLiveGrantQualified": false,
+        "modelCalls": false,
+        "supervisorLoaded": false,
+        "admittedAfterResolvedDigest": true,
+        "child": {
+          "code": 101,
+          "signal": null,
+          "failure": null,
+          "settled": true
+        },
+        "utc": "2026-10-31T16:36:31.675Z",
+        "originalArtifactSha256": "f37210f119e72e285f993bca841736d1838072e84c99247929f9bc332968ba22",
+        "stdout": {
+          "bytes": 428,
+          "sha256": "e9cdb62501b0cf428b0ac1c67b55c8878b00623b67f5ee8581776d5b4899b019",
+          "selectedLines": [
+            "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1140 filtered out; finished in 33.68s"
+          ]
+        },
+        "stderr": {
+          "bytes": 333,
+          "sha256": "ce9285bcdcfd2b85d079ea532ee14863ea3bb44c22d93a7cb18d5f9200ebb6c1",
+          "selectedLines": [
+            "physical App source lifecycle timed out"
+          ]
+        }
+      }
+    },
+    {
+      "caseId": "8deb5be9-94a7-4302-b8b6-d79b8b4aec19",
+      "family": "rudder-source5-app-diagnostic-canary-20261031",
+      "classification": "invalid-proof-read-backend-outcome-unestablished",
+      "detail": "OWNED_EXEC_INVALID_JSON is a failed proof read. No valid guest proof was saved, so this attempt does not establish backend success or failure.",
+      "originalArtifactSha256": "6746b4d61bba36d9be04a1f33fff20bb7a11a50c1af43011db4d3009a20fb824",
+      "report": {
+        "kind": "source5-physical-canary",
+        "nonce": "8deb5be9-94a7-4302-b8b6-d79b8b4aec19",
+        "digest": "sha256:369ef22ddb9e90b48b7dba6c2434ee8dcc4fa9f53da86226b23159335317ae3c",
+        "nativeSha256": "4c1984d3ce610339fe2a6539e9acd2855b650b752ffb2c62bc838993a59ded1a",
+        "libtestSha256": "41e87a5d6c2fbbc9e5d0cb5c4c3b927e1fe454d90595091da75f203a9ff1328f",
+        "sourceEnvelopeSha256": "cbfd371c28ab583921e8d878eaaf6bd691cc4d9795801ded8e47b653df2a0fee",
+        "revision": "cf6324cce9eb61f7a502c4722ea6b343a9d3c90a",
+        "qualified": false,
+        "errorCode": "OWNED_EXEC_INVALID_JSON",
+        "creationAttempted": true,
+        "authCreationAttempted": true,
+        "cleanupVerified": true,
+        "independentAbsence": true,
+        "syntheticCredentialRemoved": true,
+        "independentCredentialAbsence": true,
+        "exactOwnedDestroyIssued": true,
+        "elapsedMs": 61372,
+        "providerCalls": 31,
+        "utc": "2026-10-31T16:41:31.975Z"
+      },
+      "guestProofPresent": false
+    },
+    {
+      "caseId": "455d2b6d-40bb-4b41-a2e4-a74c9147d6c5",
+      "family": "rudder-source5-app-diagnostic-canary-20261031",
+      "classification": "actual-app-activation-failure-before-backend-ready",
+      "detail": "The valid guest failure records activated=false and backend_ready=false with Orphaned/recovery state. It remains a failed attempt.",
+      "originalArtifactSha256": "2d24d8672ba2426346ca41c8af00c50afd1c1981e6a5648b18ba89f3747232ae",
+      "report": {
+        "kind": "source5-physical-canary",
+        "nonce": "455d2b6d-40bb-4b41-a2e4-a74c9147d6c5",
+        "digest": "sha256:369ef22ddb9e90b48b7dba6c2434ee8dcc4fa9f53da86226b23159335317ae3c",
+        "nativeSha256": "4c1984d3ce610339fe2a6539e9acd2855b650b752ffb2c62bc838993a59ded1a",
+        "libtestSha256": "41e87a5d6c2fbbc9e5d0cb5c4c3b927e1fe454d90595091da75f203a9ff1328f",
+        "sourceEnvelopeSha256": "cbfd371c28ab583921e8d878eaaf6bd691cc4d9795801ded8e47b653df2a0fee",
+        "revision": "cf6324cce9eb61f7a502c4722ea6b343a9d3c90a",
+        "qualified": false,
+        "errorCode": "ERR_ASSERTION",
+        "creationAttempted": true,
+        "authCreationAttempted": true,
+        "cleanupVerified": true,
+        "independentAbsence": true,
+        "syntheticCredentialRemoved": true,
+        "independentCredentialAbsence": true,
+        "exactOwnedDestroyIssued": true,
+        "elapsedMs": 69801,
+        "providerCalls": 57,
+        "utc": "2026-10-31T16:44:27.134Z",
+        "proofReadFailures": []
+      },
+      "guestProofPresent": true,
+      "guestProof": {
+        "formatVersion": 1,
+        "kind": "source5-physical-canary",
+        "nonce": "455d2b6d-40bb-4b41-a2e4-a74c9147d6c5",
+        "digest": "sha256:369ef22ddb9e90b48b7dba6c2434ee8dcc4fa9f53da86226b23159335317ae3c",
+        "nativeSha256": "4c1984d3ce610339fe2a6539e9acd2855b650b752ffb2c62bc838993a59ded1a",
+        "libtestSha256": "41e87a5d6c2fbbc9e5d0cb5c4c3b927e1fe454d90595091da75f203a9ff1328f",
+        "sourceEnvelopeSha256": "cbfd371c28ab583921e8d878eaaf6bd691cc4d9795801ded8e47b653df2a0fee",
+        "revision": "cf6324cce9eb61f7a502c4722ea6b343a9d3c90a",
+        "test": "managed_launch::source_prepare::tests::runtime5_source_qualification::actual_https_source5_owned_stop_checkpoint_join_and_settlement",
+        "qualified": false,
+        "productionRootQualified": false,
+        "rawLiveGrantQualified": false,
+        "modelCalls": false,
+        "supervisorLoaded": false,
+        "admittedAfterResolvedDigest": true,
+        "child": {
+          "code": 101,
+          "signal": null,
+          "failure": null,
+          "settled": true
+        },
+        "utc": "2026-10-31T16:44:20.404Z",
+        "originalArtifactSha256": "2816c44a25ce7f70ca71d00f10d6c5ae10124fbb1eb4fa28f7100b7726480530",
+        "stdout": {
+          "bytes": 428,
+          "sha256": "2dfa2fb8d6744408f2f84f2570247d3543f6d62ed5ae1e0c6d6a8f558d2270ad",
+          "selectedLines": [
+            "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1140 filtered out; finished in 33.82s"
+          ]
+        },
+        "stderr": {
+          "bytes": 772,
+          "sha256": "0c29899ebbfcbf8b04973485f5b816af7615599126cdc529af8b71e9ec044ad5",
+          "selectedLines": [
+            "physical App source lifecycle timed out: status=Some(Orphaned), detail=Some(\"source outcome uncertain; ownership retained for recovery\"), terminal=false, source={\"activated\":false,\"backend_ready\":false,\"cancelled\":false,\"checkpoint\":false,\"entry\":true,\"guest_settled\":false,\"joining\":false,\"live\":true,\"provisional\":false,\"recovery\":true,\"recovery_owner\":false,\"stop\":false,\"successful_exit\":false,\"worker_finished_hint\":false,\"worker_join_pending\":false,\"worker_settled\":false}"
+          ]
+        }
+      }
+    }
+  ]
+}

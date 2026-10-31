@@ -1,0 +1,274 @@
+{
+  "source": {
+    "formatVersion": 1,
+    "createdAt": "2026-10-31T04:07:21.760868+00:00",
+    "version": "4.0.0-alpha.14",
+    "packageVersion": "4.0.0-alpha.13",
+    "revision": "96c7b25db02fd559052ad92c072da98c2621ae0d",
+    "sourceKind": "candidate",
+    "archiveMembers": 1748,
+    "sourceFiles": 1502,
+    "sourceBytes": 51214821,
+    "archiveSha256": "c949e5fd9bd5ba4e13e40f6f6fec1b36ef1fb15f0c94c8aeb234686284884ff4",
+    "sourceEnvelopeSha256": "9a564dd0cce47a35183cbe565bfcc87767fefb433955d37ffc7ab79e43aa7bf4",
+    "sourceEnvelopeEncoding": "sha256 of sorted compact JSON path-to-sha256 map",
+    "configuredSecretValuesScanned": 2,
+    "matches": 0
+  },
+  "build": {
+    "revision": "96c7b25db02fd559052ad92c072da98c2621ae0d",
+    "version": "4.0.0-alpha.14",
+    "packageVersion": "4.0.0-alpha.13",
+    "sourceKind": "candidate",
+    "sourceEnvelopeSha256": "9a564dd0cce47a35183cbe565bfcc87767fefb433955d37ffc7ab79e43aa7bf4",
+    "steps": [
+      {
+        "name": "root-deps",
+        "command": [
+          "npm",
+          "ci",
+          "--ignore-scripts",
+          "--prefer-offline",
+          "--no-audit",
+          "--no-fund"
+        ],
+        "minimumFreeBytes": 6121963520,
+        "guardTerminated": false,
+        "startedAt": "2026-10-31T04:07:24.911097+00:00",
+        "exitCode": 0,
+        "finishedAt": "2026-10-31T04:07:36.917699+00:00",
+        "log": "candidate-root-deps.log",
+        "logSha256": "814dfa4793722e4da8a2a3a38ca599c757a05914717cc8e223fdeb8eb68e251d"
+      },
+      {
+        "name": "cloud-deps",
+        "command": [
+          "npm",
+          "ci",
+          "--ignore-scripts",
+          "--prefer-offline",
+          "--no-audit",
+          "--no-fund"
+        ],
+        "minimumFreeBytes": 5886676992,
+        "guardTerminated": false,
+        "startedAt": "2026-10-31T04:07:37.005046+00:00",
+        "exitCode": 0,
+        "finishedAt": "2026-10-31T04:07:42.008225+00:00",
+        "log": "candidate-cloud-deps.log",
+        "logSha256": "faaffdb29fcd925ad52432f05b9d8b6dd94223a121c8854dc12ae7c56fb284a1"
+      },
+      {
+        "name": "release-binaries",
+        "command": [
+          "cargo",
+          "build",
+          "--release",
+          "--workspace",
+          "--locked",
+          "--features",
+          "rudder-vcs-bridge/cli",
+          "--bin",
+          "rudder-native",
+          "--bin",
+          "rudder-jj",
+          "--bin",
+          "rudder-connected-network-qualifier"
+        ],
+        "minimumFreeBytes": 5830549504,
+        "guardTerminated": false,
+        "startedAt": "2026-10-31T04:07:42.101625+00:00",
+        "exitCode": 0,
+        "finishedAt": "2026-10-31T04:16:18.392043+00:00",
+        "log": "candidate-release-binaries.log",
+        "logSha256": "1eeccd4a2107b25e4452cb9a7536826d23af9759bce605ad1bffc755a6369113"
+      },
+      {
+        "name": "product-build",
+        "command": [
+          "npm",
+          "run",
+          "build"
+        ],
+        "minimumFreeBytes": 5912899584,
+        "guardTerminated": false,
+        "startedAt": "2026-10-31T04:16:18.543176+00:00",
+        "exitCode": 0,
+        "finishedAt": "2026-10-31T04:16:29.552646+00:00",
+        "log": "candidate-product-build.log",
+        "logSha256": "46fe4f7faedfe95032fbc01ca1dff661a1b042883ee32e6f9b217a794cc5b335"
+      },
+      {
+        "name": "cloud-build",
+        "command": [
+          "npm",
+          "run",
+          "build"
+        ],
+        "minimumFreeBytes": 5854785536,
+        "guardTerminated": false,
+        "startedAt": "2026-10-31T04:16:29.688462+00:00",
+        "exitCode": 0,
+        "finishedAt": "2026-10-31T04:16:37.691694+00:00",
+        "log": "candidate-cloud-build.log",
+        "logSha256": "2cfc37097f4576d5e7a4f98ca1acfd34b6e64ec4258d6ecb87df02ce30814a87"
+      }
+    ],
+    "startedAt": "2026-10-31T04:07:24.910969+00:00",
+    "sourceUnchanged": true,
+    "ok": true,
+    "artifacts": {
+      "rudder-native": {
+        "sha256": "970dee2b5a1bc130937d24d4911a84a018420fe899d50cd5ff65d008ace14442",
+        "size": 26742120
+      },
+      "rudder-jj": {
+        "sha256": "930fb28df17d19ce3174218d3dd01a96b15dc48ecfdc01657e7a2a6b7037f9b2",
+        "size": 30911464
+      },
+      "rudder-connected-network-qualifier": {
+        "sha256": "a2c3fa2060c197c08dfcbd707ecc706c6971cf44de3e88e778b3f8f39a5447a6",
+        "size": 1206264
+      }
+    },
+    "finishedAt": "2026-10-31T04:16:38.043297+00:00"
+  },
+  "controllerPreparation": {
+    "formatVersion": 1,
+    "kind": "connected-controller-preparation",
+    "createdUtc": "2026-10-31T03:52:04.634703+00:00",
+    "status": "prepared-not-run",
+    "providerCalls": 0,
+    "dnsCalls": 0,
+    "productEdits": false,
+    "cargoCommands": 0,
+    "parentWorkerImage": "registry.fly.io/rudder-workers-exla:4.0.0-alpha.13@sha256:17247eba2f2293bf85b66ccdf78d3884a378a3ce8c734638350da44b41cc1fd7",
+    "proposedVersion": "4.0.0-alpha.14",
+    "workerVersion": "4.0.0-alpha.13",
+    "sourceInputsPending": "Root supplies immutable full commit/envelope, release ELF hash and derived image tag/digest",
+    "files": {
+      "qualify-connected-network.mjs": {
+        "sha256": "878c4cf3642de19337bf9dfaa7dcf560bedac36fa373a1baf24e53c1a632c40b",
+        "size": 49872
+      },
+      "selftest.mjs": {
+        "sha256": "cac5b030113cfc4618d65645baea7c9c7a40445b4e25fe1398445f9a423c92c9",
+        "size": 33003
+      },
+      "README.md": {
+        "sha256": "f37efd19eba493305bf57bf1131c609250d75ea9c65d86b4ff4b3f485d91cc2c",
+        "size": 6486
+      },
+      "selftest-final.stdout.json": {
+        "sha256": "d0c97604184495067f9694bfac5acf8da1c2d620b92b9e23a99fa42501d35a83",
+        "size": 2072
+      },
+      "selftest-final.stderr.private": {
+        "sha256": "ae689d2e6b6d9610608eceb22a540d4fb1c8237d0a8f326af44fa89bffd50fda",
+        "size": 173
+      }
+    },
+    "tests": {
+      "actualSerializedProcStatusPassed": true,
+      "actualSerializedOwnNsfsWitnesses": 3,
+      "realTabNewlineFixtures": 4,
+      "publicDnsRejections": 14,
+      "proofMismatchRejections": 23,
+      "serializedPreloadMocks": 17,
+      "serializedRootProbes": 6,
+      "ownershipMismatchRejections": 16,
+      "boundedPrivateDiagnosticScenarios": 10,
+      "diagnosticsFailureStillRequiresCleanup": 3,
+      "mockedFullControllerScenarios": 6,
+      "preexistingCollisionNeverAdoptedOrDestroyed": true
+    },
+    "limits": {
+      "controllerSeconds": 540,
+      "mainWorkSeconds": 400,
+      "independentVmWorkloadFuseSeconds": 420,
+      "childSeconds": 55,
+      "proofBytes": 1048576,
+      "stderrPrivateFailureBytes": 8192
+    },
+    "limitations": [
+      "No actual Fly or public HTTPS qualification during preparation.",
+      "Script/file/provenance assertions and mocks are not live process or network authority.",
+      "Rust permits answer subsets inside sealed pins; rejects every unlisted/private/mixed answer and never expands pins.",
+      "A workload fuse cannot claim successful resource absence when provider/controller cleanup fails.",
+      "No managed/default connected execution or model-provider account inference is qualified."
+    ],
+    "preparationHarnessCorrection": "vm.SourceTextModule.status can be evaluated while top-level-await is pending; selftest checks the actual evaluation Promise remains unsettled."
+  },
+  "freshHostDenyFix": {
+    "formatVersion": 1,
+    "kind": "connected-fresh-host-deny-lifetime-fix",
+    "createdUtc": "2026-10-31T04:07:31.330937+00:00",
+    "scope": "Only relay.rs +connected transport documentation; no source changes after the fixed focused tests",
+    "sourceInputs": {
+      "engine/src/execution/network/connected/relay.rs": {
+        "sha256": "be6b1c8b7c5bb5c2d9fdbe9a28e9bde634132bf68fc4ff0ad9faaed7f75f3e73",
+        "size": 55329
+      },
+      "docs/architecture/connected-network-transport.md": {
+        "sha256": "827dec526009a214a098de54b965fe7794f60c932a5c79420de3acdecc807eff",
+        "size": 9377
+      }
+    },
+    "problem": "Periodic authority refresh discarded the fresh host/NAT deny set for already-open tunnels.",
+    "change": "Every successful actual grant callback revalidates all at-most32 sealed origin pins against fresh host inventory. Any denied pin cancels the whole proxy and actual sockets before renewing authority freshness.",
+    "negativeControl": {
+      "exitCode": 101,
+      "expectedFailure": true,
+      "method": "Temporarily replaced only new grant validation branch with previous Ok(host) return while retaining the actual socket regression. Exact fixed bytes restored automatically before positive checks. Not a rebuild of the historical3987648 source.",
+      "regression": "refreshed_host_deny_closes_open_relay_before_renewal_and_retains_worker_until_settlement",
+      "message": "open tunnel forwarded after its sealed pin became host-denied",
+      "actualFixtureSettledBeforeAssertion": true
+    },
+    "positive": {
+      "connectedUnits": 17,
+      "connectedIntegration": 5,
+      "failed": 0,
+      "boundedPrivateSocketRegression": true,
+      "heldWorkerTimeoutYieldsNoSettlement": true,
+      "independentStorageReview": true
+    },
+    "commands": {
+      "envelope": {
+        "CARGO_INCREMENTAL": "0",
+        "CARGO_BUILD_JOBS": "2",
+        "TMPDIR": "/workspace/rudder-tmp"
+      },
+      "cargo": "cargo test --workspace --locked --features rudder-vcs-bridge/cli",
+      "units": "--lib execution::network::connected -- --test-threads=2",
+      "integration": "--test connected_network -- --test-threads=2",
+      "diskFloorBytes": 3489660928,
+      "guardsTriggered": false
+    },
+    "logs": {
+      "rudder-alpha14-connected-host-deny-negative.log": {
+        "sha256": "689cc5ca5d4806353e5f55ef9f3c3b1e22f7f26a89927b5d8bfbc4ea99145cda",
+        "size": 2609
+      },
+      "rudder-alpha14-connected-host-deny-fixed-units.log": {
+        "sha256": "9f0b8d926543738dd461ff9e7003dcd2538a0a5bf73ba290317b06c54cd96d36",
+        "size": 4206
+      },
+      "rudder-alpha14-connected-host-deny-fixed-integration.log": {
+        "sha256": "a61e6fec9122135110e13b21247af2db6b1b46b588935d4a345d49494331b9d1",
+        "size": 724
+      }
+    },
+    "handoff": "Shared target returned to Root after exact terminal0; source frozen for candidate2 rebuild.",
+    "limits": [
+      "No Fly/provider/DNS/public HTTPS calls during this fix or test.",
+      "Regression uses real local TCP relay and actual owned worker/socket/permit, not a public upstream.",
+      "All-pin cancellation is intentionally conservative, including an unused fallback pin.",
+      "Historical3987648 archive/stopped-build records and pending controller scaffold remain unchanged; no image or release claim."
+    ]
+  },
+  "publishedControllerNormalization": {
+    "executedSha256": "878c4cf3642de19337bf9dfaa7dcf560bedac36fa373a1baf24e53c1a632c40b",
+    "publishedSha256": "2f8a95a3d09e91853607939b2d2cca6ed9ae3191435222baf16d93c395e062ea",
+    "reproduceExecutedBytes": "Append exactly one LF byte to the published controller. Only its trailing empty line was removed."
+  }
+}

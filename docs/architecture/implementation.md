@@ -109,14 +109,36 @@ The connected transport transfers an actual guest loopback listener to a host
 supervisor, validates its namespace and process witnesses, and dials only sealed
 public IPv4 pins. DNS workers, accepted connections, buffers and lifetimes are
 bounded. Settlement waits for actual owned workers and sockets. The standalone
-no-key TLS qualifier still needs a source-bound disposable Fly VM run; transport
-tests are not provider inference or managed launch qualification.
+no-key TLS qualifier has a source-bound disposable Fly VM result below;
+transport tests do not establish provider inference or managed launch qualification.
 
-The coordinated alpha.14 Linux library/dashboard run passes 1,139 tests with 12
-explicitly ignored fixtures. Focused checkpoint, object-retention, legacy delta,
-connected transport, Cloud codec and client tests also pass. Final HTTP, fresh
-production binaries, native RPC, full JavaScript/TUI, Mac CI, npm publication
-and actual Fly delivery remain separate gates.
+Candidate `96c7b25` passes the fresh production build and native checkpoint RPC,
+737 JavaScript tests with no failures, and all 59 TUI journeys. Two worker cases
+initially skipped for missing archive dependencies pass separately, leaving nine
+optional skips. The earlier coordinated Linux library/dashboard run passes
+1,139 tests with 12 explicitly ignored fixtures; the later network correction
+passes 17 units and five integration cases, including a failing old-code control.
+This is composed coverage, not one final successful full-workspace Rust command.
+See [local evidence](../../examples/execution/evidence/2026-10-31-alpha14-foundations/README.md).
+
+At `2026-10-31T04:18:26Z`, the corrected candidate passes the actual disposable
+Fly connected transport case: separate USER/NET, socket-namespace ioctl,
+loopback-only networking, zero capabilities/NNP, verified TLS1.3 HEAD with
+HTTP200, one DNS job/upstream and actual worker/process/socket settlement.
+The canary is destroyed and independently absent. Its derived image uses stock
+alpha.13 plus the exact candidate release qualifier; this remains distinct from
+an alpha.14 tag/deployment or provider inference. See
+[physical transport evidence](../../examples/execution/evidence/2026-10-31-alpha14-connected/README.md).
+
+The immutable archive test setup needed the shared Cargo target and SQLite/PTY
+native dependencies. Failed/stopped setup runs remain private; final checks bind
+the unchanged source and fresh binaries. Mac CI, both npm publications, tagged
+Fly images/control deployment and the new real S3 checkpoint DATA smoke remain
+the alpha.14 delivery gates. Host-only source authorization and source-grace
+transport are prepared as private patches, uncompiled/unapplied until after the
+alpha.14 source boundary. Managed defaults, private-jj acceptance, production
+build-cache adoption, fleet/migration and the remaining command cleanup remain
+full v4 work.
 
 The previous Cloud checkpoint, alpha.12, deployed as release 163 from
 `f609730d27ee7d02b1886eb343477d1c09aa7255`; the canonical app, health,

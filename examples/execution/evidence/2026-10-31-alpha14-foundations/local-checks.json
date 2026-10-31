@@ -1,0 +1,899 @@
+{
+  "formatVersion": 1,
+  "verifiedAt": "2026-10-31T04:33:40.934793+00:00",
+  "sourceRevision": "96c7b25db02fd559052ad92c072da98c2621ae0d",
+  "sourceEnvelopeSha256": "9a564dd0cce47a35183cbe565bfcc87767fefb433955d37ffc7ab79e43aa7bf4",
+  "candidatePackageVersion": "4.0.0-alpha.13",
+  "build": {
+    "revision": "96c7b25db02fd559052ad92c072da98c2621ae0d",
+    "version": "4.0.0-alpha.14",
+    "packageVersion": "4.0.0-alpha.13",
+    "sourceKind": "candidate",
+    "sourceEnvelopeSha256": "9a564dd0cce47a35183cbe565bfcc87767fefb433955d37ffc7ab79e43aa7bf4",
+    "steps": [
+      {
+        "name": "root-deps",
+        "command": [
+          "npm",
+          "ci",
+          "--ignore-scripts",
+          "--prefer-offline",
+          "--no-audit",
+          "--no-fund"
+        ],
+        "minimumFreeBytes": 6121963520,
+        "guardTerminated": false,
+        "startedAt": "2026-10-31T04:07:24.911097+00:00",
+        "exitCode": 0,
+        "finishedAt": "2026-10-31T04:07:36.917699+00:00",
+        "log": "candidate-root-deps.log",
+        "logSha256": "814dfa4793722e4da8a2a3a38ca599c757a05914717cc8e223fdeb8eb68e251d"
+      },
+      {
+        "name": "cloud-deps",
+        "command": [
+          "npm",
+          "ci",
+          "--ignore-scripts",
+          "--prefer-offline",
+          "--no-audit",
+          "--no-fund"
+        ],
+        "minimumFreeBytes": 5886676992,
+        "guardTerminated": false,
+        "startedAt": "2026-10-31T04:07:37.005046+00:00",
+        "exitCode": 0,
+        "finishedAt": "2026-10-31T04:07:42.008225+00:00",
+        "log": "candidate-cloud-deps.log",
+        "logSha256": "faaffdb29fcd925ad52432f05b9d8b6dd94223a121c8854dc12ae7c56fb284a1"
+      },
+      {
+        "name": "release-binaries",
+        "command": [
+          "cargo",
+          "build",
+          "--release",
+          "--workspace",
+          "--locked",
+          "--features",
+          "rudder-vcs-bridge/cli",
+          "--bin",
+          "rudder-native",
+          "--bin",
+          "rudder-jj",
+          "--bin",
+          "rudder-connected-network-qualifier"
+        ],
+        "minimumFreeBytes": 5830549504,
+        "guardTerminated": false,
+        "startedAt": "2026-10-31T04:07:42.101625+00:00",
+        "exitCode": 0,
+        "finishedAt": "2026-10-31T04:16:18.392043+00:00",
+        "log": "candidate-release-binaries.log",
+        "logSha256": "1eeccd4a2107b25e4452cb9a7536826d23af9759bce605ad1bffc755a6369113"
+      },
+      {
+        "name": "product-build",
+        "command": [
+          "npm",
+          "run",
+          "build"
+        ],
+        "minimumFreeBytes": 5912899584,
+        "guardTerminated": false,
+        "startedAt": "2026-10-31T04:16:18.543176+00:00",
+        "exitCode": 0,
+        "finishedAt": "2026-10-31T04:16:29.552646+00:00",
+        "log": "candidate-product-build.log",
+        "logSha256": "46fe4f7faedfe95032fbc01ca1dff661a1b042883ee32e6f9b217a794cc5b335"
+      },
+      {
+        "name": "cloud-build",
+        "command": [
+          "npm",
+          "run",
+          "build"
+        ],
+        "minimumFreeBytes": 5854785536,
+        "guardTerminated": false,
+        "startedAt": "2026-10-31T04:16:29.688462+00:00",
+        "exitCode": 0,
+        "finishedAt": "2026-10-31T04:16:37.691694+00:00",
+        "log": "candidate-cloud-build.log",
+        "logSha256": "2cfc37097f4576d5e7a4f98ca1acfd34b6e64ec4258d6ecb87df02ce30814a87"
+      }
+    ],
+    "startedAt": "2026-10-31T04:07:24.910969+00:00",
+    "sourceUnchanged": true,
+    "ok": true,
+    "artifacts": {
+      "rudder-native": {
+        "sha256": "970dee2b5a1bc130937d24d4911a84a018420fe899d50cd5ff65d008ace14442",
+        "size": 26742120
+      },
+      "rudder-jj": {
+        "sha256": "930fb28df17d19ce3174218d3dd01a96b15dc48ecfdc01657e7a2a6b7037f9b2",
+        "size": 30911464
+      },
+      "rudder-connected-network-qualifier": {
+        "sha256": "a2c3fa2060c197c08dfcbd707ecc706c6971cf44de3e88e778b3f8f39a5447a6",
+        "size": 1206264
+      }
+    },
+    "finishedAt": "2026-10-31T04:16:38.043297+00:00"
+  },
+  "typescriptJavascriptTerminal": {
+    "formatVersion": 1,
+    "revision": "96c7b25db02fd559052ad92c072da98c2621ae0d",
+    "sourceEnvelopeSha256": "9a564dd0cce47a35183cbe565bfcc87767fefb433955d37ffc7ab79e43aa7bf4",
+    "native": {
+      "sha256": "970dee2b5a1bc130937d24d4911a84a018420fe899d50cd5ff65d008ace14442",
+      "size": 26742120
+    },
+    "steps": [
+      {
+        "name": "typescript",
+        "command": [
+          "npm",
+          "run",
+          "check"
+        ],
+        "startedAt": "2026-10-31T04:29:51.675664+00:00",
+        "minimumFreeBytes": 5666799616,
+        "guardTerminated": false,
+        "exitCode": 0,
+        "finishedAt": "2026-10-31T04:29:58.681303+00:00",
+        "durationSeconds": 7.006,
+        "counts": {},
+        "log": "candidate-typescript-checks.log",
+        "logSha256": "732b3c4092d95df6b6f94c0882f1ef15b2283e145319921aa489fe27914e8e73"
+      },
+      {
+        "name": "javascript",
+        "command": [
+          "npm",
+          "test"
+        ],
+        "startedAt": "2026-10-31T04:29:58.872498+00:00",
+        "minimumFreeBytes": 5586784256,
+        "guardTerminated": false,
+        "exitCode": 0,
+        "finishedAt": "2026-10-31T04:32:02.946551+00:00",
+        "durationSeconds": 124.075,
+        "counts": {
+          "tests": 748,
+          "pass": 737,
+          "fail": 0,
+          "skipped": 11,
+          "cancelled": 0
+        },
+        "log": "candidate-javascript-checks.log",
+        "logSha256": "b11011961a3bf2a3ea08837e7029440785ee60378db105bf0f22e212236338d9"
+      },
+      {
+        "name": "terminal",
+        "command": [
+          "npm",
+          "run",
+          "test:tui"
+        ],
+        "startedAt": "2026-10-31T04:32:03.174094+00:00",
+        "minimumFreeBytes": 5579976704,
+        "guardTerminated": false,
+        "exitCode": 0,
+        "finishedAt": "2026-10-31T04:33:11.207872+00:00",
+        "durationSeconds": 68.034,
+        "counts": {
+          "tests": 59,
+          "pass": 59,
+          "fail": 0,
+          "skipped": 0,
+          "cancelled": 0
+        },
+        "log": "candidate-terminal-checks.log",
+        "logSha256": "df129105eadad9122a0a16ed43f8c3012c53b83cd222939aadcb67640bc72bc0"
+      }
+    ],
+    "sourceUnchanged": true,
+    "ok": true,
+    "finishedAt": "2026-10-31T04:33:11.511639+00:00"
+  },
+  "freshProductionNativeCheckpointRpc": {
+    "revision": "96c7b25db02fd559052ad92c072da98c2621ae0d",
+    "sourceEnvelopeSha256": "9a564dd0cce47a35183cbe565bfcc87767fefb433955d37ffc7ab79e43aa7bf4",
+    "command": [
+      "cargo",
+      "test",
+      "--workspace",
+      "--locked",
+      "--features",
+      "rudder-vcs-bridge/cli",
+      "--test",
+      "partial_checkpoint",
+      "actual_native_rpc_clones_opaque_checkpoint_receipt_and_settles_eof",
+      "--",
+      "--ignored",
+      "--exact",
+      "--nocapture"
+    ],
+    "native": {
+      "sha256": "970dee2b5a1bc130937d24d4911a84a018420fe899d50cd5ff65d008ace14442",
+      "size": 26742120
+    },
+    "startedAt": "2026-10-31T04:16:53.180639+00:00",
+    "minimumFreeBytes": 5437661184,
+    "guardTerminated": false,
+    "exitCode": 0,
+    "finishedAt": "2026-10-31T04:17:55.211351+00:00",
+    "logSha256": "3413815e00c7967ca669a55a52d987936a1b66c14ff54d55d583a4fd1c78c3e4",
+    "sourceUnchanged": true
+  },
+  "rustLibraryDashboardBaseline": {
+    "sourceRevision": "3987648e23c2aac0d86313aacc2a39a6c6a4c1f7",
+    "passed": 1139,
+    "ignored": 12,
+    "engine": 93,
+    "nativeLibrary": 29,
+    "nativeDashboard": 1017,
+    "log": {
+      "sha256": "c2c71673b8275b50787579aabe059407d56fa0f1530b757ab4d4f9bcf0fed440",
+      "bytes": 120697
+    },
+    "coverage": "one successful library/dashboard command before the independently validated host-deny fix; not one final full-workspace run"
+  },
+  "correctedConnected": {
+    "formatVersion": 1,
+    "kind": "connected-fresh-host-deny-lifetime-fix",
+    "createdUtc": "2026-10-31T04:07:31.330937+00:00",
+    "scope": "Only relay.rs +connected transport documentation; no source changes after the fixed focused tests",
+    "sourceInputs": {
+      "engine/src/execution/network/connected/relay.rs": {
+        "sha256": "be6b1c8b7c5bb5c2d9fdbe9a28e9bde634132bf68fc4ff0ad9faaed7f75f3e73",
+        "size": 55329
+      },
+      "docs/architecture/connected-network-transport.md": {
+        "sha256": "827dec526009a214a098de54b965fe7794f60c932a5c79420de3acdecc807eff",
+        "size": 9377
+      }
+    },
+    "problem": "Periodic authority refresh discarded the fresh host/NAT deny set for already-open tunnels.",
+    "change": "Every successful actual grant callback revalidates all at-most32 sealed origin pins against fresh host inventory. Any denied pin cancels the whole proxy and actual sockets before renewing authority freshness.",
+    "negativeControl": {
+      "exitCode": 101,
+      "expectedFailure": true,
+      "method": "Temporarily replaced only new grant validation branch with previous Ok(host) return while retaining the actual socket regression. Exact fixed bytes restored automatically before positive checks. Not a rebuild of the historical3987648 source.",
+      "regression": "refreshed_host_deny_closes_open_relay_before_renewal_and_retains_worker_until_settlement",
+      "message": "open tunnel forwarded after its sealed pin became host-denied",
+      "actualFixtureSettledBeforeAssertion": true
+    },
+    "positive": {
+      "connectedUnits": 17,
+      "connectedIntegration": 5,
+      "failed": 0,
+      "boundedPrivateSocketRegression": true,
+      "heldWorkerTimeoutYieldsNoSettlement": true,
+      "independentStorageReview": true
+    },
+    "commands": {
+      "envelope": {
+        "CARGO_INCREMENTAL": "0",
+        "CARGO_BUILD_JOBS": "2",
+        "TMPDIR": "/workspace/rudder-tmp"
+      },
+      "cargo": "cargo test --workspace --locked --features rudder-vcs-bridge/cli",
+      "units": "--lib execution::network::connected -- --test-threads=2",
+      "integration": "--test connected_network -- --test-threads=2",
+      "diskFloorBytes": 3489660928,
+      "guardsTriggered": false
+    },
+    "logs": {
+      "rudder-alpha14-connected-host-deny-negative.log": {
+        "sha256": "689cc5ca5d4806353e5f55ef9f3c3b1e22f7f26a89927b5d8bfbc4ea99145cda",
+        "size": 2609
+      },
+      "rudder-alpha14-connected-host-deny-fixed-units.log": {
+        "sha256": "9f0b8d926543738dd461ff9e7003dcd2538a0a5bf73ba290317b06c54cd96d36",
+        "size": 4206
+      },
+      "rudder-alpha14-connected-host-deny-fixed-integration.log": {
+        "sha256": "a61e6fec9122135110e13b21247af2db6b1b46b588935d4a345d49494331b9d1",
+        "size": 724
+      }
+    },
+    "handoff": "Shared target returned to Root after exact terminal0; source frozen for candidate2 rebuild.",
+    "limits": [
+      "No Fly/provider/DNS/public HTTPS calls during this fix or test.",
+      "Regression uses real local TCP relay and actual owned worker/socket/permit, not a public upstream.",
+      "All-pin cancellation is intentionally conservative, including an unused fallback pin.",
+      "Historical3987648 archive/stopped-build records and pending controller scaffold remain unchanged; no image or release claim."
+    ]
+  },
+  "partialCheckpointData": {
+    "sourceFiles": [
+      {
+        "path": "engine/src/partial_checkpoint.rs",
+        "bytes": 31792,
+        "sha256": "c6e83debd22172ffafa0b3f2e9837ded0e253d824e3103969d562bb66bdf79eb"
+      },
+      {
+        "path": "engine/src/partial_checkpoint/recovery.rs",
+        "bytes": 5580,
+        "sha256": "1171416305df1c8becf83f9d929eaa72e282d0e832ab38b48e8f10bca73a49de"
+      },
+      {
+        "path": "engine/src/partial_checkpoint/session_tests.rs",
+        "bytes": 8468,
+        "sha256": "616c4a95fe57be56ee7ca4bcbed824081e0ba9c4556ed4995efd09a8f4c0e72c"
+      },
+      {
+        "path": "engine/src/lib.rs",
+        "bytes": 600,
+        "sha256": "d4ea1420ad5fceb313b61ce99d7591c752bb12692adcfc0158b80f656708d6e7"
+      },
+      {
+        "path": "engine/src/service.rs",
+        "bytes": 29515,
+        "sha256": "b18da9e23f50408d3df98b06e8839e15b36e2958b8fb4f1e1b1f19268da6da0b"
+      },
+      {
+        "path": "engine/tests/partial_checkpoint.rs",
+        "bytes": 57750,
+        "sha256": "bb3778141aa9699e5092592394a9c027a548c4b7d86c71bb70f767fb2817fb9e"
+      },
+      {
+        "path": "native/src/fabric_cli.rs",
+        "bytes": 9816,
+        "sha256": "ff5330283133f5d99dc1fdf7f9ea52eaaa1f4df76879449978d2ab5b0a3986f7"
+      },
+      {
+        "path": "docs/architecture/partial-checkpoint-publication.md",
+        "bytes": 9302,
+        "sha256": "0695b80dd44600bcdd0dc2d19d99a28046c094bb224f843586329b3bcec87e98"
+      }
+    ],
+    "regularPassed": 17,
+    "actualNativePreviouslyIgnoredNowPassed": 1,
+    "custodyUnitsPassed": 6,
+    "priorObjectSetPassed": 8,
+    "priorLegacyDeltaPassed": 9,
+    "fixtures": [
+      {
+        "kind": "legacy_directory1",
+        "path": "/workspace/rudder-partial-checkpoint-parity-v1/fixture.json",
+        "bytes": 48724,
+        "sha256": "5a47a7321952d5064734d9667bf3ddd2ed66f96ada4f871cfb7e0e47530ae76f",
+        "authority": "synthetic historical DATA only"
+      },
+      {
+        "kind": "paged_directory2_file_rawname",
+        "path": "/workspace/rudder-partial-checkpoint-parity-v2/fixture.json",
+        "bytes": 51561,
+        "sha256": "3c50ab8383c4e970802ec7dde0fd8508c62199bb93c1ea52592698e41e8ba2e5",
+        "authority": "synthetic historical DATA only"
+      }
+    ],
+    "logs": [
+      {
+        "sha256": "7c39b73e3cb43650d74b79064923e1b62224284ef7897efd67368a2e26b51091",
+        "bytes": 2847,
+        "passed": 6
+      },
+      {
+        "sha256": "8514e77233aa4e2fb4afe1bd18b75cb5a11d20f463e92a10cee6ef292dec35b6",
+        "bytes": 1919,
+        "passed": 17
+      }
+    ]
+  },
+  "client": {
+    "formatVersion": 1,
+    "verifiedAt": "2026-10-31T03:43:55.617816+00:00",
+    "source": {
+      "src/fabric-remote.ts": "789366a394e440d0f6e9c7b1157c2dd75c3fc91b37c7a0c258bb90a8e6350e05",
+      "src/fabric-local.ts": "7af29ec6e3f6543846ba32583ae8a50d4a48fadc9d9ee91c9155f7da617439cd",
+      "tests/fabric-partial-checkpoint.test.mjs": "92fa324afb1d97009090fd67cdd59b5ffc4b78e51191ee02789addea031b089c",
+      "tests/fabric-partial-transfer.test.mjs": "7ac02d948324527e54eaba9e61f17080f6c83e5dc99391eec63c3a9d7f435f75"
+    },
+    "steps": [
+      {
+        "name": "compile",
+        "exitCode": 0,
+        "logSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "name": "tests",
+        "exitCode": 0,
+        "logSha256": "850c8ca086c2cc3a735cc8c0b11c38c9f215db2465daf6a53ca49cde0659f62c"
+      }
+    ],
+    "sourceUnchanged": true,
+    "rootDistTouched": false
+  },
+  "actualLocalHttp": {
+    "formatVersion": 1,
+    "frozenAt": "2026-10-31T03:52:31.770Z",
+    "ownedFile": "tests/fabric-partial-checkpoint-http.test.mjs",
+    "sourceSha256": "560a3d907031bd08a710fbf3751066a63c026a74c52877dc562e2b8d7bcb5ddd",
+    "report": "/workspace/rudder-partial-checkpoint-http-JGkZZC/report-final.json",
+    "sourceAndReadOnlyCloudDistHashes": {
+      "tests/fabric-partial-checkpoint-http.test.mjs": "560a3d907031bd08a710fbf3751066a63c026a74c52877dc562e2b8d7bcb5ddd",
+      "tests/fixtures/partial-checkpoint-v1.json": "5a47a7321952d5064734d9667bf3ddd2ed66f96ada4f871cfb7e0e47530ae76f",
+      "src/fabric-remote.ts": "789366a394e440d0f6e9c7b1157c2dd75c3fc91b37c7a0c258bb90a8e6350e05",
+      "cloud/src/fabric-cas.ts": "4c158d2746a4c6511c7f9262db386ef81a2368df42c361eddbce01138e47b7ca",
+      "cloud/src/fabric-http.ts": "0de3f677778b3576faac037f378a7a6fb42dfb50f1b6cb2ba76356ad0d2810ad",
+      "cloud/src/fabric-partial-checkpoint.ts": "b5f5e6ce35eba3af10034c5caa7214fe6cddb47c59ee24f840d30ee2f33d03f0",
+      "cloud/dist/fabric-cas.js": "98e7bc5d7f60ed9d05b2b908a19ed39659d993e26dc9eac01cb5e7980945457a",
+      "cloud/dist/fabric-http.js": "3011d259fd476a3ad50cbe144912019fbddb0c53b22ba597c65cc628bdb48788",
+      "cloud/dist/fabric-partial-checkpoint.js": "224c151b296315966304751cf0c51b6d6d2e81e5f8037d2f208246775fe8d5dd",
+      "cloud/dist/fabric-content.js": "10503ba264abe0e00284aa3c392ea1ce969e7b2c59321401ce717d20530b3fda",
+      "cloud/dist/fabric-directory.js": "dbf5d7de3093565dafdf27d340b94813931ac6f5445def5e51cf524b2ce394a4",
+      "cloud/dist/fabric-snapshot.js": "bc32df3acd8d690b206c4d0d48171eac1344a8d9e2f6fb8a756022c215e70a4e",
+      "cloud/dist/fabric-stream.js": "00561e390304aadfb9c91ce9b4c2c377782093354fa501c4d72d79e3de29aa43"
+    },
+    "compiledClient": {
+      "sha256": "72cd4edc555a6b0a72f491f95a8a0acf58736b96e167c532ebf0e9b7f57156c3"
+    },
+    "commands": [
+      {
+        "name": "compile",
+        "command": [
+          "/usr/local/bin/node",
+          "/workspace/code/exla-ai-rudder/node_modules/typescript/bin/tsc",
+          "--project",
+          "/workspace/rudder-partial-checkpoint-http-JGkZZC/tsconfig.json"
+        ],
+        "log": "/workspace/rudder-partial-checkpoint-http-JGkZZC/compile.log",
+        "exitCode": 0,
+        "signal": null,
+        "durationSeconds": 2.314,
+        "minimumFreeBytes": 6107488256,
+        "guardTerminated": null,
+        "logSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "ok": true
+      },
+      {
+        "name": "tests-final",
+        "command": [
+          "/usr/local/bin/node",
+          "--test",
+          "/workspace/rudder-partial-checkpoint-http-JGkZZC/tests/fabric-partial-checkpoint-http.test.mjs"
+        ],
+        "exitCode": 0,
+        "log": "/workspace/rudder-partial-checkpoint-http-JGkZZC/tests-final.log",
+        "logSha256": "09ee3ea713a3a7e0264e48cfba27e613b4bb6caf530c8e1e2c0c05d5ba72527f",
+        "durationSeconds": 1.9553772360000001
+      }
+    ],
+    "counts": {
+      "passed": 3,
+      "failed": 0,
+      "skipped": 0
+    },
+    "coverage": [
+      "Real global-fetch FabricRemoteClient.uploadPartialCheckpoint joined to actual createFabricHttpHandler and FabricCas",
+      "Golden Rust v1 SHA5a47... fixture: original opaque receipt text includes generation9007199254740995; actual HTTP Runnable bytes preserve knowledge_cursor9007199254740999",
+      "Nine transferred new objects plus four inherited/policy/profile Blobs produce exact13-object closure and exact byte total; public HTTP GET verifies every object after fresh handler/cache restart",
+      "Real root receipt is stored before ServerResponse.end is intercepted to destroy the TCP acknowledgment; first call errors, then fresh handler/client reconciles exact immutable ID using only GET and no source read",
+      "Authenticated accountB cannot read accountA base root/Blob; upload fails before local bytes; foreign trusted provider/tenant binding refuses before network",
+      "All affected public hashes/set receipts are recomputed around an unknown freeze-audit field; actual new root HTTP publication returns400 and stores no receipt despite cached object proofs"
+    ],
+    "limits": [
+      "Local file-backed fixture checks persisted bytes across handler/cache restart; it is not production replication, power-loss,RPO or provider HA qualification",
+      "Transfer source adapter models only fixture clone ownership; it never reconstructs native active producer pins or physical/current authority from saved receipts",
+      "Generic FabricRootReceipt remains byte-closure data durability, not accepted source/current authority or semantic_verified grant",
+      "No Native/Cargo/provider/model calls, no Rootdist writes, no other source/test edits, no git/index/version/push/deploy actions"
+    ]
+  },
+  "workerRuntimeSupplement": {
+    "formatVersion": 1,
+    "sourceRevision": "96c7b25db02fd559052ad92c072da98c2621ae0d",
+    "verifiedAt": "2026-10-31T04:33:40.847103+00:00",
+    "passed": 2,
+    "failed": 0,
+    "scope": "separate execution of the two worker dependency skips in the full737-pass run; total distinct JavaScript tests now739 passed and9 optional skips",
+    "logSha256": "6fae3c9242a25d29eef43853024a5df40f7b43a86981662725230c3c02143e4e",
+    "dependencyLogSha256": "8f33d1817faa6774ff154d3075e4489f858f00e59c9f5407d9025bf45f22f0bd"
+  },
+  "cloudNativeAddon": {
+    "ok": true,
+    "node": "v22.23.4",
+    "abi": "127",
+    "sqlite": "Database",
+    "verifiedAt": "2026-10-31T04:29:51.151339+00:00",
+    "binarySha256": "1ba30ab367585433049007c732f0d83423584697636474ab99b9c64911650bd3",
+    "binaryBytes": 2118112,
+    "rebuildLogSha256": "5fea06889844726ffbf8e27f38feb7a12898a3d5a295ed2d1284ad720672f18e",
+    "packageVersion": "12.10.0",
+    "sourceUnchanged": true
+  },
+  "cloudCodec": {
+    "passed": 12,
+    "log": {
+      "sha256": "9062c1ef30f081c3f78ba1d68330045f8ab971262dd43091a1542b94fe63a3fb",
+      "bytes": 3166
+    }
+  },
+  "macFixtureCorrection": {
+    "formatVersion": 1,
+    "frozenAt": "2026-10-31T03:45:41.202Z",
+    "stage": "/workspace/rudder-alpha14-mac-fixtures-TaiZKa",
+    "source": {
+      "native/src/agent_broker_tests.rs": "14034bee1b00426ff7d7c36fb0c14cb9f15e2f2d995f55d6420098742a7d59b9",
+      "native/src/agent_link_tests.rs": "b334f640fd4af51c8a4ac097c310a99402baa68a8de23bf5c0da7c9634f84941",
+      "native/src/engine_host_tests.rs": "c38bf1ce1838e69228321d3533ef8a4e17f82f2742f40db37f85e19fa94e3153",
+      "native/src/agent_broker.rs": "99488b19608616c730d04b3356aedaf7277f5f497b57c7e3aa18a025105e14af",
+      "native/src/agent_link.rs": "8b7414caa519001aae6b450db843e1ff31756c9c20a99562254f58e44dbc2a21",
+      "native/src/engine_host.rs": "1113e2e63f54f64105c25c5410a5fb396ae316a6fdbb0a9992ad9f57c223180a"
+    },
+    "ownedFiles": [
+      "native/src/agent_broker_tests.rs",
+      "native/src/agent_link_tests.rs",
+      "native/src/engine_host_tests.rs"
+    ],
+    "productionFilesUnchanged": [
+      "native/src/agent_broker.rs",
+      "native/src/agent_link.rs",
+      "native/src/engine_host.rs"
+    ],
+    "originalMacFailure": {
+      "workflow": "41162599461",
+      "job": "124426403965",
+      "log": "/workspace/home/.cache/rudder-release-build/alpha13-checks/npm-ci-failures.log",
+      "sha256": "2226da6e1f4908feef94bbd1f01d5c2f70eaea0549e7a32b7d3992b0595e6727",
+      "result": {
+        "passed": 987,
+        "failed": 4,
+        "ignored": 11
+      }
+    },
+    "findings": [
+      {
+        "tests": [
+          "partial_workspace_authorization_keeps_two_second_saturated_connect_budget",
+          "workspace_authorization_deadline_survives_an_unaccepted_connection_backlog"
+        ],
+        "cause": "Fixture setup recognized only Linux WouldBlock. XNU sonewconn rejects a full accept queue and unp_connect returns ECONNREFUSED.",
+        "fix": "Shared helper requires >=1 held connection and an explicit terminal saturation error. ConnectionRefused allowed only on macOS; Linux remains WouldBlock-only. Actual authorization calls require exact unavailable WireError and original <3s bound.",
+        "sources": [
+          {
+            "file": "uipc_socket2.c",
+            "line": 360,
+            "url": "https://github.com/apple-oss-distributions/xnu/blob/f6217f891ac0bb64f3d375211650a4c1ff8ca1ea/bsd/kern/uipc_socket2.c#L360"
+          },
+          {
+            "file": "uipc_usrreq.c",
+            "line": 1404,
+            "url": "https://github.com/apple-oss-distributions/xnu/blob/f6217f891ac0bb64f3d375211650a4c1ff8ca1ea/bsd/kern/uipc_usrreq.c#L1404"
+          }
+        ]
+      },
+      {
+        "tests": [
+          "owned_backend_peer_is_verified_before_any_protocol_bytes_are_sent"
+        ],
+        "cause": "Long TMPDIR+UUID socket fixture bypassed existing short Scratch and exceeded sun_path.",
+        "fix": "Use existing short canonical0700 Scratch; preserve actual peer callback and exact zero protocol bytes/EOF assertion.",
+        "sources": []
+      },
+      {
+        "tests": [
+          "control_frames_reject_oversized_incomplete_and_unknown_fields"
+        ],
+        "cause": "Sender fully dropped its stream after write+SHUT_WR. XNU full disconnect marks both shutdown flags; the parser timeout setsockopt can then fail EINVAL before checking queued8193 bytes. This is a fixture-lifetime race, not evidence of submicro timeout or parser acceptance.",
+        "fix": "Return UnixStream through JoinHandle and retain through exact8193 assertion; SHUT_WR supplies EOF. No sleeps, relaxed errors, timeout changes or production changes.",
+        "sources": [
+          {
+            "file": "uipc_socket.c",
+            "line": 4749,
+            "url": "https://github.com/apple-oss-distributions/xnu/blob/f6217f891ac0bb64f3d375211650a4c1ff8ca1ea/bsd/kern/uipc_socket.c#L4749"
+          },
+          {
+            "file": "uipc_socket2.c",
+            "line": 278,
+            "url": "https://github.com/apple-oss-distributions/xnu/blob/f6217f891ac0bb64f3d375211650a4c1ff8ca1ea/bsd/kern/uipc_socket2.c#L278"
+          },
+          {
+            "file": "uipc_usrreq.c",
+            "line": 1709,
+            "url": "https://github.com/apple-oss-distributions/xnu/blob/f6217f891ac0bb64f3d375211650a4c1ff8ca1ea/bsd/kern/uipc_usrreq.c#L1709"
+          },
+          {
+            "file": "uipc_usrreq.c",
+            "line": 2222,
+            "url": "https://github.com/apple-oss-distributions/xnu/blob/f6217f891ac0bb64f3d375211650a4c1ff8ca1ea/bsd/kern/uipc_usrreq.c#L2222"
+          }
+        ]
+      }
+    ],
+    "qualification": {
+      "platform": "Linux6.12.114-fly x86_64",
+      "tmpAlias": "/workspace/rudder-alpha14-mac-fixtures-TaiZKa/controlled-long-tmp-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "tmpAliasBytes": 171,
+      "runs": {
+        "baseline": {
+          "label": "baseline",
+          "command": [
+            "cargo",
+            "test",
+            "--workspace",
+            "--locked",
+            "--features",
+            "rudder-vcs-bridge/cli",
+            "--bin",
+            "rudder-native",
+            "--",
+            "--exact",
+            "agent_broker::tests::partial_workspace_authorization_keeps_two_second_saturated_connect_budget",
+            "agent_broker::tests::workspace_authorization_deadline_survives_an_unaccepted_connection_backlog",
+            "agent_link::tests::owned_backend_peer_is_verified_before_any_protocol_bytes_are_sent",
+            "engine_host::tests::control_frames_reject_oversized_incomplete_and_unknown_fields",
+            "--nocapture",
+            "--test-threads=1"
+          ],
+          "startedAt": "2026-10-31T03:41:17.441Z",
+          "log": "/workspace/rudder-alpha14-mac-fixtures-TaiZKa/baseline.log",
+          "env": {
+            "TMPDIR": "/workspace/rudder-alpha14-mac-fixtures-TaiZKa/controlled-long-tmp-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+            "CARGO_INCREMENTAL": "0",
+            "CARGO_BUILD_JOBS": "2"
+          },
+          "sourceBefore": {
+            "native/src/agent_broker_tests.rs": "5126df6454be01c46da9512fe8f0cbd8263aa9a76f1272416cffc5d2a27eb9fd",
+            "native/src/agent_link_tests.rs": "79e7c550d696c958e27f2455c30cc705086e056ccb9722faa9e3afa858748f51",
+            "native/src/engine_host_tests.rs": "f4d2553c605ff0e72dc178b4a7121cd0c1bbecb57ee1c0737ad3647063dda627",
+            "native/src/agent_broker.rs": "99488b19608616c730d04b3356aedaf7277f5f497b57c7e3aa18a025105e14af",
+            "native/src/agent_link.rs": "8b7414caa519001aae6b450db843e1ff31756c9c20a99562254f58e44dbc2a21",
+            "native/src/engine_host.rs": "1113e2e63f54f64105c25c5410a5fb396ae316a6fdbb0a9992ad9f57c223180a"
+          },
+          "minimumDiskFloorBytes": 3489660928,
+          "exitCode": 101,
+          "signal": null,
+          "finishedAt": "2026-10-31T03:42:05.982Z",
+          "durationSeconds": 48.542,
+          "minimumFreeBytes": 6035144704,
+          "guardTerminated": null,
+          "logSha256": "29b53aa5a9d49fb8dbb2e51aefafce6668a2e4dfa13f6e6b5de90c802dd84726",
+          "sourceAfter": {
+            "native/src/agent_broker_tests.rs": "5126df6454be01c46da9512fe8f0cbd8263aa9a76f1272416cffc5d2a27eb9fd",
+            "native/src/agent_link_tests.rs": "79e7c550d696c958e27f2455c30cc705086e056ccb9722faa9e3afa858748f51",
+            "native/src/engine_host_tests.rs": "f4d2553c605ff0e72dc178b4a7121cd0c1bbecb57ee1c0737ad3647063dda627",
+            "native/src/agent_broker.rs": "99488b19608616c730d04b3356aedaf7277f5f497b57c7e3aa18a025105e14af",
+            "native/src/agent_link.rs": "8b7414caa519001aae6b450db843e1ff31756c9c20a99562254f58e44dbc2a21",
+            "native/src/engine_host.rs": "1113e2e63f54f64105c25c5410a5fb396ae316a6fdbb0a9992ad9f57c223180a"
+          },
+          "sourceUnchanged": true,
+          "expectedFailure": true,
+          "ok": true,
+          "counts": {
+            "passed": 3,
+            "failed": 1,
+            "ignored": 0
+          }
+        },
+        "fixed": {
+          "label": "fixed",
+          "command": [
+            "cargo",
+            "test",
+            "--workspace",
+            "--locked",
+            "--features",
+            "rudder-vcs-bridge/cli",
+            "--bin",
+            "rudder-native",
+            "--",
+            "--exact",
+            "agent_broker::tests::partial_workspace_authorization_keeps_two_second_saturated_connect_budget",
+            "agent_broker::tests::workspace_authorization_deadline_survives_an_unaccepted_connection_backlog",
+            "agent_link::tests::owned_backend_peer_is_verified_before_any_protocol_bytes_are_sent",
+            "engine_host::tests::control_frames_reject_oversized_incomplete_and_unknown_fields",
+            "--nocapture",
+            "--test-threads=1"
+          ],
+          "startedAt": "2026-10-31T03:42:27.158Z",
+          "log": "/workspace/rudder-alpha14-mac-fixtures-TaiZKa/fixed.log",
+          "env": {
+            "TMPDIR": "/workspace/rudder-alpha14-mac-fixtures-TaiZKa/controlled-long-tmp-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+            "CARGO_INCREMENTAL": "0",
+            "CARGO_BUILD_JOBS": "2"
+          },
+          "sourceBefore": {
+            "native/src/agent_broker_tests.rs": "14034bee1b00426ff7d7c36fb0c14cb9f15e2f2d995f55d6420098742a7d59b9",
+            "native/src/agent_link_tests.rs": "b334f640fd4af51c8a4ac097c310a99402baa68a8de23bf5c0da7c9634f84941",
+            "native/src/engine_host_tests.rs": "c38bf1ce1838e69228321d3533ef8a4e17f82f2742f40db37f85e19fa94e3153",
+            "native/src/agent_broker.rs": "99488b19608616c730d04b3356aedaf7277f5f497b57c7e3aa18a025105e14af",
+            "native/src/agent_link.rs": "8b7414caa519001aae6b450db843e1ff31756c9c20a99562254f58e44dbc2a21",
+            "native/src/engine_host.rs": "1113e2e63f54f64105c25c5410a5fb396ae316a6fdbb0a9992ad9f57c223180a"
+          },
+          "minimumDiskFloorBytes": 3489660928,
+          "exitCode": 0,
+          "signal": null,
+          "finishedAt": "2026-10-31T03:43:14.312Z",
+          "durationSeconds": 47.154,
+          "minimumFreeBytes": 6005440512,
+          "guardTerminated": null,
+          "logSha256": "e2f3873493ff1fc0037d14f5570d8138fe25b4fb71b21d39d9b7eefc6a0ffd75",
+          "sourceAfter": {
+            "native/src/agent_broker_tests.rs": "14034bee1b00426ff7d7c36fb0c14cb9f15e2f2d995f55d6420098742a7d59b9",
+            "native/src/agent_link_tests.rs": "b334f640fd4af51c8a4ac097c310a99402baa68a8de23bf5c0da7c9634f84941",
+            "native/src/engine_host_tests.rs": "c38bf1ce1838e69228321d3533ef8a4e17f82f2742f40db37f85e19fa94e3153",
+            "native/src/agent_broker.rs": "99488b19608616c730d04b3356aedaf7277f5f497b57c7e3aa18a025105e14af",
+            "native/src/agent_link.rs": "8b7414caa519001aae6b450db843e1ff31756c9c20a99562254f58e44dbc2a21",
+            "native/src/engine_host.rs": "1113e2e63f54f64105c25c5410a5fb396ae316a6fdbb0a9992ad9f57c223180a"
+          },
+          "sourceUnchanged": true,
+          "expectedFailure": false,
+          "ok": true,
+          "counts": {
+            "passed": 4,
+            "failed": 0,
+            "ignored": 0
+          }
+        },
+        "groups": {
+          "label": "groups",
+          "command": [
+            "cargo",
+            "test",
+            "--workspace",
+            "--locked",
+            "--features",
+            "rudder-vcs-bridge/cli",
+            "--bin",
+            "rudder-native",
+            "--",
+            "agent_broker::tests::",
+            "agent_link::tests::",
+            "engine_host::tests::",
+            "fabric_cli::tests::partial_checkpoint",
+            "--nocapture"
+          ],
+          "startedAt": "2026-10-31T03:43:27.883Z",
+          "log": "/workspace/rudder-alpha14-mac-fixtures-TaiZKa/groups.log",
+          "env": {
+            "TMPDIR": "/workspace/rudder-alpha14-mac-fixtures-TaiZKa/controlled-long-tmp-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+            "CARGO_INCREMENTAL": "0",
+            "CARGO_BUILD_JOBS": "2"
+          },
+          "sourceBefore": {
+            "native/src/agent_broker_tests.rs": "14034bee1b00426ff7d7c36fb0c14cb9f15e2f2d995f55d6420098742a7d59b9",
+            "native/src/agent_link_tests.rs": "b334f640fd4af51c8a4ac097c310a99402baa68a8de23bf5c0da7c9634f84941",
+            "native/src/engine_host_tests.rs": "c38bf1ce1838e69228321d3533ef8a4e17f82f2742f40db37f85e19fa94e3153",
+            "native/src/agent_broker.rs": "99488b19608616c730d04b3356aedaf7277f5f497b57c7e3aa18a025105e14af",
+            "native/src/agent_link.rs": "8b7414caa519001aae6b450db843e1ff31756c9c20a99562254f58e44dbc2a21",
+            "native/src/engine_host.rs": "1113e2e63f54f64105c25c5410a5fb396ae316a6fdbb0a9992ad9f57c223180a"
+          },
+          "minimumDiskFloorBytes": 3489660928,
+          "exitCode": 0,
+          "signal": null,
+          "finishedAt": "2026-10-31T03:43:33.116Z",
+          "durationSeconds": 5.233,
+          "minimumFreeBytes": 6152855552,
+          "guardTerminated": null,
+          "logSha256": "931422a083637b766398776f5b52eeb4fbd7d92f06c50b0c8045237b2bf078fb",
+          "sourceAfter": {
+            "native/src/agent_broker_tests.rs": "14034bee1b00426ff7d7c36fb0c14cb9f15e2f2d995f55d6420098742a7d59b9",
+            "native/src/agent_link_tests.rs": "b334f640fd4af51c8a4ac097c310a99402baa68a8de23bf5c0da7c9634f84941",
+            "native/src/engine_host_tests.rs": "c38bf1ce1838e69228321d3533ef8a4e17f82f2742f40db37f85e19fa94e3153",
+            "native/src/agent_broker.rs": "99488b19608616c730d04b3356aedaf7277f5f497b57c7e3aa18a025105e14af",
+            "native/src/agent_link.rs": "8b7414caa519001aae6b450db843e1ff31756c9c20a99562254f58e44dbc2a21",
+            "native/src/engine_host.rs": "1113e2e63f54f64105c25c5410a5fb396ae316a6fdbb0a9992ad9f57c223180a"
+          },
+          "sourceUnchanged": true,
+          "expectedFailure": false,
+          "ok": true,
+          "counts": {
+            "passed": 76,
+            "failed": 0,
+            "ignored": 2
+          }
+        },
+        "partial_transfer": {
+          "label": "partial_transfer",
+          "command": [
+            "cargo",
+            "test",
+            "--workspace",
+            "--locked",
+            "--features",
+            "rudder-vcs-bridge/cli",
+            "--test",
+            "partial_transfer",
+            "--",
+            "--nocapture"
+          ],
+          "startedAt": "2026-10-31T03:43:59.020Z",
+          "log": "/workspace/rudder-alpha14-mac-fixtures-TaiZKa/partial_transfer.log",
+          "env": {
+            "TMPDIR": "/workspace/rudder-alpha14-mac-fixtures-TaiZKa/controlled-long-tmp-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+            "CARGO_INCREMENTAL": "0",
+            "CARGO_BUILD_JOBS": "2"
+          },
+          "sourceBefore": {
+            "native/src/agent_broker_tests.rs": "14034bee1b00426ff7d7c36fb0c14cb9f15e2f2d995f55d6420098742a7d59b9",
+            "native/src/agent_link_tests.rs": "b334f640fd4af51c8a4ac097c310a99402baa68a8de23bf5c0da7c9634f84941",
+            "native/src/engine_host_tests.rs": "c38bf1ce1838e69228321d3533ef8a4e17f82f2742f40db37f85e19fa94e3153",
+            "native/src/agent_broker.rs": "99488b19608616c730d04b3356aedaf7277f5f497b57c7e3aa18a025105e14af",
+            "native/src/agent_link.rs": "8b7414caa519001aae6b450db843e1ff31756c9c20a99562254f58e44dbc2a21",
+            "native/src/engine_host.rs": "1113e2e63f54f64105c25c5410a5fb396ae316a6fdbb0a9992ad9f57c223180a"
+          },
+          "minimumDiskFloorBytes": 3489660928,
+          "exitCode": 0,
+          "signal": null,
+          "finishedAt": "2026-10-31T03:44:50.368Z",
+          "durationSeconds": 51.349,
+          "minimumFreeBytes": 5603627008,
+          "guardTerminated": null,
+          "logSha256": "1d16ac9fb428ed9b7a43f9696816589372cb844d569c7d74fddaea75bbc368d9",
+          "sourceAfter": {
+            "native/src/agent_broker_tests.rs": "14034bee1b00426ff7d7c36fb0c14cb9f15e2f2d995f55d6420098742a7d59b9",
+            "native/src/agent_link_tests.rs": "b334f640fd4af51c8a4ac097c310a99402baa68a8de23bf5c0da7c9634f84941",
+            "native/src/engine_host_tests.rs": "c38bf1ce1838e69228321d3533ef8a4e17f82f2742f40db37f85e19fa94e3153",
+            "native/src/agent_broker.rs": "99488b19608616c730d04b3356aedaf7277f5f497b57c7e3aa18a025105e14af",
+            "native/src/agent_link.rs": "8b7414caa519001aae6b450db843e1ff31756c9c20a99562254f58e44dbc2a21",
+            "native/src/engine_host.rs": "1113e2e63f54f64105c25c5410a5fb396ae316a6fdbb0a9992ad9f57c223180a"
+          },
+          "sourceUnchanged": true,
+          "expectedFailure": false,
+          "ok": true,
+          "counts": {
+            "passed": 1,
+            "failed": 0,
+            "ignored": 0
+          }
+        }
+      },
+      "minimumObservedFreeBytes": 5603627008,
+      "diskFloorBytes": 3489660928
+    },
+    "primarySources": {
+      "retrievedAt": "2026-10-31T03:41:36.368Z",
+      "primaryRepository": "https://github.com/apple-oss-distributions/xnu",
+      "revision": "f6217f891ac0bb64f3d375211650a4c1ff8ca1ea",
+      "commitDate": "2025-10-16T22:36:30Z",
+      "files": [
+        {
+          "file": "uipc_socket.c",
+          "revision": "f6217f891ac0bb64f3d375211650a4c1ff8ca1ea",
+          "url": "https://raw.githubusercontent.com/apple-oss-distributions/xnu/f6217f891ac0bb64f3d375211650a4c1ff8ca1ea/bsd/kern/uipc_socket.c",
+          "bytes": 209727,
+          "sha256": "68d5a0dfb22ad62bca963b3bc3b1c08ed28549f3c7679789a549eae428fa60bc"
+        },
+        {
+          "file": "uipc_socket2.c",
+          "revision": "f6217f891ac0bb64f3d375211650a4c1ff8ca1ea",
+          "url": "https://raw.githubusercontent.com/apple-oss-distributions/xnu/f6217f891ac0bb64f3d375211650a4c1ff8ca1ea/bsd/kern/uipc_socket2.c",
+          "bytes": 79529,
+          "sha256": "f3b0439027c33981ed7acef7399ef17f8f3888ff3848d98b1923a7b9e9220520"
+        },
+        {
+          "file": "uipc_usrreq.c",
+          "revision": "f6217f891ac0bb64f3d375211650a4c1ff8ca1ea",
+          "url": "https://raw.githubusercontent.com/apple-oss-distributions/xnu/f6217f891ac0bb64f3d375211650a4c1ff8ca1ea/bsd/kern/uipc_usrreq.c",
+          "bytes": 73277,
+          "sha256": "c34d28100931762957c2cb2f3b7a2bef5fe078e4d9c1dca1c494345cbec0e12c"
+        }
+      ]
+    },
+    "cleanup": {
+      "emptyFailedFixtureDirectoriesRemoved": [
+        "rudder-owned-link-88506e7e-484a-4511-bf38-917e8215cc7a"
+      ],
+      "temporaryAliasRetainedForReproduction": true
+    },
+    "limits": [
+      "Actual Darwin execution unavailable; next tag14 Mac CI is final verification gate.",
+      "Only SUN_LEN reproduced locally; Darwin backlog/disconnect diagnosis uses observed CI plus pinned primary XNU source.",
+      "No broad Native full run; Root owns final full coverage.",
+      "Explicit source/target handoff directly to Storage after final terminal0 for separate same-stage ABA fix.",
+      "No production broker/link/host edits,Rootdist mutation,Cargo feature/pin changes,providers,git/index/version,push or deploy."
+    ]
+  },
+  "limits": [
+    "Full PLAN.md remains active; default remote activation and private-jj/history acceptance are absent.",
+    "Actual Mac execution remains the tag CI gate; Linux long-temp fixtures and pinned XNU diagnosis are not Mac runtime verification.",
+    "Fresh Native RPC and physical connected transport are qualified independently; this does not join managed source authorization, private-jj or provider inference.",
+    "A source-bound candidate and its package alpha.13 version are distinguished from the later alpha.14 tag and actual Fly/npm deliveries.",
+    "The first archive JavaScript run was stopped because its private runner omitted shared CARGO_TARGET_DIR; the corrected run is reported here. A subsequent full run exposed the missing SQLite native addon in the archive dependency setup; rebuilding that pinned dependency restored runtime availability before this final run."
+  ]
+}

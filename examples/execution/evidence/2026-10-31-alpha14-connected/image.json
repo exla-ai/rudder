@@ -1,0 +1,29 @@
+{
+  "image": "registry.fly.io/rudder-workers-exla:4.0.0-alpha.14-connected-candidate-96c7b25",
+  "parentDigest": "sha256:17247eba2f2293bf85b66ccdf78d3884a378a3ce8c734638350da44b41cc1fd7",
+  "provenance": {
+    "formatVersion": 1,
+    "kind": "rudder-connected-network-qualifier-image",
+    "proposedVersion": "4.0.0-alpha.14",
+    "workerVersion": "4.0.0-alpha.13",
+    "sourceKind": "candidate",
+    "revision": "96c7b25db02fd559052ad92c072da98c2621ae0d",
+    "qualifierSourceRevision": "96c7b25db02fd559052ad92c072da98c2621ae0d",
+    "sourceEnvelopeSha256": "9a564dd0cce47a35183cbe565bfcc87767fefb433955d37ffc7ab79e43aa7bf4",
+    "qualifierSha256": "a2c3fa2060c197c08dfcbd707ecc706c6971cf44de3e88e778b3f8f39a5447a6",
+    "parentDigest": "sha256:17247eba2f2293bf85b66ccdf78d3884a378a3ce8c734638350da44b41cc1fd7"
+  },
+  "sourceKind": "candidate",
+  "binary": {
+    "sha256": "a2c3fa2060c197c08dfcbd707ecc706c6971cf44de3e88e778b3f8f39a5447a6",
+    "size": 1206264
+  },
+  "startedAt": "2026-10-31T04:16:51.926965+00:00",
+  "configuredSecretValuesScanned": 2,
+  "matches": 0,
+  "exitCode": 0,
+  "digest": "sha256:d1f7130b2ad1044b07a22ce70c1dc60d58cd0c9c9c55f7dca03fe3451aa3731e",
+  "pushManifestDone": true,
+  "observedAt": "2026-10-31T04:17:17.350231+00:00",
+  "logSha256": "261d96e4c5b4972fe2a856312ffef111bc070b9450422e3e0530347c13893de1"
+}

@@ -1,0 +1,181 @@
+{
+  "formatVersion": 1,
+  "kind": "alpha14-connected-network-qualification",
+  "nonce": "609f7c8b-9be1-4365-b2c6-129788ed75d5",
+  "provenance": {
+    "formatVersion": 1,
+    "kind": "rudder-connected-network-qualifier-image",
+    "proposedVersion": "4.0.0-alpha.14",
+    "workerVersion": "4.0.0-alpha.13",
+    "sourceKind": "candidate",
+    "revision": "96c7b25db02fd559052ad92c072da98c2621ae0d",
+    "qualifierSourceRevision": "96c7b25db02fd559052ad92c072da98c2621ae0d",
+    "sourceEnvelopeSha256": "9a564dd0cce47a35183cbe565bfcc87767fefb433955d37ffc7ab79e43aa7bf4",
+    "qualifierSha256": "a2c3fa2060c197c08dfcbd707ecc706c6971cf44de3e88e778b3f8f39a5447a6",
+    "parentDigest": "sha256:17247eba2f2293bf85b66ccdf78d3884a378a3ce8c734638350da44b41cc1fd7"
+  },
+  "supervisorModuleEvaluated": false,
+  "productionWired": false,
+  "managedConnectedExecutionQualified": false,
+  "modelProviderAccountCalls": false,
+  "modelCalls": false,
+  "sourceAcceptanceQualified": false,
+  "transportOnly": true,
+  "completed": true,
+  "qualified": true,
+  "attempted": 1,
+  "admittedAfterResolvedDigest": true,
+  "boot": {
+    "uid": 1500,
+    "gid": 1500,
+    "fields": {
+      "Uid": "1500\t1500\t1500\t1500",
+      "Gid": "1500\t1500\t1500\t1500",
+      "Groups": "",
+      "NoNewPrivs": "1",
+      "CapEff": "0000000000000000",
+      "CapPrm": "0000000000000000",
+      "CapInh": "0000000000000000",
+      "CapAmb": "0000000000000000",
+      "CapBnd": "0000000000000000"
+    },
+    "node": "v22.23.4",
+    "kernel": "6.12.114-fly",
+    "credentialEnvironmentFields": 0
+  },
+  "runtime": {
+    "qualifierSha256": "a2c3fa2060c197c08dfcbd707ecc706c6971cf44de3e88e778b3f8f39a5447a6",
+    "qualifierBytes": 1206264,
+    "provenanceSha256": "b47c648c9583b8782e32b83c2c2ff753003ed88b961034ab8d7e829d08053376",
+    "workerVersion": "4.0.0-alpha.13",
+    "workerPackageSha256": "ca2c92ab57a187aa3dd0f0ef6484f87d13340286dc012947686c10dd4ee08d0e"
+  },
+  "parentBefore": {
+    "user": {
+      "device": "4",
+      "inode": "4026531837"
+    },
+    "net": {
+      "device": "4",
+      "inode": "4026531840"
+    },
+    "mnt": {
+      "device": "4",
+      "inode": "4026531841"
+    }
+  },
+  "sealedTarget": {
+    "host": "rudder.exla.ai",
+    "port": 443,
+    "ipv4": [
+      "76.76.21.21"
+    ],
+    "lookupCalls": 1,
+    "searchSuffixExpansion": false
+  },
+  "child": {
+    "status": 0,
+    "signal": null,
+    "failure": null,
+    "settled": true,
+    "stdout": {
+      "bytes": 1546,
+      "sha256": "d0415054ae2a057bbe2d6484c44c3a4ad536d0a7823ce1b19a3f4c057545bdaf",
+      "retainedBytes": 1546,
+      "truncated": false
+    },
+    "stderr": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "retainedBytes": 0,
+      "truncated": false
+    }
+  },
+  "parentAfter": {
+    "user": {
+      "device": "4",
+      "inode": "4026531837"
+    },
+    "net": {
+      "device": "4",
+      "inode": "4026531840"
+    },
+    "mnt": {
+      "device": "4",
+      "inode": "4026531841"
+    }
+  },
+  "parentNamespacesAndStatusUnchanged": true,
+  "counts": {
+    "qualified": 1,
+    "unsupported": 0,
+    "failed": 0,
+    "publicHttpsConnectCasesPassed": 1
+  },
+  "summary": {
+    "client": {
+      "certificateVerified": true,
+      "httpStatus": 200,
+      "kind": "public-tls-head-v1",
+      "responseHeaderBytes": 504,
+      "tlsVersion": "TLSv1.3"
+    },
+    "counters": {
+      "accepted": 1,
+      "active_connections": 0,
+      "active_dns_jobs": 0,
+      "cancellation_requested": true,
+      "charged_bytes": 6039,
+      "completed": 1,
+      "dns_jobs": 1,
+      "maximum_active_connections": 1,
+      "maximum_active_dns_jobs": 1,
+      "rejected": 0,
+      "upstream_connections": 1
+    },
+    "guestNetwork": {
+      "device": "4",
+      "inode": "4026532225"
+    },
+    "guestUser": {
+      "device": "4",
+      "inode": "4026532224"
+    },
+    "kind": "connected-network-qualification-v1",
+    "limitations": [
+      "standalone synthetic current grant; no managed connected execution activation",
+      "public no-key Python TLS HEAD; no Claude/Codex/model/account calls",
+      "local interface inventory only; production needs authenticated public/NAT host inventory",
+      "IPv4 HTTPS CONNECT only; tunnel contents and inner TLS authority are not inspected",
+      "no private root, PID namespace, PTY, filesystem, VCS or checkpoint claim"
+    ],
+    "limits": {
+      "combinedBufferBytesPerConnection": 32768,
+      "connectionTotalMs": 20000,
+      "connectionWorkers": 2,
+      "dnsProcesses": 1,
+      "lifetimeConnections": 32,
+      "totalBytes": 2097152
+    },
+    "listenerPort": 34027,
+    "networkProfileVersion": 1,
+    "physical": {
+      "actualGuestReaped": true,
+      "allFiveCapabilitiesZero": true,
+      "listenerRemovedBeforeExec": true,
+      "loOnly": true,
+      "noNewPrivileges": true,
+      "proxyWorkersJoined": true,
+      "resolverChildrenReaped": true,
+      "separateNetwork": true,
+      "separateUser": true,
+      "socketNamespaceIoctl": true,
+      "uid": 1500
+    },
+    "profileSha256": "ad3c82e274ee69616be314f45810be9f6cf3a37371925660c4fc9225e8991802",
+    "status": "passed",
+    "transportVersion": 1
+  },
+  "summarySha256": "bd535e3ac731a72b554bbbc3ee07048e08f7bee699e821eb65ced5d66da074e5",
+  "verifiedAt": "2026-10-31T04:18:21.090Z"
+}

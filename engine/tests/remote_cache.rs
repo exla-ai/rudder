@@ -385,14 +385,55 @@ fn independent_borrowed_and_resident_quotas_never_invent_space_for_held_snapshot
 
 #[test]
 fn borrowed_entries_prevent_disk_eviction_and_all_busy_is_eagain() {
+    use std::future::Future;
+    use std::task::{Context, Poll, Wake, Waker};
+    // A published result is available before finish_job returns and drops its
+    // own Job/result Arc. Pause that exact phase instead of relying on whether
+    // the test or worker happens to run first after wait() wakes the caller.
+    struct FinishingWorker {
+        entered: AtomicBool,
+        released: Mutex<bool>,
+        changed: Condvar,
+    }
+    impl Wake for FinishingWorker {
+        fn wake(self: Arc<Self>) {
+            let mut released = self.released.lock().unwrap();
+            self.entered.store(true, Ordering::SeqCst);
+            while !*released {
+                released = self.changed.wait(released).unwrap();
+            }
+        }
+    }
+    struct ResumeWorker(Arc<FinishingWorker>);
+    impl Drop for ResumeWorker {
+        fn drop(&mut self) {
+            *self.0.released.lock().unwrap() = true;
+            self.0.changed.notify_all();
+        }
+    }
     let base = fixture();
     let objects = vec![object(b"aaaaaaaa"), object(b"bbbbbbbb")];
-    let source = Source::new("disk", &objects, false, true);
+    let source = Source::new("disk", &objects, true, true);
     let mut limits = small_limits();
     limits.disk_quota_bytes = 8;
     limits.max_disk_entries = 1;
     let cache = open(base.path(), source.clone(), limits);
-    let first = read(&cache, &objects[0].0);
+    let finishing = Arc::new(FinishingWorker {
+        entered: AtomicBool::new(false),
+        released: Mutex::new(false),
+        changed: Condvar::new(),
+    });
+    let resume = ResumeWorker(finishing.clone());
+    let waker = Waker::from(finishing.clone());
+    let mut first_ticket = cache.request(&objects[0].0, deadline()).unwrap();
+    assert!(matches!(
+        std::pin::Pin::new(&mut first_ticket).poll(&mut Context::from_waker(&waker)),
+        Poll::Pending
+    ));
+    source.release();
+    until(|| finishing.entered.load(Ordering::SeqCst));
+    let first = first_ticket.wait().unwrap();
+    assert_eq!(source.active.load(Ordering::SeqCst), 0);
     let ticket = cache.request(&objects[1].0, deadline()).unwrap();
     let error = ticket.wait().unwrap_err();
     assert_eq!(error.errno(), libc::EAGAIN);
@@ -400,6 +441,20 @@ fn borrowed_entries_prevent_disk_eviction_and_all_busy_is_eagain() {
     assert_eq!(cache.stats().unwrap().disk_bytes, 8);
     drop(ticket);
     drop(first);
+    drop(first_ticket);
+    assert_eq!(cache.stats().unwrap().borrowed_bytes, 0);
+    assert_eq!(cache.stats().unwrap().resident_bytes, 8);
+    assert_eq!(cache.stats().unwrap().inflight_jobs, 0);
+    // The transport has settled, but the paused worker still owns the verified
+    // result. EAGAIN remains correct until that actual owner releases it.
+    let still_finishing = cache.request(&objects[1].0, deadline()).unwrap();
+    assert_eq!(still_finishing.wait().unwrap_err(), CacheError::Busy);
+    drop(still_finishing);
+    assert_eq!(source.calls.load(Ordering::SeqCst), 1);
+    drop(resume);
+    // This is the eviction predicate's actual last-Arc settlement, not a delay
+    // or a retry that masks an unexpected request failure.
+    until(|| cache.stats().unwrap().resident_bytes == 0);
     assert_eq!(read(&cache, &objects[1].0).bytes(), b"bbbbbbbb");
     let stats = cache.stats().unwrap();
     assert_eq!(stats.evictions, 1);

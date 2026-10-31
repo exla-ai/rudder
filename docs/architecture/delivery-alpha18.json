@@ -1,0 +1,219 @@
+{
+  "schemaVersion": 1,
+  "milestone": "Codex launch policy (effort high, compaction 150K, tool output 6K), one wait-and-read prompt rule, full Codex session pinning and a pre-tag release check; full v4 continues",
+  "version": "4.0.0-alpha.18",
+  "sourceRevision": "243728b94f55fd3bd40be22c44abf8ccae9f34a6",
+  "delivery": {
+    "kind": "web",
+    "status": "deployed",
+    "target": "Rudder Cloud control plane and configured alpha18 worker image",
+    "url": "https://rudder.exla.ai/app",
+    "provider": "Fly.io",
+    "revision": "243728b94f55fd3bd40be22c44abf8ccae9f34a6",
+    "deploymentId": "168",
+    "version": "4.0.0-alpha.18",
+    "verifiedAt": "2026-10-31T09:47:05.856Z",
+    "checks": [
+      {
+        "url": "https://rudder.exla.ai/app",
+        "status": 200,
+        "expected": 200,
+        "finalUrl": "https://rudder-cloud-control.fly.dev/app",
+        "ok": true
+      },
+      {
+        "url": "https://rudder-cloud-control.fly.dev/health",
+        "status": 200,
+        "expected": 200,
+        "finalUrl": "https://rudder-cloud-control.fly.dev/health",
+        "ok": true,
+        "health": {
+          "ok": true,
+          "s3": true,
+          "fabric": true,
+          "fly": true,
+          "byoVm": true,
+          "state": true,
+          "secrets": true,
+          "auth": {
+            "google": true,
+            "github": true,
+            "githubDevice": true
+          }
+        }
+      },
+      {
+        "url": "https://rudder-cloud-control.fly.dev/api/app/state",
+        "status": 401,
+        "expected": 401,
+        "finalUrl": "https://rudder-cloud-control.fly.dev/api/app/state",
+        "ok": true
+      },
+      {
+        "url": "https://rudder-cloud-control.fly.dev/api/rudder/fabric/roots/unauthenticated-alpha18-smoke",
+        "status": 401,
+        "expected": 401,
+        "finalUrl": "https://rudder-cloud-control.fly.dev/api/rudder/fabric/roots/unauthenticated-alpha18-smoke",
+        "ok": true
+      }
+    ]
+  },
+  "release": {
+    "id": "og8k9ZRKKeO8Mfnlkq4YnbQ4Q",
+    "version": 168,
+    "status": "complete",
+    "createdAt": "2026-10-31T09:46:43Z"
+  },
+  "control": {
+    "id": "8911d61a434978",
+    "instance": "01M68NNEJD8173ZAABMBHPBNDT",
+    "state": "started",
+    "image": "registry.fly.io/rudder-cloud-control:4.0.0-alpha.18",
+    "digest": "sha256:f574e9e0859706b7835466707a8b264a5f2feebf49c33e0002b645090141953e",
+    "revision": "243728b94f55fd3bd40be22c44abf8ccae9f34a6"
+  },
+  "controlImage": {
+    "image": "registry.fly.io/rudder-cloud-control:4.0.0-alpha.18",
+    "digest": "sha256:f574e9e0859706b7835466707a8b264a5f2feebf49c33e0002b645090141953e",
+    "sourceEnvelopeSha256": "c10e248a2263612a62c596ac617ecf63dab0c5af423cc2e0ace33bd77fed353c",
+    "logSha256": "ce7de1cc314931513b5177f7f091ddc633997c5510a7caaf41ea00f67efddb73"
+  },
+  "database": {
+    "integrity": "ok",
+    "counts": {
+      "workspaces": 52,
+      "sails": 14
+    },
+    "homeRetained": true,
+    "serverSha256": "96e6392705d1ac86949c09b5e69eb6ced86d53c1f8f820225df2cb7ceb3f4770"
+  },
+  "actualRuntimeCodeSha256": {
+    "src/server.ts": "96e6392705d1ac86949c09b5e69eb6ced86d53c1f8f820225df2cb7ceb3f4770",
+    "src/fabric-cas.ts": "4c158d2746a4c6511c7f9262db386ef81a2368df42c361eddbce01138e47b7ca",
+    "src/fabric-partial-checkpoint.ts": "b5f5e6ce35eba3af10034c5caa7214fe6cddb47c59ee24f840d30ee2f33d03f0",
+    "dist/server.js": "d548970543d355e9626435c0a22899485e097405ad0ef6aedbfb738ad39639a2",
+    "dist/fabric-cas.js": "98e7bc5d7f60ed9d05b2b908a19ed39659d993e26dc9eac01cb5e7980945457a",
+    "dist/fabric-partial-checkpoint.js": "224c151b296315966304751cf0c51b6d6d2e81e5f8037d2f208246775fe8d5dd"
+  },
+  "worker": {
+    "image": "registry.fly.io/rudder-workers-exla:4.0.0-alpha.18",
+    "revision": "243728b94f55fd3bd40be22c44abf8ccae9f34a6",
+    "sourceEnvelopeSha256": "c10e248a2263612a62c596ac617ecf63dab0c5af423cc2e0ace33bd77fed353c",
+    "pushManifestDone": true,
+    "digest": "sha256:0d52fd93e5adbf09352110c0ec74dd98db22ba6f6df3ea16b1d4e0277f2efad9",
+    "logSha256": "a626b89c9e72583fbc776db7437ef9441b70d8222bb7d9209b919792f20012b4"
+  },
+  "activeHome": {
+    "id": "8edd225a7d0378",
+    "instance": "01M670MG4A8E0DWE9GA1C0PQ92",
+    "state": "started",
+    "digest": "sha256:404f46396aca77324d9b53c55d2824a5401af56ba5362d0bdae67e16108fc245",
+    "unchanged": true
+  },
+  "cli": {
+    "status": "published",
+    "workflow": "https://github.com/exla-ai/rudder/actions/runs/41189571495",
+    "registry": {
+      "observedAt": "2026-10-31T10:13:27.066068+00:00",
+      "@exla/rudder": {
+        "latest": "3.9.13",
+        "next": "4.0.0-alpha.18"
+      },
+      "@viraatdas/rudder": {
+        "latest": "3.9.13",
+        "next": "4.0.0-alpha.18"
+      }
+    }
+  },
+  "openGates": [
+    "E14: the launch values and the wait-and-read rule shipped before measurement and are unproven",
+    "acpx adapter: no Codex config passthrough, effort default only",
+    "one blocking rudder wait command and one ship command (alpha.18 ships only the prompt rule and the release-check run)",
+    "new managed host context and parent-sent stop wire",
+    "connected model-provider execution",
+    "private-jj source/history acceptance",
+    "production distributed build-cache caller and speed",
+    "fleet authority and default migration",
+    "real laptop/phone Tailscale continuity"
+  ],
+  "freshInstall": {
+    "status": "verified",
+    "verifiedAt": "2026-10-31T10:21:55.204234Z",
+    "sourceRevision": "243728b94f55fd3bd40be22c44abf8ccae9f34a6",
+    "proofSha256": "645d5705e5d6fb40d8c61db4ebfc08d3821d02ad61bf1fcf891432e025d87cef",
+    "packages": {
+      "@exla/rudder": {
+        "status": "passed",
+        "version": "4.0.0-alpha.18",
+        "checks": [
+          "buddy-capabilities",
+          "buddy-version",
+          "cli-help",
+          "cli-version",
+          "installation",
+          "native-execution",
+          "native-fabric",
+          "native-smoke",
+          "native-vfs",
+          "native-workspace",
+          "postinstall_jj",
+          "reviewed_archive"
+        ]
+      },
+      "@viraatdas/rudder": {
+        "status": "passed",
+        "version": "4.0.0-alpha.18",
+        "checks": [
+          "buddy-capabilities",
+          "buddy-version",
+          "cli-help",
+          "cli-version",
+          "installation",
+          "native-execution",
+          "native-fabric",
+          "native-smoke",
+          "native-vfs",
+          "native-workspace",
+          "postinstall_jj",
+          "reviewed_archive"
+        ]
+      }
+    },
+    "scope": "private homes/cwd/config/cache and cleared child env, not an OS sandbox; no provider calls, TUI, Cloud or global install; npm provenance signatures not verified"
+  },
+  "currentSmoke": {
+    "verifiedAt": "2026-10-31T10:12:08.371882+00:00",
+    "release": {
+      "id": "og8k9ZRKKeO8Mfnlkq4YnbQ4Q",
+      "version": 168,
+      "status": "complete",
+      "createdat": "2026-10-31T09:46:43Z",
+      "imageref": "registry.fly.io/rudder-cloud-control:4.0.0-alpha.18"
+    },
+    "taggedRevision": "243728b94f55fd3bd40be22c44abf8ccae9f34a6",
+    "checks": [
+      {
+        "url": "https://rudder.exla.ai/app",
+        "status": 200,
+        "expected": 200
+      },
+      {
+        "url": "https://rudder-cloud-control.fly.dev/health",
+        "status": 200,
+        "expected": 200
+      },
+      {
+        "url": "https://rudder-cloud-control.fly.dev/api/app/state",
+        "status": 401,
+        "expected": 401
+      },
+      {
+        "url": "https://rudder-cloud-control.fly.dev/api/rudder/fabric/roots/unauthenticated-alpha18-smoke",
+        "status": 401,
+        "expected": 401
+      }
+    ],
+    "ok": true,
+    "releaseMatchesPriorProof": true
+  }
+}

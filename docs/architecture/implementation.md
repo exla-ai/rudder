@@ -87,6 +87,25 @@ prompt (PLAN.md section 20) and fixes Codex session pinning: a `session_meta`
 line is about 22 KB because it carries the base instructions, and the old 8 KB
 head read could not parse it, so current Codex runs did not record a session id.
 
+## Resumed ownership after alpha.18
+
+Opus handed the checkout and unfinished runtime patches back to Sol. Alpha.18
+commit `243728b` contains the launch policy, wait/read prompt rule, full Codex
+session pinning and the release-check branch gate. Release run41189571495 passed;
+both npm next tags now resolve to alpha.18. Both registry packages also passed
+isolated installation, CLI/native/jj checks and archive/manifest verification at
+2026-10-31T10:21Z. Cloud release168 passed fresh app,
+health and authentication smoke checks on 2026-10-31T10:12Z. The live home was
+not restarted. See [delivery](delivery-alpha18.json) for exact identities.
+
+The next runtime batch is uncommitted: Binding4 readiness and helper custody,
+source preparation, missing context2 writer/runtime APIs and bounded startup /
+grant expiry. The 15 source-preparation tests pass after correcting endpoint
+authority layout, broker projection/validation order and pending activation.
+The original startup budget now bounds preparation and activation and covers
+execution plus finalization in the fixed grant expiry. Runtime5 stays refused until
+owned launch, actual kernel readiness and shutdown composition are qualified.
+
 ## Current implementation track
 
 Base: `91579cf631b1d9d78afbbd786a6dc1f8120cc1ca` on `origin/main` at start.
@@ -99,7 +118,7 @@ the three architecture documents already contained this session's planning work.
 | Private previews | Persisted Tailscale login, actual readiness, bounded async probes, exact project ownership, ready links and local open | E13 subset implemented; real userspace/Serve check passed; laptop/phone access remains untested |
 | Terminal stream | Shared home/sail helper, short output batching, bounded backpressure, connection fencing, UTF-8 and repaint recovery | E13 subset deployed in the worker image; real WS/PTY VM checks passed; existing homes adopt when idle |
 | Startup/download caches | Background CLI update, persistent account-local npm/pnpm/uv cache defaults, explicit overrides retained | Behavior tests pass; no distributed action-cache claim |
-| Full storage/engine rewrite | Milestones below | Cloud release166 / worker alpha.15 is deployed and verified; all three alpha.15 native release builds passed; npm awaits release tests and publication; both next tags still name alpha.7. Default workspace integration, fleet and migration gates remain open |
+| Full storage/engine rewrite | Milestones below | Cloud release168 / worker alpha.18 is deployed and verified; the alpha.18 release matrix passed and both npm next tags name alpha.18. Both packages passed isolated installation, CLI/native/jj smoke checks and all-platform artifact verification. Default workspace integration, fleet and migration gates remain open |
 
 The current native simple-execution path remains an isolated worker; explicit
 main-checkout mode remains available. The initial automatic DAG path retains

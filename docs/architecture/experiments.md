@@ -441,4 +441,6 @@ value only when tokens and wall clock improve without increased failed checks,
 review rejection or re-read rate; otherwise retune or revert it in the one
 policy rather than adding a second profile. A session correlation or one
 synthetic test does not pass this gate. Status-only verification has its own
-regression checks and does not depend on changing model settings.
+regression checks and does not depend on changing model settings. The alpha.18
+wait-and-read prompt rule is measured the same way: wait-only requests, clock
+checks and carried read tokens, with the same failure and review gates.

@@ -156,6 +156,28 @@ name alpha.19; stable stays3.9.13. Both packages passed isolated fresh installs,
 CLI/native/jj smoke and all-platform artifact/revision checks at13:55:43.717Z.
 See the [delivery record](delivery-alpha19.json).
 
+## Owned checkpoint DATA durability, after alpha.19
+
+The opt-in source5 fixture now prepares retained checkpoint DATA from its actual
+joined Record2, persists the original Q/template/intent, reconciles a lost local
+ACK and supplies the actual managed CAS to the normal transfer RPC. A lost
+successful Cloud publication response reconciled with GETs and zero uploads.
+After producer destruction, an independent readback continuation verified all
+14 objects, original evidence, mapped write and inherited file bytes through
+HTTPS at14:14:46.837Z. The first readback failed without a useful diagnostic;
+its original run remains unqualified and the successful continuation is recorded
+separately. Both synthetic credentials were removed with independent absence
+checks. The live home stayed unchanged. See the
+[evidence](../../examples/execution/evidence/2026-10-31-source5-publication/README.md).
+
+The affected Rust build and RPC tests passed. All 30 local transfer, checkpoint,
+Cloud validation and HTTP recovery tests passed with the current native helper.
+
+This is current working-tree qualification, not a product deployment or default
+launch change. The normal RPC uses the same session loop with a host-selected
+store; no request can choose a store. Connected model execution, App adoption,
+accepted jj history, fleet and migration remain open.
+
 ## Current implementation track
 
 Base: `91579cf631b1d9d78afbbd786a6dc1f8120cc1ca` on `origin/main` at start.

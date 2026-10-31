@@ -10,6 +10,9 @@ use rudder_engine::{
 };
 use rudder_native::pty_terminal::{TerminalCommand, TerminalPane, TerminalPaneOptions};
 
+#[path = "runtime5_checkpoint_transfer.rs"]
+mod checkpoint_transfer;
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Graph {
@@ -30,6 +33,8 @@ struct Input {
     auth_headers: BTreeMap<String, String>,
     graph: Graph,
     proof: PathBuf,
+    #[serde(default)]
+    checkpoint_transfer: Option<checkpoint_transfer::Input>,
 }
 
 const GUEST: &str = r#"import json,mmap,os,socket,sys,time
@@ -210,6 +215,7 @@ fn actual_https_source5_owned_stop_checkpoint_join_and_settlement() {
     );
     let (mut fixture, request) = qualified_request(&input);
     let mut prepared = prepare(request, fixture.journal(), &AtomicBool::new(false)).unwrap();
+    let selection = prepared.assignment().selection.clone();
     let spec = prepared.execution_spec().clone();
     let binding = prepared.binding().clone();
     let source_binding = binding
@@ -424,11 +430,19 @@ fn actual_https_source5_owned_stop_checkpoint_join_and_settlement() {
         .journal()
         .authorize_host_source(&host_token, &source_binding, now_ms().unwrap())
         .is_err());
+    let checkpoint_publication = input.checkpoint_transfer.as_ref().map(|transfer| {
+        let Some(CheckpointRef::PartialRemote(q)) = joined.provisional().unwrap().record().checkpoint() else {
+            panic!("source5 checkpoint DATA required")
+        };
+        checkpoint_transfer::publish(transfer, &input, selection, q, &spec.store_root, fixture.directory())
+            .unwrap_or_else(|error| panic!("actual checkpoint DATA publication failed: {error}"))
+    });
     let proof = serde_json::json!({"format_version":1,"kind":"private-runtime5-source-qualification", "status":"qualified",
         "spec_version":5,"binding_version":4,"actual_https_source":true,"actual_backend_ready":true,
         "actual_uid1500_fuse_offline_namespace":true,"actual_stop_v4":true,"captured_mmap_bytes_verified":true,"actual_successful_helper_exit":true,
         "idle_source_freshness_window_ms":4000,"actual_helper_alive_after_idle_window":true,
         "actual_fresh_issuer_join":true,"actual_server_callbacks_settled":true,"record":record,
+        "checkpoint_publication":checkpoint_publication,
         "accepted_jj_history":false,"model_execution":false,"default_rollout":false});
     write_new(&input.proof, &serde_json::to_vec(&proof).unwrap()).unwrap();
     drop(handle);

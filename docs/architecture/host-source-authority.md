@@ -133,10 +133,13 @@ handoff starts a fresh allowance. Startup checks end at backend admission;
 execution and finalization keep their own budgets. Spec4 omits the field and
 retains its wire shape. This constraint supplies no source or process authority.
 
-The passing case verifies inherited HTTPS reads, mapped writes in the partial
-checkpoint, StopV4, actual successful helper exit, fresh issuer join and settled
-source callbacks. It verifies local retention before destroying the test VM;
-it does not publish the captured delta/evidence remotely or promote the capture's
-`live_best_effort` consistency label. The default Native App launch has not
-adopted this family. Default migration, connected models and accepted jj history
-remain separate gates.
+The first source5 case verifies inherited HTTPS reads, mapped writes in the
+partial checkpoint, StopV4, successful helper exit, fresh issuer join and settled
+source callbacks with local retention. The subsequent
+[publication case](../../examples/execution/evidence/2026-10-31-source5-publication/README.md)
+uses the actual captured DATA and normal transfer RPC, reconciles lost local and
+remote replies, and verifies the 14-object closure through HTTPS after producer
+destruction. The original independent read failed; its successful readback
+continuation is recorded separately. The capture remains `live_best_effort`.
+The default Native App launch has not adopted this family. Default migration,
+connected models and accepted jj history remain separate gates.

@@ -1,0 +1,109 @@
+{
+  "status": "passed",
+  "after_producer_destruction": true,
+  "publication_id": "pcd1-118ab71d5bab02e5652eae40ca359eba2b4a626108bbeabe9901cce3ecc9d882",
+  "publication": {
+    "algorithm": "sha256",
+    "digest": "e4f4d731811083e2b43a0db819d1ad183902d07cba33dbea1578da2448dd1ed4",
+    "kind": "action_result",
+    "size_bytes": 4786
+  },
+  "q": {
+    "algorithm": "sha256",
+    "digest": "34195d2bbb5d9b1d347b31f2de7c72f7b2486801843b27fff115550698c3983e",
+    "kind": "blob",
+    "size_bytes": 3517
+  },
+  "plan": {
+    "algorithm": "sha256",
+    "digest": "229bc3b8a3cb94206728514441f218a672987575f619824013c0f7fe04d58d66",
+    "kind": "blob",
+    "size_bytes": 1769
+  },
+  "freeze_intent": {
+    "algorithm": "sha256",
+    "digest": "88588c9f220f34bdf9e3907eff573c46ca71132cdc9a18219533c1952c425121",
+    "kind": "blob",
+    "size_bytes": 473
+  },
+  "drain_record": {
+    "algorithm": "sha256",
+    "digest": "a86a175322a6aa626cb93e233ce80d1655cbee811de1b73ae19fe787409f860c",
+    "kind": "blob",
+    "size_bytes": 1272
+  },
+  "source": {
+    "algorithm": "sha256",
+    "digest": "04f1b97575ab4622e8cf20c7af1b406c13ef9c0e948b8b7e07774d8032272e73",
+    "kind": "source_root",
+    "size_bytes": 341
+  },
+  "runnable": {
+    "algorithm": "sha256",
+    "digest": "fc9b7b86bbfd669dece5bc543a3883f439c42ae702a434f7a2b0c6fc4b28e1ec",
+    "kind": "runnable_root",
+    "size_bytes": 658
+  },
+  "receipt": {
+    "format_version": 1,
+    "root_id": "pcd1-118ab71d5bab02e5652eae40ca359eba2b4a626108bbeabe9901cce3ecc9d882",
+    "root": {
+      "kind": "action_result",
+      "algorithm": "sha256",
+      "digest": "e4f4d731811083e2b43a0db819d1ad183902d07cba33dbea1578da2448dd1ed4",
+      "size_bytes": 4786
+    },
+    "durability": "replicated",
+    "published_at_ms": 1793455891112,
+    "object_count": 14,
+    "total_bytes": 13846
+  },
+  "base": {
+    "root": {
+      "algorithm": "sha256",
+      "digest": "bf4577fcd42ebd27aaa8f89763b82313f44cbe827a8d541d5e0cdf6ab6ecd8e5",
+      "kind": "runnable_root",
+      "size_bytes": 658
+    },
+    "root_id": "runtime5-source-16219bc4-6ddb-4c03-9758-8422f45a1017",
+    "scope": {
+      "provider_id": "fixture-provider",
+      "tenant_id": "fixture-tenant"
+    }
+  },
+  "original_q_exact": true,
+  "exact_attempt_observation_stop": true,
+  "capture_consistency": "live_best_effort",
+  "closure_objects": 14,
+  "closure_bytes": 13846,
+  "object_reads": 16,
+  "read_bytes": 14845,
+  "files": [
+    {
+      "path": "/runtime5-qualified.txt",
+      "reference": {
+        "algorithm": "sha256",
+        "digest": "9165d1dcdaebdca2477487a0c5cbf2aa6af0ae297a5dc7fd7416791620f5ad57",
+        "kind": "blob",
+        "size_bytes": 32
+      },
+      "bytes": 32,
+      "sha256": "9165d1dcdaebdca2477487a0c5cbf2aa6af0ae297a5dc7fd7416791620f5ad57",
+      "exact_content_verified": true
+    },
+    {
+      "path": "/old",
+      "reference": {
+        "algorithm": "sha256",
+        "digest": "6a9030387b1fcad0cde231223f5a57b996d99ab2f49ca2de71e9deacddbbb495",
+        "kind": "blob",
+        "size_bytes": 27
+      },
+      "bytes": 27,
+      "sha256": "6a9030387b1fcad0cde231223f5a57b996d99ab2f49ca2de71e9deacddbbb495",
+      "exact_content_verified": true
+    }
+  ],
+  "model_calls": false,
+  "accepted_history": false
+}

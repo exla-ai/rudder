@@ -160,3 +160,16 @@ account-scoped and does not delete objects or published roots.
 The existing partial-tree format and complete-root APIs keep their original
 bytes and meanings. This DATA path does not activate a managed profile or
 permit a saved Q/bundle receipt to authorize a launch or acceptance transaction.
+
+## Actual owned source5 publication
+
+The [Fly qualification](../../examples/execution/evidence/2026-10-31-source5-publication/README.md)
+composes actual source5 shutdown with this DATA path. It persists original inputs,
+reconciles a lost producer ACK, transfers the actual managed CAS and reconciles a
+lost successful publication response with GETs and zero further uploads. After
+producer destruction, a separate readback continuation verified the exact receipt,
+14-object closure, original Q/evidence and both changed and inherited file bytes.
+The first independent read failed with an uninformative diagnostic and remains
+recorded as unqualified. The successful continuation preserves that history and
+the original capture consistency. It does not enable default launch or history
+acceptance.

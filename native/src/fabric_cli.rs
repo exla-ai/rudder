@@ -119,11 +119,19 @@ fn frame(output: &mut impl Write, id: &str, result: Result<Value>, bytes: &[u8])
 fn rpc() -> Result<()> {
     let home = super::signals::rudder_home()
         .ok_or_else(|| anyhow::anyhow!("Rudder home is unavailable"))?;
-    let mut session = TransferSession::open(&FabricPaths::new(&home))?;
+    let session = TransferSession::open(&FabricPaths::new(&home))?;
     let input = io::stdin();
     let output = io::stdout();
-    let mut reader = input.lock();
-    let mut writer = output.lock();
+    rpc_session(session, input.lock(), output.lock())
+}
+
+/// The trusted host chooses the actual store before opening the transport.
+/// No request frame can select a store or acquire scheduler authority.
+pub(crate) fn rpc_session(
+    mut session: TransferSession,
+    mut reader: impl BufRead,
+    mut writer: impl Write,
+) -> Result<()> {
     loop {
         let mut line = Vec::new();
         (&mut reader)

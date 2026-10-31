@@ -232,7 +232,30 @@ impl Runtime {
         let answer = self.authority.validate(&self.binding);
         self.check_cancelled()?;
         match answer {
-            Ok(host) => Ok(host),
+            Ok(host) => {
+                // A refreshed inventory is also a revocation input for OPEN
+                // tunnels. Conservatively fence the entire proxy if any sealed
+                // pin became host/NAT-denied, before publishing fresh validity.
+                let allowed = self.profile.policy().is_some_and(|policy| {
+                    policy.origins.iter().all(|origin| {
+                        origin.ipv4_addresses.iter().all(|address| {
+                            self.profile
+                                .check_destination(
+                                    &origin.host,
+                                    origin.port,
+                                    IpAddr::V4(*address),
+                                    &host,
+                                )
+                                .is_ok()
+                        })
+                    })
+                });
+                if !allowed {
+                    self.fail(Kind::AuthorityDenied);
+                    return Err(Error::new(Kind::AuthorityDenied));
+                }
+                Ok(host)
+            }
             Err(_) => {
                 self.fail(Kind::AuthorityDenied);
                 Err(Error::new(Kind::AuthorityDenied))
@@ -1287,5 +1310,119 @@ mod tests {
         assert_eq!(error.kind(), Kind::Deadline);
         assert!(fixture.shared.sockets.lock().unwrap().is_empty());
         assert_eq!(fixture.shared.stats.upstreams.load(Ordering::Acquire), 0);
+    }
+    #[test]
+    fn refreshed_host_deny_closes_open_relay_before_renewal_and_retains_worker_until_settlement() {
+        struct ChangingAuthority(Mutex<Vec<Ipv4Addr>>);
+        impl ConnectAuthority for ChangingAuthority {
+            fn validate(&self, _: &ConnectBinding) -> Result<HostIpv4DenySet> {
+                HostIpv4DenySet::from_trusted_host_inventory(self.0.lock().unwrap().clone())
+                    .map_err(|_| Error::new(Kind::AuthorityDenied))
+            }
+        }
+        let mut fixture = Fixture::new();
+        let authority = Arc::new(ChangingAuthority(Mutex::new(vec![Ipv4Addr::LOCALHOST])));
+        Arc::get_mut(&mut fixture.shared).unwrap().authority = authority.clone();
+        fixture.shared.grant().unwrap();
+        let (mut guest, guest_proxy) = pair();
+        let (mut origin, upstream_proxy) = pair();
+        origin
+            .set_read_timeout(Some(Duration::from_millis(200)))
+            .unwrap();
+        fixture.shared.stats.active.store(1, Ordering::Release);
+        let mut connection = Connection {
+            stream: TrackedStream::new(guest_proxy, &fixture.shared),
+            _permit: ActivePermit(Arc::clone(&fixture.shared)),
+            accepted: Instant::now(),
+        };
+        let mut upstream = TrackedStream::new(upstream_proxy, &fixture.shared);
+        let shared = Arc::clone(&fixture.shared);
+        let (returned, stopped) = mpsc::sync_channel(1);
+        let (release, hold) = mpsc::sync_channel(1);
+        let worker = Worker::spawn("connect-revoked-open-relay", move || {
+            let mut meter = Meter {
+                shared: &shared,
+                used: 0,
+            };
+            let result = relay_pair(
+                &mut connection.stream.stream,
+                &mut upstream.stream,
+                &mut [0u8; 4096],
+                &mut meter,
+                Instant::now() + Duration::from_secs(3),
+                Instant::now(),
+            );
+            returned.send(result.map_err(|error| error.kind())).unwrap();
+            // Retain actual socket/permit owners after logical relay return.
+            // A close timeout cannot turn this held worker into settlement.
+            hold.recv().unwrap();
+            drop(upstream);
+            drop(connection);
+        })
+        .unwrap();
+        let mut owner = OwnedConnectProxy {
+            shared: Arc::clone(&fixture.shared),
+            workers: vec![worker],
+            ready: None,
+            settled: false,
+        };
+        guest.write_all(b"before").unwrap();
+        let mut before = [0u8; 6];
+        origin.read_exact(&mut before).unwrap();
+        assert_eq!(&before, b"before");
+        origin.write_all(b"reply").unwrap();
+        let mut reply = [0u8; 5];
+        guest.read_exact(&mut reply).unwrap();
+        assert_eq!(&reply, b"reply");
+        *authority.0.lock().unwrap() = vec![Ipv4Addr::LOCALHOST, Ipv4Addr::new(93, 184, 216, 34)];
+        let previous = fixture.shared.authority_until.load(Ordering::Acquire);
+        let refresh = fixture.shared.grant();
+        // This is the monitor's real publication condition. With the old
+        // discarded-inventory behavior the following bytes reach the peer.
+        if refresh.is_ok() {
+            fixture
+                .shared
+                .authority_until
+                .store(boottime_ms() + 500, Ordering::Release);
+        }
+        let cancelled_before_close = fixture.shared.cancelled();
+        let validity_after_refresh = fixture.shared.authority_until.load(Ordering::Acquire);
+        let _ = guest.write_all(b"AFTER");
+        let mut after = [0u8; 5];
+        let peer_read = origin.read(&mut after);
+        let forwarded_after_revocation = matches!(peer_read, Ok(count) if count > 0);
+        let peer_closed = matches!(peer_read, Ok(0))
+            || peer_read.as_ref().is_err_and(|error| {
+                matches!(
+                    error.kind(),
+                    std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::NotConnected
+                )
+            });
+        // Always settle the fixture before assertions, including the old-code
+        // negative control, so a deliberate regression cannot leak its worker.
+        let early = owner.close_and_settle(Duration::from_millis(20));
+        let still_owned = fixture.shared.witnesses.lock().unwrap().is_some()
+            && fixture.shared.stats.active.load(Ordering::Acquire) == 1
+            && !fixture.shared.sockets.lock().unwrap().is_empty();
+        let relay_result = stopped.recv_timeout(Duration::from_secs(1)).unwrap();
+        release.send(()).unwrap();
+        let settled = owner.close_and_settle(Duration::from_secs(1)).unwrap();
+        assert!(
+            !forwarded_after_revocation && peer_closed,
+            "open tunnel forwarded after its sealed pin became host-denied"
+        );
+        assert!(cancelled_before_close && refresh.is_err());
+        assert_eq!(
+            validity_after_refresh, previous,
+            "denied refresh published new validity"
+        );
+        assert!(matches!(early, Err(error) if error.kind() == Kind::Unsettled));
+        assert!(still_owned);
+        assert!(matches!(
+            relay_result,
+            Ok(()) | Err(Kind::Cancelled) | Err(Kind::Io)
+        ));
+        assert_eq!(settled.snapshot().active_connections, 0);
+        assert!(fixture.shared.sockets.lock().unwrap().is_empty());
     }
 }

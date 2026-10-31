@@ -53,6 +53,12 @@ only inventories its local interfaces and reports that limitation.
 `await_ready` success before sending a child admission ACK. A fixed authority
 worker refreshes a 500ms CLOCK_BOOTTIME validity bound. Connections fail closed
 when it expires. Authority is also checked around resolution and dialing.
+Every successful callback revalidates all bounded sealed origin pins against
+the fresh host deny set before renewing validity. If any pin becomes host/NAT
+denied, the whole proxy cancels and shuts existing sockets, including tunnels
+already forwarding bytes. An unused fallback pin can conservatively fence the
+proxy too; a refreshed inventory is never discarded merely because a dial
+already succeeded.
 Blocking callbacks occupy their fixed workers until actual return; timeout does
 not release or replace them.
 

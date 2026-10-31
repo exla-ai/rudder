@@ -1,7 +1,7 @@
 {
   "formatVersion": 1,
   "version": "4.0.0-alpha.21",
-  "sourceKind": "working-tree candidate",
+  "sourceKind": "release record with candidate checks and exact-tag CI",
   "checks": {
     "rust": {
       "status": "passed",
@@ -166,11 +166,240 @@
     "modelExecution": false
   },
   "releaseCheckCi": {
-    "status": "not_started",
-    "branch": "release-check/4.0.0-alpha.21"
+    "id": 41224165296,
+    "html_url": "https://github.com/exla-ai/rudder/actions/runs/41224165296",
+    "head_sha": "fee7ac889ed8d40db70ba7f570202d3fb21f26bc",
+    "head_branch": "release-check/4.0.0-alpha.21",
+    "status": "completed",
+    "conclusion": "success",
+    "run_attempt": 1,
+    "created_at": "2026-10-31T17:21:48Z",
+    "updated_at": "2026-10-31T18:05:09Z",
+    "verifiedAt": "2026-10-31T18:06:55.251980+00:00"
   },
   "delivery": {
-    "status": "not_started"
+    "status": "verified",
+    "cloud": {
+      "kind": "web",
+      "status": "deployed",
+      "provider": "Fly.io",
+      "url": "https://rudder.exla.ai/app",
+      "revision": "20942911a060e41bb97e480b5177ae147db7992e",
+      "version": "4.0.0-alpha.21",
+      "deploymentId": "1RNM1g3ppxjNQHy7eORBepwq",
+      "release": 171,
+      "verifiedAt": "2026-10-31T18:18:27.326Z",
+      "controlImage": "registry.fly.io/rudder-cloud-control:4.0.0-alpha.21",
+      "controlDigest": "sha256:45e0b71fd68c73333ed38541ee969093e6017e5f51c757b5c40e22d5449064cd",
+      "workerImage": "registry.fly.io/rudder-workers-exla:4.0.0-alpha.21",
+      "workerDigest": "sha256:53c763d9e5886cadc262fa03631e5d08338c44486e2f3ffbb8e0afba4c21d89f",
+      "homeUnchangedAcrossDeploy": true,
+      "checks": [
+        {
+          "url": "https://rudder.exla.ai/app",
+          "status": 200,
+          "expected": 200,
+          "finalUrl": "https://rudder-cloud-control.fly.dev/app",
+          "ok": true
+        },
+        {
+          "url": "https://rudder-cloud-control.fly.dev/health",
+          "status": 200,
+          "expected": 200,
+          "finalUrl": "https://rudder-cloud-control.fly.dev/health",
+          "ok": true,
+          "health": {
+            "ok": true,
+            "s3": true,
+            "fabric": true,
+            "fly": true,
+            "byoVm": true,
+            "state": true,
+            "secrets": true,
+            "auth": {
+              "google": true,
+              "github": true,
+              "githubDevice": true
+            }
+          }
+        },
+        {
+          "url": "https://rudder-cloud-control.fly.dev/api/app/state",
+          "status": 401,
+          "expected": 401,
+          "finalUrl": "https://rudder-cloud-control.fly.dev/api/app/state",
+          "ok": true
+        },
+        {
+          "url": "https://rudder-cloud-control.fly.dev/api/rudder/fabric/roots/unauthenticated-alpha21-smoke",
+          "status": 401,
+          "expected": 401,
+          "finalUrl": "https://rudder-cloud-control.fly.dev/api/rudder/fabric/roots/unauthenticated-alpha21-smoke",
+          "ok": true
+        }
+      ],
+      "workerSmoke": {
+        "qualified": true,
+        "smokePassed": true,
+        "cleanupVerified": true,
+        "independentAbsence": true,
+        "ownedDestruction": true,
+        "withinLifetimeBound": true,
+        "testOnlyMock": false
+      }
+    },
+    "npm": {
+      "status": "verified",
+      "version": "4.0.0-alpha.21",
+      "revision": "20942911a060e41bb97e480b5177ae147db7992e",
+      "runId": 41227801166,
+      "runAttempt": 2,
+      "verifiedAt": "2026-10-31T19:01:24.738453Z",
+      "proofSha256": "d304365cadc28a8ebc9bdf9a9a24ffc97bb47142c9f7c7e6ea14c3a17563a3e7",
+      "packages": {
+        "@exla/rudder": {
+          "status": "passed",
+          "next": "4.0.0-alpha.21",
+          "latest": "3.9.13",
+          "registryGitHead": null,
+          "privateFixtureRemoved": true,
+          "checks": {
+            "buddy-capabilities": {
+              "ok": true,
+              "exitCode": 0
+            },
+            "buddy-version": {
+              "ok": true,
+              "exitCode": 0
+            },
+            "cli-help": {
+              "ok": true,
+              "exitCode": 0
+            },
+            "cli-version": {
+              "ok": true,
+              "exitCode": 0
+            },
+            "installation": {
+              "realPostinstall": true,
+              "exitCode": 0
+            },
+            "native-execution": {
+              "ok": true,
+              "exitCode": 0
+            },
+            "native-fabric": {
+              "ok": true,
+              "exitCode": 0
+            },
+            "native-smoke": {
+              "ok": true,
+              "exitCode": 0
+            },
+            "native-vfs": {
+              "ok": true,
+              "exitCode": 0
+            },
+            "native-workspace": {
+              "ok": true,
+              "exitCode": 0
+            },
+            "postinstall_jj": {
+              "source": "system",
+              "version": "jj 0.40.0-941d0290f5511db1d1cf8e4fe7365ba7d1828ea0"
+            },
+            "reviewed_archive": {
+              "verified": true
+            }
+          },
+          "nativePlatforms": [
+            "darwin-arm64",
+            "darwin-x64",
+            "linux-x64"
+          ]
+        },
+        "@viraatdas/rudder": {
+          "status": "passed",
+          "next": "4.0.0-alpha.21",
+          "latest": "3.9.13",
+          "registryGitHead": null,
+          "privateFixtureRemoved": true,
+          "checks": {
+            "buddy-capabilities": {
+              "ok": true,
+              "exitCode": 0
+            },
+            "buddy-version": {
+              "ok": true,
+              "exitCode": 0
+            },
+            "cli-help": {
+              "ok": true,
+              "exitCode": 0
+            },
+            "cli-version": {
+              "ok": true,
+              "exitCode": 0
+            },
+            "installation": {
+              "realPostinstall": true,
+              "exitCode": 0
+            },
+            "native-execution": {
+              "ok": true,
+              "exitCode": 0
+            },
+            "native-fabric": {
+              "ok": true,
+              "exitCode": 0
+            },
+            "native-smoke": {
+              "ok": true,
+              "exitCode": 0
+            },
+            "native-vfs": {
+              "ok": true,
+              "exitCode": 0
+            },
+            "native-workspace": {
+              "ok": true,
+              "exitCode": 0
+            },
+            "postinstall_jj": {
+              "source": "system",
+              "version": "jj 0.40.0-941d0290f5511db1d1cf8e4fe7365ba7d1828ea0"
+            },
+            "reviewed_archive": {
+              "verified": true
+            }
+          },
+          "nativePlatforms": [
+            "darwin-arm64",
+            "darwin-x64",
+            "linux-x64"
+          ]
+        }
+      },
+      "aliasComparison": {
+        "native_pairs_identical": true,
+        "package_metadata_except_name_identical": true
+      },
+      "limits": {
+        "scope": "private Linux prefixes and cleared child environment; not an OS sandbox",
+        "actualExecutionPlatform": "linux-x64",
+        "nativeManifestsVerified": [
+          "darwin-arm64",
+          "darwin-x64",
+          "linux-x64"
+        ],
+        "npmProvenanceSignaturesVerified": false
+      },
+      "priorAttempts": [
+        "tag attempt1 failed the legacy broker cancellation fixture; attempt2 passed",
+        "first registry/install attempt pending because both versions returned 404",
+        "second install attempt refused insufficient local workspace space before installs"
+      ]
+    }
   },
   "fullV4Complete": false,
   "remainingGates": [
@@ -178,5 +407,54 @@
     "authenticated connected Codex/Claude profiles and runtime attachment",
     "current source selection and accepted jj history",
     "fleet ownership, distributed caches and migration"
-  ]
+  ],
+  "revision": "20942911a060e41bb97e480b5177ae147db7992e",
+  "tag": "v4.0.0-alpha.21",
+  "taggedReleaseCi": {
+    "verifiedAt": "2026-10-31T18:55:25.941048+00:00",
+    "runs": [
+      {
+        "id": 41227801166,
+        "name": "Release",
+        "status": "completed",
+        "conclusion": "success",
+        "head_sha": "20942911a060e41bb97e480b5177ae147db7992e",
+        "run_attempt": 2,
+        "updated_at": "2026-10-31T18:54:37Z",
+        "html_url": "https://github.com/exla-ai/rudder/actions/runs/41227801166"
+      },
+      {
+        "id": 41227801175,
+        "name": "Mac",
+        "status": "completed",
+        "conclusion": "success",
+        "head_sha": "20942911a060e41bb97e480b5177ae147db7992e",
+        "run_attempt": 1,
+        "updated_at": "2026-10-31T18:08:03Z",
+        "html_url": "https://github.com/exla-ai/rudder/actions/runs/41227801175"
+      },
+      {
+        "id": 41227801179,
+        "name": "iOS",
+        "status": "completed",
+        "conclusion": "success",
+        "head_sha": "20942911a060e41bb97e480b5177ae147db7992e",
+        "run_attempt": 1,
+        "updated_at": "2026-10-31T18:08:35Z",
+        "html_url": "https://github.com/exla-ai/rudder/actions/runs/41227801179"
+      },
+      {
+        "id": 41227801789,
+        "name": "TUI e2e",
+        "status": "completed",
+        "conclusion": "success",
+        "head_sha": "20942911a060e41bb97e480b5177ae147db7992e",
+        "run_attempt": 1,
+        "updated_at": "2026-10-31T18:10:31Z",
+        "html_url": "https://github.com/exla-ai/rudder/actions/runs/41227801789"
+      }
+    ]
+  },
+  "candidateRevision": "fee7ac889ed8d40db70ba7f570202d3fb21f26bc",
+  "localChecksSourceKind": "working-tree candidate before version bump; exact-tag CI is recorded separately"
 }

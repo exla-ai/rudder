@@ -198,7 +198,7 @@ stable stays 3.9.13. Both packages passed isolated installs, CLI/native/jj smoke
 and all-platform artifact/revision checks at 2026-10-31T16:11:35.964957Z. See
 [delivery](delivery-alpha20.json).
 
-## Source ownership in App, alpha.21 candidate
+## Source ownership in App, alpha.21
 
 The explicit Linux source App adapter retains preparation, helper, Journal and
 checkpoint ownership through bounded worker and join supervision. Two reserved
@@ -243,8 +243,24 @@ now waits for the actual WebSocket connection under the original five-second
 bound, and the focused and full reruns passed. See
 [verification](verification-alpha21.json).
 
-This candidate has not shipped. Normal managed-project startup still requires
-its explicit migration and ownership gates; the legacy startup guard remains.
+Alpha.21 shipped at `20942911a060e41bb97e480b5177ae147db7992e`. The exact-tag
+Release workflow passed on attempt2 after the first attempt exposed the legacy
+broker cancellation fixture's fixed-delay race. Both npm names are available on
+`next`; fresh private Linux installs, CLI/native/jj smoke checks and all three
+platform manifests passed at 2026-10-31T19:01:24.735285Z. Alias binaries and
+metadata match apart from the package name. Registry availability was delayed
+after CI publication; a later local verifier attempt refused low disk space.
+Both earlier outcomes remain in the private release receipts.
+
+Rudder Cloud is deployed on Fly.io at https://rudder.exla.ai/app, release171,
+deployment `1RNM1g3ppxjNQHy7eORBepwq`, verified 2026-10-31T18:18:27.326Z. App,
+health, unauthenticated state/Fabric boundaries, runtime hashes, database
+integrity and the disposable UID1500 worker smoke passed. The active alpha.7
+home retained its exact instance and image; it was not restarted. Image digests
+and the complete delivery checks are in the verification record.
+
+Normal managed-project startup still requires its explicit migration and
+ownership gates; the legacy startup guard remains.
 The qualified source profile is offline-command-v1 with Immediate startup.
 Connected Codex/Claude execution, authenticated transport attachment, accepted
 jj history, normal source selection, fleet and full shutdown/recovery routing

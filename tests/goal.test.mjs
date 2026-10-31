@@ -3,7 +3,12 @@ import test from "node:test";
 
 import { DEFAULT_SUCCESS, deriveGoal, deriveSuccess, extractSuccess, formatGoalPrompt } from "../dist/goal.js";
 import { PARALLEL_WORK_RULE, renderContract } from "../dist/brain.js";
+import { nativeAgentCommand } from "../dist/native-agents.js";
 import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 
 // ---------------------------------------------------------------------------
 // The canonical objective-format convention: every spawned agent's launch prompt
@@ -127,8 +132,8 @@ test("renderContract leads with the Objective + Done-when header", () => {
   const contract = renderContract(spec);
   assert.equal(contract.split("\n")[0], "Objective: add a dark mode toggle");
   assert.equal(contract.split("\n")[1], "Done when: the toggle works and tests pass");
-  // The existing body still follows the header.
-  assert.ok(contract.includes("Task: add a dark mode toggle"));
+  // Adapters carry the actual user prompt separately from this contract.
+  assert.ok(!contract.includes("Task: add a dark mode toggle"));
   assert.ok(contract.includes("Acceptance criteria:"));
   assert.ok(contract.includes("Working rules:"));
 });
@@ -148,6 +153,48 @@ test("renderContract derives goal/success when the spec omits them", () => {
   const contract = renderContract(spec);
   assert.equal(contract.split("\n")[0], "Objective: refactor the scheduler");
   assert.ok(contract.split("\n")[1].startsWith("Done when: "));
+});
+
+test("native command adapters submit the full task once while preserving role and criteria", {
+  skip: process.platform === "win32" ? "native command adapters use POSIX shell quoting" : false,
+}, async (t) => {
+  const execute = promisify(execFile);
+  const directory = await fs.promises.mkdtemp(path.join(os.tmpdir(), "rudder-prompt-once-"));
+  t.after(() => fs.promises.rm(directory, { recursive: true, force: true }));
+  const bin = path.join(directory, "bin");
+  await fs.promises.mkdir(bin);
+  const capture = path.join(directory, "capture.mjs");
+  await fs.promises.writeFile(capture, "import fs from 'node:fs'; fs.writeFileSync(process.env.RUDDER_ARGV_FIXTURE_FILE, JSON.stringify(process.argv.slice(2)));\n");
+  for (const backend of ["claude", "codex", "opencode"]) {
+    await fs.promises.writeFile(path.join(bin, backend), '#!/bin/sh\nexec "$RUDDER_ARGV_FIXTURE_NODE" "$RUDDER_ARGV_FIXTURE_SCRIPT" "$@"\n', { mode: 0o700 });
+  }
+  const task = "Fix the caller's quoted parser input.\n" + "Keep the complete task detail and its exact newlines.\n".repeat(160) + "End of distinct task body.";
+  for (const runtimeRole of ["isolated-worker", "main-owner"]) {
+    const contract = renderContract({
+      runId: "fixture", runtimeRole, task, goal: "Preserve parser input", success: "The quoted-input regression passes",
+      createdAt: "2026-01-01T00:00:00.000Z", repo: { root: directory, branch: "main", baseCommit: "fixture", status: [] },
+      instructionsFiles: [], acceptanceCriteria: ["Retain every input byte."], suggestedTests: ["npm test"],
+    });
+    assert.ok(!contract.includes(task), "the task body belongs only in the user prompt");
+    for (const backend of ["claude", "codex", "opencode"]) {
+      const output = path.join(directory, `${runtimeRole}-${backend}.json`);
+      const command = nativeAgentCommand({
+        run: { id: "fixture", task, backend, model: backend === "codex" ? "gpt-6.1-sol" : "fixture-model", workspace: { path: directory } },
+        prompt: task, contract, codexCommand: path.join(bin, "codex"),
+      });
+      await execute("/bin/sh", ["-c", command], {
+        cwd: directory, timeout: 10_000,
+        env: { PATH: `${bin}${path.delimiter}${process.env.PATH ?? ""}`, HOME: path.join(directory, "home"), RUDDER_ARGV_FIXTURE_NODE: process.execPath, RUDDER_ARGV_FIXTURE_SCRIPT: capture, RUDDER_ARGV_FIXTURE_FILE: output },
+      });
+      const args = JSON.parse(await fs.promises.readFile(output, "utf8"));
+      const submitted = args.join("\n");
+      assert.equal(submitted.split(task).length - 1, 1, `${backend}/${runtimeRole} task body`);
+      assert.ok(submitted.includes("Objective: Preserve parser input"));
+      assert.ok(submitted.includes("Done when: The quoted-input regression passes"));
+      assert.ok(submitted.includes("Retain every input byte."));
+      assert.ok(submitted.includes(runtimeRole === "main-owner" ? "user's main checkout" : "You are an isolated worker"));
+    }
+  }
 });
 
 test("renderContract asks the worker to parallelize, in parity with the native prompt", () => {

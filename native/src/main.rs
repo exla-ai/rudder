@@ -19485,7 +19485,7 @@ Files involved: {}
                     &run.model,
                     run.effort,
                     &prompt,
-                    AgentMode::Execute,
+                    run_mode,
                     sid.as_deref(),
                 );
                 (command, None, sid)

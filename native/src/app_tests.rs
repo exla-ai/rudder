@@ -8618,6 +8618,108 @@ fn resume_commands_reuse_saved_session_ids() {
 }
 
 #[test]
+fn historical_claude_resume_preserves_planner_and_reviewer_tool_policy() {
+    let _env = env_guard();
+    let value = |args: &[String], flag: &str| {
+        args.windows(2).find(|pair| pair[0] == flag).map(|pair| pair[1].clone())
+    };
+    for mode in [AgentMode::Plan, AgentMode::GamAdversarial] {
+        let mut run = test_agent_run("historical", "inspect the saved work");
+        run.mode = mode;
+        let command = claude_resume_command(&run, "saved-session");
+        assert_eq!(value(&command.args, "--resume").as_deref(), Some("saved-session"));
+        if mode == AgentMode::Plan {
+            assert_eq!(value(&command.args, "--permission-mode").as_deref(), Some("plan"));
+            assert_eq!(value(&command.args, "--allowedTools").as_deref(), Some("Read,Grep,Glob,LS,WebSearch,WebFetch,Bash"));
+        } else {
+            assert_eq!(value(&command.args, "--permission-mode").as_deref(), Some("bypassPermissions"));
+            assert_eq!(value(&command.args, "--allowedTools").as_deref(), Some("Read,Grep,Glob,LS"));
+            assert_eq!(value(&command.args, "--disallowedTools").as_deref(), Some("Edit,Write,NotebookEdit,Bash,Task"));
+        }
+    }
+    for mode in [AgentMode::Execute, AgentMode::Main, AgentMode::OneOff, AgentMode::ReviewAll] {
+        let mut run = test_agent_run("writer", "continue the assigned implementation");
+        run.mode = mode;
+        let command = claude_resume_command(&run, "saved-session");
+        assert_eq!(value(&command.args, "--permission-mode").as_deref(), Some("bypassPermissions"));
+        assert!(value(&command.args, "--allowedTools").is_none());
+        assert!(value(&command.args, "--disallowedTools").is_none());
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn historical_readonly_modes_survive_restarts_with_and_without_sessions() {
+    let _env = env_guard();
+    let repo = unique_test_repo("historical-readonly-restart").canonicalize().unwrap();
+    let home = repo.join("home");
+    fs::create_dir_all(&home).unwrap();
+    std::env::set_var("HOME", &home);
+    std::env::set_var("RUDDER_HOME", home.join(".rudder"));
+    let cli = repo.join("fake-rudder");
+    write_fake_bin(&cli, "#!/bin/sh\nexit 0\n");
+    std::env::set_var("RUDDER_CLI", &cli);
+    for backend in [Backend::Claude, Backend::Codex] {
+        for persisted_mode in ["plan", "gam-adversarial"] {
+            for saved_session in [false, true] {
+                let case = repo.join(format!("{}-{persisted_mode}-{saved_session}", backend.as_str()));
+                fs::create_dir_all(&case).unwrap();
+                let log = case.join("argv");
+                let fake = case.join("fake-provider");
+                write_fake_bin(&fake, &format!(
+                    "#!/bin/sh\nprintf '%s\\0' \"$@\" > {tmp}\n/bin/mv {tmp} {log}\n/bin/cat >/dev/null\n",
+                    tmp = shell_single_quote(&case.join("argv.tmp").to_string_lossy()),
+                    log = shell_single_quote(&log.to_string_lossy()),
+                ));
+                std::env::set_var("RUDDER_CLAUDE_BIN", &fake);
+                std::env::set_var("RUDDER_CODEX_BIN", &fake);
+                let mut app = App::new();
+                app.cwd = case.clone();
+                let mut run = test_agent_run("historical", "inspect the saved work");
+                run.mode = AgentMode::parse(persisted_mode).unwrap();
+                run.backend = backend;
+                run.cwd = case.clone();
+                run.status = AgentStatus::Stopped;
+                run.session_id = saved_session.then(|| "saved-session".to_string());
+                app.agents.push(run);
+                assert!(app.restart_agent_at(0, "continue the inspection", None), "{:?}", app.notice);
+                let end = Instant::now() + Duration::from_secs(3);
+                while !log.exists() && Instant::now() < end {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                let args: Vec<String> = fs::read(&log).expect("owned provider argv")
+                    .split(|byte| *byte == 0).filter(|part| !part.is_empty())
+                    .map(|part| String::from_utf8(part.to_vec()).unwrap()).collect();
+                let value = |flag: &str| args.windows(2).find(|pair| pair[0] == flag).map(|pair| pair[1].as_str());
+                assert_eq!(app.agents[0].mode, AgentMode::parse(persisted_mode).unwrap());
+                assert_eq!(app.agents[0].cwd, case);
+                if backend == Backend::Claude {
+                    if persisted_mode == "plan" {
+                        assert_eq!(value("--permission-mode"), Some("plan"), "{args:?}");
+                    } else {
+                        assert_eq!(value("--allowedTools"), Some("Read,Grep,Glob,LS"), "{args:?}");
+                        assert_eq!(value("--disallowedTools"), Some("Edit,Write,NotebookEdit,Bash,Task"), "{args:?}");
+                    }
+                    assert_eq!(value("--resume"), saved_session.then_some("saved-session"));
+                } else {
+                    assert_eq!(value("--sandbox"), Some("read-only"), "{args:?}");
+                    assert_eq!(value("--ask-for-approval"), Some("never"), "{args:?}");
+                    assert!(!args.iter().any(|arg| arg == "--dangerously-bypass-approvals-and-sandbox"));
+                    assert_eq!(args.iter().any(|arg| arg == "resume"), saved_session);
+                }
+                if saved_session {
+                    assert_eq!(app.agents[0].session_id.as_deref(), Some("saved-session"));
+                } else {
+                    assert!(!args.iter().any(|arg| arg == "saved-session"));
+                }
+                app.agents[0].terminal = None;
+            }
+        }
+    }
+    let _ = fs::remove_dir_all(repo);
+}
+
+#[test]
 fn fork_commands_branch_the_session_without_touching_the_original() {
     // Builds commands via claude_program()/codex_program(); serialize against
     // bin-injecting tests.

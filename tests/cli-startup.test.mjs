@@ -56,6 +56,31 @@ test("help and unknown private callbacks leave agent setup pending", async (t) =
   await assert.rejects(fs.stat(home), { code: "ENOENT" });
 });
 
+test("completion writes its evidence without skills, telemetry setup or jj discovery", {
+  skip: process.platform === "win32" ? "jj discovery trap uses a POSIX executable" : false,
+}, async (t) => {
+  const { directory, home, env, run } = await fixture(t);
+  const bin = path.join(directory, "bin");
+  await fs.mkdir(bin);
+  const probe = path.join(directory, "jj-discovery");
+  env.RUDDER_STARTUP_FIXTURE_PROBE = probe;
+  // A valid jj is discoverable without downloads. Trap the discovery shell,
+  // since command -v does not execute jj itself.
+  await fs.writeFile(path.join(bin, "jj"), "#!/bin/sh\nprintf 'jj 0.40.0\\n'\n", { mode: 0o755 });
+  await fs.writeFile(path.join(bin, "sh"), '#!/bin/sh\ncase "$2" in *"command -v"*"jj"*) printf discovery > "$RUDDER_STARTUP_FIXTURE_PROBE";; esac\nexec /bin/sh "$@"\n', { mode: 0o755 });
+  env.PATH = `${bin}${path.delimiter}${env.PATH ?? ""}`;
+  const done = path.join(directory, "done.json");
+  env.RUDDER_DONE_FILE = done;
+  const note = { summary: "Checked the parser.", interfaces: "Parser result remains typed.", followups: [] };
+  const result = await run("done", "--node", "n0", JSON.stringify(note));
+  assert.equal(result.stdout, "");
+  assert.equal(result.stderr, "");
+  assert.deepEqual(JSON.parse(await fs.readFile(done, "utf8")), { ...note, node: "n0" });
+  assert.match(await fs.readFile(path.join(directory, "DECISIONS.md"), "utf8"), /Checked the parser\./);
+  await assert.rejects(fs.stat(home), { code: "ENOENT" });
+  await assert.rejects(fs.stat(probe), { code: "ENOENT" });
+});
+
 test("first-use disclosure preserves JSON stdout and is shown once on stderr", {
   skip: process.platform === "win32" ? "jj discovery fixture uses a POSIX executable" : false,
 }, async (t) => {

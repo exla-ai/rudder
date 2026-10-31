@@ -107,8 +107,6 @@ export function renderContract(spec: SpecContract): string {
       ? "You own this request end to end in the user's main checkout. Preserve unrelated edits."
       : "You are an isolated worker. Use jj status/diff; Rudder handles commits and integration. Keep to your assignment.",
     "",
-    `Task: ${spec.task}`,
-    "",
     "Acceptance criteria:",
     ...spec.acceptanceCriteria.map((item) => `- ${item}`),
     "",

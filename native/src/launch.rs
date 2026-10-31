@@ -139,10 +139,28 @@ pub(crate) fn can_resume_agent(run: &AgentRun) -> bool {
 }
 
 pub(crate) fn claude_resume_command(run: &AgentRun, session_id: &str) -> TerminalCommand {
-    let mut args: Vec<String> = vec![
-        "--permission-mode".to_string(),
-        "bypassPermissions".to_string(),
-    ];
+    // A saved conversation does not replace the launch-time tool policy.
+    // Historical planners/reviewers keep their original restrictions on resume.
+    let mut args = match run.mode {
+        AgentMode::Plan => vec![
+            "--permission-mode".to_string(),
+            "plan".to_string(),
+            "--allowedTools".to_string(),
+            CLAUDE_PLAN_FRONTEND_TOOLS.to_string(),
+        ],
+        AgentMode::GamAdversarial => vec![
+            "--permission-mode".to_string(),
+            "bypassPermissions".to_string(),
+            "--allowedTools".to_string(),
+            GAM_ADVERSARIAL_CLAUDE_TOOLS.to_string(),
+            "--disallowedTools".to_string(),
+            GAM_ADVERSARIAL_CLAUDE_DENIED.to_string(),
+        ],
+        _ => vec![
+            "--permission-mode".to_string(),
+            "bypassPermissions".to_string(),
+        ],
+    };
     if !run.model.trim().is_empty() {
         args.push("--model".to_string());
         args.push(run.model.clone());

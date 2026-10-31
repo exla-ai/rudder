@@ -145,7 +145,7 @@ export async function main(): Promise<void> {
   // launcher already prepares the worker environment; repeating installation
   // here turns every callback into a walk of the user's skills directory.
   const internal = isInternalCommand(parsed.command);
-  const setup = !internal && !parsed.flags.help && parsed.command !== "help"
+  const setup = !internal && !parsed.flags.help && parsed.command !== "help" && parsed.command !== "done"
     && Boolean(parsed.command || parsed.args.length > 0 || isTty());
   if (setup) {
     await ensureAgentSkills();
@@ -558,8 +558,8 @@ export function isInternalCommand(command: string | undefined): boolean {
   return Boolean(command?.startsWith("__"));
 }
 
-// Commands that never touch a repository, so they never wait on a jj download.
-const JJ_FREE_COMMANDS = new Set(["__event", "__route-task", "engine", "telemetry", "feedback", "login", "logout", "help"]);
+// These commands need no jj installation. Completion only writes its evidence.
+const JJ_FREE_COMMANDS = new Set(["__event", "__route-task", "engine", "telemetry", "feedback", "login", "logout", "help", "done"]);
 
 function shouldAutoUpdateForCommand(command: string | undefined): boolean {
   if (command?.startsWith("__")) {

@@ -1,10 +1,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 
 import {
+  CODEX_RUDDER_COMMON_CONFIG_ARGS,
   CODEX_RUDDER_PLANNER_CONFIG_ARGS,
   CODEX_RUDDER_WORKER_CONFIG_ARGS,
 } from "../dist/codex-binary.js";
+import { codexEffortConfigArgs, DEFAULT_EFFORT } from "../dist/effort.js";
 import { columnForRun, hasVerifiedDelivery } from "../dist/board/daemon.js";
 import { parseCompletionNoteArg } from "../dist/surfaces.js";
 
@@ -30,6 +33,24 @@ test("Codex workers get plugin and Computer Use parity while planners stay restr
   assert.ok(!CODEX_RUDDER_WORKER_CONFIG_ARGS.includes("features.plugins=false"));
   assert.ok(CODEX_RUDDER_PLANNER_CONFIG_ARGS.includes("features.plugins=false"));
   assert.ok(CODEX_RUDDER_PLANNER_CONFIG_ARGS.includes("features.computer_use=false"));
+});
+
+test("TS and native Codex launches share one efficiency policy", async () => {
+  const launch = await readFile(new URL("../native/src/launch.rs", import.meta.url), "utf8");
+  const start = launch.indexOf("pub(crate) const CODEX_COMMON_CONFIG");
+  const block = launch.slice(start, launch.indexOf("];", start));
+  const native = [...block.matchAll(/^\s*("(?:[^"\\]|\\.)*"),$/gm)].map((match) => JSON.parse(match[1]));
+  const ts = CODEX_RUDDER_COMMON_CONFIG_ARGS.filter((_, index) => index % 2 === 1);
+  assert.deepEqual(native, ts);
+  assert.ok(ts.includes("model_auto_compact_token_limit=150000"));
+  assert.ok(ts.includes("tool_output_token_limit=6000"));
+
+  const models = await readFile(new URL("../native/src/models.rs", import.meta.url), "utf8");
+  assert.match(models, /const DEFAULT_EFFORT: EffortLevel = EffortLevel::High;/);
+  assert.equal(DEFAULT_EFFORT, "high");
+  assert.deepEqual(codexEffortConfigArgs(undefined), ["-c", 'model_reasoning_effort="high"']);
+  assert.deepEqual(codexEffortConfigArgs("low"), ["-c", 'model_reasoning_effort="low"']);
+  assert.deepEqual(codexEffortConfigArgs("max"), ["-c", 'model_reasoning_effort="xhigh"']);
 });
 
 test("direct completion is done, but requested delivery stays review until proof is complete", () => {

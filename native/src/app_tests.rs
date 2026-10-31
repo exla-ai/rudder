@@ -5322,6 +5322,26 @@ fn command_copy_is_not_forwarded_to_embedded_terminal() {
 }
 
 #[test]
+fn codex_launches_carry_the_efficiency_policy_and_an_explicit_effort() {
+    let has = |args: &[String], value: &str| {
+        args.windows(2).any(|window| window[0] == "-c" && window[1] == value)
+    };
+    // No chosen effort still sends Rudder's default, never the user's global
+    // Codex tier; a chosen tier wins, and max maps to Codex's xhigh.
+    let unset = codex_fork_command("gpt-test", None, "sid-codex", None);
+    assert!(has(&unset.args, "model_reasoning_effort=\"high\""), "{:?}", unset.args);
+    assert!(has(&unset.args, "model_auto_compact_token_limit=150000"));
+    assert!(has(&unset.args, "tool_output_token_limit=6000"));
+    let chosen = codex_fork_command("gpt-test", Some(EffortLevel::Low), "sid-codex", None);
+    assert!(has(&chosen.args, "model_reasoning_effort=\"low\""));
+    assert!(!has(&chosen.args, "model_reasoning_effort=\"high\""));
+    let max = codex_fork_command("gpt-test", Some(EffortLevel::Max), "sid-codex", None);
+    assert!(has(&max.args, "model_reasoning_effort=\"xhigh\""));
+    assert_eq!(default_effort_for(Backend::Codex, "gpt-6.1"), Some(EffortLevel::High));
+    assert_eq!(default_effort_for(Backend::Claude, "opus"), Some(EffortLevel::High));
+}
+
+#[test]
 fn plan_commands_use_read_only_backend_profiles() {
     // This asserts the HEADLESS decomposer profile, which is now the opt-out path
     // (interactive orchestrator is the default). Pin it via the env so the assertion is

@@ -831,27 +831,38 @@ pub(crate) fn push_codex_interactive_orchestrator_args(
     push_codex_planner_config_overrides(args, effort);
 }
 
+/// Config every Rudder Codex CLI launch carries (acpx has no passthrough and
+/// gets only the effort default). Must match
+/// `CODEX_RUDDER_COMMON_CONFIG_ARGS` in `src/codex-binary.ts`; a TS test compares
+/// the two. Rudder workers run Codex as a child process, so they do not inherit
+/// desktop-app notification hooks that expect the official signed launch chain.
+/// Compaction and the output cap come from the v4 session measurement (PLAN.md
+/// section 20): context ran to about 451K of a 475K window before compacting,
+/// and tokens above 150K per request were 44% of all input.
+pub(crate) const CODEX_COMMON_CONFIG: &[&str] = &[
+    "notify=[]",
+    "model_reasoning_summary=\"detailed\"",
+    "model_supports_reasoning_summaries=true",
+    "model_auto_compact_token_limit=150000",
+    "tool_output_token_limit=6000",
+];
+
 fn push_codex_common_config_overrides(args: &mut Vec<String>, effort: Option<EffortLevel>) {
-    // Rudder workers run Codex as a child process, so do not inherit desktop-app
-    // notification hooks that expect the official signed app launch chain.
-    args.push("-c".to_string());
-    args.push("notify=[]".to_string());
-    args.push("-c".to_string());
-    args.push("model_reasoning_summary=\"detailed\"".to_string());
-    args.push("-c".to_string());
-    args.push("model_supports_reasoning_summaries=true".to_string());
-    if let Some(effort) = effort {
-        // Codex has no "max" tier; TS normalizes max→xhigh (normalizeEffortForBackend)
-        // but this Rust path used to emit the raw value, which Codex rejects —
-        // `/model codex gpt-5.5 max` launched a worker that died on startup.
-        let effort = if effort == EffortLevel::Max {
-            EffortLevel::XHigh
-        } else {
-            effort
-        };
+    for value in CODEX_COMMON_CONFIG {
         args.push("-c".to_string());
-        args.push(format!("model_reasoning_effort=\"{}\"", effort.as_str()));
+        args.push((*value).to_string());
     }
+    // Always send an effort: unset would fall through to the user's global Codex
+    // config, which is how the v4 session ran every step at its highest tier.
+    // Codex has no "max" tier; TS normalizes max→xhigh (normalizeEffortForBackend)
+    // but this Rust path used to emit the raw value, which Codex rejects —
+    // `/model codex gpt-5.5 max` launched a worker that died on startup.
+    let effort = match effort.unwrap_or(DEFAULT_EFFORT) {
+        EffortLevel::Max => EffortLevel::XHigh,
+        effort => effort,
+    };
+    args.push("-c".to_string());
+    args.push(format!("model_reasoning_effort=\"{}\"", effort.as_str()));
 }
 
 /// Implementation, review, and shipping agents match a direct Codex session:

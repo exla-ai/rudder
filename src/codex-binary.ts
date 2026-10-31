@@ -11,13 +11,20 @@ export const RUDDER_CODEX_RELEASE = "rudder-codex-v0.1.1-upstream-db9cb04";
 export const RUDDER_CODEX_ASSET_SHA256 = "ea08a91e85b35c0c4782a96535011dfcaeaff7259113e65ecf5260bc24368517";
 // Rudder workers run Codex as a child process, so do not inherit desktop-app
 // notification hooks that expect the official signed app launch chain.
-const CODEX_RUDDER_COMMON_CONFIG_ARGS = [
+// Must match CODEX_COMMON_CONFIG in native/src/launch.rs; a test compares them.
+// Compaction and the output cap come from the v4 session measurement (PLAN.md
+// section 20): context ran to about 451K of a 475K window before compacting.
+export const CODEX_RUDDER_COMMON_CONFIG_ARGS = [
   "-c",
   "notify=[]",
   "-c",
   'model_reasoning_summary="detailed"',
   "-c",
   "model_supports_reasoning_summaries=true",
+  "-c",
+  "model_auto_compact_token_limit=150000",
+  "-c",
+  "tool_output_token_limit=6000",
 ];
 
 /** Full-capability profile for implementation, review, and shipping agents. */

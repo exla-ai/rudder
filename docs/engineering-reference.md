@@ -1412,6 +1412,16 @@ functional but less battle-tested than the local dashboard; treat it as beta.
   per-backend mapping (Claude uses `effort`, Codex uses `reasoningEffort`).
   opencode gets `undefined`: it has no effort flag, and passing one it would
   reject is worse than offering no dial.
+- **Codex launch policy (4.0.0-alpha.17).** Every Codex CLI launch (native
+  panes and TS workers) carries one config list, `CODEX_COMMON_CONFIG` (`native/src/launch.rs`), mirrored by
+  `CODEX_RUDDER_COMMON_CONFIG_ARGS` (`src/codex-binary.ts`); a test in
+  `tests/workflow-contracts.test.mjs` fails if they drift. It adds
+  `model_auto_compact_token_limit=150000` and `tool_output_token_limit=6000`,
+  and an effort is always sent: the chosen one, else `DEFAULT_EFFORT` (`high`).
+  An unset effort used to fall through to `~/.codex/config.toml`, which ran a
+  whole v4 session at `max`. The acpx backend has no Codex config passthrough;
+  it gets only the effort default, through its `model/effort` string. Evidence and the analyzer: PLAN.md section 20 and
+  `research/agent-efficiency/`.
 - **opencode (third backend, added with `/handoff`).** `Backend::Opencode` /
   `BackendId "opencode"`. Model ids are provider-qualified (`anthropic/claude-…`);
   an EMPTY model is legal and means "opencode's own default", so `-m` is omitted

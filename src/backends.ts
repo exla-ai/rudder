@@ -3,7 +3,7 @@ import { spawn } from "node:child_process";
 import type { BackendAdapter, BackendId, RunRequest, RudderEvent, AuthProfileStore, EffortLevel } from "./types.js";
 import { CODEX_RUDDER_WORKER_CONFIG_ARGS, codexLaunchEnv, ensureRudderCodexBinary } from "./codex-binary.js";
 import { CODEX_DEFAULT_MODEL, lastUsedCodexModelSync, liveCodexModel, loadAuthStore, loadConfig, saveRunRecord } from "./state.js";
-import { normalizeEffortForBackend } from "./effort.js";
+import { codexEffortConfigArgs, DEFAULT_EFFORT, normalizeEffortForBackend } from "./effort.js";
 import {
   commandExists,
   formatMissingToolMessage,
@@ -174,7 +174,6 @@ function codexBackend(): BackendAdapter {
       const prompt = stripRudderPromptWrappers(request.prompt);
       const command = await ensureRudderCodexBinary();
       const env = await codexLaunchEnv(await backendEnv("openai"));
-      const effort = normalizeEffortForBackend("codex", request.run.effort);
       const sessionId = request.run.session?.nativeSessionId;
       const isFollowUp = (request.run.turns?.length ?? 0) > 1 && Boolean(sessionId);
       const args = compact(isFollowUp
@@ -188,8 +187,7 @@ function codexBackend(): BackendAdapter {
             "--enable",
             "goals",
             ...CODEX_RUDDER_WORKER_CONFIG_ARGS,
-            effort ? "-c" : undefined,
-            effort ? `model_reasoning_effort="${effort}"` : undefined,
+            ...codexEffortConfigArgs(request.run.effort),
             sessionId,
             `${request.contract}\n\n${prompt}`,
           ]
@@ -204,8 +202,7 @@ function codexBackend(): BackendAdapter {
             "--enable",
             "goals",
             ...CODEX_RUDDER_WORKER_CONFIG_ARGS,
-            effort ? "-c" : undefined,
-            effort ? `model_reasoning_effort="${effort}"` : undefined,
+            ...codexEffortConfigArgs(request.run.effort),
             `${request.contract}\n\n${prompt}`,
           ]);
       return await spawnAndStream({
@@ -317,7 +314,7 @@ function acpxCodexModel(model: string | undefined, effort: EffortLevel | undefin
   if (selectedModel.includes("/")) {
     return selectedModel;
   }
-  const selectedEffort = normalizeEffortForBackend("codex", effort) || "xhigh";
+  const selectedEffort = normalizeEffortForBackend("codex", effort ?? DEFAULT_EFFORT);
   return `${selectedModel}/${selectedEffort}`;
 }
 

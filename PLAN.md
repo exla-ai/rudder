@@ -1075,16 +1075,25 @@ The independent research on this v4 session found model time and accumulated
 context to be the main costs. The main agent spent about 2% of active time
 blocked on tools. High reasoning output and large contexts correlated with
 slower steps; this is observational evidence, not a controlled causal result.
-The local research source is `research/agent-efficiency` at `e684468` in the
-separate research checkout. Preserve that checkout and its branch.
+The trace analyzer and findings live in `research/agent-efficiency`. The full
+session report stays on the local research branch because it contains session
+command text.
 
 Make efficiency part of the engine and adapter contract:
 
-- Launch settings come from one shared policy for native and TS callers.
-  Evaluate a Codex compaction limit near 150K tokens, bounded tool output and
-  high rather than maximum default reasoning effort. Verify support in the
-  shipped adapter and adopt defaults only after E14. Preserve explicit user
-  choices and model capability limits. Claude uses its supported equivalents.
+- Launch settings come from one shared policy for native and TS callers
+  (`CODEX_COMMON_CONFIG` in `native/src/launch.rs`, mirrored and tested in
+  `src/codex-binary.ts`). Every Codex CLI launch (native panes and TS workers)
+  compacts at 150K tokens, caps tool output at 6K tokens and runs reasoning
+  effort `high` unless the user chose one; an unset effort never falls through
+  to the user's global Codex config. Codex 0.166 accepts these keys. The acpx
+  adapter has no Codex config passthrough, so it gets only the effort default.
+  This is the only launch path, with no opt-out profile. The user chose to ship
+  these values in alpha.17 before E14: they come from one observational session
+  and their effect on speed and quality is unproven. E14 decides whether each
+  value stays, changes or is reverted. Explicit user choices and model
+  capability limits still apply. Claude keeps its CLI default effort when none
+  is chosen until E14 measures the Claude adapter.
 - After compaction, supply the current task, constraints, open obligations and
   recent changes. Retrieve relevant context instead of growing the initial
   prompt. Use fresh, scoped worker briefs and one result handoff.
@@ -1110,6 +1119,7 @@ Make efficiency part of the engine and adapter contract:
   A steering message is not an acknowledgment that behavior changed.
 
 E14 compares accepted changes, failures, review outcomes, token cost, wall clock,
-context and re-read rates on a fixed task set. Ship the already independently
-verifiable status-only improvement first. Select launch defaults from measured
-results, then add engine telemetry, adaptive effort and trace-derived memory.
+context and re-read rates on a fixed task set. Status-only verification and the
+launch policy shipped in alpha.17; E14 measures the launch values and can
+revert them. Then add engine telemetry, adaptive effort and trace-derived
+memory.

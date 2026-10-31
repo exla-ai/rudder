@@ -55,10 +55,16 @@ pub(crate) fn flagship_model_for(backend: Backend) -> &'static str {
     fast_model_for(backend)
 }
 
+/// Rudder's one default reasoning tier. On the measured v4 session (PLAN.md
+/// section 20) every step ran the highest tier and output tokens were about
+/// 74% of model time. Codex launches send it when no effort is chosen, so a
+/// global `~/.codex/config.toml` tier never applies to Rudder agents silently.
+pub(crate) const DEFAULT_EFFORT: EffortLevel = EffortLevel::High;
+
 pub(crate) fn default_effort_for(backend: Backend, model: &str) -> Option<EffortLevel> {
     let options = effort_options_for(backend, model);
-    if options.contains(&Some(EffortLevel::XHigh)) {
-        Some(EffortLevel::XHigh)
+    if options.contains(&Some(DEFAULT_EFFORT)) {
+        Some(DEFAULT_EFFORT)
     } else {
         options.into_iter().next().flatten()
     }
@@ -140,6 +146,7 @@ pub(crate) fn effort_options_for(backend: Backend, model: &str) -> Vec<Option<Ef
 
 pub(crate) fn effort_detail(backend: Backend, effort: Option<EffortLevel>) -> &'static str {
     match (backend, effort) {
+        (Backend::Codex, None) => "Rudder default (high)",
         (_, None) => "let the agent decide",
         (_, Some(EffortLevel::Low)) => "fastest",
         (_, Some(EffortLevel::Medium)) => "balanced",

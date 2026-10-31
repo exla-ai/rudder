@@ -53,7 +53,18 @@ The combined pre-join Rust check passed 1,276 tests with zero failures. Context2
 passed 12 focused tests after using a joined refresh owner only during fixture
 startup. StopV4 carries the original parent deadline through queueing, framed I/O
 and finalization phases. The verifier uses one status decision; its 16 regression
-cases passed. Launch effort/compaction defaults remain behind E14.
+cases passed.
+
+## Owner change and launch policy, alpha.17
+
+At 07:19 UTC on 2026-10-31 the user moved this job from the Codex owner to a
+Claude owner. The Codex owner stopped at a clean checkout with `39ca500` and
+`3179f71` unpushed and the local `v4.0.0-alpha.16` tag unpushed. Its unapplied
+binding4 readiness patch and interrupted managed-source preparation stay outside
+the checkout; Runtime5 remains refused. Alpha.17 ships those two commits plus
+the single Codex launch policy (PLAN.md section 20): effort `high` when unset,
+compaction at 150K tokens and tool output at 6K tokens. These shipped before
+E14 and are unproven; E14 decides whether each value stays.
 
 The next merged changes add an opaque provisional source receipt, actual helper
 exit custody and a fresh off-App issuer query. They also add a local build DATA

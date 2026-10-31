@@ -10,12 +10,28 @@ export type EffortOption = {
 
 const FALLBACK_EFFORTS: EffortLevel[] = ["low", "medium", "high", "xhigh"];
 
+/** Rudder's one default reasoning tier. Matches `DEFAULT_EFFORT` in native/src/models.rs. */
+export const DEFAULT_EFFORT: EffortLevel = "high";
+
+/**
+ * Effort config for every Codex launch. Always explicit: unset would fall
+ * through to the user's global Codex config, which is how the measured v4
+ * session ran every step at its highest tier (PLAN.md section 20).
+ */
+export function codexEffortConfigArgs(effort: EffortLevel | undefined): string[] {
+  return ["-c", `model_reasoning_effort="${normalizeEffortForBackend("codex", effort ?? DEFAULT_EFFORT)}"`];
+}
+
+function autoEffortDetail(backend: BackendId): string {
+  return backend === "codex" ? `Rudder default (${DEFAULT_EFFORT})` : "let the selected model choose";
+}
+
 export async function discoverEffortOptions(backend: BackendId): Promise<EffortOption[]> {
   const values = backend === "claude"
     ? await discoverClaudeEfforts()
     : await discoverCodexEfforts();
   return [
-    { label: "auto", value: undefined, detail: "let the selected model choose" },
+    { label: "auto", value: undefined, detail: autoEffortDetail(backend) },
     ...values.map((value) => ({
       label: value,
       value,
@@ -26,7 +42,7 @@ export async function discoverEffortOptions(backend: BackendId): Promise<EffortO
 
 export function fallbackEffortOptions(backend: BackendId): EffortOption[] {
   return [
-    { label: "auto", value: undefined, detail: "let the selected model choose" },
+    { label: "auto", value: undefined, detail: autoEffortDetail(backend) },
     ...(backend === "claude" ? [...FALLBACK_EFFORTS, "max" as EffortLevel] : FALLBACK_EFFORTS)
       .map((value) => ({ label: value, value, detail: effortDetail(value) })),
   ];

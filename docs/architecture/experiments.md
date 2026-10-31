@@ -433,7 +433,12 @@ mean/p95 context; coordination/wait share; repeated reads after compaction;
 failed checks, review rejections and release attempts. Test Codex and Claude
 adapters independently and retain explicit user settings.
 
-Adopt launch defaults only when tokens and wall clock improve without increased
-failed checks, review rejection or re-read rate. A session correlation or one
+The alpha.17 launch policy (effort `high`, compaction at 150K, tool output at
+6K) shipped before this gate at the user's direction, so it is an unproven
+candidate, not a measured result. Compare it with the earlier settings (no
+compaction limit or output cap, effort from the user's Codex config). Keep a
+value only when tokens and wall clock improve without increased failed checks,
+review rejection or re-read rate; otherwise retune or revert it in the one
+policy rather than adding a second profile. A session correlation or one
 synthetic test does not pass this gate. Status-only verification has its own
 regression checks and does not depend on changing model settings.

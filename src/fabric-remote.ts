@@ -27,6 +27,27 @@ export interface FabricPartialSource {
   unpin(ownedPinId: string): Promise<void>;
   read(reference: FabricObjectRef): Promise<Uint8Array>;
 }
+/** This inventory retains a checkpoint DATA bundle. Its ActionResult root is
+ * not a RunnableRoot receipt, a complete local pin or accepted source history. */
+export interface FabricPartialCheckpointInventory {
+  format_version: 1; owned_pin: string; publication_id: string;
+  publication: FabricObjectRef; q: FabricObjectRef; source: FabricObjectRef;
+  runnable: FabricObjectRef; plan: FabricObjectRef; freeze_intent: FabricObjectRef;
+  drain_record: FabricObjectRef; base: FabricPartialInventory["base"];
+  objects: FabricObjectRef[];
+}
+export interface FabricPartialCheckpointSource {
+  pinPartialCheckpoint(receiptJson: string): Promise<FabricPartialCheckpointInventory>;
+  unpin(ownedPinId: string): Promise<void>;
+  read(reference: FabricObjectRef): Promise<Uint8Array>;
+}
+export interface FabricPartialCheckpointUploadResult {
+  format_version: 1; kind: "partial_checkpoint_data";
+  source_role: "quiesced_source_complement_data"; publication_id: string;
+  publication: FabricObjectRef; runnable: FabricObjectRef; q: FabricObjectRef;
+  bundle: FabricRootReceipt; uploaded_objects: number; uploaded_bytes: number;
+  cleanup_warning?: string;
+}
 export interface FabricTransferResult { receipt: FabricRootReceipt; uploaded_objects: number; uploaded_bytes: number; cleanup_warning?: string }
 export interface FabricLocalReceipt { format_version: 1; root: FabricObjectRef; pin: string; generation: number; durability: "local" }
 export interface FabricTransferTarget {
@@ -60,6 +81,35 @@ export function validateFabricPartialInventory(value: unknown): FabricPartialInv
   for (const object of objects) { const key = identity(object); if (seen.has(key)) fail("invalid_source", "Partial inventory repeats an object"); seen.add(key); total += object.size_bytes; }
   if (!seen.has(identity(plan)) || total > 4 * 1024 ** 3) fail("invalid_source", "Partial inventory is incomplete or exceeds byte limit");
   return { format_version: 1, owned_pin: item.owned_pin, plan, directory, hardlinks, base, objects };
+}
+const partialCheckpointPin = /^transfer:partial-checkpoint:rpc:[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/;
+function partialCheckpointId(value: string): string {
+  if (typeof value !== "string" || !/^pcd1-[a-f0-9]{64}$/.test(value)) fail("invalid_source", "Invalid checkpoint data publication identity");
+  return value;
+}
+export function validateFabricPartialCheckpointInventory(value: unknown): FabricPartialCheckpointInventory {
+  const keys = ["format_version", "owned_pin", "publication_id", "publication", "q", "source", "runnable", "plan", "freeze_intent", "drain_record", "base", "objects"];
+  const item = value as FabricPartialCheckpointInventory;
+  if (!item || typeof item !== "object" || Array.isArray(item) || Object.keys(item).length !== keys.length
+    || keys.some((key) => !Object.hasOwn(item, key)) || item.format_version !== 1
+    || typeof item.owned_pin !== "string" || !partialCheckpointPin.test(item.owned_pin)
+    || !item.base || typeof item.base !== "object" || Array.isArray(item.base) || Object.keys(item.base).length !== 3
+    || ["scope", "root_id", "root"].some((key) => !Object.hasOwn(item.base, key))
+    || !Array.isArray(item.objects) || item.objects.length < 1 || item.objects.length > 16_384) fail("invalid_source", "Invalid checkpoint data transfer inventory");
+  const publication_id = partialCheckpointId(item.publication_id);
+  const publication = validateFabricReference(item.publication), q = validateFabricReference(item.q);
+  const source = validateFabricReference(item.source), runnable = validateFabricReference(item.runnable);
+  const plan = validateFabricReference(item.plan), freeze_intent = validateFabricReference(item.freeze_intent), drain_record = validateFabricReference(item.drain_record);
+  const base = { scope: scope(item.base.scope), root_id: rootId(item.base.root_id), root: validateFabricReference(item.base.root) };
+  if (publication.kind !== "action_result" || publication.size_bytes > 64 * 1024 || source.kind !== "source_root"
+    || runnable.kind !== "runnable_root" || base.root.kind !== "runnable_root"
+    || q.kind !== "blob" || q.size_bytes > 32 * 1024 || plan.kind !== "blob" || plan.size_bytes > 4 * 1024 * 1024
+    || freeze_intent.kind !== "blob" || freeze_intent.size_bytes > 64 * 1024
+    || drain_record.kind !== "blob" || drain_record.size_bytes > 32 * 1024) fail("invalid_source", "Invalid checkpoint data object kinds or bounds");
+  const objects = item.objects.map(validateFabricReference), seen = new Set<string>(); let total = 0;
+  for (const object of objects) { const key = identity(object); if (seen.has(key)) fail("invalid_source", "Checkpoint data inventory repeats an object"); seen.add(key); total += object.size_bytes; }
+  if (total > 4 * 1024 ** 3 || [publication, q, source, runnable, plan, freeze_intent, drain_record].some((object) => !seen.has(identity(object)))) fail("invalid_source", "Checkpoint data inventory omits retained proof or exceeds its byte limit");
+  return { format_version: 1, owned_pin: item.owned_pin, publication_id, publication, q, source, runnable, plan, freeze_intent, drain_record, base, objects };
 }
 export function validateFabricReference(value: unknown): FabricObjectRef {
   if (!value || typeof value !== "object" || Array.isArray(value)) fail("invalid_reference", "Invalid object reference");
@@ -285,18 +335,58 @@ export class FabricRemoteClient {
     let pinned: FabricPartialInventory;
     try { pinned = await source.pinPartial(receiptJson); }
     catch (error) { throw error instanceof FabricRemoteError ? error : new FabricRemoteError("source_failed", "Could not retain the partial transfer source"); }
-    if (!pinned || typeof pinned.owned_pin !== "string" || !/^transfer:partial:rpc:[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(pinned.owned_pin)) fail("invalid_source", "Partial source did not return a private retention identity");
+    const issuedPin = pinned?.owned_pin;
+    if (typeof issuedPin !== "string" || !/^transfer:partial:rpc:[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(issuedPin)) fail("invalid_source", "Partial source did not return a private retention identity");
     let result: FabricTransferResult | undefined; let failure: unknown;
     try {
       const inventory = validateFabricPartialInventory(pinned);
+      if (inventory.owned_pin !== issuedPin) fail("invalid_source", "Partial source changed its issued retention identity");
       if (inventory.base.scope.provider_id !== this.scope!.provider_id || inventory.base.scope.tenant_id !== this.scope!.tenant_id) fail("scope_mismatch", "Partial source belongs to another provider or tenant");
       const base = await this.getRoot(inventory.base.root_id);
       if (identity(base.root) !== identity(inventory.base.root)) fail("base_mismatch", "Partial source base no longer matches its immutable Cloud publication");
       result = await this.uploadInventory(root, inventory.directory, inventory.objects, source);
     } catch (error) { failure = error instanceof FabricRemoteError ? error : new FabricRemoteError("source_failed", "Partial source transfer failed"); }
     finally {
-      try { await source.unpin(pinned.owned_pin); }
+      try { await source.unpin(issuedPin); }
       catch { if (result) result.cleanup_warning = "Remote publication committed; its temporary local retention needs cleanup"; else failure ??= new FabricRemoteError("source_cleanup_failed", "Temporary local retention needs cleanup"); }
+    }
+    if (failure) throw failure;
+    return result!;
+  }
+  /** Clone the producer's exact retained DATA and publish its whole proof
+   * closure. Repeated calls first reconcile the same immutable publication ID;
+   * a transport failure never automatically retries an uncertain POST. */
+  async uploadPartialCheckpoint(publicationId: string, receiptJson: string, source: FabricPartialCheckpointSource): Promise<FabricPartialCheckpointUploadResult> {
+    partialCheckpointId(publicationId);
+    const trustedScope = this.scope;
+    if (!trustedScope) return fail("scope_required", "Checkpoint transfer requires a trusted provider and tenant binding");
+    if (typeof receiptJson !== "string" || Buffer.byteLength(receiptJson) > 64 * 1024) fail("invalid_source", "Invalid opaque checkpoint data receipt");
+    let pinned: FabricPartialCheckpointInventory;
+    try { pinned = await source.pinPartialCheckpoint(receiptJson); }
+    catch (error) { throw error instanceof FabricRemoteError ? error : new FabricRemoteError("source_failed", "Could not retain the checkpoint data transfer source"); }
+    const issuedPin = pinned?.owned_pin;
+    if (typeof issuedPin !== "string" || !partialCheckpointPin.test(issuedPin)) fail("invalid_source", "Checkpoint source did not return a private retention identity");
+    let result: FabricPartialCheckpointUploadResult | undefined; let failure: unknown;
+    try {
+      const inventory = validateFabricPartialCheckpointInventory(pinned);
+      if (inventory.owned_pin !== issuedPin) fail("invalid_source", "Checkpoint source changed its issued retention identity");
+      if (inventory.publication_id !== publicationId) fail("publication_mismatch", "Checkpoint data belongs to another immutable publication");
+      if (inventory.base.scope.provider_id !== trustedScope.provider_id || inventory.base.scope.tenant_id !== trustedScope.tenant_id) fail("scope_mismatch", "Checkpoint data belongs to another provider or tenant");
+      const base = await this.getRoot(inventory.base.root_id);
+      if (identity(base.root) !== identity(inventory.base.root)) fail("base_mismatch", "Checkpoint base differs from its immutable Cloud publication");
+      let previous: FabricRootReceipt | undefined;
+      try { previous = await this.getRoot(publicationId); }
+      catch (error) { if (!(error instanceof FabricRemoteError) || error.status !== 404) throw error; }
+      if (previous && identity(previous.root) !== identity(inventory.publication)) fail("publication_mismatch", "Checkpoint publication already refers to different content");
+      const transfer = previous ? { receipt: previous, uploaded_objects: 0, uploaded_bytes: 0 } : await this.uploadInventory(publicationId, inventory.publication, inventory.objects, source);
+      result = { format_version: 1, kind: "partial_checkpoint_data", source_role: "quiesced_source_complement_data", publication_id: publicationId,
+        publication: inventory.publication, runnable: inventory.runnable, q: inventory.q, bundle: transfer.receipt,
+        uploaded_objects: transfer.uploaded_objects, uploaded_bytes: transfer.uploaded_bytes,
+        ...(transfer.cleanup_warning ? { cleanup_warning: transfer.cleanup_warning } : {}) };
+    } catch (error) { failure = error instanceof FabricRemoteError ? error : new FabricRemoteError("source_failed", "Checkpoint data transfer failed"); }
+    finally {
+      try { await source.unpin(issuedPin); }
+      catch { if (result) result.cleanup_warning = [result.cleanup_warning, "Checkpoint data published; temporary local retention needs cleanup"].filter(Boolean).join("; "); else failure ??= new FabricRemoteError("source_cleanup_failed", "Temporary checkpoint retention needs cleanup"); }
     }
     if (failure) throw failure;
     return result!;

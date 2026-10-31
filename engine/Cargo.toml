@@ -54,3 +54,9 @@ name = "rudder-remote-execution-qualifier"
 path = "src/bin/remote_execution_qualifier.rs"
 test = false
 bench = false
+
+[[bin]]
+name = "rudder-connected-network-qualifier"
+path = "src/bin/connected_network_qualifier.rs"
+test = false
+bench = false

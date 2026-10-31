@@ -29,11 +29,43 @@ fn partial_workspace_broker_requires_new_right_exact_scope_and_current_instance(
 
 #[test]
 fn partial_workspace_authorization_keeps_two_second_saturated_connect_budget() {
-    let f=Fixture::new();let listener=UnixListener::bind(&f.socket).unwrap();assert_eq!(unsafe{libc::listen(listener.as_raw_fd(),1)},0);listener.set_nonblocking(true).unwrap();
-    let mut held=Vec::new();for _ in 0..16{match mio::net::UnixStream::connect(&f.socket){Ok(stream)=>held.push(stream),Err(error)if error.kind()==io::ErrorKind::WouldBlock=>break,Err(error)=>panic!("fixture backlog: {error}")}}
-    let partial=partial_workspace_binding(&f,&uuid::Uuid::new_v4().to_string());let start=Instant::now();
-    assert!(BrokerClient::connect_partial_workspace(f.socket.clone(),f.socket.with_file_name("identity.json"),&BrokerBinding::from(&f.a),&partial).is_err());
-    assert!(start.elapsed()<Duration::from_secs(3),"partial auth used generic long-poll connect budget");drop(held);
+    let f = Fixture::new();
+    let (listener, held) = saturated_unaccepted_backlog(&f.socket);
+    let partial = partial_workspace_binding(&f, &uuid::Uuid::new_v4().to_string());
+    let start = Instant::now();
+    let error = BrokerClient::connect_partial_workspace(
+        f.socket.clone(), f.socket.with_file_name("identity.json"),
+        &BrokerBinding::from(&f.a), &partial,
+    ).err().expect("a saturated listener must not authorize partial workspace access");
+    assert_eq!(error.downcast_ref::<WireError>().map(|error| error.code.as_str()), Some("unavailable"));
+    assert!(start.elapsed() < Duration::from_secs(3), "partial auth used generic long-poll connect budget");
+    drop(held); drop(listener);
+}
+
+fn saturated_unaccepted_backlog(path: &Path) -> (UnixListener, Vec<mio::net::UnixStream>) {
+    let listener = UnixListener::bind(path).unwrap();
+    assert_eq!(unsafe { libc::listen(listener.as_raw_fd(), 1) }, 0);
+    listener.set_nonblocking(true).unwrap();
+    let mut held = Vec::new();
+    let mut saturated = false;
+    for _ in 0..16 {
+        match mio::net::UnixStream::connect(path) {
+            Ok(stream) => held.push(stream),
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                saturated = true; break;
+            }
+            // XNU's unp_connect returns ECONNREFUSED when sonewconn cannot
+            // allocate another accept-queue entry. Linux reports EAGAIN.
+            #[cfg(target_os = "macos")]
+            Err(error) if error.kind() == io::ErrorKind::ConnectionRefused => {
+                saturated = true; break;
+            }
+            Err(error) => panic!("fill private socket backlog: {error}"),
+        }
+    }
+    assert!(!held.is_empty(), "fixture must first establish a queued connection");
+    assert!(saturated, "fixture must observe the terminal full-backlog error");
+    (listener, held)
 }
 
 #[test]
@@ -213,21 +245,12 @@ fn workspace_authorization_requires_explicit_scope_and_current_execution() {
 #[test]
 fn workspace_authorization_deadline_survives_an_unaccepted_connection_backlog() {
     let f = Fixture::new();
-    let listener = UnixListener::bind(&f.socket).unwrap();
-    assert_eq!(unsafe { libc::listen(listener.as_raw_fd(), 1) }, 0);
-    listener.set_nonblocking(true).unwrap();
-    let mut connections = Vec::new();
-    for _ in 0..16 {
-        match mio::net::UnixStream::connect(&f.socket) {
-            Ok(connection) => connections.push(connection),
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
-            Err(error) => panic!("fill private socket backlog: {error}"),
-        }
-    }
-    assert!(!connections.is_empty());
+    let (listener, connections) = saturated_unaccepted_backlog(&f.socket);
     let binding = workspace_binding(&f, &uuid::Uuid::new_v4().to_string());
     let started = Instant::now();
-    assert!(BrokerClient::connect_workspace(f.socket.clone(), f.socket.with_file_name("identity.json"), &BrokerBinding::from(&f.a), &binding).is_err());
+    let error = BrokerClient::connect_workspace(f.socket.clone(), f.socket.with_file_name("identity.json"), &BrokerBinding::from(&f.a), &binding)
+        .err().expect("a saturated listener must not authorize workspace access");
+    assert_eq!(error.downcast_ref::<WireError>().map(|error| error.code.as_str()), Some("unavailable"));
     assert!(started.elapsed() < Duration::from_secs(3), "saturated broker connect exceeded authorization bound");
     drop(connections); drop(listener);
 }

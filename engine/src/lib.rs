@@ -12,6 +12,7 @@ pub mod remote_cache;
 pub mod remote_source;
 pub mod remote_root;
 pub mod delta;
+pub mod partial_checkpoint;
 pub mod directory;
 pub mod snapshot;
 pub mod tree;

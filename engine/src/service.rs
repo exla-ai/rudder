@@ -315,7 +315,9 @@ struct TransferPin {
     inventory: BTreeSet<ObjectRef>,
 }
 struct PartialTransferPin {
-    receipt: crate::store::ObjectSetReceipt,
+    staging_id: String,
+    expected: Vec<ObjectRef>,
+    receipt: Option<crate::store::ObjectSetReceipt>,
     inventory: BTreeSet<ObjectRef>,
 }
 #[derive(Debug, Serialize, Deserialize)]
@@ -330,6 +332,26 @@ pub struct PartialTransferInventory {
     pub objects: Vec<ObjectRef>,
 }
 
+/// An exact transfer-owned DATA clone. This inventory is neither a complete
+/// local root pin nor an execution/accepted-history receipt. Receipt counters
+/// stay in their opaque CAS documents rather than crossing JavaScript numbers.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PartialCheckpointTransferInventory {
+    pub format_version: u32,
+    pub owned_pin: String,
+    pub publication_id: String,
+    pub publication: ObjectRef,
+    pub q: ObjectRef,
+    pub source: ObjectRef,
+    pub runnable: ObjectRef,
+    pub plan: ObjectRef,
+    pub freeze_intent: ObjectRef,
+    pub drain_record: ObjectRef,
+    pub base: crate::remote_root::RootBinding,
+    pub objects: Vec<ObjectRef>,
+}
+
 /// One trusted local transport session. Resources allocated here are distinct
 /// from caller pins/leases and only this session's resources are cleaned up.
 /// A hard process kill can leave a conservative pin; it never acknowledges a
@@ -337,7 +359,7 @@ pub struct PartialTransferInventory {
 pub struct TransferSession {
     store: LocalStore,
     source_pins: BTreeMap<String, TransferPin>,
-    partial_pins: BTreeMap<String, Option<PartialTransferPin>>,
+    partial_pins: BTreeMap<String, PartialTransferPin>,
     staging: BTreeSet<String>,
 }
 impl TransferSession {
@@ -417,13 +439,15 @@ impl TransferSession {
     }
     pub fn unpin_source(&mut self, pin: &str) -> Result<()> {
         if let Some(partial) = self.partial_pins.get(pin) {
-            let receipt = match partial {
-                Some(partial) => Some(partial.receipt.clone()),
-                None => self.store.object_set_receipt(pin)?,
-            };
-            if let Some(receipt) = receipt {
-                self.store.release_object_set(&receipt)?;
-            }
+            // Original stage+set cannot identify the first generation after
+            // a crash-stage was released/reused with the same UUID. Looking
+            // up a current name would turn unknown DATA into cleanup authority.
+            // Preserve this entry and any existing original GC stage instead;
+            // consumed stages are never revived by finish/Drop.
+            let receipt = partial.receipt.as_ref().context(
+                "transfer ACK generation is unknown; retention cleanup remains unconfirmed",
+            )?;
+            self.store.release_object_set(receipt)?;
             self.partial_pins.remove(pin);
             return Ok(());
         }
@@ -470,17 +494,8 @@ impl TransferSession {
                 "partial inventory exceeds byte limit"
             );
             let pin = format!("transfer:partial:rpc:{}", Uuid::new_v4());
-            self.partial_pins.insert(pin.clone(), None);
             owned_pin = Some(pin.clone());
-            let receipt = self.store.retain_object_set(&lease.id, &pin, &objects)?;
-            self.staging.remove(&lease.id);
-            self.partial_pins.insert(
-                pin.clone(),
-                Some(PartialTransferPin {
-                    receipt,
-                    inventory: objects.iter().cloned().collect(),
-                }),
-            );
+            self.clone_partial_pin(&lease.id, &pin, &objects)?;
             Ok(PartialTransferInventory {
                 format_version: 1,
                 owned_pin: pin,
@@ -492,14 +507,106 @@ impl TransferSession {
             })
         })();
         if result.is_err() {
-            if let Some(pin) = owned_pin {
-                let _ = self.unpin_source(&pin);
-            }
-            if self.store.abandon_staging(&lease.id).is_ok() {
-                self.staging.remove(&lease.id);
-            }
+            self.clean_failed_partial(&lease.id, owned_pin.as_deref());
         }
         result
+    }
+
+    /// Clone all explicit capture/evidence/wrapper units before exposing any
+    /// producer reads to the caller. Staging begins before the first producer
+    /// receipt/CAS read. No inherited payload or accepted seed is hydrated.
+    pub fn pin_partial_checkpoint(
+        &mut self,
+        record: &crate::partial_checkpoint::PartialCheckpointDataReceipt,
+    ) -> Result<PartialCheckpointTransferInventory> {
+        ensure!(
+            self.source_pins.len() + self.partial_pins.len() < 32,
+            "too many session source pins"
+        );
+        ensure!(self.staging.len() < 32, "too many session staging leases");
+        let lease = self
+            .store
+            .begin_staging(crate::partial_checkpoint::STAGING_TTL)?;
+        self.staging.insert(lease.id.clone());
+        let mut owned_pin = None;
+        let result = (|| {
+            let data =
+                crate::partial_checkpoint::read_partial_checkpoint_data(&self.store, record)?;
+            let objects = data.objects().to_vec();
+            let payload = &data.publication().payload;
+            let pin = format!("transfer:partial-checkpoint:rpc:{}", Uuid::new_v4());
+            owned_pin = Some(pin.clone());
+            self.clone_partial_pin(&lease.id, &pin, &objects)?;
+            // Original producer receipts may legitimately retire after their
+            // validation. The acknowledged clone now owns these exact bytes;
+            // do not require the old pins to remain active after this point.
+            Ok(PartialCheckpointTransferInventory {
+                format_version: 1,
+                owned_pin: pin,
+                publication_id: payload.publication_id.clone(),
+                publication: record.publication.clone(),
+                q: payload.q.clone(),
+                source: payload.source.clone(),
+                runnable: payload.runnable.clone(),
+                plan: payload.plan.clone(),
+                freeze_intent: payload.freeze_intent.clone(),
+                drain_record: payload.drain_record.clone(),
+                base: data.q().capture.base.clone(),
+                objects,
+            })
+        })();
+        if result.is_err() {
+            self.clean_failed_partial(&lease.id, owned_pin.as_deref());
+        }
+        result
+    }
+
+    fn clone_partial_pin(
+        &mut self,
+        staging_id: &str,
+        pin: &str,
+        objects: &[ObjectRef],
+    ) -> Result<()> {
+        let expected = crate::partial_checkpoint::bounded_objects(objects)?;
+        ensure!(expected == objects, "noncanonical partial clone inventory");
+        self.partial_pins.insert(
+            pin.into(),
+            PartialTransferPin {
+                staging_id: staging_id.into(),
+                expected: expected.clone(),
+                receipt: None,
+                inventory: BTreeSet::new(),
+            },
+        );
+        let receipt = self.store.retain_object_set(staging_id, pin, objects)?;
+        // Save the complete returned receipt before later checks can fail, so
+        // cleanup always compares this generation rather than a current name.
+        self.partial_pins.get_mut(pin).unwrap().receipt = Some(receipt.clone());
+        crate::partial_checkpoint::check_receipt_set(
+            &receipt,
+            staging_id,
+            &self.partial_pins[pin].expected,
+        )?;
+        ensure!(
+            receipt.pin_id == pin && self.store.object_set_refs(&receipt)? == expected,
+            "partial clone ACK differs from its exact retained inventory"
+        );
+        self.staging.remove(staging_id);
+        self.partial_pins.get_mut(pin).unwrap().inventory = expected.into_iter().collect();
+        Ok(())
+    }
+
+    fn clean_failed_partial(&mut self, staging_id: &str, pin: Option<&str>) {
+        if pin.is_some_and(|pin| {
+            self.partial_pins.contains_key(pin) && self.unpin_source(pin).is_err()
+        }) {
+            // Leave uncertain retention and its original staging discoverable
+            // for retry/recovery. Never erase the only conservative GC fence.
+            return;
+        }
+        if self.store.abandon_staging(staging_id).is_ok() {
+            self.staging.remove(staging_id);
+        }
     }
     pub fn inventory(&mut self, root: &ObjectRef) -> Result<Vec<ObjectRef>> {
         ensure!(
@@ -541,7 +648,6 @@ impl TransferSession {
                 || self
                     .partial_pins
                     .values()
-                    .flatten()
                     .any(|pin| pin.inventory.contains(object)),
             "object is outside retained source inventory"
         );
@@ -584,6 +690,14 @@ impl TransferSession {
             }
         }
         for lease in self.staging.iter().cloned().collect::<Vec<_>>() {
+            if self
+                .partial_pins
+                .values()
+                .any(|pin| pin.staging_id == lease)
+            {
+                failed = true;
+                continue;
+            }
             if self.store.abandon_staging(&lease).is_ok() {
                 self.staging.remove(&lease);
             } else {
@@ -599,17 +713,14 @@ impl TransferSession {
 }
 impl Drop for TransferSession {
     fn drop(&mut self) {
-        for pin in self.partial_pins.keys().cloned().collect::<Vec<_>>() {
-            let _ = self.unpin_source(&pin);
-        }
-        for pin in self.source_pins.keys() {
-            let _ = self.store.unpin(pin);
-        }
-        for lease in &self.staging {
-            let _ = self.store.abandon_staging(lease);
-        }
+        let _ = self.finish();
     }
 }
+
+#[cfg(test)]
+#[path = "partial_checkpoint/session_tests.rs"]
+mod partial_checkpoint_tests;
+
 pub fn transfer_reference(reference: &ObjectRef) -> Result<()> {
     reference.validate()?;
     ensure!(

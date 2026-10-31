@@ -433,16 +433,21 @@ fn control_frames_reject_oversized_incomplete_and_unknown_fields() {
             }, 0);
         }
         let oversized = payload.len() > CONTROL_LIMIT;
-        let sender = thread::spawn(move || -> io::Result<()> {
+        let sender = thread::spawn(move || -> io::Result<UnixStream> {
             writer.write_all(&payload)?;
-            writer.shutdown(std::net::Shutdown::Write)
+            writer.shutdown(std::net::Shutdown::Write)?;
+            // Keep the peer descriptor alive through the parser assertion.
+            // XNU rejects timeout updates after a full peer disconnect, even
+            // with queued bytes; SHUT_WR alone still supplies the required EOF.
+            Ok(writer)
         });
         let error = read_control(&reader).err().expect("invalid control frame was accepted");
-        sender.join().unwrap().unwrap();
+        let writer = sender.join().unwrap().unwrap();
         if oversized {
             assert!(error.to_string().contains("invalid engine control request size"),
                 "the parser must reject all 8193 bytes, not pass after an I/O timeout: {error:#}");
         }
+        drop(writer);
     }
 }
 

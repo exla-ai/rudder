@@ -12,6 +12,8 @@ use std::{
 use uuid::Uuid;
 
 #[cfg(target_os = "linux")]
+pub mod connected;
+#[cfg(target_os = "linux")]
 pub mod linux;
 
 pub const NETWORK_PROFILE_VERSION: u32 = 1;
@@ -453,6 +455,13 @@ impl ValidatedNetworkProfile {
     /// policy, budgets and readiness challenge, not only a reusable UUID label.
     pub fn profile_digest(&self) -> [u8; 32] {
         self.profile_digest
+    }
+    /// Immutable configuration only, never a current owner or egress grant.
+    pub fn policy(&self) -> Option<&PublicIpv4HttpsPolicy> {
+        self.profile.policy.as_ref()
+    }
+    pub fn readiness_nonce(&self) -> &str {
+        &self.profile.readiness_nonce
     }
     /// Check an already resolved numeric target against pinned configuration
     /// and a freshly supplied host deny set. Does not resolve, dial or grant

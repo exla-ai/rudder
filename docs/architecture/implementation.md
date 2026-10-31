@@ -50,7 +50,7 @@ the three architecture documents already contained this session's planning work.
 | Private previews | Persisted Tailscale login, actual readiness, bounded async probes, exact project ownership, ready links and local open | E13 subset implemented; real userspace/Serve check passed; laptop/phone access remains untested |
 | Terminal stream | Shared home/sail helper, short output batching, bounded backpressure, connection fencing, UTF-8 and repaint recovery | E13 subset deployed in the worker image; real WS/PTY VM checks passed; existing homes adopt when idle |
 | Startup/download caches | Background CLI update, persistent account-local npm/pnpm/uv cache defaults, explicit overrides retained | Behavior tests pass; no distributed action-cache claim |
-| Full storage/engine rewrite | Milestones below | Cloud release 163 / worker alpha.12 is deployed and verified; npm remains alpha.7 after the alpha.12 Mac test failure. Default workspace integration, fleet and migration gates remain open |
+| Full storage/engine rewrite | Milestones below | Cloud release 164 / worker alpha.13 is deployed and verified; npm remains alpha.7 after the alpha.13 Mac test failure. Default workspace integration, fleet and migration gates remain open |
 
 The current native simple-execution path remains an isolated worker; explicit
 main-checkout mode remains available. The initial automatic DAG path retains
@@ -67,7 +67,58 @@ path, so this is a stated alpha limitation, not complete Cloud routing parity.
 
 ## V4 foundations and current continuation, 2026-10-31
 
-Cloud alpha.12 is deployed as release 163 from
+Cloud alpha.13 is deployed as release 164 from
+`030ebeff621089649c0cfb50e55f8fc9c7642d61`, verified at
+`2026-10-31T03:13:36Z`. The canonical app, health/authentication, database and
+unchanged active home pass. Its stock worker boot and S3-to-fresh-native-CAS
+restore pass. A directly derived image adds only the tagged qualifier and
+provenance; the actual offline remote guest, partial checkpoint finalization
+and historical reopen pass. All seven alpha.13 canaries, including the four
+candidate attempts, and the temporary credential row were independently absent
+at `2026-10-31T03:17:30Z`. The tagged config now names the actual alpha.13 worker.
+See [delivery proof](delivery-alpha13.json) and
+[tagged runtime evidence](../../examples/execution/evidence/2026-10-31-alpha13-runtime/README.md).
+The active home retains alpha.7 until idle. This does not activate remote launch
+by default or qualify connected inference, accepted history or faster builds.
+
+All three alpha.13 native platform artifacts, publication JavaScript checks and
+separate TUI CI pass. Publication then stopped on four Mac socket fixtures:
+Darwin reports an exhausted accept queue as ConnectionRefused, one fixture path
+exceeded SUN_LEN, and another dropped its peer before the oversized-frame parser
+completed. Both npm publish steps were skipped. Next-tag corrections preserve
+the exact authentication, 8,193-byte rejection and deadline assertions without
+production changes. Both npm `next` tags remain alpha.7 as of
+`2026-10-31T03:18:20Z`; actual publication and fresh installations remain gates.
+
+Post-alpha.13 main contains the verified completion/prompt cleanup and retained
+Plan/reviewer resume-mode correction in `6ef9e41`. The alpha.14 candidate adds
+[partial checkpoint DATA publication](partial-checkpoint-publication.md) and
+[bounded connected networking](connected-network-transport.md). Neither path
+enables managed remote execution by default. Both are absent from the frozen
+alpha.13 images. Full v4 remains the active objective.
+
+Checkpoint publication retains the exact new source-complement bytes, plan and
+freeze/drain audit documents without hydrating inherited content or the private
+accepted seed. Rust, opaque native RPC, TypeScript and Cloud share the canonical
+fixture with above-JS-integer counters. A DATA bundle remains distinct from an
+accepted source/history or live execution grant. Transfer readers settle before
+their exact clone is released. Lost acknowledgment cleanup preserves uncertain
+retention rather than adopting a newer pin generation by name.
+
+The connected transport transfers an actual guest loopback listener to a host
+supervisor, validates its namespace and process witnesses, and dials only sealed
+public IPv4 pins. DNS workers, accepted connections, buffers and lifetimes are
+bounded. Settlement waits for actual owned workers and sockets. The standalone
+no-key TLS qualifier still needs a source-bound disposable Fly VM run; transport
+tests are not provider inference or managed launch qualification.
+
+The coordinated alpha.14 Linux library/dashboard run passes 1,139 tests with 12
+explicitly ignored fixtures. Focused checkpoint, object-retention, legacy delta,
+connected transport, Cloud codec and client tests also pass. Final HTTP, fresh
+production binaries, native RPC, full JavaScript/TUI, Mac CI, npm publication
+and actual Fly delivery remain separate gates.
+
+The previous Cloud checkpoint, alpha.12, deployed as release 163 from
 `f609730d27ee7d02b1886eb343477d1c09aa7255`; the canonical app, health,
 authentication, database integrity and unchanged active-home instance were
 verified at `2026-10-31T01:28:36Z`. Its complete worker image passed an owned
@@ -123,7 +174,7 @@ the inactive PostgreSQL authority adapter and explicit internal managed App
 composition are included in Cloud alpha.12, alongside private managed storage,
 writer floors, board capabilities and paired native build artifacts. Alpha.13
 main-checkout work joins logical freeze, distinct partial RPC and Record2 data
-with physical execution drain; it is not in these frozen images. CLI publication,
+with physical execution drain; it is included in the frozen alpha.13 images. CLI publication,
 configured worker image and live adoption remain separate facts. The active
 objective remains the full plan.
 
@@ -140,7 +191,7 @@ keeps host-unsupported qualification separate. Npm availability remains blocked
 by the Mac journal fixture above. Remote activation and the new partial
 checkpoint/transfer protocols remain open.
 
-The alpha.13 candidate now implements the offline physical composition in
+The alpha.13 tag implements the offline physical composition in
 source: jointly versioned Spec4/Binding3, separate partial RPC1, namespace5
 whole-effect admission and actual frozen-view ownership, Record2's explicit
 complete/partial families, and one-shot partial finalization after real kernel,

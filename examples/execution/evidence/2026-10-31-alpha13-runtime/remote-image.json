@@ -1,0 +1,25 @@
+{
+  "image": "registry.fly.io/rudder-workers-exla:4.0.0-alpha.13-remote-qualification",
+  "provenance": {
+    "formatVersion": 1,
+    "kind": "alpha13-remote-execution-qualification",
+    "proposedVersion": "4.0.0-alpha.13",
+    "workerVersion": "4.0.0-alpha.13",
+    "sourceKind": "committed-release",
+    "baseRevision": null,
+    "revision": "030ebeff621089649c0cfb50e55f8fc9c7642d61",
+    "sourceEnvelopeSha256": "8a25679f4a3b8a65effbd99a4f6057bfebf2b66683cc762f24d5094f329bfa72",
+    "baseWorkerDigest": "sha256:17247eba2f2293bf85b66ccdf78d3884a378a3ce8c734638350da44b41cc1fd7",
+    "directBaseDigest": "sha256:17247eba2f2293bf85b66ccdf78d3884a378a3ce8c734638350da44b41cc1fd7",
+    "qualifierSha256": "ac6c32b3b0259a47171891ad11845b2153b02e57f213cf29e77d6a698c70a9a2"
+  },
+  "files": {
+    "Dockerfile": "e1065c8fab31db504f7ad683f38ff3f7358b81b278e60da9d70bc340f8a50c31",
+    "remote-execution-provenance.json": "e0eb8fd75047e43975b6dd38242e2620089d878c5a1e30d53e7cec5d07635e31",
+    "rudder-remote-execution-qualifier": "ac6c32b3b0259a47171891ad11845b2153b02e57f213cf29e77d6a698c70a9a2"
+  },
+  "digest": "sha256:4f1c9b3ebf94fda27ef469a1e4f8f722628503aed0f176124d6feea8c92e482f",
+  "observedAt": "2026-10-31T03:11:50.139747+00:00",
+  "pushManifestDone": true,
+  "logSha256": "5e15429150a7284941df7d34f13c606c1af2d264ae0e1b08f46631f07e38dbf2"
+}

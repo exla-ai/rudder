@@ -1,0 +1,11 @@
+{
+  "observedAt": "2026-10-31T03:18:20.644436+00:00",
+  "@exla/rudder": {
+    "next": "4.0.0-alpha.7",
+    "latest": "3.9.13"
+  },
+  "@viraatdas/rudder": {
+    "next": "4.0.0-alpha.7",
+    "latest": "3.9.13"
+  }
+}

@@ -81,6 +81,7 @@ enum RpcOperation {
     Store { request: StoreOperation },
     PinSource { root: ObjectRef },
     PinPartialSource { receipt_json: String },
+    PinPartialCheckpoint { receipt_json: String },
     UnpinSource { pin: String },
     Inventory { root: ObjectRef },
     ReadBinary { object: ObjectRef },
@@ -193,6 +194,13 @@ fn rpc() -> Result<()> {
                         serde_json::from_str(&receipt_json)?;
                     serde_json::to_value(session.pin_partial_source(&record)?)?
                 }
+                RpcOperation::PinPartialCheckpoint { receipt_json } => {
+                    let record =
+                        rudder_engine::partial_checkpoint::PartialCheckpointDataReceipt::from_json(
+                            &receipt_json,
+                        )?;
+                    serde_json::to_value(session.pin_partial_checkpoint(&record)?)?
+                }
                 RpcOperation::UnpinSource { pin } => {
                     session.unpin_source(&pin)?;
                     json!({"released":true})
@@ -208,5 +216,38 @@ fn rpc() -> Result<()> {
             })
         })();
         frame(&mut writer, &request.id, result, &outgoing)?;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn partial_checkpoint_frame_keeps_receipt_json_opaque() {
+        let opaque = r#"{"generation":9007199254740993,"inode":18446744073709551615}"#;
+        let frame = json!({"format_version":1,"id":"frame","request":{
+            "operation":"pin_partial_checkpoint","receipt_json":opaque
+        },"binary_bytes":0});
+        let request: RpcRequest =
+            serde_json::from_slice(&serde_json::to_vec(&frame).unwrap()).unwrap();
+        let RpcOperation::PinPartialCheckpoint { receipt_json } = request.request else {
+            panic!("distinct checkpoint operation")
+        };
+        assert_eq!(receipt_json.as_bytes(), opaque.as_bytes());
+    }
+
+    #[test]
+    fn partial_checkpoint_frame_refuses_extra_fields_and_nonopaque_receipt() {
+        for request in [
+            json!({"operation":"pin_partial_checkpoint","receipt_json":{},}),
+            json!({"operation":"pin_partial_checkpoint","receipt_json":"{}","receipt":{}}),
+            json!({"operation":"pin_partial_checkpoint","receipt_json":"{}","existing":true}),
+        ] {
+            let frame = json!({"format_version":1,"id":"frame","request":request,"binary_bytes":0});
+            assert!(
+                serde_json::from_slice::<RpcRequest>(&serde_json::to_vec(&frame).unwrap()).is_err()
+            );
+        }
     }
 }

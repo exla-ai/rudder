@@ -1,0 +1,69 @@
+{
+  "frozen": {
+    "formatVersion": 1,
+    "createdAt": "2026-10-31T03:02:19.317339+00:00",
+    "version": "4.0.0-alpha.13",
+    "revision": "030ebeff621089649c0cfb50e55f8fc9c7642d61",
+    "sourceKind": "tagged",
+    "archiveMembers": 1710,
+    "sourceFiles": 1467,
+    "sourceBytes": 50580126,
+    "archiveSha256": "3071a8d0c9f32ab4c616e5fe22b19cc4a324956fe809ce5fa03ef91da5eaee75",
+    "sourceEnvelopeSha256": "8a25679f4a3b8a65effbd99a4f6057bfebf2b66683cc762f24d5094f329bfa72",
+    "sourceEnvelopeEncoding": "sha256 of sorted compact JSON path-to-sha256 map",
+    "configuredSecretValuesScanned": 2,
+    "matches": 0
+  },
+  "qualifierBuild": {
+    "sourceKind": "tagged",
+    "revision": "030ebeff621089649c0cfb50e55f8fc9c7642d61",
+    "sourceEnvelopeSha256": "8a25679f4a3b8a65effbd99a4f6057bfebf2b66683cc762f24d5094f329bfa72",
+    "version": "4.0.0-alpha.13",
+    "command": [
+      "cargo",
+      "build",
+      "--release",
+      "--workspace",
+      "--locked",
+      "--features",
+      "rudder-vcs-bridge/cli",
+      "--bin",
+      "rudder-remote-execution-qualifier"
+    ],
+    "startedAt": "2026-10-31T03:03:58.505589+00:00",
+    "minimumFreeBytes": 5547417600,
+    "guardTerminated": false,
+    "exitCode": 0,
+    "binary": {
+      "sha256": "ac6c32b3b0259a47171891ad11845b2153b02e57f213cf29e77d6a698c70a9a2",
+      "size": 7383984
+    },
+    "finishedAt": "2026-10-31T03:06:35.749772+00:00"
+  },
+  "remoteControllerOriginalSha256": "e68f2b5fccb1d6e68839867df7064d63c1f567a96a179b9d1fa97564f30e738f",
+  "remoteGuestProofSha256": "05cb067719b1b2aa13fee1e419909d99f91487dd2d16af0c079dd60f9e4f8754",
+  "workerImage": {
+    "image": "registry.fly.io/rudder-workers-exla:4.0.0-alpha.13",
+    "revision": "030ebeff621089649c0cfb50e55f8fc9c7642d61",
+    "sourceEnvelopeSha256": "8a25679f4a3b8a65effbd99a4f6057bfebf2b66683cc762f24d5094f329bfa72",
+    "startedAt": "2026-10-31T03:03:57.399350+00:00",
+    "observedAt": "2026-10-31T03:10:19.706314+00:00",
+    "exitCode": 0,
+    "pushManifestDone": true,
+    "digest": "sha256:17247eba2f2293bf85b66ccdf78d3884a378a3ce8c734638350da44b41cc1fd7",
+    "logSha256": "e91d563afebd6f4b6fae31afc4c1c969290270ce108f5711e91215b0dbf6134c",
+    "sourceUnchanged": true
+  },
+  "controlImage": {
+    "image": "registry.fly.io/rudder-cloud-control:4.0.0-alpha.13",
+    "revision": "030ebeff621089649c0cfb50e55f8fc9c7642d61",
+    "sourceEnvelopeSha256": "8a25679f4a3b8a65effbd99a4f6057bfebf2b66683cc762f24d5094f329bfa72",
+    "startedAt": "2026-10-31T03:03:57.399874+00:00",
+    "observedAt": "2026-10-31T03:04:24.289235+00:00",
+    "exitCode": 0,
+    "pushManifestDone": true,
+    "digest": "sha256:275c1a0d4348f124d1a7f36704d1fb86418aa0e12fda5678da340826a3865ee0",
+    "logSha256": "373f1d92aca2a0a87d12107af1fbee911c753e7bc05c86c918feb7f82fde4c8d",
+    "sourceUnchanged": true
+  }
+}

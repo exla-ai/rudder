@@ -7,10 +7,11 @@ import { createHash, randomUUID } from "node:crypto";
 import { GetObjectCommand, PutObjectCommand, DeleteObjectCommand, type S3Client } from "@aws-sdk/client-s3";
 import { readFile } from "node:fs/promises";
 import { blobFileStream, checkedBlobStream, withVerifiedSpool } from "./fabric-stream.js";
-import { ContentFormatError, fileNodeReferences, decodeFileNode, validateFileChild,
+import { ContentFormatError, fileNodeReferences, decodeFileNode, validateFileChild, validateContentReference,
   type ContentObjectKind } from "./fabric-content.js";
 import { directoryReferences, validateDirectoryChild } from "./fabric-directory.js";
 import { snapshotReferences, validateRunnableChild } from "./fabric-snapshot.js";
+import { partialCheckpointDataReferences, validatePartialCheckpointDataChildren } from "./fabric-partial-checkpoint.js";
 
 export const FABRIC_FORMAT_VERSION = 1;
 export type FabricObjectKind = ContentObjectKind;
@@ -208,6 +209,10 @@ export function fabricReferences(reference: FabricObjectRef, bytes: Buffer, meta
     if (checkpointVersion === 2n || checkpointVersion === 3n) { ref(object.view_root, "directory"); ref(object.profile, "blob"); }
     if (checkpointVersion === 3n) ref(object.hardlinks, "blob");
   } else {
+    if (reference.kind === "action_result") {
+      const checkpoint = contentFormat(() => partialCheckpointDataReferences(value, metadataCodec));
+      if (checkpoint !== null) return checkpoint.map((child) => validateFabricObjectRef(child));
+    }
     const object = exact(value, ["format_version", "references", "payload"]); version(object.format_version); for (const item of array(object.references)) ref(item);
   }
   return refs;
@@ -333,10 +338,31 @@ export class FabricCas {
     return proofReadEntry(this.options.verificationCache, this.options.storage, this.prefix, reference)?.metadata ?? this.getObject(reference);
   }
   private async verifySemanticEdges(reference: FabricObjectRef, signal: AbortSignal): Promise<void> {
-    if (reference.kind !== "runnable_root" && reference.kind !== "file" && reference.kind !== "directory_shard" && !(reference.kind === "directory" && reference.size_bytes <= 4096)) return;
+    if (reference.kind !== "action_result" && reference.kind !== "runnable_root" && reference.kind !== "file" && reference.kind !== "directory_shard" && !(reference.kind === "directory" && reference.size_bytes <= 4096)) return;
     const bytes = await this.semanticMetadata(reference, signal);
     const value = parseCanonical(bytes);
-    if (reference.kind === "runnable_root") {
+    if (reference.kind === "action_result") {
+      if (contentFormat(() => partialCheckpointDataReferences(value, metadataCodec)) === null) return;
+      const current = () => { if (signal.aborted) error("verification_timeout", "Root closure verification exceeded its deadline", 503); };
+      try {
+        await validatePartialCheckpointDataChildren(value, metadataCodec, async (child, maxBytes) => {
+          current();
+          const actual = this.reference(child);
+          if (!Number.isSafeInteger(maxBytes) || maxBytes < 1 || maxBytes > 4 * 1024 * 1024 || actual.size_bytes > Math.min(maxBytes, this.limits.maxMetadataBytes)) error("too_large", "Checkpoint proof metadata exceeds its byte limit", 413);
+          const body = await this.semanticMetadata(actual, signal);
+          current();
+          return body;
+        }, async (rootId) => {
+          current();
+          const base = await this.getRoot(rootId);
+          current();
+          return base ? validateContentReference(base.root) : null;
+        });
+      } catch (failure) {
+        if (failure instanceof ContentFormatError) error("invalid_metadata", failure.message);
+        throw failure;
+      }
+    } else if (reference.kind === "runnable_root") {
       const refs = contentFormat(() => snapshotReferences("runnable_root", value, metadataCodec));
       await parallel(refs.filter((child) => child.kind === "source_root" || child.kind === "environment_root").map((child) => this.reference(child)), this.limits.maxConcurrency, async (child) => {
         const actual = await this.semanticMetadata(child, signal);

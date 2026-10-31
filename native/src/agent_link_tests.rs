@@ -11,9 +11,8 @@ fn owned_backend_peer_is_verified_before_any_protocol_bytes_are_sent() {
         }
         fn check_current(&self) -> Result<()> { Ok(()) }
     }
-    let directory = std::env::temp_dir().join(format!("rudder-owned-link-{}", uuid::Uuid::new_v4()));
-    fs::create_dir(&directory).unwrap();
-    let path = directory.join("cx.sock");
+    let directory = Scratch::new();
+    let path = directory.0.join("cx.sock");
     let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
     let server = std::thread::spawn(move || {
         let (mut stream, _) = listener.accept().unwrap(); stream.set_nonblocking(false).unwrap();
@@ -24,7 +23,7 @@ fn owned_backend_peer_is_verified_before_any_protocol_bytes_are_sent() {
     let process = RefusedPeer(AtomicBool::new(false));
     assert!(connect(&path, &AtomicBool::new(false), Some(&process)).is_err());
     assert!(process.0.load(Ordering::Acquire));
-    server.join().unwrap(); fs::remove_dir_all(directory).unwrap();
+    server.join().unwrap();
 }
 use std::os::unix::net::UnixListener;
 use std::os::unix::process::CommandExt;

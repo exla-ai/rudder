@@ -162,6 +162,18 @@ test("invalid partial inventory releases its allocated pin before any network wo
   assert.equal(f.pins.size, 0); assert.equal(f.requests.length, 0);
 });
 
+test("partial upload cleanup retains its issued identity across adapter inventory mutation", async (t) => {
+  const f = await fixture(t), other = `transfer:partial:rpc:${randomUUID()}`; f.pins.add(other);
+  let admitted, issued; const releases = [];
+  const mint = f.source.pinPartial, unpin = f.source.unpin, get = f.remote.getRoot.bind(f.remote);
+  f.source.pinPartial = async (receipt) => { admitted = await mint(receipt); issued = admitted.owned_pin; return admitted; };
+  f.source.unpin = async (pin) => { releases.push(pin); return unpin(pin); };
+  f.remote.getRoot = async (id) => { admitted.owned_pin = other; return get(id); };
+  const result = await f.remote.uploadPartialTree("stable-issued-pin", "{}", f.source);
+  assert.deepEqual(result.receipt.root, f.after.object);
+  assert.deepEqual(releases, [issued]); assert.deepEqual([...f.pins], [other]);
+});
+
 test("remote staging cleanup is idempotent and cannot delete another account's lease", async (t) => {
   const f = await fixture(t);
   const own = await f.remote.beginStaging();

@@ -316,6 +316,7 @@ int main(void){struct io_uring_params p={0};int ring=syscall(__NR_io_uring_setup
             drop(manager.fork(&view, &base, owner.clone()).unwrap());
             let command=match mode{"static"=>vec!["/usr/bin/busybox".into(),"sh".into(),"-ec".into(),"stty -echo -onlcr; test -r /workspace/task.js; test ! -e /root; test ! -e /dev/fuse; printf 'static-shell Ω😀\\033[31mRED\\033[0m\\n'".into()],"node"=>vec!["/usr/bin/node".into(),"/workspace/task.js".into()],"interrupt"=>vec!["/bin/sh".into(),"-ec".into(),"stty -echo -onlcr; printf 'interrupt-ready Ω😀\\n'; exec /usr/bin/sleep 30".into()],_=>vec!["/usr/bin/node".into(),"/workspace/wait.js".into(),Uuid::new_v4().to_string()]};
             let spec = ExecutionSpec {
+                profile: None,
                 format_version: 1,
                 execution_id: Uuid::new_v4().to_string(),
                 operation_id: Uuid::new_v4().to_string(),
@@ -431,8 +432,10 @@ int main(void){struct io_uring_params p={0};int ring=syscall(__NR_io_uring_setup
                     if mode == "interrupt" { 130 } else { 0 },
                     "{mode}: {text}"
                 );
-                let snapshot: VfsCheckpoint =
-                    serde_json::from_value(record["checkpoint"].clone()).unwrap();
+                let snapshot: VfsCheckpoint = match serde_json::from_str::<rudder_engine::execution::ExecutionRecord>(&record.to_string()).unwrap() {
+                    rudder_engine::execution::ExecutionRecord::V1(record) => record.checkpoint.expect("legacy qualifier requires complete local checkpoint"),
+                    rudder_engine::execution::ExecutionRecord::V2(_) => panic!("legacy qualifier cannot consume Record2 or partial checkpoint"),
+                };
                 if mode == "static" || mode == "node" {
                     assert!(
                         bytes
@@ -741,6 +744,7 @@ async function denied(operation, offered) {try{await call(operation,offered);thr
             .unwrap();
             let endpoint = root.join(format!("ws-{mode}"));
             let spec = ExecutionSpec {
+                profile: None,
                 format_version: 2,
                 execution_id: binding.attempt.execution_id.clone(),
                 operation_id: binding.attempt.operation_id.clone(),
@@ -918,8 +922,10 @@ async function denied(operation, offered) {try{await call(operation,offered);thr
                 assert_eq!(record["phase"], "checkpointed", "{text}");
                 assert_eq!(record["agent_exit"], 0, "{text}");
                 assert!(text.contains("workspace-rpc-live-complete Ω😀"), "{text}");
-                let snapshot: VfsCheckpoint =
-                    serde_json::from_value(record["checkpoint"].clone()).unwrap();
+                let snapshot: VfsCheckpoint = match serde_json::from_str::<rudder_engine::execution::ExecutionRecord>(&record.to_string()).unwrap() {
+                    rudder_engine::execution::ExecutionRecord::V1(record) => record.checkpoint.expect("legacy qualifier requires complete local checkpoint"),
+                    rudder_engine::execution::ExecutionRecord::V2(_) => panic!("legacy qualifier cannot consume Record2 or partial checkpoint"),
+                };
                 let proof: serde_json::Value = serde_json::from_slice(&rpc_file_bytes(
                     &store,
                     &snapshot.directory,

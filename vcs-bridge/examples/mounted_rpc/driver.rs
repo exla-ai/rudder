@@ -71,11 +71,12 @@ pub fn main() -> Result<()> {
         let spec = rudder_engine::execution::handoff::receive(&args[4], args[6].parse()?)?;
         let outcome =
             rudder_engine::execution::run_helper_with_services(spec, services::factory())?;
+        let finalized = outcome.finalized().context("historical execution has no fresh isolation proof")?;
         println!(
             "{}",
-            serde_json::json!({"kind":"helper-proof","isolation":outcome.isolation,"warnings":outcome.warnings})
+            serde_json::json!({"kind":"helper-proof","isolation":finalized.isolation(),"warnings":finalized.warnings()})
         );
-        std::process::exit(outcome.record.agent_exit.unwrap_or(125));
+        std::process::exit(outcome.agent_exit_for_cli().unwrap_or(125));
     }
     match args.first().map(String::as_str) {
         Some("as-user") => {
@@ -280,6 +281,7 @@ async fn fixture(root: &Path, binary: &Path, mode: &str) -> Result<Fixture> {
         },
     )?;
     let spec = ExecutionSpec {
+        profile: None,
         format_version: 2,
         execution_id: observation.attempt.execution_id.clone(),
         operation_id: observation.attempt.operation_id.clone(),
@@ -664,8 +666,10 @@ fn run(f: Fixture, mode: &str) -> Result<serde_json::Value> {
             status.success() && record["phase"] == "checkpointed" && record["agent_exit"] == 0,
             "normal helper did not acknowledge checkpoint"
         );
-        let checkpoint: rudder_engine::vfs::VfsCheckpoint =
-            serde_json::from_value(record["checkpoint"].clone())?;
+        let checkpoint = match serde_json::from_str::<rudder_engine::execution::ExecutionRecord>(&record.to_string())? {
+            rudder_engine::execution::ExecutionRecord::V1(record) => record.checkpoint.context("legacy fixture requires complete local checkpoint")?,
+            rudder_engine::execution::ExecutionRecord::V2(_) => anyhow::bail!("legacy fixture cannot consume Record2 or partial checkpoint"),
+        };
         ensure!(
             services::source_bytes(&f.store, &checkpoint.directory, b"source.ts")?
                 == b"export const n = 5;\n",

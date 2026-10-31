@@ -315,6 +315,258 @@ pub(crate) fn validate_workspace_projection(workspace: &WorkspaceObservationProf
     Ok(())
 }
 
+pub(crate) fn validate_partial_workspace_projection(
+    workspace: &WorkspaceObservationProfile,
+    expected: &crate::vfs::partial_rpc::PartialBinding,
+) -> Result<()> {
+    use crate::vfs::partial_rpc::{self, IDENTITY_NAME, SOCKET_NAME};
+    expected.validate()?;
+    ensure!(
+        expected.observation == workspace.binding && workspace.application.is_none(),
+        "partial workspace projection differs from the sealed source-only assignment"
+    );
+    let path = &workspace.endpoint_directory;
+    let directory = fs::symlink_metadata(path)?;
+    ensure!(
+        directory.is_dir()
+            && !directory.file_type().is_symlink()
+            && directory.uid() == unsafe { libc::geteuid() }
+            && directory.mode() & 0o777 == 0o700,
+        "partial workspace projection must be an owned private directory"
+    );
+    let mut identity_found = false;
+    let mut socket_found = false;
+    for entry in fs::read_dir(path)? {
+        let entry = entry?;
+        let metadata = fs::symlink_metadata(entry.path())?;
+        ensure!(
+            !metadata.file_type().is_symlink()
+                && metadata.uid() == unsafe { libc::geteuid() }
+                && metadata.mode() & 0o777 == 0o600
+                && metadata.nlink() == 1,
+            "partial workspace projection has unsafe ownership/mode/links"
+        );
+        if entry.file_name() == IDENTITY_NAME {
+            ensure!(
+                metadata.is_file(),
+                "partial workspace identity must be a regular file"
+            );
+            let identity = partial_rpc::read_identity(&entry.path())?;
+            ensure!(
+                identity.binding == *expected,
+                "partial workspace identity differs from the exact execution binding"
+            );
+            identity_found = true;
+        } else if entry.file_name() == SOCKET_NAME {
+            ensure!(
+                metadata.file_type().is_socket(),
+                "partial workspace endpoint must be a socket"
+            );
+            socket_found = true;
+        } else {
+            bail!("partial workspace projection contains an unexpected entry");
+        }
+    }
+    ensure!(
+        identity_found && socket_found,
+        "owning partial workspace RPC must be ready before guest launch"
+    );
+    Ok(())
+}
+
+#[cfg(test)]
+mod partial_projection_tests {
+    use super::*;
+    use crate::{
+        protocol::{canonical_json, ObjectKind, ObjectRef, OwnerEpoch},
+        remote_cache::CacheScope,
+        remote_root::{AttemptBinding, RootBinding},
+        vfs::{
+            partial_rpc::{self, PartialBinding, PartialIdentity},
+            rpc::{AttemptContext, ObservationBinding},
+        },
+    };
+    use std::os::unix::{fs::symlink, net::UnixListener};
+    struct Fixture {
+        _temp: tempfile::TempDir,
+        _listener: UnixListener,
+        workspace: WorkspaceObservationProfile,
+        binding: PartialBinding,
+    }
+    impl Fixture {
+        fn new() -> Self {
+            let base = if Path::new("/workspace").is_dir() {
+                Path::new("/workspace")
+            } else {
+                Path::new("/tmp")
+            };
+            let temp = tempfile::Builder::new()
+                .prefix("rpp-")
+                .tempdir_in(base)
+                .unwrap();
+            let directory = temp.path().join("w");
+            fs::create_dir(&directory).unwrap();
+            fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).unwrap();
+            let owner = OwnerEpoch {
+                owner: "projection-owner".into(),
+                epoch: 1,
+            };
+            let execution = uuid::Uuid::new_v4().to_string();
+            let operation = uuid::Uuid::new_v4().to_string();
+            let view = uuid::Uuid::new_v4().to_string();
+            let observation = ObservationBinding {
+                format_version: 1,
+                attempt: AttemptContext {
+                    execution_id: execution.clone(),
+                    operation_id: operation.clone(),
+                },
+                view_id: view.clone(),
+                owner: owner.clone(),
+                namespace: uuid::Uuid::new_v4().to_string(),
+                profile: ObjectRef::from_bytes(ObjectKind::Blob, b"profile"),
+                exclusion_policy_digest: crate::vfs::exclusion_policy_digest(
+                    &crate::store::ImportPolicy::default(),
+                )
+                .unwrap(),
+            };
+            let binding = PartialBinding {
+                protocol: partial_rpc::PROTOCOL.into(),
+                format_version: 1,
+                launch_request_digest: "a".repeat(64),
+                root: RootBinding {
+                    scope: CacheScope {
+                        provider_id: "projection".into(),
+                        tenant_id: "tenant".into(),
+                    },
+                    root_id: "root".into(),
+                    root: ObjectRef::from_bytes(ObjectKind::RunnableRoot, b"runnable"),
+                },
+                attempt: AttemptBinding {
+                    project_id: "project".into(),
+                    run_id: "run".into(),
+                    run_epoch: 1,
+                    owner,
+                    execution_id: execution,
+                    operation_id: operation,
+                    view_id: view,
+                },
+                observation: observation.clone(),
+            };
+            let listener = UnixListener::bind(directory.join(partial_rpc::SOCKET_NAME)).unwrap();
+            fs::set_permissions(
+                directory.join(partial_rpc::SOCKET_NAME),
+                fs::Permissions::from_mode(0o600),
+            )
+            .unwrap();
+            let fixture = Self {
+                _temp: temp,
+                _listener: listener,
+                workspace: WorkspaceObservationProfile {
+                    binding: observation,
+                    endpoint_directory: directory,
+                    application: None,
+                },
+                binding,
+            };
+            fixture.write_identity(&fixture.binding);
+            fixture
+        }
+        fn write_identity(&self, binding: &PartialBinding) {
+            let identity = PartialIdentity {
+                protocol: partial_rpc::PROTOCOL.into(),
+                format_version: 1,
+                binding: binding.clone(),
+                token: "c".repeat(64),
+            };
+            let path = self
+                .workspace
+                .endpoint_directory
+                .join(partial_rpc::IDENTITY_NAME);
+            fs::write(&path, canonical_json(&identity).unwrap()).unwrap();
+            fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        fn validate(&self) -> Result<()> {
+            validate_partial_workspace_projection(&self.workspace, &self.binding)
+        }
+    }
+    #[test]
+    fn exact_partial_projection_passes_while_legacy_family_stays_separate() {
+        let fixture = Fixture::new();
+        fixture.validate().unwrap();
+        assert!(validate_workspace_projection(&fixture.workspace).is_err());
+    }
+    #[test]
+    fn valid_legacy_identity_and_names_never_satisfy_partial_projection() {
+        let fixture = Fixture::new();
+        let directory = &fixture.workspace.endpoint_directory;
+        let identity = crate::vfs::rpc::ObservationIdentity {
+            format_version: 1,
+            binding: fixture.workspace.binding.clone(),
+            token: "c".repeat(64),
+        };
+        fs::write(
+            directory.join(partial_rpc::IDENTITY_NAME),
+            canonical_json(&identity).unwrap(),
+        )
+        .unwrap();
+        assert!(fixture.validate().is_err());
+        fs::rename(
+            directory.join(partial_rpc::IDENTITY_NAME),
+            directory.join("identity.json"),
+        )
+        .unwrap();
+        fs::rename(
+            directory.join(partial_rpc::SOCKET_NAME),
+            directory.join("workspace.sock"),
+        )
+        .unwrap();
+        validate_workspace_projection(&fixture.workspace).unwrap();
+        assert!(fixture.validate().is_err());
+    }
+    #[test]
+    fn extra_entries_unsafe_modes_and_symlinked_leaf_or_directory_are_rejected() {
+        let fixture = Fixture::new();
+        let directory = &fixture.workspace.endpoint_directory;
+        let extra = directory.join("extra");
+        fs::write(&extra, b"unapproved").unwrap();
+        fs::set_permissions(&extra, fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(fixture.validate().is_err());
+        fs::remove_file(extra).unwrap();
+        let identity = directory.join(partial_rpc::IDENTITY_NAME);
+        fs::set_permissions(&identity, fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(fixture.validate().is_err());
+        fs::set_permissions(&identity, fs::Permissions::from_mode(0o600)).unwrap();
+        let original = fixture._temp.path().join("held-identity.json");
+        fs::rename(&identity, &original).unwrap();
+        symlink(&original, &identity).unwrap();
+        assert!(fixture.validate().is_err());
+        fs::remove_file(&identity).unwrap();
+        fs::rename(&original, &identity).unwrap();
+        fixture.validate().unwrap();
+        let original_directory = fixture._temp.path().join("held-directory");
+        fs::rename(directory, &original_directory).unwrap();
+        symlink(&original_directory, directory).unwrap();
+        assert!(fixture.validate().is_err());
+    }
+    #[test]
+    fn matching_observation_cannot_hide_stale_root_or_whole_selection_digest() {
+        let fixture = Fixture::new();
+        for field in ["root", "digest", "namespace"] {
+            let mut changed = fixture.binding.clone();
+            match field {
+                "root" => changed.root.root_id = "stale-root".into(),
+                "digest" => changed.launch_request_digest = "b".repeat(64),
+                _ => changed.observation.namespace = uuid::Uuid::new_v4().to_string(),
+            }
+            changed.validate().unwrap();
+            fixture.write_identity(&changed);
+            assert!(fixture.validate().is_err());
+        }
+        fixture.write_identity(&fixture.binding);
+        fixture.validate().unwrap();
+    }
+}
+
 pub(crate) fn validate_application_projection(
     spec: &ExecutionSpec,
     projection: &GuestServiceProjection,
@@ -642,7 +894,17 @@ pub(crate) fn restrict(
         bind(broker, &layout.root.join("run/rudder/agent"), true, false)?;
     }
     if let Some(workspace) = &spec.workspace_observation {
-        validate_workspace_projection(workspace)?;
+        let partial = spec
+            .profile
+            .as_ref()
+            .map(|profile| profile.partial_binding())
+            .transpose()?
+            .flatten();
+        if let Some(expected) = &partial {
+            validate_partial_workspace_projection(workspace, expected)?;
+        } else {
+            validate_workspace_projection(workspace)?;
+        }
         bind(
             &workspace.endpoint_directory,
             &layout.root.join("run/rudder/workspace"),

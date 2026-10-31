@@ -1,10 +1,13 @@
 # Remote managed launch and quiescent partial checkpoints
 
-Status: implementation in progress, 2026-10-31. The alpha.12 candidate implements
+Status: implementation in progress, 2026-10-31. Deployed alpha.12 implements
 the held-state workspace factory, strict remote selection and reserved namespaces;
-see [the implemented ownership contract](execution-workspace.md). Remote guest
-activation, quiescent finalization and the proposed format floors below remain
-unimplemented. They compose the existing
+see [the implemented ownership contract](execution-workspace.md). The alpha.13
+candidate adds explicit offline Spec4/Binding3 execution, namespace5 logical
+freeze, separate partial RPC1 and Record2 finalization. Combined compilation
+and focused execution tests pass; actual guest qualification is pending. Native
+remote preparation, connected inference, partial transfer/history acceptance
+and default activation remain open. These changes compose the existing
 [partial capture](partial-retention.md) and [managed launch](managed-launch.md)
 contracts toward [PLAN §§4–6 and 8](../../PLAN.md). Existing qualification does
 not establish remote managed launch, remote source acceptance or fleet latency.
@@ -37,8 +40,12 @@ HelperWorkspaceFactory returning OwnedHelperWorkspace with the actual manager,
 view and resource owners. None preserves the local implementation. The post-RPC
 HelperApplication::start callback is too late for workspace construction.
 
-The production remote factory still needs to create NodeRemoteSource,
-RemoteCache, RemoteRootRegistry and a fresh admitted session. Implemented
+The alpha.13 native remote factory creates NodeRemoteSource, RemoteCache,
+RemoteRootRegistry and a fresh admitted session after the held reservation.
+A hash-bound protected context selects fixed HTTPS fabric credentials, pinned
+image-owned Node/script files and separate private cache/registry roots. Native
+remote preparation does not yet issue its grant/context or select this path.
+Implemented
 validate_selection checks its actual manifest/profile/policy/topology against
 the sealed expectation under startup budgets. The opaque result opens its exact
 bound view through a reserved-namespace fork. The reserved UUID is included in
@@ -57,8 +64,10 @@ unavailable or revoked authority denies further byte exposure and invalidates
 the session. Invalidating interest does not free admission or payload ownership
 until the actual transport settles. Polling continues through final receipt
 publication. The implemented workspace monitor now spans checkpoint retention,
-record fsync and the authenticated receipt; remote-grant refresh still needs its
-own current-authority composition.
+record fsync and the authenticated receipt. The candidate's separate partial
+authority refreshes an exact broker grant with a three-second deadline measured
+from request send. Late results, expiry, clock regression and revocation
+permanently fence that session; the root callback reads only bounded memory.
 
 Graceful stop withdraws exact guest network admission, streams and helpers; it
 retains the exact workspace/remote-root finalization authority and refresh
@@ -77,9 +86,11 @@ PTYs; callbacks and late preparation cannot select another attempt.
 ## Drain proof and the partial checkpoint artifact
 
 PartialCaptureReceipt v1 remains LiveBestEffort, including matching cursors.
-Introduce QuiescedPartialCheckpoint v1, wrapping the exact capture receipt plus
+The candidate adds QuiescedPartialCheckpoint v1, wrapping the exact capture receipt plus
 stop request, observation binding, execution digest and durable drain-record
-identity. Only trusted executor finalization can construct its proof; a guest
+identity and an exact two-Blob evidence retention receipt. This serialized
+artifact is audit data. Only trusted executor finalization can construct its
+owned result; a guest
 boolean, fsync assertion, CLI exit or saved PID cannot authorize it.
 
 The finalization order is mandatory:
@@ -93,8 +104,11 @@ The finalization order is mandatory:
 4. syncfs, normal unmount and FUSE join must succeed. Busy mounts, drain timeout
    and discard withhold checkpoint proof; discard remains cleanup only.
 5. Freeze logical writes under the owning view lock and durably bind finalization
-   to one nonce/cursor/head. Capture producer refs and authorized boundaries,
-   commit object-set retention, then fsync the execution record.
+   to one nonce/cursor/head. Refuse any pre-existing live capture under the
+   private stop nonce. Persist the evidence reservation and lease before effects;
+   retain exact freeze-intent and drain-audit Blobs, then capture producer refs
+   and authorized boundaries, commit data retention and fsync Record2. Preserve
+   the actual frozen guard through receipt publication.
 6. Recheck current authority and send the matching authenticated shutdown receipt.
    App requires the exact receipt and observed physical exit before Paused.
 
@@ -142,15 +156,21 @@ grant no authority. Retain the current capture head through upload/history
 failure. Release generation-exact units only after publication and acceptance
 reconciliation; the next launch uses a new view and freshly admitted session.
 
-## Proposed compatibility and implementation boundary
+## Compatibility and implementation boundary
 
-The proposed outer ExecutionSpec version is greater than3 and must be allocated
-jointly with the execution network profile; neither proposal independently
-reserves4. ManagedExecutionBinding3, ExecutionRecord2, WorkspaceAssignment2, a
-separate partial RPC/provider protocol1, QuiescedPartialCheckpoint1 and remote
-namespace5 remain proposals. The proposed remote namespace floor gates new
-finalization semantics; local namespaces1/2 and live PartialCaptureReceipt1 stay
-unchanged.
+The candidate jointly allocates ExecutionSpec4, ManagedExecutionBinding3,
+ExecutionRecord2, partial workspace RPC1, QuiescedPartialCheckpoint1 and remote
+namespace5. Spec1–3/Binding2 retain their canonical bytes and complete checkpoint
+family. Namespace3/4 retain their earlier remote/live-capture semantics; only an
+explicit finalizable selection opens namespace5. Disk history never rebuilds
+the process, namespace, RPC-settlement or frozen-view capabilities. Native
+WorkspaceAssignment2 and the partial VCS provider remain unimplemented.
+
+Partial RPC exposes only cursor, dirty events, partial capture/inspection/head
+and cancellation. Its socket, token, identity and capability scope differ from
+complete RPC1. It provides neither freeze, complete observation, adoption nor
+retirement. Endpoint settlement is retained as an owned guard and proves only
+that endpoint's actual completed handlers.
 
 Journal schema5 now implements only the opt-in managed-project writer floor and
 historical preparation/recovery receipt. It does not implement partial provider
@@ -170,6 +190,15 @@ legacy graph.workspace/jj metadata. launchNode, mergeNodeIntoIntegration, direct
 workspaceDiff and board paths must retire, engine-route or check durable
 capability before effects. Missing owner.json and per-run guards do not fence
 these paths or older native clients. Full managed-source acceptance stays closed.
+
+Native composition also needs a host-only source authorizer whose lifetime is
+independent of guest tools. The current graceful managed stop keeps its broker
+alive, but closing that broker or rotating a projected identity after peer
+closure can fence the source. Keep source authorization current through final
+receipt and actual helper exit while guest ingress is closed and settled.
+Owner/run/token revocation still fences immediately. The existing Native
+30-second stop budget must gain an explicit remote-profile budget covering
+the already bounded RPC, freeze, capture and save phases.
 
 ## Required qualification
 

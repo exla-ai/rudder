@@ -27,16 +27,19 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
+mod admission;
 mod capture;
 mod content;
 #[cfg(target_os = "linux")]
 pub mod linux;
 mod namespace;
 mod observation;
+pub mod partial_rpc;
 mod readdir;
 mod remote;
 pub mod remote_launch;
 pub mod rpc;
+pub use admission::{FrozenRemoteView, RemoteFreezeIntent, RemoteFreezeRequest};
 pub use capture::{
     PartialCaptureBudget, PartialCaptureReceipt, PartialCaptureRequest, PartialCaptureStatus,
 };
@@ -70,6 +73,7 @@ struct View {
     owner: OwnerEpoch,
     path: PathBuf,
     db: Mutex<Connection>,
+    admission: admission::Admission,
     _lock: File,
     mounted: AtomicBool,
     next_handle: AtomicU64,
@@ -135,6 +139,8 @@ pub struct VfsDescriptor {
     pub data_plane: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub partial_capture_format: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_finalization_format: Option<u32>,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -189,6 +195,7 @@ pub fn capabilities() -> serde_json::Value {
                 "inherited_hardlinks":"nonempty topology requires explicit bulk path; runtime links supported",
                 "checkpoint":false,"live_observation":false,"root_pin":"no complete LocalStore pin",
                 "partial_capture":"explicit data-only receipt v1; permanent namespace4 activation; nonce/head journal; complete consumers gated",
+                "logical_freeze":"explicit strict namespace5; owned intent-bound logical barrier, never physical quiescence; frozen reopen is recovery-only",
                 "listing":"remote namespace3 fixed snapshots; bounded pages, disk cookies and stable inode reservations; quotas return EAGAIN",
                 "default_runtime_switch":false
             }
@@ -311,7 +318,7 @@ fn require_dir(c: &Connection, id: u64) -> Result<Node> {
 }
 fn mutable(c: &Connection) -> Result<()> {
     if c.query_row(
-        "SELECT EXISTS(SELECT 1 FROM meta WHERE key IN ('sealed','destroyed') AND value='true')",
+        "SELECT EXISTS(SELECT 1 FROM meta WHERE key IN ('sealed','destroyed','remote_frozen') AND value='true')",
         [],
         |r| r.get::<_, bool>(0),
     )? {
@@ -725,7 +732,7 @@ impl VfsManager {
         owner: OwnerEpoch,
         v2: bool,
     ) -> Result<VfsView> {
-        self.fork_inner_with_namespace(id, root, topology, owner, v2, None)
+        self.fork_inner_with_namespace(id, root, topology, owner, v2, None, false)
     }
     fn fork_inner_with_namespace(
         &self,
@@ -735,6 +742,7 @@ impl VfsManager {
         owner: OwnerEpoch,
         v2: bool,
         observation_namespace: Option<&str>,
+        finalizable: bool,
     ) -> Result<VfsView> {
         ensure!(Uuid::parse_str(id).is_ok(), "view id must be a UUID");
         if let Some(namespace) = observation_namespace {
@@ -743,6 +751,17 @@ impl VfsManager {
                 "reserved observation namespace requires canonical paged profile"
             );
         }
+        ensure!(
+            !finalizable
+                || (self
+                    .0
+                    .remote
+                    .as_ref()
+                    .and_then(|remote| remote.launch_request())
+                    .is_some()
+                    && observation_namespace.is_some()),
+            "finalizable fork requires an actual strict remote selection"
+        );
         owner.validate()?;
         if let Some(remote) = &self.0.remote {
             remote.guard()?;
@@ -764,7 +783,9 @@ impl VfsManager {
             .open(self.root().join("fork.lock"))?;
         fork_lock.lock_exclusive()?;
         let reservation = self.root().join("requests").join(format!("{id}.json"));
-        let view_format = if self.0.remote.is_some() {
+        let view_format = if finalizable {
+            5
+        } else if self.0.remote.is_some() {
             3
         } else if v2 {
             2
@@ -787,17 +808,22 @@ impl VfsManager {
                     .open(&reservation)?;
                 let meta = input.metadata()?;
                 ensure!(
-                    meta.is_file() && meta.uid() == unsafe { libc::geteuid() }
-                        && meta.mode() & 0o077 == 0 && meta.nlink() == 1,
+                    meta.is_file()
+                        && meta.uid() == unsafe { libc::geteuid() }
+                        && meta.mode() & 0o077 == 0
+                        && meta.nlink() == 1,
                     "unsafe reserved remote fork request"
                 );
                 if meta.len() > 64 * 1024 {
                     return Err(error(libc::EFBIG)).context("remote fork request exceeds 64 KiB");
                 }
                 let mut bytes = Vec::new();
-                Read::by_ref(&mut input).take(64 * 1024 + 1).read_to_end(&mut bytes)?;
+                Read::by_ref(&mut input)
+                    .take(64 * 1024 + 1)
+                    .read_to_end(&mut bytes)?;
                 if bytes.len() > 64 * 1024 {
-                    return Err(error(libc::EFBIG)).context("remote fork request grew beyond 64 KiB");
+                    return Err(error(libc::EFBIG))
+                        .context("remote fork request grew beyond 64 KiB");
                 }
                 bytes
             } else {
@@ -866,6 +892,10 @@ impl VfsManager {
         }
         if self.0.remote.is_some() {
             readdir::initialize(&db)?;
+        }
+        if finalizable {
+            capture::initialize(&db)?;
+            admission::initialize(&db)?;
         }
         let tx = db.transaction()?;
         let time = now();
@@ -965,16 +995,26 @@ impl VfsManager {
             |r| r.get::<_, String>(0),
         )?;
         ensure!(
-            version == "1" || version == "2" || version == "3" || version == "4",
+            version == "1" || version == "2" || version == "3" || version == "4" || version == "5",
             "unsupported VFS version"
         );
         ensure!(
-            (version == "3" || version == "4") == self.0.remote.is_some(),
-            "remote pager requires namespace3/4; legacy remote namespaces require migration"
+            (version == "3" || version == "4" || version == "5") == self.0.remote.is_some(),
+            "remote pager requires namespace3/4/5; legacy remote namespaces require migration"
         );
-        let v2 = version == "2" || version == "3" || version == "4";
-        if version == "4" {
+        let v2 = version == "2" || version == "3" || version == "4" || version == "5";
+        if version == "4" || version == "5" {
             capture::validate_schema(&db, self.0.remote.as_deref())?;
+        }
+        if version == "5" {
+            let remote = self
+                .0
+                .remote
+                .as_deref()
+                .context("namespace5 requires its exact strict selection")?;
+            if admission::validate_schema(&db, remote)?.is_some() {
+                return Err(error(libc::EROFS)).context("frozen remote view is recovery-only");
+            }
         }
         ensure!(
             db.query_row("SELECT value FROM meta WHERE key='view_id'", [], |r| r
@@ -983,9 +1023,16 @@ impl VfsManager {
             ))? == id,
             "view id mismatch"
         );
-        if let Some(request) = self.0.remote.as_ref().and_then(|remote| remote.launch_request()) {
+        if let Some(request) = self
+            .0
+            .remote
+            .as_ref()
+            .and_then(|remote| remote.launch_request())
+        {
             let namespace: String = db.query_row(
-                "SELECT namespace FROM observation_state WHERE singleton=1", [], |row| row.get(0),
+                "SELECT namespace FROM observation_state WHERE singleton=1",
+                [],
+                |row| row.get(0),
             )?;
             ensure!(
                 namespace == request.observation.namespace,
@@ -1018,6 +1065,7 @@ impl VfsManager {
             owner: owner.clone(),
             path,
             db: Mutex::new(db),
+            admission: admission::Admission::new(version == "5"),
             _lock: lock,
             mounted: AtomicBool::new(false),
             next_handle: AtomicU64::new(1),
@@ -1096,7 +1144,9 @@ impl VfsView {
             inode_count: c.query_row("SELECT count(*) FROM nodes", [], |r| read_id(r, 0))?,
             private_dirent_count: c
                 .query_row("SELECT count(*) FROM dirents", [], |r| read_id(r, 0))?,
-            partial_capture_format: (get("format_version")? == "4").then_some(1),
+            partial_capture_format: matches!(get("format_version")?.as_str(), "4" | "5")
+                .then_some(1),
+            remote_finalization_format: (get("format_version")? == "5").then_some(1),
             data_plane: self.0.v2.then(|| {
                 if self.manager().0.remote.is_some() {
                     "remote_paged_ranges_v1".to_string()
@@ -1464,6 +1514,19 @@ impl VfsView {
         mode: u32,
         target: &[u8],
     ) -> Result<VfsAttr> {
+        let effect = self.admit_live_effect()?;
+        self.create_admitted(parent, name, kind, mode, target, &effect)
+    }
+    fn create_admitted(
+        &self,
+        parent: u64,
+        name: &[u8],
+        kind: NodeKind,
+        mode: u32,
+        target: &[u8],
+        effect: &admission::LiveEffect,
+    ) -> Result<VfsAttr> {
+        effect.validate(self)?;
         name_ok(name)?;
         ensure!(mode <= 0o7777, "invalid mode");
         if kind == NodeKind::Symlink {
@@ -1640,6 +1703,18 @@ impl VfsView {
         Ok(())
     }
     pub fn write(&self, id: u64, offset: u64, bytes: &[u8], sync: bool) -> Result<usize> {
+        let effect = self.admit_live_effect()?;
+        self.write_admitted(id, offset, bytes, sync, &effect)
+    }
+    fn write_admitted(
+        &self,
+        id: u64,
+        offset: u64,
+        bytes: &[u8],
+        sync: bool,
+        effect: &admission::LiveEffect,
+    ) -> Result<usize> {
+        effect.validate(self)?;
         ensure!(bytes.len() <= MAX_IO, "write exceeds16MiB");
         ensure!(
             offset
@@ -1684,6 +1759,8 @@ impl VfsView {
         atime: Option<i64>,
         mtime: Option<i64>,
     ) -> Result<VfsAttr> {
+        let effect = self.admit_live_effect()?;
+        effect.validate(self)?;
         let mut c = self.db()?;
         let tx = c.transaction()?;
         mutable(&tx)?;
@@ -1763,6 +1840,8 @@ impl VfsView {
         Ok(!c.query_row("SELECT EXISTS(SELECT 1 FROM dirents WHERE parent=? AND child IS NOT NULL UNION ALL SELECT 1 FROM inherited.directory_entries b WHERE digest=? AND NOT EXISTS(SELECT 1 FROM dirents p WHERE p.parent=? AND p.name=b.name) LIMIT 1)",params![sql_id(parent),digest,sql_id(parent)],|r|r.get::<_,bool>(0))?)
     }
     pub fn unlink(&self, parent: u64, name: &[u8], directory: bool) -> Result<()> {
+        let effect = self.admit_live_effect()?;
+        effect.validate(self)?;
         name_ok(name)?;
         let mut c = self.db()?;
         let tx = c.transaction()?;
@@ -1800,6 +1879,8 @@ impl VfsView {
         Ok(())
     }
     pub fn link(&self, id: u64, parent: u64, name: &[u8]) -> Result<VfsAttr> {
+        let effect = self.admit_live_effect()?;
+        effect.validate(self)?;
         name_ok(name)?;
         let mut c = self.db()?;
         let tx = c.transaction()?;
@@ -1839,6 +1920,8 @@ impl VfsView {
         newname: &[u8],
         flags: u32,
     ) -> Result<()> {
+        let effect = self.admit_live_effect()?;
+        effect.validate(self)?;
         name_ok(name)?;
         name_ok(newname)?;
         if flags & !3 != 0 || flags == 3 {
@@ -1987,6 +2070,17 @@ impl VfsView {
         Ok(out)
     }
     pub fn open_handle(&self, id: u64, flags: i32, directory: bool) -> Result<u64> {
+        let effect = self.admit_live_effect()?;
+        self.open_handle_admitted(id, flags, directory, &effect)
+    }
+    fn open_handle_admitted(
+        &self,
+        id: u64,
+        flags: i32,
+        directory: bool,
+        effect: &admission::LiveEffect,
+    ) -> Result<u64> {
+        effect.validate(self)?;
         let a = self.attr(id)?;
         if directory != (a.kind == NodeKind::Directory) {
             return Err(error(if directory {
@@ -2022,6 +2116,19 @@ impl VfsView {
             },
         );
         Ok(h)
+    }
+    #[cfg(target_os = "linux")]
+    pub(super) fn create_with_handle(
+        &self,
+        parent: u64,
+        name: &[u8],
+        mode: u32,
+        flags: i32,
+    ) -> Result<(VfsAttr, u64)> {
+        let effect = self.admit_live_effect()?;
+        let attr = self.create_admitted(parent, name, NodeKind::File, mode, b"", &effect)?;
+        let handle = self.open_handle_admitted(attr.ino, flags, false, &effect)?;
+        Ok((attr, handle))
     }
     pub fn check_handle(&self, id: u64, handle: u64, write: bool) -> Result<()> {
         if let Some(remote) = &self.manager().0.remote {
@@ -2079,6 +2186,8 @@ impl VfsView {
         cookie: u64,
         max_entries: usize,
     ) -> Result<DirectoryPage> {
+        let effect = self.admit_live_effect()?;
+        effect.validate(self)?;
         if max_entries == 0 || max_entries > readdir::DIRECTORY_PAGE_ENTRIES {
             return Err(error(libc::EINVAL));
         }
@@ -2124,6 +2233,8 @@ impl VfsView {
             .transpose()
     }
     pub fn close_handle(&self, id: u64, handle: u64) -> Result<()> {
+        let effect = self.admit_cleanup_effect()?;
+        effect.validate(self)?;
         let mut hs = self.0.handles.lock().map_err(|_| error(libc::EIO))?;
         ensure!(
             hs.get(&handle).is_some_and(|h| h.ino == id),
@@ -2281,6 +2392,11 @@ impl VfsView {
     }
     pub fn seal(&self) -> Result<VfsCheckpoint> {
         self.require_local_checkpoint()?;
+        let effect = self.admit_live_effect()?;
+        self.seal_admitted(&effect)
+    }
+    fn seal_admitted(&self, effect: &admission::LiveEffect) -> Result<VfsCheckpoint> {
+        effect.validate(self)?;
         {
             let c = self.db()?;
             ensure!(
@@ -2302,7 +2418,9 @@ impl VfsView {
     /// Logical destruction retains private bytes and all published roots. A
     /// separate retention-aware sweeper is deliberately not implemented yet.
     pub fn destroy(&self) -> Result<VfsCheckpoint> {
-        let snapshot = self.seal()?;
+        self.require_local_checkpoint()?;
+        let effect = self.admit_live_effect()?;
+        let snapshot = self.seal_admitted(&effect)?;
         self.db()?
             .execute("INSERT OR REPLACE INTO meta VALUES('destroyed','true')", [])?;
         Ok(snapshot)

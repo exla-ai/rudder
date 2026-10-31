@@ -543,6 +543,31 @@ impl Journal {
         Ok(identity)
     }
 
+    /// Separate partial-workspace authorization. Complete observation rights
+    /// and scope hashes cannot authorize remote source/capture ingress.
+    pub fn authorize_partial_workspace(&self, token: &str, binding: &crate::vfs::partial_rpc::PartialBinding, now_ms: i64) -> Result<CapabilityIdentity> {
+        binding.validate()?;
+        let scope = crate::vfs::partial_rpc::partial_scope(binding)?;
+        let tx = self.conn.unchecked_transaction()?;
+        let auth = authenticate(&tx, token, now_ms)?;
+        authorize(&tx, &auth, crate::vfs::partial_rpc::REQUIRED_OPERATION)?;
+        ensure!(auth.grant.scopes.contains(&scope), "partial workspace is outside capability");
+        ensure!(auth.project == binding.attempt.project_id
+            && auth.grant.run_id == binding.attempt.run_id
+            && auth.grant.run_epoch == binding.attempt.run_epoch,
+            "partial workspace belongs to another project/run");
+        let project = project_state(&tx, &auth.project)?;
+        ensure!(project.owner.owner_id == binding.attempt.owner.owner
+            && project.owner.epoch == binding.attempt.owner.epoch,
+            "partial workspace owner changed");
+        let instance: Option<String> = tx.query_row("SELECT instance_id FROM runs WHERE project_id=?1 AND run_id=?2", params![auth.project,auth.grant.run_id], |row| row.get(0))?;
+        ensure!(instance.as_deref() == Some(binding.attempt.execution_id.as_str()), "partial workspace execution changed");
+        let identity = CapabilityIdentity { project_id:auth.project, principal:auth.grant.principal,
+            run_id:auth.grant.run_id, run_epoch:auth.grant.run_epoch, owner_epoch:project.owner.epoch };
+        tx.commit()?;
+        Ok(identity)
+    }
+
     /// Trusted engine projection. Do not expose a raw project-wide journal to
     /// an agent capability; use its scoped inbox instead.
     pub fn events(&self, project_id: &str, after: u64, limit: usize) -> Result<Vec<JournalEvent>> {

@@ -23,15 +23,27 @@ use uuid::Uuid;
 pub mod handoff;
 #[cfg(target_os = "linux")]
 pub mod linux;
+pub mod network;
+#[cfg(target_os = "linux")]
+mod network_phase;
+mod profile;
+#[cfg(target_os = "linux")]
+pub mod remote_qualification;
 #[cfg(target_os = "linux")]
 mod root;
 #[cfg(target_os = "linux")]
 mod state;
-pub mod network;
+pub use profile::{ExecutionProfileV4, ExecutionWorkspaceSelectionV4};
+mod record;
+pub use record::{
+    CheckpointArtifactV2, CheckpointRef, CommittedExecutionRecord, ExecutionIdentityV2,
+    ExecutionRecord, ExecutionRecordV1, ExecutionRecordV2, ExecutionStateV2,
+    QuiescedPartialCheckpointV1,
+};
 pub mod workspace;
 pub use workspace::{
-    read_execution_recovery, CheckpointCapability, HelperWorkspaceFactory, HelperWorkspaceResources,
-    HistoricalExecution, NewExecution, OwnedHelperWorkspace,
+    read_execution_recovery, CheckpointCapability, HelperWorkspaceFactory,
+    HelperWorkspaceResources, HistoricalExecution, NewExecution, OwnedHelperWorkspace,
 };
 
 /// Caller is the trusted engine ingress, not an agent-supplied mount request.
@@ -65,6 +77,10 @@ pub struct ExecutionSpec {
     /// request identity; old helpers reject this unknown field/version.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_observation: Option<WorkspaceObservationProfile>,
+    /// Joint workspace/network selection data. Runtime admission remains gated
+    /// until actual namespace and finalization ownership are available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<ExecutionProfileV4>,
     pub timeout_seconds: u64,
 }
 
@@ -109,6 +125,47 @@ impl ProtectedHostContextRef {
             "invalid protected host context digest"
         );
         safe_absolute(&self.path)
+    }
+    /// Read only the exact protected host file. Credential-bearing contents
+    /// stay outside shared CAS, execution audit records and guest projections.
+    #[cfg(unix)]
+    pub fn read_bytes(&self) -> Result<Vec<u8>> {
+        use anyhow::Context;
+        use sha2::{Digest, Sha256};
+        use std::{
+            io::Read,
+            os::unix::fs::{MetadataExt, OpenOptionsExt},
+        };
+        self.validate()?;
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
+            .open(&self.path)?;
+        let metadata = file.metadata()?;
+        ensure!(
+            metadata.is_file()
+                && metadata.nlink() == 1
+                && metadata.uid() == unsafe { libc::geteuid() }
+                && metadata.mode() & 0o077 == 0
+                && metadata.len() == self.size_bytes,
+            "unsafe protected host context"
+        );
+        let mut bytes = Vec::new();
+        file.take(self.size_bytes + 1)
+            .read_to_end(&mut bytes)
+            .context("read protected host context")?;
+        let current = std::fs::symlink_metadata(&self.path)?;
+        ensure!(
+            bytes.len() as u64 == self.size_bytes
+                && hex::encode(Sha256::digest(&bytes)) == self.sha256
+                && current.dev() == metadata.dev()
+                && current.ino() == metadata.ino()
+                && current.is_file()
+                && current.nlink() == 1
+                && current.mode() & 0o077 == 0,
+            "protected host context changed"
+        );
+        Ok(bytes)
     }
 }
 
@@ -276,9 +333,17 @@ pub const WORKSPACE_GUEST_DIRECTORY: &str = "/run/rudder/workspace";
 pub const WORKSPACE_GUEST_SOCKET: &str = "/run/rudder/workspace/workspace.sock";
 pub const WORKSPACE_GUEST_IDENTITY: &str = "/run/rudder/workspace/identity.json";
 
+pub enum HelperWorkspaceServices {
+    Complete {
+        authority: Arc<dyn AttemptAuthority>,
+        adoption_witness: Option<Arc<dyn AdoptionWitness>>,
+    },
+    Partial {
+        authority: Arc<dyn crate::vfs::partial_rpc::PartialAttemptAuthority>,
+    },
+}
 pub struct HelperServices {
-    pub workspace_authority: Arc<dyn AttemptAuthority>,
-    pub adoption_witness: Option<Arc<dyn AdoptionWitness>>,
+    pub workspace: HelperWorkspaceServices,
     pub application: Option<Box<dyn HelperApplication>>,
     /// Invoked only for a new, locked execution after services authorization.
     /// None preserves the existing complete local manager/open_view path.
@@ -292,7 +357,10 @@ pub type HelperServicesFactory = Box<dyn FnOnce(&ExecutionSpec) -> Result<Helper
 /// handoffs retain their exact encoding; this requires managed-helper dispatch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ManagedFrontendStart { Immediate, AfterHostApiKeyV1 }
+pub enum ManagedFrontendStart {
+    Immediate,
+    AfterHostApiKeyV1,
+}
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -309,29 +377,86 @@ pub struct ManagedExecutionBinding {
     pub frontend_start: ManagedFrontendStart,
     pub server_command: Option<Vec<String>>,
     pub guest_socket: PathBuf,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<ExecutionProfileV4>,
 }
 impl ManagedExecutionBinding {
     pub fn validate(&self, spec: &ExecutionSpec) -> Result<()> {
-        for id in [&self.request_id, &self.execution_id, &self.operation_id, &self.view_id] {
-            ensure!(Uuid::parse_str(id).is_ok_and(|u| u.to_string() == *id), "noncanonical managed execution identity");
+        for id in [
+            &self.request_id,
+            &self.execution_id,
+            &self.operation_id,
+            &self.view_id,
+        ] {
+            ensure!(
+                Uuid::parse_str(id).is_ok_and(|u| u.to_string() == *id),
+                "noncanonical managed execution identity"
+            );
         }
-        ensure!(self.format_version == 2 && self.execution_id == spec.execution_id
-            && self.operation_id == spec.operation_id && self.view_id == spec.view_id && self.owner == spec.owner
-            && self.run_epoch > 0 && !self.run_id.is_empty() && self.run_id.len() <= 256
-            && matches!(self.execution_profile.as_str(), "codex-app-server" | "claude-sdk")
-            && self.guest_socket == Path::new("/tmp/cx.sock") && spec.format_version == 3,
-            "managed execution differs from the reserved local assignment");
-        let broker = spec.broker_binding.as_ref().ok_or_else(||anyhow::anyhow!("managed execution has no broker binding"))?;
-        ensure!(broker.run_id == self.run_id && broker.run_epoch == self.run_epoch
-            && broker.owner_epoch == self.owner.epoch, "managed broker fence differs");
-        ensure!((self.execution_profile == "codex-app-server") == self.server_command.is_some(),
-            "managed server/profile mismatch");
-        ensure!(self.frontend_start == if self.execution_profile == "codex-app-server" { ManagedFrontendStart::AfterHostApiKeyV1 }
-            else { ManagedFrontendStart::Immediate }, "managed frontend has no matching authenticated-start protocol");
+        ensure!(
+            (self.format_version == 2
+                && spec.format_version == 3
+                && self.profile.is_none()
+                && spec.profile.is_none()
+                || self.format_version == 3
+                    && spec.format_version == 4
+                    && self.profile.is_some()
+                    && self.profile == spec.profile)
+                && self.execution_id == spec.execution_id
+                && self.operation_id == spec.operation_id
+                && self.view_id == spec.view_id
+                && self.owner == spec.owner
+                && self.run_epoch > 0
+                && !self.run_id.is_empty()
+                && self.run_id.len() <= 256
+                && (matches!(
+                    self.execution_profile.as_str(),
+                    "codex-app-server" | "claude-sdk"
+                ) || self.format_version == 3
+                    && self.execution_profile == "offline-command-v1")
+                && self.guest_socket == Path::new("/tmp/cx.sock"),
+            "managed execution differs from the reserved local assignment"
+        );
+        let broker = spec
+            .broker_binding
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("managed execution has no broker binding"))?;
+        if let Some(profile) = &self.profile {
+            profile.validate_metadata(spec)?;
+            ensure!(
+                self.request_id == profile.request_id,
+                "managed v4 request differs from the sealed profile"
+            );
+        }
+        ensure!(
+            broker.run_id == self.run_id
+                && broker.run_epoch == self.run_epoch
+                && broker.owner_epoch == self.owner.epoch,
+            "managed broker fence differs"
+        );
+        ensure!(
+            (self.execution_profile == "codex-app-server") == self.server_command.is_some(),
+            "managed server/profile mismatch"
+        );
+        ensure!(
+            self.frontend_start
+                == if self.execution_profile == "codex-app-server" {
+                    ManagedFrontendStart::AfterHostApiKeyV1
+                } else {
+                    ManagedFrontendStart::Immediate
+                },
+            "managed frontend has no matching authenticated-start protocol"
+        );
         if let Some(command) = &self.server_command {
-            ensure!(!command.is_empty() && command.len() <= 256 && Path::new(&command[0]).is_absolute()
-                && command.iter().all(|a| a.len() <= 64 * 1024 && !a.contains('\0')),
-                "invalid managed backend command");
+            ensure!(
+                !command.is_empty()
+                    && command.len() <= 256
+                    && Path::new(&command[0]).is_absolute()
+                    && command
+                        .iter()
+                        .all(|a| a.len() <= 64 * 1024 && !a.contains('\0')),
+                "invalid managed backend command"
+            );
         }
         Ok(())
     }
@@ -350,11 +475,16 @@ pub struct StopAndCheckpoint {
 }
 impl StopAndCheckpoint {
     pub fn validate(&self, binding: &ManagedExecutionBinding) -> Result<()> {
-        ensure!(Uuid::parse_str(&self.request_id).is_ok_and(|u|u.to_string() == self.request_id)
-            && self.execution_id == binding.execution_id && self.operation_id == binding.operation_id
-            && self.view_id == binding.view_id && self.run_id == binding.run_id
-            && self.run_epoch == binding.run_epoch && self.owner == binding.owner,
-            "shutdown request differs from the owned managed attempt");
+        ensure!(
+            Uuid::parse_str(&self.request_id).is_ok_and(|u| u.to_string() == self.request_id)
+                && self.execution_id == binding.execution_id
+                && self.operation_id == binding.operation_id
+                && self.view_id == binding.view_id
+                && self.run_id == binding.run_id
+                && self.run_epoch == binding.run_epoch
+                && self.owner == binding.owner,
+            "shutdown request differs from the owned managed attempt"
+        );
         Ok(())
     }
 }
@@ -405,25 +535,67 @@ pub enum ExecutionPhase {
     Checkpointed,
     Orphaned,
 }
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ExecutionRecord {
-    pub format_version: u32,
-    pub execution_id: String,
-    pub operation_id: String,
-    pub view_id: String,
-    pub owner: OwnerEpoch,
-    pub request_digest: String,
-    pub phase: ExecutionPhase,
-    pub supervisor_pid: u32,
-    pub agent_exit: Option<i32>,
-    pub checkpoint: Option<VfsCheckpoint>,
+/// Historical data is separate from the owned result of this helper's drain.
+/// Neither branch can be deserialized into current execution authority.
+pub enum ExecutionOutcome {
+    Finalized(FinalizedExecution),
+    Historical(HistoricalExecution),
 }
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ExecutionOutcome {
-    pub record: ExecutionRecord,
-    pub isolation: ExecutionIsolation,
-    pub warnings: Vec<String>,
+pub struct FinalizedExecution {
+    committed: CommittedExecutionRecord,
+    isolation: ExecutionIsolation,
+    warnings: Vec<String>,
+    #[cfg(target_os = "linux")]
+    _drain: linux::OwnedExecutionDrain,
+}
+impl ExecutionOutcome {
+    pub fn record(&self) -> &ExecutionRecord {
+        match self {
+            Self::Finalized(value) => value.committed.record(),
+            Self::Historical(value) => value.record(),
+        }
+    }
+    pub fn agent_exit_for_cli(&self) -> Option<i32> {
+        self.record().agent_exit()
+    }
+    pub fn finalized(&self) -> Option<&FinalizedExecution> {
+        match self {
+            Self::Finalized(value) => Some(value),
+            Self::Historical(_) => None,
+        }
+    }
+    pub(super) fn warnings_mut(&mut self) -> Option<&mut Vec<String>> {
+        match self {
+            Self::Finalized(value) => Some(&mut value.warnings),
+            Self::Historical(_) => None,
+        }
+    }
+    #[cfg(target_os = "linux")]
+    fn from_drained(
+        committed: CommittedExecutionRecord,
+        isolation: ExecutionIsolation,
+        warnings: Vec<String>,
+        drain: linux::OwnedExecutionDrain,
+    ) -> Result<Self> {
+        drain.validate_publication(&committed)?;
+        Ok(Self::Finalized(FinalizedExecution {
+            committed,
+            isolation,
+            warnings,
+            _drain: drain,
+        }))
+    }
+}
+impl FinalizedExecution {
+    pub fn record(&self) -> &ExecutionRecord {
+        self.committed.record()
+    }
+    pub fn isolation(&self) -> &ExecutionIsolation {
+        &self.isolation
+    }
+    pub fn warnings(&self) -> &[String] {
+        &self.warnings
+    }
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExecutionIsolation {
@@ -444,11 +616,16 @@ impl ExecutionSpec {
             .as_ref()
             .and_then(|w| w.application.as_ref());
         ensure!(
-            (self.format_version == 1 && self.workspace_observation.is_none())
-                || (self.format_version == 2
+            (self.profile.is_none()
+                && ((self.format_version == 1 && self.workspace_observation.is_none())
+                    || (self.format_version == 2
+                        && self.workspace_observation.is_some()
+                        && application.is_none())
+                    || (self.format_version == 3 && application.is_some())))
+                || (self.format_version == 4
+                    && self.profile.is_some()
                     && self.workspace_observation.is_some()
-                    && application.is_none())
-                || (self.format_version == 3 && application.is_some()),
+                    && application.is_none()),
             "unsupported execution specification"
         );
         for id in [&self.execution_id, &self.operation_id, &self.view_id] {
@@ -458,6 +635,22 @@ impl ExecutionSpec {
             );
         }
         self.owner.validate()?;
+        if let Some(profile) = &self.profile {
+            profile.validate_metadata(self)?;
+            ensure!(
+                self.environment.keys().all(|key| ![
+                    "RUDDER_WORKSPACE_",
+                    "RUDDER_PARTIAL_WORKSPACE_",
+                    "RUDDER_AGENT_",
+                    "RUDDER_EXECUTION_",
+                    "RUDDER_FABRIC_",
+                    "RUDDER_ENGINE",
+                ]
+                .iter()
+                .any(|prefix| key.starts_with(prefix))),
+                "v4 environment cannot override execution authority"
+            );
+        }
         if let Some(workspace) = &self.workspace_observation {
             if let Some(application) = &workspace.application {
                 application.validate()?;
@@ -482,7 +675,16 @@ impl ExecutionSpec {
                     ))
                     && workspace
                         .endpoint_directory
-                        .join("workspace.sock")
+                        .join(
+                            if self.profile.as_ref().is_some_and(|profile| matches!(
+                                profile.workspace,
+                                ExecutionWorkspaceSelectionV4::RemoteSourceOnly { .. }
+                            )) {
+                                "partial-workspace.sock"
+                            } else {
+                                "workspace.sock"
+                            }
+                        )
                         .as_os_str()
                         .as_encoded_bytes()
                         .len()

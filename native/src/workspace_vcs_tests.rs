@@ -134,6 +134,7 @@ impl Fixture {
         )
         .unwrap();
         let spec = ExecutionSpec {
+            profile: None,
             format_version: 3,
             execution_id,
             operation_id: observation.attempt.operation_id.clone(),
@@ -391,7 +392,11 @@ fn native_factory_uses_real_broker_scope_and_never_prepares_wc_before_rpc_ready(
     .unwrap();
     f.spec.broker_directory = Some(socket.parent().unwrap().into());
     let mut services = services(&f.spec).unwrap();
-    assert!(services.adoption_witness.is_some() && services.application.is_some());
+    let rudder_engine::execution::HelperWorkspaceServices::Complete { authority, adoption_witness } = &services.workspace else {
+        panic!("VCS service requires the complete workspace protocol");
+    };
+    let authority = authority.clone();
+    assert!(adoption_witness.is_some() && services.application.is_some());
     assert!(!f
         .context
         .service
@@ -408,7 +413,7 @@ fn native_factory_uses_real_broker_scope_and_never_prepares_wc_before_rpc_ready(
         .binding
         .clone();
     wrong.namespace = uuid::Uuid::new_v4().to_string();
-    assert!(services.workspace_authority.validate(&wrong).is_err());
+    assert!(authority.validate(&wrong).is_err());
     let application = f.application();
     let ready = WorkspaceRpcReady {
         binding: &f.context.service.view.observation,
@@ -423,8 +428,7 @@ fn native_factory_uses_real_broker_scope_and_never_prepares_wc_before_rpc_ready(
         .start(&ready)
         .is_err());
     journal.revoke_capability(&owner, &token, 1).unwrap();
-    assert!(services
-        .workspace_authority
+    assert!(authority
         .validate(&f.context.service.view.observation)
         .is_err());
     broker.close();

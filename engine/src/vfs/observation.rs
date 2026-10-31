@@ -189,6 +189,13 @@ pub(super) fn mutation(
     name: Option<&[u8]>,
     destination: Option<(u64, &[u8])>,
 ) -> Result<()> {
+    if c.query_row(
+        "SELECT EXISTS(SELECT 1 FROM meta WHERE key='remote_frozen' AND value='true')",
+        [],
+        |row| row.get::<_, bool>(0),
+    )? {
+        return Err(error(libc::EROFS));
+    }
     if !namespace::enabled(c)? {
         return Ok(());
     }
@@ -531,6 +538,8 @@ impl VfsView {
         }
     }
     pub fn release_observation(&self, request_nonce: &str) -> Result<()> {
+        let effect = self.admit_live_effect()?;
+        effect.validate(self)?;
         ensure!(
             Uuid::parse_str(request_nonce).is_ok(),
             "observation nonce must be a UUID"

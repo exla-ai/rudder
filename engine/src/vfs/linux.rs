@@ -159,6 +159,8 @@ pub fn mount(
     path: impl AsRef<Path>,
     namespace: &PrivateMountNamespace,
 ) -> Result<MountedVfs> {
+    let effect = view.admit_live_effect()?;
+    effect.validate(&view)?;
     ensure!(
         fs::read_link("/proc/self/ns/mnt")?.into_os_string() == namespace.identity,
         "mount namespace proof differs"
@@ -446,14 +448,9 @@ impl Filesystem for Adapter {
         r: ReplyCreate,
     ) {
         let result = (|| {
-            let a = self.view.create(
-                p.0,
-                n.as_bytes(),
-                NodeKind::File,
-                mode & !umask & 0o7777,
-                b"",
-            )?;
-            let h = self.view.open_handle(a.ino, flags, false)?;
+            let (a, h) =
+                self.view
+                    .create_with_handle(p.0, n.as_bytes(), mode & !umask & 0o7777, flags)?;
             Ok((a, h))
         })();
         match result {

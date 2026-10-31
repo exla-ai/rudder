@@ -509,12 +509,14 @@ pub(crate) fn services(spec: &ExecutionSpec) -> Result<HelperServices> {
     )?;
     let Some(application) = &workspace.application else {
         return Ok(HelperServices {
-            workspace_authority: Arc::new(BrokerAuthority {
+            workspace: rudder_engine::execution::HelperWorkspaceServices::Complete {
+            authority: Arc::new(BrokerAuthority {
                 broker,
                 observation: workspace.binding.clone(),
                 attempt: None,
             }),
             adoption_witness: None,
+            },
             application: None,
             workspace_factory: None,
         });
@@ -529,8 +531,10 @@ pub(crate) fn services(spec: &ExecutionSpec) -> Result<HelperServices> {
     });
     let witness = host::working_copy_witness(&context.service)?;
     Ok(HelperServices {
-        workspace_authority: authority.clone(),
+        workspace: rudder_engine::execution::HelperWorkspaceServices::Complete {
+        authority: authority.clone(),
         adoption_witness: Some(witness),
+        },
         application: Some(Box::new(WorkspaceVcsApplication {
             context,
             assignment: application.clone(),

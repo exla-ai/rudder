@@ -426,6 +426,7 @@ impl PreparedManagedLaunch {
         let spec = self.execution_spec()?;
         rudder_engine::execution::handoff::ManagedExecutionHandoff::new(spec,
             rudder_engine::execution::ManagedExecutionBinding { format_version: 2,
+                profile: None,
                 request_id: self.assignment.fence.request_id.clone(), run_id: self.assignment.fence.run_id.clone(),
                 run_epoch: self.assignment.fence.run_epoch, execution_id: spec.execution_id.clone(),
                 operation_id: spec.operation_id.clone(), view_id: spec.view_id.clone(), owner: spec.owner.clone(),
@@ -633,7 +634,7 @@ pub(crate) fn prepare_local(mut request: ManagedLocalLaunchRequest, cancelled: A
             request.private_root.join("projections"), request.journal.clone()];
         authority_roots.extend(protected_roots);
         authority_roots.push(request.endpoint_parent.clone());
-        let spec = ExecutionSpec { format_version: 3, execution_id: request.fence.attempt_id.clone(),
+        let spec = ExecutionSpec { profile: None, format_version: 3, execution_id: request.fence.attempt_id.clone(),
             operation_id: request.operation_id.clone(), execution_root, manager_root: manager.root().into(),
             store_root: request.store.root().into(), authority_roots,
             view_id: request.view_id.clone(), owner: request.fence.owner_epoch(), command, environment,

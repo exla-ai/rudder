@@ -540,7 +540,7 @@ impl Resolver {
                     return Ok(entries
                         .into_iter()
                         .find(|entry| entry.name().is_ok_and(|raw| raw == name))
-                        .map(|entry| (current, entry)))
+                        .map(|entry| (current, entry)));
                 }
                 ShardNode::Branch { children } => {
                     let prefix = hex::decode(shard.prefix_hex)?;
@@ -884,15 +884,18 @@ impl VfsManager {
         Ok(manager)
     }
     pub fn fork_remote(&self) -> Result<VfsView> {
-        self.fork_remote_inner(None)
+        self.fork_remote_inner(None, false)
     }
     /// Reserved namespaces are available only on a validated launch selection.
     /// The exact namespace is included in immutable fork request bytes and the
     /// v2 remote binding; neither retry nor reopen can mint a replacement.
     pub fn fork_remote_with_namespace(&self, namespace: &str) -> Result<VfsView> {
-        self.fork_remote_inner(Some(namespace))
+        self.fork_remote_inner(Some(namespace), false)
     }
-    fn fork_remote_inner(&self, namespace: Option<&str>) -> Result<VfsView> {
+    pub(super) fn fork_remote_finalizable(&self, namespace: &str) -> Result<VfsView> {
+        self.fork_remote_inner(Some(namespace), true)
+    }
+    fn fork_remote_inner(&self, namespace: Option<&str>, finalizable: bool) -> Result<VfsView> {
         let remote = self
             .0
             .remote
@@ -907,7 +910,7 @@ impl VfsManager {
             ),
             _ => {
                 return Err(error(libc::EOPNOTSUPP))
-                    .context("remote reserved fork requires its validated selection")
+                    .context("remote reserved fork requires its validated selection");
             }
         }
         let (mode, entries, subdirectories) = remote.header;
@@ -935,6 +938,7 @@ impl VfsManager {
             remote.owner().clone(),
             true,
             namespace,
+            finalizable,
         )
     }
     pub fn open_remote_view(&self) -> Result<VfsView> {

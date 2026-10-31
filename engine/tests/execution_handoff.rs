@@ -13,6 +13,7 @@ use std::{
 use uuid::Uuid;
 fn spec(path: &Path) -> ExecutionSpec {
     ExecutionSpec {
+        profile: None,
         format_version: 1,
         execution_id: Uuid::new_v4().to_string(),
         operation_id: Uuid::new_v4().to_string(),

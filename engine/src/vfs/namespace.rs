@@ -122,7 +122,7 @@ pub(super) fn initialize(c: &Connection, root_entries: u64) -> Result<()> {
 }
 pub(super) fn enabled(c: &Connection) -> Result<bool> {
     Ok(c.query_row(
-        "SELECT value IN ('2','3','4') FROM meta WHERE key='format_version'",
+        "SELECT value IN ('2','3','4','5') FROM meta WHERE key='format_version'",
         [],
         |r| r.get(0),
     )?)

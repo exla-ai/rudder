@@ -190,6 +190,17 @@ impl AgentApi {
         Ok(actual)
     }
 
+    /// Internal partial service authorization, absent from the model tool
+    /// catalog. Identity rotation is allowed only in this exact current run.
+    pub fn authorize_partial_workspace(&self, binding: &crate::vfs::partial_rpc::PartialBinding) -> Result<CapabilityIdentity> {
+        let (journal, identity) = self.load(Duration::from_millis(100))?;
+        let actual = journal.authorize_partial_workspace(&identity.token, binding, now_ms()?)?;
+        ensure!(actual.project_id == self.binding.project && actual.run_id == self.binding.run
+            && actual.run_epoch == self.binding.epoch && actual.owner_epoch == self.binding.owner_epoch,
+            "partial workspace capability binding changed");
+        Ok(actual)
+    }
+
     fn load(&self, busy_wait: Duration) -> Result<(Journal, AgentIdentityFile)> {
         let identity = read_identity(&self.identity_file)?;
         ensure!(
@@ -445,7 +456,7 @@ fn read_identity(path: &Path) -> Result<AgentIdentityFile> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        options.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK);
     }
     let file: File = options
         .open(path)

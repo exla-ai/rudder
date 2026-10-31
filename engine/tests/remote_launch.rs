@@ -17,8 +17,8 @@ use rudder_engine::{
         exclusion_policy_digest,
         remote_launch::{self, RemoteLaunchRequest},
         rpc::{AttemptContext, ObservationBinding},
-        NodeKind, ObservationBudget, PartialCaptureBudget, PartialCaptureRequest, RemoteOptions,
-        VfsManager,
+        NodeKind, ObservationBudget, PartialCaptureBudget, PartialCaptureRequest,
+        RemoteFreezeRequest, RemoteOptions, VfsManager, VfsView,
     },
     workspace::WorkspaceProfile,
 };
@@ -167,6 +167,7 @@ impl RootReceiptSource for Source {
 #[derive(Default)]
 struct Shape {
     count: usize,
+    nested_directory: bool,
     different_directory: bool,
     environment: bool,
     partitions: bool,
@@ -205,7 +206,7 @@ impl Fixture {
                 children: vec![payload.clone(); 52],
             },
         );
-        let entries = (0..shape.count)
+        let mut entries = (0..shape.count)
             .map(|index| {
                 DirectoryEntry::new(
                     format!("file-{index:08}").as_bytes(),
@@ -218,6 +219,14 @@ impl Fixture {
                 .unwrap()
             })
             .collect::<Vec<_>>();
+        if shape.nested_directory {
+            let child = PagedDirectory::new(source.as_ref())
+                .build(0o711, std::iter::empty())
+                .unwrap();
+            entries.push(
+                DirectoryEntry::new(b"nested", EntryNode::Directory { object: child }).unwrap(),
+            );
+        }
         let directory = PagedDirectory::new(source.as_ref())
             .build(0o755, entries)
             .unwrap();
@@ -412,6 +421,462 @@ fn errno(error: &anyhow::Error) -> Option<i32> {
     error
         .downcast_ref::<std::io::Error>()
         .and_then(std::io::Error::raw_os_error)
+}
+fn freeze_request(view: &VfsView) -> RemoteFreezeRequest {
+    RemoteFreezeRequest {
+        format_version: 1,
+        intent_id: Uuid::new_v4().to_string(),
+        capture: PartialCaptureRequest {
+            nonce: Uuid::new_v4().to_string(),
+            expected_begin: view.dirty_cursor().unwrap(),
+            expected_head: view
+                .partial_capture_head()
+                .unwrap()
+                .map(|receipt| receipt.request_nonce),
+        },
+    }
+}
+
+#[test]
+fn finalizable_fork_is_explicit_initialized_and_cannot_reinterpret_original_open() {
+    let fixture = Fixture::new(Shape::default());
+    let workspace = fixture
+        .selection()
+        .open_finalizable(fixture.manager_root(), fixture.store.clone())
+        .unwrap();
+    let descriptor = workspace.view().descriptor().unwrap();
+    assert_eq!(descriptor.remote_finalization_format, Some(1));
+    assert_eq!(descriptor.partial_capture_format, Some(1));
+    let request: serde_json::Value = serde_json::from_slice(
+        &fs::read(
+            workspace
+                .manager()
+                .root()
+                .join("requests")
+                .join(format!("{}.json", workspace.view().id())),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(request["format_version"], 5);
+    assert_eq!(request["remote_binding"]["format_version"], 2);
+    assert!(workspace.view().partial_capture_head().unwrap().is_none());
+    drop(workspace);
+    assert!(fixture
+        .selection()
+        .open(fixture.manager_root(), fixture.store.clone())
+        .is_err());
+    let reopened = fixture
+        .selection()
+        .open_finalizable(fixture.manager_root(), fixture.store.clone())
+        .unwrap();
+    assert_eq!(reopened.view().dirty_cursor().unwrap().generation, 0);
+    fixture.no_payload_reads();
+}
+
+#[test]
+fn frozen_view_excludes_effects_allows_immutable_reads_and_captures_only_live_data() {
+    let fixture = Fixture::new(Shape {
+        count: 1,
+        ..Default::default()
+    });
+    let workspace = fixture
+        .selection()
+        .open_finalizable(fixture.manager_root(), fixture.store.clone())
+        .unwrap();
+    let view = workspace.view();
+    let private = view
+        .create(1, b"private", NodeKind::File, 0o600, b"")
+        .unwrap();
+    view.write(private.ino, 0, b"private frozen bytes", false)
+        .unwrap();
+    let request = freeze_request(view);
+    let inode_count = view.descriptor().unwrap().inode_count;
+    let mut frozen = view
+        .freeze_remote(&request, Duration::from_secs(1))
+        .unwrap();
+    assert_eq!(frozen.intent().request, request);
+    frozen
+        .intent_reference()
+        .verify(frozen.intent_bytes())
+        .unwrap();
+    for result in [
+        view.write(private.ino, 0, b"changed", false).map(|_| ()),
+        view.set_attr(private.ino, Some(0o644), Some(0), None, None)
+            .map(|_| ()),
+        view.create(1, b"later", NodeKind::File, 0o600, b"")
+            .map(|_| ()),
+        view.unlink(1, b"private", false),
+        view.link(private.ino, 1, b"alias").map(|_| ()),
+        view.rename(1, b"private", 1, b"renamed", 0),
+        view.open_handle(private.ino, libc::O_RDWR, false)
+            .map(|_| ()),
+        view.open_handle(1, libc::O_RDONLY, true).map(|_| ()),
+        view.read_directory_page(1, 99, 0, 4).map(|_| ()),
+        view.release_partial_capture(&request.capture.nonce),
+        view.release_observation(&request.capture.nonce),
+    ] {
+        assert_eq!(errno(&rejected(result)), Some(libc::EROFS));
+    }
+    fixture.no_payload_reads();
+    // Inherited clean materialization changes representation, not the source
+    // cursor, dirty entries, file bytes or final capture's selected roots.
+    view.lookup(1, b"file-00000000").unwrap();
+    assert!(view.descriptor().unwrap().inode_count > inode_count);
+    assert_eq!(view.dirty_cursor().unwrap(), request.capture.expected_begin);
+    assert_eq!(
+        view.read(private.ino, 0, 20).unwrap(),
+        b"private frozen bytes"
+    );
+    let receipt = frozen
+        .capture(&PartialCaptureBudget::default(), &|| false)
+        .unwrap();
+    assert_eq!(
+        receipt.consistency,
+        rudder_engine::vfs::ObservationConsistency::LiveBestEffort
+    );
+    assert_eq!(receipt.begin, request.capture.expected_begin);
+    assert_eq!(receipt.end, receipt.begin);
+    assert_eq!(
+        receipt,
+        frozen
+            .capture(&PartialCaptureBudget::default(), &|| false)
+            .unwrap()
+    );
+    assert!(view
+        .capture_partial_source(
+            &ImportPolicy::default(),
+            &request.capture,
+            &PartialCaptureBudget::default()
+        )
+        .is_err());
+    assert!(fixture.store.retention().unwrap().pins.is_empty());
+    assert_eq!(view.dirty_cursor().unwrap(), request.capture.expected_begin);
+    // Lookup and new directory-edge validation use the unchanged File's bounded
+    // descriptor, never its 208 MiB content or private seed.
+    let calls = fixture.source.calls.lock().unwrap();
+    assert!(calls
+        .iter()
+        .all(|r| r != &fixture.payload && r != &fixture.request.accepted_seed));
+    assert_eq!(calls.iter().filter(|r| *r == &fixture.file).count(), 1);
+    assert!(fixture.file.size_bytes <= 64 * 1024);
+}
+
+#[test]
+fn persisted_frozen_intent_never_reconstructs_guard_or_thaws_on_fresh_reopen() {
+    let fixture = Fixture::new(Shape::default());
+    let workspace = fixture
+        .selection()
+        .open_finalizable(fixture.manager_root(), fixture.store.clone())
+        .unwrap();
+    let request = freeze_request(workspace.view());
+    let frozen = workspace
+        .view()
+        .freeze_remote(&request, Duration::from_secs(1))
+        .unwrap();
+    let bytes = frozen.intent_bytes().to_vec();
+    let saved: rudder_engine::vfs::RemoteFreezeIntent = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(saved.request, request);
+    drop(frozen);
+    assert_eq!(
+        errno(&rejected(
+            workspace
+                .view()
+                .freeze_remote(&request, Duration::from_secs(1))
+        )),
+        Some(libc::EROFS)
+    );
+    drop(workspace);
+    assert_eq!(
+        errno(&rejected(fixture.selection().open_finalizable(
+            fixture.manager_root(),
+            fixture.store.clone()
+        ))),
+        Some(libc::EROFS)
+    );
+    let c = rusqlite::Connection::open(
+        fixture
+            .manager_root()
+            .join("views")
+            .join(&fixture.request.attempt.view_id)
+            .join("namespace.sqlite"),
+    )
+    .unwrap();
+    let stored: String = c
+        .query_row(
+            "SELECT body FROM remote_freeze_intent WHERE singleton=1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(stored.as_bytes(), bytes);
+    assert!(fixture.store.retention().unwrap().pins.is_empty());
+}
+
+#[test]
+fn frozen_owner_rejects_equal_selection_under_another_actual_manager_and_store() {
+    let fixture = Fixture::new(Shape::default());
+    let workspace = fixture
+        .selection()
+        .open_finalizable(fixture.manager_root(), fixture.store.clone())
+        .unwrap();
+    let other_store = LocalStore::open(fixture.temp.path().join("other-store")).unwrap();
+    let other = fixture
+        .selection()
+        .open_finalizable(fixture.temp.path().join("other-manager"), other_store)
+        .unwrap();
+    assert_eq!(workspace.request(), other.request());
+    assert_eq!(
+        workspace.view().dirty_cursor().unwrap(),
+        other.view().dirty_cursor().unwrap()
+    );
+    assert_eq!(
+        workspace.view().remote_launch_digest().unwrap(),
+        other.view().remote_launch_digest().unwrap()
+    );
+    let frozen = workspace
+        .view()
+        .freeze_remote(&freeze_request(workspace.view()), Duration::from_secs(1))
+        .unwrap();
+    frozen.check_for(workspace.view()).unwrap();
+    frozen.check_for(&workspace.view().clone()).unwrap();
+    assert!(frozen.check_for(other.view()).is_err());
+    assert!(other
+        .view()
+        .descriptor()
+        .unwrap()
+        .remote_finalization_format
+        .is_some());
+    assert!(fixture.store.retention().unwrap().pins.is_empty());
+}
+
+#[test]
+fn freeze_db_deadline_is_bounded_while_immutable_read_settles_and_later_writes_stay_closed() {
+    let fixture = Fixture::new(Shape {
+        count: 1,
+        ..Default::default()
+    });
+    let workspace = fixture
+        .selection()
+        .open_finalizable(fixture.manager_root(), fixture.store.clone())
+        .unwrap();
+    let inherited = workspace.view().lookup(1, b"file-00000000").unwrap();
+    let request = freeze_request(workspace.view());
+    fixture.source.held_fetch.store(true, Ordering::Release);
+    let view = workspace.view().clone();
+    let read = std::thread::spawn(move || view.read(inherited.ino, 0, 4));
+    let until = Instant::now() + Duration::from_secs(2);
+    while !fixture.source.fetch_entered.load(Ordering::Acquire) && Instant::now() < until {
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert!(fixture.source.fetch_entered.load(Ordering::Acquire));
+    let began = Instant::now();
+    assert_eq!(
+        errno(&rejected(
+            workspace
+                .view()
+                .freeze_remote(&request, Duration::from_millis(25))
+        )),
+        Some(libc::ETIMEDOUT)
+    );
+    assert!(began.elapsed() < Duration::from_secs(1));
+    assert_eq!(
+        errno(&rejected(workspace.view().write(
+            inherited.ino,
+            0,
+            b"x",
+            false
+        ))),
+        Some(libc::EROFS)
+    );
+    fixture.source.held_fetch.store(false, Ordering::Release);
+    assert_eq!(read.join().unwrap().unwrap(), b"pppp");
+    let frozen = workspace
+        .view()
+        .freeze_remote(&request, Duration::from_secs(1))
+        .unwrap();
+    assert_eq!(frozen.intent().request, request);
+}
+
+#[test]
+fn external_sqlite_writer_cannot_exceed_freeze_deadline_and_same_owned_intent_can_retry() {
+    let fixture = Fixture::new(Shape::default());
+    let workspace = fixture
+        .selection()
+        .open_finalizable(fixture.manager_root(), fixture.store.clone())
+        .unwrap();
+    let request = freeze_request(workspace.view());
+    let c = rusqlite::Connection::open(
+        fixture
+            .manager_root()
+            .join("views")
+            .join(workspace.view().id())
+            .join("namespace.sqlite"),
+    )
+    .unwrap();
+    c.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let began = Instant::now();
+    assert!(workspace
+        .view()
+        .freeze_remote(&request, Duration::from_millis(25))
+        .is_err());
+    assert!(began.elapsed() < Duration::from_secs(1));
+    assert_eq!(
+        errno(&rejected(workspace.view().create(
+            1,
+            b"late",
+            NodeKind::File,
+            0o600,
+            b""
+        ))),
+        Some(libc::EROFS)
+    );
+    c.execute_batch("ROLLBACK").unwrap();
+    let frozen = workspace
+        .view()
+        .freeze_remote(&request, Duration::from_secs(1))
+        .unwrap();
+    frozen.check_current().unwrap();
+    assert_eq!(frozen.intent().request, request);
+    assert!(fixture.store.retention().unwrap().pins.is_empty());
+}
+
+#[test]
+fn open_registration_settles_before_freeze_and_cleanup_can_close_existing_handles() {
+    let fixture = Fixture::new(Shape {
+        nested_directory: true,
+        ..Default::default()
+    });
+    let workspace = fixture
+        .selection()
+        .open_finalizable(fixture.manager_root(), fixture.store.clone())
+        .unwrap();
+    let root = workspace
+        .view()
+        .open_handle(1, libc::O_RDONLY, true)
+        .unwrap();
+    let rows = workspace
+        .view()
+        .read_directory_page(1, root, 0, 32)
+        .unwrap();
+    let nested = rows
+        .entries
+        .into_iter()
+        .find(|entry| entry.name == b"nested")
+        .unwrap()
+        .ino;
+    workspace.view().close_handle(1, root).unwrap();
+    let request = freeze_request(workspace.view());
+    fixture.source.held_fetch.store(true, Ordering::Release);
+    let view = workspace.view().clone();
+    let open = std::thread::spawn(move || view.open_handle(nested, libc::O_RDONLY, true));
+    let until = Instant::now() + Duration::from_secs(2);
+    while !fixture.source.fetch_entered.load(Ordering::Acquire) && Instant::now() < until {
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert!(fixture.source.fetch_entered.load(Ordering::Acquire));
+    assert_eq!(
+        errno(&rejected(
+            workspace
+                .view()
+                .freeze_remote(&request, Duration::from_millis(25))
+        )),
+        Some(libc::ETIMEDOUT)
+    );
+    fixture.source.held_fetch.store(false, Ordering::Release);
+    let handle = open.join().unwrap().unwrap();
+    assert!(workspace
+        .view()
+        .freeze_remote(&request, Duration::from_secs(1))
+        .is_err());
+    workspace.view().close_handle(nested, handle).unwrap();
+    workspace
+        .view()
+        .freeze_remote(&request, Duration::from_secs(1))
+        .unwrap();
+    assert_eq!(
+        errno(&rejected(workspace.view().open_handle(
+            nested,
+            libc::O_RDONLY,
+            true
+        ))),
+        Some(libc::EROFS)
+    );
+}
+
+#[test]
+fn changed_freeze_intent_or_view_custody_withholds_capture_without_releasing_data_ack() {
+    let fixture = Fixture::new(Shape::default());
+    let workspace = fixture
+        .selection()
+        .open_finalizable(fixture.manager_root(), fixture.store.clone())
+        .unwrap();
+    let private = workspace
+        .view()
+        .create(1, b"private", NodeKind::File, 0o600, b"")
+        .unwrap();
+    workspace
+        .view()
+        .write(private.ino, 0, b"retained after custody loss", false)
+        .unwrap();
+    let request = freeze_request(workspace.view());
+    let mut frozen = workspace
+        .view()
+        .freeze_remote(&request, Duration::from_secs(1))
+        .unwrap();
+    let c = rusqlite::Connection::open(
+        fixture
+            .manager_root()
+            .join("views")
+            .join(workspace.view().id())
+            .join("namespace.sqlite"),
+    )
+    .unwrap();
+    let original = std::str::from_utf8(frozen.intent_bytes())
+        .unwrap()
+        .to_owned();
+    let mut changed = frozen.intent().clone();
+    changed.launch_digest = "f".repeat(64);
+    c.execute(
+        "UPDATE remote_freeze_intent SET body=? WHERE singleton=1",
+        [String::from_utf8(canonical_json(&changed).unwrap()).unwrap()],
+    )
+    .unwrap();
+    assert!(frozen
+        .capture(&PartialCaptureBudget::default(), &|| false)
+        .is_err());
+    assert!(fixture
+        .store
+        .object_set_receipt(&format!(
+            "vfs:partial:{}:{}",
+            workspace.view().id(),
+            request.capture.nonce
+        ))
+        .unwrap()
+        .is_none());
+    c.execute(
+        "UPDATE remote_freeze_intent SET body=? WHERE singleton=1",
+        [&original],
+    )
+    .unwrap();
+    let receipt = frozen
+        .capture(&PartialCaptureBudget::default(), &|| false)
+        .unwrap();
+    let before = fixture.store.retention().unwrap();
+    let path = fixture
+        .manager_root()
+        .join("views")
+        .join(workspace.view().id())
+        .join("owner.lock");
+    fs::rename(&path, path.with_file_name("replaced-owner.lock")).unwrap();
+    fs::write(&path, b"replacement").unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+    assert!(frozen
+        .capture(&PartialCaptureBudget::default(), &|| false)
+        .is_err());
+    assert_eq!(fixture.store.retention().unwrap(), before);
+    rudder_engine::delta::read_partial_tree(&fixture.store, &receipt.retention).unwrap();
+    assert!(fixture.store.retention().unwrap().pins.is_empty());
 }
 
 #[test]

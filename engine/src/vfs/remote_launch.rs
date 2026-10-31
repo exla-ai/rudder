@@ -130,9 +130,30 @@ impl ValidatedRemoteSelection {
         manager_root: impl AsRef<Path>,
         delta_store: LocalStore,
     ) -> Result<RemoteLaunchWorkspace> {
+        self.open_inner(manager_root, delta_store, false)
+    }
+    /// Explicit namespace5 lifecycle. Initializes capture/freeze journals before
+    /// exposure, but grants no process quiescence or execution authority.
+    pub fn open_finalizable(
+        self,
+        manager_root: impl AsRef<Path>,
+        delta_store: LocalStore,
+    ) -> Result<RemoteLaunchWorkspace> {
+        self.open_inner(manager_root, delta_store, true)
+    }
+    fn open_inner(
+        self,
+        manager_root: impl AsRef<Path>,
+        delta_store: LocalStore,
+        finalizable: bool,
+    ) -> Result<RemoteLaunchWorkspace> {
         self.check_current()?;
         let manager = VfsManager::open_remote_selection(manager_root, delta_store, self.resolver)?;
-        let view = manager.fork_remote_with_namespace(&self.request.observation.namespace)?;
+        let view = if finalizable {
+            manager.fork_remote_finalizable(&self.request.observation.namespace)?
+        } else {
+            manager.fork_remote_with_namespace(&self.request.observation.namespace)?
+        };
         self::check_workspace(&manager, &view, &self.request)?;
         Ok(RemoteLaunchWorkspace {
             manager,

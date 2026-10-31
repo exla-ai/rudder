@@ -65,6 +65,8 @@ mod fabric_cli;
 mod fabric_runtime;
 mod execution_cli;
 mod workspace_vcs;
+#[cfg(target_os = "linux")]
+mod remote_workspace;
 mod managed_launch;
 mod managed_app;
 mod managed_store;

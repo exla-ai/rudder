@@ -160,7 +160,7 @@ fn validate_identity(identity: &AgentIdentityFile) -> Result<()> {
 fn read_identity(path: &Path) -> Result<AgentIdentityFile> {
     let file = OpenOptions::new()
         .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
         .open(path)
         .context("open protected agent identity")?;
     let metadata = file.metadata()?;
@@ -225,6 +225,7 @@ struct Request {
 enum Operation {
     Authenticate,
     AuthorizeWorkspace { binding: rudder_engine::vfs::rpc::ObservationBinding },
+    AuthorizePartialWorkspace { binding: rudder_engine::vfs::partial_rpc::PartialBinding },
     Call { tool: String, arguments: Value },
     Pending,
     Cancel { request_id: String },
@@ -674,6 +675,10 @@ fn connection_call(inner: &Arc<Inner>, mut stream: UnixStream) {
             snapshot.api.authorize_workspace(binding)?;
             return Ok(json!({"binding":inner.binding,"workspace_scope":rudder_engine::execution::workspace_scope(binding)?}));
         }
+        if let Operation::AuthorizePartialWorkspace { ref binding } = request.operation {
+            snapshot.api.authorize_partial_workspace(binding)?;
+            return Ok(json!({"binding":inner.binding,"partial_workspace_scope":rudder_engine::vfs::partial_rpc::partial_scope(binding)?}));
+        }
         if let Operation::Cancel { request_id } = request.operation {
             if let Some(cancel) = inner
                 .active
@@ -872,6 +877,21 @@ impl BrokerClient {
         ensure!(serde_json::from_value::<BrokerBinding>(result["binding"].clone())? == self.binding && result["workspace_scope"] == rudder_engine::execution::workspace_scope(workspace)?, "workspace broker authorization binding differs");
         Ok(())
     }
+    pub(crate) fn connect_partial_workspace(socket: PathBuf, identity: PathBuf, expected: &BrokerBinding, workspace: &rudder_engine::vfs::partial_rpc::PartialBinding) -> Result<Self> {
+        let initial = read_identity(&identity)?;
+        ensure!(BrokerBinding::from(&initial) == *expected, "partial broker belongs to a replacement attempt");
+        let client = Self { socket, identity, binding: expected.clone() };
+        client.authorize_partial_workspace(workspace)?;
+        Ok(client)
+    }
+    pub(crate) fn authorize_partial_workspace(&self, workspace: &rudder_engine::vfs::partial_rpc::PartialBinding) -> Result<()> {
+        workspace.validate()?;
+        let result = self.exchange(Operation::AuthorizePartialWorkspace { binding: workspace.clone() }, &AtomicBool::new(false))?;
+        ensure!(serde_json::from_value::<BrokerBinding>(result["binding"].clone())? == self.binding
+            && result["partial_workspace_scope"] == rudder_engine::vfs::partial_rpc::partial_scope(workspace)?,
+            "partial broker authorization binding differs");
+        Ok(())
+    }
     pub(crate) fn connect(socket: PathBuf, identity: PathBuf) -> Result<Self> {
         let initial = read_identity(&identity)?;
         let client = Self {
@@ -914,7 +934,7 @@ impl BrokerClient {
         let _ = stream.shutdown(std::net::Shutdown::Write);
     }
     fn exchange(&self, operation: Operation, cancelled: &AtomicBool) -> Result<Value> {
-        let workspace_auth = matches!(operation, Operation::AuthorizeWorkspace { .. });
+        let workspace_auth = matches!(operation, Operation::AuthorizeWorkspace { .. } | Operation::AuthorizePartialWorkspace { .. });
         let deadline = Instant::now() + if workspace_auth { Duration::from_secs(2) } else { CONNECT_DEADLINE + CALL_DEADLINE + Duration::from_secs(1) };
         let offered = self.identity()?;
         let pending = matches!(operation, Operation::Pending);
@@ -952,7 +972,7 @@ impl BrokerClient {
         cancelled: &AtomicBool,
         deadline: Instant,
     ) -> Result<Value> {
-        let workspace_auth = matches!(operation, Operation::AuthorizeWorkspace { .. });
+        let workspace_auth = matches!(operation, Operation::AuthorizeWorkspace { .. } | Operation::AuthorizePartialWorkspace { .. });
         let connect_deadline = deadline.min(Instant::now() + CONNECT_DEADLINE);
         let mut stream = loop {
             ensure!(

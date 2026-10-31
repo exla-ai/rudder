@@ -51,6 +51,7 @@ fn spec(path: &Path) -> ExecutionSpec {
         exclusion_policy_digest: "a".repeat(64),
     };
     ExecutionSpec {
+        profile: None,
         format_version: 2,
         execution_id,
         operation_id,
@@ -119,6 +120,135 @@ fn legacy_canonical_request_bytes_are_preserved_and_profile_versions_fail_closed
     );
     value.format_version = 3;
     assert!(value.validate().is_err());
+}
+
+#[test]
+fn explicit_v4_offline_profile_binds_all_ids_and_cannot_fall_back_to_legacy_control() {
+    use execution::{
+        ExecutionProfileV4, ExecutionWorkspaceSelectionV4, ManagedExecutionBinding,
+        ManagedFrontendStart,
+    };
+    let temp = fixture();
+    let mut value = spec(temp.path());
+    let request_id = Uuid::new_v4().to_string();
+    let network: execution::network::NetworkProfileV1 = serde_json::from_value(serde_json::json!({
+        "format_version":1,"execution_profile":"cloud_uid1500_linux_v1",
+        "binding":{"project_id":"p","owner":value.owner.owner,"owner_epoch":"3","run_id":"r","run_epoch":"1",
+            "request_id":request_id,"execution_id":value.execution_id,"operation_id":value.operation_id,
+            "view_id":value.view_id,"network_id":Uuid::new_v4().to_string()},
+        "mode":"offline_v1","policy":null,"policy_sha256":null,
+        "budgets":{"max_connections":0,"max_dns_jobs":0,"max_request_bytes":0,"max_buffer_bytes":0,
+            "max_bytes_per_connection":0,"max_total_bytes":0,"connect_timeout_ms":0,"idle_timeout_ms":0,"total_timeout_ms":0},
+        "readiness_nonce":Uuid::new_v4().to_string()
+    })).unwrap();
+    value.format_version = 4;
+    value.profile = Some(ExecutionProfileV4 {
+        format_version: 1,
+        request_id: request_id.clone(),
+        network,
+        workspace: ExecutionWorkspaceSelectionV4::LocalComplete {},
+    });
+    value.validate().unwrap();
+    let binding = ManagedExecutionBinding {
+        format_version: 3,
+        request_id,
+        run_id: "r".into(),
+        run_epoch: 1,
+        execution_id: value.execution_id.clone(),
+        operation_id: value.operation_id.clone(),
+        view_id: value.view_id.clone(),
+        owner: value.owner.clone(),
+        execution_profile: "offline-command-v1".into(),
+        frontend_start: ManagedFrontendStart::Immediate,
+        server_command: None,
+        guest_socket: "/tmp/cx.sock".into(),
+        profile: value.profile.clone(),
+    };
+    binding.validate(&value).unwrap();
+    let mut old = binding.clone();
+    old.format_version = 2;
+    assert!(old.validate(&value).is_err());
+    for kind in ["epoch", "request", "connected", "environment", "legacy"] {
+        let mut changed = value.clone();
+        match kind {
+            "epoch" => {
+                changed.profile.as_mut().unwrap().network.binding.run_epoch =
+                    execution::network::NetworkEpoch::new(2).unwrap()
+            }
+            "request" => changed.profile.as_mut().unwrap().request_id = Uuid::new_v4().to_string(),
+            "connected" => {
+                changed.profile.as_mut().unwrap().network.mode =
+                    execution::network::NetworkMode::QualificationHttpsConnectV1
+            }
+            "environment" => {
+                changed.environment.insert(
+                    "RUDDER_PARTIAL_WORKSPACE_SOCKET".into(),
+                    "/tmp/forged.sock".into(),
+                );
+            }
+            _ => changed.format_version = 3,
+        }
+        assert!(
+            changed.validate().is_err(),
+            "{kind} must not reuse the sealed v4 grant"
+        );
+    }
+    assert!(serde_json::from_str::<ExecutionWorkspaceSelectionV4>(
+        r#"{"kind":"local_complete","extra":true}"#
+    )
+    .is_err());
+    let invoked = Arc::new(AtomicBool::new(false));
+    let counter = invoked.clone();
+    assert!(execution::run_helper_with_services(
+        value,
+        Box::new(move |_| {
+            counter.store(true, Ordering::Release);
+            anyhow::bail!("must never construct services without v4 managed control")
+        })
+    )
+    .is_err());
+    assert!(!invoked.load(Ordering::Acquire));
+}
+
+#[test]
+fn protected_host_context_rejects_fifo_symlink_and_changed_bytes() {
+    use execution::ProtectedHostContextRef;
+    use sha2::{Digest, Sha256};
+    use std::{
+        ffi::CString,
+        os::unix::{ffi::OsStrExt, fs::symlink},
+    };
+    let temp = fixture();
+    let path = temp.path().join("context.json");
+    let bytes = br#"{"format_version":1}"#;
+    fs::write(&path, bytes).unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+    let reference = ProtectedHostContextRef {
+        format_version: 1,
+        path: path.clone(),
+        sha256: hex::encode(Sha256::digest(bytes)),
+        size_bytes: bytes.len() as u64,
+    };
+    assert_eq!(reference.read_bytes().unwrap(), bytes);
+    let linked = temp.path().join("linked");
+    symlink(&path, &linked).unwrap();
+    assert!(ProtectedHostContextRef {
+        path: linked,
+        ..reference.clone()
+    }
+    .read_bytes()
+    .is_err());
+    let fifo = temp.path().join("fifo");
+    let raw = CString::new(fifo.as_os_str().as_bytes()).unwrap();
+    assert_eq!(unsafe { libc::mkfifo(raw.as_ptr(), 0o600) }, 0);
+    assert!(ProtectedHostContextRef {
+        path: fifo,
+        ..reference.clone()
+    }
+    .read_bytes()
+    .is_err());
+    fs::write(&path, b"changed bytes").unwrap();
+    assert!(reference.read_bytes().is_err());
 }
 
 #[test]

@@ -72,19 +72,27 @@ pub fn run_helper_with_services(
 ) -> Result<ExecutionOutcome> {
     supervisor(spec, Some(factory), None)
 }
-pub fn run_helper_with_managed_services(spec: ExecutionSpec, factory: HelperServicesFactory,
-    control: super::handoff::ManagedControl) -> Result<ExecutionOutcome> {
+pub fn run_helper_with_managed_services(
+    spec: ExecutionSpec,
+    factory: HelperServicesFactory,
+    control: super::handoff::ManagedControl,
+) -> Result<ExecutionOutcome> {
     control.binding.validate(&spec)?;
     supervisor(spec, Some(factory), Some(control))
 }
 
-use super::{root::Layout, state::{self, Preflight}};
-use crate::{
-    vfs::{
-        linux::{mount, MountedVfs, PrivateMountNamespace},
-        rpc::{ObservationRpc, RpcConfig, RpcLimits},
-        VfsView,
+use super::{
+    root::Layout,
+    state::{self, Preflight},
+};
+use crate::vfs::{
+    linux::{mount, MountedVfs, PrivateMountNamespace},
+    partial_rpc::{
+        PartialAttemptAuthority, PartialBinding, PartialRpc, PartialRpcConfig, PartialRpcLimits,
+        PartialRpcSettled,
     },
+    rpc::{ObservationRpc, RpcConfig, RpcLimits},
+    VfsView,
 };
 use std::{
     fs,
@@ -95,7 +103,7 @@ use std::{
             process::{CommandExt, ExitStatusExt},
         },
     },
-    process::{Command, Stdio},
+    process::{Child, Command, Stdio},
     sync::atomic::{AtomicBool, Ordering},
     time::{Duration, Instant},
 };
@@ -194,8 +202,179 @@ impl Drop for AuthorityMonitor {
 
 struct ExecutionMount {
     mounted: Option<MountedVfs>,
-    rpc: Option<ObservationRpc>,
+    rpc: Option<WorkspaceRpc>,
     application: Option<ApplicationLifecycle>,
+}
+enum WorkspaceRpc {
+    Complete(ObservationRpc),
+    Partial {
+        rpc: PartialRpc,
+        settled: std::sync::Mutex<Option<PartialRpcSettled>>,
+    },
+}
+impl WorkspaceRpc {
+    fn close(&self) -> Result<()> {
+        match self {
+            Self::Complete(rpc) => rpc.await_closed(Duration::from_secs(35)),
+            Self::Partial { rpc, settled } => {
+                let mut receipt = settled
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("partial settlement ownership unavailable"))?;
+                if receipt.is_none() {
+                    *receipt = Some(rpc.await_closed(Duration::from_secs(35))?);
+                }
+                ensure!(
+                    receipt.as_ref().unwrap().binding_digest() == rpc.binding().digest()?,
+                    "partial settlement changed binding"
+                );
+                Ok(())
+            }
+        }
+    }
+    fn partial_settlement(&self) -> Result<(String, String)> {
+        let Self::Partial { rpc, settled } = self else {
+            anyhow::bail!("remote drain has no partial RPC owner")
+        };
+        let receipt = settled
+            .lock()
+            .map_err(|_| anyhow::anyhow!("partial settlement ownership unavailable"))?;
+        let receipt = receipt
+            .as_ref()
+            .context("partial endpoint has not actually settled")?;
+        ensure!(
+            receipt.binding_digest() == rpc.binding().digest()?,
+            "partial endpoint settlement differs"
+        );
+        Ok((
+            receipt.binding_digest().into(),
+            receipt.endpoint_instance().into(),
+        ))
+    }
+    fn complete(&self) -> Result<&ObservationRpc> {
+        match self {
+            Self::Complete(rpc) => Ok(rpc),
+            _ => anyhow::bail!("complete application cannot use partial RPC"),
+        }
+    }
+}
+
+struct LivePartialAuthority {
+    source: Arc<dyn PartialAttemptAuthority>,
+    binding: PartialBinding,
+    revoked: AtomicBool,
+}
+impl PartialAttemptAuthority for LivePartialAuthority {
+    fn validate(&self, binding: &PartialBinding) -> Result<()> {
+        ensure!(
+            binding == &self.binding && !self.cancelled(),
+            "partial attempt retired"
+        );
+        if self.source.validate(binding).is_err() {
+            self.revoked.store(true, Ordering::Release);
+            anyhow::bail!("partial attempt unavailable or revoked");
+        }
+        ensure!(
+            !self.cancelled(),
+            "partial attempt retired during authentication"
+        );
+        Ok(())
+    }
+    fn cancelled(&self) -> bool {
+        self.revoked.load(Ordering::Acquire) || self.source.cancelled()
+    }
+}
+struct PartialAuthorityMonitor {
+    authority: Arc<LivePartialAuthority>,
+    stop: Arc<AtomicBool>,
+    done: std::sync::mpsc::Receiver<()>,
+    thread: std::sync::Mutex<Option<std::thread::JoinHandle<()>>>,
+}
+impl PartialAuthorityMonitor {
+    fn start(source: Arc<dyn PartialAttemptAuthority>, binding: PartialBinding) -> Result<Self> {
+        let authority = Arc::new(LivePartialAuthority {
+            source,
+            binding,
+            revoked: AtomicBool::new(false),
+        });
+        authority.validate(&authority.binding)?;
+        let stop = Arc::new(AtomicBool::new(false));
+        let (send, done) = std::sync::mpsc::sync_channel(1);
+        let (running, stopped) = (authority.clone(), stop.clone());
+        let thread = std::thread::Builder::new()
+            .name("rudder-partial-authority".into())
+            .spawn(move || {
+                while !stopped.load(Ordering::Acquire) {
+                    if running.validate(&running.binding).is_err() {
+                        break;
+                    }
+                    let deadline = Instant::now() + AUTHORIZATION_POLL;
+                    while !stopped.load(Ordering::Acquire) && Instant::now() < deadline {
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                }
+                let _ = send.send(());
+            })?;
+        Ok(Self {
+            authority,
+            stop,
+            done,
+            thread: std::sync::Mutex::new(Some(thread)),
+        })
+    }
+    fn check(&self) -> Result<()> {
+        ensure!(!self.authority.cancelled(), "partial authority retired");
+        Ok(())
+    }
+    fn validate_current(&self) -> Result<()> {
+        self.authority.validate(&self.authority.binding)
+    }
+    fn finish(&self) -> Result<()> {
+        self.validate_current()?;
+        self.stop.store(true, Ordering::Release);
+        self.done
+            .recv_timeout(AUTHORIZATION_SETTLE)
+            .context("partial authority monitor has not settled")?;
+        if let Some(thread) = self
+            .thread
+            .lock()
+            .map_err(|_| anyhow::anyhow!("partial monitor ownership unavailable"))?
+            .take()
+        {
+            thread
+                .join()
+                .map_err(|_| anyhow::anyhow!("partial authority monitor failed"))?;
+        }
+        self.validate_current()
+    }
+}
+impl Drop for PartialAuthorityMonitor {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+    }
+}
+enum WorkspaceMonitor {
+    Complete(AuthorityMonitor),
+    Partial(PartialAuthorityMonitor),
+}
+impl WorkspaceMonitor {
+    fn check(&self) -> Result<()> {
+        match self {
+            Self::Complete(m) => m.check(),
+            Self::Partial(m) => m.check(),
+        }
+    }
+    fn validate_current(&self) -> Result<()> {
+        match self {
+            Self::Complete(m) => m.validate_current(),
+            Self::Partial(m) => m.validate_current(),
+        }
+    }
+    fn finish(&self) -> Result<()> {
+        match self {
+            Self::Complete(m) => m.finish(),
+            Self::Partial(m) => m.finish(),
+        }
+    }
 }
 struct ApplicationLifecycle {
     service: Box<dyn HelperApplication>,
@@ -233,7 +412,7 @@ impl ExecutionMount {
     }
     fn close_rpc(&self) -> Result<()> {
         if let Some(rpc) = &self.rpc {
-            rpc.await_closed(Duration::from_secs(35))?;
+            rpc.close()?;
         }
         Ok(())
     }
@@ -256,6 +435,147 @@ impl Drop for ExecutionMount {
                 std::mem::forget(mounted);
             }
         }
+    }
+}
+
+/// Actual owned wrapper and application/RPC/FUSE drain, constructed only after
+/// kernel reap and successful unmount. Saved drain JSON cannot recreate it.
+pub(super) struct OwnedExecutionDrain {
+    _wrapper: Child,
+    _mount: ExecutionMount,
+    execution_id: String,
+    operation_id: String,
+    view_id: String,
+    owner: crate::protocol::OwnerEpoch,
+    request_digest: String,
+    agent_exit: i32,
+    stop: Option<super::StopAndCheckpoint>,
+    network: Option<super::network_phase::OwnedNetworkReady>,
+    workspace_view: VfsView,
+    frozen: Option<crate::vfs::FrozenRemoteView>,
+}
+impl OwnedExecutionDrain {
+    pub(super) fn authenticated_stop(&self) -> Result<&super::StopAndCheckpoint> {
+        self.stop
+            .as_ref()
+            .context("remote drain has no authenticated stop")
+    }
+    pub(super) fn agent_exit(&self) -> i32 {
+        self.agent_exit
+    }
+    pub(super) fn validate_remote_finalization(
+        &self,
+        record: &ExecutionRecord,
+        workspace: &OwnedHelperWorkspace,
+    ) -> Result<Vec<u8>> {
+        use sha2::{Digest, Sha256};
+        ensure!(
+            record.format_version() == 2
+                && record.phase() == ExecutionPhase::Running
+                && record.execution_id() == self.execution_id
+                && record.operation_id() == self.operation_id
+                && record.view_id() == self.view_id
+                && record.owner() == &self.owner
+                && record.request_digest() == self.request_digest
+                && record.supervisor_pid() == std::process::id(),
+            "remote drain differs from actual running execution"
+        );
+        let request = workspace
+            .remote_request()
+            .context("remote drain requires a remote workspace")?;
+        let stop = self.authenticated_stop()?;
+        ensure!(
+            stop.execution_id == self.execution_id
+                && stop.operation_id == self.operation_id
+                && stop.view_id == self.view_id
+                && stop.owner == self.owner
+                && stop.run_id == request.attempt.run_id
+                && stop.run_epoch == request.attempt.run_epoch
+                && request.observation.view_id == self.view_id
+                && request.attempt.owner == self.owner
+                && workspace.view().descriptor()?.remote_finalization_format == Some(1),
+            "remote drain assignment differs"
+        );
+        let (partial_binding_digest, endpoint_instance) = self
+            ._mount
+            .rpc
+            .as_ref()
+            .context("remote drain lacks RPC owner")?
+            .partial_settlement()?;
+        let network = self
+            .network
+            .as_ref()
+            .context("remote drain lacks actual network readiness")?;
+        ensure!(
+            network.frame().execution_request_digest == self.request_digest,
+            "remote network drain differs from request"
+        );
+        let audit = serde_json::json!({ "format_version": 1, "execution_id": self.execution_id, "operation_id": self.operation_id,
+            "view_id": self.view_id, "owner": self.owner, "execution_request_digest": self.request_digest,
+            "launch_request_digest": hex::encode(Sha256::digest(crate::protocol::canonical_json(request)?)),
+            "agent_exit": self.agent_exit, "stop": stop, "partial_binding_digest": partial_binding_digest,
+            "endpoint_instance": endpoint_instance, "network": network.audit()?, "kernel_drained": true });
+        let bytes = crate::protocol::canonical_json(&audit)?;
+        ensure!(bytes.len() <= 32 * 1024, "remote drain audit exceeds bound");
+        Ok(bytes)
+    }
+    pub(super) fn validate_commit(
+        &self,
+        committed: &super::CommittedExecutionRecord,
+    ) -> Result<()> {
+        let record = committed.record();
+        ensure!(
+            record.execution_id() == self.execution_id
+                && record.operation_id() == self.operation_id
+                && record.view_id() == self.view_id
+                && record.owner() == &self.owner
+                && record.request_digest() == self.request_digest
+                && record.agent_exit() == Some(self.agent_exit)
+                && record.phase() == ExecutionPhase::Checkpointed
+                && record.supervisor_pid() == std::process::id(),
+            "committed execution differs from the actual owned drain"
+        );
+        if let Some(network) = &self.network {
+            network.validate_retained()?;
+        }
+        if matches!(record.checkpoint(), Some(CheckpointRef::PartialRemote(_))) {
+            self._mount
+                .rpc
+                .as_ref()
+                .context("partial commit lacks actual RPC settlement")?
+                .partial_settlement()?;
+            ensure!(
+                self.network.is_some() && self.stop.is_some(),
+                "partial commit lacks actual network/stop drain"
+            );
+        }
+        Ok(())
+    }
+    pub(super) fn validate_stop(&self, stop: &super::StopAndCheckpoint) -> Result<()> {
+        ensure!(
+            self.stop.as_ref() == Some(stop),
+            "drain has no matching authenticated stop"
+        );
+        Ok(())
+    }
+    pub(super) fn validate_publication(
+        &self,
+        committed: &super::CommittedExecutionRecord,
+    ) -> Result<()> {
+        self.validate_commit(committed)?;
+        if let Some(CheckpointRef::PartialRemote(checkpoint)) = committed.record().checkpoint() {
+            let frozen = self
+                .frozen
+                .as_ref()
+                .context("partial publication lacks its actual frozen guard")?;
+            frozen.check_for(&self.workspace_view)?;
+            ensure!(
+                frozen.intent_reference() == checkpoint.freeze_intent
+                    && frozen.intent().request.capture.nonce == checkpoint.capture.request_nonce,
+                "partial publication differs from the owned frozen intent"
+            );
+        }
+        Ok(())
     }
 }
 
@@ -374,6 +694,7 @@ struct ChildSpec {
     spec: ExecutionSpec,
     layout: Layout,
     nonce: String,
+    execution_request_digest: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     application_projection: Option<GuestServiceProjection>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -443,6 +764,14 @@ fn supervisor(
     mut control: Option<super::handoff::ManagedControl>,
 ) -> Result<ExecutionOutcome> {
     spec.validate()?;
+    if spec.format_version == 4 {
+        ensure!(
+            control
+                .as_ref()
+                .is_some_and(|control| control.binding.format_version == 3),
+            "v4 execution requires its owned managed shutdown controller"
+        );
+    }
     ensure!(
         unsafe { libc::geteuid() } == 1500 && unsafe { libc::getegid() } == 1500,
         "execution profile requires worker UID/GID1500"
@@ -463,11 +792,7 @@ fn supervisor(
     // factory starts authority, source/cache, VFS or application effects.
     let (mut state, mut services) = match state::preflight(&spec, factory)? {
         Preflight::Recovered(state) => {
-            return Ok(ExecutionOutcome {
-                record: state.record.clone(),
-                isolation: proof(),
-                warnings: Vec::new(),
-            })
+            return Ok(ExecutionOutcome::Historical(state.into_historical()))
         }
         Preflight::New { state, services } => (state, services),
     };
@@ -481,11 +806,33 @@ fn supervisor(
                 == services.as_ref().is_some_and(|s| s.application.is_some()),
             "application specification has no matching trusted factory"
         );
+        let partial_binding = spec
+            .profile
+            .as_ref()
+            .map(|profile| profile.partial_binding())
+            .transpose()?
+            .flatten();
         let monitor = match (&spec.workspace_observation, &services) {
-            (Some(workspace), Some(services)) => Some(AuthorityMonitor::start(
-                services.workspace_authority.clone(),
-                workspace.binding.clone(),
-            )?),
+            (Some(workspace), Some(services)) => Some(match &services.workspace {
+                HelperWorkspaceServices::Complete { authority, .. } => {
+                    ensure!(
+                        partial_binding.is_none(),
+                        "remote selection cannot use complete authority"
+                    );
+                    WorkspaceMonitor::Complete(AuthorityMonitor::start(
+                        authority.clone(),
+                        workspace.binding.clone(),
+                    )?)
+                }
+                HelperWorkspaceServices::Partial { authority } => {
+                    WorkspaceMonitor::Partial(PartialAuthorityMonitor::start(
+                        authority.clone(),
+                        partial_binding
+                            .clone()
+                            .context("partial authority requires a sealed remote selection")?,
+                    )?)
+                }
+            }),
             (None, None) => None,
             _ => anyhow::bail!("workspace helper service/profile mismatch"),
         };
@@ -498,7 +845,14 @@ fn supervisor(
                 .as_mut()
                 .and_then(|services| services.workspace_factory.take()),
         )?;
-        workspace.require_supported_execution()?;
+        if partial_binding.is_some() {
+            ensure!(
+                workspace.checkpoint_capability() == CheckpointCapability::PartialRemoteFinalizable,
+                "remote execution requires actual namespace5 finalization"
+            );
+        } else {
+            workspace.require_supported_execution()?;
+        }
         // Keep this owner outside the guest namespaces through mount/application
         // drain, retained checkpoint, record fsync and authenticated receipt.
         let manager = workspace.manager();
@@ -527,28 +881,61 @@ fn supervisor(
             };
             if let Some(workspace) = &spec.workspace_observation {
                 let services = services.as_ref().context("workspace services absent")?;
-                let authority = monitor
-                    .as_ref()
-                    .context("workspace monitor absent")?
-                    .authority
-                    .clone();
-                let rpc = ObservationRpc::bind(
-                    view.clone(),
-                    RpcConfig {
-                        attempt: workspace.binding.attempt.clone(),
-                        profile: workspace.binding.profile.clone(),
-                        authority,
-                        adoption_witness: services.adoption_witness.clone(),
-                        limits: RpcLimits::default(),
-                    },
-                    &workspace.endpoint_directory,
-                )?;
-                mounted.rpc = Some(rpc);
-                ensure!(
-                    mounted.rpc.as_ref().unwrap().binding() == &workspace.binding,
-                    "mounted workspace differs from the sealed observation assignment"
-                );
-                super::root::validate_workspace_projection(workspace)?;
+                match (
+                    &services.workspace,
+                    monitor.as_ref().context("workspace monitor absent")?,
+                ) {
+                    (
+                        HelperWorkspaceServices::Complete {
+                            adoption_witness, ..
+                        },
+                        WorkspaceMonitor::Complete(monitor),
+                    ) => {
+                        let rpc = ObservationRpc::bind(
+                            view.clone(),
+                            RpcConfig {
+                                attempt: workspace.binding.attempt.clone(),
+                                profile: workspace.binding.profile.clone(),
+                                authority: monitor.authority.clone(),
+                                adoption_witness: adoption_witness.clone(),
+                                limits: RpcLimits::default(),
+                            },
+                            &workspace.endpoint_directory,
+                        )?;
+                        ensure!(
+                            rpc.binding() == &workspace.binding,
+                            "mounted workspace differs from sealed observation"
+                        );
+                        super::root::validate_workspace_projection(workspace)?;
+                        mounted.rpc = Some(WorkspaceRpc::Complete(rpc));
+                    }
+                    (
+                        HelperWorkspaceServices::Partial { .. },
+                        WorkspaceMonitor::Partial(monitor),
+                    ) => {
+                        let rpc = PartialRpc::bind(
+                            view.clone(),
+                            PartialRpcConfig {
+                                authority: monitor.authority.clone(),
+                                limits: PartialRpcLimits::default(),
+                            },
+                            &workspace.endpoint_directory,
+                        )?;
+                        ensure!(
+                            Some(rpc.binding()) == partial_binding.as_ref(),
+                            "partial endpoint differs from sealed selection"
+                        );
+                        super::root::validate_partial_workspace_projection(
+                            workspace,
+                            rpc.binding(),
+                        )?;
+                        mounted.rpc = Some(WorkspaceRpc::Partial {
+                            rpc,
+                            settled: std::sync::Mutex::new(None),
+                        });
+                    }
+                    _ => anyhow::bail!("workspace authority family differs from the owned monitor"),
+                }
             }
             let application_projection = if let Some(application) = &mut mounted.application {
                 let workspace = spec
@@ -558,7 +945,8 @@ fn supervisor(
                 let rpc = mounted
                     .rpc
                     .as_ref()
-                    .context("application requires the owning workspace RPC")?;
+                    .context("application requires the owning workspace RPC")?
+                    .complete()?;
                 let projection = application.service.start(&WorkspaceRpcReady {
                     binding: rpc.binding(),
                     socket: rpc.socket_path(),
@@ -583,6 +971,7 @@ fn supervisor(
                 spec: projected,
                 layout,
                 nonce: nonce.clone(),
+                execution_request_digest: state.record().request_digest().to_owned(),
                 application_projection,
                 managed: control.as_ref().map(|c| c.binding.clone()),
             };
@@ -594,9 +983,8 @@ fn supervisor(
             receive.set_read_timeout(Some(Duration::from_secs(3)))?;
             let fd3 = duplicate_high(payload.as_raw_fd())?;
             let fd4 = duplicate_high(send.as_raw_fd())?;
-            let fd5 = control
-                .as_ref()
-                .map(|_| duplicate_high(init_control.as_raw_fd()))
+            let fd5 = (control.is_some() || spec.profile.is_some())
+                .then(|| duplicate_high(init_control.as_raw_fd()))
                 .transpose()?;
             let mut command = Command::new("/proc/self/exe");
             command
@@ -627,8 +1015,7 @@ fn supervisor(
                     Ok(())
                 });
             }
-            state.record.phase = ExecutionPhase::Running;
-            state.save()?;
+            state.mark_running()?;
             let mut child = command
                 .spawn()
                 .context("spawn restricted execution init wrapper")?;
@@ -637,6 +1024,25 @@ fn supervisor(
             drop(payload);
             drop(init_control);
             let mut guard = ProcessGuard(child.id() as i32);
+            let network_ready = if spec.profile.is_some() {
+                supervisor_control.set_read_timeout(Some(Duration::from_secs(10)))?;
+                let (frame, descriptors): (super::network_phase::NetworkReadyFrame, _) =
+                    super::handoff::receive_control_packet_fds(&mut supervisor_control)?;
+                let process = super::handoff::pidfd(child.id())?;
+                let witness = super::network_phase::OwnedNetworkReady::receive(
+                    &spec,
+                    &nonce,
+                    frame,
+                    &process,
+                    child.id(),
+                    descriptors,
+                )?;
+                supervisor_control.write_all(b"N")?;
+                supervisor_control.set_read_timeout(Some(Duration::from_secs(2)))?;
+                Some(witness)
+            } else {
+                None
+            };
             let began = Instant::now();
             let mut renewed = Instant::now();
             let mut stop_sent = false;
@@ -670,9 +1076,12 @@ fn supervisor(
                             execution == spec.execution_id,
                             "backend readiness belongs to another execution"
                         );
-                        control.backend_ready(
-                            &descriptor.context("backend readiness lacks actual pidfd")?,
-                        )?;
+                        let process = descriptor.context("backend readiness lacks actual pidfd")?;
+                        if let Some(network) = &network_ready {
+                            control.backend_ready_network(&process, network)?;
+                        } else {
+                            control.backend_ready(&process)?;
+                        }
                         backend_ready = true;
                     }
                 }
@@ -729,46 +1138,81 @@ fn supervisor(
                 monitor.check()?;
             }
             let _view = mounted.unmount()?;
-            let checkpoint = state.checkpoint_workspace(&workspace)?;
+            let mut owned_drain = OwnedExecutionDrain {
+                _wrapper: child,
+                _mount: mounted,
+                execution_id: spec.execution_id.clone(),
+                operation_id: spec.operation_id.clone(),
+                view_id: spec.view_id.clone(),
+                owner: spec.owner.clone(),
+                request_digest: state.record().request_digest().to_owned(),
+                agent_exit: drain.agent_exit,
+                stop: control.as_ref().and_then(|value| value.request.clone()),
+                network: network_ready,
+                workspace_view: view.clone(),
+                frozen: None,
+            };
             if let Some(monitor) = &monitor {
                 monitor.validate_current()?;
             }
-            state.record.phase = ExecutionPhase::Checkpointed;
-            state.record.agent_exit = Some(drain.agent_exit);
-            state.record.checkpoint = Some(checkpoint);
-            state.save()?;
+            let committed = if partial_binding.is_some() {
+                owned_drain.validate_remote_finalization(state.record(), &workspace)?;
+                let request = crate::vfs::RemoteFreezeRequest {
+                    format_version: 1,
+                    intent_id: Uuid::new_v4().to_string(),
+                    capture: crate::vfs::PartialCaptureRequest {
+                        nonce: owned_drain.authenticated_stop()?.request_id.clone(),
+                        expected_begin: view.dirty_cursor()?,
+                        expected_head: view.partial_capture_head()?.map(|head| head.request_nonce),
+                    },
+                };
+                let mut frozen = view.freeze_remote(&request, Duration::from_secs(35))?;
+                let committed = state.finalize_remote(
+                    &workspace,
+                    &owned_drain,
+                    &mut frozen,
+                    crate::vfs::PartialCaptureBudget::default(),
+                )?;
+                frozen.check_for(view)?;
+                owned_drain.frozen = Some(frozen);
+                committed
+            } else {
+                state.finalize_local(&workspace, drain.agent_exit)?
+            };
             if let Some(monitor) = &monitor {
                 monitor.validate_current()?;
-            }
-            if let Some(control) = &mut control {
-                control.shutdown_receipt(&state.record)?;
             }
             if let Some(monitor) = &monitor {
                 monitor.finish()?;
             }
-            Ok(ExecutionOutcome {
-                record: state.record.clone(),
-                isolation: proof(),
-                warnings: Vec::new(),
-            })
+            state.verify_commit_current(&committed)?;
+            owned_drain.validate_publication(&committed)?;
+            if let Some(control) = &mut control {
+                control.shutdown_receipt(&committed, &owned_drain)?;
+            }
+            let mut isolation = proof();
+            isolation.network_isolated = owned_drain.network.is_some();
+            ExecutionOutcome::from_drained(committed, isolation, Vec::new(), owned_drain)
         })();
         let release = manager.store().abandon_staging(&lease.id);
         match result {
             Ok(mut value) => {
                 if release.is_err() {
-                    value.warnings.push(
-                        "checkpoint committed; execution staging cleanup needs reconciliation"
-                            .into(),
-                    );
+                    value
+                        .warnings_mut()
+                        .context("new execution returned historical output")?
+                        .push(
+                            "checkpoint committed; execution staging cleanup needs reconciliation"
+                                .into(),
+                        );
                 }
                 Ok(value)
             }
             Err(e) => Err(e),
         }
     })();
-    if result.is_err() && state.record.phase != ExecutionPhase::Checkpointed {
-        state.record.phase = ExecutionPhase::Orphaned;
-        let _ = state.save();
+    if result.is_err() && state.record().phase() != ExecutionPhase::Checkpointed {
+        let _ = state.mark_orphaned();
     }
     result
 }
@@ -836,12 +1280,51 @@ pub fn run_child() -> Result<()> {
     );
     let payload = read_payload(unsafe { OwnedFd::from_raw_fd(3) })?;
     payload.spec.validate()?;
-    if let Some(binding) = &payload.managed { binding.validate(&payload.spec)?; }
-    let init_control = payload.managed.as_ref().map(|_| UnixStream::from(unsafe { OwnedFd::from_raw_fd(5) }));
+    if let Some(binding) = &payload.managed {
+        binding.validate(&payload.spec)?;
+    }
+    let mut init_control = (payload.managed.is_some() || payload.spec.profile.is_some())
+        .then(|| UnixStream::from(unsafe { OwnedFd::from_raw_fd(5) }));
     let mut report = unsafe { File::from_raw_fd(4) };
     let parent = unsafe { libc::getppid() } as u32;
     let lifetime = arm_parent(parent)?;
+    let network_baseline = if let Some(profile) = &payload.spec.profile {
+        ensure!(
+            unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1 as libc::c_ulong, 0, 0, 0) } == 0,
+            "cannot fence offline wrapper privileges"
+        );
+        Some(super::network::linux::ChildNetworkBaseline::capture(
+            &profile.validated_network(&payload.spec)?,
+        )?)
+    } else {
+        None
+    };
     let _namespace = PrivateMountNamespace::enter_for_current_user()?;
+    let network = network_baseline
+        .map(|baseline| unsafe { baseline.enter_after_new_user() })
+        .transpose()?;
+    if let Some(network) = &network {
+        let control = init_control
+            .as_mut()
+            .context("offline wrapper has no private control")?;
+        control.set_read_timeout(Some(Duration::from_secs(10)))?;
+        control.set_write_timeout(Some(Duration::from_secs(2)))?;
+        let frame = super::network_phase::NetworkReadyFrame::from_child(
+            &payload.spec,
+            &payload.nonce,
+            &payload.execution_request_digest,
+            network,
+        )?;
+        let descriptors = network.child_namespace_fds().map(|fd| fd.as_raw_fd());
+        super::handoff::send_control_packet_fds(control, &frame, &descriptors)?;
+        let mut admission = [0u8];
+        control.read_exact(&mut admission)?;
+        ensure!(
+            admission == *b"N",
+            "parent withheld offline namespace admission"
+        );
+        network.verify_current()?;
+    }
     check_lifetime(lifetime.as_raw_fd())?;
     ensure!(
         unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0) } == 0,
@@ -862,7 +1345,12 @@ pub fn run_child() -> Result<()> {
         drop(report);
         drop(init_receive);
         let mut pipe = init_send;
-        let result = namespace_init(&payload, wrapper.as_raw_fd(), init_control);
+        let result = namespace_init(
+            &payload,
+            wrapper.as_raw_fd(),
+            init_control,
+            network.as_ref(),
+        );
         let code = match result {
             Ok((exit, managed_stop)) => {
                 let frame = InitReport {
@@ -940,7 +1428,12 @@ pub fn run_child() -> Result<()> {
     report.write_all(&crate::protocol::canonical_json(&frame)?)?;
     Ok(())
 }
-fn namespace_init(payload: &ChildSpec, parent: RawFd, mut control: Option<UnixStream>) -> Result<(i32, bool)> {
+fn namespace_init(
+    payload: &ChildSpec,
+    parent: RawFd,
+    mut control: Option<UnixStream>,
+    network: Option<&super::network::linux::OwnedChildNetwork>,
+) -> Result<(i32, bool)> {
     ensure!(
         unsafe { libc::getpid() } == 1,
         "execution is not private PID namespace init"
@@ -976,6 +1469,13 @@ fn namespace_init(payload: &ChildSpec, parent: RawFd, mut control: Option<UnixSt
         &payload.spec,
         payload.application_projection.as_ref(),
     )?;
+    ensure!(
+        payload.spec.profile.is_some() == network.is_some(),
+        "init network ownership differs from sealed profile"
+    );
+    if let Some(network) = network {
+        network.verify_current()?;
+    }
     let mut command = Command::new(&payload.spec.command[0]);
     command
         .args(&payload.spec.command[1..])
@@ -1009,17 +1509,41 @@ fn namespace_init(payload: &ChildSpec, parent: RawFd, mut control: Option<UnixSt
             .env("RUDDER_AGENT_IDENTITY", "/run/rudder/agent/identity.json");
     }
     if let Some(workspace) = &payload.spec.workspace_observation {
-        command
-            .env("RUDDER_WORKSPACE_SOCKET", WORKSPACE_GUEST_SOCKET)
-            .env("RUDDER_WORKSPACE_IDENTITY", WORKSPACE_GUEST_IDENTITY)
-            .env(
-                "RUDDER_WORKSPACE_BINDING",
-                crate::protocol::canonical_json(&workspace.binding)
-                    .map(|bytes| String::from_utf8(bytes).expect("canonical JSON is UTF-8"))?,
-            );
+        if let Some(binding) = payload
+            .spec
+            .profile
+            .as_ref()
+            .map(|profile| profile.partial_binding())
+            .transpose()?
+            .flatten()
+        {
+            command
+                .env(
+                    "RUDDER_PARTIAL_WORKSPACE_SOCKET",
+                    "/run/rudder/workspace/partial-workspace.sock",
+                )
+                .env(
+                    "RUDDER_PARTIAL_WORKSPACE_IDENTITY",
+                    "/run/rudder/workspace/partial-identity.json",
+                )
+                .env(
+                    "RUDDER_PARTIAL_WORKSPACE_BINDING",
+                    String::from_utf8(crate::protocol::canonical_json(&binding)?)?,
+                );
+        } else {
+            command
+                .env("RUDDER_WORKSPACE_SOCKET", WORKSPACE_GUEST_SOCKET)
+                .env("RUDDER_WORKSPACE_IDENTITY", WORKSPACE_GUEST_IDENTITY)
+                .env(
+                    "RUDDER_WORKSPACE_BINDING",
+                    crate::protocol::canonical_json(&workspace.binding)
+                        .map(|bytes| String::from_utf8(bytes).expect("canonical JSON is UTF-8"))?,
+                );
+        }
     }
+    let all_five = payload.spec.profile.is_some();
     unsafe {
-        command.pre_exec(|| {
+        command.pre_exec(move || {
             if libc::setpgid(0, 0) != 0 {
                 return Err(std::io::Error::last_os_error());
             }
@@ -1027,47 +1551,82 @@ fn namespace_init(payload: &ChildSpec, parent: RawFd, mut control: Option<UnixSt
             if libc::syscall(libc::SYS_close_range, 3u32, u32::MAX, 4u32) != 0 {
                 return Err(std::io::Error::last_os_error());
             }
-            drop_privileges()?;
+            drop_profile_privileges(all_five)?;
             Ok(())
         });
     }
     let mut server = if let Some(binding) = &payload.managed {
         if let Some(argv) = &binding.server_command {
             let mut server = Command::new(&argv[0]);
-            server.args(&argv[1..]).env_clear().current_dir("/workspace")
-                .envs(command.get_envs().filter_map(|(key, value)| value.map(|value|(key, value))))
-                .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
-            unsafe { server.pre_exec(|| {
-                if libc::setpgid(0, 0) != 0 || libc::syscall(libc::SYS_close_range, 3u32, u32::MAX, 4u32) != 0 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                drop_privileges()
-            }); }
+            server
+                .args(&argv[1..])
+                .env_clear()
+                .current_dir("/workspace")
+                .envs(
+                    command
+                        .get_envs()
+                        .filter_map(|(key, value)| value.map(|value| (key, value))),
+                )
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+            unsafe {
+                server.pre_exec(move || {
+                    if libc::setpgid(0, 0) != 0
+                        || libc::syscall(libc::SYS_close_range, 3u32, u32::MAX, 4u32) != 0
+                    {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    drop_profile_privileges(all_five)
+                });
+            }
             let mut child = server.spawn().context("launch owned backend server")?;
             if !wait_owned_backend(&mut child, &binding.guest_socket, control.as_mut())? {
-                unsafe { libc::kill(-1, libc::SIGKILL); }
+                unsafe {
+                    libc::kill(-1, libc::SIGKILL);
+                }
                 return Ok((143, true));
             }
-            send_backend_ready(control.as_mut().unwrap(), &payload.spec.execution_id, child.id())?;
-            ensure!(binding.frontend_start == ManagedFrontendStart::AfterHostApiKeyV1,
-                "owned server lacks mandatory authenticated frontend admission");
+            send_backend_ready(
+                control.as_mut().unwrap(),
+                &payload.spec.execution_id,
+                child.id(),
+            )?;
+            ensure!(
+                binding.frontend_start == ManagedFrontendStart::AfterHostApiKeyV1,
+                "owned server lacks mandatory authenticated frontend admission"
+            );
             if !wait_frontend_auth(&mut child, control.as_mut().unwrap())? {
-                unsafe { libc::kill(-1, libc::SIGKILL); }
+                unsafe {
+                    libc::kill(-1, libc::SIGKILL);
+                }
                 return Ok((143, true));
             }
             Some(child)
-        } else { None }
-    } else { None };
+        } else {
+            None
+        }
+    } else {
+        None
+    };
     let mut child = command
         .spawn()
         .context("launch command in restricted root")?;
     if let Some(binding) = &payload.managed {
         if server.is_none() {
-            if !wait_owned_backend(&mut child, &binding.guest_socket, control.as_mut())? {
-                unsafe { libc::kill(-1, libc::SIGKILL); }
+            if binding.execution_profile != "offline-command-v1"
+                && !wait_owned_backend(&mut child, &binding.guest_socket, control.as_mut())?
+            {
+                unsafe {
+                    libc::kill(-1, libc::SIGKILL);
+                }
                 return Ok((143, true));
             }
-            send_backend_ready(control.as_mut().unwrap(), &payload.spec.execution_id, child.id())?;
+            send_backend_ready(
+                control.as_mut().unwrap(),
+                &payload.spec.execution_id,
+                child.id(),
+            )?;
         }
     }
     if unsafe { libc::isatty(0) } == 1 {
@@ -1083,7 +1642,10 @@ fn namespace_init(payload: &ChildSpec, parent: RawFd, mut control: Option<UnixSt
     let mut managed_stop = false;
     let exit = loop {
         if let Some(control) = &mut control {
-            if managed_stop_requested(control)? { managed_stop = true; break 143; }
+            if managed_stop_requested(control)? {
+                managed_stop = true;
+                break 143;
+            }
         }
         if let Some(status) = child.try_wait()? {
             ensure!(payload.managed.is_none(),
@@ -1093,7 +1655,12 @@ fn namespace_init(payload: &ChildSpec, parent: RawFd, mut control: Option<UnixSt
         if began.elapsed() > Duration::from_secs(payload.spec.timeout_seconds) {
             anyhow::bail!("backend execution timed out; checkpoint authority withheld");
         }
-        if let Some(server) = &mut server { ensure!(server.try_wait()?.is_none(), "owned backend server exited before its terminal"); }
+        if let Some(server) = &mut server {
+            ensure!(
+                server.try_wait()?.is_none(),
+                "owned backend server exited before its terminal"
+            );
+        }
         std::thread::sleep(Duration::from_millis(10));
     };
     // PID1's exit is the final kernel-enforced kill/reap barrier. Userland
@@ -1105,29 +1672,66 @@ fn namespace_init(payload: &ChildSpec, parent: RawFd, mut control: Option<UnixSt
     Ok((exit, managed_stop))
 }
 fn managed_stop_requested(control: &mut UnixStream) -> Result<bool> {
-    let mut event = libc::pollfd { fd: control.as_raw_fd(), events: libc::POLLIN, revents: 0 };
-    ensure!(unsafe { libc::poll(&mut event, 1, 0) } >= 0, "private init control poll failed");
+    let mut event = libc::pollfd {
+        fd: control.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    ensure!(
+        unsafe { libc::poll(&mut event, 1, 0) } >= 0,
+        "private init control poll failed"
+    );
     if event.revents & libc::POLLIN != 0 {
-        let mut byte = [0]; control.read_exact(&mut byte)?;
-        ensure!(byte == *b"S", "invalid private init stop request"); return Ok(true);
+        let mut byte = [0];
+        control.read_exact(&mut byte)?;
+        ensure!(byte == *b"S", "invalid private init stop request");
+        return Ok(true);
     }
-    ensure!(event.revents & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) == 0, "owning supervisor control ended");
+    ensure!(
+        event.revents & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) == 0,
+        "owning supervisor control ended"
+    );
     Ok(false)
 }
 fn wait_frontend_auth(server: &mut std::process::Child, control: &mut UnixStream) -> Result<bool> {
-    wait_frontend_auth_until(server, control, Instant::now()+Duration::from_secs(30))
+    wait_frontend_auth_until(server, control, Instant::now() + Duration::from_secs(30))
 }
-fn wait_frontend_auth_until(server: &mut std::process::Child, control: &mut UnixStream, deadline:Instant) -> Result<bool> {
+fn wait_frontend_auth_until(
+    server: &mut std::process::Child,
+    control: &mut UnixStream,
+    deadline: Instant,
+) -> Result<bool> {
     loop {
-        ensure!(Instant::now() < deadline, "host frontend authentication deadline ended");
-        ensure!(server.try_wait()?.is_none(), "owned backend exited before host authentication");
-        let mut event = libc::pollfd { fd:control.as_raw_fd(), events:libc::POLLIN, revents:0 };
-        ensure!(unsafe { libc::poll(&mut event, 1, 10) } >= 0, "private frontend admission poll failed");
+        ensure!(
+            Instant::now() < deadline,
+            "host frontend authentication deadline ended"
+        );
+        ensure!(
+            server.try_wait()?.is_none(),
+            "owned backend exited before host authentication"
+        );
+        let mut event = libc::pollfd {
+            fd: control.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        ensure!(
+            unsafe { libc::poll(&mut event, 1, 10) } >= 0,
+            "private frontend admission poll failed"
+        );
         if event.revents & libc::POLLIN != 0 {
-            let mut byte = [0]; control.read_exact(&mut byte)?;
-            match byte[0] { b'A' => return Ok(true), b'S' => return Ok(false), _ => anyhow::bail!("invalid private frontend admission") }
+            let mut byte = [0];
+            control.read_exact(&mut byte)?;
+            match byte[0] {
+                b'A' => return Ok(true),
+                b'S' => return Ok(false),
+                _ => anyhow::bail!("invalid private frontend admission"),
+            }
         }
-        ensure!(event.revents & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) == 0, "parent frontend admission control ended");
+        ensure!(
+            event.revents & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) == 0,
+            "parent frontend admission control ended"
+        );
     }
 }
 
@@ -1141,39 +1745,81 @@ mod frontend_auth_tests {
             let (result, received) = std::sync::mpsc::sync_channel(1);
             let worker = std::thread::spawn(move || {
                 let mut server = Command::new("/bin/sleep").arg("30").spawn().unwrap();
-                let admitted = wait_frontend_auth_until(&mut server, &mut init, Instant::now()+Duration::from_secs(2));
-                let started = if matches!(admitted,Ok(true)) { Command::new("/bin/true").status().unwrap().success() } else { false };
-                server.kill().unwrap(); server.wait().unwrap();
-                result.send((admitted.is_ok(),started)).unwrap();
+                let admitted = wait_frontend_auth_until(
+                    &mut server,
+                    &mut init,
+                    Instant::now() + Duration::from_secs(2),
+                );
+                let started = if matches!(admitted, Ok(true)) {
+                    Command::new("/bin/true").status().unwrap().success()
+                } else {
+                    false
+                };
+                server.kill().unwrap();
+                server.wait().unwrap();
+                result.send((admitted.is_ok(), started)).unwrap();
             });
-            assert!(received.recv_timeout(Duration::from_millis(30)).is_err(), "no socket/text/default readiness may start the frontend");
-            if action == 0 { drop(parent); } else { parent.write_all(&[action]).unwrap(); }
-            let (valid,started) = received.recv_timeout(Duration::from_secs(2)).unwrap(); worker.join().unwrap();
-            assert_eq!(started,action == b'A'); assert_eq!(valid,matches!(action,b'A'|b'S'));
+            assert!(
+                received.recv_timeout(Duration::from_millis(30)).is_err(),
+                "no socket/text/default readiness may start the frontend"
+            );
+            if action == 0 {
+                drop(parent);
+            } else {
+                parent.write_all(&[action]).unwrap();
+            }
+            let (valid, started) = received.recv_timeout(Duration::from_secs(2)).unwrap();
+            worker.join().unwrap();
+            assert_eq!(started, action == b'A');
+            assert_eq!(valid, matches!(action, b'A' | b'S'));
         }
     }
     #[test]
     fn missing_parent_authentication_is_bounded_and_never_admits_frontend() {
         let (_parent, mut init) = UnixStream::pair().unwrap();
         let mut server = Command::new("/bin/sleep").arg("30").spawn().unwrap();
-        let result = wait_frontend_auth_until(&mut server,&mut init,Instant::now()+Duration::from_millis(40));
-        server.kill().unwrap(); server.wait().unwrap(); assert!(result.is_err());
+        let result = wait_frontend_auth_until(
+            &mut server,
+            &mut init,
+            Instant::now() + Duration::from_millis(40),
+        );
+        server.kill().unwrap();
+        server.wait().unwrap();
+        assert!(result.is_err());
     }
 }
-fn wait_owned_backend(child: &mut std::process::Child, socket: &std::path::Path,
-    mut control: Option<&mut UnixStream>) -> Result<bool> {
+fn wait_owned_backend(
+    child: &mut std::process::Child,
+    socket: &std::path::Path,
+    mut control: Option<&mut UnixStream>,
+) -> Result<bool> {
     let deadline = Instant::now() + Duration::from_secs(20);
     while Instant::now() < deadline {
         if let Some(stream) = control.as_deref_mut() {
-            if managed_stop_requested(stream)? { return Ok(false); }
+            if managed_stop_requested(stream)? {
+                return Ok(false);
+            }
         }
-        ensure!(child.try_wait()?.is_none(), "owned backend exited before readiness");
+        ensure!(
+            child.try_wait()?.is_none(),
+            "owned backend exited before readiness"
+        );
         if let Ok(stream) = UnixStream::connect(socket) {
             let mut cred: libc::ucred = unsafe { std::mem::zeroed() };
             let mut length = std::mem::size_of_val(&cred) as libc::socklen_t;
-            ensure!(unsafe { libc::getsockopt(stream.as_raw_fd(), libc::SOL_SOCKET, libc::SO_PEERCRED,
-                (&mut cred as *mut libc::ucred).cast(), &mut length) } == 0 && cred.pid == child.id() as i32,
-                "guest socket belongs to another process, not the owned backend");
+            ensure!(
+                unsafe {
+                    libc::getsockopt(
+                        stream.as_raw_fd(),
+                        libc::SOL_SOCKET,
+                        libc::SO_PEERCRED,
+                        (&mut cred as *mut libc::ucred).cast(),
+                        &mut length,
+                    )
+                } == 0
+                    && cred.pid == child.id() as i32,
+                "guest socket belongs to another process, not the owned backend"
+            );
             return Ok(true);
         }
         std::thread::sleep(Duration::from_millis(10));
@@ -1220,6 +1866,16 @@ fn drop_privileges() -> std::io::Result<()> {
         return Err(std::io::Error::last_os_error());
     }
     Ok(())
+}
+fn drop_profile_privileges(all_five: bool) -> std::io::Result<()> {
+    if !all_five {
+        return drop_privileges();
+    }
+    let proof = unsafe { super::network::linux::drop_all_capabilities_for_exec() }
+        .map_err(std::io::Error::other)?;
+    proof
+        .verify_current_for_exec()
+        .map_err(std::io::Error::other)
 }
 struct ProcessGuard(i32);
 impl Drop for ProcessGuard {

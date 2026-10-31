@@ -76,8 +76,10 @@ pub fn factory() -> HelperServicesFactory {
                 }
             })?;
         Ok(HelperServices {
-            workspace_authority: authority,
+            workspace: rudder_engine::execution::HelperWorkspaceServices::Complete {
+            authority,
             adoption_witness: Some(witness),
+            },
             application: None,
             workspace_factory: None,
         })

@@ -8,7 +8,7 @@ use rudder_engine::journal::{Journal, OwnerFence};
 mod local {
     use super::*;
     use crate::{agent_broker::{AgentBroker, BrokerConfig}, managed_launch::{self, PreparedManagedLaunch}};
-    use rudder_engine::{execution::{handoff::{HandoffReceipt, ManagedExecutionHandoff, ManagedExecutionHandle, ManagedExecutionEvent}, ManagedShutdownReceipt, StopAndCheckpoint}, paths::FabricPaths};
+    use rudder_engine::{execution::{handoff::{HandoffReceipt, ManagedExecutionHandoff, ManagedExecutionHandle, ManagedExecutionEvent, ValidatedManagedShutdown}, StopAndCheckpoint}, paths::FabricPaths};
     use std::sync::{atomic::{AtomicBool, AtomicUsize, Ordering}, Arc, mpsc::{self, Receiver, SyncSender}};
     use std::collections::BTreeMap;
 
@@ -56,7 +56,7 @@ mod local {
     struct WorkerResult { fence: ManagedLaunchFence, result: Result<WorkerStep> }
     struct PendingAuth { process:BackendProcess, cancelled:Arc<AtomicBool>, deadline:Instant, running:bool }
     struct Live { prepared: PreparedManagedLaunch, handoff: HandoffReceipt, control: ManagedExecutionHandle,
-        receipt: Option<ManagedShutdownReceipt>, stop: Option<(StopAndCheckpoint, Instant)>, uncertain: bool,
+        receipt: Option<ValidatedManagedShutdown>, stop: Option<(StopAndCheckpoint, Instant)>, uncertain: bool,
         orphan_reported: bool, backend_ready: bool, auth:Option<PendingAuth>, report_pending: bool, last_report: Option<Instant>, report_digest: Option<[u8;32]> }
     impl Drop for Live { fn drop(&mut self) { if let Some(auth) = &self.auth { auth.cancelled.store(true, Ordering::Release); } } }
     struct CandidateReports { summary: Option<String>, signal: Option<signals::SignalState>, digest: [u8;32] }
@@ -398,7 +398,7 @@ mod local {
                             } else { live.uncertain = true; }
                         }
                         ManagedExecutionEvent::Shutdown(receipt) => {
-                            if live.stop.as_ref().is_some_and(|(request, _)| *request == receipt.request) && receipt.kernel_drained {
+                            if live.stop.as_ref().is_some_and(|(request, _)| request == receipt.request()) {
                                 live.receipt = Some(receipt);
                             } else { live.uncertain = true; }
                         }
@@ -436,7 +436,7 @@ mod local {
                     if live.stop.is_some() && live.receipt.is_none() { continue; }
                     // Physical exit alone never certifies final bytes. Even an
                     // observed completed model turn still needs the FD receipt.
-                    let proved = live.receipt.as_ref().is_some_and(|receipt| receipt.record.checkpoint.is_some());
+                    let proved = live.receipt.is_some();
                     app.fabric_runtime.close_managed_assignment(assignment); run.terminal = None; run.completed_at = None;
                     if proved { live.prepared.confirm_transient_settlement(); }
                     run.status = if proved { AgentStatus::Paused } else { AgentStatus::Orphaned };

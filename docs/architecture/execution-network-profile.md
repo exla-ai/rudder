@@ -1,8 +1,10 @@
 # Execution network profile
 
-Status: alpha.12 candidate, 2026-10-31. Strict configuration validation and
-child-only Rust namespace/capability primitives are implemented; execution
-wiring, egress, live network ownership and default activation remain proposed.
+Status: alpha.12 primitives deployed; alpha.13 offline composition candidate,
+2026-10-31. Strict validation, child-only namespace/capability primitives and
+explicit offline Spec4/Binding3 wiring are implemented. Combined compilation
+and focused execution tests pass; actual guest qualification is pending.
+Connected egress and default activation remain proposed.
 See [the ownership boundary](execution-workspace.md). This narrows the next
 slice of [managed networking](managed-network-isolation.md).
 
@@ -17,10 +19,12 @@ that child-namespace bounding set. The original evidence wrapper's contrary
 bounding-set assertion failed; its raw evidence and limitations remain explicit.
 TUN open failed `EACCES`; packet-device creation was not qualified.
 
-Current [drop_privileges](../../engine/src/execution/linux.rs) sets NNP and zeros
+Legacy [drop_privileges](../../engine/src/execution/linux.rs) sets NNP and zeros
 effective/permitted/inheritable through capset. It does not explicitly drop or
-verify the bounding set. It makes no all-five-sets guarantee today. The new
-profile must establish and verify that stronger boundary before untrusted exec,
+verify the bounding set. It makes no all-five-sets guarantee. The new offline
+profile uses the separate all-five drop/verify in every actual server/frontend
+pre-exec and reads back the owned backend's status before managed readiness.
+It must establish that stronger boundary before untrusted exec,
 after the final trusted USER/namespace/device setup. Boot state alone is
 insufficient. This does not claim capabilities in the child user namespace
 grant authority over its parent.
@@ -49,9 +53,8 @@ no host namespace FD, host AF_INET socket or route into the host network.
 Its offline mode requires empty policy and zero egress budgets; the qualification
 mode checks canonical policy, exact expected identities and a trusted host deny
 inventory. It opens no connection and grants no current-attempt permission.
-The next execution wiring embeds it inside an explicitly new spec version
-greater than3. Allocate that
-outer version together with remote composition; do not independently reserve4.
+The candidate jointly allocates outer ExecutionSpec4 with remote composition
+and requires ManagedExecutionBinding3 carrying the exact sealed profile.
 Existing v1-v3 canonical request bytes and unmanaged behavior stay unchanged.
 Old helpers must reject the new version. Missing or invalid configuration for a
 requested new profile is Unsupported before selected-key login or inference.
@@ -85,17 +88,22 @@ network receipts support audit/reconciliation only.
 1. Complete the one-use outer abstract Unix handoff. Keep the outer supervisor,
    FUSE, broker and remote source/cache on the host network. Do not add NEWNET to
    `supervisor()` or the generally used `PrivateMountNamespace` helper.
-2. In fresh `run_child()`, after its own self-mapped USER/MNT entry and before
+2. In fresh `run_child()`, capture the baseline before its own USER/MNT entry,
+   explicitly set NNP and check saved IDs and empty supplementary groups. After
+   that self-mapped USER/MNT entry and before
    the PID fork, unshare NEWNET. Open and hold actual user/net namespace FDs;
-   check NS_GET_NSTYPE, compare device/inode against the held parent witness,
+   require NSFS via fstatfs before namespace ioctls, check NS_GET_NSTYPE,
+   compare device/inode against the held parent witness,
    and match NS_GET_USERNS to the newly created user namespace. Transfer only
    these typed witnesses over the existing authenticated private FD channel;
-   never reopen a guest-supplied `/proc/<pid>/ns` path. NEWNET also isolates
+   corroborate them against only the actual owned process/pidfd, then ACK before
+   the child can fork its PID tree. Never use a guest-supplied PID/path. NEWNET also isolates
    abstract Unix names. [Linux namespace semantics](https://man7.org/linux/man-pages/man7/network_namespaces.7.html)
 3. Raise `lo` with in-process ioctl before exec/capability drop. Initial profile
    has no external interface, default route, guest DNS, TUN or host network
    fallback. Finish PID/root setup without introducing threads before raw fork.
-4. After root restriction, start a trusted owned guest-loopback CONNECT adapter
+4. The offline profile has no network helper, proxy, DNS or external route.
+   A future connected profile, after root restriction, starts a trusted owned guest-loopback CONNECT adapter
    with a dedicated private Unix byte transport to the host policy proxy.
    Adapter/backend/server children receive the verified privilege boundary
    above. The untrusted backend never inherits namespace/control FDs, raw host

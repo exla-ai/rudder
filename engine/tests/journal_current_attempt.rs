@@ -4,7 +4,10 @@ use rudder_engine::journal::Journal;
 fn current_attempt_getter_never_observes_or_replaces_an_instance() {
     let temporary = tempfile::tempdir().unwrap();
     let mut journal = Journal::open(temporary.path().join("journal.sqlite")).unwrap();
-    assert_eq!(journal.database_path().unwrap(), temporary.path().join("journal.sqlite"));
+    assert_eq!(
+        journal.database_path().unwrap(),
+        temporary.path().join("journal.sqlite").canonicalize().unwrap()
+    );
     let owner = journal.create_project("project", "owner", "base", 0).unwrap();
     journal.register_run(&owner, "run", 0).unwrap();
     assert!(journal.current_run_attempt(&owner, "run", 1).is_err());

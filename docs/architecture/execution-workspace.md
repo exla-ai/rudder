@@ -14,9 +14,11 @@ the authenticated shutdown receipt. Dropping an owner does not prove transport
 drain or release an uncertain retained object set.
 
 With no workspace factory, the helper opens the existing local view. A remote
-workspace has a distinct checkpoint capability and currently fails before
-layout, home seeding, mounting or backend startup. It cannot become a complete
-local checkpoint through the factory interface.
+workspace has a distinct checkpoint capability. Legacy remote results remain
+unavailable for execution. The alpha.13 candidate permits an explicit Spec4
+source-only namespace5 result through its offline managed controller and actual
+partial finalizer. Neither becomes a complete local checkpoint through the
+factory interface. Native remote preparation/default activation is still open.
 
 ## Reservation and recovery compatibility
 
@@ -57,6 +59,15 @@ Reopen compares the saved bytes with the actual fresh resolver; old parsers
 reject binding2 before workspace operations. Namespace3 and partial-capture
 namespace4 remain distinct from the binding version.
 
+The candidate's `open_finalizable` creates namespace5 explicitly. Whole-effect
+admission covers dirty mutations, handles, cookies, capture and mount lifecycle.
+After physical drain, an actual `FrozenRemoteView` closes new effects, waits for
+in-flight work under a deadline and saves one immutable cursor/head/nonce intent.
+Reopening its disk state is recovery-only. `check_for` matches the actual owning
+view, so duplicated selection metadata under another manager cannot substitute.
+Frozen capture still returns the original LiveBestEffort1 data receipt; the
+executor separately joins real process/RPC/FUSE drain and durable Record2.
+
 ## Network preparation
 
 The network module validates an explicit offline or bounded HTTPS CONNECT
@@ -67,7 +78,9 @@ all five capability sets. Parent namespace witnesses close before the child
 owner is returned. A standalone qualifier keeps destructive transitions out of
 the test harness and reports unsupported kernels explicitly.
 
-These primitives are not yet wired into execution. There is no DNS, proxy,
-provider authentication, packet forwarding or general egress qualification in
-this module. Remote execution still needs joint versioned admission, controlled
-networking and quiescent partial finalization before activation.
+The alpha.13 candidate wires them into explicit offline Spec4. The parent
+corroborates received NSFS descriptors against its owned wrapper pidfd before
+allowing the PID fork, then verifies the actual backend namespaces and zero
+capabilities before managed readiness. The witness remains owned through
+finalization. Physical qualification is pending. DNS, proxy/packet transport,
+connected provider inference and general/default activation remain open.

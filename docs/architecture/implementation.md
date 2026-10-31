@@ -138,6 +138,50 @@ keeps host-unsupported qualification separate. Npm availability remains blocked
 by the Mac journal fixture above. Remote activation and the new partial
 checkpoint/transfer protocols remain open.
 
+The alpha.13 candidate now implements the offline physical composition in
+source: jointly versioned Spec4/Binding3, separate partial RPC1, namespace5
+whole-effect admission and actual frozen-view ownership, Record2's explicit
+complete/partial families, and one-shot partial finalization after real kernel,
+RPC and FUSE drain. The host checks actual namespace descriptors against owned
+pidfds before guest launch and checks all five backend capability sets. The
+frozen guard and exact retained capture/evidence remain owned through the final
+authenticated receipt. Saved records expose historical data rather than new
+execution authority.
+
+The Native source factory uses a protected context, actual Node transport and
+fresh root admission. Its in-memory current-authority check is separate from
+bounded broker I/O and permanently fences failed/expired attempts. Full
+workspace compilation passed. Under a symlinked temporary directory, 61 execution
+units, 4 handoff and 7 RPC integrations passed; partial RPC/journal checks passed
+18 cases, Native source factory 9 cases and broker 16 cases (one existing ignored
+exporter). Corrected test-only file modes, missing imports, temporary-directory
+helpers and HTTP fixture routing retain their original failure logs. No product
+authorization checks were weakened. Full test/build and actual offline guest
+qualification remain the candidate's release gates.
+
+Current composition:
+
+```mermaid
+flowchart TD
+    H[Held execution reservation] --> S[Host source, cache and current authorization]
+    S --> V[Namespace5 view and partial RPC]
+    V --> N[Owned wrapper: new USER, MNT and offline NET]
+    N --> A[Parent verifies namespace FDs and acknowledges]
+    A --> P[Private PID tree, restricted root and zero capabilities]
+    P --> B[Parent verifies actual backend before managed readiness]
+    B --> D[Authenticated stop, kernel reap, RPC settlement and FUSE unmount]
+    D --> F[Owned freeze, fresh capture nonce and retained evidence]
+    F --> R[Record2 fsync, authority recheck and authenticated receipt]
+```
+
+This candidate does not enable Native remote launch by default. Next composition
+gates are a separate host source authorizer during guest ingress retirement,
+remote stop budgets, partial checkpoint transfer/publication, private-jj
+projection/history acceptance, connected provider networking and physical legacy
+retirement. A replicated byte-data candidate and accepted versioned history are
+different facts. A future publication must retain the proof closure as well as
+the RunnableRoot graph; uploading a few extra unreferenced Blobs is insufficient.
+
 Alpha.11 includes:
 
 - [Private managed storage](managed-storage.md), explicit journal schema5 opt-in,

@@ -7,7 +7,10 @@ fn services_factory() -> HelperServicesFactory {
     Box::new(|spec| {
         // The engine invokes this only after single-thread namespace entry.
         // No journal, caller-supplied author, or peer credential path is used.
-        crate::workspace_vcs::services(spec)
+        if spec.profile.as_ref().is_some_and(|profile| matches!(profile.workspace,
+            rudder_engine::execution::ExecutionWorkspaceSelectionV4::RemoteSourceOnly { .. })) {
+            crate::remote_workspace::services(spec)
+        } else { crate::workspace_vcs::services(spec) }
     })
 }
 pub(crate) fn run(args: &[String]) -> Result<()> {
@@ -29,7 +32,7 @@ pub(crate) fn run(args: &[String]) -> Result<()> {
         if args.len() == 5 && args[0] == "managed-helper" && args[1] == "--handoff" && args[3] == "--parent-pid" {
             let (spec, control) = rudder_engine::execution::handoff::receive_managed(&args[2], args[4].parse()?)?;
             let outcome = rudder_engine::execution::linux::run_helper_with_managed_services(spec, services_factory(), control)?;
-            std::process::exit(outcome.record.agent_exit.unwrap_or(125));
+            std::process::exit(outcome.agent_exit_for_cli().unwrap_or(125));
         }
         if args.len() != 5
             || args[0] != "helper"
@@ -45,6 +48,6 @@ pub(crate) fn run(args: &[String]) -> Result<()> {
             rudder_engine::execution::run_helper(spec)?
         };
         // Protected execution record carries proof; never corrupt PTY bytes.
-        std::process::exit(outcome.record.agent_exit.unwrap_or(125));
+        std::process::exit(outcome.agent_exit_for_cli().unwrap_or(125));
     }
 }

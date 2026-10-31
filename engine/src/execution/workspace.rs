@@ -11,13 +11,16 @@
 //! services, views, sessions or locks and never authorizes retry or resume.
 use super::ExecutionSpec;
 use crate::{
-    store::LocalStore,
+    protocol::{ObjectKind, ObjectRef},
+    store::{LocalStore, ObjectSetReceipt, StagingLease},
     vfs::{
         remote_launch::{RemoteLaunchRequest, RemoteLaunchWorkspace},
-        VfsManager, VfsView,
+        RemoteFreezeIntent, VfsManager, VfsView,
     },
 };
 use anyhow::{ensure, Context, Result};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::{fs::File, path::Path};
 
 /// Borrowed proof that the executor holds the actual state lock for this new
@@ -84,17 +87,139 @@ pub enum CheckpointCapability {
     /// Preparation only. No outer remote execution version or quiescent
     /// partial-finalization protocol has been allocated by this seam.
     PartialRemoteUnavailable,
+    /// Requires actual drain, an owned namespace5 freeze, exact data/evidence
+    /// retention and durable Record2. The capability itself proves none of them.
+    PartialRemoteFinalizable,
 }
 
 /// Historical data only, including pre-sidecar records. This type carries no
 /// held lock, source pin, process witness or current attempt grant.
 pub struct HistoricalExecution {
     record: super::ExecutionRecord,
+    remote_evidence: Option<RemoteFinalizationRecovery>,
 }
 impl HistoricalExecution {
+    pub(super) fn from_record(record: super::ExecutionRecord) -> Self {
+        // A supervisor's recovered outcome carries record DATA only. Bounded
+        // recovery-file snapshots are loaded by read_execution_recovery; this
+        // conversion does not reopen state or restore its old live resources.
+        Self {
+            record,
+            remote_evidence: None,
+        }
+    }
     pub fn record(&self) -> &super::ExecutionRecord {
         &self.record
     }
+    /// Snapshot of durable recovery DATA, including an unfinished finalization.
+    /// This neither checks an active pin nor reconstructs any held guard.
+    pub fn remote_evidence(&self) -> Option<&RemoteFinalizationRecovery> {
+        self.remote_evidence.as_ref()
+    }
+}
+/// Immutable recovery reservation written before staging/CAS/capture effects.
+/// Public decoding permits audit only, never re-entry or finalization.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RemoteFinalizationReservation {
+    pub format_version: u32,
+    pub identity: super::ExecutionIdentityV2,
+    pub freeze: RemoteFreezeIntent,
+    pub freeze_reference: ObjectRef,
+    pub drain_record: ObjectRef,
+    pub stop: super::StopAndCheckpoint,
+    pub agent_exit: i32,
+    pub evidence_pin: String,
+}
+impl RemoteFinalizationReservation {
+    pub(super) fn validate_data(&self) -> Result<()> {
+        self.identity.validate()?;
+        let capture = &self.freeze.request.capture;
+        for id in [
+            &self.freeze.request.intent_id,
+            &capture.nonce,
+            &self.stop.request_id,
+            &capture.expected_begin.namespace,
+        ] {
+            ensure!(
+                uuid::Uuid::parse_str(id)?.to_string() == *id,
+                "invalid evidence reservation identity"
+            );
+        }
+        if let Some(head) = &capture.expected_head {
+            ensure!(
+                uuid::Uuid::parse_str(head)?.to_string() == *head,
+                "invalid evidence reservation head"
+            );
+        }
+        self.freeze_reference.validate()?;
+        self.drain_record.validate()?;
+        let expected = ObjectRef::from_bytes(
+            ObjectKind::Blob,
+            &crate::protocol::canonical_json(&self.freeze)?,
+        );
+        ensure!(
+            self.format_version == 1
+                && self.freeze.format_version == 1
+                && self.freeze.request.format_version == 1
+                && self.freeze_reference == expected
+                && self.freeze_reference.size_bytes <= 64 * 1024
+                && self.drain_record.kind == ObjectKind::Blob
+                && self.drain_record.size_bytes <= 32 * 1024
+                && self.drain_record != self.freeze_reference
+                && self.freeze.launch_digest.len() == 64
+                && self
+                    .freeze
+                    .launch_digest
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+                && self.freeze.request.intent_id != capture.nonce
+                && capture.nonce == self.stop.request_id
+                && capture.expected_begin.view_id == self.identity.view_id
+                && capture.expected_begin.owner == self.identity.owner
+                && capture.expected_begin.generation <= i64::MAX as u64
+                && self.stop.execution_id == self.identity.execution_id
+                && self.stop.operation_id == self.identity.operation_id
+                && self.stop.view_id == self.identity.view_id
+                && self.stop.owner == self.identity.owner
+                && self.stop.run_id == self.identity.run_id
+                && self.stop.run_epoch == self.identity.run_epoch
+                && self.evidence_pin
+                    == format!(
+                        "execution:evidence:{}:{}",
+                        self.identity.execution_id, self.freeze.request.intent_id
+                    ),
+            "remote evidence reservation differs from its exact execution/stop/freeze"
+        );
+        Ok(())
+    }
+    pub(super) fn references(&self) -> Vec<ObjectRef> {
+        let mut refs = vec![self.freeze_reference.clone(), self.drain_record.clone()];
+        refs.sort();
+        refs
+    }
+    pub(super) fn digest(&self) -> Result<String> {
+        self.validate_data()?;
+        Ok(hex::encode(Sha256::digest(
+            crate::protocol::canonical_json(self)?,
+        )))
+    }
+}
+/// Persisted before receiving either Blob or performing the one fresh capture.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RemoteEvidenceLease {
+    pub format_version: u32,
+    pub reservation_digest: String,
+    pub staging: StagingLease,
+}
+/// Historical snapshots only. A saved receipt may have since been released;
+/// current retention always requires the store's exact generation comparison.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteFinalizationRecovery {
+    pub reservation: RemoteFinalizationReservation,
+    pub lease: Option<RemoteEvidenceLease>,
+    pub receipt: Option<ObjectSetReceipt>,
 }
 /// Bounded off-actor read. Missing records return None; malformed or unsafe
 /// evidence remains an error. It never creates/chmods/repairs execution state.
@@ -104,8 +229,14 @@ pub fn read_execution_recovery(
 ) -> Result<Option<HistoricalExecution>> {
     #[cfg(target_os = "linux")]
     {
-        Ok(super::state::read_recovery_record(root, execution_id)?
-            .map(|record| HistoricalExecution { record }))
+        let Some(record) = super::state::read_recovery_record(root, execution_id)? else {
+            return Ok(None);
+        };
+        let remote_evidence = super::state::read_evidence_recovery(root, &record)?;
+        Ok(Some(HistoricalExecution {
+            record,
+            remote_evidence,
+        }))
     }
     #[cfg(not(target_os = "linux"))]
     {
@@ -121,6 +252,7 @@ pub fn read_execution_recovery(
 enum Kind {
     Local,
     Remote(RemoteLaunchRequest),
+    RemoteFinalizable(RemoteLaunchRequest),
 }
 pub struct OwnedHelperWorkspace {
     // Drop view/manager before the resource owner. Neither accessors nor a
@@ -134,6 +266,17 @@ impl OwnedHelperWorkspace {
     /// Existing local implementation, with no fork, inferred checkout or eager
     /// preparation. The selected view must already exist under this owner.
     pub fn local(request: &NewExecution<'_>) -> Result<Self> {
+        ensure!(
+            !request
+                .spec
+                .profile
+                .as_ref()
+                .is_some_and(|profile| matches!(
+                    &profile.workspace,
+                    super::ExecutionWorkspaceSelectionV4::RemoteSourceOnly { .. }
+                )),
+            "remote selection cannot fall back to the local workspace factory"
+        );
         let manager = VfsManager::open(
             &request.spec.manager_root,
             LocalStore::open(&request.spec.store_root)?,
@@ -148,6 +291,17 @@ impl OwnedHelperWorkspace {
         resources: R,
     ) -> Result<Self> {
         ensure!(
+            !request
+                .spec
+                .profile
+                .as_ref()
+                .is_some_and(|profile| matches!(
+                    &profile.workspace,
+                    super::ExecutionWorkspaceSelectionV4::RemoteSourceOnly { .. }
+                )),
+            "remote selection cannot acquire complete local checkpoint capability"
+        );
+        ensure!(
             manager.remote_root_binding().is_none()
                 && view.manager().remote_root_binding().is_none(),
             "remote workspace cannot acquire complete local checkpoint capability"
@@ -160,8 +314,8 @@ impl OwnedHelperWorkspace {
             _resources: Box::new(resources),
         })
     }
-    /// Consume the pager's opaque validated selection. This returns only the
-    /// unavailable remote capability; callers cannot select CompleteLocal.
+    /// Consume the pager's opaque validated selection. Only an exact spec4
+    /// selection and namespace5 can acquire partial-finalization capability.
     pub fn from_remote<R: HelperWorkspaceResources + 'static>(
         request: &NewExecution<'_>,
         workspace: RemoteLaunchWorkspace,
@@ -170,6 +324,17 @@ impl OwnedHelperWorkspace {
         let (manager, view, remote) = workspace.into_parts();
         validate_workspace(request, &manager, &view)?;
         let spec = request.spec();
+        if let Some(profile) = &spec.profile {
+            ensure!(
+                matches!(&profile.workspace,
+                super::ExecutionWorkspaceSelectionV4::RemoteSourceOnly { selection, .. } if selection == &remote),
+                "remote factory result differs from the sealed v4 workspace selection"
+            );
+            ensure!(
+                view.descriptor()?.remote_finalization_format == Some(1),
+                "profile4 remote workspace requires finalizable namespace5"
+            );
+        }
         let observation = spec
             .workspace_observation
             .as_ref()
@@ -194,7 +359,11 @@ impl OwnedHelperWorkspace {
         Ok(Self {
             view,
             manager,
-            kind: Kind::Remote(remote),
+            kind: if spec.format_version == 4 && spec.profile.is_some() {
+                Kind::RemoteFinalizable(remote)
+            } else {
+                Kind::Remote(remote)
+            },
             _resources: Box::new(resources),
         })
     }
@@ -207,19 +376,20 @@ impl OwnedHelperWorkspace {
     pub fn remote_request(&self) -> Option<&RemoteLaunchRequest> {
         match &self.kind {
             Kind::Local => None,
-            Kind::Remote(request) => Some(request),
+            Kind::Remote(request) | Kind::RemoteFinalizable(request) => Some(request),
         }
     }
     pub fn checkpoint_capability(&self) -> CheckpointCapability {
         match self.kind {
             Kind::Local => CheckpointCapability::CompleteLocal,
             Kind::Remote(_) => CheckpointCapability::PartialRemoteUnavailable,
+            Kind::RemoteFinalizable(_) => CheckpointCapability::PartialRemoteFinalizable,
         }
     }
-    /// The current supervisor has only complete local finalization. Deny a
-    /// partial result before mount, guest home seeding or backend effects.
+    /// Legacy remote factory results remain preparation-only. Spec4's actual
+    /// physical wiring must separately validate its stronger capability.
     pub(crate) fn require_supported_execution(&self) -> Result<()> {
-        if self.checkpoint_capability() != CheckpointCapability::CompleteLocal {
+        if self.checkpoint_capability() == CheckpointCapability::PartialRemoteUnavailable {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::Unsupported,
                 "remote workspace execution requires quiescent partial finalization",
@@ -258,6 +428,7 @@ fn validate_workspace(
 mod tests {
     use super::*;
     use crate::execution::{
+        record::{encode_envelope, ExecutionRecord, ExecutionRecordV1},
         state::{self, Preflight, State},
         BrokerBinding, ExecutionPhase, HelperServices, HelperServicesFactory,
         WorkspaceObservationProfile,
@@ -318,6 +489,7 @@ mod tests {
                 broker_directory: None,
                 broker_binding: None,
                 workspace_observation: None,
+                profile: None,
                 timeout_seconds: 30,
             };
             if observed {
@@ -388,8 +560,10 @@ mod tests {
         Box::new(move |_| {
             counter.fetch_add(1, Ordering::AcqRel);
             Ok(HelperServices {
-                workspace_authority: Arc::new(Allow),
-                adoption_witness: None,
+                workspace: super::super::HelperWorkspaceServices::Complete {
+                    authority: Arc::new(Allow),
+                    adoption_witness: None,
+                },
                 application: None,
                 workspace_factory: Some(Box::new(move |_| {
                     workspace.fetch_add(1, Ordering::AcqRel);
@@ -441,6 +615,7 @@ mod tests {
             )
             .is_err());
         assert_eq!(workspace_calls.load(Ordering::Acquire), 1);
+        assert!(state.mark_running().is_err());
         drop(state);
         drop(services);
         assert!(state::preflight(
@@ -465,23 +640,24 @@ mod tests {
             ExecutionPhase::Checkpointed,
         ] {
             let fixture = Fixture::new(true);
-            let mut state = State::open(&fixture.spec).unwrap();
-            state.record.phase = phase;
-            if phase == ExecutionPhase::Checkpointed {
-                state.record.agent_exit = Some(0);
-                state.record.checkpoint = Some(VfsCheckpoint {
-                    format_version: 1,
-                    directory: ObjectRef::from_bytes(
-                        ObjectKind::Directory,
-                        b"historical directory identity",
-                    ),
-                    hardlinks: ObjectRef::from_bytes(
-                        ObjectKind::Blob,
-                        b"historical topology identity",
-                    ),
-                });
-            }
-            state.save().unwrap();
+            let state = State::open(&fixture.spec).unwrap();
+            modify_record_fixture(&state, |record| {
+                record.phase = phase;
+                if phase == ExecutionPhase::Checkpointed {
+                    record.agent_exit = Some(0);
+                    record.checkpoint = Some(VfsCheckpoint {
+                        format_version: 1,
+                        directory: ObjectRef::from_bytes(
+                            ObjectKind::Directory,
+                            b"historical directory identity",
+                        ),
+                        hardlinks: ObjectRef::from_bytes(
+                            ObjectKind::Blob,
+                            b"historical topology identity",
+                        ),
+                    });
+                }
+            });
             let record = state.directory.join("record.json");
             let original = fs::read(&record).unwrap();
             drop(state);
@@ -495,7 +671,7 @@ mod tests {
                     panic!("historical checkpoint must not be new");
                 };
                 assert!(State::open(&fixture.spec).is_err());
-                assert_eq!(recovered.record.phase, ExecutionPhase::Checkpointed);
+                assert_eq!(recovered.record().phase(), ExecutionPhase::Checkpointed);
                 drop(recovered);
             } else {
                 assert!(result.is_err());
@@ -595,18 +771,31 @@ mod tests {
         assert!(!fixture.spec.manager_root.exists());
         assert!(!fixture.spec.store_root.exists());
     }
-    fn complete_record(state: &mut State) {
-        state.record.phase = ExecutionPhase::Checkpointed;
-        state.record.agent_exit = Some(0);
-        state.record.checkpoint = Some(VfsCheckpoint {
-            format_version: 1,
-            directory: ObjectRef::from_bytes(
-                ObjectKind::Directory,
-                b"historical directory identity",
-            ),
-            hardlinks: ObjectRef::from_bytes(ObjectKind::Blob, b"historical topology identity"),
+    // Deliberate on-disk crash/corruption fixture, not an active State setter.
+    fn modify_record_fixture(state: &State, modify: impl FnOnce(&mut ExecutionRecordV1)) {
+        let ExecutionRecord::V1(mut record) = state.record().clone() else {
+            panic!("legacy fixture");
+        };
+        modify(&mut record);
+        fs::write(
+            state.directory.join("record.json"),
+            encode_envelope(&ExecutionRecord::V1(record)).unwrap(),
+        )
+        .unwrap();
+    }
+    fn complete_record(state: &State) {
+        modify_record_fixture(state, |record| {
+            record.phase = ExecutionPhase::Checkpointed;
+            record.agent_exit = Some(0);
+            record.checkpoint = Some(VfsCheckpoint {
+                format_version: 1,
+                directory: ObjectRef::from_bytes(
+                    ObjectKind::Directory,
+                    b"historical directory identity",
+                ),
+                hardlinks: ObjectRef::from_bytes(ObjectKind::Blob, b"historical topology identity"),
+            });
         });
-        state.save().unwrap();
     }
     #[test]
     fn missing_lock_beside_retained_records_is_never_recreated() {
@@ -639,14 +828,14 @@ mod tests {
                     .unwrap()
                     .unwrap();
             assert_eq!(
-                historical.record().phase,
+                historical.record().phase(),
                 if complete {
                     ExecutionPhase::Checkpointed
                 } else {
                     ExecutionPhase::Preparing
                 }
             );
-            assert_eq!(historical.record().checkpoint.is_some(), complete);
+            assert_eq!(historical.record().checkpoint().is_some(), complete);
             assert!(!directory.join("owner.lock").exists());
         }
     }
@@ -677,7 +866,7 @@ mod tests {
         )
         .is_err());
         assert_eq!(calls.load(Ordering::Acquire), 0);
-        assert!(state.save().is_err());
+        assert!(state.mark_running().is_err());
         let contender = OpenOptions::new()
             .read(true)
             .write(true)
@@ -690,7 +879,7 @@ mod tests {
                 .unwrap()
                 .unwrap()
                 .record()
-                .phase,
+                .phase(),
             ExecutionPhase::Checkpointed
         );
         drop(state);
@@ -758,7 +947,7 @@ mod tests {
                 assert!(historical.is_none());
             } else {
                 assert_eq!(
-                    historical.unwrap().record().phase,
+                    historical.unwrap().record().phase(),
                     ExecutionPhase::Checkpointed
                 );
                 assert_eq!(fs::read(directory.join("record.json")).unwrap(), record);
@@ -799,7 +988,7 @@ mod tests {
                 .unwrap()
                 .unwrap()
                 .record()
-                .phase,
+                .phase(),
             ExecutionPhase::Checkpointed
         );
     }
@@ -882,7 +1071,7 @@ mod tests {
             workspace.view().read(file.ino, 0, dirty.len()).unwrap(),
             dirty
         );
-        assert!(state.record.checkpoint.is_none());
+        assert!(state.record().checkpoint().is_none());
     }
     #[test]
     fn unsafe_existing_state_directories_are_refused_without_permission_repair() {
@@ -912,21 +1101,22 @@ mod tests {
     fn incomplete_checkpoint_records_never_become_recovered_or_new() {
         for missing_exit in [false, true] {
             let fixture = Fixture::new(true);
-            let mut state = State::open(&fixture.spec).unwrap();
-            state.record.phase = ExecutionPhase::Checkpointed;
-            if missing_exit {
-                state.record.checkpoint = Some(VfsCheckpoint {
-                    format_version: 1,
-                    directory: ObjectRef::from_bytes(
-                        ObjectKind::Directory,
-                        b"historical directory",
-                    ),
-                    hardlinks: ObjectRef::from_bytes(ObjectKind::Blob, b"historical topology"),
-                });
-            } else {
-                state.record.agent_exit = Some(0);
-            }
-            state.save().unwrap();
+            let state = State::open(&fixture.spec).unwrap();
+            modify_record_fixture(&state, |record| {
+                record.phase = ExecutionPhase::Checkpointed;
+                if missing_exit {
+                    record.checkpoint = Some(VfsCheckpoint {
+                        format_version: 1,
+                        directory: ObjectRef::from_bytes(
+                            ObjectKind::Directory,
+                            b"historical directory",
+                        ),
+                        hardlinks: ObjectRef::from_bytes(ObjectKind::Blob, b"historical topology"),
+                    });
+                } else {
+                    record.agent_exit = Some(0);
+                }
+            });
             let record = state.directory.join("record.json");
             let original = fs::read(&record).unwrap();
             drop(state);
@@ -1030,16 +1220,145 @@ mod tests {
             .unwrap();
         assert!(contender.try_lock_exclusive().is_err());
         assert!(!published.load(Ordering::Acquire));
-        let checkpoint = state.checkpoint_workspace(&workspace).unwrap();
-        state.record.phase = ExecutionPhase::Checkpointed;
-        state.record.agent_exit = Some(0);
-        state.record.checkpoint = Some(checkpoint);
-        state.save().unwrap();
+        state.mark_running().unwrap();
+        let committed = state.finalize_local(&workspace, 0).unwrap();
+        assert_eq!(committed.record().phase(), ExecutionPhase::Checkpointed);
         assert!(contender.try_lock_exclusive().is_err());
         drop(workspace);
         assert!(published.load(Ordering::Acquire));
         contender.try_lock_exclusive().unwrap();
         FileExt::unlock(&contender).unwrap();
+    }
+
+    #[test]
+    fn state_transitions_commit_data_once_and_historical_state_cannot_restart() {
+        let fixture = Fixture::new(false);
+        fixture.prepare_local();
+        let mut state = State::open(&fixture.spec).unwrap();
+        let initial = fs::read(state.directory.join("record.json")).unwrap();
+        assert!(state.mark_running().is_err());
+        assert_eq!(
+            fs::read(state.directory.join("record.json")).unwrap(),
+            initial
+        );
+        let workspace = state.open_workspace(&fixture.spec, None).unwrap();
+        state.mark_running().unwrap();
+        assert_eq!(state.record().phase(), ExecutionPhase::Running);
+        assert!(state.mark_running().is_err());
+        let committed = state.finalize_local(&workspace, 143).unwrap();
+        state.verify_commit_current(&committed).unwrap();
+        assert_eq!(committed.record().agent_exit(), Some(143));
+        assert!(matches!(
+            committed.record().checkpointed_data().unwrap(),
+            crate::execution::CheckpointRef::CompleteLocal(_)
+        ));
+        let retention = workspace.manager().store().retention().unwrap();
+        assert!(state.finalize_local(&workspace, 0).is_err());
+        assert!(state.mark_orphaned().is_err());
+        assert_eq!(workspace.manager().store().retention().unwrap(), retention);
+        drop(workspace);
+        drop(state);
+        let Preflight::Recovered(mut recovered) = state::preflight(&fixture.spec, None).unwrap()
+        else {
+            panic!("historical only");
+        };
+        assert!(!recovered.is_new());
+        assert!(recovered.mark_running().is_err());
+        assert!(recovered.verify_commit_current(&committed).is_err());
+        let historical = recovered.into_historical();
+        assert_eq!(historical.record().phase(), ExecutionPhase::Checkpointed);
+    }
+    #[test]
+    fn failed_local_finalization_does_not_replay_capture_after_handles_settle() {
+        let fixture = Fixture::new(false);
+        fixture.prepare_local();
+        let mut state = State::open(&fixture.spec).unwrap();
+        let workspace = state.open_workspace(&fixture.spec, None).unwrap();
+        let file = workspace.view().lookup(1, b"file").unwrap();
+        let handle = workspace
+            .view()
+            .open_handle(file.ino, libc::O_RDONLY, false)
+            .unwrap();
+        state.mark_running().unwrap();
+        let retention = workspace.manager().store().retention().unwrap();
+        assert!(state.finalize_local(&workspace, 0).is_err());
+        workspace.view().close_handle(file.ino, handle).unwrap();
+        assert!(state.finalize_local(&workspace, 0).is_err());
+        assert_eq!(workspace.manager().store().retention().unwrap(), retention);
+        state.mark_orphaned().unwrap();
+        assert_eq!(state.record().phase(), ExecutionPhase::Orphaned);
+        assert!(state.record().checkpoint().is_none());
+    }
+    #[test]
+    fn committed_data_is_rechecked_against_the_persisted_envelope_before_publication() {
+        let fixture = Fixture::new(false);
+        fixture.prepare_local();
+        let mut state = State::open(&fixture.spec).unwrap();
+        let workspace = state.open_workspace(&fixture.spec, None).unwrap();
+        state.mark_running().unwrap();
+        let committed = state.finalize_local(&workspace, 0).unwrap();
+        state.verify_commit_current(&committed).unwrap();
+        let original = fs::read(state.directory.join("record.json")).unwrap();
+        modify_record_fixture(&state, |record| record.agent_exit = Some(143));
+        assert!(state.verify_commit_current(&committed).is_err());
+        fs::write(state.directory.join("record.json"), original).unwrap();
+        state.verify_commit_current(&committed).unwrap();
+        fs::remove_file(state.directory.join("record.json")).unwrap();
+        assert!(state.verify_commit_current(&committed).is_err());
+    }
+    #[test]
+    fn record2_history_is_visible_but_cannot_downgrade_into_a_legacy_factory() {
+        use crate::execution::{
+            CheckpointArtifactV2, ExecutionIdentityV2, ExecutionRecordV2, ExecutionStateV2,
+        };
+        let fixture = Fixture::new(true);
+        let state = State::open(&fixture.spec).unwrap();
+        let old = state.record();
+        let record = ExecutionRecord::V2(ExecutionRecordV2 {
+            format_version: 2,
+            identity: ExecutionIdentityV2 {
+                project_id: "project".into(),
+                request_id: Uuid::new_v4().to_string(),
+                run_id: "run".into(),
+                run_epoch: 1,
+                execution_id: old.execution_id().into(),
+                operation_id: old.operation_id().into(),
+                view_id: old.view_id().into(),
+                owner: old.owner().clone(),
+                request_digest: old.request_digest().into(),
+                supervisor_pid: old.supervisor_pid(),
+            },
+            state: ExecutionStateV2::Checkpointed {
+                agent_exit: 0,
+                checkpoint: CheckpointArtifactV2::CompleteLocal(VfsCheckpoint {
+                    format_version: 1,
+                    directory: ObjectRef::from_bytes(
+                        ObjectKind::Directory,
+                        b"historical v2 directory",
+                    ),
+                    hardlinks: ObjectRef::from_bytes(ObjectKind::Blob, b"historical topology"),
+                }),
+            },
+        });
+        let path = state.directory.join("record.json");
+        fs::write(&path, encode_envelope(&record).unwrap()).unwrap();
+        drop(state);
+        let original = fs::read(&path).unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        assert!(state::preflight(
+            &fixture.spec,
+            Some(services(calls.clone(), Arc::new(AtomicUsize::new(0))))
+        )
+        .is_err());
+        assert_eq!(calls.load(Ordering::Acquire), 0);
+        assert_eq!(fs::read(&path).unwrap(), original);
+        let historical =
+            read_execution_recovery(&fixture.spec.execution_root, &fixture.spec.execution_id)
+                .unwrap()
+                .unwrap();
+        assert!(matches!(historical.record(), ExecutionRecord::V2(_)));
+        assert!(!fixture.spec.manager_root.exists());
+        assert!(!fixture.spec.store_root.exists());
     }
 
     struct Source {
@@ -1296,7 +1615,7 @@ mod tests {
             .join("mounts")
             .join(&fixture.spec.view_id)
             .exists());
-        assert_eq!(state.record.phase, ExecutionPhase::Preparing);
-        assert!(state.record.checkpoint.is_none());
+        assert_eq!(state.record().phase(), ExecutionPhase::Preparing);
+        assert!(state.record().checkpoint().is_none());
     }
 }

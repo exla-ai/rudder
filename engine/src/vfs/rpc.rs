@@ -42,9 +42,9 @@ use uuid::Uuid;
 pub const MAX_REQUEST_BYTES: usize = 16 * 1024;
 pub const MAX_RESPONSE_BYTES: usize = 256 * 1024;
 pub const MAX_DIRTY_EVENTS: usize = 128;
-const IO_TIMEOUT: Duration = Duration::from_millis(20);
-const FRAME_DEADLINE: Duration = Duration::from_secs(2);
-const CLIENT_DEADLINE: Duration = Duration::from_secs(35);
+pub(super) const IO_TIMEOUT: Duration = Duration::from_millis(20);
+pub(super) const FRAME_DEADLINE: Duration = Duration::from_secs(2);
+pub(super) const CLIENT_DEADLINE: Duration = Duration::from_secs(35);
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -384,11 +384,11 @@ impl Drop for EndpointLock {
         let _ = FileExt::unlock(&self.0);
     }
 }
-struct CounterGuard {
+pub(super) struct CounterGuard {
     counter: Arc<AtomicUsize>,
 }
 impl CounterGuard {
-    fn acquire(counter: &Arc<AtomicUsize>, maximum: usize) -> Result<Self> {
+    pub(super) fn acquire(counter: &Arc<AtomicUsize>, maximum: usize) -> Result<Self> {
         let mut value = counter.load(Ordering::Acquire);
         loop {
             if value >= maximum {
@@ -999,7 +999,7 @@ pub fn read_identity(path: &Path) -> Result<ObservationIdentity> {
     identity.validate()?;
     Ok(identity)
 }
-fn private_regular(metadata: &fs::Metadata) -> Result<()> {
+pub(super) fn private_regular(metadata: &fs::Metadata) -> Result<()> {
     ensure!(
         metadata.is_file()
             && metadata.uid() == unsafe { libc::geteuid() }
@@ -1009,7 +1009,7 @@ fn private_regular(metadata: &fs::Metadata) -> Result<()> {
     );
     Ok(())
 }
-fn private_directory(path: &Path, create: bool) -> Result<()> {
+pub(super) fn private_directory(path: &Path, create: bool) -> Result<()> {
     let mut created = false;
     if create {
         match fs::create_dir(path) {
@@ -1030,7 +1030,7 @@ fn private_directory(path: &Path, create: bool) -> Result<()> {
     );
     Ok(())
 }
-fn socket_length(path: &Path) -> Result<()> {
+pub(super) fn socket_length(path: &Path) -> Result<()> {
     ensure!(
         path.is_absolute()
             && path.as_os_str().as_bytes().len() < 100
@@ -1040,7 +1040,7 @@ fn socket_length(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn connect_until(path: &Path, deadline: Instant) -> io::Result<UnixStream> {
+pub(super) fn connect_until(path: &Path, deadline: Instant) -> io::Result<UnixStream> {
     let bytes = path.as_os_str().as_bytes();
     if bytes.is_empty() || bytes.len() >= 100 || bytes.contains(&0) {
         return Err(io::Error::new(
@@ -1125,7 +1125,7 @@ fn connect_until(path: &Path, deadline: Instant) -> io::Result<UnixStream> {
     stream.set_nonblocking(false)?;
     Ok(stream)
 }
-fn same_peer_user(stream: &UnixStream) -> bool {
+pub(super) fn same_peer_user(stream: &UnixStream) -> bool {
     #[cfg(target_os = "linux")]
     {
         let mut credentials: libc::ucred = unsafe { std::mem::zeroed() };
@@ -1149,7 +1149,7 @@ fn same_peer_user(stream: &UnixStream) -> bool {
             && uid == unsafe { libc::geteuid() }
     }
 }
-fn disconnected(stream: &UnixStream) -> bool {
+pub(super) fn disconnected(stream: &UnixStream) -> bool {
     #[cfg(target_os = "macos")]
     {
         let mut pid: libc::pid_t = 0;
@@ -1176,7 +1176,7 @@ fn disconnected(stream: &UnixStream) -> bool {
             && event.revents & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) != 0
     }
 }
-fn read_frame(
+pub(super) fn read_frame(
     stream: &mut UnixStream,
     limit: usize,
     deadline: Instant,
@@ -1235,7 +1235,7 @@ fn read_frame(
     exact(stream, &mut bytes, deadline, &cancelled)?;
     Ok(bytes)
 }
-fn write_frame(
+pub(super) fn write_frame(
     stream: &mut UnixStream,
     value: &impl Serialize,
     limit: usize,
@@ -1294,21 +1294,21 @@ impl std::fmt::Display for RpcError {
     }
 }
 impl std::error::Error for RpcError {}
-fn problem(code: &str, message: &str) -> anyhow::Error {
+pub(super) fn problem(code: &str, message: &str) -> anyhow::Error {
     RpcError {
         code: code.into(),
         message: message.into(),
     }
     .into()
 }
-fn uuid(value: &str) -> Result<()> {
+pub(super) fn uuid(value: &str) -> Result<()> {
     ensure!(
         Uuid::parse_str(value)?.to_string() == value,
         "identifier must be a canonical UUID"
     );
     Ok(())
 }
-fn digest(value: &str) -> Result<()> {
+pub(super) fn digest(value: &str) -> Result<()> {
     ensure!(
         value.len() == 64
             && value

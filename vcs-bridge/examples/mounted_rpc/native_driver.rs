@@ -337,8 +337,10 @@ fn run(mut native_fixture: NativeFixture, native: &Path, mode: &str) -> Result<s
             status.success() && record["phase"] == "checkpointed" && record["agent_exit"] == 0,
             "native v3 helper did not acknowledge clean checkpoint"
         );
-        let checkpoint: rudder_engine::vfs::VfsCheckpoint =
-            serde_json::from_value(record["checkpoint"].clone())?;
+        let checkpoint = match serde_json::from_str::<rudder_engine::execution::ExecutionRecord>(&record.to_string())? {
+            rudder_engine::execution::ExecutionRecord::V1(record) => record.checkpoint.context("legacy fixture requires complete local checkpoint")?,
+            rudder_engine::execution::ExecutionRecord::V2(_) => anyhow::bail!("legacy fixture cannot consume Record2 or partial checkpoint"),
+        };
         ensure!(
             services::source_bytes(&f.store, &checkpoint.directory, b"source.ts")?
                 == b"export const n = 5;\n",

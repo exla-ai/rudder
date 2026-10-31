@@ -2,6 +2,49 @@ use super::*;
 use rudder_engine::journal::{CapabilityGrant, Journal, OwnerFence};
 use std::collections::{BTreeMap, BTreeSet};
 
+fn partial_workspace_binding(f:&Fixture,execution_id:&str)->rudder_engine::vfs::partial_rpc::PartialBinding {
+    use rudder_engine::{remote_cache::CacheScope,remote_root::{AttemptBinding,RootBinding},protocol::{ObjectKind,ObjectRef},store::ImportPolicy,vfs::{exclusion_policy_digest,partial_rpc::{PartialBinding,PROTOCOL}}};
+    let mut observation=workspace_binding(f,execution_id);
+    observation.exclusion_policy_digest=exclusion_policy_digest(&ImportPolicy::default()).unwrap();
+    let attempt=AttemptBinding{project_id:"p".into(),run_id:"a".into(),run_epoch:1,owner:observation.owner.clone(),execution_id:execution_id.into(),operation_id:observation.attempt.operation_id.clone(),view_id:observation.view_id.clone()};
+    PartialBinding{protocol:PROTOCOL.into(),format_version:1,launch_request_digest:"a".repeat(64),root:RootBinding{scope:CacheScope{provider_id:"broker-fixture".into(),tenant_id:uuid::Uuid::new_v4().to_string()},root_id:"root".into(),root:ObjectRef::from_bytes(ObjectKind::RunnableRoot,b"fixture")},attempt,observation}
+}
+
+#[test]
+fn partial_workspace_broker_requires_new_right_exact_scope_and_current_instance() {
+    use rudder_engine::vfs::partial_rpc::{partial_scope,REQUIRED_OPERATION};
+    let mut f=Fixture::new();let execution=uuid::Uuid::new_v4().to_string();f.journal.observe_run_attempt(&f.owner,"a",&execution,0).unwrap();
+    let partial=partial_workspace_binding(&f,&execution);let _broker=f.broker();let client=f.client();assert!(client.authorize_partial_workspace(&partial).is_err());
+    let mut complete=grant("a");complete.operations.insert("workspace:observe".into());complete.scopes.insert(rudder_engine::execution::workspace_scope(&partial.observation).unwrap());
+    complete.scopes.insert(partial_scope(&partial).unwrap());f.a.token=f.journal.issue_capability(&f.owner,&complete,0).unwrap();project_identity(&f.socket,&f.a).unwrap();
+    assert!(client.authorize_partial_workspace(&partial).is_err(),"complete right must not authorize partial scope");client.authorize_workspace(&partial.observation).unwrap();
+    let mut allowed=grant("a");allowed.operations.insert(REQUIRED_OPERATION.into());f.a.token=f.journal.issue_capability(&f.owner,&allowed,0).unwrap();project_identity(&f.socket,&f.a).unwrap();
+    assert!(client.authorize_partial_workspace(&partial).is_err(),"partial operation alone does not authorize a view");
+    allowed.scopes.insert(partial_scope(&partial).unwrap());f.a.token=f.journal.issue_capability(&f.owner,&allowed,0).unwrap();project_identity(&f.socket,&f.a).unwrap();
+    let bound=BrokerClient::connect_partial_workspace(f.socket.clone(),f.socket.with_file_name("identity.json"),&BrokerBinding::from(&f.a),&partial).unwrap();
+    bound.authorize_partial_workspace(&partial).unwrap();assert!(bound.authorize_workspace(&partial.observation).is_err());
+    let mut foreign=partial.clone();foreign.launch_request_digest="f".repeat(64);assert!(bound.authorize_partial_workspace(&foreign).is_err());
+    f.journal.observe_run_attempt(&f.owner,"a",&uuid::Uuid::new_v4().to_string(),1).unwrap();assert!(bound.authorize_partial_workspace(&partial).is_err());
+}
+
+#[test]
+fn partial_workspace_authorization_keeps_two_second_saturated_connect_budget() {
+    let f=Fixture::new();let listener=UnixListener::bind(&f.socket).unwrap();assert_eq!(unsafe{libc::listen(listener.as_raw_fd(),1)},0);listener.set_nonblocking(true).unwrap();
+    let mut held=Vec::new();for _ in 0..16{match mio::net::UnixStream::connect(&f.socket){Ok(stream)=>held.push(stream),Err(error)if error.kind()==io::ErrorKind::WouldBlock=>break,Err(error)=>panic!("fixture backlog: {error}")}}
+    let partial=partial_workspace_binding(&f,&uuid::Uuid::new_v4().to_string());let start=Instant::now();
+    assert!(BrokerClient::connect_partial_workspace(f.socket.clone(),f.socket.with_file_name("identity.json"),&BrokerBinding::from(&f.a),&partial).is_err());
+    assert!(start.elapsed()<Duration::from_secs(3),"partial auth used generic long-poll connect budget");drop(held);
+}
+
+#[test]
+fn broker_identity_fifo_is_rejected_without_waiting_for_writer() {
+    use std::os::unix::ffi::OsStrExt;
+    let f=Fixture::new();let fifo=f.root.join("fifo-identity");let name=std::ffi::CString::new(fifo.as_os_str().as_bytes()).unwrap();assert_eq!(unsafe{libc::mkfifo(name.as_ptr(),0o600)},0);
+    let (send,receive)=std::sync::mpsc::channel();let path=fifo.clone();let reader=std::thread::spawn(move||{let _=send.send(read_identity(&path).is_err());});
+    let prompt=receive.recv_timeout(Duration::from_secs(1));if prompt.is_err(){let _writer=OpenOptions::new().write(true).custom_flags(libc::O_NONBLOCK).open(&fifo);let _=receive.recv_timeout(Duration::from_secs(1));}
+    if reader.is_finished(){reader.join().unwrap();}assert_eq!(prompt.ok(),Some(true));
+}
+
 struct Fixture {
     root: PathBuf,
     journal: Journal,

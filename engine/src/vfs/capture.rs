@@ -261,6 +261,10 @@ impl crate::directory::DirectoryStore for Collector<'_> {
     }
 }
 
+pub(super) fn initialize(c: &Connection) -> Result<()> {
+    c.execute_batch("CREATE TABLE partial_captures(nonce TEXT PRIMARY KEY,binding TEXT NOT NULL,stage TEXT NOT NULL,pin TEXT NOT NULL,state TEXT NOT NULL,candidate TEXT,retention TEXT,result TEXT,release_receipt TEXT);CREATE TABLE partial_capture_head(singleton INTEGER PRIMARY KEY CHECK(singleton=1),nonce TEXT NOT NULL,sequence INTEGER NOT NULL CHECK(sequence>0));")?;
+    Ok(())
+}
 pub(super) fn validate_schema(c: &Connection, expected: Option<&remote::Resolver>) -> Result<()> {
     let count: u64 = c.query_row("SELECT count(*) FROM sqlite_master WHERE type='table' AND name IN ('partial_captures','partial_capture_head')", [], |r| read_id(r,0))?;
     ensure!(
@@ -377,6 +381,17 @@ pub(super) fn validate_schema(c: &Connection, expected: Option<&remote::Resolver
             );
         }
     }
+    let version: String = c.query_row(
+        "SELECT value FROM meta WHERE key='format_version'",
+        [],
+        |r| r.get(0),
+    )?;
+    if version == "5" {
+        admission::validate_schema(
+            c,
+            expected.context("namespace5 requires strict launch binding")?,
+        )?;
+    }
     head(c)?;
     Ok(())
 }
@@ -387,7 +402,7 @@ fn existing_schema(c: &Connection, expected: Option<&remote::Resolver>) -> Resul
         |r| r.get(0),
     )?;
     match version.as_str() {
-        "4" => {
+        "4" | "5" => {
             validate_schema(c, expected)?;
             Ok(true)
         }
@@ -399,7 +414,7 @@ fn existing_schema(c: &Connection, expected: Option<&remote::Resolver>) -> Resul
             );
             Ok(false)
         }
-        _ => Err(error(libc::EOPNOTSUPP)).context("partial capture requires remote namespace3/4"),
+        _ => Err(error(libc::EOPNOTSUPP)).context("partial capture requires remote namespace3/4/5"),
     }
 }
 fn activate(c: &Connection, expected: Option<&remote::Resolver>) -> Result<()> {
@@ -407,11 +422,12 @@ fn activate(c: &Connection, expected: Option<&remote::Resolver>) -> Result<()> {
         return Ok(());
     }
     let tx = c.unchecked_transaction()?;
-    tx.execute_batch("CREATE TABLE partial_captures(nonce TEXT PRIMARY KEY,binding TEXT NOT NULL,stage TEXT NOT NULL,pin TEXT NOT NULL,state TEXT NOT NULL,candidate TEXT,retention TEXT,result TEXT,release_receipt TEXT);CREATE TABLE partial_capture_head(singleton INTEGER PRIMARY KEY CHECK(singleton=1),nonce TEXT NOT NULL,sequence INTEGER NOT NULL CHECK(sequence>0));UPDATE meta SET value='4' WHERE key='format_version';")?;
+    initialize(&tx)?;
+    tx.execute("UPDATE meta SET value='4' WHERE key='format_version'", [])?;
     tx.commit()?;
     Ok(())
 }
-fn head(c: &Connection) -> Result<Option<(String, u64)>> {
+pub(super) fn head(c: &Connection) -> Result<Option<(String, u64)>> {
     let head: Option<(String, u64)> = c
         .query_row(
             "SELECT nonce,sequence FROM partial_capture_head WHERE singleton=1",
@@ -522,6 +538,23 @@ fn replay_boundaries(
     Ok(result)
 }
 
+enum CaptureAdmission<'a> {
+    Live(&'a admission::LiveEffect),
+    Frozen(&'a FrozenRemoteView),
+}
+impl CaptureAdmission<'_> {
+    fn validate(
+        &self,
+        view: &VfsView,
+        c: &Connection,
+        request: &PartialCaptureRequest,
+    ) -> Result<()> {
+        match self {
+            Self::Live(effect) => effect.validate(view),
+            Self::Frozen(frozen) => frozen.validate(view, c, request),
+        }
+    }
+}
 impl VfsView {
     pub fn capture_partial_source(
         &self,
@@ -539,6 +572,37 @@ impl VfsView {
         request: &PartialCaptureRequest,
         budget: &PartialCaptureBudget,
         cancelled: &dyn Fn() -> bool,
+    ) -> Result<PartialCaptureReceipt> {
+        let effect = self.admit_live_effect()?;
+        self.capture_partial_source_admitted(
+            policy,
+            request,
+            budget,
+            cancelled,
+            CaptureAdmission::Live(&effect),
+        )
+    }
+    pub(super) fn capture_partial_source_frozen(
+        &self,
+        frozen: &FrozenRemoteView,
+        budget: &PartialCaptureBudget,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<PartialCaptureReceipt> {
+        self.capture_partial_source_admitted(
+            &ImportPolicy::default(),
+            &frozen.intent().request.capture,
+            budget,
+            cancelled,
+            CaptureAdmission::Frozen(frozen),
+        )
+    }
+    fn capture_partial_source_admitted(
+        &self,
+        policy: &ImportPolicy,
+        request: &PartialCaptureRequest,
+        budget: &PartialCaptureBudget,
+        cancelled: &dyn Fn() -> bool,
+        admission: CaptureAdmission<'_>,
     ) -> Result<PartialCaptureReceipt> {
         let remote = self
             .manager()
@@ -569,7 +633,14 @@ impl VfsView {
         let (policy, digest) = normalized_policy(policy)?;
         let meter = WorkMeter::cancellable(&budget.work, cancelled)?;
         let mut c = self.db()?;
-        mutable(&c)?;
+        admission.validate(self, &c, request)?;
+        match &admission {
+            CaptureAdmission::Live(_) => mutable(&c)?,
+            CaptureAdmission::Frozen(_) => {
+                let terminal: bool = c.query_row("SELECT EXISTS(SELECT 1 FROM meta WHERE key IN ('sealed','destroyed') AND value='true')", [], |r| r.get(0))?;
+                ensure!(!terminal, "terminal view cannot capture");
+            }
+        }
         if !existing_schema(&c, self.manager().0.remote.as_deref())? {
             ensure!(
                 self.observation_cursor(&c)? == request.expected_begin,
@@ -615,6 +686,7 @@ impl VfsView {
                 self.validate_partial_receipt(&c, &binding, &receipt)?;
                 meter.check()?;
                 remote.guard()?;
+                admission.validate(self, &c, request)?;
                 return Ok(receipt);
             }
             (stage, candidate)
@@ -733,6 +805,7 @@ impl VfsView {
                 .saturating_duration_since(std::time::Instant::now()),
         );
         meter.check()?;
+        admission.validate(self, &c, request)?;
         let retained = delta::retain_partial_tree(
             self.manager().store(),
             &stage,
@@ -756,6 +829,7 @@ impl VfsView {
         )?;
         meter.check()?;
         remote.guard()?;
+        admission.validate(self, &c, request)?;
         let tx = c.transaction()?;
         ensure!(
             head(&tx)?.map(|h| h.0) == request.expected_head,
@@ -791,6 +865,7 @@ impl VfsView {
         // commit. Keep the exact record and all retention for reconciliation.
         meter.check()?;
         remote.guard()?;
+        admission.validate(self, &c, request)?;
         Ok(receipt)
     }
     fn capture_stage_available(
@@ -936,6 +1011,8 @@ impl VfsView {
             .transpose()
     }
     pub fn release_partial_capture(&self, nonce: &str) -> Result<()> {
+        let effect = self.admit_live_effect()?;
+        effect.validate(self)?;
         canonical_nonce(nonce)?;
         let mut c = self.db()?;
         ensure!(

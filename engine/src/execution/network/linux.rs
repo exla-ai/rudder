@@ -2,7 +2,7 @@
 //! scheduling, host networking, egress or privileged device provisioning.
 use super::{NetworkError, NetworkErrorKind as Kind, NetworkResult, ValidatedNetworkProfile};
 use std::{
-    ffi::CStr,
+    ffi::{CStr, CString},
     marker::PhantomData,
     os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd},
     rc::Rc,
@@ -53,6 +53,7 @@ pub struct NamespaceFd {
 }
 impl NamespaceFd {
     pub fn inspect(fd: OwnedFd, kind: NamespaceKind) -> NetworkResult<Self> {
+        require_nsfs(&fd)?;
         let actual = unsafe { libc::ioctl(fd.as_raw_fd(), NS_GET_NSTYPE) };
         if actual != kind.flag() {
             return Err(NetworkError::new(Kind::InvalidNamespaceFd));
@@ -79,12 +80,26 @@ impl NamespaceFd {
     pub fn identity(&self) -> NamespaceIdentity {
         self.identity
     }
-    fn current(kind: NamespaceKind) -> NetworkResult<Self> {
+    pub(crate) fn current(kind: NamespaceKind) -> NetworkResult<Self> {
         let path = match kind {
             NamespaceKind::User => c"/proc/self/ns/user",
             NamespaceKind::Network => c"/proc/self/ns/net",
         };
         Self::inspect(open(path, libc::O_RDONLY)?, kind)
+    }
+    /// Inspect a caller-owned live process, never a guest/saved PID grant. The
+    /// caller must hold its actual child/pidfd and check lifetime before/after.
+    pub(crate) fn for_process(pid: u32, kind: NamespaceKind) -> NetworkResult<Self> {
+        if pid == 0 || pid > i32::MAX as u32 {
+            return Err(NetworkError::new(Kind::WrongProcess));
+        }
+        let name = match kind {
+            NamespaceKind::User => "user",
+            NamespaceKind::Network => "net",
+        };
+        let path = CString::new(format!("/proc/{pid}/ns/{name}"))
+            .map_err(|_| NetworkError::new(Kind::InvalidNamespaceFd))?;
+        Self::inspect(open(&path, libc::O_RDONLY)?, kind)
     }
 }
 impl AsFd for NamespaceFd {
@@ -152,7 +167,7 @@ impl ChildNetworkBaseline {
         if network.identity == self.network.identity {
             return Err(NetworkError::new(Kind::ForeignNamespace));
         }
-        verify_owner(&user, &network)?;
+        verify_namespace_owner(&user, &network)?;
         bring_loopback_up()?;
         let network_id = self.network_id;
         let profile_digest = self.profile_digest;
@@ -235,7 +250,7 @@ impl OwnedChildNetwork {
         {
             return Err(NetworkError::new(Kind::ForeignNamespace));
         }
-        verify_owner(&self.user, &self.network)?;
+        verify_namespace_owner(&self.user, &self.network)?;
         let control = network_control()?;
         if loopback_flags(&control)? & libc::IFF_UP as libc::c_short == 0 {
             return Err(NetworkError::new(Kind::LoopbackSetupFailed));
@@ -244,7 +259,28 @@ impl OwnedChildNetwork {
     }
 }
 
-fn verify_owner(user: &NamespaceFd, network: &NamespaceFd) -> NetworkResult<()> {
+// Namespace ioctls are never issued to an arbitrary SCM_RIGHTS FD. Validate
+// nsfs before inspecting its type or requesting its owning user namespace.
+fn require_nsfs(fd: &OwnedFd) -> NetworkResult<()> {
+    let mut stat = std::mem::MaybeUninit::<libc::statfs>::uninit();
+    if unsafe { libc::fstatfs(fd.as_raw_fd(), stat.as_mut_ptr()) } != 0 {
+        return Err(NetworkError::os(Kind::InvalidNamespaceFd));
+    }
+    if unsafe { stat.assume_init() }.f_type as libc::c_ulong != libc::NSFS_MAGIC as libc::c_ulong {
+        return Err(NetworkError::new(Kind::InvalidNamespaceFd));
+    }
+    Ok(())
+}
+pub(crate) fn verify_namespace_owner(
+    user: &NamespaceFd,
+    network: &NamespaceFd,
+) -> NetworkResult<()> {
+    require_nsfs(&user.fd)?;
+    require_nsfs(&network.fd)?;
+    if user.identity.kind != NamespaceKind::User || network.identity.kind != NamespaceKind::Network
+    {
+        return Err(NetworkError::new(Kind::InvalidNamespaceFd));
+    }
     let owner = unsafe { libc::ioctl(network.fd.as_raw_fd(), NS_GET_USERNS) };
     if owner < 0 {
         return Err(NetworkError::os(Kind::ForeignNamespace));
@@ -255,6 +291,89 @@ fn verify_owner(user: &NamespaceFd, network: &NamespaceFd) -> NetworkResult<()> 
         return Err(NetworkError::new(Kind::ForeignNamespace));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod namespace_fd_tests {
+    use super::*;
+    use std::os::unix::net::UnixStream;
+    fn rejected(value: NetworkResult<NamespaceFd>) -> NetworkError {
+        match value {
+            Ok(_) => panic!("non-namespace FD accepted"),
+            Err(error) => error,
+        }
+    }
+    #[test]
+    fn ordinary_file_is_rejected_before_namespace_inspection() {
+        let file: OwnedFd = tempfile::tempfile().unwrap().into();
+        assert_eq!(
+            rejected(NamespaceFd::inspect(file, NamespaceKind::User)).kind(),
+            Kind::InvalidNamespaceFd
+        );
+    }
+    #[test]
+    fn socket_is_rejected_before_namespace_inspection() {
+        let (socket, _peer) = UnixStream::pair().unwrap();
+        assert_eq!(
+            rejected(NamespaceFd::inspect(socket.into(), NamespaceKind::Network)).kind(),
+            Kind::InvalidNamespaceFd
+        );
+    }
+    #[test]
+    fn wrong_namespace_type_is_rejected() {
+        let fd: OwnedFd = std::fs::File::open("/proc/self/ns/user").unwrap().into();
+        assert_eq!(
+            rejected(NamespaceFd::inspect(fd, NamespaceKind::Network)).kind(),
+            Kind::InvalidNamespaceFd
+        );
+    }
+    #[test]
+    fn current_and_owned_process_inspection_hold_actual_cloexec_namespace_fds() {
+        for kind in [NamespaceKind::User, NamespaceKind::Network] {
+            let current = NamespaceFd::current(kind).unwrap();
+            let process = NamespaceFd::for_process(std::process::id(), kind).unwrap();
+            assert_eq!(current.identity(), process.identity());
+            assert_eq!(current.identity().kind(), kind);
+            assert_ne!(current.identity().inode(), 0);
+            assert_ne!(
+                unsafe { libc::fcntl(process.fd.as_raw_fd(), libc::F_GETFD) } & libc::FD_CLOEXEC,
+                0
+            );
+        }
+        assert_eq!(
+            rejected(NamespaceFd::for_process(0, NamespaceKind::User)).kind(),
+            Kind::WrongProcess
+        );
+    }
+    #[test]
+    fn owner_verifier_rechecks_both_filesystems_and_rejects_swapped_types() {
+        let user = NamespaceFd::current(NamespaceKind::User).unwrap();
+        let network = NamespaceFd::current(NamespaceKind::Network).unwrap();
+        let fake_user = NamespaceFd {
+            fd: tempfile::tempfile().unwrap().into(),
+            identity: user.identity(),
+        };
+        let fake_network = NamespaceFd {
+            fd: tempfile::tempfile().unwrap().into(),
+            identity: network.identity(),
+        };
+        assert_eq!(
+            verify_namespace_owner(&fake_user, &network)
+                .unwrap_err()
+                .kind(),
+            Kind::InvalidNamespaceFd
+        );
+        assert_eq!(
+            verify_namespace_owner(&user, &fake_network)
+                .unwrap_err()
+                .kind(),
+            Kind::InvalidNamespaceFd
+        );
+        assert_eq!(
+            verify_namespace_owner(&network, &user).unwrap_err().kind(),
+            Kind::InvalidNamespaceFd
+        );
+    }
 }
 fn open(path: &CStr, flags: libc::c_int) -> NetworkResult<OwnedFd> {
     let fd = unsafe { libc::open(path.as_ptr(), flags | libc::O_CLOEXEC) };

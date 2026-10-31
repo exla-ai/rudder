@@ -259,7 +259,7 @@ fn protected_credentials_are_explicit_bounded_host_roots_including_identity_home
 #[cfg(target_os = "linux")]
 fn declared_runtime_cannot_include_selected_or_sibling_credentials_under_public_image_roots() {
     let fixture = Fixture::new();
-    let mut spec = ExecutionSpec { format_version:1, execution_id:uuid::Uuid::new_v4().to_string(), operation_id:uuid::Uuid::new_v4().to_string(),
+    let mut spec = ExecutionSpec { profile: None, format_version:1, execution_id:uuid::Uuid::new_v4().to_string(), operation_id:uuid::Uuid::new_v4().to_string(),
         execution_root:fixture.0.join("executions"), manager_root:fixture.0.join("manager"), store_root:fixture.0.join("store"),
         authority_roots:selected_protected_roots(&fixture.0.join("identity"), &[]).unwrap(), view_id:uuid::Uuid::new_v4().to_string(),
         owner:OwnerEpoch { owner:"owner".into(), epoch:1 }, command:vec!["/usr/bin/true".into()], environment:Default::default(),

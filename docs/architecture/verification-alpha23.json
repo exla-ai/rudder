@@ -1,7 +1,7 @@
 {
   "formatVersion": 1,
   "version": "4.0.0-alpha.23",
-  "sourceKind": "candidate; local tests precede version/pin metadata update; exact-source CI pending",
+  "sourceKind": "verified immutable tag",
   "baseRevision": "d660d32bc308e65f03fc9f1ad63c69d4e7a79067",
   "checks": {
     "rust": {
@@ -91,15 +91,122 @@
       "exactCommitRequired": true,
       "strictProducerArchiveDigest": true,
       "fullPipelineFallback": true,
-      "actualActionsExecutionVerified": false
+      "actualActionsExecutionVerified": true
     }
   },
   "physicalQualification": {
-    "newProof": false,
-    "scope": "local kernel descriptor tests and fake Cloud transports; no real provider lease/model calls or native bootstrap"
+    "stockWorker": {
+      "qualified": true,
+      "commands": 7,
+      "cleanupVerified": true,
+      "twoIndependentAbsenceChecks": true,
+      "scope": "packaged executables under UID/GID1500, caps0 and NNP1; no model/profile"
+    },
+    "rootStorage": {
+      "formatVersion": 1,
+      "scope": "actual stock root storage capability only",
+      "revision": "ca3eb6ce2c663b6c5069ce2adc094c8b64f8af87",
+      "imageDigest": "sha256:ea39437f476ea1c704afb7eca6596d79df9dfada97ae9dde74141562e7394f80",
+      "qualified": true,
+      "rootStoragePassed": true,
+      "providerCalls": 21,
+      "rootCapSysAdmin": true,
+      "rootWrite": "EROFS",
+      "uid1500Write": "EROFS",
+      "normalUnmount": true,
+      "ownedVmCleanup": true,
+      "twoAbsenceChecks": true,
+      "verifiedAt": "2026-10-31T22:43:34.063Z",
+      "productionSeedProducer": false,
+      "backendRun": false,
+      "proofSha256": "60a48dbf1cc6f2260dbb5610e3f1dd8b98aef64d42db052fbb9e5514d25bd42b"
+    },
+    "productionSeedProducer": false,
+    "realModelRun": false
   },
   "delivery": {
-    "status": "not_started"
+    "kind": "web",
+    "status": "deployed",
+    "target": "Rudder Cloud",
+    "provider": "Fly.io",
+    "url": "https://rudder.exla.ai/app",
+    "revision": "ca3eb6ce2c663b6c5069ce2adc094c8b64f8af87",
+    "version": "4.0.0-alpha.23",
+    "deploymentId": "l8w0PB4QQoOwMT9eKM3O3MONj",
+    "release": 173,
+    "verifiedAt": "2026-10-31T22:52:53.001Z",
+    "controlImage": {
+      "image": "registry.fly.io/rudder-cloud-control:4.0.0-alpha.23",
+      "digest": "sha256:0c68f58a84ade44cc523e11b1855f3ca43d885e6a75792e4a8b5de8cf2052dbd",
+      "machine": "8911d61a434978",
+      "instance": "01M6A2JA669ABFR6Z7G5R306K1"
+    },
+    "workerImage": {
+      "image": "registry.fly.io/rudder-workers-exla:4.0.0-alpha.23",
+      "digest": "sha256:ea39437f476ea1c704afb7eca6596d79df9dfada97ae9dde74141562e7394f80"
+    },
+    "checks": [
+      {
+        "url": "https://rudder.exla.ai/app",
+        "status": 200,
+        "expected": 200,
+        "finalUrl": "https://rudder-cloud-control.fly.dev/app",
+        "ok": true
+      },
+      {
+        "url": "https://rudder-cloud-control.fly.dev/health",
+        "status": 200,
+        "expected": 200,
+        "finalUrl": "https://rudder-cloud-control.fly.dev/health",
+        "ok": true,
+        "health": {
+          "ok": true,
+          "s3": true,
+          "fabric": true,
+          "fly": true,
+          "byoVm": true,
+          "state": true,
+          "secrets": true,
+          "auth": {
+            "google": true,
+            "github": true,
+            "githubDevice": true
+          }
+        }
+      },
+      {
+        "url": "https://rudder-cloud-control.fly.dev/api/app/state",
+        "status": 401,
+        "expected": 401,
+        "finalUrl": "https://rudder-cloud-control.fly.dev/api/app/state",
+        "ok": true
+      },
+      {
+        "url": "https://rudder-cloud-control.fly.dev/api/rudder/fabric/roots/unauthenticated-alpha23-smoke",
+        "status": 401,
+        "expected": 401,
+        "finalUrl": "https://rudder-cloud-control.fly.dev/api/rudder/fabric/roots/unauthenticated-alpha23-smoke",
+        "ok": true
+      }
+    ],
+    "runtimeCodeSha256": {
+      "src/server.ts": "8235e1b7271ac450491472a1e5adf195f50a80789f59c44861a473818fdfbd60",
+      "src/fabric-cas.ts": "4c158d2746a4c6511c7f9262db386ef81a2368df42c361eddbce01138e47b7ca",
+      "src/fabric-partial-checkpoint.ts": "b5f5e6ce35eba3af10034c5caa7214fe6cddb47c59ee24f840d30ee2f33d03f0",
+      "src/home-control-sessions.ts": "99887ab5965689668818ea908b0aac979983b68c06311cba7ae737f5477ef2f3",
+      "src/fly-custody.ts": "38a16b0d55bbc9e888dae5cab842463ea95b53b8ecac48d33af218382ae65a07",
+      "dist/server.js": "01cb5ccc3b71949a2060cbcbead8ef67af21c8b89ebcaec76c77315ef6094a74",
+      "dist/fabric-cas.js": "98e7bc5d7f60ed9d05b2b908a19ed39659d993e26dc9eac01cb5e7980945457a",
+      "dist/fabric-partial-checkpoint.js": "224c151b296315966304751cf0c51b6d6d2e81e5f8037d2f208246775fe8d5dd",
+      "dist/home-control-sessions.js": "c27b91b1532bdbbb6ff734277a31633b6565c81a7db0a8343b041abf5795447f",
+      "dist/fly-custody.js": "7ed78b899804fbf964570a28ad666264b71df82591a57d384636bbce4c27c30d"
+    },
+    "databaseQuickCheck": "ok",
+    "activeHomeUnchanged": true,
+    "postgresAuthority": {
+      "active": 0,
+      "queued": 0
+    }
   },
   "fullV4Complete": false,
   "remainingGates": [
@@ -110,7 +217,7 @@
     "selected OAuth profiles; hosted ChatGPT-plan support additionally requires SIWC client registration (user has none)"
   ],
   "releaseCheckCi": {
-    "status": "corrected_candidate_pending",
+    "status": "success",
     "branch": "release-check/4.0.0-alpha.23",
     "requireExactVersionCommit": true,
     "priorFailedQualification": {
@@ -126,6 +233,74 @@
       "failed": 0,
       "skipped": 0,
       "scope": "allow digits after the first output-key character; retain output-file injection guards"
+    },
+    "runId": 41246904136,
+    "revision": "ca3eb6ce2c663b6c5069ce2adc094c8b64f8af87",
+    "runAttempt": 1
+  },
+  "revision": "ca3eb6ce2c663b6c5069ce2adc094c8b64f8af87",
+  "tag": "v4.0.0-alpha.23",
+  "releasePublication": {
+    "runId": 41249990378,
+    "status": "success",
+    "mode": "reused",
+    "qualificationRunId": 41246904136,
+    "secondNativeMatrix": "skipped",
+    "secondQualification": "skipped",
+    "provenanceSha256": "863572f1abac4a94d11684f4c41e3834ce8bc0593b0e3ece5ffb5d2c7b04009c",
+    "npm": {
+      "status": "passed",
+      "verifiedAt": "2026-10-31T22:57:17.287379Z",
+      "registry": {
+        "observedAt": "2026-10-31T22:56:43.773586+00:00",
+        "packages": {
+          "@exla/rudder": {
+            "status": 200,
+            "version": "4.0.0-alpha.23",
+            "gitHead": "ca3eb6ce2c663b6c5069ce2adc094c8b64f8af87",
+            "next": "4.0.0-alpha.23",
+            "latest": "3.9.13"
+          },
+          "@viraatdas/rudder": {
+            "status": 200,
+            "version": "4.0.0-alpha.23",
+            "gitHead": "ca3eb6ce2c663b6c5069ce2adc094c8b64f8af87",
+            "next": "4.0.0-alpha.23",
+            "latest": "3.9.13"
+          }
+        }
+      },
+      "aliasComparison": {
+        "native_pairs_identical": true,
+        "package_metadata_except_name_identical": true
+      },
+      "freshInstallPackages": {
+        "@exla/rudder": {
+          "status": "passed",
+          "privateFixtureRemoved": true
+        },
+        "@viraatdas/rudder": {
+          "status": "passed",
+          "privateFixtureRemoved": true
+        }
+      },
+      "freshInstallReceiptSha256": "ef9afe6e14e71a016017b126c743dd3c3a73c43af8d428da814a1aee9dd0924b",
+      "provenanceSignaturesVerified": false
+    }
+  },
+  "relatedCi": {
+    "mac": {
+      "runId": 41249990404,
+      "status": "success"
+    },
+    "ios": {
+      "runId": 41249990415,
+      "status": "success",
+      "ipadAndTestflight": "not_requested; skipped"
+    },
+    "tui": {
+      "runId": 41249990926,
+      "status": "success"
     }
   }
 }

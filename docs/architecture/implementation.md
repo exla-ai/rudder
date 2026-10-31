@@ -332,7 +332,7 @@ smoke checks and all three platform manifests passed at
 the name. Initial registry lookups lagged successful publication; no republish
 was attempted. The full v4 rewrite remains incomplete.
 
-## Cloud session ownership and exact-source reuse, alpha.23 candidate
+## Cloud session ownership and exact-source reuse, alpha.23
 
 Home-control RPCs now retain their authenticated home and exact live socket
 session. A stale or foreign socket cannot acknowledge another session's request
@@ -357,11 +357,26 @@ Producer archive digests, qualified native seals and source revisions are checke
 before certification and again at publication. Missing or uncertain eligibility
 runs the full pipeline. The older native/test origin remains explicit in artifact
 provenance. All three native builds passed in the first Actions attempt, but
-qualification failed before the test jobs. The output validator rejected the
+qualification failed before its test steps. The output validator rejected the
 required `proof_sha256` key because its name contained digits. The correction
 permits digits after the first character and adds an output-file regression;
-all nineteen release fixtures pass. The corrected candidate still requires a
-complete exact-source Actions qualification before publication.
+all nineteen release fixtures pass. Corrected commit
+`ca3eb6ce2c663b6c5069ce2adc094c8b64f8af87` passed the complete qualification in
+run `41246904136`. Its immutable tag reused those exact artifacts in publication
+run `41249990378`; the second matrix and qualification were skipped. Both npm
+aliases are available on `next`, and fresh Linux installs, all three platform
+manifests and CLI/native/jj smoke checks passed at 22:57:17 UTC. The stable
+`latest` tag remains 3.9.13. Mac, iOS and TUI CI passed.
+
+Cloud release **173**, deployment `l8w0PB4QQoOwMT9eKM3O3MONj`, is verified at
+22:52:53 UTC on [the canonical app URL](https://rudder.exla.ai/app). Running
+revision/image and ten source/emitted runtime hashes match the frozen source;
+health, unauthenticated-route refusal and SQLite integrity passed. The active
+home retained its original instance/image. The stock worker and a separate
+[root-storage canary](../../examples/execution/evidence/2026-10-31-alpha23-root-storage/README.md)
+passed with exact owned VM cleanup and independent absence checks. The latter
+proved global-namespace read-only storage works before the existing UID/capability
+drop; it did not implement or qualify a production seed producer.
 
 The local combined gate passed 1,841 Rust tests, 812 JavaScript tests and all 59
 terminal tests, with zero failures. Cloud compilation passed; thirty Rust fixtures
@@ -374,12 +389,19 @@ The next product milestone is one actual Codex or Claude agent completing a task
 through v4, then two agents sharing caches, steering each other and safely
 integrating verified changes. Production bootstrap/routing custody, connected
 model profiles, accepted jj history/current source selection, fleet migration and
-measured normal-path distributed-cache performance remain required. This candidate
+measured normal-path distributed-cache performance remain required. This release
 does not switch normal agent startup to v4 or complete the rewrite.
 
 The shorter opt-in milestone uses the existing managed-local Spec3/Binding2 path
 with ordinary worker networking. Task admission, immutable preparation reuse and
-checkpoint-to-jj acceptance are private drafts pending combined qualification.
+checkpoint-to-jj acceptance remain private and are not wired into startup. Their
+combined managed-runtime suite passed 124 tests, zero failures and five existing
+ignored fixtures. Internal seed export passed seven tests, exact Git import eight
+and selected-profile pipe handoff eight. A local prototype measured fresh manager
+prepare/fork versus validated cached fork at 10,000 files: median 1,684 ms versus
+36 ms, with eleven independent live views. That excludes source import, mounts,
+backend/VCS setup, remote transfer and builds; it is not launch latency or a
+production speed claim. Next is the retained seed producer and actual bootstrap.
 Current selected user profiles use OAuth; this path currently accepts only API
 keys and must not silently switch billing. Hosted ChatGPT-plan support needs the
 separate [Sign in with ChatGPT integration](https://developers.openai.com/siwc);

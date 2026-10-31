@@ -1,0 +1,46 @@
+{
+  "formatVersion": 1,
+  "scope": "mock-and-syntax-only",
+  "syntax": [
+    {
+      "file": "controller.mjs",
+      "exitCode": 0,
+      "status": "fulfilled"
+    },
+    {
+      "file": "guest.mjs",
+      "exitCode": 0,
+      "status": "fulfilled"
+    },
+    {
+      "file": "ownership.mjs",
+      "exitCode": 0,
+      "status": "fulfilled"
+    },
+    {
+      "file": "transport.mjs",
+      "exitCode": 0,
+      "status": "fulfilled"
+    },
+    {
+      "file": "selftest.mjs",
+      "exitCode": 0,
+      "status": "fulfilled"
+    }
+  ],
+  "selftest": {
+    "command": "node selftest.mjs",
+    "exitCode": 0,
+    "summary": {
+      "status": "passed",
+      "fakeTransportScenarios": 8,
+      "providerCalls": 0,
+      "actualSmokeCommands": 0
+    }
+  },
+  "providerCalls": 0,
+  "actualSmokeCommands": 0,
+  "actualMountCommands": 0,
+  "buildsRun": 0,
+  "physicalRun": false
+}

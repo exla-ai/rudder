@@ -1,0 +1,312 @@
+{
+  "formatVersion": 1,
+  "kind": "alpha23-global-ro-seed-mount-capability",
+  "nonce": "3c2640c4-cd73-4ac5-bace-e3bca9a5445a",
+  "role": "alpha23-global-ro-seed-mount-capability",
+  "revision": "ca3eb6ce2c663b6c5069ce2adc094c8b64f8af87",
+  "imageDigest": "sha256:ea39437f476ea1c704afb7eca6596d79df9dfada97ae9dde74141562e7394f80",
+  "packageVersion": "4.0.0-alpha.23",
+  "fuseAtMs": 1793486859359,
+  "guestSha256": "ad66b5658e2fb212eb7b54bcaa83a683bb830736fbe70841a2ae4f11bee9e095",
+  "requestedImage": "registry.fly.io/rudder-workers-exla:4.0.0-alpha.23",
+  "testOnlyMock": false,
+  "providerCalls": 21,
+  "scope": "root-storage-capability-only",
+  "productionSeedProducer": false,
+  "managedBackend": false,
+  "preparationReuse": false,
+  "smokePassed": true,
+  "rootStoragePassed": true,
+  "qualified": true,
+  "cleanupVerified": true,
+  "independentAbsence": true,
+  "ownedDestruction": true,
+  "steps": [
+    {
+      "label": "fly-version",
+      "settled": true,
+      "status": 0,
+      "signal": null,
+      "failure": null,
+      "stdoutBytes": 109,
+      "stderrBytes": 0,
+      "stdoutSha256": "72470d1729320c7892ff922ced24cde58ad20859cbb8fdaa8e19b7e40d0000fe",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "label": "empty-app-secrets",
+      "settled": true,
+      "status": 0,
+      "signal": null,
+      "failure": null,
+      "stdoutBytes": 3,
+      "stderrBytes": 0,
+      "stdoutSha256": "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "label": "inventory",
+      "settled": true,
+      "status": 0,
+      "signal": null,
+      "failure": null,
+      "stdoutBytes": 74775,
+      "stderrBytes": 0,
+      "stdoutSha256": "8f3c09c0457ef218a0683f570f1c96c64d6c0a8297be45fd741714650d0f5e72",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "label": "create",
+      "settled": true,
+      "status": 0,
+      "signal": null,
+      "failure": null,
+      "stdoutBytes": 439,
+      "stderrBytes": 191,
+      "stdoutSha256": "4b3936aa00f09b687aa177d3c8fa8103ab49f3eb880ba477a8097adf254864ee",
+      "stderrSha256": "2f7daabc667bfac3cc6be8248fe34e6f2346cf8faaba083dcbaa3dd8a30b8221"
+    },
+    {
+      "label": "inventory",
+      "settled": true,
+      "status": 0,
+      "signal": null,
+      "failure": null,
+      "stdoutBytes": 105742,
+      "stderrBytes": 0,
+      "stdoutSha256": "60eb4e7745f16615da7bd22fa07b9aa2d2e86a56ae73d3784fa8ff9f769447ff",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "label": "empty-app-secrets",
+      "settled": true,
+      "status": 0,
+      "signal": null,
+      "failure": null,
+      "stdoutBytes": 3,
+      "stderrBytes": 0,
+      "stdoutSha256": "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "label": "inventory",
+      "settled": true,
+      "status": 0,
+      "signal": null,
+      "failure": null,
+      "stdoutBytes": 105742,
+      "stderrBytes": 0,
+      "stdoutSha256": "a04514c9c7a64f76368bcfb0a25e88b2b36b4902cf4e6e43d09641cf035b159d",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "label": "admission",
+      "settled": true,
+      "status": 0,
+      "signal": null,
+      "failure": null,
+      "stdoutBytes": 157,
+      "stderrBytes": 0,
+      "stdoutSha256": "f85181116a73de759eae5dcdf6a5478405f6ff8c5e5d2e1fa4f8846a7be4b6c4",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "label": "inventory",
+      "settled": true,
+      "status": 0,
+      "signal": null,
+      "failure": null,
+      "stdoutBytes": 105742,
+      "stderrBytes": 0,
+      "stdoutSha256": "ea8f633bdc6579063544474a442abc4c6350f18ab4bd92749c60f0690e9b5108",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "label": "proof",
+      "settled": true,
+      "status": 0,
+      "signal": null,
+      "failure": null,
+      "stdoutBytes": 68,
+      "stderrBytes": 0,
+      "stdoutSha256": "ea5fde822ae467eae1004a52df9b34e9926d627cb5dd921e4895285768d916bf",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "label": "inventory",
+      "settled": true,
+      "status": 0,
+      "signal": null,
+      "failure": null,
+      "stdoutBytes": 105742,
+      "stderrBytes": 0,
+      "stdoutSha256": "e4f8fd9fe23cf1e9b6014ec241eaba17b97e55e225aed83bac29bbb8684ef581",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "label": "proof",
+      "settled": true,
+      "status": 0,
+      "signal": null,
+      "failure": null,
+      "stdoutBytes": 68,
+      "stderrBytes": 0,
+      "stdoutSha256": "ea5fde822ae467eae1004a52df9b34e9926d627cb5dd921e4895285768d916bf",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "label": "inventory",
+      "settled": true,
+      "status": 0,
+      "signal": null,
+      "failure": null,
+      "stdoutBytes": 105742,
+      "stderrBytes": 0,
+      "stdoutSha256": "66b03dd3be1ac40e9d85014c7f17c4d50205f52845d0839cac70c72e1450a43d",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "label": "proof",
+      "settled": true,
+      "status": 0,
+      "signal": null,
+      "failure": null,
+      "stdoutBytes": 68,
+      "stderrBytes": 0,
+      "stdoutSha256": "ea5fde822ae467eae1004a52df9b34e9926d627cb5dd921e4895285768d916bf",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "label": "inventory",
+      "settled": true,
+      "status": 0,
+      "signal": null,
+      "failure": null,
+      "stdoutBytes": 105742,
+      "stderrBytes": 0,
+      "stdoutSha256": "41d7190c98a32c661a15473792990ce76600fcb00278a0c04921061cd38538b1",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "label": "proof",
+      "settled": true,
+      "status": 0,
+      "signal": null,
+      "failure": null,
+      "stdoutBytes": 10987,
+      "stderrBytes": 0,
+      "stdoutSha256": "9718e68328dfd4df4d8a762b102a99b4259d6eb0a6c6d1b70eed48ee7fd0f097",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "label": "inventory",
+      "settled": true,
+      "status": 0,
+      "signal": null,
+      "failure": null,
+      "stdoutBytes": 105742,
+      "stderrBytes": 0,
+      "stdoutSha256": "bc53cafc5e9141d6379cc8fd1bc52c5c90a92e90b219b6bcfd70dbf32bf36b35",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "label": "inventory",
+      "settled": true,
+      "status": 0,
+      "signal": null,
+      "failure": null,
+      "stdoutBytes": 105742,
+      "stderrBytes": 0,
+      "stdoutSha256": "66415825829d0d1cc0e048503d77a8701d2c3c71532a90e3cbd06786139f707a",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "label": "destroy-exact-owned",
+      "settled": true,
+      "status": 0,
+      "signal": null,
+      "failure": null,
+      "stdoutBytes": 127,
+      "stderrBytes": 0,
+      "stdoutSha256": "1eca9fa0a86c455a9e36233d34e261f97c7237c2ababff3059f6774ed5452b41",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "label": "inventory",
+      "settled": true,
+      "status": 0,
+      "signal": null,
+      "failure": null,
+      "stdoutBytes": 74775,
+      "stderrBytes": 0,
+      "stdoutSha256": "89309fd192c9209248a530b023a6683d06e8ba67ad187fceb061d833cf8dfc95",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "label": "inventory",
+      "settled": true,
+      "status": 0,
+      "signal": null,
+      "failure": null,
+      "stdoutBytes": 74775,
+      "stderrBytes": 0,
+      "stdoutSha256": "041d6c26f75ab3e93377f460fd880ae16a27609d4bc1e10ece616a206a5e6f2d",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    }
+  ],
+  "maxLifetimeSeconds": 360,
+  "machine": {
+    "id": "8d3d07ce499178",
+    "instance": "01M6A229D06PSDVFZV430ESFJF",
+    "digest": "sha256:ea39437f476ea1c704afb7eca6596d79df9dfada97ae9dde74141562e7394f80",
+    "revisionLabel": "ca3eb6ce2c663b6c5069ce2adc094c8b64f8af87"
+  },
+  "rootStorage": {
+    "scope": "root-storage-capability-only",
+    "mountNamespace": "mnt:[4026531841]",
+    "capSysAdminEffective": true,
+    "maxBytes": 16777216,
+    "capacityBytes": 16777216,
+    "rootWriteEROFS": true,
+    "uid1500WriteEROFS": true,
+    "normalUnmountVerified": true
+  },
+  "artifacts": {
+    "node": {
+      "path": "/usr/local/bin/node",
+      "bytes": 124902584,
+      "sha256": "94efd062ed066c1a0b332e18249859c905e920eeada5df55d24c99b919629a90"
+    },
+    "native": {
+      "path": "/opt/rudder/dist/native/rudder-native",
+      "bytes": 28079080,
+      "sha256": "6a3fe58f4c9ace94457dbece27fd8e0dfd11594bde5c0e5be08c56f44c8ba637"
+    },
+    "buddy": {
+      "path": "/opt/rudder/dist/native/rudder-jj",
+      "bytes": 30907552,
+      "sha256": "46abf554e120f6a703f227be245a0faa5f00afaf740832d270e2c0db9a2efd14"
+    },
+    "cli": {
+      "path": "/opt/rudder/dist/index.js",
+      "bytes": 2940,
+      "sha256": "bef76b6a2e5b19e840998d50b4f88688ade163d0e5263c69f2a8bcbcede6e96d"
+    },
+    "package": {
+      "path": "/opt/rudder/package.json",
+      "bytes": 2889,
+      "sha256": "495ca3aa9253a5baf8b782ceb8ed1ec596e4f197379e4a244f7dc9b704b84043"
+    }
+  },
+  "node": {
+    "version": "v22.23.4",
+    "resolvedPath": "/usr/local/bin/node",
+    "sha256": "94efd062ed066c1a0b332e18249859c905e920eeada5df55d24c99b919629a90"
+  },
+  "secretChecks": 2,
+  "reconciliationRequired": false,
+  "cleanupRequired": false,
+  "elapsedMs": 54704,
+  "withinLifetimeBound": true,
+  "utc": "2026-10-31T22:43:34.063Z"
+}

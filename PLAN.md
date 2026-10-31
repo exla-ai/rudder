@@ -1102,9 +1102,15 @@ Make efficiency part of the engine and adapter contract:
 - Wait on jobs and releases through bounded asynchronous subscriptions. Return
   one settled result or a named timeout instead of requiring repeated polling.
   Keep the App loop responsive and retain actual worker admission until exit.
+  Until that exists, every agent prompt carries one wait-and-read rule (native
+  `wait_and_read_rule!`, TS `WAIT_AND_READ_RULE`, parity tested): one long
+  blocking wait instead of short polls or clock checks, and targeted reads
+  instead of whole files or whole-tree diffs.
 - Use affected checks between milestones and a shared compiler/action cache.
   Avoid competing Cargo writers and duplicated complete build directories.
-  Release checks still cover the supported platform matrix.
+  Release checks still cover the supported platform matrix. A release first
+  runs that matrix on a `release-check/X.Y.Z` branch, and only a green run is
+  tagged.
 - Record per-step token usage, context size, model/tool latency, output size,
   effort, repeated failures and coordination/wait share. Read only supported
   transcript fields; redact before storage and keep raw transcripts private.
@@ -1120,6 +1126,7 @@ Make efficiency part of the engine and adapter contract:
 
 E14 compares accepted changes, failures, review outcomes, token cost, wall clock,
 context and re-read rates on a fixed task set. Status-only verification and the
-launch policy shipped in alpha.17; E14 measures the launch values and can
-revert them. Then add engine telemetry, adaptive effort and trace-derived
-memory.
+launch policy shipped in alpha.17; the wait-and-read prompt rule and the
+pre-tag release check ship in alpha.18. E14 measures the launch values and the
+rule and can revert them. Then add engine telemetry, adaptive effort and
+trace-derived memory.

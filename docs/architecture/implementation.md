@@ -75,6 +75,18 @@ compiler/behavior checks. Debug walls75.502s/71.689s expose setup/verification
 costs; this is neither a full-app nor production-speed result. Runtime5 is still refused; do not
 count these interfaces as default migration or complete v4 delivery.
 
+## Release gate and wait rule, alpha.18
+
+Alpha.12 through alpha.17 built their native binaries but failed the macOS
+release tests, so npm `next` stayed at alpha.7. Alpha.17 failed only because
+macOS adds `__CF_USER_TEXT_ENCODING` to every process environment; the build
+client test now ignores that key on macOS. The Release workflow also runs on
+`release-check/**` branches with publication skipped, and a version is tagged
+only after that run passes. Alpha.18 adds one wait-and-read rule to every agent
+prompt (PLAN.md section 20) and fixes Codex session pinning: a `session_meta`
+line is about 22 KB because it carries the base instructions, and the old 8 KB
+head read could not parse it, so current Codex runs did not record a session id.
+
 ## Current implementation track
 
 Base: `91579cf631b1d9d78afbbd786a6dc1f8120cc1ca` on `origin/main` at start.

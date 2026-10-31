@@ -13,6 +13,18 @@ macro_rules! parallel_work_rule {
 #[cfg(test)]
 pub(crate) const PARALLEL_WORK_RULE: &str = parallel_work_rule!();
 
+/// Waiting and reading cost context, not tool time (PLAN.md section 20): the
+/// measured v4 session had 866 empty polls, 523 clock checks and `sed -n`
+/// slabs worth about 15% of all input tokens. Codex accepts one `write_stdin`
+/// wait of up to `background_terminal_max_timeout` (300000 ms by default).
+macro_rules! wait_and_read_rule {
+    () => {
+        "- Wait for long builds, tests, CI runs and deploys in one long blocking call (Codex: one `write_stdin` wait of up to 300000 ms), not repeated short polls, sleeps or clock checks. Read targeted line ranges, symbols and `--stat` or path-scoped diffs, not whole files or whole-tree diffs."
+    };
+}
+#[cfg(test)]
+pub(crate) const WAIT_AND_READ_RULE: &str = wait_and_read_rule!();
+
 /// Short planner/orchestrator version: shape the DAG for parallelism.
 pub(crate) const PARALLEL_PLAN_RULE: &str = "Favor independent nodes joined by soft edges so workers run in parallel; add a hard edge only for a real code dependency, never as a default chain.";
 
@@ -21,6 +33,8 @@ pub(crate) fn execution_prompt(task: &str) -> String {
     const CONTEXT: &str = concat!(
         "Rudder-specific context injected by Rudder:\n- You are an isolated worker in a jj (Jujutsu) workspace. Edit and verify your assigned task; use `jj status`/`jj diff`. Rudder handles commits and integration, so do not create commits, branches or merges, or push/deploy outside your assignment.\n- Follow applicable repo rules once if not already loaded. Check RUDDER.md for overlapping work and relevant decisions before integration. Read linked docs or RUDDER_SHARED.md only when needed. Never edit generated context.\n",
         parallel_work_rule!(),
+        "\n",
+        wait_and_read_rule!(),
         "\n- Run relevant checks. Before finishing, file `rudder done` JSON with summary, interfaces and followups (scope in/out); use `--node` with your Worker node value when supplied. Report unfinished work honestly."
     );
     // Keep the objective block as the very first lines, but do NOT launch with a
@@ -46,6 +60,8 @@ pub(crate) fn main_task_prompt(task: &str) -> String {
     const CONTEXT: &str = concat!(
         "Rudder-specific context injected by Rudder:\n- You are the single end-to-end owner in the user's main checkout. Preserve unrelated edits. Follow repo rules once if not already loaded; check RUDDER.md for overlapping owners. Read linked docs/shared setup only when relevant.\n- Carry the request through implementation, relevant checks and real verification. Use available tools when helpful; avoid routine approval loops and keep prior authorization.\n",
         parallel_work_rule!(),
+        "\n",
+        wait_and_read_rule!(),
         "\n- For explicit shipping, follow the repo release/install/deploy workflow and verify the actual target. Never force-push. Pushing alone is not deployment. Report artifact/revision, URL or app path, provider, verification time and checks; distinguish Mac install from public release.\n- Before finishing, run `rudder done` with summary, interfaces and followups. Requested delivery also needs kind/status/target and available url/appPath/revision/deploymentId/version/verifiedAt/checks. Only claim outcomes supported by evidence."
     );
     format!("{CONTEXT}\n\n{task}")

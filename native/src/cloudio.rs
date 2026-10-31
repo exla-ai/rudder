@@ -534,10 +534,14 @@ pub(crate) fn codex_session_id_for_run_in(
             if !needles.iter().any(|needle| head.contains(needle.as_str())) {
                 continue;
             }
-            let Some(line) = head.lines().next() else {
+            // Parse the whole first line, not the 8 KiB head: Codex 0.166 writes
+            // its base instructions into `session_meta`, so the line runs past
+            // 20 KiB and a truncated parse skipped every current session. Main
+            // agents then had no session to resume after a home restart.
+            let Some(line) = read_first_line(&path, CODEX_SESSION_META_MAX_BYTES) else {
                 continue;
             };
-            let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else {
                 continue;
             };
             if value.get("type").and_then(serde_json::Value::as_str) != Some("session_meta") {
@@ -586,6 +590,18 @@ fn codex_day_dirs(root: &Path, started_at_ms: u64) -> Vec<PathBuf> {
             dir.is_dir().then_some(dir)
         })
         .collect()
+}
+
+/// Upper bound for one `session_meta` line; real ones are tens of KiB.
+const CODEX_SESSION_META_MAX_BYTES: u64 = 4 * 1024 * 1024;
+
+fn read_first_line(path: &Path, max_bytes: u64) -> Option<String> {
+    use std::io::{BufRead, Read};
+    let file = fs::File::open(path).ok()?;
+    let mut reader = std::io::BufReader::new(file.take(max_bytes));
+    let mut line = Vec::new();
+    reader.read_until(b'\n', &mut line).ok()?;
+    Some(String::from_utf8_lossy(&line).into_owned())
 }
 
 fn read_file_head(path: &Path, max_bytes: usize) -> Option<String> {
@@ -900,8 +916,10 @@ pub(crate) fn codex_session_id_if_cwd_matches(path: &Path, target_cwd: &Path) ->
     if !head_mentions_cwd(&head, target_cwd) {
         return None;
     }
-    let line = head.lines().next()?;
-    let value = serde_json::from_str::<serde_json::Value>(line).ok()?;
+    // Only a rollout that passed the cheap reject pays for the whole first
+    // line; the 8 KiB head cuts that line short and never parses.
+    let line = read_first_line(path, CODEX_SESSION_META_MAX_BYTES)?;
+    let value = serde_json::from_str::<serde_json::Value>(&line).ok()?;
     if value.get("type").and_then(serde_json::Value::as_str) != Some("session_meta") {
         return None;
     }

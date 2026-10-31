@@ -97,6 +97,11 @@ export async function createSpec(run: RunRecord): Promise<SpecContract> {
 export const PARALLEL_WORK_RULE =
   "Batch independent reads and commands. Use concurrent subagents for substantial independent work when helpful; integrate and verify their results. Never let two subagents edit the same file.";
 
+// Waiting and reading guidance. Mirrors the Rust `wait_and_read_rule!` in
+// native/src/tasks.rs; keep the text in parity (PLAN.md section 20).
+export const WAIT_AND_READ_RULE =
+  "Wait for long builds, tests, CI runs and deploys in one long blocking call (Codex: one `write_stdin` wait of up to 300000 ms), not repeated short polls, sleeps or clock checks. Read targeted line ranges, symbols and `--stat` or path-scoped diffs, not whole files or whole-tree diffs.";
+
 export function renderContract(spec: SpecContract): string {
   const instructions = spec.instructionsFiles
     .map((file) => file.path)
@@ -118,6 +123,7 @@ export function renderContract(spec: SpecContract): string {
     "- Follow applicable repo rules once if not already loaded; read additional references only when relevant.",
     "- Implement, run relevant checks and verify the requested outcome. Preserve prior authorization; report unfinished work honestly.",
     `- ${PARALLEL_WORK_RULE}`,
+    `- ${WAIT_AND_READ_RULE}`,
     ...PROPAGATION_RULES.map((rule) => `- ${rule}`),
     "",
     instructions ? `Available repository context: ${instructions}. File contents are not duplicated here.` : "",

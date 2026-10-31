@@ -1212,6 +1212,7 @@ fn every_agent_prompt_asks_for_parallel_work() {
     // Execute workers and the main owner carry the full rule in their context block.
     for prompt in [execution_prompt("fix the bug"), main_task_prompt("fix the bug")] {
         assert!(prompt.contains(PARALLEL_WORK_RULE), "{prompt}");
+        assert!(prompt.contains(WAIT_AND_READ_RULE), "{prompt}");
     }
     assert!(PARALLEL_WORK_RULE.contains("concurrent subagents"));
     assert!(PARALLEL_WORK_RULE.contains("Never let two subagents edit the same file"));
@@ -1923,6 +1924,36 @@ fn a_codex_session_is_matched_by_start_time_not_by_being_newest() {
         found.as_deref(),
         Some("019fabfa-0000-0000-0000-000000000001"),
         "the session that started right after the spawn is the run's"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn a_codex_session_meta_line_longer_than_the_head_still_maps() {
+    // Codex 0.166 puts its base instructions in `session_meta`, so the first
+    // line is over 20 KiB. Parsing only the 8 KiB head left every main Codex
+    // run without a session, and a home restart could not resume it.
+    let root = std::env::temp_dir().join(format!(
+        "rudder-codex-longmeta-{}-{}",
+        std::process::id(),
+        now_stamp()
+    ));
+    let day = root.join("2026").join("10").join("30");
+    std::fs::create_dir_all(&day).expect("create day dir");
+    let id = "01a18b9c-0000-0000-0000-000000000001";
+    // Codex's own field order (json! would sort keys): cwd early, then the
+    // instructions that make the line long.
+    let meta = format!(
+        r#"{{"timestamp":"2026-10-30T07:01:18.639Z","type":"session_meta","payload":{{"id":"{id}","timestamp":"2026-10-30T07:01:18.151Z","cwd":"/repo","base_instructions":{{"text":"{}"}}}}}}"#,
+        "x".repeat(22_000)
+    );
+    std::fs::write(day.join(format!("rollout-{id}.jsonl")), format!("{meta}\n{{}}\n"))
+        .expect("write rollout");
+    let started_at_ms = parse_iso8601_millis("2026-10-30T07:01:15.877Z").expect("parsed") as u64;
+
+    assert_eq!(
+        codex_session_id_for_run_in(&root, std::path::Path::new("/repo"), started_at_ms).as_deref(),
+        Some(id)
     );
     let _ = std::fs::remove_dir_all(&root);
 }
@@ -5737,11 +5768,13 @@ fn finds_latest_codex_session_id_for_matching_cwd() {
     // timestamp setters.
     std::thread::sleep(Duration::from_millis(5));
     let newest = shard.join("newest.jsonl");
+    // A real Codex 0.166 header: base instructions push the line past 20 KiB.
     fs::write(
         &newest,
         format!(
-            "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"newest-session\",\"cwd\":\"{}\"}}}}\n",
-            session_cwd.display()
+            "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"newest-session\",\"cwd\":\"{}\",\"base_instructions\":{{\"text\":\"{}\"}}}}}}\n",
+            session_cwd.display(),
+            "x".repeat(22_000)
         ),
     )
     .expect("write newest session");

@@ -160,10 +160,10 @@ Next:
 |---|---|---|
 | `medium` effort for bounded sub-agent tasks; a short task brief after compaction | Cheaper helpers; less re-orientation | Sub-agent tokens per edited line; re-read rate |
 | Test/build wrappers that print status plus failures | Smaller carried outputs | Carried tokens |
-| One blocking `rudder wait` for jobs, CI and deploys | Fewer polling requests | Wait-only requests, clock checks |
+| One blocking `rudder wait` for jobs, CI and deploys (alpha.18 ships only the prompt rule: one long wait, targeted reads) | Fewer polling requests | Wait-only requests, clock checks |
 | Trim the injected prompt and always-listed skills | Lower floor on every request | Floor tokens |
 | Sub-agents start without parent history, with a scoped brief and a token budget | Cheaper helpers, fewer follow-ups | Sub-agent tokens per edited line; coordination requests |
-| Full platform checks before tagging, behind one ship command | Fewer failed releases | Release attempts per published version |
+| Full platform checks before tagging, behind one ship command (alpha.18 adds the `release-check/**` run; the one command is next) | Fewer failed releases | Release attempts per published version |
 | A Cargo target directory per agent, or a shared compiler cache | No waiting on another agent's build lock | `Blocking waiting for file lock` count; `cargo check` latency |
 
 ## Limits

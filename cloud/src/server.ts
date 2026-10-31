@@ -35,6 +35,7 @@ import { annotateAgent } from "./agent-status.js";
 import { FabricVerificationCache, S3FabricObjectStorage } from "./fabric-cas.js";
 import { createFabricHttpHandler } from "./fabric-http.js";
 import { cleanupFabricUploadSpools } from "./fabric-stream.js";
+import { HomeControlSessions } from "./home-control-sessions.js";
 
 type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
 
@@ -5095,15 +5096,12 @@ type HomeState = {
    * socket is the open control socket (homeStateLive). */
   via?: WebSocket;
 };
-type PendingRpc = {
-  resolve: (value: Json) => void;
-  reject: (error: Error) => void;
-  timer: NodeJS.Timeout;
-};
-
 const homeControls = new Map<string, WebSocket>();
 const homeStates = new Map<string, HomeState>();
-const homeRpcs = new Map<string, PendingRpc>();
+const homeRpcSessions = new HomeControlSessions<WebSocket, Json>({
+  isOpen: (socket) => isOpen(socket),
+  send: (socket, data) => sendSocket(socket, data),
+});
 const homeStarts = new Map<string, Promise<Workspace>>();
 
 const listHomeRepoRows = database.prepare(
@@ -5334,6 +5332,7 @@ async function moveHomeRegion(home: Workspace, move: HomeRegionMove): Promise<vo
 function closeHomeControl(homeId: string): void {
   const control = homeControls.get(homeId);
   if (control) {
+    homeRpcSessions.closeCurrent(homeId, control);
     homeControls.delete(homeId);
     try { control.close(); } catch { /* ignore */ }
   }
@@ -5757,14 +5756,18 @@ function handleHomeControlUpgrade(req: IncomingMessage, socket: Duplex, head: Bu
 
 function attachHomeControl(homeId: string, ws: WebSocket): void {
   const previous = homeControls.get(homeId);
+  // Bind the already-authenticated home to this actual socket generation.
+  // Reject only the old session's pending effects before closing its socket.
+  const session = homeRpcSessions.attach(homeId, ws);
+  homeControls.set(homeId, ws);
   if (previous && previous !== ws) {
     try { previous.close(4000, "replaced"); } catch { /* ignore */ }
   }
-  homeControls.set(homeId, ws);
   enableSocketLiveness(ws);
   pushHomeRepos(homeId);
   flushPendingHomeDeletes(homeId);
   ws.on("message", (data) => {
+    if (!homeRpcSessions.isCurrent(session)) return;
     let message: Json;
     try {
       message = JSON.parse(Buffer.isBuffer(data) ? data.toString("utf8") : String(data)) as Json;
@@ -5817,21 +5820,12 @@ function attachHomeControl(homeId: string, ws: WebSocket): void {
     }
     if (type === "rpc-result") {
       const id = stringField(message, "id") ?? "";
-      const pending = homeRpcs.get(id);
-      if (!pending) {
-        return;
-      }
-      homeRpcs.delete(id);
-      clearTimeout(pending.timer);
-      const error = stringField(message, "error");
-      if (error) {
-        pending.reject(Object.assign(new Error(error), { status: 400 }));
-      } else {
-        pending.resolve((message as JsonRecord).result ?? null);
-      }
+      homeRpcSessions.reply(session, id, (message as JsonRecord).result ?? null,
+        stringField(message, "error"));
     }
   });
   ws.on("close", () => {
+    homeRpcSessions.close(session);
     if (homeControls.get(homeId) === ws) {
       homeControls.delete(homeId);
     }
@@ -5844,15 +5838,7 @@ async function homeRpc(homeId: string, method: string, params: JsonRecord, timeo
   if (!isOpen(control)) {
     throw Object.assign(new Error("the cloud machine is not connected yet; it may still be starting"), { status: 503 });
   }
-  const id = randomUUID();
-  return await new Promise<Json>((resolve, reject) => {
-    const timer = setTimeout(() => {
-      homeRpcs.delete(id);
-      reject(Object.assign(new Error(`home machine did not answer ${method} in time`), { status: 504 }));
-    }, timeoutMs);
-    homeRpcs.set(id, { resolve, reject, timer });
-    sendSocket(control, JSON.stringify({ type: "rpc", id, method, params }));
-  });
+  return await homeRpcSessions.request(homeId, control, method, params, timeoutMs);
 }
 
 // ---------------------------------------------------------------------------

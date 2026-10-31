@@ -1,0 +1,106 @@
+{
+  "formatVersion": 1,
+  "version": "4.0.0-alpha.23",
+  "sourceKind": "uncommitted working-tree candidate before version bump",
+  "baseRevision": "d660d32bc308e65f03fc9f1ad63c69d4e7a79067",
+  "checks": {
+    "rust": {
+      "passed": 1841,
+      "failed": 0,
+      "ignored": 30,
+      "suites": 60,
+      "completedAt": "2026-10-31T21:12:03.572290+00:00",
+      "receiptPath": "/workspace/home/.cache/rudder-release-build/alpha22-checks/next-full-rust36.json",
+      "receiptSha256": "6cecdb5d1bd11d50b260cf584fb3f7b1e199677220dcdb2cf4195bb360a0e4bf",
+      "sourceKind": "working-tree next batch on d660d32, before version bump"
+    },
+    "cloudBuild": {
+      "status": "passed",
+      "completedAt": "2026-10-31T21:12:49.490093+00:00",
+      "command": [
+        "python3",
+        "/workspace/home/.cache/rudder-release-build/alpha23-checks/without-rudder-env.py",
+        "npm",
+        "--prefix",
+        "cloud",
+        "run",
+        "build"
+      ],
+      "receiptSha256": "d302fcf3baa6ce1a2729c4e3189d417f87b55b2af9d9e889177d7d26d5ada4e9"
+    },
+    "javascript": {
+      "status": "passed",
+      "completedAt": "2026-10-31T21:15:40.696379+00:00",
+      "command": [
+        "python3",
+        "/workspace/home/.cache/rudder-release-build/alpha23-checks/without-rudder-env.py",
+        "npm",
+        "test"
+      ],
+      "receiptSha256": "fb30c37261c431badb8da1cfa7d08eccd4dc98002cf3ee96acae8e2e2d0c4062",
+      "tests": 821,
+      "pass": 812,
+      "fail": 0,
+      "skipped": 9
+    },
+    "terminal": {
+      "status": "passed",
+      "completedAt": "2026-10-31T21:17:58.628699+00:00",
+      "command": [
+        "python3",
+        "/workspace/home/.cache/rudder-release-build/alpha23-checks/without-rudder-env.py",
+        "env",
+        "RUDDER_NATIVE_BIN=/workspace/code/exla-ai-rudder/target/debug/rudder-native",
+        "npm",
+        "run",
+        "test:tui"
+      ],
+      "receiptSha256": "2456a6023ad0cc1588bb2860c48669871c928106c48f8cd31f8970d40b757d9d",
+      "tests": 59,
+      "pass": 59,
+      "fail": 0,
+      "skipped": 0
+    }
+  },
+  "components": {
+    "homeControlSessions": {
+      "exactHomeSocketGeneration": true,
+      "originalPreDispatchDeadline": true,
+      "mutationReplay": false,
+      "nativeAttestation": false
+    },
+    "kernelInventory": {
+      "actualCurrentHostNetCustody": true,
+      "completeProtectedEndpointAuthority": false,
+      "productionInventoryConstructor": false
+    },
+    "machineLease": {
+      "originalFiniteSessionCap": true,
+      "shortProviderLeaseRenewals": true,
+      "lateReleaseAckCleanupFactOnly": true,
+      "serverTransportWired": false,
+      "productionClockWired": false,
+      "egressPermission": false
+    },
+    "releaseReuse": {
+      "exactCommitRequired": true,
+      "strictProducerArchiveDigest": true,
+      "fullPipelineFallback": true,
+      "actualActionsExecutionVerified": false
+    }
+  },
+  "physicalQualification": {
+    "newProof": false,
+    "scope": "local kernel descriptor tests and fake Cloud transports; no real provider lease/model calls or native bootstrap"
+  },
+  "delivery": {
+    "status": "not_started"
+  },
+  "fullV4Complete": false,
+  "remainingGates": [
+    "real connected Codex/Claude execution with authenticated native/Fly/bootstrap and routing custody",
+    "current source selection, accepted jj history and normal engine startup/recovery",
+    "distributed source/dependency/action caches on normal launch path and measured cold/warm speed",
+    "fleet ownership, migration and complete macOS/Cloud end-to-end qualification"
+  ]
+}

@@ -1511,19 +1511,36 @@ committed git tag. The workflow refuses to publish if the tag does not match
 `package.json` `version`, so the repo and the registry can never drift apart (the
 failure mode that left `1.0.70`–`1.0.73` on npm but never in git).
 
-Cut a release from a clean, pushed `main`:
+Cut a release from clean `main` after the feature changes are committed:
 
 ```bash
-git push origin HEAD:release-check/X.Y.Z # full Release matrix, tag and publish steps skipped
-npm version patch          # after release-check is green: bumps package.json + package-lock, commits, tags vX.Y.Z
+npm version X.Y.Z          # create the FINAL version commit and local vX.Y.Z tag; keep the tag unpushed
+# For a prerelease, use the explicit target, such as npm version 4.0.0-alpha.N.
+git push origin HEAD:release-check/X.Y.Z # qualify the exact versioned SHA; no publish
+# After the complete Release qualification is green, push the SAME main/tag SHA:
 git push origin main vX.Y.Z # push main and only the newly created release tag
 ```
 
-The `release-check/**` branch runs every Release job on the candidate commit
-(three native builds, macOS JS, native, jj and TUI tests) and skips the tag
-check and both npm publishes. Before 4.0.0-alpha.18 the only way to run the
-macOS tests was to tag, so several alphas between alpha.9 and alpha.17 were
-spent on platform-only failures.
+Do not amend, add another commit, force-push or retag between qualification and
+publication. A changed SHA requires fresh complete qualification. Existing
+published versions/tags remain immutable.
+
+The `release-check/<package-version>` branch always runs all three native builds
+and macOS JS, native, jj and TUI tests, with both npm publishes disabled. A later
+tag run may reuse only the single completed successful same-repository Release
+push run for the exact versioned SHA, with complete job/step and immutable
+artifact evidence. It verifies source revisions and all native hashes again and
+records the originating run/artifact identities. Missing, expired, ambiguous or
+unavailable reuse evidence runs the full pipeline. Reuse never substitutes a
+branch name or a skipped/failed test job for qualification.
+
+Before 4.0.0-alpha.18 the only way to run the macOS tests was to tag, so several
+alphas between alpha.9 and alpha.17 were spent on platform-only failures.
+
+A failed or lost npm response is not proof that publication did not happen.
+Reconcile both package versions, provenance and dist-tags against the registry
+before retrying; do not move an existing tag or publish a replacement version
+under the same version number.
 
 Prerelease versions (for example `npm version 4.0.0-alpha.1`) publish to the
 `next` dist-tag; stable versions publish to `latest`. Both package names use the

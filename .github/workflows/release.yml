@@ -4,10 +4,10 @@ name: Release
 # published version is always pinned to a committed git tag. No more repo vs
 # registry drift.
 #
-# Release flow (from a clean, pushed main):
-#   git push origin HEAD:release-check/<version>  # full platform matrix, no publish
-#   npm version patch        # bumps package.json + lock, commits, tags vX.Y.Z
-#   git push origin main vX.Y.Z  # explicitly push main and only the newly created tag
+# Release flow (from clean main with feature changes committed):
+#   npm version <version>    # creates final local version commit/tag; do not push tag yet
+#   git push origin HEAD:release-check/<version>  # full matrix/tests at FINAL SHA, no publish
+#   git push origin main vX.Y.Z  # after green, push the SAME SHA and explicit local tag
 #
 # One-time setup: add an npm "Automation" access token as the repo secret
 # NPM_TOKEN (Settings -> Secrets and variables -> Actions -> New secret).
@@ -24,7 +24,101 @@ on:
       - "release-check/**"
 
 jobs:
+  reuse:
+    name: Release reuse probe
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      eligible: ${{ steps.ready.outputs.eligible }}
+      native_ids: ${{ steps.record.outputs.native_ids }}
+      proof_id: ${{ steps.proof.outputs.artifact-id }}
+      proof_digest: ${{ steps.proof.outputs.artifact-digest }}
+      proof_sha256: ${{ steps.record.outputs.proof_sha256 }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      # These are optional discovery/staging steps, never qualification gates.
+      # Positive eligibility is emitted only after ALL evidence/copies are ready.
+      - name: Select trusted exact-SHA qualification
+        id: select
+        continue-on-error: true
+        run: node scripts/release-reuse.mjs select
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - name: Download exact originating native artifacts
+        id: download
+        if: steps.select.outcome == 'success' && steps.select.outputs.found == 'true'
+        continue-on-error: true
+        run: node scripts/release-reuse.mjs fetch-origin
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - name: Recheck origin and verify every native hash
+        id: verify
+        if: steps.download.outcome == 'success'
+        continue-on-error: true
+        run: node scripts/release-reuse.mjs verify-origin
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - name: Stage reused darwin-arm64
+        id: arm
+        if: steps.verify.outcome == 'success'
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: reuse-rudder-native-darwin-arm64
+          path: prebuilt-native/rudder-native-darwin-arm64/
+          if-no-files-found: error
+      - name: Stage reused darwin-x64
+        id: intel
+        if: steps.verify.outcome == 'success'
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: reuse-rudder-native-darwin-x64
+          path: prebuilt-native/rudder-native-darwin-x64/
+          if-no-files-found: error
+      - name: Stage reused linux-x64
+        id: linux
+        if: steps.verify.outcome == 'success'
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: reuse-rudder-native-linux-x64
+          path: prebuilt-native/rudder-native-linux-x64/
+          if-no-files-found: error
+      - name: Record originating and current copy identities
+        id: record
+        if: steps.arm.outcome == 'success' && steps.intel.outcome == 'success' && steps.linux.outcome == 'success'
+        continue-on-error: true
+        run: node scripts/release-reuse.mjs record-reuse
+        env:
+          REUSE_UPLOADS: >-
+            [{"name":"reuse-rudder-native-darwin-arm64","id":"${{ steps.arm.outputs.artifact-id }}","digest":"${{ steps.arm.outputs.artifact-digest }}"},
+            {"name":"reuse-rudder-native-darwin-x64","id":"${{ steps.intel.outputs.artifact-id }}","digest":"${{ steps.intel.outputs.artifact-digest }}"},
+            {"name":"reuse-rudder-native-linux-x64","id":"${{ steps.linux.outputs.artifact-id }}","digest":"${{ steps.linux.outputs.artifact-digest }}"}]
+      - name: Upload exact reuse proof
+        id: proof
+        if: steps.record.outcome == 'success'
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-reuse-proof
+          path: release-evidence/reuse.json
+          if-no-files-found: error
+      - name: Enable reuse only after every copy and proof succeeded
+        id: ready
+        if: steps.record.outcome == 'success' && steps.proof.outcome == 'success' && steps.proof.outputs.artifact-id != '' && steps.record.outputs.native_ids != '' && steps.record.outputs.proof_sha256 != ''
+        run: echo 'eligible=true' >> "$GITHUB_OUTPUT"
+
   native-artifacts:
+    needs: reuse
+    # Branch candidates ALWAYS qualify in full. Any failed/unavailable probe also does.
+    if: ${{ always() && !cancelled() && (github.ref_type != 'tag' || needs.reuse.result != 'success' || needs.reuse.outputs.eligible != 'true') }}
     name: Native ${{ matrix.key }}
     runs-on: ${{ matrix.runner }}
     strategy:
@@ -63,33 +157,191 @@ jobs:
           chmod 755 "native-dist/${{ matrix.key }}/rudder-jj"
           node scripts/native-artifacts.mjs create --directory "native-dist/${{ matrix.key }}" --platform "${{ matrix.key }}" --revision "$GITHUB_SHA"
 
-      - uses: actions/upload-artifact@v4
+      - name: Upload native artifact
+        id: upload
+        uses: actions/upload-artifact@v4
         with:
           name: rudder-native-${{ matrix.key }}
           path: native-dist/${{ matrix.key }}/
 
-  publish:
+      - name: Record native upload identity
+        run: node scripts/release-reuse.mjs upload-identity
+        env:
+          NATIVE_PLATFORM: ${{ matrix.key }}
+          NATIVE_ARTIFACT_ID: ${{ steps.upload.outputs.artifact-id }}
+          NATIVE_ARTIFACT_DIGEST: ${{ steps.upload.outputs.artifact-digest }}
+      - name: Upload native identity
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-upload-${{ matrix.key }}
+          path: native-upload-meta/${{ matrix.key }}/upload.json
+          if-no-files-found: error
+
+  qualification:
+    name: Release qualification
     needs: native-artifacts
+    if: ${{ always() && !cancelled() && needs.native-artifacts.result == 'success' }}
     runs-on: macos-15
     permissions:
       contents: read
-      id-token: write # required for npm provenance
+      actions: read
+    outputs:
+      native_ids: ${{ steps.certify.outputs.native_ids }}
+      proof_id: ${{ steps.proof.outputs.artifact-id }}
+      proof_digest: ${{ steps.proof.outputs.artifact-digest }}
+      proof_sha256: ${{ steps.certify.outputs.proof_sha256 }}
     steps:
       - uses: actions/checkout@v4
-
-      - uses: actions/download-artifact@v4
-        with:
-          pattern: rudder-native-*
-          path: prebuilt-native
 
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
           registry-url: "https://registry.npmjs.org"
 
+      # Authenticate the producer sidecar ZIPs against trusted run metadata,
+      # then hash every original native ZIP BEFORE extracting any entry.
+      - name: Authenticate original native archives before extraction
+        id: native_archives
+        run: node scripts/release-reuse.mjs fetch-native
+        env:
+          GH_TOKEN: ${{ github.token }}
+
       - name: Verify complete native artifacts and source revision
+        id: verify_native
         run: node scripts/native-artifacts.mjs verify --root prebuilt-native --revision "$GITHUB_SHA"
 
+      - name: Configure git (rebase-first test creates temp repos)
+        id: git_config
+        run: |
+          git config --global user.email "ci@rudder.local"
+          git config --global user.name "Rudder CI"
+          git config --global init.defaultBranch main
+
+      # The native and JS tests drive real jj repos. Rudder's own installer no
+      # longer puts jj on the system PATH (it keeps a private copy), so install it.
+      - name: Install jj
+        id: install_jj
+        run: brew install jj
+
+      - name: Install npm dependencies
+        id: install
+        run: npm ci
+
+      - name: Install + build cloud test fixtures
+        id: cloud
+        working-directory: cloud
+        run: |
+          npm ci
+          npm run build
+
+      # MCP/broker JS journeys export trusted fixtures from Rust test binaries.
+      # Compile outside their short per-fixture timeout on a fresh CI checkout.
+      - name: Compile engine and native test fixtures
+        id: fixtures
+        run: cargo test --workspace --locked --features rudder-vcs-bridge/cli --no-run
+
+      - name: Typecheck + JS tests
+        id: js
+        run: |
+          chmod +x prebuilt-native/rudder-native-darwin-arm64/rudder-native
+          chmod +x prebuilt-native/rudder-native-darwin-arm64/rudder-jj
+          prebuilt-native/rudder-native-darwin-arm64/rudder-jj --version
+          prebuilt-native/rudder-native-darwin-arm64/rudder-jj --help
+          npm test
+        env:
+          RUDDER_NATIVE_BIN: ${{ github.workspace }}/prebuilt-native/rudder-native-darwin-arm64/rudder-native
+
+      - name: Native tests
+        id: rust
+        run: cargo test --workspace --locked --features rudder-vcs-bridge/cli
+
+      - name: Managed jj provider tests
+        id: jj_provider
+        run: cargo test --workspace --locked --features rudder-vcs-bridge/cli --test guest_diagnostics --test identities_and_seed --test journal_integration --test projection --test publication --test rpc_view --test vfs_provider --test working_copy
+
+      # Screen-level e2e: the REAL prebuilt dashboard binary in a real PTY,
+      # driven by keystrokes via tui-integration-tests (which fetches its own
+      # sha256-pinned driver). Uses the darwin-arm64 artifact this job already
+      # downloaded; download-artifact does not preserve the execute bit.
+      - name: TUI end-to-end tests
+        id: tui
+        run: |
+          chmod +x prebuilt-native/rudder-native-darwin-arm64/rudder-native
+          node node_modules/tui-integration-tests/harness/fetch-driver.mjs
+          npm run test:tui:report
+        env:
+          RUDDER_NATIVE_BIN: ${{ github.workspace }}/prebuilt-native/rudder-native-darwin-arm64/rudder-native
+
+      # The report embeds the final screen of every session — on a red run it
+      # shows exactly what the dashboard displayed when the test gave up.
+      - name: Upload TUI report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tui-report
+          path: tui-report.html
+          if-no-files-found: ignore
+
+      - name: Record complete qualification
+        id: certify
+        run: node scripts/release-reuse.mjs certify
+        env:
+          QUALIFICATION_STEPS: ${{ toJSON(steps) }}
+          EXPECTED_NATIVE_ARCHIVES_SHA256: ${{ steps.native_archives.outputs.proof_sha256 }}
+      - name: Upload complete qualification
+        id: proof
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-qualification
+          path: release-evidence/qualification.json
+          if-no-files-found: error
+
+  publish:
+    name: Publish npm release
+    needs: [reuse, native-artifacts, qualification]
+    # No failed qualification job is skipped/bypassed. The alternative requires
+    # verified origin evidence AND both expensive current jobs actually skipped.
+    if: >-
+      ${{ always() && !cancelled() && github.ref_type == 'tag' &&
+        ((needs.reuse.result == 'success' && needs.reuse.outputs.eligible == 'true' &&
+          needs.native-artifacts.result == 'skipped' && needs.qualification.result == 'skipped') ||
+         (needs.native-artifacts.result == 'success' && needs.qualification.result == 'success')) }}
+    runs-on: macos-15
+    permissions:
+      contents: read
+      id-token: write # required for npm provenance
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          registry-url: "https://registry.npmjs.org"
+      - name: Download exact qualified native artifacts
+        uses: actions/download-artifact@v4
+        with:
+          artifact-ids: ${{ needs.reuse.outputs.eligible == 'true' && needs.reuse.result == 'success' && needs.reuse.outputs.native_ids || needs.qualification.outputs.native_ids }}
+          path: prebuilt-native
+      - name: Download exact qualification proof
+        uses: actions/download-artifact@v4
+        with:
+          artifact-ids: ${{ needs.reuse.outputs.eligible == 'true' && needs.reuse.result == 'success' && needs.reuse.outputs.proof_id || needs.qualification.outputs.proof_id }}
+          path: release-evidence
+          merge-multiple: true # ID downloads otherwise add an artifact-name directory, even for one ID.
+      - run: npm ci
+
+      - name: Independently verify qualified bytes and record provenance
+        run: node scripts/release-reuse.mjs publication
+        env:
+          REUSE_QUALIFICATION: ${{ needs.reuse.result == 'success' && needs.reuse.outputs.eligible == 'true' }}
+          EXPECTED_PROOF_SHA256: ${{ needs.reuse.outputs.eligible == 'true' && needs.reuse.result == 'success' && needs.reuse.outputs.proof_sha256 || needs.qualification.outputs.proof_sha256 }}
+          PROOF_ARTIFACT_ID: ${{ needs.reuse.outputs.eligible == 'true' && needs.reuse.result == 'success' && needs.reuse.outputs.proof_id || needs.qualification.outputs.proof_id }}
+          PROOF_ARTIFACT_DIGEST: ${{ needs.reuse.outputs.eligible == 'true' && needs.reuse.result == 'success' && needs.reuse.outputs.proof_digest || needs.qualification.outputs.proof_digest }}
+      - name: Upload publication provenance
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-publication-provenance
+          path: release-evidence/publication-provenance.json
+          if-no-files-found: error
       - name: Verify tag matches package.json version
         if: github.ref_type == 'tag'
         run: |
@@ -112,68 +364,6 @@ jobs:
           fs.appendFileSync(process.env.GITHUB_OUTPUT, `tag=${tag}\n`);
           console.log(`Publishing ${version} to ${tag}`);
           NODE
-
-      - name: Configure git (rebase-first test creates temp repos)
-        run: |
-          git config --global user.email "ci@rudder.local"
-          git config --global user.name "Rudder CI"
-          git config --global init.defaultBranch main
-
-      # The native and JS tests drive real jj repos. Rudder's own installer no
-      # longer puts jj on the system PATH (it keeps a private copy), so install it.
-      - name: Install jj
-        run: brew install jj
-
-      - run: npm ci
-
-      - name: Install + build cloud test fixtures
-        working-directory: cloud
-        run: |
-          npm ci
-          npm run build
-
-      # MCP/broker JS journeys export trusted fixtures from Rust test binaries.
-      # Compile outside their short per-fixture timeout on a fresh CI checkout.
-      - name: Compile engine and native test fixtures
-        run: cargo test --workspace --locked --features rudder-vcs-bridge/cli --no-run
-
-      - name: Typecheck + JS tests
-        run: |
-          chmod +x prebuilt-native/rudder-native-darwin-arm64/rudder-native
-          chmod +x prebuilt-native/rudder-native-darwin-arm64/rudder-jj
-          prebuilt-native/rudder-native-darwin-arm64/rudder-jj --version
-          prebuilt-native/rudder-native-darwin-arm64/rudder-jj --help
-          npm test
-        env:
-          RUDDER_NATIVE_BIN: ${{ github.workspace }}/prebuilt-native/rudder-native-darwin-arm64/rudder-native
-
-      - name: Native tests
-        run: cargo test --workspace --locked --features rudder-vcs-bridge/cli
-
-      - name: Managed jj provider tests
-        run: cargo test --workspace --locked --features rudder-vcs-bridge/cli --test guest_diagnostics --test identities_and_seed --test journal_integration --test projection --test publication --test rpc_view --test vfs_provider --test working_copy
-
-      # Screen-level e2e: the REAL prebuilt dashboard binary in a real PTY,
-      # driven by keystrokes via tui-integration-tests (which fetches its own
-      # sha256-pinned driver). Uses the darwin-arm64 artifact this job already
-      # downloaded; download-artifact does not preserve the execute bit.
-      - name: TUI end-to-end tests
-        run: |
-          chmod +x prebuilt-native/rudder-native-darwin-arm64/rudder-native
-          node node_modules/tui-integration-tests/harness/fetch-driver.mjs
-          npm run test:tui:report
-        env:
-          RUDDER_NATIVE_BIN: ${{ github.workspace }}/prebuilt-native/rudder-native-darwin-arm64/rudder-native
-
-      # The report embeds the final screen of every session — on a red run it
-      # shows exactly what the dashboard displayed when the test gave up.
-      - name: Upload TUI report
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: tui-report
-          path: tui-report.html
-          if-no-files-found: ignore
 
       # Both publishes run prepack's TS/board/package work. Native Cargo is
       # bypassed only after all three source-bound binary pairs verify again;

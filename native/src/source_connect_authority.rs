@@ -7,6 +7,9 @@
 //! while its original Engine owner/run is current, then join off-App before
 //! releasing Engine ownership. Capability retirement alone proves no stopped worker.
 //! Current checks are observations, not atomic synchronization with later revocation.
+#[path = "kernel_address_inventory.rs"]
+pub(crate) mod kernel_inventory;
+
 use crate::engine_host::EngineSourceLease;
 use rudder_engine::{
     execution::network::{connected::{ConnectAuthority, ConnectBinding, ConnectDeadline,

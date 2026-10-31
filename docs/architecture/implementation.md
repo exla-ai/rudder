@@ -332,6 +332,47 @@ smoke checks and all three platform manifests passed at
 the name. Initial registry lookups lagged successful publication; no republish
 was attempted. The full v4 rewrite remains incomplete.
 
+## Cloud session ownership and exact-source reuse, alpha.23 candidate
+
+Home-control RPCs now retain their authenticated home and exact live socket
+session. A stale or foreign socket cannot acknowledge another session's request
+or update its state. Replacement and close fail only their own pending calls
+with an unknown-effect result. Serialization finishes before the final original
+deadline/current-owner check; expired requests are not dispatched. The existing
+worker7/BYOC wire and bearer authentication remain unchanged, with no automatic
+mutation replay or new native/Fly attestation claim.
+
+The Machine-lease module retains the trusted transport, private acquisition nonce
+and original session deadline. Short provider leases can renew within that fixed
+cap; older observations keep their own expiry. Lost acknowledgments stay
+uncertain. A direct late release acknowledgment records cleanup without restoring
+custody. This module is not wired to a production transport/clock and grants no
+egress permission. The kernel inventory similarly retains actual current process,
+boot, NET and address-dump custody without claiming Fly outer-VM, public/NAT or
+routing authority. These components still need a real combined bootstrap owner.
+
+The release workflow qualifies the final local version commit before tag push.
+A tag may reuse only a complete successful qualification at that identical SHA.
+Producer archive digests, qualified native seals and source revisions are checked
+before certification and again at publication. Missing or uncertain eligibility
+runs the full pipeline. The older native/test origin remains explicit in artifact
+provenance. Local fixtures and review passed; actual Actions execution remains
+unverified until the candidate runs.
+
+The local combined gate passed 1,841 Rust tests, 812 JavaScript tests and all 59
+terminal tests, with zero failures. Cloud compilation passed; thirty Rust fixtures
+were ignored and nine existing JavaScript cases skipped. Earlier private review
+found and fixed concurrent kernel fencing, archive-substitution, dispatch-deadline
+and late-cleanup-ACK defects before integration. See
+[verification](verification-alpha23.json).
+
+The next product milestone is one actual Codex or Claude agent completing a task
+through v4, then two agents sharing caches, steering each other and safely
+integrating verified changes. Production bootstrap/routing custody, connected
+model profiles, accepted jj history/current source selection, fleet migration and
+measured normal-path distributed-cache performance remain required. This candidate
+does not switch normal agent startup to v4 or complete the rewrite.
+
 ## Current implementation track
 
 Base: `91579cf631b1d9d78afbbd786a6dc1f8120cc1ca` on `origin/main` at start.

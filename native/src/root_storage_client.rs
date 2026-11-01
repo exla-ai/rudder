@@ -2,11 +2,14 @@
 //! API. Keep actual transfer/client owners outside worker/result callbacks.
 #![cfg(target_os = "linux")]
 use anyhow::{ensure, Context, Result};
+use sha2::Digest;
 use crate::root_storage_service::{self as service, Answer, Endpoint, Envelope, Image, Process, Reply, Request,
     CHUNK, ENGINE_IMAGE, MAX_HELPERS_PER_SEED, MAX_OBJECT_BYTES, MAX_REFS, MAX_TRANSFER_BYTES, SERVICE_IMAGE};
 use rudder_engine::{execution::finalization_budget::FinalizationBudget,
     protocol::{ObjectKind, ObjectRef}, store::LocalStore};
-use rudder_vcs_bridge::seed::VerifiedMetadataTemplate;
+use rudder_vcs_bridge::seed::{VerifiedMetadataTemplate,LocalizedMetadataFork,NeverLinkedMetadataFork};
+use crate::root_storage_uses::{SeedUseLedger,SeedUseGuard,SeedUseKind,SeedActorsJoined,RetainedLocalizedFork,SeedTaskUseGate,SealedSeedTaskUse,RetainedUnusedFork};
+use std::sync::{Arc,Weak};
 use std::{collections::{BTreeMap, BTreeSet}, fs::{self, File, OpenOptions}, os::{fd::{AsRawFd, FromRawFd, OwnedFd}, unix::fs::{MetadataExt, OpenOptionsExt}},
     path::{Path, PathBuf}, sync::atomic::{AtomicBool, Ordering}, time::Duration};
 static INHERITED_BOOTSTRAP_TAKEN: AtomicBool = AtomicBool::new(false);
@@ -34,14 +37,14 @@ pub(crate) fn bounded_inventory(root: &ObjectRef, original: &FinalizationBudget,
 
 struct SourcePin {
     store: LocalStore, directory: File, identity: (u64, u64), seed: ObjectRef, pin: String,
-    attempted: bool, acquired: bool,
+    attempted: bool, acquired: bool, unpin_attempted:bool, removed:bool,
 }
 impl SourcePin {
     fn capture(store: LocalStore, seed: ObjectRef) -> Result<Self> {
         seed.validate()?; ensure!(seed.kind == ObjectKind::Directory && seed.size_bytes <= 256 * 1024, "storage client seed exceeds small profile");
         let directory = OpenOptions::new().read(true).custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC).open(store.root())?;
         let pin = Self { identity: service::id(&directory)?, directory, store, seed,
-            pin: format!("root-storage-client:{}", uuid::Uuid::new_v4()), attempted: false, acquired: false };
+            pin: format!("root-storage-client:{}", uuid::Uuid::new_v4()), attempted: false, acquired: false,unpin_attempted:false,removed:false };
         pin.current_directory()?; Ok(pin)
     }
     fn current_directory(&self) -> Result<()> {
@@ -60,6 +63,16 @@ impl SourcePin {
         self.current_directory()?;
         ensure!(self.acquired && self.store.retention()?.pins.get(&self.pin) == Some(&self.seed), "storage client source pin not retained"); Ok(())
     }
+    fn release_retaining(&mut self,original:&FinalizationBudget)->Result<()> {
+        if self.removed {return Ok(());}original.remaining()?;self.current_directory()?;
+        match self.store.retention()?.pins.get(&self.pin) {
+            Some(root)=>{ensure!(root==&self.seed,"original client pin changed");self.unpin_attempted=true;self.store.unpin(&self.pin)?;}
+            None=>ensure!(self.unpin_attempted,"client pin disappeared before original unpin intent"),
+        }
+        ensure!(!self.store.retention()?.pins.contains_key(&self.pin),"original client pin removal uncertain");
+        self.current_directory()?;original.remaining()?;self.removed=true;Ok(())
+    }
+
 }
 
 /// Original client-side transfer/read owner. Not Clone/Serde, and Drop never
@@ -69,6 +82,8 @@ pub struct ClientSeedOwner {
     source: SourcePin, cancel: OwnedFd, attempted: bool, fenced: bool,
     instance: Option<uuid::Uuid>, slot: Option<uuid::Uuid>, ready: Option<(PathBuf, PathBuf)>,
     helpers: BTreeMap<uuid::Uuid, Process>, pending_helper: Option<Process>,
+    uses:SeedUseLedger,templates:Vec<Weak<VerifiedMetadataTemplate>>,untracked_templates:AtomicBool,
+    retirement:Option<ClientRetirement>,
 }
 /// One enrolled original helper in a shared immutable seed session. IDs are
 /// DATA; this non-Serde token must stay with that helper's actual task carrier.
@@ -80,15 +95,36 @@ impl ClientSeedOwner {
         service::floor(std::process::id(), 1500)?;
         Ok(Self { source: SourcePin::capture(store, already_retained_seed)?, cancel: service::eventfd()?,
             attempted: false, fenced: false, instance: None, slot: None, ready: None,
-            helpers: BTreeMap::new(), pending_helper: None })
+            helpers: BTreeMap::new(), pending_helper: None,uses:SeedUseLedger::new(),templates:Vec::with_capacity(2),
+            untracked_templates:AtomicBool::new(false),retirement:None })
     }
     pub fn seed(&self) -> &ObjectRef { &self.source.seed }
     /// Returned paths are DATA only. An original live client and retained root
     /// reader still gate checked use; serialized paths cannot adopt this owner.
     pub fn paths(&self) -> Option<(&Path, &Path)> {
-        if self.fenced { return None; }
+        if self.fenced||self.retirement.is_some() { return None; }
         self.ready.as_ref().map(|(root, objects)| (root.as_path(), objects.as_path()))
     }
+    /// OFF App. Stage guard BEFORE use; late failure leaves the actual guard in
+    /// caller storage. Dropping it keeps its unresolved ledger entry charged.
+    pub fn acquire_use_retaining(&self,slot:&mut Option<SeedUseGuard>,kind:SeedUseKind,original:&FinalizationBudget)->Result<()> {
+        original.remaining()?;ensure!(slot.is_none()&&!self.fenced&&self.ready.is_some()&&self.retirement.is_none(),"original seed use unavailable");
+        self.source.check()?;self.uses.admit()?;*slot=Some(self.uses.acquire(kind)?);original.remaining()?;Ok(())
+    }
+    pub fn register_task_start_retaining(&self,out:&mut Option<SeedTaskUseGate>,task:&SeedUseGuard,
+        fork:&SeedUseGuard,original:&FinalizationBudget)->Result<()> {
+        original.remaining()?;ensure!(!self.fenced&&self.ready.is_some()&&self.retirement.is_none(),"original seed unavailable");
+        self.source.check()?;self.uses.register_task_start_retaining(out,task,fork,self.seed(),original)?;original.remaining()?;Ok(())
+    }
+    pub fn close_native_admission(&self)->Result<()> {self.uses.close()}
+    /// Compatibility refusal only; this cannot grant or clear any authority.
+    pub fn has_untracked_native_use(&self)->bool {self.untracked_templates.load(Ordering::Acquire)}
+    pub fn latch_untracked_native_use(&self) {self.untracked_templates.store(true,Ordering::Release);}
+    /// OFF App. Joins original handles even if a typed result was dropped;
+    /// failed/unknown callbacks remain charged and their actual T is retained.
+    pub fn poll_native_joins_off_app(&self)->Result<()> {self.uses.drive_joins_off_app()}
+    pub fn retirement_ack(&self)->Option<&RootSeedRetired> {self.retirement.as_ref()?.ack.as_ref()}
+    pub fn is_retired(&self)->bool {self.retirement.as_ref().is_some_and(|intent|intent.released&&self.source.removed)}
     pub fn cancel(&mut self) { self.fenced = true; service::cancel_event(&self.cancel); }
     /// Test-only duplicate of the original cancellation event, so the paired
     /// root fixture can cancel after actual Begin ACK while retaining this owner.
@@ -96,12 +132,20 @@ impl ClientSeedOwner {
     pub(crate) fn qualification_cancel_fd(&self) -> Result<OwnedFd> { Ok(self.cancel.try_clone()?) }
 }
 
+/// Past original Root cleanup ACK, not a serialized reconstruction or read grant.
+#[must_use="retain with original actor/client/seed owners"]
+pub struct RootSeedRetired {_instance:uuid::Uuid,_slot:uuid::Uuid,_operation:uuid::Uuid}
+struct RetirementPacket {serial:u64,bytes:Vec<u8>,release:bool,attempted:bool,replayed:bool}
+enum RetirementReply {None,Duplicate,Accepted,Partial}
+struct ClientRetirement {id:uuid::Uuid,slot:uuid::Uuid,original:FinalizationBudget,_actors:SeedActorsJoined,
+    readers:Vec<String>,packet:Option<RetirementPacket>,last_reply:Option<(u64,Vec<u8>)>,ack:Option<RootSeedRetired>,released:bool}
+
 /// One original image-bootstrap connection in the actual UID1500 host engine.
 /// No Clone/Serde/raw socket accessor. All IO/verification is OFF App.
 pub struct RootStorageClient {
     endpoint: Endpoint, server: Process, own: Process, image: Image, engine_image: Image,
     _inherited_image: OwnedFd, mnt: File, user: File, boot: Vec<u8>, serial: u64,
-    instance: Option<uuid::Uuid>, fenced: bool,
+    instance: Option<uuid::Uuid>, fenced: bool,retirement_inflight:Option<uuid::Uuid>,
 }
 impl RootStorageClient {
     /// Bootstrap must supply the actual connected pair, original root-service
@@ -124,7 +168,7 @@ impl RootStorageClient {
         let value = Self { endpoint: Endpoint::capture(endpoint)?, server: Process::capture(original_service_pidfd)?, own,
             image, engine_image, _inherited_image: original_service_image,
             mnt: service::namespace(None, "mnt", libc::CLONE_NEWNS)?, user: service::namespace(None, "user", libc::CLONE_NEWUSER)?,
-            boot: service::proc_bytes("/proc/sys/kernel/random/boot_id", 64)?, serial: 0, instance: None, fenced: false };
+            boot: service::proc_bytes("/proc/sys/kernel/random/boot_id", 64)?, serial: 0, instance: None, fenced: false,retirement_inflight:None };
         ensure!(value.server.pid != value.own.pid, "storage client cannot authenticate itself as service"); value.current()?; Ok(value)
     }
     /// Fixed inherited FD adapter for the image-owned engine bootstrap only.
@@ -145,7 +189,16 @@ impl RootStorageClient {
             && service::id(&self.user)? == service::id(&service::namespace(None, "user", libc::CLONE_NEWUSER)?)?
             && self.boot == service::proc_bytes("/proc/sys/kernel/random/boot_id", 64)?, "storage client entered another host namespace/boot"); Ok(())
     }
+    pub(crate) fn assert_authenticated_bootstrap_current(&self)->Result<()> {
+        self.current()?;ensure!(self.instance.is_some(),"storage original service authentication absent");Ok(())
+    }
+    /// OFF App physical/client continuity only. No seed/backend readiness or
+    /// new read grant is created; caller must still hold its actual seed scope.
+    pub fn assert_authenticated_current(&self)->Result<()> {self.assert_authenticated_bootstrap_current()}
+    /// Refusal-state observation only, never a retirement/settlement ACK.
+    pub fn retirement_pending(&self)->bool {self.retirement_inflight.is_some()}
     fn exchange(&mut self, request: Request, payload: &[u8], fd: Option<&OwnedFd>, budget: &FinalizationBudget) -> Result<Reply> {
+        ensure!(self.retirement_inflight.is_none(),"original retirement ACK reconciliation pending; no interleaved RPC");
         let result = (|| {
             self.current()?; budget.remaining()?;
             self.serial = self.serial.checked_add(1).context("storage client serial exhausted")?;
@@ -184,6 +237,7 @@ impl RootStorageClient {
     /// Exactly one preparation attempt. Borrowed owners remain available on all
     /// failures, including source pin/remote import/mount/ACK uncertainty.
     pub fn prepare_seed_retaining(&mut self, owner: &mut ClientSeedOwner, original: &FinalizationBudget) -> Result<()> {
+        ensure!(self.retirement_inflight.is_none(),"original retirement reconciliation pending");
         ensure!(!owner.attempted && !owner.fenced, "storage original seed already attempted/fenced");
         owner.attempted = true;
         let result = (|| {
@@ -239,16 +293,65 @@ impl RootStorageClient {
     /// Checked reuse of production verifier with the user's own retained CAS.
     /// No root retention writes can change that CAS's UID1500 ownership.
     pub fn open_retained_template(&mut self, owner: &ClientSeedOwner, operation: &FinalizationBudget) -> Result<VerifiedMetadataTemplate> {
+        // Compatibility only: callers using an untracked template may still
+        // run, but this owner can never later claim complete native drain.
+        owner.uses.admit()?;owner.untracked_templates.store(true,Ordering::Release);
         let slot = self.original_slot(owner)?;
         ensure!(matches!(self.exchange(Request::Check { slot }, &[], None, operation)?, Reply::Accepted), "storage original reader check failed");
         let (root, objects) = owner.ready.as_ref().unwrap();
         let template = VerifiedMetadataTemplate::open_retained(&owner.source.store, &owner.source.seed, root, objects)?;
         self.current()?; operation.remaining()?; Ok(template)
     }
+    /// Actual shared Arc aliases are tracked. Native fork/cache scopes must
+    /// also retain registered guards through their actual actor/TLS joins.
+    pub fn open_tracked_template(&mut self,owner:&mut ClientSeedOwner,guard:&SeedUseGuard,original:&FinalizationBudget)->Result<Arc<VerifiedMetadataTemplate>> {
+        original.remaining()?;owner.uses.admit()?;owner.uses.require_kind(guard,SeedUseKind::Template)?;
+        let slot=self.original_slot(owner)?;
+        ensure!(matches!(self.exchange(Request::Check {slot},&[],None,original)?,Reply::Accepted),"original root reader check failed");
+        owner.templates.retain(|weak|weak.strong_count()>0);
+        ensure!(owner.templates.len()<2,"tracked original template admission full");
+        let (root,objects)=owner.ready.as_ref().context("original paths unavailable")?;
+        let template=Arc::new(VerifiedMetadataTemplate::open_retained(&owner.source.store,&owner.source.seed,root,objects)?);
+        owner.templates.push(Arc::downgrade(&template));self.current()?;original.remaining()?;Ok(template)
+    }
+    pub fn associate_original_helper_use(&self,owner:&ClientSeedOwner,guard:&SeedUseGuard,helper:&EnrolledSeedHelper)->Result<()> {
+        self.original_slot(owner)?;
+        ensure!(owner.instance==Some(helper.instance)&&owner.slot==Some(helper.slot),"helper ACK belongs to another original seed");
+        ensure!(owner.helpers.get(&helper.reader).is_some_and(|actual|actual.pid==helper.pid),"original helper ACK/process absent");
+        owner.uses.associate(guard,helper.reader)
+    }
+    /// Consume the actual non-Serde VCS localizer ACK ONCE into BOTH original
+    /// task/fork uses. Binding checks against the genuine Joined task occur in
+    /// the fixed native bridge before this call; Root still checks its pidfds.
+    pub fn acknowledge_localized_fork_retaining(&mut self,owner:&ClientSeedOwner,out:&mut Option<RetainedLocalizedFork>,
+        task:&SeedUseGuard,fork:&SeedUseGuard,proof:&mut Option<LocalizedMetadataFork>,original:&FinalizationBudget,cancelled:&AtomicBool)->Result<()> {
+        self.current()?;self.original_slot(owner)?;original.remaining()?;
+        let actual=proof.as_ref().context("original opaque fork localization ACK absent")?;
+        ensure!(actual.kernel_readonly_objects()&&actual.seed()==owner.seed()&&owner.ready.as_ref().is_some_and(|(_,objects)|objects==actual.original_shared_objects_root()),
+            "localization ACK belongs to another original seed/mount");
+        owner.uses.acknowledge_localized_retaining(out,task,fork,proof,original,cancelled)?;
+        self.current()?;original.remaining()?;Ok(())
+    }
+    /// Genuine unused task admission plus original VCS dependency-release ACK.
+    /// Per-task close allows siblings to continue; whole seed close is still
+    /// mandatory before actual Root retirement.
+    pub fn acknowledge_never_started_fork_retaining(&mut self,owner:&ClientSeedOwner,out:&mut Option<RetainedUnusedFork>,
+        task:&SeedUseGuard,fork:&SeedUseGuard,seal:&SealedSeedTaskUse,localized:&mut Option<LocalizedMetadataFork>,
+        never_linked:&mut Option<NeverLinkedMetadataFork>,original:&FinalizationBudget,cancelled:&AtomicBool)->Result<()> {
+        self.current()?;self.original_slot(owner)?;original.remaining()?;
+        ensure!(seal.seed()==owner.seed(),"never-started seal belongs to another seed");
+        if let Some(proof)=localized.as_ref() {ensure!(proof.kernel_readonly_objects()&&proof.seed()==owner.seed()
+            &&owner.ready.as_ref().is_some_and(|(_,objects)|objects==proof.original_shared_objects_root()),"unused localization uses another original mount");}
+        if let Some(proof)=never_linked.as_ref() {ensure!(proof.seed()==owner.seed()
+            &&owner.ready.as_ref().is_some_and(|(_,objects)|objects==proof.original_shared_objects_root()),"never-linked receipt uses another original mount");}
+        owner.uses.acknowledge_never_started_retaining(out,task,fork,seal,localized,never_linked,original,cancelled)?;
+        self.current()?;original.remaining()?;Ok(())
+    }
     /// OFF App: caller passes a DUPLICATE of its actual retained original helper
     /// witness pidfd, never opens one from a saved PID. The current helper witness
     /// lacks that export API; a separate mechanical host adapter is still needed.
     pub fn enroll_original_helper_retaining(&mut self, owner: &mut ClientSeedOwner, original_helper_pidfd: OwnedFd, operation: &FinalizationBudget) -> Result<EnrolledSeedHelper> {
+        ensure!(self.retirement_inflight.is_none(),"original retirement reconciliation pending");owner.uses.admit()?;
         let slot = self.original_slot(owner)?;
         ensure!(owner.pending_helper.is_none() && owner.helpers.len() < MAX_HELPERS_PER_SEED, "storage original helper reader admission full/uncertain");
         owner.pending_helper = Some(Process::capture(original_helper_pidfd)?);
@@ -280,9 +383,101 @@ impl RootStorageClient {
         for helper in owner.helpers.values() { if !helper.exited()? { return Ok(false); } }
         Ok(true)
     }
-    /// Explicit gate: no drained:boolean/TTL retirement opcode exists. Root must
-    /// wire actual App/Broker/Runtime join custody to the private service issuer.
-    pub fn request_retirement_retaining(&mut self, _owner: &mut ClientSeedOwner, _operation: &FinalizationBudget) -> Result<()> {
-        anyhow::bail!("root storage retirement requires the missing typed native actor-drain bridge; original owners retained")
+    /// OFF App. Close admission before proving EVERY actual native use. No
+    /// bool/JSON/TTL/path can issue this proof; dropped/unknown guards block it.
+    /// Once admitted, every retry uses this SAME retained original budget.
+    pub fn request_retirement_retaining(&mut self,owner:&mut ClientSeedOwner,operation:&FinalizationBudget)->Result<()> {
+        self.current()?;
+        ensure!(self.retirement_inflight.is_none()||owner.retirement.as_ref().is_some_and(|intent|Some(intent.id)==self.retirement_inflight),"another original retirement requires reconciliation");
+        if owner.retirement.is_none() {
+            operation.remaining()?;owner.uses.close()?;
+            ensure!(!owner.untracked_templates.load(Ordering::Acquire)&&owner.templates.iter().all(|weak|weak.upgrade().is_none()),"legacy/unreleased native template aliases block retirement");
+            ensure!(owner.pending_helper.is_none(),"unknown enrollment ACK blocks retirement");
+            let slot=self.original_slot(owner)?;
+            let actors=owner.uses.prove(&owner.helpers.keys().copied().collect(),operation,&AtomicBool::new(false))?;
+            for helper in owner.helpers.values(){ensure!(helper.exited()?,"original sibling helper still live");}
+            operation.remaining()?;
+            owner.retirement=Some(ClientRetirement {id:uuid::Uuid::new_v4(),slot,original:operation.clone(),_actors:actors,
+                readers:owner.helpers.keys().map(ToString::to_string).collect(),packet:None,last_reply:None,ack:None,released:false});
+        }
+        let intent=owner.retirement.as_mut().unwrap();
+        ensure!(intent.original.constraint()==operation.constraint(),"retirement original budget changed");
+        self.retirement_inflight=Some(intent.id);
+        if intent.released {self.retirement_inflight=None;return Ok(());}
+        intent.original.remaining()?;
+        if intent.ack.is_none() {
+            self.retirement_exchange(intent,false)?;intent.original.remaining()?;
+        }
+        owner.source.release_retaining(&intent.original)?;intent.original.remaining()?;
+        self.retirement_exchange(intent,true)?;
+        ensure!(intent.released,"original Root capacity-release ACK absent");
+        self.retirement_inflight=None;Ok(())
     }
+    /// Explicit original-packet reconciliation. An unknown packet is retried
+    /// at most once, byte-for-byte/same serial/budget. Root replays only its held
+    /// exact ACK; no status/path readback becomes authority. Errors keep owner.
+    fn retirement_exchange(&mut self,intent:&mut ClientRetirement,release:bool)->Result<()> {
+        self.current()?;intent.original.remaining()?;
+        if intent.packet.is_none() {
+            let serial=self.serial.checked_add(1).context("storage serial exhausted")?;
+            let request=if release {Request::ReleaseSeed {slot:intent.slot,retirement:intent.id}}
+                else {Request::RetireSeed {slot:intent.slot,retirement:intent.id,readers:intent.readers.clone()}};
+            let bytes=service::encode(&Envelope {version:1,serial,constraint:intent.original.constraint(),request},&[])?;
+            intent.packet=Some(RetirementPacket {serial,bytes,release,attempted:false,replayed:false});self.serial=serial;
+        }
+        // At most one send per invocation; only an explicit subsequent call
+        // may replay an uncertain original packet once. No timed resend loop.
+        let packet=intent.packet.as_ref().unwrap();
+        ensure!(packet.release==release,"original retirement phase changed");
+        let mut may_send=!packet.attempted||!packet.replayed;
+        loop {
+            self.current()?;intent.original.remaining()?;
+            match self.receive_retirement_ack(intent)? {
+                RetirementReply::Duplicate=>continue,
+                RetirementReply::Accepted=>{self.current()?;intent.original.remaining()?;return Ok(());}
+                RetirementReply::Partial=>anyhow::bail!("original Root cleanup partial; same owner/budget only"),
+                RetirementReply::None=>{},
+            }
+            let packet=intent.packet.as_mut().unwrap();
+            if may_send {
+                let was_attempted=packet.attempted;
+                if was_attempted {packet.replayed=true;}packet.attempted=true;may_send=false;
+                if !self.endpoint.send(&packet.bytes,None)? {
+                    packet.attempted=was_attempted;if was_attempted {packet.replayed=false;}may_send=true;
+                }
+            }
+            std::thread::sleep(intent.original.phase_limit(Duration::from_millis(2))?);
+        }
+    }
+
+    fn receive_retirement_ack(&self,intent:&mut ClientRetirement)->Result<RetirementReply> {
+        let Some(packet)=self.endpoint.receive()? else {return Ok(RetirementReply::None);};
+        ensure!(packet.fds.is_empty()&&packet.credentials.pid==self.server.pid as i32&&packet.credentials.uid==0&&packet.credentials.gid==0,"retirement reply is not original Root");
+        let digest=sha2::Sha256::digest(&packet.bytes).to_vec();
+        let (answer,payload):(Answer,_)=service::decode(&packet.bytes)?;
+        if intent.last_reply.as_ref().is_some_and(|(serial,old)|*serial==answer.serial&&old==&digest) {return Ok(RetirementReply::Duplicate);}
+        let original=intent.packet.as_ref().context("original immutable retirement packet absent")?;
+        ensure!(answer.version==1&&payload.is_empty()&&answer.serial==original.serial,"original retirement ACK serial differs");
+        let state=match answer.reply {
+            Reply::SeedRetired {slot,retirement} if !original.release&&slot==intent.slot&&retirement==intent.id=>{
+                intent.ack=Some(RootSeedRetired {_instance:self.instance.context("original service absent")?,_slot:slot,_operation:retirement});RetirementReply::Accepted
+            }
+            Reply::SeedReleased {slot,retirement} if original.release&&slot==intent.slot&&retirement==intent.id=>{intent.released=true;RetirementReply::Accepted}
+            Reply::RetirementPending {slot,retirement} if slot==intent.slot&&retirement==intent.id=>RetirementReply::Partial,
+            _=>anyhow::bail!("original retirement ACK invalid; owners retained"),
+        };
+        // Genuine original ACK retained BEFORE every fallible postcheck.
+        intent.last_reply=Some((answer.serial,digest));intent.packet=None;Ok(state)
+    }
+    /// OFF App, at most ONE nonblocking receive. Even after expiry, an actual
+    /// queued original ACK can establish a past fact. No send, unpin, cleanup,
+    /// new budget, readback promotion, or automatic continuation occurs.
+    pub fn reconcile_retirement_ack_retaining(&mut self,owner:&mut ClientSeedOwner)->Result<bool> {
+        self.current()?;let intent=owner.retirement.as_mut().context("original retirement absent")?;
+        ensure!(self.retirement_inflight==Some(intent.id),"another original retirement owns the channel");
+        if intent.packet.is_some() {let _=self.receive_retirement_ack(intent)?;}
+        self.current()?;
+        if intent.released {self.retirement_inflight=None;Ok(true)} else {Ok(false)}
+    }
+
 }

@@ -1491,10 +1491,11 @@ fn codex_peer_control_requires_actual_qualified_server_version_and_has_no_text_f
     assert!(codex_peer_controls_supported(
         "rudder_agent_link/0.167.0 (macOS; arm64)"
     ));
+    // Originator is the first process-wide client, not peer identity.
+    assert!(codex_peer_controls_supported("other/0.166.0"));
     for version in [
         "rudder_agent_link/0.165.9",
         "rudder_agent_link/0.166.0-preview",
-        "other/0.166.0",
         "unknown",
         "rudder_agent_link/0.166",
     ] {

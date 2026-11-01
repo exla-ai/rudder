@@ -199,6 +199,8 @@ impl ManagedTaskCancellation { pub(crate) fn cancel(&self) { self.cancelled.stor
 pub(crate) struct ManagedTaskAdmission { target: ManagedTaskTarget, selected: ManagedTaskOptIn,
     budget: FinalizationBudget, cancelled: Arc<AtomicBool>, _permit: Permit }
 impl ManagedTaskAdmission {
+    pub(crate) fn source_lifetime(&self)->(FinalizationBudget,Arc<AtomicBool>) {(self.budget.clone(),self.cancelled.clone())}
+
     #[cfg(test)]
     pub(crate) fn wiring_test_parts(&self) -> (FinalizationBudget,Arc<AtomicBool>) {
         (self.budget.clone(),self.cancelled.clone())
@@ -250,7 +252,7 @@ impl ManagedTaskAdmission {
             runtime: resources.runtime, native_guest: resources.native_guest, jj_guest: resources.jj_guest,
             user_name: resources.user_name, user_email: resources.user_email, timeout_seconds: resources.timeout_seconds };
         Ok(PreparedManagedTask { admission: self, project: Arc::downgrade(project), head: resources.expected_integration_head,
-            inputs, native_program: resources.native_program, preparation_cache: resources.preparation_cache })
+            inputs, native_program: resources.native_program, preparation_cache: resources.preparation_cache,seed_fork:None })
     }
 }
 fn normalized(path: &Path) -> bool {
@@ -261,11 +263,22 @@ fn normalized(path: &Path) -> bool {
 #[must_use = "App must recheck the exact row/owner before moving the launch packet"]
 pub(crate) struct PreparedManagedTask { inputs: ManagedLocalLaunchInputs, native_program: PathBuf,
     preparation_cache: Option<Arc<crate::managed_preparation_cache::ManagedPreparationCache>>,
+    seed_fork:Option<Arc<crate::managed_seed_fork::ManagedSeedForkCell>>,
     project: Weak<ManagedTaskProject>, head: String,
     // A rejected/stale result must dispose cleanup-bearing inputs/cache before
     // releasing its charged slot. Moving into the packet preserves that order.
     admission: ManagedTaskAdmission }
 impl PreparedManagedTask {
+    pub(crate) fn target_run_id(&self)->&str {self.admission.target.run_id()}
+    pub(crate) fn original_budget(&self)->&FinalizationBudget {&self.admission.budget}
+    pub(crate) fn install_seed_fork_retaining(&mut self,fork:&Arc<crate::managed_seed_fork::ManagedSeedForkCell>)->Result<()> {
+        check(&self.admission.budget,&self.admission.cancelled)?;ensure!(self.seed_fork.is_none(),"task fork owner already installed");
+        fork.matches_inputs(&self.inputs)?;fork.matches_lifetime(&self.admission.budget,&self.admission.cancelled)?;fork.matches_cache(&self.preparation_cache)?;self.seed_fork=Some(fork.clone());check(&self.admission.budget,&self.admission.cancelled)
+    }
+    pub(crate) fn has_seed_fork(&self,fork:&Arc<crate::managed_seed_fork::ManagedSeedForkCell>)->bool {
+        self.seed_fork.as_ref().is_some_and(|actual|Arc::ptr_eq(actual,fork))
+    }
+
     /// App-only adoption. No path reopening, profile IO, materialization, model
     /// call or PTY mutation. Uses the already-held owner Journal, like the
     /// existing start_managed_local admission, to reject a changed accepted head.
@@ -287,7 +300,7 @@ impl PreparedManagedTask {
         owner: &OwnerFence) -> std::result::Result<ManagedTaskLaunchPacket, (Self, anyhow::Error)> {
         if let Err(error) = self.check_adoption(app, index, project, journal, owner) { return Err((self, error)); }
         Ok(ManagedTaskLaunchPacket { inputs: self.inputs, native_program: self.native_program, budget: self.admission.budget.clone(),
-            cancelled: self.admission.cancelled.clone(), preparation_cache: self.preparation_cache, retention: self.admission })
+            cancelled: self.admission.cancelled.clone(), preparation_cache: self.preparation_cache,seed_fork:self.seed_fork, retention: self.admission })
     }
     /// Existing consuming API preserved for old explicit callers. New App task
     /// wiring must use adopt_retaining and dispose rejected owners off-App.
@@ -307,13 +320,15 @@ pub(crate) struct ManagedTaskLaunchPacket {
     pub preparation_cache: Option<Arc<crate::managed_preparation_cache::ManagedPreparationCache>>,
     /// Keep this actual owner through the downstream preparation callback/result
     /// settlement, including timeout/cancel. Its Drop only releases a counter.
+    pub seed_fork:Option<Arc<crate::managed_seed_fork::ManagedSeedForkCell>>,
     pub retention: ManagedTaskAdmission,
 }
 impl ManagedTaskLaunchPacket {
+    pub(crate) fn target_run_id(&self)->&str {self.retention.target.run_id()}
     pub(crate) fn matches_target(&self, app: &App, index: usize) -> Result<()> {
         ensure!(ManagedTaskTarget::capture(app, index)? == self.retention.target,
             "managed task row/task/model changed before queue admission");
-        ensure!(!self.cancelled.load(Ordering::Acquire), "managed task preparation cancelled"); Ok(())
+        ensure!(!self.cancelled.load(Ordering::Acquire), "managed task preparation cancelled");self.budget.remaining()?;Ok(())
     }
 }
 

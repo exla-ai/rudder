@@ -16,10 +16,11 @@ RUN --mount=type=cache,id=rudder-cargo-registry,target=/usr/local/cargo/registry
     cargo clean --locked --release -p rudder-engine -p rudder-native -p rudder-vcs-bridge \
   && cargo build --release --locked --manifest-path Cargo.toml \
        -p rudder-native -p rudder-vcs-bridge --features rudder-vcs-bridge/cli \
-       --bin rudder-native --bin rudder-jj --bin rudder-root-storage \
+       --bin rudder-native --bin rudder-jj --bin rudder-root-storage --bin rudder-machine-root \
   && cp target/release/rudder-native /rudder-native \
   && cp target/release/rudder-jj /rudder-jj \
-  && cp target/release/rudder-root-storage /rudder-root-storage
+  && cp target/release/rudder-root-storage /rudder-root-storage \
+  && cp target/release/rudder-machine-root /rudder-machine-root
 
 FROM debian:bookworm-slim AS git-builder
 # Git 2.41 introduced fetch --porcelain, required by pinned jj0.40. Build the
@@ -127,7 +128,7 @@ RUN test "$(/usr/local/bin/git --version)" = "git version 2.56.0" \
 WORKDIR /opt/rudder
 # Copy scripts BEFORE npm ci so the package's postinstall hook (scripts/postinstall.mjs)
 # resolves; RUDDER_SKIP_POSTINSTALL makes it a no-op since jj is installed above.
-COPY package.json package-lock.json ./
+COPY --chmod=0644 package.json package-lock.json ./
 COPY scripts ./scripts
 RUN RUDDER_SKIP_POSTINSTALL=1 npm ci --omit=dev
 COPY dist ./dist
@@ -138,8 +139,16 @@ RUN rm -rf ./dist/native && mkdir -p ./dist/native
 COPY --from=native-builder /rudder-native ./dist/native/rudder-native
 COPY --from=native-builder /rudder-jj ./dist/native/rudder-jj
 COPY --from=native-builder --chown=0:0 --chmod=0555 /rudder-root-storage /usr/local/bin/rudder-root-storage
+COPY --from=native-builder --chown=0:0 --chmod=0555 /rudder-machine-root /usr/local/bin/rudder-machine-root
 RUN chmod +x ./dist/native/rudder-native ./dist/native/rudder-jj \
   && RUDDER_SKIP_POSTINSTALL=1 npm link
+# Bind deployed executable observations to the actual image build output.
+RUN set -eu; \
+    for executable in /opt/rudder/dist/native/rudder-native /opt/rudder/dist/native/rudder-jj /usr/local/bin/rudder-root-storage /usr/local/bin/rudder-machine-root; do \
+      digest="$(sha256sum "$executable")"; digest="${digest%% *}"; \
+      bytes="$(stat -c %s "$executable")"; \
+      printf 'RUDDER_PRODUCTION_ELF %s %s %s\n' "$executable" "$digest" "$bytes"; \
+    done
 
 WORKDIR /opt/rudder-worker
 COPY cloud/worker/package.json ./package.json

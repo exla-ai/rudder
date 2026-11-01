@@ -264,6 +264,10 @@ pub(crate) enum Request {
     Check { #[serde(with = "uuid_wire")] slot: uuid::Uuid },
     EnrollHelper { #[serde(with = "uuid_wire")] slot: uuid::Uuid },
     Fence { #[serde(with = "uuid_wire")] slot: uuid::Uuid },
+    // Only the original authenticated fixed engine can issue these commands.
+    // Reader IDs are routing DATA; native actual join custody stays in issuer.
+    RetireSeed { #[serde(with="uuid_wire")] slot:uuid::Uuid, #[serde(with="uuid_wire")] retirement:uuid::Uuid, readers:Vec<String> },
+    ReleaseSeed { #[serde(with="uuid_wire")] slot:uuid::Uuid, #[serde(with="uuid_wire")] retirement:uuid::Uuid },
 }
 // Native's pinned UUID dependency has v4, not serde. Keep wire IDs canonical
 // without changing package features or treating a parsed ID as authority.
@@ -289,6 +293,9 @@ pub(crate) enum Reply {
     Hello { #[serde(with = "uuid_wire")] instance: uuid::Uuid, image_sha256: String },
     Begun { #[serde(with = "uuid_wire")] slot: uuid::Uuid },
     Accepted,
+    SeedRetired { #[serde(with="uuid_wire")] slot:uuid::Uuid, #[serde(with="uuid_wire")] retirement:uuid::Uuid },
+    SeedReleased { #[serde(with="uuid_wire")] slot:uuid::Uuid, #[serde(with="uuid_wire")] retirement:uuid::Uuid },
+    RetirementPending { #[serde(with="uuid_wire")] slot:uuid::Uuid, #[serde(with="uuid_wire")] retirement:uuid::Uuid },
     HelperEnrolled { #[serde(with = "uuid_wire")] reader: uuid::Uuid, pid: u32 },
     Ready { #[serde(with = "uuid_wire")] slot: uuid::Uuid, seed: ObjectRef, root: PathBuf, objects: PathBuf },
     Rejected,
@@ -354,6 +361,16 @@ struct Slot {
     import_unpin_attempted: bool,
     mount: Option<RootSeedMount>, reader: Option<SeedMountRead>, helpers: BTreeMap<uuid::Uuid, Process>,
     budget: FinalizationBudget, cancel: Cancellation, fenced: bool, published: bool,
+    retirement:Option<RootRetirement>,
+}
+struct RootRetirement { id:uuid::Uuid, original:FinalizationBudget, readers:BTreeSet<uuid::Uuid>,
+    import_removed:bool, directory_remove_attempted:bool, directory_removed:bool, committed:bool }
+struct RetirementAnswer {serial:u64,digest:Vec<u8>,bytes:Vec<u8>,_retired:Option<Slot>}
+impl RetirementAnswer {
+    fn replay(&self,serial:u64,request:&[u8],has_fd:bool)->Result<Vec<u8>> {
+        ensure!(self.serial==serial&&self.digest==Sha256::digest(request).to_vec()&&!has_fd,"storage retirement replay differs");
+        Ok(self.bytes.clone())
+    }
 }
 impl Slot {
     fn current(&self) -> Result<()> {
@@ -367,9 +384,10 @@ impl Slot {
     }
     fn store(&self) -> Result<&LocalStore> { self.store.as_ref().context("storage original CAS unavailable") }
 }
-/// No public constructor or Deserialize. The native-bin actor-drain issuance
-/// bridge is intentionally not implemented by this storage producer slice.
-pub struct RootStorageActorDrain { instance: uuid::Uuid, slot: uuid::Uuid, helper_readers: BTreeSet<uuid::Uuid> }
+/// No public constructor or Deserialize. Issued only inside authenticated
+/// dispatch after the fixed native engine sends its original joined use set.
+pub struct RootStorageActorDrain { instance: uuid::Uuid, slot: uuid::Uuid, retirement:uuid::Uuid,
+    helper_readers: BTreeSet<uuid::Uuid> }
 pub struct RootStorageRetired { _instance: uuid::Uuid, _slot: uuid::Uuid }
 
 /// Root keeps this actual owner outside callbacks/catch_unwind/result delivery.
@@ -379,6 +397,7 @@ pub struct RootStorageService {
     mnt: File, user: File, boot: Vec<u8>, instance: uuid::Uuid,
     root: Option<RootDirectory>, root_caps: u64,
     serial: u64, hello: bool, fenced: bool, slots: BTreeMap<uuid::Uuid, Slot>,
+    retirement_answer:Option<RetirementAnswer>,outbox:Option<Vec<u8>>,pending_retired:Option<Slot>,
 }
 impl RootStorageService {
     /// Image bootstrap supplies only actual inherited endpoint and enrolled
@@ -396,7 +415,7 @@ impl RootStorageService {
             engine_image: Image::capture(Path::new(ENGINE_IMAGE))?, service_image,
             mnt: namespace(None, "mnt", libc::CLONE_NEWNS)?, user: namespace(None, "user", libc::CLONE_NEWUSER)?,
             boot: proc_bytes("/proc/sys/kernel/random/boot_id", 64)?, instance: uuid::Uuid::new_v4(), serial: 0,
-            root: None, root_caps: caps, hello: false, fenced: false, slots: BTreeMap::new() };
+            root: None, root_caps: caps, hello: false, fenced: false, slots: BTreeMap::new(),retirement_answer:None,outbox:None,pending_retired:None };
         ensure!(value.engine.pid != value.own.pid, "root storage cannot enroll itself as engine");
         ensure!(Path::new("/run").canonicalize()? == Path::new("/run"), "root storage /run redirects");
         let run = fs::symlink_metadata("/run")?;
@@ -434,18 +453,38 @@ impl RootStorageService {
     /// OFF App, one bounded packet. No error removes a slot or its actual owners.
     pub fn poll_once(&mut self) -> Result<bool> {
         self.current()?;
-        let Some(mut packet) = self.endpoint.receive()? else { return Ok(false); };
+        if let Some(bytes)=&self.outbox {
+            if !self.endpoint.send(bytes,None)? {return Ok(false);}
+            self.outbox=None;return Ok(true);
+        }
+        let Some(mut packet)=self.endpoint.receive()? else {return Ok(false);};
         self.authenticate(&packet.credentials)?;
-        let (envelope, payload): (Envelope, _) = decode(&packet.bytes)?;
-        ensure!(envelope.version == 1 && envelope.serial == self.serial.checked_add(1).context("storage serial exhausted")?, "storage packet replay/order rejected");
-        self.serial = envelope.serial;
-        let wire_budget = FinalizationBudget::from_constraint(&envelope.constraint)?;
-        wire_budget.remaining()?;
-        let result = self.dispatch(envelope.request, payload, packet.fds.pop(), &envelope.constraint);
-        let reply = match result { Ok(reply) => reply, Err(_) => { for slot in self.slots.values_mut() { slot.fence(); } Reply::Rejected } };
-        let bytes = encode(&Answer { version: 1, serial: self.serial, reply }, &[])?;
-        // A full response queue/unknown ACK must not release the source owners.
-        ensure!(self.endpoint.send(&bytes, None)?, "storage response queue full; original owners retained"); Ok(true)
+        let (envelope,payload):(Envelope,_)=decode(&packet.bytes)?;
+        ensure!(envelope.version==1&&packet.fds.len()<=1,"storage invalid envelope/descriptors");
+        let digest=Sha256::digest(&packet.bytes).to_vec();
+        // Replay ONLY the exact original held retirement ACK. No path/status
+        // lookup, new operation, new budget, or publication promotion occurs.
+        if envelope.serial==self.serial {
+            let old=self.retirement_answer.as_ref().context("storage replay rejected")?;
+            self.outbox=Some(old.replay(envelope.serial,&packet.bytes,!packet.fds.is_empty())?);return Ok(true);
+        }
+        ensure!(envelope.serial==self.serial.checked_add(1).context("storage serial exhausted")?,"storage packet order rejected");
+        self.serial=envelope.serial;
+        let retirement=match &envelope.request {
+            Request::RetireSeed {slot,retirement,..}|Request::ReleaseSeed {slot,retirement}=>Some((*slot,*retirement)),_=>None};
+        let result=(||->Result<Reply>{
+            let wire_budget=FinalizationBudget::from_constraint(&envelope.constraint)?;wire_budget.remaining()?;
+            self.dispatch(envelope.request,payload,packet.fds.pop(),&envelope.constraint)
+        })();
+        let reply=match result {Ok(reply)=>reply,Err(_)=>match retirement {
+            Some((slot,retirement))=>Reply::RetirementPending {slot,retirement},
+            None=>{for slot in self.slots.values_mut(){slot.fence();}Reply::Rejected}
+        }};
+        let bytes=encode(&Answer {version:1,serial:self.serial,reply},&[])?;
+        if retirement.is_some() {self.retirement_answer=Some(RetirementAnswer {serial:self.serial,digest,bytes:bytes.clone(),_retired:self.pending_retired.take()});}
+        else {self.retirement_answer=None;}
+        // Queue-full never drops the actual ACK or root retirement owner.
+        self.outbox=Some(bytes);Ok(true)
     }
     fn dispatch(&mut self, request: Request, payload: &[u8], fd: Option<OwnedFd>, wire_constraint: &FinalizationConstraint) -> Result<Reply> {
         if let Request::Hello { constraint } = request {
@@ -465,7 +504,7 @@ impl RootStorageService {
             self.slots.insert(slot_id, Slot { directory: Path::new(ROOT_DIRECTORY).join(slot_id.to_string()), directory_owner: None, seed, refs, bytes,
                 received_bytes: 0, received: BTreeSet::new(), pending: None, store: None, stage: None,
                 import_pin: format!("root-storage-import:{slot_id}"), pin_attempted: false, import_unpin_attempted: false, mount: None, reader: None,
-                helpers: BTreeMap::new(), budget, cancel, fenced: false, published: false });
+                helpers: BTreeMap::new(), budget, cancel, fenced: false, published: false,retirement:None });
             let slot = self.slots.get_mut(&slot_id).unwrap();
             slot.cancel.start(slot.budget.clone())?; slot.current()?;
             fs::DirBuilder::new().mode(0o700).create(&slot.directory)?;
@@ -474,12 +513,38 @@ impl RootStorageService {
             slot.stage = Some(slot.store()?.begin_staging(Duration::from_secs(120))?.id);
             slot.current()?; return Ok(Reply::Begun { slot: slot_id });
         }
+        if let Request::RetireSeed {slot,retirement,readers}=request {
+            ensure!(payload.is_empty()&&fd.is_none()&&readers.len()<=MAX_HELPERS_PER_SEED,"invalid native retirement command");
+            let mut set=BTreeSet::new();for reader in readers {
+                let id=uuid::Uuid::parse_str(&reader)?;ensure!(id.get_version_num()==4&&id.to_string()==reader&&set.insert(id),"retirement reader set invalid");
+            }
+            let proof=RootStorageActorDrain {instance:self.instance,slot,retirement,helper_readers:set};
+            let original=FinalizationBudget::from_constraint(wire_constraint)?;
+            self.retire_after_actor_drain_retaining(&proof,&original)?;
+            return Ok(Reply::SeedRetired {slot,retirement});
+        }
+        if let Request::ReleaseSeed {slot,retirement}=request {
+            ensure!(payload.is_empty()&&fd.is_none(),"invalid original seed release");
+            let held=self.slots.get(&slot).context("original retired slot absent")?;
+            let done=held.retirement.as_ref().context("original retirement absent")?;
+            ensure!(done.id==retirement&&done.original.constraint()==*wire_constraint&&done.committed&&done.directory_removed,
+                "original root cleanup not committed");
+            done.original.remaining()?;self.current()?;
+            // Native sends this ONLY after genuine Root ACK + observed removal
+            // of its own source pin. All root effects are already proven.
+            ensure!(self.pending_retired.is_none(),"previous Root retirement reply not staged");
+            self.pending_retired=self.slots.remove(&slot);
+            // Keep the actual fully-cleaned owner through ACK construction,
+            // failed delivery and exact packet replay. Only a later original
+            // authenticated serial can replace this bounded past-ACK history.
+            return Ok(Reply::SeedReleased {slot,retirement});
+        }
         let slot_id = match &request { Request::Object { slot, .. } | Request::Chunk { slot, .. } | Request::Commit { slot }
             | Request::Check { slot } | Request::EnrollHelper { slot } | Request::Fence { slot } => *slot, _ => unreachable!() };
         let slot = self.slots.get_mut(&slot_id).context("storage original slot absent")?;
         if let Request::Fence { .. } = request { ensure!(payload.is_empty() && fd.is_none(), "invalid storage fence"); slot.fence(); return Ok(Reply::Accepted); }
         if let Request::EnrollHelper { .. } = request {
-            ensure!(payload.is_empty() && slot.published && !slot.fenced && slot.helpers.len() < MAX_HELPERS_PER_SEED,
+            ensure!(payload.is_empty() && slot.published && !slot.fenced && slot.retirement.is_none() && slot.helpers.len() < MAX_HELPERS_PER_SEED,
                 "storage helper reader enrollment unavailable/full");
             let helper = Process::capture(fd.context("actual original helper pidfd required")?)?;
             self.engine.live()?; uid_identity(helper.pid, 1500)?; self.engine_image.matches_process(&helper)?;
@@ -541,36 +606,59 @@ impl RootStorageService {
         }
         slot.current()?; Ok(Reply::Accepted)
     }
-    /// No wire opcode can call this yet. The missing native-bin drain issuance
-    /// bridge must supply this non-Serde capability, tied to this original slot.
-    /// Even that trusted capability cannot substitute for actual helper exit.
-    pub fn retire_after_actor_drain_retaining(&mut self, proof: &RootStorageActorDrain, budget: &FinalizationBudget) -> Result<RootStorageRetired> {
-        self.current()?;
-        ensure!(proof.instance == self.instance, "storage drain belongs to another original service");
-        let slot = self.slots.get_mut(&proof.slot).context("storage original drain slot absent")?;
-        ensure!(!slot.fenced, "storage unknown reader effects require explicit recovery");
-        ensure!(slot.published && slot.pin_attempted, "storage original import publication absent");
-        ensure!(!slot.helpers.is_empty() && slot.helpers.keys().copied().collect::<BTreeSet<_>>() == proof.helper_readers,
-            "storage full original helper-reader drain set differs/unknown");
-        ensure!(all_helpers_exited(&slot.helpers)?, "storage an original helper has not physically exited");
-        budget.remaining()?;
-        slot.mount.as_ref().context("storage original mount absent")?.close_admission();
-        slot.reader.take();
-        let mount = slot.mount.as_mut().unwrap(); mount.cleanup_after_reader_drain(budget)?;
-        ensure!(mount.is_settled(), "storage original mount not settled");
-        let store = slot.store()?.clone();
-        match store.retention()?.pins.get(&slot.import_pin) {
-            Some(reference) => {
-                ensure!(reference == &slot.seed, "storage original import pin changed");
-                slot.import_unpin_attempted = true; // Before possibly unknown unpin effect.
-                store.unpin(&slot.import_pin)?;
-            }
-            None => ensure!(slot.import_unpin_attempted, "storage import pin disappeared without original cleanup"),
+    /// Private authenticated engine command is the cross-process issuer. Root
+    /// independently verifies original pidfds and exact full reader set. Rust
+    /// join ownership never comes from a serialized boolean/receipt/path/TTL.
+    pub fn retire_after_actor_drain_retaining(&mut self,proof:&RootStorageActorDrain,budget:&FinalizationBudget)->Result<RootStorageRetired> {
+        self.current()?;budget.remaining()?;
+        ensure!(proof.instance==self.instance,"retirement belongs to another original service");
+        let slot=self.slots.get_mut(&proof.slot).context("original retirement slot absent")?;
+        ensure!(!slot.fenced&&slot.published&&slot.pin_attempted,"unknown/unpublished seed cannot retire");
+        ensure!(slot.helpers.keys().copied().collect::<BTreeSet<_>>()==proof.helper_readers,"full original helper-reader set differs");
+        ensure!(slot.helpers.values().try_fold(true,|all,helper|Ok::<_,anyhow::Error>(all&&helper.exited()?))?,"original sibling helper still live");
+        if let Some(old)=&slot.retirement {
+            ensure!(old.id==proof.retirement&&old.readers==proof.helper_readers&&old.original.constraint()==budget.constraint(),"retirement intent/budget changed");
+        } else {
+            slot.mount.as_ref().context("original mount absent")?.close_admission();
+            slot.retirement=Some(RootRetirement {id:proof.retirement,original:budget.clone(),readers:proof.helper_readers.clone(),
+                import_removed:false,directory_remove_attempted:false,directory_removed:false,committed:false});
         }
-        ensure!(!store.retention()?.pins.contains_key(&slot.import_pin), "storage import pin removal uncertain");
-        budget.remaining()?;
-        Ok(RootStorageRetired { _instance: self.instance, _slot: proof.slot })
+        let original=slot.retirement.as_ref().unwrap().original.clone();original.remaining()?;
+        if slot.retirement.as_ref().unwrap().committed {return Ok(RootStorageRetired {_instance:self.instance,_slot:proof.slot});}
+        // Real native proof and all original kernel exits precede read-owner
+        // release; an error never removes the Slot or substitutes a clock.
+        slot.reader.take();
+        slot.mount.as_mut().context("original mount absent")?.cleanup_after_reader_drain(&original)?;
+        ensure!(slot.mount.as_ref().unwrap().is_settled(),"original mount cleanup uncertain");original.remaining()?;
+        if !slot.retirement.as_ref().unwrap().import_removed {
+            let store=slot.store()?.clone();
+            match store.retention()?.pins.get(&slot.import_pin) {
+                Some(root)=>{ensure!(root==&slot.seed,"original import pin changed");slot.import_unpin_attempted=true;store.unpin(&slot.import_pin)?;}
+                None=>ensure!(slot.import_unpin_attempted,"import pin disappeared without original cleanup"),
+            }
+            ensure!(!store.retention()?.pins.contains_key(&slot.import_pin),"import unpin effect uncertain");
+            slot.retirement.as_mut().unwrap().import_removed=true;
+        }
+        original.remaining()?;
+        if !slot.retirement.as_ref().unwrap().directory_removed {
+            match fs::symlink_metadata(&slot.directory) {
+                Ok(_)=>{
+                    slot.directory_owner.as_ref().context("original root directory absent")?.check()?;
+                    ensure!(slot.store()?.retention()?.pins.is_empty(),"root seed CAS retains unexpected pins");original.remaining()?;
+                    slot.retirement.as_mut().unwrap().directory_remove_attempted=true;
+                    fs::remove_dir_all(&slot.directory)?;
+                }
+                Err(error) if error.kind()==std::io::ErrorKind::NotFound=>ensure!(slot.retirement.as_ref().unwrap().directory_remove_attempted,"root directory disappeared before cleanup intent"),
+                Err(error)=>return Err(error.into()),
+            }
+            ensure!(matches!(fs::symlink_metadata(&slot.directory),Err(error) if error.kind()==std::io::ErrorKind::NotFound),"root directory absence unconfirmed");
+            self.root.as_ref().context("original root parent absent")?.file.sync_all()?;
+            slot.retirement.as_mut().unwrap().directory_removed=true;
+        }
+        original.remaining()?;slot.retirement.as_mut().unwrap().committed=true;
+        Ok(RootStorageRetired {_instance:self.instance,_slot:proof.slot})
     }
+
 }
 
 /// Root-only fixed FD entry. The machine bootstrap interface that creates and
@@ -602,3 +690,7 @@ mod tests;
 #[cfg(test)]
 #[path = "root_storage_ipc_qualification_tests.rs"]
 mod ipc_qualification_tests;
+
+#[cfg(test)]
+#[path="root_storage_retirement_tests.rs"]
+mod retirement_tests;

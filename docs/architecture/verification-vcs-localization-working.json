@@ -1,0 +1,49 @@
+{
+  "formatVersion": 1,
+  "scope": "physical read-only VCS seed localization and normal unmount with retained history",
+  "sourceKind": "unreleased VCS/engine working-source fixture",
+  "baseRevision": "e0d762a66ffe6cf4bcacb06105a5c80dab9835ec",
+  "sourceManifestSha256": "d22438a3b1abcd453806c6e2ca397a909b151745ff8387afa39db4b2efb7b8b5",
+  "image": "registry.fly.io/rudder-workers-exla:vcs-ro-localization-d22438a3b1ab",
+  "imageDigest": "sha256:93dc56a5cb9b3764bb8c0b20c413b3e3c842af825c3a5411062254e8fb716135",
+  "fixtureArtifact": {
+    "path": "/usr/local/libexec/rudder-vcs-ro-localization-test",
+    "bytes": 52695584,
+    "sha256": "253030d638b26733c30a9160bccb8e869bb2154411bae77a781058ba8a8b742d"
+  },
+  "exactTest": "seed::fork_localization::tests::actual_ro_mount_can_normally_unmount_before_git_jj_status_history_and_new_commit",
+  "receiptKind": "derived-from-exact-rust-assertions",
+  "qualified": true,
+  "verifiedAt": "2026-11-01T04:18:35.409Z",
+  "provider": "Fly.io",
+  "reportSha256": "c64c6f2c4f4d017fc4515d71e418a1e379141a31ebeb0232896c7c6f9d5d6d5e",
+  "checks": {
+    "actualPrivateMountNamespace": true,
+    "actualReadOnlySharedSeedMount": true,
+    "originalForkDurablyLocalized": true,
+    "normalUnmountFlagsZero": true,
+    "gitJjStatusHistoryAndNewCommitAfterSharedMountRemoval": true,
+    "exactRustTest": {
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0
+    },
+    "originalChildExitZeroAndAllPipesEof": true,
+    "stdoutSha256": "bcd39e2a6a46793f8360a94d3a578245e84cbef2edf31ea3697179b265d54f8a",
+    "stderrBytes": 0,
+    "sevenUid1500StockCommands": "passed",
+    "providerCalls": 15,
+    "ownedMachineDestroyed": true,
+    "twoIndependentAbsenceChecks": true,
+    "reconciliationRequired": false
+  },
+  "scopeLimits": {
+    "rootServiceNormalRetirementQualified": false,
+    "thirdSeedCapacityReuseQualified": false,
+    "productionDeployed": false,
+    "defaultAdoption": false,
+    "representativeBuildPerformanceQualified": false,
+    "modelsQualified": false,
+    "fullV4Complete": false
+  }
+}

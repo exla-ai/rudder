@@ -566,17 +566,86 @@ This qualifies the privilege component, not the installed production launcher,
 machine worker readiness, project authority or model execution. Original failed
 source, ELF bytes and VM cleanup evidence remain retained.
 
-Two real Codex0.166.0 app-server runs also passed file tooling, active steering,
-interrupt ACK/terminal/HTTP-close checks and actual process reap/EOF with a
-synthetic loopback provider and zero paid calls. These qualify the CLI protocol,
-not Rudder's native managed adapter; that separate ignored integration is drafted.
+The actual Rudder native Codex adapter now also passed against the official
+Codex 0.166.0 executable and a synthetic loopback provider, with zero paid model
+calls. The case covers a real file edit, exact thread/turn binding, typed peer
+steering, stale/wrong-target refusal, interruption and actual child/reader joins,
+reaping and pipe EOF. Holding the real interrupted notification proved that the
+empty interrupt RPC acknowledgment alone does not confirm interruption. A real
+multi-client initialization exposed an originator/version parsing error; the
+corrected parser accepts Codex's first-client originator while preserving the
+minimum version and malformed-version refusals. The passing run took 23.63s and
+finished all cleanup. This qualifies the existing native adapter with a simulated
+provider, not managed guest execution, real authentication or model quality.
 
 Private task forks retain Git alternates into the shared seed even after a task
 joins. Safe seed reuse therefore also requires original fork ownership and
 verified, durable localization of every object needed by retained jj history.
-Thread joins alone cannot release those mount references. Actual fork/localizer
-and seed-use/retirement integration, machine control ingress and installed
-production bootstrap qualification are the next concrete work.
+Thread joins alone cannot release those mount references. The integrated fork
+owner/localizer and never-linked recovery passed 20 real local Git/jj history,
+original-intent and recovery tests. Its current
+durability fallback copies all shared objects before removing the alternate;
+that is not a constant-cost fork or the final distributed-cache design. The real
+read-only mount fixture passed on Fly at 2026-11-01T04:18:35Z: after durable
+localization, normal unmount with flags0 and shared mount removal, the private
+fork still read Git/jj status and old history and created a new commit. The exact
+named Rust test passed with actual child exit0 and all pipe EOF. Seven stock
+commands and exact VM destruction/two absence checks also passed in 15 provider
+calls. The [physical VCS record](verification-vcs-localization-working.json)
+binds source, ELF, image and cleanup evidence. This does not establish Root
+service retirement, third-seed capacity reuse or representative build speed.
+
+The seed-use ledger and normal retirement path are integrated with original
+factory/helper ownership, retained fork identity, explicit discard or whole
+published acceptance, durable localization and distinct Root retirement/release
+acknowledgments. The host acknowledges readiness from the actual retained client
+worker before publishing Serving. Original dispatch/fork/helper/enrollment permits
+and whole unused-App custody now support settlement of proven never-started
+tasks. Uncertain activation, enrollment and partial alternate installation remain
+retained. The native library containing the new ledger gates passed 89 tests
+with zero failures and 13 ignored; the updated full application passed 1,254
+with zero failures and 19 ignored at 2026-11-01T04:18:01Z.
+
+The combined native application suite passed 1,251 tests with zero failures and
+19 ignored at 2026-11-01T03:55:11Z. The native library passed 82 with 13 ignored;
+the local fork/history suite passed 12 with one physical mount case ignored.
+The application run used the required explicit Node/profile-helper paths and
+serial execution. These results do not replace the ignored physical gates.
+
+Frozen working source manifest
+`90f02b7339e2690de0b7743012b2248bc67905359e70c3fbd2d37d92bcfa1260`
+built successfully at 2026-11-01T04:01:32Z as a qualification image derived from
+the immutable alpha.27 worker, replacing all four production native executables.
+The qualification image digest is
+`sha256:f531105ae9cc80c7bc6603104fb008cd6599f724599069936b44ba3ab97f58e5`.
+This is an uncommitted development snapshot, not a release or deployment.
+
+The real installed production bootstrap then passed on a disposable Fly VM at
+2026-11-01T04:14:24Z. An inherited package metadata mode0664 first failed the
+artifact guard before startup; explicit Docker mode0644 corrected packaging.
+The passing snapshot manifest is
+`310404b9590ab264b504d95eac1076acfe2653827c2468c06ff0b91ed5b11be5`,
+image digest `sha256:dddb3a94710114039d29bf51955db24cb5ea6b3adbefef8384562415747333e9`.
+All four compiled native executable bytes are unchanged from the first image.
+The actual original launcher Child/pidfd/executable witness, root storage service,
+UID1500/capabilities-zero/NNP1 engine, authenticated client and non-main worker ACK
+were checked live. Seven stock commands passed; exact VM destruction and two
+independent absence checks passed in 15 provider calls. Both earlier failed VMs
+also have verified destruction/absence. See the [focused verification record](verification-machine-bootstrap-working.json).
+This snapshot predates the later never-started follow-on; its physical proof
+does not qualify those changes or any model/project/source/retirement authority.
+
+Normal Root unmount/third-seed reuse and trusted machine control ingress remain
+open. The default startup path is still legacy.
+
+The alpha.28 candidate also passed TypeScript checking, all 822 JavaScript tests
+with 10 optional skips, and all 59 real terminal tests using the newly built
+normal native executable. All four native executables built from the integrated
+source. The isolated Codex provider fixture passed four checks. CI dependency
+caches restore external dependencies only, clean every local workspace crate
+and retain the full release qualification; cache restoration is never evidence
+that a release passed. Final versioned CI, registry publication and Cloud delivery
+are still separate gates.
 
 ## Current implementation track
 

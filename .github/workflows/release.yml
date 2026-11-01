@@ -127,16 +127,49 @@ jobs:
         include:
           - key: darwin-arm64
             runner: macos-15
+            cache_profile: release-fixtures
           - key: darwin-x64
             runner: macos-15-intel
+            cache_profile: release
           - key: linux-x64
             runner: ubuntu-22.04
+            cache_profile: release
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
+
+      # Never use this cache as native artifact or qualification evidence.
+      - name: Restore external Rust dependencies
+        id: rust_dependencies
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          prefix-key: rudder-external-deps-v1
+          shared-key: "${{ matrix.key }}-${{ matrix.runner }}-${{ matrix.cache_profile }}-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'native/Cargo.toml', 'engine/Cargo.toml', 'vcs-bridge/Cargo.toml', 'scripts/build-native.mjs', 'rust-toolchain', 'rust-toolchain.toml', '.cargo/config', '.cargo/config.toml') }}"
+          workspaces: ". -> target"
+          cache-targets: "true"
+          cache-workspace-crates: "false"
+          cache-all-crates: "false"
+          cache-bin: "false"
+          cache-on-failure: "false"
+          cache-provider: github
+          env-vars: "ImageOS ImageVersion SDKROOT DEVELOPER_DIR MACOSX_DEPLOYMENT_TARGET LIBRARY_PATH PKG_CONFIG LDFLAGS AR"
+          save-if: "false"
+
+      # Checked cleanup also covers local path dependencies, not just members.
+      # A cache can never make source mtimes accept an old local binary.
+      - name: Discard any restored local Cargo outputs
+        run: |
+          git diff --exit-code HEAD -- Cargo.lock Cargo.toml native/Cargo.toml engine/Cargo.toml vcs-bridge/Cargo.toml
+          node <<'NODE'
+          const cp = require('node:child_process');
+          const metadata = JSON.parse(cp.execFileSync('cargo', ['metadata', '--locked', '--all-features', '--format-version', '1'], {encoding: 'utf8', maxBuffer: 16 * 1024 * 1024}));
+          const local = metadata.packages.filter(pkg => pkg.source === null).map(pkg => pkg.name);
+          if (!local.length) throw new Error('Expected local workspace packages');
+          for (const profile of ['dev', 'release']) cp.execFileSync('cargo', ['clean', '--profile', profile, ...local.flatMap(name => ['--package', name])], {stdio: 'inherit'});
+          NODE
 
       # These host/browser fixtures need no Rust artifacts. Check platform
       # paths and opener behavior before spending time compiling the pair.
@@ -203,6 +236,36 @@ jobs:
         with:
           node-version: "22"
           registry-url: "https://registry.npmjs.org"
+
+      # Never use this cache as native artifact or qualification evidence.
+      - name: Restore external Rust dependencies
+        id: rust_dependencies
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          prefix-key: rudder-external-deps-v1
+          shared-key: "darwin-arm64-macos-15-release-fixtures-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'native/Cargo.toml', 'engine/Cargo.toml', 'vcs-bridge/Cargo.toml', 'scripts/build-native.mjs', 'rust-toolchain', 'rust-toolchain.toml', '.cargo/config', '.cargo/config.toml') }}"
+          workspaces: ". -> target"
+          cache-targets: "true"
+          cache-workspace-crates: "false"
+          cache-all-crates: "false"
+          cache-bin: "false"
+          cache-on-failure: "false"
+          cache-provider: github
+          env-vars: "ImageOS ImageVersion SDKROOT DEVELOPER_DIR MACOSX_DEPLOYMENT_TARGET LIBRARY_PATH PKG_CONFIG LDFLAGS AR"
+          save-if: "false"
+
+      # Checked cleanup also covers local path dependencies, not just members.
+      # A cache can never make source mtimes accept an old local binary.
+      - name: Discard any restored local Cargo outputs
+        run: |
+          git diff --exit-code HEAD -- Cargo.lock Cargo.toml native/Cargo.toml engine/Cargo.toml vcs-bridge/Cargo.toml
+          node <<'NODE'
+          const cp = require('node:child_process');
+          const metadata = JSON.parse(cp.execFileSync('cargo', ['metadata', '--locked', '--all-features', '--format-version', '1'], {encoding: 'utf8', maxBuffer: 16 * 1024 * 1024}));
+          const local = metadata.packages.filter(pkg => pkg.source === null).map(pkg => pkg.name);
+          if (!local.length) throw new Error('Expected local workspace packages');
+          for (const profile of ['dev', 'release']) cp.execFileSync('cargo', ['clean', '--profile', profile, ...local.flatMap(name => ['--package', name])], {stdio: 'inherit'});
+          NODE
 
       # Authenticate the producer sidecar ZIPs against trusted run metadata,
       # then hash every original native ZIP BEFORE extracting any entry.

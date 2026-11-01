@@ -134,15 +134,38 @@ fn read_boot(file: &File) -> Result<Vec<u8>> {
         .to_string().as_bytes() == &bytes[..36], "root seed boot ID malformed"); Ok(bytes[..n].to_vec())
 }
 
+/// Only the original held inode and a pre-effect intent permit absent-path
+/// reconciliation. A replacement path (including a symlink) is never cleanup.
+fn original_directory_present(held:&HeldDir,attempted:bool)->Result<bool> {
+    match fs::symlink_metadata(&held.path) {
+        Ok(_)=>{held.check()?;Ok(true)}
+        Err(error) if error.kind()==std::io::ErrorKind::NotFound=>{
+            ensure!(attempted,"owned directory disappeared before original remove intent");
+            let m=held.file.metadata()?;
+            ensure!((m.dev(),m.ino())==held.id&&m.is_dir()&&m.uid()==0&&m.gid()==0
+                &&m.mode()&0o7777==held.mode,"original removed directory custody changed");Ok(false)
+        }
+        Err(error)=>Err(error.into()),
+    }
+}
+fn remove_original_directory(held:&HeldDir,attempted:&mut bool,original:&FinalizationBudget)->Result<()> {
+    original.remaining()?;
+    if original_directory_present(held,*attempted)? {
+        *attempted=true;if let Err(error)=fs::remove_dir(&held.path) {*attempted=false;return Err(error.into());}
+    }
+    ensure!(!original_directory_present(held,*attempted)?,"original directory removal unconfirmed");
+    original.remaining()?;Ok(())
+}
+
 struct SourcePin { store: LocalStore, directory: HeldDir, seed: ObjectRef, name: String,
-    attempted: bool, acquired: bool, removed: bool }
+    attempted: bool, acquired: bool, removed: bool, unpin_attempted:bool }
 impl SourcePin {
     fn capture(store: LocalStore, seed: ObjectRef, nonce: uuid::Uuid) -> Result<Self> {
         seed.validate()?; ensure!(seed.kind == ObjectKind::Directory, "root seed must be a Directory");
         // Pin/unpin writes must NEVER target the UID1500 engine's store.
         root_ancestors(store.root())?; let directory = HeldDir::root(store.root(), 0o700)?;
         Ok(Self { store, directory, seed, name: format!("root-seed-mount:{nonce}"),
-            attempted: false, acquired: false, removed: false })
+            attempted: false, acquired: false, removed: false,unpin_attempted:false })
     }
     fn acquire(&mut self) -> Result<()> {
         self.directory.check()?;
@@ -160,8 +183,8 @@ impl SourcePin {
         self.directory.check()?;
         if !self.attempted { self.removed = true; return Ok(()); }
         match self.store.retention()?.pins.get(&self.name) {
-            Some(root) => { ensure!(root == &self.seed, "root seed pin was replaced"); self.store.unpin(&self.name)?; }
-            None => {} // Reconcile an original failed/unknown pin or unpin.
+            Some(root) => { ensure!(root == &self.seed, "root seed pin was replaced"); self.unpin_attempted=true;self.store.unpin(&self.name)?; }
+            None => ensure!(!self.acquired||self.unpin_attempted,"acquired root pin vanished before original unpin intent"),
         }
         ensure!(!self.store.retention()?.pins.contains_key(&self.name), "root seed pin removal unconfirmed");
         self.directory.check()?; self.removed = true; Ok(())
@@ -274,6 +297,7 @@ struct Resources {
     session_created: bool, target_created: bool, mount_attempted: bool, mount_id: Option<u64>,
     unmounted: bool, prepare_attempted: bool, template: Option<VerifiedMetadataTemplate>, bytes: u64,
     retiring: AtomicBool, fenced: AtomicBool, cleaned: bool,
+    unmount_attempted:bool,target_remove_attempted:bool,session_remove_attempted:bool,cleanup_budget:Option<FinalizationBudget>,
 }
 impl Resources {
     fn paths_current(&self) -> Result<()> {
@@ -323,6 +347,7 @@ impl RootSeedMount {
             label: CString::new(format!("rudder-seed-{nonce}"))?, prefix: None, session_dir: None,
             underlying: None, mounted: None, session_created: false, target_created: false,
             mount_attempted: false, mount_id: None, unmounted: false, prepare_attempted: false,
+            unmount_attempted:false,target_remove_attempted:false,session_remove_attempted:false,cleanup_budget:None,
             template: None, bytes: 0, retiring: AtomicBool::new(false), fenced: AtomicBool::new(false), cleaned: false }) })
     }
     /// Original admission deadline/cancel must be captured before worker queueing.
@@ -409,33 +434,51 @@ impl RootSeedMount {
     pub fn cleanup_after_reader_drain(&mut self, budget: &FinalizationBudget) -> Result<()> {
         self.close_admission();
         let r = Arc::get_mut(&mut self.resources).context("root seed still has retained reader owners")?;
+        if let Some(original)=&r.cleanup_budget {ensure!(original.constraint()==budget.constraint(),"root seed cleanup budget changed");}
+        else {budget.remaining()?;r.cleanup_budget=Some(budget.clone());}
         if r.cleaned { return Ok(()); }
-        budget.remaining()?; r.paths_current()?; r.template = None;
+        let original=r.cleanup_budget.as_ref().unwrap().clone();original.remaining()?;
+        // Normal read checks require named paths. Cleanup additionally permits
+        // an absent directory ONLY after our retained original unlink intent.
+        r.custody.check()?;r.source.directory.check()?;
+        if let Some(prefix)=&r.prefix {prefix.check()?;}
+        if let Some(session)=&r.session_dir {original_directory_present(session,r.session_remove_attempted)?;}
+        r.template = None;
         if r.mount_attempted && !r.unmounted {
             if let Some(mount) = mount_at(&r.target)? {
                 ensure!(mount.filesystem == "tmpfs" && mount.source.as_bytes() == r.label.as_bytes()
                     && r.mount_id.is_none_or(|id| id == mount.id), "cleanup refuses replaced root seed mount");
-                budget.remaining()?; r.paths_current()?;
-                // Our own directory descriptor must not cause EBUSY.
+                original.remaining()?;r.custody.check()?;
+                // Our own directory descriptor must not cause EBUSY. This
+                // original intent, not path absence alone, permits recovery.
                 drop(r.mounted.take()); let target = CString::new(r.target.as_os_str().as_bytes())?;
+                r.unmount_attempted=true;
                 let result = syscall(unsafe { libc::umount2(target.as_ptr(), 0) }, "normal root seed unmount");
-                if let Err(error) = result { r.mounted = open_dir(&r.target).ok(); return Err(error); }
-                r.unmounted = true; // Original actual syscall succeeded.
-            } else { ensure!(r.mount_id.is_none(), "owned root seed mount disappeared without normal cleanup"); }
+                if let Err(error) = result { r.unmount_attempted=false;r.mounted = open_dir(&r.target).ok(); return Err(error); }
+                r.unmounted = true;
+            } else {
+                ensure!(r.mount_id.is_none()||r.unmount_attempted,"owned root seed disappeared without original normal-unmount intent");
+                // Held underlying inode must be exposed after actual unmount.
+                if let Some(underlying)=&r.underlying {original_directory_present(underlying,r.target_remove_attempted)?;}
+                r.unmounted=true;r.mounted=None;
+            }
         }
-        budget.remaining()?; r.paths_current()?;
+        original.remaining()?;r.custody.check()?;
         ensure!(mount_at(&r.target)?.is_none(), "root seed mount absence unconfirmed");
         if r.target_created {
-            r.underlying.as_ref().context("underlying root seed directory absent")?.check()?;
-            fs::remove_dir(&r.target)?; r.target_created = false; r.underlying = None;
+            remove_original_directory(r.underlying.as_ref().context("underlying root seed directory absent")?,
+                &mut r.target_remove_attempted,&original)?;
+            r.target_created=false;r.underlying=None;
         }
         if r.session_created {
-            r.session_dir.as_ref().context("root seed session directory absent")?.check()?;
-            fs::remove_dir(&r.session)?; r.session_created = false; r.session_dir = None;
+            remove_original_directory(r.session_dir.as_ref().context("root seed session directory absent")?,
+                &mut r.session_remove_attempted,&original)?;
+            r.session_created=false;r.session_dir=None;
         }
-        budget.remaining()?; r.custody.check()?; r.source.release()?; budget.remaining()?;
+        original.remaining()?;r.custody.check()?;r.source.release()?;original.remaining()?;
         r.cleaned = true; Ok(())
     }
+
 }
 impl SeedMountRead {
     pub fn check_current(&self) -> Result<()> { self.resources.check() }
@@ -454,3 +497,7 @@ mod tests;
 #[cfg(test)]
 #[path = "root_seed_real_history_tests.rs"]
 mod real_history_tests;
+
+#[cfg(test)]
+#[path="root_seed_retirement_cleanup_tests.rs"]
+mod retirement_cleanup_tests;

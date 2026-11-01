@@ -43,6 +43,8 @@ pub(crate) struct ManagedInitialSourceOwner {
     lease: EngineSourceLease,
 }
 impl ManagedInitialSourceOwner {
+    pub(crate) fn owner(&self)->&rudder_engine::journal::OwnerFence {self.lease.owner()}
+    pub(crate) fn cas_root(&self)->&std::path::Path {self.store.root()}
     pub(crate) fn capture(owner: &mut EngineOwnership, _selection: &ManagedTaskOptIn, store: LocalStore) -> Result<Self> {
         ensure!(owner.is_fabric(),"initial managed source requires the actual Fabric owner");
         owner.assert_current()?;

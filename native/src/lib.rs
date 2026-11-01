@@ -9,3 +9,9 @@ pub mod root_storage_service;
 
 #[cfg(target_os = "linux")]
 pub mod root_storage_client;
+
+#[cfg(target_os = "linux")]
+pub mod root_storage_bootstrap;
+
+#[cfg(target_os = "linux")]
+pub mod root_storage_uses;

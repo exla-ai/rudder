@@ -375,6 +375,8 @@ pub(crate) struct PreparedManagedLaunch {
     retirement: Option<Retirement>,
     #[cfg(target_os = "linux")]
     pub preparation_reuse: Option<crate::managed_preparation_cache::ManagedPreparationReuse>,
+    #[cfg(target_os = "linux")]
+    pub seed_fork:Option<Arc<crate::managed_seed_fork::ManagedSeedForkCell>>,
 }
 impl PreparedManagedLaunch {
     pub(crate) fn take_codex_api_key(&mut self) -> Option<ManagedCodexApiKey> { self.codex_api_key.take() }
@@ -398,6 +400,15 @@ impl PreparedManagedLaunch {
         crate::agent_link::AgentLinkLaunch { format_version: 1, run_id: self.assignment.fence.run_id.clone(),
             attempt_id: self.assignment.fence.attempt_id.clone(), backend: if self.execution_profile == "codex-app-server" { "codex".into() } else { self.execution_profile.clone() },
             socket_path: self.transport.host_socket.clone(), log_path: self.transport.host_socket.with_file_name("backend.log") }
+    }
+    /// Borrowed unused cleanup for a genuine never-started capsule. No actor,
+    /// helper or seed dependency proof is issued here. A failure retains this
+    /// original retirement owner instead of scheduling/drop-based settlement.
+    pub(crate) fn settle_unused_retaining(&mut self)->Result<()> {
+        if let Some(retirement)=&mut self.retirement {
+            ensure!(!retirement.adopted,"adopted launch needs actual helper/actor drain");retire_unused(retirement)?;
+        }
+        self.retirement=None;Ok(())
     }
     /// Explicit unused-result retirement on a background worker. Adopted or
     /// uncertain running attempts retain their recovery state conservatively.
@@ -493,8 +504,15 @@ pub(crate) struct ManagedLocalPreparationOwner {
     view: Option<ManagedLaunchViewOwner>, retirement: Option<Retirement>, attempted:bool,
     #[cfg(target_os = "linux")]
     cache: Option<Arc<crate::managed_preparation_cache::ManagedPreparationCache>>,
+    #[cfg(target_os = "linux")]
+    seed_fork:Option<Arc<crate::managed_seed_fork::ManagedSeedForkCell>>,
 }
 impl ManagedLocalPreparationOwner {
+    #[cfg(target_os = "linux")]
+    pub(crate) fn set_seed_fork(&mut self,fork:Option<Arc<crate::managed_seed_fork::ManagedSeedForkCell>>)->Result<()> {
+        ensure!(!self.attempted&&self.seed_fork.is_none(),"task fork owner must precede preparation effects");self.seed_fork=fork;Ok(())
+    }
+
     #[cfg(target_os = "linux")]
     pub(crate) fn set_cache(&mut self, cache:Option<Arc<crate::managed_preparation_cache::ManagedPreparationCache>>) -> Result<()> {
         ensure!(!self.attempted && self.view.is_none() && self.retirement.is_none() && self.cache.is_none(), "managed task owner is not fresh");
@@ -647,7 +665,13 @@ fn prepare_local_retaining(mut request: ManagedLocalLaunchRequest, cancelled: Ar
         // A local seed with LocalWC metadata is rebound by the post-RPC host
         // factory. Already-bound Rudder metadata needs a fresh observation and
         // is explicitly refused here rather than inventing one before RPC.
-        fork_private_metadata(&request.seed, &private, binding.clone(), None)?;
+        #[cfg(target_os = "linux")]
+        if let Some(fork)=&retained.seed_fork {
+            fork.prepare_retaining(&request.seed,&private,binding.clone(),None,
+                budget.context("retained fork requires original task budget")?,&cancelled)?;
+        } else {fork_private_metadata(&request.seed,&private,binding.clone(),None)?;}
+        #[cfg(not(target_os = "linux"))]
+        fork_private_metadata(&request.seed,&private,binding.clone(),None)?;
         check()?;
         for name in ["context", "state", "projections"] {
             fs::DirBuilder::new().mode(0o700).create(request.private_root.join(name))?;
@@ -704,7 +728,9 @@ fn prepare_local_retaining(mut request: ManagedLocalLaunchRequest, cancelled: Ar
             execution_profile: execution_profile.into(), frontend_start, identity_home: request.home.clone(),
             identity_journal: request.journal.clone(), server_command, codex_api_key, spec: Some(spec), retirement: None,
             #[cfg(target_os = "linux")]
-            preparation_reuse: match held { ManagedLaunchViewOwner::Cached(view) => Some(view.stats().clone()), _ => None } })
+            preparation_reuse: match held { ManagedLaunchViewOwner::Cached(view) => Some(view.stats().clone()), _ => None },
+            #[cfg(target_os = "linux")]
+            seed_fork:retained.seed_fork.clone() })
     })();
     prepared
 }

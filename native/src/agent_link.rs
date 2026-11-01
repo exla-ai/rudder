@@ -1030,12 +1030,22 @@ fn connect(path: &Path, stopped: &AtomicBool, process: Option<&dyn OwnedPeerProc
 }
 
 fn codex_peer_controls_supported(user_agent: &str) -> bool {
-    let Some(version) = user_agent
-        .strip_prefix("rudder_agent_link/")
-        .and_then(|tail| tail.split_whitespace().next())
-    else {
+    // Codex retains the first client's originator in this process-wide
+    // product token. A second client's name/version is a separate suffix;
+    // neither client label establishes socket/process identity. Parse only
+    // the server version from the leading product token, never the suffix.
+    let Some(product) = user_agent.split_whitespace().next() else {
         return false;
     };
+    if !user_agent.starts_with(product) {
+        return false;
+    }
+    let Some((originator, version)) = product.split_once('/') else {
+        return false;
+    };
+    if originator.is_empty() || originator.chars().any(char::is_control) {
+        return false;
+    }
     let parts: Vec<_> = version.split('.').collect();
     if parts.len() != 3
         || !parts
@@ -1957,3 +1967,11 @@ mod tests;
 #[cfg(test)]
 #[path = "agent_link_worker_join_tests.rs"]
 mod worker_join_tests;
+
+#[cfg(all(test, target_os = "linux"))]
+#[path = "agent_link_codex_protocol_integration_tests.rs"]
+mod codex_protocol_integration_tests;
+
+#[cfg(test)]
+#[path = "agent_link_originator_version_tests.rs"]
+mod originator_version_tests;

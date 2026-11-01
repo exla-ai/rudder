@@ -831,3 +831,10 @@ fn require_readonly_mount(path: &Path) -> Result<()> {
 fn require_readonly_mount(_: &Path) -> Result<()> {
     anyhow::bail!("read-only seed mount qualification requires Unix");
 }
+
+// Actual retained fork custody is Linux-only; legacy DATA forks stay unchanged.
+#[cfg(all(feature = "jj", target_os = "linux"))]
+#[path = "seed_fork_localization.rs"]
+mod fork_localization;
+#[cfg(all(feature = "jj", target_os = "linux"))]
+pub use fork_localization::*;

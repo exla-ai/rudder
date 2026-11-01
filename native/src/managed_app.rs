@@ -29,6 +29,8 @@ mod local {
     const TASK_RECOVERY: u8 = 4;
     const TASK_SETTLED: u8 = 5;
     const TASK_JOINED: u8 = 6;
+    const TASK_NEVER_STARTED:u8=7;
+    include!("managed_never_started.rs");
     fn now_ms() -> Result<i64> {
         Ok(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_millis().try_into()?)
     }
@@ -64,7 +66,9 @@ mod local {
             let send = self.send.clone();
             let slot=ticket.slot.clone();
             let worker = thread::Builder::new().name("rudder-managed-task-prepare".into()).spawn(move || {
-                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(||work(send.clone()))).unwrap_or_else(|_|on_panic());
+                let result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(||work(send.clone()))) {
+                    Ok(result)=>result,Err(panic)=>{slot.carrier.lock().unwrap_or_else(|p|p.into_inner()).panics.push(panic);on_panic()}
+                };
                 if send.send(result).is_err() {
                     slot.state.store(if slot.may_have_helper.load(Ordering::Acquire) { TASK_RECOVERY } else { TASK_UNUSED },Ordering::Release);
                     slot.work.store(true,Ordering::Release);
@@ -104,6 +108,8 @@ mod local {
         broker_joined: Option<crate::agent_broker::BrokerThreadsSettled>,
         drain: Option<TaskDrain>, ready_owner:Option<PreparedResult>, activation_failure:Option<TaskActivationFailure>,
         admission: Option<ManagedTaskAdmission>, preparation_joined: bool,
+        preparation_proof:Option<ManagedPreparationJoined>,scoped_fork:Option<Arc<crate::managed_seed_fork::ManagedSeedForkCell>>,
+        unused_budget:Option<FinalizationBudget>,
         panics: Vec<Box<dyn std::any::Any + Send>>,
     }
     struct TaskDrain { live: Live, runtime: Option<fabric_runtime::ManagedRuntimeDrain>, pty:Option<ManagedPtyDrainOwner>,
@@ -130,6 +136,13 @@ mod local {
         pub(crate) fn shutdown(&self)->&ValidatedManagedShutdown { self.drain.live.receipt.as_ref().unwrap() }
         pub(crate) fn helper_exit(&self)->&SuccessfulManagedHelperExit { self.drain.exit.as_ref().unwrap() }
         pub(crate) fn helper_custody(&self)->&ManagedHelperCustody { self.drain.custody.as_ref().unwrap() }
+        /// OFF App. Original stopped run identity remains in the genuine
+        /// capsule; this checks the SAME held Journal/project owner epoch. A
+        /// later run attempt is not authority to rewrite this old private fork.
+        pub(crate) fn check_seed_localization_owner(&self,budget:&FinalizationBudget,cancelled:&AtomicBool)->Result<()> {
+            self._project.with_writer(budget,cancelled,|_|Ok(()))
+        }
+
         /// Acceptance and immutable checkpoint pinning remain separate. Call
         /// only AFTER they used this original custody, or on explicit discard.
         /// Every cleanup error leaves this SAME mutable capsule owned by caller.
@@ -157,7 +170,7 @@ mod local {
         drain_send: SyncSender<TaskPayload>, drain_receive: Mutex<Receiver<TaskPayload>>,
         project: Arc<ManagedTaskJournalOwner>, wake: Mutex<Option<PtyOutputWaker>> }
     struct TaskWorkerJoins { worker:[Option<RetainedTaskWorker>;TASK_WORKERS],
-        preparation_joined:bool,panics:Vec<Box<dyn std::any::Any+Send>> }
+        preparation_joined:bool,preparation_proof:Option<ManagedPreparationJoined>,panics:Vec<Box<dyn std::any::Any+Send>> }
     #[derive(Clone)]
     pub(crate) struct TaskHandle { slot:Arc<TaskSlot>, generation:u64,
         budget:FinalizationBudget,cancelled:Arc<AtomicBool> }
@@ -240,8 +253,8 @@ mod local {
                     carrier: Mutex::new(TaskCarrier { packet:None,request:None,native:None,budget:None,cancelled:Arc::new(AtomicBool::new(false)),
                         preparation:Default::default(),projection:fabric_runtime::AgentToolsProjectionOwner::new(),
                         broker:crate::agent_broker::BrokerThreadOwner::new(),broker_joined:None,drain:None,ready_owner:None,activation_failure:None,
-                        admission:None,preparation_joined:false,panics:Vec::new() }),
-                    joining:Mutex::new(TaskWorkerJoins { worker:std::array::from_fn(|_|None),preparation_joined:false,panics:Vec::new() }),
+                        admission:None,preparation_joined:false,preparation_proof:None,scoped_fork:None,unused_budget:None,panics:Vec::new() }),
+                    joining:Mutex::new(TaskWorkerJoins { worker:std::array::from_fn(|_|None),preparation_joined:false,preparation_proof:None,panics:Vec::new() }),
                     workers:workers.try_into().ok().unwrap(),worker_receivers:Mutex::new(receivers.try_into().ok().unwrap()),
                     drain_send,drain_receive:Mutex::new(drain_receive),project:project.clone(),wake:Mutex::new(None) })
             }).collect();
@@ -279,7 +292,7 @@ mod local {
                     Ok(old)=>old+1,Err(_)=>{ slot.occupied.store(false,Ordering::Release); continue; } };
                 slot.state.store(TASK_PENDING,Ordering::Release);slot.may_have_helper.store(false,Ordering::Release);slot.activation_committed.store(false,Ordering::Release);
                 let budget=packet.budget.clone();let cancelled=packet.cancelled.clone();
-                carrier.budget=Some(budget.clone());carrier.cancelled = cancelled.clone(); carrier.packet = Some(packet);
+                carrier.scoped_fork=packet.seed_fork.clone();carrier.budget=Some(budget.clone());carrier.cancelled = cancelled.clone(); carrier.packet = Some(packet);
                 *wake_cell = wake;
                 return Ok(TaskHandle { slot:slot.clone(), generation,budget,cancelled });
             }
@@ -316,7 +329,7 @@ mod local {
                     preparation:std::mem::take(&mut carrier.preparation),_project:slot.project.clone(),_slot:slot.clone(),settled:false };
                 carrier.native=None;carrier.request=None;carrier.packet=None;carrier.broker_joined=None;
                 carrier.broker=crate::agent_broker::BrokerThreadOwner::new();carrier.projection=fabric_runtime::AgentToolsProjectionOwner::new();
-                carrier.preparation_joined=false;carrier.panics.clear();
+                carrier.preparation_joined=false;carrier.preparation_proof=None;carrier.scoped_fork=None;carrier.unused_budget=None;carrier.panics.clear();
                 slot.state.store(TASK_SETTLED,Ordering::Release);slot.work.store(true,Ordering::Release);return Ok(Some(joined));
             }
             Ok(None)
@@ -350,21 +363,25 @@ mod local {
             if let Some(worker) = joining.worker[index].take() {
                 // OFF-App actual join, including TLS; no timeout/is_finished
                 // shortcut can release either charged preparation admission.
+                let actual_thread=worker.worker.thread().clone();
                 let result=worker.join();
-                if index == 0 { joining.preparation_joined = true; }
+                if index == 0 { joining.preparation_joined = true;
+                    if result.is_ok()&&joining.preparation_proof.is_none() {joining.preparation_proof=Some(ManagedPreparationJoined {_thread:actual_thread});}
+                }
                 slot.handles.fetch_and(!(1 << index),Ordering::AcqRel);
                 if let Err(payload) = result { joining.panics.push(payload); anyhow::bail!("managed task worker panicked"); }
             }
         }
-        drop(receivers);let preparation_joined=joining.preparation_joined;drop(joining);
+        drop(receivers);let preparation_joined=joining.preparation_joined;let preparation_proof=joining.preparation_proof.take();drop(joining);
         let mut carrier = slot.carrier.lock().unwrap_or_else(|p|p.into_inner());
         carrier.preparation_joined |= preparation_joined;
+        if preparation_proof.is_some(){carrier.preparation_proof=preparation_proof;}
         if let Ok(payload) = slot.drain_receive.lock().unwrap_or_else(|p|p.into_inner()).try_recv() {
             match payload { TaskPayload::Live(drain)=>carrier.drain=Some(drain),TaskPayload::ReadyOwner(ready)=>carrier.ready_owner=Some(ready),
                 TaskPayload::ActivationFailure(failure)=>carrier.activation_failure=Some(failure) }
         }
         let state = slot.state.load(Ordering::Acquire);
-        if state==TASK_JOINED { return Ok(()); }
+        if matches!(state,TASK_JOINED|TASK_NEVER_STARTED) { return Ok(()); }
         if state==TASK_SETTLED {
             carrier.ready_owner=None;
             // Keep the original budget's actual clock owner off-App until no
@@ -379,7 +396,14 @@ mod local {
         // original child/reader/control and unused cleanup actually settle.
         if slot.activation_committed.load(Ordering::Acquire) && carrier.preparation_joined { drop(carrier.admission.take()); }
         if state == TASK_PENDING { return Ok(()); }
-        let budget = FinalizationBudget::begin(STOP_DEADLINE)?; // cleanup ONLY; never restarts preparation
+        let budget=if let Some(fork)=&carrier.scoped_fork {
+            if carrier.drain.is_none()&&carrier.activation_failure.is_none() {
+                // No cleanup budget is minted while the original task gate is
+                // open. The caller first seals actual unspent admission permits.
+                let Some(original)=fork.start_gate().cleanup_budget() else {return Ok(());};
+                carrier.unused_budget=Some(original.clone());original
+            } else {FinalizationBudget::begin(STOP_DEADLINE)?}
+        } else {FinalizationBudget::begin(STOP_DEADLINE)?}; // only scoped unused cleanup uses its original captured budget
         if let Some(failure) = &mut carrier.activation_failure {
             failure.activation.settle_unused_off_app(&budget)?;
             anyhow::ensure!(failure.activation.is_settled(),"actual PTY activation cleanup remains uncertain");
@@ -408,14 +432,25 @@ mod local {
         anyhow::ensure!(carrier.projection.is_settled(), "managed task grant settlement remains uncertain");
         drop(journal); budget.remaining()?;
         if carrier.drain.is_some() { slot.state.store(TASK_JOINED,Ordering::Release);return Ok(()); }
+        if let Some(fork)=&carrier.scoped_fork {
+            // A scoped task may still own durable shared alternates/history.
+            // Keep its WHOLE original carrier, even before the caller seals it.
+            // Neither missing Child nor may_have_helper issues this receipt.
+            if let Some(seal)=fork.start_gate().original_seal() {
+                seal.check_original(fork.start_gate())?;
+                anyhow::ensure!(carrier.preparation_proof.is_some()&&carrier.panics.is_empty(),"original preparation/TLS join receipt absent or callback panicked");
+                slot.state.store(TASK_NEVER_STARTED,Ordering::Release);
+            }
+            return Ok(());
+        }
         carrier.preparation.settle_unused()?;
         carrier.preparation=Default::default();
         carrier.drain = None; carrier.ready_owner=None;carrier.activation_failure=None;carrier.request = None; carrier.packet = None; carrier.native = None;
         carrier.broker_joined = None; carrier.panics.clear();
         drop(carrier.admission.take());
         carrier.broker=crate::agent_broker::BrokerThreadOwner::new();carrier.projection=fabric_runtime::AgentToolsProjectionOwner::new();
-        carrier.preparation_joined=false;
-        let mut joining=slot.joining.lock().unwrap_or_else(|p|p.into_inner());joining.panics.clear();joining.preparation_joined=false;
+        carrier.preparation_joined=false;carrier.preparation_proof=None;carrier.unused_budget=None;
+        let mut joining=slot.joining.lock().unwrap_or_else(|p|p.into_inner());joining.panics.clear();joining.preparation_joined=false;joining.preparation_proof=None;
         slot.state.store(TASK_SETTLED,Ordering::Release); Ok(())
     }
     fn task_time(budget:&FinalizationBudget,cancelled:&AtomicBool) -> Result<()> {
@@ -479,6 +514,7 @@ mod local {
         fence:ManagedLaunchFence,
         assignment:managed_launch::WorkspaceAssignment,
         managed_run:crate::managed_store::ManagedRunLocation,
+        seed_fork:Option<Arc<crate::managed_seed_fork::ManagedSeedForkCell>>,
         helper:Arc<rudder_engine::execution::handoff::helper_process::HelperProcessWitness>,
         task:TaskHandle,
     }
@@ -487,6 +523,7 @@ mod local {
         pub(crate) fn assignment(&self)->&managed_launch::WorkspaceAssignment { &self.assignment }
         pub(crate) fn managed_run(&self)->&crate::managed_store::ManagedRunLocation { &self.managed_run }
         pub(crate) fn journal_owner(&self)->&Arc<ManagedTaskJournalOwner> { &self.task.slot.project }
+        pub(crate) fn seed_fork(&self)->Option<&Arc<crate::managed_seed_fork::ManagedSeedForkCell>> {self.seed_fork.as_ref()}
         pub(crate) fn helper(&self)->&Arc<rudder_engine::execution::handoff::helper_process::HelperProcessWitness> { &self.helper }
         pub(crate) fn original_budget(&self)->&FinalizationBudget { &self.task.budget }
         pub(crate) fn cancellation(&self)->&AtomicBool { &self.task.cancelled }
@@ -601,7 +638,7 @@ mod local {
             anyhow::ensure!(self.agents.iter().any(|run|run.id==fence.run_id && matches_workspace(run.managed_local.as_ref(),&live.prepared.assignment,false)
                 && task.custody.as_ref().is_some_and(|custody|run.terminal.as_ref().is_some_and(|pane|pane.matches_managed_helper_custody(custody)))),"original managed task pane replaced");
             Ok(PendingManagedTaskHelper { fence:fence.clone(),assignment:live.prepared.assignment.clone(),
-                managed_run:live.prepared.managed_run.clone(),helper:start.pending_helper_process(),task:task.handle.clone() })
+                managed_run:live.prepared.managed_run.clone(),seed_fork:live.prepared.seed_fork.clone(),helper:start.pending_helper_process(),task:task.handle.clone() })
         }
         /// Trusted Root IPC adapter ONLY: invoke after verifying the actual
         /// original enrollment ACK for this pending helper + exact seed/source.
@@ -676,6 +713,7 @@ mod local {
             })();
             if let Err(error) = validation { return Err(ManagedTaskStartFailure::Packet(packet,error)); }
             let permit = match self.managed_local.queue.admit() { Ok(permit)=>permit,Err(error)=>return Err(ManagedTaskStartFailure::Packet(packet,error)) };
+            if let Some(fork)=&packet.seed_fork {if let Err(error)=fork.start_gate().claim_dispatch(){return Err(ManagedTaskStartFailure::Packet(packet,error));}}
             let task = self.managed_local.task_supervisor.as_ref().unwrap().reserve(packet,self.pty_output_waker.clone())
                 .map_err(|(packet,error)|ManagedTaskStartFailure::Packet(packet,error))?;
             let result = (|| -> Result<ManagedLaunchFence> {
@@ -698,6 +736,7 @@ mod local {
                 let packet = carrier.packet.take().unwrap();
                 carrier.budget=Some(packet.budget); carrier.cancelled=packet.cancelled; carrier.admission=Some(packet.retention);
                 carrier.native=Some(packet.native_program); carrier.preparation.set_cache(packet.preparation_cache)?;
+                carrier.preparation.set_seed_fork(packet.seed_fork)?;
                 carrier.request=Some(packet.inputs.bind(fence.clone(),uuid::Uuid::new_v4().to_string(),uuid::Uuid::new_v4().to_string()));
                 let budget = carrier.budget.as_ref().unwrap().clone(); let cancelled=carrier.cancelled.clone(); drop(carrier);
                 self.managed_local.pending.insert(run_id,Pending { fence:fence.clone(),cancelled,started:Instant::now(),budget:Some(budget) });
@@ -930,6 +969,10 @@ mod local {
                         if let Some(task)=&task { if task.time().is_err() {
                             task.reject_ready(ready);orphan(&app.cwd,&mut app.agents[index],"original managed task preparation deadline elapsed before helper admission");continue;
                         } }
+                        if let Some(fork)=&ready.prepared.seed_fork {if let Err(_)=fork.start_gate().claim_helper_start() {
+                            if let Some(task)=&task {task.reject_ready(ready);}
+                            orphan(&app.cwd,&mut app.agents[index],"original helper admission sealed/refused; unused owner retained");continue;
+                        }}
                         ready.prepared.adopt();
                         if let Some(task)=&task { task.adopted(); }
                         let options = TerminalPaneOptions { size: app.agents[index].terminal_size.unwrap_or_default(),
@@ -1204,7 +1247,7 @@ mod local {
     #[cfg(test)]
     mod task_retained_activation_tests { use super::*;include!("managed_task_retained_activation_tests.rs"); }
     #[cfg(test)]
-    mod task_wiring_tests { use super::*;include!("managed_task_launch_wiring_tests.rs"); }
+    mod task_wiring_tests { use super::*;include!("managed_task_launch_wiring_tests.rs");include!("managed_never_started_worker_tests.rs"); }
     #[cfg(test)]
     mod tests {
         use super::*;
@@ -1337,7 +1380,7 @@ mod local {
 }
 
 #[cfg(target_os = "linux")]
-pub(crate) use local::{ManagedAppState, JoinedManagedTask, ManagedTaskJournalOwner, ManagedTaskLifetimeSupervisor, ManagedTaskStartFailure, PendingManagedTaskHelper, poll, stop, abandon, accepts_input};
+pub(crate) use local::{NeverStartedManagedTask,ManagedAppState, JoinedManagedTask, ManagedTaskJournalOwner, ManagedTaskLifetimeSupervisor, ManagedTaskStartFailure, PendingManagedTaskHelper, poll, stop, abandon, accepts_input};
 
 #[cfg(not(target_os = "linux"))]
 #[derive(Default)]

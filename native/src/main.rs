@@ -89,7 +89,13 @@ mod managed_checkpoint_accept;
 mod managed_launch;
 mod managed_app;
 #[cfg(target_os = "linux")]
+mod managed_machine_entry;
+#[cfg(target_os = "linux")]
 mod managed_seed_enrollment;
+#[cfg(target_os = "linux")]
+mod managed_root_seed_retirement;
+#[cfg(target_os = "linux")]
+mod managed_seed_fork;
 mod managed_source_app;
 mod managed_store;
 mod board_access;
@@ -21435,6 +21441,11 @@ mod app_tests;
 mod board_app_tests;
 
 fn main() -> Result<()> {
+    // FIRST: an inherited managed bridge/FD family never reaches legacy or smoke.
+    #[cfg(target_os = "linux")]
+    if managed_machine_entry::selected_early() {
+        managed_machine_entry::run_selected();
+    }
     if std::env::args().any(|arg| arg == "--smoke") {
         println!("rudder-native smoke ok");
         return Ok(());

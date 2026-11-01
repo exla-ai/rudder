@@ -60,6 +60,7 @@ impl ManagedSeedEnrollment {
         check_time(self.pending.original_budget(), self.pending.cancellation())?;
         let expected_seed = seed.seed().clone();
         self.check_current_assignment(&expected_seed)?;
+        if let Some(fork)=self.pending.seed_fork(){fork.start_gate().claim_enrollment()?;}
         let pidfd = self.pending.helper().duplicate_live_pidfd_for_seed_enrollment()?;
         check_time(self.pending.original_budget(), self.pending.cancellation())?;
         // Absorbing BEFORE entering the client API: an Err/panic/late ACK may

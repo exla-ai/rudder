@@ -320,6 +320,17 @@ impl ManagedCheckpointAcceptance {
         completion.settle_discard_off_app(budget)?;
         Ok(integration)
     }
+    /// Pure borrowing access for the native seed-retirement bridge. The WHOLE
+    /// acceptor remains owned by that bridge; this never extracts/reconstructs a
+    /// completion, promotes an unknown publication, or creates an ACK.
+    pub(crate) fn settled_joined_task(&self)->Result<&JoinedManagedTask> {
+        let receipt=self.intent.as_ref().context("original publication ACK absent")?;
+        ensure!(receipt.state==VcsIntentState::Published&&receipt.integration.is_some(),"original acceptance is not Published");
+        let ManagedCompletion::Task(joined)=&self.completion else {anyhow::bail!("original joined task absent");};
+        ensure!(joined.is_settled(),"Published task cleanup is not settled");
+        joined.helper_exit().matches_checkpoint(joined.helper_custody(),joined.shutdown())?;
+        Ok(joined)
+    }
     fn progress(&self) -> Result<ManagedAcceptanceProgress> {
         let receipt = self.intent.as_ref().context("intent ACK absent")?;
         if receipt.state == VcsIntentState::Published {

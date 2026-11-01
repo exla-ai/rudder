@@ -449,6 +449,7 @@ impl LocalImageImport {
     fn commit_state(&self,state:&mut State,mut retained:RetentionState)->Result<()> {
         self.check()?;
         retained.generation=retained.generation.checked_add(1).context("image retention generation overflow")?;
+        backed_data::validate_retention(&retained)?;
         let checksum=ObjectRef::from_bytes(ObjectKind::Blob,&canonical_json(&retained)?).digest;
         let bytes=canonical_json(&StateEnvelope {state:retained.clone(),checksum})?;
         ensure!(bytes.len()as u64<=MAX_RETENTION_BYTES,"image import retention state exceeds byte bound");

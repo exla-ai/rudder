@@ -52,6 +52,7 @@ impl SeedTicket {
 #[derive(Clone)]
 pub(crate) struct SeedTaskTicket {id:String,seed_id:String,seed:Weak<Cell<SeedCarrier>>,pub(super) cell:Arc<Cell<TaskScope>>,admission:Arc<SeedAdmission>,original:FinalizationBudget,app_thread:ThreadId}
 pub(super) struct TaskScope {
+    backed_inputs:Option<Arc<crate::managed_initial_source::task_backing::ManagedBackedTaskInputs>>,
     factory:SeedFactoryOwner,start:Option<SeedTaskUseGate>,factory_outcome:Option<Result<PreparedManagedTask>>,factory_refusal:Option<ManagedTaskStartFailure>,never:Option<NeverStartedScope>,guard:Option<SeedUseGuard>,fork_guard:Option<SeedUseGuard>,fork:Option<Arc<ManagedSeedForkCell>>,
     expected_run:Option<String>,bound:bool,enrollment:Option<EnrollmentTicket>,pub(super) completion:Option<Completion>,pub(super) generation:Option<Arc<super::source_generations::SourceGeneration>>,
     localized:Option<RetainedLocalizedFork>,cow:Option<rudder_native::root_storage_uses::RetainedCowFork>,localize_attempted:bool,
@@ -68,7 +69,7 @@ struct CacheScope {factory:SeedFactoryOwner,guard:Option<SeedUseGuard>,cache:Opt
     weak:Option<Weak<ManagedPreparationCache>>,attempted:bool,acknowledged:bool,value:Option<CacheClose>,close:Option<RetainedSeedJoin<CacheClose>>,started:bool}
 /// DATA/actual Arcs from an already admitted actual source. Construct resources
 /// on the ORIGINAL registered thread, then bind its actual PreparedManagedTask.
-pub(crate) struct ManagedSeedTaskSource {pub store:LocalStore,pub runnable_root:ObjectRef,pub seed_source:ObjectRef,
+pub(crate) struct ManagedSeedTaskSource {pub backed_inputs:Option<Arc<crate::managed_initial_source::task_backing::ManagedBackedTaskInputs>>,pub store:LocalStore,pub runnable_root:ObjectRef,pub seed_source:ObjectRef,
     pub seed:Arc<VerifiedMetadataTemplate>,pub expected_integration_head:String,
     pub preparation_cache:Option<Arc<ManagedPreparationCache>>}
 struct TemplateClose {template:Option<Arc<VerifiedMetadataTemplate>>}
@@ -217,7 +218,7 @@ impl MachineControl {
         let mut factory=None;let reserved=SeedFactoryOwner::reserve_retaining(&mut factory,&s.admission,original,cancelled);
         if factory.is_none(){return reserved;}
         let ticket=SeedTaskTicket {id,seed_id:seed.id.clone(),seed:Arc::downgrade(&seed.cell),admission:s.admission.clone(),original:original.clone(),app_thread:self.shared.app_thread,
-            cell:Cell::new(TaskScope {factory:factory.take().unwrap(),start:None,factory_outcome:None,factory_refusal:None,never:None,guard:None,fork_guard:None,fork:None,expected_run:None,bound:false,enrollment:None,
+            cell:Cell::new(TaskScope {backed_inputs:None,factory:factory.take().unwrap(),start:None,factory_outcome:None,factory_refusal:None,never:None,guard:None,fork_guard:None,fork:None,expected_run:None,bound:false,enrollment:None,
                 completion:None,generation:None,localized:None,cow:None,localize_attempted:false,fork_value:None,fork_close:None,fork_started:false,task_close:None,task_started:false})};
         s.tasks.insert(ticket.id.clone(),ticket.clone());*out=Some(ticket.clone());reserved?;
         let mut held=lock(&ticket.cell,original)?;let actual=s.client_owner.as_ref().context("actual seed owner absent")?;
@@ -260,13 +261,14 @@ impl MachineControl {
             ensure!(cache.seed_id==ticket.seed_id&&s.caches.get(&cache.id).is_some_and(|actual|Arc::ptr_eq(&actual.cell,&cache.cell)),"cache belongs to another actual seed");
             let cache=lock(&cache.cell,&original)?;ensure!(cache.factory.is_joined()&&cache.acknowledged,"actual cache factory/TLS or original constructor ACK absent");Some(cache.cache.as_ref().context("actual cache absent")?.clone())
         }else{None};
+        let actual_cancel=held.factory.cancellation();s.source.capture_task_backing_retaining(&mut held.backed_inputs,&original,&actual_cancel)?;
         let prepared=s.source.prepared_current(&original,&s.cancelled)?;
         let template=s.template.as_ref().context("actual tracked template absent")?;held.factory.check_original_thread()?;
         let start=held.start.as_ref().context("original task start gate absent")?.clone();
         held.fork=Some(if template.profile()==rudder_vcs_bridge::seed::SeedProfile::PagedCowV2 {
             ManagedSeedForkCell::new_cow(template,prepared.runnable_root.clone(),prepared.source_root.clone(),s.admission.clone(),start,s.store.root(),preparation_cache.as_ref(),&original,held.factory.cancellation(),ManagedSeedCowFactory::from_actual(self,ticket))?
         }else{ManagedSeedForkCell::new(template,prepared.runnable_root.clone(),prepared.source_root.clone(),s.admission.clone(),start,s.store.root(),preparation_cache.as_ref(),&original,held.factory.cancellation())?});
-        let result=ManagedSeedTaskSource {store:s.store.clone(),runnable_root:prepared.runnable_root.clone(),seed_source:prepared.source_root.clone(),seed:template.clone(),
+        let result=ManagedSeedTaskSource {backed_inputs:held.backed_inputs.clone(),store:s.store.clone(),runnable_root:prepared.runnable_root.clone(),seed_source:prepared.source_root.clone(),seed:template.clone(),
             expected_integration_head:prepared.baseline.commit.0.clone(),preparation_cache};held.factory.check_original_thread()?;Ok(result)
     }
 }
@@ -498,6 +500,7 @@ impl MachineControl {
     }
 }
 fn check_completion_before_close(scope:&TaskScope,joined:&JoinedManagedTask)->Result<()> {
+    if let Some(backed)=&scope.backed_inputs{backed.check_reads_settled()?;}
     ensure!(scope.generation.as_ref().is_none_or(|generation|generation.input_released()),"accepted source generation still owns original canonical input");
     ensure!(scope.factory.is_joined()&&joined.is_settled(),"actual factory/task joins or acceptance unsettled");
     let ticket=scope.enrollment.as_ref().context("original enrollment absent")?;

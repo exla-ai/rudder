@@ -8,7 +8,8 @@ fn run_command(shared:&Arc<Shared>,job:&Arc<Job>)->Result<()> {
     // Metadata-only actual selected profile inspection before creating any
     // project owner/task row/seed use. It never reads inherited credentials or
     // substitutes another profile, and its real child is reaped before return.
-    let result=if let Some(rejected)=inspect_profile(shared,job,&original,&cancelled)? {rejected}
+    let result=if sdk_driver::is_sdk(&job.command.operation){sdk_driver::run_original(shared,job,&original,&cancelled)?}
+    else if let Some(rejected)=inspect_profile(shared,job,&original,&cancelled)? {rejected}
     else {match &job.command.operation {
         HostOperation::OpenPreparedProjectV1 {..}=>open_project(shared,job,&original,&cancelled)?,
         HostOperation::StartTaskV1 {..}=>start_task(shared,job,&original,&cancelled)?,
@@ -24,7 +25,13 @@ fn inspect_profile(shared:&Shared,job:&Job,original:&FinalizationBudget,cancelle
         node.and_then(|node|{let runtime=node.work.lock().unwrap_or_else(|p|p.into_inner()).runtime.clone();runtime})};
     let mut held=job.carrier.lock().unwrap_or_else(|p|p.into_inner());
     let loader=if let Some(runtime)=&runtime {runtime.assert_current(original,cancelled)?;runtime.profile_loader()} else {
-        ManagedProfileInspection::capture_retaining(&mut held.profile_inspection,shared.config.clone(),alias,original,cancelled)?;
+        if shared.config.data().image_preseed.as_ref().and_then(|p|p.runtime_mount.as_ref()).is_some(){
+            let machine=shared.fresh.lock().unwrap_or_else(|p|p.into_inner()).clone();let Some(machine)=machine else{return Ok(Some(serde_json::json!({"phase":"rejected","reason":"fresh_source_bootstrap_unavailable"})))};
+            let Some(assigned)=machine.assigned_off_app(alias,original)? else{return Ok(Some(serde_json::json!({"phase":"rejected","reason":"fresh_project_pending"})))};
+            let actual=match assigned.try_lock(){Ok(a)=>a,Err(std::sync::TryLockError::WouldBlock)=>return Ok(Some(serde_json::json!({"phase":"rejected","reason":"fresh_project_busy"}))),Err(_)=>anyhow::bail!("original fresh project poisoned")};
+            actual.assert_current_bounded(original,cancelled)?;let environment=actual.source().environment()?;
+            ManagedProfileInspection::capture_from_fresh_retaining(&mut held.profile_inspection,environment,alias,original,cancelled)?;
+        }else{ManagedProfileInspection::capture_retaining(&mut held.profile_inspection,shared.config.clone(),alias,original,cancelled)?;}
         held.profile_inspection.as_ref().unwrap().loader()
     };
     let metadata=inspect_selected_managed_task_profile(&loader,profile,native_backend(backend),cancelled,original);
@@ -40,7 +47,7 @@ fn open_project(shared:&Arc<Shared>,job:&Arc<Job>,original:&FinalizationBudget,c
     let (alias,backend,model,profile)=operation_selection(&job.command.operation)?;
     let explicit_selection=selected(&job.command.operation)?;
     let existing={shared.projects.lock().unwrap_or_else(|p|p.into_inner()).get(alias).cloned()};
-    if let Some(node)=existing{if node.selection!=(backend,model.to_owned(),profile.to_owned()){return Ok(serde_json::json!({"phase":"rejected","reason":"project_selection_conflict"}));}
+    if let Some(node)=existing{if node.selection.as_ref()!=Some(&(backend,model.to_owned(),profile.to_owned())){return Ok(serde_json::json!({"phase":"rejected","reason":"project_selection_conflict"}));}
         ensure!(node.phase.load(Ordering::Acquire)==READY,"original project open pending/recovery; no acquire replay");let ticket=node.work.lock().unwrap_or_else(|p|p.into_inner()).ticket.as_ref().context("actual project ticket absent")?.clone();
         shared.control.ingress_task_services(&ticket,original)?;time(original,cancelled)?;return Ok(serde_json::json!({"phase":"project_ready","project_alias":alias}));}
     let fresh=if crate::managed_fresh_machine::fresh_config(&shared.config){
@@ -51,10 +58,10 @@ fn open_project(shared:&Arc<Shared>,job:&Arc<Job>,original:&FinalizationBudget,c
             actual.assert_current_bounded(original,cancelled)?;time(original,cancelled)?;}Some(assigned)
     }else{None};
     let node={let mut nodes=shared.projects.lock().unwrap_or_else(|p|p.into_inner());
-        if let Some(node)=nodes.get(alias) {if node.selection!=(backend,model.to_owned(),profile.to_owned()){return Ok(serde_json::json!({"phase":"rejected","reason":"project_selection_conflict"}));}
+        if let Some(node)=nodes.get(alias) {if node.selection.as_ref()!=Some(&(backend,model.to_owned(),profile.to_owned())){return Ok(serde_json::json!({"phase":"rejected","reason":"project_selection_conflict"}));}
             ensure!(node.phase.load(Ordering::Acquire)==READY,"original project open pending/recovery; no acquire replay");return Ok(serde_json::json!({"phase":"project_ready","project_alias":alias}));}
         if nodes.len()>=PROJECT_LIMIT{return Ok(serde_json::json!({"phase":"rejected","reason":"project_capacity"}));}
-        let node=Arc::new(ProjectNode {alias:alias.to_owned(),selection:(backend,model.to_owned(),profile.to_owned()),phase:AtomicU8::new(OPENING),controller:Arc::new(ManagedTaskController::new()),work:Mutex::new(ProjectWork {
+        let node=Arc::new(ProjectNode {alias:alias.to_owned(),selection:Some((backend,model.to_owned(),profile.to_owned())),phase:AtomicU8::new(OPENING),controller:Arc::new(ManagedTaskController::new()),work:Mutex::new(ProjectWork {
             fresh:fresh.clone(),fresh_engine:None,acquisition:None,runtime_capture:None,runtime:None,source:None,ticket:None,seed:None,cache:None,cache_handle:None,cache_outcome:None,supervisor:None,project:None})});
         nodes.insert(alias.to_owned(),node.clone());node};
     job.carrier.lock().unwrap_or_else(|p|p.into_inner()).node=Some(node.clone());
@@ -85,7 +92,7 @@ fn open_project(shared:&Arc<Shared>,job:&Arc<Job>,original:&FinalizationBudget,c
         if let Some(actual)=held.fresh.clone(){let source=actual.lock().unwrap_or_else(|p|p.into_inner()).source().clone();held.source.as_mut().unwrap().adopt_fresh_prepared_retaining(source,original,cancelled)?;}
         else{match shared.config.data().seed_profile.unwrap_or_default(){
             rudder_vcs_bridge::seed::SeedProfile::SmallV1=>held.source.as_mut().unwrap().prepare(runtime.environment()?,&runtime.settings()?,original,cancelled)?,
-            rudder_vcs_bridge::seed::SeedProfile::PagedCowV2=>held.source.as_mut().unwrap().prepare_paged_retaining(runtime.environment()?,&runtime.settings()?,original,cancelled.clone())?,
+            rudder_vcs_bridge::seed::SeedProfile::PagedCowV2=>held.source.as_mut().unwrap().prepare_packed_paged_retaining(runtime.environment()?,&runtime.settings()?,original,cancelled.clone())?,
         }}
         held.source.as_ref().unwrap().prepared_current(original,cancelled)?;
         held.seed=Some(SeedTicket::capture(held.source.take().unwrap(),runtime.store().clone(),original.clone(),cancelled.clone()));
@@ -119,6 +126,7 @@ fn start_task(shared:&Arc<Shared>,job:&Arc<Job>,original:&FinalizationBudget,can
     let (alias,backend,_,_)=operation_selection(&job.command.operation)?;
     let node=shared.projects.lock().unwrap_or_else(|p|p.into_inner()).get(alias).cloned();
     let Some(node)=node else {return Ok(serde_json::json!({"phase":"rejected","reason":"project_not_open"}));};
+    if node.selection.is_none(){return Ok(serde_json::json!({"phase":"rejected","reason":"source_only_requires_actual_model_opt_in"}));}
     if node.phase.load(Ordering::Acquire)!=READY {return Ok(serde_json::json!({"phase":"rejected","reason":"project_not_ready"}));}
     job.carrier.lock().unwrap_or_else(|p|p.into_inner()).node=Some(node.clone());
     let (runtime,project,supervisor,ticket)={let held=node.work.lock().unwrap_or_else(|p|p.into_inner());
@@ -158,7 +166,7 @@ fn start_task(shared:&Arc<Shared>,job:&Arc<Job>,original:&FinalizationBudget,can
                 let (original,cancelled)=held.admission.as_ref().context("original admission absent")?.source_lifetime();image.assert_current(&original,&cancelled)?;
                 let admission=held.admission.take().context("original admitted call absent")?;
                 let prepared=admission.prepare(&owner,|selected,cancel,budget|Ok(load_selected_managed_task_profile(&image.profile_loader(),selected,cancel,budget)?),
-                    |_,cancel,budget|{image.assert_current(budget,cancel)?;let source=control.source_for_factory(&actual_scope,Some(&cache))?;image.resources(source,backend)});
+                    |_,cancel,budget|{image.assert_current(budget,cancel)?;let source=control.source_for_factory(&actual_scope,Some(&cache))?;image.resources_retaining(source,backend,budget,&cancelled)});
                 match prepared {Ok(value)=>{
                     held.prepared=Some(value);actual_scope.bind_prepared_retaining(held.prepared.as_mut().unwrap())?;
                     held.outcome=Some(Ok(held.prepared.take().unwrap()));held.ready=true;

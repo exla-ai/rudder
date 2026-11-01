@@ -247,6 +247,8 @@ fn read_assignment_record(home: &Path, fence: &ManagedLaunchFence, exact_request
 }
 
 pub(crate) struct ManagedLocalLaunchRequest {
+    #[cfg(target_os="linux")]
+    pub(crate) backed_inputs:Option<Arc<crate::managed_initial_source::task_backing::ManagedBackedTaskInputs>>,
     pub fence: ManagedLaunchFence,
     pub journal: PathBuf,
     pub home: PathBuf,
@@ -281,6 +283,8 @@ pub(crate) struct ManagedLocalLaunchRequest {
 /// Construct/verify retained seed/runtime/credential values off-App; this type
 /// performs no profile lookup, environment scan or checkout inference.
 pub(crate) struct ManagedLocalLaunchInputs {
+    #[cfg(target_os="linux")]
+    pub(crate) backed_inputs:Option<Arc<crate::managed_initial_source::task_backing::ManagedBackedTaskInputs>>,
     pub journal: PathBuf,
     pub home: PathBuf,
     pub managed_store: crate::managed_store::ManagedStore,
@@ -306,6 +310,7 @@ impl ManagedLocalLaunchInputs {
         ManagedLocalLaunchRequest { private_root: self.preparation_parent.join(&fence.request_id), fence,
             journal: self.journal, home: self.home, store: self.store, runnable_root: self.runnable_root,
             managed_store:self.managed_store,
+            #[cfg(target_os="linux")] backed_inputs:self.backed_inputs,
             endpoint_parent:self.endpoint_parent,
             seed_source: self.seed_source, seed: self.seed, operation_id, view_id, backend: self.backend,
             credentials: self.credentials, protected_credential_roots: self.protected_credential_roots,
@@ -361,6 +366,8 @@ fn retire_endpoints(endpoints:&ManagedEndpoints) -> Result<()> {
     fs::remove_dir_all(&endpoints.root)?; File::open(parent)?.sync_all()?; Ok(())
 }
 pub(crate) struct PreparedManagedLaunch {
+    #[cfg(target_os="linux")]
+    pub(crate) backed_inputs:Option<Arc<crate::managed_initial_source::task_backing::ManagedBackedTaskInputs>>,
     pub assignment: WorkspaceAssignment,
     pub transport: ManagedTransportMapping,
     pub reports: ManagedReportMapping,
@@ -405,6 +412,7 @@ impl PreparedManagedLaunch {
     /// helper or seed dependency proof is issued here. A failure retains this
     /// original retirement owner instead of scheduling/drop-based settlement.
     pub(crate) fn settle_unused_retaining(&mut self)->Result<()> {
+        #[cfg(target_os="linux")] if let Some(backed)=&self.backed_inputs{backed.check_reads_settled()?;}
         if let Some(retirement)=&mut self.retirement {
             ensure!(!retirement.adopted,"adopted launch needs actual helper/actor drain");retire_unused(retirement)?;
         }
@@ -501,6 +509,7 @@ impl ManagedLaunchViewOwner {
 }
 #[derive(Default)]
 pub(crate) struct ManagedLocalPreparationOwner {
+    #[cfg(target_os="linux")] backed_inputs:Option<Arc<crate::managed_initial_source::task_backing::ManagedBackedTaskInputs>>,
     view: Option<ManagedLaunchViewOwner>, retirement: Option<Retirement>, attempted:bool,
     #[cfg(target_os = "linux")]
     cache: Option<Arc<crate::managed_preparation_cache::ManagedPreparationCache>>,
@@ -520,6 +529,7 @@ impl ManagedLocalPreparationOwner {
     }
     /// Borrow across cleanup errors/panics; never consume a failed owner.
     pub(crate) fn settle_unused(&mut self) -> Result<()> {
+        #[cfg(target_os="linux")] if let Some(backed)=&self.backed_inputs{backed.check_reads_settled()?;}
         if let Some(retirement) = &mut self.retirement {
             ensure!(!retirement.adopted, "live managed task still requires physical/helper/actor drain");
             retire_unused(retirement)?;
@@ -532,6 +542,7 @@ impl ManagedLocalPreparationOwner {
     /// control, handoff and broker joins. This method creates no such authority.
     #[cfg(target_os = "linux")]
     pub(crate) fn settle_after_runtime_join(&mut self) -> Result<()> {
+        #[cfg(target_os="linux")] if let Some(backed)=&self.backed_inputs{backed.check_reads_settled()?;}
         if let Some(retirement) = &mut self.retirement {
             retirement.adopted = true; retirement.endpoints_safe = true;
             retire_unused(retirement)?;
@@ -560,6 +571,7 @@ fn prepare_local_retaining(mut request: ManagedLocalLaunchRequest, cancelled: Ar
     supplied_journal:Option<&Journal>,
     budget: Option<&rudder_engine::execution::finalization_budget::FinalizationBudget>,
     retained: &mut ManagedLocalPreparationOwner) -> Result<PreparedManagedLaunch> {
+    #[cfg(target_os="linux")] {retained.backed_inputs=request.backed_inputs.clone();}
     ensure!(cfg!(target_os = "linux"), "managed local execution requires a qualified Linux worker");
     let reopened;
     let journal=if let Some(journal)=supplied_journal { journal }
@@ -603,8 +615,9 @@ fn prepare_local_retaining(mut request: ManagedLocalLaunchRequest, cancelled: Ar
     ensure!(request.runnable_root.kind == ObjectKind::RunnableRoot, "managed local launch requires a RunnableRoot");
     let seed_ref = request.seed.retained_seed().context("managed local launch requires a retained private seed")?.clone();
     let source_retention = request.store.retention()?;
-    for root in [&request.runnable_root, &seed_ref] {
-        ensure!(source_retention.pins.values().any(|r| r == root), "managed launch input has no retained LOCAL authority");
+    for root in [&request.runnable_root,&seed_ref] {
+        #[cfg(target_os="linux")] if root==&request.runnable_root {if let Some(backed)=&request.backed_inputs{backed.check_for_new_task(budget.context("backed task requires original preparation budget")?,&cancelled)?;backed.matches(&request.store,root,&request.seed_source)?;continue;}}
+        ensure!(source_retention.pins.values().any(|r|r==root),"managed launch input has no actual retained authority");
     }
     let runnable = rudder_engine::snapshot::decode_runnable(&request.store.read_object(&request.runnable_root)?)?;
     ensure!(request.seed_source == runnable.source, "private VCS seed belongs to another accepted source");
@@ -627,6 +640,9 @@ fn prepare_local_retaining(mut request: ManagedLocalLaunchRequest, cancelled: Ar
     let retirement = retained.retirement.as_mut().unwrap();
     let prepared = (|| -> Result<PreparedManagedLaunch> {
         for (kind, root) in [("runnable", &request.runnable_root), ("seed", &seed_ref)] {
+            // The original source's acknowledged backed owner stays in the
+            // whole prepared/task/acceptor capsule; never forge a local alias.
+            #[cfg(target_os="linux")] if kind=="runnable"&&request.backed_inputs.is_some(){continue;}
             let pin = format!("managed:{}:{kind}", request.fence.request_id);
             request.store.pin_existing(&pin, root)?; retirement.pins.push(pin);
         }
@@ -724,7 +740,7 @@ fn prepare_local_retaining(mut request: ManagedLocalLaunchRequest, cancelled: Ar
         check()?;
         File::open(&request.private_root)?.sync_all()?;
         File::open(request.private_root.parent().context("managed root parent absent")?)?.sync_all()?;
-        Ok(PreparedManagedLaunch { assignment, transport: ManagedTransportMapping { host_socket, guest_socket, guest_cwd: "/workspace".into() }, reports,
+        Ok(PreparedManagedLaunch { #[cfg(target_os="linux")]backed_inputs:retained.backed_inputs.clone(),assignment, transport: ManagedTransportMapping { host_socket, guest_socket, guest_cwd: "/workspace".into() }, reports,
             managed_run,
             execution_profile: execution_profile.into(), frontend_start, identity_home: request.home.clone(),
             identity_journal: request.journal.clone(), server_command, codex_api_key, spec: Some(spec), retirement: None,

@@ -136,6 +136,7 @@ impl EngineOwnerLifetime {
     fn check_custody(&self) -> Result<()> {
         let result = (|| -> Result<()> {
             self.check_active()?;
+            #[cfg(test)] tests::custody_contention::restriction()?;
             #[cfg(target_os="linux")] if let Some(assigned)=&self.assigned{assigned.assert_retained_custody()?;}
             let held = self.lock.metadata()?;
             let named = fs::symlink_metadata(self.repo.join(".rudder/engine/owner.lock"))?;
@@ -151,20 +152,20 @@ impl EngineOwnerLifetime {
             );
             self.check_active()
         })();
-        if result.is_err() {
-            self.revoke();
-        }
+        if result.as_ref().is_err_and(|error|!custody_busy(error)) { self.revoke(); }
         result
     }
 }
+fn custody_busy(error:&anyhow::Error)->bool{error.downcast_ref::<EngineSharedAdmissionBusy>().is_some()}
 
 /// Host-held local owner lifetime only, with no serialized constructor. The
 /// actual checkout lock remains held until every outstanding lease is dropped,
 /// including after retirement. Retirement revokes checks immediately; retaining
 /// this lease never retains a Journal/run grant or source/history acceptance.
+#[derive(Clone)]
 pub(crate) struct EngineSourceLease {
     // Close the actual Journal anchor descriptors before the final lock holder.
-    database: HeldJournalFile,
+    database: Arc<HeldJournalFile>,
     journal_identity: (u64, u64),
     lifetime: Arc<EngineOwnerLifetime>,
 }
@@ -204,9 +205,7 @@ impl EngineSourceLease {
             self.database.check_current()?;
             self.lifetime.check_active()
         })();
-        if result.is_err() {
-            self.lifetime.revoke();
-        }
+        if result.as_ref().is_err_and(|error|!custody_busy(error)) { self.lifetime.revoke(); }
         result
     }
 
@@ -526,7 +525,7 @@ impl EngineOwnership {
         database.check_current()?;
         let lease = EngineSourceLease {
             lifetime: Arc::clone(&self.lifetime),
-            database,
+            database:Arc::new(database),
             journal_identity,
         };
         lease.check_current()?;

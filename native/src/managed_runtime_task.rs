@@ -6,7 +6,7 @@ use rudder_engine::execution::{finalization_budget::FinalizationBudget,
     handoff::{ManagedExecutionStartBarrier, helper_process::HelperProcessWitness}};
 use rudder_native::{host_ingress::{HostIngressConfigOwner, HostBakedRuntimePolicy},
     root_storage_bootstrap::{ManagedMachineBootstrap,
-        runtime_image::{RuntimeImageClient, RuntimeHelperGrant}}};
+        runtime_image::{RuntimeImageClient, RuntimeHelperGrant, RuntimeReadyObservation, RuntimeReadyObservationData}}};
 use std::{sync::{Arc, Mutex, MutexGuard, TryLockError,
     atomic::{AtomicBool, Ordering}}, thread::{self, ThreadId}, time::Duration};
 
@@ -33,11 +33,13 @@ pub(crate) fn require_legacy_environment_backing(config: &HostIngressConfigOwner
 pub(crate) struct MachineRuntimeImage {
     config: Option<Arc<HostIngressConfigOwner>>,
     client: Option<Arc<RuntimeImageClient>>,
+    ready: Option<RuntimeReadyObservation>,
+    ready_data: Option<RuntimeReadyObservationData>,
     app_thread: ThreadId,
 }
 impl MachineRuntimeImage {
     pub(crate) fn new(app_thread: ThreadId) -> Self {
-        Self { config: None, client: None, app_thread }
+        Self { config: None, client: None, ready: None, ready_data: None, app_thread }
     }
     fn off_app(&self) -> Result<()> {
         ensure!(thread::current().id() != self.app_thread, "runtime Root IO requires off-App worker"); Ok(())
@@ -69,8 +71,20 @@ impl MachineRuntimeImage {
                 ensure!(Arc::ptr_eq(prior, &client), "actual runtime client replaced");
             } else { self.client = Some(client); }
         }
+        if let Some(client)=&self.client {
+            // The actual client alias is retained above BEFORE the one-time
+            // observation transfer/current check. Never rebuild from DATA.
+            if self.ready.is_none(){bootstrap.take_runtime_ready_observation_retaining(&mut self.ready)?;}
+            if let Some(owner)=&self.ready {
+                ensure!(owner.matches_original_client(client),"runtime ready observation replaced original client");
+                self.ready_data=Some(owner.checked_data_snapshot_off_app()?);
+                bootstrap.export_runtime_qualification_retaining(owner)?;
+            }
+        }
         Ok(()) // None remains configured/pending, never an absent profile.
     }
+    /// Pure last checked DATA, never a readiness or original owner constructor.
+    pub(crate) fn ready_observation_data(&self)->Option<RuntimeReadyObservationData> {self.ready_data.clone()}
     pub(crate) fn enroll_helper_retaining(&mut self, bootstrap: &mut ManagedMachineBootstrap,
         start: &RuntimeTaskStart, original: &FinalizationBudget, cancelled: &Arc<AtomicBool>) -> Result<()> {
         self.off_app()?; time(original, cancelled)?;
@@ -88,6 +102,7 @@ impl MachineRuntimeImage {
 
 struct StartState {
     barrier: ManagedExecutionStartBarrier,
+    environment:Option<Arc<rudder_native::root_storage_bootstrap::runtime_image::environment::RuntimeEnvironmentBacking>>,
     client: Option<Arc<RuntimeImageClient>>,
     grant: Option<RuntimeHelperGrant>,
     required: bool,
@@ -106,9 +121,13 @@ pub(crate) struct RuntimeTaskStart {
 impl RuntimeTaskStart {
     /// Pure ownership transfer, immediately after successful actual PTY stage.
     pub(crate) fn capture(barrier: ManagedExecutionStartBarrier) -> Arc<Self> {
+        Self::capture_with_environment(barrier,None)
+    }
+    pub(crate) fn capture_with_environment(barrier:ManagedExecutionStartBarrier,environment:Option<Arc<rudder_native::root_storage_bootstrap::runtime_image::environment::RuntimeEnvironmentBacking>>)->Arc<Self>{
         let helper = barrier.pending_helper_process();
+        let required=environment.is_some();if required{barrier.require_runtime_image_before_release();}
         Arc::new(Self { helper, app_thread: thread::current().id(), state: Mutex::new(StartState {
-            barrier, client: None, grant: None, required: false, attached: false, failed: false }) })
+            barrier,environment, client: None, grant: None, required, attached: false, failed: false }) })
     }
     fn on_app(&self) -> Result<MutexGuard<'_, StartState>> {
         ensure!(thread::current().id() == self.app_thread, "runtime start adoption requires original App thread");
@@ -147,7 +166,7 @@ impl RuntimeTaskStart {
     }
     fn check_legacy_off_app(&self, original: &FinalizationBudget, cancelled: &Arc<AtomicBool>) -> Result<()> {
         let state = self.off_app(original, cancelled)?;
-        ensure!(!state.required && state.client.is_none() && state.grant.is_none(), "runtime task cannot fall back to legacy");
+        ensure!(!state.required&&state.environment.is_none() && state.client.is_none() && state.grant.is_none(), "runtime task cannot fall back to legacy");
         Ok(())
     }
     fn require_image_off_app(&self, original: &FinalizationBudget, cancelled: &Arc<AtomicBool>) -> Result<()> {
@@ -158,6 +177,9 @@ impl RuntimeTaskStart {
         cancelled: &Arc<AtomicBool>) -> Result<()> {
         let mut state = self.off_app(original, cancelled)?;
         ensure!(state.required && !state.attached, "original runtime enrollment already attached/not required");
+        if let Some(environment)=&state.environment{ensure!(environment.matches_runtime_client(client),"task environment changed actual original Root runtime client");
+            loop{time(original,cancelled)?;match environment.assert_original_custody(){Ok(())=>break,
+                Err(e)if e.downcast_ref::<rudder_native::root_storage_bootstrap::runtime_image::environment::RuntimeBackingBusy>().is_some()=>thread::sleep(original.phase_limit(Duration::from_millis(1))?),Err(e)=>return Err(e)}}}
         if let Some(prior) = &state.client {
             ensure!(Arc::ptr_eq(prior, client), "runtime helper cannot change its original client");
         } else { state.client = Some(Arc::clone(client)); }
@@ -188,3 +210,17 @@ impl RuntimeTaskStart {
 #[cfg(test)]
 #[path = "managed_runtime_task_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path="managed_runtime_ready_tests.rs"]
+mod ready_observation_tests;
+
+impl MachineRuntimeImage {
+    /// OFF App original owner only. A pending client/observation stays pending;
+    /// no snapshot DATA or configured flag can create a usable client alias.
+    pub(crate) fn environment_client_retaining(&self,registered:&Arc<rudder_native::engine_registration::RegisteredEngineOwner>)->Result<Option<Arc<RuntimeImageClient>>>{
+        self.off_app()?;if !self.selected()?{return Ok(None)}let (Some(client),Some(ready))=(&self.client,&self.ready)else{return Ok(None)};
+        ensure!(ready.matches_original_client(client),"runtime environment observation/client origin changed");ready.assert_current()?;
+        client.assert_environment_scope(self.config.as_ref().unwrap(),registered)?;Ok(Some(client.clone()))
+    }
+}

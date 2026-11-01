@@ -1,0 +1,118 @@
+{
+  "formatVersion": 1,
+  "scope": "immutable C1 compiler artifact construction only",
+  "verifiedAt": "2026-11-01T19:15:49.802378+00:00",
+  "sourceManifestSha256": "12ba05736aeab5ebd1b580b9a03c8f642d1dd45a030c5fad14b48233cc6d6340",
+  "image": "registry.fly.io/rudder-workers-exla:compiler-c1-data-12ba05736aea",
+  "digest": "sha256:469e5b3667cd673bab2674fcb30021f2c731555a8cc3326519dbb7c4cab73273",
+  "artifact": {
+    "entries": 6108,
+    "execution_qualified": false,
+    "format_version": 1,
+    "kind": "compiler-artifact-data",
+    "logical_bytes": 1372802439,
+    "manifest_sha256": "bb70f8795da717a73f9d9ded535149f1fb4abff84374b12188361f1cc4a8106a",
+    "profile_id": "rudder-linux-rust-cxx-typescript-c1",
+    "scope": "compiler-C1-DATA-only",
+    "sdk_grant": false
+  },
+  "logSha256": "4f0e244e446b106bed198158484ee4aa398a10ea14ede54bd32a108b6a8d967d",
+  "portableDataTests": {
+    "passed": 9,
+    "failed": 0,
+    "actualCliMissingArtifactRefused": true
+  },
+  "priorFailedAttempts": [
+    {
+      "attempt": 1,
+      "sourceManifestSha256": "eb012b1c754017def5467d7d94fd53d0d77a0255b37c11389951c14766e45703",
+      "logSha256": "694a3fb9d1ffbf05d4e0b72720b0c05fd6042596d1a8d7a81f730b1f3b6b15f7",
+      "failure": "GCC driver-relative public path rejected",
+      "createdVm": false,
+      "deployed": false
+    },
+    {
+      "attempt": 2,
+      "sourceManifestSha256": "db86ebd130876437ba95abc6c288ff466f688abbe94f78a363ba7ad76d8f830d",
+      "logSha256": "0fdffba8c2bcb62ef8869d2be81381437d51291f18111356351b687c25908762",
+      "failure": "policy bytes shadowed by driver path string",
+      "createdVm": false,
+      "deployed": false
+    },
+    {
+      "attempt": 3,
+      "sourceManifestSha256": "352d5c0cdd8d3c651e30b910dc16003b2027c7636c1dc8bc107def0d7d679507",
+      "logSha256": "b8b9b0342b52680703f10b69d8653c94e6214ef1f7d12803ccfbc04a30eb8435",
+      "failure": "verification function shadowed by argument parser",
+      "createdVm": false,
+      "deployed": false
+    }
+  ],
+  "limits": {
+    "logicalBytes": 2147483648,
+    "entries": 65536,
+    "constructorMilliseconds": 300000
+  },
+  "executionQualified": false,
+  "casBaked": true,
+  "sdkRoleQualified": false,
+  "RudderRepositoryBuild": false,
+  "productionActivation": false,
+  "sourceFiles": {
+    "Dockerfile": "95074a8eff4b18ddb96daea98f58668e032bc4f6ef4b92512f0d3295cea9cec8",
+    "build.sh": "69a625dc8a6b30f8d54dea717b5bc8fc8b8640e3657494a4787c86873fe0e6e0",
+    "compiler_artifact.py": "9707cb1d9ae7d22b086e18098889aab667d4ce91a85e176fc9c3df908a2cf798",
+    "compiler_c1.py": "62ed75bafde687748be84023dbd81ce9903d950f33965c2a89ef579bf6d05330",
+    "inputs/c1-policy.json": "c7cd72820c6fefbc8f9c68abb2a778a3e438b018bb99fb2fe3aa13a01f359470",
+    "inputs/source-images.json": "3938b82c3fe973af630021ebea8eb4dd886cb115fd2ce8731ab4ef5cde55a14e",
+    "inputs/tools.lock.json": "b3e110415b819c1af07d0368a5a7216cd941b4fae7683f644da034a62093e546",
+    "inputs/typescript.json": "ddd44fbf44009eaa74f11f6ccf9baa9acbf46986ab9f48867f7e9ac88bddeb7a",
+    "tests/test_compiler_c1.py": "4b0340121ca528f87e8cbb25532899ec60198c9719ac990972cb233bdc0b0450",
+    "workloads/BUCK": "35fa75b0c00bfdff74b12fd0100949d0df38d90d2ad4abf81caf4980ef9402d5",
+    "workloads/Cargo.toml": "351ba9d0922a3a0773f9ac3ace280c7a55d6194f5ed389d88207749ffb834de0",
+    "workloads/buckconfig": "fafaf567db089936cd3ab37408129e2f97b4101e4b4fc55e0cdeef5994d05936",
+    "workloads/build.rs": "34a5bf124d86154825b7d1a80e4b2b1a4fdc91e22acda4f61338744a0d962ad5",
+    "workloads/hello.c": "598fdca5b6b142239b91587c5cb55ceff5affec9e9409623176a4a56e6eadc90",
+    "workloads/hello.cpp": "7258178628dbaa4f0edf4f3161600aaf930fadb0ae0b45c62353e882e97a4f16",
+    "workloads/main.rs": "8d8fe8d51c966df9c32a50b7ac103cad592adf356d118618df5a72d9102cfd1c",
+    "workloads/main.ts": "6b06554da8ff64e2469109628d6a4b196414f48d77ea46d478ccd5395ca16454",
+    "workloads/qualify_c1.py": "7e977d148fb42560d5f3a4316944f21e34ccb94977d5fbd7c70cebba5488e338",
+    "workloads/rules.bzl": "b9081f34d4460f1edf19f747bb38b1613656fa04da21907f8c537ef2dfac1014",
+    "workloads/sqlite.c": "05c4ba8b552eae1c6adc5532af4cd88cbea056170a8f5cb7264b3334875e8811"
+  },
+  "priorConstructedImage": {
+    "verifiedAt": "2026-11-01T18:34:59.309933+00:00",
+    "sourceManifestSha256": "f27f19768970d971087b44c56e6743cd46094478aa872ca324962817c9404577",
+    "image": "registry.fly.io/rudder-workers-exla:compiler-c1-data-f27f19768970",
+    "digest": "sha256:ea31ddedbf16f1feee0f8be1ec123225f13e706681d5c80fed5414f9de9be9bb",
+    "artifact": {
+      "entries": 6104,
+      "execution_qualified": false,
+      "format_version": 1,
+      "kind": "compiler-artifact-data",
+      "logical_bytes": 1372577116,
+      "manifest_sha256": "e0e8d7b5d374e3ed872ba811cbd129994653299d4235d9ab7167433850f37495",
+      "profile_id": "rudder-linux-rust-cxx-typescript-c1",
+      "scope": "compiler-C1-DATA-only",
+      "sdk_grant": false
+    },
+    "logSha256": "e136c72d67f82319dfb5dacaea9cae8421b9e2432e2f012231e2fe37918c4f17"
+  },
+  "failedFunctionalVm": {
+    "verifiedAt": "2026-11-01T18:44:45.998507+00:00",
+    "image": "registry.fly.io/rudder-workers-exla@sha256:72d970169fbd52785e572913af5fce715d77a160846d955177676c4d1a83594e",
+    "machineId": "802470c6292278",
+    "instanceId": "01M6C6TGTB15WFPE3XXCKNNT3T",
+    "failure": "artifact directory ownership/mode/type before compiler execution",
+    "guestLogSha256": "abee9534a1ec9866881c8dbf0d92b67a4005ad6b177ce7643f20f8e2d2b78443",
+    "rawLogsMatched": true,
+    "cleanupVerified": true,
+    "providerCalls": 10,
+    "protectedHomeRetained": true,
+    "causeInference": "COPY contents into a new destination loses outer-directory readonly mode; A5 packaging and new VM fixture preserve the named directory; positive physical verification pending",
+    "status": "historical A5 failure; A6 public CA fix subsequently passed all functional cases"
+  },
+  "previousEvidence": "verification-compiler-c1-artifact-a5-working.json",
+  "functionalEvidence": "verification-compiler-c1-functional-working.json",
+  "casEvidence": "verification-compiler-c1-cas-working.json"
+}

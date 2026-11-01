@@ -21449,6 +21449,8 @@ mod app_tests;
 mod board_app_tests;
 
 fn main() -> Result<()> {
+    #[cfg(target_os="linux")]
+    if rudder_native::root_storage_bootstrap::runtime_image::compiler_sdk::helper_selected_early(){return rudder_native::root_storage_bootstrap::runtime_image::compiler_sdk::run_helper();}
     // FIRST: an inherited managed bridge/FD family never reaches legacy or smoke.
     #[cfg(target_os = "linux")]
     if managed_machine_entry::selected_early() {

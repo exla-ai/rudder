@@ -6,7 +6,7 @@ fn pin(manifest:&SidecarManifest,raw:&[u8])->serde_json::Value {serde_json::json
     "sidecar_manifest_sha256":format!("{:x}",Sha256::digest(raw)),"sidecar_core_sha256":manifest.files[0].sha256,
     "sidecar_script_sha256":manifest.files[1].sha256,"files":manifest.files})}
 #[test]
-fn complete_26_file_manifest_and_four_field_pin_are_data_only() {
+fn complete_27_file_manifest_and_four_field_pin_are_data_only() {
     let manifest=manifest();validate_manifest(&manifest).unwrap();let raw=serde_json::to_vec(&manifest).unwrap();
     validate_pin(&serde_json::to_vec(&pin(&manifest,&raw)).unwrap(),&raw,&manifest).unwrap();
 }
@@ -36,4 +36,11 @@ fn unknown_manifest_entry_and_pin_fields_and_nonpositive_sizes_refuse() {
     let mut data=serde_json::to_value(&manifest).unwrap();data["ready"]=true.into();assert!(serde_json::from_value::<SidecarManifest>(data).is_err());
     let mut data=serde_json::to_value(&manifest).unwrap();data["files"][0]["authority"]=true.into();assert!(serde_json::from_value::<SidecarManifest>(data).is_err());
     let mut invalid=manifest.clone();invalid.files[0].size_bytes=0;assert!(validate_manifest(&invalid).is_err());
+}
+
+#[test]
+fn qualification_module_is_exactly_required_not_an_arbitrary_new_module_allowlist() {
+    let original=manifest();assert_eq!(original.files.last().unwrap().path,PathBuf::from("runtime-qualification.mjs"));
+    let mut missing=original.clone();missing.files.pop();assert!(validate_manifest(&missing).is_err());
+    let mut replaced=original;replaced.files.last_mut().unwrap().path="other-qualification.mjs".into();assert!(validate_manifest(&replaced).is_err());
 }

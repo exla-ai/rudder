@@ -5,6 +5,7 @@ import { readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import test from 'node:test';
 import {PacketQueue,sameGeneration,canonicalData} from '../cloud/worker/host-control-core.mjs';
+import {RuntimeQualificationRelay,READY as QUAL_READY,ACK as QUAL_ACK} from '../cloud/worker/runtime-qualification.mjs';
 const source = readFileSync(new URL('../cloud/worker/host-control.mjs', import.meta.url), 'utf8')
   .replace(/^import .*;\n/gm, '');
 const nonce = '99999999-9999-4999-8999-999999999999', initial = '11111111-1111-4111-8111-111111111111';
@@ -39,8 +40,8 @@ async function fixture(options = {}) {
     terminate() { this.terminated = true; }
   }
   Object.assign(proc, options.process ?? {});
-  new Function('fs', 'createHash', 'randomUUID', 'WebSocket', 'process', 'setInterval', 'clearInterval', 'PacketQueue', 'sameGeneration', 'canonicalData', source)(
-    fs, createHash, () => initial, Socket, proc, fn => { interval = fn; return 1; }, () => { interval = undefined; }, PacketQueue, sameGeneration, canonicalData);
+  new Function('fs', 'createHash', 'randomUUID', 'WebSocket', 'process', 'setInterval', 'clearInterval', 'PacketQueue', 'sameGeneration', 'canonicalData', 'RuntimeQualificationRelay', 'QUAL_READY', 'QUAL_ACK', source)(
+    fs, createHash, () => initial, Socket, proc, fn => { interval = fn; return 1; }, () => { interval = undefined; }, PacketQueue, sameGeneration, canonicalData, RuntimeQualificationRelay, QUAL_READY, QUAL_ACK);
   await Promise.resolve();
   return { writes, replies, incoming, closes, sockets, proc, get ws() { return ws; },
     commands() { return writes.filter(v=>v.operation); },

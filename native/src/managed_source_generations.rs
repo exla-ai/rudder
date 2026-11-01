@@ -273,3 +273,7 @@ pub(super) fn is_generation_seed(c:&WorkerCarrier,seed:&SeedTicket)->bool {
 #[cfg(test)]
 #[path="managed_source_generation_worker_tests.rs"]
 mod tests;
+
+#[path="managed_current_source_sdk.rs"]
+mod current_sdk;
+pub(crate) use current_sdk::{CurrentSourceSdkCampaign,CurrentSdkBuildState,CurrentSourceSdkCleanup};

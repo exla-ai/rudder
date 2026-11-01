@@ -264,7 +264,7 @@ fn validate_observation(observation: &RuntimeObservation) -> Result<()> {
     Ok(())
 }
 
-fn runtime_snapshot(
+pub(super) fn runtime_snapshot(
     conn: &Connection,
     project: &str,
     run_id: &str,

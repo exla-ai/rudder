@@ -24,6 +24,13 @@ use std::sync::{
 #[cfg(target_os = "linux")]
 use rudder_engine::execution::handoff::{OwnedWorkerJoin, WorkerJoined};
 
+#[path="fabric_mailbox_delivery.rs"]
+mod mailbox_delivery;
+#[cfg(test)]
+pub(crate) fn automatic_mailbox_message_for_test(claim: &EffectClaim) -> Result<Option<PeerMessage>> {
+    mailbox_delivery::message(claim)
+}
+
 /// Transport threads produce evidence. This state belongs exclusively to the
 /// App actor; it neither owns another scheduler nor mutates App from a thread.
 pub(crate) struct RuntimeState {
@@ -518,6 +525,9 @@ impl RuntimeState {
         }
         if housekeeping || inventory_changed {
             self.publish(app, journal, owner, epoch_ms()?)?;
+        }
+        if housekeeping || inventory_changed {
+            self.deliver_idle_mailboxes(app, journal, owner)?;
         }
         // A bounded durable outbox head per target. The journal independently
         // rechecks sender grant, target epoch and the accepted thread/turn pin.
@@ -1364,6 +1374,7 @@ impl RuntimeState {
             .is_some_and(|terminal| terminal.instance_id() == slot.attempt);
         let capabilities = slot.observation(&run.id, run.backend, owned).capabilities;
         if slot.epoch != claim.target_epoch
+            || !mailbox_delivery::still_allowed(slot, run, owned, &claim)
             || !capabilities.contains(&claim.kind)
             || matches!(
                 run.status,
@@ -1392,13 +1403,13 @@ impl RuntimeState {
             .map(str::to_string);
         // Never infer author or role from payload text. These fields were
         // authenticated and durably copied at command acceptance.
-        let message = PeerMessage {
+        let message = mailbox_delivery::message(&claim)?.unwrap_or(PeerMessage {
             sender_run_id: claim.sender_run.clone(),
             message_id: claim.command_id.clone(),
             text: serde_json::to_string(
                 &serde_json::json!({"principal":claim.principal,"sender_epoch":claim.sender_epoch,"instruction":claim.payload.get("instruction"),"reason":claim.payload.get("reason")}),
             )?,
-        };
+        });
         let operation = match claim.kind.as_str() {
             "steer" => AgentLinkOperation::Steer { message },
             "resume" => AgentLinkOperation::Resume { message },

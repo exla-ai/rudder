@@ -1,3 +1,4 @@
+import {migrateProviderRetirement} from "./provider-retirement-schema.js";
 import { budgets, validateConfig, type AuthorityConfig, type PostgresAuthorityConfig } from "./config.js";
 import { AuthorityPool } from "./pool.js";
 import { ProjectAuthority } from "./authority.js";
@@ -26,3 +27,8 @@ export type { ProjectAuthority } from "./authority.js";
 export type { AuthorityConfig, PostgresAuthorityConfig, PoolBudgets } from "./config.js";
 export type { Accepted, Outcome, TrustedContext, OwnerGrant, OwnerFence, RootAdmission, HandoffAdmission,
   BootstrapRequest, AcquireRequest, RenewRequest, ReleaseRequest, DecisionRequest, VerificationAdmission, IntegrationRequest } from "./types.js";
+
+/** Explicit additive restriction-only install; never activates replacement. */
+export function createProviderRetirementMigrator(config:PostgresAuthorityConfig){const manager=pool(config,"migration");return {migrate:(runtimeRoles:readonly string[])=>migrateProviderRetirement(manager,{authorityId:config.authorityId,runtimeRoles}),close:()=>manager.close()};}
+export {OriginalProviderFenceRequest,assertOriginalProviderFenceRequest} from "./authority.js";
+export type {ProviderRetirementRequest,ProviderRetirementData,ProviderRetirementInventory,ProviderFenceDispatchData} from "./provider-retirement-types.js";

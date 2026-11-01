@@ -20,6 +20,11 @@ pub use frontend::{Buck2Adapter, BuildRun};
 pub use index::{BuildIndex, PreparedEnvironment, StoredBuild};
 pub use index::{PreparationAcknowledgment, RetainedPreparation, RetainedPreparationStatus};
 
+#[cfg(target_os = "linux")]
+pub mod backed_preparation;
+#[cfg(target_os = "linux")]
+pub use backed_preparation::{BackedPreparationAcknowledgment, BackedPreparedEnvironment, RetainedBackedPreparation};
+
 /// Preparation encodings have separate cache keys and index categories. A
 /// retained legacy environment is never silently relabeled as ancestry-free.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -668,3 +673,9 @@ fn decode_payload<T: serde::de::DeserializeOwned>(
             .clone(),
     )?)
 }
+
+#[cfg(target_os="linux")]
+pub mod index_acquisition;
+
+#[cfg(target_os="linux")]
+pub(crate) mod environment_preparation_lineage;

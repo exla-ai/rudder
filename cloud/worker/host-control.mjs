@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import {createHash,randomUUID} from 'node:crypto';
 import WebSocket from './node_modules/ws/wrapper.mjs';
 import {PacketQueue,sameGeneration,canonicalData} from './host-control-core.mjs';
+import {RuntimeQualificationRelay,READY as QUAL_READY,ACK as QUAL_ACK} from './runtime-qualification.mjs';
 const LIMIT=32768,TIMEOUT=20000;
 // This finite mapping is image-owned. Only the actual protected FD4 config
 // selects it; no environment, RPC, generation or caller URL can change it.
@@ -45,6 +46,10 @@ function operation(method, params) {
     if (!exact(params, ['command_key', 'lookup_command_key']) || !key(params.lookup_command_key)) throw Error();
     return { op: 'ReceiptV1', lookup_command_key: params.lookup_command_key };
   }
+  if(method==='managed.buildCurrentSourceSdkV1'){
+    if(!exact(params,['command_key','project_alias','case','repeat_identical'])||!key(params.project_alias)||!['accepted','proc-deny','job-deny'].includes(params.case)||typeof params.repeat_identical!=='boolean')throw Error();
+    return {op:'BuildCurrentSourceSdkV1',project_alias:params.project_alias,case:params.case,repeat_identical:params.repeat_identical};
+  }
   const task = method === 'managed.startTaskV1';
   if (!task && method !== 'managed.openPreparedProjectV1') return undefined;
   if (!exact(params, ['command_key', 'project_alias', 'backend', 'model', 'profile_id', ...(task ? ['text'] : [])])
@@ -65,6 +70,7 @@ async function start(){
  const sendWs=(g,value)=>{const bytes=JSON.stringify(value);if(Buffer.byteLength(bytes)>LIMIT||g.socket.readyState!==WebSocket.OPEN||g.socket.bufferedAmount>4*LIMIT)throw Error();
   if(g.sends.size>=8)throw Error();const send={bytes,known:false,unknown:false};g.sends.add(send);
   try{g.socket.send(bytes,{binary:false},error=>{if(error){send.unknown=true;lost(g);}else{send.known=true;g.sends.delete(send);}});}catch{send.unknown=true;lost(g);throw Error();}};
+ const qualification=new RuntimeQualificationRelay({scope:config.runtime_qualification,compilerScope:config.compiler_qualification,config:{home_id:config.home_id,incarnation:config.incarnation,configSha},now:lowerNs,send:sendWs,emit});
  const lost=g=>{if(g.lost)return;g.lost=true;g.authorized=false;emit({kind:'host_transport_lost_v1',serial:g.serial,generation:g.generation,attempt_nonce:g.nonce});try{g.socket.terminate();}catch{}};
  const closed=g=>{if(g.closed)return;g.closed=true;lost(g);emit({kind:'host_transport_closed_v1',serial:g.serial,generation:g.generation,attempt_nonce:g.nonce});};
  const prune=()=>{for(let i=retired.length-1;i>=0;i--){const g=retired[i];if(g.closed&&!g.pending&&g.sends.size===0)retired.splice(i,1);}if(retired.length>=4)throw Error();};
@@ -76,10 +82,12 @@ async function start(){
   g.socket.on('error',()=>{try{lost(g);}catch{fail();}});g.socket.on('close',()=>{try{closed(g);}catch{fail();}});
   g.socket.on('open',()=>{try{if(expired(g.end)){lost(g);return;}if(initial)emit({kind:'ready',version:1,session_generation:g.generation,nonce:bootstrap.nonce,home_id:config.home_id,incarnation:config.incarnation,config_sha256:configSha});else ready(g);flush();}catch{fail();}});
   g.socket.on('message',(raw,binary)=>{try{const began=lowerNs();if(fatal||binary||raw.length>LIMIT)throw Error();if(g!==current||g.closed||g.lost){if(g.history.length>=8)throw Error();g.history.push({kind:'late_original_ws_data',bytes:Buffer.from(raw)});return;}const m=JSON.parse(raw.toString());if(m?.type==='repos')return;
+   if(m?.type===QUAL_ACK){qualification.receive(m,g);flush();return;}
    if(['engine_registration_challenge_v1','engine_registration_ack_v1','engine_operation_ack_v1','host_transport_challenge_v1','host_transport_ack_v1'].includes(m?.type)){if(!exact(m,['type','rpc_id','packet'])||!key(m.rpc_id)||!plain(m.packet))throw Error();emit({kind:m.type,rpc_id:m.rpc_id,packet:m.packet});flush();return;}
    if(!exact(m,['type','id','method','params'])||m.type!=='rpc'||!key(m.id))throw Error();
    if(!registered||!g.authorized){sendWs(g,{type:'rpc-result',id:m.id,error:'MANAGED_TRANSPORT_AUTHENTICATING'});return;}
    if(g.pending||outgoing.length){sendWs(g,{type:'rpc-result',id:m.id,error:'MANAGED_BUSY'});return;}
+   if(qualification.scoped){sendWs(g,{type:'rpc-result',id:m.id,error:'MANAGED_METHOD_UNSUPPORTED'});return;}
    const op=operation(m.method,m.params);if(!op||!key(m.params.command_key)){sendWs(g,{type:'rpc-result',id:m.id,error:'MANAGED_METHOD_UNSUPPORTED'});return;}
    const pending={id:m.id,key:m.params.command_key,cutoff:began+BigInt(TIMEOUT)*1000000n,expired:false,reply:null};g.pending=pending;
    emit({version:1,session_generation:g.generation,rpc_id:pending.id,command_key:pending.key,operation:op,constraint:{format_version:1,maximum_milliseconds:TIMEOUT,boottime_deadline_nanoseconds:pending.cutoff.toString()}});flush();
@@ -99,7 +107,9 @@ async function start(){
   }
   if(['engine_registration_begin_v1','engine_registration_proof_v1'].includes(m?.kind)){if(registered||!exact(m,['kind','rpc_id','packet'])||!key(m.rpc_id)||!plain(m.packet)||expired(initialEnd))throw Error();if(registrationId&&registrationId!==m.rpc_id)throw Error();registrationId=m.rpc_id;sendWs(current,{type:m.kind,rpc_id:m.rpc_id,packet:m.packet});return;}
   if(m?.kind==='engine_registration_complete_v1'){if(!exact(m,['kind','challenge_id'])||!key(m.challenge_id)||!registrationId||registered)throw Error();registered=true;return;}
+  if(m?.kind===QUAL_READY){qualification.forward(m,current,registered);return;}
   if(m?.kind==='engine_operation_v1'){
+   if(qualification.scoped)throw Error('QUALIFICATION_GENERAL_OPERATION_REFUSED');
    if(!registered||!exact(m,['kind','rpc_id','packet','transport'])||!key(m.rpc_id)||!plain(m.packet)||!plain(m.transport))throw Error();
    const body=m.packet.body,rootHash=createHash('sha256').update(JSON.stringify(canonicalData(body))).digest('hex');
    if(!current.authorized||current.closed||current.lost||current.socket.readyState!==WebSocket.OPEN||!sameGeneration(current,m.transport)||expired(BigInt(body.constraint.boottime_deadline_nanoseconds))){

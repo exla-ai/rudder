@@ -20,7 +20,7 @@
     "max_compressed_bytes": 8388608,
     "max_expanded_bytes": 8388608
   },
-  "sidecar_script_sha256": "ec5ecb8f01f1c638f983e439f8870c2fe832d8a1df57cb6a720a4c2bca25869f",
+  "sidecar_script_sha256": "f64a2b43fcbbd789ee4a461472694e0ebf660ec6bf992972ed5210cc73543267",
   "sidecar_package_sha256": "cc476e1740527e961d32b387b45c3a86efb751733d447a8d4b386957722c2e74",
   "sidecar_lock_sha256": "fab22bef059e4a8de3de3dae446d0ad8c2adea9bbf50be2578c590e3d14b3a34",
   "claude_supported": false,
@@ -42,5 +42,6 @@
     "public_keyring_base64_sha256": "78c6daf4ec83fbda8259d7c7de029499ce68b42c4cab2a110b9d0befa9382854",
     "metadata_sha256": "85401250df69f41978da777d38a3ecbdff9112d1c55f215733c608568fe0252e"
   },
-  "sidecar_core_sha256": "1ae2619a014abf9d89efc6ebf56a34a52d4934a37034a2872a3d4a5f405ea900"
+  "sidecar_core_sha256": "1ae2619a014abf9d89efc6ebf56a34a52d4934a37034a2872a3d4a5f405ea900",
+  "qualification_script_sha256": "ffc07a1ccd7b96a4b3ffef9753217b052467c7c2f77e46746af5b768ca01597c"
 }

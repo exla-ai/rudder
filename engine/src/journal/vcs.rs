@@ -211,7 +211,18 @@ impl Journal {
         request: &VcsIntentRequest,
         now_ms: i64,
     ) -> Result<VcsIntentReceipt> {
+        self.begin_vcs_intent_with_inputs(owner,store,request,now_ms,None)
+    }
+    /// Actual retained input owner only. Its whole original carrier must remain
+    /// through SQL uncertainty/publication and task settlement; DATA cannot reopen it.
+    #[cfg(target_os="linux")]
+    pub fn begin_vcs_intent_retained(&mut self,owner:&OwnerFence,store:&LocalStore,request:&VcsIntentRequest,now_ms:i64,inputs:&mut VcsRetainedInputs)->Result<VcsIntentReceipt>{
+        self.begin_vcs_intent_with_inputs(owner,store,request,now_ms,Some(inputs))
+    }
+    fn begin_vcs_intent_with_inputs(&mut self,owner:&OwnerFence,store:&LocalStore,request:&VcsIntentRequest,now_ms:i64,
+        #[allow(unused_mut)] mut inputs:Option<&mut VcsRetainedInputs>)->Result<VcsIntentReceipt>{
         request.validate()?;
+        if let Some(actual)=inputs.as_deref_mut(){actual.check(store)?;}
         let body = json(request)?;
         if let Some(receipt) = duplicate(
             &self.conn,
@@ -233,7 +244,7 @@ impl Journal {
         let id = Uuid::new_v4().to_string();
         // Retention precedes journal publication. A crash/failed fence may leak
         // conservative pins; it cannot leave a committed intent with no roots.
-        let pins = retain(store, &id, request.roots())?;
+        let pins = if let Some(actual)=inputs.as_deref_mut(){actual.retain(store,&id,request.roots())?}else{retain(store,&id,request.roots())?};
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -269,6 +280,7 @@ impl Journal {
             sequence,
         };
         tx.execute("INSERT INTO vcs_intents(intent_id,project_id,idempotency_key,request_json,state,receipt_json,created_at,updated_at) VALUES(?1,?2,?3,?4,'accepted',?5,?6,?6)", params![id,owner.project_id,request.idempotency_key,body,json(&receipt)?,now_ms])?;
+        if let Some(actual)=inputs.as_deref_mut(){actual.check(store)?;}
         tx.commit()?;
         Ok(receipt)
     }
@@ -855,3 +867,9 @@ fn raw_hex(value: &str, length: usize) -> Result<()> {
     );
     Ok(())
 }
+
+#[cfg(target_os="linux")]
+#[path="vcs_retained_inputs.rs"]mod retained_inputs;
+#[cfg(target_os="linux")]pub use retained_inputs::VcsRetainedInputs;
+#[cfg(not(target_os="linux"))]struct VcsRetainedInputs;
+#[cfg(not(target_os="linux"))]impl VcsRetainedInputs{fn check(&mut self,_:&LocalStore)->Result<()>{anyhow::bail!("retained input profile unavailable")}fn retain(&mut self,_:&LocalStore,_:&str,_:Vec<ObjectRef>)->Result<BTreeMap<String,ObjectRef>>{anyhow::bail!("retained input profile unavailable")}}

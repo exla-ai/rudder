@@ -1,0 +1,3 @@
+load(":rules.bzl", "c1_cxx", "platforms")
+platforms(name = "platforms")
+c1_cxx(name = "cxx", source = "hello.cpp")

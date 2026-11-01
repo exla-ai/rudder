@@ -72,6 +72,14 @@ export function flyFetchFixture(){
       else {
         const n=/^\/machines\/([^/]+)(.*)$/.exec(suffix);assert(n&&a.machine?.id===n[1]);const tail=n[2];
         if(method==='GET'&&tail===''){counts.read++;result=a.machine;}
+        else if(method==='GET'&&tail==='/wait'){
+          // Model the exact already-acknowledged configure version only. The
+          // wait observes settlement; it cannot create or adopt an update.
+          assert.equal(u.searchParams.get('state'),'settled');assert.equal(u.searchParams.get('version'),a.machine.instance_id);
+          const timeout=Number(u.searchParams.get('timeout'));assert(Number.isInteger(timeout)&&timeout>=1&&timeout<=55);
+          assert.deepEqual([...u.searchParams.keys()].sort(),['state','timeout','version']);assert.equal(a.machine.state,'stopped');
+          counts.read++;result={};
+        }
         else if(method==='POST'&&tail==='/lease'){counts.lease++;assert(!a.lease);a.lease={nonce:randomUUID(),version:a.machine.instance_id,description:body.description,owner:'fixture-provider',expires_at:Math.floor(Date.now()/1000)+15};result={status:'success',data:a.lease};status=201;}
         else if(method==='GET'&&tail==='/lease'){counts.read++;assert(a.lease);result={status:'success',data:a.lease};}
         else if(method==='DELETE'&&tail==='/lease'){counts.release++;assert.equal(options.headers['fly-machine-lease-nonce'],a.lease.nonce);a.lease=undefined;result={status:'success',data:{ok:true}};}

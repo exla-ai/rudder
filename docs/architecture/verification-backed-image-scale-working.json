@@ -1,0 +1,89 @@
+{
+  "formatVersion": 1,
+  "scope": "Storage component on an actual existing baked runtime image. Not agent startup, compiler execution, physical cold-cache performance or deployment.",
+  "verifiedAt": "2026-11-01T17:17:11.826356+00:00",
+  "sourceKind": "immutable-captured-working-tree",
+  "sourceManifestSha256": "1e8e895a064e86adc540be470b812975199ded0052a2e231badd49a6c1e88a49",
+  "componentImage": {
+    "image": "registry.fly.io/rudder-workers-exla:backed-scale-1e8e895a064e",
+    "digest": "sha256:1c7e8760b75c375c1832c2a9668009803ea1b168d22b5e1b0d7bc9102c6cdcfb"
+  },
+  "bakedImage": "registry.fly.io/rudder-workers-exla@sha256:f26ab1dda848fc41a5b1305ad1058083fbe52347966328cee32f302fce341336",
+  "qualifierElf": {
+    "sha256": "54a873f13539a78791365d542b9e2a80e3acd1a15bcff0f0ee0e4a72760256b5",
+    "bytes": 4815040
+  },
+  "actual": {
+    "actualAgentLaunch": false,
+    "binding": {
+      "closure_sha256": "c63df1d20daf2b53a622fb1d865c646ffb5da54b5801c0f778126ee9082b025f",
+      "encoded_bytes": 1975378537,
+      "format_version": 1,
+      "installer_input": {
+        "algorithm": "sha256",
+        "digest": "4376c44497f07b9129917fd351394eb8116e0bfe4b5df1c3a21312003d0c26af",
+        "kind": "directory",
+        "size_bytes": 231
+      },
+      "inventory": {
+        "algorithm": "sha256",
+        "digest": "8654bab675d670ac9663e18072c5c18570ff06a2859d5a25e41a13a37bc27ddb",
+        "kind": "blob",
+        "size_bytes": 2936778
+      },
+      "manifest": {
+        "algorithm": "sha256",
+        "digest": "2218969d9db880ebe8ff5096bf91ace16b9049db2191b269bd60defc4400e6b5",
+        "kind": "blob",
+        "size_bytes": 5673331
+      },
+      "object_count": 22176
+    },
+    "compilerOrRootAuthority": false,
+    "formatVersion": 1,
+    "gcRemovedObjects": 0,
+    "inventory": {
+      "algorithm": "sha256",
+      "digest": "8654bab675d670ac9663e18072c5c18570ff06a2859d5a25e41a13a37bc27ddb",
+      "kind": "blob",
+      "size_bytes": 2936778
+    },
+    "localEncodedBytes": 4545,
+    "localObjects": 3,
+    "perOperationOriginalDeadlineMs": 30000,
+    "preparationRestartRecovery": false,
+    "sameLiveTypedBackingReattached": true,
+    "scope": "storage-data-component-only",
+    "timings": {
+      "capture_typed_inputs_ms": 2898.8759910000003,
+      "cold_preparation_ms": 6687.601289,
+      "explicit_reattachment_ms": 17045.528684,
+      "gc_ms": 13812.750543,
+      "warm_preparation_ms": 26.426067
+    }
+  },
+  "logSha256": "e0a927d3bcf8c15d2bf02917eee34c234147d3e7fb4fe7e752d00659a702cb6a",
+  "firstAttempt": {
+    "receiptSha256": "0f06e7b6be2d969b734807e6d62ebb0fc38e57fd0b3dc0091d58094b03b6c4d2",
+    "exitCode": 1,
+    "phase": "explicit reattachment",
+    "cause": "Retained error detail absent in original qualifier; underlying cause not established. No production storage changes before second attempt.",
+    "qualified": false
+  },
+  "interpretation": {
+    "localStoreAndIndexSetupIncludedInPreparationMs": false,
+    "laterPhasesUseWarmImageAndPageCache": true,
+    "independentSamples": 1,
+    "firstAttemptFailed": true,
+    "latencyDistributionOrFiftyAgentsQualified": false,
+    "preparationRestartRecoveryQualified": false,
+    "actualAgentLaunchQualified": false,
+    "runtimeAuthorityQualified": false
+  },
+  "remaining": [
+    "Understand first failed reattachment and qualify latency distributions under concurrency",
+    "Genuine complete native source/task/export integration",
+    "Root runtime-role physical proof and SDK/compiler execution",
+    "Preparation restart recovery and normal runtime drain"
+  ]
+}

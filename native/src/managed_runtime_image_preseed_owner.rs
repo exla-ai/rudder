@@ -10,13 +10,18 @@ const CHUNK:usize=16*1024;
 #[derive(Clone,Serialize)]
 pub(crate) struct ImagePreseedBinding {pub image_id:String,pub profile_id:String,pub manifest_sha256:String,pub manifest:ObjectRef,pub installer_input:ObjectRef}
 struct Owner {machine:Arc<ManagedMachineCas>,original:ManagedImageBudget,cancelled:Arc<AtomicBool>,files:Vec<ImageFile>,dirs:Vec<Directory>,anchors:DirectoryAnchors,stamps:Vec<Stamp>,hashes:Vec<(PathBuf,String,u32)>,loader:Option<OsLoaderInputs>,
+    backed:Option<Arc<super::runtime_environment::SharedRuntimeEnvironment>>,environment_subgraph:Option<Arc<rudder_engine::store::environment_dependencies::RetainedEnvironmentSubgraph>>,backed_files:Vec<rudder_native::image_preseed_data::ImageFileData>,manifest_read:Option<rudder_engine::store::backed_inputs::VerifiedBakedRead>,
     identity:String,data:Option<ImageDataBuild>,binding:Option<ImagePreseedBinding>,objects:Vec<ObjectRef>,attempted:bool,ready:bool,error:Option<anyhow::Error>,panic:Option<Box<dyn Any+Send>>}
 /// Actual original finite importer+TLS handle/result survives every error.
 pub(crate) struct ManagedImagePreseed {owner:Mutex<Owner>,factory:Mutex<Option<OwnedWorkerJoin>>,factory_thread:Mutex<Option<ThreadId>>,owned:AtomicBool,joined:Mutex<Option<WorkerJoined>>}
 impl ManagedImagePreseed {
     pub(crate) fn capture(machine:Arc<ManagedMachineCas>,original:ManagedImageBudget,cancelled:Arc<AtomicBool>)->Arc<Self> {
-        Arc::new(Self{owner:Mutex::new(Owner{machine,original,cancelled,files:Vec::new(),dirs:Vec::new(),anchors:DirectoryAnchors::default(),stamps:Vec::new(),hashes:Vec::new(),loader:None,identity:String::new(),data:None,binding:None,objects:Vec::new(),attempted:false,ready:false,error:None,panic:None}),factory:Mutex::new(None),factory_thread:Mutex::new(None),owned:AtomicBool::new(false),joined:Mutex::new(None)})
+        Arc::new(Self{owner:Mutex::new(Owner{machine,original,cancelled,files:Vec::new(),dirs:Vec::new(),anchors:DirectoryAnchors::default(),stamps:Vec::new(),hashes:Vec::new(),loader:None,backed:None,environment_subgraph:None,backed_files:Vec::new(),manifest_read:None,identity:String::new(),data:None,binding:None,objects:Vec::new(),attempted:false,ready:false,error:None,panic:None}),factory:Mutex::new(None),factory_thread:Mutex::new(None),owned:AtomicBool::new(false),joined:Mutex::new(None)})
     }
+    pub(crate) fn capture_backed(machine:Arc<ManagedMachineCas>,backed:Arc<super::runtime_environment::SharedRuntimeEnvironment>,original:ManagedImageBudget,cancelled:Arc<AtomicBool>)->Arc<Self>{
+        let value=Self::capture(machine,original,cancelled);value.owner.lock().unwrap_or_else(|p|p.into_inner()).backed=Some(backed);value
+    }
+    pub(crate) fn runtime_environment(&self)->Option<Arc<super::runtime_environment::SharedRuntimeEnvironment>>{self.owner.lock().unwrap_or_else(|p|p.into_inner()).backed.clone()}
     pub(crate) fn start_retaining(self:&Arc<Self>)->Result<()> {
         let mut slot=self.factory.try_lock().map_err(|_|anyhow::anyhow!("original image factory registration busy"))?;ensure!(slot.is_none()&&!self.owned.load(Ordering::Acquire),"original image factory already registered");let source=self.clone();
         let worker=thread::Builder::new().name("rudder-image-cas-import".into()).spawn(move||{
@@ -31,11 +36,12 @@ impl ManagedImagePreseed {
         ensure!(out.is_none(),"image export already published");let factory=self.factory.lock().unwrap_or_else(|p|p.into_inner());let factory=factory.as_ref().context("actual importer handle absent")?;
         factory.start_join_observer()?;let Some(joined)=factory.try_joined()? else{return Ok(false);};*self.joined.lock().unwrap_or_else(|p|p.into_inner())=Some(joined);
         let held=self.owner.lock().unwrap_or_else(|p|p.into_inner());clock(&held.original,&held.cancelled)?;ensure!(held.ready&&held.error.is_none()&&held.panic.is_none(),"image importer failed/unknown; original owner retained");held.current_deep_for_import()?;
-        *out=Some(Arc::new(ImagePreseedExport{source:self.clone(),binding:held.binding.as_ref().unwrap().clone(),objects:held.objects.clone(),cached:Mutex::new(None)}));clock(&held.original,&held.cancelled)?;Ok(true)
+        *out=Some(Arc::new(ImagePreseedExport{source:self.clone(),binding:held.binding.as_ref().unwrap().clone(),objects:held.objects.clone(),cached:Mutex::new(None),backed_cached:Mutex::new(None)}));clock(&held.original,&held.cancelled)?;Ok(true)
     }
     fn current<B:RuntimeReadBudget+?Sized>(&self,original:&B,cancelled:&AtomicBool,deep:bool)->Result<()> {
         clock(original,cancelled)?;ensure!(self.joined.lock().unwrap_or_else(|p|p.into_inner()).is_some(),"original image factory/TLS join absent");let held=self.owner.lock().unwrap_or_else(|p|p.into_inner());ensure!(held.ready&&held.error.is_none()&&held.panic.is_none(),"original image import ACK absent");
-        if deep{held.current_deep()?;}else{held.current_roots()?;}clock(original,cancelled)
+        if let Some(backed)=&held.backed{backed.current(original,cancelled)?;}
+        else if deep{held.current_deep()?;}else{held.current_roots()?;}clock(original,cancelled)
     }
     pub(crate) fn assert_retained_custody(&self)->Result<()> {ensure!(self.joined.lock().unwrap_or_else(|p|p.into_inner()).is_some(),"original image worker/TLS join absent");let held=self.owner.lock().unwrap_or_else(|p|p.into_inner());ensure!(held.ready&&held.error.is_none()&&held.panic.is_none(),"original image ACK absent");held.current_roots()}
     pub(crate) fn machine(&self)->Arc<ManagedMachineCas>{self.owner.lock().unwrap_or_else(|p|p.into_inner()).machine.clone()}
@@ -43,7 +49,7 @@ impl ManagedImagePreseed {
 }
 impl Owner {
     fn current_deep_for_import(&self)->Result<()> {
-        clock(&self.original,&self.cancelled)?;self.machine.assert_custody()?;self.anchors.check_all_with(||clock(&self.original,&self.cancelled))?;
+        clock(&self.original,&self.cancelled)?;if let Some(backed)=&self.backed{return backed.current(&self.original,&self.cancelled);}self.machine.assert_custody()?;self.anchors.check_all_with(||clock(&self.original,&self.cancelled))?;
         for dir in &self.dirs{clock(&self.original,&self.cancelled)?;dir.current()?;}
         for file in &self.files{clock(&self.original,&self.cancelled)?;file.current()?;}
         if let Some(loader)=&self.loader{clock(&self.original,&self.cancelled)?;loader.current()?;}
@@ -51,10 +57,23 @@ impl Owner {
         if let Some(data)=&self.data{data.check_deep_for_import()?;}
         clock(&self.original,&self.cancelled)
     }
-    fn current_roots(&self)->Result<()> {self.machine.assert_custody()?;for dir in &self.dirs{dir.current()?;}for file in &self.files{file.current()?;}if let Some(loader)=&self.loader{loader.current()?;}if let Some(data)=&self.data{data.check_roots()?;}Ok(())}
-    fn current_deep(&self)->Result<()> {self.current_roots()?;self.anchors.check_all_with(||Ok(()))?;for previous in &self.stamps{ensure!(package_stamp(&previous.path)?==*previous,"actual image package changed");}if let Some(data)=&self.data{data.check_deep()?;}Ok(())}
+    fn current_roots(&self)->Result<()> {if let Some(backed)=&self.backed{return backed.assert_original_custody();}self.machine.assert_custody()?;for dir in &self.dirs{dir.current()?;}for file in &self.files{file.current()?;}if let Some(loader)=&self.loader{loader.current()?;}if let Some(data)=&self.data{data.check_roots()?;}Ok(())}
+    fn current_deep(&self)->Result<()> {if let Some(backed)=&self.backed{return backed.assert_original_custody();}self.current_roots()?;self.anchors.check_all_with(||Ok(()))?;for previous in &self.stamps{ensure!(package_stamp(&previous.path)?==*previous,"actual image package changed");}if let Some(data)=&self.data{data.check_deep()?;}Ok(())}
     fn prepare_retaining(&mut self)->Result<()> {
         clock(&self.original,&self.cancelled)?;ensure!(!self.attempted,"original image import already attempted");self.attempted=true;self.machine.assert_custody()?;
+        if let Some(backed)=&self.backed {
+            ensure!(Arc::ptr_eq(&backed.machine(),&self.machine),"actual runtime environment belongs to another machine");backed.current(&self.original,&self.cancelled)?;
+            // One immutable boundary is derived during the existing image job,
+            // after the original preparation/TLS ACK, not once per task.
+            backed.derive_environment_subgraph_retaining(&mut self.environment_subgraph,Arc::new(BackedImageClock{original:self.original.clone(),cancelled:self.cancelled.clone()}))?;
+            let backing=backed.backing()?;let inputs=backing.inputs();let manifest=backing.manifest().clone();
+            inputs.read_retaining(&mut self.manifest_read,manifest.clone(),Arc::new(BackedImageClock{original:self.original.clone(),cancelled:self.cancelled.clone()}))?;
+            let data:rudder_native::image_preseed_data::ImageManifestData=serde_json::from_slice(self.manifest_read.as_ref().unwrap().verified_bytes()?)?;
+            ensure!(data.format_version==1&&data.installer_input==*backing.installer_input(),"actual baked image manifest differs");
+            self.backed_files=data.files;self.objects=inputs.objects_data()?.iter().cloned().collect();
+            self.binding=Some(ImagePreseedBinding{image_id:manifest.digest.clone(),profile_id:self.machine.config().data().runtime_manifest.profile_id.clone(),manifest_sha256:manifest.digest.clone(),manifest,installer_input:backing.installer_input().clone()});
+            backed.current(&self.original,&self.cancelled)?;self.manifest_read.take();self.ready=true;return Ok(())
+        }
         self.identity=capture_fixed_image(self.machine.config(),&mut self.anchors,&mut self.files,&mut self.dirs,&mut self.stamps,&mut self.hashes,&mut self.loader,&self.original,&self.cancelled)?;
         let policy=self.machine.config().data().image_preseed.as_ref().context("actual full-image preseed policy unconfigured")?.clone();
         ImageDataBuild::capture_retaining(&mut self.data,self.machine.store()?.clone(),self.original.clone(),self.cancelled.clone())?;
@@ -70,8 +89,11 @@ impl Owner {
     }
 }
 /// Complete graph plus actual original importer/join/current-image owners.
-pub(crate) struct ImagePreseedExport {source:Arc<ManagedImagePreseed>,binding:ImagePreseedBinding,objects:Vec<ObjectRef>,cached:Mutex<Option<(ObjectRef,Vec<u8>)>>}
+pub(crate) struct ImagePreseedExport {source:Arc<ManagedImagePreseed>,binding:ImagePreseedBinding,objects:Vec<ObjectRef>,cached:Mutex<Option<(ObjectRef,Vec<u8>)>>,backed_cached:Mutex<Option<(ObjectRef,Option<rudder_engine::store::backed_inputs::VerifiedBakedRead>)>>}
 impl ImagePreseedExport {
+    pub(crate) fn environment_subgraph(&self)->Result<Option<Arc<rudder_engine::store::environment_dependencies::RetainedEnvironmentSubgraph>>>{
+        self.source.assert_retained_custody()?;let held=self.source.owner.lock().unwrap_or_else(|p|p.into_inner());ensure!(held.ready,"actual image export ACK absent");
+        ensure!(held.backed.is_some()==held.environment_subgraph.is_some(),"backed image lost original preparation boundary");Ok(held.environment_subgraph.clone())}
     fn original_image_budget(&self,original:&ManagedImageBudget)->Result<()> {let held=self.source.owner.lock().unwrap_or_else(|p|p.into_inner());ensure!(original.constraint()==held.original.constraint(),"original image budget replaced");clock(&held.original,&held.cancelled)}
     pub(crate) fn binding(&self)->&ImagePreseedBinding{&self.binding}
     pub(crate) fn objects(&self)->&[ObjectRef]{&self.objects}
@@ -82,11 +104,23 @@ impl ImagePreseedExport {
     pub(crate) fn assert_current_deep(&self,original:&ManagedImageBudget,cancelled:&AtomicBool)->Result<()>{self.original_image_budget(original)?;self.source.current(original,cancelled,true)}
     pub(crate) fn assert_current_for_fresh(&self,original:&FinalizationBudget,cancelled:&AtomicBool)->Result<()>{self.source.current(original,cancelled,true)}
     pub(crate) fn assert_custody_for_fresh(&self,original:&FinalizationBudget,cancelled:&AtomicBool)->Result<()>{self.source.current(original,cancelled,false)}
-    pub(crate) fn captured_file_data(&self,path:&Path)->Result<Option<rudder_native::image_preseed_data::ImageFileData>>{let held=self.source.owner.lock().unwrap_or_else(|p|p.into_inner());ensure!(held.ready,"actual image export not ready");held.current_roots()?;let files=held.data.as_ref().context("actual image DATA owner absent")?.files_data()?;Ok(files.binary_search_by(|f|f.path.as_os_str().as_encoded_bytes().cmp(path.as_os_str().as_encoded_bytes())).ok().map(|i|files[i].clone()))}
-    pub(crate) fn contains_actual_program(&self,backend:HostBackend)->Result<bool>{let held=self.source.owner.lock().unwrap_or_else(|p|p.into_inner());held.current_roots()?;let path=Path::new(ROOT).join(match backend{HostBackend::Codex=>"codex",HostBackend::Claude=>"claude"});Ok(held.ready&&held.files.iter().any(|f|f.stamp.path==path&&f.stamp.mode&0o111!=0))}
+    pub(crate) fn captured_file_data(&self,path:&Path)->Result<Option<rudder_native::image_preseed_data::ImageFileData>>{let held=self.source.owner.lock().unwrap_or_else(|p|p.into_inner());ensure!(held.ready,"actual image export not ready");held.current_roots()?;let files=if held.backed.is_some(){&held.backed_files[..]}else{held.data.as_ref().context("actual image DATA owner absent")?.files_data()?};Ok(files.binary_search_by(|f|f.path.as_os_str().as_encoded_bytes().cmp(path.as_os_str().as_encoded_bytes())).ok().map(|i|files[i].clone()))}
+    pub(crate) fn captured_package_files(&self)->Result<Vec<rudder_native::image_preseed_data::ImageFileData>>{let held=self.source.owner.lock().unwrap_or_else(|p|p.into_inner());ensure!(held.ready,"actual image export not ready");held.current_roots()?;
+        let files=if held.backed.is_some(){&held.backed_files[..]}else{held.data.as_ref().context("actual image DATA owner absent")?.files_data()?};Ok(files.iter().filter(|f|f.path.starts_with("/opt/rudder")).cloned().collect())}
+    pub(crate) fn contains_actual_program(&self,backend:HostBackend)->Result<bool>{let held=self.source.owner.lock().unwrap_or_else(|p|p.into_inner());held.current_roots()?;ensure!(held.backed.is_none(),"baked runtime backend execution still requires its explicit qualified task consumer");let path=Path::new(ROOT).join(match backend{HostBackend::Codex=>"codex",HostBackend::Claude=>"claude"});Ok(held.ready&&held.files.iter().any(|f|f.stamp.path==path&&f.stamp.mode&0o111!=0))}
     pub(crate) fn read_verified_chunk(&self,reference:&ObjectRef,offset:u64,max_bytes:usize,original:&ManagedImageBudget,cancelled:&AtomicBool)->Result<Vec<u8>>{
         self.assert_current(original,cancelled)?;ensure!(self.objects.binary_search(reference).is_ok()&&(1..=CHUNK).contains(&max_bytes)&&offset<=reference.size_bytes,"image read outside actual retained graph/bounds");
+        if let Some(backed)=self.source.runtime_environment(){
+            let backing=backed.backing()?;let mut slot=self.backed_cached.lock().unwrap_or_else(|p|p.into_inner());
+            if slot.as_ref().is_none_or(|(r,_)|r!=reference){if let Some((_,old))=&*slot{old.as_ref().context("original baked image read interrupted; retain it")?.verified_bytes()?;}
+                *slot=Some((reference.clone(),None));backing.inputs().read_retaining(&mut slot.as_mut().unwrap().1,reference.clone(),Arc::new(BackedImageClock{original:original.clone(),cancelled:self.source.owner.lock().unwrap_or_else(|p|p.into_inner()).cancelled.clone()}))?;}
+            let bytes=slot.as_ref().unwrap().1.as_ref().context("actual original baked image read incomplete")?.verified_bytes()?;
+            let start=usize::try_from(offset)?;let end=start.saturating_add(max_bytes).min(bytes.len());let chunk=bytes[start..end].to_vec();drop(slot);self.assert_current(original,cancelled)?;return Ok(chunk)
+        }
         let mut cached=self.cached.lock().unwrap_or_else(|p|p.into_inner());if cached.as_ref().is_none_or(|(r,_)|r!=reference){let machine=self.source.machine();let bytes=machine.store()?.read_object(reference)?;reference.verify(&bytes)?;*cached=Some((reference.clone(),bytes));}
         let bytes=&cached.as_ref().unwrap().1;let start=usize::try_from(offset)?;let end=start.saturating_add(max_bytes).min(bytes.len());let chunk=bytes[start..end].to_vec();drop(cached);self.assert_current(original,cancelled)?;Ok(chunk)
     }
 }
+
+struct BackedImageClock {original:ManagedImageBudget,cancelled:Arc<AtomicBool>}
+impl rudder_engine::store::ImageImportFence for BackedImageClock{fn remaining(&self)->Result<std::time::Duration>{clock(&self.original,&self.cancelled)?;self.original.remaining()}}

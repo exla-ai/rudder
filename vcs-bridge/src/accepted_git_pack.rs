@@ -107,7 +107,7 @@ impl PackBuilder {
  pub(super) fn paths(&self)->[Option<&Path>;3]{[self.pack_final.as_deref(),self.index_final.as_deref(),self.keep_final.as_deref()]}
 }
 fn create(path:&Path)->Result<File>{Ok(OpenOptions::new().read(true).write(true).create_new(true).mode(0o600).custom_flags(libc::O_NOFOLLOW|libc::O_CLOEXEC).open(path)?)}
-fn rename_noreplace(from:&Path,to:&Path)->std::io::Result<()> {let from=std::ffi::CString::new(from.as_os_str().as_bytes())?;let to=std::ffi::CString::new(to.as_os_str().as_bytes())?;
+pub(super) fn rename_noreplace(from:&Path,to:&Path)->std::io::Result<()> {let from=std::ffi::CString::new(from.as_os_str().as_bytes())?;let to=std::ffi::CString::new(to.as_os_str().as_bytes())?;
  #[cfg(target_os="linux")]let answer=unsafe{libc::syscall(libc::SYS_renameat2,libc::AT_FDCWD,from.as_ptr(),libc::AT_FDCWD,to.as_ptr(),libc::RENAME_NOREPLACE)};
  #[cfg(target_os="macos")]let answer=unsafe{libc::renamex_np(from.as_ptr(),to.as_ptr(),libc::RENAME_EXCL)};
  #[cfg(not(any(target_os="linux",target_os="macos")))]return Err(std::io::Error::other("atomic no-replace Git pack publication unsupported"));

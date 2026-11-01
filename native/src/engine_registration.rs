@@ -12,9 +12,11 @@ use std::{collections::BTreeMap,fs::{self,File,OpenOptions},os::{fd::{AsRawFd,Ow
     path::{Path,PathBuf},sync::{Arc,atomic::{AtomicBool,Ordering}}};
 #[path="host_transport_root.rs"]
 mod host_transport_root;
+#[path="root_registration_qualification.rs"]
+mod runtime_qualification;
 #[path="engine_operations.rs"]
 pub mod engine_operations;
-pub use engine_operations::{EngineOperation,EngineOperationKind,EngineOperationAck,EngineOperationError,FreshProjectPreparation,FreshPreparationData,ImagePreseedBudget,ImagePreseedConstraint,RootUploadTransfer,MissingObjectsAck,UploadScope,OperationConstraint,PublishedImagePreseed,OriginalFreshAcquireAck,OriginalOwnerRenewalAck};
+pub use engine_operations::{EngineOperation,EngineOperationKind,EngineOperationAck,EngineOperationError,FreshProjectPreparation,FreshPreparationData,ImagePreseedBudget,ImagePreseedConstraint,RootUploadTransfer,MissingObjectsAck,UploadScope,OperationConstraint,PublishedImagePreseed,OriginalFreshAcquireAck,OriginalOwnerRenewalAck,OriginalProviderAcquireAck,OriginalProviderHeartbeatAck};
 
 const MAX:usize=16*1024;
 const KEY:&str="/run/rudder-host-control/registration-key";
@@ -297,3 +299,5 @@ impl RegisteredEngineOwner {
 #[cfg(test)]
 #[path="engine_registration_tests.rs"]
 mod tests;
+
+pub(crate) use engine_operations::provider_data::ProviderGrant;

@@ -157,8 +157,9 @@ impl ManagedRootUpload {
         ensure!(matches!(self.stage,Stage::Complete)&&self.published.is_some(),"fresh source publication incomplete");self.current()?;self.source.deep(&self.cancelled)?;
         let Source::Fresh {original,..}=&self.source else{return Err(anyhow::anyhow!("image publication cannot acquire a project"));};
         let transfer_id=self.stream.as_ref().context("original transfer absent")?.scope_data().transfer_id.clone();
-        self.registration.try_begin_operation_retaining(out,EngineOperationKind::AcquireFreshOwnerV1 {workspace_id:self.workspace_id.clone(),transfer_id,acquire_key,expected_owner_epoch:"1".into()},
-            format!("{}.acquire",self.key),original.clone(),self.cancelled.clone())
+        let operation=if self.registration.provider_fenced_ownership()?{EngineOperationKind::AcquireProviderFreshOwnerV1 {workspace_id:self.workspace_id.clone(),transfer_id,acquire_key,expected_owner_epoch:"1".into()}}
+            else{EngineOperationKind::AcquireFreshOwnerV1 {workspace_id:self.workspace_id.clone(),transfer_id,acquire_key,expected_owner_epoch:"1".into()}};
+        self.registration.try_begin_operation_retaining(out,operation,format!("{}.acquire",self.key),original.clone(),self.cancelled.clone())
     }
     pub(crate) fn publication_data(&self)->Option<&EngineOperationAck> {self.published.as_ref()}
     /// Passive observations only after uncertainty. No effect resend, new time,

@@ -5825,7 +5825,7 @@ function attachHomeControl(homeId: string, ws: WebSocket, managedWorker?: Manage
       return;
     }
     const type = stringField(message, "type");
-    if (managedWorker && (type === "engine_registration_begin_v1" || type === "engine_registration_proof_v1" || type === "engine_operation_v1" || type === "host_transport_begin_v1" || type === "host_transport_commit_v1" || type === "host_transport_confirm_v1" || type === "host_transport_reconcile_v1")) {
+    if (managedWorker && (type === "runtime_image_qualification_ready_v1" || type === "engine_registration_begin_v1" || type === "engine_registration_proof_v1" || type === "engine_operation_v1" || type === "host_transport_begin_v1" || type === "host_transport_commit_v1" || type === "host_transport_confirm_v1" || type === "host_transport_reconcile_v1")) {
       void managedHomeRegistrationWire.receive(managedWorker, message, (reply) => new Promise<void>((resolve, reject) => {
         ws.send(JSON.stringify(reply), (error) => error ? reject(new Error("managed registration send unknown")) : resolve());
       }), ws, async (owner) => {

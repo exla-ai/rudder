@@ -7,6 +7,10 @@ source_dir=$1
 runtime_dir=$2
 qualification=$3
 owned=$4
+fixture_variant=${6:-managed-storage-v3}
+[[ "$fixture_variant" == managed-storage-v3 || "$fixture_variant" == provider-owner-v1 || "$fixture_variant" == role-activation-v1 ]]
+if [[ "$fixture_variant" == provider-owner-v1 ]]; then test -z "${5:-}"; fi
+if [[ "$fixture_variant" == role-activation-v1 ]]; then test -n "${5:-}"; fi
 [[ "$qualification" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]]
 [[ "$owned" =~ ^[0-9a-f]+$ && "$owned" != 8edd225a7d0378 ]]
 test "$(cat /run/rudder-authority-node-qualification)" = "$qualification:$owned"
@@ -88,15 +92,29 @@ state=$work/test-state.json
 printf '{"nonce":"%s","work":"%s","socket":"%s","data":"%s","host":"localhost","port":55432,"ca":"%s","adminPassword":"%s"}\n' \
   "$qualification" "$work" "$socket" "$data" "$work/tls/server.crt" "$password" >"$state"
 unset password
-# Optional explicit ROOT-installed descriptor contains module paths/hashes ONLY.
+python3 - "$state" "$fixture_variant" <<'PYVARIANT'
+import json,os,sys
+from pathlib import Path
+state=Path(sys.argv[1]);value=json.loads(state.read_text());value['fixtureVariant']=sys.argv[2]
+with open(state,'w') as f:json.dump(value,f,separators=(',',':'));f.write('\n');f.flush();os.fsync(f.fileno())
+PYVARIANT
+# Optional explicit ROOT-installed descriptor contains module paths/hashes and
+# the fixed role-only fixture selector. It cannot change the original variant.
 # It never transports a credential, adds an HTTP Context issuer or runs by default.
 if [[ -n "${5:-}" ]]; then
   python3 - "$state" "$5" <<'PYDATA'
 import json,os,sys
 from pathlib import Path
 state=Path(sys.argv[1]);extra=json.loads(Path(sys.argv[2]).read_text())
-assert set(extra)<= {'backendModule','followupModule'}
-value=json.loads(state.read_text());value.update(extra)
+value=json.loads(state.read_text())
+if value['fixtureVariant']=='role-activation-v1':
+    assert set(extra)=={'followupModule','roleActivationOnly','selectedRole'}
+    assert extra['roleActivationOnly'] is True and extra['selectedRole'] in ('sdk','runtime')
+    module='managed-compiler-sdk-role-pg-followup.mjs' if extra['selectedRole']=='sdk' else 'managed-runtime-role-pg-followup.mjs'
+    assert extra['followupModule']['path']=='/var/tmp/rudder-authority-node-runtime/tests/'+module
+else:
+    assert set(extra)<= {'backendModule','followupModule'}
+value.update(extra)
 with open(state,'w') as f:json.dump(value,f,separators=(',',':'));f.write('\n');f.flush();os.fsync(f.fileno())
 PYDATA
 fi
@@ -106,16 +124,28 @@ gosu postgres "$pgbin/psql" -XAt -v ON_ERROR_STOP=1 "host=$socket port=55432 dbn
   -c "SELECT jsonb_build_object('version',version(),'fsync',current_setting('fsync'),'synchronous_commit',current_setting('synchronous_commit'),'full_page_writes',current_setting('full_page_writes'),'ssl',current_setting('ssl'),'listen_addresses',current_setting('listen_addresses'),'data_checksums',current_setting('data_checksums'))" >"$out/server.json"
 chmod 0755 "$runtime_dir"
 mkdir -p "$runtime_dir/tests"
-cp "$source_dir/tests/managed-storage-pg-qualification.mjs" "$source_dir/tests/managed-storage-pg-fixtures.mjs" "$runtime_dir/tests/"
+if [[ "$fixture_variant" == provider-owner-v1 ]]; then
+  cp "$source_dir/tests/provider-fenced-ownership-pg.test.mjs" "$runtime_dir/tests/"
+  selected_test=$runtime_dir/tests/provider-fenced-ownership-pg.test.mjs
+else
+  cp "$source_dir/tests/managed-storage-pg-qualification.mjs" "$source_dir/tests/managed-storage-pg-fixtures.mjs" "$runtime_dir/tests/"
+  selected_test=$runtime_dir/tests/managed-storage-pg-qualification.mjs
+fi
 chmod 0755 "$runtime_dir/tests"
 chmod 0644 "$runtime_dir/tests/"*.mjs
 "$runtime_dir/node" --version >"$out/node-version.txt"
-# The actual single Node child intentionally stays live with original Registry
-# carriers. The supervisor observes completed proof, then performs declared
-# fixture PROCESS teardown and actual wait, never normal Registry retirement.
+# Legacy Registry fixture carriers stay live until explicit process teardown.
+# The separate finite provider test closes only its SQL fixture sessions and
+# exits naturally; both paths require actual Child wait and both pipe EOF.
 python3 "$source_dir/examples/managed-storage-pg/retained-fixture-runner.py" \
-  "$runtime_dir/node" "$runtime_dir/tests/managed-storage-pg-qualification.mjs" "$state" "$out"
+  "$runtime_dir/node" "$selected_test" "$state" "$out" "$fixture_variant"
 test -s "$out/node-proof.json"
 gosu postgres "$pgbin/pg_ctl" -D "$data" -m fast -w stop >"$out/final-stop.log" 2>&1
 server_running=false
-printf '{"ok":true,"scope":"real single PostgreSQL TLS/roles/transactions plus scoped fixture transports","normal_runtime_retirement":false}\n'
+if [[ "$fixture_variant" == provider-owner-v1 ]]; then
+  printf '{"ok":true,"scope":"real PG provider-owner concurrency/constraints; synthetic enrollment/CAS rows","normal_runtime_retirement":false}\n'
+elif [[ "$fixture_variant" == role-activation-v1 ]]; then
+  printf '{"ok":true,"scope":"real PG original staging activation component only; synthetic Root/image/compiler/Fly/clock evidence","normal_runtime_retirement":false}\n'
+else
+  printf '{"ok":true,"scope":"real single PostgreSQL TLS/roles/transactions plus scoped fixture transports","normal_runtime_retirement":false}\n'
+fi

@@ -1,0 +1,40 @@
+{
+  "formatVersion": 1,
+  "scope": "C1 compiler build-only component",
+  "sourceManifestSha256": "cedd7127bc017e01e5386d1f8f126afd6d0cd795f89b3a7a09b0d88603728f20",
+  "target": "compiler-artifact",
+  "image": "registry.fly.io/rudder-workers-exla:compiler-c1-data-cedd7127bc01",
+  "digest": "sha256:b5d7681a9caf7527425e372628f54893ea26d50a6f01b522a5accc9a24661ffe",
+  "exitCode": 0,
+  "componentPassed": true,
+  "receipts": [
+    {
+      "entries": 6104,
+      "execution_qualified": false,
+      "format_version": 1,
+      "kind": "compiler-artifact-data",
+      "logical_bytes": 1372577116,
+      "manifest_sha256": "e0e8d7b5d374e3ed872ba811cbd129994653299d4235d9ab7167433850f37495",
+      "profile_id": "rudder-linux-rust-cxx-typescript-c1",
+      "scope": "compiler-C1-DATA-only",
+      "sdk_grant": false
+    },
+    {
+      "entries": 6104,
+      "execution_qualified": false,
+      "format_version": 1,
+      "kind": "compiler-artifact-data",
+      "logical_bytes": 1372577116,
+      "manifest_sha256": "e0e8d7b5d374e3ed872ba811cbd129994653299d4235d9ab7167433850f37495",
+      "profile_id": "rudder-linux-rust-cxx-typescript-c1",
+      "scope": "compiler-C1-DATA-only",
+      "sdk_grant": false
+    }
+  ],
+  "logSha256": "aff22c9e885d7b0671aa25faca81bdf0c4dc070b5a5809bc39234ba8139279e8",
+  "verifiedAt": "2026-11-01T18:48:24.217362+00:00",
+  "remoteBuildMayContinue": false,
+  "runtimeQualified": false,
+  "productionActivation": false,
+  "deployed": false
+}

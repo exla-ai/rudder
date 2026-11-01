@@ -1,0 +1,93 @@
+import {StagingListenerAdmissionClosure} from "./staging-listener-admission.js";
+import type {OriginalRuntimeRoleActivationPermit} from "./runtime-qualification.js";
+import {createServer,type Server} from "node:http";
+import {WebSocket,WebSocketServer} from "ws";
+import {inspect} from "node:util";
+import {createManagedRuntimeImageQualificationRegistry,type ManagedHomePostgresConfig} from "./index.js";
+import {ManagedHomeRegistrationWire} from "./wire.js";
+import {originalTime,type OriginalTime} from "./fly.js";
+import {check,fail,snapshot,controlOrigin,QUALIFICATION_CONTROL_ORIGIN,type Code} from "./types.js";
+import type {RuntimeQualificationCandidate,RuntimeQualificationAck} from "./runtime-qualification-protocol.js";
+import type {Envelope} from "./registration.js";
+import type {ManagedHomeRegistry,RuntimeQualificationProvisionReceipt} from "./registry.js";
+
+/** Dedicated staging fixture/driver, not the production scheduler or another
+ * config writer. Same concrete registry, original provider effects and wire.
+ * One fixed HTTPS/WSS origin; no RPC/project/model/general-operation handler.
+ * Servers/sockets/campaign owners remain held after any error/timeout until
+ * Root's explicit disposable provider teardown; this class never kills/restarts.
+ */
+export class RuntimeImageQualificationDriver {
+ readonly registry:ManagedHomeRegistry;readonly wire:ManagedHomeRegistrationWire;
+ #server?:Server;#wss?:WebSocketServer;#listen?:Promise<void>;#sockets=new Set<WebSocket>();
+ #acceptingClosed=false;#listenerClosure?:StagingListenerAdmissionClosure;
+ #admissions=0;#pendingUpgrades=0;#messages=0;#started=false;#time?:OriginalTime;#provision?:Promise<RuntimeQualificationProvisionReceipt>;
+ #receipt?:RuntimeQualificationProvisionReceipt;#error?:Code;#expired=false;#fuse?:NodeJS.Timeout;
+ #ack?:Envelope<RuntimeQualificationAck>;#sendAttempted=false;#sendCallback=false;#sendUnknown=false;
+ constructor(config:ManagedHomePostgresConfig,candidate:RuntimeQualificationCandidate,private readonly accountId:string,private readonly commandKey:string){
+  check(config.policy.controlPlane?.profile==="qualification-v1"&&controlOrigin(config.policy)===QUALIFICATION_CONTROL_ORIGIN,"unconfigured");
+  this.registry=createManagedRuntimeImageQualificationRegistry(config,candidate);this.wire=new ManagedHomeRegistrationWire(this.registry);
+ }
+ [inspect.custom](){return "RuntimeImageQualificationDriver [original disposable fixture owners retained]";}
+ toJSON():never{fail("invalid_request");}
+ async startRetaining():Promise<void>{check(!this.#started,"effect_unknown");this.#started=true;this.#time=originalTime(300_000);
+  // Reference the actual lifetime timer. An unresolved Promise alone does not
+  // retain Node/VM lifetime; the live server and this timer both do so.
+  this.#fuse=setTimeout(()=>{this.#expired=true;this.#error??="expired";},300_000);
+  const wss=new WebSocketServer({noServer:true,maxPayload:24*1024,perMessageDeflate:false});this.#wss=wss;
+  const server=createServer((_req,res)=>{res.writeHead(404);res.end();});this.#server=server;
+  server.on("error",()=>{this.#error??="unavailable";});wss.on("error",()=>{this.#error??="unavailable";});
+  server.headersTimeout=5000;server.requestTimeout=5000;server.maxHeadersCount=32;server.maxConnections=16;
+  server.on("upgrade",(request,socket,head)=>{if(this.#acceptingClosed||this.#pendingUpgrades>=4){socket.destroy();return;}this.#pendingUpgrades++;void(async()=>{
+   check(this.#time&&!this.#expired&&this.#admissions<4,"expired");this.#time.remaining();
+   check(request.method==="GET"&&request.headers.host===new URL(QUALIFICATION_CONTROL_ORIGIN).host&&request.headers["x-forwarded-proto"]==="https","identity_changed");
+   const match=/^\/api\/rudder\/home\/(mh-[a-f0-9-]{36})\/control$/.exec(request.url??"");check(match,"identity_changed");
+   const authorization=request.headers.authorization;check(typeof authorization==="string"&&/^Bearer rdrmh_[a-f0-9]{64}$/.test(authorization),"not_found");
+   const worker=await this.registry.authenticateManagedHomeWorker(match[1],authorization.slice(7));this.#time.remaining();check(!this.#acceptingClosed,"expired");this.#admissions++;
+   wss.handleUpgrade(request,socket,head,ws=>{
+    // Actual upgrade socket is captured before any packet is accepted.
+    this.#sockets.add(ws);this.registry.bindAuthenticatedManagedHomeSocket(ws,worker);
+    ws.on("error",()=>{this.#sendUnknown=true;});ws.on("close",()=>{this.registry.closeManagedHostSocket(ws);});
+    ws.on("message",data=>{if(this.#messages>=64||this.#expired)return;this.#messages++;
+     let message:unknown;try{message=JSON.parse(data.toString());}catch{return;}
+     void this.wire.receive(worker,message,reply=>new Promise<void>((resolve,reject)=>{
+      const r=reply as {type?:string;packet?:Envelope<RuntimeQualificationAck>};
+      if(r.type==="runtime_image_qualification_ack_v1"){this.#ack=snapshot(r.packet!);this.#sendAttempted=true;}
+      ws.send(JSON.stringify(reply),error=>{if(error){if(r.type==="runtime_image_qualification_ack_v1")this.#sendUnknown=true;reject(new Error("qualification wire send unknown"));}
+       else{if(r.type==="runtime_image_qualification_ack_v1")this.#sendCallback=true;resolve();}});
+     }),ws,async owner=>{await owner.assertCurrent();check(owner.socket===ws&&ws.readyState===WebSocket.OPEN,"identity_changed");}).catch(()=>{this.#error??="effect_unknown";});
+    });
+   });
+  })().catch(()=>{socket.destroy();}).finally(()=>{this.#pendingUpgrades--;});});
+  this.#listen=new Promise<void>((resolve,reject)=>{server.once("listening",resolve);server.once("error",()=>reject(new Error("qualification listen failed")));server.listen(8080,"0.0.0.0");});
+  await this.#listen;this.#time.remaining();
+  // Stage the actual promise before first provider/PG effects; timeout/error
+  // cannot throw away its registry/cipher/key/creation/purpose/unknown owners.
+  this.#provision=this.registry.provisionRuntimeImageQualification(this.accountId,this.commandKey);
+  try{this.#receipt=await this.#provision;this.#time.remaining();}catch{this.#error="effect_unknown";}
+ }
+ /** One-way listener restriction. Existing WS, registry, provider and PG
+  * owners remain held; close-listener completion is NOT actor/WS retirement. */
+ async closeNewListenerAdmissionRetaining():Promise<void>{
+  check(this.#server&&!this.#listenerClosure,"effect_unknown");this.#acceptingClosed=true;
+  const held=new StagingListenerAdmissionClosure(this.#server);this.#listenerClosure=held;await held.closeRetaining();
+ }
+ takeOriginalRoleActivationPermit():OriginalRuntimeRoleActivationPermit|undefined {
+  check(!this.#error&&!this.#expired&&!this.#sendUnknown,"effect_unknown");if(!this.#sendCallback)return undefined;
+  return this.registry.takeOriginalRoleActivationPermit(this.accountId,this.commandKey) as OriginalRuntimeRoleActivationPermit|undefined;
+ }
+ /** Bounded public DATA for a private fixture output file. A send callback is
+  * NOT Root ACK receipt or a readiness/lease/helper/drain constructor. */
+ statusData():unknown {
+  let custody:unknown=null;try{custody=this.registry.runtimeImageQualificationCustodyData(this.accountId,this.commandKey);}catch{}
+  return snapshot({format_version:1,scope:"disposable-runtime-floor-qualification-driver-data-only",
+   state:this.#ack?"role_commit_observed":this.#error??"pending",expired:this.#expired,error:this.#error??null,
+   receipt:this.#receipt??null,custody,publication_ack_data:this.#ack??null,
+   ack_send_attempted:this.#sendAttempted,ack_send_callback_observed:this.#sendCallback,ack_send_unknown:this.#sendUnknown,
+   root_ack_receipt_observed:false,source_authority:false,helper_qualified:false,scheduler_ready:false,normal_retirement:false,
+   sockets_retained:this.#sockets.size,messages_observed:this.#messages,owners_retained:true},64*1024);
+ }
+ /** Read-only reconciliation of exact durable original ACK/Started; no repeat
+  * publication/provider mutation/registration/new clock or capability adoption. */
+ async historicalResultData():Promise<unknown>{check(this.#receipt,"not_found");return this.registry.runtimeImageQualificationResultData(this.accountId,this.#receipt.scope.qualification_id);}
+}

@@ -49,6 +49,14 @@ async function lostCommit(user,predicate,work){
 async function qualify(){
   const st=await fs.lstat(statePath);assert(st.isFile()&&!st.isSymbolicLink()&&st.nlink===1&&st.uid===process.getuid()&&(st.mode&0o777)===0o600);
   const state=JSON.parse(await fs.readFile(statePath,'utf8'));assert.match(state.nonce,/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/);
+  const roleActivationOnly=state.fixtureVariant==='role-activation-v1';
+  assert([undefined,'managed-storage-v3','role-activation-v1'].includes(state.fixtureVariant));
+  assert.equal(state.roleActivationOnly??false,roleActivationOnly);
+  if(roleActivationOnly){
+    assert(['sdk','runtime'].includes(state.selectedRole));assert.equal(state.backendModule,undefined);
+    const module=state.selectedRole==='sdk'?'managed-compiler-sdk-role-pg-followup.mjs':'managed-runtime-role-pg-followup.mjs';
+    assert.equal(state.followupModule?.path,'/var/tmp/rudder-authority-node-runtime/tests/'+module);
+  }else assert.equal(state.selectedRole,undefined);
   const work='/var/tmp/rudder-managed-storage-pg-'+state.nonce;
   assert.equal(state.work,work);assert.equal(state.socket,work+'/socket');assert.equal(state.data,work+'/data');assert.equal(state.host,'localhost');assert.equal(state.port,55432);
   assert.equal((await fs.readFile(work+'/qualification-nonce','utf8')).trim(),state.nonce);assert.equal((await fs.stat(state.socket)).mode&0o777,0o700);
@@ -69,6 +77,7 @@ async function qualify(){
   for(const k of ['ssl','fsync','sync','full','checksums'])assert.equal(serverIdentity[k],'on');assert(Number(serverIdentity.version)>=170000&&Number(serverIdentity.version)<180000);assert.equal(serverIdentity.authority_schema,null);
   const socketStat=await fs.lstat(state.socket+'/.s.PGSQL.55432');assert(socketStat.isSocket()&&socketStat.uid===process.getuid());
   const followup=state.followupModule?await fixtureModule(state.followupModule):undefined;
+  if(roleActivationOnly){assert.equal(typeof followup?.prepareFixturePolicy,'function');assert.equal(typeof followup.qualifyActivationOnly,'function');}
   const graph=componentGraph(canonicalFabricMetadata);const preparedFollowup=followup?.prepareFixturePolicy?await followup.prepareFixturePolicy({policy:structuredClone(graph.policy),authorityId,config,query:q}):undefined;
   if(preparedFollowup){assert(preparedFollowup.policy&&typeof preparedFollowup.policy==='object');graph.policy=preparedFollowup.policy;}
   const storageReceipt=state.backendModule?.storageReceiptSha256??hash('fixture storage qualification only');assert.match(storageReceipt,/^[a-f0-9]{64}$/);
@@ -83,7 +92,7 @@ async function qualify(){
   const make=(authority=config(role.runtime),credentials=serviceCredentials)=>{const peer=user=>({...config(user),connection:{...config(user).connection,host:authority.connection.host,ca:authority.connection.ca}});const registry=createManagedHomeRegistry({mode:'postgres',authority,registrationAuthority:peer(role.registration),policy:graph.policy,flyToken:'synthetic-managed-pg-provider-only',tokenEncryptionKey:Buffer.alloc(32,23),
       freshStorage:{authority:{...authority,connection:{...authority.connection}},storage:backend.storage,storageReceiptSha256:storageReceipt,serviceCredentials:credentials}});owners.push(registry);return registry;};
   let migrationsClosed=false;const migrations=[createAuthorityMigrator(config('postgres')),createManagedHomeMigrator(config('postgres'),graph.policy),createManagedHomeOperationMigrator(config('postgres')),createManagedStorageMigrator(config('postgres'),storageReceipt)];
-  proof={format_version:1,scope:'managed-home-v1-v2-v3-real-PG-component-only',qualification:state.nonce,actualPostgres:true,verifiedTLS:false,fixtureOperatorEnrollment:true,
+  proof={format_version:1,scope:'managed-home-v1-v2-v3-real-PG-component-only',qualification:state.nonce,roleActivationOnly,selectedRole:state.selectedRole,actualPostgres:true,verifiedTLS:false,fixtureOperatorEnrollment:true,
     fixtureFlyTransport:true,realRootRegistration:false,realRootKernelWitness:false,actualFabricCas:false,objectBackend:backend.evidence,productionStartup:false,Spec3:false,models:false,
     acceptedJournalAuthority:false,fleetHA:false,RPO:false,normalRetirementBlocked:false,serverIdentity,steps};
   try{
@@ -286,7 +295,11 @@ async function qualify(){
       const publish=makeOperation({op:'PublishFreshRootsV1',workspace_id:active.workspaceId,transfer_id:transfer},'fresh-publish',original);const pub=await perform(publish);assert.equal(pub.body.error,null);assert.equal(pub.body.result.scope,'fresh-bootstrap-only');
       assert.deepEqual(await perform(publish),pub);assert.equal(await count('projects'),1);assert.equal(await count('handoff_witnesses'),1);assert.equal(await count('retained_roots'),3);
       const acquire=makeOperation({op:'AcquireFreshOwnerV1',workspace_id:active.workspaceId,transfer_id:transfer,acquire_key:'original-acquire',expected_owner_epoch:'1'},'fresh-acquire',original);
-      const result=await perform(acquire);assert.equal(result.body.error,null);acquirePacket=result;acquired=result.body.result.owner_receipt;assert.equal(acquired.data.ownerEpoch,'2');
+      const result=await perform(acquire);
+      // Bounded diagnostic DATA only. Preserve the strict success assertion;
+      // never copy a credential/packet/SQL/provider cause into failure output.
+      proof.baseAcquireErrorCode=result.body.error===null?null:['unconfigured','expired','busy','rejected'].includes(result.body.error)?result.body.error:'unknown-code';
+      assert.equal(result.body.error,null);acquirePacket=result;acquired=result.body.result.owner_receipt;assert.equal(acquired.data.ownerEpoch,'2');
       assert.deepEqual(await perform(acquire),result);assert.equal((await q(`SELECT owner_epoch::text AS epoch FROM ${S}.projects`)).rows[0].epoch,'2');proof.bootstrapAndOwner=true;
       const enrolled=await perform(makeOperation({op:'EnrollFreshProjectV1',workspace_id:active.workspaceId},'active-original-assignment',original));assert.equal(enrolled.body.error,null);assert.equal(enrolled.body.result.owner_epoch,'2');
       const route=await registry.resolveManagedHomeRoute(account,receipt.homeId,active.workspaceId);await route.assertRoutableCurrent();
@@ -297,7 +310,9 @@ async function qualify(){
     proof.v4MixedQualification=false;
     proof.hostTransportPgQualification=false;
     if(state.followupModule){await step('explicit-Root-supplied-separate-followup',async()=>{
-      try{proof.separateFollowup=await followup.qualify({registry,worker,account,active,workspace:receipt.projects[3],initialAcquire:acquirePacket,operation:makeOperation,perform,budget,query:q,backend,graph,missing,put,fixtureTransport});}
+      // Fixed export selection only; both paths inherit the SAME original budget.
+      const qualifyFollowup=roleActivationOnly?followup.qualifyActivationOnly:followup.qualify;
+      try{proof.separateFollowup=await qualifyFollowup.call(followup,{registry,worker,account,active,workspace:receipt.projects[3],initialAcquire:acquirePacket,operation:makeOperation,perform,budget,query:q,backend,graph,missing,put,fixtureTransport});}
       catch(error){if(followup.failureData)proof.separateFollowup=JSON.parse(canonical(followup.failureData(),24576).toString('utf8'));throw error;}
       proof.v4MixedQualification=proof.separateFollowup?.actualMixedPgQualification===true;
     });}

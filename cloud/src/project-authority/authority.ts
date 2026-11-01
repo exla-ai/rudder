@@ -1,14 +1,19 @@
+import {PROVIDER_RETIREMENT_MIGRATION_SHA256} from "./provider-retirement-schema.js";
+import type {ProviderRetirementRequest,ProviderRetirementData,ProviderRetirementInventory,ProviderFenceDispatchData} from "./provider-retirement-types.js";
+import {inspect} from "node:util";
+import {PROVIDER_OWNERSHIP_MIGRATION_SHA256} from "./provider-ownership-schema.js";
+import type {ProviderOwnerGrant,ProviderHeartbeatRequest,ProviderBinding,OwnerAdmissionFence} from "./types.js";
 import { createHash, randomUUID } from "node:crypto";
 import { AuthorityPool, SCHEMA as S, type Transaction } from "./pool.js";
 import { canonical, counter, exact, fail, hash, next, text, uuid, type Accepted, type AcquireRequest,
   type BootstrapRequest, type DecisionRequest, type HandoffAdmission, type IntegrationRequest,
-  type Json, type Outcome, type OwnerFence, type OwnerGrant, type ReleaseRequest, type RenewRequest,
+  type Json, type Outcome, type OwnerGrant, type ReleaseRequest, type RenewRequest,
   type RootAdmission, type TrustedContext, type VerificationAdmission } from "./types.js";
 
 type Project = { authority_id: string; account_id: string; project_id: string; mode: string;
   owner_epoch: string; owner_engine_instance: string | null; lease_id: string | null; lease_until: string | null;
-  renew_serial: string; event_seq: string; integration_version: string; head_vcs_commit: string };
-const projectColumns = "authority_id,account_id,project_id,mode,owner_epoch::text,owner_engine_instance,lease_id,lease_until,renew_serial::text,event_seq::text,integration_version::text,head_vcs_commit";
+  renew_serial: string; ownership_mode:string;ownership_id:string|null;provider_binding:ProviderBinding|null;provider_heartbeat_serial:string;provider_retirement_id:string|null;event_seq: string; integration_version: string; head_vcs_commit: string };
+const projectColumns = "authority_id,account_id,project_id,mode,owner_epoch::text,owner_engine_instance,lease_id,lease_until,renew_serial::text,event_seq::text,integration_version::text,head_vcs_commit,COALESCE(to_jsonb(projects)->>'ownership_mode','clock-lease-v1') AS ownership_mode,to_jsonb(projects)->>'ownership_id' AS ownership_id,to_jsonb(projects)->'provider_binding' AS provider_binding,COALESCE(to_jsonb(projects)->>'provider_heartbeat_serial','0') AS provider_heartbeat_serial,to_jsonb(projects)->>'provider_retirement_id' AS provider_retirement_id";
 const creatorOps = ["receipt:read", "owner:acquire", "owner:renew", "owner:release", "decision:accept", "integration:accept"];
 const sha = (value: Buffer) => createHash("sha256").update(value).digest("hex");
 const snapshot = <T>(value: T): T => JSON.parse(canonical(value).toString()) as T;
@@ -24,18 +29,37 @@ function context(input: TrustedContext): TrustedContext {
   }
   return result;
 }
-function fence(input: OwnerFence): void { counter(input.ownerEpoch, true); uuid(input.leaseId); }
+function fenceKeys(input:OwnerAdmissionFence):string[]{return "ownershipMode" in input?["ownershipMode","ownerEpoch","ownershipId"]:["ownerEpoch","leaseId"];}
+function fence(input: OwnerAdmissionFence): void {counter(input.ownerEpoch,true);if("ownershipMode" in input){if(input.ownershipMode!=="provider-fenced-v1")fail("invalid_request");uuid(input.ownershipId);}else uuid(input.leaseId);}
 function operationBytes(ctx: TrustedContext, kind: string, input: unknown): Buffer {
   return canonical({ formatVersion: 1, kind, request: input,
     engine: ctx.engine ? { instanceId: ctx.engine.instanceId, bootId: ctx.engine.bootId } : null });
 }
 
+const PROVIDER_FENCE_REQUEST_ISSUER=Symbol("same original retirement known COMMIT request");
+const originalFenceRequests=new WeakSet<OriginalProviderFenceRequest>();
+/** Request to a FUTURE real exact-host fencing producer. Never proof that a
+ * host stopped, effects reconciled or an ownership transfer/release occurred. */
+export class OriginalProviderFenceRequest {
+ private constructor(issuer:symbol,private readonly data:ProviderRetirementData,private readonly current:()=>Promise<void>,private readonly start:()=>Promise<void>,private readonly claim:()=>ProviderFenceDispatchData){if(issuer!==PROVIDER_FENCE_REQUEST_ISSUER)fail("forbidden");originalFenceRequests.add(this);}
+ static issue(issuer:symbol,data:ProviderRetirementData,current:()=>Promise<void>,start:()=>Promise<void>,claim:()=>ProviderFenceDispatchData){return new OriginalProviderFenceRequest(issuer,data,current,start,claim);}
+ scopeData():ProviderRetirementData {assertOriginalProviderFenceRequest(this);return snapshot(this.data);}
+ async assertPendingOriginal():Promise<void>{assertOriginalProviderFenceRequest(this);await this.current();}
+ async startDispatchRetaining():Promise<void>{assertOriginalProviderFenceRequest(this);await this.start();}
+ takeOriginalDispatchData():ProviderFenceDispatchData{assertOriginalProviderFenceRequest(this);return this.claim();}
+ [inspect.custom](){return "OriginalProviderFenceRequest [admission closed; physical fencing UNPROVEN]";}
+ toJSON():never{fail("invalid_request");}
+}
+export function assertOriginalProviderFenceRequest(v:unknown):asserts v is OriginalProviderFenceRequest {if(!v||typeof v!=="object"||!originalFenceRequests.has(v as OriginalProviderFenceRequest))fail("forbidden");}
+interface RetirementAttempt {ctx:TrustedContext;request:ProviderRetirementRequest;bytes:Buffer;attempted:boolean;known:boolean;unknown:boolean;fresh:boolean;data?:ProviderRetirementData;receipt?:Accepted;token?:OriginalProviderFenceRequest;taken:boolean;
+ dispatchAttempted:boolean;dispatchKnown:boolean;dispatchUnknown:boolean;dispatchId?:string;dispatchPromise?:Promise<void>;dispatchClaimed:boolean;}
+
 /** Dormant library. No server route, scheduler, environmental fallback or automatic activation. */
 export class ProjectAuthority {
-  #pool?: AuthorityPool;
+  #pool?: AuthorityPool;#retirementClosed=false;#retirements=new Map<string,RetirementAttempt>();
   constructor(readonly authorityId: string, pool?: AuthorityPool) { uuid(authorityId); this.#pool = pool; }
   stats(): { active: number; queued: number } { return this.#pool?.stats() ?? { active: 0, queued: 0 }; }
-  async close(): Promise<void> { await this.#pool?.close(); }
+  async close(): Promise<void> { this.#retirementClosed=true;await this.#pool?.close(); }
   #run<T>(ctx: TrustedContext, body: (tx: Transaction) => Promise<T>): Promise<Outcome<T>> {
     if (!this.#pool) fail("inactive");
     return this.#pool.run(ctx.accountId, async tx => {
@@ -92,10 +116,12 @@ export class ProjectAuthority {
     [ctx.accountId, e.instanceId, e.bootId, e.credentialId]);
     if (row.rows.length !== 1) fail("stale_fence");
   }
-  async #owner(tx: Transaction, ctx: TrustedContext, p: Project, expected: OwnerFence, live = true): Promise<string> {
+  async #owner(tx: Transaction, ctx: TrustedContext, p: Project, expected: OwnerAdmissionFence, live = true): Promise<string|null> {
     await this.#authority(tx);
     await this.#engine(tx, ctx);
-    if (p.mode !== "ready" || p.owner_epoch !== expected.ownerEpoch || p.lease_id !== expected.leaseId
+    if("ownershipMode" in expected){await this.#providerVersion(tx);if(p.mode!=="ready"||p.ownership_mode!=="provider-fenced-v1"||p.owner_epoch!==expected.ownerEpoch||p.ownership_id!==expected.ownershipId||p.owner_engine_instance!==ctx.engine!.instanceId)fail("stale_fence");
+      const binding=await this.#providerBinding(tx,ctx,p.project_id);if(!p.provider_binding||!canonical(binding).equals(canonical(p.provider_binding)))fail("stale_fence");return null;}
+    if (p.mode !== "ready" || p.ownership_mode!=="clock-lease-v1" || p.owner_epoch !== expected.ownerEpoch || p.lease_id !== expected.leaseId
       || p.owner_engine_instance !== ctx.engine!.instanceId) fail("stale_fence");
     const row = await tx.query("SELECT clock_timestamp() AS now, $1::timestamptz>clock_timestamp() AS live", [p.lease_until]);
     if (live && !row.rows[0].live) fail("stale_fence");
@@ -187,25 +213,134 @@ export class ProjectAuthority {
       return { witnessId: req.witnessId };
     });
   }
-  async bootstrapProject(trusted: TrustedContext, input: BootstrapRequest): Promise<Outcome<Accepted>> {
+  async bootstrapProject(trusted:TrustedContext,input:BootstrapRequest):Promise<Outcome<Accepted>>{return this.#bootstrap(trusted,input,"clock-lease-v1");}
+  async bootstrapProviderProject(trusted:TrustedContext,input:BootstrapRequest):Promise<Outcome<Accepted>>{return this.#bootstrap(trusted,input,"provider-fenced-v1");}
+  async #bootstrap(trusted: TrustedContext, input: BootstrapRequest, mode:"clock-lease-v1"|"provider-fenced-v1"): Promise<Outcome<Accepted>> {
     const ctx = context(trusted); exact(input, ["projectId", "projectKey", "idempotencyKey", "witnessId", "head", "sourceRoot", "environmentRoot", "topics"]);
     uuid(input.projectId); uuid(input.witnessId); [input.projectKey, input.idempotencyKey, input.head, input.sourceRoot, input.environmentRoot].forEach(value => text(value));
     if (!Array.isArray(input.topics) || input.topics.length > 64 || !input.topics.includes("policy/verification") || new Set(input.topics).size !== input.topics.length) fail("invalid_request");
-    input.topics.forEach(value => text(value)); const req = snapshot(input); const bytes = operationBytes(ctx, "project-bootstrap", req);
+    input.topics.forEach(value => text(value)); const req = snapshot(input);const kind=mode==="clock-lease-v1"?"project-bootstrap":"project-provider-bootstrap-v1"; const bytes = operationBytes(ctx,kind,req);
     return this.#run(ctx, async tx => {
       await this.#authority(tx); const principalKind = await this.#accountGrant(tx, ctx, "project:bootstrap");
       await tx.query("SELECT pg_advisory_xact_lock(hashtextextended($1,44))", [this.authorityId + ":" + ctx.accountId + ":" + req.projectId]);
       const existing = await tx.query(`SELECT project_id FROM ${S}.projects WHERE authority_id=$1 AND account_id=$2 AND project_id=$3 FOR UPDATE`, [this.authorityId, ctx.accountId, req.projectId]);
-      if (existing.rows.length) { const prior = await this.#prior(tx, ctx, req.projectId, req.idempotencyKey, "project-bootstrap", bytes); if (prior) return prior; fail("conflict"); }
+      if (existing.rows.length) { const prior = await this.#prior(tx, ctx, req.projectId, req.idempotencyKey, kind, bytes); if (prior) return prior; fail("conflict"); }
       await this.#roots(tx, ctx.accountId, [[req.sourceRoot, "source"], [req.environmentRoot, "environment"]]);
       const operation = randomUUID(); const root = await this.#handoff(tx, ctx, null, req.projectId, req.witnessId, operation);
-      await tx.query(`INSERT INTO ${S}.projects(authority_id,account_id,project_id,project_key,mode,owner_epoch,event_seq,head_vcs_commit,head_source_root,head_environment_root)
-        VALUES($1,$2,$3,$4,'ready',1,1,$5,$6,$7)`, [this.authorityId, ctx.accountId, req.projectId, req.projectKey, req.head, req.sourceRoot, req.environmentRoot]);
+      if(mode==="provider-fenced-v1"){await this.#providerVersion(tx);await this.#engine(tx,ctx);if(req.projectKey!=="fresh-v4:"+req.projectId)fail("handoff_required");const provider=await this.#providerBinding(tx,ctx,req.projectId);
+        await tx.query(`INSERT INTO ${S}.projects(authority_id,account_id,project_id,project_key,mode,owner_epoch,event_seq,head_vcs_commit,head_source_root,head_environment_root,ownership_mode,provider_binding) VALUES($1,$2,$3,$4,'ready',1,1,$5,$6,$7,'provider-fenced-v1',$8)`,[this.authorityId,ctx.accountId,req.projectId,req.projectKey,req.head,req.sourceRoot,req.environmentRoot,JSON.stringify(provider)]);
+      }else{await tx.query(`INSERT INTO ${S}.projects(authority_id,account_id,project_id,project_key,mode,owner_epoch,event_seq,head_vcs_commit,head_source_root,head_environment_root)
+        VALUES($1,$2,$3,$4,'ready',1,1,$5,$6,$7)`, [this.authorityId, ctx.accountId, req.projectId, req.projectKey, req.head, req.sourceRoot, req.environmentRoot]);}
       await tx.query(`INSERT INTO ${S}.ownership_receipts(authority_id,account_id,project_id,owner_epoch,operation_id,cause,quiescence_root,receipt_canonical)
         VALUES($1,$2,$3,1,$4,'created',$5,$6)`, [this.authorityId, ctx.accountId, req.projectId, operation, root, bytes]);
       await tx.query(`INSERT INTO ${S}.project_principals(authority_id,account_id,project_id,principal_id,principal_kind,access_version,operations,scopes)
         VALUES($1,$2,$3,$4,$5,1,$6,$7)`, [this.authorityId, ctx.accountId, req.projectId, ctx.principalId, principalKind, JSON.stringify(creatorOps), JSON.stringify(["project", ...req.topics.map(topic => "topic:" + topic)])]);
-      return this.#record(tx, ctx, req.projectId, req.idempotencyKey, "project-bootstrap", bytes, "1", { head: req.head, ownerEpoch: "1" }, operation);
+      return this.#record(tx, ctx, req.projectId, req.idempotencyKey, kind, bytes, "1", { head: req.head, ownerEpoch: "1" }, operation);
+    });
+  }
+  async #providerVersion(tx:Transaction):Promise<void>{const row=await tx.query(`SELECT authority_id,sha256 FROM ${S}.provider_ownership_migrations WHERE version=1`);if(row.rows[0]?.authority_id!==this.authorityId||row.rows[0].sha256!==PROVIDER_OWNERSHIP_MIGRATION_SHA256)fail("inactive");}
+  /** This binding is selected from the actual enrolled Root proof and NEW
+   * committed reservation, never accepted from an operation body. */
+  async #providerBinding(tx:Transaction,ctx:TrustedContext,projectId:string):Promise<ProviderBinding>{
+    const r=await tx.query(`SELECT r.challenge_json->'body'->'binding' AS binding,h.intent_json->'policy' AS policy,i.policy_sha256,e.machine_id,e.machine_installation_id::text,e.machine_boot_id
+      FROM ${S}.managed_home_fresh_projects f JOIN ${S}.managed_home_fresh_preparations p USING(authority_id,account_id,project_id)
+      JOIN ${S}.managed_home_intents h ON h.authority_id=f.authority_id AND h.account_id=f.account_id AND h.home_id=f.home_id
+      JOIN ${S}.managed_home_registrations r ON r.authority_id=f.authority_id AND r.account_id=f.account_id AND r.home_id=f.home_id
+      JOIN ${S}.managed_home_installation i ON i.authority_id=f.authority_id
+      JOIN ${S}.engine_instances e ON e.account_id=f.account_id AND e.engine_instance_id=p.engine_instance_id
+      WHERE f.authority_id=$1 AND f.account_id=$2 AND f.project_id=$3 AND f.origin='fresh-v4-empty' AND h.phase='routable' AND h.revoked_at IS NULL
+       AND h.intent_json->'policy'->>'ownerMode'='provider-fenced-v1' AND i.state='ready' AND p.engine_instance_id=$4 AND p.boot_id=$5 AND r.phase='enrolled'
+       AND r.challenge_json->'body'->>'engine_instance_id'=$4::text AND e.revoked_at IS NULL FOR SHARE OF f,h,e`,[this.authorityId,ctx.accountId,projectId,ctx.engine!.instanceId,ctx.engine!.bootId]);
+    if(r.rows.length!==1)fail("stale_fence");const row=r.rows[0],b=row.binding;
+    if(!b||sha(canonical(row.policy))!==row.policy_sha256||b.machine_id!==row.machine_id||b.incarnation!==row.machine_installation_id||row.machine_boot_id!==ctx.engine!.bootId)fail("stale_fence");
+    const binding:ProviderBinding={engineInstanceId:ctx.engine!.instanceId,machineBootId:ctx.engine!.bootId,appName:text(b.app_name),networkName:text(b.network_name),machineId:text(b.machine_id),instanceId:text(b.instance_id),incarnation:uuid(b.incarnation),storeId:uuid(b.store_id),configSha256:hash(b.config_sha256),machineConfigSha256:hash(b.machine_config_sha256)};return binding;
+  }
+  async #retirementVersion(tx:Transaction):Promise<void>{const v=await tx.query(`SELECT authority_id,sha256 FROM ${S}.provider_retirement_migrations WHERE version=1`);if(v.rows[0]?.authority_id!==this.authorityId||v.rows[0].sha256!==PROVIDER_RETIREMENT_MIGRATION_SHA256)fail("inactive");}
+  async #retirementInventory(tx:Transaction,ctx:TrustedContext,p:Project):Promise<ProviderRetirementInventory>{
+    // Nonlocking snapshots avoid effect-row -> project-row lock inversion.
+    // Admission triggers acquire the project lock before any new write can
+    // commit. This remains HISTORICAL metadata, never complete reconciliation.
+    const keys=[this.authorityId,ctx.accountId,p.project_id];
+    const n=await tx.query(`SELECT (SELECT count(*)::text FROM ${S}.command_effects WHERE authority_id=$1 AND account_id=$2 AND project_id=$3 AND state IN('pending','started','uncertain')) AS effects,(SELECT count(*)::text FROM ${S}.outbox WHERE authority_id=$1 AND account_id=$2 AND project_id=$3 AND status IN('pending','leased')) AS outbox`,keys);
+    const e=await tx.query(`SELECT command_id,state,effect_scope,claim_id,claim_owner_epoch::text,claim_engine_instance FROM ${S}.command_effects WHERE authority_id=$1 AND account_id=$2 AND project_id=$3 AND state IN('pending','started','uncertain') ORDER BY command_id LIMIT 64`,keys);
+    const o=await tx.query(`SELECT outbox_id,event_seq::text,left(kind,180) AS kind_prefix,left(destination,180) AS destination_prefix,status,claim_id FROM ${S}.outbox WHERE authority_id=$1 AND account_id=$2 AND project_id=$3 AND status IN('pending','leased') ORDER BY outbox_id LIMIT 64`,keys);
+    const effectCount=counter(n.rows[0].effects),outboxCount=counter(n.rows[0].outbox);
+    return {formatVersion:1,scope:"bounded-historical-reconciliation-inventory-only",effectCount,outboxCount,effects:snapshot(e.rows),outbox:snapshot(o.rows),overflow:BigInt(effectCount)>64n||BigInt(outboxCount)>64n,requiresNativeJournalReconciliation:true,complete:false};
+  }
+  /** Authenticated service intent closes existing admission but preserves old
+   * ownership UUID/epoch/binding/head. No host action or vacancy is implied. */
+  async beginProviderOwnerRetirement(trusted:TrustedContext,input:ProviderRetirementRequest):Promise<Outcome<Accepted>>{
+    const ctx=context(trusted);exact(input,["projectId","idempotencyKey","ownershipMode","ownerEpoch","ownershipId","action"]);uuid(input.projectId);text(input.idempotencyKey);fence(input);if(input.ownershipMode!=="provider-fenced-v1"||BigInt(input.ownerEpoch)<2n||!["release","replace"].includes(input.action))fail("invalid_request");
+    const req=snapshot(input),bytes=operationBytes(ctx,"provider-owner-retirement-begin-v1",req),key=ctx.accountId+"\0"+ctx.principalId+"\0"+req.projectId+"\0"+req.idempotencyKey;
+    let held=this.#retirements.get(key);if(held){if(!held.bytes.equals(bytes))fail("conflict");if(held.unknown)fail("handoff_required");return this.#run(ctx,async tx=>{await this.#project(tx,ctx,req.projectId);await this.#member(tx,ctx,req.projectId,"owner:release");await this.#accountGrant(tx,ctx,"owner:fence");const prior=await this.#prior(tx,ctx,req.projectId,req.idempotencyKey,"provider-owner-retirement-begin-v1",bytes);if(!prior)fail("handoff_required");return prior;});}
+    if(this.#retirementClosed||this.#retirements.size>=16)fail("busy");held={ctx,request:req,bytes,attempted:true,known:false,unknown:false,fresh:false,taken:false,dispatchAttempted:false,dispatchKnown:false,dispatchUnknown:false,dispatchClaimed:false};this.#retirements.set(key,held);const original=held;
+    try{const out=await this.#run(ctx,async tx=>{
+      await this.#retirementVersion(tx);const p=await this.#project(tx,ctx,req.projectId);await this.#authority(tx);await this.#member(tx,ctx,p.project_id,"owner:release");await this.#accountGrant(tx,ctx,"owner:fence");
+      const prior=await this.#prior(tx,ctx,p.project_id,req.idempotencyKey,"provider-owner-retirement-begin-v1",bytes);if(prior)return prior; // DATA only; original.fresh remains false
+      if(p.ownership_mode!=="provider-fenced-v1"||p.provider_retirement_id||!["ready","frozen"].includes(p.mode)||p.owner_epoch!==req.ownerEpoch||p.ownership_id!==req.ownershipId||!p.owner_engine_instance||!p.provider_binding)fail("stale_fence");
+      const provider=p.provider_binding;if(provider.engineInstanceId!==p.owner_engine_instance)fail("stale_fence");
+      const engine=await tx.query(`SELECT machine_id,machine_installation_id::text,machine_boot_id FROM ${S}.engine_instances WHERE account_id=$1 AND engine_instance_id=$2 FOR SHARE`,[ctx.accountId,p.owner_engine_instance]);
+      if(engine.rows.length!==1||engine.rows[0].machine_id!==provider.machineId||engine.rows[0].machine_installation_id!==provider.incarnation||engine.rows[0].machine_boot_id!==provider.machineBootId)fail("stale_fence");
+      const inventory=await this.#retirementInventory(tx,ctx,p),retirementId=randomUUID(),sequence=next(p.event_seq);
+      const data:ProviderRetirementData={formatVersion:1,scope:"provider-owner-admission-closed-only",authorityId:this.authorityId,accountId:ctx.accountId,projectId:p.project_id,retirementId,action:req.action,ownerEpoch:p.owner_epoch,ownershipId:p.ownership_id,engineInstanceId:p.owner_engine_instance,machineBootId:provider.machineBootId,provider:snapshot(provider),previousProjectMode:p.mode,inventory,physicalFenceObserved:false,effectsReconciled:false,ownerTransferred:false};original.data=data;original.fresh=true;
+      await tx.query(`INSERT INTO ${S}.provider_owner_retirements(authority_id,account_id,project_id,retirement_id,action,owner_epoch,ownership_id,engine_instance_id,machine_boot_id,provider_binding,previous_project_mode,inventory_json) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,[this.authorityId,ctx.accountId,p.project_id,retirementId,req.action,p.owner_epoch,p.ownership_id,p.owner_engine_instance,provider.machineBootId,JSON.stringify(provider),p.mode,JSON.stringify(inventory)]);
+      await tx.query(`UPDATE ${S}.projects SET provider_retirement_id=$4,mode='frozen',event_seq=$5 WHERE authority_id=$1 AND account_id=$2 AND project_id=$3`,[this.authorityId,ctx.accountId,p.project_id,retirementId,sequence]);
+      return this.#record(tx,ctx,p.project_id,req.idempotencyKey,"provider-owner-retirement-begin-v1",bytes,sequence,snapshot(data)as unknown as Json);
+    });if(out.status!=="committed"){original.unknown=true;return out;}original.known=original.fresh;original.receipt=out.value;return out;
+    }catch(e){original.unknown=true;throw e;}
+  }
+  #originalRetirement(h:RetirementAttempt):void {
+    if(this.#retirementClosed||!h.known||h.unknown||!h.data||!this.#pool||Object.getPrototypeOf(this.#pool)!==AuthorityPool.prototype||this.#pool.run!==AuthorityPool.prototype.run)fail("handoff_required");
+  }
+  async #retirementCurrent(tx:Transaction,h:RetirementAttempt):Promise<void>{
+    this.#originalRetirement(h);await this.#retirementVersion(tx);const p=await this.#project(tx,h.ctx,h.request.projectId);await this.#authority(tx);await this.#member(tx,h.ctx,p.project_id,"owner:release");await this.#accountGrant(tx,h.ctx,"owner:fence");const d=h.data!;
+    if(p.mode!=="frozen"||p.ownership_mode!=="provider-fenced-v1"||p.provider_retirement_id!==d.retirementId||p.owner_epoch!==d.ownerEpoch||p.ownership_id!==d.ownershipId||p.owner_engine_instance!==d.engineInstanceId||!canonical(p.provider_binding).equals(canonical(d.provider)))fail("stale_fence");
+    const r=await tx.query(`SELECT state,fence_attempt_id FROM ${S}.provider_owner_retirements WHERE authority_id=$1 AND account_id=$2 AND project_id=$3 AND retirement_id=$4 FOR UPDATE`,[this.authorityId,h.ctx.accountId,p.project_id,d.retirementId]);
+    if(r.rows.length!==1||r.rows[0].state!==(h.dispatchKnown?"fencing":"fence_required")||h.dispatchKnown&&r.rows[0].fence_attempt_id!==h.dispatchId)fail("handoff_required");
+  }
+  /** SAME retained original only; historical receipt/reopen never reconstructs
+   * this request. It is not a physical fence token or execution grant. */
+  takeOriginalProviderFenceRequest(trusted:TrustedContext,projectId:string,key:string):OriginalProviderFenceRequest{
+    const ctx=context(trusted);uuid(projectId);text(key);const h=this.#retirements.get(ctx.accountId+"\0"+ctx.principalId+"\0"+projectId+"\0"+key);if(!h||!canonical(ctx).equals(canonical(h.ctx))||h.taken)fail("handoff_required");this.#originalRetirement(h);h.taken=true;
+    const current=async()=>{if(h.dispatchUnknown)fail("handoff_required");const out=await this.#run(h.ctx,tx=>this.#retirementCurrent(tx,h));if(out.status!=="committed")fail("handoff_required");};
+    const start=async()=>{
+      this.#originalRetirement(h);if(h.dispatchAttempted){if(h.dispatchUnknown||!h.dispatchPromise)fail("handoff_required");return h.dispatchPromise;}
+      h.dispatchAttempted=true;h.dispatchId=randomUUID();h.dispatchPromise=(async()=>{
+        const out=await this.#run(h.ctx,async tx=>{await this.#retirementCurrent(tx,h);const r=await tx.query(`UPDATE ${S}.provider_owner_retirements SET state='fencing',fence_attempt_id=$5 WHERE authority_id=$1 AND account_id=$2 AND project_id=$3 AND retirement_id=$4 AND state='fence_required' RETURNING retirement_id`,[this.authorityId,h.ctx.accountId,projectId,h.data!.retirementId,h.dispatchId]);if(r.rowCount!==1)fail("handoff_required");});
+        if(out.status!=="committed")fail("handoff_required");h.dispatchKnown=true;
+      })().catch(e=>{h.dispatchUnknown=true;throw e;});return h.dispatchPromise;
+    };
+    const claim=():ProviderFenceDispatchData=>{this.#originalRetirement(h);if(!h.dispatchKnown||h.dispatchUnknown||h.dispatchClaimed||!h.dispatchId)fail("handoff_required");h.dispatchClaimed=true;return snapshot({formatVersion:1,scope:"original-provider-fence-request-only",retirement:h.data!,fenceAttemptId:h.dispatchId,physicalFenceObserved:false});};
+    return h.token=OriginalProviderFenceRequest.issue(PROVIDER_FENCE_REQUEST_ISSUER,snapshot(h.data!),current,start,claim);
+  }
+
+  /** First owner ONLY. No elapsed DB time, heartbeat, null-owner readback or
+   * generic handoff boolean can authorize a replacement/restart. */
+  async acquireProviderOwner(trusted:TrustedContext,input:AcquireRequest):Promise<Outcome<Accepted>>{
+    const ctx=context(trusted);exact(input,["projectId","idempotencyKey","expectedOwnerEpoch","witnessId"]);uuid(input.projectId);uuid(input.witnessId);text(input.idempotencyKey);
+    if(input.expectedOwnerEpoch!=="1")fail("handoff_required");const req=snapshot(input),kind="provider-owner-first-acquire-v1",bytes=operationBytes(ctx,kind,req);
+    return this.#run(ctx,async tx=>{await this.#providerVersion(tx);const p=await this.#project(tx,ctx,req.projectId);await this.#member(tx,ctx,req.projectId,"owner:acquire");await this.#authority(tx);await this.#engine(tx,ctx);
+      if(p.ownership_mode!=="provider-fenced-v1")fail("stale_fence");if(p.provider_retirement_id)fail("handoff_required");const prior=await this.#prior(tx,ctx,req.projectId,req.idempotencyKey,kind,bytes);if(prior)return prior;
+      if(p.mode!=="ready"||p.owner_epoch!=="1"||p.owner_engine_instance!==null||p.ownership_id!==null)fail("handoff_required");
+      const provider=await this.#providerBinding(tx,ctx,p.project_id);if(!p.provider_binding||!canonical(provider).equals(canonical(p.provider_binding)))fail("stale_fence");
+      const root=await this.#handoff(tx,ctx,p,p.project_id,req.witnessId,randomUUID());const operation=randomUUID(),ownership=randomUUID(),epoch=next(p.owner_epoch),sequence=next(p.event_seq);
+      await tx.query(`UPDATE ${S}.projects SET owner_epoch=$4,owner_engine_instance=$5,ownership_id=$6,provider_heartbeat_serial=0,event_seq=$7 WHERE authority_id=$1 AND account_id=$2 AND project_id=$3`,[this.authorityId,ctx.accountId,p.project_id,epoch,ctx.engine!.instanceId,ownership,sequence]);
+      await tx.query(`INSERT INTO ${S}.ownership_receipts(authority_id,account_id,project_id,owner_epoch,owner_engine_instance,operation_id,cause,quiescence_root,receipt_canonical) VALUES($1,$2,$3,$4,$5,$6,'claimed',$7,$8)`,[this.authorityId,ctx.accountId,p.project_id,epoch,ctx.engine!.instanceId,operation,root,bytes]);
+      const grant:ProviderOwnerGrant={formatVersion:2,ownershipMode:"provider-fenced-v1",authorityId:this.authorityId,accountId:ctx.accountId,projectId:p.project_id,ownerEpoch:epoch,ownershipId:ownership,engineInstanceId:ctx.engine!.instanceId,machineBootId:ctx.engine!.bootId,heartbeatSerial:"0",requestId:req.idempotencyKey,provider};
+      return this.#record(tx,ctx,p.project_id,req.idempotencyKey,kind,bytes,sequence,snapshot(grant)as unknown as Json,operation);
+    });
+  }
+  /** Liveness acknowledgment for the SAME durable owner; never an expiry or
+   * ownership transfer. Unknown COMMIT/retry preserves exact request bytes. */
+  async heartbeatProviderOwner(trusted:TrustedContext,input:ProviderHeartbeatRequest):Promise<Outcome<ProviderOwnerGrant>>{
+    const ctx=context(trusted);exact(input,["projectId","ownershipMode","ownerEpoch","ownershipId","requestId","expectedSerial"]);uuid(input.projectId);uuid(input.requestId);counter(input.expectedSerial);fence(input);
+    const req=snapshot(input),bytes=operationBytes(ctx,"provider-owner-heartbeat-v1",req);
+    return this.#run(ctx,async tx=>{const p=await this.#project(tx,ctx,req.projectId);await this.#member(tx,ctx,p.project_id,"owner:renew");await this.#owner(tx,ctx,p,req);
+      const prior=await tx.query(`SELECT request_canonical,grant_json FROM ${S}.provider_owner_heartbeats WHERE authority_id=$1 AND account_id=$2 AND project_id=$3 AND request_id=$4`,[this.authorityId,ctx.accountId,p.project_id,req.requestId]);
+      if(prior.rows.length){if(!prior.rows[0].request_canonical.equals(bytes))fail("conflict");return prior.rows[0].grant_json as ProviderOwnerGrant;}
+      if(p.provider_heartbeat_serial!==req.expectedSerial)fail("stale_fence");const serial=next(req.expectedSerial),grant:ProviderOwnerGrant={formatVersion:2,ownershipMode:"provider-fenced-v1",authorityId:this.authorityId,accountId:ctx.accountId,projectId:p.project_id,ownerEpoch:p.owner_epoch,ownershipId:req.ownershipId,engineInstanceId:ctx.engine!.instanceId,machineBootId:ctx.engine!.bootId,heartbeatSerial:serial,requestId:req.requestId,provider:p.provider_binding!};
+      await tx.query(`UPDATE ${S}.projects SET provider_heartbeat_serial=$4 WHERE authority_id=$1 AND account_id=$2 AND project_id=$3`,[this.authorityId,ctx.accountId,p.project_id,serial]);
+      await tx.query(`INSERT INTO ${S}.provider_owner_heartbeats VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)`,[this.authorityId,ctx.accountId,p.project_id,req.requestId,req.ownershipId,p.owner_epoch,serial,bytes,JSON.stringify(grant)]);return grant;
     });
   }
   async acquireOwner(trusted: TrustedContext, input: AcquireRequest): Promise<Outcome<Accepted>> {
@@ -213,7 +348,7 @@ export class ProjectAuthority {
     uuid(input.projectId); uuid(input.witnessId); text(input.idempotencyKey); counter(input.expectedOwnerEpoch, true);
     const req = snapshot(input); const bytes = operationBytes(ctx, "owner-acquire", req);
     return this.#run(ctx, async tx => {
-      const p = await this.#project(tx, ctx, req.projectId); await this.#member(tx, ctx, req.projectId, "owner:acquire");
+      const p = await this.#project(tx, ctx, req.projectId); await this.#member(tx, ctx, req.projectId, "owner:acquire");if(p.ownership_mode!=="clock-lease-v1")fail("stale_fence");
       const prior = await this.#prior(tx, ctx, req.projectId, req.idempotencyKey, "owner-acquire", bytes); if (prior) return prior;
       await this.#authority(tx); await this.#engine(tx, ctx);
       if (p.mode !== "ready" || p.owner_epoch !== req.expectedOwnerEpoch) fail("stale_fence");
@@ -239,14 +374,14 @@ export class ProjectAuthority {
     uuid(input.projectId); uuid(input.requestId); counter(input.expectedSerial); fence(input);
     const req = snapshot(input); const bytes = operationBytes(ctx, "owner-renew", req);
     return this.#run(ctx, async tx => {
-      const p = await this.#project(tx, ctx, req.projectId); await this.#member(tx, ctx, req.projectId, "owner:renew");
+      const p = await this.#project(tx, ctx, req.projectId); await this.#member(tx, ctx, req.projectId, "owner:renew");if(p.ownership_mode!=="clock-lease-v1")fail("stale_fence");
       await this.#engine(tx, ctx);
       const prior = await tx.query(`SELECT request_canonical,owner_epoch::text,lease_id,renew_serial::text,issued_at,lease_until
         FROM ${S}.lease_renewals WHERE authority_id=$1 AND account_id=$2 AND project_id=$3 AND request_id=$4`, [this.authorityId, ctx.accountId, req.projectId, req.requestId]);
       if (prior.rows.length && !prior.rows[0].request_canonical.equals(bytes)) fail("conflict");
       let row = prior.rows[0];
       if (!row) {
-        const now = await this.#owner(tx, ctx, p, req); const serial = next(req.expectedSerial);
+        const now = await this.#owner(tx, ctx, p, req);if(now===null)fail("stale_fence"); const serial = next(req.expectedSerial);
         const updated = await tx.query(`UPDATE ${S}.projects SET renew_serial=$8,lease_until=$7::timestamptz+interval '15 seconds'
           WHERE authority_id=$1 AND account_id=$2 AND project_id=$3 AND owner_epoch=$4 AND lease_id=$5
             AND renew_serial=$6 AND lease_until>$7::timestamptz RETURNING owner_epoch::text,lease_id,renew_serial::text,lease_until`,
@@ -266,7 +401,7 @@ export class ProjectAuthority {
     uuid(input.projectId); uuid(input.witnessId); text(input.idempotencyKey); fence(input);
     const req = snapshot(input); const bytes = operationBytes(ctx, "owner-release", req);
     return this.#run(ctx, async tx => {
-      const p = await this.#project(tx, ctx, req.projectId); await this.#member(tx, ctx, req.projectId, "owner:release");
+      const p = await this.#project(tx, ctx, req.projectId); await this.#member(tx, ctx, req.projectId, "owner:release");if(p.ownership_mode!=="clock-lease-v1")fail("stale_fence");
       const prior = await this.#prior(tx, ctx, req.projectId, req.idempotencyKey, "owner-release", bytes); if (prior) return prior;
       await this.#owner(tx, ctx, p, req, false);
       const operation = randomUUID(); const root = await this.#handoff(tx, ctx, p, req.projectId, req.witnessId, operation);
@@ -279,7 +414,7 @@ export class ProjectAuthority {
     });
   }
   async acceptDecision(trusted: TrustedContext, input: DecisionRequest): Promise<Outcome<Accepted>> {
-    const ctx = context(trusted); exact(input, ["projectId", "idempotencyKey", "ownerEpoch", "leaseId", "topic", "expectedVersion", "statement"]);
+    const ctx = context(trusted); exact(input, ["projectId", "idempotencyKey", ...fenceKeys(input), "topic", "expectedVersion", "statement"]);
     uuid(input.projectId); text(input.idempotencyKey); text(input.topic); counter(input.expectedVersion); fence(input);
     const req = snapshot(input); const bytes = operationBytes(ctx, "decision-accept", req);
     return this.#run(ctx, async tx => {
@@ -298,7 +433,7 @@ export class ProjectAuthority {
     });
   }
   async admitVerification(trusted: TrustedContext, input: VerificationAdmission): Promise<Outcome<{ verificationId: string }>> {
-    const ctx = context(trusted); exact(input, ["projectId", "ownerEpoch", "leaseId", "verificationId", "baseVersion", "baseHead", "testedHead", "sourceRoot", "environmentRoot", "gateReceiptRoot", "buildContractRoot", "topics"]);
+    const ctx = context(trusted); exact(input, ["projectId", ...fenceKeys(input), "verificationId", "baseVersion", "baseHead", "testedHead", "sourceRoot", "environmentRoot", "gateReceiptRoot", "buildContractRoot", "topics"]);
     uuid(input.projectId); uuid(input.verificationId); fence(input); counter(input.baseVersion);
     [input.baseHead, input.testedHead, input.sourceRoot, input.environmentRoot, input.gateReceiptRoot, input.buildContractRoot].forEach(value => text(value));
     if (!input.topics || !Object.hasOwn(input.topics, "policy/verification") || Object.keys(input.topics).length > 64) fail("invalid_request");
@@ -327,7 +462,7 @@ export class ProjectAuthority {
     });
   }
   async integrate(trusted: TrustedContext, input: IntegrationRequest): Promise<Outcome<Accepted>> {
-    const ctx = context(trusted); exact(input, ["projectId", "idempotencyKey", "ownerEpoch", "leaseId", "expectedVersion", "expectedHead", "newHead", "sourceRoot", "environmentRoot", "verificationId"]);
+    const ctx = context(trusted); exact(input, ["projectId", "idempotencyKey", ...fenceKeys(input), "expectedVersion", "expectedHead", "newHead", "sourceRoot", "environmentRoot", "verificationId"]);
     uuid(input.projectId); uuid(input.verificationId); text(input.idempotencyKey); fence(input); counter(input.expectedVersion);
     [input.expectedHead, input.newHead, input.sourceRoot, input.environmentRoot].forEach(value => text(value));
     const req = snapshot(input); const bytes = operationBytes(ctx, "integration-accept", req);
@@ -336,10 +471,11 @@ export class ProjectAuthority {
       const prior = await this.#prior(tx, ctx, req.projectId, req.idempotencyKey, "integration-accept", bytes); if (prior) return prior;
       await this.#owner(tx, ctx, p, req); next(p.integration_version); next(p.event_seq);
       await this.#roots(tx, ctx.accountId, [[req.sourceRoot, "source"], [req.environmentRoot, "environment"]]);
+      const ownerPredicate="ownershipMode" in req?"p.ownership_mode='provider-fenced-v1' AND p.ownership_id=$6::uuid":"p.lease_id=$6 AND p.lease_until>clock_timestamp()";
       const result = await tx.query(`UPDATE ${S}.projects AS p SET head_vcs_commit=$9,head_source_root=$10,head_environment_root=$11,
         integration_version=integration_version+1,event_seq=event_seq+1
         WHERE p.authority_id=$1 AND p.account_id=$2 AND p.project_id=$3 AND p.mode='ready'
-          AND p.owner_epoch=$4 AND p.owner_engine_instance=$5 AND p.lease_id=$6 AND p.lease_until>clock_timestamp()
+          AND p.owner_epoch=$4 AND p.owner_engine_instance=$5 AND ${ownerPredicate}
           AND p.integration_version=$7 AND p.head_vcs_commit=$8 AND EXISTS (
             SELECT 1 FROM ${S}.verifications v WHERE v.authority_id=p.authority_id AND v.account_id=p.account_id AND v.project_id=p.project_id
               AND v.verification_id=$12 AND v.owner_epoch=p.owner_epoch AND v.base_version=p.integration_version AND v.base_head=p.head_vcs_commit
@@ -358,7 +494,7 @@ export class ProjectAuthority {
           AND NOT EXISTS(SELECT 1 FROM ${S}.command_effects effect WHERE effect.authority_id=p.authority_id AND effect.account_id=p.account_id
             AND effect.project_id=p.project_id AND effect.effect_scope IN ('integration','delivery') AND effect.state IN ('started','uncertain'))
         RETURNING integration_version::text,event_seq::text`,
-      [this.authorityId, ctx.accountId, req.projectId, req.ownerEpoch, ctx.engine!.instanceId, req.leaseId, req.expectedVersion, req.expectedHead, req.newHead, req.sourceRoot, req.environmentRoot, req.verificationId]);
+      [this.authorityId, ctx.accountId, req.projectId, req.ownerEpoch, ctx.engine!.instanceId, "ownershipMode" in req?req.ownershipId:req.leaseId, req.expectedVersion, req.expectedHead, req.newHead, req.sourceRoot, req.environmentRoot, req.verificationId]);
       if (!result.rows.length) fail("head_conflict");
       const sequence = result.rows[0].event_seq; const version = result.rows[0].integration_version; const operation = randomUUID();
       const receipt = await this.#record(tx, ctx, req.projectId, req.idempotencyKey, "integration-accept", bytes, sequence, { version, head: req.newHead }, operation);

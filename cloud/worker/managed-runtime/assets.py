@@ -17,7 +17,7 @@ CHUNK = 65536
 # Local denial modules close ws optional-addon lookup inside the declared tree.
 # ws catches this explicit error and uses its builtin/pure-JS implementation.
 DENY = b"'use strict';\nthrow new Error('RUDDER_OPTIONAL_ADDON_DISABLED');\n"
-SIDECAR_FILES = ('host-control-core.mjs', 'host-control.mjs', 'node_modules/ws/LICENSE', 'node_modules/ws/README.md', 'node_modules/ws/browser.js', 'node_modules/ws/index.js', 'node_modules/ws/lib/buffer-util.js', 'node_modules/ws/lib/constants.js', 'node_modules/ws/lib/event-target.js', 'node_modules/ws/lib/extension.js', 'node_modules/ws/lib/limiter.js', 'node_modules/ws/lib/permessage-deflate.js', 'node_modules/ws/lib/receiver.js', 'node_modules/ws/lib/sender.js', 'node_modules/ws/lib/stream.js', 'node_modules/ws/lib/subprotocol.js', 'node_modules/ws/lib/validation.js', 'node_modules/ws/lib/websocket-server.js', 'node_modules/ws/lib/websocket.js', 'node_modules/ws/node_modules/bufferutil/index.js', 'node_modules/ws/node_modules/utf-8-validate/index.js', 'node_modules/ws/package.json', 'node_modules/ws/wrapper.mjs', 'package-lock.json', 'package.json', 'root-upload.mjs')
+SIDECAR_FILES = ('host-control-core.mjs', 'host-control.mjs', 'node_modules/ws/LICENSE', 'node_modules/ws/README.md', 'node_modules/ws/browser.js', 'node_modules/ws/index.js', 'node_modules/ws/lib/buffer-util.js', 'node_modules/ws/lib/constants.js', 'node_modules/ws/lib/event-target.js', 'node_modules/ws/lib/extension.js', 'node_modules/ws/lib/limiter.js', 'node_modules/ws/lib/permessage-deflate.js', 'node_modules/ws/lib/receiver.js', 'node_modules/ws/lib/sender.js', 'node_modules/ws/lib/stream.js', 'node_modules/ws/lib/subprotocol.js', 'node_modules/ws/lib/validation.js', 'node_modules/ws/lib/websocket-server.js', 'node_modules/ws/lib/websocket.js', 'node_modules/ws/node_modules/bufferutil/index.js', 'node_modules/ws/node_modules/utf-8-validate/index.js', 'node_modules/ws/package.json', 'node_modules/ws/wrapper.mjs', 'package-lock.json', 'package.json', 'root-upload.mjs', 'runtime-qualification.mjs')
 
 class Rejected(Exception): pass
 
@@ -34,7 +34,7 @@ def read_json(path, limit=65536):
 
 def policy_at(path):
     p,_=read_json(path)
-    for field in ('sidecar_script_sha256','sidecar_core_sha256','uploader_script_sha256'):
+    for field in ('sidecar_script_sha256','sidecar_core_sha256','uploader_script_sha256','qualification_script_sha256'):
         value=p.get(field);need(isinstance(value,str) and len(value)==64 and all(c in '0123456789abcdef' for c in value) and value!='0'*64,'SIDECAR_SOURCE_DIGEST')
     need(p['version']==1 and p['profile_id']==PROFILE and p['node_base_image']==NODE_BASE and p['codex']['bytes']==CODEX_BYTES
          and p.get('claude_supported') is False and p.get('registry_signature_verification_claimed') is False
@@ -218,9 +218,9 @@ def enumerate_files(root, kind, end):
     return files,dirs
 
 def expected_sidecar(root, files, p, ws_receipt):
-    expected={'host-control.mjs','host-control-core.mjs','root-upload.mjs','package.json','package-lock.json'}
-    need(set(files)==set(SIDECAR_FILES) and len(files)==26,'SIDECAR_EXACT_26_FILE_CLOSURE')
-    need(files['root-upload.mjs'][0]==p['uploader_script_sha256'] and files['host-control.mjs'][0]==p['sidecar_script_sha256'] and files['host-control-core.mjs'][0]==p['sidecar_core_sha256'] and files['package.json'][0]==p['sidecar_package_sha256']
+    expected={'host-control.mjs','host-control-core.mjs','root-upload.mjs','runtime-qualification.mjs','package.json','package-lock.json'}
+    need(set(files)==set(SIDECAR_FILES) and len(files)==27,'SIDECAR_EXACT_27_FILE_CLOSURE')
+    need(files['runtime-qualification.mjs'][0]==p['qualification_script_sha256'] and files['root-upload.mjs'][0]==p['uploader_script_sha256'] and files['host-control.mjs'][0]==p['sidecar_script_sha256'] and files['host-control-core.mjs'][0]==p['sidecar_core_sha256'] and files['package.json'][0]==p['sidecar_package_sha256']
          and files['package-lock.json'][0]==p['sidecar_lock_sha256'],'SIDECAR_SOURCE_POLICY')
     for name in files:
         need(name in expected or name.startswith('node_modules/ws/'),'SIDECAR_UNDECLARED_PACKAGE')
@@ -252,8 +252,8 @@ def pin_value(value, raw, kind, policy):
              and all(c in '0123456789abcdef' for c in entry['sha256']) and type(entry['size_bytes']) is int and 0<entry['size_bytes']<=8*1024*1024
              for entry in value['files']),'SIDECAR_MANIFEST_ENTRY_SHAPE')
     files={entry['path']:(entry['sha256'],entry['size_bytes']) for entry in value['files']}
-    need(len(value['files'])==26 and set(files)==set(SIDECAR_FILES) and [entry['path'] for entry in value['files']]==list(SIDECAR_FILES),'SIDECAR_EXACT_26_FILE_CLOSURE')
-    need(files['host-control.mjs'][0]==policy['sidecar_script_sha256'] and files['host-control-core.mjs'][0]==policy['sidecar_core_sha256'] and files['root-upload.mjs'][0]==policy['uploader_script_sha256'],'SIDECAR_SOURCE_POLICY')
+    need(len(value['files'])==27 and set(files)==set(SIDECAR_FILES) and [entry['path'] for entry in value['files']]==list(SIDECAR_FILES),'SIDECAR_EXACT_27_FILE_CLOSURE')
+    need(files['host-control.mjs'][0]==policy['sidecar_script_sha256'] and files['host-control-core.mjs'][0]==policy['sidecar_core_sha256'] and files['runtime-qualification.mjs'][0]==policy['qualification_script_sha256'] and files['root-upload.mjs'][0]==policy['uploader_script_sha256'],'SIDECAR_SOURCE_POLICY')
     need(sum(entry['size_bytes'] for entry in value['files'])<=8*1024*1024,'SIDECAR_MANIFEST_TOTAL_BYTES')
     return {'sidecar_manifest_sha256':sha(raw),'sidecar_script_sha256':policy['sidecar_script_sha256'],
             'sidecar_core_sha256':policy['sidecar_core_sha256'],'files':value['files']}

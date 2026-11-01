@@ -133,8 +133,9 @@ async function planAndDrain(t, ws, tasks) {
   assert.equal(planned.status, 0, `rudder plan failed:\n${planned.stdout}\n${planned.stderr}`);
   assert.ok(fs.existsSync(ws.graphFile), "rudder plan wrote .rudder/graph.json");
 
-  const port = 30000 + (process.pid % 9000) + (t.fakePortOffset ?? 0);
-  const board = spawn(process.execPath, [cli, "board", "--no-open", "--port", String(port)], {
+  // Let the server bind an ephemeral port atomically. PID-derived ports can
+  // collide with another suite's sockets during parallel test execution.
+  const board = spawn(process.execPath, [cli, "board", "--no-open", "--port", "0"], {
     cwd: ws.repo,
     env: { ...process.env, ...ws.baseEnv, RUDDER_FAKE_BACKEND: "1", RUDDER_AUTO_STEER_DELAY_MS: "150" },
     stdio: ["ignore", "pipe", "pipe"],
@@ -279,7 +280,6 @@ test("e2e: hard-edge DAG serializes, isolates workers, and merges through jj", {
 // merge (a different path than the serialized hard-edge case).
 // ---------------------------------------------------------------------------
 test("e2e: independent nodes run in parallel and both fan in to the trunk", { skip: !jjAvailable, timeout: 180_000 }, async (t) => {
-  t.fakePortOffset = 1; // avoid colliding with scenario 1's port within a run
   const ws = await makeWorkspace(t);
   const { graph } = await planAndDrain(t, ws, [
     {

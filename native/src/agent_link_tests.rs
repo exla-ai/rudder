@@ -1526,3 +1526,6 @@ fn codex_peer_control_requires_actual_qualified_server_version_and_has_no_text_f
         }
     ));
 }
+
+#[path="agent_link_mailbox_delivery_tests.rs"]
+mod automatic_mailbox_delivery;

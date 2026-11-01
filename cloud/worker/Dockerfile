@@ -141,19 +141,9 @@ COPY assets ./assets
 # Local npm builds can contain platform-keyed binaries that the resolver would
 # prefer over our fresh container build. Install exactly the builder's pair.
 RUN rm -rf ./dist/native && mkdir -p ./dist/native
-COPY --from=native-builder /rudder-native ./dist/native/rudder-native
-COPY --from=native-builder /rudder-jj ./dist/native/rudder-jj
-COPY --from=native-builder --chown=0:0 --chmod=0555 /rudder-root-storage /usr/local/bin/rudder-root-storage
-COPY --from=native-builder --chown=0:0 --chmod=0555 /rudder-machine-root /usr/local/bin/rudder-machine-root
-RUN chmod +x ./dist/native/rudder-native ./dist/native/rudder-jj \
-  && RUDDER_SKIP_POSTINSTALL=1 npm link
-# Bind deployed executable observations to the actual image build output.
-RUN set -eu; \
-    for executable in /opt/rudder/dist/native/rudder-native /opt/rudder/dist/native/rudder-jj /usr/local/bin/rudder-root-storage /usr/local/bin/rudder-machine-root; do \
-      digest="$(sha256sum "$executable")"; digest="${digest%% *}"; \
-      bytes="$(stat -c %s "$executable")"; \
-      printf 'RUDDER_PRODUCTION_ELF %s %s %s\n' "$executable" "$digest" "$bytes"; \
-    done
+# Link only the already copied JS package here. Its postinstall immediately
+# returns under RUDDER_SKIP_POSTINSTALL; no native executable is needed yet.
+RUN RUDDER_SKIP_POSTINSTALL=1 npm link
 
 WORKDIR /opt/rudder-worker
 COPY cloud/worker/package.json ./package.json
@@ -186,6 +176,25 @@ RUN groupadd --gid 1500 rudder \
   && mkdir -p /workspace \
   && chown -R rudder:rudder /workspace /opt/rudder-worker
 
+# Native-only source changes must not reinstall the unchanged worker packages
+# or recreate the worker account. Install the SAME exact builder outputs after
+# those stable preparations, preserving worker-common's final working directory.
+WORKDIR /opt/rudder
+COPY --from=native-builder /rudder-native ./dist/native/rudder-native
+COPY --from=native-builder /rudder-jj ./dist/native/rudder-jj
+COPY --from=native-builder --chown=0:0 --chmod=0555 /rudder-root-storage /usr/local/bin/rudder-root-storage
+COPY --from=native-builder --chown=0:0 --chmod=0555 /rudder-machine-root /usr/local/bin/rudder-machine-root
+RUN chmod +x ./dist/native/rudder-native ./dist/native/rudder-jj
+# Bind deployed executable observations to the actual image build output.
+RUN set -eu; \
+    for executable in /opt/rudder/dist/native/rudder-native /opt/rudder/dist/native/rudder-jj /usr/local/bin/rudder-root-storage /usr/local/bin/rudder-machine-root; do \
+      digest="$(sha256sum "$executable")"; digest="${digest%% *}"; \
+      bytes="$(stat -c %s "$executable")"; \
+      printf 'RUDDER_PRODUCTION_ELF %s %s %s\n' "$executable" "$digest" "$bytes"; \
+    done
+
+WORKDIR /opt/rudder-worker
+
 # Only the explicit managed target depends on these pinned assets. No model,
 # credentials, installer scripts or optional native addons execute here.
 FROM worker-tools AS managed-assets
@@ -205,6 +214,7 @@ RUN test "$TARGETARCH" = amd64 \
   && mkdir -p /out/runtime /out/sidecar/node_modules /out/receipts
 COPY --chown=0:0 --chmod=0555 cloud/worker/host-control.mjs /out/sidecar/host-control.mjs
 COPY --chown=0:0 --chmod=0555 cloud/worker/host-control-core.mjs /out/sidecar/host-control-core.mjs
+COPY --chown=0:0 --chmod=0555 cloud/worker/runtime-qualification.mjs /out/sidecar/runtime-qualification.mjs
 COPY --chown=0:0 --chmod=0555 cloud/worker/root-upload.mjs /out/sidecar/root-upload.mjs
 COPY --chown=0:0 --chmod=0555 cloud/worker/managed-runtime/sidecar-package.json /out/sidecar/package.json
 COPY --chown=0:0 --chmod=0555 cloud/worker/managed-runtime/sidecar-package-lock.json /out/sidecar/package-lock.json
@@ -247,6 +257,10 @@ ARG RUDDER_IMAGE_QUALIFICATION_NONCE=release
 ARG RUDDER_IMAGE_PRESEED_PROFILE=legacy-v1
 RUN test -n "$RUDDER_IMAGE_QUALIFICATION_NONCE" \
   && case "$RUDDER_IMAGE_PRESEED_PROFILE" in legacy-v1|baked-cas-v1) ;; *) exit 1 ;; esac \
+  # The protected SDK mount checks every ancestor. worker-common makes this
+  # directory user-owned for legacy workers; normalize only the managed image.
+  && chown 0:0 /opt/rudder-worker && chmod 0555 /opt/rudder-worker \
+  && install -d -o 0 -g 0 -m 0555 /opt/rudder-worker/compiler-sdk-v1 \
   && test -L /usr/lib/ssl/private \
   && test "$(readlink /usr/lib/ssl/private)" = /etc/ssl/private \
   && rm /usr/lib/ssl/private \

@@ -924,3 +924,9 @@ fn fabric_refuses_scheduler_but_permits_read_only_projector_metadata() {
     .unwrap();
     assert!(reject_legacy_writers(&scratch.0).is_ok());
 }
+
+#[path="engine_custody_contention_tests.rs"]
+pub(super) mod custody_contention;
+
+#[path="engine_source_lease_alias_tests.rs"]
+mod source_lease_alias;

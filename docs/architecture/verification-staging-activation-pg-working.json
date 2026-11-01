@@ -1,0 +1,100 @@
+{
+  "formatVersion": 1,
+  "sdk": {
+    "machine": "48edd72ec05668",
+    "instance": "01M6CF2BQ8G3SA00B2PA8YNWAA",
+    "providerCalls": 22,
+    "verifiedAt": "2026-11-01T21:09:03.304Z",
+    "ok": true,
+    "cleanupVerified": true,
+    "guestExitCode": 0,
+    "guestCleanup": {
+      "fixture_exit": 0,
+      "cluster_stop_confirmed": true,
+      "cluster_removed": true,
+      "normal_runtime_retirement": false,
+      "exact_vm_teardown_required": true
+    },
+    "scope": {
+      "scope": "actual-PG-original-staging-activation-component-only",
+      "role": "sdk",
+      "actualStagingActivationPgQualification": true,
+      "actualPostgres": true,
+      "fixtureRootHmac": true,
+      "fixtureImageNativeEvidence": true,
+      "fixtureCompilerEvidence": true,
+      "fixtureFly": true,
+      "fixtureBaseClockAdmission": true,
+      "physicalRoot": false,
+      "physicalNative": false,
+      "physicalCompilerSdk": false,
+      "actualS3": false,
+      "providerOwnerQualified": false,
+      "qualifiedClockContinuity": false,
+      "productionEnablement": false,
+      "models": false,
+      "steps": [],
+      "currentStep": "activation-complete-original-publishers-admin-unknowns-retained",
+      "checks": [
+        "sdk known original permit only, immutable rows preserved, one shot",
+        "sdk real forwarded COMMIT/lost reply stays unknown and consumed",
+        "sdk exact original PG database/postmaster identity required"
+      ],
+      "actualFly": false,
+      "sourceAuthority": false,
+      "clockSafety": false,
+      "ownersRetained": true,
+      "actualFreshDatabases": 3,
+      "actualClosedSocketPairs": 3
+    }
+  },
+  "runtime": {
+    "machine": "8ee335b7e10d48",
+    "instance": "01M6CF8MZRGSR5GKZKSKZDTZWR",
+    "providerCalls": 24,
+    "verifiedAt": "2026-11-01T21:12:54.407Z",
+    "ok": true,
+    "cleanupVerified": true,
+    "guestExitCode": 0,
+    "guestCleanup": {
+      "fixture_exit": 0,
+      "cluster_stop_confirmed": true,
+      "cluster_removed": true,
+      "normal_runtime_retirement": false,
+      "exact_vm_teardown_required": true
+    },
+    "scope": {
+      "scope": "actual-PG-original-staging-activation-component-only",
+      "role": "runtime",
+      "actualStagingActivationPgQualification": true,
+      "actualPostgres": true,
+      "fixtureRootHmac": true,
+      "fixtureImageNativeEvidence": true,
+      "fixtureCompilerEvidence": true,
+      "fixtureFly": true,
+      "fixtureBaseClockAdmission": true,
+      "physicalRoot": false,
+      "physicalNative": false,
+      "physicalCompilerSdk": false,
+      "actualS3": false,
+      "providerOwnerQualified": false,
+      "qualifiedClockContinuity": false,
+      "productionEnablement": false,
+      "models": false,
+      "steps": [],
+      "currentStep": "activation-complete-original-publishers-admin-unknowns-retained",
+      "checks": [
+        "runtime known original permit only, immutable rows preserved, one shot",
+        "runtime real forwarded COMMIT/lost reply stays unknown and consumed",
+        "runtime exact original PG database/postmaster identity required"
+      ],
+      "actualFly": false,
+      "sourceAuthority": false,
+      "clockSafety": false,
+      "ownersRetained": true,
+      "actualFreshDatabases": 3,
+      "actualClosedSocketPairs": 6
+    }
+  },
+  "fullV4Complete": false
+}

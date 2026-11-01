@@ -11,12 +11,30 @@ use sha2::{Digest,Sha256};
 const SERVICE_ROOT:&str="/run/rudder-root-storage";
 const RUNTIME_ROOT:&str="/run/rudder-root-storage/runtime-image-v1";
 const MAX_HELPERS:usize=256;
+#[path="root_runtime_ready.rs"]
+mod ready;
+pub use ready::{RuntimeReadyObservation,RuntimeReadyObservationData};
+#[path="root_runtime_qualification.rs"]
+pub mod qualification;
+#[path="root_compiler_sdk.rs"]
+pub mod compiler_sdk;
+#[path="compiler_sdk_client.rs"]
+mod compiler_client;
+pub use compiler_client::{CompilerSdkClient,CompilerSdkBuildOutcome,RetainedCompilerSdkBuild,CompilerSdkBuildFailure,CompilerSdkJobDisposal,CompilerSdkJobSettled};
+#[path="compiler_sdk_job_protocol.rs"]
+mod sdk_job_protocol;
+#[path="root_compiler_qualification.rs"]
+pub mod compiler_qualification;
+#[path="root_runtime_backing.rs"]
+pub mod environment;
 #[derive(Clone,Serialize,Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Enable {version:u32,kind:String,bootstrap_nonce:String,request_nonce:String,constraint:FinalizationConstraint}
-#[derive(Serialize,Deserialize)]
+#[derive(Clone,Serialize,Deserialize)]
 #[serde(deny_unknown_fields)]
-struct EnableAck {version:u32,kind:String,bootstrap_nonce:String,request_nonce:String,engine_instance_id:String,epoch:String,mount_id:u64}
+struct EnableAck {version:u32,kind:String,bootstrap_nonce:String,request_nonce:String,engine_instance_id:String,epoch:String,mount_id:u64,
+    #[serde(default,skip_serializing_if="Option::is_none")]compiler_sdk:Option<compiler_sdk::CompilerSdkEnableData>,
+    inventory:rudder_engine::protocol::ObjectRef,manifest:rudder_engine::protocol::ObjectRef,installer_input:rudder_engine::protocol::ObjectRef,selected_executables:Vec<RuntimeExecutableData>}
 #[derive(Clone,Serialize,Deserialize)]
 #[serde(deny_unknown_fields)]
 struct HelperRequest {version:u32,request_nonce:String,binding_sha256:String,engine_instance_id:String,epoch:String,constraint:FinalizationConstraint}
@@ -50,10 +68,11 @@ pub(crate) struct RootRuntimeParent {
     parent:RuntimeEndpoint,service:OwnedFd,engine:Option<OwnedFd>,service_engine:OwnedFd,
     original:Option<FinalizationBudget>,request:Option<Enable>,certificate:Option<OwnedFd>,config:Option<OwnedFd>,bytes:Option<Vec<u8>>,
     offered:bool,send_unknown:bool,failed:bool,pending:Option<RuntimePacket>,ready:bool,endpoint_offered:bool,
+    accepted_ack:Option<EnableAck>,ready_evidence:Option<ready::ReadyEvidenceData>,ready_file:Option<OwnedFd>,ready_offered:bool,
 }
 impl RootRuntimeParent {
     pub(super) fn capture()->Result<Self>{let(a,b)=storage::bootstrap_socket_pair()?;let(c,d)=storage::bootstrap_socket_pair()?;
-        Ok(Self{parent:RuntimeEndpoint::capture(a)?,service:b,engine:Some(c),service_engine:d,original:None,request:None,certificate:None,config:None,bytes:None,offered:false,send_unknown:false,failed:false,pending:None,ready:false,endpoint_offered:false})}
+        Ok(Self{parent:RuntimeEndpoint::capture(a)?,service:b,engine:Some(c),service_engine:d,original:None,request:None,certificate:None,config:None,bytes:None,offered:false,send_unknown:false,failed:false,pending:None,ready:false,endpoint_offered:false,accepted_ack:None,ready_evidence:None,ready_file:None,ready_offered:false})}
     pub(super) fn inherited(&self)->[(&OwnedFd,i32);2]{[(&self.service,5),(&self.service_engine,6)]}
     pub(super) fn poll_retaining(&mut self,reg:&RootRegistration,host:&RootHostControl,service:&Process)->Result<bool>{
         ensure!(!self.failed&&!self.send_unknown,"runtime original Root offer outcome unknown/closed");
@@ -74,8 +93,21 @@ impl RootRuntimeParent {
             let ack:EnableAck=serde_json::from_slice(&p.bytes)?;let q=self.request.as_ref().unwrap();let reg=reg.completed_runtime_registration()?;
             ensure!(ack.version==1&&ack.kind=="runtime_image_ready_v1"&&ack.bootstrap_nonce==q.bootstrap_nonce&&ack.request_nonce==q.request_nonce
                 &&ack.engine_instance_id==reg.ack.engine_instance_id&&ack.epoch==reg.ack.binding.epoch&&ack.mount_id>0,"runtime original service ready binding differs");
-            self.original.as_ref().unwrap().remaining()?;self.ready=true;}
+            // Retain the ACTUAL parsed ACK and original RuntimePacket BEFORE
+            // the final time/current checks; late/failed observations never issue.
+            self.accepted_ack=Some(ack);let observed=super::boottime_stamp()?;
+            self.ready_evidence=Some(ready::ReadyEvidenceData{version:1,kind:"original-runtime-enable-ready-evidence-v1".into(),
+                request:q.clone(),ack:self.accepted_ack.as_ref().unwrap().clone(),service_pid:service.pid,service_start_ticks:original_stat(service.pid)?.1,
+                registration_proof_sha256:reg.ack.proof_sha256.clone(),config_sha256:reg.ack.binding.config_sha256.clone(),boot_id:reg.ack.boot_id.clone(),root_ack_observed_boottime_nanoseconds:observed});
+            self.original.as_ref().unwrap().remaining()?;service.live()?;self.ready=true;}
         Ok(self.ready)
+    }
+    pub(super) fn take_ready_evidence_retaining(&mut self)->Result<OwnedFd>{
+        ensure!(self.ready&&!self.failed&&!self.ready_offered,"runtime original ready evidence absent/already offered");
+        self.original.as_ref().unwrap().remaining()?;
+        if self.ready_file.is_none(){let bytes=canonical_json(self.ready_evidence.as_ref().context("runtime actual ready ACK evidence absent")?)?;
+            ensure!(bytes.len()<=ready::READY_LIMIT,"runtime ready evidence exceeds bound");self.ready_file=Some(super::sealed_bytes(&bytes)?);}
+        self.original.as_ref().unwrap().remaining()?;let copy=self.ready_file.as_ref().unwrap().try_clone()?;self.ready_offered=true;Ok(copy)
     }
     pub(super) fn take_engine_endpoint_retaining(&mut self)->Result<OwnedFd>{ensure!(self.ready&&!self.endpoint_offered,"runtime original service ready ACK absent/already offered");
         self.original.as_ref().unwrap().remaining()?;self.endpoint_offered=true;Ok(self.engine.as_ref().context("runtime engine endpoint absent")?.try_clone()?)}
@@ -140,14 +172,14 @@ impl RuntimeImageReadRestriction for RuntimeReadAdmission {
 pub(crate) struct RuntimeImageMountOwner {
     proof:Arc<RuntimeBootstrapProof>,original:FinalizationBudget,request:Enable,
     raw_offer:RuntimePacket,admission:Option<Arc<RuntimeReadAdmission>>,config:Option<HostIngressConfig>,
-    baked:Option<Arc<BakedImageCas>>,manifest_read:Option<BakedImageRead>,floor:Option<ReadonlyRuntimeImage>,
+    baked:Option<Arc<BakedImageCas>>,original_backing:Option<environment::RootBackingDescriptors>,manifest_read:Option<BakedImageRead>,floor:Option<ReadonlyRuntimeImage>,
     local:Option<LocalStore>,mount:Option<RetainedMetadataMount>,root_fd:Option<OwnedFd>,components:Vec<OwnedFd>,
-    selected:Vec<RuntimeExecutableData>,pending_file:Option<File>,ready:bool,failed:bool,
+    compiler_sdk:Option<compiler_sdk::RootCompilerSdkOwner>,selected:Vec<RuntimeExecutableData>,pending_file:Option<File>,ready:bool,failed:bool,
 }
 impl RuntimeImageMountOwner {
     fn capture_retaining(out:&mut Option<Self>,proof:Arc<RuntimeBootstrapProof>,packet:RuntimePacket,request:Enable)->Result<()>{ensure!(out.is_none(),"runtime mount original owner already exists");
         let original=FinalizationBudget::from_constraint(&request.constraint)?;
-        *out=Some(Self{proof,original,request,raw_offer:packet,admission:None,config:None,baked:None,manifest_read:None,floor:None,local:None,mount:None,root_fd:None,components:Vec::new(),selected:Vec::new(),pending_file:None,ready:false,failed:false});
+        *out=Some(Self{proof,original,request,raw_offer:packet,admission:None,config:None,baked:None,original_backing:None,manifest_read:None,floor:None,local:None,mount:None,root_fd:None,components:Vec::new(),compiler_sdk:None,selected:Vec::new(),pending_file:None,ready:false,failed:false});
         let owner=out.as_mut().unwrap();let result=owner.prepare();if result.is_err(){owner.failed=true;if let Some(a)=&owner.admission{a.closed.store(true,Ordering::Release);a.reads_closed.store(true,Ordering::Release)}
             if let Some(floor)=&owner.floor{floor.close_admission()}if let Some(m)=&owner.mount{m.close_admission();}}result
     }
@@ -165,9 +197,10 @@ impl RuntimeImageMountOwner {
         let policy=data.image_preseed.as_ref().context("runtime qualified image policy absent")?;let runtime=policy.runtime_mount.as_ref().context("runtime image profile absent")?;
         self.admission=Some(Arc::new(RuntimeReadAdmission{proof:Arc::clone(&self.proof),config_stamp:stamp(&config)?,config,config_sha:digest(&bytes),registration:reg,closed:AtomicBool::new(false),reads_closed:AtomicBool::new(false)}));
         self.config=Some(data.clone());self.admission.as_ref().unwrap().current()?;
-        let root=protected_directory(Path::new(BAKED_IMAGE_DIRECTORY))?;self.pending_file=Some(OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW|libc::O_CLOEXEC|libc::O_NONBLOCK).open(Path::new(BAKED_IMAGE_DIRECTORY).join("inventory.json"))?);
-        let inventory=self.pending_file.take().unwrap().into();let fence:Arc<dyn ImageImportFence>=Arc::new(CaptureFence(self.original.clone()));
-        BakedImageCas::capture_retaining(&mut self.baked,root.into(),inventory,runtime.inventory.clone(),Arc::clone(&fence))?;
+        environment::RootBackingDescriptors::capture_retaining(&mut self.original_backing)?;
+        let(root,inventory)=self.original_backing.as_ref().unwrap().duplicate_for_baked()?;
+        let fence:Arc<dyn ImageImportFence>=Arc::new(CaptureFence(self.original.clone()));
+        BakedImageCas::capture_retaining(&mut self.baked,root,inventory,runtime.inventory.clone(),Arc::clone(&fence))?;
         let baked=self.baked.as_ref().unwrap();let inventory=baked.inventory_data()?;
         ensure!(inventory.roots.manifest.digest==policy.full_manifest_sha256,"runtime manifest differs from qualified image pin");
         baked.read_manifest_retaining(&mut self.manifest_read,Arc::clone(&fence))?;
@@ -195,9 +228,12 @@ impl RuntimeImageMountOwner {
             while at<record.size_bytes{self.original.remaining()?;let n=file.read_at(&mut chunk[..usize::try_from((record.size_bytes-at).min(65536))?],at)?;ensure!(n>0,"runtime selected ELF read incomplete");hash.update(&chunk[..n]);at+=n as u64;}
             ensure!(stamp(file)?==before&&format!("{:x}",hash.finalize())==record.sha256,"runtime selected ELF whole SHA differs");self.pending_file.take();}
         let a=self.admission.as_ref().unwrap();ensure!(self.selected[0].sha256==a.registration.ack.binding.native_sha256&&self.selected[2].sha256==a.registration.ack.binding.service_sha256&&self.selected[3].sha256==a.registration.ack.binding.launcher_sha256,"runtime full-image selected ELF differs from original registration");
-        a.current()?;self.original.remaining()?;self.ready=true;Ok(())
+        a.current()?;self.original.remaining()?;self.ready=true;
+        if let Some(catalog)=&data.compiler_sdk {
+            compiler_sdk::RootCompilerSdkOwner::capture_retaining(&mut self.compiler_sdk,self.proof.clone(),self.admission.as_ref().unwrap().clone(),self.original.clone(),catalog.clone(),data.compiler_qualification.is_some())?;
+        }Ok(())
     }
-    fn current(&self)->Result<()>{ensure!(self.ready&&!self.failed,"runtime original floor not ready/retained failure");self.admission.as_ref().context("runtime actual admission absent")?.current()?;self.mount.as_ref().unwrap().check_current()?;Ok(())}
+    fn current(&self)->Result<()>{ensure!(self.ready&&!self.failed,"runtime original floor not ready/retained failure");self.admission.as_ref().context("runtime actual admission absent")?.current()?;self.mount.as_ref().unwrap().check_current()?;if let Some(sdk)=&self.compiler_sdk{sdk.current()?;}Ok(())}
     fn capsule_retaining(&mut self,session:&mut ServiceSession)->Result<bool>{self.current()?;session.original.remaining()?;let a=self.admission.as_ref().unwrap();let ack=&a.registration.ack;
         session.helper.as_ref().context("runtime original helper pidfd absent")?.live()?;let helper=session.helper.as_ref().unwrap();
         storage::floor(helper.pid,1500)?;ensure!(original_stat(helper.pid)?.0==self.proof.engine.pid,"runtime helper is not child of original engine");
@@ -210,7 +246,7 @@ impl RuntimeImageMountOwner {
         ensure!(proc_owner==0,"runtime helper protection ownership differs");
         for(name,kind)in [("mnt",libc::CLONE_NEWNS),("user",libc::CLONE_NEWUSER),("pid",libc::CLONE_NEWPID)]{ensure!(storage::id(&storage::namespace(Some(helper.pid),name,kind)?)?==storage::id(&storage::namespace(Some(self.proof.engine.pid),name,kind)?)?,"runtime pending helper already entered guest namespace");}
         let inventory=self.baked.as_ref().unwrap().inventory_data()?;
-        let data=RuntimeImageCapsuleData{version:1,request_nonce:session.request.request_nonce.clone(),binding_sha256:session.request.binding_sha256.clone(),engine_instance_id:ack.engine_instance_id.clone(),epoch:ack.binding.epoch.clone(),config_sha256:a.config_sha.clone(),registration_proof_sha256:ack.proof_sha256.clone(),boot_id:ack.boot_id.clone(),
+        let data=RuntimeImageCapsuleData{compiler_sdk:self.compiler_sdk.as_ref().map(|s|s.enable_data().map(|d|d.mount)).transpose()?,version:1,request_nonce:session.request.request_nonce.clone(),binding_sha256:session.request.binding_sha256.clone(),engine_instance_id:ack.engine_instance_id.clone(),epoch:ack.binding.epoch.clone(),config_sha256:a.config_sha.clone(),registration_proof_sha256:ack.proof_sha256.clone(),boot_id:ack.boot_id.clone(),
             launcher_pid:self.proof.root.pid,service_pid:self.proof.own.pid,engine_pid:self.proof.engine.pid,helper_pid:helper.pid,helper_start_ticks:session.start.clone(),
             launcher_sha256:self.proof.root_image.sha256.clone(),service_sha256:self.proof.service_image.sha256.clone(),engine_sha256:self.proof.engine_image.sha256.clone(),
             inventory:self.config.as_ref().unwrap().image_preseed.as_ref().unwrap().runtime_mount.as_ref().unwrap().inventory.clone(),manifest:inventory.roots.manifest,installer_input:inventory.roots.installer_input,
@@ -219,9 +255,9 @@ impl RuntimeImageMountOwner {
         session.fds.push(session.certificate.as_ref().unwrap().try_clone()?);session.fds.push(self.proof.root.fd().try_clone()?);session.fds.push(self.proof.raw[3].try_clone()?);
         session.fds.push(self.proof.own.fd().try_clone()?);session.fds.push(File::open(format!("/proc/{}/exe",self.proof.own.pid))?.into());session.fds.push(self.proof.engine.fd().try_clone()?);session.fds.push(File::open(format!("/proc/{}/exe",self.proof.engine.pid))?.into());session.fds.push(helper.fd().try_clone()?);
         for index in [5,6,7]{session.fds.push(self.proof.raw[index].try_clone()?);}session.fds.push(a.config.try_clone()?.into());session.fds.push(self.root_fd.as_ref().unwrap().try_clone()?);session.fds.push(session.packet.fds[2].try_clone()?);
-        for component in &self.components{session.fds.push(component.try_clone()?);}session.original.remaining()?;self.current()?;Ok(true)
+        for component in &self.components{session.fds.push(component.try_clone()?);}if let Some(sdk)=&self.compiler_sdk{session.fds.push(sdk.duplicate_floor()?);}session.original.remaining()?;self.current()?;Ok(true)
     }
-    fn close_admission(&self){if let Some(a)=&self.admission{a.closed.store(true,Ordering::Release)}if let Some(m)=&self.mount{m.close_admission()}
+    fn close_admission(&self){if let Some(sdk)=&self.compiler_sdk{sdk.close_admission()}if let Some(a)=&self.admission{a.closed.store(true,Ordering::Release)}if let Some(m)=&self.mount{m.close_admission()}
         // Keep existing immutable reads and every floor/FD/worker owner. No
         // callable runtime actor-drain issuer exists yet, so reads_closed,
         // floor.close_admission and normal umount are NOT reachable here.
@@ -269,12 +305,12 @@ impl CapturedRuntimeDescriptors {
 
 /// Private service extension. Missing inherited set leaves legacy service
 /// behavior unchanged. Partial/bad set is absorbing and retains every owner.
-pub(crate) struct RootRuntimeService {raw:Vec<OwnedFd>,proof:Option<Arc<RuntimeBootstrapProof>>,parent:Option<RuntimeEndpoint>,engine:Option<RuntimeEndpoint>,offer:Option<RuntimePacket>,owner:Option<RuntimeImageMountOwner>,ack:Option<Vec<u8>>,ack_sent:bool,sessions:BTreeMap<String,ServiceSession>,pending:Option<RuntimePacket>,failed:bool}
+pub(crate) struct RootRuntimeService {raw:Vec<OwnedFd>,proof:Option<Arc<RuntimeBootstrapProof>>,parent:Option<RuntimeEndpoint>,engine:Option<RuntimeEndpoint>,offer:Option<RuntimePacket>,owner:Option<RuntimeImageMountOwner>,ack:Option<Vec<u8>>,ack_sent:bool,sessions:BTreeMap<String,ServiceSession>,compiler_jobs:Vec<compiler_sdk::jobs::RootBuildTransfer>,sdk_job_high_watermark:u64,backing_transfer:Option<environment::RootBackingTransfer>,pending:Option<RuntimePacket>,failed:bool}
 impl RootRuntimeService {
     pub(crate) fn capture_entry_snapshot_retaining(out:&mut Option<Self>,captured:&mut CapturedRuntimeDescriptors,engine:&Process)->Result<()> {
         ensure!(out.is_none(),"runtime inherited slot occupied");captured.validate_shape()?;
         if captured.is_absent_at_entry(){return Ok(())}
-        *out=Some(Self{raw:Vec::with_capacity(8),proof:None,parent:None,engine:None,offer:None,owner:None,ack:None,ack_sent:false,sessions:BTreeMap::new(),pending:None,failed:false});
+        *out=Some(Self{raw:Vec::with_capacity(8),proof:None,parent:None,engine:None,offer:None,owner:None,ack:None,ack_sent:false,sessions:BTreeMap::new(),compiler_jobs:Vec::new(),sdk_job_high_watermark:0,backing_transfer:None,pending:None,failed:false});
         let s=out.as_mut().unwrap();ensure!(captured.take_complete_into_retaining(&mut s.raw)?,"runtime complete entry snapshot absent");
         // Validate ONLY the owned entry snapshot against the actual constructed
         // service/engine. Never inspect numeric slots after allocation.
@@ -288,9 +324,18 @@ impl RootRuntimeService {
             ensure!(packet.credentials.pid==proof.root.pid as i32&&packet.credentials.uid==0&&packet.credentials.gid==0,"runtime enable is not actual original image launcher");
             let request:Enable=serde_json::from_slice(&packet.bytes)?;ensure!(request.version==1&&request.kind=="runtime_image_enable_v1"&&request.bootstrap_nonce==proof.data.nonce,"runtime enable original bootstrap binding differs");
             RuntimeImageMountOwner::capture_retaining(&mut self.owner,Arc::clone(proof),self.offer.take().unwrap(),request)?;
-            let owner=self.owner.as_ref().unwrap();let a=owner.admission.as_ref().unwrap();self.ack=Some(canonical_json(&EnableAck{version:1,kind:"runtime_image_ready_v1".into(),bootstrap_nonce:owner.request.bootstrap_nonce.clone(),request_nonce:owner.request.request_nonce.clone(),engine_instance_id:a.registration.ack.engine_instance_id.clone(),epoch:a.registration.ack.binding.epoch.clone(),mount_id:wire::fd_data(owner.root_fd.as_ref().unwrap())?.mount_id})?);}
+            let owner=self.owner.as_ref().unwrap();owner.current()?;let a=owner.admission.as_ref().unwrap();let baked=owner.baked.as_ref().unwrap();let inventory=baked.inventory_data()?;
+            self.ack=Some(canonical_json(&EnableAck{version:1,kind:"runtime_image_ready_v1".into(),bootstrap_nonce:owner.request.bootstrap_nonce.clone(),request_nonce:owner.request.request_nonce.clone(),engine_instance_id:a.registration.ack.engine_instance_id.clone(),epoch:a.registration.ack.binding.epoch.clone(),mount_id:wire::fd_data(owner.root_fd.as_ref().unwrap())?.mount_id,
+                inventory:baked.inventory_reference_data().clone(),manifest:inventory.roots.manifest,installer_input:inventory.roots.installer_input,selected_executables:owner.selected.clone(),compiler_sdk:owner.compiler_sdk.as_ref().map(|s|s.enable_data()).transpose()?})?);}
         let owner=self.owner.as_mut().unwrap();owner.current()?;
         if !self.ack_sent{owner.original.remaining()?;if !self.parent.as_ref().unwrap().send_data(self.ack.as_ref().unwrap(),&[])?{return Ok(false)}owner.original.remaining()?;self.ack_sent=true;return Ok(true)}
+        let mut job_progress=false;
+        for job in &mut self.compiler_jobs{job_progress|=job.poll_retaining(owner,self.engine.as_ref().unwrap())?;}
+        // Removal requires actual known resource closure, not a sent build ACK.
+        self.compiler_jobs.retain(|job|!job.resources_disposed());if job_progress{return Ok(true)}
+        if let Some(backing)=&mut self.backing_transfer{match backing.poll_retaining(owner,self.engine.as_ref().unwrap()){
+            Ok(true)=>return Ok(true),Ok(false)=>{},Err(_)=>{} // Original failed packet/FDs remain; existing helper/private reads continue.
+        }}
         for session in self.sessions.values_mut(){if session.unknown||session.ack_sent{continue}
             // Per-helper expiry/cancellation/loss closes only this original
             // request. It never unmounts/retires the machine floor or treats a
@@ -308,8 +353,18 @@ impl RootRuntimeService {
                 session.ack_sent=true;session.original.remaining()?;Ok(true)})();
             match result{Ok(true)=>return Ok(true),Ok(false)=>{},Err(_)=>{session.unknown=true;}}
         }
-        if self.pending.is_none(){self.pending=self.engine.as_ref().unwrap().receive_data()?;}let Some(packet)=self.pending.as_ref()else{return Ok(false)};
-        ensure!(packet.credentials.pid==proof.engine.pid as i32&&packet.credentials.uid==1500&&packet.credentials.gid==1500&&packet.fds.len()==3,"runtime enrollment is not actual original engine");
+        if self.pending.is_none(){match self.engine.as_ref().unwrap().receive_disposal_retaining(&mut self.pending)?{
+            wire::RuntimeDisposalRead::Pending=>return Ok(false),wire::RuntimeDisposalRead::Packet=>{},wire::RuntimeDisposalRead::ReadClosed{..}=>anyhow::bail!("original runtime engine endpoint closed; pending owners retained")}}
+        let Some(packet)=self.pending.as_ref()else{return Ok(false)};
+        ensure!(packet.credentials.pid==proof.engine.pid as i32&&packet.credentials.uid==1500&&packet.credentials.gid==1500,"runtime enrollment is not actual original engine");
+        if compiler_sdk::jobs::is_request(&packet.bytes)?{if self.compiler_jobs.len()>=MAX_HELPERS{return Ok(false)}
+            let staged=compiler_sdk::jobs::RootBuildTransfer::staged(self.pending.take().unwrap());self.compiler_jobs.push(staged);
+            self.compiler_jobs.last_mut().unwrap().admit_original_serial_retaining(owner,&mut self.sdk_job_high_watermark);return Ok(true)}
+        if environment::is_request(&packet.bytes)?{
+            ensure!(self.backing_transfer.is_none(),"original runtime backing request already retained; no replay");
+            self.backing_transfer=Some(environment::RootBackingTransfer::stage(self.pending.take().unwrap()));return Ok(true)
+        }
+        ensure!(packet.fds.len()==3,"runtime helper enrollment descriptor set differs");
         let request:HelperRequest=serde_json::from_slice(&packet.bytes)?;let a=owner.admission.as_ref().unwrap();
         ensure!(request.version==1&&request.engine_instance_id==a.registration.ack.engine_instance_id&&request.epoch==a.registration.ack.binding.epoch&&self.sessions.len()<MAX_HELPERS&&!self.sessions.contains_key(&request.request_nonce),"runtime enrollment scope/capacity differs; no replay");
         let original=FinalizationBudget::from_constraint(&request.constraint)?;let key=request.request_nonce.clone();let packet=self.pending.take().unwrap();
@@ -320,24 +375,31 @@ impl RootRuntimeService {
     }
 }
 
-struct ClientState {endpoint:RuntimeEndpoint,active:Option<Arc<Mutex<ClientRequest>>>,retained:Vec<Arc<Mutex<ClientRequest>>>}
+struct ClientState {endpoint:RuntimeEndpoint,active:Option<Arc<Mutex<ClientRequest>>>,retained:Vec<Arc<Mutex<ClientRequest>>>,
+    backing_active:Option<Arc<Mutex<environment::NativeBackingState>>>,backing_retained:Option<Arc<Mutex<environment::NativeBackingState>>>}
 struct ClientRequest {original:FinalizationBudget,cancelled:Arc<AtomicBool>,helper:Arc<rudder_engine::execution::handoff::helper_process::HelperProcessWitness>,binding:rudder_engine::execution::ManagedExecutionBinding,
     request:Option<HelperRequest>,bytes:Option<Vec<u8>>,pidfd:Option<OwnedFd>,delivery:Option<OwnedFd>,receive:Option<OwnedFd>,cancel:Option<OwnedFd>,pid:u32,start:String,sent:bool,unknown:bool,pending:Option<RuntimePacket>,ready:bool,attached:bool}
 /// Actual registered Native owner + original authenticated service endpoint.
 /// No public path/JSON constructor. A pending/unknown request remains owned by
 /// this machine client even if its task caller drops its output alias.
-pub struct RuntimeImageClient {state:Mutex<ClientState>,registration:Arc<RegisteredEngineOwner>,config:Arc<HostIngressConfigOwner>,service:Process,service_image:Image,service_exe:OwnedFd}
+pub struct RuntimeImageClient {compiler_sdk:Mutex<Option<Arc<CompilerSdkClient>>>,ready:ready::ReadyOrigin,state:Mutex<ClientState>,registration:Arc<RegisteredEngineOwner>,config:Arc<HostIngressConfigOwner>,service:Process,service_image:Image,service_exe:OwnedFd}
 /// Per-helper actual request/carrier. No source/task/lease authority. Its only
 /// transferable value is a transport FD which the original helper independently
 /// authenticates against the actual Root service and sealed managed binding.
 pub struct RuntimeHelperGrant {client:Arc<RuntimeImageClient>,state:Arc<Mutex<ClientRequest>>}
 impl RuntimeImageClient {
-    pub(super) fn capture_original_retaining(out:&mut Option<Arc<Self>>,endpoint:OwnedFd,registration:Arc<RegisteredEngineOwner>,config:Arc<HostIngressConfigOwner>,service:&OwnedFd,service_exe:&OwnedFd)->Result<()> {
-        ensure!(out.is_none(),"runtime actual client already captured");registration.assert_current()?;config.assert_current()?;
+    pub(super) fn capture_original_retaining(out:&mut Option<Arc<Self>>,observation:&mut Option<RuntimeReadyObservation>,endpoint:OwnedFd,ready_fd:&OwnedFd,bootstrap_nonce:&str,registration:Arc<RegisteredEngineOwner>,config:Arc<HostIngressConfigOwner>,service:&OwnedFd,service_exe:&OwnedFd)->Result<()> {
+        ensure!(out.is_none()&&observation.is_none(),"runtime actual client/observation already captured");registration.assert_current()?;config.assert_current()?;
         ensure!(config.data().image_preseed.as_ref().and_then(|p|p.runtime_mount.as_ref()).is_some(),"runtime image profile absent");
         let service=Process::capture(service.try_clone()?)?;let image=Image::capture(Path::new(SERVICE_PATH))?;image.matches_fd(service_exe)?;service.live()?;
-        *out=Some(Arc::new(Self{state:Mutex::new(ClientState{endpoint:RuntimeEndpoint::capture(endpoint)?,active:None,retained:Vec::new()}),registration,config,service,service_image:image,service_exe:service_exe.try_clone()?}));out.as_ref().unwrap().current()
+        let ready=ready::ReadyOrigin::capture_from_original_bootstrap(ready_fd,&registration,&service,bootstrap_nonce)?;
+        *out=Some(Arc::new(Self{compiler_sdk:Mutex::new(None),ready,state:Mutex::new(ClientState{endpoint:RuntimeEndpoint::capture(endpoint)?,active:None,retained:Vec::new(),backing_active:None,backing_retained:None}),registration,config,service,service_image:image,service_exe:service_exe.try_clone()?}));
+        let client=out.as_ref().unwrap();client.current()?;client.ready.original_receipt_current()?;
+        if client.config.data().compiler_sdk.is_some(){let mut slot=client.compiler_sdk.lock().unwrap_or_else(|p|p.into_inner());CompilerSdkClient::capture_retaining(&mut slot,client.clone())?;}
+        *observation=Some(RuntimeReadyObservation::issue_on_original_client(client)?);Ok(())
     }
+    pub fn compiler_sdk_client(&self)->Result<Option<Arc<CompilerSdkClient>>>{self.current()?;let slot=self.compiler_sdk.try_lock().map_err(|_|anyhow::anyhow!("original SDK alias temporarily borrowed"))?;
+        if let Some(sdk)=&*slot{sdk.assert_current()?;}Ok(slot.clone())}
     pub(super) fn assert_current(&self)->Result<()>{self.current()}
     fn current(&self)->Result<()>{ensure!(unsafe{libc::prctl(libc::PR_GET_DUMPABLE,0,0,0,0)}==0,"runtime original engine descriptor protection changed");storage::floor(std::process::id(),1500)?;
         self.registration.assert_current()?;self.config.assert_current()?;self.service.live()?;self.service_image.matches_fd(&self.service_exe)?;Ok(())}
@@ -348,7 +410,7 @@ impl RuntimeImageClient {
         let (actual_original,cancelled)=barrier.original_request_retaining()?;
         ensure!(actual_original.constraint()==original.constraint(),"runtime enrollment cannot replace original task clock");
         let mut client=match self.state.try_lock(){Ok(v)=>v,Err(TryLockError::WouldBlock)=>return Ok(false),Err(TryLockError::Poisoned(_))=>anyhow::bail!("runtime original client ownership poisoned")};
-        if client.active.is_some(){return Ok(false)}ensure!(client.retained.len()<MAX_HELPERS,"runtime retained helper/session bound reached; actual drain required");
+        if client.active.is_some()||client.backing_active.is_some(){return Ok(false)}ensure!(client.retained.len()<MAX_HELPERS,"runtime retained helper/session bound reached; actual drain required");
         let state=Arc::new(Mutex::new(ClientRequest{original:actual_original,cancelled,helper:barrier.pending_helper_process(),binding:barrier.binding_data().clone(),request:None,bytes:None,pidfd:None,delivery:None,receive:None,cancel:None,pid:0,start:String::new(),sent:false,unknown:false,pending:None,ready:false,attached:false}));
         client.active=Some(Arc::clone(&state));client.retained.push(Arc::clone(&state));*out=Some(RuntimeHelperGrant{client:Arc::clone(self),state});
         let mut state=out.as_ref().unwrap().state.lock().map_err(|_|anyhow::anyhow!("runtime helper owner poisoned"))?;
@@ -361,14 +423,22 @@ impl RuntimeImageClient {
     /// kernel eventfd. This closes new helper binding only; no reader capacity,
     /// mount, actor, worker or source owner is released by elapsed time.
     pub(super) fn poll_original_cancellations_retaining(&self)->Result<()> {
+        if let Ok(sdk)=self.compiler_sdk.try_lock(){if let Some(sdk)=&*sdk{sdk.poll_cancellations()?;}}
         let client=match self.state.try_lock(){Ok(v)=>v,Err(TryLockError::WouldBlock)=>return Ok(()),Err(TryLockError::Poisoned(_))=>anyhow::bail!("runtime original cancellation owner poisoned")};
+        if let Some(backing)=&client.backing_retained{if let Ok(state)=backing.try_lock(){state.signal_original_cancellation()?;}}
         for request in &client.retained{let state=match request.try_lock(){Ok(v)=>v,Err(TryLockError::WouldBlock)=>continue,Err(TryLockError::Poisoned(_))=>anyhow::bail!("runtime original helper owner poisoned")};
             if state.cancelled.load(Ordering::Acquire)||state.original.remaining().is_err(){state.original.cancel();if let Some(cancel)=&state.cancel{signal_cancel(cancel)?;}}
         }Ok(())
     }
     /// Fixed approved DATA projections only, used instead of host runtime paths
     /// by the trusted task resource builder when this actual client is selected.
-    pub fn projections_data(&self)->Result<Vec<rudder_engine::execution::ReadOnlyRuntime>>{self.current()?;Ok(COMPONENTS.iter().map(|(_,source,guest,_)|rudder_engine::execution::ReadOnlyRuntime{source:PathBuf::from(source),guest_path:(*guest).into()}).collect())}
+    pub fn projections_data(&self)->Result<Vec<rudder_engine::execution::ReadOnlyRuntime>>{self.current()?;let mut all:Vec<_>=COMPONENTS.iter().map(|(_,source,guest,_)|rudder_engine::execution::ReadOnlyRuntime{source:PathBuf::from(source),guest_path:(*guest).into()}).collect();
+        if self.ready.compiler_sdk_data()?.is_some(){all.push(rudder_engine::execution::ReadOnlyRuntime{source:PathBuf::from(rudder_engine::execution::compiler_sdk::SDK_SOURCE),guest_path:rudder_engine::execution::compiler_sdk::SDK_GUEST.into()});}Ok(all)}
+    /// Complete SDK content identities from the original sealed Root ACK and
+    /// this SAME live client. Callers retain the client/grant, never these DATA.
+    pub fn compiler_toolchains_data(&self)->Result<Option<BTreeMap<String,rudder_engine::build::ToolchainIdentity>>>{self.current()?;
+        let Some(sdk)=self.ready.compiler_sdk_data()?else{return Ok(None)};sdk.mount.validate_data()?;
+        ensure!(self.config.data().compiler_sdk.as_ref()==Some(&sdk.mount.catalog),"actual SDK client/config origin differs");Ok(Some(sdk.mount.toolchains.clone()))}
 }
 impl RuntimeHelperGrant {
     pub fn poll_retaining(&mut self)->Result<bool>{let mut client=match self.client.state.try_lock(){Ok(v)=>v,Err(TryLockError::WouldBlock)=>return Ok(false),Err(TryLockError::Poisoned(_))=>anyhow::bail!("runtime client owner poisoned")};

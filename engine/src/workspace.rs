@@ -500,6 +500,7 @@ enum ProofDirectory {
     Paged,
 }
 struct ProofTree<'a> {
+    original:Option<std::sync::Arc<dyn crate::store::ImageImportFence>>,
     store: &'a LocalStore,
     budget: &'a ProjectionBudget,
     started: Instant,
@@ -518,7 +519,7 @@ impl<'a> ProofTree<'a> {
                 && (1..=crate::directory::MAX_PATH_DEPTH).contains(&budget.max_depth),
             "invalid projection deadline/depth budget"
         );
-        Ok(Self {
+        Ok(Self {original:None,
             store,
             budget,
             started: Instant::now(),
@@ -532,6 +533,7 @@ impl<'a> ProofTree<'a> {
         })
     }
     fn check(&self) -> Result<()> {
+        if let Some(original)=&self.original{original.remaining()?;}
         ensure!(
             self.started.elapsed().as_millis() < u128::from(self.budget.max_elapsed_ms),
             "projection exceeded its cooperative deadline"
@@ -1108,8 +1110,13 @@ pub fn runnable_build_input_view(
     };
     let mut stages = BTreeMap::new();
     stages.insert("root_pinning".into(), elapsed_ms(began));
+    let(input,report)=qualify_runnable_build_data(store,runnable,expected_projection_policy,budget,began,stages,None,false)?;
+    Ok(QualifiedRunnableBuildInput{input,report,pin})
+}
+fn qualify_runnable_build_data(store:&LocalStore,runnable:&ObjectRef,expected_projection_policy:&ObjectRef,budget:&ProjectionBudget,
+    began:Instant,mut stages:BTreeMap<String,u64>,original:Option<std::sync::Arc<dyn crate::store::ImageImportFence>>,source_only:bool)->Result<(crate::build::BuildInputView,ProjectionReport)>{
     let mut tree = ProofTree::new(store, budget)?;
-    tree.started = began;
+    tree.started = began;tree.original=original;
     let start = Instant::now();
     ensure!(
         runnable.size_bytes <= crate::snapshot::MAX_MANIFEST_BYTES as u64,
@@ -1136,6 +1143,7 @@ pub fn runnable_build_input_view(
         "source policy must be canonical JSON"
     );
     let profile = qualified_profile(&tree.read_metadata(&root.profile)?, budget)?;
+    ensure!(!source_only||profile.prepared.is_empty(),"retained canonical input supports only a source-only prepared partition");
     let environment = if let Some(reference) = &root.environment {
         {
             ensure!(
@@ -1188,7 +1196,7 @@ pub fn runnable_build_input_view(
     );
     let mut report = tree.report(stages);
     report.total_ms = elapsed_ms(began);
-    Ok(QualifiedRunnableBuildInput { input, report, pin })
+    Ok((input,report))
 }
 
 impl WorkspaceManager {
@@ -2206,3 +2214,7 @@ fn write_checked<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     sync_dir(path.parent().unwrap())?;
     Ok(())
 }
+
+#[cfg(target_os="linux")]
+#[path="workspace/retained_build_input.rs"]
+pub mod retained_build_input;

@@ -9,7 +9,7 @@ import { originalTime } from "./managed-home-provisioning/fly.js";
 const PREFIX = "/api/rudder/home/managed/";
 const LIMIT = 32 * 1024;
 const TEXT_LIMIT = 24 * 1024;
-type EffectName = "open-prepared-project" | "start-task" | "receipt";
+type EffectName = "open-prepared-project" | "start-task" | "build-current-source-sdk" | "receipt";
 export interface ManagedMachineApiDependencies {
   readonly registry: ManagedHomeRegistry;
   readJsonBody(request: IncomingMessage, limit: number): Promise<unknown>;
@@ -40,16 +40,17 @@ function key(value: unknown, name: string): string {
 }
 export type ManagedMachineInput = Readonly<{ workspace: string; commandKey: string;
   selection?: Readonly<{ backend: "codex" | "claude"; model: string; profileId: string }>;
-  task?: string; lookupKey?: string }>;
+  task?: string; lookupKey?: string; sdkCase?:"accepted"|"proc-deny"|"job-deny";repeatIdentical?:boolean }>;
 /** DATA validation only. This does not issue a home/project/task capability. */
 export function parseManagedMachineInput(name: EffectName, value: unknown): ManagedMachineInput {
   const body = record(value);
   const fields = name === "receipt" ? ["workspace", "command_key", "lookup_command_key"]
-    : ["workspace", "command_key", "backend", "model", "profile_id", ...(name === "start-task" ? ["text"] : [])];
+    : name==="build-current-source-sdk"?["workspace","command_key","case","repeat_identical"]:["workspace", "command_key", "backend", "model", "profile_id", ...(name === "start-task" ? ["text"] : [])];
   if (Object.keys(body).some(field => !fields.includes(field))) rejected("unknown managed request field");
   const workspace = key(body.workspace, "workspace");
   const commandKey = key(body.command_key, "command_key");
   if (name === "receipt") return Object.freeze({ workspace, commandKey, lookupKey: key(body.lookup_command_key, "lookup_command_key") });
+  if(name==="build-current-source-sdk"){if(typeof body.case!=="string"||!["accepted","proc-deny","job-deny"].includes(body.case)||typeof body.repeat_identical!=="boolean")rejected("explicit SDK case and repeat_identical are required");return Object.freeze({workspace,commandKey,sdkCase:body.case as "accepted"|"proc-deny"|"job-deny",repeatIdentical:body.repeat_identical});}
   if (body.backend !== "codex" && body.backend !== "claude") rejected("explicit backend is required");
   const model = text(body.model, "model", 256);
   const profileId = text(body.profile_id, "profile_id", 256);
@@ -63,6 +64,7 @@ export function parseManagedMachineInput(name: EffectName, value: unknown): Mana
 }
 function operation(name: EffectName, input: ManagedMachineInput, alias: string): HostOperation {
   if (name === "receipt") return { op: "ReceiptV1", lookup_command_key: input.lookupKey! };
+  if(name==="build-current-source-sdk")return {op:"BuildCurrentSourceSdkV1",project_alias:alias,case:input.sdkCase!,repeat_identical:input.repeatIdentical!};
   const selected = input.selection!;
   // Current qualified registry/image profile is Codex-only. Claude remains an
   // explicit unsupported selection until its exact artifact/profile qualifies.
@@ -77,7 +79,7 @@ export async function handleManagedMachineApi(request: IncomingMessage, response
   url: URL, authenticatedAccountId: string, deps: ManagedMachineApiDependencies): Promise<boolean> {
   if (!url.pathname.startsWith(PREFIX)) return false;
   const suffix = url.pathname.slice(PREFIX.length);
-  if (request.method !== "POST" || !["open-prepared-project", "start-task", "receipt"].includes(suffix)) {
+  if (request.method !== "POST" || !["open-prepared-project", "start-task", "build-current-source-sdk", "receipt"].includes(suffix)) {
     deps.sendJson(response, 404, { error: "managed operation not found" }); return true;
   }
   const name = suffix as EffectName;

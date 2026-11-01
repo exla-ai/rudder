@@ -49,6 +49,8 @@ impl Drop for Fixture {fn drop(&mut self){
     writable(&self.root);
 }}
 
+#[path="baked_original_versions_tests.rs"]mod original_version_tests;
+
 #[test]
 fn baked_image_real_original_pin_inventory_and_sha_before_bytes(){
     let f=Fixture::new(b"full image manifest fixture".to_vec());let source=f.capture();let mut read=None;
@@ -56,7 +58,9 @@ fn baked_image_real_original_pin_inventory_and_sha_before_bytes(){
     assert_eq!(read.as_ref().unwrap().verified_bytes().unwrap(),vec![b'X';128*1024]);
     assert!(read.as_ref().unwrap().file.is_some());assert_eq!(read.as_ref().unwrap().reference_data(),&f.payload);
     let data=source.inventory_data().unwrap();assert_eq!(data.pins.len(),2);assert_eq!(data.roots.manifest,f.manifest);
-    assert!(source.state.lock().unwrap().shards.len()<=1);
+    let state=source.state.lock().unwrap();let data=state.inventory.as_ref().unwrap();
+    assert_eq!(state.object_versions.len(),data.objects.len());
+    assert_eq!(state.shards.len(),data.objects.iter().map(|r|&r.digest[..2]).collect::<BTreeSet<_>>().len());
 }
 
 #[test]

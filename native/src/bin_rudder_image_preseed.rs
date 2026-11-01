@@ -1,17 +1,29 @@
 //! Build-time DATA emitter, not a Root/bootstrap/ready API. Install final image
 //! files FIRST. Output is outside every captured root to avoid self-reference.
 #[cfg(target_os="linux")]
+#[derive(Clone,Copy,Debug,PartialEq,Eq)]
+enum BakedProfile{Runtime,CompilerA2,CompilerC1}
+#[cfg(target_os="linux")]
+impl BakedProfile {
+    fn from_exact_args(args:&[std::ffi::OsString])->Option<Self>{if args.len()!=1{return None}match args[0].to_str(){
+        Some("--bake-cas-v1")=>Some(Self::Runtime),Some("--bake-compiler-cas-v1")=>Some(Self::CompilerA2),
+        Some("--bake-compiler-c1-cas-v1")=>Some(Self::CompilerC1),_=>None}}
+    fn output(self)->&'static str{match self{Self::Runtime=>rudder_engine::store::baked_image::BAKED_IMAGE_DIRECTORY,
+        Self::CompilerA2=>rudder_native::compiler_image_data::COMPILER_CAS_DIRECTORY,
+        Self::CompilerC1=>rudder_native::compiler_image_data::COMPILER_C1_CAS_DIRECTORY}}
+    fn compiler(self)->bool{self!=Self::Runtime}
+}
+#[cfg(target_os="linux")]
 fn main()->anyhow::Result<()> {
     use std::{fs,io::{Read,Write},os::unix::fs::{DirBuilderExt,OpenOptionsExt,MetadataExt,PermissionsExt},path::Path,sync::{Arc,atomic::AtomicBool},time::Duration};
     use rudder_native::{engine_registration::ImagePreseedBudget,image_preseed_data::ImageDataBuild};
     let args=std::env::args_os().skip(1).collect::<Vec<_>>();
     let verify=args.as_slice()==[std::ffi::OsString::from("--verify")];
-    let bake=args.as_slice()==[std::ffi::OsString::from("--bake-cas-v1")];
-    let compiler_bake=args.as_slice()==[std::ffi::OsString::from("--bake-compiler-cas-v1")];
-    anyhow::ensure!(args.is_empty()||verify||bake||compiler_bake,"image DATA emitter accepts only fixed image profiles, never paths or runtime authority");
+    let profile=BakedProfile::from_exact_args(&args);
+    anyhow::ensure!(args.is_empty()||verify||profile.is_some(),"image DATA emitter accepts only fixed image profiles, never paths or runtime authority");
     anyhow::ensure!(unsafe{libc::getuid()}==0&&unsafe{libc::geteuid()}==0,"image DATA build must run as actual image Root");
-    if bake{return bake_complete_cas();}
-    if compiler_bake{return bake_complete_cas_profile(true);}
+    if profile==Some(BakedProfile::Runtime){return bake_complete_cas();}
+    if let Some(profile)=profile{return bake_complete_cas_profile(profile);}
     let output=Path::new("/var/lib/rudder-image-preseed-v1");
     if verify {let m=fs::symlink_metadata(output)?;anyhow::ensure!(m.is_dir()&&!m.file_type().is_symlink()&&m.uid()==0&&m.gid()==0&&m.mode()&0o7777==0o555,"image DATA verification output is not protected");}
     else {anyhow::ensure!(output.symlink_metadata().err().is_some_and(|e|e.kind()==std::io::ErrorKind::NotFound),"image DATA output already exists; never overwrite");}
@@ -51,12 +63,12 @@ fn main()->anyhow::Result<()> {
 /// DATA directory, inaccessible at0700 until all actual IO/ACKs settle. No
 /// second payload copy, existing destination adoption or cleanup on error.
 #[cfg(target_os="linux")]
-fn bake_complete_cas()->anyhow::Result<()> {bake_complete_cas_profile(false)}
+fn bake_complete_cas()->anyhow::Result<()> {bake_complete_cas_profile(BakedProfile::Runtime)}
 
 /// The compiler floor has a separate fixed input/output and the SAME original
 /// build clock. This common sealer preserves complete two-pin ACK/IO checks.
 #[cfg(target_os="linux")]
-fn bake_complete_cas_profile(compiler:bool)->anyhow::Result<()> {
+fn bake_complete_cas_profile(profile:BakedProfile)->anyhow::Result<()> {
     use anyhow::{ensure,Context};
     use std::{collections::{BTreeMap,BTreeSet},fs::{self,File,OpenOptions},io::Write,
         os::{fd::OwnedFd,unix::fs::{DirBuilderExt,FileExt,MetadataExt,OpenOptionsExt,PermissionsExt}},
@@ -72,15 +84,18 @@ fn bake_complete_cas_profile(compiler:bool)->anyhow::Result<()> {
     let mut owned=Owned{store:None,build:None,io:None,dirs:Vec::new(),reader:None};
     ensure!(unsafe{libc::getuid()}==0&&unsafe{libc::geteuid()}==0&&unsafe{libc::getgid()}==0&&unsafe{libc::getegid()}==0,"baked image profile requires Root0/gid0");
     let original=ImagePreseedBudget::begin(Duration::from_secs(300))?;
-    let output=Path::new(if compiler{rudder_native::compiler_image_data::COMPILER_CAS_DIRECTORY}else{BAKED_IMAGE_DIRECTORY});
+    let compiler=profile.compiler();let output=Path::new(profile.output());
     for parent in output.parent().unwrap().ancestors(){original.remaining()?;let m=fs::symlink_metadata(parent)?;
         ensure!(m.is_dir()&&!m.file_type().is_symlink()&&m.uid()==0&&m.gid()==0&&m.mode()&0o022==0,"baked DATA ancestry not Root protected");}
     ensure!(output.symlink_metadata().err().is_some_and(|e|e.kind()==std::io::ErrorKind::NotFound),"baked image output exists; original recovery required");
     original.remaining()?;fs::DirBuilder::new().mode(0o700).create(output)?;
     owned.dirs.push(OpenOptions::new().read(true).custom_flags(libc::O_DIRECTORY|libc::O_CLOEXEC|libc::O_NOFOLLOW).open(output)?);
     original.remaining()?;owned.store=Some(LocalStore::open(output.join("cas"))?);
-    if compiler {rudder_native::compiler_image_data::capture_build_retaining(&mut owned.build,owned.store.as_ref().unwrap().clone(),original.clone(),Arc::new(AtomicBool::new(false)))?;}
-    else {ImageDataBuild::capture_retaining(&mut owned.build,owned.store.as_ref().unwrap().clone(),original.clone(),Arc::new(AtomicBool::new(false)))?;}
+    match profile {
+        BakedProfile::CompilerA2=>rudder_native::compiler_image_data::capture_build_retaining(&mut owned.build,owned.store.as_ref().unwrap().clone(),original.clone(),Arc::new(AtomicBool::new(false)))?,
+        BakedProfile::CompilerC1=>rudder_native::compiler_image_data::capture_c1_build_retaining(&mut owned.build,owned.store.as_ref().unwrap().clone(),original.clone(),Arc::new(AtomicBool::new(false)))?,
+        BakedProfile::Runtime=>ImageDataBuild::capture_retaining(&mut owned.build,owned.store.as_ref().unwrap().clone(),original.clone(),Arc::new(AtomicBool::new(false)))?,
+    }
     let data=owned.build.as_ref().unwrap();data.check_deep_for_import()?;
     let pin=data.pin_data()?;let objects=data.objects_for_import()?;
     // These getters require the SAME successful LocalImageImport two-pin ACK
@@ -160,7 +175,7 @@ fn bake_complete_cas_profile(compiler:bool)->anyhow::Result<()> {
     BakedImageCas::capture_retaining(&mut owned.reader,root,inventory_fd,inventory_ref.clone(),Arc::new(Clock(original.clone())))?;
     original.remaining()?;
     if compiler {println!("RUDDER_BAKED_COMPILER_CAS_DATA {}",serde_json::json!({"format_version":1,"layout":BAKED_IMAGE_LAYOUT,
-        "directory":rudder_native::compiler_image_data::COMPILER_CAS_DIRECTORY,"inventory":inventory_ref,"roots":roots,"objects":inventory.objects.len(),"total_bytes":inventory.total_bytes,
+        "directory":profile.output(),"inventory":inventory_ref,"roots":roots,"objects":inventory.objects.len(),"total_bytes":inventory.total_bytes,
         "retention_generation":inventory.retention_generation,"compiler":compiler_binding,"scope":"immutable-compiler-cas-data-only","production_admission":false,"runtime_mount":false}));}
     else {println!("RUDDER_BAKED_IMAGE_CAS_DATA {}",serde_json::json!({"format_version":1,"layout":BAKED_IMAGE_LAYOUT,
         "directory":BAKED_IMAGE_DIRECTORY,"inventory":inventory_ref,"roots":roots,"objects":inventory.objects.len(),"total_bytes":inventory.total_bytes,
@@ -169,3 +184,20 @@ fn bake_complete_cas_profile(compiler:bool)->anyhow::Result<()> {
 }
 #[cfg(not(target_os="linux"))]
 fn main(){eprintln!("fixed image DATA emitter requires Linux");std::process::exit(78);}
+
+#[cfg(all(test,target_os="linux"))]
+mod c1_cli_tests {
+    use super::*;
+    #[test]fn explicit_c1_profile_is_distinct_and_accepts_no_path_hash_or_extra_argument(){
+        let args=|values:&[&str]|values.iter().map(|v|std::ffi::OsString::from(*v)).collect::<Vec<_>>();
+        assert_eq!(BakedProfile::from_exact_args(&args(&["--bake-compiler-c1-cas-v1"])),Some(BakedProfile::CompilerC1));
+        for values in [vec![],vec!["--bake-compiler-c1-cas-v1","/tmp/source"],vec!["--bake-compiler-c1-cas-v1","--manifest-sha256=0000"],vec!["--bake-compiler-c1-cas-v2"],vec!["--bake-compiler-cas-v1","--bake-compiler-c1-cas-v1"]]{assert_eq!(BakedProfile::from_exact_args(&args(&values)),None);}
+        assert_ne!(BakedProfile::CompilerC1.output(),BakedProfile::CompilerA2.output());
+        assert_eq!(BakedProfile::CompilerC1.output(),"/var/lib/rudder-compiler-c1-cas-v1");
+    }
+    #[test]fn legacy_runtime_and_a2_exact_flags_and_outputs_remain_unchanged(){
+        assert_eq!(BakedProfile::from_exact_args(&["--bake-cas-v1".into()]),Some(BakedProfile::Runtime));
+        assert_eq!(BakedProfile::from_exact_args(&["--bake-compiler-cas-v1".into()]),Some(BakedProfile::CompilerA2));
+        assert_eq!(BakedProfile::Runtime.output(),"/var/lib/rudder-image-cas-v1");assert_eq!(BakedProfile::CompilerA2.output(),"/var/lib/rudder-compiler-cas-v1");
+    }
+}

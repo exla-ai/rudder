@@ -223,7 +223,7 @@ fn lookup(conn:&Connection,key:&str)->Result<Option<(MachineReceipt,String,Strin
     }).transpose()
 }
 
-fn operation_alias(operation:&HostOperation)->Result<&str> {match operation {HostOperation::OpenPreparedProjectV1 {project_alias,..}|HostOperation::StartTaskV1 {project_alias,..}=>Ok(project_alias),_=>anyhow::bail!("query has no effect project")}}
+fn operation_alias(operation:&HostOperation)->Result<&str> {match operation {HostOperation::OpenPreparedProjectV1 {project_alias,..}|HostOperation::StartTaskV1 {project_alias,..}|HostOperation::BuildCurrentSourceSdkV1 {project_alias,..}=>Ok(project_alias),_=>anyhow::bail!("query has no effect project")}}
 
 fn check_sidecars(path:&std::path::Path)->Result<()> {for suffix in ["-wal","-shm"] {let mut name=path.as_os_str().to_os_string();name.push(suffix);
     match fs::symlink_metadata(std::path::Path::new(&name)) {Ok(m)=>private_file(&m)?,Err(e) if e.kind()==std::io::ErrorKind::NotFound=>{},Err(e)=>return Err(e.into())}}Ok(())}

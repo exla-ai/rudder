@@ -1,0 +1,112 @@
+{
+  "format_version": 1,
+  "kind": "provider-owner-postgresql-component-qualification",
+  "provider": "Fly.io",
+  "app": "rudder-workers-exla",
+  "name": "rudder-managed-pg-provider-owner-20261101-a2",
+  "qualification": "f227722e-02cd-40bb-af55-855d63939981",
+  "startedAt": "2026-11-01T21:03:12.408Z",
+  "image": {
+    "requested": "Root-supplied component PG+Python image",
+    "platform": "linux/amd64",
+    "manifestDigest": "sha256:b0c21439e441671351766e8a2f4e87810887a7d6add0bac4959d7c16388143a4",
+    "image": "registry.fly.io/rudder-workers-exla@sha256:b0c21439e441671351766e8a2f4e87810887a7d6add0bac4959d7c16388143a4",
+    "scope": "explicit Root fixture-image selection DATA only; no managed-runtime qualification"
+  },
+  "sourceArchiveSha256": "c72c831a7c093654cffa13244eb434cfbf5d6196c282dba163209ac02c3df3e1",
+  "machine": "2865537ef02418",
+  "instance": "01M6CERW9ZPTEYJFXGHS5G5P4G",
+  "region": "iad",
+  "resolvedImage": {
+    "registry": "registry.fly.io",
+    "repository": "rudder-workers-exla",
+    "digest": "sha256:b0c21439e441671351766e8a2f4e87810887a7d6add0bac4959d7c16388143a4"
+  },
+  "guestExitCode": 0,
+  "guestEvidenceSha256": "8067c8daad4da490c7f9ed1fd6f7bcf8e5c2c951af2b43a8a44018d6ee0248fc",
+  "nodeProof": {
+    "format_version": 1,
+    "scope": "provider-owner-real-PG-component-only",
+    "qualification": "f227722e-02cd-40bb-af55-855d63939981",
+    "fixtureVariant": "provider-owner-v1",
+    "executedCases": 1,
+    "ok": true,
+    "nonrootFixtureUser": true,
+    "syntheticEnrollmentAndCasRows": true,
+    "realRootRegistration": false,
+    "physicalNative": false,
+    "physicalProviderFence": false,
+    "actualS3": false,
+    "sdkExecution": false,
+    "normalRuntimeRetirement": false,
+    "productionEnablement": false,
+    "models": false,
+    "actualPostgres": true,
+    "freshEmptySchema": true,
+    "verifiedTLSFactories": true,
+    "firstOwnerExclusivity": true,
+    "immutableReceiptRetry": true,
+    "oldApisRefused": true,
+    "oldSqlLeaseWriterRefused": true,
+    "elapsedTimeNoRegrant": true,
+    "sameOwnerHeartbeat": true,
+    "modeChangeRefused": true,
+    "replacementRefused": true,
+    "wrongOwnershipRefused": true,
+    "fixtureConnectionsClosed": true
+  },
+  "guestCleanup": {
+    "fixture_exit": 0,
+    "cluster_stop_confirmed": true,
+    "cluster_removed": true,
+    "normal_runtime_retirement": false,
+    "exact_vm_teardown_required": true
+  },
+  "ok": true,
+  "cleanupVerified": true,
+  "cleanup": {
+    "originalCreateStillUncertain": false,
+    "observations": [
+      {
+        "ownedIdPresent": false,
+        "exactNoncePresent": false
+      },
+      {
+        "ownedIdPresent": false,
+        "exactNoncePresent": false
+      }
+    ],
+    "ownedId": "2865537ef02418"
+  },
+  "providerCalls": 24,
+  "verifiedAt": "2026-11-01T21:04:17.444Z",
+  "scope": "actual PostgreSQL first-owner exclusivity and non-temporal owner constraints; enrollment/CAS DATA fixtures, no Root/SDK or production qualification",
+  "nodeLifecycle": {
+    "actual_child_wait": true,
+    "stdout_eof": true,
+    "stderr_eof": true,
+    "exit_code": 0,
+    "forced_kill_requested": false,
+    "node_stdout_sha256": "f4dea99f3d1325817dd1c32c53960d804e23fab0029c10b31874edf033775947",
+    "node_stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "component_only": true,
+    "realRootRegistration": false,
+    "productionStartup": false,
+    "models": false,
+    "fixture_variant": "provider-owner-v1",
+    "fixture_teardown_requested": false,
+    "node_test_reporter_one_executed": true
+  },
+  "priorFailure": {
+    "ok": false,
+    "cleanupVerified": true,
+    "machine": "d892735f321508",
+    "instance": "01M6CEJABKPNB1XKA6GT6VQ1TE",
+    "verifiedAt": "2026-11-01T21:00:20.723Z",
+    "cause": "actual provider-binding SQL JSON text compared against UUID parameter; corrected explicit $4::text cast"
+  },
+  "sourceFix": {
+    "path": "cloud/src/project-authority/authority.ts",
+    "sha256": "90d215d680ca5f2f28ee4715f345bc0215e1632d2aa944b063e9fa1b4a6352e9"
+  }
+}

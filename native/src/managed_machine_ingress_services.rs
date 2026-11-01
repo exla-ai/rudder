@@ -17,7 +17,7 @@ impl MachineControl {
         ->Result<(Arc<ManagedTaskProject>,Arc<ManagedTaskLifetimeSupervisor>)> {
         self.ingress_project_current(ticket,original)?;
         loop {original.remaining()?;match ticket.cell.owner.try_lock() {
-            Ok(actual)=>{actual.owner.assert_current()?;let result=(actual.project.as_ref().context("actual project absent")?.clone(),
+            Ok(actual)=>{actual.owner.assert_current()?;ensure!(matches!(&actual.purpose,ProjectPurpose::Task(_)),"source-only project has no model/task opt-in");let result=(actual.project.as_ref().context("actual project absent")?.clone(),
                 actual.supervisor.as_ref().context("actual task supervisor absent")?.clone());original.remaining()?;return Ok(result);},
             Err(TryLockError::WouldBlock)=>std::thread::sleep(original.phase_limit(Duration::from_millis(2))?),Err(_)=>anyhow::bail!("actual project carrier poisoned")}}
     }
@@ -25,8 +25,8 @@ impl MachineControl {
         store:LocalStore,original:&FinalizationBudget)->Result<()> {
         ensure!(out.is_none(),"original initial-source output already present");self.ingress_project_current(ticket,original)?;
         loop {original.remaining()?;match ticket.cell.owner.try_lock() {
-            Ok(mut actual)=>{actual.owner.assert_current()?;let selected=actual.selected.clone();
-                *out=Some(ManagedInitialSourceOwner::capture(&mut actual.owner,&selected,store)?);original.remaining()?;return Ok(());},
+            Ok(mut actual)=>{actual.owner.assert_current()?;
+                *out=Some(ManagedInitialSourceOwner::capture_source_only(&mut actual.owner,store)?);original.remaining()?;return Ok(());},
             Err(TryLockError::WouldBlock)=>std::thread::sleep(original.phase_limit(Duration::from_millis(2))?),Err(_)=>anyhow::bail!("actual project carrier poisoned")}}
     }
 }

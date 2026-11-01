@@ -177,6 +177,19 @@ No custom consensus algorithm. Use database transactions and fencing first;
 introduce an established replicated coordinator only when availability requires
 it. Keep transport/outbox records in the transaction that commits their event.
 
+For new Cloud projects, support explicit provider-fenced ownership alongside
+clock-based leases. Provider-fenced ownership has one durable owner, ownership
+UUID and epoch bound to its actual engine, boot and provider incarnation.
+Elapsed database time or a missed heartbeat never frees that ownership. A
+replacement requires proven fencing of the original host and reconciliation of
+uncertain effects before an atomic epoch change. Unknown fencing keeps new
+admission closed. This trades availability for exclusivity when provider clock
+rate, suspension and positive-step bounds are unavailable. Local watchdogs and
+operation deadlines remain liveness limits; they do not prove global vacancy.
+Clock-based mode still requires its separately qualified safety bounds. Modes
+are fixed at project creation, and database constraints must reject incompatible
+older writers. No live project changes mode through a configuration flag.
+
 ## 5. Core identities and contracts
 
 Version all serialized formats. References carry object kind, hash algorithm,
@@ -230,6 +243,19 @@ affected path's metadata nodes and dirty file data. Small files can use whole
 file blobs; large-file chunking is an implementation choice measured in E2.
 File-level CoW can copy an entire modified file. Block-level CoW copies dirty
 blocks but introduces another storage/runtime layer. Make that cost explicit.
+
+Publishing a private view must also scale with changed data. Retain one genuinely
+verified source parent and its environment; validate and durably publish the
+child's changed metadata/chunks, with typed parent dependencies for reads and GC.
+The first profile allows sibling views from one flat parent, with bounded depth
+and explicit compaction when an accepted successor becomes the next parent.
+Serialized membership or a caller-provided changed-file list is not proof.
+
+Initial publication and cold reattachment verify the full parent. Warm children
+inherit its completed immutable-CAS fact, rather than claiming a fresh scrub of
+every untouched blob. Changed data still requires verification and durability;
+served reads verify their bytes, and observed parent failures refuse further use.
+Measure publication separately from the descriptor fork and agent startup.
 
 Small source trees may be eagerly materialized when that beats a virtual mount.
 The central objective is eliminating repeated large dependency/build setup,

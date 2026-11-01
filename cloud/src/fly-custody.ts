@@ -6,6 +6,21 @@ import { inspect } from "node:util";
  * Fly wire contract: https://docs.fly.io/machines/api/machines-resource
  * Explicit renewal: https://fly.io/mcp/ (create_machine_lease).
  */
+/** Closed process-local startup policy, never a JSON/operator timeout or an
+ * owner grant. Only explicit managed configure/start callers select it. */
+export const FLY_MANAGED_HOME_LIFECYCLE: unique symbol = Symbol("managed-home-lifecycle-v1");
+export type FlyManagedHomeLifecycleProfile = typeof FLY_MANAGED_HOME_LIFECYCLE;
+export const FLY_MANAGED_HOME_LIFECYCLE_LIMITS = Object.freeze({ leaseSeconds:120, sessionMs:120_000, mutationMs:60_000, checkMs:5_000 });
+export function isFlyManagedHomeLifecycle(value:unknown):value is FlyManagedHomeLifecycleProfile {return value===FLY_MANAGED_HOME_LIFECYCLE;}
+/** Fixed HTTP caps. The original operation signal/global provisioning clock
+ * can cut these shorter; a new timer never extends either original cutoff. */
+export function flyProviderHttpTimeoutLimit(profile:FlyManagedHomeLifecycleProfile|undefined,method:string,path:string):number {
+  if(profile===undefined)return 15_000;
+  if(!isFlyManagedHomeLifecycle(profile))fail("invalid_input");
+  const lifecycleWait=method==="GET"&&/^\/v1\/apps\/[a-z0-9][a-z0-9-]{0,62}\/machines\/[a-z0-9_-]{1,64}\/wait\?state=settled&version=[A-Za-z0-9_-]{1,128}&timeout=[1-9][0-9]?$/.test(path);
+  return lifecycleWait||method==="POST"&&/^\/v1\/apps\/[a-z0-9][a-z0-9-]{0,62}\/machines\/[a-z0-9_-]{1,64}(?:\/start)?$/.test(path)
+    ?FLY_MANAGED_HOME_LIFECYCLE_LIMITS.mutationMs:FLY_MANAGED_HOME_LIFECYCLE_LIMITS.checkMs;
+}
 export type FlyCustodySample = Readonly<{ wallMs: number; boottimeMs: number }>;
 export interface FlyCustodyClock {
   /** Trusted process-local, suspend-aware time. Restart/resume uncertainty must
@@ -18,6 +33,7 @@ export type FlyCustodyRequest = Readonly<{
   headers: Readonly<Record<string, string>>;
   body?: string;
   signal: AbortSignal;
+  lifecycleProfile?: FlyManagedHomeLifecycleProfile;
 }>;
 export type FlyCustodyReply = Readonly<{ status: number; body: unknown }>;
 export interface FlyCustodyTransport {
@@ -33,7 +49,7 @@ export type FlyMachineExpectation = Readonly<{
   instanceId: string;
   configSha256: string;
   /** Fresh 256-bit correlation supplied by the trusted controller. The lease
-   * description echoes it; that is NOT an authenticated worker/NET challenge. */
+   * description echoes its full SHA256; that is NOT an authenticated worker/NET challenge. */
   challenge: string;
 }>;
 export type FlyMachineMutation =
@@ -99,6 +115,8 @@ export type FlyMachineLeaseOptions = Readonly<{
    * deadline is accepted, and explicit renewal can never move this cap. */
   sessionLifetimeMs?: number;
   requestTimeoutMs?: number;
+  /** Trusted code-only closed startup policy. Ordinary/publication defaults stay unchanged. */
+  lifecycleProfile?: FlyManagedHomeLifecycleProfile;
 }>;
 
 const MAX_CONFIG_BYTES = 256 * 1024;
@@ -114,8 +132,8 @@ function object(value: unknown): Record<string, unknown> {
 function text(value: unknown, max = 256): value is string {
   return typeof value === "string" && value.length > 0 && value.length <= max && !/[\x00-\x1f\x7f]/.test(value);
 }
-function ttl(value: number): number {
-  if (!Number.isSafeInteger(value) || value < 1 || value > 60) fail("invalid_input");
+function ttl(value: number, lifecycle = false): number {
+  if (!Number.isSafeInteger(value) || (lifecycle ? value !== FLY_MANAGED_HOME_LIFECYCLE_LIMITS.leaseSeconds : value < 1 || value > 60)) fail("invalid_input");
   return value;
 }
 function canonicalConfig(value: unknown): string {
@@ -169,23 +187,29 @@ function nonceEqual(value: unknown, held: Buffer): boolean {
 
 class MachineLeaseSession implements FlyMachineLeaseSession {
   #transport: FlyCustodyTransport; #clock: FlyCustodyClock; #expected: FlyMachineExpectation;
+  #lifecycle: boolean;
   #timeout: number; #ttl: number; #sessionLifetime: number; #description: string; #challengeHash: string;
   #phase: Phase = "new"; #uncertain = false; #closing = false;
   #last?: FlyCustodySample; #cap?: End; #lease?: Lease; #nonce?: Buffer;
   #pending?: Operation; #releaseAttempted = false; #releaseAck = false;
   constructor(options: FlyMachineLeaseOptions) {
     this.#transport = options.transport; this.#clock = options.clock;
-    this.#expected = Object.freeze({ ...options.expected }); this.#ttl = ttl(options.ttlSeconds);
+    this.#lifecycle = isFlyManagedHomeLifecycle(options.lifecycleProfile);
+    if(options.lifecycleProfile!==undefined&&!this.#lifecycle)fail("invalid_input");
+    this.#expected = Object.freeze({ ...options.expected }); this.#ttl = ttl(options.ttlSeconds,this.#lifecycle);
     this.#sessionLifetime = options.sessionLifetimeMs ?? this.#ttl * 1000;
-    this.#timeout = options.requestTimeoutMs ?? 1500;
+    this.#timeout = this.#lifecycle ? FLY_MANAGED_HOME_LIFECYCLE_LIMITS.checkMs : options.requestTimeoutMs ?? 1500;
     const e = this.#expected;
     if (!e || !/^[a-z0-9][a-z0-9-]{0,62}$/.test(e.app)
       || !/^[a-z0-9_-]{1,64}$/.test(e.machineId) || !/^[A-Za-z0-9_-]{1,128}$/.test(e.instanceId)
       || !/^[0-9a-f]{64}$/.test(e.configSha256) || !/^[0-9a-f]{64}$/.test(e.challenge)
       || !Number.isSafeInteger(this.#timeout) || this.#timeout < 1 || this.#timeout > 5000
       || !Number.isSafeInteger(this.#sessionLifetime) || this.#sessionLifetime < 1000 || this.#sessionLifetime > MAX_SESSION_LIFETIME_MS
+      || this.#lifecycle && (options.requestTimeoutMs!==undefined || this.#sessionLifetime>FLY_MANAGED_HOME_LIFECYCLE_LIMITS.sessionMs)
       || typeof this.#transport?.request !== "function" || typeof this.#clock?.sample !== "function") fail("invalid_input");
-    this.#challengeHash = hash(e.challenge); this.#description = `rudder-machine-custody-v1:${e.challenge}`;
+    // Fly permits at most64 runes. Reuse the complete already-computed256-bit
+    // correlation hash, without truncating or weakening exact echo checks.
+    this.#challengeHash = hash(e.challenge); this.#description = this.#challengeHash;
   }
   #invalidate(): void {
     this.#uncertain = true; this.#phase = "uncertain";
@@ -211,7 +235,7 @@ class MachineLeaseSession implements FlyMachineLeaseSession {
     const cleanup = name === "release" || name === "reconcile";
     if (!cleanup && name !== "acquire" && (this.#phase !== "held" || this.#closing)) fail("not_current");
     if (name === "acquire" && this.#phase !== "new") fail("not_current");
-    let end = addEnd(at, this.#timeout);
+    let end = addEnd(at, this.#lifecycle&&name==="mutate" ? FLY_MANAGED_HOME_LIFECYCLE_LIMITS.mutationMs : this.#timeout);
     if (!cleanup) {
       if (name === "acquire") this.#cap = addEnd(at, this.#sessionLifetime - MARGIN_MS);
       const cap = this.#cap;
@@ -248,7 +272,8 @@ class MachineLeaseSession implements FlyMachineLeaseSession {
     Object.defineProperty(headers, "toJSON", { value: redactedHeaders });
     Object.defineProperty(headers, inspect.custom, { value: redactedHeaders });
     Object.freeze(headers);
-    const request = { method, path: this.#path(suffix), headers, body, signal: op.abort.signal };
+    const request: FlyCustodyRequest = { method, path: this.#path(suffix), headers, body, signal: op.abort.signal,
+      lifecycleProfile:this.#lifecycle?FLY_MANAGED_HOME_LIFECYCLE:undefined };
     const redacted = () => ({ method, path: request.path, headers: redactedHeaders(), ...(body === undefined ? {} : { body: "[REDACTED]" }) });
     Object.defineProperty(request, "toJSON", { value: redacted });
     Object.defineProperty(request, inspect.custom, { value: redacted }); Object.freeze(request);
@@ -352,7 +377,7 @@ class MachineLeaseSession implements FlyMachineLeaseSession {
     finally { this.#finish(op); }
   }
   async renew(ttlSeconds: number): Promise<FlyMachineLeaseObservation> {
-    ttl(ttlSeconds); const op = this.#begin("renew");
+    ttl(ttlSeconds,this.#lifecycle); const op = this.#begin("renew");
     try {
       await this.#verify(op);
       const lease = this.#leaseReply(await this.#request(op, "POST", "/lease",
@@ -367,6 +392,7 @@ class MachineLeaseSession implements FlyMachineLeaseSession {
   async mutate(mutation: FlyMachineMutation): Promise<Readonly<{ kind: "machine-mutation-http-ack"; action: FlyMachineMutation["action"] }>> {
     let method: FlyCustodyRequest["method"] = "POST", suffix: string, body: string | undefined, configHash: string | undefined;
     const action = mutation?.action;
+    if(this.#lifecycle&&action!=="update"&&action!=="start")return fail("invalid_input");
     if (mutation?.action === "update") {
       const config = canonicalConfig(mutation.config); configHash = hash(config); suffix = "";
       body = `{"config":${config},"current_version":${JSON.stringify(this.#expected.instanceId)}}`;
@@ -379,7 +405,23 @@ class MachineLeaseSession implements FlyMachineLeaseSession {
       await this.#verify(op); this.#phase = "retired"; // Before any mutation dispatch.
       const reply = await this.#request(op, method, suffix, body);
       if (reply.status !== 200) fail("rejected");
-      if (action === "update") this.#machine(reply, configHash, false);
+      if (action === "update") {
+        this.#machine(reply, configHash, false);
+        if(this.#lifecycle){
+          // A known update ACK may precede provider settlement. Keep THIS
+          // operation, signal and deadline; a wait cannot manufacture the ACK.
+          const machine=object(reply.body),version=machine.version??machine.instance_id;
+          if(!text(version,128)||!/^[A-Za-z0-9_-]+$/.test(version))fail("identity_changed");
+          const at=this.#guard(op),remaining=Math.min(op.end.wallMs-at.wallMs,op.end.boottimeMs-at.boottimeMs);
+          const seconds=Math.min(55,Math.floor((remaining-250)/1000));
+          if(seconds<1)fail("expired");
+          const waited=await this.#request(op,"GET",`/wait?state=settled&version=${version}&timeout=${seconds}`);
+          if(waited.status!==200)fail("rejected");
+          const final=await this.#request(op,"GET"),actual=object(final.body);
+          this.#machine(final,configHash,false);
+          if((actual.version??actual.instance_id)!==version||actual.state!=="stopped")fail("identity_changed");
+        }
+      }
       return Object.freeze({ kind: "machine-mutation-http-ack", action });
     } catch (error) { this.#invalidate(); throw this.#error(error); }
     finally { this.#finish(op); }

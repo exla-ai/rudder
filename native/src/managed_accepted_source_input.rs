@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicBool,Ordering};
 
 pub(crate) struct AcceptedSourceInput {
     identity:Arc<()>,owner:OwnerFence,receipt:VcsIntentReceipt,repo:Arc<jj_lib::repo::ReadonlyRepo>,
-    verified:Arc<VerifiedSourceProjection>,directories:Vec<IntegrationDirectory>,
+    verified:Arc<VerifiedSourceProjection>,backed:Option<Arc<rudder_engine::store::environment_dependencies::EnvironmentDependentPinOwner>>,directories:Vec<IntegrationDirectory>,
 }
 impl AcceptedSourceInput {
     pub(crate) fn same_origin(&self,identity:&Arc<()>)->bool{Arc::ptr_eq(&self.identity,identity)}
@@ -15,6 +15,7 @@ impl AcceptedSourceInput {
     pub(crate) fn receipt(&self)->&VcsIntentReceipt{&self.receipt}
     pub(crate) fn integration(&self)->&IntegrationReceipt{self.receipt.integration.as_ref().unwrap()}
     pub(crate) fn repository(&self)->&Arc<jj_lib::repo::ReadonlyRepo>{&self.repo}
+    pub(crate) fn backed(&self)->Option<&Arc<rudder_engine::store::environment_dependencies::EnvironmentDependentPinOwner>>{self.backed.as_ref()}
     pub(crate) fn verified(&self)->&Arc<VerifiedSourceProjection>{&self.verified}
     pub(crate) fn check_physical(&self)->Result<()> {for directory in &self.directories{directory.check_current()?;}Ok(())}
     pub(crate) fn check_current(&self,lease:&EngineSourceLease,journal:&Journal,budget:&FinalizationBudget,cancel:&AtomicBool)->Result<()> {
@@ -81,11 +82,14 @@ impl ManagedCheckpointAcceptance {
         ensure!(CommitIdentity::from_jj(&commit)==record.commit
             &&repo.view().get_wc_commit_id(jj_lib::ref_name::WorkspaceName::DEFAULT)==Some(commit.id()),
             "Published operation lacks exact accepted WC/commit identity");
+        let backed=self.backed_candidate.as_ref().map(|p|p.acknowledgment().cloned()).transpose()?;
+        if let Some(backed)=&backed{let previous=previous.runnable_dependency().context("backed acceptance predecessor boundary absent")?;
+            ensure!(Arc::ptr_eq(backed.environment(),previous.environment())&&backed.root_data()==&receipt.request.recovery_root,"Published acceptor changed original Environment boundary");}
         let identity=self.generation_identity.get_or_insert_with(||Arc::new(())).clone();
         let mut directories=Vec::with_capacity(repository.directories.len()+1);
         directories.push(IntegrationDirectory{path:repository.path.clone(),held:repository.directory.try_clone()?});
         for d in &repository.directories{directories.push(IntegrationDirectory{path:d.path.clone(),held:d.held.try_clone()?});}
-        let input=Arc::new(AcceptedSourceInput{identity,owner:self.lease.owner().clone(),receipt:receipt.clone(),repo,verified:verified.clone(),directories});
+        let input=Arc::new(AcceptedSourceInput{identity,owner:self.lease.owner().clone(),receipt:receipt.clone(),repo,verified:verified.clone(),backed,directories});
         input.check_current(&self.lease,journal,budget,cancel)?;repository.check_current()?;Ok(input)
     }
     /// Explicit OFF-App lock release only after the original successor source
@@ -99,7 +103,7 @@ impl ManagedCheckpointAcceptance {
         ensure!(out.is_none(),"original canonical input release already attempted");repository.check_current()?;
         *out=Some(AcceptedInputRelease{identity:self.generation_identity.as_ref().unwrap().clone(),_lock:repository.lock.try_clone()?,acknowledged:false});
         FileExt::unlock(&repository.lock)?;out.as_mut().unwrap().acknowledged=true;repository.lock_held=false;
-        time(budget,cancel)
+        time(budget,cancel)?;repository.writer_released.store(true,Ordering::Release);Ok(())
     }
 }
 fn time(budget:&FinalizationBudget,cancel:&AtomicBool)->Result<()> {if cancel.load(Ordering::Acquire){budget.cancel();anyhow::bail!("original accepted source job cancelled");}budget.remaining()?;Ok(())}

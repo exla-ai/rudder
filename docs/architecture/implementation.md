@@ -51,12 +51,81 @@ Tag run41331075052 authenticated and reused those exact artifacts for npm.
 The actual stock worker smoke and deployed control checks are recorded in the
 alpha.33 evidence; configured runtime-floor qualification remains separate.
 
-The next uncommitted work adds retained local/baked preparation, shared index
-ownership, authenticated runtime backing transfer, and genuine backed initial
-source/export consumers. A separate runtime-role publisher and Native bridge
-are under qualification. These paths, task/successor integration, compiler SDK
-authority, restart recovery and normal runtime drain are not established by
-the alpha.33 delivery or its default-absent bootstrap smoke.
+The uncommitted batch now connects retained baked preparation and a shared
+Environment boundary through initial source, selected task resources, checkpoint
+retention and accepted successors. Its nine storage cases pass. The original full
+Rudder-history composition failed because 597MB of reconstructed Git history
+exceeds the old 384MiB raw importer. The explicit PackedHistoryV2 path now passes
+the actual full-history plus 1.975GB runtime component: 12,260 Git objects become
+51,047,059 encoded bytes, with 724,831,675 bytes of bounded verification work.
+Source/seed/runnable preparation takes 11.866s inside its original 30 seconds;
+typed capture, environment preparation and dependency derivation are separately
+bounded phases, not one combined startup measurement. Eleven selected format,
+process, Git and jj tests pass. The explicitly selected repetitive-history
+debug stress test expires its original deadline; that failure and the original
+raw-history refusal remain in [composition evidence](verification-environment-dependency-working.json).
+The optimized full-repository result does not qualify 50 forks, cold storage,
+actual agent launch or normal filesystem retirement.
+
+Automatic mailbox notices now use the existing durable effect ledger and wake
+only qualified idle sessions. Thirteen Journal tests and six Native checks pass;
+notices do not acknowledge mail. Native library regressions pass 245 cases with
+21 ignored. The new SDK Cloud code compiles, its 23 protocol checks pass, and
+the [actual PostgreSQL SDK-role qualification](verification-sdk-role-pg-working.json)
+passes again with the SDK semantic v2 schema at 19:36:41Z, with restricted roles,
+TLS, commit loss, socket closure, expiry and exact
+owned cleanup. Root/compiler evidence in that database run is explicitly fixture
+data. The actual C1 [artifact](verification-compiler-c1-working.json) and
+[CAS producer](verification-compiler-c1-cas-working.json) built successfully;
+the current A6 bake produced 6,430 objects / 1,174,586,558 bytes in 24.299s.
+After adding only the signed-package public CA bundle, the actual disposable
+Linux VM passed C/C++, Rust executable, offline Cargo build script, SQLite,
+TypeScript and Buck2 C++ action/output checks. Exact owned VM cleanup and the
+unchanged live home were verified at 19:30:42Z. [Functional evidence](verification-compiler-c1-functional-working.json)
+is separate from actual Root SDK admission and normal daemon retirement.
+
+A source review found two concrete SDK cache-input gaps: compilers can read
+unkeyed job metadata and kernel `/proc` values. Local SDK warm reuse is now
+disabled. Per-run artifacts/evidence remain retained; their receipts include the
+execution nonce and explicitly prohibit reusable-cache admission. Enforced
+hermetic reads/effects are required before reuse can return. The review and
+new cache guard still require full integration/physical regression qualification.
+
+Successful per-job resource disposal is locally connected through the existing
+canonical worker pool. Run 356 compiles all Native targets; runs 357/358 pass
+eleven new Child, socket, descriptor, actual thread/TLS join, real CAS and serial
+component cases. Full genuine SDK disposal/capacity reuse is unverified. Routine
+terminal helper failures still need a separate authenticated failed-job outcome
+and disposal path. That v2 is now integrated without inventing artifact success;
+run 364 passes 25 SDK component cases, including bounded real diagnostics and
+terminal-failure retention. Runs 365–367 pass ten current-source policy, actual
+Engine/Journal/Git/jj owner and two-worker/TLS cleanup cases. Actual ordinary
+SourceOnly trigger wiring and positive SDK execution remain unverified.
+
+The first payload-read isolation implementation required Landlock. Actual
+`6.12.114-fly` kernel configuration has `CONFIG_SECURITY_LANDLOCK` disabled;
+the real syscall refuses with ENOSYS. Two Linux filesystem tests therefore fail
+and two descriptor/policy tests pass. This is an unsupported mechanism on the
+current Fly kernel, not physical SDK readiness. Cache reuse stays disabled while
+an explicit proc-less view and compiler-only seccomp replace it. The five actual
+Fly kernel component tests now pass, including fresh-PID proc-FD isolation,
+recursive mounts, read-only inputs, writable private outputs, descriptor closure,
+ordinary threads/forks and x32 refusal. Two Rust policy checks pass after adding
+the missing PermissionsExt trait import. Actual SDK Python/Rust/TypeScript
+execution still requires the newly built configured worker. No unconfined retry
+or live-home restart occurs.
+
+The complete Native binary run 353 passed 1,351 cases with 21 ignored before
+the subsequent catalogue/isolation changes. C1 catalogue Engine run 354 passes
+nine cases, Cloud compiles, and fourteen catalogue/protocol/semantic Node cases
+pass. These do not qualify the later configured worker or its compiler role.
+
+Canonical gate production is locally connected; run 348 passed sixteen selected
+Native canonical/legacy cases, including twelve new policy/repository/worker
+checks. The new Journal and retained-input tests remain a separate check.
+Complete SDK execution qualification, enforced cache inputs, actual multi-agent execution,
+restart recovery and normal runtime drain remain unfinished. These working checks are separate from alpha.33's
+deployed revision and default-absent bootstrap smoke.
 
 The new compiler CAS producer passed all seven real Root0 Bookworm tests and
 baked the actual pinned 852MB A2 compiler artifact in 14.466s under its unchanged
@@ -2046,3 +2115,583 @@ floor slot before reporting expiration. The first compile caught an old direct
 mutable-lock use; the corrected existing custody path requires the actual lock
 and refuses readonly floors. Run240 passed14 library VFS checks with four
 explicit physical/Root skips. Broader VFS regressions remain pending.
+
+
+### Current continuation: ownership and staging producers
+
+The ordinary source path correctly requires actual fresh storage, PostgreSQL
+acquisition and a Root/Native owner. No qualified Fly suspension/database
+clock-step receipt exists. ProviderFencedV1 is therefore being implemented as a
+distinct new-project ownership mode, with no timer-based replacement. Its real
+first-owner issuer, constraints rejecting older writers and physical replacement
+coordinator still need qualification; unsupported replacement must stay closed.
+This is not a ClockSafety ready flag or an exception to source admission.
+
+The staged physical sequence is compiler SDK qualification and explicit SDK
+activation, runtime qualification and explicit runtime activation, then a fresh
+ordinary home under the same immutable policy. Original known-commit publisher
+permits and real admin authority must drive activation. The runtime permit can
+supply its exact image-qualification tuple; storage/service/S3 admission remains
+separate. The updated control image d3fd8c26a294319102806d101adcbe86bd8dfa63d468b15c9655a102a4edb712
+was built only. An isolated staging app and read-only disposable identity-probe
+machine were subsequently created; the machine has been destroyed. Its context
+is fixed at 5b9d300866ba97f331aa5587f5bc8111179ee9a8de9713b3e3e0d3f1a79584d8.
+It predates the new activation/source-only/provider-mode changes and will need
+another coherent build after their integration. A read-only default AWS profile
+check at 20:32:32Z confirmed versioning on the existing Rudder fabric bucket;
+that does not issue a staging S3 backend or service credential.
+
+### 2026-11-01 20:44Z: source trigger, staged activation and actual S3 identity
+
+The source-only trigger is integrated exactly from sealed manifest
+`920f1f72684dd2bf5d0a440395d7b1b31029464416ef39d59f507b0fb9068dd6`,
+27 targets. Cloud compilation and all eight new Node command/config/actual-script
+fake-transport checks pass. Native runs368/369 pass all seven new fixed-source/wire cases;
+related machine-entry and SDK-origin runs370/371 pass sixteen and four cases. The staged
+SDK activation, runtime activation and distinct ordinary-home flow is also
+integrated exactly, 17 targets, manifest
+`972ec7ab5fd965c45c1c639d2958545f4d801402fa8ca74a9662ad504480c96d`.
+Its three local permit-refusal and actual listener/WebSocket tests pass. Full
+Cloud compilation currently awaits the separate provider-fenced ownership type
+and producer implementation. No physical SDK/activation/build success follows.
+
+The isolated `rudder-v4-qualification` Fly app, dedicated versioned S3 bucket
+and restricted workload role now exist. Actual Fly OIDC plus the same
+`S3FabricObjectStorage.fromWebIdentityForImmutableBatches` adapter passed real
+versioning/lifecycle/policy readback in 1,037ms, with all IO settled and no
+objects written. [Identity evidence](verification-staging-s3-working.json)
+records the original image/VM/instance and exact cleanup, two absent inventories
+and unchanged live home at 20:43:46Z. This is a workload/backend component proof;
+the later staging process must qualify its own original adapter again. No Root,
+compiler, storage-role activation, project acquire or production deployment is
+claimed by the readback. Shared SDK cache reuse remains disabled.
+
+The staged flow review found its 200 status polls at 100ms could reject a valid
+25-second build before work30 elapsed, and three cases could exceed the global
+512-message cap. Root changed query-only pacing to 500ms, 160 polls per case
+and a 1,024-message total budget. Original ordinary/setup/work/cleanup bounds
+remain unchanged; no mutation is replayed. Two focused polling regressions are
+defined and await the final provider-mode Cloud build. The existing sidecar
+harness now injects its actual imported qualification relay; 33 relevant Node
+qualification/transport/listener checks pass.
+
+### 2026-11-01 20:53Z: provider-mode compile and actual S3 CAS component
+
+ProviderFencedV1 is integrated exactly from27-output sealed manifest
+`acebd316c1a50c57e705f2ff57d45d2678c17766842a99689ece39c677880c62`.
+Cloud builds. Native run372 passes four new provider protocol/local-liveness
+cases plus four existing provider cases; run373 compiles the actual binary
+consumers and passes sixteen machine-entry cases. Four new Node provider
+checks and both status-polling regressions pass. The real-PG concurrency and
+old-writer qualification is not yet run. Review identified one heartbeat route
+still doing Fly management reads inside the two-second heartbeat budget; the
+narrow committed-binding route correction is being prepared.
+
+Actual isolated S3 CAS component now passes through a new Fly OIDC VM: policy
+readback,404 misses, staging create/conditional renewal, immutable blob PUT,
+exact read, identical-content conflict verification, actual AWS403 overwrite
+and deletion denials, unchanged original bytes, staging deletion and actual
+foreign-account conditional PUT denial. Final VM7813e0dc141378 / instance
+01M6CE41JB18H56WEVAFFVJ6TB exited0; its exact cleanup/two absences and unchanged
+live home were verified at20:52:20Z. The two earlier probe assertion failures
+and their cleanup remain in [S3 evidence](verification-staging-s3-working.json).
+They concern sanitized error observation and nonexistent foreign GET404, not
+successful forbidden writes. Three tiny immutable fixture blobs remain retained.
+The isolated IAM role was corrected to actual hashed account/staging paths and
+ListBucket miss semantics; production storage/policy is untouched. These checks
+issue no Root/SDK/Source authority or reusable-cache admission.
+
+The stock managed image now protects `/opt/rudder-worker` itself as Root0/0555
+and creates the empty protected SDK mount before runtime bake. All14 executable
+Python asset checks pass with two skips. Fresh worker source756 files/15.3MB,
+plus227 freshly generated CLI/board outputs, is frozen at manifest
+`3e34a5e237ffb93e81c423968b57682492a18466accaba7a3b2f6f1cc5edacce`.
+A new remote stock-managed build is in flight, with real fresh native/emitter
+outputs and baked runtime selected. It has no deployment or qualification claim;
+C1 CAS overlay and the physical SDK→runtime→ordinary flow remain next.
+
+The heartbeat registry correction is integrated exactly from sealed manifest
+`fb71d3b4d9f21e16f6739f44a73ed825d5165dce5c2cefbee5867d8d4b9091bb`.
+Cloud builds; four genuine registry/HMAC-path fixture regressions pass, retaining
+invalid MAC/foreign worker/changed binding refusal and old clock-renew behavior.
+It does not construct a successful Native provider owner. Independent bounded
+review found no additional concrete ownership P1/P2. Thirty-nine related Cloud
+policy/provisioning/storage/clock/provider regressions pass.
+
+The updated staging-control image is built:
+`sha256:c192f728efeef6e4e30e89dfb108e33328d62deff8feb2ded02740e40b39d341`,
+context manifest `1f91d237dc6b62fc39ac925c2381e5ff22be3ec6e7b80085833706e8ebb74bd4`,
+verified20:57:18Z. This includes provider mode, trigger, original activation and
+heartbeat route correction; it is not a managed worker or execution proof.
+The isolated app now has publicIPv6 and sharedIPv4 for its fixed HTTPS origin.
+No control machine is running yet. The actual provider-owner PostgreSQL variant
+is integrated with unchanged budgets and is running on its own disposable VM;
+fixture enrollment/CAS rows remain explicitly synthetic. Activation-only PG
+cases are being connected separately, preserving the older suites.
+
+### 2026-11-01 21:04Z: actual provider-owner PostgreSQL component passes
+
+The first physical PG run reached provider bootstrap but failed because one
+query used the same UUID parameter in a JSON text comparison. Root added the
+explicit `$4::text` cast; no admission/fence check was removed. That original
+failure, natural process evidence, server error and exact owned cleanup remain
+retained. A fresh second cluster then passed actual concurrent first-owner
+exclusivity, immutable receipt retry, old API/raw SQL lease-writer refusal,
+16s without heartbeat and no time-based regrant, same-owner heartbeat, immutable
+mode and replacement/wrong-owner refusal. Actual restricted TLS factories,
+nonroot user, natural Child exit0/both EOFs and PG stop/removal are checked.
+[PG evidence](verification-provider-owner-pg-working.json) records24 provider
+calls and exact VM2865537ef02418 cleanup/two absences at21:04:17Z. Enrollment,
+provider and CAS rows are explicitly synthetic DATA; this cannot construct a
+Native owner, prove Root registration or qualify physical replacement/SDK.
+The older control imagec192f728 predates the SQL correction and must be rebuilt
+before the full ordinary-source staging campaign.
+
+### 2026-11-01 21:10Z: fresh worker artifacts and activation/regression checks
+
+The fresh stock managed build produced all four Bookworm production ELFs and
+same-source preseed emitter. Its new runtime CAS has22,177 objects and
+1,980,777,987 bytes, inventory9a9cd9a6…, manifestcfa14328…, installer7f67e750….
+Base image004218657658… then received only the exact pinned C1 CAS overlay,
+which verifies the four ELF/inventory hashes, compiler descriptors and protected
+SDK parent/empty leaf. Final worker image is
+`sha256:f4d5922cfa332a67e05fccd6e7bd46703c24f1a51b4a832346535c4434ba55a6`.
+[Build evidence](verification-managed-c1-worker-working.json) labels these
+unreleased working-source artifacts; their packageVersion33 is not the shipped
+alpha33 product identity. No SDK/runtime execution role is claimed yet.
+
+The corrected control image includes the actual PG-tested SQL cast:
+`sha256:ec7ed50fd7c5e9680cee1f5259882fd317d368a009f5c196224098b887e70853`,
+context77cb91e7ac7d…, built21:07:01Z. Full Native library run374 passes275 with
+21 ignored; complete Native binary run375 passes1,365 with21 ignored. The
+actual SDK activation-only PG component passes all three fresh DB cases:
+known one-shot original publisher permit, actually forwarded COMMIT with lost
+reply remaining unknown, and wrong-real-DB refusal. Actual3 closed socket pairs,
+restricted TLS factories and exact VM cleanup/two absences were verified at
+21:09:03Z,22 provider calls. [Activation evidence](verification-staging-activation-pg-working.json)
+keeps synthetic Root/compiler/provider evidence explicit. The corresponding
+runtime activation component and actual fresh-volume component are next.
+
+The runtime activation-only PG component also passes its three fresh DB cases,
+with genuine original fixture SDK publication/activation first in each SAME DB,
+then runtime original permit, actual lost admin-COMMIT reply and wrong-DB refusal.
+Six actual socket pairs close; all original owners remain retained through the
+fixture lifetime. Exact VM8ee335b7e10d48 cleanup/two absences were verified at
+21:12:54Z,24 provider calls. These database mechanisms retain explicit synthetic
+Root/compiler/provider labels and do not qualify physical SDK/runtime mounts.
+
+### 2026-11-01 21:27Z: regression and original-custody corrections
+
+Full Node run376 executes1,009 cases:997 pass,11 skip, one older sidecar
+import-stripping harness fails because it did not inject the now-imported
+qualification relay. Root corrected only that harness; nineteen affected
+uploader/sidecar tests then pass. The original failed full log remains retained;
+this is not a claim of a subsequent green full run.
+
+The ordinary staging registry originally archived/deleted its actual provision
+carrier before the driver requested recovery DATA. The narrow correction is
+integrated from manifest62d8158509d7…: only explicit qualification-origin,
+fixed-source-suite, provider-mode ordinary carriers stay retained within the
+existing16-carrier bound. Default production archival remains unchanged; the
+getter refuses foreign/unqualified state and exposes no secret or cleanup
+authority. Cloud builds and all eight new lifecycle cases pass, together with
+sixteen related provisioning/heartbeat cases. The final control image needs
+this correction and the pending strictly observed Fly normalization delta.
+
+Fresh-volume probe attempts1/2 stop before filesystem work because actual Fly
+readbacks expand mount metadata and omit false/empty config fields. Root
+independently reconciled their original acknowledged IDs, exact nonce/image/
+instance/config/volume attachment, then removed only those VMs/volumes and
+verified two absences plus the unchanged live home. Attempt3 reaches the real
+guest filesystem but fails a mount/device assertion; its automatic exact
+cleanup succeeds. The diagnostic attempt4 retains the original filesystem
+checks and adds bounded actual mount/device observations. No fresh-volume
+success, cold restart, Root/SDK/source grant or normal retirement is claimed.
+
+### 2026-11-01 21:27Z: actual fresh encrypted volume filesystem component
+
+The bounded fifth fresh-volume run passes actual original encrypted1GiB
+provider allocation, distinct ext4 block device/mount identity, Root ownership,
+empty root except lost+found, exclusive no-follow creation, file/directory
+fsync, same-directory atomic rename and exact inode/bytes/SHA readback. The
+usable guest device is1,056,964,608 bytes, smaller than the provider's nominal
+1GiB; actual capacity is observed and checked against the held device instead
+of asserting an unsupported exact nominal byte count. No encryption mechanism
+or cold-restart durability is inferred. All held guest files close, all actual
+CLI children reap, then exact VMe826243a5321e8 and volumevol_r7yn0gl8kox6g19r
+are destroyed and checked absent twice. The unchanged protected home and
+24 provider calls are recorded at21:27:31Z in
+[fresh-volume evidence](verification-fresh-volume-working.json), preserving all
+four prior failed component attempts and their eventual verified cleanup.
+
+The private staging policy/services templates are now prepared from actual
+worker/descriptor/PG/S3/volume evidence, explicitly limited to this isolated
+new-project run. They are not role/owner/source grants or fleet HA/clock/RPO
+qualification. The actual control bootstrap nonce still must bind their final
+bytes before upload; SDK/runtime publishers remain the only role producers.
+
+### 2026-11-01 21:39Z: final Cloud input checks and staging attempt state
+
+Fly machine readbacks omit empty env/services/false auto_destroy and expand
+mounts with encrypted/name/size metadata. The narrow parser correction is
+integrated from manifest2d80896a4194…; requests stay byte-identical, expanded
+mounts bind the original VolumeAck, raw actual config/hash remain authoritative,
+and execution/process/secret/extra-environment checks stay strict. All eight
+new normalization cases and38 related Cloud cases pass. Full Node run377 now
+passes1,014 cases, zero failures,11 skipped (1,025 total), including the
+corrected old sidecar harness and new custody/normalization cases.
+
+Final control image5a5bebe6f69d… / contexta89b40e13e96… is built from those
+coherent Cloud inputs. Its first exporter403 remains retained; a terminal exact
+immutable build-graph retry succeeds at21:33:40Z. Workerf4d5922c… is unchanged.
+
+The first actual control VM861054bee01278 boots, verifies its supervisor and
+binds the private original nonce, but its first private upload exits with an
+SSH organization-authorization rejection BEFORE admission. Its exact DELETE
+acknowledgment is reconciled by two fresh machine-list absences and unchanged
+protected home at21:37:29Z; GET retains a destroyed tombstone. No home is
+provisioned. The original local retained controller is terminated only after
+that verified cleanup. Its failed evidence/private upload remains retained.
+Current read-only organization checks succeed. A fresh second controller/bundle/
+authority uses explicit SSH organization and actual list-absence cleanup,
+with the original deadlines and no unknown upload replay. Full physical
+SDK/runtime/ordinary-source qualification remains in progress, not proved.
+
+The second control attempt also stops at SSH organization authorization before
+bootstrap/admission; its unknown DELETE is reconciled by two exact-id list
+absences and unchanged protected home, then its retained local controller ends.
+The third uses the documented Machines API command-array/stdin contract with a
+fixed actual-Child/pidfd/wait/EOF wrapper. Read-only bootstrap succeeds, but the
+actual wrapper observes ZERO stdin bytes on the first upload despite the
+nonempty request. The receiver refuses before creating the file; no role or
+home is admitted. Automatic exact VM cleanup/two absences succeeds. Request/
+response/actual-child evidence is retained privately. No confidential argv
+fallback or unknown write replay occurs.
+
+The next finite staging transport uses Fly's native encrypted app-secret file
+injection for exactly operator/services/birth, with explicit file modes and
+secret-environment suppression. A protected planned birth identity will be
+confirmed against the actual original supervisor before public admission.
+Nonsecret receipts/admission can use the bounded fixed exec receiver; private
+inputs never enter command arguments. Source/controller proposals are being
+prepared; this transport and full physical SDK flow are not yet qualified.
+
+### 2026-11-01 21:54Z: protected staging birth integrated
+
+The optional protected `birth.json` reader and strict driver compatibility are
+integrated from manifests6db76ae848bf… and340e0384504e…. The original setup900
+starts before the bounded file read; matching birth metadata does not grant
+ownership, readiness or admission. Syntax checks and two driver parser cases
+pass. The two actual-filesystem Python cases skip locally because this home is
+UID1500; actual Root-owned Fly startup/readback remains required.
+
+Control context20f2c01b7b86… compares all3,997 payload files against current
+source or the pinned original Node ELF. It reuses135,434,674 exact frozen bytes
+and changes only the supervisor and its driver reader. Its remote build is
+in flight. Full Rust workspace run378 stops at the unchanged disk-floor guard;
+obsolete, unused Root build objects/archives are removed with hash records and
+run379 starts. Neither a completed workspace suite nor the physical SDK flow
+is claimed by these source/parser checks.
+
+### 2026-11-01 22:08Z: real secret-file startup and full workspace checks
+
+Full Rust workspace run379 passes2,606 tests across69 groups, zero failures,
+77 ignored, at22:06:30Z. TypeScript checking also passes. These results precede
+the next worker launcher permission fix and do not qualify that future change.
+
+Actual native Fly secret-file delivery works, but the requested0600 becomes
+0755 in the guest. The first A6 supervisor therefore correctly refuses before
+admission. Its exact VM and three owned secrets are cleaned. A separate bounded
+metadata probe observes Root0:0, nlink1, exact bytes/hash and the Root0700 parent;
+its VM and original secret are also cleaned. The earlier403 read attempt makes
+no mutation; fresh private auth succeeds. No provider mode behavior is inferred
+from the requested configuration alone.
+
+The staging startup now retains the protected parent and bounded original FDs,
+accepts only0600 or the observed0755, restricts those files to0600 through their
+held FDs, fsyncs and rechecks named identity/bytes before parsing. The original
+setup900 includes that work. Actual A7 supervisor startup confirms all three
+Root-owned0600 files and their exact hashes plus planned birth. The component
+stops before public receipts/admission; exact VM80e9e51ae2e928 and three secrets
+are deleted and verified absent in27 calls. See
+[native secret-file evidence](verification-native-secret-files-working.json).
+
+The standalone managed worker's strict config/token/registration-key readers
+have the same provider-mode mismatch. A narrow retained startup fix is in
+preparation. Its fresh worker image and the complete SDK/runtime/ordinary flow
+remain required; no SDK role, reusable build-cache result or full v4 completion
+is claimed by the control-only pass.
+
+### 2026-11-01 22:24Z: standalone worker fix and retirement restriction
+
+The standalone launcher now retains a preparation stage before parsing its
+three fixed injected files or starting children. It validates their original
+protected parent/FDs, restricts only the observed0755 form to0600, and preserves
+existing0600 and absent-profile behavior. Eight actual file/FD cases pass;
+the complete native library passes283 tests,21 ignored. The fresh four-ELF
+worker base13579e8812d6… builds and pushes at22:22:11Z from sourcebf37421cd673…;
+its C1 data overlay is in progress. Actual worker/SDK readiness remains pending.
+
+Provider retirement groundwork closes admission without changing the original
+ownership UUID, epoch, engine, provider binding or head. It records bounded
+reconciliation inventory and one-shot dispatch intent; it produces no physical
+fence or successor. Cloud builds and18 unit cases pass. The actual PostgreSQL
+extension passes at22:23:55Z with24 provider calls and verified cluster/VM
+cleanup. Three retained failures correct invalid/incomplete topic fixture rows;
+production restrictions are unchanged. Valid FK-backed rows now prove insert
+and delete refusal. See [retirement evidence](verification-provider-retirement-working.json).
+
+The explicit fifty-fork real-source/runtime benchmark is integrated and its
+release ELF is compiling. No new fifty-fork timing or concurrency claim is
+made before execution. Its fixed single active mutation per wave measures
+logical view capacity/isolation, not fifty running model agents.
+
+The full A5 control run passes private file and public admission gates, then
+the actual SDK qualifier creates its isolated app but fails at volume creation.
+The generated name is39 characters. A distinct fresh-name component request
+returns HTTP400 with Fly's explicit30-character limit; no volume is created.
+The unknown SDK request is not replayed. Its original control/app owners remain
+retained for cleanup, and a canonical bounded name plus retained transport
+diagnostics are being prepared. Worker2c44eaacc919… / control e3cdaef6b769… are
+the actual A5 inputs. No SDK/runtime role is published.
+
+A read-only raw API check also finds the five earlier Root fixture volumes in
+`pending_destroy`, despite their disappearance from CLI inventories. The
+[fresh-volume evidence](verification-fresh-volume-working.json) now states
+that distinction: known deletion and inactive provider teardown are proved;
+physical erasure and terminal raw API absence are not.
+
+The A6 SDK run subsequently creates its30-character volume and its first
+Machine. Fly omits empty process.env and adds empty init; strict parsing refuses
+that observed representation before the Machine is configured or started. The
+next narrow parser correction preserves nonempty exec/env/init and raw config
+hash checks, and retains the original Machine ID before metadata validation.
+The control and stopped SDK Machine both receive known DELETE plus exact-version
+destroyed-wait200. Volume deletion transitions through waiting_for_detach to
+inactive pending_destroy; the app and three secrets are deleted and checked
+absent. Original and tail reconciliation use32 calls at22:44:22Z, preserving the
+initial incomplete teardown rather than replaying its known deletion.
+
+The actual Bookworm fifty-fork run fails after34 immutable publications and
+two negative attempts, during Completed(34). Successful view forks take roughly
+20ms and dependent publication roughly3.8s. The failure is inside publication;
+the per-attempt30s and total300s restrictions are not exhausted. Its original
+retained cause was omitted from the benchmark output, so the next diagnostic
+delta uses the existing failure() accessor and records bounded resource metrics.
+No quota or deadline is increased. Actual test exit101, both EOFs and terminal
+BuildKit failure are retained in [the failed benchmark evidence](verification-fifty-fork-working.json).
+
+Full Node run386 passes1,028 cases but exposes one new regression: a global128
+transport-retention limit blocks the existing16-home carrier allowance. The
+correction retains the explicit128 lifetime request cap for qualification, and
+bounds default service retention by16 app groups with128 requests each. All28
+focused transport/process/ordinary-custody cases pass after correction. Full
+Node run387 is in progress. This is a source fix, not a raised campaign limit.
+
+### 2026-11-01 23:03Z: lease contract fixed and real lifecycle checked
+
+Full Node run387 completes with1,041 passed,0 failed and11 skipped. Subsequent
+null incomplete_config handling passes16 focused cases and Cloud compiles;
+Fly's actual nullable representation remains distinct from false or nonempty
+values. A7 fixture cleanup completes32 calls at22:54:18Z, with both exact
+Machine versions terminal and SDK app/control secrets independently absent.
+
+A8 reaches SDK app, volume, Machine and all three secrets, then Fly rejects the
+lease description: the90-character prefix/challenge exceeds its64-rune limit.
+The correction sends the existing full64-character challenge SHA256. Exact
+reply comparisons, TTLs, clocks, nonce custody and reconciliation stay intact.
+All23 focused lease tests pass and Cloud compiles. A distinct operator probe
+uses the original stopped disposable SDK Machine and the actual lease class:
+acquisition201, exact readbacks, renewal201 and release200 pass in16 requests
+at23:02:32Z. This is Machine lease proof, without project or Root authority.
+See [lease evidence](verification-fly-lease-working.json). A8 fixture cleanup
+and a new frozen control-image build are in progress; no SDK readiness or
+new production delivery is claimed. The fifty-fork diagnostic rerun remains
+active, preserving the original34-of50 failure and unchanged time/resource
+restrictions.
+
+The diagnostic A2 fifty-fork run now proves EMFILE/os24, with a10,240 descriptor
+limit. Descriptor observations grow from600 before the first publication to
+10,054 after Completed(34) fails;27,465ms remain on that attempt. Successful
+StoreIo settlement retains its up-to256 cached shard-directory FDs in every
+original publication carrier. The immutable pin already owns independent
+root/object/tmp/GC custody. A narrow production lifetime correction is being
+prepared; uncertain/failed operations must retain custody, and all original
+limits remain unchanged. No50-fork success is claimed.
+
+A8 operator cleanup completes32 calls at23:03:14Z: both exact Machine versions
+reach destroyed-wait200, original volume deletion reaches an inactive state,
+and SDK app/control secrets are verified absent. The next A9 control fixture
+is destroyed before init/admission, after image preparation; no SDK resources
+are created. Its24-call cleanup verifies Machine and secret absence. Available
+provider logs contain only image pull/preparation, so the startup cause is
+unproven. A source review separately identifies that the canonical SDK process
+exec overrides the image's environment-clearing entrypoint. It must use the
+same fixed /usr/bin/env -i prefix before the strict empty-environment launcher;
+Fly injects infrastructure variables even when app secrets are ignored. This
+correction will be included before another full SDK attempt.
+
+### 2026-11-01 23:10Z: storage lifetime correction and next real SDK flow
+
+The known StoreIo settlement now refuses pending resources and closes its
+per-operation shard cache only after the existing unlock/original-clock
+postcheck. Independent immutable pin custody and all failed/unknown owners
+remain retained. Five new real-CAS regressions and existing backed-retention
+cases are compiling under the unchanged disk/time guard. A3 freezes the new
+production code for an unchanged actual50-fork rerun; no result yet.
+
+The fixed SDK process command now exactly preserves the image's env-clearing
+entrypoint. Cloud build and22 focused provision/parser cases pass. An initial
+focused invocation ran before Cloud compilation finished and saw stale output;
+the completed-build invocation passes all22. Full Node run390 previously had
+1,043 passes,11 skips and one EADDRINUSE failure in the orchestrator fixture.
+That fixture used PID-derived ports and now atomically binds port0; both real
+orchestrator scenarios pass in run391. A full current-source rerun remains.
+
+Control image1f66693c4efd… is frozen from manifestff4e0a096208… with the lease
+and process corrections. Fresh A10 control80e967ea397e68 / instance
+01M6CP09TNDY2Y2NP7MJ8H6FV8 boots and reaches original-flow observation, unlike
+A9's pre-init destruction. Actual SDK/runtime/ordinary qualification and original
+resource cleanup remain pending. This uses the existing explicit worker2c44…,
+which predates the new storage lifetime correction; no new production release
+or current-source worker qualification is implied.
+
+A10 reaches actual lease acquisition/readbacks and dispatches its original SDK
+configure update. That request times out; an independent read of the exact
+original Machine later shows a provider revert to its original stopped version.
+The recorded reason is invalid base64 contents for the config secret-backed
+file. No update is replayed, TTL or request deadline is increased. The SDK
+secret wire encoding must match Fly's file-secret base64 contract in both the
+intent body digest and actual POST. Cleanup completes32 calls at23:12:03Z,
+including exact-version terminal waits, original volume deletion, absent SDK
+app/control secrets and unchanged protected user home.
+
+All27 backed-retention cases pass in run392, including the five new descriptor
+lifetime regressions. Broader engine-library testing is running. A3's actual
+fifty-fork rerun is active, and a fresh same-source Bookworm worker base is
+building from manifest42e3222cd966… with the storage correction and Docker cache
+ordering change. These are build-only artifacts; neither changes the production
+worker or restarts any active home.
+
+### 2026-11-01 23:18Z: actual fifty-view capacity passes
+
+The unchanged actual A3 component passes all50 immutable publications and both
+expected negative attempts, retaining every original private view and owner.
+Campaign time is198,333ms under the original300s restriction; the outer actual
+child exits0 with wait and both EOFs. Median logical fork is20.26ms and dependent
+publication3,728.96ms. Descriptor observations go from334 before the first
+publication to1,041 after the last, under the unchanged10,240 limit. Build-only
+artifact4ae3c9072922… is tied to frozen source49851daaff6f… . A1/A2 failures
+remain recorded. See [fifty-view evidence](verification-fifty-fork-working.json).
+This is one mutating operation at a time and does not qualify50 model agents,
+cold workers, Root mounts, private jj workspaces or normal physical drain.
+
+The complete engine library also passes416 tests with14 ignored in run393.
+The SDK encoding correction now reaches actual configured files on A11's new
+stopped version, but its original POST response exceeds local15s HTTP/1.5s
+lease-operation limits. Independent readback confirms completion after about27s;
+that DATA does not become the missing original acknowledgment. A11 is cleaned
+in32 operator calls at23:18:10Z, with both terminal waits and app/secret absence.
+Primary fly-go exposes one direct Update POST, while flyctl uses a120s provider
+lease and separately waits for settlement. A typed bounded startup lifecycle
+profile is being prepared; generic defaults and runtime/publication authority
+clocks stay separate. No A11 mutation is retried or adopted.
+
+The current-source worker base44706ba66bee… builds/pushes successfully at
+23:21:57Z with four freshly compiled Bookworm ELFs and source42e3222cd966… .
+Its exact C1 CAS overlay104f13a76d74… completes at23:24:34Z, retaining the new
+ELF/component descriptors and1,980,798,731-byte baked runtime. The CLI logs a
+builder-release deadline warning after the artifact is pushed; image build
+success does not claim physical builder drain. These images are not deployed
+and have no SDK/runtime role qualification yet. The local release build remains
+active. All A11 disposable resources and its local controller are now closed.
+
+### 2026-11-01 23:32Z: bounded startup profile verified locally
+
+Managed configure/start now selects a closed process-local lifecycle profile:
+provider lease120s, whole mutation/preflight phase60s, other checks5s, and a
+session bounded by min120s and the SAME original provisioning300s remainder.
+The HTTP adapter retains/propagates the actual operation AbortSignal. Generic
+probe defaults, runtime/publication leases, Root30s and admission rules stay
+unchanged. Unknown/late responses never become ACKs or replay candidates.
+Cloud compiles and all64 focused cases pass. Retained failed test attempts
+correct two inert fixture DTO/timer assumptions; production additionally uses
+an explicit never-return in the catch to satisfy TS2366. No bound is widened
+outside the explicit managed-startup profile.
+
+New control source8a7e534fbbc8… is building for the actual current worker104f…
+from producerV3/controllerV6, with a fresh unbound bundlea14. Its SDK flow is
+still unqualified. The local product build remains live under its original
+3600s/disk guard; it is not restarted while compiling.
+
+The next performance primitive is specified in PLAN6.1: one genuine flat source
+parent with sibling private overlays, exact typed parent GC dependencies and
+verified changed data. Cold baseline/reattachment still scans the full source;
+warm inheritance explicitly uses completed immutable-CAS facts, and reads still
+verify served bytes. A private engine-only implementation is in progress; the
+current default publisher and measured50-view baseline are unchanged.
+
+A12 with the new worker and lifecycle profile obtains the ORIGINAL configure
+HTTP ACK and its new exact Machine version. The next start step fails during
+its first readback, before any start or new lease POST. A later independent
+readback passes the strict machineAck parser with the identical configured
+instance and config SHA, now stopped. The exact initial invalid readback fields
+are not exported, so a particular transient state is not proved. The correction
+will await the acknowledged update's exact-version stopped state under the
+same original budget, retain strict final checks, and expose bounded safe
+original read diagnostics. It will not reconstruct an unknown update ACK.
+A12 operator cleanup completes32 calls at23:37:37Z; both exact Machines reach
+terminal waits, SDK app/control secrets are absent, and the protected user home
+is unchanged. No Root or SDK process was started. Original failed evidence and
+configure ACK remain retained; no SDK qualification is claimed.
+
+### 2026-11-01 23:47Z: original-update settlement implemented
+
+Managed update now retains the SAME original60s mutation Operation through an
+exact acknowledged-version wait for documented settled state, followed by a
+strict same-ID/version/config and stopped read. The fixed HTTP lifecycle wait
+cap is60s, additionally shortened by the original operation signal; the server
+wait uses at most55s and fits the remaining original budget. No new clock,
+transient-state parser exception, unknown-ACK adoption or mutation retry exists.
+Ordinary checks retain5s caps. A bounded latest-read tuple records fixed stage,
+sanitized ID/version/state, host/incomplete booleans and config SHA only.
+
+Cloud compilation and71 focused cases pass, including delayed known-ACK wait,
+original deadline expiry,400/version/config/state refusals and redacted bounded
+diagnostics. Full latest-source Node suite396 is active. Native product build
+and59TUI cases already pass; Cloud-only edits do not require recompiling them.
+New frozen control38cd7c07db70… / source108e175617fe… builds successfully for
+fresh actual A13 against current worker104f… . Source-parent overlay work resumes
+in a new High-effort helper with only its checkpoint, not the old conversation.
+No production release is started; publishing will be batched at milestones.
+
+### 2026-11-01 23:59Z: restart fixes and green latest-source Node suite
+
+The15 failures in full Node run396 were all caused by the shared Fly model in
+`tests/managed-storage-pg-fixtures.mjs` refusing the newly added configure wait
+route before the tests reached their target assertions. Its wait now checks
+the exact acknowledged version, settled state and original bounded timeout.
+The affected17 cases pass. The lifecycle test also now starts its update ACK
+in `created` and proves that completion waits for settlement to `stopped`.
+All14 lifecycle cases pass. Latest-source full Node run397 completes with
+1064 PASS,11 SKIP,zero failures and no guard interruption. Private receipt/log:
+`/workspace/home/.cache/rudder-release-build/alpha22-checks/main397-node-suite.{json,log}`.
+Native build394 and59TUI cases from395 remain unchanged and passing.
+
+A13 did not prove either settlement success or failure. Its captured Fly
+credential had a validity end of23:49:16Z, between the last200 at23:48:59Z and
+the403 at23:49:39Z; fresh authenticated reads proved the original control VM
+remained present. Exact operator cleanup completes32calls at23:52:47Z with
+control/SDK terminal waits, inactive volume deletion acknowledgment and app/
+control-secret absence. This is operator teardown, not normal owner retirement
+or proof of physical volume erasure. No SDK start was observed in that run.
+
+Private controller v7 distinguishes authentication, not-found response,
+provider failure and unknown transport, retaining bounded status/hash/size
+diagnostics without private error text;8 offline cases pass. Private producer
+v4 requires an explicit credential instead of capturing the short-lived
+deprecated auth-token output. Fresh isolated A14 uses a30-minute org-scoped
+credential, new bound boot UUID and the unchanged control38cd7c07db70… /
+worker104f13a76d74… artifacts. It is still running; no SDK/runtime/ordinary
+qualification or production delivery is claimed. The private source-overlay
+draft remains outside Main pending review and compilation.

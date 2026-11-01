@@ -12,7 +12,7 @@ use rudder_engine::{execution::finalization_budget::FinalizationBudget,
     vfs::HardlinkTopology, workspace::WorkspaceProfile};
 use serde::Serialize;
 use std::{fs, path::Path, sync::Arc, time::Duration};
-use crate::{accepted_git_import::{import_expected_git_head_retaining,RetainedGitImport,GitImportLimits},
+use crate::{accepted_git_import::{import_expected_git_head_profile_retaining,RetainedGitImport,GitImportLimits,GitHistoryProfile},
     projection::{materialize_source, verify_versioned_source, VerifiedSourceProjection},
     projection_io::ProjectionBudget, publication::INTEGRATION_BOOKMARK,
     seed::prepare_internal_metadata_template, vfs_provider::SourceProjectionPolicy,
@@ -43,8 +43,17 @@ pub struct PreparedInitialSource {
     pub seed_pin: String,
     pub verified: Arc<VerifiedSourceProjection>,
     seed_cache: Arc<crate::seed::RetainedSeedCasCache>,
+    #[cfg(target_os="linux")] runnable_backing:Option<Arc<rudder_engine::store::backed_retention::BackedPinOwner>>,
+    #[cfg(target_os="linux")] runnable_dependency:Option<Arc<rudder_engine::store::environment_dependencies::EnvironmentDependentPinOwner>>,
 }
 impl PreparedInitialSource {
+    #[cfg(target_os="linux")]
+    pub fn runnable_backing(&self)->Option<&Arc<rudder_engine::store::backed_retention::BackedPinOwner>>{self.runnable_backing.as_ref()}
+    #[cfg(target_os="linux")]
+    pub fn runnable_dependency(&self)->Option<&Arc<rudder_engine::store::environment_dependencies::EnvironmentDependentPinOwner>>{self.runnable_dependency.as_ref()}
+    #[cfg(target_os="linux")]
+    pub fn runnable_inputs(&self)->Option<rudder_engine::store::environment_dependencies::RetainedRunnableInputs>{use rudder_engine::store::environment_dependencies::RetainedRunnableInputs;
+        self.runnable_dependency.as_ref().map(|p|RetainedRunnableInputs::Environment(p.clone())).or_else(||self.runnable_backing.as_ref().map(|p|RetainedRunnableInputs::Flat(p.clone())))}
     pub fn repository(&self) -> &Arc<ReadonlyRepo> { &self.repository }
     pub fn seed_cache(&self)->&Arc<crate::seed::RetainedSeedCasCache>{&self.seed_cache}
 }
@@ -86,7 +95,23 @@ pub async fn prepare_initial_source_profile_retaining(store:LocalStore,request:I
 #[allow(clippy::too_many_arguments)]
 pub async fn prepare_initial_source_profile_with_import_retaining(store:LocalStore,request:InitialSourceRequest<'_>,
  profile:crate::seed::SeedProfile,paged:&mut Option<crate::seed::PagedSeedGeneration>,import:&mut Option<RetainedGitImport>,
- original:&FinalizationBudget,cancelled:Arc<std::sync::atomic::AtomicBool>,mut validate_owner:impl FnMut()->Result<()>)->Result<PreparedInitialSource>{
+ original:&FinalizationBudget,cancelled:Arc<std::sync::atomic::AtomicBool>,validate_owner:impl FnMut()->Result<()>)->Result<PreparedInitialSource>{
+    prepare_initial_source_history_with_import_retaining(store,request,profile,GitHistoryProfile::RawObjectsV1,paged,import,original,cancelled,validate_owner).await
+}
+/// Explicit representation; SAME original source/seed/environment carriers and
+/// clock. Existing APIs always select RawObjectsV1, including old V2 callers.
+#[allow(clippy::too_many_arguments)]
+pub async fn prepare_initial_source_history_with_import_retaining(store:LocalStore,request:InitialSourceRequest<'_>,
+ profile:crate::seed::SeedProfile,history:GitHistoryProfile,paged:&mut Option<crate::seed::PagedSeedGeneration>,import:&mut Option<RetainedGitImport>,
+ original:&FinalizationBudget,cancelled:Arc<std::sync::atomic::AtomicBool>,validate_owner:impl FnMut()->Result<()>)->Result<PreparedInitialSource>{
+    prepare_initial_source_with_retention(store,request,profile,history,paged,import,original,cancelled,InitialEnvironmentRetention::Local,validate_owner).await
+}
+enum InitialEnvironmentRetention<'a>{Local,#[cfg(target_os="linux")]Backed(&'a mut backed::BackedInitialEnvironment),
+    #[cfg(not(target_os="linux"))] _Lifetime(std::marker::PhantomData<&'a ()>)}
+#[allow(clippy::too_many_arguments)]
+async fn prepare_initial_source_with_retention(store:LocalStore,request:InitialSourceRequest<'_>,
+ profile:crate::seed::SeedProfile,history:GitHistoryProfile,paged:&mut Option<crate::seed::PagedSeedGeneration>,import:&mut Option<RetainedGitImport>,
+ original:&FinalizationBudget,cancelled:Arc<std::sync::atomic::AtomicBool>,mut retention:InitialEnvironmentRetention<'_>,mut validate_owner:impl FnMut()->Result<()>)->Result<PreparedInitialSource>{
     let original_cancel=cancelled.clone();
     let mut check_owner=||->Result<()> {
         if original_cancel.load(std::sync::atomic::Ordering::Acquire){original.cancel();anyhow::bail!("initial source original cancellation");}
@@ -98,9 +123,12 @@ pub async fn prepare_initial_source_profile_with_import_retaining(store:LocalSto
     request.environment.validate()?;
     ensure!(request.environment.kind == ObjectKind::EnvironmentRoot,
         "initial source requires an explicit retained environment");
-    decode_environment(&store.read_object(request.environment)?)?;
-    ensure!(store.retention()?.pins.values().any(|r| r == request.environment),
-        "initial environment has no actual retention");
+    match &mut retention {
+        InitialEnvironmentRetention::Local=>{decode_environment(&store.read_object(request.environment)?)?;
+            ensure!(store.retention()?.pins.values().any(|r|r==request.environment),"initial environment has no actual local retention");}
+        #[cfg(target_os="linux")] InitialEnvironmentRetention::Backed(owner)=>owner.check_environment_retaining(request.environment,original,&cancelled)?,
+        #[cfg(not(target_os="linux"))] InitialEnvironmentRetention::_Lifetime(_)=>anyhow::bail!("unsupported environment retention"),
+    }
     ensure!(request.private_repository.is_absolute()
         && request.private_repository.canonicalize()? == request.private_repository
         && fs::symlink_metadata(request.private_repository)?.is_dir()
@@ -126,10 +154,10 @@ pub async fn prepare_initial_source_profile_with_import_retaining(store:LocalSto
         "initial outputs cannot write into the original Git metadata");
     phase(original, &mut check_owner)?;
     let (workspace, repo) = Workspace::init_internal_git(request.settings, request.private_repository).await?;
-    RetainedGitImport::stage_initial_repository_retaining(import,workspace,repo.clone(),request.expected_head,original,cancelled.clone())?;
+    RetainedGitImport::stage_initial_repository_profile_retaining(import,workspace,repo.clone(),request.expected_head,original,cancelled.clone(),history)?;
     phase(original, &mut check_owner)?;
     let backend = repo.store().backend_impl::<GitBackend>().context("initial repository must use internal Git")?;
-    import_expected_git_head_retaining(import,&source,backend,request.expected_head,GitImportLimits::default(),original,cancelled.clone(),&mut check_owner)?;
+    import_expected_git_head_profile_retaining(import,&source,backend,request.expected_head,GitImportLimits::default(),history,original,cancelled.clone(),&mut check_owner)?;
     phase(original, &mut check_owner)?;
     let commit = repo.store().get_commit(&CommitId::new(hex::decode(&request.expected_head.0)?))?;
     let baseline = CommitIdentity::from_jj(&commit);
@@ -166,8 +194,13 @@ pub async fn prepare_initial_source_profile_with_import_retaining(store:LocalSto
     let runnable_root = staged(&store, &stage.id, ObjectKind::RunnableRoot, &RunnableRoot { format_version: 1,
         consistency: CheckpointConsistency::Quiesced, source: source_root.clone(), environment: Some(request.environment.clone()),
         view_root: record.directory, profile:workspace_profile, hardlinks, knowledge_cursor: 0 })?;
-    let runnable_pin = format!("initial-runnable:{id}");
-    store.publish_extending(&stage.id, &runnable_pin, &runnable_root, &[request.environment.clone()])?;
+    let runnable_pin = match &mut retention {
+        InitialEnvironmentRetention::Local=>{let pin=format!("initial-runnable:{id}");
+            store.publish_extending(&stage.id,&pin,&runnable_root,&[request.environment.clone()])?;pin}
+        #[cfg(target_os="linux")] InitialEnvironmentRetention::Backed(owner)=>{
+            owner.publish_runnable_retaining(&store,&stage.id,&runnable_root,original,&cancelled)?;owner.pin_name().to_owned()}
+        #[cfg(not(target_os="linux"))] InitialEnvironmentRetention::_Lifetime(_)=>anyhow::bail!("unsupported environment retention"),
+    };
     phase(original, &mut check_owner)?;
     let seed_cache=crate::seed::RetainedSeedCasCache::capture_profile(request.private_repository,store.clone(),profile)?;
     let seed_pin=format!("initial-vcs-seed:{id}");
@@ -187,9 +220,16 @@ pub async fn prepare_initial_source_profile_with_import_retaining(store:LocalSto
     };
     phase(original,&mut check_owner)?;
     Ok(PreparedInitialSource { _workspace:None,repository: repo, baseline, operation,
-        runnable_root, source_root, seed_root, runnable_pin, seed_pin, verified:Arc::new(verified),seed_cache })
+        runnable_root, source_root, seed_root, runnable_pin, seed_pin, verified:Arc::new(verified),seed_cache,
+        #[cfg(target_os="linux")] runnable_backing:match &retention{InitialEnvironmentRetention::Backed(owner)=>owner.flat_runnable_owner()?,_=>None},
+        #[cfg(target_os="linux")] runnable_dependency:match &retention{InitialEnvironmentRetention::Backed(owner)=>owner.dependent_runnable_owner()?,_=>None},
+    })
 }
 
 #[path="accepted_source_generation.rs"]
 mod accepted_generation;
 pub use accepted_generation::AcceptedSourceGeneration;
+
+#[cfg(target_os="linux")]
+#[path="initial_source_backed.rs"]
+pub mod backed;

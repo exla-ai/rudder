@@ -1,0 +1,121 @@
+{
+  "formatVersion": 1,
+  "scope": "actual C1 CAS DATA producer only",
+  "sourceManifestSha256": "e970059f57b39174ac19bbd24a2e0f5808217b04b9945b2bf9dd373b6abbfcb8",
+  "image": "registry.fly.io/rudder-workers-exla:compiler-c1-cas-e970059f57b3",
+  "digest": "sha256:19ce471b0c894dcd820135d1d97d2a1f5a355938cd339acedd8373efa86e070e",
+  "exitCode": 0,
+  "componentPassed": true,
+  "results": [
+    {
+      "formatVersion": 1,
+      "kind": "compiler-cas-bake-build-only",
+      "nonce": "ce870067-62b7-4099-ab6d-10a079080cec",
+      "sourceKind": "immutable-captured-working-tree",
+      "baseRevision": "486d6c3cd5811bc27ddaa3fb61305ef7fadeb81c",
+      "sourceCaptureSha256": "7598c8f6baad49ffac4e06cb18e650e882a67c36659c7b1cd7dbb16cd2a02643",
+      "helperSha256": "84e74ba69611a8c520b30b6b233c395b2f69caa1c60da378eb916ab53c392742",
+      "helperBuildReceiptSha256": "0264502a7bca7225ecaab50e1441ab2c964a1292b3f9f8d80bcf0b799da1bea1",
+      "compilerImage": "registry.fly.io/rudder-workers-exla@sha256:469e5b3667cd673bab2674fcb30021f2c731555a8cc3326519dbb7c4cab73273",
+      "compilerManifestSha256": "bb70f8795da717a73f9d9ded535149f1fb4abff84374b12188361f1cc4a8106a",
+      "invocations": 1,
+      "budgetMs": 300000,
+      "elapsedMs": 24298.613199,
+      "exitObserved": true,
+      "closed": true,
+      "exitCode": 0,
+      "signal": null,
+      "spawnError": null,
+      "deadlineReached": false,
+      "componentPassed": true,
+      "productionActivation": false,
+      "runtimeQualified": false,
+      "productionNativeParityClaimed": false,
+      "stdout": {
+        "bytes": 1168,
+        "sha256": "36d0e759a01ec0164e046297101fd6c45109607268184ff2b214b386e469522c"
+      },
+      "stderr": {
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "marker": {
+        "compiler": {
+          "artifact_image": "registry.fly.io/rudder-workers-exla@sha256:469e5b3667cd673bab2674fcb30021f2c731555a8cc3326519dbb7c4cab73273",
+          "artifact_manifest": {
+            "algorithm": "sha256",
+            "digest": "bb70f8795da717a73f9d9ded535149f1fb4abff84374b12188361f1cc4a8106a",
+            "kind": "blob",
+            "size_bytes": 1065125
+          },
+          "entries": 6108,
+          "format_version": 1,
+          "logical_bytes": 1372802439,
+          "profile_id": "rudder-linux-rust-cxx-typescript-c1"
+        },
+        "directory": "/var/lib/rudder-compiler-c1-cas-v1",
+        "format_version": 1,
+        "inventory": {
+          "algorithm": "sha256",
+          "digest": "4f8d57a0ffd78335a9ca9863d26040379d65dc8942fa32d41e217f898612f832",
+          "kind": "blob",
+          "size_bytes": 850145
+        },
+        "layout": "baked-image-cas-v1",
+        "objects": 6430,
+        "production_admission": false,
+        "retention_generation": 2,
+        "roots": {
+          "format_version": 1,
+          "installer_input": {
+            "algorithm": "sha256",
+            "digest": "7deff164fb058949352597c656660878bbcb8d19d2ef9b6a6c23bba9bbf261e5",
+            "kind": "directory",
+            "size_bytes": 230
+          },
+          "manifest": {
+            "algorithm": "sha256",
+            "digest": "d60afb84b6e373fece5fd2a0babb1b66bd0f4c637efddf766f59a180e39ec54a",
+            "kind": "blob",
+            "size_bytes": 1830173
+          }
+        },
+        "runtime_mount": false,
+        "scope": "immutable-compiler-cas-data-only",
+        "total_bytes": 1174586558
+      },
+      "outputs": {
+        "inventory": {
+          "path": "/var/lib/rudder-compiler-c1-cas-v1/inventory.json",
+          "bytes": 850145,
+          "sha256": "4f8d57a0ffd78335a9ca9863d26040379d65dc8942fa32d41e217f898612f832"
+        },
+        "sourceBinding": {
+          "path": "/var/lib/rudder-compiler-c1-cas-v1/compiler-source.json",
+          "bytes": 988,
+          "sha256": "301ec13415fa57e2623571adce9327b4e406d558698a1fa46adfb7e04f5fbbc0"
+        },
+        "manifest": {
+          "path": "/var/lib/rudder-compiler-c1-cas-v1/manifest.json",
+          "bytes": 1830173,
+          "sha256": "d60afb84b6e373fece5fd2a0babb1b66bd0f4c637efddf766f59a180e39ec54a"
+        },
+        "pin": {
+          "path": "/var/lib/rudder-compiler-c1-cas-v1/pin.json",
+          "bytes": 318,
+          "sha256": "99280417315de05c8b18ca04038beb41e177efc17b842242a0be36a36c0ac5cb"
+        }
+      },
+      "objectCount": 6430,
+      "totalBytes": 1174586558,
+      "retentionGeneration": 2,
+      "failure": null
+    }
+  ],
+  "logSha256": "a659e43cb43ee67123bf1ac889db9d106343004f6397eca8c95740c24d7a9ab2",
+  "verifiedAt": "2026-11-01T19:32:19.568164+00:00",
+  "runtimeQualified": false,
+  "productionActivation": false,
+  "deployed": false,
+  "remoteBuildMayContinue": false
+}

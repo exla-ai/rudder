@@ -92,6 +92,7 @@ class SourceAndSchemaTests(unittest.TestCase):
         self.assertEqual(m['registryMetadata']['dist']['integrity'],p['codex']['integrity'])
         self.assertEqual(hashlib.sha256((ROOT/'cloud/worker/host-control.mjs').read_bytes()).hexdigest(),p['sidecar_script_sha256'])
         self.assertEqual(hashlib.sha256((ROOT/'cloud/worker/host-control-core.mjs').read_bytes()).hexdigest(),p['sidecar_core_sha256'])
+        self.assertEqual(hashlib.sha256((ROOT/'cloud/worker/runtime-qualification.mjs').read_bytes()).hexdigest(),p['qualification_script_sha256'])
         lock=json.loads((ROOT/'cloud/worker/managed-runtime/sidecar-package-lock.json').read_text())
         self.assertEqual(lock['packages']['node_modules/ws']['integrity'],p['ws']['integrity'])
         self.assertFalse(p['claude_supported'])
@@ -106,9 +107,9 @@ class SourceAndSchemaTests(unittest.TestCase):
                 path=Path(name)/'policy.json';path.write_text(json.dumps(changed))
                 with self.assertRaises(assets.Rejected):assets.policy_at(path)
 
-    def test_exact_26_file_sidecar_refuses_omitted_substituted_or_wrong_core(self):
+    def test_exact_27_file_sidecar_refuses_omitted_substituted_or_wrong_core(self):
         p=assets.policy_at(POLICY);files={path:(hashlib.sha256(path.encode()).hexdigest(),1) for path in assets.SIDECAR_FILES}
-        for name,field in [('host-control.mjs','sidecar_script_sha256'),('host-control-core.mjs','sidecar_core_sha256'),
+        for name,field in [('host-control.mjs','sidecar_script_sha256'),('host-control-core.mjs','sidecar_core_sha256'),('runtime-qualification.mjs','qualification_script_sha256'),
                            ('root-upload.mjs','uploader_script_sha256'),('package.json','sidecar_package_sha256'),('package-lock.json','sidecar_lock_sha256')]:files[name]=(p[field],1)
         for addon in ['bufferutil','utf-8-validate']:files['node_modules/ws/node_modules/'+addon+'/index.js']=(assets.sha(assets.DENY),len(assets.DENY))
         archived=[{'path':path.removeprefix('node_modules/ws/'),'sha256':digest,'size_bytes':size} for path,(digest,size) in files.items()
@@ -127,10 +128,10 @@ class SourceAndSchemaTests(unittest.TestCase):
 
     def test_sidecar_four_field_pin_binds_exact_raw_manifest_and_both_scripts(self):
         p=assets.policy_at(POLICY);files={path:('a'*64,1) for path in assets.SIDECAR_FILES}
-        files['host-control.mjs']=(p['sidecar_script_sha256'],1);files['host-control-core.mjs']=(p['sidecar_core_sha256'],1);files['root-upload.mjs']=(p['uploader_script_sha256'],1)
+        files['host-control.mjs']=(p['sidecar_script_sha256'],1);files['host-control-core.mjs']=(p['sidecar_core_sha256'],1);files['root-upload.mjs']=(p['uploader_script_sha256'],1);files['runtime-qualification.mjs']=(p['qualification_script_sha256'],1)
         manifest=assets.manifest_value(files,'sidecar');raw=assets.canonical(manifest);pin=assets.pin_value(manifest,raw,'sidecar',p)
         self.assertEqual(set(pin),{'sidecar_manifest_sha256','sidecar_script_sha256','sidecar_core_sha256','files'})
-        self.assertEqual(len(pin['files']),26);self.assertEqual(pin['sidecar_manifest_sha256'],hashlib.sha256(raw).hexdigest())
+        self.assertEqual(len(pin['files']),27);self.assertEqual(pin['sidecar_manifest_sha256'],hashlib.sha256(raw).hexdigest())
         self.assertEqual(pin['sidecar_core_sha256'],p['sidecar_core_sha256'])
         changed=json.loads(json.dumps(manifest));changed['files'][0]['sha256']='f'*64
         with self.assertRaises(assets.Rejected):assets.pin_value(changed,assets.canonical(changed),'sidecar',p)

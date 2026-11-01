@@ -8,7 +8,7 @@ fn capsule(b:&ManagedExecutionBinding)->RuntimeImageCapsuleData{
     let hash="1".repeat(64);let floor=RuntimeFdData{device:1,inode:2,mount_id:3,directory:true};
     let selected_executables=["package/dist/native/rudder-native","package/dist/native/rudder-jj","usr/local/bin/rudder-root-storage","usr/local/bin/rudder-machine-root"].into_iter().map(|p|RuntimeExecutableData{installer_path:p.into(),sha256:hash.clone(),size_bytes:1}).collect();
     RuntimeImageCapsuleData{version:1,request_nonce:Uuid::new_v4().to_string(),binding_sha256:hex::encode(Sha256::digest(canonical_json(b).unwrap())),engine_instance_id:Uuid::new_v4().to_string(),epoch:"1".into(),config_sha256:hash.clone(),registration_proof_sha256:hash.clone(),boot_id:Uuid::new_v4().to_string(),launcher_pid:std::process::id(),service_pid:std::process::id(),engine_pid:std::process::id(),helper_pid:std::process::id(),helper_start_ticks:"1".into(),launcher_sha256:hash.clone(),service_sha256:hash.clone(),engine_sha256:hash,
-        inventory:ObjectRef::from_bytes(crate::protocol::ObjectKind::Blob,b"untrusted inventory DATA"),manifest:ObjectRef::from_bytes(crate::protocol::ObjectKind::Blob,b"untrusted manifest DATA"),installer_input:ObjectRef::from_bytes(crate::protocol::ObjectKind::Directory,b"untrusted installer DATA"),constraint:budget().constraint(),floor:floor.clone(),components:COMPONENTS.iter().map(|(_,_,_,d)|RuntimeFdData{directory:*d,..floor.clone()}).collect(),selected_executables}
+        compiler_sdk:None,inventory:ObjectRef::from_bytes(crate::protocol::ObjectKind::Blob,b"untrusted inventory DATA"),manifest:ObjectRef::from_bytes(crate::protocol::ObjectKind::Blob,b"untrusted manifest DATA"),installer_input:ObjectRef::from_bytes(crate::protocol::ObjectKind::Directory,b"untrusted installer DATA"),constraint:budget().constraint(),floor:floor.clone(),components:COMPONENTS.iter().map(|(_,_,_,d)|RuntimeFdData{directory:*d,..floor.clone()}).collect(),selected_executables}
 }
 #[test]
 fn actual_seqpacket_transfers_original_fd_credentials_and_cloexec(){
@@ -26,8 +26,8 @@ fn actual_nonblocking_eagain_retains_original_transport_and_fd(){
 #[test]
 fn received_untrusted_data_cannot_mint_root_grant_and_keeps_received_fds(){
     let(a,b)=runtime_socket_pair().unwrap();let a=RuntimeEndpoint::capture(a).unwrap();let b=RuntimeEndpoint::capture(b).unwrap();let binding=binding();let data=capsule(&binding);data.validate_data().unwrap();
-    let fds:Vec<OwnedFd>=(0..MAX_RUNTIME_FDS).map(|_|tempfile::tempfile().unwrap().into()).collect();let refs:Vec<_>=fds.iter().collect();assert!(a.send_data(&canonical_json(&data).unwrap(),&refs).unwrap());let mut owner=None;let mut pending=None;
-    assert!(RuntimeImageGrant::receive_retaining(&mut owner,&mut pending,&b,&binding).is_err());assert!(owner.is_none());let p=pending.as_ref().unwrap();assert_eq!(p.fds.len(),MAX_RUNTIME_FDS);
+    let fds:Vec<OwnedFd>=(0..BASE_RUNTIME_FDS).map(|_|tempfile::tempfile().unwrap().into()).collect();let refs:Vec<_>=fds.iter().collect();assert!(a.send_data(&canonical_json(&data).unwrap(),&refs).unwrap());let mut owner=None;let mut pending=None;
+    assert!(RuntimeImageGrant::receive_retaining(&mut owner,&mut pending,&b,&binding).is_err());assert!(owner.is_none());let p=pending.as_ref().unwrap();assert_eq!(p.fds.len(),BASE_RUNTIME_FDS);
     assert!(p.fds.iter().all(|fd|unsafe{libc::fcntl(fd.as_raw_fd(),libc::F_GETFD)}>=0));
 }
 #[test]

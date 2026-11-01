@@ -28,6 +28,8 @@ use crate::protocol::ObjectRef;
 mod agent_admission;
 pub use agent_admission::{AgentAdmissionState,AgentAdmissionPoint,AgentCommitAdmission,AgentJournalUse,AgentAdmissionError,GuardedAgentJournal,reject_unguarded_fresh_agent};
 mod commands;
+mod automatic_mail_delivery;
+pub use automatic_mail_delivery::{ClaimedMailboxDelivery, MailboxDeliveryNotice};
 mod decisions;
 mod mailbox;
 mod schema;
@@ -57,6 +59,7 @@ pub use commands::{
 pub use decisions::{
     AcceptedDecision, DecisionRequest, IntegrationEvidence, IntegrationReceipt, IntegrationRequest,
 };
+pub use decisions::canonical_versions::{CanonicalDecisionSnapshot,CANONICAL_DECISION_SET_TOPIC,CANONICAL_BUILD_POLICY_TOPIC};
 pub use mailbox::{MailboxCursor, MessageEnvelope, MessageIntent, MessagePriority, MessageRequest};
 pub use runtime::{DiscoveredAgent, RuntimeObservation, RuntimePhase, RuntimeSnapshot, RUNTIME_MAX_AGE_MS};
 
@@ -64,6 +67,8 @@ pub use vcs::{
     PreparedVcsOperation, VcsIntentReceipt, VcsIntentRequest, VcsIntentState,
     VcsPublicationObservation, VcsPublisher, VcsRunFence,
 };
+#[cfg(target_os="linux")]
+pub use vcs::VcsRetainedInputs;
 pub use managed::{ManagedProjectNamespace, ManagedProjectPrepare, ManagedProjectReceipt, ManagedRecoveryCursor,
     ManagedAttemptRecovery, ManagedAttemptRecoveryPage, MANAGED_WRITER_PROTOCOL};
 

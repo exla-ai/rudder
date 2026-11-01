@@ -10,6 +10,14 @@ use jj_lib::{backend::CommitId, git_backend::GitBackend};
 use rudder_engine::execution::finalization_budget::FinalizationBudget;
 use std::{collections::{BTreeMap, BTreeSet, VecDeque}, fs, io, path::Path, sync::{Arc,atomic::{AtomicBool,Ordering}}, time::Instant};
 
+/// Explicit representation selection. Not deserializable and never an accepted
+/// source/Root grant; the actual retaining factory fixes it before effects.
+#[derive(Clone,Copy,Debug,Default,PartialEq,Eq)]
+pub enum GitHistoryProfile { #[default] RawObjectsV1, PackedHistoryV2 }
+#[path="accepted_git_packed.rs"]
+mod packed;
+pub use packed::{PackedHistoryData,CanonicalProcessData};
+
 #[derive(Clone, Copy, Debug)]
 pub struct GitImportLimits {
     pub max_objects: u64,
@@ -138,21 +146,31 @@ pub struct GitImportProgress {
 /// Actual partial pack/index/keep/parent FDs survive errors and unwind when the
 /// caller stages this outside its operation/catch. No Drop cleanup or replay.
 pub struct RetainedGitImport {
- original:FinalizationBudget,cancelled:Arc<AtomicBool>,workspace:Option<jj_lib::workspace::Workspace>,repository:Option<Arc<jj_lib::repo::ReadonlyRepo>>,attempted:bool,pack:Option<pack::PackBuilder>,packs:Vec<pack::PackBuilder>,data:ImportedGitHeadData,
+ original:FinalizationBudget,cancelled:Arc<AtomicBool>,profile:GitHistoryProfile,packed:Option<packed::PackedHistory>,workspace:Option<jj_lib::workspace::Workspace>,repository:Option<Arc<jj_lib::repo::ReadonlyRepo>>,attempted:bool,pack:Option<pack::PackBuilder>,packs:Vec<pack::PackBuilder>,data:ImportedGitHeadData,
  stage:&'static str,current_oid:Option<String>,current_kind:Option<String>,current_size:u64,
  verified_objects:u64,verified_bytes:u64,pending:usize,edges:u64,started:Instant,ack:bool,error_chain:Option<String>,
 }
 impl RetainedGitImport {
  pub(crate) fn stage_initial_repository_retaining(out:&mut Option<Self>,workspace:jj_lib::workspace::Workspace,repository:Arc<jj_lib::repo::ReadonlyRepo>,expected:&GitCommitId,budget:&FinalizationBudget,cancelled:Arc<AtomicBool>)->Result<()> {
-  ensure!(out.is_none(),"initial Git import carrier already staged");*out=Some(Self::capture(expected,budget,cancelled));let owner=out.as_mut().unwrap();owner.workspace=Some(workspace);owner.repository=Some(repository);owner.stage="initialized-private-repository";owner.tick()
+  Self::stage_initial_repository_profile_retaining(out,workspace,repository,expected,budget,cancelled,GitHistoryProfile::RawObjectsV1)
  }
- fn capture(expected:&GitCommitId,budget:&FinalizationBudget,cancelled:Arc<AtomicBool>)->Self{Self{original:budget.clone(),cancelled,workspace:None,repository:None,attempted:false,pack:None,packs:Vec::new(),
+ pub(crate) fn stage_initial_repository_profile_retaining(out:&mut Option<Self>,workspace:jj_lib::workspace::Workspace,repository:Arc<jj_lib::repo::ReadonlyRepo>,expected:&GitCommitId,budget:&FinalizationBudget,cancelled:Arc<AtomicBool>,profile:GitHistoryProfile)->Result<()> {
+  ensure!(out.is_none(),"initial Git import carrier already staged");*out=Some(Self::capture_profile(expected,budget,cancelled,profile));let owner=out.as_mut().unwrap();owner.workspace=Some(workspace);owner.repository=Some(repository);owner.stage="initialized-private-repository";owner.tick()
+ }
+ fn capture(expected:&GitCommitId,budget:&FinalizationBudget,cancelled:Arc<AtomicBool>)->Self{Self::capture_profile(expected,budget,cancelled,GitHistoryProfile::RawObjectsV1)}
+ fn capture_profile(expected:&GitCommitId,budget:&FinalizationBudget,cancelled:Arc<AtomicBool>,profile:GitHistoryProfile)->Self{Self{original:budget.clone(),cancelled,profile,packed:None,workspace:None,repository:None,attempted:false,pack:None,packs:Vec::new(),
   data:ImportedGitHeadData{head:expected.clone(),objects:0,commits:0,trees:0,blobs:0,bytes:0},stage:"validate",current_oid:None,current_kind:None,current_size:0,verified_objects:0,verified_bytes:0,pending:0,edges:0,started:Instant::now(),ack:false,error_chain:None}}
  pub fn progress(&self)->GitImportProgress {let all=self.packs.iter().chain(self.pack.iter()).collect::<Vec<_>>();GitImportProgress{scope:"verified-Git-history-import-DATA-only",stage:self.stage,current_oid:self.current_oid.clone(),current_kind:self.current_kind.clone(),current_size:self.current_size,
   verified_objects:self.verified_objects,verified_bytes:self.verified_bytes,packed_objects:self.data.objects,packed_bytes:self.data.bytes,pending_objects:self.pending,edges:self.edges,elapsed_ms:self.started.elapsed().as_millis(),acknowledged:self.ack,error_chain:self.error_chain.clone(),
   pack_stage:all.last().map(|p|p.stage),pack_bytes:all.iter().map(|p|p.bytes).sum(),pack_synced:!all.is_empty()&&all.iter().all(|p|p.pack_synced),index_synced:!all.is_empty()&&all.iter().all(|p|p.index_synced),keep_synced:!all.is_empty()&&all.iter().all(|p|p.keep_synced),directory_syncs:all.iter().map(|p|p.directory_syncs).sum(),
   pack_install_attempted:all.iter().any(|p|p.pack_install_attempted),index_install_attempted:all.iter().any(|p|p.index_install_attempted),keep_install_attempted:all.iter().any(|p|p.keep_install_attempted),pack_installed:!all.is_empty()&&all.iter().all(|p|p.pack_installed),index_installed:!all.is_empty()&&all.iter().all(|p|p.index_installed),keep_installed:!all.is_empty()&&all.iter().all(|p|p.keep_installed),installed_paths:all.iter().flat_map(|p|p.paths().into_iter().flatten().map(Path::to_path_buf)).collect(),temporary_paths:all.iter().flat_map(|p|p.temporary_paths().into_iter().map(Path::to_path_buf)).collect(),pack_count:all.len()}}
 
+ /// Off-App cleanup observation only; no new budget, retry or readiness.
+ pub fn request_pending_child_stop_retaining(&mut self){if let Some(packed)=&mut self.packed{packed.request_child_stop_retaining();}}
+ pub fn poll_pending_child_settlement(&mut self)->Result<bool>{if let Some(packed)=&mut self.packed{packed.poll_child_settlement()}else{Ok(true)}}
+ pub fn history_profile(&self)->GitHistoryProfile{self.profile}
+ pub fn packed_progress_data(&self)->Option<PackedHistoryData>{self.packed.as_ref().map(|p|p.progress_data())}
+ pub fn packed_data(&self)->Result<PackedHistoryData>{ensure!(self.ack&&self.profile==GitHistoryProfile::PackedHistoryV2,"original packed import ACK absent");self.packed.as_ref().context("original packed input absent")?.receipt()}
  pub fn data(&self)->Result<&ImportedGitHeadData>{ensure!(self.ack,"original Git import ACK absent");Ok(&self.data)}
  fn tick(&self)->Result<()>{if self.cancelled.load(Ordering::Acquire){self.original.cancel();anyhow::bail!("original Git import cancelled");}self.original.remaining()?;Ok(())}
 }
@@ -172,12 +190,30 @@ pub fn import_expected_git_head(
 #[allow(clippy::too_many_arguments)]
 pub fn import_expected_git_head_retaining(out:&mut Option<RetainedGitImport>,source:&gix::Repository,target:&GitBackend,
  expected:&GitCommitId,limits:GitImportLimits,budget:&FinalizationBudget,cancelled:Arc<AtomicBool>,mut check_owner:impl FnMut()->Result<()>)->Result<ImportedGitHeadData>{
- if out.is_none(){*out=Some(RetainedGitImport::capture(expected,budget,cancelled.clone()));}
- let retained=out.as_mut().unwrap();ensure!(!retained.attempted&&retained.original.constraint()==budget.constraint()&&Arc::ptr_eq(&retained.cancelled,&cancelled)&&retained.data.head==*expected,"original Git import carrier differs or attempted; no replay");retained.attempted=true;
- let owner=out.as_mut().unwrap();let result=owner.run(source,target,expected,limits,&mut check_owner);
+ import_expected_git_head_profile_retaining(out,source,target,expected,limits,GitHistoryProfile::RawObjectsV1,budget,cancelled,check_owner)
+}
+/// Packed V2 has its own fixed encoded/work envelope. Raw limits remain V1
+/// only; no caller can enlarge the V2 constants or reconstruct a retained owner.
+#[allow(clippy::too_many_arguments)]
+pub fn import_expected_git_head_profile_retaining(out:&mut Option<RetainedGitImport>,source:&gix::Repository,target:&GitBackend,
+ expected:&GitCommitId,limits:GitImportLimits,profile:GitHistoryProfile,budget:&FinalizationBudget,cancelled:Arc<AtomicBool>,mut check_owner:impl FnMut()->Result<()>)->Result<ImportedGitHeadData>{
+ if out.is_none(){*out=Some(RetainedGitImport::capture_profile(expected,budget,cancelled.clone(),profile));}
+ let retained=out.as_mut().unwrap();ensure!(!retained.attempted&&retained.profile==profile&&retained.original.constraint()==budget.constraint()&&Arc::ptr_eq(&retained.cancelled,&cancelled)&&retained.data.head==*expected,"original Git import carrier/profile differs or attempted; no replay");retained.attempted=true;
+ let owner=out.as_mut().unwrap();let result=if profile==GitHistoryProfile::PackedHistoryV2{owner.run_packed(source,target,expected,&mut check_owner)}else{owner.run(source,target,expected,limits,&mut check_owner)};
  if let Err(error)=&result{owner.error_chain=Some(format!("{error:#}").chars().take(4096).collect());}result
 }
 impl RetainedGitImport {
+ fn run_packed(&mut self,source:&gix::Repository,target:&GitBackend,expected:&GitCommitId,check_owner:&mut impl FnMut()->Result<()>)->Result<ImportedGitHeadData>{
+  self.tick()?;check_owner()?;expected.validate()?;let head=ObjectId::from_hex(expected.0.as_bytes())?;
+  check_odb(source,&self.original)?;check_head(source,head,&self.original)?;let destination=target.git_repo();check_target(target,&destination,&self.original)?;
+  ensure!(source.objects.store_ref().path().canonicalize()?!=destination.objects.store_ref().path().canonicalize()?,"source and target Git stores must differ");
+  self.packed=Some(packed::PackedHistory::stage(self.original.clone(),self.cancelled.clone()));self.stage="verify-original-canonical-pack";
+  self.data=self.packed.as_mut().unwrap().verify(source,target,head,check_owner)?;self.verified_objects=self.data.objects;self.verified_bytes=self.data.bytes;
+  let original=self.original.clone();let cancel=self.cancelled.clone();let mut guard=||->Result<()>{if cancel.load(Ordering::Acquire){original.cancel();anyhow::bail!("original packed publication cancelled");}original.remaining()?;check_owner()?;check_odb(source,&original)?;check_head(source,head,&original)?;check_target(target,&destination,&original)};
+  guard()?;self.stage="install-original-canonical-pack";self.packed.as_mut().unwrap().install(target,&mut guard)?;guard()?;
+  self.stage="jj-import-packed-head";let commit=CommitId::new(head.as_bytes().to_vec());target.import_head_commits([&commit])?;guard()?;
+  self.packed.as_ref().unwrap().receipt()?;self.stage="complete";self.ack=true;Ok(self.data.clone())
+ }
  fn run(&mut self,source:&gix::Repository,target:&GitBackend,expected:&GitCommitId,limits:GitImportLimits,check_owner:&mut impl FnMut()->Result<()>)->Result<ImportedGitHeadData>{
     let original=self.original.clone();let budget=&original;self.tick()?;check_owner()?;
     budget.remaining()?;

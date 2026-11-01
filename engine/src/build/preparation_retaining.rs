@@ -375,6 +375,18 @@ fn scalar_bound(total: &mut usize, value: &str) -> Result<()> {
 
 #[cfg(test)] #[derive(Clone, Copy, PartialEq, Eq)]
 enum TestPoint { AfterStaging, PinDirectorySync, AfterPin, AfterInsert, AfterCommit, CancelAfterCommit, CancelAfterStaging }
+#[cfg(target_os = "linux")]
+#[path = "backed_preparation_index.rs"]
+mod backed_index;
+
 #[cfg(test)]
 #[path = "preparation_retaining_tests.rs"]
 mod tests;
+
+#[cfg(target_os="linux")]
+#[path="index_acquisition_impl.rs"]
+mod index_acquisition_impl;
+
+#[cfg(target_os="linux")]
+#[path="environment_lineage_impl.rs"]
+mod environment_lineage_impl;

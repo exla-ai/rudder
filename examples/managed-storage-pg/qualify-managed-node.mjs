@@ -30,8 +30,20 @@ assert([undefined,'0','1'].includes(process.env.RUDDER_MANAGED_PG_BATCHES));
 const coldBatches=process.env.RUDDER_MANAGED_PG_BATCHES==='1';
 assert([undefined,'0','1'].includes(process.env.RUDDER_MANAGED_PG_IMMUTABLE_BATCHES));
 const immutableBatches=process.env.RUDDER_MANAGED_PG_IMMUTABLE_BATCHES==='1';
-assert(Number(mixedRenewal)+Number(hardlinkImage)+Number(hostTransport)+Number(imageReuse)+Number(coldBatches)+Number(immutableBatches)<=1,'separate qualification variants');
-const followupFiles = immutableBatches?['tests/managed-owner-renewal-pg-followup.mjs','tests/managed-immutable-batch-retention-pg-followup.mjs']:coldBatches?['tests/managed-owner-renewal-pg-followup.mjs','tests/managed-image-batch-pg-followup.mjs']:imageReuse?['tests/managed-owner-renewal-pg-followup.mjs','tests/managed-image-publication-reuse-pg-followup.mjs']:
+assert([undefined,'0','1'].includes(process.env.RUDDER_MANAGED_PG_RUNTIME_ROLE));
+const runtimeRole=process.env.RUDDER_MANAGED_PG_RUNTIME_ROLE==='1';
+assert([undefined,'0','1'].includes(process.env.RUDDER_MANAGED_PG_SDK_ROLE));
+const sdkRole=process.env.RUDDER_MANAGED_PG_SDK_ROLE==='1';
+assert([undefined,'0','1'].includes(process.env.RUDDER_MANAGED_PG_PROVIDER_OWNER));
+const providerOwner=process.env.RUDDER_MANAGED_PG_PROVIDER_OWNER==='1';
+assert([undefined,'0','1'].includes(process.env.RUDDER_MANAGED_PG_ROLE_ACTIVATION_ONLY));
+const roleActivationOnly=process.env.RUDDER_MANAGED_PG_ROLE_ACTIVATION_ONLY==='1';
+assert(Number(mixedRenewal)+Number(hardlinkImage)+Number(hostTransport)+Number(imageReuse)+Number(coldBatches)+Number(immutableBatches)+Number(runtimeRole)+Number(sdkRole)+Number(providerOwner)<=1,'separate qualification variants');
+assert(!roleActivationOnly||(sdkRole!==runtimeRole),'activation-only requires exactly one SDK/runtime role and no other variant');
+const selectedRole=roleActivationOnly?(sdkRole?'sdk':'runtime'):undefined;
+const fixtureVariant=providerOwner?'provider-owner-v1':roleActivationOnly?'role-activation-v1':'managed-storage-v3';
+const roleHelperFiles=sdkRole||runtimeRole?['tests/managed-staging-activation-pg-cases.mjs']:[];
+const followupFiles = sdkRole?['tests/managed-owner-renewal-pg-followup.mjs','tests/managed-compiler-sdk-role-pg-followup.mjs']:runtimeRole?['tests/managed-owner-renewal-pg-followup.mjs','tests/managed-runtime-role-pg-followup.mjs']:immutableBatches?['tests/managed-owner-renewal-pg-followup.mjs','tests/managed-immutable-batch-retention-pg-followup.mjs']:coldBatches?['tests/managed-owner-renewal-pg-followup.mjs','tests/managed-image-batch-pg-followup.mjs']:imageReuse?['tests/managed-owner-renewal-pg-followup.mjs','tests/managed-image-publication-reuse-pg-followup.mjs']:
   hostTransport?['tests/managed-owner-renewal-pg-followup.mjs','tests/managed-host-transport-pg-followup.mjs']:
   mixedRenewal||hardlinkImage?['tests/managed-owner-renewal-pg-followup.mjs',...(hardlinkImage?['tests/managed-storage-hardlink-pg-followup.mjs']:[])]:[];
 const forbidden = '8edd225a7d0378';
@@ -45,7 +57,7 @@ const sourceFiles = ['cloud/package.json','cloud/package-lock.json',
   ...((await fs.readdir(path.join(root,'cloud/src'))).filter(f=>f.startsWith('fabric-')&&f.endsWith('.ts')).map(f=>'cloud/src/'+f)),
   'cloud/src/fly-custody.ts','tests/managed-storage-pg-qualification.mjs','tests/managed-storage-pg-fixtures.mjs',
   'examples/managed-storage-pg/qualify-managed-node.mjs','examples/managed-storage-pg/qualify-managed-guest.sh','examples/managed-storage-pg/retained-fixture-runner.py','examples/managed-storage-pg/Dockerfile',
-  ...followupFiles];
+  ...(providerOwner?['tests/provider-fenced-ownership-pg.test.mjs']:[]),...followupFiles,...roleHelperFiles];
 
 async function officialImage() {
   const image=process.env.RUDDER_MANAGED_PG_IMAGE;
@@ -98,12 +110,14 @@ async function prepare(output) {
   await dependency('pg');
   await dependency('@aws-sdk/client-s3');
   await dependency('@aws-sdk/credential-provider-web-identity');
-  if(hostTransport)await dependency('ws');
+  if(hostTransport||runtimeRole||sdkRole)await dependency('ws');
   await copyFile(process.execPath,'node');
+  if(providerOwner)await copyFile(path.join(root,'tests/provider-fenced-ownership-pg.test.mjs'),'tests/provider-fenced-ownership-pg.test.mjs');
   if(followupFiles.length){
-    for(const module of followupFiles)await copyFile(path.join(root,module),module);
-    const module=immutableBatches?'tests/managed-immutable-batch-retention-pg-followup.mjs':coldBatches?'tests/managed-image-batch-pg-followup.mjs':imageReuse?'tests/managed-image-publication-reuse-pg-followup.mjs':hostTransport?'tests/managed-host-transport-pg-followup.mjs':hardlinkImage?'tests/managed-storage-hardlink-pg-followup.mjs':'tests/managed-owner-renewal-pg-followup.mjs';
-    const descriptor={followupModule:{path:'/var/tmp/rudder-authority-node-runtime/'+module,sha256:runtimeHashes[module]}};
+    for(const module of [...followupFiles,...roleHelperFiles])await copyFile(path.join(root,module),module);
+    const module=sdkRole?'tests/managed-compiler-sdk-role-pg-followup.mjs':runtimeRole?'tests/managed-runtime-role-pg-followup.mjs':immutableBatches?'tests/managed-immutable-batch-retention-pg-followup.mjs':coldBatches?'tests/managed-image-batch-pg-followup.mjs':imageReuse?'tests/managed-image-publication-reuse-pg-followup.mjs':hostTransport?'tests/managed-host-transport-pg-followup.mjs':hardlinkImage?'tests/managed-storage-hardlink-pg-followup.mjs':'tests/managed-owner-renewal-pg-followup.mjs';
+    const descriptor={followupModule:{path:'/var/tmp/rudder-authority-node-runtime/'+module,sha256:runtimeHashes[module]},
+      ...(roleActivationOnly?{roleActivationOnly:true,selectedRole}:{})};
     await fs.writeFile(path.join(runtimeStage,'managed-followup.json'),JSON.stringify(descriptor)+'\n',{mode:0o444});
     runtimeHashes['managed-followup.json']=digest(await fs.readFile(path.join(runtimeStage,'managed-followup.json')));
   }
@@ -112,7 +126,7 @@ async function prepare(output) {
   await fs.rm(runtimeStage,{recursive:true});
   const runtime={archive:runtimeArchive,sha256:digest(await fs.readFile(runtimeArchive)),hashes:runtimeHashes,nodeVersion:process.version,packages:[...packages].sort()};
   const image=await officialImage();
-  const state={format_version:1,name,nonce,role,app,output,mixedRenewal,hardlinkImage,hostTransport,imageReuse,coldBatches,immutableBatches,sourceHashes,sourceArchive,
+  const state={format_version:1,name,nonce,role,app,output,mixedRenewal,hardlinkImage,hostTransport,imageReuse,coldBatches,immutableBatches,runtimeRole,sdkRole,providerOwner,roleActivationOnly,selectedRole,sourceHashes,sourceArchive,
     sourceArchiveSha256:digest(await fs.readFile(sourceArchive)),image,runtime};
   await fs.writeFile(statePath,JSON.stringify(state,null,2)+'\n',{mode:0o600});
   emit({step:'prepared-no-machine-created',name,image:image.image,state:statePath});
@@ -128,14 +142,19 @@ async function run(statePath) {
   assert.equal(state.imageReuse??false,imageReuse);
   assert.equal(state.coldBatches??false,coldBatches);
   assert.equal(state.immutableBatches??false,immutableBatches);
+  assert.equal(state.runtimeRole??false,runtimeRole);
+  assert.equal(state.sdkRole??false,sdkRole);
+  assert.equal(state.providerOwner??false,providerOwner);
+  assert.equal(state.roleActivationOnly??false,roleActivationOnly);
+  assert.equal(state.selectedRole,selectedRole);
   assert.match(state.nonce,/^[0-9a-f-]{36}$/);
   const bytes=await fs.readFile(state.sourceArchive);
   const runtimeBytes=await fs.readFile(state.runtime.archive); assert.equal(digest(runtimeBytes),state.runtime.sha256);
   assert.equal(digest(bytes),state.sourceArchiveSha256);
-  const report={format_version:1,kind:'managed-home-storage-postgresql-component-qualification',provider:'Fly.io',app,
-    name,qualification:state.nonce,startedAt:new Date().toISOString(),image:state.image,
+  const report={format_version:1,kind:providerOwner?'provider-owner-postgresql-component-qualification':roleActivationOnly?'managed-staging-activation-postgresql-component-qualification':'managed-home-storage-postgresql-component-qualification',provider:'Fly.io',app,
+    name,qualification:state.nonce,fixtureVariant,roleActivationOnly,selectedRole,startedAt:new Date().toISOString(),image:state.image,
     sourceArchiveSha256:state.sourceArchiveSha256,sourceHashes:state.sourceHashes,runtime:state.runtime,steps:[],
-    scope:'One disposable PostgreSQL server with verified TLS factories; fixture Fly/Root evidence and memory-backed actual FabricCas/S3 adapter; no fleet/HA/realRoot/model proof'};
+    scope:providerOwner?'One exact owned fresh PostgreSQL server; real TLS factories/concurrency/constraints, synthetic enrollment/CAS rows; no physical Root/Native/SDK/S3/provider ownership proof':roleActivationOnly?'One exact owned PostgreSQL fixture; three fresh role databases exercise original staging activation, lost COMMIT and wrong database; synthetic Root/image/compiler/Fly/clock evidence, no physical readiness or production enablement':'One disposable PostgreSQL server with verified TLS factories; fixture Fly/Root evidence and memory-backed actual FabricCas/S3 adapter; no fleet/HA/realRoot/model proof'};
   let owned, server, phase='preflight',calls=0,createUncertain=false;
   report.providerCallLimit=48;report.cleanupReserve=8;
   async function command(args,label,timeout=30000) {
@@ -169,7 +188,7 @@ async function run(statePath) {
     await fs.writeFile(configPath,JSON.stringify(config,null,2)+'\n');
     report.requestedConfig=config;
     emit({step:'about-to-provision-exact-disposable-name',name,image:state.image.image});
-    const intentFile=await fs.open(path.join(state.output,'creation-intent.json'),'wx',0o600);try{await intentFile.writeFile(JSON.stringify({nonce:state.nonce,name,role,image:state.image.image,sourceArchiveSha256:state.sourceArchiveSha256,at:new Date().toISOString()})+'\n');await intentFile.sync();}finally{await intentFile.close();}
+    const intentFile=await fs.open(path.join(state.output,'creation-intent.json'),'wx',0o600);try{await intentFile.writeFile(JSON.stringify({nonce:state.nonce,name,role,fixtureVariant,roleActivationOnly,selectedRole,image:state.image.image,sourceArchiveSha256:state.sourceArchiveSha256,at:new Date().toISOString()})+'\n');await intentFile.sync();}finally{await intentFile.close();}
     const intentDirectory=await fs.open(state.output,'r');try{await intentDirectory.sync();}finally{await intentDirectory.close();}
     createUncertain=true;let creationFailure;
     try {
@@ -224,7 +243,7 @@ async function run(statePath) {
       .replace(state.sourceArchiveSha256,state.runtime.sha256)
       .replace('sha256sum -c SOURCE-SHA256SUMS;','test -x node;');
     assert((await remote(runtimeDownload,'private-runtime-download-and-sha256')).includes('VERIFIED:'+state.nonce));
-    const followup=followupFiles.length?' /var/tmp/rudder-authority-node-runtime/managed-followup.json':'';
+    const followup=providerOwner?" '' provider-owner-v1":followupFiles.length?' /var/tmp/rudder-authority-node-runtime/managed-followup.json'+(roleActivationOnly?' role-activation-v1':''):'';
     const launch=`(timeout 180 /bin/bash /var/tmp/rudder-authority-node-source/examples/managed-storage-pg/qualify-managed-guest.sh /var/tmp/rudder-authority-node-source /var/tmp/rudder-authority-node-runtime ${quote(state.nonce)} ${quote(owned)}${followup}; result=$?; printf '%s\\n' "$result" >/var/tmp/rudder-authority-node-done) >/var/tmp/rudder-authority-node-output 2>&1 </dev/null & printf 'LAUNCHED:${state.nonce}\\n'`;
     assert((await remote(launch,'launch-contained-postgresql-qualification')).includes('LAUNCHED:'+state.nonce));
     const deadline=Date.now()+210000;
@@ -258,9 +277,33 @@ async function run(statePath) {
     }
     phase='guest-'+(report.guestFailure?.phase||'completed');
     assert.equal(report.guestExitCode,0,'guest returned failure; see public fixture log');
+    if(providerOwner){const p=report.nodeProof;assert(p?.ok&&p.scope==='provider-owner-real-PG-component-only'&&p.qualification===state.nonce);
+      for(const field of ['actualPostgres','verifiedTLSFactories','freshEmptySchema','nonrootFixtureUser','syntheticEnrollmentAndCasRows','firstOwnerExclusivity','immutableReceiptRetry','oldApisRefused','oldSqlLeaseWriterRefused','elapsedTimeNoRegrant','sameOwnerHeartbeat','modeChangeRefused','replacementRefused','wrongOwnershipRefused','fixtureConnectionsClosed'])assert.equal(p[field],true);
+      for(const field of ['realRootRegistration','physicalNative','physicalProviderFence','actualS3','sdkExecution','normalRuntimeRetirement','productionEnablement','models'])assert.equal(p[field],false);
+      assert.equal(p.fixtureVariant,'provider-owner-v1');assert.equal(p.executedCases,1);
+    }else{
     assert(report.nodeProof?.ok&&report.nodeProof.scope==='managed-home-v1-v2-v3-real-PG-component-only');
+    assert.equal(report.nodeProof.qualification,state.nonce);
+    assert.equal(report.nodeProof.roleActivationOnly??false,roleActivationOnly);
+    assert.equal(report.nodeProof.selectedRole,selectedRole);
+    if(roleActivationOnly){const r=report.nodeProof.separateFollowup;
+      assert.equal(r?.scope,'actual-PG-original-staging-activation-component-only');assert.equal(r.role,selectedRole);
+      for(const key of ['actualStagingActivationPgQualification','actualPostgres','fixtureRootHmac','fixtureImageNativeEvidence','fixtureCompilerEvidence','fixtureFly','fixtureBaseClockAdmission'])assert.equal(r[key],true);
+      for(const key of ['physicalRoot','physicalNative','physicalCompilerSdk','actualS3','providerOwnerQualified','qualifiedClockContinuity','productionEnablement','models'])assert.equal(r[key],false);
+      assert(Array.isArray(r.checks)&&r.checks.length===3);assert.equal(r.actualFreshDatabases,3);assert.equal(r.actualClosedSocketPairs,selectedRole==='sdk'?3:6);
+    }
     assert.equal(report.nodeProof.v4MixedQualification,mixedRenewal);
     assert.equal(report.nodeProof.hostTransportPgQualification,hostTransport);
+    if(sdkRole&&!roleActivationOnly){const r=report.nodeProof.separateFollowup;assert.equal(r?.scope,'actual-PG-compiler-SDK-role-and-completion-component-only');
+      for(const key of ['actualCompilerSdkRolePgQualification','fixtureBaseClockAdmission','fixtureCompilerEvidence','actualPostgres','actualTlsRoleSessions','frozenMigrations','frozenHashes','restrictedRoles','tenantIsolation','immutablePreparedAndCompletion','globalArtifactDataOnly','authRevocationLock','knownOriginalCompletion','lostFirstCommitNoAdmission','unknownSecondCommitHistoricalFact','socketCloseBeforeCommit','socketCloseAfterCommit','providerLeaseExpiryAfterCommit','expiredOriginalRefused','legacyRuntimeRoleUnblessed'])assert.equal(r[key],true);
+      for(const key of ['actualS3','physicalRoot','physicalNative','physicalCompilerSdk','fixtureRoleDatabaseClockAdmission','configuredSidecar','qualifiedClockContinuity','normalRootRetirement','productionEnablement','models'])assert.equal(r[key],false);
+      assert.equal(r.actualFreshDatabases,6);assert.equal(r.actualClosedSocketPairs,7);assert.equal(r.retainedOriginalRegistries,6);assert.equal(r.faultBoundaries.length,5);assert(r.faultBoundaries.every(b=>b.actual_query_completed===true));
+    }
+    if(runtimeRole&&!roleActivationOnly){const r=report.nodeProof.separateFollowup;assert.equal(r?.scope,'actual-PG-runtime-role-and-completion-component-only');
+      for(const key of ['actualRuntimeRolePgQualification','fixtureBaseClockAdmission','actualPostgres','actualTlsRoleSessions','frozenMigrations','frozenHashes','restrictedRoles','tenantIsolation','immutablePreparedAndCompletion','globalArtifactDataOnly','authRevocationLock','knownOriginalCompletion','lostFirstCommitNoAdmission','unknownSecondCommitHistoricalFact','socketCloseBeforeCommit','socketCloseAfterCommit','providerLeaseExpiryAfterCommit','expiredOriginalRefused'])assert.equal(r[key],true);
+      for(const key of ['actualS3','physicalRoot','physicalNative','configuredSidecar','qualifiedClockContinuity','normalRootRetirement','productionEnablement','models'])assert.equal(r[key],false);
+      assert.equal(r.actualFreshDatabases,6);assert.equal(r.actualClosedSocketPairs,7);assert.equal(r.retainedOriginalRegistries,6);
+    }
     if(immutableBatches){const b=report.nodeProof.separateFollowup;assert.equal(b?.scope,'real-PG-immutable-batch-retention-component-only');for(const key of ['actualPostgres','frozenMigration','oneStartedAndAckPerBatch','storedAckReconciliation','unknownStartedNoDispatch','expiredOriginalRefused','historicalAckNoClockRenewal','batchPublication','runtimeRlsAndRestrictedGrants','historicalAckCannotContinue','originalImmutableHold','zeroObjectLeaseReads','syntheticPolicyReadback'])assert.equal(b[key],true);for(const key of ['actualS3','realWorkloadRole','physicalRoot','physicalNative','productionEnablement','models','wholeImage300sQualified'])assert.equal(b[key],false);}
     if(coldBatches){const b=report.nodeProof.separateFollowup;assert.equal(b?.scope,'real-PG-cold-image-batch-component-only');for(const key of ['actualPostgres','frozenMigration','oneStartedAndAckPerBatch','storedAckReconciliation','unknownStartedNoDispatch','expiredOriginalRefused','historicalAckNoClockRenewal','batchPublication','runtimeRlsAndRestrictedGrants'])assert.equal(b[key],true);for(const key of ['actualS3','physicalRoot','physicalNative','productionEnablement','models','wholeImage300sQualified'])assert.equal(b[key],false);}
     if(imageReuse){const reused=report.nodeProof.separateFollowup;
@@ -277,6 +320,7 @@ async function run(statePath) {
     if(hardlinkImage){const h=report.nodeProof.separateFollowup;assert(h&&h.aliases===513&&h.logicalPathBytes>2147483648&&h.retainedUniqueObjectBytes<=2147483648&&h.successfulTargetBodyReads===1&&h.cpuDigestInvocationCountQualified===false);}
     assert(report.nodeProof.realSessionBlockers?.length>=2&&report.nodeProof.verifiedTLS&&report.nodeProof.bootstrapAndOwner&&report.nodeProof.wrongServiceCredentialRefused);
     assert(report.nodeProof.realRootRegistration===false&&report.nodeProof.normalRetirementBlocked===true&&report.nodeProof.normalCleanupPerformed===false);
+    }
     assert(report.guestCleanup.cluster_stop_confirmed&&report.guestCleanup.cluster_removed&&report.guestCleanup.normal_runtime_retirement===false&&report.guestCleanup.exact_vm_teardown_required);
     for(const file of sourceFiles) assert.equal(digest(await fs.readFile(path.join(root,file))),state.sourceHashes[file],`source changed during run: ${file}`);
     report.ok=true;

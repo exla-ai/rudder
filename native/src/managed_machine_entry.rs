@@ -73,8 +73,9 @@ impl ManagedProjectDisplay {
             && !self.session_started_iso.chars().any(char::is_control),"managed project display/selection invalid");Ok(())
     }
 }
+enum ProjectPurpose {Task(ManagedTaskOptIn),SourceOnly}
 struct ProjectCarrier {
-    owner:EngineOwnership,selected:ManagedTaskOptIn,display:Option<ManagedProjectDisplay>,initial:Option<ManagedAppInitialState>,
+    owner:EngineOwnership,purpose:ProjectPurpose,display:Option<ManagedProjectDisplay>,initial:Option<ManagedAppInitialState>,
     project:Option<Arc<ManagedTaskProject>>,supervisor:Option<Arc<ManagedTaskLifetimeSupervisor>>,current_source:Option<source_generations::CurrentSource>,
     budget:FinalizationBudget,cancelled:Arc<AtomicBool>,panic:Option<Box<dyn Any+Send>>,
 }
@@ -85,7 +86,7 @@ impl ProjectTicket {
     /// native host worker; saved paths/JSON cannot construct EngineOwnership.
     pub(crate) fn capture(owner:EngineOwnership,selected:ManagedTaskOptIn,display:ManagedProjectDisplay,
         budget:FinalizationBudget,cancelled:Arc<AtomicBool>)->Self {
-        Self {id:uuid::Uuid::new_v4().to_string(),cell:Cell::new(ProjectCarrier {owner,selected,display:Some(display),initial:None,
+        Self {id:uuid::Uuid::new_v4().to_string(),cell:Cell::new(ProjectCarrier {owner,purpose:ProjectPurpose::Task(selected),display:Some(display),initial:None,
             project:None,supervisor:None,current_source:None,budget,cancelled,panic:None})}
     }
     /// OFF App retaining overload. Complete all fallible DATA/clock checks and
@@ -94,7 +95,13 @@ impl ProjectTicket {
         budget:FinalizationBudget,cancelled:Arc<AtomicBool>)->Result<()> {
         ensure!(out.is_none()&&owner.is_some(),"original project capture output/owner unavailable");time(&budget,&cancelled)?;display.check(&selected)?;
         let id=uuid::Uuid::new_v4().to_string();loop{time(&budget,&cancelled)?;match owner.as_ref().unwrap().check_shared_for_app(){Ok(())=>break,Err(error) if error.downcast_ref::<crate::engine_host::EngineSharedAdmissionBusy>().is_some()=>std::thread::sleep(budget.phase_limit(Duration::from_millis(2))?),Err(error)=>return Err(error)}}time(&budget,&cancelled)?;
-        *out=Some(Self{id,cell:Cell::new(ProjectCarrier{owner:owner.take().unwrap(),selected,display:Some(display),initial:None,project:None,supervisor:None,current_source:None,budget,cancelled,panic:None})});Ok(())
+        *out=Some(Self{id,cell:Cell::new(ProjectCarrier{owner:owner.take().unwrap(),purpose:ProjectPurpose::Task(selected),display:Some(display),initial:None,project:None,supervisor:None,current_source:None,budget,cancelled,panic:None})});Ok(())
+    }
+    pub(crate) fn capture_source_only_retaining(out:&mut Option<Self>,owner:&mut Option<EngineOwnership>,budget:FinalizationBudget,cancelled:Arc<AtomicBool>)->Result<()> {
+        ensure!(out.is_none()&&owner.is_some(),"source-only ticket output/original owner unavailable");time(&budget,&cancelled)?;
+        loop{time(&budget,&cancelled)?;match owner.as_ref().unwrap().assert_current_bounded(&budget,&cancelled){Ok(())=>break,Err(e)if e.downcast_ref::<crate::engine_host::EngineSharedAdmissionBusy>().is_some()=>std::thread::sleep(budget.phase_limit(Duration::from_millis(1))?),Err(e)=>return Err(e)}}
+        ensure!(owner.as_ref().unwrap().is_fabric()&&owner.as_ref().unwrap().managed_recovery_store().is_some(),"source-only project needs actual prepared Fabric owner");
+        let id=uuid::Uuid::new_v4().to_string();*out=Some(Self{id,cell:Cell::new(ProjectCarrier{owner:owner.take().unwrap(),purpose:ProjectPurpose::SourceOnly,display:None,initial:None,project:None,supervisor:None,current_source:None,budget,cancelled,panic:None})});Ok(())
     }
     pub(crate) fn id(&self)->&str {&self.id}
 }
@@ -108,15 +115,20 @@ struct WorkerCarrier {bootstrap:ManagedMachineBootstrap,projects:BTreeMap<String
     generations:BTreeMap<String,Arc<source_generations::SourceGeneration>>,
     source_reservations:BTreeMap<String,Arc<source_generations::RootSourceReservation>>}
 struct Shared {phase:AtomicU8,worker_owned:AtomicBool,app_thread:std::thread::ThreadId,carrier:Mutex<WorkerCarrier>,receive:Mutex<Receiver<Job>>,
-    host_offer:Mutex<Option<HostIngress>>,send:SyncSender<Job>,kernel:Arc<kernel_startup::KernelSlot>}
+    host_offer:Mutex<Option<HostIngress>>,runtime_ready_data:Mutex<Option<rudder_native::root_storage_bootstrap::runtime_image::RuntimeReadyObservationData>>,send:SyncSender<Job>,kernel:Arc<kernel_startup::KernelSlot>}
 
 fn prepare_project(ticket:&ProjectTicket)->Result<()> {
     let mut c=ticket.cell.owner.lock().map_err(|_|anyhow::anyhow!("managed project carrier poisoned"))?;
     let result=catch_unwind(AssertUnwindSafe(||->Result<()> {loop{let step=(||->Result<()> {
         time(&c.budget,&c.cancelled)?;c.owner.assert_current_bounded(&c.budget,&c.cancelled)?;ensure!(c.owner.is_fabric(),"managed machine requires actual Fabric owner");
-        if let Some(display)=&c.display{display.check(&c.selected)?;}
+        let selected=match &c.purpose {ProjectPurpose::Task(selected)=>selected.clone(),ProjectPurpose::SourceOnly=>{
+            ensure!(c.display.is_none()&&c.initial.is_none()&&c.project.is_none()&&c.supervisor.is_none(),"source-only ticket cannot contain task/model state");
+            let store=c.owner.managed_recovery_store().context("source-only project needs genuine prepared namespace")?.clone();
+            let fence=c.owner.journal_parts().1.clone();ensure!(store.reopen_current(c.owner.journal_parts().0)?==store,"source-only managed namespace changed");c.owner.source_lease(&fence)?.check_shared_current()?;return Ok(());
+        }};
+        if let Some(display)=&c.display{display.check(&selected)?;}
         let namespace=c.owner.managed_recovery_store().context("explicit managed project preparation required")?.binding().clone();
-        let selected=c.selected.clone();let original=c.budget.clone();let cancel=c.cancelled.clone();if c.project.is_none(){c.project=Some(ManagedTaskProject::capture_bounded(&mut c.owner,&selected,&original,&cancel)?);}
+        let original=c.budget.clone();let cancel=c.cancelled.clone();if c.project.is_none(){c.project=Some(ManagedTaskProject::capture_bounded(&mut c.owner,&selected,&original,&cancel)?);}
         time(&c.budget,&c.cancelled)?;let fence=c.owner.journal_parts().1.clone();
         if c.supervisor.is_none(){let lease=c.owner.source_lease(&fence)?;let writer=c.owner.source_journal_factory(&fence)?;
         c.supervisor=Some(ManagedTaskLifetimeSupervisor::new_off_app(lease,writer)?);}
@@ -174,6 +186,9 @@ fn worker(shared:&Arc<Shared>) {
                 }
             }
             {let WorkerCarrier {bootstrap,runtime_image,..}=&mut *carrier;runtime_image.poll_retaining(bootstrap)?;}
+            // Typed snapshot only. Root checks ran on this actual worker; App
+            // receives no owner/FD and performs no Root IO from this cache.
+            if let Ok(mut data)=shared.runtime_ready_data.try_lock(){*data=carrier.runtime_image.ready_observation_data();}
             shared.kernel.poll_retaining(carrier.registered_engine.as_ref());
             for ticket in carrier.projects.values() {
                 if matches!(ticket.cell.phase.load(Ordering::Acquire),READY|SHARED_FENCED) {
@@ -218,6 +233,13 @@ fn worker(shared:&Arc<Shared>) {
 #[derive(Clone)]
 pub(crate) struct MachineControl {shared:Arc<Shared>,send:SyncSender<Job>}
 impl MachineControl {
+    /// App-only nonblocking last-observed DATA, never runtime/source/task/drain
+    /// authority. Pending/absent/unavailable/contended states return None.
+    pub(crate) fn runtime_ready_observation_data_on_app(&self)->Result<Option<rudder_native::root_storage_bootstrap::runtime_image::RuntimeReadyObservationData>> {
+        ensure!(self.shared.app_thread==std::thread::current().id(),"runtime snapshot requires original App thread");
+        if self.shared.phase.load(Ordering::Acquire)!=SERVING{return Ok(None);}
+        match self.shared.runtime_ready_data.try_lock(){Ok(data)=>Ok(data.clone()),Err(TryLockError::WouldBlock)=>Ok(None),Err(_)=>anyhow::bail!("runtime observation DATA cache poisoned")}
+    }
     /// Nonblocking host transfer. Err returns the SAME ticket; a registered
     /// failed queue also stays in the machine map and cannot be retried.
     pub(crate) fn submit_project(&self,ticket:ProjectTicket)->std::result::Result<ProjectTicket,(ProjectTicket,anyhow::Error)> {
@@ -260,7 +282,7 @@ pub(crate) struct ManagedMachineRuntime {
 impl ManagedMachineRuntime {
     pub(crate) fn capture(bootstrap:ManagedMachineBootstrap)->Self {
         let (send,receive)=mpsc::sync_channel(QUEUE);
-        let shared=Arc::new(Shared {phase:AtomicU8::new(STARTING),worker_owned:AtomicBool::new(false),app_thread:std::thread::current().id(),receive:Mutex::new(receive),host_offer:Mutex::new(None),send:send.clone(),kernel:kernel_startup::KernelSlot::new(),carrier:Mutex::new(WorkerCarrier {
+        let shared=Arc::new(Shared {phase:AtomicU8::new(STARTING),worker_owned:AtomicBool::new(false),app_thread:std::thread::current().id(),receive:Mutex::new(receive),host_offer:Mutex::new(None),runtime_ready_data:Mutex::new(None),send:send.clone(),kernel:kernel_startup::KernelSlot::new(),carrier:Mutex::new(WorkerCarrier {
             bootstrap,projects:BTreeMap::new(),seeds:BTreeMap::new(),retired_seeds:BTreeMap::new(),enrollments:BTreeMap::new(),root_rpc_held:false,root_private_held:false,
             registered_engine:None,runtime_image:MachineRuntimeImage::new(std::thread::current().id()),host_offered:false,host_error:None,panic:None,generations:BTreeMap::new(),source_reservations:BTreeMap::new()})});
         Self {control:MachineControl {shared:shared.clone(),send},shared,worker:None,apps:BTreeMap::new(),app_thread:std::thread::current().id(),panic:None}
@@ -310,10 +332,11 @@ impl ManagedMachineRuntime {
         for ticket in tickets {self.apps.entry(ticket.id.clone()).or_insert(ProjectApp {ticket,app:None});}
         for slot in self.apps.values_mut() {
             let phase=slot.ticket.cell.phase.load(Ordering::Acquire);
-            ensure!(phase!=RECOVERY,"managed project requires recovery; original App/owner retained");
-            if phase!=READY&&phase!=SHARED_FENCED&&phase!=STARTUP_CLOSED {continue;}
+            if phase!=READY&&phase!=SHARED_FENCED&&phase!=STARTUP_CLOSED&&phase!=RECOVERY {continue;}
             let mut carrier=match slot.ticket.cell.owner.try_lock() {Ok(c)=>c,Err(TryLockError::WouldBlock)=>continue,
                 Err(_)=>anyhow::bail!("managed project carrier poisoned")};
+            if matches!(&carrier.purpose,ProjectPurpose::SourceOnly){ensure!(slot.app.is_none(),"source-only ticket cannot own an App");continue;}
+            ensure!(phase!=RECOVERY,"managed project requires recovery; original App/owner retained");
             if phase==SHARED_FENCED||phase==STARTUP_CLOSED {
                 // Existing original work keeps its PTY/backend/actor/completion
                 // polling. No App is created, no new task adopted and no state
@@ -380,8 +403,18 @@ include!("managed_machine_ingress_services.rs");
 
 #[path="managed_source_generations.rs"]
 mod source_generations;
-pub(crate) use source_generations::CurrentSourceAdmission;
+pub(crate) use source_generations::{CurrentSourceAdmission,CurrentSourceSdkCampaign,CurrentSdkBuildState,CurrentSourceSdkCleanup};
 
 #[path="managed_machine_kernel_startup.rs"]
 mod kernel_startup;
 pub(crate) use kernel_startup::{ManagedKernelStartup,ManagedMachineStartupGate,KernelStartupStatus};
+
+impl MachineControl {
+    pub(crate) fn runtime_environment_client_off_app(&self,original:&FinalizationBudget,cancel:&AtomicBool)->Result<Option<Arc<rudder_native::root_storage_bootstrap::runtime_image::RuntimeImageClient>>>{
+        ensure!(self.shared.app_thread!=std::thread::current().id(),"runtime environment client requires off App");
+        loop{time(original,cancel)?;ensure!(self.shared.phase.load(Ordering::Acquire)==SERVING,"original machine worker unavailable");
+            match self.shared.carrier.try_lock(){Ok(carrier)=>{let registered=carrier.registered_engine.as_ref().context("actual original registration pending")?;
+                let result=carrier.runtime_image.environment_client_retaining(registered)?;time(original,cancel)?;return Ok(result)},
+                Err(TryLockError::WouldBlock)=>std::thread::sleep(original.phase_limit(Duration::from_millis(1))?),Err(_)=>anyhow::bail!("original machine carrier poisoned")}}
+    }
+}

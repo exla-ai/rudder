@@ -100,6 +100,7 @@ impl PreparationStore {
         for (name, reference) in &envelope.state.pins { validate_pin(name)?; reference.validate()?; }
         for (id, lease) in &envelope.state.staging { ensure!(*id == lease.id && !id.is_empty(), "invalid original staging state"); }
         image_import::validate_holds(&envelope.state.image_import_holds)?;
+        backed_data::validate_retention(&envelope.state)?;
         self.check()?; Ok(envelope.state)
     }
     pub(crate) fn pin_matches(&self, name: &str, reference: &ObjectRef) -> Result<bool> {
@@ -242,6 +243,7 @@ impl PreparationStore {
     fn commit_state(&mut self, mut state: RetentionState) -> Result<()> {
         self.locked()?; ensure!(self.pending_file.is_none(), "retention write has original pending IO");
         state.generation = self.retained.as_ref().context("retention snapshot absent")?.generation.checked_add(1).context("retention generation exhausted")?;
+        backed_data::validate_retention(&state)?;
         self.retention_intent = Some(state.clone());
         let checksum = ObjectRef::from_bytes(ObjectKind::Blob, &canonical_json(&state)?).digest;
         let bytes = canonical_json(&StateEnvelope { state: state.clone(), checksum })?;

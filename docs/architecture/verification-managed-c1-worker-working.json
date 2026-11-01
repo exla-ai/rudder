@@ -1,0 +1,132 @@
+{
+  "formatVersion": 1,
+  "scope": "unreleased same-source managed worker base+runtimeCAS+C1overlay and separate staging control build only",
+  "sourceKind": "uncommitted working-source snapshot; packageVersion field does not identify shipped alpha33 product bits",
+  "workerSourceManifestSha256": "3e34a5e237ffb93e81c423968b57682492a18466accaba7a3b2f6f1cc5edacce",
+  "base": {
+    "formatVersion": 1,
+    "scope": "fresh same-source managed Bookworm worker base and runtimeCAS, before C1 CAS-only overlay; build only",
+    "sourceManifestSha256": "3e34a5e237ffb93e81c423968b57682492a18466accaba7a3b2f6f1cc5edacce",
+    "sourceRevision": "486d6c3cd5811bc27ddaa3fb61305ef7fadeb81c",
+    "packageVersion": "4.0.0-alpha.33",
+    "image": "registry.fly.io/rudder-workers-exla:managed-c1-base-3e34a5e237ff",
+    "digest": "sha256:0042186576586baacc20e1f8e4f53c51eb0d4f83cb398522deb8bc8a91f32e3b",
+    "exitCode": 0,
+    "artifacts": {
+      "/opt/rudder/dist/native/rudder-native": {
+        "sha256": "f1e7a3350872761893af1c70f46000683ec510c38d301691a677534394e2d6e8",
+        "bytes": 39955472
+      },
+      "/opt/rudder/dist/native/rudder-jj": {
+        "sha256": "3ad84c4b26e53ff4e1aabfc5076a3a06772e4b825cbd3137673dc8d3f82ef34a",
+        "bytes": 31182480
+      },
+      "/usr/local/bin/rudder-root-storage": {
+        "sha256": "6f5b4109ce5b300472ae5cc90ceaf446854b3d983a8114fcab37d64dcf24f256",
+        "bytes": 7730024
+      },
+      "/usr/local/bin/rudder-machine-root": {
+        "sha256": "9732c90d8f7ec06a010f28649178102ed8563f4a66ded36a4f5b62a24e9b48a2",
+        "bytes": 2894888
+      }
+    },
+    "logSha256": "2e8ebda431367f0984179413eb1d1fa99208640f5649d73243dc9da2bbfa1577",
+    "verifiedAt": "2026-11-01T21:03:06.402705+00:00",
+    "deployed": false,
+    "sdkQualified": false,
+    "runtimeQualified": false,
+    "remoteBuildMayContinue": false
+  },
+  "overlay": {
+    "formatVersion": 1,
+    "scope": "same-source managed worker plus exact C1 A6 CAS overlay, build-only DATA",
+    "image": "registry.fly.io/rudder-workers-exla:managed-c1-overlay-68906e9213cf",
+    "digest": "sha256:f4d5922cfa332a67e05fccd6e7bd46703c24f1a51b4a832346535c4434ba55a6",
+    "exitCode": 0,
+    "inputManifestSha256": "68906e9213cf9f51c3584ca1817a6a81744695af5a2159aa3d1172489c49f8b3",
+    "workerSourceManifestSha256": "3e34a5e237ffb93e81c423968b57682492a18466accaba7a3b2f6f1cc5edacce",
+    "baseReceiptSha256": "9192addc3b099439b2401dd4be717fadc54f7cd1d1ea04088be8cbddf94956af",
+    "runtimeData": {
+      "directory": "/var/lib/rudder-image-cas-v1",
+      "format_version": 1,
+      "inventory": {
+        "algorithm": "sha256",
+        "digest": "9a9cd9a6cd59a925111bf845628e7e74a317dd69ca873da268e76b11358fc83f",
+        "kind": "blob",
+        "size_bytes": 2936912
+      },
+      "layout": "baked-image-cas-v1",
+      "objects": 22177,
+      "production_admission": false,
+      "retention_generation": 2,
+      "roots": {
+        "format_version": 1,
+        "installer_input": {
+          "algorithm": "sha256",
+          "digest": "7f67e75079ee2094982cd7fa041031ed47e010add6de8fd4647935889a8f45f1",
+          "kind": "directory",
+          "size_bytes": 231
+        },
+        "manifest": {
+          "algorithm": "sha256",
+          "digest": "cfa143286cc8b3b609cc5f7b9262fe1196405c87099d780e36127b5fd87561b9",
+          "kind": "blob",
+          "size_bytes": 5673331
+        }
+      },
+      "runtime_mount": false,
+      "scope": "immutable-image-cas-data-only",
+      "total_bytes": 1980777987
+    },
+    "descriptors": {
+      "runtime-config-pin.json": {
+        "path": "/usr/local/share/rudder-managed-image/runtime-config-pin.json",
+        "sha256": "a1f5f3dd8d9b3316111a832bc4ffd9a2120cb828b7d6e344c5f103160f2e0897",
+        "size_bytes": 430
+      },
+      "sidecar-policy-pin.json": {
+        "path": "/usr/local/share/rudder-managed-image/sidecar-policy-pin.json",
+        "sha256": "e3aac458b318d8e3187c25269b77a5669bf4f8e42b47622e478513258cf2c7c0",
+        "size_bytes": 3935
+      },
+      "components.json": {
+        "path": "/usr/local/share/rudder-managed-image/components.json",
+        "sha256": "fd22383b65e3bd6a49c4d7325b45bfb082e0e9e49ac4c1d0453d8abb7c0ed615",
+        "size_bytes": 1584
+      },
+      "policy.json": {
+        "path": "/usr/local/share/rudder-managed-image/policy.json",
+        "sha256": "8a3a151a5ffd9b07612da0e57908ad218e84239284872d7bfea861117a445694",
+        "size_bytes": 2689
+      }
+    },
+    "logSha256": "b79bec839ea2a9881778a4fac57647c0321dae9950dd93c1339d6b1924268383",
+    "verifiedAt": "2026-11-01T21:05:10.444937+00:00",
+    "deployed": false,
+    "sdkQualified": false,
+    "runtimeQualified": false,
+    "remoteBuildMayContinue": false
+  },
+  "stagingControl": {
+    "formatVersion": 1,
+    "scope": "isolated staging control/PG build only; not worker or actual runtime qualification",
+    "contextManifestSha256": "77cb91e7ac7dc552b6532f4f9edd0d8ea1ed7e1e45dae4cf65ff2b1e2a4252c0",
+    "image": "registry.fly.io/rudder-workers-exla:runtime-qualification-control-77cb91e7ac7d",
+    "digest": "sha256:ec7ed50fd7c5e9680cee1f5259882fd317d368a009f5c196224098b887e70853",
+    "exitCode": 0,
+    "stopReason": null,
+    "logSha256": "29bb0f92dd3f906bfdf16139480dc148257138b4ea7bdc2b27f4a6fb5b6223df",
+    "verifiedAt": "2026-11-01T21:07:01.888612+00:00",
+    "deployed": false,
+    "newAppOrVmCreated": false,
+    "runtimeQualified": false,
+    "remoteBuildMayContinue": false
+  },
+  "sdkRoleQualified": false,
+  "runtimeRoleQualified": false,
+  "ordinarySourceReadyVerified": false,
+  "sharedCacheReuse": false,
+  "productionDeployed": false,
+  "fullV4Complete": false,
+  "verifiedAt": "2026-11-01T21:05:10.444937+00:00"
+}

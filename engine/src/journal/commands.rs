@@ -99,6 +99,7 @@ impl Journal {
         now_ms: i64,
     ) -> Result<CommandReceipt> {
         valid_id(&request.idempotency_key)?;
+        super::automatic_mail_delivery::reserve_agent_key(&request.idempotency_key)?;
         valid_id(&request.kind)?;
         let body = json(request)?;
         ensure!(
@@ -217,6 +218,13 @@ impl Journal {
         }
         let blockers:i64=tx.query_row("SELECT count(*) FROM commands c JOIN effects e ON e.command_id=c.command_id WHERE c.project_id=?1 AND c.target_run=?2 AND c.target_epoch=?3 AND c.accepted_sequence<?4 AND e.state!='completed'",params![project,target,sql_u64(epoch)?,sql_u64(sequence)?],|r|r.get(0))?;
         if blockers != 0 {
+            return Ok(None);
+        }
+        if let Err(error) = super::automatic_mail_delivery::validate_reconciled_claim(&tx, command_id, now_ms) {
+            let result = serde_json::json!({"status":"rejected","reason":"original mailbox notification no longer permits a write","detail":error.to_string()});
+            complete(&tx, command_id, &result)?;
+            append_event(&tx, &project, "effect-rejected", &owner.owner_id, &serde_json::json!({"command_id":command_id,"result":result}), now_ms)?;
+            tx.commit()?;
             return Ok(None);
         }
         if matches!(kind.as_str(), "steer" | "interrupt" | "resume") {

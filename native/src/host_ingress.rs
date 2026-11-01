@@ -66,6 +66,8 @@ impl HostBakedRuntimePolicy {
 #[serde(deny_unknown_fields)]
 pub struct HostImagePreseedPolicy {pub image:String,pub image_receipt_sha256:String,pub full_manifest_sha256:String,#[serde(default,skip_serializing_if="Option::is_none")]pub batch_transport:Option<String>,
     #[serde(default,skip_serializing_if="Option::is_none")]pub runtime_mount:Option<HostBakedRuntimePolicy>}
+#[derive(Clone,Copy,Debug,PartialEq,Eq,Serialize,Deserialize)]
+pub enum HostOwnerMode {#[serde(rename="provider-fenced-v1")]ProviderFencedV1}
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HostOwnerLeaseSafety {pub qualification_receipt_sha256:String,pub margin_milliseconds:u32,pub engine_rate_error_ppm:u32,pub database_rate_error_ppm:u32,pub max_positive_clock_step_milliseconds:u32}
@@ -82,10 +84,19 @@ pub struct HostIngressConfig { pub version:u32, pub machine_id:String, pub store
     pub store_policy:HostReceiptStorePolicy, pub projects:Vec<AllowedPreparedProject>,
     pub runtime_profile:HostRuntimeProfile, pub runtime_manifest:ImageRuntimeManifest,
     #[serde(default)] pub image_preseed:Option<HostImagePreseedPolicy>,
+    #[serde(default,skip_serializing_if="Option::is_none")] pub runtime_qualification:Option<super::runtime_image::qualification::RuntimeQualificationScope>,
+    #[serde(default,skip_serializing_if="Option::is_none")] pub sdk_initial_source:Option<SdkInitialSourceProfile>,
+    #[serde(default,skip_serializing_if="Option::is_none")] pub compiler_sdk:Option<rudder_engine::execution::compiler_sdk::CompilerSdkCatalogData>,
+    #[serde(default,skip_serializing_if="Option::is_none")] pub compiler_qualification:Option<super::runtime_image::compiler_qualification::CompilerQualificationScope>,
+    #[serde(default,skip_serializing_if="Option::is_none")] pub owner_mode:Option<HostOwnerMode>,
     #[serde(default)] pub owner_lease_safety:Option<HostOwnerLeaseSafety>,
     /// Explicit qualified image/profile opt-in only. Absent remains V1.
     /// This policy choice mints no source/task/Root-ready authority.
     #[serde(default,skip_serializing_if="Option::is_none")] pub seed_profile:Option<rudder_vcs_bridge::seed::SeedProfile> }
+#[derive(Clone,Copy,Debug,PartialEq,Eq,Serialize,Deserialize)]
+pub enum SdkInitialSourceProfile {#[serde(rename="sdk-fixed-suite-v1")] FixedSuiteV1}
+#[derive(Clone,Copy,Debug,PartialEq,Eq,Serialize,Deserialize)]
+pub enum SdkBuildCase {#[serde(rename="accepted")] Accepted,#[serde(rename="proc-deny")] ProcDenied,#[serde(rename="job-deny")] JobDenied}
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all="snake_case")]
 pub enum HostBackend { Codex, Claude }
@@ -94,6 +105,7 @@ pub enum HostBackend { Codex, Claude }
 pub enum HostOperation {
     OpenPreparedProjectV1 { project_alias:String, backend:HostBackend, model:String, profile_id:String },
     StartTaskV1 { project_alias:String, backend:HostBackend, model:String, profile_id:String, text:String },
+    BuildCurrentSourceSdkV1 {project_alias:String,case:SdkBuildCase,repeat_identical:bool},
     ReceiptV1 { lookup_command_key:String },
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -116,7 +128,10 @@ fn path(value:&Path)->Result<()> {ensure!(value.is_absolute() && value.as_os_str
     && value.to_str().is_some_and(|s|s.trim()==s && !s.chars().any(char::is_control)),"host explicit path invalid");Ok(())}
 fn sha(value:&str)->Result<()> {ensure!(value.len()==64 && value.bytes().all(|b|b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),"host image digest invalid");Ok(())}
 impl HostIngressConfig {
+    pub(super) fn assert_unscoped_operations(&self)->Result<()> {ensure!(self.runtime_qualification.is_none()&&self.compiler_qualification.is_none(),"disposable qualification scope refuses host and general engine operations");Ok(())}
     pub(super) fn validate_for_runtime_mount(&self)->Result<()> {self.validate()?;
+        if let Some(sdk)=&self.compiler_sdk{sdk.validate_data()?;}
+        if let Some(scope)=&self.compiler_qualification{scope.validate_config(self)?;}
         ensure!(self.image_preseed.as_ref().and_then(|p|p.runtime_mount.as_ref()).is_some(),"runtime immutable image profile unconfigured");Ok(())}
     fn validate(&self)->Result<()> {
         ensure!(self.version==1 && !self.projects.is_empty() && self.projects.len()<=8,"host config version/count invalid");
@@ -128,6 +143,11 @@ impl HostIngressConfig {
             ensure!(p.batch_transport.as_deref().is_none_or(|v|v=="batch-v1"),"unsupported image batch transport");sha(&p.image_receipt_sha256)?;sha(&p.full_manifest_sha256)?;
             let Some((name,digest))=p.image.split_once("@sha256:")else{return Err(anyhow::anyhow!("host image preseed image not pinned"));};
             ensure!(name=="registry.fly.io/rudder-workers-exla","host image registry policy invalid");sha(digest)?;}
+        if let Some(scope)=&self.runtime_qualification{scope.validate_config(self)?;}
+        if let Some(sdk)=&self.compiler_sdk{sdk.validate_data()?;ensure!(self.image_preseed.as_ref().and_then(|p|p.runtime_mount.as_ref()).is_some(),"SDK catalog requires original Root runtime mount");}
+        if let Some(scope)=&self.compiler_qualification{scope.validate_config(self)?;}
+        if self.sdk_initial_source.is_some(){self.assert_unscoped_operations()?;ensure!(self.compiler_sdk.is_some()&&self.image_preseed.as_ref().and_then(|p|p.runtime_mount.as_ref()).is_some(),"fixed initial SDK source needs actual configured ordinary SDK/runtime profile");}
+        ensure!(self.owner_mode.is_none()||self.owner_lease_safety.is_none(),"provider ownership cannot reinterpret a clock lease policy");
         if let Some(safety)=&self.owner_lease_safety{safety.reserve_nanoseconds()?;}
         path(&self.state_directory)?;let mut aliases=std::collections::BTreeSet::new();
         for p in &self.projects {key(&p.alias)?;ensure!(aliases.insert(&p.alias),"host project alias duplicate");
@@ -149,6 +169,7 @@ impl HostCommand {
         ensure!(self.version==1,"host command version invalid");uuid(&self.session_generation)?;key(&self.rpc_id)?;key(&self.command_key)?;
         match &self.operation {
             HostOperation::ReceiptV1 {lookup_command_key}=>key(lookup_command_key)?,
+            HostOperation::BuildCurrentSourceSdkV1 {project_alias,..}=>key(project_alias)?,
             HostOperation::OpenPreparedProjectV1 {project_alias,model,profile_id,..} |
             HostOperation::StartTaskV1 {project_alias,model,profile_id,..}=>{key(project_alias)?;text(model,256)?;text(profile_id,256)?;}
         }
@@ -229,6 +250,7 @@ impl HostIngress {
             // Stage original DATA BEFORE late/binding/time checks. Errors never
             // reopen this slot or permit a second dispatch/reconstruction.
             self.command=Some(command);let command=self.command.as_ref().unwrap();command.validate()?;
+            self.config.data().assert_unscoped_operations()?;
             ensure!(command.session_generation==self.session_generation&&self.transport.online(),"host command has no genuine current transport generation");
             if FinalizationBudget::from_constraint(&command.constraint).and_then(|b|b.remaining()).is_err(){self.expired_reply=Some(HostReply {version:1,session_generation:command.session_generation.clone(),rpc_id:command.rpc_id.clone(),command_key:command.command_key.clone(),result:None,error:Some(HostReplyError::Expired)});self.flush_expired_retaining()?;return Ok(None);}
             self.assert_current()?;let command=command.clone();self.received.take();Ok(Some(command))})();
@@ -309,6 +331,7 @@ pub(super) struct RootHostControl { transport:transport_io::TransportIo, volume_
     token:File,token_stamp:Stamp,images:Vec<ImmutableFile>,node:Image,sidecar_pair:Endpoint,child_endpoint:OwnedFd,
     native_pair:Endpoint,native_endpoint:OwnedFd,uptime:File,boot:Vec<u8>,child:Option<super::ChildOwner>,
     attempted:bool,generation:Option<String>,namespaces:Vec<(String,File,i32)>,exe:Option<OwnedFd>,
+    runtime_qualification_inbound:Option<storage::Packet>,
     runtime_received:Option<storage::Packet>,operation_inbound:Option<storage::Packet>,ready_packet:Option<storage::Packet>,pending:Option<RootPending>,fenced:bool,fence_sent:bool,fence_unknown:bool }
 impl RootHostControl {
     pub(super) fn capture_optional(original:&FinalizationBudget,nonce:&str)->Result<Option<Self>> {
@@ -343,7 +366,7 @@ impl RootHostControl {
         let mut stat:libc::statfs=unsafe {std::mem::zeroed()};ensure!(unsafe {libc::fstatfs(uptime.as_raw_fd(),&mut stat)}==0 && stat.f_type==0x9fa0,"host uptime is not actual procfs");
         let value=Self {transport:transport_io::TransportIo::new(sidecar_pair.try_clone()?),volume_init:None,original:original.clone(),nonce:nonce.into(),file,stamp,data,digest:format!("{:x}",Sha256::digest(&bytes)),token,token_stamp,images,
             node:Image::capture(Path::new(NODE))?,sidecar_pair:Endpoint::capture(sidecar_pair)?,child_endpoint,native_pair:Endpoint::capture(native_pair)?,native_endpoint,
-            uptime,boot:storage::proc_bytes("/proc/sys/kernel/random/boot_id",64)?,child:None,attempted:false,generation:None,namespaces:Vec::new(),exe:None,runtime_received:None,operation_inbound:None,ready_packet:None,pending:None,fenced:false,fence_sent:false,fence_unknown:false};
+            uptime,boot:storage::proc_bytes("/proc/sys/kernel/random/boot_id",64)?,child:None,attempted:false,generation:None,namespaces:Vec::new(),exe:None,runtime_qualification_inbound:None,runtime_received:None,operation_inbound:None,ready_packet:None,pending:None,fenced:false,fence_sent:false,fence_unknown:false};
         value.current()?;original.remaining()?;Ok(Some(value))
     }
     pub(super) fn check_transport_policy_current(&self)->Result<()> {
@@ -407,7 +430,7 @@ impl RootHostControl {
     pub(super) fn registration_config(&self)->&HostIngressConfig {&self.data}
     pub(super) fn registration_config_sha(&self)->&str {&self.digest}
     pub(super) fn registration_node_sha(&self)->&str {&self.node.sha256}
-    pub(super) fn registration_send(&mut self,bytes:&[u8])->Result<bool> {self.check_transport_policy_current()?;ensure!(bytes.len()<=MAX_HOST_FRAME,"registration relay exceeds bound");if serde_json::from_slice::<serde_json::Value>(bytes)?.get("kind").and_then(|v|v.as_str())==Some("engine_operation_v1")&&self.transport.offline(){return Ok(false);}self.current()?;self.sidecar_pair.send(bytes,None)}
+    pub(super) fn registration_send(&mut self,bytes:&[u8])->Result<bool> {self.check_transport_policy_current()?;ensure!(bytes.len()<=MAX_HOST_FRAME,"registration relay exceeds bound");if serde_json::from_slice::<serde_json::Value>(bytes)?.get("kind").and_then(|v|v.as_str()).is_some_and(|kind|matches!(kind,"engine_operation_v1"|"runtime_image_qualification_ready_v1"))&&self.transport.offline(){return Ok(false);}self.current()?;self.sidecar_pair.send(bytes,None)}
     pub(super) fn registration_receive_retaining(&mut self,out:&mut Option<storage::Packet>)->Result<()> {
         self.current()?;ensure!(out.is_none(),"registration received packet already retained");
         if let Some(packet)=self.sidecar_pair.receive()? {*out=Some(packet);self.actual_sidecar_packet(out.as_ref().unwrap())?;self.current()?;}Ok(())
@@ -418,6 +441,12 @@ impl RootHostControl {
     pub(super) fn registration_receive_settled_retaining(&mut self,out:&mut Option<storage::Packet>)->Result<()> {
         ensure!(out.is_none(),"registration received packet already retained");
         if let Some(packet)=self.sidecar_pair.receive()? {*out=Some(packet);self.actual_sidecar_packet(out.as_ref().unwrap())?;}Ok(())
+    }
+    pub(in crate::root_storage_bootstrap) fn runtime_qualification_receive_retaining(&mut self,out:&mut Option<storage::Packet>)->Result<()> {
+        ensure!(out.is_none(),"original qualification ACK output occupied");
+        self.pump_sidecar_transport_retaining()?;self.current()?;
+        ensure!(!self.transport.offline(),"qualification transport unknown/offline; no ACK promotion");
+        *out=self.runtime_qualification_inbound.take();Ok(())
     }
     fn pump_runtime_retaining(&mut self,_passive:bool)->Result<()> {self.pump_sidecar_transport_retaining()}
     pub(super) fn operation_receive_retaining(&mut self,out:&mut Option<storage::Packet>)->Result<()> {
@@ -433,6 +462,7 @@ impl RootHostControl {
             self.poll_transport_health_retaining(engine)?;
             if let Some(pending)=&self.pending {if FinalizationBudget::from_constraint(&pending.command.constraint).and_then(|b|b.remaining()).is_err(){ensure!(self.transport.orphan_capacity(),"unknown original commands retained at bound");self.transport.retain_orphan(self.pending.take().unwrap());}}
             if let Some(pending)=&mut self.pending {
+                self.data.assert_unscoped_operations()?;
                 if !pending.forwarded&&!self.transport.offline(){if !self.native_pair.send(&pending.bytes,None)?{return Ok(());}pending.forwarded=true;}
                 if let Some(packet)=&pending.reply {if !self.transport.offline()&&Some(pending.command.session_generation.as_str())==self.generation.as_deref(){if self.sidecar_pair.send(&packet.bytes,None)?{self.pending.take();}}}
             }
@@ -456,3 +486,5 @@ mod tests;
 
 #[path="host_volume_init.rs"]
 mod volume_init;
+
+#[cfg(test)]#[path="managed_sdk_host_command_tests.rs"]mod sdk_source_command_tests;

@@ -1,0 +1,189 @@
+{
+  "formatVersion": 1,
+  "scope": "actual isolated Fly WebIdentity S3 retention readback; no object writes or SDK/Root grant",
+  "image": "registry.fly.io/rudder-workers-exla@sha256:d3fd8c26a294319102806d101adcbe86bd8dfa63d468b15c9655a102a4edb712",
+  "sourceManifestSha256": "5b9d300866ba97f331aa5587f5bc8111179ee9a8de9713b3e3e0d3f1a79584d8",
+  "componentPassed": true,
+  "cleanupVerified": true,
+  "machineId": "48e639ec977e68",
+  "instanceId": "01M6CDMCHX5RMW31ER0SAWTGJ0",
+  "foregroundExecCompleted": true,
+  "protectedHomeRetained": true,
+  "providerCalls": 11,
+  "verifiedAt": "2026-11-01T20:43:46.062908+00:00",
+  "guest": {
+    "formatVersion": 1,
+    "scope": "actual-Fly-WebIdentity-immutable-S3-retention-readback-only",
+    "passed": true,
+    "status": {
+      "state": "qualified",
+      "io_settled": true,
+      "retained_transfers": 0,
+      "workload_role_arn": "arn:aws:iam::597088032164:role/rudder-v4-qualification-fabric-v1",
+      "policy_sha256": "1ca89a46ba6902463e62f128e17ebc52d5f4c24663085b5821424760e676be04"
+    },
+    "objectWrites": false,
+    "rootOrCompilerAuthority": false,
+    "elapsedMilliseconds": 1037,
+    "verifiedAt": "2026-11-01T20:43:39.561Z"
+  },
+  "normalDaemonRetirement": false,
+  "sdkRoleQualified": false,
+  "productionActivation": false,
+  "evidenceSource": "/workspace/rudder-sdk-oidc-retention-probe-v1/report.json",
+  "controllerSha256": "42eb3777f0b1667cbacdbb21ddc49a50612b13a7d76c2cf30fb04dfd31750537",
+  "probeSha256": "37a3a7a9b67ad65a19211dacc1b4749dcea79462711c523532cbf883c640d56d",
+  "actualCasAttempts": [
+    {
+      "scope": "actual isolated Fly WebIdentity FabricCas conditional writes, miss, retention and staging cleanup; no SDK/Root grant",
+      "componentPassed": false,
+      "cleanupVerified": true,
+      "machineId": "d8de462c60d768",
+      "instanceId": "01M6CE0V1Q6KFPR1ZNY0KP3T32",
+      "protectedHomeRetained": true,
+      "providerCalls": 11,
+      "verifiedAt": "2026-11-01T20:50:32.845755+00:00",
+      "guest": {
+        "formatVersion": 1,
+        "scope": "actual-Fly-WebIdentity-FabricCas-write-and-retention-component",
+        "passed": false,
+        "allCasChecksPassed": false,
+        "checks": {
+          "retentionReadback": true,
+          "missingIs404": true,
+          "stagingCreate": true,
+          "stagingConditionalRenew": true,
+          "conditionalPutAndExactRead": true,
+          "identicalPutConflictVerified": true,
+          "failureStagingDelete": true
+        },
+        "status": {
+          "state": "qualified",
+          "io_settled": true,
+          "retained_transfers": 0,
+          "workload_role_arn": "arn:aws:iam::597088032164:role/rudder-v4-qualification-fabric-v1",
+          "policy_sha256": "1ca89a46ba6902463e62f128e17ebc52d5f4c24663085b5821424760e676be04"
+        },
+        "objectWrites": true,
+        "rootOrCompilerAuthority": false,
+        "elapsedMilliseconds": 2327,
+        "verifiedAt": "2026-11-01T20:50:26.825Z"
+      }
+    },
+    {
+      "scope": "actual isolated Fly WebIdentity FabricCas conditional writes, miss, retention and staging cleanup; no SDK/Root grant",
+      "componentPassed": false,
+      "cleanupVerified": true,
+      "machineId": "d892e55c920408",
+      "instanceId": "01M6CE2PBZA4EG6DAQRF7GNCJ1",
+      "protectedHomeRetained": true,
+      "providerCalls": 11,
+      "verifiedAt": "2026-11-01T20:51:30.875070+00:00",
+      "guest": {
+        "formatVersion": 1,
+        "scope": "actual-Fly-WebIdentity-FabricCas-write-and-retention-component",
+        "passed": false,
+        "allCasChecksPassed": false,
+        "checks": {
+          "retentionReadback": true,
+          "missingIs404": true,
+          "stagingCreate": true,
+          "stagingConditionalRenew": true,
+          "conditionalPutAndExactRead": true,
+          "identicalPutConflictVerified": true,
+          "unconditionalOverwriteDenied": true,
+          "immutableDeleteDenied": true,
+          "originalBytesPreserved": true,
+          "stagingDeleted": true
+        },
+        "status": {
+          "state": "qualified",
+          "io_settled": true,
+          "retained_transfers": 0,
+          "workload_role_arn": "arn:aws:iam::597088032164:role/rudder-v4-qualification-fabric-v1",
+          "policy_sha256": "1ca89a46ba6902463e62f128e17ebc52d5f4c24663085b5821424760e676be04"
+        },
+        "objectWrites": true,
+        "rootOrCompilerAuthority": false,
+        "elapsedMilliseconds": 3496,
+        "verifiedAt": "2026-11-01T20:51:24.944Z"
+      }
+    },
+    {
+      "scope": "actual isolated Fly WebIdentity FabricCas conditional writes, miss, retention and staging cleanup; no SDK/Root grant",
+      "componentPassed": true,
+      "cleanupVerified": true,
+      "machineId": "7813e0dc141378",
+      "instanceId": "01M6CE41JB18H56WEVAFFVJ6TB",
+      "protectedHomeRetained": true,
+      "providerCalls": 11,
+      "verifiedAt": "2026-11-01T20:52:20.018856+00:00",
+      "guest": {
+        "formatVersion": 1,
+        "scope": "actual-Fly-WebIdentity-FabricCas-write-and-retention-component",
+        "passed": true,
+        "allCasChecksPassed": true,
+        "checks": {
+          "retentionReadback": true,
+          "missingIs404": true,
+          "stagingCreate": true,
+          "stagingConditionalRenew": true,
+          "conditionalPutAndExactRead": true,
+          "identicalPutConflictVerified": true,
+          "unconditionalOverwriteDenied": true,
+          "immutableDeleteDenied": true,
+          "originalBytesPreserved": true,
+          "stagingDeleted": true,
+          "foreignAccountWriteDenied": true
+        },
+        "status": {
+          "state": "qualified",
+          "io_settled": true,
+          "retained_transfers": 0,
+          "workload_role_arn": "arn:aws:iam::597088032164:role/rudder-v4-qualification-fabric-v1",
+          "policy_sha256": "1ca89a46ba6902463e62f128e17ebc52d5f4c24663085b5821424760e676be04"
+        },
+        "objectWrites": true,
+        "rootOrCompilerAuthority": false,
+        "elapsedMilliseconds": 3497,
+        "verifiedAt": "2026-11-01T20:52:12.549Z"
+      }
+    }
+  ],
+  "actualCasPassed": true,
+  "retainedFailureScopes": {
+    "v2": "Probe incorrectly required raw AWS403 on adapter errors deliberately sanitized to storage_unavailable; corrected raw SDK DATA check in v3.",
+    "v3": "Foreign nonexistent GET404 is valid with ListBucket and cannot prove access to existing foreign content; corrected actual foreign conditional PUT403 in v4."
+  },
+  "iamCorrections": {
+    "accountPrefix": "FabricCas actual SHA256 account prefix, not literal account ID",
+    "ephemeralDeletion": "actual staging/* key, not leases/*",
+    "missingObjects": "ListBucket on isolated qualification bucket gives correct404; object access remains exact fixture-account prefix",
+    "knownAdminReadbacks": [
+      "2026-11-01T20:49:04.503Z",
+      "2026-11-01T20:49:54.961Z"
+    ],
+    "productionChanged": false,
+    "source": "https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetObject.html"
+  },
+  "retainedProbeBlobs": [
+    {
+      "kind": "blob",
+      "algorithm": "sha256",
+      "digest": "7010dfbb515f7f1d9531791e504c6cb1e27300da60dec9768e3f3ff3815c64c6",
+      "size_bytes": 56
+    },
+    {
+      "kind": "blob",
+      "algorithm": "sha256",
+      "digest": "b185aff3f2cc93701fb7943c2341e7400752c94d319fb2117bcf462a18637aac",
+      "size_bytes": 56
+    },
+    {
+      "kind": "blob",
+      "algorithm": "sha256",
+      "digest": "8e5eb5e45f73a0176f00ed85c2b8d9ff058ed4b99892aef04bbc5e43673b941f",
+      "size_bytes": 56
+    }
+  ]
+}

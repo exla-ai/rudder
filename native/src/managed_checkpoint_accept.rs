@@ -121,12 +121,19 @@ pub(crate) enum ManagedAcceptanceProgress {
 }
 pub(crate) struct ManagedCheckpointAcceptance {
     completion: ManagedCompletion, lease: EngineSourceLease, location: ManagedRunLocation,
-    store: LocalStore, repository: Option<PrivateIntegration>, candidate: Option<ManagedCheckpointCandidate>,
+    store: LocalStore, repository: Option<PrivateIntegration>, repository_open:Option<canonical::RetainedIntegrationOpen>, candidate: Option<ManagedCheckpointCandidate>,
     binding: Option<AttemptBinding>, verified: Option<Arc<VerifiedSourceProjection>>,
     projected: Option<jj_lib::merged_tree::MergedTree>, stages: Vec<String>,
     request: Option<VcsIntentRequest>, intent: Option<VcsIntentReceipt>, publish_attempted: bool,
     candidate_attempted: bool, preparation_attempted: bool, generation_identity:Option<Arc<()>>,
+    backed_work:Option<Arc<AcceptanceClock>>,intent_work:Option<Arc<AcceptanceClock>>,backed_candidate:Option<rudder_engine::store::environment_dependencies::EnvironmentDependentPublication>,
+    retained_inputs:Option<rudder_engine::journal::VcsRetainedInputs>,publication_acknowledged:bool,
 }
+struct AcceptanceClock{lease:EngineSourceLease,original:rudder_engine::execution::finalization_budget::FinalizationBudget,cancelled:Arc<std::sync::atomic::AtomicBool>}
+impl rudder_engine::store::ImageImportFence for AcceptanceClock{fn remaining(&self)->Result<Duration>{
+    if self.cancelled.load(std::sync::atomic::Ordering::Acquire){self.original.cancel();}
+    loop{self.original.remaining()?;match self.lease.check_active_for_adoption(){Ok(())=>return self.original.remaining(),
+        Err(e)if e.downcast_ref::<crate::engine_host::EngineSharedAdmissionBusy>().is_some()=>std::thread::sleep(self.original.phase_limit(Duration::from_millis(1))?),Err(e)=>return Err(e)}}}}
 impl ManagedCheckpointAcceptance {
     /// Off-App transfer. Failed CAS opening leaves both original owning slots.
     /// Root retains this owner through panic/stale rows and actual worker join.
@@ -141,8 +148,8 @@ impl ManagedCheckpointAcceptance {
         let store = LocalStore::open(&finished.prepared.execution_spec()?.store_root)?;
         held.check_current()?;
         *slot = Some(Self { completion: ManagedCompletion::Pane(completion.take().unwrap()), lease: lease.take().unwrap(), location,
-            store, repository: None, candidate: None, binding: None, verified: None, projected: None, stages: Vec::new(),
-            request: None, intent: None, publish_attempted: false, candidate_attempted: false, preparation_attempted: false,generation_identity:None });
+            store, repository: None, repository_open:None, candidate: None, binding: None, verified: None, projected: None, stages: Vec::new(),
+            request: None, intent: None, publish_attempted: false, candidate_attempted: false, preparation_attempted: false,generation_identity:None,backed_work:None,intent_work:None,backed_candidate:None,retained_inputs:None,publication_acknowledged:false });
         Ok(())
     }
     /// OFF App. Every fallible check precedes moving either original owner.
@@ -173,9 +180,9 @@ impl ManagedCheckpointAcceptance {
         let store = LocalStore::open(&spec.store_root)?;
         held.check_current()?;
         *slot = Some(Self { completion: ManagedCompletion::Task(completion.take().unwrap()),
-            lease: lease.take().unwrap(), location, store, repository: None, candidate: None, binding: None,
+            lease: lease.take().unwrap(), location, store, repository: None, repository_open:None, candidate: None, binding: None,
             verified: None, projected: None, stages: Vec::new(), request: None, intent: None,
-            publish_attempted: false, candidate_attempted: false, preparation_attempted: false,generation_identity:None });
+            publish_attempted: false, candidate_attempted: false, preparation_attempted: false,generation_identity:None,backed_work:None,intent_work:None,backed_candidate:None,retained_inputs:None,publication_acknowledged:false });
         Ok(())
     }
     fn check(&self, journal: &Journal) -> Result<()> {
@@ -190,9 +197,24 @@ impl ManagedCheckpointAcceptance {
         Ok(())
     }
     pub(crate) fn candidate(&self) -> Option<&ManagedCheckpointCandidate> { self.candidate.as_ref() }
+    /// Candidate DATA only. Canonical execution/evidence is a separate genuine
+    /// producer; this accessor cannot certify a gate or a backend completion.
+    pub(crate) fn candidate_binding(&self)->Option<&AttemptBinding>{self.binding.as_ref()}
     /// Full-local/source-only first slice. No live capture, partial overlay,
     /// ignored/prepared partition derivation or inherited environment mutation.
     pub(crate) fn prepare_candidate(&mut self, journal: &Journal, budget: ProjectionBudget) -> Result<()> {
+        ensure!(self.completion.prepared().backed_inputs.is_none(),"backed candidate requires its original retained work clock");
+        self.prepare_candidate_inner(journal,budget)
+    }
+    pub(crate) fn prepare_candidate_retaining(&mut self,journal:&Journal,original:rudder_engine::execution::finalization_budget::FinalizationBudget,cancelled:Arc<std::sync::atomic::AtomicBool>)->Result<()> {
+        ensure!(self.backed_work.is_none()&&!self.candidate_attempted,"candidate original work already staged");
+        self.backed_work=Some(Arc::new(AcceptanceClock{lease:self.lease.clone(),original,cancelled}));
+        let work=self.backed_work.as_ref().unwrap();let remaining=rudder_engine::store::ImageImportFence::remaining(&**work)?;
+        let mut budget=ProjectionBudget::default();budget.max_elapsed_ms=u64::try_from(remaining.as_millis().min(30_000))?;
+        ensure!(budget.max_elapsed_ms>0,"candidate original work expired");self.prepare_candidate_inner(journal,budget)
+    }
+    fn prepare_candidate_inner(&mut self,journal:&Journal,budget:ProjectionBudget)->Result<()> {
+        if let Some(work)=&self.backed_work{rudder_engine::store::ImageImportFence::remaining(&**work)?;self.lease.wait_shared_current(&work.original,&work.cancelled)?;}
         self.check(journal)?;
         ensure!(!self.candidate_attempted, "candidate preparation requires explicit recovery after any attempt");
         self.candidate_attempted = true;
@@ -205,16 +227,25 @@ impl ManagedCheckpointAcceptance {
             && binding.attempt_id == assignment.fence.attempt_id && binding.view_id == assignment.observation.view_id
             && binding.seed == assignment.seed && binding.profile == assignment.observation.profile
             && context.service.view.cas_root.canonicalize()? == self.store.root().canonicalize()?, "protected VCS attempt differs");
-        self.repository = Some(PrivateIntegration::open(self.location.store().binding().directory.join("integration"),
-            &context.service.user_name, &context.service.user_email)?);
+        let path=self.location.store().binding().directory.join("integration");
+        if let Some(work)=&self.backed_work {
+            canonical::RetainedIntegrationOpen::open_retaining(&mut self.repository_open,&mut self.repository,path,
+                &context.service.user_name,&context.service.user_email,&work.original,&work.cancelled)?;
+        }else{self.repository=Some(PrivateIntegration::open(path,&context.service.user_name,&context.service.user_email)?);}
         let stage = self.store.begin_staging(Duration::from_secs(120))?; self.stages.push(stage.id.clone());
         let Some(CheckpointRef::CompleteLocal(checkpoint)) = self.completion.shutdown().record().checkpoint()
             else { anyhow::bail!("only actual complete-local checkpoint is supported") };
         let base = snapshot::decode_runnable(&self.store.read_object(&assignment.runnable_root)?)?;
         ensure!(base.source == assignment.source, "base runnable/source assignment differs");
         let candidate = versioned_candidate(&self.store, &stage.id, &base, checkpoint, &binding.projection_policy)?;
-        self.store.pin(&format!("managed-accept:{}:candidate", assignment.fence.request_id), &candidate.runnable)?;
-        self.candidate = Some(candidate);
+        self.candidate = Some(candidate);let candidate=self.candidate.as_ref().unwrap();
+        let pin=format!("managed-accept:{}:candidate", assignment.fence.request_id);
+        if let Some(inputs)=&self.completion.prepared().backed_inputs{
+            let environment=match inputs.retention(){rudder_engine::store::environment_dependencies::RetainedRunnableInputs::Environment(owner)=>owner.environment().clone(),
+                _=>anyhow::bail!("legacy flat-backed candidate requires genuine Environment derivation before this path")};
+            let original=self.backed_work.as_ref().context("actual backed candidate clock absent")?.clone();
+            self.store.publish_environment_dependent_retaining(&mut self.backed_candidate,stage.id.clone(),pin,candidate.runnable.clone(),environment,original)?;
+        }else{self.store.pin(&pin,&candidate.runnable)?;}
         self.binding = Some(binding);
         let repository = self.repository.as_ref().unwrap();
         let candidate = self.candidate.as_ref().unwrap();
@@ -230,18 +261,34 @@ impl ManagedCheckpointAcceptance {
         self.verified = Some(Arc::new(pollster::block_on(verify_versioned_source(self.store.clone(), &stage.id,
             &candidate.source, &self.binding.as_ref().unwrap().projection_policy,
             self.projected.as_ref().unwrap(), Some(&projected.record), budget))?));
-        self.check(journal)
+        if let Some(work)=&self.backed_work{rudder_engine::store::ImageImportFence::remaining(&**work)?;}self.check(journal)
     }
     /// Caller supplies ACTUAL canonical gate evidence for candidate(), never a
     /// done-file or backend turn report. This module creates only mapping evidence.
-    pub(crate) fn prepare_acceptance(&mut self, journal: &mut Journal,
+    pub(crate) fn prepare_acceptance(&mut self,journal:&mut Journal,evidence:IntegrationEvidence,versions:TopicVersions)->Result<ManagedAcceptanceProgress>{
+        ensure!(self.backed_candidate.is_none(),"backed acceptance requires actual original intent work budget");self.prepare_acceptance_inner(journal,evidence,versions)
+    }
+    pub(crate) fn prepare_acceptance_retaining(&mut self,journal:&mut Journal,evidence:IntegrationEvidence,versions:TopicVersions,
+        original:rudder_engine::execution::finalization_budget::FinalizationBudget,cancelled:Arc<std::sync::atomic::AtomicBool>)->Result<ManagedAcceptanceProgress>{
+        ensure!(self.intent_work.is_none()&&!self.preparation_attempted,"acceptance original intent already staged");
+        self.intent_work=Some(Arc::new(AcceptanceClock{lease:self.lease.clone(),original,cancelled}));
+        if let Some(publication)=&self.backed_candidate{let owner=publication.acknowledgment()?.clone();
+            rudder_engine::journal::VcsRetainedInputs::stage_retaining(&mut self.retained_inputs,rudder_engine::store::environment_dependencies::RetainedRunnableInputs::Environment(owner),self.intent_work.as_ref().unwrap().clone())?;}
+        self.prepare_acceptance_inner(journal,evidence,versions)
+    }
+    fn intent_time(&self)->Result<()>{if let Some(work)=&self.intent_work{rudder_engine::store::ImageImportFence::remaining(&**work)?;self.lease.wait_shared_current(&work.original,&work.cancelled)?;}Ok(())}
+    fn begin_original_intent(&mut self,journal:&mut Journal)->Result<VcsIntentReceipt>{self.intent_time()?;
+        if let Some(inputs)=&mut self.retained_inputs{journal.begin_vcs_intent_retained(self.lease.owner(),&self.store,self.request.as_ref().context("original request absent")?,now_ms()?,inputs)}
+        else{ensure!(self.backed_candidate.is_none(),"backed intent original retention absent");journal.begin_vcs_intent(self.lease.owner(),&self.store,self.request.as_ref().context("original request absent")?,now_ms()?)}
+    }
+    fn prepare_acceptance_inner(&mut self, journal: &mut Journal,
         mut evidence: IntegrationEvidence, versions: TopicVersions) -> Result<ManagedAcceptanceProgress> {
-        self.lease.check_shared_current()?;self.check(journal)?;
+        self.intent_time()?;self.lease.check_shared_current()?;self.check(journal)?;
         ensure!(!self.preparation_attempted, "acceptance preparation already attempted; recover original intent");
-        let candidate = self.candidate.as_ref().context("candidate absent")?;
-        let binding = self.binding.as_ref().context("attempt binding absent")?;
-        let verified = self.verified.as_ref().context("actual jj mapping verification absent")?;
-        validate_gate_input(candidate, binding, &evidence)?;
+        let candidate = self.candidate.as_ref().context("candidate absent")?.clone();
+        let binding = self.binding.as_ref().context("attempt binding absent")?.clone();
+        let verified = self.verified.as_ref().context("actual jj mapping verification absent")?.clone();
+        validate_gate_input(&candidate, &binding, &evidence)?;
         self.preparation_attempted = true;
         if !evidence.action_results.contains(verified.evidence()) { evidence.action_results.push(verified.evidence().clone()); }
         self.request = Some(VcsIntentRequest { idempotency_key: format!("managed-accept:{}", self.completion.assignment().fence.request_id),
@@ -250,7 +297,7 @@ impl ManagedCheckpointAcceptance {
             proposed_source_root: candidate.source.clone(), proposed_environment_root: candidate.environment.clone(),
             recovery_root: candidate.runnable.clone(), seed_root: binding.seed.clone(), projection_policy: binding.projection_policy.clone(),
             profile: candidate.profile.clone(), expected_view_root: Some(candidate.directory.clone()), hardlinks: Some(candidate.hardlinks.clone()), versions, evidence });
-        self.intent = Some(journal.begin_vcs_intent(self.lease.owner(), &self.store, self.request.as_ref().unwrap(), now_ms()?)?);
+        self.intent = Some(self.begin_original_intent(journal)?);
         if self.intent.as_ref().unwrap().state != VcsIntentState::Accepted { return self.progress(); }
         let repository = self.repository.as_ref().unwrap();
         let heads = pollster::block_on(repository.loader.op_heads_store().get_op_heads())?;
@@ -266,32 +313,33 @@ impl ManagedCheckpointAcceptance {
             source: candidate.source.clone(), environment: Some(candidate.environment.clone()), tree: CommitIdentity::from_jj(&commit).tree };
         let prepared = pollster::block_on(prepare_verified_operation(tx, self.intent.as_ref().unwrap().intent_id.clone(),
             heads.iter().map(|id| JjOperationId(id.hex())).collect(), GitCommitId(binding.baseline.commit.0.clone()),
-            CommitIdentity::from_jj(&commit), proof, verified))?;
+            CommitIdentity::from_jj(&commit), proof, &verified))?;
         let stage = self.store.begin_staging(Duration::from_secs(120))?; self.stages.push(stage.id.clone());
         let envelope = persist_prepared_record(&self.store, &stage.id, &prepared)?;
         repository.check_current()?;
+        self.intent_time()?;
         self.intent = Some(journal.attach_vcs_operation(self.lease.owner(), &self.store,
             &self.intent.as_ref().unwrap().intent_id, &envelope, now_ms()?)?);
-        repository.check_current()?;
+        repository.check_current()?;self.intent_time()?;
         self.progress()
     }
     pub(crate) fn publish_once(&mut self, journal: &mut Journal) -> Result<ManagedAcceptanceProgress> {
-        self.lease.check_shared_current()?;self.check(journal)?;
+        self.intent_time()?;self.lease.check_shared_current()?;self.check(journal)?;
         ensure!(!self.publish_attempted && self.intent.as_ref().is_some_and(|r| r.state == VcsIntentState::Prepared),
             "publication cannot replay; inspect original intent");
         self.publish_attempted = true;
         let mut publisher = CheckedJjPublisher { repository: self.repository.as_ref().unwrap(), store: &self.store };
         self.intent = Some(journal.publish_vcs_intent(self.lease.owner(), &self.intent.as_ref().unwrap().intent_id,
             &mut publisher, now_ms()?)?);
-        self.repository.as_ref().unwrap().check_current()?;
+        self.repository.as_ref().unwrap().check_current()?;self.intent_time()?;
+        self.publication_acknowledged=self.intent.as_ref().is_some_and(|r|r.state==VcsIntentState::Published);
         self.progress()
     }
     /// Readback/reconciliation only: never prepares or republishes an operation.
     pub(crate) fn reconcile_only(&mut self, journal: &mut Journal) -> Result<ManagedAcceptanceProgress> {
         self.lease.check_shared_current()?;self.check(journal)?;
         if self.intent.is_none() {
-            self.intent = Some(journal.begin_vcs_intent(self.lease.owner(), &self.store,
-                self.request.as_ref().context("no original immutable intent to reconcile")?, now_ms()?)?);
+            self.intent = Some(self.begin_original_intent(journal)?);
         }
         let id = self.intent.as_ref().unwrap().intent_id.clone();
         self.intent = Some(journal.vcs_intent(self.lease.owner(), &id)?);
@@ -309,6 +357,7 @@ impl ManagedCheckpointAcceptance {
     pub(crate) fn settle_published_task(&mut self, journal: &Journal,
         budget: &rudder_engine::execution::finalization_budget::FinalizationBudget) -> Result<IntegrationReceipt> {
         budget.remaining()?;
+        ensure!(self.backed_candidate.is_none()||self.publication_acknowledged,"original timely backed publication ACK absent; DATA reconciliation cannot settle it");
         self.check(journal)?;
         let receipt = self.intent.as_ref().context("original publication acknowledgement absent")?;
         ensure!(receipt.state == VcsIntentState::Published, "task acceptance is not published");
@@ -325,6 +374,7 @@ impl ManagedCheckpointAcceptance {
     /// acceptor remains owned by that bridge; this never extracts/reconstructs a
     /// completion, promotes an unknown publication, or creates an ACK.
     pub(crate) fn settled_joined_task(&self)->Result<&JoinedManagedTask> {
+        ensure!(self.backed_candidate.is_none()||self.publication_acknowledged,"original timely backed publication ACK absent");
         let receipt=self.intent.as_ref().context("original publication ACK absent")?;
         ensure!(receipt.state==VcsIntentState::Published&&receipt.integration.is_some(),"original acceptance is not Published");
         let ManagedCompletion::Task(joined)=&self.completion else {anyhow::bail!("original joined task absent");};
@@ -334,7 +384,7 @@ impl ManagedCheckpointAcceptance {
     }
     fn progress(&self) -> Result<ManagedAcceptanceProgress> {
         let receipt = self.intent.as_ref().context("intent ACK absent")?;
-        if receipt.state == VcsIntentState::Published {
+        if receipt.state == VcsIntentState::Published && (self.backed_candidate.is_none()||self.publication_acknowledged) {
             Ok(ManagedAcceptanceProgress::Published(receipt.integration.clone().context("publication has no integration receipt")?))
         } else if receipt.state == VcsIntentState::Prepared && !self.publish_attempted {
             Ok(ManagedAcceptanceProgress::Prepared { intent_id: receipt.intent_id.clone() })
@@ -411,7 +461,7 @@ impl IntegrationDirectory {
 struct PrivateIntegration {
     loader: RepoLoader, directories: Vec<IntegrationDirectory>, directory: File,
     // The actual exclusive lock drops after loader and retained directory IO.
-    lock: File, path: PathBuf, lock_held:bool,
+    lock: File, path: PathBuf, lock_held:bool, writer_released:Arc<std::sync::atomic::AtomicBool>,
 }
 impl PrivateIntegration {
     fn open(path: PathBuf, name: &str, email: &str) -> Result<Self> {
@@ -437,7 +487,7 @@ impl PrivateIntegration {
         let expected_git = path.join(".jj/repo/store/git");
         ensure!(git.git_repo_path() == expected_git.as_path()
             && expected_git.canonicalize()? == expected_git, "integration requires its exact canonical internal Git store");
-        let held = Self { loader, directories, lock, directory, path,lock_held:true }; held.check_current()?; Ok(held)
+        let held = Self { loader, directories, lock, directory, path,lock_held:true,writer_released:Arc::new(std::sync::atomic::AtomicBool::new(false)) }; held.check_current()?; Ok(held)
     }
     fn check_current(&self) -> Result<()> {
         ensure!(self.lock_held,"published integration lock was explicitly released; no further mutation");
@@ -487,3 +537,6 @@ mod tests;
 #[path="managed_accepted_source_input.rs"]
 mod accepted_source_input;
 pub(crate) use accepted_source_input::{AcceptedSourceInput,AcceptedInputRelease};
+
+#[path="managed_canonical_gates.rs"]
+pub(crate) mod canonical;

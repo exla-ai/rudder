@@ -90,14 +90,14 @@ export interface ReleaseRequest extends OwnerFence {
   idempotencyKey: string;
   witnessId: string;
 }
-export interface DecisionRequest extends OwnerFence {
+export type DecisionRequest = OwnerAdmissionFence & {
   projectId: string;
   idempotencyKey: string;
   topic: string;
   expectedVersion: Decimal;
   statement: Json;
-}
-export interface VerificationAdmission extends OwnerFence {
+};
+export type VerificationAdmission = OwnerAdmissionFence & {
   projectId: string;
   verificationId: string;
   baseVersion: Decimal;
@@ -108,8 +108,8 @@ export interface VerificationAdmission extends OwnerFence {
   gateReceiptRoot: string;
   buildContractRoot: string;
   topics: Record<string, Decimal>;
-}
-export interface IntegrationRequest extends OwnerFence {
+};
+export type IntegrationRequest = OwnerAdmissionFence & {
   projectId: string;
   idempotencyKey: string;
   expectedVersion: Decimal;
@@ -118,7 +118,7 @@ export interface IntegrationRequest extends OwnerFence {
   sourceRoot: string;
   environmentRoot: string;
   verificationId: string;
-}
+};
 
 export const MAX_COUNTER = 9223372036854775807n;
 export function counter(value: unknown, positive = false): Decimal {
@@ -198,3 +198,10 @@ export function canonical(value: unknown, max = 256 * 1024): Buffer {
   }
   visit(value, 0); return Buffer.from(chunks.join(""));
 }
+
+/** Distinct DATA protocol; only original authenticated issuance can mint an owner. */
+export interface ProviderBinding {engineInstanceId:string;machineBootId:string;appName:string;networkName:string;machineId:string;instanceId:string;incarnation:string;storeId:string;configSha256:string;machineConfigSha256:string;}
+export interface ProviderOwnerFence {ownershipMode:"provider-fenced-v1";ownerEpoch:Decimal;ownershipId:string;}
+export interface ProviderOwnerGrant extends ProviderOwnerFence {formatVersion:2;authorityId:string;accountId:string;projectId:string;engineInstanceId:string;machineBootId:string;heartbeatSerial:Decimal;requestId:string;provider:ProviderBinding;}
+export interface ProviderHeartbeatRequest extends ProviderOwnerFence {projectId:string;requestId:string;expectedSerial:Decimal;}
+export type OwnerAdmissionFence=OwnerFence|ProviderOwnerFence;

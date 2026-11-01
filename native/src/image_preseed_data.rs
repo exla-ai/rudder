@@ -103,6 +103,13 @@ impl ImageDataBuild {
         let mut staged=Self::staged(store,original,cancelled);staged.compiler=Some(CompilerSource::staged_fixed());*out=Some(staged);
         out.as_mut().unwrap().build_retaining()
     }
+    /// Separate fixed C1 source; constructor budget/owners and import/sealer
+    /// are exactly the existing compiler path, never a generic pin override.
+    pub(crate) fn capture_compiler_c1_retaining(out:&mut Option<Self>,store:LocalStore,original:ImagePreseedBudget,cancelled:Arc<AtomicBool>)->Result<()> {
+        clock(&original,&cancelled)?;ensure!(out.is_none(),"original compiler C1 DATA build already captured");
+        let mut staged=Self::staged(store,original,cancelled);staged.compiler=Some(CompilerSource::staged_c1_fixed());*out=Some(staged);
+        out.as_mut().unwrap().build_retaining()
+    }
     #[cfg(test)]
     pub(crate) fn capture_compiler_fixture_retaining(out:&mut Option<Self>,store:LocalStore,original:ImagePreseedBudget,cancelled:Arc<AtomicBool>,source:CompilerSource)->Result<()> {
         ensure!(out.is_none(),"compiler fixture carrier occupied");let mut staged=Self::staged(store,original,cancelled);staged.compiler=Some(source);*out=Some(staged);

@@ -109,6 +109,9 @@ impl Directory {
 struct State {
     root: Option<Stamp>, inventory_stamp: Option<Stamp>, cas: Option<Directory>, objects: Option<Directory>,
     shards: BTreeMap<String, Directory>, inventory: Option<BakedImageInventoryData>,
+    // Original kernel versions, not a claim that every payload was hashed.
+    // Actual byte reads still verify complete SHA and typed schemas.
+    object_versions:BTreeMap<ObjectRef,Stamp>,
     pending: Option<File>, failed: bool, captured: bool,
 }
 /// Actual owned readonly FD source, DATA only. No image-policy, Root peer,
@@ -117,6 +120,10 @@ struct State {
 pub struct BakedImageCas {
     root: File, inventory_file: File, expected_inventory: ObjectRef, owner: (u32,u32),
     state: Mutex<State>, active: AtomicUsize, bytes: AtomicUsize,
+    // Absorbing physical observation, independent of any caller's clock. A
+    // cancellation arriving during error unwind cannot erase this fact.
+    physical_failed: std::sync::atomic::AtomicBool,
+    #[cfg(test)] cancel_after_physical_failure: Mutex<Option<Arc<std::sync::atomic::AtomicBool>>>,
 }
 impl BakedImageCas {
     /// Stage original descriptors before any reads/checks. Errors retain this
@@ -138,7 +145,9 @@ impl BakedImageCas {
         ensure!(out.is_none(), "original baked source carrier occupied");
         *out = Some(Arc::new(Self { root:File::from(root), inventory_file:File::from(inventory), expected_inventory, owner,
             state:Mutex::new(State {root:None,inventory_stamp:None,cas:None,objects:None,shards:BTreeMap::new(),
-                inventory:None,pending:None,failed:false,captured:false}), active:AtomicUsize::new(0),bytes:AtomicUsize::new(0) }));
+                inventory:None,object_versions:BTreeMap::new(),pending:None,failed:false,captured:false}), active:AtomicUsize::new(0),bytes:AtomicUsize::new(0),
+            physical_failed:std::sync::atomic::AtomicBool::new(false),
+            #[cfg(test)]cancel_after_physical_failure:Mutex::new(None) }));
         let source=out.as_ref().unwrap(); let mut state=source.lock(&*original)?;
         let result=source.capture(&mut state,&*original);
         if result.is_err(){state.failed=true;} result
@@ -152,8 +161,17 @@ impl BakedImageCas {
             }
         }
     }
+    fn physical<T>(&self,observation:Result<T>)->Result<T> {
+        if observation.is_err(){self.physical_failed.store(true,Ordering::Release);
+            #[cfg(test)]if let Ok(hook)=self.cancel_after_physical_failure.try_lock(){
+                if let Some(flag)=hook.as_ref(){flag.store(true,Ordering::Release);}}
+        }observation
+    }
     fn check(&self,state:&State,shard:Option<&str>,original:&dyn ImageImportFence)->Result<()> {
-        original.remaining()?; ensure!(!state.failed,"baked source fenced; original owner retained");
+        original.remaining()?; ensure!(!state.failed&&!self.physical_failed.load(Ordering::Acquire),"baked source fenced; original owner retained");
+        // Clock/caller admission errors occur outside this physical section.
+        // Record failed stat/identity checks before another clock callback.
+        self.physical((||->Result<()>{
         ensure!(state.root.as_ref()==Some(&stamp(&self.root)?),"original baked root changed");
         if let Some(cas)=&state.cas{cas.current(&self.root,"cas")?;}
         if let (Some(cas),Some(objects))=(&state.cas,&state.objects){objects.current(&cas.file,"objects")?;}
@@ -163,7 +181,7 @@ impl BakedImageCas {
             ensure!(stamp(&self.inventory_file)?==*expected && stamp(&open_at(&self.root,"inventory.json",false)?)?==*expected,
                 "original baked inventory descriptor changed");
         }
-        original.remaining()?;Ok(())
+        Ok(())})())?;original.remaining()?;Ok(())
     }
     fn capture(&self,state:&mut State,original:&dyn ImageImportFence)->Result<()> {
         original.remaining()?; self.expected_inventory.validate()?;
@@ -191,18 +209,42 @@ impl BakedImageCas {
         let envelope:StateEnvelope=serde_json::from_slice(&raw)?;
         ensure!(ObjectRef::from_bytes(ObjectKind::Blob,&canonical_json(&envelope.state)?).digest==envelope.checksum
             && envelope.state.format_version==1 && envelope.state.generation==data.retention_generation
-            && envelope.state.pins==data.pins && envelope.state.staging.is_empty() && envelope.state.image_import_holds.is_empty(),
+            && envelope.state.pins==data.pins && envelope.state.staging.is_empty() && envelope.state.image_import_holds.is_empty()
+            && envelope.state.backed_retention.is_none()&&envelope.state.environment_dependencies.is_none(),
             "baked retention DATA differs from original inventory");
         state.pending.take();
         original.remaining()?;state.pending=Some(open_at(&self.root,"pin.json",false)?);let pin_stamp=regular(state.pending.as_ref().unwrap(),self.owner,4096)?;
         let mut pin=vec![0;usize::try_from(pin_stamp.len)?];read_exact(state.pending.as_ref().unwrap(),&mut pin,original)?;
         ensure!(pin==canonical_json(&data.roots)? && stamp(state.pending.as_ref().unwrap())?==pin_stamp,"baked pin DATA differs");
         state.pending.take();
+        // Capture every original object version before exposing the catalog.
+        // Keep the actual partial leaf in State on every failed/late capture.
+        // No payload bytes are copied or declared fully verified here.
+        for reference in &data.objects {
+            original.remaining()?;bound(reference,*reference==data.roots.manifest)?;
+            let shard=reference.digest[..2].to_owned();let leaf=&reference.digest[2..];
+            if !state.shards.contains_key(&shard){ensure!(state.shards.len()<256,"baked original version shard bound");
+                state.shards.insert(shard.clone(),Directory::staged(open_at(&state.objects.as_ref().unwrap().file,&shard,true)?));
+                state.shards.get_mut(&shard).unwrap().capture(&state.objects.as_ref().unwrap().file,&shard,self.owner)?;}
+            self.check(state,Some(&shard),original)?;ensure!(state.pending.is_none(),"original baked version leaf still pending");
+            state.pending=Some(open_at(&state.shards[&shard].file,leaf,false)?);
+            let observed=regular(state.pending.as_ref().unwrap(),self.owner,if *reference==data.roots.manifest{MANIFEST}else{CHUNK})?;
+            ensure!(observed.len==reference.size_bytes&&stamp(&open_at(&state.shards[&shard].file,leaf,false)?)?==observed,"original baked catalog leaf size/name differs");
+            original.remaining()?;state.object_versions.insert(reference.clone(),observed);state.pending.take();
+        }
         self.check(state,None,original)?;state.captured=true;Ok(())
     }
     pub fn inventory_data(&self)->Result<BakedImageInventoryData>{
         let state=self.state.try_lock().map_err(|_|anyhow::anyhow!("baked source busy/poisoned"))?;
-        ensure!(state.captured&&!state.failed,"baked inventory capture incomplete");Ok(state.inventory.as_ref().unwrap().clone())
+        ensure!(state.captured&&!state.failed&&!self.physical_failed.load(Ordering::Acquire),"baked inventory capture incomplete/fenced");Ok(state.inventory.as_ref().unwrap().clone())
+    }
+    /// Identity DATA only; possession does not grant Root or local retention.
+    pub fn inventory_reference_data(&self)->&ObjectRef{&self.expected_inventory}
+    /// Check the SAME held readonly source under the caller's original clock.
+    /// No new budget, role, pin or lifetime is issued.
+    pub fn assert_current(&self,original:&dyn ImageImportFence)->Result<()>{
+        let state=self.lock(original)?;ensure!(state.captured&&!state.failed,"baked source incomplete/fenced");
+        self.check(&state,None,original)
     }
     pub fn read_object_retaining(self:&Arc<Self>,out:&mut Option<BakedImageRead>,reference:ObjectRef,
         original:Arc<dyn ImageImportFence>)->Result<()> {
@@ -259,10 +301,10 @@ impl BakedImageRead {
         source.bytes.fetch_update(Ordering::AcqRel,Ordering::Acquire,|n|n.checked_add(amount).filter(|v|*v<=MAX_READ_BYTES)).map_err(|_|anyhow::anyhow!("baked read byte reservations full"))?;
         self.reservation.as_mut().unwrap().bytes=amount;
         let result=self.read_inner(&mut state);
-        // A particular reader's deadline/cancellation does not revoke immutable
-        // physical custody used by another legitimate operation. The failed
-        // read stays nonretryable and retains its own FD/reservation/bytes.
-        if result.is_err()&&self.original.remaining().is_ok(){state.failed=true;}result
+        // A caller's clock/admission failure alone does not revoke another
+        // legitimate reader. Actual physical failure was latched at its point
+        // of observation and cannot be masked by later cancellation.
+        if source.physical_failed.load(Ordering::Acquire){state.failed=true;}result
     }
     fn read_inner(&mut self,state:&mut State)->Result<()> {
         let shard=self.reference.digest[..2].to_owned();let leaf=self.reference.digest[2..].to_owned();
@@ -271,14 +313,17 @@ impl BakedImageRead {
             state.shards.insert(shard.clone(),Directory::staged(open_at(&state.objects.as_ref().unwrap().file,&shard,true)?));
             state.shards.get_mut(&shard).unwrap().capture(&state.objects.as_ref().unwrap().file,&shard,self.source.owner)?;}
         self.source.check(state,Some(&shard),&*self.original)?;
-        self.file=Some(open_at(&state.shards[&shard].file,&leaf,false)?);
-        self.original_stamp=Some(regular(self.file.as_ref().unwrap(),self.source.owner,if self.manifest{MANIFEST}else{CHUNK})?);
+        self.file=Some(self.source.physical(open_at(&state.shards[&shard].file,&leaf,false))?);
+        self.original_stamp=Some(self.source.physical(state.object_versions.get(&self.reference).cloned().context("original baked object version absent"))?);
+        self.source.physical((||->Result<()>{
+        ensure!(regular(self.file.as_ref().unwrap(),self.source.owner,if self.manifest{MANIFEST}else{CHUNK})?==*self.original_stamp.as_ref().unwrap(),"baked payload changed since original catalog capture");
         let expected=self.original_stamp.as_ref().unwrap();ensure!(expected.len==self.reference.size_bytes,"baked object size mismatch");
-        ensure!(stamp(&open_at(&state.shards[&shard].file,&leaf,false)?)?==*expected,"baked object name changed at open");
+        ensure!(stamp(&open_at(&state.shards[&shard].file,&leaf,false)?)?==*expected,"baked object name changed at open");Ok(())})())?;
+        let expected=self.original_stamp.as_ref().unwrap();
         self.bytes.reserve_exact(usize::try_from(expected.len)?);
         let mut buffer=[0;64*1024];let mut sha=Sha256::new();let mut offset=0u64;
-        loop {self.original.remaining()?;let n=self.file.as_ref().unwrap().read_at(&mut buffer,offset)?;if n==0{break;}
-            ensure!(offset+(n as u64)<=self.reference.size_bytes,"baked object grew during verification");
+        loop {self.original.remaining()?;let n=self.source.physical(self.file.as_ref().unwrap().read_at(&mut buffer,offset).context("baked original payload read failed"))?;if n==0{break;}
+            self.source.physical((||->Result<()>{ensure!(offset+(n as u64)<=self.reference.size_bytes,"baked object grew during verification");Ok(())})())?;
             sha.update(&buffer[..n]);self.bytes.extend_from_slice(&buffer[..n]);offset+=n as u64;
             #[cfg(test)] if let Some(flag)=&self.cancel_after_first_chunk{flag.store(true,Ordering::Release);}
             #[cfg(test)] if self.panic_after_first_chunk{panic!("fixture original read panic");}
@@ -287,10 +332,10 @@ impl BakedImageRead {
         // SHA and never assert a complete root or actual child availability.
         let actual=ObjectRef{kind:self.reference.kind,algorithm:crate::protocol::HashAlgorithm::Sha256,
             digest:hex::encode(sha.finalize()),size_bytes:offset};
-        ensure!(actual==self.reference,"baked typed content checksum/size mismatch");
+        self.source.physical((||->Result<()>{ensure!(actual==self.reference,"baked typed content checksum/size mismatch");
         references_from_bytes(self.reference.kind,&self.bytes)?;
         ensure!(stamp(self.file.as_ref().unwrap())?==*self.original_stamp.as_ref().unwrap()
-            &&stamp(&open_at(&state.shards[&shard].file,&leaf,false)?)?==*self.original_stamp.as_ref().unwrap(),"baked object replaced/changed during read");
+            &&stamp(&open_at(&state.shards[&shard].file,&leaf,false)?)?==*self.original_stamp.as_ref().unwrap(),"baked object replaced/changed during read");Ok(())})())?;
         self.source.check(state,Some(&shard),&*self.original)?;self.original.remaining()?;self.verified=true;Ok(())
     }
 }
@@ -298,3 +343,7 @@ impl BakedImageRead {
 #[cfg(test)]
 #[path="baked_image_tests.rs"]
 mod tests;
+
+#[path="baked_original_versions.rs"]
+mod original_versions;
+pub use original_versions::BakedVersionSweep;

@@ -6,31 +6,103 @@ struct Meta {serial:String,generation:String,attempt_nonce:String}
 impl Meta {fn matches(&self,v:&serde_json::Value)->bool {v["serial"]==self.serial&&v["generation"]==self.generation&&v["attempt_nonce"]==self.attempt_nonce}}
 struct Offer {meta:Meta,constraint:FinalizationConstraint,fds:Vec<OwnedFd>,index:usize,unknown:bool}
 struct RetiredSidecar {instance:String,child:super::super::ChildOwner,endpoint:Endpoint,poll:OwnedFd,peer:Option<OwnedFd>,exe:Option<OwnedFd>,namespaces:Vec<(String,File,i32)>}
-pub(super) struct TransportIo {poll:OwnedFd,offline:bool,offline_wire:Option<Vec<u8>>,offline_unknown:bool,sidecar_instance:String,meta:Option<Meta>,ready:bool,closed:bool,activated:bool,bootstrapped:bool,connect_sent:bool,connect_wire:Option<Vec<u8>>,active_sent:bool,close_sent:bool,
+// Actual packet source state is retained independently of its JSON kind. A
+// rejected source/instance never becomes valid by pumping the same bytes again.
+#[derive(Clone,Copy,Debug,PartialEq,Eq)]
+enum RuntimeAckClass { Qualification, Engine, Other }
+#[derive(Clone,Copy,Debug,PartialEq,Eq)]
+enum RuntimePacketValidation { Staged, Validated, Rejected }
+struct RuntimePacketOrigin { expected_pid:u32, instance:String,
+    class:Option<RuntimeAckClass>, validation:RuntimePacketValidation }
+impl RuntimePacketOrigin {
+ fn staged(expected_pid:u32,instance:&str)->Self {Self {expected_pid,instance:instance.into(),class:None,validation:RuntimePacketValidation::Staged}}
+ fn validate(&mut self,packet:&storage::Packet)->Result<()> {self.validate_owned(packet,1500,1500)}
+ // Private mechanism helper; production always uses the fixed1500 wrapper.
+ // Tests use the actual local kernel UID/GID without creating a Root owner.
+ fn validate_owned(&mut self,packet:&storage::Packet,uid:u32,gid:u32)->Result<()> {
+  ensure!(self.validation==RuntimePacketValidation::Staged,"original runtime packet already validated/rejected");
+  let result=(||->Result<RuntimeAckClass>{
+   ensure!(packet.credentials.pid==self.expected_pid as i32&&packet.credentials.uid==uid&&packet.credentials.gid==gid
+     &&packet.fds.is_empty()&&packet.bytes.len()<=MAX_HOST_FRAME,"runtime packet is not actual original sidecar");
+   let value:serde_json::Value=serde_json::from_slice(&packet.bytes)?;
+   Ok(match value["kind"].as_str(){Some("runtime_image_qualification_ack_v1")=>RuntimeAckClass::Qualification,
+     Some("engine_operation_ack_v1")=>RuntimeAckClass::Engine,_=>RuntimeAckClass::Other})
+  })();
+  match result {Ok(class)=>{self.class=Some(class);self.validation=RuntimePacketValidation::Validated;Ok(())},
+   Err(error)=>{self.reject();Err(error)}}
+ }
+ fn reject(&mut self){self.validation=RuntimePacketValidation::Rejected;}
+ fn promotion_class(&mut self,current_instance:&str)->Result<RuntimeAckClass>{
+  ensure!(self.validation==RuntimePacketValidation::Validated,"rejected/unvalidated original runtime packet retained");
+  let class=self.class.context("original runtime packet class absent")?;
+  if class==RuntimeAckClass::Qualification&&self.instance!=current_instance {self.reject();anyhow::bail!("qualification ACK from retired sidecar retained");}
+  Ok(class)
+ }
+}
+// This is the actual held-slot pump used below, separately testable without a
+// fabricated RootHostControl/registration/ready owner. No origin is recreated.
+fn pump_retained_runtime_ack(packet:&mut Option<storage::Packet>,origin:&mut Option<RuntimePacketOrigin>,
+ current_instance:&str,operation:&mut Option<storage::Packet>,qualification:&mut Option<storage::Packet>)->Result<()> {
+ ensure!(packet.is_some(),"held original runtime packet absent");
+ let class=origin.as_mut().context("held runtime packet source absent")?.promotion_class(current_instance)?;
+ let destination=match class {RuntimeAckClass::Engine=>Some(operation),RuntimeAckClass::Qualification=>Some(qualification),RuntimeAckClass::Other=>None};
+ if let Some(out)=destination {if out.is_none(){*out=packet.take();origin.take();}}
+ Ok(())
+}
+pub(super) struct TransportIo {runtime_received_origin:Option<RuntimePacketOrigin>,poll:OwnedFd,offline:bool,offline_wire:Option<Vec<u8>>,offline_unknown:bool,sidecar_instance:String,meta:Option<Meta>,ready:bool,closed:bool,activated:bool,bootstrapped:bool,connect_sent:bool,connect_wire:Option<Vec<u8>>,active_sent:bool,close_sent:bool,
  auth:VecDeque<storage::Packet>,unforwarded:VecDeque<storage::Packet>,native_ack:Option<storage::Packet>,native_received:Option<storage::Packet>,offer:Option<Offer>,old_offers:Vec<Offer>,orphans:Vec<RootPending>,known_receipts:VecDeque<RootPending>,retired:Vec<RetiredSidecar>,historical:Vec<storage::Packet>}
-impl TransportIo {pub(in crate::root_storage_bootstrap) fn new(poll:OwnedFd)->Self {Self {poll,offline:true,offline_wire:None,offline_unknown:false,sidecar_instance:uuid::Uuid::new_v4().to_string(),meta:None,ready:false,closed:false,activated:false,bootstrapped:false,connect_sent:false,connect_wire:None,active_sent:false,close_sent:false,auth:VecDeque::new(),unforwarded:VecDeque::new(),native_ack:None,native_received:None,offer:None,old_offers:Vec::new(),orphans:Vec::new(),known_receipts:VecDeque::new(),retired:Vec::new(),historical:Vec::new()}}
+impl TransportIo {pub(in crate::root_storage_bootstrap) fn new(poll:OwnedFd)->Self {Self {runtime_received_origin:None,poll,offline:true,offline_wire:None,offline_unknown:false,sidecar_instance:uuid::Uuid::new_v4().to_string(),meta:None,ready:false,closed:false,activated:false,bootstrapped:false,connect_sent:false,connect_wire:None,active_sent:false,close_sent:false,auth:VecDeque::new(),unforwarded:VecDeque::new(),native_ack:None,native_received:None,offer:None,old_offers:Vec::new(),orphans:Vec::new(),known_receipts:VecDeque::new(),retired:Vec::new(),historical:Vec::new()}}
  pub(in crate::root_storage_bootstrap) fn offline(&self)->bool{self.offline}
  pub(in crate::root_storage_bootstrap) fn orphan_capacity(&self)->bool{self.orphans.len()<8}
  pub(in crate::root_storage_bootstrap) fn retain_orphan(&mut self,pending:RootPending){self.orphans.push(pending);}
 }
 impl RootHostControl {
- fn stage_runtime_packet_retaining(&mut self,packet:storage::Packet,expected_pid:u32,instance:&str)->Result<()> {ensure!(self.runtime_received.is_none(),"unknown original sidecar packet retained");self.runtime_received=Some(packet);let p=self.runtime_received.as_ref().unwrap();ensure!(p.credentials.pid==expected_pid as i32&&p.credentials.uid==1500&&p.credentials.gid==1500&&p.fds.is_empty()&&p.bytes.len()<=MAX_HOST_FRAME,"runtime packet is not actual original sidecar");let v:serde_json::Value=serde_json::from_slice(&p.bytes)?;
-  if instance!=self.transport.sidecar_instance&&matches!(v["kind"].as_str(),Some("ready"|"host_transport_ready_v1"|"host_transport_lost_v1"|"host_transport_closed_v1"|"host_transport_activated_v1"|"host_transport_challenge_v1"|"host_transport_ack_v1")){ensure!(self.transport.historical.len()<8,"retired physical sidecar DATA retained at bound");self.transport.historical.push(self.runtime_received.take().unwrap());return Ok(());}
+ pub(in crate::root_storage_bootstrap) fn runtime_qualification_transport_current(&self)->Result<bool> {
+  self.check_transport_policy_current()?;
+  if self.transport.offline{return Ok(false);}
+  self.current()?;
+  ensure!(self.transport.activated&&self.transport.active_sent
+   &&self.transport.meta.as_ref().is_some_and(|m|Some(m.generation.as_str())==self.generation.as_deref()),
+   "qualification requires actual committed/activated original transport");Ok(true)
+ }
+ fn take_validated_runtime_packet(&mut self)->Result<storage::Packet> {
+  self.transport.runtime_received_origin.as_mut().context("original runtime packet source absent")?
+   .promotion_class(&self.transport.sidecar_instance)?;
+  let packet=self.runtime_received.take().context("original runtime packet absent")?;
+  self.transport.runtime_received_origin.take();Ok(packet)
+ }
+ fn stage_runtime_packet_retaining(&mut self,packet:storage::Packet,expected_pid:u32,instance:&str)->Result<()> {
+  ensure!(self.runtime_received.is_none()&&self.transport.runtime_received_origin.is_none(),"unknown original sidecar packet retained");
+  self.runtime_received=Some(packet);
+  self.transport.runtime_received_origin=Some(RuntimePacketOrigin::staged(expected_pid,instance));
+  let result=(||->Result<()> {
+   self.transport.runtime_received_origin.as_mut().unwrap().validate(self.runtime_received.as_ref().unwrap())?;
+   self.transport.runtime_received_origin.as_mut().unwrap().promotion_class(&self.transport.sidecar_instance)?;
+   let v:serde_json::Value=serde_json::from_slice(&self.runtime_received.as_ref().unwrap().bytes)?;
+  if instance!=self.transport.sidecar_instance&&matches!(v["kind"].as_str(),Some("ready"|"host_transport_ready_v1"|"host_transport_lost_v1"|"host_transport_closed_v1"|"host_transport_activated_v1"|"host_transport_challenge_v1"|"host_transport_ack_v1")){ensure!(self.transport.historical.len()<8,"retired physical sidecar DATA retained at bound");let packet=self.take_validated_runtime_packet()?;self.transport.historical.push(packet);return Ok(());}
   match v["kind"].as_str(){
-   Some("ready")=>{let ready:Ready=serde_json::from_value(v)?;ensure!(ready.version==1&&ready.nonce==self.nonce&&ready.home_id==self.data.home_id&&ready.incarnation==self.data.incarnation&&ready.config_sha256==self.digest,"replacement initial sidecar binding differs");uuid(&ready.session_generation)?;self.generation=Some(ready.session_generation);self.transport.bootstrapped=true;self.runtime_received.take();},
-   Some("host_transport_ready_v1"|"host_transport_lost_v1"|"host_transport_closed_v1"|"host_transport_activated_v1")=>{let matches=self.transport.meta.as_ref().is_some_and(|m|m.matches(&v));if !matches{ensure!(self.transport.historical.len()<8,"historical transport packets retained at bound");self.transport.historical.push(self.runtime_received.take().unwrap());return Ok(());}
-    match v["kind"].as_str().unwrap(){"host_transport_ready_v1"=>{ensure!(v["version"]==1&&v["home_id"]==self.data.home_id&&v["incarnation"]==self.data.incarnation&&v["config_sha256"]==self.digest,"candidate sidecar ready differs");self.transport.ready=true;},"host_transport_lost_v1"=>self.transport.offline=true,"host_transport_closed_v1"=>{self.transport.offline=true;self.transport.closed=true;},"host_transport_activated_v1"=>self.transport.activated=true,_=>unreachable!()}self.runtime_received.take();},
-   Some("host_transport_challenge_v1"|"host_transport_ack_v1")=>{ensure!(self.transport.auth.len()<4,"original transport ACKs retained at bound");self.transport.auth.push_back(self.runtime_received.take().unwrap());},
-   Some("engine_operation_ack_v1")=>{if self.operation_inbound.is_none(){self.operation_inbound=self.runtime_received.take();}},
-   Some("engine_operation_not_forwarded_v1")=>{ensure!(self.transport.unforwarded.len()<2,"original unforwarded packets retained at bound");self.transport.unforwarded.push_back(self.runtime_received.take().unwrap());},
+   Some("ready")=>{let ready:Ready=serde_json::from_value(v)?;ensure!(ready.version==1&&ready.nonce==self.nonce&&ready.home_id==self.data.home_id&&ready.incarnation==self.data.incarnation&&ready.config_sha256==self.digest,"replacement initial sidecar binding differs");uuid(&ready.session_generation)?;self.generation=Some(ready.session_generation);self.transport.bootstrapped=true;let _=self.take_validated_runtime_packet()?;},
+   Some("host_transport_ready_v1"|"host_transport_lost_v1"|"host_transport_closed_v1"|"host_transport_activated_v1")=>{let matches=self.transport.meta.as_ref().is_some_and(|m|m.matches(&v));if !matches{ensure!(self.transport.historical.len()<8,"historical transport packets retained at bound");let packet=self.take_validated_runtime_packet()?;self.transport.historical.push(packet);return Ok(());}
+    match v["kind"].as_str().unwrap(){"host_transport_ready_v1"=>{ensure!(v["version"]==1&&v["home_id"]==self.data.home_id&&v["incarnation"]==self.data.incarnation&&v["config_sha256"]==self.digest,"candidate sidecar ready differs");self.transport.ready=true;},"host_transport_lost_v1"=>self.transport.offline=true,"host_transport_closed_v1"=>{self.transport.offline=true;self.transport.closed=true;},"host_transport_activated_v1"=>self.transport.activated=true,_=>unreachable!()}let _=self.take_validated_runtime_packet()?;},
+   Some("host_transport_challenge_v1"|"host_transport_ack_v1")=>{ensure!(self.transport.auth.len()<4,"original transport ACKs retained at bound");let packet=self.take_validated_runtime_packet()?;self.transport.auth.push_back(packet);},
+   Some("runtime_image_qualification_ack_v1")=>{ensure!(instance==self.transport.sidecar_instance,"qualification ACK from retired sidecar");if self.runtime_qualification_inbound.is_none(){self.runtime_qualification_inbound=Some(self.take_validated_runtime_packet()?);}},
+   Some("engine_operation_ack_v1")=>{if self.operation_inbound.is_none(){self.operation_inbound=Some(self.take_validated_runtime_packet()?);}},
+   Some("engine_operation_not_forwarded_v1")=>{ensure!(self.transport.unforwarded.len()<2,"original unforwarded packets retained at bound");let packet=self.take_validated_runtime_packet()?;self.transport.unforwarded.push_back(packet);},
    _=>{let command:HostCommand=serde_json::from_value(v)?;command.validate()?;let bytes=self.runtime_received.as_ref().unwrap().bytes.clone();let pending=RootPending {command,bytes,forwarded:false,reply:None,sidecar_instance:instance.into()};
-    if instance!=self.transport.sidecar_instance||self.transport.offline||Some(pending.command.session_generation.as_str())!=self.generation.as_deref(){ensure!(self.transport.orphans.len()<8,"old original host commands retained at bound");self.transport.orphans.push(pending);}else{ensure!(self.pending.is_none(),"original host command slot occupied");self.pending=Some(pending);}self.runtime_received.take();}
-  }Ok(())
+    if instance!=self.transport.sidecar_instance||self.transport.offline||Some(pending.command.session_generation.as_str())!=self.generation.as_deref(){ensure!(self.transport.orphans.len()<8,"old original host commands retained at bound");self.transport.orphans.push(pending);}else{ensure!(self.pending.is_none(),"original host command slot occupied");self.pending=Some(pending);}let _=self.take_validated_runtime_packet()?;}
+  }
+   Ok(())})();
+  if result.is_err(){if let Some(origin)=&mut self.transport.runtime_received_origin{origin.reject();}}
+  result
  }
  pub(in crate::root_storage_bootstrap) fn pump_sidecar_transport_retaining(&mut self)->Result<()> {self.check_transport_policy_current()?;
   // A full original ACK slot must not be overwritten or read past. Root's
   // operation bridge consumes it with the original MAC/nonce/budget checks.
-  if self.runtime_received.is_some(){if self.operation_inbound.is_none(){let v:serde_json::Value=serde_json::from_slice(&self.runtime_received.as_ref().unwrap().bytes)?;if v["kind"]=="engine_operation_ack_v1"{self.operation_inbound=self.runtime_received.take();}}return Ok(());}if let Some(child)=&self.child{if child.status.is_none(){if let Some(packet)=self.sidecar_pair.receive()?{let pid=child.original()?.pid;let instance=self.transport.sidecar_instance.clone();self.stage_runtime_packet_retaining(packet,pid,&instance)?;}}}
+  if self.runtime_received.is_some(){
+   pump_retained_runtime_ack(&mut self.runtime_received,&mut self.transport.runtime_received_origin,
+    &self.transport.sidecar_instance,&mut self.operation_inbound,&mut self.runtime_qualification_inbound)?;
+   return Ok(());
+  }if let Some(child)=&self.child{if child.status.is_none(){if let Some(packet)=self.sidecar_pair.receive()?{let pid=child.original()?.pid;let instance=self.transport.sidecar_instance.clone();self.stage_runtime_packet_retaining(packet,pid,&instance)?;}}}
   if self.runtime_received.is_some(){return Ok(());}
   let mut index=0;while index<self.transport.retired.len(){let old=&mut self.transport.retired[index];ensure!(old.child.status.is_some()&&old.child.original()?.exited()?,"retired sidecar not actually reaped/exited");old.peer.take();
    let mut byte=0u8;let n=unsafe{libc::recv(old.poll.as_raw_fd(),(&mut byte as *mut u8).cast(),1,libc::MSG_PEEK|libc::MSG_DONTWAIT)};
@@ -103,3 +175,7 @@ impl RootHostControl {
    let known=self.transport.orphans.remove(index);self.transport.known_receipts.push_back(known);if self.transport.known_receipts.len()>64{self.transport.known_receipts.pop_front();}
   }Ok(())}
 }
+
+#[cfg(test)]
+#[path="host_runtime_packet_origin_tests.rs"]
+mod runtime_packet_origin_tests;

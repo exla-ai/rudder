@@ -62,18 +62,23 @@ mod worker_join {
     /// Drop never joins. Keep this owner through explicit off-App settlement.
     #[derive(Clone)]
     #[must_use = "retain until explicit actual worker join; dropping is not drain"]
-    pub struct OwnedWorkerJoin { state: Arc<Mutex<State>> }
+    pub struct OwnedWorkerJoin { state: Arc<Mutex<State>>, thread_id:std::thread::ThreadId }
     /// Proves the original worker was actually joined, including its TLS.
     /// Holds the fixed join observer; proves no helper/backend process exit.
     #[must_use = "retain with the resources whose worker was joined"]
+    #[derive(Clone)]
     pub struct WorkerJoined { owner: OwnedWorkerJoin }
     impl WorkerJoined {
+        /// Original actual JoinHandle identity, never a caller assertion. The
+        /// opaque token exists only after actual join including that TLS.
+        pub fn original_thread_id_data(&self)->std::thread::ThreadId{self.owner.thread_id.clone()}
         pub fn same_worker(&self, other: &Self) -> bool { Arc::ptr_eq(&self.owner.state, &other.owner.state) }
     }
     impl OwnedWorkerJoin {
         /// Infallible custody transfer from the actual successful spawn.
         pub fn new(worker: JoinHandle<()>) -> Self {
-            Self { state: Arc::new(Mutex::new(State { worker: Some(worker), observer: None, result: None })) }
+            let thread_id=worker.thread().id();
+            Self { thread_id,state: Arc::new(Mutex::new(State { worker: Some(worker), observer: None, result: None })) }
         }
         /// OFF App. Spawn at most one fixed observer. On spawn failure the actual
         /// worker remains in this same owner, available for explicit retry.
@@ -129,7 +134,7 @@ mod worker_join {
         }
         #[cfg(test)]
         pub(super) fn joined_test_fixture() -> Self {
-            Self { state: Arc::new(Mutex::new(State { worker: None, observer: None, result: Some(Ok(())) })) }
+            Self { thread_id:std::thread::current().id(),state: Arc::new(Mutex::new(State { worker: None, observer: None, result: Some(Ok(())) })) }
         }
     }
 }

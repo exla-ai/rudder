@@ -1,0 +1,61 @@
+{
+  "formatVersion": 1,
+  "scope": "actual generic Fly Machine lease on stopped disposable SDK fixture",
+  "fullV4Complete": false,
+  "productionDeployed": false,
+  "projectAuthorityGranted": false,
+  "descriptionRunes": 64,
+  "descriptionBinding": "full existing SHA256 of fresh 256-bit challenge; exact echo checks unchanged",
+  "focusedTests": {
+    "passed": 23,
+    "failed": 0
+  },
+  "cloudBuildPassed": true,
+  "actualProbe": {
+    "passed": true,
+    "acquire": true,
+    "observe": true,
+    "renew": true,
+    "release": true,
+    "providerCalls": 16,
+    "verifiedAt": "2026-11-01T23:02:32.354Z",
+    "reportSha256": "5e38770430278a72ec32b3d7b9d0426ace9dbe201d3030c5e60b22725a255ffb"
+  },
+  "sdkEndToEndQualified": false,
+  "managedLaunchEnvironment": {
+    "canonicalExec": [
+      "/usr/bin/env",
+      "-i",
+      "/usr/local/bin/rudder-machine-root"
+    ],
+    "focusedPassed": 22,
+    "focusedFailed": 0,
+    "cloudBuildPassed": true,
+    "actualWorkerStartupQualified": false,
+    "documentation": "https://docs.fly.io/machines/runtime-environment/"
+  },
+  "fileSecretEncoding": {
+    "encoding": "standard base64 of exact UTF8 file bytes",
+    "sharedDescribeAndExecute": true,
+    "focusedPassed": 25,
+    "focusedFailed": 0,
+    "cloudBuildPassed": true,
+    "actualStartupQualified": false
+  },
+  "providerStartupProfile": {
+    "kind": "closed process-local profile selected only by trusted managed lifecycle caller",
+    "leaseSeconds": 120,
+    "mutationWholePhaseMs": 60000,
+    "checkMs": 5000,
+    "originalProvisioningCapMs": 300000,
+    "genericDefaultsChanged": false,
+    "runtimePublicationLeaseChanged": false,
+    "originalAbortSignalPropagated": true,
+    "unknownRetryOrReadbackAdoption": false,
+    "focusedPassed": 64,
+    "failed": 0,
+    "cancelled": 0,
+    "actualSdkQualified": false,
+    "primaryLeaseContract": "https://github.com/superfly/flyctl/blob/v0.4.118/internal/machine/lease.go"
+  }
+}

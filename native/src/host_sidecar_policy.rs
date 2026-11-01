@@ -1,7 +1,7 @@
 //! Exact immutable packaging DATA only. No Root/transport/engine owner factory.
 use super::*;
 
-pub(super) const FILES:[&str;26]=[
+pub(super) const FILES:[&str;27]=[
     "host-control-core.mjs","host-control.mjs",
     "node_modules/ws/LICENSE","node_modules/ws/README.md","node_modules/ws/browser.js","node_modules/ws/index.js",
     "node_modules/ws/lib/buffer-util.js","node_modules/ws/lib/constants.js","node_modules/ws/lib/event-target.js",
@@ -10,7 +10,7 @@ pub(super) const FILES:[&str;26]=[
     "node_modules/ws/lib/subprotocol.js","node_modules/ws/lib/validation.js","node_modules/ws/lib/websocket-server.js",
     "node_modules/ws/lib/websocket.js","node_modules/ws/node_modules/bufferutil/index.js",
     "node_modules/ws/node_modules/utf-8-validate/index.js","node_modules/ws/package.json","node_modules/ws/wrapper.mjs",
-    "package-lock.json","package.json","root-upload.mjs",
+    "package-lock.json","package.json","root-upload.mjs","runtime-qualification.mjs",
 ];
 
 #[derive(Deserialize)]

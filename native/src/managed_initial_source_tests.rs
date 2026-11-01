@@ -101,3 +101,9 @@ fn replaced_cas_or_managed_namespace_cannot_reconstruct_the_original_source_owne
 
 #[path="managed_initial_source_generation_tests.rs"]
 mod generation_lifetime;
+
+#[path="managed_backed_task_capture_tests.rs"]
+mod backed_task_capture;
+
+#[path="managed_current_source_owner_tests.rs"]
+mod current_source_build;

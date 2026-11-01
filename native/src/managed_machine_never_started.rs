@@ -127,6 +127,7 @@ fn close_never_started(client:&mut rudder_native::root_storage_client::RootStora
     outer:&FinalizationBudget,_cancelled:&Arc<AtomicBool>,reconcile:bool)->Result<()> {
     outer.remaining()?;let mut task=lock(&ticket.cell,outer)?;
     ensure!(task.factory.is_joined(),"original source factory/TLS not joined");
+    if let Some(backed)=&task.backed_inputs{backed.check_reads_settled()?;}
     let TaskScope {never,guard,fork_guard,fork,factory_outcome,factory_refusal,..}=&mut *task;
     let n=never.as_mut().context("original never-started campaign absent")?;
     if let Some(work)=&n.task_close {if let Some(joined)=work.reconcile_joined()? {

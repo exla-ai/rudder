@@ -14,7 +14,8 @@ pub const LAUNCHER_IMAGE:&str="/usr/local/bin/rudder-machine-root";
 pub const ENGINE_IMAGE:&str="/opt/rudder/dist/native/rudder-native";
 pub const MAX_RUNTIME_COMPONENTS:usize=9;
 pub const RUNTIME_FIXED_FDS:usize=14;
-pub const MAX_RUNTIME_FDS:usize=RUNTIME_FIXED_FDS+MAX_RUNTIME_COMPONENTS;
+pub const BASE_RUNTIME_FDS:usize=RUNTIME_FIXED_FDS+MAX_RUNTIME_COMPONENTS;
+pub const MAX_RUNTIME_FDS:usize=BASE_RUNTIME_FDS+1;
 const SEALED:i32=libc::F_SEAL_WRITE|libc::F_SEAL_GROW|libc::F_SEAL_SHRINK|libc::F_SEAL_SEAL;
 const MAX_FRAME:usize=24*1024;
 /// Exact installer entries and approved guest projections. No public /run
@@ -47,11 +48,14 @@ pub struct RuntimeImageCapsuleData {
     pub launcher_sha256:String,pub service_sha256:String,pub engine_sha256:String,
     pub inventory:ObjectRef,pub manifest:ObjectRef,pub installer_input:ObjectRef,pub constraint:FinalizationConstraint,
     pub floor:RuntimeFdData,pub components:Vec<RuntimeFdData>,pub selected_executables:Vec<RuntimeExecutableData>,
+    #[serde(default,skip_serializing_if="Option::is_none")]pub compiler_sdk:Option<super::compiler_sdk::CompilerSdkMountData>,
 }
 fn hash_text(value:&str)->Result<()> {ensure!(value.len()==64&&value.bytes().all(|b|b.is_ascii_digit()||(b'a'..=b'f').contains(&b)),"runtime SHA invalid");Ok(())}
 fn uuid(value:&str)->Result<()> {ensure!(Uuid::parse_str(value).is_ok_and(|u|u.get_version_num()==4&&u.to_string()==value),"runtime nonce invalid");Ok(())}
 impl RuntimeImageCapsuleData {
+    fn expected_fds(&self)->usize{BASE_RUNTIME_FDS+usize::from(self.compiler_sdk.is_some())}
     pub fn validate_data(&self)->Result<()> {
+        if let Some(sdk)=&self.compiler_sdk{sdk.validate_data()?;}
         ensure!(self.version==1&&self.components.len()==MAX_RUNTIME_COMPONENTS&&self.selected_executables.len()==4,"runtime capsule shape differs");
         uuid(&self.request_nonce)?;uuid(&self.engine_instance_id)?;uuid(&self.boot_id)?;
         for sha in [&self.binding_sha256,&self.config_sha256,&self.registration_proof_sha256,&self.launcher_sha256,&self.service_sha256,&self.engine_sha256]{hash_text(sha)?;}
@@ -172,7 +176,7 @@ impl RuntimeImageGrant {
     pub(crate) fn receive_retaining(out:&mut Option<Self>,pending:&mut Option<RuntimePacket>,endpoint:&RuntimeEndpoint,binding:&super::ManagedExecutionBinding)->Result<bool>{
         ensure!(out.is_none()&&pending.is_none(),"runtime original receive slot occupied");let Some(packet)=endpoint.receive_data()?else{return Ok(false)};*pending=Some(packet);
         let p=pending.as_ref().unwrap();let data:RuntimeImageCapsuleData=serde_json::from_slice(&p.bytes)?;data.validate_data()?;
-        ensure!(p.fds.len()==MAX_RUNTIME_FDS&&p.credentials.pid==data.service_pid as i32&&p.credentials.uid==0&&p.credentials.gid==0,"runtime capsule is not original Root service packet");
+        ensure!(p.fds.len()==data.expected_fds()&&p.credentials.pid==data.service_pid as i32&&p.credentials.uid==0&&p.credentials.gid==0,"runtime capsule is not original Root service packet");
         ensure!(data.helper_pid==std::process::id()&&data.engine_pid==unsafe{libc::getppid()}as u32&&data.binding_sha256==hex::encode(Sha256::digest(canonical_json(binding)?)),"runtime capsule belongs to another original helper/assignment");
         let original=FinalizationBudget::from_constraint(&data.constraint)?;original.remaining()?;
         ensure!(sealed_root_bytes(&p.fds[0],true)?==p.bytes,"runtime live packet differs from original sealed Root capsule");
@@ -191,27 +195,45 @@ impl RuntimeImageGrant {
         // The protected public config (not token/key) is an actual original FD.
         let config=File::from(p.fds[11].try_clone()?);let cm=config.metadata()?;ensure!(cm.uid()==0&&cm.gid()==0&&cm.mode()&0o7777==0o600&&cm.nlink()==1&&cm.len()<=32*1024&&unsafe{libc::fcntl(p.fds[11].as_raw_fd(),libc::F_GETFL)}&libc::O_ACCMODE==libc::O_RDONLY
             &&hash_file(&config,32*1024,&original)?==data.config_sha256,"runtime original protected config differs");
+        let mut config_bytes=vec![0;cm.len()as usize];ensure!(config.read_at(&mut config_bytes,0)?==config_bytes.len(),"runtime actual config read incomplete");
+        let config_data:serde_json::Value=serde_json::from_slice(&config_bytes)?;
+        ensure!(config_data.get("compiler_sdk").cloned().unwrap_or(serde_json::Value::Null)==serde_json::to_value(data.compiler_sdk.as_ref().map(|s|&s.catalog))?,"compiler SDK capsule differs from actual protected config");
         let fds=pending.take().unwrap().fds;*out=Some(Self{data,fds,closed:AtomicBool::new(false),validated:false});
         let result=(||->Result<()>{let value=out.as_ref().unwrap();value.check_component_bindings()?;FinalizationBudget::from_constraint(&value.data.constraint)?.remaining()?;Ok(())})();
         if let Err(error)=result{out.as_ref().unwrap().close_admission();return Err(error)}out.as_mut().unwrap().validated=true;Ok(true)
     }
     fn check_components(&self)->Result<()>{ensure!(self.validated,"runtime original complete grant ACK absent");self.check_component_bindings()}
-    fn check_component_bindings(&self)->Result<()>{ensure!(!self.closed.load(Ordering::Acquire)&&self.fds.len()==MAX_RUNTIME_FDS,"runtime grant closed/incomplete");
+    fn check_component_bindings(&self)->Result<()>{ensure!(!self.closed.load(Ordering::Acquire)&&self.fds.len()==self.data.expected_fds(),"runtime grant closed/incomplete");
         for i in [1,3,5,7]{live(&self.fds[i])?;}
         let mut cancel=libc::pollfd{fd:self.fds[13].as_raw_fd(),events:libc::POLLIN,revents:0};
         ensure!(fs::read_link(format!("/proc/self/fd/{}",self.fds[13].as_raw_fd()))?==Path::new("anon_inode:[eventfd]")
             &&unsafe{libc::poll(&mut cancel,1,0)}==0,"runtime original helper request cancelled");ensure!(fd_data(&self.fds[12])?==self.data.floor,"runtime held floor FD changed");
         let mut stat:libc::statfs=unsafe{std::mem::zeroed()};ensure!(unsafe{libc::fstatfs(self.fds[12].as_raw_fd(),&mut stat)}==0&&stat.f_type==0x65735546,"runtime floor is not original FUSE");
+        if let Some(sdk)=&self.data.compiler_sdk {
+            sdk.validate_data()?;let fd=&self.fds[BASE_RUNTIME_FDS];ensure!(fd_data(fd)?==sdk.floor,"compiler SDK held floor identity changed");
+            let mut fs:libc::statfs=unsafe{std::mem::zeroed()};let mut v:libc::statvfs=unsafe{std::mem::zeroed()};
+            ensure!(unsafe{libc::fstatfs(fd.as_raw_fd(),&mut fs)}==0&&fs.f_type==0x65735546&&unsafe{libc::fstatvfs(fd.as_raw_fd(),&mut v)}==0
+                &&v.f_flag&((libc::ST_RDONLY|libc::ST_NOSUID|libc::ST_NODEV)as libc::c_ulong)==((libc::ST_RDONLY|libc::ST_NOSUID|libc::ST_NODEV)as libc::c_ulong)
+                &&v.f_flag&libc::ST_NOEXEC as libc::c_ulong==0,"compiler SDK original readonly executable FUSE floor differs");
+        }
         for(i,expected)in self.data.components.iter().enumerate(){let fd=&self.fds[RUNTIME_FIXED_FDS+i];ensure!(fd_data(fd)?==*expected,"runtime held component inode/mount changed");let mut v:libc::statvfs=unsafe{std::mem::zeroed()};
             ensure!(unsafe{libc::fstatvfs(fd.as_raw_fd(),&mut v)}==0&&v.f_flag&((libc::ST_RDONLY|libc::ST_NOSUID|libc::ST_NODEV)as libc::c_ulong)==((libc::ST_RDONLY|libc::ST_NOSUID|libc::ST_NODEV)as libc::c_ulong)
                 &&v.f_flag&libc::ST_NOEXEC as libc::c_ulong==0,"runtime component mount permissions differ");}Ok(())}
+    pub fn compiler_toolchains_data(&self)->Result<Option<&std::collections::BTreeMap<String,crate::build::ToolchainIdentity>>>{
+        self.check_components()?;Ok(self.data.compiler_sdk.as_ref().map(|sdk|&sdk.toolchains))
+    }
     pub fn close_admission(&self){self.closed.store(true,Ordering::Release)}
     pub(crate) fn component(&self,runtime:&ReadOnlyRuntime)->Result<Option<(&OwnedFd,bool)>>{
-        self.check_components()?;if let Some((i,(_,source,_,dir)))=COMPONENTS.iter().enumerate().find(|(_,(_,_,guest,_))|*guest==runtime.guest_path){
+        self.check_components()?;
+        if runtime.guest_path==super::compiler_sdk::SDK_GUEST {
+            ensure!(runtime.source==Path::new(super::compiler_sdk::SDK_SOURCE)&&self.data.compiler_sdk.is_some(),"compiler SDK projection lacks original typed Root grant");
+            return Ok(Some((&self.fds[BASE_RUNTIME_FDS],true)));
+        }if let Some((i,(_,source,_,dir)))=COMPONENTS.iter().enumerate().find(|(_,(_,_,guest,_))|*guest==runtime.guest_path){
             ensure!(runtime.source==Path::new(source),"runtime projection differs from exact approved source DATA");return Ok(Some((&self.fds[RUNTIME_FIXED_FDS+i],*dir)))}
         ensure!(["/etc/resolv.conf","/etc/hosts","/etc/nsswitch.conf"].contains(&runtime.guest_path.as_str())&&runtime.source==Path::new(&runtime.guest_path),"runtime image grant refuses ordinary image-path fallback/remap");Ok(None)
     }
     pub(crate) fn assert_spec(&self,spec:&ExecutionSpec)->Result<()>{self.check_components()?;
+        if self.data.compiler_sdk.is_some(){ensure!(spec.runtime.iter().filter(|r|r.guest_path==super::compiler_sdk::SDK_GUEST&&r.source==Path::new(super::compiler_sdk::SDK_SOURCE)).count()==1,"compiler SDK grant requires its exact separate floor projection");}
         for(_,source,guest,_)in COMPONENTS{ensure!(spec.runtime.iter().filter(|r|r.guest_path==guest&&r.source==Path::new(source)).count()==1,"runtime spec lacks exact immutable component projection");}
         for runtime in &spec.runtime{self.component(runtime)?;}Ok(())
     }
@@ -239,7 +261,7 @@ impl RuntimeImageGrant {
         if let Err(error)=result{out.as_ref().unwrap().close_admission();return Err(error)}out.as_mut().unwrap().validated=true;Ok(())
     }
     fn validate_original_helper_exec(&self)->Result<()>{let data=&self.data;let fds=&self.fds;
-        data.validate_data()?;for fd in fds{ensure!(unsafe{libc::fcntl(fd.as_raw_fd(),libc::F_SETFD,libc::FD_CLOEXEC)}==0,"runtime wrapper descriptor protection unavailable");}ensure!(fds.len()==MAX_RUNTIME_FDS&&data.helper_pid==unsafe{libc::getppid()}as u32&&pid_from_fd(&fds[7])?==data.helper_pid
+        data.validate_data()?;for fd in fds{ensure!(unsafe{libc::fcntl(fd.as_raw_fd(),libc::F_SETFD,libc::FD_CLOEXEC)}==0,"runtime wrapper descriptor protection unavailable");}ensure!(fds.len()==data.expected_fds()&&data.helper_pid==unsafe{libc::getppid()}as u32&&pid_from_fd(&fds[7])?==data.helper_pid
             &&proc_start(data.helper_pid)?==data.helper_start_ticks,"runtime wrapper changed original helper parent");
         // Child is already in the helper's one-user namespace. The original
         // Root memfd is unmapped, while helper-created files map to uid1500. This
@@ -294,7 +316,7 @@ impl RuntimeExecHandoff {
     // the actual already authenticated grant above. Component tests can use
     // harmless real FDs without fabricating any Root grant/readiness owner.
     fn capture_transport_retaining(out:&mut Option<Self>,original:FinalizationBudget,bytes:Vec<u8>,fds:Vec<OwnedFd>)->Result<()>{
-        ensure!(out.is_none()&&!bytes.is_empty()&&bytes.len()<=MAX_FRAME&&fds.len()==MAX_RUNTIME_FDS,"runtime transport original bounds differ");original.remaining()?;
+        ensure!(out.is_none()&&!bytes.is_empty()&&bytes.len()<=MAX_FRAME&&(BASE_RUNTIME_FDS..=MAX_RUNTIME_FDS).contains(&fds.len()),"runtime transport original bounds differ");original.remaining()?;
         *out=Some(Self{listener:None,name:format!("rudder-runtime-exec-{}",Uuid::new_v4()),child:None,connection:None,peer:None,fds,bytes,original,sent:false,unknown:false});
         let owner=out.as_mut().unwrap();
         let raw=unsafe{libc::socket(libc::AF_UNIX,libc::SOCK_SEQPACKET|libc::SOCK_CLOEXEC|libc::SOCK_NONBLOCK,0)};ensure!(raw>=0,"runtime exec listener unavailable");owner.listener=Some(unsafe{OwnedFd::from_raw_fd(raw)});
@@ -341,9 +363,13 @@ impl RuntimeExecReceive {
         ensure!(pid_from_fd(&self.peer)?==self.data.helper_pid,"runtime original connected helper exited");
         if self.pending.is_none(){self.pending=self.endpoint.receive_data()?;}let Some(packet)=&self.pending else{return Ok(false)};
         ensure!(packet.credentials.pid==self.data.helper_pid as i32&&packet.credentials.uid==1500&&packet.credentials.gid==1500
-            &&packet.fds.len()==MAX_RUNTIME_FDS&&packet.bytes==canonical_json(&self.data)?,"runtime original protected helper transfer differs");
+            &&packet.fds.len()==self.data.expected_fds()&&packet.bytes==canonical_json(&self.data)?,"runtime original protected helper transfer differs");
         self.original.remaining()?;let fds=self.pending.take().unwrap().fds;
         RuntimeImageGrant::after_original_helper_exec_retaining(out,self.data.clone(),fds)?;
         if let Err(error)=self.original.remaining(){out.as_ref().unwrap().close_admission();return Err(error)}Ok(true)
     }
 }
+
+#[path="runtime_endpoint_disposal.rs"]
+mod disposal_io;
+pub use disposal_io::RuntimeDisposalRead;

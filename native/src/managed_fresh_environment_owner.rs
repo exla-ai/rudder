@@ -4,18 +4,24 @@ use rudder_native::engine_registration::FreshProjectPreparation;
 /// An environment is immutable DATA backed by actual pins/current image and
 /// per-VM input custody. It grants no source/project/task/lease authority.
 pub(crate) struct ManagedFreshEnvironment {machine:Arc<ManagedMachineCas>,image:Arc<ImagePreseedExport>,preparation:Arc<FreshProjectPreparation>,
-    network:Option<VmNetworkInputs>,statics:Vec<StaticFile>,static_dirs:Vec<Directory>,stage:Option<String>,environment:Option<ObjectRef>,network_directory:Option<ObjectRef>,pin:String,pin_attempted:bool,pin_ack:bool,attempted:bool,fenced:AtomicBool}
+    backed:Option<Arc<super::runtime_environment::SharedRuntimeEnvironment>>,network:Option<VmNetworkInputs>,statics:Vec<StaticFile>,static_dirs:Vec<Directory>,stage:Option<String>,environment:Option<ObjectRef>,network_directory:Option<ObjectRef>,pin:String,pin_attempted:bool,pin_ack:bool,attempted:bool,fenced:AtomicBool}
 impl ManagedFreshEnvironment {
     pub(crate) fn capture_retaining(out:&mut Option<Self>,machine:Arc<ManagedMachineCas>,image:Arc<ImagePreseedExport>,preparation:Arc<FreshProjectPreparation>,original:&FinalizationBudget,cancelled:&AtomicBool)->Result<()> {
         clock(original,cancelled)?;ensure!(out.is_none(),"fresh environment original carrier occupied");
         ensure!(Arc::ptr_eq(machine.registration(),preparation.registration())&&Arc::ptr_eq(&image.source().machine(),&machine),"fresh environment differs from actual image/registered CAS owner");
-        let p=preparation.prepare();*out=Some(Self{machine,image,preparation:preparation.clone(),network:None,statics:Vec::new(),static_dirs:Vec::new(),stage:None,environment:None,network_directory:None,
+        let p=preparation.prepare();*out=Some(Self{machine,image,preparation:preparation.clone(),backed:None,network:None,statics:Vec::new(),static_dirs:Vec::new(),stage:None,environment:None,network_directory:None,
             pin:format!("fresh-env:{}:{}",p.namespace.project_id,p.request_id),pin_attempted:false,pin_ack:false,attempted:false,fenced:AtomicBool::new(false)});
         out.as_mut().unwrap().prepare_retaining(original,cancelled)
     }
     fn prepare_retaining(&mut self,original:&FinalizationBudget,cancelled:&AtomicBool)->Result<()> {
         ensure!(!self.attempted,"fresh environment already attempted");self.attempted=true;clock(original,cancelled)?;self.preparation.assert_current()?;self.machine.assert_custody()?;
-        self.image.assert_current_for_fresh(original,cancelled)?;self.network=Some(VmNetworkInputs::capture(original,cancelled)?);
+        self.image.assert_current_for_fresh(original,cancelled)?;
+        if let Some(backed)=self.image.source().runtime_environment(){
+            self.backed=Some(backed);let actual=self.backed.as_ref().unwrap();
+            ensure!(Arc::ptr_eq(&actual.machine(),&self.machine),"backed project environment belongs to another actual machine");
+            actual.current(original,cancelled)?;self.environment=Some(actual.root()?);self.current(original,cancelled)?;return Ok(())
+        }
+        self.network=Some(VmNetworkInputs::capture(original,cancelled)?);
         for (_,path)in rudder_native::image_preseed_data::static_files(){clock(original,cancelled)?;let path=PathBuf::from(path);let before=alias_stamp(&path)?;let target=path.canonicalize()?;let data=self.image.captured_file_data(&target)?.context("declared static runtime target absent from actual full image manifest")?;
             let file=ImageFile::open(&target,16*1024*1024,original,cancelled)?;ensure!(file.sha==data.sha256&&file.stamp.len==data.size_bytes&&alias_stamp(&path)?==before&&path.canonicalize()?==target,"declared static runtime differs from actual image capture");self.statics.push(StaticFile{guest:path,alias:before,target,file});}
         for (_,path)in rudder_native::image_preseed_data::static_directories(){self.static_dirs.push(Directory::open(Path::new(path))?);}
@@ -40,14 +46,20 @@ impl ManagedFreshEnvironment {
     pub(crate) fn current(&self,original:&FinalizationBudget,cancelled:&AtomicBool)->Result<()> {
         // A caller's deadline/cancel cannot poison immutable physical custody
         // needed by genuine original cleanup or unrelated later task jobs.
-        clock(original,cancelled)?;let result=self.physical_current();if result.is_err(){self.fenced.store(true,Ordering::Release);}result?;clock(original,cancelled)
+        clock(original,cancelled)?;loop{match self.physical_current(){
+            Ok(())=>return clock(original,cancelled),
+            Err(error)if super::runtime_environment::is_busy(&error)=>{clock(original,cancelled)?;std::thread::sleep(original.remaining()?.min(std::time::Duration::from_millis(1)));},
+            Err(error)=>{self.fenced.store(true,Ordering::Release);return Err(error);}}}
     }
     fn physical_current(&self)->Result<()> {ensure!(!self.fenced.load(Ordering::Acquire),"original fresh environment custody fenced");self.preparation.assert_current()?;self.machine.assert_custody()?;
-        self.image.source().assert_retained_custody()?;if let Some(network)=&self.network{network.current()?;}for item in &self.statics{item.current()?;}for dir in &self.static_dirs{dir.current()?;}
+        self.image.source().assert_retained_custody()?;if let Some(backed)=&self.backed{backed.assert_original_custody()?;ensure!(self.environment.as_ref()==Some(&backed.root()?),"backed environment root differs");}if let Some(network)=&self.network{network.current()?;}for item in &self.statics{item.current()?;}for dir in &self.static_dirs{dir.current()?;}
         if self.pin_attempted{ensure!(self.machine.store()?.retention()?.pins.get(&self.pin)==self.environment.as_ref(),"actual fresh environment pin changed");}Ok(())
     }
-    pub(crate) fn assert_retained_custody(&self)->Result<()> {ensure!(self.pin_ack&&!self.fenced.load(Ordering::Acquire),"fresh environment original ACK absent/fenced");self.preparation.assert_current()?;self.machine.assert_custody()?;self.image.source().assert_retained_custody()?;self.network.as_ref().context("original VM inputs absent")?.current()?;for item in &self.statics{item.current()?;}for dir in &self.static_dirs{dir.current()?;}ensure!(self.machine.store()?.retention()?.pins.get(&self.pin)==self.environment.as_ref(),"fresh environment pin changed");Ok(())}
-    pub(crate) fn environment(&self)->Result<&ObjectRef>{ensure!(self.pin_ack,"fresh environment original pin ACK absent");self.environment.as_ref().context("fresh environment absent")}
+    pub(crate) fn assert_retained_custody(&self)->Result<()> {
+        if let Some(backed)=&self.backed{let result=(||->Result<()>{ensure!(!self.fenced.load(Ordering::Acquire),"backed environment physical custody fenced");self.preparation.assert_current()?;self.machine.assert_custody()?;self.image.source().assert_retained_custody()?;backed.assert_original_custody()?;ensure!(self.environment.as_ref()==Some(&backed.root()?),"backed environment changed");Ok(())})();
+            return result.map_err(|error|if super::runtime_environment::is_busy(&error){crate::engine_host::EngineSharedAdmissionBusy.into()}else{error})}
+        ensure!(self.pin_ack&&!self.fenced.load(Ordering::Acquire),"fresh environment original ACK absent/fenced");self.preparation.assert_current()?;self.machine.assert_custody()?;self.image.source().assert_retained_custody()?;self.network.as_ref().context("original VM inputs absent")?.current()?;for item in &self.statics{item.current()?;}for dir in &self.static_dirs{dir.current()?;}ensure!(self.machine.store()?.retention()?.pins.get(&self.pin)==self.environment.as_ref(),"fresh environment pin changed");Ok(())}
+    pub(crate) fn environment(&self)->Result<&ObjectRef>{if let Some(backed)=&self.backed{ensure!(self.environment.as_ref()==Some(&backed.root()?),"backed environment differs from original ACK");}else{ensure!(self.pin_ack,"fresh environment original pin ACK absent");}self.environment.as_ref().context("fresh environment absent")}
     pub(crate) fn machine(&self)->&Arc<ManagedMachineCas>{&self.machine}
     pub(crate) fn image(&self)->&Arc<ImagePreseedExport>{&self.image}
     pub(crate) fn preparation(&self)->&Arc<FreshProjectPreparation>{&self.preparation}
@@ -57,3 +69,5 @@ impl ManagedFreshEnvironment {
 
 struct StaticFile{guest:PathBuf,alias:Stamp,target:PathBuf,file:ImageFile}
 impl StaticFile{fn current(&self)->Result<()>{self.file.current()?;ensure!(alias_stamp(&self.guest)?==self.alias&&self.guest.canonicalize()?==self.target,"original declared static runtime alias changed");Ok(())}}
+
+impl ManagedFreshEnvironment {pub(crate) fn runtime_backing(&self)->Option<&Arc<super::runtime_environment::SharedRuntimeEnvironment>>{self.backed.as_ref()}}

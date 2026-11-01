@@ -1,0 +1,148 @@
+{
+  "formatVersion": 1,
+  "scope": "new retained Environment boundary; local component tests and failed actual full-repository composition",
+  "localTests": {
+    "passed": 9,
+    "failed": 0,
+    "verifiedAt": "2026-11-01T18:39:27.007865+00:00",
+    "logSha256": "54836612b7c817e85e65d3597f4c56fd783ab894ce0874ccae1a1bfa3497deba"
+  },
+  "actualFullRepository": {
+    "passed": false,
+    "verifiedAt": "2026-11-01T18:44:26.910838+00:00",
+    "sourceManifestSha256": "daa65c84f3325bcdf94ebdbeabaa209e54a9bc3326ae9d035e7f2f00289dad9e",
+    "acceptedHead": "486d6c3cd5811bc27ddaa3fb61305ef7fadeb81c",
+    "bakedImage": "registry.fly.io/rudder-workers-exla@sha256:f26ab1dda848fc41a5b1305ad1058083fbe52347966328cee32f302fce341336",
+    "qualifierElfs": [
+      {
+        "sha256": "9c0821ad62fdee48fdfad338083f57fec92b422c42fbbc36e0a3c3dfc51d53c4",
+        "bytes": 16648296,
+        "uid": 0
+      }
+    ],
+    "logSha256": "73a5d7be25c823c603aac3c82ea15dada16dcbb1c6db63b9f791b45a0f0f1886",
+    "observedFailure": "Git import object kind/size exceeds admission",
+    "testElapsedSeconds": 28.12,
+    "acceptedGitHistory": {
+      "reachableObjects": 12260,
+      "rawBytes": 596801142,
+      "largestRawObjectBytes": 4252036,
+      "defaultImportRawByteLimit": 402653184
+    },
+    "historyFiles": {
+      "HEAD": "e994538ba3785d9f784e9069bc91964e6dbff889d72eec4dd3590a2eff940039",
+      "config": "583e3939cc50830531b229f4cedc2565e444b5b94c16fb6635ecd5d98e9dcbc3",
+      "description": "85ab6c163d43a17ea9cf7788308bca1466f1b0a8d1cc92e26e9bf63da4062aee",
+      "objects/pack/pack-65bbcc6cc70804dd4e78660d089485def2eac1db.idx": "a7b0968db2c60facc8d6652d6d419dd7d9e15d2d89fc52e746073529b7a4e36c",
+      "objects/pack/pack-65bbcc6cc70804dd4e78660d089485def2eac1db.pack": "4507fc918e3bc9f738d738ca20be67b7715ead5112ef9564ffa09a28a38850b0"
+    },
+    "imagePushed": false,
+    "createdVm": false
+  },
+  "actualAgentLaunch": false,
+  "sdkBuild": false,
+  "productionActivation": false,
+  "normalDrain": false,
+  "packedHistoryV2": {
+    "report": {
+      "formatVersion": 1,
+      "sourceManifestSha256": "6cdcb1e63654b345b41407d6bbea3848c07dedfd33b86a687807788d110e4451",
+      "scope": "actual accepted Rudder Git history plus full baked runtime; storage/jj component only",
+      "acceptedHead": "486d6c3cd5811bc27ddaa3fb61305ef7fadeb81c",
+      "bakedImage": "registry.fly.io/rudder-workers-exla@sha256:f26ab1dda848fc41a5b1305ad1058083fbe52347966328cee32f302fce341336",
+      "image": "registry.fly.io/rudder-workers-exla:environment-dependency-packed-6cdcb1e63654",
+      "digest": "sha256:c8aa51d01222cc74b350c70c993899dc498c171ef1894cd6e76dd140015c8d88",
+      "exitCode": 0,
+      "passed": true,
+      "results": [
+        {
+          "RootMountAuthority": false,
+          "actualAgentLaunch": false,
+          "combinedObservedBytes": 2084554781,
+          "compilerSDK": false,
+          "environmentDependencyDepth": 2,
+          "formatVersion": 1,
+          "head": "486d6c3cd5811bc27ddaa3fb61305ef7fadeb81c",
+          "historyProfile": {
+            "canonical_child_reaped_and_all_pipes_eof": true,
+            "canonicalizer": {
+              "exit_code_data": 0,
+              "original_child_pid_data": 10,
+              "spawn_error_returned": false,
+              "stderr_bytes": 0,
+              "stderr_eof": true,
+              "stdin_bytes_sent": 41,
+              "stdout_bytes": 41,
+              "stdout_eof": true,
+              "stop_requested": false
+            },
+            "decode_buffer_limit_bytes": 134217728,
+            "decoded_record_bytes": 78612431,
+            "delta_depth_limit": 64,
+            "encoded_bytes": 51047059,
+            "encoded_limit_bytes": 402653184,
+            "installed": true,
+            "object_limit_bytes": 33554432,
+            "objects": 12260,
+            "original_constraint": {
+              "boottime_deadline_nanoseconds": "320791692629",
+              "format_version": 1,
+              "maximum_milliseconds": 30000
+            },
+            "pack_sha1": "ac9c28d3f9c75b6e326cf6f30de2bc0142845560",
+            "profile": "packed_history_v2",
+            "reconstructed_bytes": 596801142,
+            "verification_work_bytes": 724831675,
+            "verification_work_limit_bytes": 1073741824
+          },
+          "inventory": {
+            "algorithm": "sha256",
+            "digest": "8654bab675d670ac9663e18072c5c18570ff06a2859d5a25e41a13a37bc27ddb",
+            "kind": "blob",
+            "size_bytes": 2936778
+          },
+          "localEncodedBytes": 109227412,
+          "localObjects": 2645,
+          "normalDrain": false,
+          "passed": true,
+          "perOperationOriginalDeadlineMs": 30000,
+          "runtimeEncodedBytes": 1975378537,
+          "scope": "storage-jj-component-only",
+          "seedReadBytes": 51169908,
+          "seedReadFiles": 31,
+          "sourceUniqueEncodedBytes": 58006336,
+          "timingsMs": {
+            "environment_derive_ms": 8355,
+            "environment_prepare_ms": 8879,
+            "source_seed_runnable_ms": 11866,
+            "typed_capture_ms": 4055
+          }
+        }
+      ],
+      "qualifierElfs": [
+        {
+          "sha256": "258665f18610a3f7fa85bce07cd293031a2cf0c7779c0752a2009b161369b925",
+          "bytes": 16881032,
+          "uid": 0
+        }
+      ],
+      "remoteBuildMayContinue": false,
+      "logSha256": "2d7bbfdd75a664a48ef956433995fed7a9a0b437648382b2020f1236090913b7",
+      "verifiedAt": "2026-11-01T19:43:44.841594+00:00",
+      "deployed": false,
+      "actualAgentLaunch": false,
+      "runtimeMountQualified": false
+    },
+    "actualUnoptimizedLargeFixture": {
+      "result": "failed-original-30-second-deadline",
+      "scope": "explicitly selected ignored104x4MiB debug build; no quota/time changes",
+      "receiptSha256": "4e6edc41294580c22d43ad016a808ee791fe1542d718633237120841d2c916bb",
+      "logSha256": "1c873dada603cd97bfd80977fff418c6175ac77e2bb4cb7f04e617266222a281"
+    },
+    "smallActualGitJjAndFormatTests": {
+      "passed": 11,
+      "ignored": 1
+    },
+    "independentSourceReview": "no additional actionable P1/P2; physical UID1500 isolation remains separate"
+  }
+}

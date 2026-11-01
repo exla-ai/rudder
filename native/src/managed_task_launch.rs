@@ -149,6 +149,7 @@ impl ManagedTaskPrograms {
 /// pair. This module verifies retention/identity, but cannot invent the upstream
 /// accepted-root producer or turn a checkout scan into accepted history.
 pub(crate) struct ManagedTaskResources {
+    pub backed_inputs:Option<Arc<crate::managed_initial_source::task_backing::ManagedBackedTaskInputs>>,
     pub expected_integration_head: String,
     pub store: LocalStore,
     pub runnable_root: ObjectRef,
@@ -262,14 +263,18 @@ impl ManagedTaskAdmission {
             "managed task requires explicit retained runnable/source roots");
         let seed = resources.seed.retained_seed().context("managed task requires an actually retained private VCS seed")?;
         let retention = resources.store.retention()?;
-        for root in [&resources.runnable_root, seed] { ensure!(retention.pins.values().any(|r| r == root), "managed task root/seed retention is absent"); }
-        let runnable = rudder_engine::snapshot::decode_runnable(&resources.store.read_object(&resources.runnable_root)?)?;
+        if let Some(backed)=&resources.backed_inputs {backed.check_for_new_task(&self.budget,&self.cancelled)?;backed.matches(&resources.store,&resources.runnable_root,&resources.seed_source)?;}
+        else {ensure!(retention.pins.values().any(|r|r==&resources.runnable_root),"managed task local runnable retention absent");}
+        ensure!(retention.pins.values().any(|r|r==seed),"managed task seed retention absent");
+        let runnable_bytes=if let Some(backed)=&resources.backed_inputs{backed.metadata(&resources.runnable_root,&self.budget,&self.cancelled)?}else{resources.store.read_object(&resources.runnable_root)?};
+        let runnable=rudder_engine::snapshot::decode_runnable(&runnable_bytes)?;
+        if let Some(backed)=&resources.backed_inputs{ensure!(runnable.environment.as_ref()==Some(backed.environment()),"task runtime environment differs from actual backed preparation");}
         ensure!(runnable.source == resources.seed_source
             && resources.seed.manifest().baseline.commit.0 == resources.expected_integration_head,
             "managed task retained source/seed/head selection differs");
         project.check_worker(&resources.expected_integration_head, &self.budget, &self.cancelled)?;
         let binding = project.store.binding();
-        let inputs = ManagedLocalLaunchInputs { journal: binding.journal.clone(), home: binding.home.clone(), managed_store: project.store.clone(),
+        let inputs = ManagedLocalLaunchInputs { backed_inputs:resources.backed_inputs, journal: binding.journal.clone(), home: binding.home.clone(), managed_store: project.store.clone(),
             store: resources.store, runnable_root: resources.runnable_root, seed_source: resources.seed_source, seed: resources.seed,
             preparation_parent: binding.directory.join("preparations"), endpoint_parent: resources.endpoint_parent, backend,
             credentials: profile.credentials, protected_credential_roots: resources.protected_credential_roots,

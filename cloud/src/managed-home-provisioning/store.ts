@@ -75,15 +75,15 @@ export class ManagedHomePgStore {
     // These rows must come from actual registered-engine credentials and the
     // existing source/environment/fresh-handoff/bootstrap/acquire producers.
     // This registry has NO INSERT/UPDATE permission for those identities.
-    const r=await tx.query(`SELECT p.owner_epoch::text,p.owner_engine_instance::text,p.lease_until,
+    const r=await tx.query(`SELECT p.owner_epoch::text,p.owner_engine_instance::text,p.lease_until,COALESCE(to_jsonb(p)->>'ownership_mode','clock-lease-v1') AS ownership_mode,to_jsonb(p)->>'ownership_id' AS ownership_id,
       p.head_source_root,p.head_environment_root,e.machine_id,e.machine_installation_id::text,e.machine_boot_id,
       e.authenticated_key_id,c.principal_id,c.token_sha256,c.kind,c.expires_at,
-      clock_timestamp()<p.lease_until AND clock_timestamp()<c.expires_at AS live
+      clock_timestamp()<c.expires_at AND ((COALESCE(to_jsonb(p)->>'ownership_mode','clock-lease-v1')='clock-lease-v1' AND clock_timestamp()<p.lease_until) OR(to_jsonb(p)->>'ownership_mode'='provider-fenced-v1' AND to_jsonb(p)->>'ownership_id' IS NOT NULL)) AS live
       FROM ${SCHEMA}.projects p JOIN ${SCHEMA}.engine_instances e ON e.account_id=p.account_id AND e.engine_instance_id=p.owner_engine_instance
       JOIN ${SCHEMA}.authority_credentials c ON c.account_id=e.account_id AND c.credential_id=e.authenticated_key_id
       WHERE p.authority_id=$1 AND p.account_id=$2 AND p.project_id=$3 AND p.project_key=$4 AND p.mode='ready'
       AND e.revoked_at IS NULL AND c.revoked_at IS NULL AND c.kind='engine' FOR SHARE OF p,e,c`,[this.authorityId,i.accountId,fresh.project_id,fresh.project_key]);
-    check(r.rows.length===1&&r.rows[0].live,"unconfigured");const actual=r.rows[0];const bound=await this.#bound(tx,i.accountId,i.homeId);const machine=bound.acks.start as {id?:string}|undefined;
+    check(r.rows.length===1&&r.rows[0].live,"unconfigured");const actual=r.rows[0];check(actual.ownership_mode===(i.policy.ownerMode??"clock-lease-v1"),"identity_changed");const bound=await this.#bound(tx,i.accountId,i.homeId);const machine=bound.acks.start as {id?:string}|undefined;
     check(machine?.id===actual.machine_id&&actual.machine_installation_id===i.incarnation,"identity_changed");
     const prepared=await tx.query(`SELECT receipt_json FROM ${SCHEMA}.managed_home_fresh_preparations WHERE authority_id=$1 AND account_id=$2 AND home_id=$3 AND project_id=$4 AND engine_instance_id=$5 AND boot_id=$6`,[this.authorityId,i.accountId,i.homeId,fresh.project_id,actual.owner_engine_instance,actual.machine_boot_id]);
     check(prepared.rows.length===1&&prepared.rows[0].receipt_json.scope==="fresh-preparation-only"&&prepared.rows[0].receipt_json.assignment_epoch==="0"&&canonical(prepared.rows[0].receipt_json.prepare).equals(canonical(config.prepare)),"unconfigured");
@@ -94,8 +94,8 @@ export class ManagedHomePgStore {
       WHERE h.authority_id=$1 AND h.account_id=$2 AND h.project_id=$3 AND h.owner_epoch=1 AND h.cause='created'
       AND w.previous_owner_epoch=0 AND w.previous_engine_instance IS NULL AND w.legacy_origin=$4`,[this.authorityId,i.accountId,fresh.project_id,"fresh-v4:"+fresh.project_id]);
     check(original.rows.length===1,"unconfigured");
-    const owner=await tx.query(`SELECT d.accepted_receipt FROM ${SCHEMA}.ownership_receipts h JOIN ${SCHEMA}.idempotency d ON d.authority_id=h.authority_id AND d.account_id=h.account_id AND d.project_id=h.project_id AND d.operation_id=h.operation_id WHERE h.authority_id=$1 AND h.account_id=$2 AND h.project_id=$3 AND h.owner_epoch=$4 AND h.owner_engine_instance=$5 AND h.cause='claimed' AND d.operation_kind='owner-acquire'`,[this.authorityId,i.accountId,fresh.project_id,actual.owner_epoch,actual.owner_engine_instance]);
-    check(owner.rows.length===1&&owner.rows[0].accepted_receipt?.data?.ownerEpoch===actual.owner_epoch&&owner.rows[0].accepted_receipt.data.engineInstanceId===actual.owner_engine_instance&&owner.rows[0].accepted_receipt.data.machineBootId===actual.machine_boot_id,"unconfigured");return {fresh,actual,ownerReceipt:owner.rows[0].accepted_receipt};}
+    const owner=await tx.query(`SELECT d.accepted_receipt FROM ${SCHEMA}.ownership_receipts h JOIN ${SCHEMA}.idempotency d ON d.authority_id=h.authority_id AND d.account_id=h.account_id AND d.project_id=h.project_id AND d.operation_id=h.operation_id WHERE h.authority_id=$1 AND h.account_id=$2 AND h.project_id=$3 AND h.owner_epoch=$4 AND h.owner_engine_instance=$5 AND h.cause='claimed' AND d.operation_kind=$6`,[this.authorityId,i.accountId,fresh.project_id,actual.owner_epoch,actual.owner_engine_instance,i.policy.ownerMode==="provider-fenced-v1"?"provider-owner-first-acquire-v1":"owner-acquire"]);
+    check(owner.rows.length===1&&owner.rows[0].accepted_receipt?.data?.ownerEpoch===actual.owner_epoch&&owner.rows[0].accepted_receipt.data.engineInstanceId===actual.owner_engine_instance&&owner.rows[0].accepted_receipt.data.machineBootId===actual.machine_boot_id,"unconfigured");if(i.policy.ownerMode==="provider-fenced-v1")check(owner.rows[0].accepted_receipt.data.ownershipMode==="provider-fenced-v1"&&owner.rows[0].accepted_receipt.data.ownershipId===actual.ownership_id,"identity_changed");return {fresh,actual,ownerReceipt:owner.rows[0].accepted_receipt};}
   async assignFresh(i:Intent,workspace:string,commandKey:string,ctx:TrustedContext):Promise<FreshAssignment>{return this.#run(i.accountId,async tx=>{const {fresh,actual,ownerReceipt}=await this.#readyFresh(tx,i,workspace);
     check(ctx.accountId===i.accountId&&ctx.engine&&ctx.engine.instanceId===actual.owner_engine_instance&&ctx.engine.bootId===actual.machine_boot_id&&ctx.engine.credentialId===actual.authenticated_key_id
       &&ctx.credentialId===actual.authenticated_key_id&&ctx.credentialSha256===actual.token_sha256&&ctx.engine.credentialSha256===actual.token_sha256&&ctx.principalId===actual.principal_id,"unconfigured");

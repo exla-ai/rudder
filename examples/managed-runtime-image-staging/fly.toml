@@ -1,0 +1,21 @@
+# ROOT REVIEW/DEPLOY ONLY. Actual fixed app was absent at Root's last readback.
+# Create with fresh durable original app/network ownership; never adopt a name.
+app = "rudder-v4-qualification"
+primary_region = "iad"
+kill_timeout = "10s"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = "off"
+  auto_start_machines = false
+  min_machines_running = 0
+  # No HTTP health check: /health is bootstrap TLS liveness only; the retained
+  # production driver subsequently owns8080 and answers ordinary HTTP404.
+
+[[vm]]
+  size = "shared-cpu-2x"
+  memory = "2gb"

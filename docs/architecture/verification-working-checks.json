@@ -1,0 +1,103 @@
+{
+  "formatVersion": 1,
+  "scope": "working-tree verification before standalone worker secret-file normalization",
+  "fullV4Complete": false,
+  "baseRevision": "486d6c3cd5811bc27ddaa3fb61305ef7fadeb81c",
+  "workingTreeUncommitted": true,
+  "rustSourceFiles": 563,
+  "rustSourceManifestSha256": "725a9b1e094f75ee619206e6fda2e51cd5becb9fd90b5960eaa72c2af511b3cb",
+  "rustWorkspace": {
+    "passed": 2606,
+    "failed": 0,
+    "ignored": 77,
+    "groups": 69,
+    "actualReceiptSha256": "fc0a421bd2ddc6e2ad129316638663a1f126d4f7ccbddd904c180338699546b3",
+    "completedAt": "2026-11-01T22:06:30.836186+00:00",
+    "elapsedSeconds": 788.81,
+    "stopReason": null,
+    "command": [
+      "python3",
+      "/workspace/home/.cache/rudder-release-build/alpha23-checks/without-rudder-env.py",
+      "env",
+      "RUDDER_PROFILE_LOADER_NODE=/usr/local/bin/node",
+      "RUDDER_PROFILE_LOADER_HELPER=/workspace/code/exla-ai-rudder/dist/managed-task-profile-cli.js",
+      "cargo",
+      "test",
+      "--workspace",
+      "--locked",
+      "--features",
+      "rudder-vcs-bridge/cli",
+      "-j",
+      "1",
+      "--",
+      "--test-threads=4"
+    ]
+  },
+  "typescript": {
+    "formatVersion": 1,
+    "completedAt": "2026-11-01T21:55:37.615296+00:00",
+    "command": [
+      "npm",
+      "run",
+      "check"
+    ],
+    "controlledEnvironment": {
+      "CARGO_INCREMENTAL": "0",
+      "CARGO_BUILD_JOBS": "2",
+      "TMPDIR": "/workspace/rudder-tmp",
+      "CARGO_PROFILE_DEV_DEBUG": "0",
+      "CARGO_PROFILE_TEST_DEBUG": "0"
+    },
+    "exitCode": 0,
+    "stopReason": null,
+    "elapsedSeconds": 11.022,
+    "initialFreeBytes": 3670663168,
+    "minimumFreeBytes": 3670634496,
+    "floorBytes": 3489660928,
+    "log": "/workspace/home/.cache/rudder-release-build/alpha22-checks/main380-typescript-check.log"
+  },
+  "nativeSecretFileStartupEvidence": "verification-native-secret-files-working.json",
+  "sdkRuntimeOrdinaryFlowQualified": false,
+  "focusedStaging": {
+    "passed": 17,
+    "failed": 0,
+    "files": [
+      "tests/managed-staging-birth.test.mjs",
+      "tests/managed-staging-flow.test.mjs",
+      "tests/managed-runtime-image-qualification.test.mjs"
+    ],
+    "scope": "actual DATA/parser and listener lifecycle cases; no Fly/Root/SDK readiness proof"
+  },
+  "storageDescriptorSettlement": {
+    "sourceSha256": "214524681b64bcd8798dae24e0cc58448b300b2fd79056afe8cb6bb85861df01",
+    "focusedRetention": {
+      "passed": 27,
+      "failed": 0
+    },
+    "engineLibrary": {
+      "passed": 416,
+      "failed": 0,
+      "ignored": 14
+    },
+    "actualFiftyPublications": {
+      "passed": 50,
+      "totalAttempts": 52,
+      "scope": "logical views, one mutating job at a time; no actual model agents"
+    }
+  },
+  "cloudLeaseAndStartup": {
+    "leaseFocusedPassed": 23,
+    "processAndSecretFocusedPassed": 25,
+    "cloudBuildPassed": true,
+    "actualGenericLeaseLifecyclePassed": true,
+    "actualFullSdkQualified": false
+  },
+  "nodeRun390": {
+    "passed": 1043,
+    "failed": 1,
+    "skipped": 11,
+    "failure": "orchestrator fixture EADDRINUSE on PID-derived port",
+    "followup": "fixture now atomically binds port0; both real orchestrator scenarios PASS in run391",
+    "fullCurrentSourcePending": true
+  }
+}

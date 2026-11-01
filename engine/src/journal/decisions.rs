@@ -91,6 +91,7 @@ impl Journal {
     ) -> Result<AcceptedDecision> {
         valid_id(&request.idempotency_key)?;
         valid_id(&request.topic)?;
+        ensure!(request.topic!=canonical_versions::CANONICAL_DECISION_SET_TOPIC,"engine canonical decision-set topic is reserved");
         let body = json(request)?;
         ensure!(body.len() <= 256 * 1024, "decision exceeds payload limit");
         let tx = self
@@ -332,6 +333,7 @@ pub(super) fn apply_integration(
 }
 
 fn topic_version(conn: &Connection, project: &str, topic: &str) -> Result<u64> {
+    if topic==canonical_versions::CANONICAL_DECISION_SET_TOPIC{return canonical_versions::decision_set_revision(conn,project);}
     Ok(conn
         .query_row(
             "SELECT version FROM topics WHERE project_id=?1 AND topic=?2",
@@ -341,6 +343,9 @@ fn topic_version(conn: &Connection, project: &str, topic: &str) -> Result<u64> {
         .optional()?
         .unwrap_or(0))
 }
+
+#[path="canonical_versions.rs"]
+pub(super) mod canonical_versions;
 fn decision(conn: &Connection, id: &str) -> Result<AcceptedDecision> {
     let(project_id,topic,version,author,scope,statement,supersedes,sequence):(String,String,u64,String,String,String,Option<String>,u64)=conn.query_row("SELECT project_id,topic,version,principal,scope,statement_json,previous_id,sequence FROM decisions WHERE decision_id=?1",[id],|r|Ok((r.get(0)?,r.get(1)?,db_u64(r,2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?,db_u64(r,7)?)))?;
     Ok(AcceptedDecision {

@@ -55,14 +55,14 @@ impl FreshNamespaceCustody {
 pub(crate) struct FreshLocalNamespace {preparation:Arc<FreshProjectPreparation>,environment:Arc<ManagedFreshEnvironment>,original:FinalizationBudget,cancelled:Arc<AtomicBool>,
     parent:Option<Arc<Directory>>,directories:Vec<NewDirectory>,marker:Option<File>,marker_attempted:bool,marker_ack:bool,journal:Option<Journal>,held:Option<Arc<HeldJournalFile>>,lock_file:Option<File>,lock:Option<Arc<CheckoutLock>>,
     fence:Option<OwnerFence>,prepare_receipt:Option<rudder_engine::journal::ManagedProjectReceipt>,store:Option<crate::managed_store::ManagedStore>,custody:Option<Arc<FreshNamespaceCustody>>,workspace:Option<Workspace>,repository:Option<Arc<ReadonlyRepo>>,
-    head:Option<rudder_vcs_bridge::GitCommitId>,active_fence:Option<OwnerFence>,active_record:Option<OwnerRecord>,transfer_attempted:bool,promoted:bool,attempted:bool,journal_attempted:bool,project_attempted:bool,prepare_attempted:bool,acknowledged:bool}
+    fixed_initial:Option<fixed_source::FixedInitialSource>,head:Option<rudder_vcs_bridge::GitCommitId>,active_fence:Option<OwnerFence>,active_record:Option<OwnerRecord>,transfer_attempted:bool,promoted:bool,attempted:bool,journal_attempted:bool,project_attempted:bool,prepare_attempted:bool,acknowledged:bool}
 impl FreshLocalNamespace {
     pub(crate) fn capture_retaining(out:&mut Option<Self>,preparation:Arc<FreshProjectPreparation>,environment:Arc<ManagedFreshEnvironment>,original:FinalizationBudget,cancelled:Arc<AtomicBool>)->Result<()> {
         ensure!(out.is_none(),"fresh namespace original carrier occupied");time(&original,&cancelled)?;preparation.assert_current()?;environment.current(&original,&cancelled)?;
         ensure!(Arc::ptr_eq(&preparation,environment.preparation()),"fresh source differs from original environment preparation");let ns=&preparation.prepare().namespace;
         let project=environment.machine().config().data().projects.iter().find(|p|p.alias==preparation.data().workspace_id).context("fresh namespace outside actual Root config")?;
         let base=Path::new("/workspace/fresh-v4").join(&ns.project_id);ensure!(project.prepare==*preparation.prepare()&&project.checkout==ns.repository&&project.home==ns.home&&ns.home==base.join("home")&&ns.repository==base.join("repository")&&project.endpoints==base.join("endpoints")&&project.cas==environment.machine().config().data().state_directory.join("cas"),"fresh namespace changed committed/configured logical UUID binding");
-        *out=Some(Self{preparation,environment,original,cancelled,parent:None,directories:Vec::with_capacity(8),marker:None,marker_attempted:false,marker_ack:false,lock_file:None,lock:None,journal:None,held:None,fence:None,prepare_receipt:None,store:None,custody:None,workspace:None,repository:None,head:None,active_fence:None,active_record:None,transfer_attempted:false,promoted:false,
+        *out=Some(Self{preparation,environment,original,cancelled,parent:None,directories:Vec::with_capacity(8),marker:None,marker_attempted:false,marker_ack:false,lock_file:None,lock:None,journal:None,held:None,fence:None,prepare_receipt:None,store:None,custody:None,workspace:None,repository:None,fixed_initial:None,head:None,active_fence:None,active_record:None,transfer_attempted:false,promoted:false,
             attempted:false,journal_attempted:false,project_attempted:false,prepare_attempted:false,acknowledged:false});out.as_mut().unwrap().initialize_retaining()
     }
     fn create(&mut self,parent:Arc<Directory>,name:&str)->Result<Arc<Directory>> {ensure!(self.directories.len()<8,"fresh directory profile bound exceeded");self.directories.push(NewDirectory::stage(parent,name)?);let last=self.directories.last_mut().unwrap();last.create_retaining(&self.original,&self.cancelled)?;last.ready()}
@@ -80,7 +80,10 @@ impl FreshLocalNamespace {
         use std::io::Write as _;self.marker.as_mut().unwrap().write_all(&bytes)?;self.marker.as_ref().unwrap().sync_all()?;engine.file.sync_all()?;self.marker_ack=true;time(&self.original,&self.cancelled)?;
         // Actual newly-created jj repository only. The source-only commit has
         // an explicit empty tree and no backend/model/profile/default task.
-        let settings=self.environment.settings()?;initialize_empty_git_retaining(&mut self.workspace,&mut self.repository,&mut self.head,&repository.path,&settings,&self.original,&self.cancelled)?;
+        let settings=self.environment.settings()?;
+        fixed_source::FixedInitialSource::capture_retaining(&mut self.fixed_initial,&self.environment,&self.original,&self.cancelled)?;
+        let files=if let Some(source)=&self.fixed_initial{Some(source.files(&self.cancelled)?)}else{None};
+        initialize_git_files_retaining(&mut self.workspace,&mut self.repository,&mut self.head,&repository.path,&settings,&self.original,&self.cancelled,files)?;
         // Journal initialization has its own staged intent in THIS original new
         // private directory. Never independently raw-open a live SQLite inode.
         self.journal_attempted=true;self.journal=Some(Journal::open(&fabric.path.join("journal.sqlite"))?);self.held=Some(Arc::new(self.journal.as_ref().unwrap().hold_database_file()?));
@@ -125,9 +128,19 @@ impl FreshLocalNamespace {
 // Reusable DATA operation for actual new private jj directories; neither this
 // function nor its tests creates a Root reservation, Namespace or Engine owner.
 fn initialize_empty_git_retaining(workspace_out:&mut Option<Workspace>,repo_out:&mut Option<Arc<ReadonlyRepo>>,head_out:&mut Option<rudder_vcs_bridge::GitCommitId>,directory:&Path,settings:&jj_lib::settings::UserSettings,original:&FinalizationBudget,cancel:&AtomicBool)->Result<()> {
-    ensure!(workspace_out.is_none()&&repo_out.is_none()&&head_out.is_none(),"original empty Git creation already staged");time(original,cancel)?;
+    initialize_git_files_retaining(workspace_out,repo_out,head_out,directory,settings,original,cancel,None)
+}
+fn initialize_git_files_retaining(workspace_out:&mut Option<Workspace>,repo_out:&mut Option<Arc<ReadonlyRepo>>,head_out:&mut Option<rudder_vcs_bridge::GitCommitId>,directory:&Path,settings:&jj_lib::settings::UserSettings,original:&FinalizationBudget,cancel:&AtomicBool,files:Option<&std::collections::BTreeMap<String,Vec<u8>>>)->Result<()> {
+    ensure!(workspace_out.is_none()&&repo_out.is_none()&&head_out.is_none(),"original initial Git creation already staged");time(original,cancel)?;
     let (workspace,repo)=pollster::block_on(Workspace::init_internal_git(settings,directory))?;*workspace_out=Some(workspace);*repo_out=Some(repo);time(original,cancel)?;
-    let repo=repo_out.as_ref().unwrap();let mut tx=repo.start_transaction();let commit=pollster::block_on(tx.repo_mut().new_commit(vec![repo.store().root_commit_id().clone()],repo.store().empty_merged_tree()).set_description("Initialize fresh Rudder project").write())?;
+    let repo=repo_out.as_ref().unwrap();let tree=if let Some(files)=files {
+        use jj_lib::{merged_tree_builder::MergedTreeBuilder,backend::{TreeValue,CopyId},merge::Merge,repo_path::RepoPathBuf};
+        ensure!(files.len()<=8&&files.values().map(Vec::len).sum::<usize>()<=32*1024,"fixed initial tree bound");let mut builder=MergedTreeBuilder::new(repo.store().empty_merged_tree());
+        for(name,bytes)in files{time(original,cancel)?;ensure!(!name.starts_with('/')&&name.split('/').all(|p|!p.is_empty()&&p!="."&&p!=".."),"fixed source member path invalid");let path=RepoPathBuf::from_internal_string(name.as_str())?;
+            let id=pollster::block_on(repo.store().write_file(&path,&mut &bytes[..]))?;builder.set_or_remove(path,Merge::resolved(Some(TreeValue::File{id,executable:false,copy_id:CopyId::placeholder()})));time(original,cancel)?;}
+        pollster::block_on(builder.write_tree())?
+    }else{repo.store().empty_merged_tree()};
+    time(original,cancel)?;let mut tx=repo.start_transaction();let commit=pollster::block_on(tx.repo_mut().new_commit(vec![repo.store().root_commit_id().clone()],tree).set_description("Initialize fresh Rudder project").write())?;
     let head=rudder_vcs_bridge::GitCommitId(commit.id().hex());head.validate()?;*head_out=Some(head);tx.repo_mut().set_wc_commit(WorkspaceName::DEFAULT.to_owned(),commit.id().clone())?;
     *repo_out=Some(pollster::block_on(tx.commit("initialize source-only fresh project"))?);let repo=repo_out.as_ref().unwrap();
     let mut wc=workspace_out.as_ref().unwrap().working_copy().start_mutation()?;pollster::block_on(wc.reset(&commit))?;pollster::block_on(wc.finish(repo.op_id().clone()))?;
@@ -139,3 +152,5 @@ fn time(original:&FinalizationBudget,cancel:&AtomicBool)->Result<()> {if cancel.
 #[cfg(test)]
 #[path="engine_host_fresh_tests.rs"]
 mod tests;
+
+#[path="managed_sdk_initial_source.rs"]mod fixed_source;

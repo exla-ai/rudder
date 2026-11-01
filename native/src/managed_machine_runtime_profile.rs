@@ -73,18 +73,19 @@ struct Manifest {version:u32,profile_id:String,entries:Vec<ImageRuntimeEntry>}
 /// Readonly custody for the metadata-only selector BEFORE any project transfer.
 /// The helper's entire actual package is protected before it can import code;
 /// this owner opens no CAS and stages no source/task/seed effect.
-pub(crate) struct ManagedProfileInspection {config:Arc<HostIngressConfigOwner>,files:Vec<ImageFile>,anchors:DirectoryAnchors,stamps:Vec<Stamp>,hashes:Vec<(PathBuf,String,u32)>,home:PathBuf}
+pub(crate) struct ManagedProfileInspection {config:Arc<HostIngressConfigOwner>,files:Vec<ImageFile>,anchors:DirectoryAnchors,stamps:Vec<Stamp>,hashes:Vec<(PathBuf,String,u32)>,home:PathBuf,
+    fresh:Option<Arc<fresh_environment::ManagedFreshEnvironment>>,dirs:Vec<Directory>,loader:Option<OsLoaderInputs>}
 impl ManagedProfileInspection {
     pub(crate) fn capture_retaining(out:&mut Option<Self>,config:Arc<HostIngressConfigOwner>,alias:&str,original:&FinalizationBudget,cancelled:&AtomicBool)->Result<()> {
         ensure!(out.is_none(),"original metadata selector already captured");config.assert_current()?;clock(original,cancelled)?;
         crate::managed_app::runtime_task::require_legacy_environment_backing(&config)?;
         let home=config.data().projects.iter().find(|p|p.alias==alias).context("selector project outside original config")?.home.clone();
-        *out=Some(Self{config,files:Vec::new(),anchors:DirectoryAnchors::default(),stamps:Vec::new(),hashes:Vec::new(),home});let owner=out.as_mut().unwrap();
+        *out=Some(Self{config,files:Vec::new(),anchors:DirectoryAnchors::default(),stamps:Vec::new(),hashes:Vec::new(),home,fresh:None,dirs:Vec::new(),loader:None});let owner=out.as_mut().unwrap();
         for name in [NODE,PROFILE] {owner.files.push(ImageFile::open_anchored(Path::new(name),512*1024*1024,original,cancelled,&mut owner.anchors)?);}
         capture_package(Path::new("/opt/rudder"),&mut owner.stamps,&mut owner.hashes,original,cancelled,&mut owner.anchors)?;owner.current(original,cancelled)
     }
     pub(crate) fn current(&self,original:&FinalizationBudget,cancelled:&AtomicBool)->Result<()> {
-        clock(original,cancelled)?;self.config.assert_current()?;self.anchors.check_all_with(||clock(original,cancelled))?;for f in &self.files {f.current()?;}for before in &self.stamps {ensure!(package_stamp(&before.path)?==*before,"original selector package changed");}clock(original,cancelled)
+        clock(original,cancelled)?;self.config.assert_current()?;if let Some(fresh)=&self.fresh{fresh.current(original,cancelled)?;}for directory in &self.dirs{directory.current()?;}if let Some(loader)=&self.loader{loader.current()?;}self.anchors.check_all_with(||clock(original,cancelled))?;for f in &self.files {f.current()?;}for before in &self.stamps {ensure!(package_stamp(&before.path)?==*before,"original selector package changed");}clock(original,cancelled)
     }
     pub(crate) fn loader(&self)->ManagedProfileLoaderRuntime {ManagedProfileLoaderRuntime{node:NODE.into(),helper:PROFILE.into(),rudder_home:self.home.clone()}}
 }
@@ -109,12 +110,13 @@ impl ManagedHostRuntime {
     }
     pub(crate) fn capture_from_fresh_retaining(out:&mut Option<Self>,fresh:Arc<fresh_environment::ManagedFreshEnvironment>,alias:&str,original:&FinalizationBudget,cancelled:&AtomicBool)->Result<()> {
         clock(original,cancelled)?;ensure!(out.is_none(),"actual fresh runtime output occupied");let config=fresh.machine().config().clone();
-        crate::managed_app::runtime_task::require_legacy_environment_backing(&config)?;fresh.current(original,cancelled)?;
+        if fresh.runtime_backing().is_none(){crate::managed_app::runtime_task::require_legacy_environment_backing(&config)?;}fresh.current(original,cancelled)?;
         let project=config.data().projects.iter().find(|p|p.alias==alias&&p.prepare==*fresh.preparation().prepare()).context("fresh runtime outside actual original preparation")?.clone();
         let store=fresh.machine().store()?.clone();let environment=fresh.environment()?.clone();
         *out=Some(Self{config,project,fresh:Some(fresh),files:Vec::new(),dirs:Vec::new(),anchors:DirectoryAnchors::default(),network:None,loader:None,package_stamps:Vec::new(),package_hashes:Vec::new(),manifest_hash:String::new(),store:Some(store),cas_dir:None,cas_id:None,
             environment:Some(environment),pin:String::new(),pin_attempted:false,environment_ack:false,fenced:AtomicBool::new(false)});
-        let held=out.as_mut().unwrap();held.network=Some(VmNetworkInputs::capture_anchored(original,cancelled,&mut held.anchors)?);held.assert_current(original,cancelled)?;held.environment_ack=true;Ok(())
+        let held=out.as_mut().unwrap();if held.fresh.as_ref().is_some_and(|f|f.runtime_backing().is_some()){return held.capture_backed_fresh_host(original,cancelled)}
+        held.network=Some(VmNetworkInputs::capture_anchored(original,cancelled,&mut held.anchors)?);held.assert_current(original,cancelled)?;held.environment_ack=true;Ok(())
     }
     fn capture_inner(&mut self,original:&FinalizationBudget,cancelled:&AtomicBool)->Result<()> {
         self.manifest_hash=capture_fixed_image(&self.config,&mut self.anchors,&mut self.files,&mut self.dirs,&mut self.package_stamps,&mut self.package_hashes,&mut self.loader,original,cancelled)?;
@@ -135,8 +137,10 @@ impl ManagedHostRuntime {
     }
     pub(crate) fn assert_current(&self,original:&FinalizationBudget,cancelled:&AtomicBool)->Result<()> {
         clock(original,cancelled)?;
+        if let Some(fresh)=&self.fresh{loop{clock(original,cancelled)?;match fresh.assert_retained_custody(){Ok(())=>break,
+            Err(error)if error.downcast_ref::<crate::engine_host::EngineSharedAdmissionBusy>().is_some()||runtime_environment::is_busy(&error)=>std::thread::sleep(original.phase_limit(std::time::Duration::from_millis(1))?),
+            Err(error)=>{self.fenced.store(true,Ordering::Release);return Err(error)}}}}
         let result=(||->Result<()> {ensure!(!self.fenced.load(Ordering::Acquire),"actual runtime owner fenced");self.config.assert_current()?;
-            if let Some(fresh)=&self.fresh{fresh.assert_retained_custody()?;}
             self.anchors.check_all_with(||clock(original,cancelled))?;for dir in &self.dirs {dir.current()?;}for file in &self.files {file.current()?;}if let Some(network)=&self.network {network.current()?;}if let Some(loader)=&self.loader {loader.current()?;}for previous in &self.package_stamps {ensure!(package_stamp(&previous.path)?==*previous,"fixed package closure changed");}
             if let Some(cas)=&self.cas_dir {let m=cas.metadata()?;let n=fs::symlink_metadata(&self.project.cas)?;ensure!(m.is_dir()&&n.is_dir()&&!n.file_type().is_symlink()&&Some((m.dev(),m.ino()))==self.cas_id&&Some((n.dev(),n.ino()))==self.cas_id&&n.uid()==1500&&n.mode()&0o7777==0o700,"original CAS directory changed");}
             if self.pin_attempted {ensure!(self.store.as_ref().unwrap().retention()?.pins.get(&self.pin)==self.environment.as_ref(),"original environment pin absent/changed");}
@@ -163,7 +167,7 @@ impl ManagedHostRuntime {
         let mut runtime=vec![ReadOnlyRuntime {source:"/usr".into(),guest_path:"/usr".into()},ReadOnlyRuntime {source:"/opt/rudder".into(),guest_path:GUEST_PACKAGE.into()},ReadOnlyRuntime {source:ROOT.into(),guest_path:GUEST_MODEL.into()}];
         runtime.extend(self.network.as_ref().context("actual declared VM network inputs absent")?.mounts());
         if let Some(fresh)=&self.fresh{for mount in fresh.static_mounts(){if let Some(old)=runtime.iter().find(|r|r.guest_path==mount.guest_path){ensure!(old.source==mount.source,"declared static/runtime mount source differs");}else{runtime.push(mount);}}}
-        Ok(ManagedTaskResources {expected_integration_head:source.expected_integration_head,store:source.store,runnable_root:source.runnable_root,seed_source:source.seed_source,
+        Ok(ManagedTaskResources {backed_inputs:source.backed_inputs,expected_integration_head:source.expected_integration_head,store:source.store,runnable_root:source.runnable_root,seed_source:source.seed_source,
             seed:source.seed,programs:self.programs(backend)?,runtime,protected_credential_roots:vec![self.project.home.clone(),self.config.data().state_directory.clone()],
             endpoint_parent:self.project.endpoints.clone(),native_program:NATIVE.into(),native_guest:format!("{GUEST_PACKAGE}/dist/native/rudder-native"),jj_guest:format!("{GUEST_PACKAGE}/dist/native/rudder-jj"),
             user_name:user_name.clone(),user_email:user_email.clone(),timeout_seconds:24*60*60,preparation_cache:source.preparation_cache})
@@ -286,3 +290,11 @@ fn settings_from_config(config:&HostIngressConfigOwner)->Result<jj_lib::settings
 }
 #[path="managed_fresh_environment_owner.rs"]
 pub(crate) mod fresh_environment;
+
+#[path="managed_backed_environment.rs"]
+pub(crate) mod backed_environment;
+
+#[path="managed_runtime_environment_owner.rs"]
+pub(crate) mod runtime_environment;
+
+#[path="managed_backed_runtime_profile.rs"]mod backed_runtime_profile;

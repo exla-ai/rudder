@@ -25,6 +25,8 @@ pub enum EngineOperationKind {
     PrepareFreshProjectV1 {workspace_id:String},FreshProjectStatusV1 {workspace_id:String},EnrollFreshProjectV1 {workspace_id:String},
     BeginFreshRootsV1 {workspace_id:String,prepare_id:String,export_id:String,head:String,source:ObjectRef,environment:ObjectRef},
     PublishFreshRootsV1 {workspace_id:String,transfer_id:String},
+    AcquireProviderFreshOwnerV1 {workspace_id:String,transfer_id:String,acquire_key:String,expected_owner_epoch:String},
+    HeartbeatProviderOwnerV1 {workspace_id:String,owner_epoch:String,ownership_id:String,request_id:String,expected_serial:String},
     AcquireFreshOwnerV1 {workspace_id:String,transfer_id:String,acquire_key:String,expected_owner_epoch:String},
     BeginImagePreseedV1 {workspace_id:String,manifest:ObjectRef,installer_input:ObjectRef,image_receipt_sha256:String},
     BeginImagePreseedV2 {workspace_id:String,manifest:ObjectRef,installer_input:ObjectRef,image_receipt_sha256:String},
@@ -33,15 +35,17 @@ pub enum EngineOperationKind {
 }
 impl EngineOperationKind {
     pub fn workspace_id(&self)->&str {match self {Self::PrepareFreshProjectV1 {workspace_id}|Self::FreshProjectStatusV1 {workspace_id}|Self::EnrollFreshProjectV1 {workspace_id}
-        |Self::BeginFreshRootsV1 {workspace_id,..}|Self::PublishFreshRootsV1 {workspace_id,..}|Self::AcquireFreshOwnerV1 {workspace_id,..}
+        |Self::BeginFreshRootsV1 {workspace_id,..}|Self::PublishFreshRootsV1 {workspace_id,..}|Self::AcquireFreshOwnerV1 {workspace_id,..}|Self::AcquireProviderFreshOwnerV1 {workspace_id,..}|Self::HeartbeatProviderOwnerV1 {workspace_id,..}
         |Self::BeginImagePreseedV1 {workspace_id,..}|Self::BeginImagePreseedV2 {workspace_id,..}|Self::PublishImagePreseedV1 {workspace_id,..}|Self::RenewFreshOwnerV1 {workspace_id,..}=>workspace_id}}
+    fn renewal(&self)->bool{matches!(self,Self::RenewFreshOwnerV1 {..}|Self::HeartbeatProviderOwnerV1 {..})}
     fn image(&self)->bool {matches!(self,Self::BeginImagePreseedV1 {..}|Self::BeginImagePreseedV2 {..}|Self::PublishImagePreseedV1 {..})}
     fn begin_upload(&self)->bool {matches!(self,Self::BeginFreshRootsV1 {..}|Self::BeginImagePreseedV1 {..}|Self::BeginImagePreseedV2 {..})}
     fn validate(&self)->Result<()> {match self {
         Self::BeginFreshRootsV1 {prepare_id,export_id,head,source,environment,..}=>{uuid(prepare_id)?;uuid(export_id)?;ensure!(head.len()==40&&head.bytes().all(|b|b.is_ascii_hexdigit()&&!b.is_ascii_uppercase()),"fresh head invalid");source.validate()?;environment.validate()?;
             ensure!(source.kind==ObjectKind::SourceRoot&&environment.kind==ObjectKind::EnvironmentRoot&&source.size_bytes<=1048576&&environment.size_bytes<=1048576,"fresh roots invalid");},
         Self::PublishFreshRootsV1 {transfer_id,..}|Self::PublishImagePreseedV1 {transfer_id,..}=>uuid(transfer_id)?,
-        Self::AcquireFreshOwnerV1 {transfer_id,acquire_key,expected_owner_epoch,..}=>{uuid(transfer_id)?;bounded_key(acquire_key)?;ensure!(expected_owner_epoch=="1","fresh acquire epoch invalid");},
+        Self::AcquireFreshOwnerV1 {transfer_id,acquire_key,expected_owner_epoch,..}|Self::AcquireProviderFreshOwnerV1 {transfer_id,acquire_key,expected_owner_epoch,..}=>{uuid(transfer_id)?;bounded_key(acquire_key)?;ensure!(expected_owner_epoch=="1","fresh acquire epoch invalid");},
+        Self::HeartbeatProviderOwnerV1 {owner_epoch,ownership_id,request_id,expected_serial,..}=>{uuid(ownership_id)?;uuid(request_id)?;ensure!(owner_epoch=="2","provider first-owner epoch differs");rudder_engine::fleet_lease::Counter::parse(expected_serial)?;},
         Self::RenewFreshOwnerV1 {owner_epoch,lease_id,request_id,expected_serial,..}=>{uuid(lease_id)?;uuid(request_id)?;let epoch=rudder_engine::fleet_lease::Counter::parse(owner_epoch)?;rudder_engine::fleet_lease::Counter::parse(expected_serial)?;ensure!(epoch.value()>0,"owner epoch invalid");},
         Self::BeginImagePreseedV1 {manifest,installer_input,image_receipt_sha256,..}|Self::BeginImagePreseedV2 {manifest,installer_input,image_receipt_sha256,..}=>{manifest.validate()?;installer_input.validate()?;unhex::<32>(image_receipt_sha256.as_bytes())?;
             ensure!(manifest.kind==ObjectKind::Blob&&installer_input.kind==ObjectKind::Directory&&manifest.size_bytes<=33554432&&installer_input.size_bytes<=4194304,"image roots invalid");},_=>{}}Ok(())}
@@ -94,11 +98,14 @@ impl FreshProjectPreparation {
     pub fn assert_current(&self)->Result<()> {ensure!(self.published.load(Ordering::Acquire),"fresh preparation owner not published");self.registration.assert_current()}
 }
 fn bounded_key(value:&str)->Result<()> {ensure!(!value.is_empty()&&value.len()<=128&&value.bytes().all(|b|b.is_ascii_alphanumeric()||b"-_:.".contains(&b)),"engine operation identity invalid");Ok(())}
-fn native_scope(request:&NativeRequest,config:&HostIngressConfig)->Result<()> {ensure!(request.version==1,"engine operation version invalid");uuid(&request.request_nonce)?;bounded_key(&request.command_key)?;bounded_key(request.operation.workspace_id())?;
+fn native_scope(request:&NativeRequest,config:&HostIngressConfig)->Result<()> {config.assert_unscoped_operations()?;ensure!(request.version==1,"engine operation version invalid");uuid(&request.request_nonce)?;bounded_key(&request.command_key)?;bounded_key(request.operation.workspace_id())?;
     ensure!(config.projects.iter().any(|p|p.alias==request.operation.workspace_id()),"engine operation outside original project scope");request.operation.validate()?;
     if let EngineOperationKind::BeginImagePreseedV1 {manifest,image_receipt_sha256,..}|EngineOperationKind::BeginImagePreseedV2 {manifest,image_receipt_sha256,..}=&request.operation {let p=config.image_preseed.as_ref().context("qualified image preseed policy unconfigured")?;
         ensure!(&p.image_receipt_sha256==image_receipt_sha256&&p.full_manifest_sha256==manifest.digest,"image import differs from original qualified config");}
     if matches!(request.operation,EngineOperationKind::BeginImagePreseedV2 {..}){ensure!(config.image_preseed.as_ref().and_then(|p|p.batch_transport.as_deref())==Some("batch-v1"),"V2 image batch transport not explicitly configured");}
+    let provider=config.owner_mode==Some(crate::host_ingress::HostOwnerMode::ProviderFencedV1);
+    if matches!(request.operation,EngineOperationKind::AcquireProviderFreshOwnerV1 {..}|EngineOperationKind::HeartbeatProviderOwnerV1 {..}){ensure!(provider&&config.owner_lease_safety.is_none(),"provider ownership not selected by original config");}
+    if matches!(request.operation,EngineOperationKind::AcquireFreshOwnerV1 {..}|EngineOperationKind::RenewFreshOwnerV1 {..}){ensure!(!provider,"clock ownership operation cannot use provider grant");}
     if matches!(request.operation,EngineOperationKind::RenewFreshOwnerV1 {..}) {config.owner_lease_safety.as_ref().context("qualified owner clock policy unconfigured")?.reserve_nanoseconds()?;}
     bytes(request)?;Ok(())}
 fn native_request(request:&NativeRequest,config:&HostIngressConfig)->Result<()> {native_scope(request,config)?;request.constraint.adopt(request.operation.image())?.remaining()?;Ok(())}
@@ -176,6 +183,7 @@ pub struct EngineOperation {registration:Arc<RegisteredEngineOwner>,nonce:String
 impl RegisteredEngineOwner {
     /// Derived only from this actual retained registered/config owner. No
     /// caller/environment toggle or downgrade after an unsupported V2 send.
+    pub fn provider_fenced_ownership(&self)->Result<bool>{self.assert_current()?;self.config.assert_current()?;Ok(self.config.data().owner_mode==Some(crate::host_ingress::HostOwnerMode::ProviderFencedV1))}
     pub fn image_batch_transport(&self)->Result<bool>{self.assert_current()?;self.config.assert_current()?;Ok(self.config.data().image_preseed.as_ref().and_then(|p|p.batch_transport.as_deref())==Some("batch-v1"))}
     pub fn begin_operation_retaining(self:&Arc<Self>,out:&mut Option<EngineOperation>,operation:EngineOperationKind,command_key:String,original:FinalizationBudget,cancelled:Arc<AtomicBool>)->Result<()> {
         ensure!(!operation.image(),"image operation requires separate original image budget");
@@ -194,11 +202,11 @@ impl RegisteredEngineOwner {
         ensure!(operation.image(),"image budget cannot admit other operations");self.try_begin_bounded_operation(out,operation,command_key,OperationBudget::Image(original),cancelled)
     }
     pub fn try_begin_owner_renewal_retaining(self:&Arc<Self>,out:&mut Option<EngineOperation>,operation:EngineOperationKind,command_key:String,original:FinalizationBudget,cancelled:Arc<AtomicBool>)->Result<bool> {
-        ensure!(matches!(operation,EngineOperationKind::RenewFreshOwnerV1 {..}),"renewal operation differs");self.try_begin_operation_retaining(out,operation,command_key,original,cancelled)
+        ensure!(operation.renewal(),"renewal/heartbeat operation differs");self.try_begin_operation_retaining(out,operation,command_key,original,cancelled)
     }
     fn try_begin_bounded_operation(self:&Arc<Self>,out:&mut Option<EngineOperation>,operation:EngineOperationKind,command_key:String,original:OperationBudget,cancelled:Arc<AtomicBool>)->Result<bool> {
         ensure!(out.is_none(),"operation carrier occupied");self.assert_current()?;original.remaining()?;
-        let mut channel=match self.operations.try_lock(){Ok(v)=>v,Err(TryLockError::WouldBlock)=>return Ok(false),Err(_)=>return Err(fault())};ensure!(!channel.fenced,"original operation channel fenced");let renewal=matches!(operation,EngineOperationKind::RenewFreshOwnerV1 {..});if channel.lane(renewal).is_some(){return Ok(false);}
+        let mut channel=match self.operations.try_lock(){Ok(v)=>v,Err(TryLockError::WouldBlock)=>return Ok(false),Err(_)=>return Err(fault())};ensure!(!channel.fenced,"original operation channel fenced");let renewal=operation.renewal();if channel.lane(renewal).is_some(){return Ok(false);}
         let nonce=uuid::Uuid::new_v4().to_string();let request=NativeRequest {version:1,request_nonce:nonce.clone(),command_key,operation,constraint:original.constraint()?};native_request(&request,self.config.data())?;let wire=bytes(&request)?;
         *out=Some(EngineOperation {registration:Arc::clone(self),nonce,original,cancelled,receipt:None,acquire_clock:None,renewal_clock:None,finished:false});
         *channel.lane(renewal)=Some(NativeExchange {request,wire,sent:false,received:None,ack:None,validated:false,uncertain:false});out.as_ref().unwrap().time()?;Ok(true)
@@ -207,7 +215,7 @@ impl RegisteredEngineOwner {
         ensure!(out.is_none(),"engine operation carrier already occupied");let nonce=uuid::Uuid::new_v4().to_string();
         *out=Some(EngineOperation {registration:Arc::clone(self),nonce:nonce.clone(),original,cancelled,receipt:None,acquire_clock:None,renewal_clock:None,finished:false});let held=out.as_ref().unwrap();held.time()?;self.assert_current()?;
         let request=NativeRequest {version:1,request_nonce:nonce,command_key,operation,constraint:held.original.constraint()?};native_request(&request,self.config.data())?;
-        let wire=bytes(&request)?;let mut channel=self.operations.try_lock().map_err(|_|fault())?;ensure!(!channel.fenced,"operation channel fenced");let renewal=matches!(request.operation,EngineOperationKind::RenewFreshOwnerV1 {..});ensure!(channel.lane(renewal).is_none(),"engine operation lane has retained prior operation");
+        let wire=bytes(&request)?;let mut channel=self.operations.try_lock().map_err(|_|fault())?;ensure!(!channel.fenced,"operation channel fenced");let renewal=request.operation.renewal();ensure!(channel.lane(renewal).is_none(),"engine operation lane has retained prior operation");
         *channel.lane(renewal)=Some(NativeExchange {request,wire,sent:false,received:None,ack:None,validated:false,uncertain:false});held.time()?;Ok(())
     }
 }
@@ -226,9 +234,9 @@ impl EngineOperation {
         let registered=Arc::clone(&self.registration);let mut channel=match registered.operations.try_lock(){Ok(v)=>v,Err(TryLockError::WouldBlock)=>return Ok(false),Err(_)=>return Err(fault())};
         ensure!(!channel.fenced&&channel.get(&self.nonce).is_some_and(|a|a.request.request_nonce==self.nonce)&&!self.finished,"engine operation original carrier differs");
         let result=(||->Result<bool>{let active=channel.get(&self.nonce).unwrap();ensure!(!active.uncertain,"engine operation uncertain; inspect original only");
-            if !active.sent {if matches!(active.request.operation,EngineOperationKind::AcquireFreshOwnerV1 {..})&&self.acquire_clock.is_none(){
+            if !active.sent {if matches!(active.request.operation,EngineOperationKind::AcquireFreshOwnerV1 {..}|EngineOperationKind::AcquireProviderFreshOwnerV1 {..})&&self.acquire_clock.is_none(){
                 self.acquire_clock=Some(FinalizationBudget::begin(std::time::Duration::from_secs(15))?);}
-                if matches!(active.request.operation,EngineOperationKind::RenewFreshOwnerV1 {..})&&self.renewal_clock.is_none(){self.renewal_clock=Some(FinalizationBudget::begin(std::time::Duration::from_secs(15))?);}
+                if active.request.operation.renewal()&&self.renewal_clock.is_none(){self.renewal_clock=Some(FinalizationBudget::begin(std::time::Duration::from_secs(15))?);}
                 if let Some(clock)=&self.renewal_clock {clock.remaining()?;}
                 if let Some(clock)=&self.acquire_clock {clock.remaining()?;}
                 if !channel.endpoint.send(&active.wire,None)? {return Ok(false);}channel.get_mut(&self.nonce).unwrap().sent=true;self.time()?;}
@@ -382,14 +390,14 @@ impl RootOperationBridge {
         let authenticated=(||->Result<()> {engine.live()?;
             for _ in 0..2 {if self.unclassified.is_none(){self.unclassified=self.endpoint.receive()?;}let Some(packet)=&self.unclassified else{break;};
                 ensure!(packet.credentials.pid==engine.pid as i32&&packet.credentials.uid==1500&&packet.credentials.gid==1500&&packet.fds.is_empty()&&packet.bytes.len()<=OP_MAX,"engine operation peer is not original Native");
-                let request:NativeRequest=serde_json::from_slice(&packet.bytes).map_err(|_|fault())?;native_scope(&request,config)?;let renewal=matches!(request.operation,EngineOperationKind::RenewFreshOwnerV1 {..});
-                ensure!(!self.pending.values().any(|p|matches!(p.native.operation,EngineOperationKind::RenewFreshOwnerV1 {..})==renewal)&&self.pending.len()<2,"original engine lane occupied");
+                let request:NativeRequest=serde_json::from_slice(&packet.bytes).map_err(|_|fault())?;native_scope(&request,config)?;let renewal=request.operation.renewal();
+                ensure!(!self.pending.values().any(|p|p.native.operation.renewal()==renewal)&&self.pending.len()<2,"original engine lane occupied");
                 ensure!(!request.operation.begin_upload()||self.upload.is_none(),"original uploader remains retained");let remaining=0;let b=&registration.binding;
                 let body=OperationBody {version:1,kind:"engine_operation".into(),account_id:b.account_id.clone(),home_id:b.home_id.clone(),store_id:b.store_id.clone(),incarnation:b.incarnation.clone(),engine_instance_id:registration.engine_instance_id.clone(),boot_id:registration.boot_id.clone(),credential_id:registration.credential_id.clone(),epoch:b.epoch.clone(),root_nonce:registration.root_nonce.clone(),registration_proof_sha256:registration.proof_sha256.clone(),request_nonce:request.request_nonce.clone(),command_key:request.command_key.clone(),operation:request.operation.clone(),payload_sha256:hex(&Sha256::digest(bytes(&request.operation)?)),constraint:request.constraint.clone(),remaining_milliseconds:remaining};
                 let wire=Vec::new();
                 self.pending.insert(request.request_nonce.clone(),RootExchange {native:request,native_packet:self.unclassified.take().unwrap(),body,wire,proxy_target:None,never_forwarded:Vec::new(),sent:false,server:None,ack:None,native_sent:false,native_send_unknown:false,uncertain:false});
             }self.receive_never_forwarded(host)?;self.receive_acks(host,registration,credential,false)?;Ok(())})();if authenticated.is_err(){self.fenced=true;return authenticated;}
-        let mut nonces:Vec<_>=self.pending.keys().cloned().collect();nonces.sort_by_key(|n|!matches!(self.pending[n].native.operation,EngineOperationKind::RenewFreshOwnerV1 {..}));
+        let mut nonces:Vec<_>=self.pending.keys().cloned().collect();nonces.sort_by_key(|n|!self.pending[n].native.operation.renewal());
         for nonce in nonces {let p=self.pending.get_mut(&nonce).unwrap();
             let expired=p.native.constraint.adopt(p.native.operation.image()).and_then(|b|b.remaining()).is_err();
             if p.uncertain||expired {
@@ -432,3 +440,7 @@ mod owner_renewal_mux_tests;
 mod image_reuse_tests;
 
 #[cfg(test)]#[path="image_batch_operation_tests.rs"]mod image_batch_operation_tests;
+
+#[path="provider_owner_protocol.rs"]pub(crate) mod provider_data;
+#[path="provider_owner_ack.rs"]mod provider_ack;
+pub use provider_ack::{OriginalProviderAcquireAck,OriginalProviderHeartbeatAck};

@@ -1,3 +1,4 @@
+import {RootProviderHeartbeats,isProviderHeartbeat,validateProviderHeartbeat,type ProviderHeartbeatOperation} from "./provider-owner-heartbeats.js";
 import {isOwnerRenew,validateOwnerRenew,type OwnerRenewOperation,type RootOwnerRenewals} from "./renewals.js";
 import {createHmac,timingSafeEqual} from "node:crypto";
 import {inspect} from "node:util";
@@ -10,7 +11,7 @@ import {originalTime,type OriginalTime} from "./fly.js";
 import type {Envelope,RootConstraint} from "./registration.js";
 import {isStorageOperation,isImageOperation,validateStorageOperation,type StorageOperation} from "./storage-protocol.js";
 import type {ManagedFreshStorage} from "./storage.js";
-export type EngineOperation=OwnerRenewOperation|StorageOperation|{op:"PrepareFreshProjectV1"|"FreshProjectStatusV1"|"EnrollFreshProjectV1";workspace_id:string;};
+export type EngineOperation=ProviderHeartbeatOperation|OwnerRenewOperation|StorageOperation|{op:"PrepareFreshProjectV1"|"FreshProjectStatusV1"|"EnrollFreshProjectV1";workspace_id:string;};
 export interface EngineOperationRequest {version:1;kind:"engine_operation";account_id:string;home_id:string;store_id:string;incarnation:string;engine_instance_id:string;boot_id:string;credential_id:string;epoch:string;root_nonce:string;registration_proof_sha256:string;request_nonce:string;command_key:string;operation:EngineOperation;payload_sha256:string;constraint:RootConstraint;remaining_milliseconds:number;}
 export type EngineOperationError="rejected"|"busy"|"expired"|"effect_unknown"|"unconfigured";
 export interface EngineOperationAck extends Omit<EngineOperationRequest,"kind"|"remaining_milliseconds"> {kind:"engine_operation_ack";request_sha256:string;result:unknown|null;error:EngineOperationError|null;}
@@ -19,13 +20,14 @@ const REQUEST_DOMAIN="rudder_engine_operation_request_v1\0",ACK_DOMAIN="rudder_e
 function sign(key:Buffer,domain:string,value:unknown){return createHmac("sha256",key).update(domain).update(canonical(value,24*1024)).digest("hex");}
 function validate(input:unknown):Envelope<EngineOperationRequest>{const v=snapshot(input,24*1024);exact(v,["body","mac"]);sha(v.mac);const b=v.body as EngineOperationRequest;exact(b,["version","kind","account_id","home_id","store_id","incarnation","engine_instance_id","boot_id","credential_id","epoch","root_nonce","registration_proof_sha256","request_nonce","command_key","operation","payload_sha256","constraint","remaining_milliseconds"]);
   check(b.version===1&&b.kind==="engine_operation");for(const x of [b.engine_instance_id,b.incarnation,b.credential_id,b.root_nonce,b.request_nonce])uuid(x);key(b.command_key);sha(b.registration_proof_sha256);sha(b.payload_sha256);check(b.epoch==="1");
-  if(isOwnerRenew(b.operation))validateOwnerRenew(b.operation);else if(isStorageOperation(b.operation))validateStorageOperation(b.operation);else{exact(b.operation,["op","workspace_id"]);check(["PrepareFreshProjectV1","FreshProjectStatusV1","EnrollFreshProjectV1"].includes(b.operation.op));key(b.operation.workspace_id);}check(b.payload_sha256===hash(canonical(b.operation)),"identity_changed");
+  if(isProviderHeartbeat(b.operation))validateProviderHeartbeat(b.operation);else if(isOwnerRenew(b.operation))validateOwnerRenew(b.operation);else if(isStorageOperation(b.operation))validateStorageOperation(b.operation);else{exact(b.operation,["op","workspace_id"]);check(["PrepareFreshProjectV1","FreshProjectStatusV1","EnrollFreshProjectV1"].includes(b.operation.op));key(b.operation.workspace_id);}check(b.payload_sha256===hash(canonical(b.operation)),"identity_changed");
   exact(b.constraint,["format_version","maximum_milliseconds","boottime_deadline_nanoseconds"]);check(b.constraint.format_version===1&&Number.isInteger(b.constraint.maximum_milliseconds)&&b.constraint.maximum_milliseconds>0&&b.constraint.maximum_milliseconds<=(isImageOperation(b.operation)?300000:30000)&&/^[1-9][0-9]{0,19}$/.test(b.constraint.boottime_deadline_nanoseconds));check(Number.isInteger(b.remaining_milliseconds)&&b.remaining_milliseconds>=1&&b.remaining_milliseconds<=b.constraint.maximum_milliseconds);return v as unknown as Envelope<EngineOperationRequest>;}
 /** Fixed post-ACK operations only. Private server constructor is wired by the
  * registry to actual Root-HMAC key custody and current committed registration.
  * The public HTTP body never contains/constructs TrustedContext. */
 export class RootEngineOperations {
   #held=new Map<string,Carrier>();
+  #providerHeartbeats?:RootProviderHeartbeats;
   constructor(private readonly pool:AuthorityPool,private readonly authorityId:string,private readonly store:ManagedHomePgStore,private readonly storage?:ManagedFreshStorage,private readonly renewals?:RootOwnerRenewals){}
   [inspect.custom](){return "RootEngineOperations [retained original requests]";}
   toJSON():never{fail("invalid_request");}
@@ -45,6 +47,7 @@ export class RootEngineOperations {
       try{check(hash(credential)===actual.token_sha256&&timingSafeEqual(Buffer.from(signed.mac,"hex"),Buffer.from(sign(credential,REQUEST_DOMAIN,b),"hex")),"identity_changed");return {credential,context:{accountId:i.accountId,principalId:actual.principal_id,credentialId:actual.credential_id,credentialSha256:actual.token_sha256,engine:{instanceId:actual.engine_instance_id,bootId:actual.machine_boot_id,credentialId:actual.credential_id,credentialSha256:actual.token_sha256}}};}catch{credential.fill(0);fail("identity_changed");}
     });}
   async perform(home:BoundHome,rootKey:Buffer,input:unknown,time:OriginalTime):Promise<Envelope<EngineOperationAck>>{const incoming=validate(input);time.remaining();const auth=await this.#authenticate(home,rootKey,incoming);const b=incoming.body,id=home.intent.homeId+":"+b.command_key;let held=this.#held.get(id);
+    if(isProviderHeartbeat(b.operation)){try{check(this.storage,"unconfigured");this.#providerHeartbeats??=new RootProviderHeartbeats(this.pool,this.authorityId,this.storage);return await this.#providerHeartbeats.perform(home,auth.context,b,auth.credential,time);}finally{auth.credential.fill(0);}}
     if(isOwnerRenew(b.operation)){try{check(this.renewals,"unconfigured");return await this.renewals.perform(home,auth.context,b,auth.credential,time);}finally{auth.credential.fill(0);}}
     if(b.operation.op==="FreshProjectStatusV1"){try{time.remaining();const result=await this.store.freshStatus(auth.context,home.intent,b.operation.workspace_id);const {kind,remaining_milliseconds,...common}=b;const reply:EngineOperationAck={...common,kind:"engine_operation_ack",request_sha256:hash(canonical(b)),result,error:null};return {body:reply,mac:sign(auth.credential,ACK_DOMAIN,reply)};}finally{auth.credential.fill(0);}}
     if(held){auth.credential.fill(0);check(held.request.payload_sha256===b.payload_sha256&&held.request.registration_proof_sha256===b.registration_proof_sha256,"conflict");check(!held.busy,"busy");if(held.ack)return snapshot(held.ack);fail("effect_unknown");}

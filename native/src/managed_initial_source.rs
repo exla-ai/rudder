@@ -51,6 +51,9 @@ pub(crate) struct ManagedInitialSourceOwner {
 struct PreviousGeneration {baseline:rudder_vcs_bridge::CommitIdentity,seed:ObjectRef,
     cache:Arc<rudder_vcs_bridge::seed::RetainedSeedCasCache>}
 impl ManagedInitialSourceOwner {
+    pub(crate) fn capture_task_backing_retaining(&self,out:&mut Option<Arc<task_backing::ManagedBackedTaskInputs>>,original:&FinalizationBudget,cancelled:&Arc<AtomicBool>)->Result<()> {
+        task_backing::ManagedBackedTaskInputs::capture_retaining(out,self,original,cancelled)
+    }
     pub(crate) fn owner(&self)->&rudder_engine::journal::OwnerFence {self.lease.owner()}
     pub(crate) fn cas_root(&self)->&std::path::Path {self.store.root()}
     pub(crate) fn accepted_head(&self)->&str{&self.head.0}
@@ -59,7 +62,8 @@ impl ManagedInitialSourceOwner {
     pub(crate) fn release_successor_input_retaining(&self,out:&mut Option<crate::managed_checkpoint_accept::AcceptedInputRelease>,acceptance:&mut crate::managed_checkpoint_accept::ManagedCheckpointAcceptance,budget:&FinalizationBudget,cancel:&AtomicBool)->Result<()> {
         acceptance.release_generation_lock_retaining(out,self,&self.journal,budget,cancel)
     }
-    pub(crate) fn capture(owner: &mut EngineOwnership, _selection: &ManagedTaskOptIn, store: LocalStore) -> Result<Self> {
+    pub(crate) fn capture(owner: &mut EngineOwnership, _selection: &ManagedTaskOptIn, store: LocalStore) -> Result<Self> {Self::capture_source_only(owner,store)}
+    pub(crate) fn capture_source_only(owner:&mut EngineOwnership,store:LocalStore)->Result<Self> {
         ensure!(owner.is_fabric(),"initial managed source requires the actual Fabric owner");
         owner.assert_current()?;
         let project=owner.managed_recovery_store().context("managed preparation must finish before initial source capture")?.clone();
@@ -99,14 +103,19 @@ impl ManagedInitialSourceOwner {
     }
     pub(crate) fn prepare_paged_retaining(&mut self,environment:&ObjectRef,settings:&UserSettings,
         budget:&FinalizationBudget,cancelled:Arc<AtomicBool>)->Result<()> {
-        self.prepare_inner_profile(environment,settings,budget,&cancelled,rudder_vcs_bridge::seed::SeedProfile::PagedCowV2,Some(cancelled.clone()),||Ok(()))
+        self.prepare_inner_profile(environment,settings,budget,&cancelled,rudder_vcs_bridge::seed::SeedProfile::PagedCowV2,rudder_vcs_bridge::accepted_git_import::GitHistoryProfile::RawObjectsV1,Some(cancelled.clone()),||Ok(()))
+    }
+    pub(crate) fn prepare_packed_paged_retaining(&mut self,environment:&ObjectRef,settings:&UserSettings,
+        budget:&FinalizationBudget,cancelled:Arc<AtomicBool>)->Result<()> {
+        self.prepare_inner_profile(environment,settings,budget,&cancelled,rudder_vcs_bridge::seed::SeedProfile::PagedCowV2,
+            rudder_vcs_bridge::accepted_git_import::GitHistoryProfile::PackedHistoryV2,Some(cancelled.clone()),||Ok(()))
     }
     fn prepare_inner(&mut self,environment:&ObjectRef,settings:&UserSettings,
         budget:&FinalizationBudget,cancelled:&AtomicBool,after_result:impl FnOnce()->Result<()>)->Result<()> {
-        self.prepare_inner_profile(environment,settings,budget,cancelled,rudder_vcs_bridge::seed::SeedProfile::SmallV1,None,after_result)
+        self.prepare_inner_profile(environment,settings,budget,cancelled,rudder_vcs_bridge::seed::SeedProfile::SmallV1,rudder_vcs_bridge::accepted_git_import::GitHistoryProfile::RawObjectsV1,None,after_result)
     }
     fn prepare_inner_profile(&mut self,environment:&ObjectRef,settings:&UserSettings,budget:&FinalizationBudget,cancelled:&AtomicBool,
-        profile:rudder_vcs_bridge::seed::SeedProfile,actual_cancel:Option<Arc<AtomicBool>>,after_result:impl FnOnce()->Result<()>)->Result<()> {
+        profile:rudder_vcs_bridge::seed::SeedProfile,history:rudder_vcs_bridge::accepted_git_import::GitHistoryProfile,actual_cancel:Option<Arc<AtomicBool>>,after_result:impl FnOnce()->Result<()>)->Result<()> {
         ensure!(self.accepted_input.is_none(),"accepted successor requires its original retained generation path");
         ensure!(!self.attempted,"initial source preparation already attempted; retain and recover original outputs");
         self.attempted=true;self.check(budget,cancelled)?;
@@ -120,7 +129,7 @@ impl ManagedInitialSourceOwner {
         // V2 carries the actual Arc. Legacy cancellation is still checked by
         // the original owner callback at every publication boundary.
         let actual_cancel=actual_cancel.unwrap_or_else(||Arc::new(AtomicBool::new(false)));
-        let result=pollster::block_on(rudder_vcs_bridge::initial_source::prepare_initial_source_profile_with_import_retaining(self.store.clone(),request,profile,&mut paged,&mut import,budget,actual_cancel,||self.check(budget,cancelled)))?;
+        let result=pollster::block_on(rudder_vcs_bridge::initial_source::prepare_initial_source_history_with_import_retaining(self.store.clone(),request,profile,history,&mut paged,&mut import,budget,actual_cancel,||self.check(budget,cancelled)))?;
         drop(import);drop(paged);
 
         // Retain the actual returned owners BEFORE any final fallible ACK/check.
@@ -158,7 +167,8 @@ impl ManagedInitialSourceOwner {
         owner.assert_current_bounded(budget,cancelled)?;ensure!(owner.journal_parts().1==previous.owner(),"successor belongs to another actual owner");
         let old=previous.prepared.as_ref().context("original predecessor source absent")?;ensure!(previous.acknowledged,"predecessor original ACK absent");
         let pins=previous.store.retention()?;
-        ensure!(pins.pins.get(&old.runnable_pin)==Some(&old.runnable_root)&&pins.pins.get(&old.seed_pin)==Some(&old.seed_root),"predecessor original retention changed");
+        let retained=if let Some(actual)=old.runnable_inputs(){actual.root_data()==&old.runnable_root&&actual.matches_record_data(&pins,&old.runnable_pin)}else{pins.pins.get(&old.runnable_pin)==Some(&old.runnable_root)};
+        ensure!(retained&&pins.pins.get(&old.seed_pin)==Some(&old.seed_root),"predecessor original retention changed");
         let fence=owner.journal_parts().1.clone();let lease=owner.source_lease(&fence)?;let journal=lease.open_source_writer()?;
         let input=acceptance.capture_source_successor_input(&journal,old,budget,cancelled)?;
         let old_runnable=rudder_engine::snapshot::decode_runnable(&previous.store.read_object(&old.runnable_root)?)?;
@@ -179,9 +189,12 @@ impl ManagedInitialSourceOwner {
         // additionally checks the SAME actual lease and original clock. Busy
         // renewal waits use that clock and never become a new source attempt.
         let lease=&self.lease;
-        rudder_vcs_bridge::initial_source::AcceptedSourceGeneration::prepare_retaining(&mut self.successor,self.store.clone(),input.repository().clone(),input.verified().clone(),previous.cache.clone(),
+        if let Some(backed)=input.backed(){
+            rudder_vcs_bridge::initial_source::AcceptedSourceGeneration::prepare_backed_retaining(&mut self.successor,self.store.clone(),input.repository().clone(),input.verified().clone(),previous.cache.clone(),
+                input.integration().proposed_source_root.clone(),backed.clone(),previous.baseline.clone(),previous.seed.clone(),format!("{pin}:runnable"),format!("{pin}:seed"),budget.clone(),cancelled.clone(),||lease.wait_shared_current(budget,&cancelled))?;
+        }else{rudder_vcs_bridge::initial_source::AcceptedSourceGeneration::prepare_retaining(&mut self.successor,self.store.clone(),input.repository().clone(),input.verified().clone(),previous.cache.clone(),
             input.integration().proposed_source_root.clone(),input.receipt().request.recovery_root.clone(),input.integration().proposed_environment_root.clone(),previous.baseline.clone(),previous.seed.clone(),
-            format!("{pin}:runnable"),format!("{pin}:seed"),budget.clone(),cancelled.clone(),||lease.wait_shared_current(budget,&cancelled))?;
+            format!("{pin}:runnable"),format!("{pin}:seed"),budget.clone(),cancelled.clone(),||lease.wait_shared_current(budget,&cancelled))?;}
         self.successor.as_mut().unwrap().take_prepared_retaining(&mut self.prepared)?;self.check(budget,&cancelled)?;
         self.persist_generation_record()?;self.check(budget,&cancelled)?;self.acknowledged=true;Ok(())
     }
@@ -204,7 +217,10 @@ impl ManagedInitialSourceOwner {
         ensure!(self.acknowledged,"initial source original preparation acknowledgment unavailable");
         let prepared=self.prepared.as_ref().context("initial source did not receive its original preparation acknowledgment")?;
         let pins=self.store.retention()?;
-        ensure!(pins.pins.get(&prepared.runnable_pin)==Some(&prepared.runnable_root)&&pins.pins.get(&prepared.seed_pin)==Some(&prepared.seed_root),"original source generation retention changed");
+        let runnable=if let Some(actual)=prepared.runnable_inputs(){
+            ensure!(self.fresh.is_some(),"backed source requires original fresh source capsule");actual.root_data()==&prepared.runnable_root&&actual.matches_record_data(&pins,&prepared.runnable_pin)
+        }else{pins.pins.get(&prepared.runnable_pin)==Some(&prepared.runnable_root)};
+        ensure!(runnable&&pins.pins.get(&prepared.seed_pin)==Some(&prepared.seed_root),"original source generation retention changed");
         self.check(budget,cancelled)?;Ok(prepared)
     }
 }
@@ -212,3 +228,10 @@ impl ManagedInitialSourceOwner {
 #[cfg(test)]
 #[path="managed_initial_source_tests.rs"]
 mod tests;
+
+#[path="managed_task_backed_inputs.rs"]
+pub(crate) mod task_backing;
+
+#[path="managed_current_source_origin.rs"]
+mod sdk_origin;
+pub(crate) use sdk_origin::AcceptedSourceBuildOrigin;

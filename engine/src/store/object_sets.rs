@@ -18,6 +18,9 @@ const MAX_TOTAL_REFERENCES: usize = 131_072;
 const MAX_SET_JSON: usize = 4 * 1024 * 1024;
 const MAX_SET_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 const VALIDATION_BUDGET: Duration = Duration::from_secs(30);
+#[cfg(target_os="linux")]
+#[path="backed_object_sets.rs"]
+pub(super) mod backed_gc;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

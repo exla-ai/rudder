@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { inspect } from "node:util";
+import { createHash } from "node:crypto";
 import test from "node:test";
 import { createFlyMachineLeaseSession, flyMachineConfigDigest, FlyCustodyError } from "../cloud/src/fly-custody.ts";
 
@@ -31,6 +32,9 @@ function fixture(overrides = {}) {
     if (path === `${base}/lease`) {
       if (request.method === "POST") {
         const body = JSON.parse(request.body);
+        assert.equal([...body.description].length, 64, "actual provider description limit is64 runes");
+        assert.equal(Buffer.byteLength(body.description), 64);
+        assert.match(body.description, /^[0-9a-f]{64}$/);
         if (f.lease && !held) return { status: 409, body: { error: "leased" } };
         f.lease = { nonce: NONCE, expires_at: Math.ceil((at.wallMs + body.ttl * 1000) / 1000),
           description: body.description, owner: "fixture-owner", version: f.machine.version };
@@ -85,6 +89,54 @@ test("direct acquisition, exact identity reads, original ends and explicit relea
   assert.equal(last.headers["fly-machine-lease-nonce"], NONCE);
   const count = f.calls.length; await f.session.release(); assert.equal(f.calls.length, count);
   await assert.rejects(f.session.observe(), rejected("not_current"));
+});
+
+test("acquisition and renewal descriptions preserve the whole challenge hash within64 provider runes", async () => {
+  const challengeHash = value => createHash("sha256").update(value).digest("hex");
+  const f = fixture(), first = await f.session.acquire(), expected = challengeHash(EXPECTED.challenge);
+  assert.equal(first.challengeSha256, expected);
+  assert.equal(f.session.status().challengeSha256, expected);
+  f.advance(1000);
+  const renewed = await f.session.renew(15);
+  assert.equal(renewed.challengeSha256, expected);
+  assert.equal(renewed.sessionEndWallMs, first.sessionEndWallMs);
+  assert.equal(renewed.sessionEndBoottimeMs, first.sessionEndBoottimeMs);
+  assert.equal(renewed.originalEndWallMs, first.originalEndWallMs);
+  const posts = f.calls.filter(call => call.method === "POST");
+  assert.equal(posts.length, 2);
+  for (const request of posts) assert.deepEqual(JSON.parse(request.body), { description: expected, ttl: 15 });
+  await f.session.release();
+  // A last-hex-digit difference must change the full correlation; no shortened
+  // prefix or reused wire description can bind two fresh challenges.
+  const challenge = EXPECTED.challenge.slice(0, -1) + "d";
+  const second = fixture({ expected: { ...EXPECTED, challenge } });
+  const secondObservation = await second.session.acquire();
+  assert.equal(JSON.parse(second.calls[0].body).description, challengeHash(challenge));
+  assert.equal(secondObservation.challengeSha256, challengeHash(challenge));
+  assert.notEqual(secondObservation.challengeSha256, expected);
+  await second.session.release();
+});
+
+test("raw, legacy-prefixed, truncated or different hash echoes fence the original acquisition", async () => {
+  for (const mismatch of ["raw", "legacy", "truncated", "last-digit"]) {
+    const f = fixture();
+    f.hook = (request, reply) => {
+      if (request.method !== "POST" || !request.path.endsWith("/lease")) return reply;
+      const wire = JSON.parse(request.body).description, result = copy(reply);
+      result.body.data.description = mismatch === "raw" ? EXPECTED.challenge
+        : mismatch === "legacy" ? `rudder-machine-custody-v1:${EXPECTED.challenge}`
+        : mismatch === "truncated" ? wire.slice(0, -1)
+        : wire.slice(0, -1) + (wire.at(-1) === "0" ? "1" : "0");
+      return result;
+    };
+    await assert.rejects(f.session.acquire(), rejected("lease_changed"), mismatch);
+    assert.equal(f.session.status().state, "uncertain", mismatch);
+    await assert.rejects(f.session.observe(), rejected("not_current"));
+    await assert.rejects(f.session.acquire(), rejected("not_current"));
+    assert.equal(f.calls.filter(call => call.method === "POST").length, 1, "never replay a refused/uncertain acquire");
+    f.hook = null; await f.session.release(); // only its directly observed private nonce, no restoration
+    assert.equal(f.session.status().state, "uncertain");
+  }
 });
 
 test("canonical exact config hash includes ingress fields and rejects unsupported/oversized inputs", () => {

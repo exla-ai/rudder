@@ -41,7 +41,7 @@ impl Anchor {
 #[derive(Clone, PartialEq, Eq)]
 struct Key { cache_format:u32, paged_format:u32, root:ObjectRef, runnable:RunnableRoot, snapshot:VfsCheckpoint }
 #[derive(Clone)]
-struct Floor { key:Key, metadata_bytes:u64 }
+struct Floor { key:Key, metadata_bytes:u64,backed_inputs:Option<Arc<crate::managed_initial_source::task_backing::ManagedBackedTaskInputs>> }
 struct State { ready:Vec<Floor>, preparations:u64 }
 
 pub(crate) struct ManagedPreparationCache {
@@ -141,11 +141,16 @@ impl ManagedPreparationCache {
         cancelled:&AtomicBool,budget:&FinalizationBudget) -> Result<ManagedPreparedView> {
         ensure!(request.managed_store == self.project && request.store.root()==self.store.root(),
             "managed cache request changed project/CAS identity");
-        self.fork_selected(&request.fence,&request.runnable_root,&request.seed_source,
-            &request.view_id,journal,cancelled,budget)
+        self.fork_selected_retained(&request.fence,&request.runnable_root,&request.seed_source,
+            &request.view_id,journal,cancelled,budget,request.backed_inputs.clone())
     }
     fn fork_selected(self:&Arc<Self>,fence:&ManagedLaunchFence,root:&ObjectRef,source:&ObjectRef,
         view_id:&str,journal:&Journal,cancelled:&AtomicBool,budget:&FinalizationBudget) -> Result<ManagedPreparedView> {
+        self.fork_selected_retained(fence,root,source,view_id,journal,cancelled,budget,None)
+    }
+    fn fork_selected_retained(self:&Arc<Self>,fence:&ManagedLaunchFence,root:&ObjectRef,source:&ObjectRef,
+        view_id:&str,journal:&Journal,cancelled:&AtomicBool,budget:&FinalizationBudget,
+        backed_inputs:Option<Arc<crate::managed_initial_source::task_backing::ManagedBackedTaskInputs>>) -> Result<ManagedPreparedView> {
         let _admission=self.admit()?; Self::time(cancelled,budget)?; self.custody()?;
         ensure!(fence.owner==*self.lease.owner(),"managed cache owner differs from reserved attempt");
         self.lease.check_journal(journal)?;self.lease.check_shared_current()?; fence.check_current(journal)?;
@@ -172,15 +177,16 @@ impl ManagedPreparationCache {
         // Atomic pin_existing keeps GC authority; a matching digest/path or
         // durable index alone can never turn an unretained root into a hit.
         self.before_effect(cancelled,budget)?;
-        self.store.pin_existing(&format!("managed:preparation-cache:{}:{}",self.lease.owner().epoch,root.digest),root)?;
+        if let Some(backed)=&backed_inputs{backed.check_for_new_task(budget,cancelled)?;backed.matches(&self.store,root,source)?;}
+        else{self.store.pin_existing(&format!("managed:preparation-cache:{}:{}",self.lease.owner().epoch,root.digest),root)?;}
         self.before_effect(cancelled,budget)?;
-        let hit=state.ready.iter().find(|floor|floor.key==key).cloned();
+        let hit=state.ready.iter().find(|floor|floor.key==key).cloned();if let Some(floor)=&hit{if let Some(backed)=&floor.backed_inputs{backed.check_retained()?;}}
         let prep_start=Instant::now();
         let floor=if let Some(floor)=&hit { floor.clone() } else {
             state.preparations=state.preparations.checked_add(1).context("preparation counter overflow")?;
             self.manager.prepare_paged_snapshot(&key.snapshot)?;
             Floor { metadata_bytes:key.snapshot.directory.size_bytes.checked_add(key.snapshot.hardlinks.size_bytes)
-                .context("preparation metadata size overflow")?,key }
+                .context("preparation metadata size overflow")?,key,backed_inputs:backed_inputs.clone() }
         };
         let prepare_ns=if hit.is_some() { 0 } else { prep_start.elapsed().as_nanos() };
         Self::time(cancelled,budget)?; self.custody()?; fence.check_current(journal)?;

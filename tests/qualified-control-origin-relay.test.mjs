@@ -6,6 +6,7 @@ import {readFileSync} from 'node:fs';
 import {createHash} from 'node:crypto';
 import {EventEmitter,once} from 'node:events';
 import {PacketQueue,sameGeneration,canonicalData} from '../cloud/worker/host-control-core.mjs';
+import {RuntimeQualificationRelay,READY as QUAL_READY,ACK as QUAL_ACK} from '../cloud/worker/runtime-qualification.mjs';
 const production='https://rudder-cloud-control.fly.dev',qualification='https://rudder-v4-qualification.fly.dev';
 const privateToken='FIXTURE_PRIVATE_TOKEN_'.repeat(3),nonce='11111111-1111-4111-8111-111111111111';
 const scope={version:1,home_id:'home',workspace_id:'project',transfer_id:'22222222-2222-4222-8222-222222222222',request_nonce:'33333333-3333-4333-8333-333333333333',mode:'fresh',manifest:null,maximum_manifest_bytes:null,maximum_objects:128,maximum_bytes:4194304,maximum_object_bytes:1048576,constraint:{format_version:1,maximum_milliseconds:30000,boottime_deadline_nanoseconds:'130000000000'}};
@@ -51,7 +52,7 @@ async function sidecar(origin,env={}){
     writeSync:(_fd,b)=>{ipc.push(JSON.parse(b));return b.length;},closeSync:()=>{}};
   const process={argv:['node','host-control.mjs'],env,getuid:()=>1500,getgid:()=>1500,exitCode:0};
   class Socket{static OPEN=1;readyState=1;bufferedAmount=0;handlers={};constructor(url,options){this.url=url;this.options=options;sockets.push(this);}on(e,f){this.handlers[e]=f;}terminate(){}send(_b,_o,cb){cb();}}
-  new Function('fs','createHash','randomUUID','WebSocket','process','setInterval','clearInterval','PacketQueue','sameGeneration','canonicalData',sidecarSource)(fs,createHash,()=>nonce,Socket,process,()=>1,()=>{},PacketQueue,sameGeneration,canonicalData);
+  new Function('fs','createHash','randomUUID','WebSocket','process','setInterval','clearInterval','PacketQueue','sameGeneration','canonicalData','RuntimeQualificationRelay','QUAL_READY','QUAL_ACK',sidecarSource)(fs,createHash,()=>nonce,Socket,process,()=>1,()=>{},PacketQueue,sameGeneration,canonicalData,RuntimeQualificationRelay,QUAL_READY,QUAL_ACK);
   await Promise.resolve();if(sockets.length)sockets[0].handlers.open();return {reads,ipc,sockets,process};
 }
 test('actual sidecar selects only exact WSS peer and keeps bearer outside native messages',async()=>{

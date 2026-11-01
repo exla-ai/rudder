@@ -1,0 +1,33 @@
+{
+  "formatVersion": 1,
+  "fullV4Complete": false,
+  "scope": "strict-Root-owned storage Git/jj component only; no Root mount, PG, task or SDK authority",
+  "sourceKind": "immutable-captured-working-tree",
+  "sourceManifestSha256": "bb086cdb8b2c5fbaf865c3d0b261657ffa2970c15b8e9d4b0e8ff998d283965d",
+  "image": "registry.fly.io/rudder-workers-exla:backed-source-bb086cdb8b2c",
+  "digest": "sha256:e589063b3a2e29a55261463e206c05fe83193220924a798e9c058f340ddb37d2",
+  "verifiedAt": "2026-11-01T18:06:15.045915+00:00",
+  "qualifierElf": {
+    "sha256": "4ccb5e1f3a8781391697bf033bf31448708612348bc97b0b5e7798843063a441",
+    "bytes": 16800512,
+    "uid": 0,
+    "gid": 0
+  },
+  "actualRootFourCases": true,
+  "results": [
+    "test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.62s"
+  ],
+  "logSha256": "ea7a72b9af4c8917c46e6616f532065ef4815ec0ffbebada7620397fd200d8bc",
+  "firstAttempt": {
+    "receiptSha256": "d0dad1e99bf8199a651c7f71976515973c5f7e65e730258d5d836fa99f01929c",
+    "passed": 3,
+    "failed": 1,
+    "cause": "Original foreign payload changed after preparation but flat publication observed only metadata/membership. Fixed with original per-object kernel version capture and retained pre/post publication sweeps; served reads still require SHA verification.",
+    "failedCorruptionCaseUnchanged": true
+  },
+  "qualificationLimits": [
+    "Small Root-owned CAS plus actual Git/jj; no configured Native runtime client or Root mount",
+    "No actual S3/PG adoption, model task, SDK execution or runtime drain",
+    "Full actual repository plus runtime composition and per-agent latency require the pending retained Environment subgraph implementation"
+  ]
+}

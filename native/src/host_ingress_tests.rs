@@ -9,7 +9,7 @@ fn config()->HostIngressConfig {
     let namespace=rudder_engine::journal::ManagedProjectNamespace {format_version:1,project_id:"project-1".into(),home:home.clone(),
         journal:home.join("fabric/journal.sqlite"),repository:checkout.clone(),
         directory:rudder_engine::journal::ManagedProjectNamespace::directory_for(&home,"project-1")};
-    HostIngressConfig {seed_profile:None,owner_lease_safety:None,image_preseed:None,version:1,machine_id:"machine-1".into(),store_id:"store-1".into(),incarnation:"incarnation-1".into(),account_id:"account-1".into(),
+    HostIngressConfig {sdk_initial_source:None,compiler_sdk:None,compiler_qualification:None,runtime_qualification:None,seed_profile:None,owner_mode:None,owner_lease_safety:None,image_preseed:None,version:1,machine_id:"machine-1".into(),store_id:"store-1".into(),incarnation:"incarnation-1".into(),account_id:"account-1".into(),
         home_id:"home-1".into(),cloud_origin:"https://rudder-cloud-control.fly.dev".into(),state_directory:"/workspace/private/receipt-store".into(),
         store_policy:HostReceiptStorePolicy::InitializeEmptyV1,projects:vec![AllowedPreparedProject {alias:"prepared".into(),checkout,home,
             cas:"/workspace/private/cas".into(),endpoints:"/workspace/private/endpoints".into(),
@@ -71,4 +71,45 @@ fn paged_seed_policy_is_explicit_and_absence_preserves_v1(){
     let selected:HostIngressConfig=serde_json::from_slice(&canonical_json(&selected).unwrap()).unwrap();
     assert_eq!(selected.seed_profile,Some(rudder_vcs_bridge::seed::SeedProfile::PagedCowV2));
     // Config DATA only; no Root/config/seed/readiness owner was constructed.
+}
+
+
+// Restriction DATA only: these fixtures construct no protected config owner,
+// registered engine, ready observer, provider or successful qualification ACK.
+fn qualification_scope_data_for_test()->super::super::runtime_image::qualification::RuntimeQualificationScope {
+    use rudder_engine::protocol::{ObjectRef,ObjectKind};
+    super::super::runtime_image::qualification::RuntimeQualificationScope {
+        format_version:1,scope:"disposable-runtime-floor-and-original-client-only".into(),
+        qualification_id:uuid::Uuid::new_v4().to_string(),qualification_nonce:uuid::Uuid::new_v4().to_string(),
+        image:format!("registry.fly.io/rudder-workers-exla@sha256:{}","a".repeat(64)),
+        image_receipt_sha256:"b".repeat(64),source_manifest_sha256:"c".repeat(64),
+        inventory:ObjectRef::from_bytes(ObjectKind::Blob,b"inventory DATA"),
+        manifest:ObjectRef::from_bytes(ObjectKind::Blob,b"manifest DATA"),
+        installer_input:ObjectRef::from_bytes(ObjectKind::Directory,b"directory reference DATA"),
+        native_sha256:"d".repeat(64),buddy_sha256:"e".repeat(64),service_sha256:"f".repeat(64),launcher_sha256:"1".repeat(64),
+    }
+}
+#[test]
+fn qualification_absence_preserves_config_bytes_and_does_not_create_scope() {
+    let original=config();let raw=canonical_json(&original).unwrap();
+    let value:serde_json::Value=serde_json::from_slice(&raw).unwrap();assert!(value.get("runtime_qualification").is_none());
+    let decoded:HostIngressConfig=serde_json::from_slice(&raw).unwrap();assert!(decoded.runtime_qualification.is_none());
+    assert_eq!(canonical_json(&decoded).unwrap(),raw);assert!(decoded.assert_unscoped_operations().is_ok());
+}
+#[test]
+fn qualification_scope_independently_refuses_every_host_and_general_operation() {
+    let mut data=config();data.runtime_qualification=Some(qualification_scope_data_for_test());
+    assert!(data.assert_unscoped_operations().is_err());
+}
+#[test]
+fn qualification_scope_requires_exact_protected_image_roots_and_nonces() {
+    let mut data=config();let scope=qualification_scope_data_for_test();
+    assert!(scope.validate_config(&data).is_err());
+    data.image_preseed=Some(HostImagePreseedPolicy{image:scope.image.clone(),image_receipt_sha256:scope.image_receipt_sha256.clone(),
+        full_manifest_sha256:scope.manifest.digest.clone(),batch_transport:None,
+        runtime_mount:Some(HostBakedRuntimePolicy{profile:"baked-cas-v1".into(),inventory:scope.inventory.clone()})});
+    scope.validate_config(&data).unwrap();
+    let mut changed=scope.clone();changed.qualification_nonce="not an original UUID".into();assert!(changed.validate_config(&data).is_err());
+    let mut changed=scope.clone();changed.inventory.digest="0".repeat(64);assert!(changed.validate_config(&data).is_err());
+    let mut changed=scope;changed.manifest.size_bytes=32*1024*1024+1;assert!(changed.validate_config(&data).is_err());
 }

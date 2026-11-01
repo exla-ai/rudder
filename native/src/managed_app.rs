@@ -1068,7 +1068,7 @@ mod local {
                                 .map(|(pane,handoff,control)|(pane,handoff,control,None)) };
                         match spawned {
                             Ok((mut terminal, handoff, control, start)) => {
-                                let task_live=match task { Some(handle)=>Some(TaskLive { handle,custody:terminal.retain_managed_helper_custody().ok(),start:start.map(RuntimeTaskStart::capture) }),None=>None };
+                                let task_live=match task { Some(handle)=>Some(TaskLive { handle,custody:terminal.retain_managed_helper_custody().ok(),start:start.map(|barrier|RuntimeTaskStart::capture_with_environment(barrier,ready.prepared.backed_inputs.as_ref().map(|input|input.runtime_backing().clone()))) }),None=>None };
                                 let task_uncertain=task_live.as_ref().is_some_and(|task|task.custody.is_none());
                                 App::attach_output_waker(&app.pty_output_waker, &terminal);
                                 let adoption = if let Some(projection)=&ready.projection_owner {

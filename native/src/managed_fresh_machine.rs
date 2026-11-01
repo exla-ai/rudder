@@ -4,19 +4,19 @@
 #![cfg(target_os="linux")]
 use anyhow::{ensure,Context,Result};
 use crate::{managed_machine_cas::ManagedMachineCas,managed_runtime_image_preseed::{ManagedImagePreseed,ImagePreseedExport,ManagedImageBudget},managed_fresh_genesis::{ManagedFreshGenesis,FreshGenesisExport},managed_fresh_assigned::AssignedFreshProject,managed_root_upload::{ManagedRootUpload,ManagedPublishedImage}};
-use rudder_native::{host_ingress::HostIngressConfigOwner,engine_registration::{RegisteredEngineOwner,FreshProjectPreparation,EngineOperation,EngineOperationKind,OriginalFreshAcquireAck},managed_owner_lease::ManagedOwnerLease};
+use rudder_native::{host_ingress::HostIngressConfigOwner,engine_registration::{RegisteredEngineOwner,FreshProjectPreparation,EngineOperation,EngineOperationKind,OriginalFreshAcquireAck,OriginalProviderAcquireAck},managed_owner_lease::ManagedOwnerLease};
 use rudder_engine::execution::{finalization_budget::FinalizationBudget,handoff::{OwnedWorkerJoin,WorkerJoined}};
 use sha2::{Digest,Sha256};
 use std::{any::Any,collections::BTreeMap,sync::{Arc,Mutex,OnceLock,atomic::{AtomicBool,Ordering}},thread,time::Duration};
 const MAX_PROJECTS:usize=2;
-struct Flow {prepare:Option<EngineOperation>,preparation:Option<Arc<FreshProjectPreparation>>,source:Option<Arc<ManagedFreshGenesis>>,export:Option<Arc<FreshGenesisExport>>,upload:Option<ManagedRootUpload>,acquire:Option<EngineOperation>,ack:Option<Arc<OriginalFreshAcquireAck>>,lease:Option<Arc<ManagedOwnerLease>>,assigned:Option<Arc<Mutex<AssignedFreshProject>>>,error:Option<anyhow::Error>,panic:Option<Box<dyn Any+Send>>}
+struct Flow {prepare:Option<EngineOperation>,preparation:Option<Arc<FreshProjectPreparation>>,source:Option<Arc<ManagedFreshGenesis>>,export:Option<Arc<FreshGenesisExport>>,upload:Option<ManagedRootUpload>,acquire:Option<EngineOperation>,ack:Option<Arc<OriginalFreshAcquireAck>>,provider_ack:Option<Arc<OriginalProviderAcquireAck>>,lease:Option<Arc<ManagedOwnerLease>>,assigned:Option<Arc<Mutex<AssignedFreshProject>>>,error:Option<anyhow::Error>,panic:Option<Box<dyn Any+Send>>}
 struct FlowContext {kernel:Arc<crate::managed_machine_entry::ManagedKernelStartup>,machine:Arc<ManagedMachineCas>,image:Arc<ImagePreseedExport>,publication:Arc<ManagedPublishedImage>,config:Arc<HostIngressConfigOwner>}
 /// This proof is born only after original actual join/TLS plus a final check of
 /// the SAME pre-queue30s. A late join is retained but cannot mint this proof.
 struct QualifiedFlowJoined {_joined:WorkerJoined,_original:FinalizationBudget}
 struct FlowCell {workspace:String,cancelled:Arc<AtomicBool>,data:Mutex<Flow>,context:OnceLock<FlowContext>,original:OnceLock<FinalizationBudget>,worker:Mutex<Option<OwnedWorkerJoin>>,owned:AtomicBool,qualified:OnceLock<QualifiedFlowJoined>,late_join:Mutex<Option<WorkerJoined>>,denied:AtomicBool}
 impl FlowCell {
-    fn capture(workspace:String,cancelled:Arc<AtomicBool>)->Arc<Self>{Arc::new(Self{workspace,cancelled,data:Mutex::new(Flow{prepare:None,preparation:None,source:None,export:None,upload:None,acquire:None,ack:None,lease:None,assigned:None,error:None,panic:None}),context:OnceLock::new(),original:OnceLock::new(),worker:Mutex::new(None),owned:AtomicBool::new(false),qualified:OnceLock::new(),late_join:Mutex::new(None),denied:AtomicBool::new(false)})}
+    fn capture(workspace:String,cancelled:Arc<AtomicBool>)->Arc<Self>{Arc::new(Self{workspace,cancelled,data:Mutex::new(Flow{prepare:None,preparation:None,source:None,export:None,upload:None,acquire:None,ack:None,provider_ack:None,lease:None,assigned:None,error:None,panic:None}),context:OnceLock::new(),original:OnceLock::new(),worker:Mutex::new(None),owned:AtomicBool::new(false),qualified:OnceLock::new(),late_join:Mutex::new(None),denied:AtomicBool::new(false)})}
     fn start_retaining(self:&Arc<Self>,context:FlowContext)->Result<()> {
         ensure!(self.original.get().is_none()&&self.context.get().is_none(),"source flow original admission already captured");
         let original=FinalizationBudget::begin(Duration::from_secs(30))?;self.original.set(original).map_err(|_|anyhow::anyhow!("original source clock occupied"))?;self.context.set(context).map_err(|_|anyhow::anyhow!("source context occupied"))?;
@@ -32,14 +32,18 @@ impl FlowCell {
         if known{time(original,&self.cancelled)?;let _=self.qualified.set(QualifiedFlowJoined{_joined:joined,_original:original.clone()});Ok(true)}else{self.denied.store(true,Ordering::Release);*self.late_join.lock().unwrap_or_else(|p|p.into_inner())=Some(joined);if let Some(assigned)=&held.assigned{assigned.lock().unwrap_or_else(|p|p.into_inner()).close_admission();}Ok(false)}
     }
 }
-struct Owner {kernel:Option<Arc<crate::managed_machine_entry::ManagedKernelStartup>>,config:Arc<HostIngressConfigOwner>,registration:Arc<RegisteredEngineOwner>,admission:FinalizationBudget,cancelled:Arc<AtomicBool>,cas_capture:Option<ManagedMachineCas>,cas:Option<Arc<ManagedMachineCas>>,image_budget:Option<ManagedImageBudget>,image_source:Option<Arc<ManagedImagePreseed>>,image_export:Option<Arc<ImagePreseedExport>>,image_upload:Option<ManagedRootUpload>,published_image:Option<Arc<ManagedPublishedImage>>,attempted:bool,error:Option<anyhow::Error>,panic:Option<Box<dyn Any+Send>>}
+struct Owner {runtime_client:Option<Arc<rudder_native::root_storage_bootstrap::runtime_image::RuntimeImageClient>>,runtime_environment:Option<Arc<crate::managed_machine_runtime_profile::runtime_environment::SharedRuntimeEnvironment>>,kernel:Option<Arc<crate::managed_machine_entry::ManagedKernelStartup>>,config:Arc<HostIngressConfigOwner>,registration:Arc<RegisteredEngineOwner>,admission:FinalizationBudget,cancelled:Arc<AtomicBool>,cas_capture:Option<ManagedMachineCas>,cas:Option<Arc<ManagedMachineCas>>,image_budget:Option<ManagedImageBudget>,image_source:Option<Arc<ManagedImagePreseed>>,image_export:Option<Arc<ImagePreseedExport>>,image_upload:Option<ManagedRootUpload>,published_image:Option<Arc<ManagedPublishedImage>>,attempted:bool,error:Option<anyhow::Error>,panic:Option<Box<dyn Any+Send>>}
 /// All mutable carriers are OUTSIDE catches and remain owned independently of
 /// delivery/WS state. No Drop unpin, namespace deletion or implicit retry.
 pub(crate) struct ManagedFreshMachine {cancelled:Arc<AtomicBool>,flows:BTreeMap<String,Arc<FlowCell>>,owner:Mutex<Owner>,worker:Mutex<Option<OwnedWorkerJoin>>,owned:AtomicBool,joined:Mutex<Option<WorkerJoined>>}
 impl ManagedFreshMachine {
     pub(crate) fn capture(config:Arc<HostIngressConfigOwner>,registration:Arc<RegisteredEngineOwner>,admission:FinalizationBudget)->Arc<Self>{Self::capture_inner(config,registration,None,admission)}
     pub(crate) fn capture_with_kernel(config:Arc<HostIngressConfigOwner>,registration:Arc<RegisteredEngineOwner>,kernel:Arc<crate::managed_machine_entry::ManagedKernelStartup>,admission:FinalizationBudget)->Arc<Self>{Self::capture_inner(config,registration,Some(kernel),admission)}
-    fn capture_inner(config:Arc<HostIngressConfigOwner>,registration:Arc<RegisteredEngineOwner>,kernel:Option<Arc<crate::managed_machine_entry::ManagedKernelStartup>>,admission:FinalizationBudget)->Arc<Self>{let cancelled=Arc::new(AtomicBool::new(false));let flows=config.data().projects.iter().map(|p|(p.alias.clone(),FlowCell::capture(p.alias.clone(),cancelled.clone()))).collect();Arc::new(Self{cancelled:cancelled.clone(),flows,owner:Mutex::new(Owner{kernel,config,registration,admission,cancelled,cas_capture:None,cas:None,image_budget:None,image_source:None,image_export:None,image_upload:None,published_image:None,attempted:false,error:None,panic:None}),worker:Mutex::new(None),owned:AtomicBool::new(false),joined:Mutex::new(None)})}
+    fn capture_inner(config:Arc<HostIngressConfigOwner>,registration:Arc<RegisteredEngineOwner>,kernel:Option<Arc<crate::managed_machine_entry::ManagedKernelStartup>>,admission:FinalizationBudget)->Arc<Self>{Self::capture_inner_cancel(config,registration,kernel,admission,Arc::new(AtomicBool::new(false)))}
+    fn capture_inner_cancel(config:Arc<HostIngressConfigOwner>,registration:Arc<RegisteredEngineOwner>,kernel:Option<Arc<crate::managed_machine_entry::ManagedKernelStartup>>,admission:FinalizationBudget,cancelled:Arc<AtomicBool>)->Arc<Self>{let flows=config.data().projects.iter().map(|p|(p.alias.clone(),FlowCell::capture(p.alias.clone(),cancelled.clone()))).collect();Arc::new(Self{cancelled:cancelled.clone(),flows,owner:Mutex::new(Owner{runtime_client:None,runtime_environment:None,kernel,config,registration,admission,cancelled,cas_capture:None,cas:None,image_budget:None,image_source:None,image_export:None,image_upload:None,published_image:None,attempted:false,error:None,panic:None}),worker:Mutex::new(None),owned:AtomicBool::new(false),joined:Mutex::new(None)})}
+    pub(crate) fn capture_with_runtime(config:Arc<HostIngressConfigOwner>,registration:Arc<RegisteredEngineOwner>,kernel:Arc<crate::managed_machine_entry::ManagedKernelStartup>,client:Option<Arc<rudder_native::root_storage_bootstrap::runtime_image::RuntimeImageClient>>,admission:FinalizationBudget,cancelled:Arc<AtomicBool>)->Arc<Self>{
+        let owner=Self::capture_inner_cancel(config,registration,Some(kernel),admission,cancelled);owner.owner.lock().unwrap_or_else(|p|p.into_inner()).runtime_client=client;owner
+    }
     pub(crate) fn start_retaining(self:&Arc<Self>)->Result<()> {let mut slot=self.worker.try_lock().map_err(|_|anyhow::anyhow!("fresh coordinator registration busy"))?;ensure!(slot.is_none()&&!self.owned.load(Ordering::Acquire),"original fresh coordinator registered");let shared=self.clone();
         let worker=thread::Builder::new().name("rudder-fresh-machine-bootstrap".into()).spawn(move||{while !shared.owned.load(Ordering::Acquire){thread::yield_now();}let mut held=shared.owner.lock().unwrap_or_else(|p|p.into_inner());
             let result=std::panic::catch_unwind(std::panic::AssertUnwindSafe(||held.run_retaining(&shared.flows)));match result{Ok(Ok(()))=>{},Ok(Err(error))=>held.error=Some(error),Err(panic)=>held.panic=Some(panic)}
@@ -58,10 +62,12 @@ impl ManagedFreshMachine {
 impl Owner {
     fn run_retaining(&mut self,flows:&BTreeMap<String,Arc<FlowCell>>)->Result<()> {
         ensure!(!self.attempted,"fresh machine original bootstrap attempted");self.attempted=true;time(&self.admission,&self.cancelled)?;self.config.assert_current()?;self.registration.assert_current()?;
-        // Current source-only genesis retains a legacy host-imported image. A
-        // configured baked profile must not start that fallback before a real
-        // composed environment/preparation producer is available.
-        crate::managed_app::runtime_task::require_legacy_environment_backing(&self.config)?;
+        // Selected baked inputs require the actual original Root client.
+        // Their shared environment and complete verified exporter are separate
+        // from the unselected legacy host-import path; no fallback on pending.
+        let selected=self.config.data().image_preseed.as_ref().and_then(|p|p.runtime_mount.as_ref()).is_some();
+        if selected{self.runtime_client.as_ref().context("configured runtime environment waits for actual Root client; no legacy fallback")?.assert_environment_scope(&self.config,&self.registration)?;}
+        else{crate::managed_app::runtime_task::require_legacy_environment_backing(&self.config)?;}
         let kernel=self.kernel.as_ref().context("fresh bootstrap requires the actual current kernel startup owner")?.clone();
         ensure!(Arc::ptr_eq(kernel.registration(),&self.registration),"fresh startup belongs to another original registration");kernel.assert_new_startup_off_app(&self.admission,&self.cancelled)?;ensure!(!flows.is_empty()&&flows.len()<=MAX_PROJECTS,"fresh profile supports at most two projects");
         ManagedMachineCas::capture_retaining(&mut self.cas_capture,self.config.clone(),self.registration.clone(),&self.admission,&self.cancelled)?;self.cas=Some(Arc::new(self.cas_capture.take().unwrap()));
@@ -70,8 +76,14 @@ impl Owner {
             if held.prepare.is_none(){if !self.registration.try_begin_operation_retaining(&mut held.prepare,EngineOperationKind::PrepareFreshProjectV1{workspace_id:flow.workspace.clone()},format!("fp-{}",project.prepare.request_id),self.admission.clone(),self.cancelled.clone())?{pause(&self.admission)?;continue;}}
             let Flow{prepare,preparation,..}=&mut *held;if prepare.as_mut().unwrap().take_preparation_retaining(preparation)?{break;}pause(&self.admission)?;
         }}
+        if selected{
+            self.runtime_environment=Some(crate::managed_machine_runtime_profile::runtime_environment::SharedRuntimeEnvironment::capture(self.cas.as_ref().unwrap().clone(),self.runtime_client.as_ref().unwrap().clone(),self.admission.clone(),self.cancelled.clone()));
+            self.runtime_environment.as_ref().unwrap().start_retaining()?;
+            loop{time(&self.admission,&self.cancelled)?;if self.runtime_environment.as_ref().unwrap().poll_ready_retaining()?{break;}pause(&self.admission)?;}
+        }
         let first=flows.keys().next().unwrap().clone();let policy=self.config.data().image_preseed.as_ref().context("qualified full image policy unconfigured")?.clone();self.image_budget=Some(ManagedImageBudget::begin(Duration::from_secs(300))?);let image=self.image_budget.as_ref().unwrap().clone();
-        self.image_source=Some(ManagedImagePreseed::capture(self.cas.as_ref().unwrap().clone(),image.clone(),self.cancelled.clone()));self.image_source.as_ref().unwrap().start_retaining()?;
+        self.image_source=Some(if let Some(backed)=&self.runtime_environment{ManagedImagePreseed::capture_backed(self.cas.as_ref().unwrap().clone(),backed.clone(),image.clone(),self.cancelled.clone())}
+            else{ManagedImagePreseed::capture(self.cas.as_ref().unwrap().clone(),image.clone(),self.cancelled.clone())});self.image_source.as_ref().unwrap().start_retaining()?;
         loop{image.remaining()?;if self.image_source.as_ref().unwrap().poll_export_retaining(&mut self.image_export)?{break;}image_pause(&image)?;}
         let key=format!("im-{:x}",Sha256::digest(format!("{}:{}",self.config.config_sha256(),policy.full_manifest_sha256).as_bytes()));ManagedRootUpload::begin_image_retaining(&mut self.image_upload,self.image_export.as_ref().unwrap().clone(),self.registration.clone(),first,policy.image_receipt_sha256,key,image.clone(),self.cancelled.clone())?;
         loop{image.remaining()?;let before=self.image_upload.as_ref().unwrap().progress();if self.image_upload.as_mut().unwrap().poll_retaining()?{break;}
@@ -95,8 +107,10 @@ fn run_flow(flow:&mut Flow,ctx:&FlowContext,work:&FinalizationBudget,cancel:&Arc
     let key=format!("fa-{}",flow.preparation.as_ref().unwrap().prepare().request_id);
     ctx.kernel.assert_new_startup_off_app(work,cancel)?;
     loop{time(work,cancel)?;if flow.acquire.is_none(){if !flow.upload.as_ref().unwrap().try_begin_owner_acquire_retaining(&mut flow.acquire,key.clone())?{pause(work)?;continue;}}
-        if flow.acquire.as_mut().unwrap().take_original_acquire_ack_retaining(&mut flow.ack)?{break;}pause(work)?;}
-    ManagedOwnerLease::capture_retaining(&mut flow.lease,flow.ack.as_ref().unwrap().clone(),ctx.config.clone())?;flow.assigned=Some(Arc::new(Mutex::new(AssignedFreshProject::capture(flow.source.as_ref().unwrap().clone(),flow.lease.as_ref().unwrap().clone()))));
+        let acknowledged=if ctx.config.data().owner_mode.is_some(){flow.acquire.as_mut().unwrap().take_original_provider_acquire_ack_retaining(&mut flow.provider_ack)?}else{flow.acquire.as_mut().unwrap().take_original_acquire_ack_retaining(&mut flow.ack)?};
+        if acknowledged{break;}pause(work)?;}
+    if ctx.config.data().owner_mode.is_some(){ManagedOwnerLease::capture_provider_retaining(&mut flow.lease,flow.provider_ack.as_ref().unwrap().clone(),ctx.config.clone())?;}
+    else{ManagedOwnerLease::capture_retaining(&mut flow.lease,flow.ack.as_ref().unwrap().clone(),ctx.config.clone())?;}flow.assigned=Some(Arc::new(Mutex::new(AssignedFreshProject::capture(flow.source.as_ref().unwrap().clone(),flow.lease.as_ref().unwrap().clone()))));
     ctx.kernel.assert_new_startup_off_app(work,cancel)?;
     flow.assigned.as_ref().unwrap().lock().unwrap_or_else(|p|p.into_inner()).adopt_retaining(work,cancel)
 }

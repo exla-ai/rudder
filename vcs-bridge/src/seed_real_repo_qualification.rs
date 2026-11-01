@@ -165,7 +165,7 @@ fn run(c:&mut Capsule,root:&Path,report:&mut Value)->Result<()> {
     let(d,_,_)=read_paged_seed(&f.store,&next.seed_root,||Ok(()))?;
     let cow_clock=budget();measured(report,"two-logical-private-metadata-CoW-views-original30s",|_phase_report|{
         let manager=VfsManager::open(root.join("logical-cow"),f.store.clone())?;manager.prepare_paged(&d.private)?;
-        for n in ["a","b"]{let start=Instant::now();c.views.push(manager.fork_paged(&format!("qualification-{n}"),&d.private,OwnerEpoch{owner:"fixture-logical-cow".into(),epoch:1})?);_phase_report["forks"].as_array_mut().unwrap().push(json!({"id":n,"elapsed_ms":start.elapsed().as_secs_f64()*1000.0}));cow_clock.remaining()?;}
+        for n in ["a","b"]{let id=uuid::Uuid::new_v4().to_string();let start=Instant::now();c.views.push(manager.fork_paged(&id,&d.private,OwnerEpoch{owner:"fixture-logical-cow".into(),epoch:1})?);_phase_report["forks"].as_array_mut().unwrap().push(json!({"id":id,"label":n,"elapsed_ms":start.elapsed().as_secs_f64()*1000.0}));cow_clock.remaining()?;}
         let a=&c.views[0];let b=&c.views[1];let ai=lookup(a,&[b".git",b"HEAD"]);let bi=lookup(b,&[b".git",b"HEAD"]);let original=b.read(bi,0,128)?;
         let handle=a.open_handle(ai,libc::O_RDWR,false)?;a.write(ai,0,b"PRIVATE-A\n",true)?;a.close_handle(ai,handle)?;ensure!(b.read(bi,0,128)?==original,"private A write crossed into B");
         let handle=b.open_handle(bi,libc::O_RDWR,false)?;b.write(bi,0,b"PRIVATE-B\n",true)?;b.close_handle(bi,handle)?;ensure!(a.read(ai,0,128)?.starts_with(b"PRIVATE-A\n")&&b.read(bi,0,128)?.starts_with(b"PRIVATE-B\n"),"two private writes lost isolation");

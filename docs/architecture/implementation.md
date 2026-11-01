@@ -19,8 +19,17 @@ After that integration, engine/VFS 241 passed 385 with zero failures and 13 igno
 native source-owner 242 passed 9, and VCS/projection 243 passed 57 with five ignored.
 The full native binary 220 passed 1,306 with zero failures and 21 ignored before
 these last changes. The complete release matrix must qualify the final versioned
-source before publication. Full repository cold preparation passed 11.70s, but
-accepted/warm reuse remains under qualification; this is not agent launch time.
+source before publication. Full repository run 245 passed cold preparation,
+accepted edits, unchanged warm reuse and two private logical CoW views. Cold was
+10.73s, acceptance 3.31s and warm reuse 46.8ms with zero seed file payload reads.
+The two logical forks took 14.6/15.9ms. This is not Cloud agent launch latency.
+
+Alpha.29 candidate `05eef52` failed its release check before publication: both
+Mac builds found three comparisons between captured u32 modes and Darwin's
+u16 file-type constants. Linux native compilation passed. The lossless u32
+normalization passed 27 focused seed tests with three large fixtures ignored;
+the next complete release candidate is alpha.30. Alpha.29's tag stays local and
+unchanged. Origin/main, npm and the production deployment still contain alpha.28.
 
 The real S3/OIDC cache probe and all three physical Root FUSE metadata component
 tests pass, with original child/IO settlement and exact local/VM cleanup. The new

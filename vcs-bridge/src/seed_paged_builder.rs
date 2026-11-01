@@ -72,7 +72,7 @@ impl PagedSeedGeneration{
         if metadata&&matches!(name,".jj/repo/store/git_target"|".git/HEAD"|".git/config"){return Ok(())}
         let before=version(p)?;let output=if metadata{format!("metadata/{name}")}else if name.is_empty(){"objects".into()}else{format!("objects/{name}")};path(&output)?;
         ensure!(self.versions.len()<=V2_MAX_FILES*3,"paged source namespace exceeded");
-        if before.mode&libc::S_IFMT==libc::S_IFDIR{let mut children=fs::read_dir(p)?.collect::<std::io::Result<Vec<_>>>()?;
+        if before.mode&u32::from(libc::S_IFMT)==u32::from(libc::S_IFDIR){let mut children=fs::read_dir(p)?.collect::<std::io::Result<Vec<_>>>()?;
             ensure!(children.len()<=V2_MAX_FILES,"paged source directory exceeded");children.sort_by_key(|e|e.file_name());
             for e in children{self.collect(&e.path(),&relative.join(e.file_name()),metadata,sanitize,check)?}}
         else{ensure!(self.records.len()<V2_MAX_FILES&&before.len<=V2_MAX_FILE_BYTES,"paged seed file bound exceeded");

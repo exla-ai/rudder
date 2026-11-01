@@ -39,7 +39,7 @@ impl RetainedSeedCasCache {
         ensure!(root.is_absolute() && root.canonicalize()?==root,"seed source root redirects");
         internal_git_directory(root)?;
         let directory=OpenOptions::new().read(true).custom_flags(libc::O_DIRECTORY|libc::O_NOFOLLOW|libc::O_CLOEXEC).open(root)?;
-        let v=version(root)?;ensure!(v.mode&libc::S_IFMT==libc::S_IFDIR,"seed source root is not a directory");
+        let v=version(root)?;ensure!(v.mode&u32::from(libc::S_IFMT)==u32::from(libc::S_IFDIR),"seed source root is not a directory");
         let held=Arc::new(Self {root:root.into(),directory,id:(v.dev,v.ino),store,snapshot:Mutex::new(None),profile,paged_snapshot:Mutex::new(None)});
         held.check_current()?;Ok(held)
     }
@@ -118,7 +118,7 @@ impl SeedCasGeneration {
         self.entries+=1;ensure!(self.entries<=MAX_SEED_ENTRIES,"seed source namespace exceeds small profile");
         let output=if metadata{format!("metadata/{name}")}else if name.is_empty(){"objects".into()}else{format!("objects/{name}")};
         small_path(&output)?;
-        if before.mode&libc::S_IFMT==libc::S_IFDIR {
+        if before.mode&u32::from(libc::S_IFMT)==u32::from(libc::S_IFDIR) {
             let mut children=fs::read_dir(path)?.collect::<std::io::Result<Vec<_>>>()?;
             children.sort_by_key(|e|e.file_name());
             ensure!(children.len()+self.files.len()<=MAX_SEED_FILES,"seed namespace exceeds small profile");

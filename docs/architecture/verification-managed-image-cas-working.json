@@ -191,6 +191,19 @@
       },
       "receiptSha256": "5e6b586fab808cd4f00987d5c62deab5801047f37fb83a611f43998b28c5d11f",
       "logSha256": "40c68d0e4706004b4e121b3137a90c60c3c3ed9d65fa744740bf7d46ed5d4d52"
+    },
+    {
+      "check": "managed-main246-darwin-portable-seeds",
+      "completedAt": "2026-11-01T14:44:20.172250+00:00",
+      "exitCode": 0,
+      "elapsedSeconds": 48.594,
+      "tests": {
+        "passed": 27,
+        "failed": 0,
+        "ignored": 3
+      },
+      "receiptSha256": "0b2309fe53a0c6406062dd41abccdf226cfeaeaae8cf6c53515202e928596b3a",
+      "logSha256": "ccf114866fbfbcc25fd16be9867c35feab96f5fe1cf1a40bdbe9770b58cd1e4e"
     }
   ],
   "sourceFiles": {
@@ -206,25 +219,114 @@
   },
   "notClaimed": [
     "default managed runtime enablement",
-    "accepted/warm source path and end-to-end launch performance; release cold238 passed11.70s, accepted reuse failed",
     "compiler execution/cache hits",
     "real models",
     "complete v4",
-    "installed full-image VFS qualification and executable runtime grant"
+    "installed full-image VFS qualification and executable runtime grant",
+    "production agent launch latency, physical cache/disk-read counters and 50-agent throughput"
   ],
   "repositoryReleaseBenchmark": {
-    "check": "managed-main238-real-repo-packed-release",
-    "reportSha256": "256b458273db2b97cf6543bc66388bd095b3f7ca6376001655530aa49f7c8c74",
-    "qualified": false,
-    "cold": {
-      "elapsed_ms": 11701.726751,
-      "error": null,
-      "name": "actual-initial-source-original30s",
-      "passed": true
-    },
-    "failedPhase": "actual-accepted-source-original30s",
-    "error": "unchanged frozen leaves failed real previous-record reuse",
-    "actualHistory": {
+    "check": "managed-main245",
+    "reportSha256": "73732ab9c97dd1f8ad50a1bd49202a0fccfc883f44763a8fda0b5ab62aac53a2",
+    "qualified": true,
+    "scope": "actual-local-source-producer-and-logical-CoW-component-only",
+    "error": null,
+    "phase": "complete",
+    "originalProductionPhaseMilliseconds": 30000,
+    "deadlinesRaised": false,
+    "phases": [
+      {
+        "elapsed_ms": 354.477506,
+        "error": null,
+        "name": "setup-copy-exact-frozen-source-and-owned-repository",
+        "passed": true
+      },
+      {
+        "elapsed_ms": 5711.775966,
+        "error": null,
+        "name": "setup-genuine-history-cohort-0",
+        "passed": true
+      },
+      {
+        "elapsed_ms": 6049.4135240000005,
+        "error": null,
+        "name": "setup-genuine-history-cohort-1",
+        "passed": true
+      },
+      {
+        "elapsed_ms": 5683.45864,
+        "error": null,
+        "name": "setup-genuine-history-cohort-2",
+        "passed": true
+      },
+      {
+        "elapsed_ms": 6226.570016000001,
+        "error": null,
+        "name": "setup-genuine-history-cohort-3",
+        "passed": true
+      },
+      {
+        "elapsed_ms": 3814.3960620000003,
+        "error": null,
+        "name": "setup-import-exact-frozen-source",
+        "passed": true
+      },
+      {
+        "elapsed_ms": 1943.6627070000002,
+        "error": null,
+        "name": "setup-final-owned-frozen-HEAD",
+        "passed": true
+      },
+      {
+        "elapsed_ms": 10729.426757000001,
+        "error": null,
+        "name": "actual-initial-source-original30s",
+        "passed": true
+      },
+      {
+        "elapsed_ms": 27.58664,
+        "error": null,
+        "name": "inspect-actual-cold-seed-data",
+        "passed": true
+      },
+      {
+        "elapsed_ms": 2404.6313800000003,
+        "error": null,
+        "name": "verify-actual-target-logical-history-and-pack-checksums",
+        "passed": true
+      },
+      {
+        "elapsed_ms": 22.294596,
+        "error": null,
+        "name": "capture-actual-accepted-FileIds-and-inode-witnesses",
+        "passed": true
+      },
+      {
+        "elapsed_ms": 1467.335966,
+        "error": null,
+        "name": "actual-prior-record-materialization",
+        "passed": true
+      },
+      {
+        "elapsed_ms": 3309.0949849999997,
+        "error": null,
+        "name": "actual-accepted-source-original30s",
+        "passed": true
+      },
+      {
+        "elapsed_ms": 46.818379,
+        "error": null,
+        "name": "actual-unchanged-warm-generation-original30s",
+        "passed": true
+      },
+      {
+        "elapsed_ms": 385.892065,
+        "error": null,
+        "name": "two-logical-private-metadata-CoW-views-original30s",
+        "passed": true
+      }
+    ],
+    "history": {
       "index_and_pack_checksums_verified": true,
       "logical_git_objects": 15031,
       "packs": 3,
@@ -239,20 +341,46 @@
       "reused_files": 0,
       "scope": "actual-seed-producer-counters-not-physical-disk-cache"
     },
+    "acceptedSeedWork": {
+      "read_bytes": 26155,
+      "read_files": 12,
+      "reused_files": 35,
+      "scope": "actual-seed-producer-counters-not-physical-disk-cache"
+    },
     "acceptedProjectionWork": {
-      "cas_content_bytes": 513128,
+      "cas_content_bytes": 55849,
       "cas_metadata_bytes": 722334,
       "cas_metadata_reads": 840,
-      "git_blob_bytes_submitted": 513128,
-      "jj_buffer_bytes_admitted": 1026256,
+      "git_blob_bytes_submitted": 55849,
+      "jj_buffer_bytes_admitted": 111698,
       "jj_entries_visited": 2011,
       "plan_metadata_bytes_admitted": 1294061,
-      "reused_leaf_values": 1907,
+      "reused_leaf_values": 2010,
       "source_entries_visited": 2290
     },
-    "scope": "actual-local-source-producer-and-logical-CoW-component-only",
-    "originalProductionPhaseMilliseconds": 30000,
-    "deadlinesRaised": false
+    "warmSeedWork": {
+      "read_bytes": 0,
+      "read_files": 0,
+      "reused_files": 47,
+      "scope": "actual-seed-producer-counters-not-physical-disk-cache"
+    },
+    "unchangedFileIdAndStampWitnesses": 2010,
+    "logicalForks": [
+      {
+        "elapsed_ms": 14.618577,
+        "id": "4e04bfd2-6322-4172-abbc-9be19e81a7ca",
+        "label": "a"
+      },
+      {
+        "elapsed_ms": 15.895172999999998,
+        "id": "0ebde992-baab-411c-b703-a3f636f98fbf",
+        "label": "b"
+      }
+    ],
+    "productionAgentLaunchQualified": false,
+    "physicalCacheCounters": false,
+    "sourceSnapshotSha256": "ead84a7d47dfc8e799125593b9f3dd0b6ef69bb95e70f9d4ceff51835511ecd0",
+    "sourceScope": "05eef52 production source plus test-only UUID correction; source snapshot verified before later Darwin casts"
   },
   "bakedImageBuild": {
     "scope": "build-only immutable image CAS; native successor retains original Git import carrier; no execution/admission claim",
@@ -319,5 +447,364 @@
     "installedFullTreeVerified": false,
     "sourceIncludesReadonlyVfs": false
   },
-  "recordedAt": "2026-11-01T14:28:05.188194+00:00"
+  "recordedAt": "2026-11-01T14:44:03.212693+00:00",
+  "repositoryReleaseAttempts": [
+    {
+      "check": "managed-main238-real-repo-packed-release",
+      "reportSha256": "256b458273db2b97cf6543bc66388bd095b3f7ca6376001655530aa49f7c8c74",
+      "qualified": false,
+      "cold": {
+        "elapsed_ms": 11701.726751,
+        "error": null,
+        "name": "actual-initial-source-original30s",
+        "passed": true
+      },
+      "failedPhase": "actual-accepted-source-original30s",
+      "error": "unchanged frozen leaves failed real previous-record reuse",
+      "actualHistory": {
+        "index_and_pack_checksums_verified": true,
+        "logical_git_objects": 15031,
+        "packs": 3,
+        "physical_pack_bytes": 168758714,
+        "raw_object_ids_verified": true,
+        "scope": "actual target pack/index and object-reader verification; no physical-cache counter claim",
+        "verified_object_preimage_bytes": 175297296
+      },
+      "coldSeedWork": {
+        "read_bytes": 169185310,
+        "read_files": 37,
+        "reused_files": 0,
+        "scope": "actual-seed-producer-counters-not-physical-disk-cache"
+      },
+      "acceptedProjectionWork": {
+        "cas_content_bytes": 513128,
+        "cas_metadata_bytes": 722334,
+        "cas_metadata_reads": 840,
+        "git_blob_bytes_submitted": 513128,
+        "jj_buffer_bytes_admitted": 1026256,
+        "jj_entries_visited": 2011,
+        "plan_metadata_bytes_admitted": 1294061,
+        "reused_leaf_values": 1907,
+        "source_entries_visited": 2290
+      },
+      "scope": "actual-local-source-producer-and-logical-CoW-component-only",
+      "originalProductionPhaseMilliseconds": 30000,
+      "deadlinesRaised": false
+    },
+    {
+      "check": "managed-main244",
+      "reportSha256": "e907a9d796c9d364ee2b84eda8fb5d728a1a3622098a93ddf537efa0f69ea00f",
+      "qualified": false,
+      "scope": "actual-local-source-producer-and-logical-CoW-component-only",
+      "error": "view id must be a UUID",
+      "phase": "two-logical-private-metadata-CoW-views-original30s",
+      "originalProductionPhaseMilliseconds": 30000,
+      "deadlinesRaised": false,
+      "phases": [
+        {
+          "elapsed_ms": 355.21532099999996,
+          "error": null,
+          "name": "setup-copy-exact-frozen-source-and-owned-repository",
+          "passed": true
+        },
+        {
+          "elapsed_ms": 5641.9369369999995,
+          "error": null,
+          "name": "setup-genuine-history-cohort-0",
+          "passed": true
+        },
+        {
+          "elapsed_ms": 6049.226077,
+          "error": null,
+          "name": "setup-genuine-history-cohort-1",
+          "passed": true
+        },
+        {
+          "elapsed_ms": 5394.737136,
+          "error": null,
+          "name": "setup-genuine-history-cohort-2",
+          "passed": true
+        },
+        {
+          "elapsed_ms": 6830.713394,
+          "error": null,
+          "name": "setup-genuine-history-cohort-3",
+          "passed": true
+        },
+        {
+          "elapsed_ms": 4154.723913,
+          "error": null,
+          "name": "setup-import-exact-frozen-source",
+          "passed": true
+        },
+        {
+          "elapsed_ms": 1910.745023,
+          "error": null,
+          "name": "setup-final-owned-frozen-HEAD",
+          "passed": true
+        },
+        {
+          "elapsed_ms": 11474.524026,
+          "error": null,
+          "name": "actual-initial-source-original30s",
+          "passed": true
+        },
+        {
+          "elapsed_ms": 29.400059,
+          "error": null,
+          "name": "inspect-actual-cold-seed-data",
+          "passed": true
+        },
+        {
+          "elapsed_ms": 2265.103094,
+          "error": null,
+          "name": "verify-actual-target-logical-history-and-pack-checksums",
+          "passed": true
+        },
+        {
+          "elapsed_ms": 15.322455,
+          "error": null,
+          "name": "capture-actual-accepted-FileIds-and-inode-witnesses",
+          "passed": true
+        },
+        {
+          "elapsed_ms": 1272.3091069999998,
+          "error": null,
+          "name": "actual-prior-record-materialization",
+          "passed": true
+        },
+        {
+          "elapsed_ms": 3397.597336,
+          "error": null,
+          "name": "actual-accepted-source-original30s",
+          "passed": true
+        },
+        {
+          "elapsed_ms": 32.720111,
+          "error": null,
+          "name": "actual-unchanged-warm-generation-original30s",
+          "passed": true
+        },
+        {
+          "elapsed_ms": 308.348792,
+          "error": "view id must be a UUID",
+          "name": "two-logical-private-metadata-CoW-views-original30s",
+          "passed": false
+        }
+      ],
+      "history": {
+        "index_and_pack_checksums_verified": true,
+        "logical_git_objects": 15031,
+        "packs": 3,
+        "physical_pack_bytes": 168758714,
+        "raw_object_ids_verified": true,
+        "scope": "actual target pack/index and object-reader verification; no physical-cache counter claim",
+        "verified_object_preimage_bytes": 175297296
+      },
+      "coldSeedWork": {
+        "read_bytes": 169185310,
+        "read_files": 37,
+        "reused_files": 0,
+        "scope": "actual-seed-producer-counters-not-physical-disk-cache"
+      },
+      "acceptedSeedWork": {
+        "read_bytes": 26155,
+        "read_files": 12,
+        "reused_files": 35,
+        "scope": "actual-seed-producer-counters-not-physical-disk-cache"
+      },
+      "acceptedProjectionWork": {
+        "cas_content_bytes": 55849,
+        "cas_metadata_bytes": 722334,
+        "cas_metadata_reads": 840,
+        "git_blob_bytes_submitted": 55849,
+        "jj_buffer_bytes_admitted": 111698,
+        "jj_entries_visited": 2011,
+        "plan_metadata_bytes_admitted": 1294061,
+        "reused_leaf_values": 2010,
+        "source_entries_visited": 2290
+      },
+      "warmSeedWork": {
+        "read_bytes": 0,
+        "read_files": 0,
+        "reused_files": 47,
+        "scope": "actual-seed-producer-counters-not-physical-disk-cache"
+      },
+      "unchangedFileIdAndStampWitnesses": 2010,
+      "logicalForks": [],
+      "productionAgentLaunchQualified": false,
+      "physicalCacheCounters": false
+    },
+    {
+      "check": "managed-main245",
+      "reportSha256": "73732ab9c97dd1f8ad50a1bd49202a0fccfc883f44763a8fda0b5ab62aac53a2",
+      "qualified": true,
+      "scope": "actual-local-source-producer-and-logical-CoW-component-only",
+      "error": null,
+      "phase": "complete",
+      "originalProductionPhaseMilliseconds": 30000,
+      "deadlinesRaised": false,
+      "phases": [
+        {
+          "elapsed_ms": 354.477506,
+          "error": null,
+          "name": "setup-copy-exact-frozen-source-and-owned-repository",
+          "passed": true
+        },
+        {
+          "elapsed_ms": 5711.775966,
+          "error": null,
+          "name": "setup-genuine-history-cohort-0",
+          "passed": true
+        },
+        {
+          "elapsed_ms": 6049.4135240000005,
+          "error": null,
+          "name": "setup-genuine-history-cohort-1",
+          "passed": true
+        },
+        {
+          "elapsed_ms": 5683.45864,
+          "error": null,
+          "name": "setup-genuine-history-cohort-2",
+          "passed": true
+        },
+        {
+          "elapsed_ms": 6226.570016000001,
+          "error": null,
+          "name": "setup-genuine-history-cohort-3",
+          "passed": true
+        },
+        {
+          "elapsed_ms": 3814.3960620000003,
+          "error": null,
+          "name": "setup-import-exact-frozen-source",
+          "passed": true
+        },
+        {
+          "elapsed_ms": 1943.6627070000002,
+          "error": null,
+          "name": "setup-final-owned-frozen-HEAD",
+          "passed": true
+        },
+        {
+          "elapsed_ms": 10729.426757000001,
+          "error": null,
+          "name": "actual-initial-source-original30s",
+          "passed": true
+        },
+        {
+          "elapsed_ms": 27.58664,
+          "error": null,
+          "name": "inspect-actual-cold-seed-data",
+          "passed": true
+        },
+        {
+          "elapsed_ms": 2404.6313800000003,
+          "error": null,
+          "name": "verify-actual-target-logical-history-and-pack-checksums",
+          "passed": true
+        },
+        {
+          "elapsed_ms": 22.294596,
+          "error": null,
+          "name": "capture-actual-accepted-FileIds-and-inode-witnesses",
+          "passed": true
+        },
+        {
+          "elapsed_ms": 1467.335966,
+          "error": null,
+          "name": "actual-prior-record-materialization",
+          "passed": true
+        },
+        {
+          "elapsed_ms": 3309.0949849999997,
+          "error": null,
+          "name": "actual-accepted-source-original30s",
+          "passed": true
+        },
+        {
+          "elapsed_ms": 46.818379,
+          "error": null,
+          "name": "actual-unchanged-warm-generation-original30s",
+          "passed": true
+        },
+        {
+          "elapsed_ms": 385.892065,
+          "error": null,
+          "name": "two-logical-private-metadata-CoW-views-original30s",
+          "passed": true
+        }
+      ],
+      "history": {
+        "index_and_pack_checksums_verified": true,
+        "logical_git_objects": 15031,
+        "packs": 3,
+        "physical_pack_bytes": 168758714,
+        "raw_object_ids_verified": true,
+        "scope": "actual target pack/index and object-reader verification; no physical-cache counter claim",
+        "verified_object_preimage_bytes": 175297296
+      },
+      "coldSeedWork": {
+        "read_bytes": 169185310,
+        "read_files": 37,
+        "reused_files": 0,
+        "scope": "actual-seed-producer-counters-not-physical-disk-cache"
+      },
+      "acceptedSeedWork": {
+        "read_bytes": 26155,
+        "read_files": 12,
+        "reused_files": 35,
+        "scope": "actual-seed-producer-counters-not-physical-disk-cache"
+      },
+      "acceptedProjectionWork": {
+        "cas_content_bytes": 55849,
+        "cas_metadata_bytes": 722334,
+        "cas_metadata_reads": 840,
+        "git_blob_bytes_submitted": 55849,
+        "jj_buffer_bytes_admitted": 111698,
+        "jj_entries_visited": 2011,
+        "plan_metadata_bytes_admitted": 1294061,
+        "reused_leaf_values": 2010,
+        "source_entries_visited": 2290
+      },
+      "warmSeedWork": {
+        "read_bytes": 0,
+        "read_files": 0,
+        "reused_files": 47,
+        "scope": "actual-seed-producer-counters-not-physical-disk-cache"
+      },
+      "unchangedFileIdAndStampWitnesses": 2010,
+      "logicalForks": [
+        {
+          "elapsed_ms": 14.618577,
+          "id": "4e04bfd2-6322-4172-abbc-9be19e81a7ca",
+          "label": "a"
+        },
+        {
+          "elapsed_ms": 15.895172999999998,
+          "id": "0ebde992-baab-411c-b703-a3f636f98fbf",
+          "label": "b"
+        }
+      ],
+      "productionAgentLaunchQualified": false,
+      "physicalCacheCounters": false,
+      "sourceSnapshotSha256": "ead84a7d47dfc8e799125593b9f3dd0b6ef69bb95e70f9d4ceff51835511ecd0",
+      "sourceScope": "05eef52 production source plus test-only UUID correction; source snapshot verified before later Darwin casts"
+    }
+  ],
+  "releaseCheckAlpha29": {
+    "revision": "05eef52a042a2a89ab2c215113a73ce4307e3ca2",
+    "run": 41316682904,
+    "url": "https://github.com/exla-ai/rudder/actions/runs/41316682904",
+    "conclusion": "failure",
+    "linuxNative": "success",
+    "darwinArm64": "failure",
+    "darwinX64": "failure",
+    "cause": "three captured u32 mode comparisons use Darwin u16 mode_t constants",
+    "armJobLogSha256": "60320aeb6255ea9fc78da94a04ba7ef8322cb11c3ad6d21e245964d7367a28e0",
+    "published": false,
+    "tagChanged": false,
+    "fix": "u32::from for platform file-type constants; local246 passes, freshfullmatrix required"
+  }
 }

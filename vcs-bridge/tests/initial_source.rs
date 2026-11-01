@@ -12,7 +12,11 @@ struct Fixture { _temp: tempfile::TempDir, source: gix::Repository, store: Local
 impl Fixture {
  fn new() -> Self {
     let temp = tempfile::tempdir().unwrap();
-    let source = gix::init_bare(temp.path().join("source.git")).unwrap();
+    // macOS temp roots may use /var, an alias of /private/var. Production
+    // requires canonical managed paths; resolve the fixture root before
+    // deriving either existing or not-yet-created destinations.
+    let root = temp.path().canonicalize().unwrap();
+    let source = gix::init_bare(root.join("source.git")).unwrap();
     let raw = |kind, bytes: &[u8]| source.objects.write_stream(kind, bytes.len() as u64, &mut &bytes[..]).unwrap();
     let blob = raw(Kind::Blob, b"exact accepted bytes $Format:%H$\n");
     let link = raw(Kind::Blob, b"tracked");
@@ -30,13 +34,13 @@ impl Fixture {
     };
     let parent = make_commit(None); let head = make_commit(Some(parent));
     fs::write(source.path().join("HEAD"),format!("{head}\n")).unwrap();
-    let store = LocalStore::open(temp.path().join("cas")).unwrap();
+    let store = LocalStore::open(root.join("cas")).unwrap();
     let empty = store.put_directory(DirectoryManifest {format_version:1,mode:0o755,entries:vec![]}).unwrap();
     let environment = store.put_metadata(ObjectKind::EnvironmentRoot,&EnvironmentV2 {format_version:2,directory:empty,
         platform:BTreeMap::from([("fixture_abi".into(),"linux-root-independent".into())]),installer_inputs:vec![],provenance:BTreeMap::new()}).unwrap();
     store.pin("environment",&environment).unwrap();
-    let private = temp.path().join("private");fs::create_dir(&private).unwrap();fs::set_permissions(&private,fs::Permissions::from_mode(0o700)).unwrap();
-    let seed=temp.path().join("seed");
+    let private = root.join("private");fs::create_dir(&private).unwrap();fs::set_permissions(&private,fs::Permissions::from_mode(0o700)).unwrap();
+    let seed=root.join("seed");
     Self {_temp:temp,source,store,private,seed,head:GitCommitId(head.to_string()),environment}
  }
  fn run(&self,budget:&FinalizationBudget,owner:impl FnMut()->anyhow::Result<()>) -> anyhow::Result<PreparedInitialSource> {
@@ -117,6 +121,28 @@ fn seed_destinations_inside_private_or_source_metadata_and_parent_aliases_are_re
   };
   assert!(f.run(&budget(),||Ok(())).is_err());
   assert!(!f.private.join(".jj").exists());assert!(!f.seed.exists());
+  assert_eq!(f.store.retention().unwrap().pins.len(),1);
+ }
+}
+
+#[test]
+fn private_directory_and_seed_parent_aliases_are_refused_before_initialization() {
+ for private_alias in [true, false] {
+  let mut f=Fixture::new();
+  let root=f._temp.path().canonicalize().unwrap();
+  let original_private=f.private.clone();
+  let alias=root.join("alias");
+  if private_alias {
+   std::os::unix::fs::symlink(&original_private,&alias).unwrap();
+   f.private=alias;
+  } else {
+   std::os::unix::fs::symlink(&root,&alias).unwrap();
+   f.seed=alias.join("seed");
+  }
+  let error=f.run(&budget(),||Ok(())).err().expect("aliases must be refused");
+  let expected=if private_alias {"fresh empty real directory"} else {"aliases or overlaps"};
+  assert!(error.to_string().contains(expected),"{error:#}");
+  assert!(!original_private.join(".jj").exists());assert!(!f.seed.exists());
   assert_eq!(f.store.retention().unwrap().pins.len(),1);
  }
 }

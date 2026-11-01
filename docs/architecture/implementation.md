@@ -512,6 +512,16 @@ including three actual socket/TLS/backlog regressions. The full Linux JS suite
 passes 822 tests with zero failures and 10 skipped. Alpha.26 must qualify these
 changes on the complete release matrix before publication.
 
+Alpha.26 passed all three native builds and the macOS JS suite, then failed
+three `initial_source` integration tests. Its temporary directory used an
+aliased ancestor, which the production source API correctly refuses. The same
+failure was reproduced on Linux with a symlinked TMPDIR. The fixture now
+canonicalizes its root before deriving destinations; all seven cases pass both
+normally and with that aliased TMPDIR. The added case verifies that explicit
+private-directory and seed-parent aliases are still refused before any jj
+initialization or new pin. Production validation is unchanged. Alpha.26 remains
+unpublished and undeployed; alpha.27 requires fresh complete qualification.
+
 Task startup/cleanup composition, Root IPC/image bootstrap and the actual
 connected model run remain activation gates. The profile loader currently accepts explicit API-key profiles only.
 Hosted ChatGPT subscription registration and OAuth refresh/writeback remain

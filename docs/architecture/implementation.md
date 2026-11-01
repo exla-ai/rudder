@@ -7,8 +7,11 @@ here is not deployment proof; record exact checks and delivery identities below.
 
 ## Current state, 2026-11-01
 
-The shipped release is alpha.28. Both npm `next` packages and Fly release175
-are verified in [the release evidence](verification-alpha28.json). The full v4
+The shipped Cloud release is alpha.33, Fly release176, product revision
+`50771f8964f4ad2e04ee9533be0d9db56b64da7b`. The primary npm `next` package
+passed fresh installation and executable checks. npm accepted the legacy alias,
+which remains in registry processing. [Release evidence](verification-alpha33.json)
+records those distinct facts and the unchanged original live home. The full v4
 rewrite remains incomplete. Entries below describe earlier checkpoints and
 unreleased work; their older version numbers are historical.
 
@@ -20,10 +23,11 @@ that assumed a 10ms releaser thread would close SQLite inside the original
 separated from post-release API semantics. Actual contention, original callback
 deadline decisions, marker/epoch refusal, restored ordinary policy and zero
 mutation remain checked. Run 271 passed all eight cases with normal parallel
-execution. Production startup policy is unchanged. The next candidate is alpha.33;
+execution. Production startup policy is unchanged. Alpha.33 subsequently passed
+all three native platforms and complete final-source release qualification;
 no alpha.29 through alpha.32 tag was pushed or retagged.
 
-The next uncommitted implementation connects the genuine optional Root runtime
+Alpha.33 connects the genuine optional Root runtime
 client to the original task barrier before the independent seed acknowledgment.
 It retains the same helper, clock and cancellation through off-App enrollment,
 App adoption and recovery. The inherited service FD snapshot occurs before any
@@ -41,8 +45,18 @@ retain actual pre-handoff proc descriptors and assert both descriptor CLOEXEC
 and unchanged protection. Focused run 275 passed all five handoff cases, then
 complete run 276 passed 2,365 tests with zero failures and 65 ignored across 65
 suites at 16:43:15Z. The original failed full run remains retained. These results
-qualify their stated local scopes and do not
-replace the next final-source macOS matrix or installed bootstrap qualification.
+qualify their stated local scopes. Final-source CI run41327838616 then passed
+the Linux, Apple Silicon and Intel macOS builds and full release qualification.
+Tag run41331075052 authenticated and reused those exact artifacts for npm.
+The actual stock worker smoke and deployed control checks are recorded in the
+alpha.33 evidence; configured runtime-floor qualification remains separate.
+
+The next uncommitted work adds retained local/baked preparation, shared index
+ownership, authenticated runtime backing transfer, and genuine backed initial
+source/export consumers. A separate runtime-role publisher and Native bridge
+are under qualification. These paths, task/successor integration, compiler SDK
+authority, restart recovery and normal runtime drain are not established by
+the alpha.33 delivery or its default-absent bootstrap smoke.
 
 The new compiler CAS producer passed all seven real Root0 Bookworm tests and
 baked the actual pinned 852MB A2 compiler artifact in 14.466s under its unchanged

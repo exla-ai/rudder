@@ -675,3 +675,6 @@ fn export_broker_fixture() {
     serde_json::to_writer(&mut file, &next).unwrap();
     fs::write(root.join("fixture.json"),serde_json::to_vec(&json!({"journal":root.join("journal.sqlite"),"a":f.socket.with_file_name("identity.json"),"b":b_file,"a_socket":f.socket,"b_socket":b_socket,"rotated_a":next_file})).unwrap()).unwrap();
 }
+
+// Same actual fixture/authority; separate bounded connection-admission regressions.
+include!("agent_broker_cancel_admission_tests.rs");

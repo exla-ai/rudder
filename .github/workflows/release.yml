@@ -145,6 +145,12 @@ jobs:
           npm ci --ignore-scripts
           node --test tests/board-capability.test.mjs tests/board-host-access.test.mjs
 
+      - name: Linux managed credential handoff
+        if: matrix.key == 'linux-x64'
+        run: |
+          node node_modules/typescript/bin/tsc -p tsconfig.json
+          node --test tests/managed-task-profile-handoff.test.mjs
+
       - name: Build native pair
         run: node scripts/build-native.mjs
 

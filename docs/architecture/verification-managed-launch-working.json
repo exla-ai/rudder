@@ -2,7 +2,7 @@
   "formatVersion": 1,
   "status": "unshipped working tree; integration in progress",
   "baseRevision": "4885ef6fdeb1992420bdda975dc9df6c198c421b",
-  "recordedAt": "2026-11-01T00:54:30.887671+00:00",
+  "recordedAt": "2026-11-01T01:38:30.211035+00:00",
   "fullV4Complete": false,
   "normalStartupChanged": false,
   "checks": {
@@ -159,6 +159,29 @@
       "completedAt": "2026-11-01T00:54:14.340710+00:00",
       "receiptSha256": "078ad7efe85d12749e80f838193c6b6505c181d10d7b9699f5f3e186ff4983b1",
       "scope": "Full compiled Linux engine and native library suites; ignored physical fixtures separately qualified where recorded"
+    },
+    "main-broker-cancel-admission88": {
+      "status": "passed",
+      "completedAt": "2026-11-01T01:33:34.161773+00:00",
+      "receiptSha256": "91ba08db34bc46fa181b6333608747af99077b1f6b91b4c6f53f905bfaebcb79",
+      "scope": "Actual broker saturation/TLS/backlog deadline regressions and existing broker tests",
+      "passed": 19,
+      "ignored": 1
+    },
+    "main-broker-fixed-cli89": {
+      "status": "passed",
+      "completedAt": "2026-11-01T01:34:22.002321+00:00",
+      "receiptSha256": "c53597fc599095b174662299d9ea126816ae7d2d070cdbb3f5158b1dc16e4fb2",
+      "scope": "Current normal native CLI build after broker fix"
+    },
+    "main-full-javascript90": {
+      "status": "passed",
+      "completedAt": "2026-11-01T01:37:18.347962+00:00",
+      "receiptSha256": "52ff6f5ee050a5882a7c98443969558e80d84027bc86f41dbfddeeef8ee7dfd5",
+      "scope": "Full Linux npm test against current patched native CLI; includes typecheck emission and all broker/profile integration cases",
+      "passed": 822,
+      "failed": 0,
+      "skipped": 10
     }
   },
   "earlierPrivateChecks": {
@@ -361,5 +384,20 @@
     },
     "evidence": "examples/execution/evidence/2026-11-01-root-storage-ipc/qualification.json",
     "remaining": "Production launcher + actual managed App/Spec3/backend run + typed actor-drain retirement + normal cleanup"
+  },
+  "releaseQualification": {
+    "alpha25": {
+      "revision": "c5ddbbbc3c5b1436509d0af460ca6e51079bfe32",
+      "runId": 41259050878,
+      "status": "failed before publication",
+      "nativeBuilds": "all three passed",
+      "javascript": {
+        "passed": 810,
+        "failed": 9,
+        "skipped": 11
+      }
+    },
+    "nextCandidate": "alpha26 with Linux-scoped pipe tests, portable metadata/refusal checks and bounded broker admission correction",
+    "productionVersion": "4.0.0-alpha.23"
   }
 }

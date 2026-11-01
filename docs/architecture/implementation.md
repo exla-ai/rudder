@@ -494,6 +494,24 @@ service/engine storage owners remained alive until VM teardown. The
 [Root IPC evidence](../../examples/execution/evidence/2026-11-01-root-storage-ipc/README.md)
 binds the frozen source, ELF, image, actual receipt and bounded harness.
 
+The first combined release candidate, alpha.25, remains unpublished. All three
+native builds passed, but macOS JS qualification failed eight pipe tests because
+the credential writer deliberately supports Linux while the fixture used Linux
+`os.pipe2`. Those integration cases now run in Linux CI; portable metadata and
+unsupported-host refusal remain macOS checks. A separate broker cancellation
+test exposed an eight-connection saturation/drop edge. Its correction must
+preserve bounded connects and actual worker/TLS ownership before a fresh release
+candidate is qualified. Alpha.25 images and the stock worker smoke passed, but
+neither image was deployed. Production remains alpha.23.
+
+The correction reserves the original eight broker connection slots before
+accept, keeps each slot/socket through actual worker/TLS join, and uses bounded
+nonblocking ordinary/cancellation connects. It adds no capacity/time and does
+not reinterpret an uncertain disconnect as busy. All 19 broker Rust tests pass,
+including three actual socket/TLS/backlog regressions. The full Linux JS suite
+passes 822 tests with zero failures and 10 skipped. Alpha.26 must qualify these
+changes on the complete release matrix before publication.
+
 Task startup/cleanup composition, Root IPC/image bootstrap and the actual
 connected model run remain activation gates. The profile loader currently accepts explicit API-key profiles only.
 Hosted ChatGPT subscription registration and OAuth refresh/writeback remain

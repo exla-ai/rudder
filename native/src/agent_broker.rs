@@ -282,12 +282,13 @@ struct Inner {
     directory: Arc<WorkDirectory>,
     current: Mutex<Option<Arc<Snapshot>>>,
     active: Mutex<BTreeMap<String, Arc<AtomicBool>>>,
-    connections: Mutex<BTreeMap<u64, UnixStream>>,
-    count: AtomicUsize,
+    connections: Arc<Mutex<BTreeMap<u64, UnixStream>>>,
+    count: Arc<AtomicUsize>,
     sequence: AtomicU64,
     stopped: AtomicBool,
     closed: AtomicBool,
     owned_calls: Option<Arc<OwnedBrokerCalls>>,
+    requests: Arc<OwnedBrokerCalls>,
     #[cfg(test)]
     api_probe: Mutex<Option<owned_thread_tests::ApiProbe>>,
 }
@@ -427,18 +428,23 @@ impl AgentBroker {
         private_directory(&private)?;
         let private = private.join(uuid::Uuid::new_v4().to_string());
         private_directory(&private)?;
+        // Every broker retains actual request workers through TLS. The
+        // optional source owner additionally retains nested API-worker drain.
+        let requests = owner.as_ref().map(|owner|Arc::clone(&owner.calls))
+            .unwrap_or_else(||Arc::new(OwnedBrokerCalls::new()));
         let inner = Arc::new(Inner {
             config: config.clone(),
             binding: BrokerBinding::from(&identity),
             directory: Arc::new(WorkDirectory(private)),
             current: Mutex::new(None),
             active: Mutex::new(BTreeMap::new()),
-            connections: Mutex::new(BTreeMap::new()),
-            count: AtomicUsize::new(0),
+            connections: Arc::new(Mutex::new(BTreeMap::new())),
+            count: Arc::new(AtomicUsize::new(0)),
             sequence: AtomicU64::new(0),
             stopped: AtomicBool::new(false),
             closed: AtomicBool::new(false),
-            owned_calls: owner.as_ref().map(|owner| Arc::clone(&owner.calls)),
+            owned_calls: owner.as_ref().map(|_| Arc::clone(&requests)),
+            requests,
             #[cfg(test)]
             api_probe: Mutex::new(None),
         });
@@ -467,31 +473,33 @@ impl AgentBroker {
         let metadata = fs::symlink_metadata(&config.socket_path)?;
         let owned = (metadata.dev(), metadata.ino());
         listener.set_nonblocking(true)?;
+        // Fixed kernel backlog, not an unbounded userspace admission queue.
+        ensure!(unsafe { libc::listen(listener.as_raw_fd(), MAX_CONNECTIONS as libc::c_int) } == 0,
+            "agent broker bounded listen backlog unavailable");
         let worker = inner.clone();
         let acceptor = std::thread::Builder::new()
             .name("rudder-agent-broker".into())
             .spawn(move || {
                 let _ownership = ownership;
                 while !worker.stopped.load(Ordering::Relaxed) {
-                    if let Some(calls) = &worker.owned_calls {
-                        match calls.reap_finished() {
-                            Ok(true) => {}
-                            Ok(false) => {
-                                // TLS/unjoined handlers still own every slot.
-                                // Leave new connections in the bounded backlog.
-                                std::thread::sleep(Duration::from_millis(5));
-                                continue;
-                            }
-                            Err(_) => { worker.stop(); break; }
+                    match worker.requests.reap_finished() {
+                        Ok(true) => {}
+                        Ok(false) => {
+                            // Four calls plus four cancellation controls may
+                            // still own all eight slots after MCP replies. Do
+                            // not accept/drop a ninth valid request as EOF.
+                            std::thread::sleep(Duration::from_millis(5));continue;
                         }
+                        Err(_) => { worker.stop();break; }
+                    }
+                    // Reserve BEFORE accepting. No saturated request socket
+                    // is consumed and dropped without a protocol response.
+                    if worker.count.fetch_update(Ordering::AcqRel,Ordering::Acquire,
+                        |count|(count<MAX_CONNECTIONS).then_some(count+1)).is_err() {
+                        std::thread::sleep(Duration::from_millis(5));continue;
                     }
                     match listener.accept() {
                         Ok((stream, _)) => {
-                            if worker.count.fetch_add(1, Ordering::Relaxed) >= MAX_CONNECTIONS {
-                                worker.count.fetch_sub(1, Ordering::Relaxed);
-                                drop(stream);
-                                continue;
-                            }
                             let id = worker.sequence.fetch_add(1, Ordering::Relaxed);
                             let clone = match stream.try_clone() {
                                 Ok(clone) => clone,
@@ -506,34 +514,25 @@ impl AgentBroker {
                                 worker.count.fetch_sub(1, Ordering::Relaxed);
                                 continue;
                             }
+                            let admission = ConnectionAdmission { id, connections:worker.connections.clone(),count:worker.count.clone() };
                             let connection = worker.clone();
                             let spawned = std::thread::Builder::new()
                                 .name("rudder-agent-call".into())
-                                .spawn(move || {
-                                    connection_call(&connection, stream);
-                                    if let Ok(mut connections) = connection.connections.lock() {
-                                        connections.remove(&id);
-                                    }
-                                    connection.count.fetch_sub(1, Ordering::Relaxed);
-                                });
+                                .spawn(move || { connection_call(&connection, stream); });
                             match spawned {
                                 Ok(handle) => {
-                                    if let Some(calls) = &worker.owned_calls {
-                                        // The sole acceptor reserved capacity above.
-                                        // Poison still retains this new actual handle.
-                                        if !calls.track(handle) { worker.stop(); }
-                                    }
+                                    // The sole acceptor reserved a fixed cell.
+                                    // Only actual join/TLS can release admission.
+                                    if !worker.requests.track_connection(handle,admission) { worker.stop(); }
                                 }
-                                Err(_) => {
-                                    if let Ok(mut connections) = worker.connections.lock() { connections.remove(&id); }
-                                    worker.count.fetch_sub(1, Ordering::Relaxed);
-                                }
+                                Err(_) => { if !admission.release() { worker.stop(); } }
                             }
                         }
                         Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                            worker.count.fetch_sub(1,Ordering::Release);
                             std::thread::sleep(Duration::from_millis(5))
                         }
-                        Err(_) => break,
+                        Err(_) => { worker.count.fetch_sub(1,Ordering::Release);break; },
                     }
                 }
                 worker.stop();
@@ -543,6 +542,9 @@ impl AgentBroker {
                 {
                     let _ = fs::remove_file(&worker.config.socket_path);
                 }
+                // Off App, including legacy brokers. Preserve every original
+                // request handle/admission until actual join, including TLS.
+                worker.requests.join_remaining();
                 worker.closed.store(true, Ordering::Relaxed);
             })?;
         if let Some(owner) = owner { owner.acceptor = Some(acceptor); }
@@ -581,8 +583,33 @@ impl Drop for AgentBroker {
 // acceptor reaps before admission, so sequential requests have no lifetime cap.
 const MAX_OWNED_UNJOINED: usize = MAX_CONNECTIONS;
 type BrokerPanic = Box<dyn std::any::Any + Send + 'static>;
+// No Drop release: a callback return/guard drop is not thread settlement.
+struct ConnectionAdmission {
+    id:u64, connections:Arc<Mutex<BTreeMap<u64,UnixStream>>>, count:Arc<AtomicUsize>,
+}
+impl ConnectionAdmission {
+    fn release(self)->bool {
+        let clean=match self.connections.lock() {
+            Ok(mut connections)=>{ connections.remove(&self.id);true }
+            Err(poison)=>{ poison.into_inner().remove(&self.id);false }
+        };
+        self.count.fetch_sub(1,Ordering::Release);clean
+    }
+}
+struct OwnedConnectionWorker {
+    worker:std::thread::JoinHandle<()>, admission:Option<ConnectionAdmission>,
+}
+impl OwnedConnectionWorker {
+    fn is_finished(&self)->bool { self.worker.is_finished() } // selector only
+    fn join(self,calls:&OwnedBrokerCalls)->std::thread::Result<()> {
+        let Self {worker,admission}=self;
+        let result=worker.join(); // ORIGINAL worker, through all TLS teardown
+        if let Some(admission)=admission { if !admission.release() { calls.uncertain.store(true,Ordering::Release); } }
+        result
+    }
+}
 struct OwnedBrokerCalls {
-    handles: Mutex<Vec<std::thread::JoinHandle<()>>>,
+    handles: Mutex<Vec<OwnedConnectionWorker>>,
     uncertain: AtomicBool,
     // Retain panic payloads rather than running arbitrary payload Drop while
     // other request handles are being joined. A panic stops further admission;
@@ -598,7 +625,7 @@ impl OwnedBrokerCalls {
         self.uncertain.store(true, Ordering::Release);
         self.panics.lock().unwrap_or_else(|p|p.into_inner()).push(payload);
     }
-    fn handles(&self) -> std::sync::MutexGuard<'_, Vec<std::thread::JoinHandle<()>>> {
+    fn handles(&self) -> std::sync::MutexGuard<'_, Vec<OwnedConnectionWorker>> {
         self.handles.lock().unwrap_or_else(|poison| {
             self.uncertain.store(true, Ordering::Release);
             poison.into_inner()
@@ -618,7 +645,7 @@ impl OwnedBrokerCalls {
                     None => return Ok(handles.len() < MAX_OWNED_UNJOINED),
                 }
             };
-            if let Err(payload) = candidate.join() {
+            if let Err(payload) = candidate.join(self) {
                 self.record_panic(payload);
                 anyhow::bail!("reaped broker handler panicked; explicit recovery required");
             }
@@ -626,14 +653,19 @@ impl OwnedBrokerCalls {
     }
     /// Called only after the sole acceptor established a slot. No allocation
     /// or fallible lock step may discard the newly spawned request handle.
-    fn track(&self, handle: std::thread::JoinHandle<()>) -> bool {
-        self.handles().push(handle);
+    fn track_connection(&self,worker:std::thread::JoinHandle<()>,admission:ConnectionAdmission)->bool {
+        self.handles().push(OwnedConnectionWorker {worker,admission:Some(admission)});
+        !self.uncertain.load(Ordering::Acquire)
+    }
+    #[cfg(test)]
+    fn track(&self,worker:std::thread::JoinHandle<()>)->bool {
+        self.handles().push(OwnedConnectionWorker {worker,admission:None});
         !self.uncertain.load(Ordering::Acquire)
     }
     fn join_remaining(&self) -> bool {
         let handles = std::mem::take(&mut *self.handles());
         for handle in handles {
-            if let Err(payload) = handle.join() { self.record_panic(payload); }
+            if let Err(payload) = handle.join(self) { self.record_panic(payload); }
         }
         !self.uncertain.load(Ordering::Acquire)
     }
@@ -1066,11 +1098,17 @@ pub(crate) struct BrokerClient {
     binding: BrokerBinding,
 }
 
-/// Nonblocking connect keeps a saturated Unix accept backlog from stalling the
-/// helper's authorization watchdog. mio supplies the platform-specific socket
+/// Nonblocking connect bounds ordinary requests, cancellation controls and
+/// helper authorization while the fixed accept backlog applies backpressure. mio supplies the platform-specific socket
 /// creation/readiness details, including close-on-exec on supported systems.
-fn connect_until(path: &Path, deadline: Instant) -> io::Result<UnixStream> {
+fn connect_until(path: &Path, deadline: Instant, cancelled: Option<&AtomicBool>) -> io::Result<UnixStream> {
+    let check_cancel=||->io::Result<()> {
+        if cancelled.is_some_and(|cancel|cancel.load(Ordering::Relaxed)) {
+            return Err(io::Error::new(io::ErrorKind::Interrupted,"agent request cancelled"));
+        } Ok(())
+    };
     let mut stream = loop {
+        check_cancel()?;
         if Instant::now() >= deadline { return Err(io::Error::new(io::ErrorKind::TimedOut, "broker connect deadline exceeded")); }
         match mio::net::UnixStream::connect(path) {
             Ok(stream) => break stream,
@@ -1082,9 +1120,10 @@ fn connect_until(path: &Path, deadline: Instant) -> io::Result<UnixStream> {
     poll.registry().register(&mut stream, mio::Token(0), mio::Interest::WRITABLE)?;
     let mut events = mio::Events::with_capacity(4);
     loop {
+        check_cancel()?;
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() { return Err(io::Error::new(io::ErrorKind::TimedOut, "broker connect deadline exceeded")); }
-        match poll.poll(&mut events, Some(remaining)) {
+        match poll.poll(&mut events, Some(remaining.min(Duration::from_millis(20)))) {
             Ok(()) if !events.is_empty() => break,
             Ok(()) => {},
             Err(error) if error.kind() == io::ErrorKind::Interrupted => {},
@@ -1095,6 +1134,8 @@ fn connect_until(path: &Path, deadline: Instant) -> io::Result<UnixStream> {
     poll.registry().deregister(&mut stream)?;
     let stream = unsafe { UnixStream::from_raw_fd(stream.into_raw_fd()) };
     stream.set_nonblocking(false)?;
+    check_cancel()?;
+    if Instant::now() >= deadline { return Err(io::Error::new(io::ErrorKind::TimedOut,"broker connect deadline exceeded")); }
     Ok(stream)
 }
 
@@ -1152,14 +1193,14 @@ impl BrokerClient {
         );
         Ok(identity)
     }
-    fn cancel(&self, id: &str) {
+    fn cancel(&self, id: &str, original_deadline: Instant) {
         let Ok(identity) = self.identity() else {
             return;
         };
-        let Ok(mut stream) = UnixStream::connect(&self.socket) else {
-            return;
-        };
-        let _ = stream.set_write_timeout(Some(Duration::from_millis(100)));
+        let deadline=original_deadline.min(Instant::now()+Duration::from_millis(100));
+        let Ok(mut stream) = connect_until(&self.socket,deadline,None) else { return; };
+        let remaining=deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() || stream.set_write_timeout(Some(remaining)).is_err() { return; }
         let request = Request {
             format_version: 1,
             id: uuid::Uuid::new_v4().to_string(),
@@ -1210,16 +1251,16 @@ impl BrokerClient {
         cancelled: &AtomicBool,
         deadline: Instant,
     ) -> Result<Value> {
-        let workspace_auth = matches!(operation, Operation::AuthorizeWorkspace { .. } | Operation::AuthorizePartialWorkspace { .. });
         let connect_deadline = deadline.min(Instant::now() + CONNECT_DEADLINE);
         let mut stream = loop {
             ensure!(
                 !cancelled.load(Ordering::Relaxed),
                 "agent request cancelled"
             );
-            let connected = if workspace_auth { connect_until(&self.socket, connect_deadline) } else { UnixStream::connect(&self.socket) };
+            let connected = connect_until(&self.socket, connect_deadline,Some(cancelled));
             match connected {
                 Ok(stream) => break stream,
+                Err(_) if cancelled.load(Ordering::Relaxed) => return Err(problem("cancelled","agent request cancelled")),
                 Err(error)
                     if matches!(
                         error.kind(),
@@ -1234,6 +1275,7 @@ impl BrokerClient {
                 Err(_) => return Err(problem("unavailable", "agent broker connection failed")),
             }
         };
+        ensure!(!cancelled.load(Ordering::Relaxed),"agent request cancelled");
         stream.set_read_timeout(Some(Duration::from_millis(20)))?;
         ensure!(Instant::now() < deadline, "agent broker authorization deadline exceeded");
         stream.set_write_timeout(Some(Duration::from_secs(1).min(deadline.saturating_duration_since(Instant::now()))))?;
@@ -1263,7 +1305,7 @@ impl BrokerClient {
             deadline,
             || {
                 if cancelled.load(Ordering::Relaxed) {
-                    self.cancel(&id);
+                    self.cancel(&id,deadline);
                     return Err(problem("cancelled", "agent request cancelled"));
                 }
                 Ok(())
@@ -1464,7 +1506,7 @@ mod owned_thread_tests {
         wait.recv_timeout(Duration::from_secs(2)).unwrap();
         let mut owner = BrokerThreadOwner::new();
         owner.acceptor = Some(std::thread::spawn(|| {}));
-        owner.calls.handles().push(call);
+        owner.calls.track(call);
         assert!(owner.await_closed(Duration::from_millis(10)).is_err());
         assert!(owner.joiner.is_some()); assert!(!owner.settled);
         release.send(()).unwrap();

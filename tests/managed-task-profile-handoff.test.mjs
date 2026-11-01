@@ -13,6 +13,8 @@ const moduleUrl = process.env.RUDDER_MANAGED_PROFILE_TEST_MODULE
   ? pathToFileURL(path.resolve(process.env.RUDDER_MANAGED_PROFILE_TEST_MODULE)).href
   : new URL("../dist/managed-task-profile.js", import.meta.url).href;
 const run = promisify(execFile);
+// The credential writer verifies Linux /proc fdinfo; metadata stays portable.
+const linuxTest = (name, work) => test(name, { skip: process.platform !== "linux" ? "managed credential handoff requires Linux" : false }, work);
 const nodeRunner = String.raw`
 const api = await import(process.argv[1]);
 const selection = JSON.parse(process.argv[2]), fd = Number(process.argv[3]), operation = process.argv[4];
@@ -111,7 +113,7 @@ function noWrite(result, code) {
   assert.deepEqual(Object.keys(result.control.error).sort(), ["code", "message"]);
 }
 
-test("actual inherited pipe carries only exact selected key and closes before child exit", async () => {
+linuxTest("actual inherited pipe carries only exact selected key and closes before child exit", async () => {
   const result = await fixture({ selected: api(), other: api("FIXTURE_OTHER_KEY"), subscription: oauth() });
   frame(result, "FIXTURE_SELECTED_KEY");
   assert.deepEqual(result.control, { ok: true, metadata: { profileId: "selected", backend: "codex", formatVersion: 1, credentialKind: "api_key", provider: "openai" } });
@@ -119,7 +121,7 @@ test("actual inherited pipe carries only exact selected key and closes before ch
     assert.ok(!JSON.stringify(result.control).includes(secret));
 });
 
-test("normal loader legacy mode/apiKey normalization works for explicit Claude profile", async () => {
+linuxTest("normal loader legacy mode/apiKey normalization works for explicit Claude profile", async () => {
   const result = await fixture({ selected: { mode: "api_key", provider: "anthropic", apiKey: "FIXTURE_CLAUDE_LEGACY" }, other: api() },
     { selection: { profileId: "selected", backend: "claude" }, operation: "inspectThenHandoff" });
   frame(result, "FIXTURE_CLAUDE_LEGACY");
@@ -127,7 +129,7 @@ test("normal loader legacy mode/apiKey normalization works for explicit Claude p
   assert.deepEqual(result.control.handoff.metadata, result.control.inspection.metadata);
 });
 
-test("metadata inspection returns selected kind only and OAuth/token handoff never falls back", async () => {
+linuxTest("metadata inspection returns selected kind only and OAuth/token handoff never falls back", async () => {
   for (const [credential, code] of [[oauth(), "UNSUPPORTED_OAUTH"], [{ type: "token", provider: "openai", token: "FIXTURE_TOKEN" }, "UNSUPPORTED_TOKEN"]]) {
     const inspected = await fixture({ selected: credential, anotherApiProfile: api() }, { operation: "inspect" });
     assert.equal(inspected.control.ok, true); assert.equal(inspected.control.metadata.credentialKind, credential.type);
@@ -136,7 +138,7 @@ test("metadata inspection returns selected kind only and OAuth/token handoff nev
   }
 });
 
-test("exact profile/backend selection has no alternate profile, inherited property or env fallback", async () => {
+linuxTest("exact profile/backend selection has no alternate profile, inherited property or env fallback", async () => {
   noWrite(await fixture({ selected: api("FIXTURE_WRONG_BACKEND", "anthropic") }), "PROFILE_BACKEND_MISMATCH");
   noWrite(await fixture({ another: api() }), "PROFILE_UNAVAILABLE");
   noWrite(await fixture({ selected: api() }, { selection: { profileId: "toString", backend: "codex" } }), "PROFILE_UNAVAILABLE");
@@ -144,23 +146,23 @@ test("exact profile/backend selection has no alternate profile, inherited proper
   noWrite(await fixture({ selected: { type: "api_key", provider: "openai", keyRef: { source: "env", provider: "openai", id: "OPENAI_API_KEY" } } }), "INVALID_KEY");
 });
 
-test("regular file, read-only, blocking and public-mode descriptors never receive a key", async () => {
+linuxTest("regular file, read-only, blocking and public-mode descriptors never receive a key", async () => {
   for (const pipeKind of ["regular", "readonly", "blocking", "public"]) noWrite(await fixture({ selected: api() }, { pipeKind }), "PRIVATE_PIPE_REQUIRED");
 });
 
-test("UTF-8 byte bound is explicit and malformed or oversized selected keys do not write", async () => {
+linuxTest("UTF-8 byte bound is explicit and malformed or oversized selected keys do not write", async () => {
   frame(await fixture({ selected: api("k".repeat(4092)) }), "k".repeat(4092));
   for (const key of ["", "bad\nkey", "bad\0key", "\ud800", "k".repeat(4093), "é".repeat(2047)])
     noWrite(await fixture({ selected: api(key) }), "INVALID_KEY");
 });
 
-test("one-shot process gate prevents a second frame even after success", async () => {
+linuxTest("one-shot process gate prevents a second frame even after success", async () => {
   const result = await fixture({ selected: api() }, { operation: "double" });
   frame(result, "FIXTURE_SELECTED_KEY"); assert.equal(result.control.first.ok, true);
   assert.equal(result.control.second.error.code, "ALREADY_USED");
 });
 
-test("full or readerless actual pipe produces static failure with no credential retry", async () => {
+linuxTest("full or readerless actual pipe produces static failure with no credential retry", async () => {
   const full = await fixture({ selected: api() }, { pipeKind: "full" });
   assert.equal(full.control.error.code, "HANDOFF_FAILED"); assert.equal(full.eofBeforeExit, true);
   assert.ok(full.initialBytes > 0); assert.equal(full.bytes.length, full.initialBytes); assert.ok(full.bytes.every(byte => byte === 120));
@@ -170,4 +172,18 @@ test("full or readerless actual pipe produces static failure with no credential 
     assert.ok(!JSON.stringify(result.control).includes("FIXTURE_SELECTED_KEY"));
     assert.deepEqual(Object.keys(result.control.error).sort(), ["code", "message"]);
   }
+});
+
+
+test("profile metadata inspection works without a credential pipe", async () => {
+  const result = await fixture({ selected: api(), other: api("FIXTURE_OTHER_KEY") }, { operation: "inspect" });
+  assert.equal(result.control.ok, true);
+  assert.equal(result.control.metadata.credentialKind, "api_key");
+  assert.equal(result.control.metadata.profileId, "selected");
+  assert.deepEqual(result.bytes, Buffer.alloc(0));
+  assert.ok(!JSON.stringify(result.control).includes("FIXTURE_SELECTED_KEY"));
+});
+
+test("unsupported hosts refuse credential handoff before writing", { skip: process.platform === "linux" }, async () => {
+  noWrite(await fixture({ selected: api() }, { pipeKind: "regular" }), "PRIVATE_PIPE_REQUIRED");
 });

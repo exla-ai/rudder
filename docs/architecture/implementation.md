@@ -31,6 +31,16 @@ normalization passed 27 focused seed tests with three large fixtures ignored;
 the next complete release candidate is alpha.30. Alpha.29's tag stays local and
 unchanged. Origin/main, npm and the production deployment still contain alpha.28.
 
+Alpha.30 passed all three native builds and its actual stock-worker Fly smoke
+check, including original process/pipe settlement and exact VM destruction plus
+absence. Release qualification then found one portable test calling the
+Linux-only managed registry factory on macOS. The configuration assertions now
+run on every platform; Linux constructs/closes the lazy factory and other
+platforms assert its expected refusal. All five cases pass locally in the real
+Linux branch and a separate simulated Darwin negative branch. Real macOS and
+the full final-source matrix must still pass. Alpha.30 stays unpublished;
+the next candidate is alpha.31.
+
 The real S3/OIDC cache probe and all three physical Root FUSE metadata component
 tests pass, with original child/IO settlement and exact local/VM cleanup. The new
 complete runtime image built from frozen source 4d0 and printed its actual four

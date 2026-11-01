@@ -35,7 +35,11 @@ test("private startup wiring preserves distinct registration and the same runtim
   assert.deepEqual(config.freshStorage.serviceCredentials[0].token,Buffer.alloc(32,7));
   // Lazy construction/close uses the actual production factory. There is no
   // migration, ready-row change, provider call or real database connection.
-  const registry=createManagedHomeRegistry(config);await registry.close();
+  if(process.platform==="linux"){
+    const registry=createManagedHomeRegistry(config);await registry.close();
+  }else{
+    assert.throws(()=>createManagedHomeRegistry(config),error=>error.code==="unconfigured");
+  }
 });
 test("explicit malformed configuration never silently falls back or exposes private input",()=>{
   const {value,dependencies}=fixture();

@@ -546,7 +546,7 @@ connected model run remain activation gates. The profile loader currently accept
 Hosted ChatGPT subscription registration and OAuth refresh/writeback remain
 separate dependencies. See the [working verification record](verification-managed-launch-working.json).
 
-## Machine entry and durable retirement after alpha.27, unshipped
+## Machine entry and durable retirement, alpha.28
 
 The checkout now contains the fixed native root launcher and FIRST managed
 entry, with a retained off-App client worker and typed project/seed/helper cells.
@@ -638,14 +638,42 @@ does not qualify those changes or any model/project/source/retirement authority.
 Normal Root unmount/third-seed reuse and trusted machine control ingress remain
 open. The default startup path is still legacy.
 
-The alpha.28 candidate also passed TypeScript checking, all 822 JavaScript tests
+Alpha.28 also passed TypeScript checking, all 822 JavaScript tests
 with 10 optional skips, and all 59 real terminal tests using the newly built
 normal native executable. All four native executables built from the integrated
 source. The isolated Codex provider fixture passed four checks. CI dependency
 caches restore external dependencies only, clean every local workspace crate
 and retain the full release qualification; cache restoration is never evidence
-that a release passed. Final versioned CI, registry publication and Cloud delivery
-are still separate gates.
+that a release passed.
+
+### Alpha.28 delivery
+
+Revision `c04997dcd7b23be83257268f34ebb4bcd1da7519` and tag
+`v4.0.0-alpha.28` were pushed together after the exact final SHA passed
+[all three native builds and full Mac qualification](https://github.com/exla-ai/rudder/actions/runs/41273492190).
+Mac JavaScript passed 813 tests with 19 skips; the Mac native application passed
+1,082 with 12 ignored. The actual stock worker then passed seven commands plus
+installed Root/native/storage/client startup and real non-main worker ACK at
+2026-11-01T04:44:38Z. Its exact VM was destroyed with two absence checks.
+
+Fly release **175**, deployment `jp1QZVeBBN01OTAaeAOgBzY1O`, runs the tagged
+control image and pins the tested alpha.28 worker. App/health returned 200 and
+unauthenticated state/CAS returned 401. Runtime hashes and database integrity
+passed at 2026-11-01T05:11:09Z. The protected live home's original instance and
+alpha.7 image were unchanged. See [the delivery record](verification-alpha28.json)
+for exact image digests, checks and scope.
+
+The [tag publication workflow](https://github.com/exla-ai/rudder/actions/runs/41275825138),
+Mac and iOS jobs passed. Npm accepted both publications, but explicit alpha.28
+registry requests still returned 404 at 05:13:54Z; fresh installations and
+`next` availability remain pending. No republishing or retagging was attempted.
+
+The default path remains legacy. Authenticated host ingress, a durable machine
+receipt store, fresh logical project/engine enrollment, immutable managed
+runtime packaging and isolated per-home app/vault/network provisioning are the
+next private implementation batch. Its separate compile checks do not qualify
+those features in alpha.28. Normal Root retirement/reuse, real managed models,
+distributed cache/build performance and fleet/migration gates remain open.
 
 ## Current implementation track
 

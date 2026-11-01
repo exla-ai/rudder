@@ -1,0 +1,60 @@
+{
+  "formatVersion": 1,
+  "sourceKind": "uncommitted source, frozen compiler and real native actor qualification",
+  "baseRevision": "467dd65c1ec4c69e0a39865c1d4816b844f03051",
+  "scope": "actual-rust-claude-adapter-synthetic-loopback-only",
+  "verifiedAt": "2026-11-01T07:21:47.436158+00:00",
+  "runCompletedAt": "2026-11-01T07:20:15.920778+00:00",
+  "resultSha256": "ba57b960765c079b2cbe23b10f356ef25099f53f862262550661106eb1c093fd",
+  "nativeReportSha256": "a48b483aadc6e28c2ceda969557bd32dbec4e7761ed0ad6dbca56eecc4c15c33",
+  "sourceManifestSha256": "64bdd19d920417bc4929e29dcc23df1bc555377b71c522a515194f77053020b3",
+  "officialClaudeVersion": "2.1.316",
+  "officialClaudeElfSha256": "fd13c70000fec3f2116dfbcbb6121210b4a29328bf0e46210a59dd594a67d824",
+  "productionProtocolSha256": "7863b2653052e28e58ec1188a36c4a1d02b33d345fea50fc89f2dcdee669ed9c",
+  "actualProductionRustActor": true,
+  "fixtureRpcRelay": true,
+  "actualFileEdit": true,
+  "typedPeerSteer": true,
+  "wrongAndStaleTurnRefused": true,
+  "actualCliInterruptReceipts": 2,
+  "actualTerminalHeldAfterCliReceipt": true,
+  "actualRustTerminalHeldAfterRpcAck": true,
+  "exactInterruptConfirmation": true,
+  "actorActuallyJoined": true,
+  "childProcesses": {
+    "claude": {
+      "actualOriginalChild": true,
+      "reaped": true,
+      "stdoutJoinedAndEof": true,
+      "stderrJoinedAndEof": true
+    },
+    "bridge": {
+      "actualOriginalChild": true,
+      "reaped": true,
+      "stdoutJoinedAndEof": true,
+      "stderrJoinedAndEof": true
+    },
+    "provider": {
+      "actualOriginalChild": true,
+      "reaped": true,
+      "stdoutJoinedAndEof": true,
+      "stderrJoinedAndEof": true
+    }
+  },
+  "nativeHarnessReaped": true,
+  "kernelNoChildrenECHILD": true,
+  "officialCliRetained": true,
+  "paidModelCalls": 0,
+  "initialFailure": "Test compared JSON text key order; exact prefix and parsed value comparison preserves every peer field. Original failed run retained.",
+  "notClaimed": [
+    "production TypeScript renderer/launch wrapper",
+    "managed guest or process witness",
+    "real provider authentication or model access",
+    "network isolation",
+    "normal Root retirement",
+    "production activation",
+    "full v4 completion"
+  ],
+  "claudeSupported": false,
+  "fullV4Complete": false
+}

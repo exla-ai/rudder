@@ -131,15 +131,22 @@ fn object_edge_total_and_per_object_limits_and_original_cancellation_fail_closed
 }
 
 #[test]
-fn gitlink_refusal_retains_partial_copied_objects_without_publishing_an_operation() {
+fn gitlink_refusal_retains_staged_pack_without_publishing_an_operation() {
     let f = Fixture::new();
     let directory = tree(&f.source, &[("160000", "submodule", f.parent)]);
     let current = commit(&f.source, directory, &[f.parent], "unsupported gitlink");
     head(&f.source, current);
     let before = pollster::block_on(f.target.loader().op_heads_store().get_op_heads()).unwrap();
-    assert!(import_expected_git_head(&f.source, f.backend(), &GitCommitId(current.to_string()),
-        GitImportLimits::default(), &budget()).is_err());
-    assert!(f.backend().git_repo().find_object(current).is_ok(), "error is not proof of no immutable effects");
+    let mut retained = None;
+    let original = budget();
+    assert!(import_expected_git_head_retaining(&mut retained, &f.source, f.backend(), &GitCommitId(current.to_string()),
+        GitImportLimits::default(), &original, Arc::new(std::sync::atomic::AtomicBool::new(false)), || Ok(())).is_err());
+    let progress = retained.as_ref().unwrap().progress();
+    assert!(!progress.acknowledged && !progress.index_installed);
+    assert!(progress.packed_objects > 0 && progress.temporary_paths.iter().any(|path|
+        fs::metadata(path).is_ok_and(|meta| meta.is_file() && meta.len() > 0)),
+        "failed import retains actual staged pack effects");
+    assert!(f.backend().git_repo().find_object(current).is_err(), "incomplete closure must not become discoverable");
     assert!(f.backend().git_repo().find_object(directory).is_err());
     assert_eq!(pollster::block_on(f.target.loader().op_heads_store().get_op_heads()).unwrap(), before);
 }

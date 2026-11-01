@@ -1,0 +1,57 @@
+{
+  "formatVersion": 1,
+  "scope": "actual-local-Git-CAS-verified-object-reuse-only",
+  "sourceKind": "uncommitted working source after frozen4d0 image",
+  "authorSealSha256": "4fcc38ca5c09e2199f79701c6db3563b7a3b7e6ff562979180a3b17fdba0b05c",
+  "sourceFiles": {
+    "vcs-bridge/src/projection_io.rs": "52c5bc7b50ee13f8daf7cac92577023a46d6bbfb56372740607f84396ebdd9ac",
+    "vcs-bridge/src/projection_git_reuse_tests.rs": "cfd8ec944f4492ac3105262a9e79b7ccc25312adf8c117ca649d75a4429fece2",
+    "vcs-bridge/src/seed_paged_tests.rs": "e7aa8af460b2946c9852575d6c34ef03f6764d80f3b52544e0bed1460a9cd365"
+  },
+  "rootCorrections": [
+    "preserve unit-return meter update API while returning reservation result",
+    "portable disposable test directory fallback on macOS"
+  ],
+  "newProducerTests": {
+    "passed": 5,
+    "failed": 0,
+    "report": "managed-main214-git-object-reuse",
+    "verifiedAt": "2026-11-01T11:59:37.219777+00:00"
+  },
+  "regressions": {
+    "libraryPassed": 41,
+    "projectionPassed": 7,
+    "vfsProviderPassed": 2,
+    "failed": 0,
+    "ignored": 3,
+    "report": "managed-main215-projection-regressions",
+    "verifiedAt": "2026-11-01T12:04:03.801945+00:00"
+  },
+  "checks": [
+    "cold None projection preserves existing Git inode while rereading actual CAS bytes",
+    "mandatory full verifier preserves inode without prior-record trust",
+    "corrupt CAS/stored bytes/wrong or oversize headers fail without repair",
+    "honest buffer-capacity refusal retains original streaming path",
+    "expired meter and actual read errors never become fallback writes"
+  ],
+  "largeScale": {
+    "firstAttempt": "failed assertion: upstream projection replaced unchanged loose objects",
+    "firstReportSha256": "9ce9e81f00aed5d3b260a974254e97d9efa65339e7185d4d56a78b6e8aad17cd",
+    "positiveReuseThresholdUnchanged": true,
+    "actualStampWitnesses": 4097,
+    "rerun": "managed-main216-large-paged-history",
+    "status": "passed",
+    "verifiedAt": "2026-11-01T12:12:47.193529+00:00",
+    "wholeGuardElapsedSeconds": 507.806,
+    "reportSha256": "fa21506be08bbc929ee3cc3b9a3b3a972d050ba54cd7d2c5191c773e40d04258",
+    "logSha256": "d62c5634dcd81fdcf591086ec8af977af69d28aa583cd5154dd95f9c9d324212",
+    "oldGenerationPinsRetained": true,
+    "privateWritesIsolated": true,
+    "fixtureTimingIsLaunchLatency": false,
+    "limits": "whole debug fixture includes real repository construction, both source generations and witness/checkpoint checks; not an end-to-end launch speed result"
+  },
+  "nativeRootQualified": false,
+  "productionActivated": false,
+  "fullV4Complete": false,
+  "limits": "unit/integration mechanism evidence only; no current production acceptance latency or all-file reuse guarantee; existing buffer quotas may select legacy streaming"
+}

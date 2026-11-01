@@ -798,6 +798,7 @@ pub(crate) fn prepare_owned(
             "remote source preparation cancelled"
         );
         pending.lease.as_ref().context("source lease absent before issuer")?.check_journal(journal)?;
+        pending.lease.as_ref().unwrap().check_shared_current()?;
         fence.check_current(journal)?;
         startup.check_preparation()
     };
@@ -813,7 +814,7 @@ pub(crate) fn prepare_owned(
     ensure!(
         namespace.project_id == fence.owner.project_id
             && namespace.journal == journal.database_path()?
-            && ManagedStore::open(journal, namespace)? == inputs.managed_store,
+            && inputs.managed_store.reopen_current(journal)? == inputs.managed_store,
         "source preparation differs from its privileged prepared project Journal"
     );
     let managed_run = inputs.managed_store.run(&fence.run_id)?;

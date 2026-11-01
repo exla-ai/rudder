@@ -51,6 +51,26 @@ test("peer input cannot claim human, coordinator, bypass or permission authority
   }
 });
 
+test("actual CLI started lifecycle accepts a synthetic peer before model output without a user replay", async (t) => {
+  const f = await fixture(t);
+  const request = f.core.execute(cmd("peer-started", "deliver"), "session-one");
+  const input = f.writes.at(-1); let accepted = false;
+  request.then(() => { accepted = true; });
+  const lifecycle = { type: "command_lifecycle", session_id: "session-one", command_uuid: input.uuid, state: "started" };
+  f.core.ingest({ ...lifecycle, state: "queued" });
+  f.core.ingest({ ...lifecycle, session_id: "another-session" });
+  f.core.ingest({ ...lifecycle, command_uuid: "unrelated-input" });
+  f.core.ingest({ ...lifecycle, parent_tool_use_id: "nested-tool" });
+  await immediate(); assert.equal(accepted, false);
+  assert.equal(f.events.length, 0);
+  f.core.ingest(lifecycle);
+  assert.deepEqual(await request, { turn: { id: input.uuid, status: "inProgress" } });
+  assert.deepEqual(input.origin, { kind: "peer", from: "authenticated-peer" });
+  f.core.ingest(lifecycle);
+  assert.equal(f.events.filter(frame => frame.method === "turn/started").length, 1);
+  assert.equal(f.events.filter(frame => frame.method === "turn/completed").length, 0);
+});
+
 test("SDK busy steer confirms cancellation and old interruption before replacement", async (t) => {
   const f = await fixture(t); const initial = await f.start();
   const steering = f.core.execute(cmd("steer", "steer", initial.uuid), "session-one");

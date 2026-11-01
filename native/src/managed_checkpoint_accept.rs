@@ -26,7 +26,7 @@ use rudder_vcs_bridge::{AttemptBinding, CommitIdentity, GitCommitId, JjOperation
     projection_io::ProjectionBudget, publication::prepare_verified_operation};
 use sha2::{Digest, Sha256};
 use std::{fs::{self, File, OpenOptions}, os::unix::fs::{MetadataExt, OpenOptionsExt},
-    path::PathBuf, time::{Duration, SystemTime, UNIX_EPOCH}};
+    path::PathBuf, sync::Arc, time::{Duration, SystemTime, UNIX_EPOCH}};
 
 /// Capture while the original pane is LIVE; strings/PIDs cannot reconstruct it.
 pub(crate) struct ManagedCheckpointCapture {
@@ -122,10 +122,10 @@ pub(crate) enum ManagedAcceptanceProgress {
 pub(crate) struct ManagedCheckpointAcceptance {
     completion: ManagedCompletion, lease: EngineSourceLease, location: ManagedRunLocation,
     store: LocalStore, repository: Option<PrivateIntegration>, candidate: Option<ManagedCheckpointCandidate>,
-    binding: Option<AttemptBinding>, verified: Option<VerifiedSourceProjection>,
+    binding: Option<AttemptBinding>, verified: Option<Arc<VerifiedSourceProjection>>,
     projected: Option<jj_lib::merged_tree::MergedTree>, stages: Vec<String>,
     request: Option<VcsIntentRequest>, intent: Option<VcsIntentReceipt>, publish_attempted: bool,
-    candidate_attempted: bool, preparation_attempted: bool,
+    candidate_attempted: bool, preparation_attempted: bool, generation_identity:Option<Arc<()>>,
 }
 impl ManagedCheckpointAcceptance {
     /// Off-App transfer. Failed CAS opening leaves both original owning slots.
@@ -142,7 +142,7 @@ impl ManagedCheckpointAcceptance {
         held.check_current()?;
         *slot = Some(Self { completion: ManagedCompletion::Pane(completion.take().unwrap()), lease: lease.take().unwrap(), location,
             store, repository: None, candidate: None, binding: None, verified: None, projected: None, stages: Vec::new(),
-            request: None, intent: None, publish_attempted: false, candidate_attempted: false, preparation_attempted: false });
+            request: None, intent: None, publish_attempted: false, candidate_attempted: false, preparation_attempted: false,generation_identity:None });
         Ok(())
     }
     /// OFF App. Every fallible check precedes moving either original owner.
@@ -175,7 +175,7 @@ impl ManagedCheckpointAcceptance {
         *slot = Some(Self { completion: ManagedCompletion::Task(completion.take().unwrap()),
             lease: lease.take().unwrap(), location, store, repository: None, candidate: None, binding: None,
             verified: None, projected: None, stages: Vec::new(), request: None, intent: None,
-            publish_attempted: false, candidate_attempted: false, preparation_attempted: false });
+            publish_attempted: false, candidate_attempted: false, preparation_attempted: false,generation_identity:None });
         Ok(())
     }
     fn check(&self, journal: &Journal) -> Result<()> {
@@ -227,16 +227,16 @@ impl ManagedCheckpointAcceptance {
         let projected = pollster::block_on(project_source(self.store.clone(), &candidate.directory,
             &base_commit.tree(), &self.binding.as_ref().unwrap().projection_policy, None, None, budget.clone()))?;
         self.projected = Some(projected.tree);
-        self.verified = Some(pollster::block_on(verify_versioned_source(self.store.clone(), &stage.id,
+        self.verified = Some(Arc::new(pollster::block_on(verify_versioned_source(self.store.clone(), &stage.id,
             &candidate.source, &self.binding.as_ref().unwrap().projection_policy,
-            self.projected.as_ref().unwrap(), Some(&projected.record), budget))?);
+            self.projected.as_ref().unwrap(), Some(&projected.record), budget))?));
         self.check(journal)
     }
     /// Caller supplies ACTUAL canonical gate evidence for candidate(), never a
     /// done-file or backend turn report. This module creates only mapping evidence.
     pub(crate) fn prepare_acceptance(&mut self, journal: &mut Journal,
         mut evidence: IntegrationEvidence, versions: TopicVersions) -> Result<ManagedAcceptanceProgress> {
-        self.check(journal)?;
+        self.lease.check_shared_current()?;self.check(journal)?;
         ensure!(!self.preparation_attempted, "acceptance preparation already attempted; recover original intent");
         let candidate = self.candidate.as_ref().context("candidate absent")?;
         let binding = self.binding.as_ref().context("attempt binding absent")?;
@@ -261,6 +261,7 @@ impl ManagedCheckpointAcceptance {
         let commit = pollster::block_on(tx.repo_mut().new_commit(
             vec![CommitId::new(decode_hex(&binding.baseline.commit.0)?)], self.projected.as_ref().unwrap().clone())
             .set_description("managed checkpoint acceptance").write())?;
+        tx.repo_mut().set_wc_commit(jj_lib::ref_name::WorkspaceName::DEFAULT.to_owned(),commit.id().clone())?;
         let proof = SealedSourceProof { format_version: 1, binding: binding.clone(), recovery_root: candidate.runnable.clone(),
             source: candidate.source.clone(), environment: Some(candidate.environment.clone()), tree: CommitIdentity::from_jj(&commit).tree };
         let prepared = pollster::block_on(prepare_verified_operation(tx, self.intent.as_ref().unwrap().intent_id.clone(),
@@ -275,7 +276,7 @@ impl ManagedCheckpointAcceptance {
         self.progress()
     }
     pub(crate) fn publish_once(&mut self, journal: &mut Journal) -> Result<ManagedAcceptanceProgress> {
-        self.check(journal)?;
+        self.lease.check_shared_current()?;self.check(journal)?;
         ensure!(!self.publish_attempted && self.intent.as_ref().is_some_and(|r| r.state == VcsIntentState::Prepared),
             "publication cannot replay; inspect original intent");
         self.publish_attempted = true;
@@ -287,7 +288,7 @@ impl ManagedCheckpointAcceptance {
     }
     /// Readback/reconciliation only: never prepares or republishes an operation.
     pub(crate) fn reconcile_only(&mut self, journal: &mut Journal) -> Result<ManagedAcceptanceProgress> {
-        self.check(journal)?;
+        self.lease.check_shared_current()?;self.check(journal)?;
         if self.intent.is_none() {
             self.intent = Some(journal.begin_vcs_intent(self.lease.owner(), &self.store,
                 self.request.as_ref().context("no original immutable intent to reconcile")?, now_ms()?)?);
@@ -346,7 +347,7 @@ impl ManagedCheckpointAcceptance {
 pub(crate) fn reconcile_managed_acceptance(journal: &mut Journal, lease: &EngineSourceLease,
     store: &crate::managed_store::ManagedStore, cas: &LocalStore,
     intent_id: &str, name: &str, email: &str) -> Result<ManagedAcceptanceProgress> {
-    lease.check_journal(journal)?;
+    lease.check_shared_current()?;lease.check_journal(journal)?;
     ensure!(lease.owner().project_id == store.binding().project_id
         && journal.managed_project(&lease.owner().project_id)?.as_ref() == Some(store.receipt()), "recovery project differs");
     let repository = PrivateIntegration::open(store.binding().directory.join("integration"), name, email)?;
@@ -410,7 +411,7 @@ impl IntegrationDirectory {
 struct PrivateIntegration {
     loader: RepoLoader, directories: Vec<IntegrationDirectory>, directory: File,
     // The actual exclusive lock drops after loader and retained directory IO.
-    lock: File, path: PathBuf,
+    lock: File, path: PathBuf, lock_held:bool,
 }
 impl PrivateIntegration {
     fn open(path: PathBuf, name: &str, email: &str) -> Result<Self> {
@@ -436,9 +437,10 @@ impl PrivateIntegration {
         let expected_git = path.join(".jj/repo/store/git");
         ensure!(git.git_repo_path() == expected_git.as_path()
             && expected_git.canonicalize()? == expected_git, "integration requires its exact canonical internal Git store");
-        let held = Self { loader, directories, lock, directory, path }; held.check_current()?; Ok(held)
+        let held = Self { loader, directories, lock, directory, path,lock_held:true }; held.check_current()?; Ok(held)
     }
     fn check_current(&self) -> Result<()> {
+        ensure!(self.lock_held,"published integration lock was explicitly released; no further mutation");
         for (held, path) in [(&self.directory, self.path.clone()), (&self.lock, self.path.join("rudder-acceptance.lock"))] {
             let actual = held.metadata()?; let current = fs::symlink_metadata(path)?;
             ensure!((actual.dev(), actual.ino()) == (current.dev(), current.ino()), "private integration custody changed");
@@ -481,3 +483,7 @@ fn now_ms() -> Result<i64> { Ok(i64::try_from(SystemTime::now().duration_since(U
 #[cfg(test)]
 #[path = "managed_checkpoint_accept_regressions.rs"]
 mod tests;
+
+#[path="managed_accepted_source_input.rs"]
+mod accepted_source_input;
+pub(crate) use accepted_source_input::{AcceptedSourceInput,AcceptedInputRelease};

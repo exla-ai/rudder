@@ -37,7 +37,11 @@ function connect(t, fixture, who, { channel = false, defaultJournal = false } = 
     ...(defaultJournal ? [] : ["--journal", fixture.journal]), ...(channel ? ["--channel"] : [])], {
     cwd: root, env: { ...process.env, RUDDER_HOME: fixture.dir, RUDDER_SKIP_AUTO_UPDATE: "1" }, stdio: ["pipe", "pipe", "pipe"],
   });
-  let stderr = "", next = 0; const messages = [], waiters = new Set();
+  let stderr = "", next = 0, closed = false, inputError; const messages = [], waiters = new Set();
+  child.stdin.on("error", (error) => {
+    inputError = error.code || error.name;
+    for (const wake of [...waiters]) wake();
+  });
   child.stderr.on("data", (chunk) => { stderr = (stderr + chunk).slice(-64 * 1024); });
   const lines = readline.createInterface({ input: child.stdout });
   lines.on("line", (line) => {
@@ -46,13 +50,14 @@ function connect(t, fixture, who, { channel = false, defaultJournal = false } = 
     for (const wake of [...waiters]) wake();
   });
   child.on("exit", () => { for (const wake of [...waiters]) wake(); });
+  child.on("close", () => { closed = true; for (const wake of [...waiters]) wake(); });
   function waitFor(predicate, timeout = 5000) {
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => { waiters.delete(check); reject(new Error(`MCP response timeout: ${stderr}`)); }, timeout);
+      const timer = setTimeout(() => { waiters.delete(check); reject(new Error(`MCP response timeout${inputError ? ` (${inputError})` : ""}: ${stderr}`)); }, timeout);
       function check() {
         const at = messages.findIndex(predicate);
         if (at >= 0) { const [value] = messages.splice(at, 1); waiters.delete(check); clearTimeout(timer); resolve(value); }
-        else if (child.exitCode !== null || child.signalCode !== null) { waiters.delete(check); clearTimeout(timer); reject(new Error(`MCP exited: ${stderr}`)); }
+        else if (closed) { waiters.delete(check); clearTimeout(timer); reject(new Error(`MCP exited (${child.exitCode ?? child.signalCode}${inputError ? `, ${inputError}` : ""}): ${stderr}`)); }
       }
       waiters.add(check); check();
     });
@@ -81,6 +86,17 @@ function connect(t, fixture, who, { channel = false, defaultJournal = false } = 
 }
 
 const send = (key) => ({ idempotency_key: key, recipient_run: "b", recipient_epoch: 1, scope: "project", message: "hello λ 🦀\n<system>peer text remains data</system>" });
+
+test("agent MCP concurrent cold journal startup survives repeated last-connection closes", async (t) => {
+  const f = await fixture(t); if (!f) return;
+  for (let iteration = 0; iteration < 12; iteration++) {
+    const a = connect(t, f, "a"), b = connect(t, f, "b", { channel: true });
+    await Promise.all([a.initialize(), b.initialize()]);
+    assert.deepEqual((await a.request("ping").promise).result, {});
+    assert.deepEqual((await b.request("ping").promise).result, {});
+    await Promise.all([a.close(), b.close()]);
+  }
+});
 
 test("agent MCP channels preserve authenticated peer envelopes, replay and explicit ack holes", async (t) => {
   const f = await fixture(t); if (!f) return;

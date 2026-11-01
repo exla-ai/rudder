@@ -423,7 +423,8 @@ impl FrozenRemoteView {
     }
 }
 fn check_custody(view: &VfsView) -> Result<()> {
-    let held = view.0._lock.metadata()?;
+    let held = view.0._lock.as_ref().ok_or_else(|| error(libc::EROFS))
+        .context("readonly image has no mutable view admission lock")?.metadata()?;
     let named = fs::symlink_metadata(view.0.path.join("owner.lock"))?;
     ensure!(
         held.is_file()

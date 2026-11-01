@@ -46,8 +46,13 @@ pub(crate) fn guest_relative(value: &str) -> Result<PathBuf> {
     );
     Ok(p.strip_prefix("/")?.to_path_buf())
 }
+fn managed_image_runtime(source:&Path)->bool {
+    source.is_absolute()&&source.components().all(|c|matches!(c,Component::RootDir|Component::Normal(_)))
+        &&source.starts_with("/opt/rudder-managed-runtime/v1")
+}
 fn public_runtime(source: &Path) -> bool {
-    [
+    if super::provider_kernel::is_provider_kernel_path(source){return false;}
+    managed_image_runtime(source) || [
         "/usr",
         "/opt/runtime",
         "/opt/rudder",
@@ -63,6 +68,8 @@ fn public_runtime(source: &Path) -> bool {
             "/etc/resolv.conf",
             "/etc/hosts",
             "/etc/localtime",
+            "/etc/ssl/openssl.cnf",
+            "/etc/python3.11/sitecustomize.py",
         ]
         .iter()
         .any(|p| source == Path::new(p))
@@ -236,6 +243,8 @@ pub(crate) fn validate(spec: &ExecutionSpec) -> Result<()> {
                 "runtime projection overlaps agent identity state"
             );
         }
+        if super::provider_kernel::requires_provider_kernel_mask(&source,Path::new(&r.guest_path))? {provider_kernel_mountpoint()?;}
+        if super::provider_kernel::requires_provider_swap_mask(&source,Path::new(&r.guest_path))? {provider_swap_mountpoint()?;}
         let m = fs::metadata(source)?;
         ensure!(
             m.is_dir() || m.is_file(),
@@ -786,6 +795,57 @@ fn bind(source: &Path, destination: &Path, readonly: bool, devices: bool) -> Res
     )?;
     harden(destination, readonly, devices)
 }
+// Check the actual host boundary, never provider payload contents. Host image
+// Root ownership is also checked by native's retained Directory producer. UID
+// numbers may map differently inside this PID init's user namespace.
+fn provider_kernel_mountpoint()->Result<fs::Metadata> {
+    let path=Path::new(super::provider_kernel::PROVIDER_KERNEL_DIRECTORY);
+    let metadata=fs::symlink_metadata(path)?;
+    ensure!(metadata.is_dir()&&!metadata.file_type().is_symlink()&&metadata.mode()&0o022==0&&path.canonicalize()?==path,"provider kernel boundary is not an actual protected directory");Ok(metadata)
+}
+fn mask_provider_kernel(root:&Path)->Result<()> {
+    let boundary=super::provider_kernel::PROVIDER_KERNEL_DIRECTORY;
+    let source=OpenOptions::new().read(true).custom_flags(libc::O_DIRECTORY|libc::O_NOFOLLOW|libc::O_CLOEXEC).open(boundary)?;
+    let before=provider_kernel_mountpoint()?;let held=source.metadata()?;
+    let destination=target(root,boundary,true)?;let mounted=fs::symlink_metadata(&destination)?;
+    ensure!(mounted.is_dir()&&!mounted.file_type().is_symlink()&&(held.dev(),held.ino(),held.mode())==(before.dev(),before.ino(),before.mode())&&(mounted.dev(),mounted.ino(),mounted.mode())==(before.dev(),before.ino(),before.mode()),"guest kernel boundary differs from the actual bound parent runtime");
+    // AFTER all relevant parent binds. This is a fresh namespace-only empty
+    // filesystem, never deletion/chmod/unlink of provider-owned host objects.
+    syscall(unsafe{libc::mount(c"tmpfs".as_ptr(),c(&destination)?.as_ptr(),c"tmpfs".as_ptr(),libc::MS_RDONLY|libc::MS_NOSUID|libc::MS_NODEV|libc::MS_NOEXEC,c"size=4k,nr_inodes=16,mode=0555".as_ptr().cast())},"mask provider kernel payload from managed userspace")?;
+    let empty=OpenOptions::new().read(true).custom_flags(libc::O_DIRECTORY|libc::O_NOFOLLOW|libc::O_CLOEXEC).open(&destination)?;
+    let metadata=empty.metadata()?;ensure!(metadata.is_dir()&&metadata.mode()&0o7777==super::provider_kernel::PROVIDER_KERNEL_EMPTY_MODE&&fs::read_dir(&destination)?.next().is_none(),"guest provider kernel mask is not empty immutable userspace");
+    let mut flags=std::mem::MaybeUninit::<libc::statvfs>::uninit();syscall(unsafe{libc::fstatvfs(empty.as_raw_fd(),flags.as_mut_ptr())},"check actual provider kernel mask flags")?;
+    let flags=unsafe{flags.assume_init()};let required=libc::ST_RDONLY|libc::ST_NOSUID|libc::ST_NODEV|libc::ST_NOEXEC;ensure!(flags.f_flag&required==required,"provider kernel mask flags incomplete");
+    // Both original unmasked directory descriptors close before agent exec.
+    Ok(())
+}
+fn provider_swap_mountpoint()->Result<fs::Metadata> {
+    let path=Path::new(super::provider_kernel::PROVIDER_SWAP_TOOL);
+    let metadata=fs::symlink_metadata(path)?;
+    ensure!(metadata.is_file()&&!metadata.file_type().is_symlink()&&metadata.mode()&0o022==0&&path.canonicalize()?==path,"provider swap boundary is not an actual protected file");
+    Ok(metadata)
+}
+fn mask_provider_swap(root:&Path)->Result<()> {
+    let boundary=super::provider_kernel::PROVIDER_SWAP_TOOL;
+    let source=OpenOptions::new().read(true).custom_flags(libc::O_PATH|libc::O_NOFOLLOW|libc::O_CLOEXEC).open(boundary)?;
+    let before=provider_swap_mountpoint()?;let held=source.metadata()?;
+    let destination=target(root,boundary,false)?;let mounted=fs::symlink_metadata(&destination)?;
+    ensure!(mounted.is_file()&&!mounted.file_type().is_symlink()&&(held.dev(),held.ino(),held.mode())==(before.dev(),before.ino(),before.mode())&&(mounted.dev(),mounted.ino(),mounted.mode())==(before.dev(),before.ino(),before.mode()),"guest swap boundary differs from actual parent runtime");
+    // A sealed anonymous inode has no writable host pathname or external
+    // provider alias. This namespace-only mask never changes Fly's helper.
+    let empty=super::linux::sealed_bytes_fd(&[])?;
+    syscall(unsafe{libc::fchmod(empty.as_raw_fd(),super::provider_kernel::PROVIDER_SWAP_EMPTY_MODE)},"set empty provider tool mode")?;
+    let fd_path=PathBuf::from(format!("/proc/self/fd/{}",empty.as_raw_fd()));
+    syscall(unsafe{libc::mount(c(&fd_path)?.as_ptr(),c(&destination)?.as_ptr(),std::ptr::null(),libc::MS_BIND,std::ptr::null())},"bind sealed empty provider tool")?;
+    syscall(unsafe{libc::mount(std::ptr::null(),c(&destination)?.as_ptr(),std::ptr::null(),libc::MS_BIND|libc::MS_REMOUNT|libc::MS_RDONLY|libc::MS_NOSUID|libc::MS_NODEV|libc::MS_NOEXEC,std::ptr::null())},"harden empty provider tool")?;
+    let masked=OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW|libc::O_CLOEXEC).open(&destination)?;
+    let actual=masked.metadata()?;let original=fs::metadata(&fd_path)?;
+    ensure!(actual.is_file()&&actual.len()==0&&actual.mode()&0o7777==super::provider_kernel::PROVIDER_SWAP_EMPTY_MODE&&(actual.dev(),actual.ino())==(original.dev(),original.ino()),"provider tool mask differs from original sealed empty inode");
+    let mut flags=std::mem::MaybeUninit::<libc::statvfs>::uninit();syscall(unsafe{libc::fstatvfs(masked.as_raw_fd(),flags.as_mut_ptr())},"check provider tool mask flags")?;
+    let flags=unsafe{flags.assume_init()};let required=libc::ST_RDONLY|libc::ST_NOSUID|libc::ST_NODEV|libc::ST_NOEXEC;
+    ensure!(flags.f_flag&required==required,"provider tool mask flags incomplete");
+    Ok(())
+}
 pub(crate) fn seed_home(layout: &Layout, spec: &ExecutionSpec) -> Result<()> {
     use std::io::Write;
     for file in &spec.home_files {
@@ -879,6 +939,10 @@ pub(crate) fn restrict(
             false,
         )?;
     }
+    let mut mask_kernel=false;let mut mask_swap=false;
+    for runtime in &spec.runtime {let source=runtime.source.canonicalize()?;mask_kernel|=super::provider_kernel::requires_provider_kernel_mask(&source,Path::new(&runtime.guest_path))?;mask_swap|=super::provider_kernel::requires_provider_swap_mask(&source,Path::new(&runtime.guest_path))?;}
+    if mask_kernel {mask_provider_kernel(&layout.root)?;}
+    if mask_swap {mask_provider_swap(&layout.root)?;}
     bind(&layout.view, &layout.root.join("workspace"), false, false)?;
     bind(&layout.home, &layout.root.join("home/agent"), false, false)?;
     bind(&layout.tmp, &layout.root.join("tmp"), false, false)?;
@@ -961,6 +1025,7 @@ pub(crate) fn restrict(
     )?;
     for (name, target) in [
         ("bin", "usr/bin"),
+        ("sbin", "usr/sbin"),
         ("lib", "usr/lib"),
         ("lib64", "usr/lib64"),
         ("dev/ptmx", "pts/ptmx"),
@@ -1028,3 +1093,11 @@ pub(crate) fn restrict(
     std::env::set_current_dir("/workspace")?;
     Ok(())
 }
+
+#[cfg(test)]
+#[path="managed_image_runtime_prefix_tests.rs"]
+mod managed_image_runtime_prefix_tests;
+
+#[cfg(test)]
+#[path="root_static_image_inputs_tests.rs"]
+mod static_image_inputs_tests;

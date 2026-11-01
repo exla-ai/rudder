@@ -26,6 +26,11 @@ impl ContentStore for Reader<'_> {
         bail!("read-only VFS content resolver")
     }
     fn read_object(&self, r: &ObjectRef) -> Result<Vec<u8>> {
+        #[cfg(target_os = "linux")]
+        if let Some(session) = self.0.image_content(r)? {
+            if let Some(meter) = self.1 { meter.metadata(r.size_bytes)?; }
+            return ContentStore::read_object(session, r);
+        }
         self.0.require_local_checkpoint()?;
         if let Some(meter) = self.1 {
             meter.metadata(r.size_bytes)?;
@@ -33,6 +38,11 @@ impl ContentStore for Reader<'_> {
         self.0.manager().store().read_object(r)
     }
     fn read_blob_range(&self, r: &ObjectRef, offset: u64, length: usize) -> Result<Vec<u8>> {
+        #[cfg(target_os = "linux")]
+        if let Some(session) = self.0.image_content(r)? {
+            if let Some(meter) = self.1 { meter.blob(r)?; }
+            return ContentStore::read_blob_range(session, r, offset, length);
+        }
         ensure!(
             r.kind == ObjectKind::Blob && length <= MAX_IO,
             "invalid bounded VFS blob read"
@@ -50,6 +60,11 @@ impl ContentStore for Reader<'_> {
         Ok(bytes)
     }
     fn copy_blob_to(&self, r: &ObjectRef, writer: &mut dyn Write) -> Result<()> {
+        #[cfg(target_os = "linux")]
+        if let Some(session) = self.0.image_content(r)? {
+            if let Some(meter) = self.1 { meter.blob(r)?; }
+            return ContentStore::copy_blob_to(session, r, writer);
+        }
         ensure!(r.kind == ObjectKind::Blob, "expected raw blob");
         if let Some(meter) = self.1 {
             meter.blob(r)?;
@@ -227,6 +242,13 @@ fn read_metered(
         .checked_add(length as u64)
         .context("range read overflow")?;
     let count = n.attr.size.saturating_sub(offset).min(length as u64) as usize;
+    #[cfg(target_os = "linux")]
+    if view.is_readonly_image() {
+        ensure!(n.backing.is_none(), "readonly image cannot contain private content");
+        let bytes = cas::read_file_range(&Reader(view, meter), n.base.as_ref().context("image file lacks content")?, offset, count)?;
+        ensure!(bytes.len() == count, "runtime image content shorter than declared length");
+        return Ok(bytes);
+    }
     let mut output = vec![0; count];
     let limit = base_limit(c, n)?;
     let mut done = 0;

@@ -90,6 +90,14 @@ mod managed_launch;
 mod managed_app;
 #[cfg(target_os = "linux")]
 mod managed_machine_entry;
+#[cfg(target_os="linux")]
+mod managed_machine_ingress;
+#[cfg(target_os="linux")]
+mod managed_machine_receipts;
+#[cfg(target_os="linux")]
+mod managed_machine_runtime_profile;
+#[cfg(target_os="linux")]
+mod provider_kernel_qualification;
 #[cfg(target_os = "linux")]
 mod managed_seed_enrollment;
 #[cfg(target_os = "linux")]
@@ -23119,3 +23127,19 @@ pub(crate) fn remote_key_bytes(key: &str) -> Option<&'static [u8]> {
 #[cfg(all(test, target_os = "linux"))]
 #[path = "managed_app_startup_tests.rs"]
 mod managed_app_startup_tests;
+
+#[cfg(target_os="linux")]
+mod managed_machine_cas;
+#[cfg(target_os="linux")]
+mod managed_runtime_image_preseed;
+
+#[cfg(target_os="linux")]
+mod managed_fresh_environment;
+#[cfg(target_os="linux")]
+mod managed_fresh_genesis;
+#[cfg(target_os="linux")]
+mod managed_fresh_assigned;
+#[cfg(target_os="linux")]
+mod managed_fresh_machine;
+#[cfg(target_os="linux")]
+mod managed_root_upload;

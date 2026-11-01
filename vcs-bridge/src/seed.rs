@@ -1,8 +1,8 @@
 //! Private metadata forks from a trusted, quiesced prepared repository.
 //!
 //! Preparation scans VCS metadata/objects once, never source. Forking copies
-//! only private metadata; it neither runs `jj workspace add` nor enumerates the
-//! prepared source/dependency view. Copying metadata is not an O(1) CoW claim.
+//! only private metadata. Explicit V2 forks a retained paged CoW floor instead.
+//! Neither path runs `jj workspace add` or copies the source/dependency view.
 //! The engine retains the seed artifact and controls the RO mount lifetime.
 
 use crate::{AttemptBinding, CommitIdentity, JjOperationId, atomic};
@@ -16,6 +16,7 @@ use std::io::{Read, Write};
 #[cfg(unix)]
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
 
 const SAFE_GIT_CONFIG: &[u8] =
     b"[core]\nrepositoryformatversion = 0\nbare = false\nlogallrefupdates = false\n";
@@ -102,7 +103,8 @@ impl MetadataTemplate {
             &canonical_json(self)?,
         ))
     }
-    pub fn validate(&self) -> Result<()> {
+    pub fn validate(&self) -> Result<()> { self.validate_with_limit(MAX_TEMPLATE_FILES) }
+    fn validate_with_limit(&self, file_limit: usize) -> Result<()> {
         ensure!(
             self.format_version == 1 && self.jj_version == "0.40.0",
             "unsupported metadata seed"
@@ -110,7 +112,7 @@ impl MetadataTemplate {
         self.baseline.validate()?;
         self.operation.validate()?;
         ensure!(
-            self.metadata.len() + self.objects.len() <= MAX_TEMPLATE_FILES,
+            self.metadata.len() + self.objects.len() <= file_limit,
             "metadata seed exceeds file-count bound"
         );
         for (path, file) in self.metadata.iter().chain(&self.objects) {
@@ -167,15 +169,16 @@ impl MetadataTemplate {
 }
 
 /// Verified objects remain immutable through an engine-owned read-only mount.
-/// Opening verifies the seed once; forks reverify metadata while copying it,
-/// without rereading every shared Git object for each agent.
+/// Opening verifies the seed once. V1 rechecks copied metadata; explicit V2
+/// shares that immutable manifest and forks a retained paged private namespace.
 pub struct VerifiedMetadataTemplate {
     root: PathBuf,
     object_mount: PathBuf,
-    manifest: MetadataTemplate,
+    manifest: Arc<MetadataTemplate>,
     identity: ObjectRef,
     require_readonly: bool,
     retained_seed: Option<ObjectRef>,
+    paged: Option<PagedSeedDescriptor>,
 }
 impl VerifiedMetadataTemplate {
     pub fn open(root: &Path, object_mount: &Path, expected: &ObjectRef) -> Result<Self> {
@@ -212,6 +215,9 @@ impl VerifiedMetadataTemplate {
                 && store.retention()?.pins.values().any(|old| old == seed),
             "VCS seed lacks current retained directory authority"
         );
+        if rudder_engine::tree::lookup(store, seed, b"descriptor.json")?.is_some() {
+            anyhow::bail!("V2 template requires the actual original-budget verifier");
+        }
         let entry = rudder_engine::tree::lookup(store, seed, b"manifest.json")?
             .context("retained VCS seed lacks manifest")?;
         let (object, logical_size) = match entry.node {
@@ -275,10 +281,11 @@ impl VerifiedMetadataTemplate {
         Ok(Self {
             root: root.canonicalize()?,
             object_mount,
-            manifest,
+            manifest:Arc::new(manifest),
             identity: expected.clone(),
             require_readonly,
             retained_seed: None,
+            paged: None,
         })
     }
     pub fn identity(&self) -> &ObjectRef {
@@ -483,6 +490,7 @@ pub fn fork_private_metadata(
     binding: AttemptBinding,
     activation: Option<&crate::LiveObservation>,
 ) -> Result<PrivateMetadataFork> {
+    ensure!(template.profile()==SeedProfile::SmallV1,"V2 private metadata requires the actual Root CoW factory");
     binding.validate()?;
     if let Some(retained) = &template.retained_seed {
         ensure!(
@@ -838,3 +846,25 @@ fn require_readonly_mount(_: &Path) -> Result<()> {
 mod fork_localization;
 #[cfg(all(feature = "jj", target_os = "linux"))]
 pub use fork_localization::*;
+
+#[cfg(all(feature="jj",unix))]
+#[path="seed_cas_generation.rs"]
+mod cas_generation;
+#[cfg(all(feature="jj",unix))]
+pub use cas_generation::{RetainedSeedCasCache,SeedCasGeneration,SeedCasWork};
+
+#[path="seed_paged.rs"]
+pub mod paged;
+pub use paged::{SeedProfile,PagedSeedDescriptor,PagedSeedFile,read_paged_seed};
+#[cfg(feature="jj")]
+pub use paged::{PagedSeedGeneration,PagedSeedWork};
+
+#[path="seed_paged_template.rs"]
+mod paged_template;
+
+
+#[cfg(all(feature="jj",target_os="linux"))]
+#[path="seed_cow_archive.rs"]
+mod cow_archive;
+#[cfg(all(feature="jj",target_os="linux"))]
+pub use cow_archive::{CowMetadataFloor,CowArchiveLocalization};

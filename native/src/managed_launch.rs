@@ -569,7 +569,7 @@ fn prepare_local_retaining(mut request: ManagedLocalLaunchRequest, cancelled: Ar
     ensure!(request.managed_store.binding().home == request.home
         && request.managed_store.binding().journal == request.journal
         && request.managed_store.binding().project_id == request.fence.owner.project_id
-        && crate::managed_store::ManagedStore::open(&journal, request.managed_store.binding())? == request.managed_store,
+        && request.managed_store.reopen_current(&journal)? == request.managed_store,
         "managed preparation differs from explicit prepared project identity");
     let reserved = managed_run.reservation(&request.fence.attempt_id)?.context("durable private managed reservation missing")?;
     ensure!(matches!(&reserved, ManagedRunSource::Reserved { fence, runnable_root }
@@ -661,7 +661,7 @@ fn prepare_local_retaining(mut request: ManagedLocalLaunchRequest, cancelled: Ar
             attempt_id: request.fence.attempt_id.clone(), view_id: request.view_id.clone(), seed: seed_ref.clone(),
             baseline: request.seed.manifest().baseline.clone(), baseline_operation: request.seed.manifest().operation.clone(),
             projection_policy: policy.reference()?, profile: runnable.profile.clone() };
-        let private = request.private_root.join("private");
+        let mut private = request.private_root.join("private");
         // A local seed with LocalWC metadata is rebound by the post-RPC host
         // factory. Already-bound Rudder metadata needs a fresh observation and
         // is explicitly refused here rather than inventing one before RPC.
@@ -669,6 +669,7 @@ fn prepare_local_retaining(mut request: ManagedLocalLaunchRequest, cancelled: Ar
         if let Some(fork)=&retained.seed_fork {
             fork.prepare_retaining(&request.seed,&private,binding.clone(),None,
                 budget.context("retained fork requires original task budget")?,&cancelled)?;
+            private=fork.prepared_private_path(budget.unwrap(),&cancelled)?;
         } else {fork_private_metadata(&request.seed,&private,binding.clone(),None)?;}
         #[cfg(not(target_os = "linux"))]
         fork_private_metadata(&request.seed,&private,binding.clone(),None)?;

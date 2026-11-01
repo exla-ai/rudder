@@ -65,6 +65,7 @@ impl ManagedSeedEnrollment {
         check_time(self.pending.original_budget(), self.pending.cancellation())?;
         // Absorbing BEFORE entering the client API: an Err/panic/late ACK may
         // already have enrolled a real Root reader. Never repeat this request.
+        self.pending.journal_owner().check_shared_admission()?;
         self.request_attempted = true;
         let receipt = client.enroll_original_helper_retaining(seed, pidfd, self.pending.original_budget())?;
         self.receipt = Some(receipt); // BEFORE every fallible post-ACK check
@@ -116,6 +117,13 @@ impl ManagedSeedEnrollment {
         ensure!(joined.prepared().assignment == *self.pending.assignment(), "joined task differs from enrolled assignment");
         joined.helper_exit().matches_checkpoint(joined.helper_custody(), joined.shutdown())
     }
+    /// OFF App. Only distinguishes ordinary shared fencing for retained
+    /// recovery. Caller separately checks the actual Root client; this neither
+    /// confirms an ACK nor releases any original helper/reader/slot custody.
+    pub(crate) fn only_shared_fence_recovery_off_app(&self)->Result<bool>{
+        if self.phase!=Phase::Recovery||self.panic.is_some()||!self.pending.journal_owner().shared_admission_closed(){return Ok(false);}
+        self.pending.journal_owner().assert_original_held_custody_off_app()?;Ok(true)
+    }
     fn retain_outcome(&mut self, outcome: std::thread::Result<Result<()>>, panic_message: &'static str) -> Result<()> {
         match outcome {
             Ok(Ok(())) => Ok(()),
@@ -143,7 +151,7 @@ fn current_assignment(journal: &Journal, owner: &OwnerFence, location: &ManagedR
         && location.run_id() == fence.run_id && location.store().binding().project_id == owner.project_id,
         "Root seed enrollment differs from the original task/owner/seed");
     fence.check_current(journal)?; check_time(original, cancelled)?;
-    ensure!(ManagedStore::open(journal, location.store().binding())? == *location.store(),
+    ensure!(location.store().reopen_current(journal)? == *location.store(),
         "managed seed enrollment floor differs from held Journal");
     check_time(original, cancelled)?;
     let saved = location.assignment(&fence.attempt_id)?.context("original managed assignment missing")?;

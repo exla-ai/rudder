@@ -78,9 +78,9 @@ impl ManagedPreparationCache {
     /// prepared marker as a cache hit. Root shares ONE Arc for this project.
     pub(crate) fn open(lease:EngineSourceLease, journal:&Journal, project:ManagedStore,
         store:LocalStore) -> Result<Arc<Self>> {
-        lease.check_journal(journal)?;
+        lease.check_journal(journal)?;lease.check_shared_current()?;
         ensure!(lease.owner().project_id == project.binding().project_id
-            && ManagedStore::open(journal,project.binding())? == project,
+            && project.reopen_current(journal)? == project,
             "preparation cache differs from actual managed owner/project");
         let mut anchors=vec![Anchor::open(&project.binding().directory)?, Anchor::open(store.root())?,
             Anchor::open(&store.root().join("objects"))?];
@@ -148,7 +148,7 @@ impl ManagedPreparationCache {
         view_id:&str,journal:&Journal,cancelled:&AtomicBool,budget:&FinalizationBudget) -> Result<ManagedPreparedView> {
         let _admission=self.admit()?; Self::time(cancelled,budget)?; self.custody()?;
         ensure!(fence.owner==*self.lease.owner(),"managed cache owner differs from reserved attempt");
-        self.lease.check_journal(journal)?; fence.check_current(journal)?;
+        self.lease.check_journal(journal)?;self.lease.check_shared_current()?; fence.check_current(journal)?;
         ensure!(uuid::Uuid::parse_str(view_id).is_ok_and(|id|id.to_string()==view_id),"managed view UUID was not reserved");
         let reserved=self.project.run(&fence.run_id)?.reservation(&fence.attempt_id)?.context("managed reservation absent")?;
         ensure!(matches!(reserved,ManagedRunSource::Reserved { fence:ref actual,runnable_root:ref selected }

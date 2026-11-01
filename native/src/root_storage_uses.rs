@@ -2,6 +2,7 @@
 //! receipts. Dropping a guard/result never releases ledger capacity or users.
 #![cfg(target_os="linux")]
 use anyhow::{ensure,Context,Result};
+use crate::root_storage_client::ArchivedMetadataCow;
 use rudder_engine::execution::finalization_budget::FinalizationBudget;
 use rudder_vcs_bridge::{AttemptBinding,seed::{LocalizedMetadataFork,NeverLinkedMetadataFork}};
 use std::sync::atomic::AtomicBool;
@@ -16,7 +17,7 @@ const MAX_USES:usize=272; // 256 helper/task scopes plus bounded host plumbing.
 #[derive(Clone,Copy,PartialEq,Eq)]
 pub enum SeedUseKind { Task, Template, Fork, Cache }
 trait ActualJoined:Send+Sync {fn joined(&self)->bool;fn drive_join(self:Arc<Self>)->Result<()>;}
-struct Entry {kind:SeedUseKind,readers:Vec<uuid::Uuid>,work:Option<Arc<dyn ActualJoined>>,localized:Option<Arc<LocalizedMetadataFork>>,binding:Option<AttemptBinding>,start:Option<SeedTaskUseGate>,never_started:Option<SealedSeedTaskUse>,never_linked:Option<Arc<NeverLinkedMetadataFork>>}
+struct Entry {kind:SeedUseKind,readers:Vec<uuid::Uuid>,work:Option<Arc<dyn ActualJoined>>,localized:Option<Arc<LocalizedMetadataFork>>,binding:Option<AttemptBinding>,start:Option<SeedTaskUseGate>,never_started:Option<SealedSeedTaskUse>,never_linked:Option<Arc<NeverLinkedMetadataFork>>,cow:Option<Arc<ArchivedMetadataCow>>}
 struct State {closed:bool,entries:Vec<Entry>}
 #[derive(Clone)]
 pub(crate) struct SeedUseLedger {state:Arc<Mutex<State>>,workers:Arc<AtomicUsize>}
@@ -25,7 +26,7 @@ impl SeedUseLedger {
     pub(crate) fn acquire(&self,kind:SeedUseKind)->Result<SeedUseGuard> {
         let mut state=self.state.lock().map_err(|_|anyhow::anyhow!("native seed use ledger poisoned"))?;
         ensure!(!state.closed&&state.entries.len()<MAX_USES,"native seed use admission closed/full");
-        let id=state.entries.len();state.entries.push(Entry {kind,readers:Vec::new(),work:None,localized:None,binding:None,start:None,never_started:None,never_linked:None});
+        let id=state.entries.len();state.entries.push(Entry {kind,readers:Vec::new(),work:None,localized:None,binding:None,start:None,never_started:None,never_linked:None,cow:None});
         Ok(SeedUseGuard {ledger:self.clone(),id})
     }
     /// Original two-use registration, BEFORE handing out source or starting
@@ -115,6 +116,22 @@ impl SeedUseLedger {
         *out=Some(RetainedLocalizedFork {actual});drop(state);
         original.remaining()?;ensure!(!cancelled.load(Ordering::Acquire),"localization acknowledgement cancelled");Ok(())
     }
+    pub(crate) fn acknowledge_cow_retaining(&self,out:&mut Option<RetainedCowFork>,task:&SeedUseGuard,fork:&SeedUseGuard,
+        proof:&Arc<ArchivedMetadataCow>,seal:Option<&SealedSeedTaskUse>,original:&FinalizationBudget,cancelled:&AtomicBool)->Result<()> {
+        original.remaining()?;ensure!(!cancelled.load(Ordering::Acquire)&&out.is_none()&&self.matches(task)&&self.matches(fork)&&task.id!=fork.id,"CoW original ledger/output differs");
+        proof.retained_fact()?;let mut state=self.state.lock().map_err(|_|anyhow::anyhow!("original CoW ledger poisoned"))?;
+        ensure!(state.closed||seal.is_some(),"CoW archive requires closed admission or original never-started seal");
+        for (id,kind) in [(task.id,SeedUseKind::Task),(fork.id,SeedUseKind::Fork)] {
+            let entry=state.entries.get(id).context("original CoW use absent")?;
+            ensure!(entry.kind==kind&&entry.work.is_none()&&entry.localized.is_none()&&entry.cow.is_none()&&entry.binding.as_ref()==Some(proof.binding()),"CoW original use/binding differs");
+            if let Some(seal)=seal {seal.check_original(entry.start.as_ref().context("original CoW start gate absent")?)?;
+                ensure!(entry.readers.is_empty(),"never-started CoW has enrolled helper");}
+        }
+        if seal.is_none(){ensure!(state.entries[task.id].readers.len()==1,"CoW original helper ACK association absent");}
+        state.entries[task.id].cow=Some(proof.clone());state.entries[fork.id].cow=Some(proof.clone());
+        if let Some(seal)=seal {state.entries[task.id].never_started=Some(seal.clone());state.entries[fork.id].never_started=Some(seal.clone());}
+        *out=Some(RetainedCowFork{actual:proof.clone()});drop(state);original.remaining()?;Ok(())
+    }
     pub(crate) fn prove(&self,readers:&std::collections::BTreeSet<uuid::Uuid>,original:&FinalizationBudget,cancelled:&AtomicBool)->Result<SeedActorsJoined> {
         let state=self.state.lock().map_err(|_|anyhow::anyhow!("native seed ledger poisoned"))?;
         ensure!(state.closed&&!state.entries.is_empty(),"native close-admission and actual joined use set required");
@@ -126,15 +143,17 @@ impl SeedUseLedger {
                 seal.check_original(entry.start.as_ref().context("original sealed gate absent")?)?;
                 ensure!(entry.readers.is_empty(),"never-started task has an enrolled helper");
                 if !seal.fork_was_never_claimed() {
-                    if let Some(proof)=&entry.localized {if !localized.iter().any(|old|Arc::ptr_eq(old,proof)){localized.push(proof.clone());}}
+                    if let Some(cow)=&entry.cow {cow.retained_fact()?;}
+                    else if let Some(proof)=&entry.localized {if !localized.iter().any(|old|Arc::ptr_eq(old,proof)){localized.push(proof.clone());}}
                     else {let proof=entry.never_linked.as_ref().context("never-started fork source dependency still held")?;
                         if !never_linked.iter().any(|old|Arc::ptr_eq(old,proof)){never_linked.push(proof.clone());}}
                 }
             } else {
                 if entry.kind==SeedUseKind::Task {ensure!(entry.readers.len()==1,"native task has no original helper ACK association");}
                 if matches!(entry.kind,SeedUseKind::Task|SeedUseKind::Fork) {
-                    let actual=entry.localized.clone().context("durable fork localization ACK absent; original seed remains retained")?;
-                    if !localized.iter().any(|prior|Arc::ptr_eq(prior,&actual)){localized.push(actual);}
+                    if let Some(cow)=&entry.cow {cow.retained_fact()?;}
+                    else {let actual=entry.localized.clone().context("durable fork localization ACK absent; original seed remains retained until localization or archive")?;
+                        if !localized.iter().any(|prior|Arc::ptr_eq(prior,&actual)){localized.push(actual);}}
                 }
             }
             actual.extend(entry.readers.iter().copied());retained.push(work.clone());
@@ -154,7 +173,7 @@ impl RetainedLocalizedFork {
     pub fn binding(&self)->&AttemptBinding {self.actual.binding()}
     pub fn check_current(&self,original:&FinalizationBudget,cancelled:&AtomicBool)->Result<()> {self.actual.check_current(original,cancelled)}
 }
-enum UnusedDependency {Uncreated(SealedSeedTaskUse),Localized(Arc<LocalizedMetadataFork>),NeverLinked(Arc<NeverLinkedMetadataFork>)}
+enum UnusedDependency {Uncreated(SealedSeedTaskUse),Localized(Arc<LocalizedMetadataFork>),NeverLinked(Arc<NeverLinkedMetadataFork>),Cow(Arc<ArchivedMetadataCow>)}
 /// Alias of actual original unspent permits OR a genuine VCS dependency-release
 /// ACK. Never converts a partial fork into a complete/localized repository.
 #[derive(Clone)]
@@ -162,7 +181,7 @@ pub struct RetainedUnusedFork {actual:Arc<UnusedDependency>}
 impl RetainedUnusedFork {
     pub fn check_current(&self,original:&FinalizationBudget,cancelled:&AtomicBool)->Result<()> {
         original.remaining()?;ensure!(!cancelled.load(Ordering::Acquire),"unused fork settlement cancelled");
-        match &*self.actual {UnusedDependency::Uncreated(seal)=>{ensure!(seal.fork_was_never_claimed(),"fork creation permit consumed");Ok(())},
+        match &*self.actual {UnusedDependency::Cow(proof)=>proof.retained_fact(),UnusedDependency::Uncreated(seal)=>{ensure!(seal.fork_was_never_claimed(),"fork creation permit consumed");Ok(())},
             UnusedDependency::Localized(proof)=>proof.check_current(original,cancelled),UnusedDependency::NeverLinked(proof)=>proof.check_current(original,cancelled)}
     }
 }
@@ -299,3 +318,33 @@ mod tests;
 #[cfg(test)]
 #[path="root_storage_never_started_tests.rs"]
 mod never_started_tests;
+
+/// Alias of the SAME original authenticated Root checkpoint/archive ACK.
+#[derive(Clone)]
+pub struct RetainedCowFork {actual:Arc<ArchivedMetadataCow>}
+impl RetainedCowFork {
+    pub fn binding(&self)->&AttemptBinding{self.actual.binding()}
+    pub fn check_current(&self,original:&FinalizationBudget,cancelled:&AtomicBool)->Result<()> {
+        original.remaining()?;ensure!(!cancelled.load(Ordering::Acquire),"CoW archive observation cancelled");self.actual.retained_fact()
+    }
+}
+
+impl SeedUseLedger {
+    pub(crate) fn acknowledge_unused_cow_retaining(&self,out:&mut Option<RetainedUnusedFork>,task:&SeedUseGuard,fork:&SeedUseGuard,
+        proof:&Arc<ArchivedMetadataCow>,seal:&SealedSeedTaskUse,original:&FinalizationBudget,cancelled:&AtomicBool)->Result<()> {
+        ensure!(out.is_none(),"original unused CoW output occupied");let mut retained=None;
+        let result=self.acknowledge_cow_retaining(&mut retained,task,fork,proof,Some(seal),original,cancelled);
+        // Keep the actual original ACK even when the final deadline check lost.
+        if let Some(retained)=retained{*out=Some(RetainedUnusedFork{actual:Arc::new(UnusedDependency::Cow(retained.actual))});}result
+    }
+}
+
+impl SeedUseLedger {
+    pub(crate) fn bind_cow_start(&self,start:&SeedTaskUseGate,binding:&AttemptBinding)->Result<()> {
+        start.check_claimed_fork()?;let mut state=self.state.lock().map_err(|_|anyhow::anyhow!("original CoW ledger poisoned"))?;
+        ensure!(!state.closed,"original seed admission closed");let mut found=Vec::new();
+        for(id,e)in state.entries.iter().enumerate(){if e.start.as_ref().is_some_and(|actual|actual.same_original(start)){
+            ensure!(matches!(e.kind,SeedUseKind::Task|SeedUseKind::Fork)&&e.work.is_none()&&e.binding.as_ref().is_none_or(|old|old==binding),"original CoW attempt/start differs");found.push(id);}}
+        ensure!(found.len()==2,"original CoW paired task/fork guards absent");for id in found{state.entries[id].binding=Some(binding.clone());}Ok(())
+    }
+}

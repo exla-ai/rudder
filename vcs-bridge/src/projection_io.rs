@@ -192,6 +192,26 @@ impl MeteredSource {
             Ok(())
         })
     }
+    /// Reserve BOTH the verified input and actual Git object buffers before
+    /// reading either. Size/capacity refusal selects the existing streaming
+    /// path; an expired meter or later IO/verification error never does.
+    fn try_reserve_git_reuse_buffers(&self, size: u64) -> Result<bool> {
+        let mut admitted = false;
+        self.update(|m| {
+            let Some(total) = size.checked_mul(2)
+                .and_then(|bytes| m.work.jj_buffer_bytes_admitted.checked_add(bytes)) else {
+                return Ok(());
+            };
+            if size > m.budget.max_jj_buffer_bytes || total > m.budget.max_content_bytes {
+                return Ok(());
+            }
+            m.work.jj_buffer_bytes_admitted = total;
+            admitted = true;
+            Ok(())
+        })?;
+        Ok(admitted)
+    }
+    fn check(&self) -> Result<()> { self.update(|_| Ok(())) }
     pub fn reused(&self) {
         self.meter.lock().unwrap().work.reused_leaf_values += 1;
     }
@@ -421,8 +441,46 @@ pub(crate) fn write_file(
     object: &ObjectRef,
     logical_size: u64,
 ) -> Result<FileId> {
+    let mut repo = git_backend(store)?.git_repo();
+    if source.try_reserve_git_reuse_buffers(logical_size)? {
+        // Mandatory verification still reads the ACTUAL CAS preimage. A prior
+        // ProjectionRecord, object name or exists() result never proves equality.
+        let mut reader = source.file_reader(object, logical_size)?;
+        let mut bytes = Vec::with_capacity(usize::try_from(logical_size)?);
+        reader.read_to_end(&mut bytes)?;
+        ensure!(reader.remaining == 0 && reader.ended
+            && bytes.len() as u64 == logical_size, "incomplete verified Git reuse input");
+        source.check()?;
+        let expected = gix::objs::compute_hash(repo.object_hash(), gix::objs::Kind::Blob, &bytes)?;
+        source.check()?;
+        // This thread-local instance must read stored bytes, not an object
+        // cache populated by an earlier operation before external corruption.
+        repo.object_cache_size(None);
+        if let Some(header) = repo.try_find_header(expected)? {
+            source.check()?;
+            // Same preflight as read_git_blob(), with the already-reserved
+            // two-buffer bound and the exact independently verified length.
+            // Wrong/oversize/corrupt headers MUST NOT reach a full allocation.
+            ensure!(header.kind() == gix::objs::Kind::Blob && header.size() == logical_size,
+                "existing Git blob kind or length differs from verified input");
+            let actual = repo.find_object(expected)?.try_into_blob()?.take_data();
+            source.check()?;
+            ensure!(actual.len() as u64 == logical_size && actual == bytes,
+                "existing Git object differs from verified input; refusing repair");
+        } else {
+            // The preimage is already completely verified and budgeted. Only
+            // an ACTUALLY absent object is written; read errors never fall back.
+            source.check()?;
+            let id = repo.objects.write_stream(gix::objs::Kind::Blob, logical_size, &mut bytes.as_slice())
+                .map_err(|e| anyhow::anyhow!("Git blob stream failed: {e}"))?;
+            ensure!(id == expected, "Git writer differs from verified input OID");
+        }
+        source.git_written(logical_size)?;
+        return Ok(FileId::new(expected.as_bytes().to_vec()));
+    }
+    // Unavailable buffer capacity is a restriction, not an enlarged quota.
+    // Preserve the existing bounded streaming behavior for these inputs.
     let mut reader = source.file_reader(object, logical_size)?;
-    let repo = git_backend(store)?.git_repo();
     let id = repo
         .objects
         .write_stream(gix::objs::Kind::Blob, logical_size, &mut reader)
@@ -461,3 +519,7 @@ pub(crate) fn reject_submodule(value: &jj_lib::merge::MergedTreeValue) -> Result
 fn io_error(error: anyhow::Error) -> io::Error {
     io::Error::other(format!("{error:#}"))
 }
+
+#[cfg(test)]
+#[path="projection_git_reuse_tests.rs"]
+mod git_reuse_tests;

@@ -289,6 +289,17 @@ fn time(ns: i64) -> SystemTime {
     UNIX_EPOCH + Duration::from_nanos(ns.max(0) as u64)
 }
 impl Adapter {
+    pub(super) fn image_call<T>(&self, call: impl FnOnce(&VfsView) -> Result<T>) -> Result<T> {
+        let mut request = None;
+        if !self.view.begin_readonly_image_request_retaining(&mut request)? { return call(&self.view); }
+        let request = request.as_mut().unwrap();
+        // The actual callback has returned before slot recycling. A panic or
+        // failed retained read leaves its real context in the floor slot.
+        let result = request.invoke(call);
+        let settled = request.finish_retaining();
+        match result { Err(error) => Err(error), Ok(value) => { settled?; Ok(value) } }
+    }
+
     fn attr(&self, a: VfsAttr) -> FileAttr {
         FileAttr {
             ino: INodeNo(a.ino),
@@ -330,10 +341,10 @@ impl Filesystem for Adapter {
         Ok(())
     }
     fn lookup(&self, _: &Request, p: INodeNo, n: &OsStr, r: ReplyEntry) {
-        self.entry(self.view.lookup(p.0, n.as_bytes()), r)
+        self.entry(self.image_call(|view| view.lookup(p.0, n.as_bytes())), r)
     }
     fn getattr(&self, _: &Request, i: INodeNo, _: Option<FileHandle>, r: ReplyAttr) {
-        match self.view.attr(i.0) {
+        match self.image_call(|view| view.attr(i.0)) {
             Ok(a) => r.attr(&TTL, &self.attr(a)),
             Err(e) => r.error(failure(e)),
         }
@@ -371,52 +382,52 @@ impl Filesystem for Adapter {
                 .as_nanos()
                 .min(i64::MAX as u128) as i64,
         };
-        match self.view.set_attr(
+        match self.image_call(|view| view.set_attr(
             i.0,
             mode.map(|m| m & 0o7777),
             size,
             atime.map(convert),
             mtime.map(convert),
-        ) {
+        )) {
             Ok(a) => r.attr(&TTL, &self.attr(a)),
             Err(e) => r.error(failure(e)),
         }
     }
     fn readlink(&self, _: &Request, i: INodeNo, r: ReplyData) {
-        match self.view.readlink(i.0) {
+        match self.image_call(|view| view.readlink(i.0)) {
             Ok(b) => r.data(&b),
             Err(e) => r.error(failure(e)),
         }
     }
     fn mkdir(&self, _: &Request, p: INodeNo, n: &OsStr, mode: u32, umask: u32, r: ReplyEntry) {
         self.entry(
-            self.view.create(
+            self.image_call(|view| view.create(
                 p.0,
                 n.as_bytes(),
                 NodeKind::Directory,
                 mode & !umask & 0o7777,
                 b"",
-            ),
+            )),
             r,
         )
     }
     fn symlink(&self, _: &Request, p: INodeNo, n: &OsStr, target: &Path, r: ReplyEntry) {
         self.entry(
-            self.view.create(
+            self.image_call(|view| view.create(
                 p.0,
                 n.as_bytes(),
                 NodeKind::Symlink,
                 0o777,
                 target.as_os_str().as_bytes(),
-            ),
+            )),
             r,
         )
     }
     fn unlink(&self, _: &Request, p: INodeNo, n: &OsStr, r: ReplyEmpty) {
-        self.empty(self.view.unlink(p.0, n.as_bytes(), false), r)
+        self.empty(self.image_call(|view| view.unlink(p.0, n.as_bytes(), false)), r)
     }
     fn rmdir(&self, _: &Request, p: INodeNo, n: &OsStr, r: ReplyEmpty) {
-        self.empty(self.view.unlink(p.0, n.as_bytes(), true), r)
+        self.empty(self.image_call(|view| view.unlink(p.0, n.as_bytes(), true)), r)
     }
     fn rename(
         &self,
@@ -429,13 +440,12 @@ impl Filesystem for Adapter {
         r: ReplyEmpty,
     ) {
         self.empty(
-            self.view
-                .rename(p.0, n.as_bytes(), np.0, nn.as_bytes(), f.bits()),
+            self.image_call(|view| view.rename(p.0, n.as_bytes(), np.0, nn.as_bytes(), f.bits())),
             r,
         )
     }
     fn link(&self, _: &Request, i: INodeNo, p: INodeNo, n: &OsStr, r: ReplyEntry) {
-        self.entry(self.view.link(i.0, p.0, n.as_bytes()), r)
+        self.entry(self.image_call(|view| view.link(i.0, p.0, n.as_bytes())), r)
     }
     fn create(
         &self,
@@ -447,12 +457,12 @@ impl Filesystem for Adapter {
         flags: i32,
         r: ReplyCreate,
     ) {
-        let result = (|| {
+        let result = self.image_call(|view| {
             let (a, h) =
-                self.view
+                view
                     .create_with_handle(p.0, n.as_bytes(), mode & !umask & 0o7777, flags)?;
             Ok((a, h))
-        })();
+        });
         match result {
             Ok((a, h)) => r.created(
                 &TTL,
@@ -466,7 +476,7 @@ impl Filesystem for Adapter {
     }
     fn open(&self, _: &Request, i: INodeNo, flags: OpenFlags, r: ReplyOpen) {
         let raw = flags.0;
-        match self.view.open_handle(i.0, raw, false) {
+        match self.image_call(|view| view.open_handle(i.0, raw, false)) {
             Ok(h) => r.opened(FileHandle(h), FopenFlags::empty()),
             Err(e) => r.error(failure(e)),
         }
@@ -482,10 +492,8 @@ impl Filesystem for Adapter {
         _: Option<LockOwner>,
         r: ReplyData,
     ) {
-        let result = self
-            .view
-            .check_handle(i.0, h.0, false)
-            .and_then(|_| self.view.read(i.0, offset, size as usize));
+        let result = self.image_call(|view| view.check_handle(i.0, h.0, false)
+            .and_then(|_| view.read(i.0, offset, size as usize)));
         match result {
             Ok(b) => r.data(&b),
             Err(e) => r.error(failure(e)),
@@ -503,14 +511,14 @@ impl Filesystem for Adapter {
         _: Option<LockOwner>,
         r: ReplyWrite,
     ) {
-        let result = self.view.check_handle(i.0, h.0, true).and_then(|_| {
-            self.view.write(
+        let result = self.image_call(|view| view.check_handle(i.0, h.0, true).and_then(|_| {
+            view.write(
                 i.0,
                 offset,
                 b,
                 flags.0 & (libc::O_SYNC | libc::O_DSYNC) != 0,
             )
-        });
+        }));
         match result {
             Ok(n) => r.written(n as u32),
             Err(e) => r.error(failure(e)),
@@ -532,18 +540,20 @@ impl Filesystem for Adapter {
         self.empty(self.view.close_handle(i.0, h.0), r)
     }
     fn fsync(&self, _: &Request, i: INodeNo, _: FileHandle, _: bool, r: ReplyEmpty) {
-        self.empty(self.view.sync(i.0), r)
+        self.empty(self.image_call(|view| view.sync(i.0)), r)
     }
     fn opendir(&self, _: &Request, i: INodeNo, f: OpenFlags, r: ReplyOpen) {
-        match self.view.open_handle(i.0, f.0, true) {
+        match self.image_call(|view| view.open_handle(i.0, f.0, true)) {
             Ok(h) => r.opened(FileHandle(h), FopenFlags::empty()),
             Err(e) => r.error(failure(e)),
         }
     }
     fn readdir(&self, _: &Request, i: INodeNo, h: FileHandle, offset: u64, mut r: ReplyDirectory) {
+        let mut reply = Some(r);
+        let result = self.image_call(|view| {
         let mut cookie = offset;
         loop {
-            match self.view.read_directory_page(
+            match view.read_directory_page(
                 i.0,
                 h.0,
                 cookie,
@@ -551,36 +561,41 @@ impl Filesystem for Adapter {
             ) {
                 Ok(page) => {
                     for entry in page.entries {
-                        if r.add(
+                        if reply.as_mut().unwrap().add(
                             INodeNo(entry.ino),
                             entry.next_cookie,
                             kind(entry.kind),
                             OsStr::from_bytes(&entry.name),
                         ) {
-                            r.ok();
-                            return;
+                            if view.is_readonly_image() { view.image_remaining()?; }
+                            reply.take().unwrap().ok();
+                            return Ok(());
                         }
                         cookie = entry.next_cookie;
                     }
                     if page.eof {
-                        r.ok();
-                        return;
+                        if view.is_readonly_image() { view.image_remaining()?; }
+                        reply.take().unwrap().ok();
+                        return Ok(());
                     }
                 }
                 Err(e) => {
-                    r.error(failure(e));
-                    return;
+                    return Err(e);
                 }
             }
         }
+        });
+        if let Err(error) = result { if let Some(reply) = reply { reply.error(failure(error)); } }
     }
+
     fn releasedir(&self, _: &Request, i: INodeNo, h: FileHandle, _: OpenFlags, r: ReplyEmpty) {
         self.empty(self.view.close_handle(i.0, h.0), r)
     }
     fn fsyncdir(&self, _: &Request, i: INodeNo, _: FileHandle, _: bool, r: ReplyEmpty) {
-        self.empty(self.view.sync(i.0), r)
+        self.empty(self.image_call(|view| view.sync(i.0)), r)
     }
     fn statfs(&self, _: &Request, _: INodeNo, r: ReplyStatfs) {
+        if self.view.is_readonly_image() { r.statfs(0, 0, 0, 0, 0, 4096, 255, 4096); return; }
         let result = (|| -> Result<libc::statvfs> {
             let path = CString::new(self.view.manager().root().as_os_str().as_bytes())?;
             let mut value = std::mem::MaybeUninit::<libc::statvfs>::uninit();
@@ -602,5 +617,31 @@ impl Filesystem for Adapter {
             ),
             Err(e) => r.error(failure(e)),
         }
+    }
+}
+
+#[path="metadata_mount.rs"]
+pub mod metadata;
+
+#[cfg(test)]
+pub(super) fn test_image_callback<T>(view: &VfsView, call: impl FnOnce(&VfsView) -> Result<T>) -> Result<T> {
+    Adapter { view: view.clone(), uid: unsafe { libc::geteuid() }, gid: unsafe { libc::getegid() } }.image_call(call)
+}
+
+#[cfg(test)]
+mod runtime_image_error_mapping_tests {
+    use super::*;
+    #[test]
+    fn actual_adapter_metadata_and_io_errors_never_map_to_fuse_success() {
+        let metadata=serde_json::from_slice::<serde_json::Value>(b"{broken").unwrap_err();
+        assert_eq!(failure(metadata.into()),Errno::EIO);
+        assert_eq!(failure(anyhow::anyhow!("raw path DATA is not image readiness")),Errno::EIO);
+        for code in [0,-1] {
+            assert_eq!(failure(std::io::Error::from_raw_os_error(code).into()),Errno::EIO);
+        }
+        let missing=anyhow::Error::new(std::io::Error::from_raw_os_error(libc::ENOENT))
+            .context("original declared metadata child absent");
+        assert_eq!(failure(missing),Errno::ENOENT);
+        assert_eq!(failure(error(libc::EROFS)),Errno::EROFS);
     }
 }

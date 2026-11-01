@@ -8,6 +8,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Duration;
 
+#[path = "preparation_retaining.rs"]
+mod retaining;
+pub use retaining::{PreparationAcknowledgment, RetainedPreparation, RetainedPreparationStatus};
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PreparedEnvironment {
     pub key: ObjectRef,
@@ -33,6 +37,27 @@ pub struct BuildIndex {
     root: PathBuf,
 }
 impl BuildIndex {
+    /// OFF actor. Publish preparation for already-built, currently retained
+    /// content. This additive path never runs an installer callback. Keep the
+    /// original output carrier on every error; no retry/recovery is inferred.
+    #[allow(clippy::too_many_arguments)]
+    pub fn prepare_pinned_retaining(
+        self: &std::sync::Arc<Self>,
+        out: &mut Option<RetainedPreparation>,
+        spec: PreparationSpec,
+        layout: PreparedContentLayout,
+        directory: ObjectRef,
+        anchors: Vec<ObjectRef>,
+        original: crate::execution::finalization_budget::FinalizationBudget,
+        cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) -> Result<()> {
+        ensure!(out.is_none(), "original preparation output occupied");
+        *out = Some(RetainedPreparation::stage(
+            self.clone(), spec, layout, directory, anchors, original, cancelled,
+        ));
+        out.as_mut().unwrap().run()
+    }
+
     pub fn open(root: impl AsRef<Path>, store: LocalStore) -> Result<Self> {
         ensure!(
             rusqlite::version_number() >= 3_051_003,

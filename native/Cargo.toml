@@ -45,3 +45,9 @@ libc = "0.2"
 [target.'cfg(target_os = "linux")'.dependencies]
 jj-lib = { version = "=0.40.0", default-features = false, features = ["git"] }
 pollster = "0.4"
+
+[[bin]]
+name = "rudder-image-preseed"
+path = "src/bin_rudder_image_preseed.rs"
+test = false
+bench = false

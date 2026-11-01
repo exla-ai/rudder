@@ -15,41 +15,50 @@ const MAX_CACHE_SCOPES:usize=2;
 const MAX_RETIRED_SEEDS:usize=2;
 
 pub(super) struct SeedCarrier {
-    source:ManagedInitialSourceOwner,store:LocalStore,budget:FinalizationBudget,cancelled:Arc<AtomicBool>,
+    pub(super) source:ManagedInitialSourceOwner,pub(super) store:LocalStore,budget:FinalizationBudget,pub(super) cancelled:Arc<AtomicBool>,
     client_owner:Option<ClientSeedOwner>,template:Option<Arc<VerifiedMetadataTemplate>>,template_guard:Option<SeedUseGuard>,
     template_value:Option<TemplateClose>,template_close:Option<RetainedSeedJoin<TemplateClose>>,template_started:bool,
-    admission:Arc<SeedAdmission>,tasks:BTreeMap<String,SeedTaskTicket>,caches:BTreeMap<String,SeedCacheTicket>,
+    admission:Arc<SeedAdmission>,pub(super) tasks:BTreeMap<String,SeedTaskTicket>,caches:BTreeMap<String,SeedCacheTicket>,
     retirement:Option<Campaign>,panic:Option<Box<dyn Any+Send>>,
 }
 struct Campaign {original:FinalizationBudget,cancelled:Arc<AtomicBool>}
 #[derive(Clone)]
 pub(crate) struct SeedTicket {pub(super) id:String,pub(super) cell:Arc<Cell<SeedCarrier>>}
 impl SeedTicket {
+    pub(crate) fn ingress_ready(&self)->bool {self.cell.phase.load(Ordering::Acquire)==READY}
+    pub(crate) fn ingress_recovery(&self)->bool {self.cell.phase.load(Ordering::Acquire)==RECOVERY}
     pub(crate) fn capture(source:ManagedInitialSourceOwner,store:LocalStore,budget:FinalizationBudget,cancelled:Arc<AtomicBool>)->Self {
         Self {id:uuid::Uuid::new_v4().to_string(),cell:Cell::new(SeedCarrier {source,store,budget,cancelled,client_owner:None,
             template:None,template_guard:None,template_value:None,template_close:None,template_started:false,
             admission:SeedAdmission::new(),tasks:BTreeMap::new(),caches:BTreeMap::new(),retirement:None,panic:None})}
+    }
+    /// Same actual inert snapshot, with a pre-reserved machine Root slot and
+    /// the original Root preparation clock captured BEFORE queue/effects.
+    pub(super) fn capture_generation_retaining(out:&mut Option<Self>,source:&mut Option<ManagedInitialSourceOwner>,store:LocalStore,id:String,budget:FinalizationBudget,cancelled:Arc<AtomicBool>)->Result<()> {
+        ensure!(out.is_none(),"original generation seed output occupied");source.as_ref().context("original inert source absent")?.prepared_current(&budget,&cancelled)?;
+        time(&budget,&cancelled)?;let source=source.take().unwrap();
+        *out=Some(Self{id,cell:Cell::new(SeedCarrier{source,store,budget,cancelled,client_owner:None,template:None,template_guard:None,template_value:None,template_close:None,template_started:false,admission:SeedAdmission::new(),tasks:BTreeMap::new(),caches:BTreeMap::new(),retirement:None,panic:None})});Ok(())
     }
     /// Legacy compatibility: unscoped aliases irreversibly block retirement.
     /// New callers use source_for_factory after pre-admitted original custody.
     pub(crate) fn template_if_ready(&self)->Result<Option<Arc<VerifiedMetadataTemplate>>> {
         let phase=self.cell.phase.load(Ordering::Acquire);ensure!(phase!=RECOVERY&&phase!=RETIRED&&phase!=CLOSING,"seed no longer admits aliases");
         if phase!=READY {return Ok(None);}
-        match self.cell.owner.try_lock() {Ok(owner)=>{owner.admission.check_open()?;
+        match self.cell.owner.try_lock() {Ok(owner)=>{owner.admission.check_open()?;owner.source.check_shared_admission()?;
             owner.client_owner.as_ref().context("actual seed owner absent")?.latch_untracked_native_use();Ok(owner.template.clone())},
             Err(TryLockError::WouldBlock)=>Ok(None),Err(_)=>anyhow::bail!("seed carrier poisoned")}
     }
 }
 #[derive(Clone)]
-pub(crate) struct SeedTaskTicket {id:String,seed_id:String,seed:Weak<Cell<SeedCarrier>>,cell:Arc<Cell<TaskScope>>,admission:Arc<SeedAdmission>,original:FinalizationBudget,app_thread:ThreadId}
-struct TaskScope {
+pub(crate) struct SeedTaskTicket {id:String,seed_id:String,seed:Weak<Cell<SeedCarrier>>,pub(super) cell:Arc<Cell<TaskScope>>,admission:Arc<SeedAdmission>,original:FinalizationBudget,app_thread:ThreadId}
+pub(super) struct TaskScope {
     factory:SeedFactoryOwner,start:Option<SeedTaskUseGate>,factory_outcome:Option<Result<PreparedManagedTask>>,factory_refusal:Option<ManagedTaskStartFailure>,never:Option<NeverStartedScope>,guard:Option<SeedUseGuard>,fork_guard:Option<SeedUseGuard>,fork:Option<Arc<ManagedSeedForkCell>>,
-    expected_run:Option<String>,bound:bool,enrollment:Option<EnrollmentTicket>,completion:Option<Completion>,
-    localized:Option<RetainedLocalizedFork>,localize_attempted:bool,
+    expected_run:Option<String>,bound:bool,enrollment:Option<EnrollmentTicket>,pub(super) completion:Option<Completion>,pub(super) generation:Option<Arc<super::source_generations::SourceGeneration>>,
+    localized:Option<RetainedLocalizedFork>,cow:Option<rudder_native::root_storage_uses::RetainedCowFork>,localize_attempted:bool,
     fork_value:Option<ForkClose>,fork_close:Option<RetainedSeedJoin<ForkClose>>,fork_started:bool,
     task_close:Option<ManagedSeedTaskDrain>,task_started:bool,
 }
-enum Completion {Discarded(Option<JoinedManagedTask>),Published(Option<ManagedCheckpointAcceptance>)}
+pub(super) enum Completion {Discarded(Option<JoinedManagedTask>),Published(Option<ManagedCheckpointAcceptance>)}
 impl Completion {fn joined(&self)->Result<&JoinedManagedTask> {match self {
     Self::Discarded(value)=>{let value=value.as_ref().context("original task transferred to drain")?;ensure!(value.is_settled(),"discard not actually settled");Ok(value)},
     Self::Published(value)=>value.as_ref().context("original acceptor transferred to drain")?.settled_joined_task(),}}}
@@ -66,14 +75,18 @@ struct TemplateClose {template:Option<Arc<VerifiedMetadataTemplate>>}
 fn close_template(value:&mut TemplateClose)->Result<()> {value.template=None;Ok(())}
 struct CacheClose {cache:Option<Arc<ManagedPreparationCache>>}
 fn close_cache(value:&mut CacheClose)->Result<()> {value.cache=None;Ok(())}
-struct ForkClose {_cell:Arc<ManagedSeedForkCell>,proof:RetainedLocalizedFork,original:FinalizationBudget,cancelled:Arc<AtomicBool>}
-fn close_fork(value:&mut ForkClose)->Result<()> {value.proof.check_current(&value.original,&value.cancelled)}
+enum ForkProof {Localized(RetainedLocalizedFork),Cow(rudder_native::root_storage_uses::RetainedCowFork)}
+struct ForkClose {_cell:Arc<ManagedSeedForkCell>,proof:ForkProof,original:FinalizationBudget,cancelled:Arc<AtomicBool>}
+fn close_fork(value:&mut ForkClose)->Result<()> {match &value.proof{ForkProof::Localized(p)=>p.check_current(&value.original,&value.cancelled),ForkProof::Cow(p)=>p.check_current(&value.original,&value.cancelled)}}
 
 pub(super) struct EnrollmentCarrier {seed_id:String,seed:Weak<Cell<SeedCarrier>>,_legacy_seed:Option<SeedTicket>,
     task:Option<Weak<Cell<TaskScope>>>,enrollment:Option<ManagedSeedEnrollment>,panic:Option<Box<dyn Any+Send>>}
 #[derive(Clone)]
 pub(crate) struct EnrollmentTicket {pub(super) id:String,pub(super) cell:Arc<Cell<EnrollmentCarrier>>,admission:Option<Arc<SeedAdmission>>}
 impl EnrollmentTicket {
+    /// Queue-admission DATA only. Retry is possible only while this SAME actual
+    /// ticket is still pending; Root IO/ACK must never be inferred from this.
+    pub(crate) fn ingress_queue_retryable(&self)->bool {self.cell.phase.load(Ordering::Acquire)==PENDING}
     pub(crate) fn capture(seed:SeedTicket,pending:crate::managed_app::PendingManagedTaskHelper)->Self {
         Self {id:uuid::Uuid::new_v4().to_string(),admission:None,cell:Cell::new(EnrollmentCarrier {seed_id:seed.id.clone(),seed:Arc::downgrade(&seed.cell),
             _legacy_seed:Some(seed),task:None,enrollment:Some(ManagedSeedEnrollment::new(pending)),panic:None})}
@@ -95,7 +108,7 @@ impl EnrollmentTicket {
     }
 }
 
-fn lock<'a,T>(cell:&'a Arc<Cell<T>>,original:&FinalizationBudget)->Result<std::sync::MutexGuard<'a,T>> {
+pub(super) fn lock<'a,T>(cell:&'a Arc<Cell<T>>,original:&FinalizationBudget)->Result<std::sync::MutexGuard<'a,T>> {
     loop {original.remaining()?;match cell.owner.try_lock() {Ok(held)=>return Ok(held),
         Err(TryLockError::WouldBlock)=>std::thread::sleep(original.phase_limit(Duration::from_millis(2))?),Err(_)=>anyhow::bail!("actual machine source carrier poisoned")}}
 }
@@ -111,7 +124,9 @@ pub(super) fn prepare_seed(machine:&mut ManagedMachineBootstrap,ticket:&SeedTick
     let mut c=ticket.cell.owner.lock().map_err(|_|anyhow::anyhow!("managed seed carrier poisoned"))?;
     let result=catch_unwind(AssertUnwindSafe(||->Result<()> {
         c.admission.check_open()?;time(&c.budget,&c.cancelled)?;let seed=c.source.prepared_current(&c.budget,&c.cancelled)?.seed_root.clone();
-        c.client_owner=Some(ClientSeedOwner::capture(c.store.clone(),seed)?);
+        let profile=c.source.prepared_current(&c.budget,&c.cancelled)?.seed_cache().profile();
+        c.client_owner=Some(if profile==rudder_vcs_bridge::seed::SeedProfile::PagedCowV2 {ClientSeedOwner::capture_paged(c.store.clone(),seed,&c.budget,c.cancelled.clone())?}
+            else{ClientSeedOwner::capture(c.store.clone(),seed)?});
         let original=c.budget.clone();machine.client_mut_retaining()?.prepare_seed_retaining(c.client_owner.as_mut().unwrap(),&original)?;
         let SeedCarrier {client_owner,template_guard,template,..}=&mut *c;
         client_owner.as_ref().unwrap().acquire_use_retaining(template_guard,SeedUseKind::Template,&original)?;
@@ -136,7 +151,17 @@ pub(super) fn enroll(machine:&mut ManagedMachineBootstrap,ticket:&EnrollmentTick
             ensure!(task.enrollment.is_none()&&task.guard.is_some()&&task.fork_guard.is_some(),"original task enrollment already attempted/absent");
             task.enrollment=Some(ticket.clone());
         } else {owner.client_owner.as_ref().context("actual seed absent")?.latch_untracked_native_use();}
-        c.enrollment.as_mut().context("original enrollment already moved")?.enroll_retaining(machine.client_mut_retaining()?,owner.client_owner.as_mut().context("actual Root seed owner absent")?)
+        let client=machine.client_mut_retaining()?;
+        if let Some(task)=&c.task {
+            let task=task.upgrade().context("original CoW task absent")?;let task=task.owner.lock().map_err(|_|anyhow::anyhow!("original CoW task poisoned"))?;
+            if let Some(fork)=&task.fork {fork.prepare_cow_enrollment_retaining(client,owner.client_owner.as_mut().context("actual Root owner absent")?,task.factory.original())?;}
+        }
+        c.enrollment.as_mut().context("original enrollment already moved")?.enroll_retaining(client,owner.client_owner.as_mut().context("actual Root seed owner absent")?)?;
+        if let Some(task)=&c.task {
+            let task=task.upgrade().context("original CoW task scope absent")?;let task=task.owner.lock().map_err(|_|anyhow::anyhow!("original CoW task poisoned"))?;
+            if let Some(fork)=&task.fork {fork.bind_cow_helper_retaining(client,owner.client_owner.as_mut().unwrap(),
+                c.enrollment.as_ref().unwrap().receipt().context("original helper Root ACK absent")?,task.factory.original())?;}
+        }Ok(())
     }));
     match result {Ok(Ok(()))=>{ticket.cell.phase.store(READY,Ordering::Release);Ok(())},Ok(Err(_))=>{ticket.cell.phase.store(RECOVERY,Ordering::Release);Err(anyhow::anyhow!("managed enrollment failed; original helper/ACK retained"))},
         Err(panic)=>{c.panic=Some(panic);ticket.cell.phase.store(RECOVERY,Ordering::Release);Err(anyhow::anyhow!("managed enrollment panicked; original helper/ACK retained"))}}
@@ -151,8 +176,8 @@ impl MachineControl {
     pub(crate) fn submit_seed(&self,ticket:SeedTicket)->std::result::Result<SeedTicket,(SeedTicket,anyhow::Error)> {
         let result=(||->Result<()> {ensure!(self.shared.phase.load(Ordering::Acquire)==SERVING,"machine unavailable");
             let mut c=self.shared.carrier.try_lock().map_err(|_|anyhow::anyhow!("machine busy; same seed retained"))?;
-            ensure!(!c.root_rpc_held,"original Root retirement RPC requires explicit reconciliation");
-            ensure!(c.seeds.len()<MAX_SEEDS&&!c.seeds.contains_key(&ticket.id)&&!c.retired_seeds.contains_key(&ticket.id)
+            ensure!(!c.root_rpc_held&&!c.root_private_held,"original Root IO requires explicit reconciliation");
+            ensure!(c.seeds.len()+c.source_reservations.len()<MAX_SEEDS&&!c.seeds.contains_key(&ticket.id)&&!c.retired_seeds.contains_key(&ticket.id)
                 &&ticket.cell.phase.load(Ordering::Acquire)==PENDING,"seed admission full/stale/already attempted");
             c.seeds.insert(ticket.id.clone(),ticket.clone());
             if self.send.try_send(Job::Seed(ticket.clone())).is_err(){ticket.cell.phase.store(RECOVERY,Ordering::Release);anyhow::bail!("seed queue failed; actual registered owner retained");}Ok(())})();
@@ -161,7 +186,7 @@ impl MachineControl {
     pub(crate) fn submit_enrollment(&self,ticket:EnrollmentTicket)->std::result::Result<EnrollmentTicket,(EnrollmentTicket,anyhow::Error)> {
         let result=(||->Result<()> {ensure!(self.shared.phase.load(Ordering::Acquire)==SERVING,"machine unavailable");
             let mut c=self.shared.carrier.try_lock().map_err(|_|anyhow::anyhow!("machine busy; same helper retained"))?;
-            ensure!(!c.root_rpc_held,"original Root retirement RPC requires explicit reconciliation");
+            ensure!(!c.root_rpc_held&&!c.root_private_held,"original Root IO requires explicit reconciliation");
             ensure!(c.enrollments.len()<MAX_ENROLLMENTS&&!c.enrollments.contains_key(&ticket.id)
                 &&ticket.cell.phase.load(Ordering::Acquire)==PENDING,"helper admission full/already attempted");
             {let held=ticket.cell.owner.try_lock().map_err(|_|anyhow::anyhow!("enrollment busy/poisoned"))?;
@@ -175,40 +200,46 @@ impl MachineControl {
     pub(crate) fn admit_task_retaining(&self,out:&mut Option<SeedTaskTicket>,seed:&SeedTicket,project:&ProjectTicket,
         original:&FinalizationBudget,cancelled:Arc<AtomicBool>)->Result<()> {
         ensure!(out.is_none(),"task scope output already exists");let c=self.carrier_off_app(original)?;
-        ensure!(self.shared.phase.load(Ordering::Acquire)==SERVING,"machine unavailable");original_seed(&c,seed)?;
+        ensure!(self.shared.phase.load(Ordering::Acquire)==SERVING&&!c.root_rpc_held&&!c.root_private_held,"machine new source work unavailable; original owners retained");original_seed(&c,seed)?;
         ensure!(c.projects.get(&project.id).is_some_and(|actual|Arc::ptr_eq(&actual.cell,&project.cell)),"foreign actual project");
         let mut s=lock(&seed.cell,original)?;s.admission.check_open()?;
         ensure!(seed.cell.phase.load(Ordering::Acquire)==READY&&s.tasks.len()<MAX_TASK_SCOPES,"seed task admission unavailable/full");
-        {let mut p=lock(&project.cell,original)?;ensure!(p.owner.journal_parts().1==s.source.owner()&&s.source.cas_root()==s.store.root(),"source/project owner or CAS differs");}
+        let mut p=lock(&project.cell,original)?;p.owner.assert_current_bounded(original,&cancelled)?;
+        s.source.prepared_current(original,&cancelled)?;
+        ensure!(p.owner.journal_parts().1==s.source.owner()&&s.source.cas_root()==s.store.root(),"source/project owner or CAS differs");
         let id=uuid::Uuid::new_v4().to_string();
         ensure!(!s.tasks.contains_key(&id)&&!s.caches.contains_key(&id),"original scope nonce collision");
+        p.owner.check_shared_for_app()?;
         let mut factory=None;let reserved=SeedFactoryOwner::reserve_retaining(&mut factory,&s.admission,original,cancelled);
         if factory.is_none(){return reserved;}
         let ticket=SeedTaskTicket {id,seed_id:seed.id.clone(),seed:Arc::downgrade(&seed.cell),admission:s.admission.clone(),original:original.clone(),app_thread:self.shared.app_thread,
             cell:Cell::new(TaskScope {factory:factory.take().unwrap(),start:None,factory_outcome:None,factory_refusal:None,never:None,guard:None,fork_guard:None,fork:None,expected_run:None,bound:false,enrollment:None,
-                completion:None,localized:None,localize_attempted:false,fork_value:None,fork_close:None,fork_started:false,task_close:None,task_started:false})};
+                completion:None,generation:None,localized:None,cow:None,localize_attempted:false,fork_value:None,fork_close:None,fork_started:false,task_close:None,task_started:false})};
         s.tasks.insert(ticket.id.clone(),ticket.clone());*out=Some(ticket.clone());reserved?;
         let mut held=lock(&ticket.cell,original)?;let actual=s.client_owner.as_ref().context("actual seed owner absent")?;
-        actual.acquire_use_retaining(&mut held.guard,SeedUseKind::Task,original)?;
-        actual.acquire_use_retaining(&mut held.fork_guard,SeedUseKind::Fork,original)?;
+        p.owner.check_shared_for_app()?;actual.acquire_use_retaining(&mut held.guard,SeedUseKind::Task,original)?;
+        p.owner.check_shared_for_app()?;actual.acquire_use_retaining(&mut held.fork_guard,SeedUseKind::Fork,original)?;
         let TaskScope {start,guard,fork_guard,factory,..}=&mut *held;
-        actual.register_task_start_retaining(start,guard.as_ref().unwrap(),fork_guard.as_ref().unwrap(),original)?;
+        p.owner.check_shared_for_app()?;actual.register_task_start_retaining(start,guard.as_ref().unwrap(),fork_guard.as_ref().unwrap(),original)?;
         factory.attach_start_retaining(start.as_ref().unwrap())?;
         ticket.cell.phase.store(READY,Ordering::Release);Ok(())
     }
     pub(crate) fn admit_cache_retaining(&self,out:&mut Option<SeedCacheTicket>,seed:&SeedTicket,
         original:&FinalizationBudget,cancelled:Arc<AtomicBool>)->Result<()> {
         ensure!(out.is_none(),"cache scope output exists");let c=self.carrier_off_app(original)?;original_seed(&c,seed)?;
-        ensure!(self.shared.phase.load(Ordering::Acquire)==SERVING,"machine unavailable");let mut s=lock(&seed.cell,original)?;
+        ensure!(self.shared.phase.load(Ordering::Acquire)==SERVING&&!c.root_rpc_held&&!c.root_private_held,"machine new source work unavailable; original owners retained");let mut s=lock(&seed.cell,original)?;
         s.admission.check_open()?;ensure!(seed.cell.phase.load(Ordering::Acquire)==READY&&s.caches.len()<MAX_CACHE_SCOPES,"cache admission full/closed");
+        s.source.prepared_current(original,&cancelled)?;
         let id=uuid::Uuid::new_v4().to_string();
         ensure!(!s.tasks.contains_key(&id)&&!s.caches.contains_key(&id),"original scope nonce collision");
+        s.source.check_shared_admission()?;
         let mut factory=None;let reserved=SeedFactoryOwner::reserve_retaining(&mut factory,&s.admission,original,cancelled);
         if factory.is_none(){return reserved;}
         let ticket=SeedCacheTicket {id,seed_id:seed.id.clone(),seed:Arc::downgrade(&seed.cell),original:original.clone(),app_thread:self.shared.app_thread,cell:Cell::new(CacheScope {
             factory:factory.take().unwrap(),guard:None,cache:None,weak:None,attempted:false,acknowledged:false,value:None,close:None,started:false})};
         s.caches.insert(ticket.id.clone(),ticket.clone());*out=Some(ticket.clone());reserved?;
         let mut held=lock(&ticket.cell,original)?;
+        s.source.check_shared_admission()?;
         s.client_owner.as_ref().context("actual seed owner absent")?.acquire_use_retaining(&mut held.guard,SeedUseKind::Cache,original)?;
         ticket.cell.phase.store(READY,Ordering::Release);Ok(())
     }
@@ -227,7 +258,10 @@ impl MachineControl {
         }else{None};
         let prepared=s.source.prepared_current(&original,&s.cancelled)?;
         let template=s.template.as_ref().context("actual tracked template absent")?;held.factory.check_original_thread()?;
-        held.fork=Some(ManagedSeedForkCell::new(template,prepared.runnable_root.clone(),prepared.source_root.clone(),s.admission.clone(),held.start.as_ref().context("original task start gate absent")?.clone(),s.store.root(),preparation_cache.as_ref(),&original,held.factory.cancellation())?);
+        let start=held.start.as_ref().context("original task start gate absent")?.clone();
+        held.fork=Some(if template.profile()==rudder_vcs_bridge::seed::SeedProfile::PagedCowV2 {
+            ManagedSeedForkCell::new_cow(template,prepared.runnable_root.clone(),prepared.source_root.clone(),s.admission.clone(),start,s.store.root(),preparation_cache.as_ref(),&original,held.factory.cancellation(),ManagedSeedCowFactory::from_actual(self,ticket))?
+        }else{ManagedSeedForkCell::new(template,prepared.runnable_root.clone(),prepared.source_root.clone(),s.admission.clone(),start,s.store.root(),preparation_cache.as_ref(),&original,held.factory.cancellation())?});
         let result=ManagedSeedTaskSource {store:s.store.clone(),runnable_root:prepared.runnable_root.clone(),seed_source:prepared.source_root.clone(),seed:template.clone(),
             expected_integration_head:prepared.baseline.commit.0.clone(),preparation_cache};held.factory.check_original_thread()?;Ok(result)
     }
@@ -284,6 +318,18 @@ fn check_completion(scope:&TaskScope,joined:&JoinedManagedTask)->Result<()> {
     enrollment.enrollment.as_ref().context("original enrollment already moved")?.matches_joined(joined)
 }
 impl SeedCacheTicket {
+    pub(crate) fn ingress_poll_factory_joined(&self)->Result<bool> {
+        ensure!(self.app_thread!=std::thread::current().id(),"cache join observation requires off App");
+        match self.cell.owner.try_lock(){Ok(mut held)=>held.factory.poll_joined(),Err(TryLockError::WouldBlock)=>Ok(false),Err(_)=>anyhow::bail!("cache factory carrier poisoned")}
+    }
+    /// Checks the actual original constructor ACK plus joined factory custody;
+    /// never returns a cache from DATA or a failed result callback.
+    pub(crate) fn ingress_original_ready(&self)->Result<()> {
+        ensure!(self.app_thread!=std::thread::current().id(),"cache check requires off App");
+        let held=lock(&self.cell,&self.original)?;
+        ensure!(held.factory.is_joined()&&held.acknowledged&&held.cache.is_some(),"actual cache/TLS/original constructor ACK absent");
+        self.original.remaining()?;Ok(())
+    }
     pub(crate) fn register_factory_retaining(&self,worker:&mut Option<JoinHandle<()>>)->Result<()> {
         ensure!(self.app_thread!=std::thread::current().id(),"cache registration requires off App");lock(&self.cell,&self.original)?.factory.register_retaining(worker)
     }
@@ -321,7 +367,7 @@ impl MachineControl {
 impl ManagedProjectApp<'_> {
     pub(crate) fn start_scoped_task(&mut self,scope:&SeedTaskTicket,index:usize,prepared:PreparedManagedTask)
         ->std::result::Result<crate::managed_launch::ManagedLaunchFence,ManagedTaskStartFailure> {
-        let checks=(||->Result<()> {scope.admission.check_open()?;ensure!(scope.cell.phase.load(Ordering::Acquire)==READY,"original task admission closed");
+        let checks=(||->Result<()> {self.check_new_startup_admission()?;scope.admission.check_open()?;ensure!(scope.cell.phase.load(Ordering::Acquire)==READY,"original task admission closed");
             let held=scope.cell.owner.try_lock().map_err(|_|anyhow::anyhow!("task scope busy/poisoned"))?;
             ensure!(held.factory.is_joined()&&held.bound&&held.fork.as_ref().is_some_and(|fork|prepared.has_seed_fork(fork)),"actual factory/TLS or prepared binding not settled");Ok(())})();
         if let Err(error)=checks{return Err(ManagedTaskStartFailure::Prepared(prepared,error));}
@@ -329,6 +375,7 @@ impl ManagedProjectApp<'_> {
         self.app.start_managed_task(index,prepared,&project,journal,owner)
     }
     pub(crate) fn release_enrollment_retaining(&mut self,ticket:&EnrollmentTicket)->Result<bool> {
+        self.check_new_startup_admission()?;
         if let Some(admission)=&ticket.admission {admission.check_open()?;}
         let phase=ticket.cell.phase.load(Ordering::Acquire);ensure!(phase!=RECOVERY&&phase!=RETIRED&&phase!=CLOSING,"enrollment no longer admits start");
         if phase!=READY{return Ok(false);}
@@ -370,6 +417,7 @@ impl MachineControl {
         }
         for task in s.tasks.values() {
             let mut held=lock(&task.cell,original)?;
+            if held.generation.as_ref().is_some_and(|g|!g.input_released()){return Ok(SeedRetirementProgress::WaitingFactories);}
             if !held.factory.registration_present()||!held.factory.poll_joined()? {return Ok(SeedRetirementProgress::WaitingFactories);}
             if let Some(unused)=held.never.as_ref().filter(|n|n.seal.is_some()) {if unused.task_close.is_some(){continue;}else{return Ok(SeedRetirementProgress::WaitingTasks);}}
             if held.task_close.is_none() {
@@ -441,25 +489,12 @@ impl MachineControl {
     /// Disposal is OFF App and only after genuine Root Release + actual joins.
     /// Ticket/refcount checks are ADDITIONAL alias gates; never join authority.
     pub(crate) fn collect_retired_seed_owners_off_app(&self,original:&FinalizationBudget)->Result<usize> {
-        let mut c=self.carrier_off_app(original)?;let mut settled=Vec::new();let mut retired=std::collections::BTreeSet::new();
-        for (id,ticket) in &c.retired_seeds {
-            let held=lock(&ticket.cell,original)?;
-            ensure!(held.client_owner.as_ref().is_some_and(ClientSeedOwner::is_retired),"archive lacks actual Root Release ACK");retired.insert(id.clone());
-        }
-        // Retry only removal of old map aliases; busy cells stay held. This is
-        // after actual Root Release, not a phase/refcount-derived drain proof.
-        c.enrollments.retain(|_,ticket|ticket.cell.owner.try_lock().map(|held|!retired.contains(&held.seed_id)).unwrap_or(true));
-        for (id,ticket) in &c.retired_seeds {
-            if Arc::strong_count(&ticket.cell)!=1{continue;}
-            let held=lock(&ticket.cell,original)?;
-            ensure!(held.client_owner.as_ref().is_some_and(ClientSeedOwner::is_retired),"retired archive lacks genuine Root Release");
-            if !archive_aliases_gone(&held){continue;}
-            settled.push(id.clone());
-        }
-        for id in &settled {c.retired_seeds.remove(id);}Ok(settled.len())
+        let mut c=self.carrier_off_app(original)?;collect_retired_in_worker(&mut c,original)
+
     }
 }
 fn check_completion_before_close(scope:&TaskScope,joined:&JoinedManagedTask)->Result<()> {
+    ensure!(scope.generation.as_ref().is_none_or(|generation|generation.input_released()),"accepted source generation still owns original canonical input");
     ensure!(scope.factory.is_joined()&&joined.is_settled(),"actual factory/task joins or acceptance unsettled");
     let ticket=scope.enrollment.as_ref().context("original enrollment absent")?;
     let held=ticket.cell.owner.try_lock().map_err(|_|anyhow::anyhow!("actual enrollment busy"))?;
@@ -468,7 +503,7 @@ fn check_completion_before_close(scope:&TaskScope,joined:&JoinedManagedTask)->Re
 fn close_task(client:&mut rudder_native::root_storage_client::RootStorageClient,seed:&ClientSeedOwner,ticket:&SeedTaskTicket,
     original:&FinalizationBudget,cancelled:&Arc<AtomicBool>,reconcile:bool)->Result<()> {
     let mut held=lock(&ticket.cell,original)?;
-    if held.localized.is_none() {
+    if held.localized.is_none()&&held.cow.is_none() {
         let joined=held.completion.as_ref().context("original completion absent")?.joined()?;
         check_completion_before_close(&held,joined)?;
         let original_enrollment=held.enrollment.as_ref().unwrap().clone();let enrollment=lock(&original_enrollment.cell,original)?;
@@ -477,13 +512,19 @@ fn close_task(client:&mut rudder_native::root_storage_client::RootStorageClient,
         if held.localize_attempted {ensure!(reconcile,"original localization partial; use explicit reconciliation");}
         let resume=held.localize_attempted;held.localize_attempted=true;
         let joined=held.completion.as_ref().unwrap().joined()?;
-        fork.localize_after_joined(joined,original,cancelled,resume)?;
-        let TaskScope {guard,fork_guard,localized,..}=&mut *held;
-        fork.with_localized(original,cancelled,|proof|client.acknowledge_localized_fork_retaining(seed,localized,
-            guard.as_ref().unwrap(),fork_guard.as_ref().unwrap(),proof,original,cancelled))?;
+        if fork.is_cow(){
+            fork.archive_cow_after_joined(client,seed,joined,original,cancelled)?;
+            let TaskScope{guard,fork_guard,cow,..}=&mut *held;
+            fork.with_cow_owner(original,cancelled,|owner|client.acknowledge_cow_fork_retaining(seed,cow,guard.as_ref().unwrap(),fork_guard.as_ref().unwrap(),owner,None,original,cancelled))?;
+        }else{
+            fork.localize_after_joined(joined,original,cancelled,resume)?;
+            let TaskScope {guard,fork_guard,localized,..}=&mut *held;
+            fork.with_localized(original,cancelled,|proof|client.acknowledge_localized_fork_retaining(seed,localized,
+                guard.as_ref().unwrap(),fork_guard.as_ref().unwrap(),proof,original,cancelled))?;
+        }
     }
     if held.fork_close.is_none() {
-        held.fork_value=Some(ForkClose {_cell:held.fork.as_ref().unwrap().clone(),proof:held.localized.as_ref().unwrap().clone(),original:original.clone(),cancelled:cancelled.clone()});
+        held.fork_value=Some(ForkClose {_cell:held.fork.as_ref().unwrap().clone(),proof:if let Some(cow)=&held.cow{ForkProof::Cow(cow.clone())}else{ForkProof::Localized(held.localized.as_ref().unwrap().clone())},original:original.clone(),cancelled:cancelled.clone()});
         let TaskScope {fork_close,fork_guard,fork_value,..}=&mut *held;
         RetainedSeedJoin::stage_retaining(fork_close,fork_guard,fork_value,original)?;
     }
@@ -521,3 +562,68 @@ fn archive_aliases_gone(seed:&SeedCarrier)->bool {
 }
 
 include!("managed_machine_never_started.rs");
+
+/// No DATA/error-string classification. The actual source/Root capsules stay
+/// retained. Only routine PG fencing with known physical custody may keep
+/// sibling polling alive; the caller ALSO validates the actual Root client.
+pub(super) fn only_seed_shared_fence_recovery(ticket:&SeedTicket)->Result<bool>{
+    let held=ticket.cell.owner.try_lock().map_err(|_|anyhow::anyhow!("actual seed recovery carrier unavailable"))?;
+    if held.panic.is_some()||!held.source.shared_admission_closed(){return Ok(false);}held.source.assert_original_retained_custody()?;Ok(true)
+}
+pub(super) fn only_enrollment_shared_fence_recovery(ticket:&EnrollmentTicket)->Result<bool>{
+    let held=ticket.cell.owner.try_lock().map_err(|_|anyhow::anyhow!("actual enrollment recovery carrier unavailable"))?;
+    if held.panic.is_some(){return Ok(false);}held.enrollment.as_ref().context("original enrollment recovery absent")?.only_shared_fence_recovery_off_app()
+}
+
+pub(super) fn collect_retired_in_worker(c:&mut WorkerCarrier,original:&FinalizationBudget)->Result<usize>{
+    let mut settled=Vec::new();let mut retired=std::collections::BTreeSet::new();
+        for (id,ticket) in &c.retired_seeds {
+            let held=lock(&ticket.cell,original)?;
+            ensure!(held.client_owner.as_ref().is_some_and(ClientSeedOwner::is_retired),"archive lacks actual Root Release ACK");retired.insert(id.clone());
+        }
+        // Retry only removal of old map aliases; busy cells stay held. This is
+        // after actual Root Release, not a phase/refcount-derived drain proof.
+        c.enrollments.retain(|_,ticket|ticket.cell.owner.try_lock().map(|held|!retired.contains(&held.seed_id)).unwrap_or(true));
+        for (id,ticket) in &c.retired_seeds {
+            if Arc::strong_count(&ticket.cell)!=1{continue;}
+            let held=lock(&ticket.cell,original)?;
+            ensure!(held.client_owner.as_ref().is_some_and(ClientSeedOwner::is_retired),"retired archive lacks genuine Root Release");
+            if !archive_aliases_gone(&held){continue;}
+            settled.push(id.clone());
+        }
+        for id in &settled {c.retired_seeds.remove(id);}Ok(settled.len())
+}
+pub(super) fn known_generation_source_custody(ticket:&SeedTicket)->Result<bool>{let held=ticket.cell.owner.try_lock().map_err(|_|anyhow::anyhow!("actual generation seed busy"))?;ensure!(held.panic.is_none(),"original seed preparation panicked; actual owner retained");held.source.assert_original_retained_custody()?;Ok(true)}
+impl MachineControl {
+    pub(super) fn generation_retirement_clock(&self,seed:&SeedTicket)->Result<Option<(FinalizationBudget,Arc<AtomicBool>)>>{
+        let read=FinalizationBudget::begin(Duration::from_secs(1))?;let c=self.carrier_off_app(&read)?;original_seed(&c,seed)?;let s=lock(&seed.cell,&read)?;
+        Ok(s.retirement.as_ref().map(|campaign|(campaign.original.clone(),campaign.cancelled.clone())))
+    }
+}
+
+impl MachineControl {
+    /// Drop ONLY observer aliases after the original machine has the genuine
+    /// Root Release ACK. The archived canonical owner, all receipts/history and
+    /// actual thread/join results remain held until their separate disposer.
+    pub(crate) fn release_retired_ingress_aliases(&self,scope:&mut Option<SeedTaskTicket>,enrollment:&mut Option<EnrollmentTicket>,original:&FinalizationBudget)->Result<bool>{
+        let Some(ticket)=scope.as_ref()else{return Ok(false);};let c=self.carrier_off_app(original)?;
+        let Some(seed)=c.retired_seeds.get(&ticket.seed_id)else{return Ok(false);};let s=lock(&seed.cell,original)?;
+        ensure!(s.client_owner.as_ref().is_some_and(ClientSeedOwner::is_retired)&&s.tasks.get(&ticket.id).is_some_and(|actual|Arc::ptr_eq(&actual.cell,&ticket.cell)),"old ingress alias differs from actual retired Root owner");
+        if let Some(actual)=enrollment.as_ref(){let held=lock(&actual.cell,original)?;
+            ensure!(held.seed_id==ticket.seed_id&&held.seed.upgrade().is_some_and(|source|Arc::ptr_eq(&source,&seed.cell))
+                &&held.task.as_ref().and_then(Weak::upgrade).is_some_and(|task|Arc::ptr_eq(&task,&ticket.cell)),"foreign enrollment alias cannot use another seed's Release ACK");}
+        drop(s);drop(c);*enrollment=None;*scope=None;Ok(true)
+    }
+    pub(crate) fn stage_joined_acceptance_retaining(&self,out:&mut Option<ManagedCheckpointAcceptance>,joined:&mut Option<JoinedManagedTask>,project:&ProjectTicket,original:&FinalizationBudget)->Result<()> {
+        let c=self.carrier_off_app(original)?;ensure!(c.projects.get(&project.id).is_some_and(|p|Arc::ptr_eq(&p.cell,&project.cell)),"foreign actual project for acceptance");
+        let mut p=lock(&project.cell,original)?;p.owner.assert_current_bounded(original,&p.cancelled)?;
+        let actual=joined.as_ref().context("original joined task absent")?;let location=actual.prepared().managed_run.clone();let fence=p.owner.journal_parts().1.clone();let mut lease=Some(p.owner.source_lease(&fence)?);
+        ManagedCheckpointAcceptance::new_joined_retaining(out,joined,&mut lease,location)?;original.remaining()?;Ok(())
+    }
+}
+
+pub(super) fn kernel_startup_for_seed(kernel:&Arc<super::kernel_startup::KernelSlot>,ticket:&SeedTicket)->Result<()> {
+    let held=ticket.cell.owner.lock().unwrap_or_else(|p|p.into_inner());kernel.ticket()?.assert_new_startup_off_app(&held.budget,&held.cancelled)
+}
+
+include!("managed_machine_seed_cow.rs");

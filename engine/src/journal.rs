@@ -25,6 +25,8 @@ use uuid::Uuid;
 
 use crate::protocol::ObjectRef;
 
+mod agent_admission;
+pub use agent_admission::{AgentAdmissionState,AgentAdmissionPoint,AgentCommitAdmission,AgentJournalUse,AgentAdmissionError,GuardedAgentJournal,reject_unguarded_fresh_agent};
 mod commands;
 mod decisions;
 mod mailbox;
@@ -145,6 +147,18 @@ impl Journal {
     /// The agent API uses a shorter lock wait for bounded inbox awaits. This
     /// changes contention waiting only, never durability or transaction mode.
     pub fn open_with_busy_timeout(path: impl AsRef<Path>, busy_timeout: Duration) -> Result<Self> {
+        Self::open_with_connection_config(path.as_ref(), |conn| {
+            conn.busy_timeout(busy_timeout)?;
+            Ok(())
+        })
+    }
+
+    /// Internal startup seam: configure the actual connection before its first
+    /// query. Initialization still executes exactly once, without caller replay.
+    pub(crate) fn open_with_connection_config(
+        path: &Path,
+        configure: impl FnOnce(&mut Connection) -> Result<()>,
+    ) -> Result<Self> {
         // WAL-reset corruption is fixed in 3.51.3 and newer (and selected
         // backports). We deliberately require the current branch rather than
         // maintaining a permissive version table for old system libraries.
@@ -152,20 +166,19 @@ impl Journal {
             rusqlite::version_number() >= 3_051_003,
             "SQLite >= 3.51.3 is required for WAL safety"
         );
-        let path = path.as_ref();
         ensure!(
             !path.as_os_str().is_empty()
                 && path != Path::new(":memory:")
                 && !path.to_string_lossy().starts_with("file:"),
             "durable journal requires a filesystem path, not a temporary database or URI"
         );
-        let conn = Connection::open(path).context("open local engine journal")?;
+        let mut conn = Connection::open(path).context("open local engine journal")?;
         #[cfg(unix)]
         if path != Path::new(":memory:") {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
         }
-        conn.busy_timeout(busy_timeout)?;
+        configure(&mut conn)?;
         conn.execute_batch(
             "PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;",
         )?;

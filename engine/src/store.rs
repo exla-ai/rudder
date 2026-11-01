@@ -24,6 +24,13 @@ use uuid::Uuid;
 
 pub mod object_sets;
 pub use object_sets::ObjectSetReceipt;
+mod image_import;
+pub(crate) mod preparation;
+#[cfg(target_os = "linux")]
+pub mod baked_image;
+#[cfg(target_os = "linux")]
+pub mod composed;
+pub use image_import::{ImageImportFence, ImageImportHold, ImageImportStats, LocalImageImport, LocalImagePinAck};
 
 #[cfg(unix)]
 use std::os::unix::{
@@ -193,6 +200,10 @@ pub struct RetentionState {
     pub generation: u64,
     pub pins: BTreeMap<String, ObjectRef>,
     pub staging: BTreeMap<String, StagingLease>,
+    /// Explicit nonexpiring GC holds. Omitted when empty to preserve V1/V2
+    /// bytes; older deny_unknown_fields readers refuse while a hold is active.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub image_import_holds: BTreeMap<String, ImageImportHold>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -253,6 +264,7 @@ impl LocalStore {
                 generation: 0,
                 pins: BTreeMap::new(),
                 staging: BTreeMap::new(),
+                image_import_holds: BTreeMap::new(),
             })?;
         }
         sync_directory(&store.root)?;
@@ -657,7 +669,7 @@ impl LocalStore {
             removed_bytes: 0,
             blocked_by_staging: false,
         };
-        if state
+        if !state.image_import_holds.is_empty() || state
             .staging
             .values()
             .any(|lease| lease.expires_at_ms > now_ms().unwrap_or(0))
@@ -749,7 +761,7 @@ impl LocalStore {
                 self.read_locked(reference)? == bytes,
                 "existing CAS object is corrupt"
             );
-            open_file(&destination, false, false)?.sync_all()?;
+            sync_file(&open_file(&destination, false, false)?)?;
             sync_directory(shard)?;
             return Ok(());
         }
@@ -759,7 +771,7 @@ impl LocalStore {
             file.write_all(bytes)?;
             #[cfg(unix)]
             file.set_permissions(fs::Permissions::from_mode(0o444))?;
-            file.sync_all()?;
+            sync_file(&file)?;
             // hard_link publishes without replacing any existing object. This
             // link exists only inside the CAS, never in a writable workspace.
             fs::hard_link(&temporary, &destination)?;
@@ -895,7 +907,7 @@ impl LocalStore {
         let mut shards = BTreeSet::new();
         for reference in self.closure_locked(root)? {
             let file = self.object_path(&reference)?;
-            open_file(&file, false, false)?.sync_all()?;
+            sync_file(&open_file(&file, false, false)?)?;
             shards.insert(file.parent().unwrap().to_path_buf());
         }
         for shard in shards {
@@ -1074,6 +1086,7 @@ impl LocalStore {
         for (id, lease) in &envelope.state.staging {
             ensure!(*id == lease.id && !id.is_empty(), "invalid staging lease");
         }
+        image_import::validate_holds(&envelope.state.image_import_holds)?;
         Ok(envelope.state)
     }
 
@@ -1095,7 +1108,7 @@ impl LocalStore {
         let result = (|| -> Result<()> {
             let mut file = create_private(&temporary)?;
             file.write_all(&bytes)?;
-            file.sync_all()?;
+            sync_file(&file)?;
             fs::rename(&temporary, self.root.join("retention.json"))?;
             sync_directory(&self.root)?;
             sync_directory(&self.root.join("tmp"))?;
@@ -1309,7 +1322,12 @@ fn ensure_directory(path: &Path) -> Result<()> {
     Ok(())
 }
 fn sync_directory(path: &Path) -> Result<()> {
-    File::open(path)?.sync_all()?;
+    sync_file(&File::open(path)?)
+}
+fn sync_file(file: &File) -> Result<()> {
+    file.sync_all()?;
+    #[cfg(test)]
+    image_import::record_actual_sync();
     Ok(())
 }
 fn create_directory_all_durable(path: &Path) -> Result<()> {

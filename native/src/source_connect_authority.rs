@@ -157,6 +157,7 @@ impl HostConnectIssuance {
         }
         let issued_at_ms = lifetime.issued_at_ms;
         lifetime.clock.sample()?;
+        held.check_shared_current().map_err(|_| HostConnectError::Fenced)?;
         held.check_journal(journal).map_err(|_| HostConnectError::Journal)?;
         if journal.current_run_attempt(owner, &binding.network.run_id, binding.network.run_epoch.value())
             .map_err(|_| HostConnectError::Journal)? != binding.network.execution_id {
@@ -165,7 +166,7 @@ impl HostConnectIssuance {
         let prepared = journal.prepare_capability_issuance(owner, selected, issued_at_ms)
             .map_err(|_| HostConnectError::Journal)?;
         lifetime.clock.sample()?;
-        held.check_current().map_err(|_| HostConnectError::Fenced)?;
+        held.check_shared_current().map_err(|_| HostConnectError::Fenced)?;
         let clock = original.take().unwrap().clock;
         Ok(Arc::new(Self { lease: lease.take().unwrap(), binding, issued_at_ms,
             grant_end: clock.fixed, clock: Mutex::new(clock), prepared: RwLock::new(prepared),
@@ -186,7 +187,7 @@ impl HostConnectIssuance {
     }
     fn check_at(&self, deadline: Deadline) -> Result<Sample> {
         if !self.acknowledged.load(Ordering::Acquire) { return Err(HostConnectError::Fenced); }
-        self.lease.check_current().map_err(|_| HostConnectError::Fenced)?;
+        self.lease.check_shared_current().map_err(|_| HostConnectError::Fenced)?;
         let at = self.sample()?;
         deadline.check(at)?;
         Ok(at)
@@ -199,13 +200,14 @@ impl HostConnectIssuance {
         let _unwind = DenyOnUnwind(self);
         let result = (|| {
             if self.attempted.swap(true, Ordering::AcqRel) { return Err(HostConnectError::Fenced); }
+            self.lease.check_shared_current().map_err(|_| HostConnectError::Fenced)?;
             self.lease.check_journal(journal).map_err(|_| HostConnectError::Journal)?;
             let at = self.sample()?;
             let mut prepared = self.prepared.try_write().map_err(|_| HostConnectError::Unsettled)?;
             journal.issue_prepared_capability(&mut prepared, at.wall_ms).map_err(|_| HostConnectError::Journal)?;
             after_write()?; // Private committed-but-unacknowledged/panic test seam.
             self.sample()?;
-            self.lease.check_current().map_err(|_| HostConnectError::Fenced)?;
+            self.lease.check_shared_current().map_err(|_| HostConnectError::Fenced)?;
             self.acknowledged.store(true, Ordering::Release);
             Ok(())
         })();

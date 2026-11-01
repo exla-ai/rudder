@@ -110,7 +110,7 @@ impl HostSourceIssuer {
             "host source binding differs from the actual owner");
         ensure!(token.len() == 64 && token.bytes().all(|b|
             b.is_ascii_hexdigit() && !b.is_ascii_uppercase()), "invalid private host source capability");
-        held.check_current()?;
+        held.check_shared_current()?;
         // All fallible checks precede this sole transfer into the actual issuer.
         Ok(Arc::new(Self { lease:lease.take().unwrap(), binding,
             token:HostSourceToken(token), denied:AtomicBool::new(false) }))

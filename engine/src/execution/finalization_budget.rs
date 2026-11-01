@@ -137,6 +137,18 @@ impl FinalizationBudget {
         Ok(self.remaining()?.min(upper_bound))
     }
 
+    /// Read-only data from this ACTUAL retained budget and its original clock.
+    /// Does not construct/reset a budget or grant execution/drain/lease authority.
+    /// A typed original-ACK owner may mirror an earlier conservative deadline;
+    /// callers must retain that independent owner and never adopt saved data.
+    pub fn observed_clock_bounds(&self) -> Result<(u64, u64)> {
+        self.remaining()?;
+        let last = self.0.last.lock().map_err(|_| fault())?;
+        ensure!(!self.0.fenced.load(Ordering::Acquire), "finalization budget retired");
+        Ok((u64::try_from(self.0.deadline).map_err(|_| fault())?,
+            u64::try_from(*last).map_err(|_| fault())?))
+    }
+
     /// Capture checked absolute clock data before fork. The child must never
     /// reconstruct this deadline from a later clock sample plus remaining time.
     #[cfg(target_os = "linux")]

@@ -83,10 +83,11 @@ impl SeedFactoryOwner {
     pub(crate) fn cancellation(&self)->Arc<AtomicBool> {self.cancelled.clone()}
 }
 enum UnusedRoute {Localize,NeverLinked}
-struct State {unused_route:Option<UnusedRoute>,owner:Option<PrivateMetadataForkOwner>,localized:Option<LocalizedMetadataFork>,never_linked:Option<NeverLinkedMetadataFork>,attempted:bool,acknowledged:bool}
+struct State {cow:Option<rudder_native::root_storage_client::ClientMetadataCowOwner>,quiesced:Option<rudder_vcs_bridge::seed::CowMetadataForkQuiesced>,private_path:Option<PathBuf>,unused_route:Option<UnusedRoute>,owner:Option<PrivateMetadataForkOwner>,localized:Option<LocalizedMetadataFork>,never_linked:Option<NeverLinkedMetadataFork>,attempted:bool,acknowledged:bool}
 pub(crate) struct ManagedSeedForkCell {
     template:Weak<VerifiedMetadataTemplate>,seed:ObjectRef,manifest:ObjectRef,root:ObjectRef,source:ObjectRef,cas:PathBuf,
     cache:Option<Weak<crate::managed_preparation_cache::ManagedPreparationCache>>,
+    cow_factory:Option<crate::managed_machine_entry::ManagedSeedCowFactory>,
     admission:Arc<SeedAdmission>,start:SeedTaskUseGate,original:FinalizationBudget,cancelled:Arc<AtomicBool>,binding:OnceLock<AttemptBinding>,state:Mutex<State>,
 }
 impl ManagedSeedForkCell {
@@ -94,9 +95,15 @@ impl ManagedSeedForkCell {
     /// are held. Exact source/Root identities, not a persisted ready claim.
     pub(crate) fn new(template:&Arc<VerifiedMetadataTemplate>,root:ObjectRef,source:ObjectRef,
         admission:Arc<SeedAdmission>,start:SeedTaskUseGate,cas:&Path,cache:Option<&Arc<crate::managed_preparation_cache::ManagedPreparationCache>>,original:&FinalizationBudget,cancelled:Arc<AtomicBool>)->Result<Arc<Self>> {
+        ensure!(template.profile()==rudder_vcs_bridge::seed::SeedProfile::SmallV1,"V2 requires actual machine Root factory");
+        Self::new_inner(template,root,source,admission,start,cas,cache,original,cancelled,None)
+    }
+    fn new_inner(template:&Arc<VerifiedMetadataTemplate>,root:ObjectRef,source:ObjectRef,admission:Arc<SeedAdmission>,start:SeedTaskUseGate,
+        cas:&Path,cache:Option<&Arc<crate::managed_preparation_cache::ManagedPreparationCache>>,original:&FinalizationBudget,cancelled:Arc<AtomicBool>,
+        cow_factory:Option<crate::managed_machine_entry::ManagedSeedCowFactory>)->Result<Arc<Self>> {
         admission.check_open()?;let seed=template.retained_seed().context("actual retained template required")?.clone();
-        Ok(Arc::new(Self {template:Arc::downgrade(template),seed,manifest:template.identity().clone(),root,source,cas:cas.into(),cache:cache.map(Arc::downgrade),admission,start,original:original.clone(),cancelled,binding:OnceLock::new(),
-            state:Mutex::new(State {unused_route:None,owner:None,localized:None,never_linked:None,attempted:false,acknowledged:false})}))
+        Ok(Arc::new(Self {template:Arc::downgrade(template),seed,manifest:template.identity().clone(),root,source,cas:cas.into(),cache:cache.map(Arc::downgrade),cow_factory,admission,start,original:original.clone(),cancelled,binding:OnceLock::new(),
+            state:Mutex::new(State {cow:None,quiesced:None,private_path:None,unused_route:None,owner:None,localized:None,never_linked:None,attempted:false,acknowledged:false})}))
     }
     pub(crate) fn start_gate(&self)->&SeedTaskUseGate {&self.start}
     pub(crate) fn original_binding(&self)->Option<&AttemptBinding> {self.binding.get()}
@@ -125,7 +132,15 @@ impl ManagedSeedForkCell {
         self.start.claim_fork_creation()?;held.attempted=true;
         self.binding.set(binding.clone()).map_err(|_|anyhow::anyhow!("original fork binding already staged"))?;
         // VCS stages the actual directory/source/alternates owner BEFORE writes.
-        let receipt=fork_private_metadata_retaining(&mut held.owner,template,destination,binding,activation,original,cancelled)?;
+        let receipt=if let Some(factory)=&self.cow_factory {
+            // Root factory acquires Machine -> Seed -> Task -> fork. Never
+            // hold the fork mutex while acquiring those original outer owners.
+            drop(held);factory.create_retaining(self,template,binding.clone(),original)?;
+            held=self.lock(original,cancelled)?;
+            let(path,nonce,base)=held.cow.as_mut().unwrap().original_mount(original)?;
+            let(path,nonce,base)=(path.to_owned(),nonce.to_owned(),base.clone());held.private_path=Some(path.clone());
+            rudder_vcs_bridge::seed::fork_private_metadata_cow_retaining(&mut held.owner,template,&path,&nonce,&base,binding,activation,original,cancelled)?
+        }else{held.private_path=Some(destination.into());fork_private_metadata_retaining(&mut held.owner,template,destination,binding,activation,original,cancelled)?};
         ensure!(held.owner.as_ref().is_some_and(PrivateMetadataForkOwner::is_ready),"original retaining fork ACK/owner not ready");
         held.acknowledged=true;time(original,cancelled)?;Ok(receipt)
     }
@@ -205,3 +220,5 @@ mod factory_tests;
 
 #[cfg(test)]
 mod never_started_factory_tests {use super::*;include!("managed_never_started_factory_tests.rs");}
+
+include!("managed_seed_cow.rs");

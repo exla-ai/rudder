@@ -115,8 +115,10 @@ impl MachineControl {
             if capsule.is_none(){supervisor.poll();return Ok(NeverStartedProgress::WaitingPreparation);}
             n.unused=capsule;
         }
-        drop(task);
-        let client=c.bootstrap.client_mut_retaining()?;client.assert_authenticated_current()?;
+        let original_fork=task.fork.clone();drop(task);
+        let client=c.bootstrap.client_mut_retaining()?;
+        if reconcile {if let Some(fork)=&original_fork{if fork.is_cow(){ensure!(fork.observe_cow_outcome_off_app(client)?,"original CoW Root outcome pending");}}}
+        client.assert_retained_seed_cleanup_custody(s.client_owner.as_ref().context("actual Root owner absent")?)?;
         close_never_started(client,s.client_owner.as_ref().context("actual Root owner absent")?,ticket,original,&cancelled,reconcile)?;
         Ok(NeverStartedProgress::Joined)
     }
@@ -138,13 +140,16 @@ fn close_never_started(client:&mut rudder_native::root_storage_client::RootStora
             let capsule=n.unused.as_ref().context("actual unused App capsule absent")?;
             if n.dependency_attempted {ensure!(reconcile,"original VCS release unresolved; explicit reconciliation required");}
             let resume=n.dependency_attempted;n.dependency_attempted=true;
-            cell.release_after_never_started(capsule,&original,&cancelled,resume)?;
+            if cell.is_cow(){cell.archive_cow_after_never_started(client,seed,capsule,&original,&cancelled,seal)?;}
+            else{cell.release_after_never_started(capsule,&original,&cancelled,resume)?;}
             let binding=cell.original_binding().context("original fork binding absent")?;
             guard.as_ref().context("original Task guard absent")?.bind_original_attempt(binding)?;
             fork_guard.as_ref().context("original Fork guard absent")?.bind_original_attempt(binding)?;
-            cell.with_unused_dependency(&original,&cancelled,|localized,never_linked|
+            if cell.is_cow(){cell.with_cow_owner(&original,&cancelled,|owner|
+                client.acknowledge_unused_cow_fork_retaining(seed,&mut n.dependency,guard.as_ref().unwrap(),fork_guard.as_ref().unwrap(),owner,seal,&original,&cancelled))?;}
+            else{cell.with_unused_dependency(&original,&cancelled,|localized,never_linked|
                 client.acknowledge_never_started_fork_retaining(seed,&mut n.dependency,guard.as_ref().unwrap(),fork_guard.as_ref().unwrap(),
-                    seal,localized,never_linked,&original,&cancelled))?;
+                    seal,localized,never_linked,&original,&cancelled))?;}
         } else {
             // Unspent ORIGINAL fork-creation permit is the positive proof. No
             // missing pathname/owner/Child is inspected or converted to proof.

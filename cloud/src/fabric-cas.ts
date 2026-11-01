@@ -1,10 +1,14 @@
+import {currentRetainedFabricIO,RetainedFabricIO} from "./fabric-cas-retention.js";
+import {inspect} from "node:util";
+import {fromTokenFile} from "@aws-sdk/credential-provider-web-identity";
+import {validateBatchRetentionPolicy} from "./fabric-cas-batch-policy.js";
 /** Account-scoped immutable remote CAS. There is deliberately NO remote GC.
  * S3 has no transaction spanning lease, objects and receipt: publication writes
  * the immutable root receipt first and only then attempts lease cleanup. Data
  * and receipts must have no bucket lifecycle expiration or external deleter.
  */
 import { createHash, randomUUID } from "node:crypto";
-import { GetObjectCommand, PutObjectCommand, DeleteObjectCommand, type S3Client } from "@aws-sdk/client-s3";
+import { GetObjectCommand, PutObjectCommand, DeleteObjectCommand, GetBucketVersioningCommand, GetBucketLifecycleConfigurationCommand, GetBucketPolicyCommand, S3Client } from "@aws-sdk/client-s3";
 import { readFile } from "node:fs/promises";
 import { blobFileStream, checkedBlobStream, withVerifiedSpool } from "./fabric-stream.js";
 import { ContentFormatError, fileNodeReferences, decodeFileNode, validateFileChild, validateContentReference,
@@ -222,6 +226,65 @@ function validRootId(value: string): string { if (typeof value !== "string" || !
 function validLeaseId(value: string): string { if (typeof value !== "string" || !/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(value)) error("invalid_lease", "Invalid staging lease identifier"); return value; }
 function ttl(value: number): number { if (!Number.isSafeInteger(value) || value < 1000 || value > 3_600_000) error("invalid_lease", "Lease duration must be between one second and one hour"); return value; }
 
+/** Clock/cancellation checks only tighten an actual original admission. They
+ * cannot qualify a backend or reconstruct a durable hold from saved data. */
+export interface FabricBatchOriginal { remaining(): number; }
+export interface FabricBatchHoldData {
+  format_version: 1; kind: "immutable-batch-retention-v1"; hold_id: string;
+  transfer_id: string; expires_at_ms: number; manifest: Readonly<FabricObjectRef>; installer_input: Readonly<FabricObjectRef>;
+}
+interface BatchObjectWork { io: RetainedFabricIO; done: boolean; succeeded: boolean; }
+interface BatchAdmissionState {
+  owner: FabricBatchStagingOwner; references: Map<string, FabricObjectRef>;
+  work: Map<string, BatchObjectWork>; finished: boolean;
+}
+interface BatchHoldState {
+  cas: FabricCas; storage: S3FabricObjectStorage; original: FabricBatchOriginal;
+  data: Readonly<FabricBatchHoldData>; key: string; phase: "prepared" | "creating" | "ready" | "unknown";
+  closed: boolean; durableAck: boolean; io: RetainedFabricIO[];
+  active?: FabricBatchAdmission; roots: Map<string, FabricRootReceipt>;
+}
+const batchIssuer = Symbol("original immutable batch issuance");
+const batchHolds = new WeakMap<FabricBatchStagingOwner, BatchHoldState>();
+const batchAdmissions = new WeakMap<FabricBatchAdmission, BatchAdmissionState>();
+let issueBatchHold: (state: BatchHoldState) => FabricBatchStagingOwner;
+let issueBatchAdmission: (state: BatchAdmissionState) => FabricBatchAdmission;
+function batchHold(owner: FabricBatchStagingOwner): BatchHoldState {
+  const state = batchHolds.get(owner); if (!state) error("invalid_batch_hold", "Original immutable batch owner is required", 409); return state!;
+}
+function batchAdmission(value: FabricBatchAdmission): BatchAdmissionState {
+  const state = batchAdmissions.get(value); if (!state) error("invalid_batch_hold", "Original batch admission is required", 409); return state!;
+}
+/** Never serialized, renewed or recreated from a hold id. Ordinary staging APIs
+ * address another namespace. close() fences effects, never releases retention. */
+export class FabricBatchStagingOwner {
+  private constructor(issuer: typeof batchIssuer, state: BatchHoldState) { if (issuer !== batchIssuer) error("invalid_batch_hold", "Original issuer is required"); batchHolds.set(this, state); }
+  static { issueBatchHold = state => new FabricBatchStagingOwner(batchIssuer, state); }
+  [inspect.custom]() { return "FabricBatchStagingOwner [original immutable retention]"; }
+  toJSON(): never { return error("invalid_batch_hold", "A retained owner cannot be serialized"); }
+  data(): Readonly<FabricBatchHoldData> { return batchHold(this).data; }
+  assertCurrent(): void { const s = batchHold(this); s.cas.assertBatchStagingCurrent(this); }
+  close(): void {
+    const s = batchHold(this); s.closed = true;
+    for (const io of s.io) io.cancel();
+    if (s.active) for (const w of batchAdmission(s.active).work.values()) w.io.cancel();
+  }
+  status(): { admission_closed: boolean; durable_hold_acknowledged: boolean; io_settled: boolean; active_batch: boolean; known_roots: number } {
+    const s = batchHold(this);
+    return {admission_closed: s.closed, durable_hold_acknowledged: s.durableAck,
+      io_settled: s.io.every(io => io.settled) && (!s.active || [...batchAdmission(s.active).work.values()].every(w => w.done && w.io.settled)),
+      active_batch: !!s.active, known_roots: s.roots.size};
+  }
+}
+/** Fixed exact refs of one known committed Started batch, not a new transfer. */
+export class FabricBatchAdmission {
+  private constructor(issuer: typeof batchIssuer, state: BatchAdmissionState) { if (issuer !== batchIssuer) error("invalid_batch_hold", "Original issuer is required"); batchAdmissions.set(this, state); }
+  static { issueBatchAdmission = state => new FabricBatchAdmission(batchIssuer, state); }
+  [inspect.custom]() { return "FabricBatchAdmission [original fixed refs]"; }
+  toJSON(): never { return error("invalid_batch_hold", "A retained admission cannot be serialized"); }
+  assertCurrent(): void { const s = batchAdmission(this); s.owner.assertCurrent(); if (s.finished) error("batch_closed", "Batch admission is closed", 409); }
+}
+
 export class FabricCas {
   readonly limits: Readonly<FabricCasLimits>;
   private readonly prefix: string;
@@ -261,6 +324,157 @@ export class FabricCas {
   /** Account-scoped and idempotent; immutable objects and roots are untouched. */
   async abandonStaging(id: string): Promise<void> {
     await this.options.storage.delete(this.leaseKey(id));
+  }
+  /** Explicit cold-V2 only. Qualification lives on the SAME actual adapter;
+   * neither a receipt hash nor caller-provided hold JSON can satisfy it. */
+  prepareImmutableBatchStaging(transferId: string, original: FabricBatchOriginal, roots: {manifest: unknown; installer_input: unknown}): FabricBatchStagingOwner {
+    if (!(this.options.storage instanceof S3FabricObjectStorage)) error("batch_retention_unqualified", "Qualified original S3 adapter is required", 409);
+    const storage = this.options.storage as S3FabricObjectStorage;
+    storage.assertQualifiedBatchRetention(); validLeaseId(transferId);
+    const remaining = original.remaining();
+    if (!Number.isSafeInteger(remaining) || remaining < 1 || remaining > 300_000) error("invalid_batch_hold", "Original batch bound is invalid");
+    const manifest = this.reference(roots.manifest), installer = this.reference(roots.installer_input);
+    if (manifest.kind !== "blob" || manifest.size_bytes > 32 * 1024 * 1024 || installer.kind !== "directory") error("invalid_batch_hold", "Exact image roots are required");
+    const data: Readonly<FabricBatchHoldData> = Object.freeze({format_version: 1, kind: "immutable-batch-retention-v1",
+      hold_id: randomUUID(), transfer_id: transferId, expires_at_ms: this.now() + remaining, manifest: Object.freeze({...manifest}), installer_input: Object.freeze({...installer})});
+    const owner = issueBatchHold({cas: this, storage, original, data, key: `${this.prefix}/batch-holds-v1/${data.hold_id}.json`,
+      phase: "prepared", closed: false, durableAck: false, io: [], roots: new Map()});
+    storage.retainBatchOwner(owner); return owner;
+  }
+  /** Store owner in the caller's original live carrier BEFORE invoking this.
+   * There is one original attempt. An uncertain conditional write is not retried. */
+  async beginImmutableBatchStaging(owner: FabricBatchStagingOwner): Promise<Readonly<FabricBatchHoldData>> {
+    const s = batchHold(owner);
+    if (s.cas !== this || s.phase !== "prepared" || s.closed) error("invalid_batch_hold", "Original unstarted hold is required", 409);
+    s.storage.assertQualifiedBatchRetention(); s.original.remaining(); s.phase = "creating";
+    return this.batchIO(owner, async () => {
+      s.original.remaining();
+      if (this.now() >= s.data.expires_at_ms) error("lease_expired", "Original immutable hold expired", 409);
+      if (!await s.storage.putIfAbsent(s.key, canonicalFabricMetadata(s.data))) error("lease_conflict", "Immutable hold already exists", 409);
+      // Preserve the direct original write ACK before any late/failing check.
+      s.durableAck = true; s.phase = "ready"; owner.assertCurrent(); return s.data;
+    }, false);
+  }
+  /** Public only for the opaque owner's fixed validation path; no issuer. */
+  assertBatchStagingCurrent(owner: FabricBatchStagingOwner): void {
+    const s = batchHold(owner);
+    if (s.cas !== this || s.phase !== "ready" || !s.durableAck || s.closed) error("batch_closed", "Immutable batch admission is unavailable", 409);
+    try {
+      s.storage.assertQualifiedBatchRetention(); s.original.remaining();
+      if (this.now() >= s.data.expires_at_ms) error("lease_expired", "Original immutable hold expired", 409);
+    } catch (failure) { owner.close(); throw failure; }
+  }
+  private async batchIO<T>(owner: FabricBatchStagingOwner, body: () => Promise<T>, ready = true): Promise<T> {
+    const s = batchHold(owner); if (s.cas !== this || s.io.length >= 8) error("invalid_batch_hold", "Original bounded IO carrier is required", 409);
+    if (ready) owner.assertCurrent();
+    const io = new RetainedFabricIO(); s.io.push(io); // BEFORE any body/SDK effect.
+    io.tightenDispatch(() => { s.storage.assertQualifiedBatchRetention(); s.original.remaining();
+      if (s.closed || this.now() >= s.data.expires_at_ms) error("batch_closed", "Original batch dispatch is fenced", 409);
+      if (ready) owner.assertCurrent(); });
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const remaining = Math.min(s.original.remaining(), s.data.expires_at_ms - this.now());
+      if (remaining <= 0) error("lease_expired", "Original immutable hold expired", 409);
+      timer = setTimeout(() => owner.close(), remaining);
+      const actual = io.run(body); io.request(actual);
+      const result = await actual;
+      while (!io.settled) { owner.assertCurrent(); await new Promise(resolve => setTimeout(resolve, 2)); }
+      owner.assertCurrent(); return result;
+    } catch (failure) { s.phase = "unknown"; owner.close(); throw failure; }
+    finally { if (timer) clearTimeout(timer); }
+  }
+  /** IO custody only, never authority from a callback result. Used by the actual
+   * image publisher so its reads/verification remain held on timeout/error. */
+  async withImmutableBatchIO<T>(owner: FabricBatchStagingOwner, body: () => Promise<T>): Promise<T> {
+    return this.batchIO(owner, body);
+  }
+  admitImmutableBatch(owner: FabricBatchStagingOwner, batch: {transfer_id: string; batch_id: string; header_sha256: string; objects: readonly FabricObjectRef[]}): FabricBatchAdmission {
+    const s = batchHold(owner); owner.assertCurrent();
+    if (s.cas !== this || s.active || batch.transfer_id !== s.data.transfer_id || !/^[a-f0-9]{64}$/.test(batch.header_sha256)
+      || batch.objects.length < 1 || batch.objects.length > 1024) error("invalid_batch_hold", "Exact original batch is required", 409);
+    validLeaseId(batch.batch_id);
+    const refs = new Map<string, FabricObjectRef>();
+    let bytes = 0;
+    for (const value of batch.objects) {
+      const r = this.reference(value); bytes += r.size_bytes;
+      if (refs.has(identity(r)) || !Number.isSafeInteger(bytes) || bytes > 32 * 1024 * 1024
+        || r.size_bytes > 4 * 1024 * 1024 && !(batch.objects.length === 1 && sameRef(r, s.data.manifest))) error("invalid_batch_hold", "Fixed batch exceeds its original bounds");
+      refs.set(identity(r), Object.freeze({...r}));
+    }
+    const admission = issueBatchAdmission({owner, references: refs, work: new Map(), finished: false}); s.active = admission; return admission;
+  }
+  private claimBatchObject(admission: FabricBatchAdmission, reference: FabricObjectRef): BatchObjectWork {
+    const a = batchAdmission(admission), s = batchHold(a.owner); admission.assertCurrent();
+    const io = currentRetainedFabricIO(), key = identity(reference);
+    if (s.cas !== this || s.active !== admission || !a.references.has(key) || a.work.has(key) || !io || io.cancelled)
+      error("invalid_batch_hold", "Original fixed object IO owner is required", 409);
+    const work: BatchObjectWork = {io: io!, done: false, succeeded: false}; a.work.set(key, work); io!.tightenDispatch(() => admission.assertCurrent()); return work;
+  }
+  async putImmutableBatchBlob(admission: FabricBatchAdmission, value: unknown, body: AsyncIterable<Uint8Array>): Promise<{stored: boolean}> {
+    const reference = this.reference(value); if (reference.kind !== "blob") error("invalid_reference", "Streaming requires a raw blob");
+    const work = this.claimBatchObject(admission, reference), owner = batchAdmission(admission).owner;
+    const checked = async function* () { admission.assertCurrent(); for await (const part of body) { admission.assertCurrent(); yield part; } admission.assertCurrent(); };
+    try {
+      admission.assertCurrent();
+      const result = await withVerifiedSpool(reference, checked(), async file => {
+        admission.assertCurrent(); // after full hash/spool, immediately before conditional PUT
+        const stored = this.options.storage.putFileIfAbsent
+          ? await this.options.storage.putFileIfAbsent(this.objectKey(reference), file, reference)
+          : await this.options.storage.putIfAbsent(this.objectKey(reference), await readFile(file));
+        if (!stored) await this.verifyObject(reference); // unchanged immutable-conflict verification
+        admission.assertCurrent(); proofRemember(this.options.verificationCache, this.options.storage, this.prefix, reference, []); return {stored};
+      });
+      work.succeeded = true; return result;
+    } catch (failure) { owner.close(); throw failure; } finally { work.done = true; }
+  }
+  async putImmutableBatchObject(admission: FabricBatchAdmission, value: unknown, bytes: Buffer): Promise<{stored: boolean}> {
+    const reference = this.reference(value), work = this.claimBatchObject(admission, reference), owner = batchAdmission(admission).owner;
+    try {
+      admission.assertCurrent(); const payload = Buffer.from(bytes);
+      if (payload.length > this.limits.maxObjectBytes) error("too_large", "Object exceeds byte limit", 413);
+      const children = fabricReferences(reference, payload, this.limits.maxMetadataBytes); admission.assertCurrent();
+      const stored = await this.options.storage.putIfAbsent(this.objectKey(reference), payload);
+      if (!stored) { const existing = await this.getObject(reference); if (!existing.equals(payload)) error("checksum_mismatch", "Existing immutable object differs", 422); }
+      admission.assertCurrent(); proofRemember(this.options.verificationCache, this.options.storage, this.prefix, reference, children, payload);
+      work.succeeded = true; return {stored};
+    } catch (failure) { owner.close(); throw failure; } finally { work.done = true; }
+  }
+  /** Called only after the actual batch has EOF/settled and its PG ACK committed.
+   * Clearing this slot never deletes the nonrevocable retention record. */
+  finishImmutableBatch(admission: FabricBatchAdmission): void {
+    const a = batchAdmission(admission), s = batchHold(a.owner); admission.assertCurrent();
+    if (s.cas !== this || s.active !== admission || a.work.size !== a.references.size
+      || [...a.work.values()].some(w => !w.done || !w.succeeded || !w.io.settled)) error("batch_unsettled", "Original batch is not settled", 409);
+    a.finished = true; s.active = undefined;
+  }
+  /** Original authenticated Publish ACK has committed before this is called.
+   * Only private process custody is retired; the durable hold remains intact. */
+  finishImmutableBatchTransfer(owner: FabricBatchStagingOwner): void {
+    const s = batchHold(owner);
+    if (s.cas !== this || s.phase !== "ready" || s.active || s.roots.size !== 2 || s.io.some(io => !io.settled)
+      || ![...s.roots.values()].some(r => sameRef(r.root, s.data.manifest)) || ![...s.roots.values()].some(r => sameRef(r.root, s.data.installer_input)))
+      error("batch_unsettled", "Original published transfer remains unsettled", 409);
+    owner.close(); s.storage.releaseSettledBatchOwner(owner);
+  }
+  async publishRootWithImmutableBatch(owner: FabricBatchStagingOwner, rootId: string, value: unknown): Promise<FabricRootReceipt> {
+    const s = batchHold(owner); owner.assertCurrent();
+    if (s.cas !== this || s.active) error("batch_unsettled", "Original upload remains active", 409);
+    return this.batchIO(owner, async () => {
+      const root = this.reference(value);
+      if (!sameRef(root, s.data.manifest) && !sameRef(root, s.data.installer_input)) error("invalid_batch_hold", "Publication differs from original image roots", 409);
+      const previous = await this.getRoot(rootId); owner.assertCurrent();
+      if (previous) { if (!sameRef(previous.root, root)) error("root_conflict", "Root identifier already refers to different content", 409); s.roots.set(rootId, previous); return previous; }
+      const closure = await this.closure(root); owner.assertCurrent();
+      const receipt: FabricRootReceipt = {format_version: 1, root_id: validRootId(rootId), root, durability: "replicated", published_at_ms: this.now(), object_count: closure.objects.length, total_bytes: closure.total_bytes};
+      if (!await this.options.storage.putIfAbsent(this.rootKey(rootId), canonicalFabricMetadata(receipt))) {
+        const winner = await this.getRoot(rootId);
+        if (!winner) error("storage_unavailable", "Conditional publication is uncertain", 503);
+        if (!sameRef(winner!.root, root)) error("root_conflict", "Root identifier already refers to different content", 409);
+        s.roots.set(rootId, winner!); owner.assertCurrent(); return winner!;
+      }
+      s.roots.set(rootId, receipt); // direct original ACK retained before deadline postcheck
+      owner.assertCurrent(); return receipt; // NO deletion, expiry is not a GC permit
+    });
   }
   async getObject(value: unknown): Promise<Buffer> {
     const reference = this.reference(value);
@@ -473,10 +687,88 @@ export class S3FabricObjectStorage implements FabricObjectStorage {
     // of the caller's constructor object silently switch its bucket later.
     this.options = Object.freeze({ ...options });
   }
+  #batchWorkloadRoleArn?: string;
+  /** Narrow genuine producer: the SAME SDK credential provider assumes this
+   * exact role. A constructor's arbitrary client/role JSON is not retro-certified.
+   * Construction is inert; the explicit readback below is still mandatory. */
+  static fromWebIdentityForImmutableBatches(input: {bucket: string; region: string; roleArn: string; webIdentityTokenFile: string; timeoutMs?: number; maxConcurrency?: number}): S3FabricObjectStorage {
+    if (!/^arn:aws:iam::[0-9]{12}:role\/[A-Za-z0-9+=,.@_\/-]{1,512}$/.test(input.roleArn)
+      || !/^[a-z]{2}-[a-z]+-[1-9][0-9]?$/.test(input.region)
+      || !input.webIdentityTokenFile.startsWith("/") || /[\x00-\x1f\x7f]/.test(input.webIdentityTokenFile))
+      error("batch_retention_unqualified", "Explicit workload-role configuration is required");
+    const storage = new S3FabricObjectStorage({bucket: input.bucket, timeoutMs: input.timeoutMs, maxConcurrency: input.maxConcurrency,
+      client: new S3Client({region: input.region, endpoint: `https://s3.${input.region}.amazonaws.com`, followRegionRedirects: false, useFipsEndpoint: false, useDualstackEndpoint: false, maxAttempts: 1, credentials: fromTokenFile({roleArn: input.roleArn,
+        roleSessionName: "rudder-fabric-immutable-batches", webIdentityTokenFile: input.webIdentityTokenFile, clientConfig: {region: input.region, endpoint: `https://sts.${input.region}.amazonaws.com`, maxAttempts: 1}})})});
+    storage.#batchWorkloadRoleArn = input.roleArn; return storage;
+  }
+  #batchQualification?: {state: "checking" | "qualified" | "failed"; io: RetainedFabricIO; policySha256?: string};
+  #batchOwners = new Set<FabricBatchStagingOwner>();
+  /** Explicit trusted startup/operator call, never an HTTP/config flag. Actual
+   * readbacks use this SAME workload client/bucket. Nothing is enabled by default.
+   * The original adapter must be retained on every failure until IO settles. */
+  async qualifyImmutableBatchRetentionRetaining(original: FabricBatchOriginal): Promise<void> {
+    if (!this.#batchWorkloadRoleArn) error("batch_retention_unqualified", "Original role-bound workload adapter is required", 409);
+    if (this.#batchQualification) error("batch_retention_unqualified", "Original qualification already attempted", 409);
+    const io = new RetainedFabricIO(), held = {state: "checking" as "checking" | "qualified" | "failed", io, policySha256: undefined as string | undefined};
+    this.#batchQualification = held; // BEFORE any actual SDK dispatch
+    let remaining = 0;
+    try { remaining = original.remaining(); if (!Number.isSafeInteger(remaining) || remaining < 1 || remaining > 300_000) throw new Error(); }
+    catch { held.state = "failed"; error("batch_retention_unqualified", "Original qualification bound is invalid"); }
+    const timer = setTimeout(() => { held.state = "failed"; io.cancel(); }, remaining);
+    io.tightenDispatch(() => { if (held.state !== "checking") error("batch_retention_unqualified", "Original qualification was fenced", 409); original.remaining(); });
+    const actual = io.run(async () => {
+      const versioning = await this.bounded(signal => this.options.client.send(new GetBucketVersioningCommand({Bucket: this.options.bucket}), {abortSignal: signal})); original.remaining();
+      const lifecycle = await this.bounded(async signal => {
+        try { return await this.options.client.send(new GetBucketLifecycleConfigurationCommand({Bucket: this.options.bucket}), {abortSignal: signal}); }
+        catch (e) { if ((e as {name?: string})?.name === "NoSuchLifecycleConfiguration" && awsStatus(e) === 404) return {Rules: []}; throw e; }
+      }); original.remaining();
+      const policy = await this.bounded(signal => this.options.client.send(new GetBucketPolicyCommand({Bucket: this.options.bucket}), {abortSignal: signal})); original.remaining();
+      validateBatchRetentionPolicy(this.options.bucket, this.#batchWorkloadRoleArn!, versioning, lifecycle, policy);
+      held.policySha256 = digest(Buffer.from(policy.Policy!));
+    }); io.request(actual);
+    try {
+      await actual; original.remaining();
+      if (held.state !== "checking" || !io.settled) error("batch_retention_unqualified", "Original policy readback is not current/settled", 409);
+      held.state = "qualified";
+    } catch { held.state = "failed"; io.cancel(); error("batch_retention_unqualified", "Immutable batch retention readback failed", 409); }
+    finally { clearTimeout(timer); }
+  }
+  assertQualifiedBatchRetention(): void {
+    const q = this.#batchQualification;
+    if (!q || q.state !== "qualified" || !q.io.settled)
+      error("batch_retention_unqualified", "Actual immutable S3 policy readback is required", 409);
+  }
+  batchRetentionStatus(): {state: "unconfigured" | "checking" | "qualified" | "failed"; io_settled: boolean; retained_transfers: number; policy_sha256?: string; workload_role_arn?: string} {
+    const q = this.#batchQualification;
+    return {state: q?.state ?? "unconfigured", io_settled: !q || q.io.settled, retained_transfers: this.#batchOwners.size, ...(this.#batchWorkloadRoleArn ? {workload_role_arn: this.#batchWorkloadRoleArn} : {}), ...(q?.policySha256 ? {policy_sha256: q.policySha256} : {})};
+  }
+  /** New dispatch stops immediately; abort never claims original jobs joined. */
+  fenceImmutableBatchRetention(): void {
+    if (this.#batchQualification) { this.#batchQualification.state = "failed"; this.#batchQualification.io.cancel(); }
+    for (const owner of this.#batchOwners) owner.close();
+  }
+  retainBatchOwner(owner: FabricBatchStagingOwner): void {
+    const s = batchHold(owner); this.assertQualifiedBatchRetention();
+    if (s.storage !== this || this.#batchOwners.has(owner) || this.#batchOwners.size >= 32) error("batch_busy", "Original batch custody slots are full", 429);
+    this.#batchOwners.add(owner);
+  }
+  releaseSettledBatchOwner(owner: FabricBatchStagingOwner): void {
+    const s = batchHold(owner);
+    if (s.storage !== this || !s.closed || s.phase !== "ready" || s.active || s.roots.size !== 2 || !owner.status().io_settled)
+      error("batch_unsettled", "Original batch owner remains retained", 409);
+    this.#batchOwners.delete(owner); // never a remote delete/GC operation
+  }
   private async bounded<T>(action: (signal: AbortSignal) => Promise<T>): Promise<T> {
     if (this.active >= (this.options.maxConcurrency ?? 16)) error("storage_busy", "Object storage concurrency limit reached", 429);
     this.active++; const controller = new AbortController(); let timer: ReturnType<typeof setTimeout> | undefined;
-    const work = Promise.resolve().then(() => action(controller.signal)).finally(() => { this.active--; });
+    const retained=currentRetainedFabricIO();
+    const work = Promise.resolve().then(() => {if(retained?.cancelled)error("storage_timeout","Original retained storage work cancelled",503);retained?.assertDispatch();return action(controller.signal);}).finally(() => { this.active--; });
+    if(retained){retained.controller(controller);retained.request(work);let timedOut=false;
+      timer=setTimeout(()=>{timedOut=true;controller.abort();},this.options.timeoutMs??20_000);
+      try{const result=await work;if(timedOut)error("storage_timeout","Retained storage request exceeded its deadline",503);return result;}
+      catch(failure){if(failure instanceof FabricCasError)throw failure;return error("storage_unavailable","Retained storage request failed",503);}
+      finally{if(timer)clearTimeout(timer);}
+    }
     try { return await Promise.race([work, new Promise<never>((_, reject) => { timer = setTimeout(() => { controller.abort(); reject(new FabricCasError("storage_timeout", "Object storage request timed out", 503)); }, this.options.timeoutMs ?? 20_000); })]); }
     catch (failure) { if (failure instanceof FabricCasError) throw failure; return error("storage_unavailable", "Object storage request failed", 503); }
     finally { if (timer) clearTimeout(timer); }
@@ -484,6 +776,7 @@ export class S3FabricObjectStorage implements FabricObjectStorage {
   async get(key: string, maxBytes: number): Promise<FabricStoredObject | null> {
     return this.bounded(async (signal) => {
       let response; try { response = await this.options.client.send(new GetObjectCommand({ Bucket: this.options.bucket, Key: key }), { abortSignal: signal }); } catch (failure) { if (awsStatus(failure) === 404) return null; throw failure; }
+      if(response.Body)currentRetainedFabricIO()?.stream(response.Body);
       if ((response.ContentLength ?? 0) > maxBytes) { (response.Body as { destroy?: () => void })?.destroy?.(); error("too_large", "Stored object exceeds byte limit", 413); }
       if (!response.Body || !response.ETag) { (response.Body as { destroy?: () => void })?.destroy?.(); error("storage_unavailable", "Object storage returned an incomplete response", 503); }
       const body = response.Body!;
@@ -502,6 +795,7 @@ export class S3FabricObjectStorage implements FabricObjectStorage {
       let response;
       try { response = await this.options.client.send(new GetObjectCommand({ Bucket: this.options.bucket, Key: key }), { abortSignal: signal }); }
       catch (failure) { if (awsStatus(failure) === 404) return false; throw failure; }
+      if(response.Body)currentRetainedFabricIO()?.stream(response.Body);
       if (!response.Body || !response.ETag) { (response.Body as { destroy?: () => void })?.destroy?.(); error("storage_unavailable", "Object storage returned an incomplete response", 503); }
       const body = response.Body!;
       const abort = () => (body as { destroy?: (error?: Error) => void }).destroy?.(new FabricCasError("storage_timeout", "Blob read exceeded its deadline", 503));
@@ -516,8 +810,9 @@ export class S3FabricObjectStorage implements FabricObjectStorage {
   }
   async putFileIfAbsent(key: string, file: string, reference: FabricObjectRef): Promise<boolean> {
     return this.bounded(async (signal) => {
-      const body = blobFileStream(file);
+      const body = blobFileStream(file);currentRetainedFabricIO()?.stream(body);
       try {
+        currentRetainedFabricIO()?.assertDispatch();
         await this.options.client.send(new PutObjectCommand({ Bucket: this.options.bucket, Key: key,
           Body: body, ContentLength: reference.size_bytes, ChecksumSHA256: Buffer.from(reference.digest, "hex").toString("base64"),
           ContentType: "application/octet-stream", ServerSideEncryption: "AES256", IfNoneMatch: "*" }), { abortSignal: signal });
@@ -527,13 +822,14 @@ export class S3FabricObjectStorage implements FabricObjectStorage {
     });
   }
   private async put(key: string, bytes: Buffer, condition: { IfNoneMatch: "*" } | { IfMatch: string }): Promise<boolean> {
+    if (key.includes("/batch-holds-v1/") && "IfMatch" in condition) error("immutable_batch_hold", "Immutable batch holds cannot be replaced", 409);
     return this.bounded(async (signal) => {
-      try { await this.options.client.send(new PutObjectCommand({ Bucket: this.options.bucket, Key: key, Body: bytes, ContentLength: bytes.length, ContentType: "application/octet-stream", ChecksumSHA256: createHash("sha256").update(bytes).digest("base64"), ServerSideEncryption: "AES256", ...condition }), { abortSignal: signal }); return true; }
+      try { currentRetainedFabricIO()?.assertDispatch(); await this.options.client.send(new PutObjectCommand({ Bucket: this.options.bucket, Key: key, Body: bytes, ContentLength: bytes.length, ContentType: "application/octet-stream", ChecksumSHA256: createHash("sha256").update(bytes).digest("base64"), ServerSideEncryption: "AES256", ...condition }), { abortSignal: signal }); return true; }
       catch (failure) { if ([409, 412].includes(awsStatus(failure))) return false; throw failure; }
     });
   }
   putIfAbsent(key: string, bytes: Buffer): Promise<boolean> { return this.put(key, bytes, { IfNoneMatch: "*" }); }
   replaceIfMatch(key: string, etag: string, bytes: Buffer): Promise<boolean> { return this.put(key, bytes, { IfMatch: etag }); }
-  async delete(key: string): Promise<void> { await this.bounded(async (signal) => { await this.options.client.send(new DeleteObjectCommand({ Bucket: this.options.bucket, Key: key }), { abortSignal: signal }); }); }
+  async delete(key: string): Promise<void> { if (key.includes("/batch-holds-v1/")) error("immutable_batch_hold", "Immutable batch holds cannot be deleted", 409); await this.bounded(async (signal) => { await this.options.client.send(new DeleteObjectCommand({ Bucket: this.options.bucket, Key: key }), { abortSignal: signal }); }); }
 }
 function awsStatus(error: unknown): number { return Number((error as { $metadata?: { httpStatusCode?: number } })?.$metadata?.httpStatusCode || ((error as { name?: string })?.name === "NoSuchKey" ? 404 : 0)); }

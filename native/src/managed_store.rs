@@ -570,11 +570,35 @@ pub(crate) fn preserve_experimental(
     Ok(())
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone)]
 pub(crate) struct ManagedStore {
     receipt: ManagedProjectReceipt,
+    // Actual original fresh namespace owner, never reconstructed from receipt.
+    #[cfg(target_os="linux")]
+    fresh:Option<std::sync::Arc<crate::engine_host::FreshNamespaceCustody>>,
 }
+impl std::fmt::Debug for ManagedStore {fn fmt(&self,f:&mut std::fmt::Formatter<'_>)->std::fmt::Result{f.debug_struct("ManagedStore").field("receipt",&self.receipt).finish_non_exhaustive()}}
+impl PartialEq for ManagedStore {fn eq(&self,other:&Self)->bool{
+    if self.receipt!=other.receipt{return false;}
+    #[cfg(target_os="linux")]{match(&self.fresh,&other.fresh){(None,None)=>true,(Some(a),Some(b))=>std::sync::Arc::ptr_eq(a,b),_=>false}}
+    #[cfg(not(target_os="linux"))]{true}
+}}
+impl Eq for ManagedStore {}
 impl ManagedStore {
+    /// Carries the SAME original logical namespace through actual task/cache/
+    /// source owners. The legacy path remains repository-hash constrained.
+    pub(crate) fn reopen_current(&self,journal:&Journal)->Result<Self>{
+        #[cfg(target_os="linux")] if let Some(fresh)=&self.fresh{return Self::open_fresh(journal,fresh.clone());}
+        Self::open(journal,self.binding())
+    }
+    #[cfg(target_os="linux")]
+    pub(crate) fn open_fresh(journal:&Journal,fresh:std::sync::Arc<crate::engine_host::FreshNamespaceCustody>)->Result<Self>{
+        ensure!(fresh.floor_acknowledged(),"fresh original floor ACK absent");fresh.check_journal(journal)?;let binding=fresh.namespace();binding.validate()?;
+        private_directory(&binding.home.join("fabric/managed-projects"))?;private_directory(&binding.directory)?;
+        let request:ManagedProjectPrepare=read_record(&binding.directory.join("project.json"))?.context("fresh original prepare intent absent")?;
+        let receipt:ManagedProjectReceipt=read_record(&binding.directory.join("prepared.json"))?.context("fresh original prepared receipt absent")?;receipt.validate()?;
+        ensure!(request.namespace==*binding&&receipt.request==request&&journal.managed_project(&binding.project_id)?.as_ref()==Some(&receipt),"fresh original floor/namespace differs");fresh.check_journal(journal)?;Ok(Self{receipt,fresh:Some(fresh)})
+    }
     pub(crate) fn open(journal: &Journal, binding: &ManagedProjectNamespace) -> Result<Self> {
         validate_namespace(binding, journal)?;
         private_directory(&binding.home.join("fabric/managed-projects"))?;
@@ -590,7 +614,7 @@ impl ManagedStore {
                 && journal.managed_project(&binding.project_id)?.as_ref() == Some(&receipt),
             "managed floor/namespace evidence differs"
         );
-        Ok(Self { receipt })
+        Ok(Self { receipt, #[cfg(target_os="linux")] fresh:None })
     }
     pub(crate) fn binding(&self) -> &ManagedProjectNamespace {
         &self.receipt.request.namespace
@@ -1127,3 +1151,26 @@ fn projection_queue() -> Option<&'static SyncSender<ProjectionJob>> {
 #[cfg(test)]
 #[path = "managed_store_tests.rs"]
 pub(crate) mod tests;
+
+/// Original same-call Journal+filesystem floor acknowledgement. No Clone,
+/// Serde, pathname, bool or receipt-data constructor can mint this witness.
+#[cfg(target_os="linux")]
+pub(crate) struct OriginalFreshFloorAck {receipt:ManagedProjectReceipt}
+#[cfg(target_os="linux")]
+impl OriginalFreshFloorAck{pub(crate) fn matches(&self,request:&ManagedProjectPrepare)->bool{self.receipt.request==*request}}
+/// Only the source-only actual fresh namespace owner can authorize this UUID
+/// floor. This does not change legacy namespace/open or mint Task authority.
+#[cfg(target_os="linux")]
+pub(crate) fn prepare_fresh_retaining(journal:&mut Journal,owner:&rudder_engine::journal::OwnerFence,request:&ManagedProjectPrepare,
+    fresh:std::sync::Arc<crate::engine_host::FreshNamespaceCustody>,now:i64,receipt_out:&mut Option<ManagedProjectReceipt>,store_out:&mut Option<ManagedStore>)->Result<()>{
+    request.validate()?;fresh.check_journal(journal)?;ensure!(receipt_out.is_none()&&store_out.is_none()&&request.namespace==*fresh.namespace()&&owner.project_id==request.namespace.project_id,"fresh floor differs from actual original namespace");
+    fresh.claim_floor_once()?;let binding=&request.namespace;create_directory(&binding.home.join("fabric/managed-projects"))?;create_directory(&binding.directory)?;
+    File::open(&binding.home)?.sync_all()?;immutable(&binding.directory.join("project.json"),request)?;
+    *receipt_out=Some(journal.prepare_managed_project(owner,request,now)?);let receipt=receipt_out.as_ref().unwrap();receipt.validate()?;fresh.check_journal(journal)?;
+    ensure!(journal.managed_project(&binding.project_id)?.as_ref()==Some(receipt),"fresh original floor ACK differs");immutable(&binding.directory.join("prepared.json"),receipt)?;
+    fresh.check_journal(journal)?;fresh.acknowledge_floor(OriginalFreshFloorAck{receipt:receipt.clone()})?;*store_out=Some(ManagedStore::open_fresh(journal,fresh)?);Ok(())
+}
+
+#[cfg(all(test,target_os="linux"))]
+#[path="managed_fresh_store_boundary_tests.rs"]
+mod fresh_boundary_tests;

@@ -1,0 +1,323 @@
+{
+  "formatVersion": 1,
+  "sourceKind": "uncommitted-working-tree",
+  "fullV4Complete": false,
+  "scope": "image CAS/readers, retained preparation and Git pack component checks only",
+  "checks": [
+    {
+      "check": "managed-main228-retained-preparation",
+      "scope": "retained compiler/environment preparation DATA",
+      "completedAt": "2026-11-01T13:28:56.046174+00:00",
+      "exitCode": 0,
+      "stopReason": null,
+      "elapsedSeconds": 35.566,
+      "tests": {
+        "passed": 24,
+        "failed": 0,
+        "ignored": 1
+      },
+      "receiptSha256": "0be18700e610a42c669b65f8c25e7aaf29379795b0b83f4598d7343e2eb1bd47",
+      "logSha256": "25a85cfb8c3eb455550f31d3540a27d2276eb614e1af973b3fff217873343b06"
+    },
+    {
+      "check": "managed-main230-baked-image-cas",
+      "scope": "immutable baked image CAS reader DATA",
+      "completedAt": "2026-11-01T13:47:58.462057+00:00",
+      "exitCode": 0,
+      "stopReason": null,
+      "elapsedSeconds": 35.308,
+      "tests": {
+        "passed": 14,
+        "failed": 0,
+        "ignored": 1
+      },
+      "receiptSha256": "d125ce69da2632258a77ca870795914aafc8bfa2947d8ab395f0f913190a34f0",
+      "logSha256": "5f463da95a5ef90062ff5b8b4767ea1c938d974647d62822cd1a548e12b64e80"
+    },
+    {
+      "check": "managed-main231-baked-image-emitter",
+      "scope": "image emitter compilation only",
+      "completedAt": "2026-11-01T13:50:04.118111+00:00",
+      "exitCode": 0,
+      "stopReason": null,
+      "elapsedSeconds": 51.83,
+      "tests": {
+        "passed": 0,
+        "failed": 0,
+        "ignored": 0
+      },
+      "receiptSha256": "82996d2b88e0b72557ed40b6b580824988d2c8a802e7174829aabf497efe08d5",
+      "logSha256": "baf8330f873566e31080d45edd5a6a312324f3449b173fb01eb4ad119cc41619"
+    },
+    {
+      "check": "managed-main232-composed-image-store",
+      "scope": "local and baked image composed reader DATA",
+      "completedAt": "2026-11-01T13:52:13.972870+00:00",
+      "exitCode": 0,
+      "stopReason": null,
+      "elapsedSeconds": 38.818,
+      "tests": {
+        "passed": 16,
+        "failed": 0,
+        "ignored": 0
+      },
+      "receiptSha256": "3a9df96e314cef1f3103bb4e0c835b4495f0f8c071b0664970a368dfcd7fbef5",
+      "logSha256": "a199729092083c953576a8801db86c3872e25f3ac548874d55b771ae176a8feb"
+    },
+    {
+      "check": "managed-main233-git-pack-import",
+      "scope": "bounded pack importer ordinary cases",
+      "completedAt": "2026-11-01T13:57:36.194741+00:00",
+      "exitCode": 0,
+      "stopReason": null,
+      "elapsedSeconds": 49.079,
+      "tests": {
+        "passed": 7,
+        "failed": 0,
+        "ignored": 1
+      },
+      "receiptSha256": "eb5553f07e3ad48d965ede7be37484be631401a747c98542a58691b2319a97fe",
+      "logSha256": "d95d0b06e427dd3f5c45bb5e9808a88e0539d652602f3fa3c4b9717d72c46cee"
+    },
+    {
+      "check": "managed-main235-git-import-regressions",
+      "scope": "existing import and initial-source regressions",
+      "completedAt": "2026-11-01T14:00:57.135458+00:00",
+      "exitCode": 0,
+      "stopReason": null,
+      "elapsedSeconds": 2.503,
+      "tests": {
+        "passed": 15,
+        "failed": 0,
+        "ignored": 0
+      },
+      "receiptSha256": "eff18f55beb192671734966324a4c0a0bda065540d60a37640e695becb1c36df",
+      "logSha256": "896d329d34bad6965ddf94c6a3d7dbed5f374f9fc64091a3503979f7d86f645f"
+    },
+    {
+      "check": "managed-main236-git-pack-real-shards",
+      "scope": "large pack shard original30s debug failure",
+      "completedAt": "2026-11-01T14:06:17.811853+00:00",
+      "exitCode": 101,
+      "stopReason": null,
+      "elapsedSeconds": 53.833,
+      "tests": {
+        "passed": 0,
+        "failed": 1,
+        "ignored": 0
+      },
+      "receiptSha256": "a83ea43eff22d334f77d08f796157fc204020be7267fb785e1c636fcf359e11b",
+      "logSha256": "18ec5291259de1c1996cd29b0a53d4f207005efdae6dc408084b2f0794f536c3"
+    },
+    {
+      "check": "managed-main237-git-pack-release-shards",
+      "scope": "actual72MiB incompressible multi-pack import and independent reader/checksum validation; release optimized, original30s import unchanged",
+      "completedAt": "2026-11-01T14:13:34.615780+00:00",
+      "exitCode": 0,
+      "stopReason": null,
+      "elapsedSecondsIncludingCompilation": 417.19,
+      "fixtureElapsedSeconds": 5.63,
+      "tests": {
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0
+      },
+      "receiptSha256": "282cab9ea441e505511eb252562e2a88c0024f733c95946f0768eb04a9c6af65",
+      "logSha256": "705d2b914852ffabcfb7abd530a0b431019ca709cc84e9c3cb35470809e9fcd4"
+    },
+    {
+      "check": "managed-main239-runtime-image-vfs",
+      "scope": "readonly VFS and existing library VFS checks;239 compile failure from optional mutable-view lock, corrected240",
+      "completedAt": "2026-11-01T14:17:01.412150+00:00",
+      "exitCode": 101,
+      "elapsedSeconds": 23.79,
+      "tests": {
+        "passed": 0,
+        "failed": 0,
+        "ignored": 0
+      },
+      "receiptSha256": "7ba27f776758d536a3cede3ef26818f5befc5555f217cbb5e1e55d55677c6d8d",
+      "logSha256": "7f02258141d38d722004a5ca3c9e34ebd446ab19edc9bd6ab402a97dcf58a8e8"
+    },
+    {
+      "check": "managed-main240-runtime-image-vfs",
+      "scope": "readonly VFS and existing library VFS checks;239 compile failure from optional mutable-view lock, corrected240",
+      "completedAt": "2026-11-01T14:18:08.514988+00:00",
+      "exitCode": 0,
+      "elapsedSeconds": 38.826,
+      "tests": {
+        "passed": 14,
+        "failed": 0,
+        "ignored": 4
+      },
+      "receiptSha256": "41ceb98ff1b5814497f9dd9d5e6300f44ca6c682ae3d671a8042c4c102b95382",
+      "logSha256": "04b62d8eb90bf15a545efcbc308e17428f6a223fedcad56b6a515d416daf4e88"
+    },
+    {
+      "check": "managed-main241-image-vfs-composed-regressions",
+      "completedAt": "2026-11-01T14:25:44.092431+00:00",
+      "exitCode": 0,
+      "elapsedSeconds": 394.68,
+      "tests": {
+        "passed": 385,
+        "failed": 0,
+        "ignored": 13
+      },
+      "receiptSha256": "201f919c84e00d10434a2bf0414c6a8a081cdcfbe036eff91e5614665aca1f70",
+      "logSha256": "b41f3b49a0eeb986f40effbb90308f379984f4b8317479abc582b3687bd41050"
+    },
+    {
+      "check": "managed-main242-native-initial-source",
+      "completedAt": "2026-11-01T14:27:50.778329+00:00",
+      "exitCode": 0,
+      "elapsedSeconds": 112.181,
+      "tests": {
+        "passed": 9,
+        "failed": 0,
+        "ignored": 0
+      },
+      "receiptSha256": "7d75b475222537360a5e599cf5d49aeb52da115256ab08e9fb29602e5f8b73d2",
+      "logSha256": "269c09e38662d6457b277796409eb02e9fb301f06ab92a0c9447b5c9eda80044"
+    },
+    {
+      "check": "managed-main243-git-mode-projection",
+      "completedAt": "2026-11-01T14:29:41.168474+00:00",
+      "exitCode": 0,
+      "elapsedSeconds": 97.169,
+      "tests": {
+        "passed": 57,
+        "failed": 0,
+        "ignored": 5
+      },
+      "receiptSha256": "5e6b586fab808cd4f00987d5c62deab5801047f37fb83a611f43998b28c5d11f",
+      "logSha256": "40c68d0e4706004b4e121b3137a90c60c3c3ed9d65fa744740bf7d46ed5d4d52"
+    }
+  ],
+  "sourceFiles": {
+    "engine/src/store/baked_image.rs": "92e6fff471d958996125a6c9d5b4a4bcdbbb0dbbf276ac63668485eb92c5350f",
+    "engine/src/store/composed.rs": "4a596d44178b5870c21fb50c7e7470ba43e9a38dbe10a6e3f996613448eb1bdf",
+    "engine/src/build/preparation_retaining.rs": "1345ff7b77d771d4064cc3db14a580e22aa8eb9d059f688f3444b1accd70c5eb",
+    "native/src/bin_rudder_image_preseed.rs": "163ffa2f6d02a0ed2db1b1ce937f51c9fabda46a939fe2a83734910a4557c17c",
+    "native/src/managed_initial_source.rs": "b03fd9f6f6c463e06415fd8cc85a6020391c5287faf389ffd6490e251296b43d",
+    "vcs-bridge/src/accepted_git_import.rs": "75d50d51c2fb9cfdfebd999803dd2d8f839ac545f1201398182996155a2b8f25",
+    "vcs-bridge/src/accepted_git_pack.rs": "dd55ee3e711ad30f5438b9c5e00aec1529f12d416c22bc99f9b7847bf1d4a8c0",
+    "vcs-bridge/src/initial_source.rs": "eb2ce02e4c51e3a6fad86e45a401650e9128dd60a3a50b0c9c450029cb61523c",
+    "vcs-bridge/src/seed_real_repo_qualification.rs": "4090b2b8b69f138bccdd128277e5128c8a46f5840abcf20067a3a7433950daa4"
+  },
+  "notClaimed": [
+    "default managed runtime enablement",
+    "accepted/warm source path and end-to-end launch performance; release cold238 passed11.70s, accepted reuse failed",
+    "compiler execution/cache hits",
+    "real models",
+    "complete v4",
+    "installed full-image VFS qualification and executable runtime grant"
+  ],
+  "repositoryReleaseBenchmark": {
+    "check": "managed-main238-real-repo-packed-release",
+    "reportSha256": "256b458273db2b97cf6543bc66388bd095b3f7ca6376001655530aa49f7c8c74",
+    "qualified": false,
+    "cold": {
+      "elapsed_ms": 11701.726751,
+      "error": null,
+      "name": "actual-initial-source-original30s",
+      "passed": true
+    },
+    "failedPhase": "actual-accepted-source-original30s",
+    "error": "unchanged frozen leaves failed real previous-record reuse",
+    "actualHistory": {
+      "index_and_pack_checksums_verified": true,
+      "logical_git_objects": 15031,
+      "packs": 3,
+      "physical_pack_bytes": 168758714,
+      "raw_object_ids_verified": true,
+      "scope": "actual target pack/index and object-reader verification; no physical-cache counter claim",
+      "verified_object_preimage_bytes": 175297296
+    },
+    "coldSeedWork": {
+      "read_bytes": 169185310,
+      "read_files": 37,
+      "reused_files": 0,
+      "scope": "actual-seed-producer-counters-not-physical-disk-cache"
+    },
+    "acceptedProjectionWork": {
+      "cas_content_bytes": 513128,
+      "cas_metadata_bytes": 722334,
+      "cas_metadata_reads": 840,
+      "git_blob_bytes_submitted": 513128,
+      "jj_buffer_bytes_admitted": 1026256,
+      "jj_entries_visited": 2011,
+      "plan_metadata_bytes_admitted": 1294061,
+      "reused_leaf_values": 1907,
+      "source_entries_visited": 2290
+    },
+    "scope": "actual-local-source-producer-and-logical-CoW-component-only",
+    "originalProductionPhaseMilliseconds": 30000,
+    "deadlinesRaised": false
+  },
+  "bakedImageBuild": {
+    "scope": "build-only immutable image CAS; native successor retains original Git import carrier; no execution/admission claim",
+    "sourceKind": "uncommitted-working-tree",
+    "sourceManifestSha256": "5e4e101e9a91fd2be487b3988193c6e942145eef8c7b22e2b5a3d2b9561135a9",
+    "baseRevision": "c615b478d9af3b0cd1a69185dbcb1f95095cae90",
+    "capturedAt": "2026-11-01T14:11:41.141844+00:00",
+    "image": "registry.fly.io/rudder-workers-exla:baked-cas-image-5e4e101e9a91",
+    "digest": "sha256:439a923ac90f375fe7eaad4743aa909f5968fb45355448e851899526e6fcddea",
+    "nativeArtifacts": {
+      "/opt/rudder/dist/native/rudder-native": {
+        "sha256": "77cb1293632dd9e3ff206b93638f9352ceafa0ca5c38a56c64d55a140fc4fea7",
+        "bytes": 36399336
+      },
+      "/opt/rudder/dist/native/rudder-jj": {
+        "sha256": "f2ebceb7a3255cc6c5745aa4ba49c19f6292809d2af6934a265af1bd255c1c35",
+        "bytes": 30952600
+      },
+      "/usr/local/bin/rudder-root-storage": {
+        "sha256": "b8e4d13b26fc63022582d87ec1d73e7b8a1b1c7ecf1de9869d0c041d14014544",
+        "bytes": 6146448
+      },
+      "/usr/local/bin/rudder-machine-root": {
+        "sha256": "ce2e2d98bde42264cd3f13c04a51e99473676d817ef67a2f63327b338bc4784d",
+        "bytes": 2140320
+      }
+    },
+    "bakedImageData": {
+      "directory": "/var/lib/rudder-image-cas-v1",
+      "format_version": 1,
+      "inventory": {
+        "algorithm": "sha256",
+        "digest": "170e940cba78878b9cd10b6d9e686158fdc1cac8e3c2d01b92e8b6c60a83118a",
+        "kind": "blob",
+        "size_bytes": 2936646
+      },
+      "layout": "baked-image-cas-v1",
+      "objects": 22175,
+      "production_admission": false,
+      "retention_generation": 2,
+      "roots": {
+        "format_version": 1,
+        "installer_input": {
+          "algorithm": "sha256",
+          "digest": "059e14df5a8634eef66b0247239dfa281e0df547049bac04adec664792326814",
+          "kind": "directory",
+          "size_bytes": 231
+        },
+        "manifest": {
+          "algorithm": "sha256",
+          "digest": "696437e287d8350364b562a8caa9904cae49b0ff56cba4c2ad3955931e56b59a",
+          "kind": "blob",
+          "size_bytes": 5673050
+        }
+      },
+      "runtime_mount": false,
+      "scope": "immutable-image-cas-data-only",
+      "total_bytes": 1974041724
+    },
+    "observedAt": "2026-11-01T14:20:35.430143+00:00",
+    "logSha256": "b1aa176fd29a47bcce21a71f3a0069ebd50feab78b6538752523eb87371bd30e",
+    "receiptSha256": "68051330439979985647824916c6b09983c6b62da27c934cf1e9ea9fd8a7d454",
+    "deployed": false,
+    "installedFullTreeVerified": false,
+    "sourceIncludesReadonlyVfs": false
+  },
+  "recordedAt": "2026-11-01T14:28:05.188194+00:00"
+}

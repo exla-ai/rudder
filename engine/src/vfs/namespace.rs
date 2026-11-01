@@ -77,6 +77,8 @@ pub(super) fn view_lookup(
     name: &[u8],
     meter: Option<&WorkMeter<'_>>,
 ) -> Result<Option<paged::DirectoryEntry>> {
+    #[cfg(target_os = "linux")]
+    if view.is_readonly_image() { return view.image_lookup(root, name, meter); }
     if let Some(remote) = &view.manager().0.remote {
         return remote.lookup(parent.origin.as_deref(), root, name);
     }
@@ -88,6 +90,8 @@ pub(super) fn view_header(
     root: &ObjectRef,
     meter: Option<&WorkMeter<'_>>,
 ) -> Result<(u32, u64, u64)> {
+    #[cfg(target_os = "linux")]
+    if view.is_readonly_image() { return view.image_header(root, meter); }
     if let Some(remote) = &view.manager().0.remote {
         return remote.header(origin, root);
     }
@@ -173,7 +177,10 @@ pub(super) fn count_delta(c: &Connection, parent: u64, delta: i64) -> Result<()>
 pub(super) fn names(view: &VfsView, c: &Connection, parent: u64) -> Result<Vec<Vec<u8>>> {
     let n = require_dir(c, parent)?;
     let mut names = if let Some(base) = n.base {
-        (if let Some(remote) = &view.manager().0.remote {
+        (if view.is_readonly_image() {
+            #[cfg(target_os = "linux")] { view.image_names(&base)? }
+            #[cfg(not(target_os = "linux"))] { unreachable!() }
+        } else if let Some(remote) = &view.manager().0.remote {
             remote.names(n.origin.as_deref(), &base)?
         } else {
             base_names(view.manager().store(), &base)?
@@ -285,6 +292,7 @@ impl VfsManager {
     /// A new root is fully retained once; an existing retained root is repinned.
     /// Paged lookup needs no all-directory SQLite entry index.
     pub fn prepare_paged(&self, root: &ObjectRef) -> Result<()> {
+        self.require_writable_manager()?;
         if self.0.remote.is_some() {
             return Err(error(libc::EOPNOTSUPP))
                 .context("remote roots cannot acquire complete LocalStore pins");
@@ -321,6 +329,7 @@ impl VfsManager {
     }
     /// Preserves declared real hardlinks; plain roots still mean independent files.
     pub fn prepare_paged_snapshot(&self, snapshot: &VfsCheckpoint) -> Result<()> {
+        self.require_writable_manager()?;
         if self.0.remote.is_some() {
             return Err(error(libc::EOPNOTSUPP))
                 .context("remote snapshots require explicit partial-root retention");
@@ -372,6 +381,7 @@ impl VfsManager {
         snapshot: &VfsCheckpoint,
         owner: OwnerEpoch,
     ) -> Result<VfsView> {
+        self.require_writable_manager()?;
         let index = self.0.index.lock().map_err(|_| error(libc::EIO))?;
         let pair: Option<(String, String)> = index
             .query_row(

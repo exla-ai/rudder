@@ -272,6 +272,9 @@ export class ClaudeSdkProtocol {
       return;
     }
     if (!this.sessionId || raw.session_id !== this.sessionId || raw.parent_tool_use_id != null) return;
+    // Synthetic peer inputs need not be replayed as user messages. The actual
+    // CLI reports their UUID entering execution before producing model output.
+    if (raw.type === "command_lifecycle" && raw.state === "started" && id(raw.command_uuid)) this.accepted(raw.command_uuid);
     if (raw.type === "user" && raw.isReplay === true && id(raw.uuid)) this.accepted(raw.uuid);
     const correlation = this.correlate(raw);
     if (raw.type === "assistant" || raw.type === "stream_event" || raw.type === "result") for (const input of correlation) this.accepted(input);

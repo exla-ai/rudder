@@ -18,7 +18,15 @@ static INHERITED_BOOTSTRAP_TAKEN: AtomicBool = AtomicBool::new(false);
 /// typed reference BEFORE reading it or growing the retained transfer queue.
 pub(crate) fn bounded_inventory(root: &ObjectRef, original: &FinalizationBudget,
     mut references: impl FnMut(&ObjectRef) -> Result<Vec<ObjectRef>>) -> Result<Vec<ObjectRef>> {
-    service::object_bound(root, MAX_TRANSFER_BYTES)?;
+    bounded_inventory_profile(rudder_vcs_bridge::seed::SeedProfile::SmallV1,root,original,references)
+}
+fn bounded_inventory_profile(profile:rudder_vcs_bridge::seed::SeedProfile,root:&ObjectRef,original:&FinalizationBudget,
+    mut references:impl FnMut(&ObjectRef)->Result<Vec<ObjectRef>>)->Result<Vec<ObjectRef>>{
+    let paged=profile==rudder_vcs_bridge::seed::SeedProfile::PagedCowV2;
+    let max_refs=if paged{rudder_vcs_bridge::seed::paged::V2_MAX_REFS}else{MAX_REFS};
+    let max_bytes=if paged{rudder_vcs_bridge::seed::paged::V2_MAX_CAS_BYTES}else{MAX_TRANSFER_BYTES};
+    if paged{service::paged::bound(root,max_bytes)?;}else{service::object_bound(root,max_bytes)?;}
+
     let mut known = BTreeSet::from([root.clone()]); let mut pending = vec![root.clone()]; let mut total = root.size_bytes;
     while let Some(reference) = pending.pop() {
         original.remaining()?;
@@ -26,8 +34,8 @@ pub(crate) fn bounded_inventory(root: &ObjectRef, original: &FinalizationBudget,
         original.remaining()?;
         for child in children {
             if known.contains(&child) { continue; }
-            ensure!(known.len() < MAX_REFS, "storage source closure exceeds ref bound");
-            service::object_bound(&child, MAX_TRANSFER_BYTES - total)?;
+            ensure!(known.len() < max_refs, "storage source closure exceeds ref bound");
+            if paged{service::paged::bound(&child,max_bytes-total)?;}else{service::object_bound(&child,max_bytes-total)?;}
             total += child.size_bytes; known.insert(child.clone()); pending.push(child);
         }
     }
@@ -80,10 +88,10 @@ impl SourcePin {
 #[must_use = "retain through original helper and actor drain plus root retirement acknowledgement"]
 pub struct ClientSeedOwner {
     source: SourcePin, cancel: OwnedFd, attempted: bool, fenced: bool,
-    instance: Option<uuid::Uuid>, slot: Option<uuid::Uuid>, ready: Option<(PathBuf, PathBuf)>,
+    instance: Option<uuid::Uuid>, slot: Option<uuid::Uuid>, ready: Option<(PathBuf, PathBuf)>,cow_floor:Option<ObjectRef>,
     helpers: BTreeMap<uuid::Uuid, Process>, pending_helper: Option<Process>,
     uses:SeedUseLedger,templates:Vec<Weak<VerifiedMetadataTemplate>>,untracked_templates:AtomicBool,
-    retirement:Option<ClientRetirement>,
+    retirement:Option<ClientRetirement>,paged_transfer:Option<seed_window::SeedPagedTransfer>,original_cancel:Option<Arc<AtomicBool>>,enrollment_cow:Option<String>,profile:rudder_vcs_bridge::seed::SeedProfile,
 }
 /// One enrolled original helper in a shared immutable seed session. IDs are
 /// DATA; this non-Serde token must stay with that helper's actual task carrier.
@@ -94,10 +102,18 @@ impl ClientSeedOwner {
     pub fn capture(store: LocalStore, already_retained_seed: ObjectRef) -> Result<Self> {
         service::floor(std::process::id(), 1500)?;
         Ok(Self { source: SourcePin::capture(store, already_retained_seed)?, cancel: service::eventfd()?,
-            attempted: false, fenced: false, instance: None, slot: None, ready: None,
+            attempted: false, fenced: false, instance: None, slot: None, ready: None,cow_floor:None,
             helpers: BTreeMap::new(), pending_helper: None,uses:SeedUseLedger::new(),templates:Vec::with_capacity(2),
-            untracked_templates:AtomicBool::new(false),retirement:None })
+            untracked_templates:AtomicBool::new(false),retirement:None,paged_transfer:None,original_cancel:None,enrollment_cow:None,profile:rudder_vcs_bridge::seed::SeedProfile::SmallV1 })
     }
+    /// Explicit V2 from the actual already acknowledged source capsule. No
+    /// profile auto-detection/readback promotion and no V1 fallback.
+    pub fn capture_paged(store:LocalStore,already_retained_seed:ObjectRef,original:&FinalizationBudget,cancelled:Arc<AtomicBool>)->Result<Self>{
+        let mut owner=Self::capture(store,already_retained_seed)?;
+        rudder_vcs_bridge::seed::read_paged_seed(&owner.source.store,&owner.source.seed,||{if cancelled.load(Ordering::Acquire){original.cancel();anyhow::bail!("paged original capture cancelled");}original.remaining()?;Ok(())})?;
+        owner.original_cancel=Some(cancelled);owner.profile=rudder_vcs_bridge::seed::SeedProfile::PagedCowV2;Ok(owner)
+    }
+    pub fn profile(&self)->rudder_vcs_bridge::seed::SeedProfile {self.profile}
     pub fn seed(&self) -> &ObjectRef { &self.source.seed }
     /// Returned paths are DATA only. An original live client and retained root
     /// reader still gate checked use; serialized paths cannot adopt this owner.
@@ -137,7 +153,7 @@ impl ClientSeedOwner {
 pub struct RootSeedRetired {_instance:uuid::Uuid,_slot:uuid::Uuid,_operation:uuid::Uuid}
 struct RetirementPacket {serial:u64,bytes:Vec<u8>,release:bool,attempted:bool,replayed:bool}
 enum RetirementReply {None,Duplicate,Accepted,Partial}
-struct ClientRetirement {id:uuid::Uuid,slot:uuid::Uuid,original:FinalizationBudget,_actors:SeedActorsJoined,
+struct ClientRetirement {paged:bool,id:uuid::Uuid,slot:uuid::Uuid,original:FinalizationBudget,_actors:SeedActorsJoined,
     readers:Vec<String>,packet:Option<RetirementPacket>,last_reply:Option<(u64,Vec<u8>)>,ack:Option<RootSeedRetired>,released:bool}
 
 /// One original image-bootstrap connection in the actual UID1500 host engine.
@@ -145,7 +161,7 @@ struct ClientRetirement {id:uuid::Uuid,slot:uuid::Uuid,original:FinalizationBudg
 pub struct RootStorageClient {
     endpoint: Endpoint, server: Process, own: Process, image: Image, engine_image: Image,
     _inherited_image: OwnedFd, mnt: File, user: File, boot: Vec<u8>, serial: u64,
-    instance: Option<uuid::Uuid>, fenced: bool,retirement_inflight:Option<uuid::Uuid>,
+    instance: Option<uuid::Uuid>, fenced: bool,retirement_inflight:Option<uuid::Uuid>,cow_inflight:Option<String>,seed_window_inflight:Option<uuid::Uuid>,private_v2_recovery:Option<RootPrivateEffect>,generic_inflight:Option<GenericOriginal>,last_generic:Option<GenericOriginal>,
 }
 impl RootStorageClient {
     /// Bootstrap must supply the actual connected pair, original root-service
@@ -168,7 +184,7 @@ impl RootStorageClient {
         let value = Self { endpoint: Endpoint::capture(endpoint)?, server: Process::capture(original_service_pidfd)?, own,
             image, engine_image, _inherited_image: original_service_image,
             mnt: service::namespace(None, "mnt", libc::CLONE_NEWNS)?, user: service::namespace(None, "user", libc::CLONE_NEWUSER)?,
-            boot: service::proc_bytes("/proc/sys/kernel/random/boot_id", 64)?, serial: 0, instance: None, fenced: false,retirement_inflight:None };
+            boot: service::proc_bytes("/proc/sys/kernel/random/boot_id", 64)?, serial: 0, instance: None, fenced: false,retirement_inflight:None,cow_inflight:None,seed_window_inflight:None,private_v2_recovery:None,generic_inflight:None,last_generic:None };
         ensure!(value.server.pid != value.own.pid, "storage client cannot authenticate itself as service"); value.current()?; Ok(value)
     }
     /// Fixed inherited FD adapter for the image-owned engine bootstrap only.
@@ -178,8 +194,9 @@ impl RootStorageClient {
         for fd in [3, 4, 5] { ensure!(unsafe { libc::fcntl(fd, libc::F_GETFD) } >= 0, "storage original bootstrap descriptor absent"); }
         Self::from_bootstrap(unsafe { OwnedFd::from_raw_fd(3) }, unsafe { OwnedFd::from_raw_fd(4) }, unsafe { OwnedFd::from_raw_fd(5) })
     }
-    fn current(&self) -> Result<()> {
-        ensure!(!self.fenced && self.own.pid == std::process::id(), "storage original client fenced/process changed");
+    fn current(&self)->Result<()>{ensure!(!self.fenced,"storage original client fenced");self.current_physical()}
+    fn current_physical(&self) -> Result<()> {
+        ensure!(self.own.pid == std::process::id(), "storage original client fenced/process changed");
         ensure!(unsafe { libc::getuid() } == 1500 && unsafe { libc::geteuid() } == 1500
             && unsafe { libc::getgid() } == 1500 && unsafe { libc::getegid() } == 1500, "storage client current thread identity changed");
         service::floor(self.own.pid, 1500)?;
@@ -197,32 +214,28 @@ impl RootStorageClient {
     pub fn assert_authenticated_current(&self)->Result<()> {self.assert_authenticated_bootstrap_current()}
     /// Refusal-state observation only, never a retirement/settlement ACK.
     pub fn retirement_pending(&self)->bool {self.retirement_inflight.is_some()}
-    fn exchange(&mut self, request: Request, payload: &[u8], fd: Option<&OwnedFd>, budget: &FinalizationBudget) -> Result<Reply> {
-        ensure!(self.retirement_inflight.is_none(),"original retirement ACK reconciliation pending; no interleaved RPC");
-        let result = (|| {
-            self.current()?; budget.remaining()?;
-            self.serial = self.serial.checked_add(1).context("storage client serial exhausted")?;
-            let bytes = service::encode(&Envelope { version: 1, serial: self.serial, constraint: budget.constraint(), request }, payload)?;
-            loop {
-                self.current()?; budget.remaining()?;
-                if self.endpoint.send(&bytes, fd)? { break; }
-                std::thread::sleep(Duration::from_millis(2));
+    fn exchange(&mut self,request:Request,payload:&[u8],fd:Option<&OwnedFd>,budget:&FinalizationBudget)->Result<Reply>{
+        ensure!(self.retirement_inflight.is_none()&&self.cow_inflight.is_none()&&self.seed_window_inflight.is_none()&&self.generic_inflight.is_none(),"original Root ACK reconciliation pending; no interleaved RPC");
+        let result=(||{
+            self.current()?;budget.remaining()?;let serial=self.serial.checked_add(1).context("storage serial exhausted")?;
+            let bytes=service::encode(&Envelope{version:1,serial,constraint:budget.constraint(),request},payload)?;
+            let fd=fd.map(OwnedFd::try_clone).transpose()?;
+            self.generic_inflight=Some(GenericOriginal{serial,bytes,fd,packet:None});self.serial=serial;
+            loop{self.current()?;budget.remaining()?;let rpc=self.generic_inflight.as_ref().unwrap();
+                if self.endpoint.send(&rpc.bytes,rpc.fd.as_ref())?{break}std::thread::sleep(budget.phase_limit(Duration::from_millis(2))?);}
+            loop{self.current()?;budget.remaining()?;
+                let rpc=self.generic_inflight.as_mut().unwrap();if rpc.packet.is_none(){rpc.packet=self.endpoint.receive()?;}
+                if let Some(packet)=&rpc.packet{
+                    let retained=self.private_v2_recovery.take();
+                    ensure!(packet.fds.is_empty()&&packet.credentials.pid==self.server.pid as i32&&packet.credentials.uid==0&&packet.credentials.gid==0,"storage original reply credentials differ");
+                    let(answer,payload):(Answer,_)=service::decode(&packet.bytes)?;
+                    ensure!(answer.version==1&&answer.serial==rpc.serial&&payload.is_empty(),"storage original reply order differs");
+                    self.private_v2_recovery=retained;self.last_generic=self.generic_inflight.take();
+                    ensure!(!matches!(answer.reply,Reply::Rejected),"storage service rejected original operation");
+                    self.current()?;budget.remaining()?;return Ok(answer.reply)
+                }std::thread::sleep(budget.phase_limit(Duration::from_millis(2))?);
             }
-            loop {
-                self.current()?; budget.remaining()?;
-                if let Some(packet) = self.endpoint.receive()? {
-                    ensure!(packet.fds.is_empty() && packet.credentials.pid == self.server.pid as i32
-                        && packet.credentials.uid == 0 && packet.credentials.gid == 0, "storage response is not original root service");
-                    let (answer, payload): (Answer, _) = service::decode(&packet.bytes)?;
-                    ensure!(answer.version == 1 && answer.serial == self.serial && payload.is_empty(), "storage response binding changed");
-                    ensure!(!matches!(answer.reply, Reply::Rejected), "storage service rejected original operation");
-                    self.current()?; budget.remaining()?; return Ok(answer.reply);
-                }
-                std::thread::sleep(Duration::from_millis(2));
-            }
-        })();
-        if result.is_err() { self.fenced = true; }
-        result.map_err(|_| anyhow::anyhow!("root storage exchange failed; original owners retained"))
+        })();if result.is_err(){self.fenced=true;}result.map_err(|_|anyhow::anyhow!("root storage exchange failed; original owners retained"))
     }
     pub fn authenticate_original_service(&mut self, original: &FinalizationBudget) -> Result<()> {
         ensure!(self.instance.is_none(), "storage original service already authenticated");
@@ -240,30 +253,36 @@ impl RootStorageClient {
         ensure!(self.retirement_inflight.is_none(),"original retirement reconciliation pending");
         ensure!(!owner.attempted && !owner.fenced, "storage original seed already attempted/fenced");
         owner.attempted = true;
+        if owner.profile==rudder_vcs_bridge::seed::SeedProfile::PagedCowV2{self.private_v2_recovery=Some(RootPrivateEffect::SeedPreparation);}
         let result = (|| {
             self.current()?; original.remaining()?;
             let instance = self.instance.context("storage original service authentication required")?;
             owner.instance = Some(instance); owner.source.acquire()?; original.remaining()?;
-            let refs = bounded_inventory(&owner.source.seed, original, |reference| {
+            let refs = bounded_inventory_profile(owner.profile,&owner.source.seed, original, |reference| {
                 owner.source.check()?; owner.source.store.references(reference)
             })?;
             let mut total = 0u64;
-            ensure!(!refs.is_empty() && refs.len() <= MAX_REFS, "storage source closure exceeds ref bound");
+            let paged=owner.profile==rudder_vcs_bridge::seed::SeedProfile::PagedCowV2;
+            ensure!(!refs.is_empty() && refs.len() <= if paged {rudder_vcs_bridge::seed::paged::V2_MAX_REFS}else{MAX_REFS}, "storage source closure exceeds ref bound");
             for reference in &refs {
-                service::object_bound(reference, MAX_OBJECT_BYTES)?;
+                if paged {service::paged::bound(reference,4<<20)?;}else{service::object_bound(reference,MAX_OBJECT_BYTES)?;}
                 total = total.checked_add(reference.size_bytes).context("storage source byte overflow")?;
             }
-            ensure!(total > 0 && total <= MAX_TRANSFER_BYTES, "storage source transfer exceeds byte bound");
-            match self.exchange(Request::Begin { constraint: original.constraint(), seed: owner.source.seed.clone(), refs: refs.len(), bytes: total },
+            ensure!(total > 0 && total <= if paged {rudder_vcs_bridge::seed::paged::V2_MAX_CAS_BYTES}else{MAX_TRANSFER_BYTES}, "storage source transfer exceeds byte bound");
+            let begin=if paged {Request::BeginPaged{constraint:original.constraint(),seed:owner.source.seed.clone(),refs:refs.len(),bytes:total}}
+                else{Request::Begin{constraint:original.constraint(),seed:owner.source.seed.clone(),refs:refs.len(),bytes:total}};
+            match self.exchange(begin,
                 &[], Some(&owner.cancel), original)? {
                 Reply::Begun { slot } => owner.slot = Some(slot), _ => anyhow::bail!("storage original begin acknowledgement invalid"),
             }
             let slot = owner.slot.unwrap();
-            for reference in refs {
+            if paged {self.transfer_paged_seed_retaining(owner,refs,original)?;}
+            else {for reference in refs {
                 original.remaining()?; owner.source.check()?;
-                let bytes = owner.source.store.read_object(&reference)?;
-                original.remaining()?;
-                ensure!(matches!(self.exchange(Request::Object { slot, reference }, &[], None, original)?, Reply::Accepted), "storage object acknowledgement invalid");
+                let reply=self.exchange(Request::Object{slot,reference:reference.clone()},&[],None,original)?;
+                if paged&&matches!(reply,Reply::ObjectPresent){continue;}
+                ensure!(matches!(reply,Reply::Accepted),"storage original object ACK invalid");
+                let bytes=owner.source.store.read_object(&reference)?;original.remaining()?;
                 if bytes.is_empty() {
                     ensure!(matches!(self.exchange(Request::Chunk { slot, offset: 0 }, &[], None, original)?, Reply::Accepted), "storage empty object acknowledgement invalid");
                 } else {
@@ -272,8 +291,16 @@ impl RootStorageClient {
                     }
                 }
             }
+            }
             match self.exchange(Request::Commit { slot }, &[], None, original)? {
+                Reply::PagedReady{slot:actual,seed,root,objects,cow_floor}=>{
+                    owner.ready=Some((root.clone(),objects.clone()));owner.cow_floor=Some(cow_floor.clone());
+                    ensure!(paged&&actual==slot&&seed==owner.source.seed&&root.is_absolute()&&root.starts_with("/run/rudder-managed-seeds")
+                        &&root.file_name().is_some_and(|n|n=="seed")&&objects==root.join("objects")&&cow_floor.kind==ObjectKind::Directory&&cow_floor.size_bytes<=4096,"original paged Root ready ACK differs");
+                }
                 Reply::Ready { slot: actual, seed, root, objects } => {
+                    ensure!(!paged,"V2 cannot adopt a V1 Root reply");
+                    owner.ready=Some((root.clone(),objects.clone()));
                     ensure!(actual == slot && seed == owner.source.seed && root.is_absolute()
                         && root.starts_with("/run/rudder-managed-seeds") && root.file_name().is_some_and(|name| name == "seed")
                         && objects == root.join("objects"), "storage original sealed paths differ");
@@ -283,7 +310,7 @@ impl RootStorageClient {
             }
             owner.source.check()?; self.current()?; original.remaining()?; Ok(())
         })();
-        if result.is_err() { owner.cancel(); self.fenced = true; }
+        if result.is_err() { owner.cancel(); self.fenced = true; }else{self.private_v2_recovery=None;}
         result.map_err(|_| anyhow::anyhow!("root seed preparation failed; original transfer/import/mount owners retained"))
     }
     fn original_slot(&self, owner: &ClientSeedOwner) -> Result<uuid::Uuid> {
@@ -299,7 +326,9 @@ impl RootStorageClient {
         let slot = self.original_slot(owner)?;
         ensure!(matches!(self.exchange(Request::Check { slot }, &[], None, operation)?, Reply::Accepted), "storage original reader check failed");
         let (root, objects) = owner.ready.as_ref().unwrap();
-        let template = VerifiedMetadataTemplate::open_retained(&owner.source.store, &owner.source.seed, root, objects)?;
+        let template = if owner.profile==rudder_vcs_bridge::seed::SeedProfile::PagedCowV2 {
+            VerifiedMetadataTemplate::open_paged_retained_bounded(&owner.source.store,&owner.source.seed,root,objects,operation,owner.original_cancel.as_ref().context("original V2 cancel carrier absent")?)?
+        }else{VerifiedMetadataTemplate::open_retained(&owner.source.store,&owner.source.seed,root,objects)?};
         self.current()?; operation.remaining()?; Ok(template)
     }
     /// Actual shared Arc aliases are tracked. Native fork/cache scopes must
@@ -311,7 +340,9 @@ impl RootStorageClient {
         owner.templates.retain(|weak|weak.strong_count()>0);
         ensure!(owner.templates.len()<2,"tracked original template admission full");
         let (root,objects)=owner.ready.as_ref().context("original paths unavailable")?;
-        let template=Arc::new(VerifiedMetadataTemplate::open_retained(&owner.source.store,&owner.source.seed,root,objects)?);
+        let template=Arc::new(if owner.profile==rudder_vcs_bridge::seed::SeedProfile::PagedCowV2 {
+            VerifiedMetadataTemplate::open_paged_retained_bounded(&owner.source.store,&owner.source.seed,root,objects,original,owner.original_cancel.as_ref().context("original V2 cancel carrier absent")?)?
+        }else{VerifiedMetadataTemplate::open_retained(&owner.source.store,&owner.source.seed,root,objects)?});
         owner.templates.push(Arc::downgrade(&template));self.current()?;original.remaining()?;Ok(template)
     }
     pub fn associate_original_helper_use(&self,owner:&ClientSeedOwner,guard:&SeedUseGuard,helper:&EnrolledSeedHelper)->Result<()> {
@@ -355,9 +386,13 @@ impl RootStorageClient {
         let slot = self.original_slot(owner)?;
         ensure!(owner.pending_helper.is_none() && owner.helpers.len() < MAX_HELPERS_PER_SEED, "storage original helper reader admission full/uncertain");
         owner.pending_helper = Some(Process::capture(original_helper_pidfd)?);
+        if owner.profile==rudder_vcs_bridge::seed::SeedProfile::PagedCowV2{self.private_v2_recovery=Some(RootPrivateEffect::CowEnrollment);}
         let result = (|| {
             let actual = owner.pending_helper.as_ref().unwrap();
-            match self.exchange(Request::EnrollHelper { slot }, &[], Some(actual.fd()), operation)? {
+            let request=if owner.profile==rudder_vcs_bridge::seed::SeedProfile::PagedCowV2 {
+                Request::EnrollHelperCow{slot,nonce:owner.enrollment_cow.clone().context("original V2 CoW enrollment context absent")?}
+            }else{Request::EnrollHelper{slot}};
+            match self.exchange(request, &[], Some(actual.fd()), operation)? {
                 Reply::HelperEnrolled { reader, pid } => {
                     ensure!(pid == actual.pid && !owner.helpers.contains_key(&reader), "storage original helper reader acknowledgement differs");
                     owner.helpers.insert(reader, owner.pending_helper.take().unwrap());
@@ -387,7 +422,7 @@ impl RootStorageClient {
     /// bool/JSON/TTL/path can issue this proof; dropped/unknown guards block it.
     /// Once admitted, every retry uses this SAME retained original budget.
     pub fn request_retirement_retaining(&mut self,owner:&mut ClientSeedOwner,operation:&FinalizationBudget)->Result<()> {
-        self.current()?;
+        self.current_for_retained_cleanup(owner)?;
         ensure!(self.retirement_inflight.is_none()||owner.retirement.as_ref().is_some_and(|intent|Some(intent.id)==self.retirement_inflight),"another original retirement requires reconciliation");
         if owner.retirement.is_none() {
             operation.remaining()?;owner.uses.close()?;
@@ -397,7 +432,7 @@ impl RootStorageClient {
             let actors=owner.uses.prove(&owner.helpers.keys().copied().collect(),operation,&AtomicBool::new(false))?;
             for helper in owner.helpers.values(){ensure!(helper.exited()?,"original sibling helper still live");}
             operation.remaining()?;
-            owner.retirement=Some(ClientRetirement {id:uuid::Uuid::new_v4(),slot,original:operation.clone(),_actors:actors,
+            owner.retirement=Some(ClientRetirement {paged:owner.profile==rudder_vcs_bridge::seed::SeedProfile::PagedCowV2,id:uuid::Uuid::new_v4(),slot,original:operation.clone(),_actors:actors,
                 readers:owner.helpers.keys().map(ToString::to_string).collect(),packet:None,last_reply:None,ack:None,released:false});
         }
         let intent=owner.retirement.as_mut().unwrap();
@@ -417,7 +452,7 @@ impl RootStorageClient {
     /// at most once, byte-for-byte/same serial/budget. Root replays only its held
     /// exact ACK; no status/path readback becomes authority. Errors keep owner.
     fn retirement_exchange(&mut self,intent:&mut ClientRetirement,release:bool)->Result<()> {
-        self.current()?;intent.original.remaining()?;
+        self.current_for_retirement_intent(intent)?;intent.original.remaining()?;
         if intent.packet.is_none() {
             let serial=self.serial.checked_add(1).context("storage serial exhausted")?;
             let request=if release {Request::ReleaseSeed {slot:intent.slot,retirement:intent.id}}
@@ -431,10 +466,10 @@ impl RootStorageClient {
         ensure!(packet.release==release,"original retirement phase changed");
         let mut may_send=!packet.attempted||!packet.replayed;
         loop {
-            self.current()?;intent.original.remaining()?;
+            self.current_for_retirement_intent(intent)?;intent.original.remaining()?;
             match self.receive_retirement_ack(intent)? {
                 RetirementReply::Duplicate=>continue,
-                RetirementReply::Accepted=>{self.current()?;intent.original.remaining()?;return Ok(());}
+                RetirementReply::Accepted=>{self.current_for_retirement_intent(intent)?;intent.original.remaining()?;return Ok(());}
                 RetirementReply::Partial=>anyhow::bail!("original Root cleanup partial; same owner/budget only"),
                 RetirementReply::None=>{},
             }
@@ -473,11 +508,49 @@ impl RootStorageClient {
     /// queued original ACK can establish a past fact. No send, unpin, cleanup,
     /// new budget, readback promotion, or automatic continuation occurs.
     pub fn reconcile_retirement_ack_retaining(&mut self,owner:&mut ClientSeedOwner)->Result<bool> {
-        self.current()?;let intent=owner.retirement.as_mut().context("original retirement absent")?;
+        self.current_for_retained_cleanup(owner)?;let intent=owner.retirement.as_mut().context("original retirement absent")?;
         ensure!(self.retirement_inflight==Some(intent.id),"another original retirement owns the channel");
         if intent.packet.is_some() {let _=self.receive_retirement_ack(intent)?;}
-        self.current()?;
+        self.current_for_retirement_intent(intent)?;
         if intent.released {self.retirement_inflight=None;Ok(true)} else {Ok(false)}
     }
 
+}
+
+#[path="root_storage_paged_client.rs"]
+mod paged_client;
+pub use paged_client::{ClientMetadataCowOwner,ArchivedMetadataCow};
+
+#[path="root_storage_seed_window.rs"]
+mod seed_window;
+
+#[derive(Clone,Copy)]
+enum RootPrivateEffect {SeedPreparation,CowPreparation,CowEnrollment,CowArchive}
+/// Refusal/continuity witness only. It permits old App/PTY/mail polling while
+/// NEW Root IO remains closed; it grants no task, lease, source or IPC effect.
+pub struct RetainedRootPrivateIoCustody<'a>{_client:&'a RootStorageClient}
+impl RootStorageClient {
+    pub fn retain_original_v2_private_io_custody(&self)->Result<RetainedRootPrivateIoCustody<'_>>{
+        self.current_physical()?;ensure!(self.instance.is_some()&&self.private_v2_recovery.is_some(),"Root error is not a retained V2 private effect");
+        Ok(RetainedRootPrivateIoCustody{_client:self})
+    }
+}
+
+struct GenericOriginal {serial:u64,bytes:Vec<u8>,fd:Option<OwnedFd>,packet:Option<service::Packet>}
+
+impl RootStorageClient {
+    /// Physical custody for fixed original-resource cleanup only. This never
+    /// clears fenced, accepts a command or renews project/task permission.
+    pub fn assert_retained_seed_cleanup_custody(&self,owner:&ClientSeedOwner)->Result<()>{self.current_for_retained_cleanup(owner)}
+    fn current_for_retained_cleanup(&self,owner:&ClientSeedOwner)->Result<()> {
+        if !self.fenced{return self.current()}
+        ensure!(owner.profile==rudder_vcs_bridge::seed::SeedProfile::PagedCowV2&&self.private_v2_recovery.is_some()
+            &&self.generic_inflight.is_none()&&self.seed_window_inflight.is_none()&&self.cow_inflight.is_none(),"original Root messages still unknown; cleanup carrier retained");
+        self.current_physical()?;self.original_slot(owner)?;Ok(())
+    }
+    fn current_for_retirement_intent(&self,intent:&ClientRetirement)->Result<()> {
+        if !self.fenced{return self.current()}
+        ensure!(intent.paged&&self.private_v2_recovery.is_some()&&self.generic_inflight.is_none()&&self.seed_window_inflight.is_none()&&self.cow_inflight.is_none(),"Root retirement cannot interleave an unknown original message");
+        self.current_physical()
+    }
 }

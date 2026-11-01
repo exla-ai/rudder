@@ -89,3 +89,11 @@ impl SealedSeedTaskUse {
 }
 
 fn start_time(original:&FinalizationBudget,cancelled:&AtomicBool)->Result<()> {if cancelled.load(Ordering::Acquire){original.cancel();anyhow::bail!("original never-started settlement cancelled");}original.remaining()?;Ok(())}
+
+impl SeedTaskUseGate {
+    pub(crate) fn same_original(&self,other:&Self)->bool {Arc::ptr_eq(&self.inner,&other.inner)}
+    pub(crate) fn check_claimed_fork(&self)->Result<()> {
+        let held=self.inner.state.try_lock().map_err(|_|anyhow::anyhow!("original fork permit busy/poisoned"))?;
+        ensure!(held.claimed.dispatch.is_some()&&held.claimed.fork.is_some()&&held.seal.is_none(),"original dispatch/fork creation permits unclaimed or sealed");Ok(())
+    }
+}

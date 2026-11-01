@@ -155,5 +155,307 @@
     "actualS3": false,
     "providerCalls": 24,
     "vmDestroyedAndTwoAbsenceChecks": true
+  },
+  "imageAliasPublication": {
+    "scope": "real-PG-image-alias-publication-component-only",
+    "sourceManifestSha256": "93ede85aa9fc6305e7d6f05cdccf5d4b9a4b4dcf5a5c648a45c28dba2f19ff26",
+    "reportSha256": "5fcdd88d0fc46f819ba8d26ecd47ec80900a2bf5896181fe8291d7563fadc349",
+    "verifiedAt": "2026-11-01T07:26:40.873Z",
+    "aliases": 513,
+    "logicalPathBytes": 2151678009,
+    "retainedUniqueObjectBytes": 4462282,
+    "physicalQuotaBytes": 2147483648,
+    "successfulTargetBodyReads": 1,
+    "cpuDigestInvocationCountQualified": false,
+    "actualS3": false,
+    "physicalRoot": false,
+    "productionEnablement": false,
+    "providerCalls": 22,
+    "vmDestroyedAndTwoAbsenceChecks": true
+  },
+  "hostTransportGeneration": {
+    "scope": "actual-PG-host-transport-generation-component-only",
+    "verifiedAt": "2026-11-01T08:58:21.099Z",
+    "reportSha256": "c398c786d88331d69dba04a069d0b632bf6ba1d9bd867a5986b4a8811d1635af",
+    "sourceArchiveSha256": "29fba827c76eb866cbf4ad336341a484846664b527ecf3f59a59cfe4dcdbc5f8",
+    "fixtureImage": {
+      "registry": "registry.fly.io",
+      "repository": "rudder-workers-exla",
+      "digest": "sha256:b0c21439e441671351766e8a2f4e87810887a7d6add0bac4959d7c16388143a4"
+    },
+    "providerCalls": 22,
+    "cleanupVerified": true,
+    "baseStages": 16,
+    "componentChecks": 10,
+    "checks": {
+      "transportMigrationFrozen": true,
+      "restrictedRegistrationRole": true,
+      "tenantRls": true,
+      "actualLoopbackWebSockets": true,
+      "replacement": true,
+      "currentRegistrationRefusal": true,
+      "staleSerialRefused": true,
+      "expiredOriginalRefused": true,
+      "unchangedOriginalAckReconciliation": true,
+      "authRowLockRevocationSerialized": true,
+      "committedAckLossRetained": true,
+      "beginCommitAckLossRetained": true,
+      "noAcquireLeaseAdoption": true
+    },
+    "limits": {
+      "physicalRoot": false,
+      "physicalNative": false,
+      "actualConfiguredSidecar": false,
+      "actualTransportHmacOnWebSocket": false,
+      "actualS3": false,
+      "qualifiedClockContinuity": false,
+      "normalRootRetirement": false,
+      "productionEnablement": false,
+      "actualNetworkCut": false
+    },
+    "fixtures": {
+      "rootHmac": true,
+      "FlyTransport": true,
+      "clockAdmission": "synthetic; not physical continuity",
+      "S3": "conditional memory service; actual FabricCas adapter"
+    },
+    "uncertainCommitFault": "after-real-COMMIT-query-success-fixture-throws-ECONNRESET",
+    "blockedRevocationSessions": 1,
+    "closedLoopbackSocketPairs": 8,
+    "sourceHashes": {
+      "cloud/src/managed-home-provisioning/transport-schema.ts": "4791c21d75cb87055a5adb0686d3089507f31b6c784fceb802f7af25be7d7004",
+      "cloud/src/managed-home-provisioning/transport.ts": "421ca44b9ae0fb763b626bf6dd472cf38bd54108d2fe1174f4eda64dc3e85957"
+    },
+    "cleanup": {
+      "ownedMachine": "8001dea6445238",
+      "twoAbsenceObservations": [
+        {
+          "ownedIdPresent": false,
+          "exactNoncePresent": false
+        },
+        {
+          "ownedIdPresent": false,
+          "exactNoncePresent": false
+        }
+      ]
+    }
+  },
+  "warmImagePublicationReuse": {
+    "scope": "real-PG-account-image-reuse-component-only",
+    "verifiedAt": "2026-11-01T09:40:10.453Z",
+    "reportSha256": "791d3e9ca2778e6ec38db798bc4fb0a2e9cd0ed66480e0cb13e3c3b961ab6b7b",
+    "sourceArchiveSha256": "0043c5514ee504ba0a2c3d6365edc4fd798e93b2e08927ee1cb300eb0074a7c3",
+    "fixtureImage": {
+      "registry": "registry.fly.io",
+      "repository": "rudder-workers-exla",
+      "digest": "sha256:b0c21439e441671351766e8a2f4e87810887a7d6add0bac4959d7c16388143a4"
+    },
+    "providerCalls": 22,
+    "checks": {
+      "actualPostgres": true,
+      "actualFabricCas": true,
+      "sameAccount": true,
+      "differentPreparedProject": true,
+      "currentOperationAck": true,
+      "originalPublicationUnchanged": true,
+      "immutableOriginalReplay": true,
+      "wrongPolicyRefused": true,
+      "forgedTenantRefused": true,
+      "frozenStorageRefused": true,
+      "missingPinRefused": true,
+      "missingPinRetainsUncertainty": true,
+      "missingPinNoPublication": true,
+      "missingPinNoAck": true
+    },
+    "warm": {
+      "casPayloadBodyReads": 0,
+      "warmObjectPuts": 0,
+      "warmRootReceiptGets": 2
+    },
+    "separateDiagnosticPreflightRootReceiptGets": 2,
+    "limits": {
+      "actualS3": false,
+      "physicalNative": false,
+      "realRootRegistration": false,
+      "newVmPhysicallyQualified": false,
+      "normalRootRetirement": false,
+      "productionEnablement": false,
+      "models": false
+    },
+    "cleanup": {
+      "originalCreateStillUncertain": false,
+      "observations": [
+        {
+          "ownedIdPresent": false,
+          "exactNoncePresent": false
+        },
+        {
+          "ownedIdPresent": false,
+          "exactNoncePresent": false
+        }
+      ],
+      "ownedId": "185770e1b65928"
+    },
+    "cleanupVerified": true,
+    "firstAttempt": {
+      "status": "failed",
+      "reportSha256": "f56440da83d87a2d1842da82696d6a5ee56c4d80513d9bdfb3a018b48b041d15",
+      "cleanupVerified": true,
+      "exactFailingSubstepProven": false,
+      "fixtureCorrection": "missing-pin negative must retain exact effect_unknown instead of expecting rejection ACK"
+    }
+  },
+  "coldImageBatches": {
+    "scope": "real-PG-cold-image-batch-component-only",
+    "actualPostgres": true,
+    "frozenMigration": true,
+    "oneStartedAndAckPerBatch": true,
+    "storedAckReconciliation": true,
+    "unknownStartedNoDispatch": true,
+    "expiredOriginalRefused": true,
+    "historicalAckNoClockRenewal": true,
+    "batchPublication": true,
+    "runtimeRlsAndRestrictedGrants": true,
+    "actualS3": false,
+    "physicalRoot": false,
+    "physicalNative": false,
+    "productionEnablement": false,
+    "models": false,
+    "wholeImage300sQualified": false,
+    "fixtureRoot": true,
+    "fixtureProvider": true,
+    "fixtureClock": true,
+    "batches": 3,
+    "uniqueObjects": 5,
+    "uniqueBytes": 1698,
+    "transfer_id": "540d699a-9545-4488-a88a-9670865fe187",
+    "verifiedAt": "2026-11-01T10:17:28.962Z",
+    "reportSha256": "d153802ef9c7f5ca714e164a31755fa8bd811a3933996770e8d12e023bf7e7ee",
+    "sourceArchiveSha256": "7d5a806d77f5e03d4ec03477bda13c4c6163f1f6f241b8ccb3947170abc9e4b5",
+    "providerCalls": 22,
+    "cleanupVerified": true,
+    "cleanup": {
+      "originalCreateStillUncertain": false,
+      "observations": [
+        {
+          "ownedIdPresent": false,
+          "exactNoncePresent": false
+        },
+        {
+          "ownedIdPresent": false,
+          "exactNoncePresent": false
+        }
+      ],
+      "ownedId": "899769f623e9e8"
+    },
+    "fixtureImage": "registry.fly.io/rudder-workers-exla@sha256:b0c21439e441671351766e8a2f4e87810887a7d6add0bac4959d7c16388143a4",
+    "limits": "tiny five-object graph, real PostgreSQL and FabricCas with simulated S3/Root/provider/clock; no physical Native or whole-image throughput proof"
+  },
+  "immutableBatchRetention": {
+    "status": "component-passed",
+    "attempts": [
+      {
+        "attempt": "a1",
+        "status": "failed",
+        "scope": "real-PG-immutable-batch-retention-component-only",
+        "reportSha256": "aa56bf12fe059319fab7ce26a806cee664d94498bc79cd6e14e4879815c0d912",
+        "sourceArchiveSha256": "045e459f848e798fc6de92e574305c62bef8e5471b3af4258b648faef457aaa6",
+        "verifiedAt": "2026-11-01T10:56:43.604Z",
+        "phase": "actual-cold-image-batch-original-producers",
+        "code": "effect_unknown",
+        "diagnostic": null,
+        "providerCalls": 22,
+        "cleanupVerified": true,
+        "actualS3": false,
+        "physicalRoot": false,
+        "productionEnablement": false
+      },
+      {
+        "attempt": "a2",
+        "status": "failed",
+        "scope": "real-PG-immutable-batch-retention-component-only",
+        "reportSha256": "887bf1420e664a057ff8aedde11a96105b85e67f9b8b45f043e77dfb568b5198",
+        "sourceArchiveSha256": "d918f9abeb49ba41d0348ea7222fb5cdc43b68cfeba2977308562b5918ab5b43",
+        "verifiedAt": "2026-11-01T11:05:07.915Z",
+        "phase": "actual-cold-image-batch-original-producers",
+        "code": "effect_unknown",
+        "diagnostic": {
+          "actualS3": false,
+          "backendCounters": {
+            "bytes": 3153,
+            "delete": 0,
+            "get": 2,
+            "holdPut": 3,
+            "leaseGet": 0,
+            "put": 10,
+            "retentionGet": 3
+          },
+          "physicalRoot": false,
+          "productionEnablement": false,
+          "realWorkloadRole": false,
+          "replayAuthorized": false,
+          "scope": "immutable-batch-PG-failure-data-only",
+          "stage": "operation:retention-lost-publish"
+        },
+        "providerCalls": 22,
+        "cleanupVerified": true,
+        "actualS3": false,
+        "physicalRoot": false,
+        "productionEnablement": false
+      }
+    ],
+    "fixtureCorrection": "Lost-ACK publication retains exact thrown effect_unknown; no signed rejection ACK is expected. Production behavior unchanged.",
+    "wholeImage300sQualified": false,
+    "passingAttempt": {
+      "scope": "real-PG-immutable-batch-retention-component-only",
+      "actualPostgres": true,
+      "frozenMigration": true,
+      "oneStartedAndAckPerBatch": true,
+      "storedAckReconciliation": true,
+      "historicalAckCannotContinue": true,
+      "originalImmutableHold": true,
+      "zeroObjectLeaseReads": true,
+      "syntheticPolicyReadback": true,
+      "realWorkloadRole": false,
+      "unknownStartedNoDispatch": true,
+      "expiredOriginalRefused": true,
+      "historicalAckNoClockRenewal": true,
+      "batchPublication": true,
+      "runtimeRlsAndRestrictedGrants": true,
+      "actualS3": false,
+      "physicalRoot": false,
+      "physicalNative": false,
+      "productionEnablement": false,
+      "models": false,
+      "wholeImage300sQualified": false,
+      "fixtureRoot": true,
+      "fixtureProvider": true,
+      "fixtureClock": true,
+      "batches": 3,
+      "uniqueObjects": 5,
+      "uniqueBytes": 1698,
+      "transfer_id": "24697a92-8479-4ad2-b23c-ca1ea61faed0",
+      "attempt": "a3",
+      "verifiedAt": "2026-11-01T11:07:01.723Z",
+      "reportSha256": "5089b3e36a14e59f0edb97b806b04f0c35925e399ab5fa23ebb7a5adc4d382a9",
+      "sourceArchiveSha256": "360f53910def6f5fbe7da80afd7882fc2543c03e4256790734c9bed0bfc8cf76",
+      "providerCalls": 22,
+      "cleanupVerified": true,
+      "cleanup": {
+        "originalCreateStillUncertain": false,
+        "observations": [
+          {
+            "ownedIdPresent": false,
+            "exactNoncePresent": false
+          },
+          {
+            "ownedIdPresent": false,
+            "exactNoncePresent": false
+          }
+        ],
+        "ownedId": "784ee73da13e08"
+      },
+      "fixtureImage": "registry.fly.io/rudder-workers-exla@sha256:b0c21439e441671351766e8a2f4e87810887a7d6add0bac4959d7c16388143a4"
+    }
   }
 }

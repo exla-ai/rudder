@@ -1,0 +1,15 @@
+{
+  "format_version": 1,
+  "version": "2.1.316",
+  "platform": "linux-x64",
+  "source_documentation": "https://code.claude.com/docs/en/setup#verify-the-manifest-signature",
+  "binary_url": "https://downloads.claude.ai/claude-code-releases/2.1.316/linux-x64/claude",
+  "binary_sha256": "fd13c70000fec3f2116dfbcbb6121210b4a29328bf0e46210a59dd594a67d824",
+  "binary_size_bytes": 328262000,
+  "historical_root_acquisition_record_sha256": "c48ba71aa8e16358287aede33222d141f4132639db450b8be01369eb6915b6ad",
+  "historical_signature_verified": true,
+  "historical_version_exit_code": 0,
+  "historical_paid_model_calls": 0,
+  "this_draft_acquired_or_executed": false,
+  "scope": "immutable artifact candidate only; guest/backend/profile/model support unqualified"
+}

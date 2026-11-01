@@ -83,6 +83,16 @@ mod local {
 
     pub(crate) struct ManagedTaskJournalOwner { journal: Mutex<Journal>, lease: EngineSourceLease }
     impl ManagedTaskJournalOwner {
+        fn check_original_cleanup_custody(&self,budget:&FinalizationBudget,cancelled:&AtomicBool)->Result<()> {
+            let journal=loop{task_time(budget,cancelled)?;match self.journal.try_lock(){Ok(v)=>break v,Err(std::sync::TryLockError::WouldBlock)=>thread::sleep(budget.phase_limit(Duration::from_millis(10))?),Err(_)=>anyhow::bail!("original cleanup writer poisoned")}};
+            self.lease.check_journal(&journal)?;task_time(budget,cancelled)
+        }
+        /// Physical validation of an already-held broker writer; grants no SQL permission.
+        pub(crate) fn check_broker_writer(&self,journal:&Journal)->Result<()> {self.lease.check_journal(journal)}
+        pub(crate) fn managed_owner_lease(&self)->Option<&Arc<rudder_native::managed_owner_lease::ManagedOwnerLease>> {self.lease.managed_owner_lease()}
+        pub(crate) fn check_shared_admission(&self)->Result<()> {self.lease.check_active_for_adoption()}
+        pub(crate) fn shared_admission_closed(&self)->bool {self.lease.shared_admission_closed()}
+        pub(crate) fn assert_original_held_custody_off_app(&self)->Result<()> {self.lease.check_current()}
         pub(crate) fn owner(&self)->&OwnerFence { self.lease.owner() }
         /// OFF-App only. Rotations borrow the same actual owner-bound writer;
         /// no scheduler, saved path or independently opened database is used.
@@ -94,9 +104,9 @@ mod local {
                     Err(std::sync::TryLockError::WouldBlock)=>thread::sleep(budget.phase_limit(Duration::from_millis(10))?),
                     Err(_)=>anyhow::bail!("managed task writer poisoned") }
             };
-            self.lease.check_journal(&journal)?;task_time(budget,cancelled)?;
+            self.lease.check_journal(&journal)?;self.lease.wait_shared_current(budget,cancelled)?;task_time(budget,cancelled)?;
             let result=work(&mut journal)?;
-            self.lease.check_journal(&journal)?;task_time(budget,cancelled)?;Ok(result)
+            self.lease.check_journal(&journal)?;self.lease.wait_shared_current(budget,cancelled)?;task_time(budget,cancelled)?;Ok(result)
         }
     }
     struct TaskCarrier {
@@ -104,6 +114,7 @@ mod local {
         native: Option<PathBuf>, budget: Option<FinalizationBudget>, cancelled: Arc<AtomicBool>,
         preparation: managed_launch::ManagedLocalPreparationOwner,
         projection: fabric_runtime::AgentToolsProjectionOwner,
+        broker_journal:Option<Journal>, // Staged BEFORE fallible fresh broker handoff.
         broker: crate::agent_broker::BrokerThreadOwner,
         broker_joined: Option<crate::agent_broker::BrokerThreadsSettled>,
         drain: Option<TaskDrain>, ready_owner:Option<PreparedResult>, activation_failure:Option<TaskActivationFailure>,
@@ -140,7 +151,7 @@ mod local {
         /// capsule; this checks the SAME held Journal/project owner epoch. A
         /// later run attempt is not authority to rewrite this old private fork.
         pub(crate) fn check_seed_localization_owner(&self,budget:&FinalizationBudget,cancelled:&AtomicBool)->Result<()> {
-            self._project.with_writer(budget,cancelled,|_|Ok(()))
+            self._project.check_original_cleanup_custody(budget,cancelled)
         }
 
         /// Acceptance and immutable checkpoint pinning remain separate. Call
@@ -252,7 +263,7 @@ mod local {
                     work: AtomicBool::new(false), busy: AtomicBool::new(false), handles: AtomicUsize::new(0),
                     carrier: Mutex::new(TaskCarrier { packet:None,request:None,native:None,budget:None,cancelled:Arc::new(AtomicBool::new(false)),
                         preparation:Default::default(),projection:fabric_runtime::AgentToolsProjectionOwner::new(),
-                        broker:crate::agent_broker::BrokerThreadOwner::new(),broker_joined:None,drain:None,ready_owner:None,activation_failure:None,
+                        broker_journal:None,broker:crate::agent_broker::BrokerThreadOwner::new(),broker_joined:None,drain:None,ready_owner:None,activation_failure:None,
                         admission:None,preparation_joined:false,preparation_proof:None,scoped_fork:None,unused_budget:None,panics:Vec::new() }),
                     joining:Mutex::new(TaskWorkerJoins { worker:std::array::from_fn(|_|None),preparation_joined:false,preparation_proof:None,panics:Vec::new() }),
                     workers:workers.try_into().ok().unwrap(),worker_receivers:Mutex::new(receivers.try_into().ok().unwrap()),
@@ -321,6 +332,7 @@ mod local {
                 let Ok(mut carrier)=slot.carrier.try_lock() else { continue; };
                 if carrier.drain.as_ref().is_none_or(|drain|drain.live.prepared.assignment.fence!=*fence) { continue; }
                 anyhow::ensure!(carrier.broker_joined.is_some(),"actual task broker join proof absent");
+                anyhow::ensure!(carrier.broker_journal.is_none(),"original broker connection was not transferred; retain recovery");
                 anyhow::ensure!(!slot.acceptance_pending.swap(true,Ordering::AcqRel),"task acceptance already transferred");
                 let joined=JoinedManagedTask { drain:carrier.drain.take().unwrap(),
                     _broker:std::mem::replace(&mut carrier.broker,crate::agent_broker::BrokerThreadOwner::new()),
@@ -443,6 +455,9 @@ mod local {
             }
             return Ok(());
         }
+        // No API worker/thread remains; a never-transferred original writer is
+        // disposed only on this existing off-App unused-settlement path.
+        carrier.broker_journal=None;
         carrier.preparation.settle_unused()?;
         carrier.preparation=Default::default();
         carrier.drain = None; carrier.ready_owner=None;carrier.activation_failure=None;carrier.request = None; carrier.packet = None; carrier.native = None;
@@ -462,7 +477,7 @@ mod local {
         // App after dispatch. Every error leaves its cleanup-bearing fields.
         let mut carrier=task.slot.carrier.lock().unwrap_or_else(|p|p.into_inner());
         let budget=carrier.budget.as_ref().context("original task budget absent")?.clone();
-        let cancelled=carrier.cancelled.clone();task_time(&budget,&cancelled)?;
+        let cancelled=carrier.cancelled.clone();task_time(&budget,&cancelled)?;task.slot.project.lease.wait_shared_current(&budget,&cancelled)?;
         let mut worker_journal=task.slot.project.lease.open_source_writer()?;task_time(&budget,&cancelled)?;
         location.persist_reservation(reservation)?;location.write_projection(reservation,projection_record)?;
         task_time(&budget,&cancelled)?;
@@ -476,14 +491,19 @@ mod local {
         if let Some(wake)=wake { wake(); }
         let prepared=receive.recv_timeout(budget.remaining()?).context("original managed task assignment deadline")?;
         task_time(&budget,&cancelled)?;
-        task.slot.project.lease.check_journal(&worker_journal)?;
-        let projection=fabric_runtime::prepare_agent_tools_for_attempt_retaining(&mut carrier.projection,&mut worker_journal,backend,&home,
-            fence,Some(&prepared.assignment),&budget,&cancelled)?;
-        task_time(&budget,&cancelled)?;task.slot.project.lease.check_journal(&worker_journal)?;
-        let broker=AgentBroker::spawn_retaining(BrokerConfig { journal_path,identity_file:projection.identity_file,
-            socket_path:projection.broker_socket },&mut carrier.broker)?;
-        task_time(&budget,&cancelled)?;
+        task.slot.project.lease.check_journal(&worker_journal)?;task.slot.project.lease.wait_shared_current(&budget,&cancelled)?;
+        let projection=fabric_runtime::prepare_agent_tools_for_location_retaining(&mut carrier.projection,&mut worker_journal,backend,&home,
+            fence,Some(&prepared.assignment),location,&budget,&cancelled)?;
+        task_time(&budget,&cancelled)?;task.slot.project.lease.check_journal(&worker_journal)?;task.slot.project.lease.wait_shared_current(&budget,&cancelled)?;
         let projection_owner=carrier.projection.share(task.slot.project.clone())?;task_time(&budget,&cancelled)?;
+        let config=BrokerConfig{journal_path,identity_file:projection.identity_file,socket_path:projection.broker_socket};
+        let broker=if task.slot.project.managed_owner_lease().is_some(){
+            carrier.broker_journal=Some(worker_journal);
+            let TaskCarrier{broker_journal,broker,..}=&mut *carrier;
+            AgentBroker::spawn_fresh_retaining(config,task.slot.project.clone(),location.clone(),projection_owner.clone(),
+                prepared.assignment.clone(),broker_journal,&budget,&cancelled,broker)?
+        }else{AgentBroker::spawn_retaining(config,&mut carrier.broker)?};
+        task_time(&budget,&cancelled)?;
         let handoff=prepared.prepare_handoff()?;
         let launch_json=serde_json::to_string(&prepared.link_launch())?;task_time(&budget,&cancelled)?;
         Ok(PreparedResult { prepared,broker:Some(broker),projection_owner:Some(projection_owner),projection_hash:projection.projection_hash,handoff:Some(handoff),
@@ -624,6 +644,25 @@ mod local {
     }
 
     impl App {
+        /// App-only observation DATA. It does not issue a process witness,
+        /// readiness, checkpoint, join, acceptance or retirement receipt. No
+        /// live carrier means unknown, never evidence that a task stopped.
+        pub(crate) fn managed_task_ingress_observation(&self,fence:&ManagedLaunchFence)->Option<serde_json::Value> {
+            let row=self.agents.iter().find(|run|run.id==fence.run_id)?;
+            let row_matches=match row.managed_local.as_ref()? {
+                ManagedRunSource::Reserved {fence:actual,..}=>actual==fence,
+                ManagedRunSource::Assigned {assignment}=>&assignment.fence==fence,
+                _=>false,
+            };
+            if !row_matches{return None;}
+            let live=self.managed_local.live.get(&fence.run_id).filter(|live|live.task.is_some()&&live.prepared.assignment.fence==*fence
+                &&matches_workspace(row.managed_local.as_ref(),&live.prepared.assignment,false));
+            let preparing=self.managed_local.pending.get(&fence.run_id).is_some_and(|pending|pending.fence==*fence);
+            Some(serde_json::json!({"run_id":fence.run_id,"run_epoch":fence.run_epoch.to_string(),"attempt_id":fence.attempt_id,
+                "row_status":crate::gitio::run_record_status(row.status),"preparing_observed":preparing,
+                "backend_ready_last_observed":live.map(|live|live.backend_ready),"stop_requested_observed":live.map(|live|live.stop.is_some()),
+                "uncertain_observed":live.map(|live|live.uncertain),"validated_checkpoint_observed":live.map(|live|live.receipt.is_some())}))
+        }
         pub(crate) fn configure_managed_task_supervisor(&mut self, supervisor:Arc<ManagedTaskLifetimeSupervisor>) -> Result<()> {
             anyhow::ensure!(self.managed_local.task_supervisor.is_none(), "managed task lifetime supervisor already configured");
             self.managed_local.task_supervisor = Some(supervisor); Ok(())
@@ -654,7 +693,7 @@ mod local {
         /// No unwind in App may consume that original helper/slot owner.
         pub(crate) fn release_managed_task_start_after_enrollment_retaining(&mut self,pending:&PendingManagedTaskHelper)
             -> Result<()> {
-                pending.task.time()?;
+                pending.task.time()?;pending.task.slot.project.lease.check_active_for_adoption()?;
                 let live=self.managed_local.live.get_mut(&pending.fence.run_id).context("managed task absent after enrollment")?;
                 anyhow::ensure!(live.prepared.assignment.fence==pending.fence && !live.uncertain && live.stop.is_none(),"managed task enrollment result stale");
                 let task=live.task.as_mut().context("managed task ownership absent")?;
@@ -709,6 +748,7 @@ mod local {
                     "managed task selected namespace/backend/program changed");
                 let supervisor = self.managed_local.task_supervisor.as_ref().context("managed task needs a retained lifetime supervisor")?;
                 anyhow::ensure!(supervisor.project.lease.owner() == owner, "managed task supervisor belongs to another owner");
+                supervisor.project.lease.check_active_for_adoption()?;
                 Ok(())
             })();
             if let Err(error) = validation { return Err(ManagedTaskStartFailure::Packet(packet,error)); }
@@ -855,8 +895,17 @@ mod local {
         let result = state.poll(app, journal, owner);
         app.managed_local = state; result
     }
+    /// Task-only concrete restriction from the SAME actual machine startup
+    /// slot. Legacy callers keep poll(); live work/receipts/reaping always run.
+    pub(crate) fn poll_with_startup_gate(app:&mut App,journal:&mut Journal,owner:&OwnerFence,
+        gate:&crate::managed_machine_entry::ManagedMachineStartupGate)->Result<()> {
+        let mut state=std::mem::take(&mut app.managed_local);
+        let result=state.poll_gated(app,journal,owner,Some(gate));app.managed_local=state;result
+    }
     impl ManagedAppState {
-        fn poll(&mut self, app: &mut App, journal: &mut Journal, owner: &OwnerFence) -> Result<()> {
+        fn poll(&mut self,app:&mut App,journal:&mut Journal,owner:&OwnerFence)->Result<()> {self.poll_gated(app,journal,owner,None)}
+        fn poll_gated(&mut self, app: &mut App, journal: &mut Journal, owner: &OwnerFence,
+            startup:Option<&crate::managed_machine_entry::ManagedMachineStartupGate>) -> Result<()> {
             if let Some(supervisor)=&self.task_supervisor { supervisor.poll(); }
             for pending in self.pending.values() {
                 if pending.budget.as_ref().map_or_else(||pending.started.elapsed() >= PREPARATION_DEADLINE,|budget|budget.remaining().is_err())
@@ -923,7 +972,9 @@ mod local {
                 if !workspace_stage && self.pending.get(&result.fence.run_id).is_some_and(|pending|pending.fence == result.fence) {
                     self.pending.remove(&result.fence.run_id);
                 }
-                if !exact || !still_pending(app, &result.fence, owner) || result.fence.check_current(journal).is_err() {
+                if !exact || !still_pending(app, &result.fence, owner) || result.fence.check_current(journal).is_err()
+                    ||task.as_ref().is_some_and(|task|task.slot.project.lease.check_active_for_adoption().is_err())
+                    ||task.is_some()&&startup.is_some_and(|gate|gate.check_on_app().is_err()) {
                     if let Some(task)=&task {
                         if let Ok(WorkerStep::Ready(ready))=result.result { task.reject_ready(ready); }
                         else { task.unused(); }
@@ -966,15 +1017,18 @@ mod local {
                         }
                         // A failed spawn/activation may still have created a child.
                         // From this point Drop cannot unpin/remove the live source.
-                        if let Some(task)=&task { if task.time().is_err() {
-                            task.reject_ready(ready);orphan(&app.cwd,&mut app.agents[index],"original managed task preparation deadline elapsed before helper admission");continue;
+                        if let Some(task)=&task { if task.time().is_err()||task.slot.project.lease.check_active_for_adoption().is_err() {
+                            task.reject_ready(ready);orphan(&app.cwd,&mut app.agents[index],"managed task deadline or project permission ended before helper activation; original preparation retained");continue;
                         } }
-                        if let Some(fork)=&ready.prepared.seed_fork {if let Err(_)=fork.start_gate().claim_helper_start() {
-                            if let Some(task)=&task {task.reject_ready(ready);}
-                            orphan(&app.cwd,&mut app.agents[index],"original helper admission sealed/refused; unused owner retained");continue;
-                        }}
-                        ready.prepared.adopt();
-                        if let Some(task)=&task { task.adopted(); }
+                        if task.is_some()&&startup.is_some_and(|gate|gate.check_on_app().is_err()) {
+                            task.as_ref().unwrap().reject_ready(ready);orphan(&app.cwd,&mut app.agents[index],"machine startup admission closed before helper activation; original preparation retained");continue;
+                        }
+                        if task.is_none() {
+                            if let Some(fork)=&ready.prepared.seed_fork {if let Err(_)=fork.start_gate().claim_helper_start() {
+                                orphan(&app.cwd,&mut app.agents[index],"original helper admission sealed/refused; unused owner retained");continue;
+                            }}
+                            ready.prepared.adopt();
+                        }
                         let options = TerminalPaneOptions { size: app.agents[index].terminal_size.unwrap_or_default(),
                             cwd: None, ..TerminalPaneOptions::default() };
                         // Keep the resource carrier OUTSIDE catch_unwind. The
@@ -982,10 +1036,21 @@ mod local {
                         let mut activation=if task.is_some() { Some(ManagedPtyActivationOwner::new(ready.handoff.take().expect("prepared handoff absent"))) } else { None };
                         let mut activation_panic=None;
                         let spawned=if let Some(activation)=&mut activation {
-                            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| activation.activate(
-                                ready.native_program.display().to_string(),&assignment.fence.attempt_id,
-                                &ready.prepared.execution_profile,Some(&ready.launch_json),options,
-                                &task.as_ref().unwrap().budget,task.as_ref().unwrap().cancelled.clone()))) {
+                            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                // Final pure validation linearization BEFORE the
+                                // retaining activation's first PTY/child effect.
+                                // Refusal uses the existing retained activation
+                                // mailbox, preserving handoff/no-spawn custody.
+                                if let Some(gate)=startup {gate.check_on_app()?;}
+                                // Claim the original helper permit only AFTER
+                                // that final check. A gate refusal preserves
+                                // genuine never-started custody for settlement.
+                                if let Some(fork)=&ready.prepared.seed_fork {fork.start_gate().claim_helper_start()?;}
+                                ready.prepared.adopt();task.as_ref().unwrap().adopted();
+                                activation.activate(ready.native_program.display().to_string(),&assignment.fence.attempt_id,
+                                    &ready.prepared.execution_profile,Some(&ready.launch_json),options,
+                                    &task.as_ref().unwrap().budget,task.as_ref().unwrap().cancelled.clone())
+                            })) {
                                 Ok(result)=>result.map(|(pane,handoff,control,barrier)|(pane,handoff,control,Some(barrier))),
                                 Err(panic)=>{ activation_panic=Some(panic);Err(anyhow::anyhow!("managed PTY activation unwound; original owner retained")) }
                             }
@@ -1245,6 +1310,10 @@ mod local {
     }
 
     #[cfg(test)]
+    mod machine_startup_gate_tests {use super::*;include!("managed_app_machine_startup_gate_tests.rs");}
+    #[cfg(test)]
+    mod ingress_observation_tests {use super::*;include!("managed_ingress_observation_tests.rs");}
+    #[cfg(test)]
     mod task_retained_activation_tests { use super::*;include!("managed_task_retained_activation_tests.rs"); }
     #[cfg(test)]
     mod task_wiring_tests { use super::*;include!("managed_task_launch_wiring_tests.rs");include!("managed_never_started_worker_tests.rs"); }
@@ -1380,7 +1449,7 @@ mod local {
 }
 
 #[cfg(target_os = "linux")]
-pub(crate) use local::{NeverStartedManagedTask,ManagedAppState, JoinedManagedTask, ManagedTaskJournalOwner, ManagedTaskLifetimeSupervisor, ManagedTaskStartFailure, PendingManagedTaskHelper, poll, stop, abandon, accepts_input};
+pub(crate) use local::{NeverStartedManagedTask,ManagedAppState, JoinedManagedTask, ManagedTaskJournalOwner, ManagedTaskLifetimeSupervisor, ManagedTaskStartFailure, PendingManagedTaskHelper, poll, poll_with_startup_gate, stop, abandon, accepts_input};
 
 #[cfg(not(target_os = "linux"))]
 #[derive(Default)]

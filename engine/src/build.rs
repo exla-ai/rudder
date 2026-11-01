@@ -18,6 +18,7 @@ mod frontend;
 mod index;
 pub use frontend::{Buck2Adapter, BuildRun};
 pub use index::{BuildIndex, PreparedEnvironment, StoredBuild};
+pub use index::{PreparationAcknowledgment, RetainedPreparation, RetainedPreparationStatus};
 
 /// Preparation encodings have separate cache keys and index categories. A
 /// retained legacy environment is never silently relabeled as ancestry-free.

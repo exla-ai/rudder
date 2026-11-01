@@ -69,11 +69,14 @@ impl ManagedTaskProject {
         let journal = factory()?; // Existing writer derived from the held owner, not a supplied path.
         let lease = owner.source_lease(&fence)?;
         lease.check_journal(&journal)?;
-        ensure!(ManagedStore::open(&journal, store.binding())? == store, "managed project namespace changed");
+        ensure!(store.reopen_current(&journal)? == store, "managed project namespace changed");
         let state = journal.project_state(&fence.project_id)?;
         ensure!(state.owner_active && state.owner == fence, "managed project owner is stale");
         owner.assert_current()?;
         Ok(Arc::new(Self { lease, journal: Mutex::new(journal), store }))
+    }
+    pub(crate) fn capture_bounded(owner:&mut EngineOwnership,selected:&ManagedTaskOptIn,budget:&FinalizationBudget,cancelled:&AtomicBool)->Result<Arc<Self>>{
+        loop{owner.assert_current_bounded(budget,cancelled)?;match Self::capture(owner,selected){Ok(value)=>return Ok(value),Err(error) if error.downcast_ref::<crate::engine_host::EngineSharedAdmissionBusy>().is_some()=>std::thread::sleep(budget.phase_limit(Duration::from_millis(2))?),Err(error)=>return Err(error)}}
     }
     fn check_worker(&self, head: &str, budget: &FinalizationBudget, cancelled: &AtomicBool) -> Result<()> {
         let journal = loop {
@@ -84,11 +87,11 @@ impl ManagedTaskProject {
                 Err(TryLockError::WouldBlock) => std::thread::sleep(budget.phase_limit(Duration::from_millis(10))?),
             }
         };
-        self.lease.check_journal(&journal)?;
+        self.lease.check_journal(&journal)?;self.lease.wait_shared_current(budget,cancelled)?;
         let state = journal.project_state(&self.lease.owner().project_id)?;
         ensure!(state.owner_active && state.owner == *self.lease.owner() && state.integration_head == head,
             "managed task selection differs from the current owner/integration head");
-        ensure!(ManagedStore::open(&journal, self.store.binding())? == self.store, "managed task private namespace changed");
+        ensure!(self.store.reopen_current(&journal)? == self.store, "managed task private namespace changed");
         check(budget, cancelled)
     }
 }
@@ -168,8 +171,14 @@ pub(crate) struct ManagedTaskResources {
     pub preparation_cache: Option<Arc<crate::managed_preparation_cache::ManagedPreparationCache>>,
 }
 
-struct Permit(Arc<AtomicUsize>);
-impl Drop for Permit { fn drop(&mut self) { self.0.fetch_sub(1, Ordering::AcqRel); } }
+struct Permit(Arc<PermitCharge>);
+struct PermitCharge(Arc<AtomicUsize>);
+impl Drop for PermitCharge {fn drop(&mut self){self.0.fetch_sub(1,Ordering::AcqRel);}}
+/// Retention only, never a second admission or selected-profile authority.
+/// The original factory carrier holds it through actual callback/TLS joins and
+/// unused-result settlement, including consuming prepare() errors.
+#[derive(Clone)]
+pub(crate) struct ManagedTaskFactoryRetention(Arc<PermitCharge>);
 pub(crate) struct ManagedTaskController { active: Arc<AtomicUsize> }
 impl ManagedTaskController {
     pub(crate) fn new() -> Self { Self { active: Arc::new(AtomicUsize::new(0)) } }
@@ -178,13 +187,27 @@ impl ManagedTaskController {
     pub(crate) fn admit(&self, app: &App, index: usize, selected: ManagedTaskOptIn) -> Result<ManagedTaskAdmission> {
         self.admit_target(ManagedTaskTarget::capture(app, index)?, selected)
     }
+    /// App-only actual task admission for a previously accepted host intent.
+    /// Native dispatcher captured this SAME30s before queue/work, independently
+    /// of its20s transport admission clock. Never mint another on duplicate.
+    pub(crate) fn admit_original(&self,app:&App,index:usize,selected:ManagedTaskOptIn,
+        original:&FinalizationBudget,cancelled:Arc<AtomicBool>)->Result<ManagedTaskAdmission> {
+        self.admit_original_target(ManagedTaskTarget::capture(app,index)?,selected,original,cancelled)
+    }
+    fn admit_original_target(&self,target:ManagedTaskTarget,selected:ManagedTaskOptIn,
+        original:&FinalizationBudget,cancelled:Arc<AtomicBool>)->Result<ManagedTaskAdmission> {
+        check(original,&cancelled)?;
+        ensure!(target.backend==selected.backend,"selected profile differs from exact task backend");
+        self.active.fetch_update(Ordering::AcqRel,Ordering::Acquire,|n|(n<MAX_PREPARATIONS).then_some(n+1)).map_err(|_|anyhow::anyhow!("managed task preparation is busy"))?;
+        Ok(ManagedTaskAdmission {target,selected,budget:original.clone(),cancelled,_permit:Permit(Arc::new(PermitCharge(self.active.clone())))})
+    }
     fn admit_target(&self, target: ManagedTaskTarget, selected: ManagedTaskOptIn) -> Result<ManagedTaskAdmission> {
         ensure!(target.backend == selected.backend, "selected profile differs from task backend");
         let budget = FinalizationBudget::begin(PREPARATION_LIMIT)?;
         self.active.fetch_update(Ordering::AcqRel, Ordering::Acquire,
             |active| (active < MAX_PREPARATIONS).then_some(active + 1))
             .map_err(|_| anyhow::anyhow!("managed task preparation is busy"))?;
-        Ok(ManagedTaskAdmission { target, selected, budget, cancelled: Arc::new(AtomicBool::new(false)), _permit: Permit(self.active.clone()) })
+        Ok(ManagedTaskAdmission { target, selected, budget, cancelled: Arc::new(AtomicBool::new(false)), _permit: Permit(Arc::new(PermitCharge(self.active.clone()))) })
     }
 }
 fn check(budget: &FinalizationBudget, cancelled: &AtomicBool) -> Result<()> {
@@ -199,6 +222,7 @@ impl ManagedTaskCancellation { pub(crate) fn cancel(&self) { self.cancelled.stor
 pub(crate) struct ManagedTaskAdmission { target: ManagedTaskTarget, selected: ManagedTaskOptIn,
     budget: FinalizationBudget, cancelled: Arc<AtomicBool>, _permit: Permit }
 impl ManagedTaskAdmission {
+    pub(crate) fn retain_factory_until_join(&self)->ManagedTaskFactoryRetention {ManagedTaskFactoryRetention(self._permit.0.clone())}
     pub(crate) fn source_lifetime(&self)->(FinalizationBudget,Arc<AtomicBool>) {(self.budget.clone(),self.cancelled.clone())}
 
     #[cfg(test)]
@@ -224,7 +248,7 @@ impl ManagedTaskAdmission {
         loader: impl FnOnce(&ManagedTaskOptIn, &AtomicBool, &FinalizationBudget) -> Result<SelectedTaskProfile>,
         resources: impl FnOnce(&ManagedTaskTarget, &AtomicBool, &FinalizationBudget) -> Result<ManagedTaskResources>) -> Result<PreparedManagedTask> {
         check(&self.budget, &self.cancelled)?;
-        project.lease.check_current()?;
+        project.lease.wait_shared_current(&self.budget,&self.cancelled)?;
         let profile = self.load_profile(loader)?;
         let resources = resources(&self.target, &self.cancelled, &self.budget)?;
         project.check_worker(&resources.expected_integration_head, &self.budget, &self.cancelled)?;
@@ -335,3 +359,7 @@ impl ManagedTaskLaunchPacket {
 #[cfg(test)]
 #[path = "managed_task_entry_admission_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path="managed_ingress_admission_tests.rs"]
+mod ingress_admission_tests;

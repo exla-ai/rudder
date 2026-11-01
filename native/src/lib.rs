@@ -15,3 +15,15 @@ pub mod root_storage_bootstrap;
 
 #[cfg(target_os = "linux")]
 pub mod root_storage_uses;
+
+#[cfg(target_os = "linux")]
+pub use root_storage_bootstrap::host_ingress;
+
+#[cfg(target_os = "linux")]
+pub use root_storage_bootstrap::engine_registration;
+
+#[cfg(target_os="linux")]
+pub mod image_preseed_data;
+
+#[cfg(target_os="linux")]
+pub mod managed_owner_lease;

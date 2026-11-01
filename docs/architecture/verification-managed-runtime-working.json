@@ -83,5 +83,330 @@
     "normal retirement and third-seed capacity reuse",
     "default production adoption",
     "full v4 completion"
-  ]
+  ],
+  "providerKernelQualification": {
+    "scope": "private full-image and actual kernel component gate; not configured startup",
+    "status": "failed-before-kernel-probe",
+    "productionActivation": false,
+    "sourceManifestSha256": "e57f4d276126e909d62549459c76e278f7c0ae2a700e1086d43fbcdfd0473c73",
+    "baseImageDigest": "sha256:0290da5d7e0967de3751beaee3faf41a001a606538b7bd520719716c8b23e7c8",
+    "qualificationImageDigest": "sha256:85c737bb6ecda73d56b257aa2df67144a3eb9508fe5716beb2ec1a4710abf4ac",
+    "buildReceiptSha256": "bb8b79570cfea2e1447aa5e2afbd04f37f672614a0c198e43e3b061aafe6f1b7",
+    "sameFourProductionExecutables": true,
+    "actualBookwormTestList": {
+      "exitCode": 0,
+      "stdoutSha256": "9e009293c53d51dda819e011f959fa148ba38a8268061735c71eb0ab15b6ac38",
+      "stdoutBytes": 109598,
+      "stderrBytes": 0,
+      "exactTestPresent": true,
+      "ownFixtureRetirementTestPresent": true,
+      "physicalProbeRun": false
+    },
+    "graph": {
+      "uniqueReferences": 22175,
+      "uniqueBytes": 1968404726
+    },
+    "attempts": [
+      {
+        "qualified": false,
+        "kernelPhysicalPassed": false,
+        "smokePassed": false,
+        "cleanupVerified": true,
+        "independentAbsence": true,
+        "ownedDestruction": true,
+        "reconciliationRequired": false,
+        "providerCalls": 17,
+        "utc": "2026-11-01T10:04:14.379Z",
+        "reportSha256": "6e6e9a1ee0a97ce3a55c244d0d48c38e488b0d044720001fe93550004345a617",
+        "guestFailure": "SMOKE_FAILED",
+        "checkerFailure": "expected sidecar pin fields compared in noncanonical insertion order; production bytes unchanged"
+      },
+      {
+        "qualified": false,
+        "kernelPhysicalPassed": false,
+        "smokePassed": false,
+        "cleanupVerified": true,
+        "independentAbsence": true,
+        "ownedDestruction": true,
+        "reconciliationRequired": false,
+        "providerCalls": 17,
+        "utc": "2026-11-01T10:07:51.158Z",
+        "reportSha256": "28beeda7d20c0117dc9dc847ddd8c5360a11100db9fde0ca471876d5324047ea",
+        "guestFailure": "FULL_TREE_RUNTIME_LINK_TOPOLOGY"
+      },
+      {
+        "qualified": false,
+        "kernelPhysicalPassed": false,
+        "smokePassed": false,
+        "cleanupVerified": true,
+        "independentAbsence": true,
+        "ownedDestruction": true,
+        "reconciliationRequired": false,
+        "providerCalls": 17,
+        "utc": "2026-11-01T10:11:43.812Z",
+        "reportSha256": "7b36a3a92ff2edb69dd3fdcd1cef81ba6f07b0f886cac960d682532ff3eb263e",
+        "guestFailure": "FULL_TREE_RUNTIME_LINK_TOPOLOGY",
+        "aliasDiagnosis": [
+          {
+            "firstPath": "/usr/sbin/swapon",
+            "count": 1,
+            "links": "2",
+            "bytes": "459224",
+            "actualMode": 493,
+            "actualSha256": "fa2dd6d40ac9cb09a5b66dd9ee643c63436728ac70a6056c4b365ca6a1f50075",
+            "baked": [
+              {
+                "content": {
+                  "algorithm": "sha256",
+                  "digest": "83971b1529f0a94be9e5af7489bab1e4c4bd32c3ffddcdcb6d5cef417bbb8198",
+                  "kind": "blob",
+                  "size_bytes": 51512
+                },
+                "path": "/usr/sbin/swapon",
+                "sha256": "83971b1529f0a94be9e5af7489bab1e4c4bd32c3ffddcdcb6d5cef417bbb8198",
+                "size_bytes": 51512
+              }
+            ],
+            "aliases": [
+              "/.fly/swapon"
+            ]
+          }
+        ]
+      }
+    ],
+    "pending": [
+      "compile current empty provider-tool capture and sealed guest mask",
+      "build and verify a fresh exact-source image",
+      "run actual guest mask, ordinary probe-fixture cleanup and startup checks",
+      "genuine configured Root/registration/PG/S3 and real model qualification"
+    ],
+    "earlierRuntimeScopeUnchanged": true,
+    "providerToolAndOriginAttempt": {
+      "sourceManifestSha256": "43b3551ea07516efbd906881ae58f255a3f8176433f29386e682bad5d845bc92",
+      "baseImageDigest": "sha256:4e624797302bfb9a5f9df5e428fbe02681dc98d10f0599a285a1c50587e4965e",
+      "qualificationImageDigest": "sha256:7c7a1f7eb0c6b4b81c023fa0aa09d4ac2c9ff77d82246281224a900580e062b8",
+      "baseBuildReceiptSha256": "23e4e034ba7ffd74d162a447e500c1831bfe8b0aac2c41b0adb123492049251f",
+      "reportSha256": "c7df3bdbb9f871ab0ec4f3a6a6fda7979d3b73fa06b258de6cd9facacf775d19",
+      "verifiedAt": "2026-11-01T10:47:54.850Z",
+      "qualified": false,
+      "kernelProbeReached": false,
+      "fullImageVerified": false,
+      "providerTopology": {
+        "entries": 22950,
+        "providerKernelBoundary": {
+          "id": "provider-kernel-empty-v1",
+          "path": "/usr/lib/modules",
+          "mode": 365,
+          "identity": {
+            "device": "21",
+            "inode": "20"
+          },
+          "providerPayloadCaptured": false,
+          "guestMaskQualified": false,
+          "kernelPolicyQualified": false
+        },
+        "providerToolBoundary": {
+          "id": "provider-swap-empty-v1",
+          "path": "/usr/sbin/swapon",
+          "mode": 292,
+          "identity": {
+            "device": "22",
+            "inode": "131078"
+          },
+          "hostFile": {
+            "regularFile": true,
+            "canonical": true,
+            "uid": 0,
+            "gid": 0,
+            "mode": 493,
+            "bytes": "459224",
+            "links": "2",
+            "descriptorAccess": "O_PATH",
+            "closeOnExec": true,
+            "originalInodeRetained": true,
+            "stampSha256": "861c1aa58b3efe2d6875c8670c1d51b506d4e4131ba57693988304f7417de99a"
+          },
+          "providerPayloadCaptured": false,
+          "guestMaskQualified": false,
+          "kernelPolicyQualified": false
+        },
+        "unexpectedGroups": 0,
+        "issues": []
+      },
+      "verifierChild": {
+        "code": null,
+        "signal": "SIGKILL",
+        "exitObserved": true,
+        "settled": true,
+        "stdoutEof": true,
+        "stderrEof": true,
+        "failure": "FULL_TREE_DEADLINE"
+      },
+      "providerCalls": 23,
+      "cleanupVerified": true,
+      "independentAbsence": true,
+      "ownedDestruction": true,
+      "reconciliationRequired": false,
+      "withinLifetimeBound": true,
+      "graph": {
+        "uniqueReferences": 22174,
+        "uniqueBytes": 1968499781
+      },
+      "next": "retained bulk local import with original300, actual full hashes/closure and durable pin acknowledgment; no deadline increase"
+    }
+  },
+  "bulkImageV12Attempt": {
+    "sourceManifestSha256": "4d0a3e6203938cd11b7b0460e2aae8889ec071a29d4c7332aa4044292846ae74",
+    "reportSha256": "db93bbcdd1ebe6c2830a2d9cb33864b9566fb7e0379e2a3d95d26322fb607a0d",
+    "guestProofSha256": "26c9775463a49c1b57f219e33c78c5a9ab925cae861decb8a5fb3218806f1fd4",
+    "baseImage": "registry.fly.io/rudder-workers-exla@sha256:a2e3e4f7011f2597afe4a29dc774b1893836c22e1e16e1e2417990d20b050cdd",
+    "qualificationImage": "registry.fly.io/rudder-workers-exla@sha256:297a2b93747ff037de9f8722edc26120cd341419acff8542d794c8ea329890da",
+    "fullImageGraph": {
+      "objects": 22176,
+      "bytes": 1973631398
+    },
+    "qualified": false,
+    "kernelPhysicalPassed": false,
+    "kernelProbeReached": false,
+    "smokePassed": false,
+    "failure": "GUEST_SMOKE_FAILED",
+    "guestFailure": "FULL_TREE_CHILD_UNSETTLED",
+    "actualFullTreeChild": {
+      "code": 1,
+      "signal": null,
+      "exitObserved": true,
+      "settled": true,
+      "stdoutEof": true,
+      "stderrEof": true,
+      "failure": null
+    },
+    "actualFullTreeStderr": "Error: captured image filesystem changed\n",
+    "originalFullTreeBudgetMilliseconds": 300000,
+    "externalObservationMilliseconds": 305000,
+    "helperWasTimeoutKilled": false,
+    "changedPathProven": false,
+    "layoutUnexpectedGroups": 0,
+    "cleanupVerified": true,
+    "independentAbsence": true,
+    "ownedDestruction": true,
+    "reconciliationRequired": false,
+    "withinLifetimeBound": true,
+    "elapsedMilliseconds": 438760,
+    "providerCalls": 23,
+    "limits": "helper exited1 with settled original child/pipes; capture consistency failed before installed pin comparison/kernel probe; no full-image or runtime qualification"
+  },
+  "bulkImageV13DiagnosticAttempt": {
+    "sourceManifestSha256": "4d0a3e6203938cd11b7b0460e2aae8889ec071a29d4c7332aa4044292846ae74",
+    "qualificationImage": "sha256:297a2b93747ff037de9f8722edc26120cd341419acff8542d794c8ea329890da",
+    "harnessManifestSha256": "24d954a6c3cf16d43c59d3ee936dd850520c3a6ed993e98bbac8c32cfc258783",
+    "reportSha256": "ad2b3ec0af768b3e8bf239c5c80ec2eaac39db23073e8a526adff79b8adeed7a",
+    "guestProofSha256": "8736a6391fe2a323a1942a3c2763e7955481f37f851d6a366c243c608d8b18a6",
+    "metadataDiffSha256": "235d505965c4cc8483f4a663c6a2e991b918d9d80b7153334cc3d7c5b1a974bf",
+    "qualified": false,
+    "kernelProbeReached": false,
+    "actualFullTreeChild": {
+      "code": 1,
+      "signal": null,
+      "exitObserved": true,
+      "settled": true,
+      "stdoutEof": true,
+      "stderrEof": true,
+      "failure": null
+    },
+    "actualFullTreeObservation": {
+      "clock": "existing-performance-now-observation-only",
+      "origin": "same-original-child-spawn-request",
+      "spawnMs": 2.640740000002552,
+      "exitMs": 289383.790187,
+      "stdoutEofMs": 289383.617577,
+      "stderrEofMs": 289383.422057,
+      "settlementMs": 289383.816087,
+      "settlementWallMs": 289392
+    },
+    "actualFullTreeStderr": "Error: captured image filesystem changed\n",
+    "metadataBefore": {
+      "complete": true,
+      "attempted": 22954,
+      "entries": 22954,
+      "errorCount": 0,
+      "receipt": {
+        "name": "image-tree.before.json",
+        "bytes": 6682848,
+        "sha256": "3492c5ac156245c94daa1a869e02697df0849adc14be8a1b92b9e724fa6627fd"
+      }
+    },
+    "metadataAfter": {
+      "complete": true,
+      "attempted": 22954,
+      "entries": 22954,
+      "errorCount": 0,
+      "receipt": {
+        "name": "image-tree.after.json",
+        "bytes": 6683851,
+        "sha256": "9329cb4b47a4e08a5cd7daf7ca03b0e845349b9d1e51238de1d271b9c24b1a0f"
+      }
+    },
+    "totalChangedPaths": 2207,
+    "retainedSamples": 50,
+    "sampleTruncated": true,
+    "sampleEntryKinds": [
+      "directory"
+    ],
+    "sampleChangedFields": [
+      "ino"
+    ],
+    "filesystemTypeVerified": false,
+    "heldDirectoryIdentityChangeProven": false,
+    "cleanupVerified": true,
+    "independentAbsence": true,
+    "ownedDestruction": true,
+    "providerCalls": 23,
+    "verifiedAt": "2026-11-01T12:22:06.005Z",
+    "limits": "All 50 retained samples are directories with only ino changed; aggregate has 2207 changes, so unsampled types are unknown. Postwalk follows original helper exit and descriptor closure; this does not prove a held descriptor changed identity. Filesystem type/cause remain unverified. No stability checks or deadlines were relaxed."
+  },
+  "localNativeBin220": {
+    "scope": "full-current-native-binary-unit-and-integration-tests",
+    "passed": 1306,
+    "failed": 0,
+    "ignored": 21,
+    "verifiedAt": "2026-11-01T12:30:50.790754Z",
+    "configuredActualNodeAndHelperPaths": true,
+    "productionRuntimeQualified": false
+  },
+  "directoryCustodyV14Attempt": {
+    "sourceManifestSha256": "30d1ac637796c0da5940b5872f74b52e7343c3d85b193bcb4daab9d3d17148c6",
+    "imageDigest": "sha256:534383666d7ff7240027138e9c8a398a5969508d93bc9f4a74b48bdfdeeeb2e1",
+    "reportSha256": "d733da914304fcb8bc095676f18b81d9a44a617fd23c72df5f42b610b83895e5",
+    "guestProofSha256": "43b782fc2e7768d7540884cccc41b2829e1cf3087d76744520ae4b9b8435933d",
+    "verifiedAt": "2026-11-01T13:07:24.735Z",
+    "qualified": false,
+    "kernelProbeReached": false,
+    "actualFullTreeChild": {
+      "code": 1,
+      "signal": null,
+      "exitObserved": true,
+      "settled": true,
+      "stdoutEof": true,
+      "stderrEof": true,
+      "failure": null
+    },
+    "actualFullTreeObservation": {
+      "clock": "existing-performance-now-observation-only",
+      "origin": "same-original-child-spawn-request",
+      "spawnMs": 2.172351000001072,
+      "exitMs": 288674.536289,
+      "stdoutEofMs": 288673.597468,
+      "stderrEofMs": 288673.406478,
+      "settlementMs": 288674.561639,
+      "settlementWallMs": 288680
+    },
+    "actualStderr": "Error: image DATA verification file identity differs\n",
+    "priorConsistencyErrorRecurred": false,
+    "bakedGuardActualValuesCaptured": false,
+    "cleanupVerified": true,
+    "independentAbsence": true,
+    "ownedDestruction": true,
+    "providerCalls": 23,
+    "limits": "The helper passed its earlier full-source consistency check, then refused the baked manifest/pin file guard (regular type, uid/gid, mode, link count, or installed/rebuilt length). Exact failed field is unknown. No runtime qualification or deadline/stability relaxation. Original child exited1 and all pipes settled."
+  }
 }

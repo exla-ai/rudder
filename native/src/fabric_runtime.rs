@@ -288,7 +288,7 @@ impl RuntimeLink {
         let link = self.link.as_ref().map(AgentLinkHandle::close_callback);
         // Managed App callbacks fence admission only. Actual broker stop can
         // lock/shutdown sockets and belongs to the retained off-App drain.
-        let broker = if self.workspace.is_none() { self.broker.as_ref().map(AgentBroker::close_callback) } else { None };
+        let broker = if self.workspace.is_none() { self.broker.as_ref().map(AgentBroker::close_callback) } else { self.broker.as_ref().map(AgentBroker::admission_fence_callback) };
         let work = self
             .broker_work
             .as_ref()
@@ -1821,6 +1821,20 @@ struct ProjectionSnapshot { recipients: BTreeMap<String,u64>, expires: Option<i6
 #[cfg(target_os = "linux")]
 impl SharedAgentToolsProjectionOwner {
     pub(crate) fn assignment(&self) -> &crate::managed_launch::WorkspaceAssignment { &self.publication.assignment }
+    /// Pure restriction on the SAME actual host/issuance, never a grant constructor.
+    pub(crate) fn broker_admission(&self,host:&Arc<crate::managed_app::ManagedTaskJournalOwner>,assignment:&crate::managed_launch::WorkspaceAssignment)
+        ->rudder_engine::journal::AgentAdmissionState {
+        use rudder_engine::journal::AgentAdmissionState::*;
+        if !Arc::ptr_eq(&self.host,host)||self.assignment()!=assignment||host.owner()!=&assignment.fence.owner
+            ||self.inner.fenced.load(Ordering::Acquire)||self.inner.settled.load(Ordering::Acquire){return Fenced;}
+        if let Err(error)=host.check_shared_admission(){return if error.is::<crate::engine_host::EngineSharedAdmissionBusy>(){Busy}else{Fenced};}
+        // Host check precedes projection lock; callbacks never acquire a Journal.
+        let state=match self.inner.state.try_lock(){Ok(state)=>state,Err(std::sync::TryLockError::WouldBlock)=>return Busy,Err(_)=>return Fenced};
+        if state.pending.is_some(){return Busy;}
+        if state.current.issuance.is_retired()||state.current.issuance.acknowledged_token().is_err()||state.current.hash.is_none(){return Fenced;}
+        Ready
+    }
+
     fn snapshot(&self) -> Result<Option<ProjectionSnapshot>> {
         if self.inner.fenced.load(Ordering::Acquire) { return Ok(None); }
         let state = match self.inner.state.try_lock() {
@@ -1984,6 +1998,26 @@ pub(crate) fn prepare_agent_tools_for_attempt_retaining(
     workspace: Option<&crate::managed_launch::WorkspaceAssignment>,
     budget: &rudder_engine::execution::finalization_budget::FinalizationBudget, cancelled: &AtomicBool,
 ) -> Result<AgentToolsProjection> {
+    prepare_agent_tools_with_location_retaining(retained,journal,backend,home,fence,workspace,None,budget,cancelled)
+}
+
+/// OFF App. New logical namespaces pass the SAME actual retained location;
+/// neither a UUID/path nor assignment DATA can reopen/mint a fresh floor.
+#[cfg(target_os = "linux")]
+pub(crate) fn prepare_agent_tools_for_location_retaining(
+    retained:&mut AgentToolsProjectionOwner,journal:&mut Journal,backend:Backend,home:&Path,
+    fence:&crate::managed_launch::ManagedLaunchFence,workspace:Option<&crate::managed_launch::WorkspaceAssignment>,
+    location:&crate::managed_store::ManagedRunLocation,
+    budget:&rudder_engine::execution::finalization_budget::FinalizationBudget,cancelled:&AtomicBool,
+)->Result<AgentToolsProjection>{prepare_agent_tools_with_location_retaining(retained,journal,backend,home,fence,workspace,Some(location),budget,cancelled)}
+
+#[cfg(target_os = "linux")]
+fn prepare_agent_tools_with_location_retaining(
+    retained:&mut AgentToolsProjectionOwner,journal:&mut Journal,backend:Backend,home:&Path,
+    fence:&crate::managed_launch::ManagedLaunchFence,workspace:Option<&crate::managed_launch::WorkspaceAssignment>,
+    location:Option<&crate::managed_store::ManagedRunLocation>,
+    budget:&rudder_engine::execution::finalization_budget::FinalizationBudget,cancelled:&AtomicBool,
+)->Result<AgentToolsProjection>{
     anyhow::ensure!(!retained.started && !retained.fenced, "agent tools preparation already attempted; retire original issuance");
     retained.started = true;
     let issued_at = epoch_ms()?;
@@ -1994,7 +2028,13 @@ pub(crate) fn prepare_agent_tools_for_attempt_retaining(
     anyhow::ensure!(home.is_absolute() && journal.database_path()? == FabricPaths::new(home).journal,
         "agent tools writer differs from the explicitly held managed Journal");
     retained.assignment = Some(workspace.clone());
-    crate::managed_launch::persist_assignment(home, workspace)?;
+    if let Some(location)=location{
+        anyhow::ensure!(location.run_id()==fence.run_id&&location.store().binding().home==home
+            &&location.store().binding().project_id==fence.owner.project_id
+            &&location.store().binding().journal==journal.database_path()?
+            &&location.store().reopen_current(journal)?==*location.store(),"agent tools original managed location differs from held Journal/attempt");
+        location.persist_assignment(workspace)?;
+    }else{crate::managed_launch::persist_assignment(home, workspace)?;}
     agent_tools_current(budget, cancelled)?; fence.check_current(journal)?;
     let recipients = journal.owned_runs(&fence.owner)?.into_iter().map(|run| (run.run_id, run.run_epoch)).collect();
     let operations = ["agents:find", "message:send", "mailbox:read", "mailbox:ack", "command:inspect",
@@ -2113,3 +2153,7 @@ fn configure_agent_tools(command: &mut TerminalCommand, backend: Backend,
     }
     Ok(())
 }
+
+#[cfg(all(test,target_os="linux"))]
+#[path="fabric_retained_location_projection_tests.rs"]
+mod retained_location_projection_tests;

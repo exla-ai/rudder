@@ -5,10 +5,10 @@
 
 use crate::GitCommitId;
 use anyhow::{Context, Result, ensure};
-use gix::{ObjectId, objs::{Kind, Write as _}};
+use gix::{ObjectId, objs::Kind};
 use jj_lib::{backend::CommitId, git_backend::GitBackend};
 use rudder_engine::execution::finalization_budget::FinalizationBudget;
-use std::{collections::{BTreeMap, BTreeSet, VecDeque}, fs, io::{self, Read}, path::Path};
+use std::{collections::{BTreeMap, BTreeSet, VecDeque}, fs, io, path::Path, sync::{Arc,atomic::{AtomicBool,Ordering}}, time::Instant};
 
 #[derive(Clone, Copy, Debug)]
 pub struct GitImportLimits {
@@ -35,7 +35,7 @@ impl GitImportLimits {
 }
 
 /// Current import DATA, deliberately non-Serde and not an accepted-source proof.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone,Debug,PartialEq,Eq,serde::Serialize)]
 pub struct ImportedGitHeadData {
     pub head: GitCommitId,
     pub objects: u64,
@@ -61,9 +61,9 @@ fn check_odb(repo: &gix::Repository, budget: &FinalizationBudget) -> Result<()> 
     // namespace even when replacement lookup is disabled, and include packed
     // refs. An unreadable/malformed matching ref is also refusal, never empty.
     let references = repo.references()
-        .map_err(|_| anyhow::anyhow!("Git replacement references cannot be inspected"))?;
+        .context("Git replacement references cannot be inspected")?;
     let mut replacements = references.prefixed("refs/replace/")
-        .map_err(|_| anyhow::anyhow!("Git replacement namespace cannot be inspected"))?;
+        .context("Git replacement namespace cannot be inspected")?;
     ensure!(replacements.next().is_none(), "Git import refuses replacement references");
     budget.remaining()?;
     let expected = repo.common_dir().join("objects");
@@ -97,7 +97,7 @@ fn check_target(target: &GitBackend, repo: &gix::Repository, budget: &Finalizati
 fn check_head(source: &gix::Repository, expected: ObjectId, budget: &FinalizationBudget) -> Result<()> {
     budget.remaining()?;
     // Do not peel tags or execute a command while resolving the expected HEAD.
-    let current = source.head().map_err(|_| anyhow::anyhow!("source Git HEAD cannot be resolved"))?;
+    let current = source.head().context("source Git HEAD cannot be resolved")?;
     ensure!(current.id().map(|id| id.detach()) == Some(expected),
         "source Git HEAD differs from the original expected commit");
     budget.remaining()?;
@@ -116,23 +116,48 @@ fn schedule(id: ObjectId, kind: Kind, known: &mut BTreeMap<ObjectId, Kind>,
     Ok(())
 }
 
-struct BudgetReader<'a> { bytes: &'a [u8], budget: &'a FinalizationBudget }
-impl Read for BudgetReader<'_> {
-    fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
-        self.budget.remaining().map_err(|_| io::Error::other("Git import budget retired"))?;
-        let count = output.len().min(self.bytes.len()).min(64 * 1024);
-        output[..count].copy_from_slice(&self.bytes[..count]);
-        self.bytes = &self.bytes[count..];
-        Ok(count)
-    }
-}
-
 /// Copy the complete commit/tree/blob closure, then import that exact commit
 /// into jj's extra metadata. No refs, configs, hooks or source files are copied;
 /// no Git subprocess/network is used. The supplied budget is ORIGINAL, shared
 /// with the caller: no new deadline is created here. Local gix/jj
 /// blocking calls are cooperative, not preemptible; retain the actual worker
 /// and target until return even when cancellation/deadline has fired.
+#[path="accepted_git_pack.rs"]
+mod pack;
+/// Diagnostic DATA only. A progress record never acknowledges an import,
+/// accepted source, seed, Root effect or permission to retry a partial target.
+#[derive(Clone,Debug,serde::Serialize)]
+pub struct GitImportProgress {
+ pub scope:&'static str,pub stage:&'static str,pub current_oid:Option<String>,pub current_kind:Option<String>,pub current_size:u64,
+ pub verified_objects:u64,pub verified_bytes:u64,pub packed_objects:u64,pub packed_bytes:u64,
+ pub pending_objects:usize,pub edges:u64,pub elapsed_ms:u128,pub acknowledged:bool,pub error_chain:Option<String>,
+ pub pack_stage:Option<&'static str>,pub pack_bytes:u64,pub pack_synced:bool,pub index_synced:bool,pub keep_synced:bool,
+ pub directory_syncs:u64,pub pack_install_attempted:bool,pub index_install_attempted:bool,pub keep_install_attempted:bool,
+ pub pack_installed:bool,pub index_installed:bool,pub keep_installed:bool,pub installed_paths:Vec<std::path::PathBuf>,pub temporary_paths:Vec<std::path::PathBuf>,pub pack_count:usize,
+}
+/// Actual partial pack/index/keep/parent FDs survive errors and unwind when the
+/// caller stages this outside its operation/catch. No Drop cleanup or replay.
+pub struct RetainedGitImport {
+ original:FinalizationBudget,cancelled:Arc<AtomicBool>,workspace:Option<jj_lib::workspace::Workspace>,repository:Option<Arc<jj_lib::repo::ReadonlyRepo>>,attempted:bool,pack:Option<pack::PackBuilder>,packs:Vec<pack::PackBuilder>,data:ImportedGitHeadData,
+ stage:&'static str,current_oid:Option<String>,current_kind:Option<String>,current_size:u64,
+ verified_objects:u64,verified_bytes:u64,pending:usize,edges:u64,started:Instant,ack:bool,error_chain:Option<String>,
+}
+impl RetainedGitImport {
+ pub(crate) fn stage_initial_repository_retaining(out:&mut Option<Self>,workspace:jj_lib::workspace::Workspace,repository:Arc<jj_lib::repo::ReadonlyRepo>,expected:&GitCommitId,budget:&FinalizationBudget,cancelled:Arc<AtomicBool>)->Result<()> {
+  ensure!(out.is_none(),"initial Git import carrier already staged");*out=Some(Self::capture(expected,budget,cancelled));let owner=out.as_mut().unwrap();owner.workspace=Some(workspace);owner.repository=Some(repository);owner.stage="initialized-private-repository";owner.tick()
+ }
+ fn capture(expected:&GitCommitId,budget:&FinalizationBudget,cancelled:Arc<AtomicBool>)->Self{Self{original:budget.clone(),cancelled,workspace:None,repository:None,attempted:false,pack:None,packs:Vec::new(),
+  data:ImportedGitHeadData{head:expected.clone(),objects:0,commits:0,trees:0,blobs:0,bytes:0},stage:"validate",current_oid:None,current_kind:None,current_size:0,verified_objects:0,verified_bytes:0,pending:0,edges:0,started:Instant::now(),ack:false,error_chain:None}}
+ pub fn progress(&self)->GitImportProgress {let all=self.packs.iter().chain(self.pack.iter()).collect::<Vec<_>>();GitImportProgress{scope:"verified-Git-history-import-DATA-only",stage:self.stage,current_oid:self.current_oid.clone(),current_kind:self.current_kind.clone(),current_size:self.current_size,
+  verified_objects:self.verified_objects,verified_bytes:self.verified_bytes,packed_objects:self.data.objects,packed_bytes:self.data.bytes,pending_objects:self.pending,edges:self.edges,elapsed_ms:self.started.elapsed().as_millis(),acknowledged:self.ack,error_chain:self.error_chain.clone(),
+  pack_stage:all.last().map(|p|p.stage),pack_bytes:all.iter().map(|p|p.bytes).sum(),pack_synced:!all.is_empty()&&all.iter().all(|p|p.pack_synced),index_synced:!all.is_empty()&&all.iter().all(|p|p.index_synced),keep_synced:!all.is_empty()&&all.iter().all(|p|p.keep_synced),directory_syncs:all.iter().map(|p|p.directory_syncs).sum(),
+  pack_install_attempted:all.iter().any(|p|p.pack_install_attempted),index_install_attempted:all.iter().any(|p|p.index_install_attempted),keep_install_attempted:all.iter().any(|p|p.keep_install_attempted),pack_installed:!all.is_empty()&&all.iter().all(|p|p.pack_installed),index_installed:!all.is_empty()&&all.iter().all(|p|p.index_installed),keep_installed:!all.is_empty()&&all.iter().all(|p|p.keep_installed),installed_paths:all.iter().flat_map(|p|p.paths().into_iter().flatten().map(Path::to_path_buf)).collect(),temporary_paths:all.iter().flat_map(|p|p.temporary_paths().into_iter().map(Path::to_path_buf)).collect(),pack_count:all.len()}}
+
+ pub fn data(&self)->Result<&ImportedGitHeadData>{ensure!(self.ack,"original Git import ACK absent");Ok(&self.data)}
+ fn tick(&self)->Result<()>{if self.cancelled.load(Ordering::Acquire){self.original.cancel();anyhow::bail!("original Git import cancelled");}self.original.remaining()?;Ok(())}
+}
+/// Compatibility DATA wrapper. Production initial-source owners use the
+/// retaining entry below; this wrapper cannot retain failure FDs for a caller.
 pub fn import_expected_git_head(
     source: &gix::Repository,
     target: &GitBackend,
@@ -140,6 +165,21 @@ pub fn import_expected_git_head(
     limits: GitImportLimits,
     budget: &FinalizationBudget,
 ) -> Result<ImportedGitHeadData> {
+    let mut owner=None;
+    import_expected_git_head_retaining(&mut owner,source,target,expected,limits,budget,
+        Arc::new(AtomicBool::new(false)),||Ok(()))
+}
+#[allow(clippy::too_many_arguments)]
+pub fn import_expected_git_head_retaining(out:&mut Option<RetainedGitImport>,source:&gix::Repository,target:&GitBackend,
+ expected:&GitCommitId,limits:GitImportLimits,budget:&FinalizationBudget,cancelled:Arc<AtomicBool>,mut check_owner:impl FnMut()->Result<()>)->Result<ImportedGitHeadData>{
+ if out.is_none(){*out=Some(RetainedGitImport::capture(expected,budget,cancelled.clone()));}
+ let retained=out.as_mut().unwrap();ensure!(!retained.attempted&&retained.original.constraint()==budget.constraint()&&Arc::ptr_eq(&retained.cancelled,&cancelled)&&retained.data.head==*expected,"original Git import carrier differs or attempted; no replay");retained.attempted=true;
+ let owner=out.as_mut().unwrap();let result=owner.run(source,target,expected,limits,&mut check_owner);
+ if let Err(error)=&result{owner.error_chain=Some(format!("{error:#}").chars().take(4096).collect());}result
+}
+impl RetainedGitImport {
+ fn run(&mut self,source:&gix::Repository,target:&GitBackend,expected:&GitCommitId,limits:GitImportLimits,check_owner:&mut impl FnMut()->Result<()>)->Result<ImportedGitHeadData>{
+    let original=self.original.clone();let budget=&original;self.tick()?;check_owner()?;
     budget.remaining()?;
     expected.validate()?;
     limits.validate()?;
@@ -153,15 +193,16 @@ pub fn import_expected_git_head(
     let mut known = BTreeMap::new();
     let mut pending = VecDeque::new();
     schedule(head, Kind::Commit, &mut known, &mut pending, limits)?;
-    let mut data = ImportedGitHeadData { head: expected.clone(), objects: 0, commits: 0, trees: 0, blobs: 0, bytes: 0 };
+    self.stage="capture-pack";pack::PackBuilder::capture_retaining(&mut self.pack,&destination.common_dir().join("objects"),limits,budget.clone(),self.cancelled.clone())?;check_owner()?;self.stage="verify-closure";
     let mut edges = 0_u64;
     while let Some(id) = pending.pop_front() {
+        self.tick()?;self.current_oid=Some(id.to_string());self.pending=pending.len();
         check_head(source, head, budget)?;
         let header = source.find_header(id)?;
         budget.remaining()?;
-        let size = header.size();
+        let size = header.size();self.current_size=size;self.current_kind=Some(format!("{:?}",header.kind()));
         ensure!(header.kind() == known[&id] && size <= limits.max_object_bytes
-            && size <= limits.max_total_bytes.saturating_sub(data.bytes),
+            && size <= limits.max_total_bytes.saturating_sub(self.data.bytes),
             "Git import object kind/size exceeds admission");
         let object = source.find_object(id)?;
         budget.remaining()?;
@@ -179,19 +220,19 @@ pub fn import_expected_git_head(
         match object.kind {
             Kind::Commit => {
                 let commit = gix::objs::CommitRef::from_bytes(&object.data)
-                    .map_err(|_| anyhow::anyhow!("malformed Git commit"))?;
-                commit.author().map_err(|_| anyhow::anyhow!("malformed Git commit author"))?;
-                commit.committer().map_err(|_| anyhow::anyhow!("malformed Git committer"))?;
+                    .context("malformed Git commit")?;
+                commit.author().context("malformed Git commit author")?;
+                commit.committer().context("malformed Git committer")?;
                 ensure!(commit.parents.len() <= 1024, "Git commit has too many parents");
                 add(commit.tree(), Kind::Tree)?;
                 for parent in commit.parents() { add(parent, Kind::Commit)?; }
-                data.commits += 1;
+                self.data.commits += 1;
             }
             Kind::Tree => {
                 let mut names = BTreeSet::new();
                 let mut previous = None;
                 for entry in gix::objs::TreeRefIter::from_bytes(&object.data) {
-                    let entry = entry.map_err(|_| anyhow::anyhow!("malformed Git tree"))?;
+                    let entry = entry.context("malformed Git tree")?;
                     let name: &[u8] = entry.filename.as_ref();
                     ensure!(!name.is_empty() && name != b"." && name != b".."
                         && !name.contains(&b'/') && names.insert(name)
@@ -205,29 +246,35 @@ pub fn import_expected_git_head(
                     };
                     add(entry.oid.to_owned(), kind)?;
                 }
-                data.trees += 1;
+                self.data.trees += 1;
             }
-            Kind::Blob => data.blobs += 1,
+            Kind::Blob => self.data.blobs += 1,
             _ => anyhow::bail!("unsupported Git closure object kind"),
         }
         check_head(source, head, budget)?;
-        let mut reader = BudgetReader { bytes: &object.data, budget };
-        let written = destination.objects.write_stream(object.kind, size, &mut reader)
-            .map_err(|_| anyhow::anyhow!("internal Git object write failed"))?;
-        budget.remaining()?;
-        ensure!(reader.bytes.is_empty() && written == id, "target Git write changed raw object identity");
+        self.verified_objects+=1;self.verified_bytes=self.verified_bytes.checked_add(size).context("verified Git byte-count overflow")?;self.edges=edges;
+        if !self.pack.as_ref().unwrap().can_fit(size)? {self.stage="seal-pack-shard";self.pack.as_mut().unwrap().seal()?;self.packs.push(self.pack.take().unwrap());ensure!(self.packs.len()<128,"Git pack shard count exceeds bounded FD profile");
+         pack::PackBuilder::capture_retaining(&mut self.pack,&destination.common_dir().join("objects"),limits,budget.clone(),self.cancelled.clone())?;self.stage="verify-closure";}
+        self.pack.as_mut().unwrap().add(id,object.kind,&object.data).with_context(||format!("append verified Git object {id} ({:?}, {size} bytes)",object.kind))?;
+        self.tick()?;
         check_head(source, head, budget)?;
-        data.objects += 1;
-        data.bytes = data.bytes.checked_add(size).context("Git byte-count overflow")?;
+        self.data.objects += 1;
+        self.data.bytes = self.data.bytes.checked_add(size).context("Git byte-count overflow")?;
     }
     check_odb(source, budget)?;
     check_head(source, head, budget)?;
     check_target(target, &destination, budget)?;
+    self.stage="install-pack";let cancelled=self.cancelled.clone();
+    let mut guard=||->Result<()> {if cancelled.load(Ordering::Acquire){budget.cancel();anyhow::bail!("original Git import publication cancelled");}budget.remaining()?;check_owner()?;check_odb(source,budget)?;check_head(source,head,budget)?;check_target(target,&destination,budget)};
+    self.pack.as_mut().unwrap().seal()?;self.packs.push(self.pack.take().unwrap());
+    // The ENTIRE closure is verified and all shards sealed before any index is visible.
+    for pack in &mut self.packs{pack.publish(&mut guard)?;}self.tick()?;self.stage="jj-import-head";
     let commit = CommitId::new(head.as_bytes().to_vec());
     target.import_head_commits([&commit])?;
     budget.remaining()?;
     check_head(source, head, budget)?;
     check_odb(source, budget)?;
     check_target(target, &destination, budget)?;
-    Ok(data)
+    for pack in &self.packs{pack.current()?;}self.tick()?;check_owner()?;self.pending=0;self.stage="complete";self.ack=true;Ok(self.data.clone())
+ }
 }

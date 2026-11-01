@@ -18,6 +18,13 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
+#[cfg(target_os="linux")]
+#[path="agent_broker_fresh.rs"]
+mod fresh;
+
+enum BrokerAuthority {Legacy,#[cfg(target_os="linux")] Fresh(Arc<fresh::FreshBrokerOwner>)}
+impl BrokerAuthority {fn is_fresh(&self)->bool {match self {Self::Legacy=>false,#[cfg(target_os="linux")] Self::Fresh(_)=>true}}}
+
 const MAX_REQUEST: usize = 256 * 1024;
 const MAX_RESPONSE: usize = 8 * 1024 * 1024;
 const MAX_CALLS: usize = 4;
@@ -262,6 +269,9 @@ pub(crate) fn retryable(error: &anyhow::Error) -> bool {
         .is_some_and(|error| matches!(error.code.as_str(), "busy" | "unavailable" | "timeout"))
 }
 fn wire_error(error: &anyhow::Error) -> WireError {
+    if let Some(state)=error.downcast_ref::<rudder_engine::journal::AgentAdmissionError>(){
+        use rudder_engine::journal::AgentAdmissionError::*;return WireError{code:match state{Busy=>"busy",Fenced=>"fenced",EffectUnknown=>"effect_unknown"}.into(),message:state.to_string()};
+    }
     if let Some(error) = error.downcast_ref::<WireError>() {
         return error.clone();
     }
@@ -278,6 +288,7 @@ fn wire_error(error: &anyhow::Error) -> WireError {
 
 struct Inner {
     config: BrokerConfig,
+    #[cfg(target_os="linux")] fresh:Option<Arc<fresh::FreshBrokerOwner>>,
     binding: BrokerBinding,
     directory: Arc<WorkDirectory>,
     current: Mutex<Option<Arc<Snapshot>>>,
@@ -324,6 +335,7 @@ impl Inner {
                     .open(&path)?;
                 serde_json::to_writer(&mut file, &current)?;
                 file.flush()?;
+                #[cfg(target_os="linux")] if let Some(fresh)=&self.fresh{return fresh.api(&path);}
                 AgentApi::open(&self.config.journal_path, &path)
             })();
             match result {
@@ -354,6 +366,7 @@ impl Inner {
         Ok(snapshot)
     }
     fn stop(&self) {
+        #[cfg(target_os="linux")] if let Some(fresh)=&self.fresh{fresh.fence();}
         self.stopped.store(true, Ordering::Relaxed);
         if let Ok(active) = self.active.lock() {
             for cancel in active.values() {
@@ -381,7 +394,29 @@ impl AgentBroker {
         ensure!(owner.inner.is_none(), "broker thread owner already used");
         Self::spawn_inner(config, Some(owner))
     }
-    fn spawn_inner(config: BrokerConfig, mut owner: Option<&mut BrokerThreadOwner>) -> Result<Self> {
+    #[cfg(target_os="linux")]
+    pub(crate) fn spawn_fresh_retaining(config:BrokerConfig,project:Arc<crate::managed_app::ManagedTaskJournalOwner>,
+        location:crate::managed_store::ManagedRunLocation,projection:crate::fabric_runtime::SharedAgentToolsProjectionOwner,
+        assignment:crate::managed_launch::WorkspaceAssignment,journal:&mut Option<rudder_engine::journal::Journal>,
+        original:&rudder_engine::execution::finalization_budget::FinalizationBudget,cancel:&AtomicBool,owner:&mut BrokerThreadOwner)->Result<Self> {
+        ensure!(owner.inner.is_none()&&owner.fresh.is_none(),"fresh broker owner already occupied");
+        let fresh=fresh::FreshBrokerOwner::stage(project,location,projection,assignment,journal)?;
+        owner.fresh=Some(fresh.clone()); // Stage actual writer/source BEFORE checks/hooks/spawn.
+        fresh.prepare(&config,original,cancel)?;
+        let result=Self::spawn_with_authority(config,Some(owner),BrokerAuthority::Fresh(fresh.clone()),Some((original,cancel)));
+        if result.is_err(){fresh.fence();}result
+    }
+    fn spawn_inner(config:BrokerConfig,owner:Option<&mut BrokerThreadOwner>)->Result<Self> {Self::spawn_with_authority(config,owner,BrokerAuthority::Legacy,None)}
+    fn spawn_with_authority(config: BrokerConfig, mut owner: Option<&mut BrokerThreadOwner>,authority:BrokerAuthority,
+        original:Option<(&rudder_engine::execution::finalization_budget::FinalizationBudget,&AtomicBool)>) -> Result<Self> {
+        let check_setup=||->Result<()> {
+            if let Some((budget,cancel))=original{budget.remaining()?;ensure!(!cancel.load(Ordering::Acquire),"fresh broker setup cancelled");}
+            #[cfg(target_os="linux")] if let BrokerAuthority::Fresh(fresh)=&authority{fresh.admit(false)?;}Ok(())
+        };
+        check_setup()?;
+        let identity=read_identity(&config.identity_file)?;
+        if !authority.is_fresh(){rudder_engine::journal::reject_unguarded_fresh_agent(&config.journal_path,&identity.project_id)?;}
+        #[cfg(target_os="linux")] let fresh=match &authority{BrokerAuthority::Fresh(fresh)=>Some(fresh.clone()),_=>None};
         let parent = endpoint_directory(&config.socket_path)?;
         // Keep ownership outside the mounted two-entry projection. The lock
         // serializes stale-socket removal against concurrent broker restarts.
@@ -414,7 +449,6 @@ impl AgentBroker {
             config.identity_file.canonicalize()? == parent.join("identity.json").canonicalize()?,
             "broker identity must be its dedicated projection"
         );
-        let identity = read_identity(&config.identity_file)?;
         let journal = fs::symlink_metadata(&config.journal_path)?;
         ensure!(
             journal.is_file() && journal.uid() == unsafe { libc::geteuid() },
@@ -434,6 +468,7 @@ impl AgentBroker {
             .unwrap_or_else(||Arc::new(OwnedBrokerCalls::new()));
         let inner = Arc::new(Inner {
             config: config.clone(),
+            #[cfg(target_os="linux")] fresh,
             binding: BrokerBinding::from(&identity),
             directory: Arc::new(WorkDirectory(private)),
             current: Mutex::new(None),
@@ -468,6 +503,7 @@ impl AgentBroker {
                 Err(_) => bail!("existing broker endpoint could not be safely classified"),
             }
         }
+        check_setup()?;
         let listener = UnixListener::bind(&config.socket_path)?;
         fs::set_permissions(&config.socket_path, fs::Permissions::from_mode(0o600))?;
         let metadata = fs::symlink_metadata(&config.socket_path)?;
@@ -476,6 +512,7 @@ impl AgentBroker {
         // Fixed kernel backlog, not an unbounded userspace admission queue.
         ensure!(unsafe { libc::listen(listener.as_raw_fd(), MAX_CONNECTIONS as libc::c_int) } == 0,
             "agent broker bounded listen backlog unavailable");
+        check_setup()?;
         let worker = inner.clone();
         let acceptor = std::thread::Builder::new()
             .name("rudder-agent-broker".into())
@@ -548,7 +585,8 @@ impl AgentBroker {
                 worker.closed.store(true, Ordering::Relaxed);
             })?;
         if let Some(owner) = owner { owner.acceptor = Some(acceptor); }
-        Ok(Self { inner })
+        // The original handle is stored before this fallible late-ACK check.
+        check_setup()?;Ok(Self { inner })
     }
     pub(crate) fn socket_path(&self) -> &Path {
         &self.inner.config.socket_path
@@ -562,6 +600,13 @@ impl AgentBroker {
     pub(crate) fn close(&self) {
         self.inner.stop();
     }
+    /// Pure App-safe admission fence; actual socket cancellation/joins stay off App.
+    pub(crate) fn fence_admission(&self){
+        self.inner.stopped.store(true,Ordering::Release);
+        #[cfg(target_os="linux")] if let Some(fresh)=&self.inner.fresh{fresh.fence();}
+    }
+    pub(crate) fn admission_fence_callback(&self)->Arc<dyn Fn()+Send+Sync>{let weak=Arc::downgrade(&self.inner);Arc::new(move ||{if let Some(inner)=weak.upgrade(){inner.stopped.store(true,Ordering::Release);#[cfg(target_os="linux")] if let Some(fresh)=&inner.fresh{fresh.fence();}}})}
+
     pub(crate) fn close_callback(&self) -> Arc<dyn Fn() + Send + Sync> {
         let weak = Arc::downgrade(&self.inner);
         Arc::new(move || {
@@ -574,7 +619,7 @@ impl AgentBroker {
 impl Drop for AgentBroker {
     fn drop(&mut self) {
         if self.inner.owned_calls.is_some() {
-            self.inner.stopped.store(true, Ordering::Release);
+            self.fence_admission();
         } else { self.close(); }
     }
 }
@@ -677,12 +722,15 @@ pub(crate) struct BrokerThreadOwner {
     acceptor: Option<std::thread::JoinHandle<()>>,
     joiner: Option<BrokerJoin>,
     settled: bool,
+    #[cfg(target_os="linux")] fresh:Option<Arc<fresh::FreshBrokerOwner>>,
 }
 impl BrokerThreadOwner {
     pub(crate) fn new() -> Self {
         Self { inner: None, calls: Arc::new(OwnedBrokerCalls::new()),
-            acceptor: None, joiner: None, settled: false }
+            acceptor: None, joiner: None, settled: false,#[cfg(target_os="linux")] fresh:None }
     }
+    #[cfg(target_os="linux")]
+    pub(crate) fn fresh_recovery_data(&self)->Result<Option<Value>> {self.fresh.as_ref().map(|fresh|fresh.recovery_data()).transpose()}
     pub(crate) fn close(&self) { if let Some(inner) = &self.inner { inner.stop(); } }
     pub(crate) fn await_closed(&mut self, timeout: Duration) -> Result<BrokerThreadsSettled> {
         ensure!(!self.settled, "broker settlement already returned");
@@ -692,8 +740,9 @@ impl BrokerThreadOwner {
             ensure!(self.calls.handles().is_empty(),
                 "broker call without acceptor ownership");
             ensure!(!self.calls.uncertain.load(Ordering::Acquire), "broker thread settlement is uncertain");
+            #[cfg(target_os="linux")] if let Some(fresh)=&self.fresh{ensure!(!fresh.has_unsettled(),"fresh broker original calls require retained reconciliation");}
             self.settled = true;
-            return Ok(BrokerThreadsSettled { _inner:self.inner.clone(), _joiner:None });
+            return Ok(BrokerThreadsSettled { _inner:self.inner.clone(), _joiner:None,#[cfg(target_os="linux")] _fresh:self.fresh.clone() });
         }
         let end = Instant::now().checked_add(timeout).context("broker settlement overflow")?;
         if self.joiner.is_none() {
@@ -734,8 +783,9 @@ impl BrokerThreadOwner {
                 "broker requests remain owned");
         }
         ensure!(!self.calls.uncertain.load(Ordering::Acquire), "broker thread settlement is uncertain");
+        #[cfg(target_os="linux")] if let Some(fresh)=&self.fresh{ensure!(!fresh.has_unsettled(),"fresh broker original calls require retained reconciliation");}
         self.settled = true;
-        Ok(BrokerThreadsSettled { _inner:self.inner.clone(), _joiner:self.joiner.take() })
+        Ok(BrokerThreadsSettled { _inner:self.inner.clone(), _joiner:self.joiner.take(),#[cfg(target_os="linux")] _fresh:self.fresh.clone() })
     }
 }
 impl Drop for BrokerThreadOwner {
@@ -746,7 +796,7 @@ impl Drop for BrokerThreadOwner {
 struct BrokerJoin { _thread:std::thread::JoinHandle<()>, done:mpsc::Receiver<bool>, joined:bool, failed:bool }
 /// Proves actual acceptor, request and nested API joins, including their TLS.
 /// The fixed join observer itself remains held here, matching source settlement.
-pub(crate) struct BrokerThreadsSettled { _inner:Option<Arc<Inner>>, _joiner:Option<BrokerJoin> }
+pub(crate) struct BrokerThreadsSettled { _inner:Option<Arc<Inner>>, _joiner:Option<BrokerJoin>,#[cfg(target_os="linux")] _fresh:Option<Arc<fresh::FreshBrokerOwner>> }
 
 fn read_exact_until(
     stream: &mut UnixStream,
@@ -915,7 +965,9 @@ fn connection_request(inner: &Arc<Inner>, mut stream: UnixStream, mut api_owner:
     }
     let id = request.id.clone();
     let result = (|| -> Result<Value> {
-        let snapshot = inner.authenticate(&request.identity).map_err(|_| {
+        #[cfg(target_os="linux")] if let Some(fresh)=&inner.fresh{fresh.admit(fresh::FreshBrokerOwner::observation(&request.operation))?;}
+        let snapshot = inner.authenticate(&request.identity).map_err(|error| {
+            if error.is::<rudder_engine::journal::AgentAdmissionError>(){return error;}
             problem(
                 "unauthorized",
                 "agent broker identity is revoked, stale or outside this attempt",
@@ -968,11 +1020,13 @@ fn connection_request(inner: &Arc<Inner>, mut stream: UnixStream, mut api_owner:
             }
             active.insert(id.clone(), cancel.clone());
         }
+        #[cfg(target_os="linux")] if let Some(fresh)=&inner.fresh{fresh.reserve(&request)?;}
         let (tx, rx) = mpsc::sync_channel(1);
         let running = inner.clone();
         let running_id = id.clone();
         let running_cancel = cancel.clone();
         let retained = api_owner.is_some();
+        #[cfg(target_os="linux")] let fresh_dispatched=inner.fresh.is_some()&&!fresh::FreshBrokerOwner::observation(&request.operation);
         #[cfg(test)]
         let api_probe = if retained { inner.api_probe.lock().unwrap().take() } else { None };
         #[cfg(test)]
@@ -986,14 +1040,15 @@ fn connection_request(inner: &Arc<Inner>, mut stream: UnixStream, mut api_owner:
                     Operation::Call { tool, arguments } => {
                         snapshot
                             .api
-                            .call_with_cancel(&tool, arguments, &running_cancel)
+                            .call_with_owned_cancel(&tool, arguments, running_cancel.clone())
                     }
                     Operation::Pending => snapshot
                         .api
-                        .pending_messages()
+                        .pending_messages_with_cancel(running_cancel.clone())
                         .and_then(|messages| Ok(serde_json::to_value(messages)?)),
                     _ => unreachable!(),
                 };
+                #[cfg(target_os="linux")] if let Some(fresh)=&running.fresh{fresh.finish(&running_id,&result);}
                 let _ = tx.send(result);
                 if !retained {
                     if let Ok(mut active) = running.active.lock() {
@@ -1007,6 +1062,7 @@ fn connection_request(inner: &Arc<Inner>, mut stream: UnixStream, mut api_owner:
                 else { drop(worker); } // Preserve ordinary legacy detached behavior.
             }
             Err(_) => {
+                #[cfg(target_os="linux")] if let Some(fresh)=&inner.fresh{fresh.spawn_failed(&id);}
                 if !retained { inner.active.lock().ok().map(|mut active| active.remove(&id)); }
                 return Err(problem("busy", "agent broker could not start a bounded call"));
             }
@@ -1017,6 +1073,7 @@ fn connection_request(inner: &Arc<Inner>, mut stream: UnixStream, mut api_owner:
         loop {
             if inner.stopped.load(Ordering::Relaxed) || disconnected(&stream) {
                 cancel.store(true, Ordering::Relaxed);
+                #[cfg(target_os="linux")] if fresh_dispatched{return Err(rudder_engine::journal::AgentAdmissionError::EffectUnknown.into());}
                 return Err(problem(
                     "cancelled",
                     "agent broker call cancelled by connection shutdown",
@@ -1024,6 +1081,7 @@ fn connection_request(inner: &Arc<Inner>, mut stream: UnixStream, mut api_owner:
             }
             if Instant::now() >= deadline {
                 cancel.store(true, Ordering::Relaxed);
+                #[cfg(target_os="linux")] if fresh_dispatched{return Err(rudder_engine::journal::AgentAdmissionError::EffectUnknown.into());}
                 return Err(problem(
                     "timeout",
                     "agent broker call deadline exceeded; inspect scoped receipts before retrying",
@@ -1033,6 +1091,10 @@ fn connection_request(inner: &Arc<Inner>, mut stream: UnixStream, mut api_owner:
                 Ok(result) => return result,
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
                 Err(_) => {
+                    #[cfg(target_os="linux")] if fresh_dispatched{
+                        if let Some(fresh)=&inner.fresh{fresh.mark_pending_unknown(&id);}
+                        return Err(rudder_engine::journal::AgentAdmissionError::EffectUnknown.into());
+                    }
                     return Err(problem(
                         "unavailable",
                         "agent broker call ended without confirmation",
@@ -1615,3 +1677,7 @@ mod owned_thread_tests {
         assert!(!owner.settled);
     }
 }
+
+#[cfg(test)]
+#[path="agent_broker_fresh_admission_tests.rs"]
+mod fresh_admission_tests;

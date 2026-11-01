@@ -5,6 +5,47 @@ Updated: 2026-11-01. Read with [the plan](../../PLAN.md),
 This file preserves the working agreement across context compaction. An entry
 here is not deployment proof; record exact checks and delivery identities below.
 
+## Current state, 2026-11-01
+
+The shipped release is alpha.28. Both npm `next` packages and Fly release175
+are verified in [the release evidence](verification-alpha28.json). The full v4
+rewrite remains incomplete. Entries below describe earlier checkpoints and
+unreleased work; their older version numbers are historical.
+
+Current working source is unreleased. The full JavaScript run passed 928 with
+zero failures and 10 skipped at 12:20:28Z. The complete Rust checkpoint 225 passed
+2,257 tests and TUI 226 passed 59; these precede the later image backing components.
+After that integration, engine/VFS 241 passed 385 with zero failures and 13 ignored,
+native source-owner 242 passed 9, and VCS/projection 243 passed 57 with five ignored.
+The full native binary 220 passed 1,306 with zero failures and 21 ignored before
+these last changes. The complete release matrix must qualify the final versioned
+source before publication. Full repository cold preparation passed 11.70s, but
+accepted/warm reuse remains under qualification; this is not agent launch time.
+
+The real S3/OIDC cache probe and all three physical Root FUSE metadata component
+tests pass, with original child/IO settlement and exact local/VM cleanup. The new
+complete runtime image built from frozen source 4d0 and printed its actual four
+ELF hashes and full-image pins. Installed full-tree/kernel qualification remains
+pending; neither component result enables the production managed runtime.
+
+The large 4,096-object history fixture failed its read-reuse assertion after both
+original 30s seed phases succeeded. Investigation confirmed that the production
+projection and mandatory verifier rewrite identical loose Git blobs, changing
+their inode/stamps and correctly invalidating the source cache. A bounded verified
+Git-object reuse producer fix and stronger fixture witnesses are integrated.
+All five new actual Git/CAS checks and 50 library/projection/provider regressions
+pass. The large rerun passed at 12:12:47Z with all 4,097 actual FileId/inode/full-stamp
+witnesses, >4,096 skipped file reads, retained old pins and isolated private writes.
+Its 507.806s whole debug fixture includes setup and is not launch latency. [Evidence](verification-managed-git-object-reuse-working.json)
+keeps these post4d0 sources distinct from the already-built qualification image.
+Do not weaken the assertion or claim production warm acceptance from a fixture
+that merely supplies a prior projection record.
+
+The former JavaScript 189 MCP startup failure is retained below. Its stdin EPIPE
+hid the original stderr; diagnostics now retain actual process/pipe completion.
+A separate bounded 100ms SQLite WAL startup fix passed eight real lock/expiry
+cases and twelve concurrent startup pairs. Both later full JS runs passed.
+
 ## Authorized scope and accepted direction
 
 The user authorized implementing the plan and shipping to main, with tighter
@@ -736,6 +777,19 @@ This is host protocol evidence, not Rust adapter, managed guest, real provider
 authentication or full process-tree drain qualification. Claude is not yet in
 the qualified managed image.
 
+The later production Rust Claude actor also passed its real official-CLI
+loopback qualification with a fixture-only RPC relay importing that same
+production protocol. It performed a file edit and typed peer steer, refused
+wrong/stale turns and kept interruption pending through both an actual CLI
+receipt with terminal held and an actual RPC ACK with the Rust event held.
+Actual actor, pipe-reader and relay joins, original child reaps, both EOFs and
+kernel ECHILD passed, with zero paid model calls. The first run exposed a test
+assumption about JSON key order; comparing the exact prefix and parsed complete
+peer value corrected the fixture without changing production behavior.
+See [the scoped native Claude record](verification-native-claude-protocol-working.json).
+Managed guest/profile, real authentication, production launch wrapper and normal
+Root retirement remain separate gates; managed Claude is still unsupported.
+
 The actual PostgreSQL storage component also passed all 14 stages at
 2026-11-01T07:01:45Z on a disposable PostgreSQL 17.11 instance. Production
 factories used verified TLS/SCRAM and restricted roles. Real transactions
@@ -758,6 +812,224 @@ request retries returned the original ACK, and a wrong owner was refused.
 All 15 stages and exact VM teardown with two absence checks passed. This uses
 synthetic Root/clock admission and the memory conditional object service;
 physical Native watchdog, real S3 and clock continuity remain unqualified.
+
+### Fresh broker admission and image boundary, unreleased
+
+The working tree now connects the fresh agent broker to the actual retained
+source, task projection, worker Journal and assigned owner lease. SQLite
+authorizer, execution-progress and commit hooks restrict shared writes using
+that same lease. Status observation remains read only after admission closes;
+inbox polling still needs write admission because it expires deliveries.
+Uncertain effects retain their original call and connection and prevent normal
+retirement. The ten engine tests passed against actual SQLite transactions,
+cached statements, commit cutoffs, cancellation, capability authentication and
+retained read-only observation. These use a synthetic admission restriction;
+they do not establish a genuine assigned lease or physical Root readiness.
+The native broker compiled and passed 28 tests, including the two new
+refusal/wire tests and the existing worker/join ownership regressions; one
+fixture-export test was ignored. All eight actual agent API integration tests
+also passed, with one fixture export ignored. A first API regression command
+selected zero library tests and supplies no behavioral evidence. The normal
+native CLI built from unchanged recorded Main inputs. Genuine Root/PG broker
+qualification remains open.
+
+The full immutable userspace image built and pushed successfully with strict
+hardlink deduplication. Its disposable Fly boot verification failed: Fly adds
+kernel modules under `/usr/lib/modules`, including files with hardlink aliases
+outside the captured userspace roots. The topology check remains intact. The
+next change must separate provider kernel data from both immutable userspace
+capture and the guest execution view; excluding it from hashing alone is
+insufficient. The working tree now implements that exact protected-directory
+boundary and mandatory empty guest mount; four engine policy tests and all ten
+image-import tests passed, preserving the external-hardlink refusal. A new
+canary copy passed fourteen offline scenarios and still needs a fresh image,
+boot verification and actual restricted-guest observation. The failed VM was
+destroyed and two independent absence checks
+passed at 2026-11-01T08:07:09.762Z. This image is not deployed or qualified.
+
+The broader Rust workspace run passed on the earlier connected-flow snapshot
+at 2026-11-01T08:13:00Z: 2,130 tests passed, zero failed and 49 were ignored
+across 65 suite reports. This run predates the broker hooks. The previous full
+JavaScript run passed 871 tests, skipped twelve and
+failed one Docker command contract after adding the private image helper. That
+contract was corrected and its 38 focused tests passed; a new complete run is
+still required. No full-suite success is inferred from that focused correction.
+
+Authenticated transport recovery is also integrated. A new socket must complete
+the original Root/native/server generation handshake before replacing a serving
+session. Reconnect does not reset operation or lease clocks, replay an uncertain
+send, or retire the original process/source owners. The Cloud build and all eight
+new transport tests passed, alongside 41 existing Cloud regressions. The native
+library passed 139 tests with fourteen ignored after correcting a test-only
+socketpair constructor that incorrectly required Root. The first failure remains
+retained. Sidecar-core packaging is now integrated: 26 manifest entries and a
+strict four-field pin include both script hashes. Four native reader tests,
+twelve script tests and 21 Python packaging tests passed; two Root filesystem
+tests skipped. Installed-image and configured physical reconnect/isolation proof
+are still pending. The PostgreSQL audit found missing row-lock permissions and
+renewal read access. The unapplied transport migration now grants UPDATE only
+on four otherwise unused lock columns and SELECT on renewal receipts, preserving
+readiness, credential and revocation restrictions. Reconciliation explicitly
+casts its UUID/text parameter. Actual PostgreSQL qualification passed at
+2026-11-01T08:58:21Z: all ten transport checks and sixteen base stages passed,
+including forced RLS, forbidden credential/readiness writes, actual revocation
+blocking behind the auth row lock, lost COMMIT acknowledgments and unchanged
+historical ACK reconciliation. Twenty-two provider calls included exact VM
+destruction and two absence observations. The HMAC fixture calls registry methods
+directly and uses real loopback sockets, memory S3 and synthetic clock admission;
+it does not qualify configured Root/native/sidecar wire or production activation.
+See [the scoped database evidence](verification-managed-storage-pg-working.json).
+
+Accepted-source generations and the physical kernel qualifier are integrated.
+Six real jj/CAS generation tests passed, including parent history and unchanged
+object reuse. Their deep-directory regression first found a production stack
+overflow; moving the recursive import's I/O buffer to the heap preserved the
+depth guard and corrected it. The combined native test binary compiled after
+correcting an owned cancellation Arc argument, then passed 214 managed tests
+with six ignored and three kernel mechanics tests with one physical test ignored.
+The actual registered startup consumer, explicit probe cleanup and disposable
+kernel execution remain separate gates.
+
+The later full Main JavaScript run passed at 2026-11-01T08:39:55Z: 889 passed,
+zero failed and ten skipped, with all 1,942 recorded source inputs unchanged.
+Its native CLI artifact came from the earlier broker integration build; newer
+Rust scopes above have their own compiled-test evidence. Later generation,
+kernel and PG-fixture changes are not included in that JavaScript run.
+
+The image-preseed source audit found a warm-VM cache gap: BeginImage repeated
+inventory and verification before finding an existing publication. The new
+exact-root, current-registration reuse path passed the actual PostgreSQL fixture
+at 2026-11-01T09:40:10Z: two root-receipt GETs, zero CAS payload reads and zero
+object/staging/root PUTs. S3 was simulated through the actual FabricCas adapter;
+this does not qualify physical Native/Root or real S3 performance.
+
+The next cold-image batch integration is in Main, default off. Client/server
+framing, retained SDK work, protected config and the separate frozen migration
+were reconstructed from both exact source seals. TypeScript passes after
+splitting the two Begin discriminants into separate union members. All 100
+selected Node storage/transport/client regressions pass. The actual PG batch
+variant passed at 2026-11-01T10:17:28Z: frozen migration/refusal, restricted grants,
+three batches/five objects, exact lost-ACK reconciliation, unknown Started with
+zero dispatch, expired-original refusal and full tiny-image publication. Its
+22 provider calls include destruction and two absence observations. It uses
+fixture Root/clock/provider and simulated S3, not physical Native or throughput.
+Per-object S3 staging-lease reads remain, so fewer HTTP and
+PG requests do not establish the original 300s whole-image bound. A separate
+nonrevocable retention class and actual S3 qualification are still required.
+
+The e57 immutable image built successfully and its complete CAS graph contains
+22,175 objects / 1,968,404,726 bytes. Its Bookworm qualification child reproduced
+all four production executable hashes and executed its test list. Physical runs
+remain unqualified. After correcting a checker-only canonical key-order error,
+the strict filesystem check found that Fly replaces `/usr/sbin/swapon` with a
+hardlink to `/.fly/swapon`: baked 51,512 bytes, observed 459,224 bytes. All three
+disposable VMs were destroyed and independently absent twice. The current
+unreleased fix retains the actual protected host file, captures an empty0444 CAS
+node and mounts a sealed read-only/noexec empty file in the guest. The existing
+external-hardlink rejection remains. The combined native test executables
+compiled; affected test execution, fresh image and physical mask verification
+must pass before claiming this boundary qualified.
+
+The later source43 image and its Bookworm test child built successfully. Review
+also caught and corrected the missing fixed `/sbin` guest alias. The fresh Fly
+run passed topology with zero unexpected hardlink groups, then its `--verify`
+child exceeded the original300s window and was killed by the305s observer.
+Actual exit/signal/EOF and exact VM destruction plus two absence checks are
+recorded at 2026-11-01T10:47:54Z. The kernel probe was not reached. The verifier
+rebuilds a fresh1.97GB CAS: current code performs roughly88,696 per-object sync
+calls for22,174 refs, besides repeated hashing and metadata checks. This source
+audit identifies work to remove; it does not attribute the exact Fly stall.
+The retained bulk-import implementation must preserve full hashes, closure,
+durability and source custody under the unchanged300s deadline.
+
+The new immutable batch-hold core passed TypeScript and 56 selected Node tests.
+It requires an actual role-bound S3 adapter's own versioning/lifecycle/policy
+readbacks; ordinary constructors and saved JSON cannot qualify it. A distinct
+nonrevocable hold removes per-object staging-lease reads while PG admission,
+expiry, unknown effects and both root publications remain guarded. The explicit
+startup caller and separate new PG fixture are integrated and typecheck; they
+are not production activation. Minimal bucket/IAM changes extend only this
+hold prefix and the workload role's retention guards/read permission. Admin
+readback passed10:31:39Z and actual existing control-plane OIDC role readback
+passed10:34:48Z. Old policy versions and operator recovery remain. The actual
+new backend capability and real tiny object/publication probe passed at
+2026-11-01T11:22:53.731085+00:00. The actual role-bound factory performed
+its own three reads, three hold writes, conditional object conflict/readback and
+both root publications under one original 30s window (24,940ms remaining after
+effects). Closed/expired owners issued no new SDK calls. Original child exit0,
+both EOF and explicit parent-owned local cleanup passed; all S3 holds remain.
+[Structured proof](verification-managed-batch-cas-s3-working.json) preserves the
+failed setup attempt and corrected transfer. Full-image throughput, physical Root
+and production startup remain unqualified.
+
+The separate immutable-retention PG attempt failed at the cold-image producer
+with `effect_unknown` after nine preceding database stages passed. Its exact
+failing cache operation was not recorded, so the fixture now captures bounded
+operation and backend-counter diagnostics without changing positive assertions.
+The owned VM was destroyed and independently absent twice at 10:56:43Z.
+The diagnostic second attempt reached the intended lost-ACK publication refusal.
+The fixture incorrectly expected a signed error ACK where production deliberately
+throws `effect_unknown`; only that assertion was corrected. Fresh attempt A3
+passed at 11:07:01Z: three batches/five objects, immutable holds, zero per-object
+lease GETs, unknown-effect refusal, original expiry and tiny-image publication.
+Its VM was destroyed and independently absent twice. Real S3, physical Root and
+whole-image throughput remain unqualified; both failed attempts are preserved.
+
+## Paged workspaces and durable image import, unreleased
+
+The V2 workspace slice is integrated from its exact 36-file source seal. It adds
+paged metadata, shared read-only Git objects, private metadata CoW and history
+archives that graft existing CAS objects without copying packs. Review corrected
+archive admission to reserve capacity for all live/partial cows before creation.
+The managed boot path already preserves Root ownership; an initial concern from
+the legacy bootstrap was withdrawn. V1 remains the default. Full V2 Root/task
+execution, restart recovery and large cold-import timing remain open gates.
+
+The seven-file bulk image importer is also integrated. Fresh objects stay private
+until file barriers; bounded batches settle shard/tmp publication. A separate
+nonexpiring hold protects shared CAS data through crashes, and one transaction
+commits both pins before releasing retention. Full SHA and typed closure checks
+remain. Review corrected the actual runtime's final export checks to use the
+same bounded import clock and to refuse late success after staging the export.
+Individual fsync calls remain uncancellable; no full-image speed is claimed yet.
+
+The combined library run passed 440 tests with 28 ignored at 11:20:13Z. This
+includes all 11 engine import tests and three native bulk fixtures. The actual
+native binary initially passed 1,297 tests with nine auth fixture failures from
+missing required Node/helper paths. The focused ten-test rerun passed; the later
+complete run with actual fixture paths passed 1,306/zero failures with 21 ignored
+at 12:30:50Z, including the post4d0 Git reuse fix and path-specific diagnostics. JavaScript196 passed 928 with zero failures before this
+Rust integration. The fresh normal native binary passed all 59 TUI checks.
+
+The actual new Bookworm engine test ELF passed all three Root FUSE cases at
+11:36:37Z: normal-unmount/TLS ordering, cancellation during the real handshake,
+and UID1500 shared read-only access with independent writes in two CoW views.
+All original exits/EOF, raw logs and exact VM teardown plus two absence checks
+passed. The first canary never ran tests because image CMD600 was appended to
+its supervisor argv; the corrected exact init.exec preserves all test checks.
+[Component evidence](verification-managed-paged-metadata-working.json) keeps
+Native/Root IPC/full-source launch and production enabling unqualified.
+
+The complete image from frozen source
+`4d0a3e6203938cd11b7b0460e2aae8889ec071a29d4c7332aa4044292846ae74`
+built and pushed at11:36:25Z with actual four-ELF/full-pin prints. Its digest is
+`sha256:a2e3e4f7011f2597afe4a29dc774b1893836c22e1e16e1e2417990d20b050cdd`.
+The new V12 canary failed the capture-consistency check: the real full-tree
+helper exited1 with `captured image filesystem changed`, and original exit plus
+both EOF were observed. It was not timeout-killed. The same-image V13 diagnostic
+also failed consistency, with original child settlement at 289,383.816ms. Both
+metadata walks completed with 22,954 entries and zero errors; 2,207 paths changed.
+All 50 retained samples are directories with only inode number changed. The
+bounded sample does not establish the types of unsampled changes or prove a held
+descriptor changed identity: postwalk follows helper exit and descriptor closure.
+A separate same-image diagnostic then verified OverlayFS and actual soft/hard
+FD limits of 10,240. All eight held directory samples retained their full
+metadata and named identity across cache eviction; all eight unheld directories
+changed only inode numbers. After releasing the handles, all 16 directory inode
+numbers changed. [Physical diagnostic evidence](verification-managed-image-directory-identity-working.json)
+records the original child settlement and exact VM destruction plus two absence
+checks. Neither full-image attempt reached the kernel probe. Exact VM destruction and two absence checks passed for both.
+No deadline or filesystem-stability check is relaxed.
 
 ## Current implementation track
 
@@ -1508,3 +1780,135 @@ excluded managed directory; earlier guidance about a sibling default was stale.
 The user confirmed continuing to publish even unstable increments. Keep the
 implementation/deployment facts distinct from the still-planned v4 engine,
 distributed CoW storage, build graph and durable coordination workstreams.
+
+## Retained image directory identity, unreleased
+
+The current image importer and runtime selector/importer owners retain bounded
+original O_PATH directory descriptors through later export/task custody. Full
+held and named metadata must still match; no inode change is ignored or adopted.
+Exact paths share one owner, incomplete captures remain refused, and actual
+process limits are checked without raising them. Import directories are checked
+once per deep validation instead of retaining duplicate unheld stamps.
+
+The affected library run passed 21 tests, including seven real directory/FD
+fixtures. Runtime capture passed eight tests, including five new anchor cases.
+The first compile failed because native has no tempfile dev dependency; the
+tests now use UUID-owned standard-library fixtures. The earlier complete native
+1,306-pass run precedes this change. The new frozen 30d source image built at
+12:53:08Z with digest `sha256:779f0d447371f232e51dac92abf3dbc8556272d2d97f3566842fff2fb5c40b15`.
+Its full manifest is `7ef992b11aac3e77df3661969ab67398ab1d67396a0786d8622f719e2d4417fc`.
+The matching Bookworm test-image build is still active. Installed full-tree and
+kernel verification remain pending. The original frozen-source metadata inherited
+an older capture timestamp; the actual raw source manifest supplies the correct
+capture time, with an explicit private correction preserving the original receipt.
+
+A separate compiler artifact constructor now exists under
+`cloud/worker/managed-compiler-v1/`. Eight offline tests pass. Its first actual
+remote build installed declared snapshot prerequisites and reached Rust input
+capture, then refused source file ownership/mode. The failed construction is
+retained. The explicit isolated-source metadata normalization keeps original
+byte hashes and the strict output verifier. All ten offline tests pass. The
+fresh A2 build and complete verifier agree on 1,047 entries/852,319,618 logical
+bytes and manifest `add56ea6ade5411145b026094f63d8d5838e38b58d397d09749027090d346d0c`.
+Its separate image digest is `sha256:88d25bcd2d359fa6c829a9126d96011b17d197b23307f997e2406e00bc5d562f`.
+[Construction evidence](verification-managed-compiler-artifact-working.json)
+keeps installed execution, compiler preparation custody, REAPI hits and the
+production App caller unqualified. The current managed runtime image and its size limit remain
+separate from this compiler artifact.
+
+The actual V14 full-image run failed at a later baked-file guard at
+13:07:24Z. The original helper exited1 after288,674.56ms with
+`image DATA verification file identity differs`; the prior filesystem-consistency
+error did not recur. This checks baked-file regular type, UID/GID, mode, link
+count and installed/rebuilt length, so the precise mismatch remains unproved.
+No kernel probe was reached. Original child/pipes settled and exact owned VM
+destruction plus two absence checks passed. A read-only same-image manifest
+comparison is being prepared before another complete CAS import. The helper
+now reports the actual guard fields and lengths; its criteria are unchanged.
+
+The full current Rust run224 was stopped by the disk guard before completion,
+with no test assertion failure reported beforehand. A private hash/identity plan
+removed1.21GB of obsolete Root-generated debug ELF/rlib artifacts, preserving
+current outputs and original receipts. Run225 repeats the complete suite with
+two test threads and the original disk floor. Neither incomplete run is green
+release proof.
+
+The complete Rust225 run passed2,257 tests with zero failures and57 ignored at
+13:21:58Z. TUI226 then passed all59 checks against the freshly compiled native
+binary. These precede integration of the new retained-preparation API. Its
+first targeted run passed23 and exposed one fixture using the wrong FileNode
+import API. The corrected actual StagedContentStore fixture passed all24 normal
+cases, with one subprocess-only probe ignored standalone. The SQLite regression
+invokes that probe explicitly and verifies main-file lock preservation.
+
+The V14 metadata-only diagnostic passed every installed baked-file guard and
+canonical/pin binding. The namespace-only diagnostic then examined all18,989
+expected regular files,2,096 required parents and22,949 namespace entries in
+1,958ms without reading payload bytes. Exactly one extra empty regular file was
+present: `/usr/bin/swapon.original`. All expected types/lengths matched.
+[Diagnostic evidence](verification-managed-baked-image-namespace-working.json)
+keeps raw payload hashes, full directory CAS and the old rebuilt length unproved.
+The managed Docker recipe now declares that exact empty backup before image
+pinning; no filesystem exclusion or validation criterion was weakened. Its
+16 asset tests passed with two explicit skips. A fresh full-image run is pending.
+
+The actual compiler component image built after correcting a missing verifier
+COPY in its native builder. Both first VM attempts stopped in the complete
+artifact verifier before compiler workloads. Both exact VMs were destroyed and
+independently absent. The first recovery omitted verifier streams; corrected
+recovery retained empty before-verifier streams from the bounded observation.
+No compile/isolation/cache-hit success is claimed. Immutable runtime CAS
+composition is the next performance slice: current full-image imports take
+about289s and should not become a per-machine startup copy requirement.
+
+## Immutable image backing and bounded Git imports, unreleased
+
+The new build-only `rudder-image-preseed --bake-cas-v1` path writes a complete
+immutable image CAS directly to its fresh output, with the original two-pin
+import acknowledgment, exact object inventory and protected files. Its reader
+passed 14 component tests; the emitter compiled but has not yet run against a
+complete worker image. A composed local/image reader passed 16 tests. It falls
+back to the image only for a proved missing local object, and refuses corrupt
+or replaced local content. These are data components; they do not enable the
+managed execution path or establish a complete writable workspace checkpoint.
+
+The repository-sized source fixture uses the exact 2,011 frozen Rudder files
+plus explicitly generated reachable Git history. Its first cold import failed
+the original 30-second limit while writing loose Git objects, before projection
+or seed publication. The bounded pack importer now validates the full reachable
+closure and publishes indexes last, retaining failed files and their original
+owners. Seven new tests and all 15 existing import/initial-source regressions
+pass. The real 72 MiB incompressible shard fixture failed its original 30-second
+import deadline in a debug build (run236). The optimized release shard check
+(run237) passed: its whole fixture took 5.63s, including genuine input creation
+and independent pack/index/object-reader validation. Compilation took 6m51s
+and is excluded from that fixture timing. The full repository release rerun
+is pending; startup speed is not yet qualified. Limits and deadlines have not
+been increased. [Component evidence](verification-managed-image-cas-working.json)
+preserves both the failed debug run and the optimized result.
+
+The optimized repository run238 passed its complete original cold phase in
+11.7017s, including actual history import, verification and seed publication.
+Independent inspection verified 15,031 Git objects across three packs. Acceptance
+then failed the unchanged-leaf reuse assertion: 103 source files have mode0600,
+while Git materializes them as0644. Their 457,279 bytes plus the edited file's
+55,849 bytes exactly account for all 513,128 bytes reread. The production reuse
+fix compares exact content/size and Git's executable bit, preserving raw modes
+in Source DATA. Run 243 passed all 57 VCS/projection checks, including both new
+mode tests. The full release rerun is pending; the fixture assertion is unchanged.
+
+The build-only baked profile now runs through an explicit Docker argument.
+Its first image failed native compilation because the successor source owner
+initializer missed the new retained import carrier. The corrected successor
+shares the predecessor's actual carrier; a new frozen capture built successfully
+at14:20:35Z, source5e4e101, image digest439a923. Its actual inventory contains
+22,175 objects totaling1,974,041,724 bytes. This is build proof, not deployment,
+installed VFS verification or executable runtime admission.
+
+The readonly image VFS and existing Adapter now read directly from retained
+composition, validate the declared closure and explicit hardlinks, and refuse
+writes/checkpoints/raw-FD fallback. Review fixed a late request clearing its
+floor slot before reporting expiration. The first compile caught an old direct
+mutable-lock use; the corrected existing custody path requires the actual lock
+and refuses readonly floors. Run240 passed14 library VFS checks with four
+explicit physical/Root skips. Broader VFS regressions remain pending.

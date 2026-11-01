@@ -19,11 +19,13 @@ use std::fs::{File, OpenOptions};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const MAX_ARGUMENT_BYTES: usize = 128 * 1024;
 const MAX_IDENTITY_BYTES: u64 = 16 * 1024;
 const MAX_WAIT_MS: u64 = 30_000;
+pub(crate) const AGENT_STARTUP_BUSY_TIMEOUT: Duration = Duration::from_millis(100);
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -66,11 +68,24 @@ impl From<&AgentIdentityFile> for Binding {
     }
 }
 
-#[derive(Debug, Clone)]
+/// Borrowing an ACTUAL host-retained Journal only tightens existing token/run
+/// authorization. This is not a fresh-project/lease authority constructor.
+/// The native fresh broker's concrete producer owns source/location/projection.
+pub trait RetainedAgentJournal: Send+Sync {
+    fn with_journal(&self, usage: AgentJournalUse, cancelled: Arc<AtomicBool>,
+        work: &mut dyn FnMut(&mut Journal)->Result<()>) -> Result<()>;
+}
+#[derive(Clone)]
 pub struct AgentApi {
     journal_path: PathBuf,
     identity_file: PathBuf,
     binding: Binding,
+    retained: Option<Arc<dyn RetainedAgentJournal>>,
+}
+impl fmt::Debug for AgentApi {
+    fn fmt(&self,f:&mut fmt::Formatter<'_>)->fmt::Result {
+        f.debug_struct("AgentApi").field("binding",&self.binding).finish_non_exhaustive()
+    }
 }
 
 #[derive(Deserialize)]
@@ -166,48 +181,71 @@ struct AwaitArgs {
 
 impl AgentApi {
     pub fn open(journal_path: impl AsRef<Path>, identity_file: impl AsRef<Path>) -> Result<Self> {
+        let deadline = Instant::now() + AGENT_STARTUP_BUSY_TIMEOUT;
         let identity = read_identity(identity_file.as_ref())?;
+        // Retain the actual read connection until the writer has opened and
+        // authenticated, avoiding another last-connection WAL-close gap.
+        let _startup_guard = Journal::retain_agent_startup_guard_before(
+            journal_path.as_ref(), &identity.project_id, deadline,
+        )?;
         let api = Self {
             journal_path: journal_path.as_ref().into(),
             identity_file: identity_file.as_ref().into(),
-            binding: Binding::from(&identity),
+            binding: Binding::from(&identity), retained: None,
         };
-        api.load(Duration::from_millis(100))?;
+        let (journal, _) = api.load_with(|| {
+            Journal::open_agent_startup_before(&api.journal_path, deadline)
+        })?;
+        journal.finish_agent_startup_before(deadline, AGENT_STARTUP_BUSY_TIMEOUT)?;
         Ok(api)
     }
 
-    pub fn authenticated_identity(&self) -> Result<CapabilityIdentity> {
-        let (journal, identity) = self.load(Duration::from_millis(100))?;
-        journal.authenticate_agent(&identity.token, now_ms()?)
+    /// Host-only retained connection seam. It authenticates the same actual
+    /// local capability; an implementation/boolean/JSON grants no new scope.
+    pub fn from_retained(identity_file:impl AsRef<Path>,owner:Arc<dyn RetainedAgentJournal>)->Result<Self> {
+        let identity=read_identity(identity_file.as_ref())?;
+        let api=Self{journal_path:PathBuf::new(),identity_file:identity_file.as_ref().into(),binding:Binding::from(&identity),retained:Some(owner)};
+        api.authenticated_identity()?;Ok(api)
     }
-
-    /// Internal workspace-service authorization, deliberately absent from the
-    /// model-facing tool catalog. Read current credentials on every request.
-    pub fn authorize_workspace(&self, binding: &crate::vfs::rpc::ObservationBinding) -> Result<CapabilityIdentity> {
-        let (journal, identity) = self.load(Duration::from_millis(100))?;
-        let actual = journal.authorize_workspace(&identity.token, binding, now_ms()?)?;
-        ensure!(actual.project_id == self.binding.project && actual.run_id == self.binding.run && actual.run_epoch == self.binding.epoch && actual.owner_epoch == self.binding.owner_epoch, "workspace capability binding changed");
-        Ok(actual)
+    fn with_loaded<T>(&self,usage:AgentJournalUse,wait:Duration,cancelled:Arc<AtomicBool>,work:impl FnOnce(&mut Journal,&AgentIdentityFile)->Result<T>)->Result<T> {
+        if let Some(owner)=&self.retained {
+            let identity=read_identity(&self.identity_file)?;ensure!(Binding::from(&identity)==self.binding,"identity belongs to another attempt");
+            let mut once=Some(work);let mut output=None;
+            owner.with_journal(usage,cancelled,&mut |journal| {
+                let call=once.take().context("retained agent callback repeated")?;
+                let actual=journal.authenticate_agent(&identity.token,now_ms()?)?;
+                ensure!(actual.project_id==identity.project_id&&actual.run_id==identity.run_id&&actual.run_epoch==identity.run_epoch&&actual.owner_epoch==identity.owner_epoch,"retained agent capability binding differs");
+                output=Some(call(journal,&identity)?);Ok(())
+            })?;output.context("retained agent callback did not execute")
+        } else {let(mut journal,identity)=self.load(wait)?;work(&mut journal,&identity)}
     }
-
-    /// Internal partial service authorization, absent from the model tool
-    /// catalog. Identity rotation is allowed only in this exact current run.
-    pub fn authorize_partial_workspace(&self, binding: &crate::vfs::partial_rpc::PartialBinding) -> Result<CapabilityIdentity> {
-        let (journal, identity) = self.load(Duration::from_millis(100))?;
-        let actual = journal.authorize_partial_workspace(&identity.token, binding, now_ms()?)?;
-        ensure!(actual.project_id == self.binding.project && actual.run_id == self.binding.run
-            && actual.run_epoch == self.binding.epoch && actual.owner_epoch == self.binding.owner_epoch,
-            "partial workspace capability binding changed");
-        Ok(actual)
+    pub fn authenticated_identity(&self)->Result<CapabilityIdentity> {
+        self.with_loaded(AgentJournalUse::RetainedObservation,Duration::from_millis(100),Arc::new(AtomicBool::new(false)),|journal,identity|journal.authenticate_agent(&identity.token,now_ms()?))
+    }
+    pub fn authorize_workspace(&self,binding:&crate::vfs::rpc::ObservationBinding)->Result<CapabilityIdentity> {
+        self.with_loaded(AgentJournalUse::SharedTool,Duration::from_millis(100),Arc::new(AtomicBool::new(false)),|journal,identity| {
+            let actual=journal.authorize_workspace(&identity.token,binding,now_ms()?)?;
+            ensure!(actual.project_id==self.binding.project&&actual.run_id==self.binding.run&&actual.run_epoch==self.binding.epoch&&actual.owner_epoch==self.binding.owner_epoch,"workspace capability binding changed");Ok(actual)
+        })
+    }
+    pub fn authorize_partial_workspace(&self,binding:&crate::vfs::partial_rpc::PartialBinding)->Result<CapabilityIdentity> {
+        self.with_loaded(AgentJournalUse::SharedTool,Duration::from_millis(100),Arc::new(AtomicBool::new(false)),|journal,identity| {
+            let actual=journal.authorize_partial_workspace(&identity.token,binding,now_ms()?)?;
+            ensure!(actual.project_id==self.binding.project&&actual.run_id==self.binding.run&&actual.run_epoch==self.binding.epoch&&actual.owner_epoch==self.binding.owner_epoch,"partial workspace capability binding changed");Ok(actual)
+        })
     }
 
     fn load(&self, busy_wait: Duration) -> Result<(Journal, AgentIdentityFile)> {
+        self.load_with(|| Journal::open_with_busy_timeout(&self.journal_path, busy_wait))
+    }
+
+    fn load_with(&self, open: impl FnOnce() -> Result<Journal>) -> Result<(Journal, AgentIdentityFile)> {
         let identity = read_identity(&self.identity_file)?;
         ensure!(
             Binding::from(&identity) == self.binding,
             "identity belongs to a replacement attempt; restart the adapter"
         );
-        let journal = Journal::open_with_busy_timeout(&self.journal_path, busy_wait)?;
+        let journal = open()?;
         let actual = journal.authenticate_agent(&identity.token, now_ms()?)?;
         ensure!(
             actual.project_id == identity.project_id
@@ -220,7 +258,7 @@ impl AgentApi {
     }
 
     pub fn call(&self, tool: &str, arguments: Value) -> Result<Value> {
-        self.call_with_cancel(tool, arguments, &AtomicBool::new(false))
+        self.call_with_owned_cancel(tool,arguments,Arc::new(AtomicBool::new(false)))
     }
 
     pub fn call_with_cancel(
@@ -229,6 +267,13 @@ impl AgentApi {
         arguments: Value,
         cancelled: &AtomicBool,
     ) -> Result<Value> {
+        ensure!(self.retained.is_none(),"retained agent call requires its actual owned cancellation");
+        self.call_inner(tool,arguments,cancelled,Arc::new(AtomicBool::new(false)))
+    }
+    pub fn call_with_owned_cancel(&self,tool:&str,arguments:Value,cancelled:Arc<AtomicBool>)->Result<Value> {
+        self.call_inner(tool,arguments,&cancelled,cancelled.clone())
+    }
+    fn call_inner(&self,tool:&str,arguments:Value,cancelled:&AtomicBool,owned_cancel:Arc<AtomicBool>)->Result<Value> {
         ensure!(
             !cancelled.load(Ordering::Relaxed),
             "agent request cancelled"
@@ -242,9 +287,10 @@ impl AgentApi {
             "agent tool arguments must be an object"
         );
         if tool == "agents_await" {
-            return self.await_result(serde_json::from_value(arguments)?, cancelled);
+            return self.await_result(serde_json::from_value(arguments)?, cancelled,owned_cancel);
         }
-        let (mut journal, identity) = self.load(Duration::from_millis(100))?;
+        let usage=if tool=="agents_status"{AgentJournalUse::RetainedObservation}else{AgentJournalUse::SharedTool};
+        self.with_loaded(usage,Duration::from_millis(100),owned_cancel,|journal,identity| {
         let now = now_ms()?;
         let response = match tool {
             "agents_find" => {
@@ -353,16 +399,18 @@ impl AgentApi {
             _ => bail!("unknown agent tool"),
         };
         version(response)
+        })
     }
 
-    /// Channel polling never acknowledges or drains pending messages. The MCP
-    /// transport suppresses repeat writes only for its current connection.
-    pub fn pending_messages(&self) -> Result<Vec<MessageEnvelope>> {
-        let (mut journal, identity) = self.load(Duration::from_millis(20))?;
-        journal.inbox(&identity.token, 256, now_ms()?)
+    /// Channel polling never acknowledges pending messages, but DOES commit
+    /// delivery expiry. Fresh polling therefore uses SharedTool admission. The
+    /// MCP transport suppresses notifications only for its current connection.
+    pub fn pending_messages(&self)->Result<Vec<MessageEnvelope>> {self.pending_messages_with_cancel(Arc::new(AtomicBool::new(false)))}
+    pub fn pending_messages_with_cancel(&self,cancelled:Arc<AtomicBool>)->Result<Vec<MessageEnvelope>> {
+        self.with_loaded(AgentJournalUse::SharedTool,Duration::from_millis(20),cancelled,|journal,identity|journal.inbox(&identity.token,256,now_ms()?))
     }
 
-    fn await_result(&self, args: AwaitArgs, cancelled: &AtomicBool) -> Result<Value> {
+    fn await_result(&self, args: AwaitArgs, cancelled: &AtomicBool, owned_cancel:Arc<AtomicBool>) -> Result<Value> {
         ensure!(
             args.timeout_ms <= MAX_WAIT_MS,
             "await timeout must be at most 30000 ms"
@@ -375,9 +423,8 @@ impl AgentApi {
         loop {
             ensure!(!cancelled.load(Ordering::Relaxed), "agent await cancelled");
             let remaining = deadline.saturating_duration_since(Instant::now());
-            let loaded = self.load(remaining.min(Duration::from_millis(20)));
-            let result = (|| -> Result<Option<Value>> {
-                let (mut journal, identity) = loaded?;
+            let usage=if args.command_id.is_some(){AgentJournalUse::RetainedObservation}else{AgentJournalUse::SharedTool};
+            let result=self.with_loaded(usage,remaining.min(Duration::from_millis(20)),owned_cancel.clone(),|journal,identity| {
                 let now = now_ms()?;
                 if let Some(id) = &args.command_id {
                     let receipt = journal.agent_command_receipt(&identity.token, id, now)?;
@@ -409,10 +456,10 @@ impl AgentApi {
                     }
                 }
                 Ok(None)
-            })();
+            });
             match result {
                 Ok(Some(response)) => return version(response),
-                Err(error) if !sqlite_busy(&error) => return Err(error),
+                Err(error) if !sqlite_busy(&error)&&error.downcast_ref::<AgentAdmissionError>()!=Some(&AgentAdmissionError::Busy) => return Err(error),
                 _ => {}
             }
             if Instant::now() >= deadline {

@@ -1972,6 +1972,10 @@ mod worker_join_tests;
 #[path = "agent_link_codex_protocol_integration_tests.rs"]
 mod codex_protocol_integration_tests;
 
+#[cfg(all(test, target_os = "linux"))]
+#[path = "agent_link_claude_protocol_integration_tests.rs"]
+mod claude_protocol_integration_tests;
+
 #[cfg(test)]
 #[path = "agent_link_originator_version_tests.rs"]
 mod originator_version_tests;

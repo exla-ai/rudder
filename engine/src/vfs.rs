@@ -31,6 +31,8 @@ mod admission;
 mod capture;
 mod content;
 #[cfg(target_os = "linux")]
+pub mod runtime_image;
+#[cfg(target_os = "linux")]
 pub mod linux;
 mod namespace;
 mod observation;
@@ -64,9 +66,13 @@ struct Manager {
     index: Mutex<Connection>,
     verified: Mutex<(HashMap<ObjectRef, Arc<File>>, VecDeque<ObjectRef>)>,
     remote: Option<Arc<remote::Resolver>>,
+    #[cfg(target_os = "linux")]
+    image: Option<Arc<runtime_image::Floor>>,
 }
 #[derive(Clone)]
-pub struct VfsView(Arc<View>);
+pub struct VfsView(Arc<View>, ReadScope);
+#[derive(Clone)]
+enum ReadScope { Plain, #[cfg(target_os = "linux")] Image(Arc<runtime_image::ReadRequest>) }
 struct View {
     manager: VfsManager,
     id: String,
@@ -74,7 +80,7 @@ struct View {
     path: PathBuf,
     db: Mutex<Connection>,
     admission: admission::Admission,
-    _lock: File,
+    _lock: Option<File>,
     mounted: AtomicBool,
     next_handle: AtomicU64,
     handles: Mutex<HashMap<u64, Handle>>,
@@ -413,6 +419,11 @@ pub fn validate_snapshot(store: &LocalStore, snapshot: &VfsCheckpoint) -> Result
 }
 
 impl VfsManager {
+    fn require_writable_manager(&self) -> Result<()> {
+        #[cfg(target_os = "linux")]
+        if self.0.image.is_some() { return Err(error(libc::EROFS)).context("readonly image floor cannot prepare/fork/checkpoint local roots"); }
+        Ok(())
+    }
     pub fn open(root: impl AsRef<Path>, store: LocalStore) -> Result<Self> {
         let root = root.as_ref();
         ensure!(root.is_absolute(), "VFS manager root must be absolute");
@@ -456,6 +467,8 @@ impl VfsManager {
             index: Mutex::new(index),
             verified: Mutex::new((HashMap::new(), VecDeque::new())),
             remote: None,
+            #[cfg(target_os = "linux")]
+            image: None,
         })))
     }
     pub fn root(&self) -> &Path {
@@ -466,6 +479,7 @@ impl VfsManager {
     }
     /// Full preparation/indexing is intentionally outside the fork fast path.
     pub fn prepare(&self, root: &ObjectRef) -> Result<()> {
+        self.require_writable_manager()?;
         if self.0.remote.is_some() {
             return Err(error(libc::EOPNOTSUPP))
                 .context("remote managers cannot prepare complete local roots");
@@ -552,6 +566,7 @@ impl VfsManager {
         self.fork_inner(id, root, None, owner, false)
     }
     pub fn prepare_snapshot(&self, snapshot: &VfsCheckpoint) -> Result<()> {
+        self.require_writable_manager()?;
         if self.0.remote.is_some() {
             return Err(error(libc::EOPNOTSUPP))
                 .context("remote managers require explicit partial-root retention");
@@ -597,6 +612,7 @@ impl VfsManager {
         snapshot: &VfsCheckpoint,
         owner: OwnerEpoch,
     ) -> Result<VfsView> {
+        self.require_writable_manager()?;
         let index = self.0.index.lock().map_err(|_| error(libc::EIO))?;
         let pair: Option<(String, String)> = index
             .query_row(
@@ -628,6 +644,7 @@ impl VfsManager {
         path: &Path,
         policy: &ImportPolicy,
     ) -> Result<VfsCheckpoint> {
+        self.require_writable_manager()?;
         if self.0.remote.is_some() {
             return Err(error(libc::EOPNOTSUPP))
                 .context("remote managers cannot silently import an inherited SDK");
@@ -744,6 +761,7 @@ impl VfsManager {
         observation_namespace: Option<&str>,
         finalizable: bool,
     ) -> Result<VfsView> {
+        self.require_writable_manager()?;
         ensure!(Uuid::parse_str(id).is_ok(), "view id must be a UUID");
         if let Some(namespace) = observation_namespace {
             ensure!(
@@ -941,6 +959,7 @@ impl VfsManager {
         self.open_view(id, &owner)
     }
     pub fn open_view(&self, id: &str, owner: &OwnerEpoch) -> Result<VfsView> {
+        self.require_writable_manager()?;
         ensure!(Uuid::parse_str(id).is_ok(), "invalid view id");
         let path = self.root().join("views").join(id);
         ensure!(
@@ -1066,13 +1085,13 @@ impl VfsManager {
             path,
             db: Mutex::new(db),
             admission: admission::Admission::new(version == "5"),
-            _lock: lock,
+            _lock: Some(lock),
             mounted: AtomicBool::new(false),
             next_handle: AtomicU64::new(1),
             handles: Mutex::new(HashMap::new()),
             pager,
             v2,
-        }));
+        }), ReadScope::Plain);
         // Validate every recorded private backing before serving: never replace a
         // missing only copy with inherited bytes. Unreferenced files are retained.
         {
@@ -1091,13 +1110,52 @@ impl VfsManager {
 }
 
 impl VfsView {
+    fn is_readonly_image(&self) -> bool {
+        #[cfg(target_os = "linux")] { self.manager().0.image.is_some() }
+        #[cfg(not(target_os = "linux"))] { false }
+    }
+    fn require_mutable_image(&self) -> Result<()> {
+        if self.is_readonly_image() { return Err(error(libc::EROFS)); } Ok(())
+    }
+    fn lock_handles(&self, cleanup: bool) -> Result<std::sync::MutexGuard<'_, HashMap<u64, Handle>>> {
+        #[cfg(target_os = "linux")]
+        if self.is_readonly_image() {
+            // A logical close has no new-read authority and remains possible
+            // after admission closes; capture its OWN original cleanup budget
+            // before this lock, never by restarting a pending operation.
+            let cleanup_clock = if cleanup && matches!(&self.1, ReadScope::Plain) {
+                Some(crate::execution::finalization_budget::FinalizationBudget::begin(Duration::from_secs(30))?)
+            } else { None };
+            loop {
+                let remaining = if let Some(clock) = &cleanup_clock { clock.remaining()? } else { self.image_remaining()? };
+                match self.0.handles.try_lock() {
+                    Ok(guard) => return Ok(guard),
+                    Err(std::sync::TryLockError::WouldBlock) => std::thread::sleep(remaining.min(Duration::from_millis(1))),
+                    Err(_) => return Err(error(libc::EIO)),
+                }
+            }
+        }
+        let _ = cleanup;
+        self.0.handles.lock().map_err(|_| error(libc::EIO))
+    }
     fn db(&self) -> Result<std::sync::MutexGuard<'_, Connection>> {
+        #[cfg(target_os = "linux")]
+        if self.is_readonly_image() {
+            loop { self.image_remaining()?;
+                match self.0.db.try_lock() {
+                    Ok(guard) => { self.image_remaining()?; return Ok(guard); }
+                    Err(std::sync::TryLockError::WouldBlock) => std::thread::sleep(self.image_remaining()?.min(Duration::from_millis(1))),
+                    Err(_) => return Err(error(libc::EIO)),
+                }
+            }
+        }
         if let Some(remote) = &self.0.manager.0.remote {
             remote.guard()?;
         }
         self.0.db.lock().map_err(|_| error(libc::EIO))
     }
     pub(crate) fn require_local_checkpoint(&self) -> Result<()> {
+        self.require_mutable_image()?;
         if self.manager().0.remote.is_some() {
             return Err(error(libc::EOPNOTSUPP)).context("partial remote views require explicit partial capture/publication; complete checkpoint and observation remain unsupported");
         }
@@ -1151,12 +1209,13 @@ impl VfsView {
                 if self.manager().0.remote.is_some() {
                     "remote_paged_ranges_v1".to_string()
                 } else {
-                    "paged_ranges_v2".to_string()
+                    if self.is_readonly_image() { "readonly_runtime_image_v1".to_string() } else { "paged_ranges_v2".to_string() }
                 }
             }),
         })
     }
     fn private_file(&self, name: &str, write: bool) -> Result<File> {
+        self.require_mutable_image()?;
         ensure!(Uuid::parse_str(name).is_ok(), "invalid private backing id");
         let p = self.0.path.join("files").join(name);
         let f = OpenOptions::new()
@@ -1168,6 +1227,7 @@ impl VfsView {
         Ok(f)
     }
     fn inherited_file(&self, r: &ObjectRef) -> Result<Arc<File>> {
+        if self.is_readonly_image() { return Err(error(libc::EOPNOTSUPP)).context("readonly image uses verified scoped bytes, never raw path fallback"); }
         if self.manager().0.remote.is_some() {
             return Err(error(libc::EOPNOTSUPP)).context(
                 "remote inherited objects require proof-bound ranges, never local CAS FD fallback",
@@ -1338,7 +1398,11 @@ impl VfsView {
             .optional()?
             .map(|s| serde_json::from_str::<ObjectRef>(&s))
             .transpose()?;
-        let group = match (topology, origin.as_ref()) {
+        #[cfg(target_os = "linux")]
+        let image_group = self.image_group(origin.as_deref());
+        #[cfg(not(target_os = "linux"))]
+        let image_group: Option<(String,u64)> = None;
+        let group = if self.is_readonly_image() { image_group } else { match (topology, origin.as_ref()) {
             (Some(t), Some(p)) => c
                 .query_row(
                     "SELECT group_id,nlink FROM inherited.topology_paths WHERE digest=? AND path=?",
@@ -1347,7 +1411,7 @@ impl VfsView {
                 )
                 .optional()?,
             _ => None,
-        };
+        }};
         if let Some((g, _)) = &group {
             if let Some(id) = c
                 .query_row(
@@ -1514,6 +1578,7 @@ impl VfsView {
         mode: u32,
         target: &[u8],
     ) -> Result<VfsAttr> {
+        self.require_mutable_image()?;
         let effect = self.admit_live_effect()?;
         self.create_admitted(parent, name, kind, mode, target, &effect)
     }
@@ -1703,6 +1768,7 @@ impl VfsView {
         Ok(())
     }
     pub fn write(&self, id: u64, offset: u64, bytes: &[u8], sync: bool) -> Result<usize> {
+        self.require_mutable_image()?;
         let effect = self.admit_live_effect()?;
         self.write_admitted(id, offset, bytes, sync, &effect)
     }
@@ -1759,6 +1825,7 @@ impl VfsView {
         atime: Option<i64>,
         mtime: Option<i64>,
     ) -> Result<VfsAttr> {
+        self.require_mutable_image()?;
         let effect = self.admit_live_effect()?;
         effect.validate(self)?;
         let mut c = self.db()?;
@@ -1840,6 +1907,7 @@ impl VfsView {
         Ok(!c.query_row("SELECT EXISTS(SELECT 1 FROM dirents WHERE parent=? AND child IS NOT NULL UNION ALL SELECT 1 FROM inherited.directory_entries b WHERE digest=? AND NOT EXISTS(SELECT 1 FROM dirents p WHERE p.parent=? AND p.name=b.name) LIMIT 1)",params![sql_id(parent),digest,sql_id(parent)],|r|r.get::<_,bool>(0))?)
     }
     pub fn unlink(&self, parent: u64, name: &[u8], directory: bool) -> Result<()> {
+        self.require_mutable_image()?;
         let effect = self.admit_live_effect()?;
         effect.validate(self)?;
         name_ok(name)?;
@@ -1879,6 +1947,7 @@ impl VfsView {
         Ok(())
     }
     pub fn link(&self, id: u64, parent: u64, name: &[u8]) -> Result<VfsAttr> {
+        self.require_mutable_image()?;
         let effect = self.admit_live_effect()?;
         effect.validate(self)?;
         name_ok(name)?;
@@ -1920,6 +1989,7 @@ impl VfsView {
         newname: &[u8],
         flags: u32,
     ) -> Result<()> {
+        self.require_mutable_image()?;
         let effect = self.admit_live_effect()?;
         effect.validate(self)?;
         name_ok(name)?;
@@ -2081,6 +2151,7 @@ impl VfsView {
         effect: &admission::LiveEffect,
     ) -> Result<u64> {
         effect.validate(self)?;
+        if self.is_readonly_image() && (flags & libc::O_ACCMODE != libc::O_RDONLY || flags & (libc::O_CREAT | libc::O_TRUNC | libc::O_APPEND) != 0) { return Err(error(libc::EROFS)); }
         let a = self.attr(id)?;
         if directory != (a.kind == NodeKind::Directory) {
             return Err(error(if directory {
@@ -2105,7 +2176,7 @@ impl VfsView {
             None
         };
         let h = self.0.next_handle.fetch_add(1, Ordering::Relaxed);
-        self.0.handles.lock().map_err(|_| error(libc::EIO))?.insert(
+        self.lock_handles(false)?.insert(
             h,
             Handle {
                 ino: id,
@@ -2131,10 +2202,11 @@ impl VfsView {
         Ok((attr, handle))
     }
     pub fn check_handle(&self, id: u64, handle: u64, write: bool) -> Result<()> {
+        if write { self.require_mutable_image()?; }
         if let Some(remote) = &self.manager().0.remote {
             remote.guard()?;
         }
-        let hs = self.0.handles.lock().map_err(|_| error(libc::EIO))?;
+        let hs = self.lock_handles(false)?;
         let h = hs.get(&handle).ok_or_else(|| error(libc::EBADF))?;
         if h.ino != id
             || h.directory.is_some()
@@ -2151,7 +2223,7 @@ impl VfsView {
                 .context("remote directory handles require bounded read_directory_page");
         }
         let (snapshot, deferred) = {
-            let hs = self.0.handles.lock().map_err(|_| error(libc::EIO))?;
+            let hs = self.lock_handles(false)?;
             let h = hs.get(&handle).ok_or_else(|| error(libc::EBADF))?;
             ensure!(h.ino == id, "handle inode mismatch");
             (
@@ -2168,7 +2240,7 @@ impl VfsView {
         if let Some(remote) = &self.manager().0.remote {
             remote.guard()?;
         }
-        let mut hs = self.0.handles.lock().map_err(|_| error(libc::EIO))?;
+        let mut hs = self.lock_handles(false)?;
         let h = hs.get_mut(&handle).ok_or_else(|| error(libc::EBADF))?;
         ensure!(h.ino == id, "handle inode mismatch");
         if h.deferred_directory {
@@ -2186,6 +2258,8 @@ impl VfsView {
         cookie: u64,
         max_entries: usize,
     ) -> Result<DirectoryPage> {
+        #[cfg(target_os = "linux")]
+        if self.is_readonly_image() { self.image_remaining()?; }
         let effect = self.admit_live_effect()?;
         effect.validate(self)?;
         if max_entries == 0 || max_entries > readdir::DIRECTORY_PAGE_ENTRIES {
@@ -2193,7 +2267,7 @@ impl VfsView {
         }
         if let Some(pager) = &self.0.pager {
             let mut c = self.db()?;
-            let handles = self.0.handles.lock().map_err(|_| error(libc::EIO))?;
+            let handles = self.lock_handles(false)?;
             let h = handles.get(&handle).ok_or_else(|| error(libc::EBADF))?;
             if h.ino != id || h.directory.is_none() {
                 return Err(error(libc::EBADF));
@@ -2235,7 +2309,7 @@ impl VfsView {
     pub fn close_handle(&self, id: u64, handle: u64) -> Result<()> {
         let effect = self.admit_cleanup_effect()?;
         effect.validate(self)?;
-        let mut hs = self.0.handles.lock().map_err(|_| error(libc::EIO))?;
+        let mut hs = self.lock_handles(true)?;
         ensure!(
             hs.get(&handle).is_some_and(|h| h.ino == id),
             "invalid handle"
@@ -2247,6 +2321,7 @@ impl VfsView {
         Ok(())
     }
     pub fn sync(&self, id: u64) -> Result<()> {
+        if self.is_readonly_image() { let _actual = self.attr(id)?; return Ok(()); }
         let c = self.db()?;
         let n = node(&c, id)?;
         if let Some(b) = n.backing {
@@ -2276,10 +2351,7 @@ impl VfsView {
             "checkpoint requires a detached/drained FUSE session"
         );
         ensure!(
-            self.0
-                .handles
-                .lock()
-                .map_err(|_| error(libc::EIO))?
+            self.lock_handles(false)?
                 .is_empty(),
             "checkpoint requires closed logical handles"
         );
@@ -2391,6 +2463,7 @@ impl VfsView {
         }
     }
     pub fn seal(&self) -> Result<VfsCheckpoint> {
+        self.require_mutable_image()?;
         self.require_local_checkpoint()?;
         let effect = self.admit_live_effect()?;
         self.seal_admitted(&effect)
@@ -2404,10 +2477,7 @@ impl VfsView {
                 "seal requires a drained FUSE session"
             );
             ensure!(
-                self.0
-                    .handles
-                    .lock()
-                    .map_err(|_| error(libc::EIO))?
+                self.lock_handles(false)?
                     .is_empty(),
                 "seal requires closed handles"
             );
@@ -2418,6 +2488,7 @@ impl VfsView {
     /// Logical destruction retains private bytes and all published roots. A
     /// separate retention-aware sweeper is deliberately not implemented yet.
     pub fn destroy(&self) -> Result<VfsCheckpoint> {
+        self.require_mutable_image()?;
         self.require_local_checkpoint()?;
         let effect = self.admit_live_effect()?;
         let snapshot = self.seal_admitted(&effect)?;

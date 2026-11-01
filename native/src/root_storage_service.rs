@@ -258,11 +258,17 @@ pub fn bootstrap_socket_pair() -> Result<(OwnedFd, OwnedFd)> {
 pub(crate) enum Request {
     Hello { constraint: FinalizationConstraint },
     Begin { constraint: FinalizationConstraint, seed: ObjectRef, refs: usize, bytes: u64 },
+    BeginPaged { constraint: FinalizationConstraint, seed: ObjectRef, refs: usize, bytes: u64 },
+    CreateMetadataCow { #[serde(with="uuid_wire")] slot:uuid::Uuid, nonce:String, binding:rudder_vcs_bridge::AttemptBinding },
+    ArchiveMetadataCow { #[serde(with="uuid_wire")] slot:uuid::Uuid, nonce:String, request:String },
     Object { #[serde(with = "uuid_wire")] slot: uuid::Uuid, reference: ObjectRef },
+    PagedInventory { #[serde(with="uuid_wire")] slot:uuid::Uuid,references:Vec<ObjectRef> },
+    PagedChunk { #[serde(with="uuid_wire")] slot:uuid::Uuid,reference:ObjectRef,offset:usize },
     Chunk { #[serde(with = "uuid_wire")] slot: uuid::Uuid, offset: usize },
     Commit { #[serde(with = "uuid_wire")] slot: uuid::Uuid },
     Check { #[serde(with = "uuid_wire")] slot: uuid::Uuid },
     EnrollHelper { #[serde(with = "uuid_wire")] slot: uuid::Uuid },
+    EnrollHelperCow { #[serde(with="uuid_wire")] slot:uuid::Uuid,nonce:String },
     Fence { #[serde(with = "uuid_wire")] slot: uuid::Uuid },
     // Only the original authenticated fixed engine can issue these commands.
     // Reader IDs are routing DATA; native actual join custody stays in issuer.
@@ -287,17 +293,22 @@ mod uuid_wire {
 #[serde(deny_unknown_fields)]
 pub(crate) struct Envelope { pub(crate) version: u32, pub(crate) serial: u64,
     pub(crate) constraint: FinalizationConstraint, pub(crate) request: Request }
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum Reply {
     Hello { #[serde(with = "uuid_wire")] instance: uuid::Uuid, image_sha256: String },
     Begun { #[serde(with = "uuid_wire")] slot: uuid::Uuid },
     Accepted,
+    ObjectPresent,
+    PagedMissing { #[serde(with="uuid_wire")] slot:uuid::Uuid,missing:Vec<usize> },
+    MetadataCowReady { #[serde(with="uuid_wire")] slot:uuid::Uuid, nonce:String, root:PathBuf, base:ObjectRef },
+    MetadataCowArchived { #[serde(with="uuid_wire")] slot:uuid::Uuid, nonce:String, request:String, directory:ObjectRef,hardlinks:ObjectRef },
     SeedRetired { #[serde(with="uuid_wire")] slot:uuid::Uuid, #[serde(with="uuid_wire")] retirement:uuid::Uuid },
     SeedReleased { #[serde(with="uuid_wire")] slot:uuid::Uuid, #[serde(with="uuid_wire")] retirement:uuid::Uuid },
     RetirementPending { #[serde(with="uuid_wire")] slot:uuid::Uuid, #[serde(with="uuid_wire")] retirement:uuid::Uuid },
     HelperEnrolled { #[serde(with = "uuid_wire")] reader: uuid::Uuid, pid: u32 },
     Ready { #[serde(with = "uuid_wire")] slot: uuid::Uuid, seed: ObjectRef, root: PathBuf, objects: PathBuf },
+    PagedReady { #[serde(with="uuid_wire")] slot:uuid::Uuid,seed:ObjectRef,root:PathBuf,objects:PathBuf,cow_floor:ObjectRef },
     Rejected,
 }
 #[derive(Serialize, Deserialize)]
@@ -347,6 +358,16 @@ impl Cancellation {
             }
         })?); Ok(())
     }
+    /// Call after the actual observer join, immediately before a success
+    /// linearization. A ready event cannot be missed merely because stop won
+    /// the observer's final iteration. Later cancellation remains the native
+    /// caller's original pre-effect check, not an atomic future guarantee.
+    fn check_success(&self,budget:&FinalizationBudget)->Result<()> {
+        let mut p=libc::pollfd{fd:self.event.as_raw_fd(),events:libc::POLLIN,revents:0};
+        let n=unsafe{libc::poll(&mut p,1,0)};
+        ensure!(n==0&&!self.flag.load(Ordering::Acquire),"original storage operation cancelled or observer uncertain");
+        budget.remaining()?;Ok(())
+    }
     fn finish(&mut self) -> Result<()> {
         self.stop.store(true, Ordering::Release);
         if let Some(worker) = self.worker.take() { self.result = Some(worker.join()); }
@@ -395,7 +416,7 @@ pub struct RootStorageRetired { _instance: uuid::Uuid, _slot: uuid::Uuid }
 pub struct RootStorageService {
     endpoint: Endpoint, engine: Process, own: Process, engine_image: Image, service_image: Image,
     mnt: File, user: File, boot: Vec<u8>, instance: uuid::Uuid,
-    root: Option<RootDirectory>, root_caps: u64,
+    root: Option<RootDirectory>, root_caps: u64, paged:Option<paged::RootPagedStorage>,
     serial: u64, hello: bool, fenced: bool, slots: BTreeMap<uuid::Uuid, Slot>,
     retirement_answer:Option<RetirementAnswer>,outbox:Option<Vec<u8>>,pending_retired:Option<Slot>,
 }
@@ -415,7 +436,7 @@ impl RootStorageService {
             engine_image: Image::capture(Path::new(ENGINE_IMAGE))?, service_image,
             mnt: namespace(None, "mnt", libc::CLONE_NEWNS)?, user: namespace(None, "user", libc::CLONE_NEWUSER)?,
             boot: proc_bytes("/proc/sys/kernel/random/boot_id", 64)?, instance: uuid::Uuid::new_v4(), serial: 0,
-            root: None, root_caps: caps, hello: false, fenced: false, slots: BTreeMap::new(),retirement_answer:None,outbox:None,pending_retired:None };
+            root: None, root_caps: caps, paged:None, hello: false, fenced: false, slots: BTreeMap::new(),retirement_answer:None,outbox:None,pending_retired:None };
         ensure!(value.engine.pid != value.own.pid, "root storage cannot enroll itself as engine");
         ensure!(Path::new("/run").canonicalize()? == Path::new("/run"), "root storage /run redirects");
         let run = fs::symlink_metadata("/run")?;
@@ -449,7 +470,7 @@ impl RootStorageService {
             && id(&self.user)? == id(&namespace(Some(self.engine.pid), "user", libc::CLONE_NEWUSER)?)?, "storage sender entered a guest namespace");
         self.engine.live()
     }
-    pub fn close_admission(&mut self) { self.fenced = true; for slot in self.slots.values_mut() { slot.fence(); } }
+    pub fn close_admission(&mut self) { if let Some(paged)=&mut self.paged{paged.close_admission();} self.fenced = true; for slot in self.slots.values_mut() { slot.fence(); } }
     /// OFF App, one bounded packet. No error removes a slot or its actual owners.
     pub fn poll_once(&mut self) -> Result<bool> {
         self.current()?;
@@ -493,8 +514,18 @@ impl RootStorageService {
             self.hello = true; return Ok(Reply::Hello { instance: self.instance, image_sha256: self.service_image.sha256.clone() });
         }
         ensure!(self.hello, "storage hello required");
+        let paged_slot=match &request {Request::Object{slot,..}|Request::PagedInventory{slot,..}|Request::PagedChunk{slot,..}|Request::Chunk{slot,..}|Request::Commit{slot}|Request::Check{slot}|Request::Fence{slot}
+            |Request::EnrollHelper{slot}|Request::EnrollHelperCow{slot,..}|Request::RetireSeed{slot,..}|Request::ReleaseSeed{slot,..}|Request::CreateMetadataCow{slot,..}
+            |Request::ArchiveMetadataCow{slot,..}=>self.paged.as_ref().is_some_and(|p|p.contains(slot)),_=>false};
+        if matches!(&request,Request::BeginPaged{..})||paged_slot {
+            if matches!(&request,Request::BeginPaged{..}) {
+                ensure!(self.slots.len()+self.paged.as_ref().map_or(0,|p|p.slots())<MAX_SEEDS,"combined Root seed capacity full");
+                if self.paged.is_none(){paged::RootPagedStorage::capture_retaining(&mut self.paged)?;}
+            }
+            return self.paged.as_mut().context("original paged Root owner absent")?.dispatch(request,payload,fd,wire_constraint,&self.engine,&self.engine_image);
+        }
         if let Request::Begin { constraint, seed, refs, bytes } = request {
-            ensure!(&constraint == wire_constraint && payload.is_empty() && self.slots.len() < MAX_SEEDS
+            ensure!(&constraint == wire_constraint && payload.is_empty() && self.slots.len()+self.paged.as_ref().map_or(0,|p|p.slots()) < MAX_SEEDS
                 && self.slots.values().all(|s| s.published || s.fenced), "storage seed/preparation admission full");
             admit(&seed, refs, bytes)?;
             let budget = FinalizationBudget::from_constraint(&constraint)?;
@@ -540,7 +571,7 @@ impl RootStorageService {
             return Ok(Reply::SeedReleased {slot,retirement});
         }
         let slot_id = match &request { Request::Object { slot, .. } | Request::Chunk { slot, .. } | Request::Commit { slot }
-            | Request::Check { slot } | Request::EnrollHelper { slot } | Request::Fence { slot } => *slot, _ => unreachable!() };
+            | Request::Check { slot } | Request::EnrollHelper { slot } | Request::Fence { slot } => *slot, _ => anyhow::bail!("storage request names no original compatible slot") };
         let slot = self.slots.get_mut(&slot_id).context("storage original slot absent")?;
         if let Request::Fence { .. } = request { ensure!(payload.is_empty() && fd.is_none(), "invalid storage fence"); slot.fence(); return Ok(Reply::Accepted); }
         if let Request::EnrollHelper { .. } = request {
@@ -694,3 +725,10 @@ mod ipc_qualification_tests;
 #[cfg(test)]
 #[path="root_storage_retirement_tests.rs"]
 mod retirement_tests;
+
+#[path="root_storage_paged.rs"]
+pub(crate) mod paged;
+
+#[cfg(test)]
+#[path="root_storage_paged_tests.rs"]
+mod paged_tests;

@@ -239,7 +239,7 @@ struct OriginalAlternateInstallIntent { _permit: NeverAttemptedAlternateInstall 
 /// error/panic. No API adopts an old directory or reconstructs this from DATA.
 #[must_use="retain original fork owner and partial effects through settlement"]
 pub struct PrivateMetadataForkOwner {
-    private: Option<Private>, source: Option<Source>, require_readonly_objects: bool, manifest: MetadataTemplate,
+    private: Option<Private>, source: Option<Source>, require_readonly_objects: bool, manifest: Arc<MetadataTemplate>,
     binding: AttemptBinding, seed_manifest: ObjectRef, shared_path: PathBuf,
     alternates: Option<HeldFile>, ready: bool, pending: Option<CopyJob>,
     alternate_install_permit: Option<NeverAttemptedAlternateInstall>,
@@ -247,7 +247,7 @@ pub struct PrivateMetadataForkOwner {
     never_linked_release: Option<never_linked::NeverLinkedRequest>, never_linked_released: bool,
     localization: Option<(FinalizationBudget,ForkLocalizationLimits)>, history: Option<BTreeMap<PathBuf,(SeedFile,u32,(u64,u64))>>, failed: bool,
     shared_index: usize, verifier: PathBuf, detach_intent: bool, detached: bool,
-    work: Work, reconciles: u8, fault: Option<Fault>, localized: bool,
+    work: Work, reconciles: u8, fault: Option<Fault>, localized: bool, cow:Option<cow::CowMount>,
 }
 impl PrivateMetadataForkOwner {
     pub fn binding(&self)->&AttemptBinding{&self.binding}
@@ -306,6 +306,7 @@ impl PrivateMetadataForkOwner {
     /// reconciliation and use the SAME original budget and unchanged limits.
     pub fn localize_retaining(&mut self,out:&mut Option<LocalizedMetadataFork>,limits:ForkLocalizationLimits,
         original:&FinalizationBudget,cancelled:&AtomicBool,mut check_quiescent:impl FnMut(&AttemptBinding)->Result<()>)->Result<()> {
+        ensure!(self.cow.is_none(),"V2 requires actual CoW checkpoint/Merkle localization, never byte-copy fallback");
         ensure!(self.localization.is_none(),"localization already attempted; reconcile original state explicitly");
         ensure!(self.is_ready() && out.is_none(),"fork is not ready or proof slot occupied");limits.validate()?;
         self.localization=Some((original.clone(),limits));self.failed=true;
@@ -566,7 +567,8 @@ impl LocalizedMetadataFork {
 pub fn fork_private_metadata_retaining(out:&mut Option<PrivateMetadataForkOwner>,template:&VerifiedMetadataTemplate,
     destination:&Path,binding:AttemptBinding,activation:Option<&crate::LiveObservation>,
     original:&FinalizationBudget,cancelled:&AtomicBool)->Result<PrivateMetadataFork> {
-    tick(original,cancelled)?;ensure!(out.is_none(),"original fork owner slot occupied");binding.validate()?;
+    tick(original,cancelled)?;ensure!(template.profile()==SeedProfile::SmallV1,"V2 requires actual Root CoW fork receipt");
+    ensure!(out.is_none(),"original fork owner slot occupied");binding.validate()?;
     ensure!(template.retained_seed()==Some(&binding.seed) && (template.require_readonly || cfg!(test)),
         "retaining fork requires actual retained read-only seed custody");
     ensure!(binding.baseline==template.manifest.baseline&&binding.baseline_operation==template.manifest.operation,"fork baseline differs");
@@ -590,7 +592,7 @@ pub fn fork_private_metadata_retaining(out:&mut Option<PrivateMetadataForkOwner>
         alternate_install_permit:Some(NeverAttemptedAlternateInstall{_private:()}),alternate_install_intent:None,
         never_linked_release:None,never_linked_released:false,
         localization:None,history:None,failed:false,shared_index:0,verifier:PathBuf::from(format!(".rudder-local-odb-{}",uuid::Uuid::new_v4())),
-        detach_intent:false,detached:false,work:Work::default(),reconciles:0,fault:None,localized:false});
+        detach_intent:false,detached:false,work:Work::default(),reconciles:0,fault:None,localized:false,cow:None});
     let owner=out.as_mut().unwrap();
     let result=(||->Result<PrivateMetadataFork>{
         #[cfg(test)]
@@ -637,3 +639,7 @@ mod tests;
 #[path="seed_fork_never_linked.rs"]
 mod never_linked;
 pub use never_linked::NeverLinkedMetadataFork;
+
+#[path="seed_cow_fork.rs"]
+mod cow;
+pub use cow::{CowMetadataForkQuiesced,fork_private_metadata_cow_retaining};

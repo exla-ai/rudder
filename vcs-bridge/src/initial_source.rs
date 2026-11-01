@@ -12,7 +12,7 @@ use rudder_engine::{execution::finalization_budget::FinalizationBudget,
     vfs::HardlinkTopology, workspace::WorkspaceProfile};
 use serde::Serialize;
 use std::{fs, path::Path, sync::Arc, time::Duration};
-use crate::{accepted_git_import::{import_expected_git_head, GitImportLimits},
+use crate::{accepted_git_import::{import_expected_git_head_retaining,RetainedGitImport,GitImportLimits},
     projection::{materialize_source, verify_versioned_source, VerifiedSourceProjection},
     projection_io::ProjectionBudget, publication::INTEGRATION_BOOKMARK,
     seed::prepare_internal_metadata_template, vfs_provider::SourceProjectionPolicy,
@@ -32,7 +32,7 @@ pub struct InitialSourceRequest<'a> {
 /// Actual live jj/store/verifier owners, deliberately not Serde or Clone.
 /// Keep this owner off App, including errors/results rejected by the App.
 pub struct PreparedInitialSource {
-    _workspace: Workspace,
+    _workspace:Option<RetainedGitImport>,
     repository: Arc<ReadonlyRepo>,
     pub baseline: CommitIdentity,
     pub operation: JjOperationId,
@@ -41,10 +41,12 @@ pub struct PreparedInitialSource {
     pub seed_root: ObjectRef,
     pub runnable_pin: String,
     pub seed_pin: String,
-    pub verified: VerifiedSourceProjection,
+    pub verified: Arc<VerifiedSourceProjection>,
+    seed_cache: Arc<crate::seed::RetainedSeedCasCache>,
 }
 impl PreparedInitialSource {
     pub fn repository(&self) -> &Arc<ReadonlyRepo> { &self.repository }
+    pub fn seed_cache(&self)->&Arc<crate::seed::RetainedSeedCasCache>{&self.seed_cache}
 }
 
 fn phase(budget: &FinalizationBudget, check_owner: &mut impl FnMut() -> Result<()>) -> Result<()> {
@@ -66,7 +68,31 @@ fn staged<T: Serialize>(store: &LocalStore, stage: &str, kind: ObjectKind, value
 /// accepted commit ID and its complete reachable history are imported exactly.
 /// A caller may not retry into either destination after an uncertain failure.
 pub async fn prepare_initial_source(store: LocalStore, request: InitialSourceRequest<'_>,
-    original: &FinalizationBudget, mut check_owner: impl FnMut() -> Result<()>) -> Result<PreparedInitialSource> {
+    original: &FinalizationBudget, check_owner: impl FnMut() -> Result<()>) -> Result<PreparedInitialSource> {
+    let mut unused=None;
+    prepare_initial_source_profile_retaining(store,request,crate::seed::SeedProfile::SmallV1,
+        &mut unused,original,Arc::new(std::sync::atomic::AtomicBool::new(false)),check_owner).await
+}
+/// Explicit V2. `paged` belongs to the original native preparation capsule and
+/// must remain outside callback/catch scopes across every error/late ACK.
+pub async fn prepare_initial_source_profile_retaining(store:LocalStore,request:InitialSourceRequest<'_>,
+    profile:crate::seed::SeedProfile,paged:&mut Option<crate::seed::PagedSeedGeneration>,
+    original:&FinalizationBudget,cancelled:Arc<std::sync::atomic::AtomicBool>,mut validate_owner:impl FnMut()->Result<()>)->Result<PreparedInitialSource>{
+    let mut import=None;
+    let mut prepared=prepare_initial_source_profile_with_import_retaining(store,request,profile,paged,&mut import,original,cancelled,validate_owner).await?;prepared._workspace=import.take();Ok(prepared)
+}
+/// Production callers retain BOTH carriers outside the operation/catch. A failed
+/// import keeps its actual partial pack/index/keep FDs, progress and no ACK.
+#[allow(clippy::too_many_arguments)]
+pub async fn prepare_initial_source_profile_with_import_retaining(store:LocalStore,request:InitialSourceRequest<'_>,
+ profile:crate::seed::SeedProfile,paged:&mut Option<crate::seed::PagedSeedGeneration>,import:&mut Option<RetainedGitImport>,
+ original:&FinalizationBudget,cancelled:Arc<std::sync::atomic::AtomicBool>,mut validate_owner:impl FnMut()->Result<()>)->Result<PreparedInitialSource>{
+    let original_cancel=cancelled.clone();
+    let mut check_owner=||->Result<()> {
+        if original_cancel.load(std::sync::atomic::Ordering::Acquire){original.cancel();anyhow::bail!("initial source original cancellation");}
+        validate_owner()?;
+        if original_cancel.load(std::sync::atomic::Ordering::Acquire){original.cancel();anyhow::bail!("initial source late original cancellation");}Ok(())
+    };
     phase(original, &mut check_owner)?;
     request.expected_head.validate()?;
     request.environment.validate()?;
@@ -100,9 +126,10 @@ pub async fn prepare_initial_source(store: LocalStore, request: InitialSourceReq
         "initial outputs cannot write into the original Git metadata");
     phase(original, &mut check_owner)?;
     let (workspace, repo) = Workspace::init_internal_git(request.settings, request.private_repository).await?;
+    RetainedGitImport::stage_initial_repository_retaining(import,workspace,repo.clone(),request.expected_head,original,cancelled.clone())?;
     phase(original, &mut check_owner)?;
     let backend = repo.store().backend_impl::<GitBackend>().context("initial repository must use internal Git")?;
-    import_expected_git_head(&source, backend, request.expected_head, GitImportLimits::default(), original)?;
+    import_expected_git_head_retaining(import,&source,backend,request.expected_head,GitImportLimits::default(),original,cancelled.clone(),&mut check_owner)?;
     phase(original, &mut check_owner)?;
     let commit = repo.store().get_commit(&CommitId::new(hex::decode(&request.expected_head.0)?))?;
     let baseline = CommitIdentity::from_jj(&commit);
@@ -127,7 +154,7 @@ pub async fn prepare_initial_source(store: LocalStore, request: InitialSourceReq
     let profile_value = WorkspaceProfile::source_only();
     let policy_value = SourceProjectionPolicy::from_import_policy(&profile_value.source_exclusions())?;
     let policy = staged(&store, &stage.id, ObjectKind::Blob, &policy_value)?;
-    let profile = staged(&store, &stage.id, ObjectKind::Blob, &profile_value)?;
+    let workspace_profile = staged(&store, &stage.id, ObjectKind::Blob, &profile_value)?;
     let hardlinks = staged(&store, &stage.id, ObjectKind::Blob, &HardlinkTopology { format_version: 1, groups: vec![] })?;
     let (record, _) = materialize_source(store.clone(), &stage.id, &commit.tree(), &policy, None, projection_budget(original)?).await?;
     phase(original, &mut check_owner)?;
@@ -138,18 +165,31 @@ pub async fn prepare_initial_source(store: LocalStore, request: InitialSourceReq
     phase(original, &mut check_owner)?;
     let runnable_root = staged(&store, &stage.id, ObjectKind::RunnableRoot, &RunnableRoot { format_version: 1,
         consistency: CheckpointConsistency::Quiesced, source: source_root.clone(), environment: Some(request.environment.clone()),
-        view_root: record.directory, profile, hardlinks, knowledge_cursor: 0 })?;
+        view_root: record.directory, profile:workspace_profile, hardlinks, knowledge_cursor: 0 })?;
     let runnable_pin = format!("initial-runnable:{id}");
-    store.publish(&stage.id, &runnable_pin, &runnable_root)?;
+    store.publish_extending(&stage.id, &runnable_pin, &runnable_root, &[request.environment.clone()])?;
     phase(original, &mut check_owner)?;
-    prepare_internal_metadata_template(request.private_repository, request.seed_destination, baseline.clone(), operation.clone())?;
-    phase(original, &mut check_owner)?;
-    // The separate seed staging covers import until its complete closure is pinned.
-    let seed_stage = store.begin_staging(Duration::from_secs(120))?;
-    let seed_root = store.import_tree(request.seed_destination, CheckpointConsistency::Quiesced)?;
-    let seed_pin = format!("initial-vcs-seed:{id}");
-    store.publish(&seed_stage.id, &seed_pin, &seed_root)?;
-    phase(original, &mut check_owner)?;
-    Ok(PreparedInitialSource { _workspace: workspace, repository: repo, baseline, operation,
-        runnable_root, source_root, seed_root, runnable_pin, seed_pin, verified })
+    let seed_cache=crate::seed::RetainedSeedCasCache::capture_profile(request.private_repository,store.clone(),profile)?;
+    let seed_pin=format!("initial-vcs-seed:{id}");
+    let seed_root=match profile {
+        crate::seed::SeedProfile::SmallV1=>{
+            prepare_internal_metadata_template(request.private_repository,request.seed_destination,baseline.clone(),operation.clone())?;
+            phase(original,&mut check_owner)?;
+            let seed_stage=store.begin_staging(Duration::from_secs(120))?;
+            let root=store.import_tree(request.seed_destination,CheckpointConsistency::Quiesced)?;
+            store.publish(&seed_stage.id,&seed_pin,&root)?;root
+        }
+        crate::seed::SeedProfile::PagedCowV2=>{
+            crate::seed::PagedSeedGeneration::prepare_retaining(paged,seed_cache.clone(),baseline.clone(),operation.clone(),seed_pin.clone(),None,
+                original.clone(),cancelled,&mut check_owner)?;
+            paged.as_ref().unwrap().root()?.clone()
+        }
+    };
+    phase(original,&mut check_owner)?;
+    Ok(PreparedInitialSource { _workspace:None,repository: repo, baseline, operation,
+        runnable_root, source_root, seed_root, runnable_pin, seed_pin, verified:Arc::new(verified),seed_cache })
 }
+
+#[path="accepted_source_generation.rs"]
+mod accepted_generation;
+pub use accepted_generation::AcceptedSourceGeneration;

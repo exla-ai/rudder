@@ -1,4 +1,5 @@
 # syntax=docker/dockerfile:1
+ARG WORKER_NODE_IMAGE=node:22-bookworm-slim
 FROM rust:1-bookworm AS native-builder
 WORKDIR /src
 COPY native ./native
@@ -16,11 +17,12 @@ RUN --mount=type=cache,id=rudder-cargo-registry,target=/usr/local/cargo/registry
     cargo clean --locked --release -p rudder-engine -p rudder-native -p rudder-vcs-bridge \
   && cargo build --release --locked --manifest-path Cargo.toml \
        -p rudder-native -p rudder-vcs-bridge --features rudder-vcs-bridge/cli \
-       --bin rudder-native --bin rudder-jj --bin rudder-root-storage --bin rudder-machine-root \
+       --bin rudder-native --bin rudder-jj --bin rudder-root-storage --bin rudder-machine-root --bin rudder-image-preseed \
   && cp target/release/rudder-native /rudder-native \
   && cp target/release/rudder-jj /rudder-jj \
   && cp target/release/rudder-root-storage /rudder-root-storage \
-  && cp target/release/rudder-machine-root /rudder-machine-root
+  && cp target/release/rudder-machine-root /rudder-machine-root \
+  && cp target/release/rudder-image-preseed /rudder-image-preseed
 
 FROM debian:bookworm-slim AS git-builder
 # Git 2.41 introduced fetch --porcelain, required by pinned jj0.40. Build the
@@ -39,7 +41,7 @@ RUN set -eu; \
     make -C /git-src prefix=/usr/local NO_TCLTK=YesPlease DESTDIR=/git-runtime install; \
     /git-runtime/usr/local/bin/git --version
 
-FROM node:22-bookworm-slim
+FROM ${WORKER_NODE_IMAGE} AS worker-tools
 
 ENV RUDDER_CLOUD_WORKER=1 \
     RUDDER_DISABLE_AUTO_UPDATE=1 \
@@ -125,6 +127,9 @@ COPY --from=git-builder /git-runtime/usr/local/ /usr/local/
 RUN test "$(/usr/local/bin/git --version)" = "git version 2.56.0" \
   && git --version
 
+# Backend archives depend on this tool layer, independently of Rudder's native
+# build and package. A code change must not download the same backends again.
+FROM worker-tools AS worker-common
 WORKDIR /opt/rudder
 # Copy scripts BEFORE npm ci so the package's postinstall hook (scripts/postinstall.mjs)
 # resolves; RUDDER_SKIP_POSTINSTALL makes it a no-op since jj is installed above.
@@ -180,6 +185,134 @@ RUN groupadd --gid 1500 rudder \
   && useradd --create-home --shell /bin/bash --uid 1500 --gid 1500 rudder \
   && mkdir -p /workspace \
   && chown -R rudder:rudder /workspace /opt/rudder-worker
+
+# Only the explicit managed target depends on these pinned assets. No model,
+# credentials, installer scripts or optional native addons execute here.
+FROM worker-tools AS managed-assets
+USER root
+ENV PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ARG TARGETARCH
+ARG WORKER_NODE_IMAGE
+WORKDIR /build
+COPY --chown=0:0 --chmod=0555 cloud/worker/managed-runtime/assets.py /build/assets.py
+COPY --chown=0:0 --chmod=0555 cloud/worker/managed-runtime/claude_assets.py /build/claude_assets.py
+COPY --chown=0:0 --chmod=0444 cloud/worker/managed-runtime/claude/* /build/claude/
+COPY --chown=0:0 --chmod=0444 cloud/worker/managed-runtime/policy.json /build/policy.json
+COPY --chown=0:0 --chmod=0444 native/tests/fixtures/codex_protocol/codex-acquisition.json /build/codex-acquisition.json
+RUN test "$TARGETARCH" = amd64 \
+  && test "$WORKER_NODE_IMAGE" = node:22-bookworm-slim@sha256:4b150b48b4116e2a22f2c39cc27025fbf4f153e2078fd3b14d159fdb5c7279da \
+  && test -x /usr/bin/gpgv \
+  && mkdir -p /out/runtime /out/sidecar/node_modules /out/receipts
+COPY --chown=0:0 --chmod=0555 cloud/worker/host-control.mjs /out/sidecar/host-control.mjs
+COPY --chown=0:0 --chmod=0555 cloud/worker/host-control-core.mjs /out/sidecar/host-control-core.mjs
+COPY --chown=0:0 --chmod=0555 cloud/worker/root-upload.mjs /out/sidecar/root-upload.mjs
+COPY --chown=0:0 --chmod=0555 cloud/worker/managed-runtime/sidecar-package.json /out/sidecar/package.json
+COPY --chown=0:0 --chmod=0555 cloud/worker/managed-runtime/sidecar-package-lock.json /out/sidecar/package-lock.json
+RUN /usr/bin/python3 -I /build/assets.py acquire --policy /build/policy.json --artifact codex \
+      --metadata /build/codex-acquisition.json --output /out/runtime/codex --receipt /out/receipts/codex-acquisition.json \
+  && /usr/bin/python3 -I /build/assets.py acquire --policy /build/policy.json --artifact ws \
+      --output /out/sidecar/node_modules/ws --receipt /out/receipts/ws-acquisition.json \
+  && /usr/bin/python3 -I /build/claude_assets.py --policy /build/policy.json --metadata-root /build/claude \
+      --scratch-root /build --output /out/runtime/claude --receipt /out/receipts/claude-acquisition.json \
+  && mkdir -p /out/receipts/claude \
+  && cp /build/claude/* /out/receipts/claude/ \
+  && chmod 0444 /out/receipts/claude/* && chmod 0555 /out/receipts/claude \
+  && /usr/bin/python3 -I /build/assets.py deny-addons --root /out/sidecar \
+  && /usr/bin/python3 -I /build/assets.py manifest --policy /build/policy.json --kind runtime \
+      --root /out/runtime --pin /out/receipts/runtime-config-pin.json \
+  && /usr/bin/python3 -I /build/assets.py manifest --policy /build/policy.json --kind sidecar \
+      --root /out/sidecar --ws-receipt /out/receipts/ws-acquisition.json --pin /out/receipts/sidecar-policy-pin.json \
+  && /usr/bin/python3 -I /build/assets.py manifest --policy /build/policy.json --kind runtime --root /out/runtime --verify \
+  && /usr/bin/python3 -I /build/assets.py manifest --policy /build/policy.json --kind sidecar --root /out/sidecar \
+      --ws-receipt /out/receipts/ws-acquisition.json --verify
+
+# Explicit new-managed-home image. It inherits no legacy backend install layer;
+# it contains one pinned ELF per backend. Claude is a packaged candidate;
+# managed Claude execution stays unsupported pending actual guest qualification.
+FROM worker-common AS managed
+USER root
+ENV PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+COPY --from=native-builder --chown=0:0 --chmod=0555 /rudder-image-preseed /usr/local/bin/rudder-image-preseed
+COPY --from=managed-assets --chown=0:0 /out/runtime/ /opt/rudder-managed-runtime/v1/
+COPY --from=managed-assets --chown=0:0 /out/sidecar/ /opt/rudder-host-control/
+COPY --from=managed-assets --chown=0:0 /out/receipts/ /usr/local/share/rudder-managed-image/
+COPY --from=managed-assets --chown=0:0 --chmod=0444 /build/policy.json /usr/local/share/rudder-managed-image/policy.json
+COPY --from=managed-assets --chown=0:0 --chmod=0555 /build/assets.py /usr/local/libexec/rudder-managed-image-assets
+COPY --chown=0:0 --chmod=0555 cloud/worker/managed-runtime/verify_image_layout.py /usr/local/libexec/rudder-managed-image-layout
+# Qualification retries can refresh these installed-byte observations while
+# reusing compiled artifacts. This argument is not a runtime environment value.
+ARG RUDDER_IMAGE_QUALIFICATION_NONCE=release
+# Build-only profile selection. Baked CAS still requires separate runtime
+# admission; selecting this argument never enables managed execution by itself.
+ARG RUDDER_IMAGE_PRESEED_PROFILE=legacy-v1
+RUN test -n "$RUDDER_IMAGE_QUALIFICATION_NONCE" \
+  && case "$RUDDER_IMAGE_PRESEED_PROFILE" in legacy-v1|baked-cas-v1) ;; *) exit 1 ;; esac \
+  && test -L /usr/lib/ssl/private \
+  && test "$(readlink /usr/lib/ssl/private)" = /etc/ssl/private \
+  && rm /usr/lib/ssl/private \
+  # The release archive preserves jj's upstream uid. Debian's public helpers
+  # also carry privileged groups that an unprivileged managed guest cannot use.
+  # Normalize these exact executable inputs before the immutable tree is pinned.
+  && chown 0:0 /usr/local/bin/jj /usr/lib/x86_64-linux-gnu/utempter/utempter \
+       /usr/sbin/unix_chkpwd /usr/bin/chage /usr/bin/expiry /usr/bin/ssh-agent \
+  && chmod 0755 /usr/local/bin/jj /usr/lib/x86_64-linux-gnu/utempter/utempter \
+       /usr/sbin/unix_chkpwd /usr/bin/chage /usr/bin/expiry /usr/bin/ssh-agent \
+  && test -d /opt/yarn-v1.22.22 \
+  && test ! -e /usr/local/lib/rudder-yarn \
+  && mv /opt/yarn-v1.22.22 /usr/local/lib/rudder-yarn \
+  && chown -R 0:0 /usr/local/lib/rudder-yarn \
+  && ln -sfn ../lib/rudder-yarn/bin/yarn /usr/local/bin/yarn \
+  && ln -sfn ../lib/rudder-yarn/bin/yarnpkg /usr/local/bin/yarnpkg \
+  && test "$(/usr/local/bin/yarn --version)" = 1.22.22 \
+  # Slim Debian omits the documentation targets. Preserve every working link.
+  && find /usr/share/doc /usr/share/man -xtype l -delete \
+  && find /etc/alternatives -xtype l -name '*.gz' -delete \
+  && chmod 0755 /usr/share/man/man1 /usr/share/man/man5 /usr/share/man/man7 /usr/share/man/man8 \
+  # Build-time only: prepare the exact empty provider boundary, never erase
+  # module payload from a booted Machine. Boot modules are not IMAGE bytes.
+  && test ! -L /usr/lib/modules \
+  && if test -e /usr/lib/modules; then \
+       test -d /usr/lib/modules && test ! -L /usr/lib/modules \
+       && test -z "$(find /usr/lib/modules -mindepth 1 -maxdepth 1 -print -quit)"; \
+     fi \
+  && install -d -o 0 -g 0 -m 0555 /usr/lib/modules \
+  # Fly replaces swapon at boot. Guests receive an independent empty mask.
+  && test ! -L /usr/sbin/swapon \
+  && install -o 0 -g 0 -m 0444 /dev/null /usr/sbin/swapon \
+  # Fly boot creates this empty backup of the disabled swap tool. Declare it
+  # before pinning so the regular-file namespace is identical on first boot.
+  && test ! -L /usr/bin/swapon.original \
+  && install -o 0 -g 0 -m 0444 /dev/null /usr/bin/swapon.original \
+  && install -d -o 0 -g 0 -m 0755 /workspace \
+  && chmod 0555 /opt/rudder-managed-runtime/v1 /opt/rudder-host-control \
+  && /usr/bin/python3 -I /usr/local/libexec/rudder-managed-image-assets manifest \
+      --policy /usr/local/share/rudder-managed-image/policy.json --kind runtime --root /opt/rudder-managed-runtime/v1 --verify \
+  && /usr/bin/python3 -I /usr/local/libexec/rudder-managed-image-assets manifest \
+      --policy /usr/local/share/rudder-managed-image/policy.json --kind sidecar --root /opt/rudder-host-control \
+      --ws-receipt /usr/local/share/rudder-managed-image/ws-acquisition.json --verify \
+  && /usr/bin/python3 -I /usr/local/libexec/rudder-managed-image-assets components \
+      --policy /usr/local/share/rudder-managed-image/policy.json --output /usr/local/share/rudder-managed-image/components.json \
+  && install -d -o 0 -g 0 -m 0700 /run/rudder-host-control \
+  && chmod 0555 /usr/local/share/rudder-managed-image \
+  && /usr/bin/python3 -I -B /usr/local/libexec/rudder-managed-image-layout \
+  && /usr/bin/python3 -I -B -c 'import hashlib,pathlib; names=("/opt/rudder/dist/native/rudder-native","/opt/rudder/dist/native/rudder-jj","/usr/local/bin/rudder-root-storage","/usr/local/bin/rudder-machine-root"); [(print("RUDDER_PRODUCTION_ELF",name,hashlib.sha256(pathlib.Path(name).read_bytes()).hexdigest(),pathlib.Path(name).stat().st_size)) for name in names]' \
+  && case "$RUDDER_IMAGE_PRESEED_PROFILE" in \
+       legacy-v1) /usr/local/bin/rudder-image-preseed \
+         && /usr/bin/python3 -c 'import hashlib,pathlib; p=pathlib.Path("/var/lib/rudder-image-preseed-v1"); print("RUDDER_IMAGE_PRESEED_MANIFEST_SHA256",hashlib.sha256((p/"manifest.json").read_bytes()).hexdigest()); print("RUDDER_IMAGE_PRESEED_PIN",(p/"pin.json").read_text())' ;; \
+       baked-cas-v1) /usr/local/bin/rudder-image-preseed --bake-cas-v1 ;; \
+     esac
+LABEL ai.exla.rudder.worker-role="managed-opt-in" \
+      ai.exla.rudder.runtime-profile="fly-managed-image-v1" \
+      ai.exla.rudder.claude-supported="false"
+WORKDIR /
+# Explicit provider/config/fresh-volume qualification is still required. No
+# fallback into the mutable legacy home/supervisor when config is absent.
+ENTRYPOINT ["/usr/bin/env", "-i", "/usr/local/bin/rudder-machine-root"]
+CMD []
+
+# Last target stays the legacy/default worker, with unchanged backend updater
+# paths/install behavior. Current deploys that omit --target still use this.
+FROM worker-common AS legacy
 
 USER rudder
 ENV NPM_CONFIG_PREFIX=/home/rudder/.npm-global \

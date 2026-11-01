@@ -1,0 +1,118 @@
+{
+  "formatVersion": 1,
+  "scope": "actual-S3-OIDC-batch-CAS-component-only",
+  "sourceKind": "uncommitted working Cloud core bundled for a private qualification process",
+  "baseRevision": "c615b478d9af3b0cd1a69185dbcb1f95095cae90",
+  "verifiedAt": "2026-11-01T11:22:53.731085+00:00",
+  "actualS3": true,
+  "actualOidcRole": true,
+  "backendCapabilityIssued": true,
+  "expectedControl": {
+    "app": "rudder-cloud-control",
+    "machine_id": "8911d61a434978",
+    "instance_id": "01M6AR83FGTFZ046PGQW759490",
+    "image_digest": "sha256:73b06c488849f40f604142561b9c41dcfb18a4cecdb8aa7c555ca0ec23f28757"
+  },
+  "actualControlReadback": {
+    "id": "8911d61a434978",
+    "state": "started",
+    "instance_id": "01M6AR83FGTFZ046PGQW759490",
+    "imageDigest": "sha256:73b06c488849f40f604142561b9c41dcfb18a4cecdb8aa7c555ca0ec23f28757",
+    "verifiedAt": "2026-11-01T11:22:53.731085+00:00"
+  },
+  "sameControlBeforeUploadsAndLaunch": true,
+  "sourceInputs": {
+    "/workspace/code/exla-ai-rudder/cloud/src/fabric-cas.ts": "bb6623dc4a1084cc4e867ee3d3e80d01661ddcb401389ba81eba4147e29d79a3",
+    "/workspace/code/exla-ai-rudder/cloud/src/fabric-cas-retention.ts": "355a3a2cd91238671bbe935ef2e29413673b81aadce658bd5300b9d1e05c8a1f",
+    "/workspace/code/exla-ai-rudder/cloud/src/fabric-cas-batch-policy.ts": "01b09f668b952e5762cfeddf1f7862715d2527b99d20b190c4a8ea3a66275746",
+    "/workspace/code/exla-ai-rudder/cloud/src/managed-home-provisioning/fly.ts": "536d55a08786ef8f6dda305189b38f039aac654b083fd2fbfbb83acfe66b3b74"
+  },
+  "bundleSha256": "d3d3aa855036ae6aba3314497c0009a869a5d275dd37360c7320445114451471",
+  "buildReceiptSha256": "237819e423f145e548b8026cd3415dc5f7bf9085a143e9d38bb66609371cc235",
+  "reportEnvelopeSha256": "388749102449d5e6a1b4c0c2dcd2162071139261a54cf96e27a42247d4007d1c",
+  "probeReportSha256": "eca745a510686c4b8dd76ec9597227a2dae4b87839bd876508c6cb11ed235455",
+  "policySha256": "91442de502a7d094d3e63d62a460bfad0042d7f8e0a68607f9e79e12331d65c2",
+  "sdkPackages": [
+    {
+      "name": "@aws-sdk/client-s3",
+      "version": "3.1047.0",
+      "package_sha256": "fb38bd5f1a05737d969134fd6f279e00679116fbb282f4b064ffcc5d6ef098d8",
+      "entry_sha256": "c010c34811f807be4d1dfe6a3066e81a72948e168351911cb3d85d5d94f18833"
+    },
+    {
+      "name": "@aws-sdk/credential-provider-web-identity",
+      "version": "3.972.85",
+      "package_sha256": "1d56c2f6374307efb79e630bd43ae4eaf4b113713639ee069d7c8f7d0de499cb",
+      "entry_sha256": "664792ccf95de183d35f270b09a5b4e1deb924c5d665e40d7a92dfd90c7c0af6"
+    }
+  ],
+  "counts": {
+    "qualification:GetBucketVersioningCommand": 1,
+    "qualification:GetBucketLifecycleConfigurationCommand": 1,
+    "qualification:GetBucketPolicyCommand": 1,
+    "positive-hold:hold-PutObjectCommand": 1,
+    "closed-hold:hold-PutObjectCommand": 1,
+    "objects-new:object-PutObjectCommand": 3,
+    "immutable-conflict:object-PutObjectCommand": 1,
+    "immutable-conflict:object-GetObjectCommand": 1,
+    "typed-readback:object-GetObjectCommand": 1,
+    "root-publications:root-GetObjectCommand": 2,
+    "root-publications:root-PutObjectCommand": 2,
+    "expired-hold:hold-PutObjectCommand": 1,
+    "retained-hold-readback:hold-GetObjectCommand": 2
+  },
+  "countsScope": "S3Client.send; excludes internal STS credential requests",
+  "originalMilliseconds": 30000,
+  "effectsEndRemainingMilliseconds": 24940,
+  "checks": {
+    "original_before_gate": true,
+    "one_original_clock": true,
+    "no_clock_restart": true,
+    "retained_closed_and_expired_holds_readback": true,
+    "hold_readback_is_primary_budget_readonly_not_reopened_owner": true,
+    "all_sdk_and_body_io_settled": true,
+    "positive_carrier_released": true,
+    "closed_new_dispatch_refused": true,
+    "expired_new_dispatch_refused": true
+  },
+  "originalChild": {
+    "original_child_exit": {
+      "code": 0,
+      "signal": null
+    },
+    "actual_child_close": true,
+    "stdout_eof": true,
+    "stderr_eof": true,
+    "ipc_closed": true
+  },
+  "pidfd": false,
+  "actualProcAndExeDescriptorsHeld": true,
+  "localCleanup": {
+    "nonce": "83f45e4a-7514-47be-a0f3-6c6764b15a14",
+    "actual_child_reaped": true,
+    "both_eof": true,
+    "local_owned_files_removed": true,
+    "s3_objects_or_holds_deleted": false,
+    "qualified": true,
+    "effects_unknown": false,
+    "normalRootRetirement": false
+  },
+  "retainedS3Holds": 3,
+  "s3HoldsOrObjectsDeleted": false,
+  "providerCalls": 14,
+  "sharedHttpAgentDestroyed": false,
+  "productionStartup": false,
+  "productionEnablement": false,
+  "nativeRoot": false,
+  "models": false,
+  "wholeImage300sQualified": false,
+  "normalRootRetirement": false,
+  "limits": "tiny three-object graph only; no fleet, physical Root, full-image throughput or production-startup qualification",
+  "firstSetupAttempt": {
+    "status": "failed before probe launch",
+    "reason": "Fly rejected command payloads; CLI returned zero while reporting remote errors",
+    "correction": "use four exact-machine SFTP uploads, verify every file hash/size/mode, validate launch ACK and remote exit output",
+    "ownFilesRemoved": true,
+    "probeStarted": false
+  }
+}

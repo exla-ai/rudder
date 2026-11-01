@@ -1,0 +1,228 @@
+//! Connected explicit managed ingress. Host transport/SQLite/Git/profile work
+//! stays on retained off-App workers; the actual App thread alone owns rows,
+//! adoption and PTYs. Machine receipts never mint project/source authority.
+#![cfg(target_os="linux")]
+use crate::{Backend,AgentMode,AgentStatus,
+    engine_host::RetainedManagedAcquisition,managed_app::{ManagedTaskLifetimeSupervisor,ManagedTaskStartFailure,JoinedManagedTask},
+    managed_initial_source::ManagedInitialSourceOwner,managed_launch::ManagedLaunchFence,
+    managed_machine_entry::{ManagedMachineRuntime,MachineControl,ProjectTicket,ManagedProjectDisplay,SeedTicket,SeedTaskTicket,SeedCacheTicket,EnrollmentTicket,NeverStartedProgress},
+    managed_task_launch::{ManagedTaskController,ManagedTaskAdmission,ManagedTaskFactoryRetention,PreparedManagedTask,ManagedTaskProject,
+        ManagedTaskOptIn,SelectedTaskCredentialKind,ManagedTaskNetworkSelection},
+    managed_profile_loader::{inspect_selected_managed_task_profile,load_selected_managed_task_profile,ManagedProfileCredentialKind},
+    managed_machine_receipts::{MachineReceipts,AcceptedHostCommand,DuplicateReceipt},managed_machine_runtime_profile::{ManagedHostRuntime,ManagedProfileInspection}};
+use anyhow::{ensure,Context,Result};
+use rudder_engine::execution::{finalization_budget::FinalizationBudget,handoff::{OwnedWorkerJoin,WorkerJoined}};
+use rudder_native::host_ingress::{HostIngress,HostIngressConfigOwner,HostCommand,HostOperation,HostBackend,HostReply,HostReplyError};
+use std::{any::Any,collections::{BTreeMap,VecDeque},panic::{catch_unwind,AssertUnwindSafe},sync::{Arc,Mutex,atomic::{AtomicBool,AtomicUsize,AtomicU8,Ordering},mpsc::{self,SyncSender,Receiver}},thread,time::Duration};
+const JOB_LIMIT:usize=256;
+const PROJECT_LIMIT:usize=2;
+const WORKERS:usize=2;
+const APP_EVENTS:usize=8;
+const OPENING:u8=0;const READY:u8=1;const RECOVERY:u8=2;
+const STEP_NONE:u8=0;const STEP_ADMIT:u8=1;const STEP_ADMITTED:u8=2;const STEP_LAUNCH:u8=3;const STEP_LAUNCHED:u8=4;const STEP_REFUSED:u8=5;
+enum AppEvent {Work(Arc<Job>),Observe(Arc<ObservationRequest>)}
+struct ObservationRequest {job:Arc<Job>,original:FinalizationBudget,result:Mutex<Option<serde_json::Value>>,done:AtomicBool}
+struct FactoryPermit; // private linear capability, never reconstructed from an absence flag.
+struct FactoryCarrier {admission:Option<ManagedTaskAdmission>,retention:Option<ManagedTaskFactoryRetention>,
+    prepared:Option<PreparedManagedTask>,outcome:Option<Result<PreparedManagedTask>>,error:Option<anyhow::Error>,panic:Option<Box<dyn Any+Send>>,recorded:bool,ready:bool}
+struct TaskWork {refused_before_factory:Option<&'static str>,admission:Option<ManagedTaskAdmission>,factory_permit:Option<FactoryPermit>,factory:Option<Arc<Mutex<FactoryCarrier>>>,
+    factory_handle:Option<thread::JoinHandle<()>>,scope:Option<SeedTaskTicket>,started:Option<ManagedLaunchFence>,refusal:Option<ManagedTaskStartFailure>,
+    pending_helper:Option<crate::managed_app::PendingManagedTaskHelper>,enrollment:Option<EnrollmentTicket>,enrollment_submitted:bool,released:bool,cleanup:Option<(FinalizationBudget,Arc<AtomicBool>)>,joined:Option<JoinedManagedTask>}
+impl TaskWork {fn new()->Self {Self {refused_before_factory:None,admission:None,factory_permit:None,factory:None,factory_handle:None,scope:None,started:None,refusal:None,
+    pending_helper:None,enrollment:None,enrollment_submitted:false,released:false,cleanup:None,joined:None}}}
+struct JobCarrier {accepted:Option<AcceptedHostCommand>,original:FinalizationBudget,cancelled:Arc<AtomicBool>,
+    node:Option<Arc<ProjectNode>>,profile_inspection:Option<ManagedProfileInspection>,task:TaskWork,result:Option<serde_json::Value>,error:Option<anyhow::Error>,panic:Option<Box<dyn Any+Send>>,
+    worker:Option<OwnedWorkerJoin>,joined:Option<WorkerJoined>,charged:bool,settled:bool}
+struct Job {command:HostCommand,carrier:Mutex<JobCarrier>,step:AtomicU8,worker_owned:AtomicBool}
+struct CacheOutcome {result:Option<Result<()>>,panic:Option<Box<dyn Any+Send>>}
+struct ProjectWork {fresh:Option<Arc<Mutex<crate::managed_fresh_assigned::AssignedFreshProject>>>,fresh_engine:Option<crate::engine_host::EngineOwnership>,acquisition:Option<RetainedManagedAcquisition>,runtime_capture:Option<ManagedHostRuntime>,runtime:Option<Arc<ManagedHostRuntime>>,
+    source:Option<ManagedInitialSourceOwner>,ticket:Option<ProjectTicket>,seed:Option<SeedTicket>,cache:Option<SeedCacheTicket>,
+    cache_handle:Option<thread::JoinHandle<()>>,cache_outcome:Option<Arc<Mutex<CacheOutcome>>>,supervisor:Option<Arc<ManagedTaskLifetimeSupervisor>>,project:Option<Arc<ManagedTaskProject>>}
+struct ProjectNode {alias:String,selection:(HostBackend,String,String),phase:AtomicU8,controller:Arc<ManagedTaskController>,work:Mutex<ProjectWork>}
+struct Shared {config:Arc<HostIngressConfigOwner>,control:MachineControl,fresh:Mutex<Option<Arc<crate::managed_fresh_machine::ManagedFreshMachine>>>,fresh_error:Mutex<Option<anyhow::Error>>,transport:Mutex<Option<HostIngress>>,receipts:Mutex<Option<MachineReceipts>>,
+    jobs:Mutex<BTreeMap<String,Arc<Job>>>,projects:Mutex<BTreeMap<String,Arc<ProjectNode>>>,queue:Mutex<VecDeque<Arc<Job>>>,
+    active:AtomicUsize,fenced:AtomicBool,worker_owned:AtomicBool,panic:Mutex<Option<Box<dyn Any+Send>>>,send:SyncSender<AppEvent>}
+/// Keep this SAME object alongside ManagedMachineRuntime through quarantine.
+/// It retains every actual transport/config/worker/job/resource owner. No Drop
+/// cleanup, forgotten/global owner or join on App is introduced.
+pub(crate) struct ManagedMachineIngress {shared:Arc<Shared>,worker:Option<OwnedWorkerJoin>,receive:Receiver<AppEvent>,pending:Vec<AppEvent>,app_thread:std::thread::ThreadId}
+#[derive(Clone)]
+pub(crate) struct ManagedIngressControl {shared:Arc<Shared>,app_thread:std::thread::ThreadId}
+impl ManagedIngressControl {
+    pub(crate) fn take_joined_for_acceptance_retaining(&self,key:&str,out:&mut Option<crate::managed_checkpoint_accept::ManagedCheckpointAcceptance>,original:&FinalizationBudget)->Result<()> {
+        ensure!(self.app_thread!=std::thread::current().id(),"acceptance transfer requires off App");let job=self.shared.jobs.lock().unwrap_or_else(|p|p.into_inner()).get(key).cloned().context("original task command absent")?;
+        let mut held=job.carrier.lock().unwrap_or_else(|p|p.into_inner());ensure!(held.joined.is_some(),"original command callback/TLS not joined");let node=held.node.as_ref().context("actual project absent")?.clone();
+        let ticket=node.work.lock().unwrap_or_else(|p|p.into_inner()).ticket.as_ref().context("actual project ticket absent")?.clone();
+        self.shared.control.stage_joined_acceptance_retaining(out,&mut held.task.joined,&ticket,original)
+    }
+    pub(crate) fn offer_published_acceptance_retaining(&self,key:&str,original:&mut Option<crate::managed_checkpoint_accept::ManagedCheckpointAcceptance>,budget:&FinalizationBudget)->Result<()> {
+        ensure!(self.app_thread!=std::thread::current().id(),"Published source transfer requires off App");let job=self.shared.jobs.lock().unwrap_or_else(|p|p.into_inner()).get(key).cloned().context("original task command absent")?;
+        let held=job.carrier.lock().unwrap_or_else(|p|p.into_inner());held.task.scope.as_ref().context("original task source scope absent")?.offer_published_retaining(original,budget)
+    }
+    pub(crate) fn reconcile_completion_off_app(&self,key:&str)->Result<()> {
+        ensure!(self.app_thread!=std::thread::current().id(),"receipt reconciliation requires off App");
+        let job=self.shared.jobs.lock().unwrap_or_else(|p|p.into_inner()).get(key).cloned().context("original command carrier absent")?;
+        let mut held=job.carrier.lock().unwrap_or_else(|p|p.into_inner());ensure!(held.joined.is_some(),"original command worker/TLS not joined");
+        let mut store=self.shared.receipts.lock().unwrap_or_else(|p|p.into_inner());
+        store.as_mut().context("actual receipt store absent")?.reconcile_completion_retaining(held.accepted.as_mut().context("original accepted owner absent")?)?;
+        held.settled=true;Ok(())
+    }
+}
+impl ManagedMachineIngress {
+    pub(crate) fn capture(host:HostIngress,control:MachineControl)->Self {
+        let config=host.config().clone();let (send,receive)=mpsc::sync_channel(APP_EVENTS);
+        Self {shared:Arc::new(Shared {config,control,fresh:Mutex::new(None),fresh_error:Mutex::new(None),transport:Mutex::new(Some(host)),receipts:Mutex::new(None),jobs:Mutex::new(BTreeMap::new()),
+            projects:Mutex::new(BTreeMap::new()),queue:Mutex::new(VecDeque::with_capacity(APP_EVENTS)),active:AtomicUsize::new(0),
+            fenced:AtomicBool::new(false),worker_owned:AtomicBool::new(false),panic:Mutex::new(None),send}),worker:None,receive,pending:Vec::with_capacity(APP_EVENTS),app_thread:std::thread::current().id()}
+    }
+    pub(crate) fn start_worker_retaining(&mut self)->Result<()> {
+        ensure!(self.worker.is_none(),"original ingress worker already attempted");let shared=self.shared.clone();
+        let worker=thread::Builder::new().name("rudder-host-ingress".into()).spawn(move||{
+            while !shared.worker_owned.load(Ordering::Acquire){thread::yield_now();}
+            let result=catch_unwind(AssertUnwindSafe(||io_loop(&shared)));
+            if let Err(panic)=result {*shared.panic.lock().unwrap_or_else(|p|p.into_inner())=Some(panic);}
+            shared.fenced.store(true,Ordering::Release);
+            // This machine owner remains retained on failure. Accepted work and
+            // existing Apps/storage are independent; no legacy fallback/kill.
+            loop {poll_actual_joins(&shared);thread::sleep(Duration::from_millis(10));}
+        })?;
+        self.worker=Some(OwnedWorkerJoin::new(worker));self.shared.worker_owned.store(true,Ordering::Release);Ok(())
+    }
+    pub(crate) fn control(&self)->ManagedIngressControl {ManagedIngressControl{shared:self.shared.clone(),app_thread:self.app_thread}}
+    pub(crate) fn fence_new_requests(&self) {self.shared.fenced.store(true,Ordering::Release);}
+    pub(crate) fn poll_on_app(&mut self,runtime:&mut ManagedMachineRuntime)->Result<()> {
+        ensure!(self.app_thread==std::thread::current().id(),"managed ingress App thread changed");
+        while self.pending.len()<APP_EVENTS {let Ok(job)=self.receive.try_recv() else {break;};self.pending.push(job);}
+        let mut index=0;
+        while index<self.pending.len() {
+            let event=&self.pending[index];
+            let polled=match event {AppEvent::Work(job)=>poll_app_job(job,runtime),AppEvent::Observe(request)=>poll_app_observation(request,runtime)};
+            match polled {
+                Ok(true)=>{self.pending.swap_remove(index);},Ok(false)=>index+=1,
+                Err(error)=>{match &self.pending[index] {
+                    AppEvent::Work(job)=>{if let Ok(mut held)=job.carrier.try_lock(){held.error=Some(error);}job.step.store(STEP_REFUSED,Ordering::Release);},
+                    AppEvent::Observe(request)=>{request.done.store(true,Ordering::Release);}
+                }self.pending.swap_remove(index);}
+            }
+        }
+        // Only pure try-lock/typed adoption and App-only PTY paths here. Every
+        // Root enrollment request is executed by existing MachineControl worker.
+        let jobs:Vec<_>=match self.shared.jobs.try_lock(){Ok(jobs)=>jobs.values().cloned().collect(),Err(_)=>return Ok(())};
+        for job in jobs {poll_app_enrollment(&self.shared,&job,runtime)?;}Ok(())
+    }
+}
+fn io_loop(shared:&Arc<Shared>) {
+    let opened=(||->Result<FinalizationBudget>{let original=FinalizationBudget::begin(Duration::from_secs(30))?;
+        MachineReceipts::open_retaining(&mut shared.receipts.lock().unwrap_or_else(|p|p.into_inner()),shared.config.clone(),&original)?;Ok(original)})();
+    let Ok(_initialization)=opened else{shared.fenced.store(true,Ordering::Release);return;};
+    // DB FIRST. This original open ACK precedes any automatic LocalStore/CAS
+    // creation/import, preserving InitializeEmpty's actual provenance checks.
+    // This new probe has its OWN original30, before its one-slot queue. It
+    // cannot precede the genuine DB open ACK because its private child would
+    // otherwise violate InitializeEmpty's unknown-prior-data refusal.
+    let kernel_request=(||->Result<()>{let original=FinalizationBudget::begin(Duration::from_secs(30))?;
+        shared.control.request_kernel_startup_after_receipts(shared.config.clone(),original)})();
+    if let Err(error)=kernel_request{*shared.fresh_error.lock().unwrap_or_else(|p|p.into_inner())=Some(error);}
+    let mut fresh_attempted=false;
+    loop {
+        poll_actual_joins(shared);start_queued_work(shared);
+        if !fresh_attempted&&shared.control.kernel_startup_status()==crate::managed_machine_entry::KernelStartupStatus::Ready&&crate::managed_fresh_machine::fresh_config(&shared.config){
+            fresh_attempted=true;let initialized=(||->Result<()>{
+                // Distinct initial CAS/inert-preparation phase, captured once
+                // after actual kernel admission, before its queue/effects.
+                let original=FinalizationBudget::begin(Duration::from_secs(30))?;let cancel=AtomicBool::new(false);
+                let kernel=shared.control.kernel_startup_off_app(&original,&cancel)?;let registered=shared.control.ingress_registered_engine(&original)?;
+                let fresh=crate::managed_fresh_machine::ManagedFreshMachine::capture_with_kernel(shared.config.clone(),registered,kernel,original);
+                *shared.fresh.lock().unwrap_or_else(|p|p.into_inner())=Some(fresh.clone());fresh.start_retaining()
+            })();if let Err(error)=initialized{*shared.fresh_error.lock().unwrap_or_else(|p|p.into_inner())=Some(error);eprintln!("MANAGED_FRESH_SOURCE_RECOVERY");}
+        }
+        if let Some(fresh)=shared.fresh.lock().unwrap_or_else(|p|p.into_inner()).as_ref(){let _=fresh.poll_worker_join_off_app();}
+        if shared.control.ingress_worker_serving()&&!shared.fenced.load(Ordering::Acquire) {if receive_one(shared).is_err(){shared.fenced.store(true,Ordering::Release);}}
+        retain_joined_completions(shared);thread::sleep(Duration::from_millis(2));
+    }
+}
+fn receive_one(shared:&Arc<Shared>)->Result<()> {
+    let mut transport=shared.transport.lock().unwrap_or_else(|p|p.into_inner());let host=transport.as_mut().context("actual host transport absent")?;
+    let Some(command)=host.try_receive()? else {return Ok(());};let original=FinalizationBudget::from_constraint(&command.constraint)?;
+    let outcome:std::result::Result<serde_json::Value,HostReplyError>=if let HostOperation::ReceiptV1 {lookup_command_key}=&command.operation {
+        let actual_job={shared.jobs.lock().unwrap_or_else(|p|p.into_inner()).get(lookup_command_key).cloned()};
+        let observation=if let Some(job)=actual_job {
+            let request=Arc::new(ObservationRequest {job,original:original.clone(),result:Mutex::new(None),done:AtomicBool::new(false)});
+            shared.send.try_send(AppEvent::Observe(request.clone())).map_err(|_|anyhow::anyhow!("bounded App observation queue busy"))?;
+            loop {original.remaining()?;if request.done.load(Ordering::Acquire){break;}thread::sleep(original.phase_limit(Duration::from_millis(2))?);}
+            let value=request.result.lock().unwrap_or_else(|p|p.into_inner()).clone();value
+        } else {None};
+        let row=shared.receipts.lock().unwrap_or_else(|p|p.into_inner()).as_ref().unwrap().receipt(lookup_command_key,&original)?;
+        Ok(serde_json::json!({"receipt":row,"task_observation":observation}))
+    } else if validate_policy(&shared.config,&command).is_err() {Err(HostReplyError::Rejected)} else {
+        let mut receipts=shared.receipts.lock().unwrap_or_else(|p|p.into_inner());let receipts=receipts.as_mut().unwrap();
+        match receipts.duplicate_receipt(&command,&original)? {
+            DuplicateReceipt::Same(receipt)=>Ok(serde_json::json!({"receipt":receipt})),
+            DuplicateReceipt::Conflict=>Err(HostReplyError::Rejected),
+            DuplicateReceipt::Missing if shared.control.kernel_startup_status()==crate::managed_machine_entry::KernelStartupStatus::Pending=>Err(HostReplyError::Busy),
+            DuplicateReceipt::Missing if shared.control.kernel_startup_status()==crate::managed_machine_entry::KernelStartupStatus::Closed=>Err(HostReplyError::Rejected),
+            DuplicateReceipt::Missing if shared.jobs.lock().unwrap_or_else(|p|p.into_inner()).len()>=JOB_LIMIT||shared.queue.lock().unwrap_or_else(|p|p.into_inner()).len()>=APP_EVENTS=>Err(HostReplyError::Busy),
+            DuplicateReceipt::Missing=>{
+            shared.control.kernel_startup_off_app(&original,&AtomicBool::new(false))?;
+            // Pre-reserve and register the WHOLE actual owner cell BEFORE the
+            // acceptance transaction. Every insert/start/ACK error retains it.
+            let job=Arc::new(Job {command:command.clone(),step:AtomicU8::new(STEP_NONE),worker_owned:AtomicBool::new(false),carrier:Mutex::new(JobCarrier {
+                accepted:None,original:original.clone(),cancelled:Arc::new(AtomicBool::new(false)),node:None,profile_inspection:None,task:TaskWork::new(),result:None,error:None,panic:None,worker:None,joined:None,charged:false,settled:false})});
+            let mut jobs=shared.jobs.lock().unwrap_or_else(|p|p.into_inner());ensure!(!jobs.contains_key(&command.command_key),"original acceptance uncertain/missing; same carrier retained");
+            jobs.insert(command.command_key.clone(),job.clone());drop(jobs);
+            let mut held=job.carrier.lock().unwrap_or_else(|p|p.into_inner());
+            let receipt=receipts.accept_retaining(&mut held.accepted,&command,&original)?;
+            let (work,cancelled)=receipts.reserve_work_retaining(held.accepted.as_mut().context("new original acceptance owner absent")?)?;
+            held.original=work;held.cancelled=cancelled;drop(held);
+            shared.queue.lock().unwrap_or_else(|p|p.into_inner()).push_back(job);
+            Ok(serde_json::json!({"receipt":receipt}))
+            }
+        }
+    };
+    let (result,error)=match outcome {Ok(value)=>(Some(value),None),Err(error)=>(None,Some(error))};
+    let reply=HostReply {version:1,session_generation:command.session_generation.clone(),rpc_id:command.rpc_id.clone(),command_key:command.command_key.clone(),result,error};
+    loop {original.remaining()?;if host.try_reply(&reply)? {return Ok(());}thread::sleep(original.phase_limit(Duration::from_millis(2))?);}
+}
+fn validate_policy(config:&HostIngressConfigOwner,command:&HostCommand)->Result<()> {
+    config.assert_current()?;let (alias,backend,model,profile)=operation_selection(&command.operation)?;
+    ensure!(config.data().projects.iter().any(|p|p.alias==alias),"project outside actual host config");
+    ensure!(!matches!(backend,HostBackend::Claude),"Claude guest/profile qualification is not admitted");
+    ensure!(!model.trim().is_empty()&&!profile.trim().is_empty(),"explicit model/API profile required");
+    let artifact=std::path::Path::new("/opt/rudder-managed-runtime/v1").join(match backend {HostBackend::Codex=>"codex",HostBackend::Claude=>"claude"});
+    ensure!(config.data().runtime_manifest.entries.iter().any(|e|e.path==artifact),"selected backend is unsupported in declared image");Ok(())
+}
+fn operation_selection(op:&HostOperation)->Result<(&str,HostBackend,&str,&str)> {match op {
+    HostOperation::OpenPreparedProjectV1 {project_alias,backend,model,profile_id}|HostOperation::StartTaskV1 {project_alias,backend,model,profile_id,..}=>Ok((project_alias,*backend,model,profile_id)),_=>anyhow::bail!("query has no effect selection")}}
+fn selected(op:&HostOperation)->Result<ManagedTaskOptIn> {let (_,backend,_,profile)=operation_selection(op)?;
+    ManagedTaskOptIn::selected(profile.to_owned(),native_backend(backend),SelectedTaskCredentialKind::ApiKeyV1,ManagedTaskNetworkSelection::OrdinaryNetworkV1)}
+fn native_backend(backend:HostBackend)->Backend {match backend {HostBackend::Codex=>Backend::Codex,HostBackend::Claude=>Backend::Claude}}
+fn time(original:&FinalizationBudget,cancelled:&AtomicBool)->Result<()> {if cancelled.load(Ordering::Acquire){original.cancel();anyhow::bail!("original accepted preparation cancelled");}original.remaining()?;Ok(())}
+fn start_queued_work(shared:&Arc<Shared>) {
+    if shared.active.load(Ordering::Acquire)>=WORKERS{return;}
+    let Some(job)=shared.queue.lock().unwrap_or_else(|p|p.into_inner()).pop_front() else {return;};
+    let mut held=job.carrier.lock().unwrap_or_else(|p|p.into_inner());
+    if held.worker.is_some(){return;}shared.active.fetch_add(1,Ordering::AcqRel);held.charged=true;
+    let actual=job.clone();let service=shared.clone();
+    let started=thread::Builder::new().name("rudder-host-command".into()).spawn(move||{
+        while !actual.worker_owned.load(Ordering::Acquire){thread::yield_now();}
+        let result=catch_unwind(AssertUnwindSafe(||run_command(&service,&actual)));
+        let mut held=actual.carrier.lock().unwrap_or_else(|p|p.into_inner());
+        match result {Ok(Ok(()))=>{},Ok(Err(error))=>held.error=Some(error),Err(panic)=>held.panic=Some(panic)}
+    });
+    match started {Ok(worker)=>{held.worker=Some(OwnedWorkerJoin::new(worker));job.worker_owned.store(true,Ordering::Release);},Err(error)=>{
+        held.error=Some(error.into());held.charged=false;shared.active.fetch_sub(1,Ordering::AcqRel);
+    }}
+}
+fn poll_actual_joins(shared:&Arc<Shared>) {
+    let jobs:Vec<_>=shared.jobs.lock().unwrap_or_else(|p|p.into_inner()).values().cloned().collect();
+    for job in jobs {let mut held=match job.carrier.try_lock(){Ok(h)=>h,Err(_)=>continue};if held.joined.is_some(){continue;}
+        if let Some(worker)=&held.worker {let _=worker.start_join_observer();match worker.try_joined() {Ok(Some(joined))=>{
+            held.joined=Some(joined);if held.charged {held.charged=false;shared.active.fetch_sub(1,Ordering::AcqRel);}
+            // Pure original admission disposal only with actual job/TLS join AND
+            // its unspent factory capability. Attempted/unknown states remain.
+            if held.task.factory_permit.is_some(){drop(held.task.admission.take());}
+        },Ok(None)=>{},Err(error)=>{if held.error.is_none(){held.error=Some(error);}}}}
+    }
+}
+include!("managed_machine_ingress_work.rs");
+include!("managed_machine_ingress_app.rs");

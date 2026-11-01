@@ -191,7 +191,7 @@ async fn project_source_inner(
         let old = tracked.get(&path).unwrap_or(&absent);
         let prior = previous.and_then(|p| p.paths.get(path.as_internal_file_string()));
         let unchanged =
-            allow_file_reuse && prior.is_some_and(|p| p.source == node) && old.is_present();
+            allow_file_reuse && prior.is_some_and(|p| same_versioned_leaf(&p.source, &node)) && old.is_present();
         let (value, marker) = if unchanged {
             source.reused();
             (old.clone(), prior.and_then(|p| p.conflict_marker_len))
@@ -794,6 +794,18 @@ fn collect_source(
     Ok(())
 }
 
+// Git/jj retain content and one executable bit. materialize_source emits
+// canonical644/755, while the immutable candidate legitimately keeps600/700
+// or other permission bits. Compare the SAME versioned value, not raw POSIX
+// permission equality; the new record still stores the exact candidate node.
+fn same_versioned_leaf(previous:&EntryNode,current:&EntryNode)->bool {
+    match (previous,current) {
+        (EntryNode::File{object:a,logical_size:an,mode:am},EntryNode::File{object:b,logical_size:bn,mode:bm})=>
+            a==b&&an==bn&&(am&0o111!=0)==(bm&0o111!=0),
+        _=>previous==current,
+    }
+}
+
 async fn project_leaf(
     source: &MeteredSource,
     baseline: &MergedTree,
@@ -1094,3 +1106,7 @@ impl OutputDirectory {
         pages.build(0o755, entries)
     }
 }
+
+#[cfg(test)]
+#[path="projection_mode_reuse_tests.rs"]
+mod mode_reuse_tests;

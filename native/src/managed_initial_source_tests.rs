@@ -45,6 +45,12 @@ fn actual_fabric_owner_and_held_writer_produce_the_journal_accepted_initial_sour
  assert_eq!(prepared.baseline.commit,f.source.head);assert_eq!(prepared.verified.receipt().source,prepared.source_root);
  assert_eq!(f.source.store.retention().unwrap().pins.get(&prepared.runnable_pin),Some(&prepared.runnable_root));
  assert_eq!(f.source.store.retention().unwrap().pins.get(&prepared.seed_pin),Some(&prepared.seed_root));
+ {
+  let import=f.source.git_import.try_lock().unwrap();
+  let import=import.as_ref().expect("actual import carrier remains with its native source owner");
+  assert!(import.progress().acknowledged);
+  assert!(import.progress().index_installed);
+ }
  assert!(f.source.prepare(&f.environment,&f.settings,&budget(),&cancel).is_err());
 }
 #[test]
@@ -92,3 +98,6 @@ fn replaced_cas_or_managed_namespace_cannot_reconstruct_the_original_source_owne
   assert!(f.source.prepared.is_some());assert!(f.source.acknowledged);
  }
 }
+
+#[path="managed_initial_source_generation_tests.rs"]
+mod generation_lifetime;

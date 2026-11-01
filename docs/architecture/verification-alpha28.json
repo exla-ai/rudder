@@ -233,7 +233,7 @@
     }
   },
   "npm": {
-    "status": "primary verified; legacy pending",
+    "status": "both packages verified",
     "publicationCiSucceeded": true,
     "requestedDistTag": "next",
     "stableLatest": "3.9.13",
@@ -253,11 +253,22 @@
     "legacy": {
       "package": "@viraatdas/rudder",
       "version": "4.0.0-alpha.28",
-      "status": "registry HTTP404 after accepted CI publication",
-      "observedAt": "2026-11-01T05:32:14.841237Z"
+      "status": "passed fresh unprivileged installation and CLI/native/jj smoke checks",
+      "observedAt": "2026-11-01T06:57:33.763388Z",
+      "freshInstallVerified": true,
+      "allThreePlatformArtifactManifestsVerified": true,
+      "realPostinstallObserved": true,
+      "next": "4.0.0-alpha.28",
+      "latest": "3.9.13",
+      "privateFixtureRemoved": true,
+      "reportSha256": "e139332bd0b23ec54f2f69130c0af3ee6607a77c4ca1c1d95b2df07b2873c336"
     },
-    "freshInstallVerified": false,
-    "republishedOrRetagged": false
+    "freshInstallVerified": true,
+    "republishedOrRetagged": false,
+    "crossPackageVerification": {
+      "allThreePlatformManifestsIdentical": true,
+      "packageMetadataExceptNameIdentical": true
+    }
   },
   "notClaimed": [
     "default machine/project/task ingress",

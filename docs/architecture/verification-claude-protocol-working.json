@@ -1,0 +1,50 @@
+{
+  "formatVersion": 1,
+  "scope": "actual production ClaudeSdkProtocol with official CLI and synthetic loopback only",
+  "verifiedAt": "2026-11-01T05:59:05.653Z",
+  "reportSha256": "49ad84dbe2a11d1c509f1027339ba8d33c746a39d388053f0d4bcee11f502d00",
+  "officialCli": {
+    "version": "2.1.316",
+    "fingerprint": "31DDDE24DDFAB679F42D7BD2BAA929FF1A7ECACE",
+    "signatureVerified": true,
+    "manifestSha256": "ac9d8bb6a65febbccf9e65bde2e3e4298b8d6974e96f559fbf1d740891a747db",
+    "signatureSha256": "863fe4c0bb7e3e5fb547241bee0b267ee2ff890cbd75911a0748d199afbc8af2",
+    "binarySize": 328262000,
+    "binarySha256": "fd13c70000fec3f2116dfbcbb6121210b4a29328bf0e46210a59dd594a67d824",
+    "binaryMatchesSignedManifest": true
+  },
+  "protocolTsSha256": "ef8054a036095ec42c08903bfd4081506e93ece3043760a70ca3fc2f9fd7ecc4",
+  "protocolJsSha256": "7863b2653052e28e58ec1188a36c4a1d02b33d345fea50fc89f2dcdee669ed9c",
+  "fixtureSha256": "69670685c554632456313ea4d6f8a27848752d5406b4330053b8debd7f0b6abd",
+  "checks": {
+    "realToolFileEdit": true,
+    "fileSha256": "03c9d931a340dc536a0804e272f364e9497368d490a069fd3c7883b4561b63cb",
+    "wrongTurnRefused": true,
+    "emptyInterruptAckAloneNeverConfirms": true,
+    "exactInterruptedTerminalHeldAndReleased": true,
+    "actualPeerInstructionSubmitted": true,
+    "nonHumanPeerOriginPreserved": true,
+    "secondExactTurnInterrupt": true,
+    "loopbackRequests": 3,
+    "paidModelCalls": 0,
+    "childExitObserved": true,
+    "pipesClosed": true,
+    "childExitCode": 1,
+    "childSignal": null,
+    "forcedStop": false,
+    "focusedUnitAndBridgeTestsPassed": 29
+  },
+  "originalFailure": {
+    "kind": "real interoperability failure",
+    "description": "Synthetic peer emitted exact command_lifecycle started without replay or model output; adapter left acceptance uncertain. Actual started UUID is now accepted only under same session/active input, not queued/unknown/subagent events.",
+    "reportSha256": "4b864c77eb1a89e9bf7604aa3ba000e851858f0dc6789089eca194d0c7f8dbfa",
+    "fixtureForcedStop": true
+  },
+  "notQualified": [
+    "Rust native adapter and managed guest execution",
+    "real provider/authentication or model quality",
+    "default Claude runtime image adoption",
+    "full process-tree/kernel ECHILD proof",
+    "full v4 completion"
+  ]
+}

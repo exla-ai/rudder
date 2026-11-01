@@ -668,8 +668,11 @@ Mac and iOS jobs passed. The primary `@exla/rudder` package passed a fresh
 unprivileged installation with its real postinstall, CLI/native/jj commands and
 all three platform artifact manifests at 2026-11-01T05:25:01Z. Its `next` tag
 names alpha.28; stable `latest` remains 3.9.13. The legacy `@viraatdas/rudder`
-version still returned registry HTTP404 at 05:32:14Z after accepted publication;
-its installation remains pending. No republishing or retagging was attempted.
+package became available and passed the same fresh unprivileged installation,
+real postinstall, CLI/native/jj commands and all-platform verification at
+2026-11-01T06:57:33Z. Both packages have identical native manifests and package
+metadata except the package name. Both `next` tags name alpha.28; stable `latest`
+remains 3.9.13. No republishing or retagging was attempted.
 
 The default path remains legacy. Authenticated host ingress, a durable machine
 receipt store, fresh logical project/engine enrollment, immutable managed
@@ -711,6 +714,50 @@ registration and App integration and is not deployed. Fresh source initializatio
 by PostgreSQL admission/assignment, real backend execution and default migration
 remain open. S3 remains the content data plane; PostgreSQL holds fleet metadata
 and ownership, rather than introducing another blob store.
+
+The actual Claude 2.1.316 CLI also passed the production TypeScript protocol
+actor against a synthetic loopback provider after a real interoperability fix.
+Its official binary checksum and detached manifest signature were verified
+using [Anthropic's published signing-key procedure](https://code.claude.com/docs/en/setup#verify-the-manifest-signature).
+Synthetic peer commands emit an exact `command_lifecycle` started UUID before
+model output, without necessarily replaying a user message. The adapter now
+accepts that exact-session/active-input event; queued, unrelated, other-session
+and nested-tool events do not acknowledge the input.
+
+The passing run performed a real tool file edit, preserved typed non-human peer
+input, refused a wrong turn and confirmed two interruptions. Holding the actual
+terminal notification after its interrupt RPC receipt proved that the receipt
+alone does not confirm interruption. Three loopback requests made zero paid
+model calls; 29 focused unit/bridge tests passed. The actual CLI exited1 after
+its interrupted print session, with observed exit and both pipe closures and no
+forced stop. The original failing run and forced fixture cleanup remain retained.
+See [the scoped Claude record](verification-claude-protocol-working.json).
+This is host protocol evidence, not Rust adapter, managed guest, real provider
+authentication or full process-tree drain qualification. Claude is not yet in
+the qualified managed image.
+
+The actual PostgreSQL storage component also passed all 14 stages at
+2026-11-01T07:01:45Z on a disposable PostgreSQL 17.11 instance. Production
+factories used verified TLS/SCRAM and restricted roles. Real transactions
+exercised row-lock overlap across independent factories, lost COMMIT replies,
+RLS, authenticated registration, streamed CAS image/source/environment
+publication, service admission, fresh bootstrap and original owner acquisition.
+The conditional object service was in memory; Fly/Root enrollment was synthetic.
+This qualifies neither physical Root registration nor fleet HA/RPO or models.
+Original registry carriers remained held until the actual fixture child exited;
+PostgreSQL stopped and its cluster was removed, then the exact VM was destroyed
+and absence checked twice. The first attempt exposed a fixture waiter-chain
+assumption and missing failed-proof retention; both were corrected before the
+passing run. See [the scoped PostgreSQL record](verification-managed-storage-pg-working.json).
+
+The later renewal integration also passed the real-PG fixture at
+2026-11-01T07:09:01Z. A real FabricCas/S3-adapter publication stayed held for
+18.58 seconds while the same owner renewed ten times, advancing serial 1 to 10.
+The original lease expired while the current lease remained live. Historical
+request retries returned the original ACK, and a wrong owner was refused.
+All 15 stages and exact VM teardown with two absence checks passed. This uses
+synthetic Root/clock admission and the memory conditional object service;
+physical Native watchdog, real S3 and clock continuity remain unqualified.
 
 ## Current implementation track
 

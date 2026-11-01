@@ -409,22 +409,22 @@ the user confirmed that Rudder has no registered client ID yet. This external
 dependency does not block engine/cache implementation, and local/OSS CLI auth
 has a separate adapter and refresh/writeback qualification gate.
 
-## Managed task composition after alpha.23, unshipped
+## Managed task composition, alpha.27
 
 The reviewed task admission, preparation cache, checkpoint acceptance, exact Git
 import, internal seed export, selected-profile handoff and actual worker joins
-are now in the main working tree. Default startup still follows the legacy path.
+are included in alpha.27. Default startup still follows the legacy path.
 Main TypeScript checking, eight actual-pipe handoff cases and the targeted VCS
 seed/import suites pass. The latest full native binary regression suite passed
 1,234 tests with zero failures and 18 ignored. The combined managed task suite
 passed 178 focused tests. The full Linux engine and native library suites also
-passed 198 and 58 tests respectively. Full release qualification and enabled
-managed startup remain in progress.
+passed 198 and 58 tests respectively. Full release qualification passed;
+enabled managed startup remains a separate gate.
 
 The new initial-source producer preserves exact Git object/history preimages,
 sets and verifies the private Git HEAD, creates the jj integration bookmark and
 operation, materializes and verifies source bytes/modes, and pins runnable and
-VCS seed closures. Six tests pass, including original owner/budget loss, missing
+VCS seed closures. Seven tests pass, including original owner/budget loss, missing
 environment retention, and overlapping/aliased export refusal. These are source
 preparation facts; the caller still needs its held Engine/Journal authority.
 
@@ -502,15 +502,15 @@ unsupported-host refusal remain macOS checks. A separate broker cancellation
 test exposed an eight-connection saturation/drop edge. Its correction must
 preserve bounded connects and actual worker/TLS ownership before a fresh release
 candidate is qualified. Alpha.25 images and the stock worker smoke passed, but
-neither image was deployed. Production remains alpha.23.
+neither image was deployed. Production remained alpha.23 at that checkpoint.
 
 The correction reserves the original eight broker connection slots before
 accept, keeps each slot/socket through actual worker/TLS join, and uses bounded
 nonblocking ordinary/cancellation connects. It adds no capacity/time and does
 not reinterpret an uncertain disconnect as busy. All 19 broker Rust tests pass,
 including three actual socket/TLS/backlog regressions. The full Linux JS suite
-passes 822 tests with zero failures and 10 skipped. Alpha.26 must qualify these
-changes on the complete release matrix before publication.
+passes 822 tests with zero failures and 10 skipped. The following candidates
+qualify these changes on the complete release matrix before publication.
 
 Alpha.26 passed all three native builds and the macOS JS suite, then failed
 three `initial_source` integration tests. Its temporary directory used an
@@ -520,12 +520,60 @@ canonicalizes its root before deriving destinations; all seven cases pass both
 normally and with that aliased TMPDIR. The added case verifies that explicit
 private-directory and seed-parent aliases are still refused before any jj
 initialization or new pin. Production validation is unchanged. Alpha.26 remains
-unpublished and undeployed; alpha.27 requires fresh complete qualification.
+unpublished and undeployed. Alpha.27 passed fresh complete qualification.
+
+Alpha.27 revision `59d59ddb4045584908d4671a6756c37ce9ab4d44` and its immutable
+tag are pushed. All three native builds and the full macOS JS/native/jj/TUI
+qualification passed, as did the tag Release, Mac and iOS workflows. Fly release
+174 runs the exact control image and pins the stock alpha.27 worker. The seven
+UID1500 worker smoke commands passed; its VM was destroyed and absence checked
+twice. Canonical app/health/auth, ten running code hashes and database checks
+passed at 2026-11-01T02:49:47.939Z. The live home instance/image stayed unchanged.
+
+The legacy npm package passed an isolated fresh install, real postinstall,
+CLI/native/jj checks and all-platform artifact/revision checks at
+2026-11-01T03:01:16.405137Z. Its `next` tag names alpha.27; stable remains3.9.13.
+The primary `@exla/rudder` publish job also succeeded, but its explicit version
+still returns404 and its `next` tag remains alpha.23 at03:09:30Z. Primary fresh
+installation and alias equality are pending. No manual republish or retag was
+attempted. See the [partial npm and verified Cloud record](verification-alpha27.json).
 
 Task startup/cleanup composition, Root IPC/image bootstrap and the actual
 connected model run remain activation gates. The profile loader currently accepts explicit API-key profiles only.
 Hosted ChatGPT subscription registration and OAuth refresh/writeback remain
 separate dependencies. See the [working verification record](verification-managed-launch-working.json).
+
+## Machine entry and durable retirement after alpha.27, unshipped
+
+The checkout now contains the fixed native root launcher and FIRST managed
+entry, with a retained off-App client worker and typed project/seed/helper cells.
+Its five entry tests and seven bootstrap tests pass. The Docker packaging source
+installs the launcher and storage service with root ownership and mode0555;
+all38 existing native build/artifact checks pass. These changes are not in
+alpha.27 and do not enable the default managed project/task path.
+
+Three disposable probes preserved a real startup failure: mixed real/effective
+IDs with NNP became all-root IDs across exec while capabilities stayed zero.
+The correction enters fixed native code with only SETGID/SETUID/SETPCAP, requires
+actual safe dumpability policy0 and drops all IDs/bounding/capabilities before
+config or threads. Its fourth physical probe passed at03:01:14Z: two actual
+same-user ptrace/proc-FD refusals, original-main/single-thread checks, three
+actual child reaps/pipe EOF, exact VM destruction and two absence checks.
+This qualifies the privilege component, not the installed production launcher,
+machine worker readiness, project authority or model execution. Original failed
+source, ELF bytes and VM cleanup evidence remain retained.
+
+Two real Codex0.166.0 app-server runs also passed file tooling, active steering,
+interrupt ACK/terminal/HTTP-close checks and actual process reap/EOF with a
+synthetic loopback provider and zero paid calls. These qualify the CLI protocol,
+not Rudder's native managed adapter; that separate ignored integration is drafted.
+
+Private task forks retain Git alternates into the shared seed even after a task
+joins. Safe seed reuse therefore also requires original fork ownership and
+verified, durable localization of every object needed by retained jj history.
+Thread joins alone cannot release those mount references. Actual fork/localizer
+and seed-use/retirement integration, machine control ingress and installed
+production bootstrap qualification are the next concrete work.
 
 ## Current implementation track
 

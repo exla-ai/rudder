@@ -1,0 +1,246 @@
+{
+  "formatVersion": 1,
+  "version": "4.0.0-alpha.27",
+  "sourceKind": "verified immutable tag; primary npm availability pending",
+  "revision": "59d59ddb4045584908d4671a6756c37ce9ab4d44",
+  "tag": "v4.0.0-alpha.27",
+  "fullV4Complete": false,
+  "releaseCheckCi": {
+    "id": 41264563881,
+    "html_url": "https://github.com/exla-ai/rudder/actions/runs/41264563881",
+    "head_sha": "59d59ddb4045584908d4671a6756c37ce9ab4d44",
+    "head_branch": "release-check/4.0.0-alpha.27",
+    "status": "completed",
+    "conclusion": "success",
+    "created_at": "2026-11-01T02:17:26Z",
+    "updated_at": "2026-11-01T02:47:48Z"
+  },
+  "releasePublication": {
+    "formatVersion": 1,
+    "run": {
+      "id": 41266673900,
+      "url": "https://github.com/exla-ai/rudder/actions/runs/41266673900",
+      "revision": "59d59ddb4045584908d4671a6756c37ce9ab4d44",
+      "status": "completed",
+      "conclusion": "success",
+      "updatedAt": "2026-11-01T02:50:22Z"
+    },
+    "related": [
+      {
+        "id": 41266673907,
+        "name": "Mac",
+        "url": "https://github.com/exla-ai/rudder/actions/runs/41266673907",
+        "status": "completed",
+        "conclusion": "success",
+        "revision": "59d59ddb4045584908d4671a6756c37ce9ab4d44"
+      },
+      {
+        "id": 41266673900,
+        "name": "Release",
+        "url": "https://github.com/exla-ai/rudder/actions/runs/41266673900",
+        "status": "completed",
+        "conclusion": "success",
+        "revision": "59d59ddb4045584908d4671a6756c37ce9ab4d44"
+      },
+      {
+        "id": 41266673881,
+        "name": "iOS",
+        "url": "https://github.com/exla-ai/rudder/actions/runs/41266673881",
+        "status": "completed",
+        "conclusion": "success",
+        "revision": "59d59ddb4045584908d4671a6756c37ce9ab4d44"
+      }
+    ]
+  },
+  "checks": {
+    "allThreeNativeBuilds": "passed",
+    "fullMacJsNativeJjTuiQualification": "passed",
+    "macJavascript": {
+      "passed": 813,
+      "failed": 0,
+      "skipped": 19
+    },
+    "linuxJavascript": {
+      "passed": 822,
+      "failed": 0,
+      "skipped": 10
+    },
+    "brokerCancellationRust": {
+      "passed": 19,
+      "failed": 0,
+      "newActualSocketTlsBacklogCases": 3
+    },
+    "initialSourceCanonicalPaths": {
+      "passed": 7,
+      "failed": 0,
+      "sameSevenAlsoPassedWithSymlinkedTmpdir": true
+    }
+  },
+  "physicalQualification": {
+    "stockWorker": {
+      "qualified": true,
+      "commands": 7,
+      "providerCalls": 17,
+      "cleanupVerified": true,
+      "twoIndependentAbsenceChecks": true,
+      "imageDigest": "sha256:e882807cf6d48c7c4aed76a7a3429e53277e159173613e49cff496629db0ee35",
+      "scope": "actual packaged executables as UID/GID1500, all five capabilities zero, NNP1; no model/profile/Root service startup"
+    }
+  },
+  "delivery": {
+    "kind": "web",
+    "status": "deployed",
+    "target": "Rudder Cloud",
+    "provider": "Fly.io",
+    "url": "https://rudder.exla.ai/app",
+    "revision": "59d59ddb4045584908d4671a6756c37ce9ab4d44",
+    "version": "4.0.0-alpha.27",
+    "release": 174,
+    "deploymentId": "RGb7R06QQkobJSYRBwj5VPK1",
+    "verifiedAt": "2026-11-01T02:49:47.939Z",
+    "controlImage": {
+      "id": "8911d61a434978",
+      "instance": "01M6AG50QPWWT0FES0191EY260",
+      "state": "started",
+      "image": "registry.fly.io/rudder-cloud-control:4.0.0-alpha.27",
+      "digest": "sha256:40d19f85deba2b34bec14fa17e5407302b320433538eb878c516078345f77cfb",
+      "revision": "59d59ddb4045584908d4671a6756c37ce9ab4d44"
+    },
+    "workerImage": {
+      "image": "registry.fly.io/rudder-workers-exla:4.0.0-alpha.27",
+      "digest": "sha256:e882807cf6d48c7c4aed76a7a3429e53277e159173613e49cff496629db0ee35"
+    },
+    "checks": [
+      {
+        "url": "https://rudder.exla.ai/app",
+        "status": 200,
+        "expected": 200,
+        "finalUrl": "https://rudder-cloud-control.fly.dev/app",
+        "ok": true
+      },
+      {
+        "url": "https://rudder-cloud-control.fly.dev/health",
+        "status": 200,
+        "expected": 200,
+        "finalUrl": "https://rudder-cloud-control.fly.dev/health",
+        "ok": true,
+        "health": {
+          "ok": true,
+          "s3": true,
+          "fabric": true,
+          "fly": true,
+          "byoVm": true,
+          "state": true,
+          "secrets": true,
+          "auth": {
+            "google": true,
+            "github": true,
+            "githubDevice": true
+          }
+        }
+      },
+      {
+        "url": "https://rudder-cloud-control.fly.dev/api/app/state",
+        "status": 401,
+        "expected": 401,
+        "finalUrl": "https://rudder-cloud-control.fly.dev/api/app/state",
+        "ok": true
+      },
+      {
+        "url": "https://rudder-cloud-control.fly.dev/api/rudder/fabric/roots/unauthenticated-alpha27-smoke",
+        "status": 401,
+        "expected": 401,
+        "finalUrl": "https://rudder-cloud-control.fly.dev/api/rudder/fabric/roots/unauthenticated-alpha27-smoke",
+        "ok": true
+      }
+    ],
+    "database": {
+      "integrity": "ok",
+      "counts": {
+        "workspaces": 52,
+        "sails": 14
+      },
+      "homeRetained": true,
+      "serverSha256": "8235e1b7271ac450491472a1e5adf195f50a80789f59c44861a473818fdfbd60"
+    },
+    "actualRuntimeCodeSha256": {
+      "src/server.ts": "8235e1b7271ac450491472a1e5adf195f50a80789f59c44861a473818fdfbd60",
+      "src/fabric-cas.ts": "4c158d2746a4c6511c7f9262db386ef81a2368df42c361eddbce01138e47b7ca",
+      "src/fabric-partial-checkpoint.ts": "b5f5e6ce35eba3af10034c5caa7214fe6cddb47c59ee24f840d30ee2f33d03f0",
+      "src/home-control-sessions.ts": "99887ab5965689668818ea908b0aac979983b68c06311cba7ae737f5477ef2f3",
+      "src/fly-custody.ts": "38a16b0d55bbc9e888dae5cab842463ea95b53b8ecac48d33af218382ae65a07",
+      "dist/server.js": "01cb5ccc3b71949a2060cbcbead8ef67af21c8b89ebcaec76c77315ef6094a74",
+      "dist/fabric-cas.js": "98e7bc5d7f60ed9d05b2b908a19ed39659d993e26dc9eac01cb5e7980945457a",
+      "dist/fabric-partial-checkpoint.js": "224c151b296315966304751cf0c51b6d6d2e81e5f8037d2f208246775fe8d5dd",
+      "dist/home-control-sessions.js": "c27b91b1532bdbbb6ff734277a31633b6565c81a7db0a8343b041abf5795447f",
+      "dist/fly-custody.js": "7ed78b899804fbf964570a28ad666264b71df82591a57d384636bbce4c27c30d"
+    },
+    "inactiveAuthority": {
+      "inactiveStats": {
+        "active": 0,
+        "queued": 0
+      },
+      "pgVersion": "8.23.1",
+      "indexSha256": "ac25e862b4d1debcf8b0d80dbdb1af1edcc38987bb1d4633ed4102352373e8ef"
+    },
+    "activeHome": {
+      "id": "8edd225a7d0378",
+      "instance": "01M670MG4A8E0DWE9GA1C0PQ92",
+      "state": "started",
+      "image": "registry.fly.io/rudder-workers-exla:4.0.0-alpha.7",
+      "digest": "sha256:404f46396aca77324d9b53c55d2824a5401af56ba5362d0bdae67e16108fc245",
+      "unchangedAcrossDeploy": true
+    }
+  },
+  "npm": {
+    "status": "partial",
+    "publicationCiSucceeded": true,
+    "stableLatest": "3.9.13",
+    "primary": {
+      "package": "@exla/rudder",
+      "version": "4.0.0-alpha.27",
+      "status": "pending",
+      "reason": "explicit_version_not_published",
+      "observedAt": "2026-11-01T03:09:30.399522Z",
+      "next": "4.0.0-alpha.23",
+      "freshInstall": "not run because explicit registry version is unavailable",
+      "receiptSha256": "5862fa2515b1b2485b4d71b02481e582e5fdc4b497749609f078deb3f410ca4f"
+    },
+    "legacy": {
+      "package": "@viraatdas/rudder",
+      "version": "4.0.0-alpha.27",
+      "status": "verified",
+      "observedAt": "2026-11-01T03:01:16.405137Z",
+      "registry": {
+        "git_head": "59d59ddb4045584908d4671a6756c37ce9ab4d44",
+        "git_head_match": true,
+        "integrity": "sha512-Cdh07I7vhIymqikm+eXeKVu5Y78hWQEXzMmGuOdrFt7FvIe1kW8qMhvJ6Bo25epBL+ahtrUigjn5J+IHJxDD9g==",
+        "provenance_metadata_present": true,
+        "repository": "git+https://github.com/exla-ai/rudder.git",
+        "shasum": "56db023b4e3d0ece0f59614f544bdf9b09066b83",
+        "signature_verification": "not_performed",
+        "unpacked_size": 141637014
+      },
+      "distTags": {
+        "latest": "3.9.13",
+        "next": "4.0.0-alpha.27"
+      },
+      "realUnprivilegedPostinstall": true,
+      "cliNativeAndJjChecks": "passed",
+      "allThreePlatformManifests": true,
+      "privateFixtureRemoved": true,
+      "receiptSha256": "2d1d7225f1603c2741456358719413ef84419d7ca3320123530a1058bcbec5b0"
+    },
+    "aliasEquality": "pending primary availability; no manual republish or retag"
+  },
+  "remainingGates": [
+    "Primary npm version/dist-tag availability, fresh installation and alias equality",
+    "Normal managed machine/project/task control ingress and default activation",
+    "Actual production-native/root-launcher/client bootstrap and retirement",
+    "Durable private Git fork localization before shared seed capacity reuse",
+    "Connected Codex and Claude managed execution, peer controls and recovery",
+    "Distributed build-cache reuse through the normal supported build path",
+    "Fleet authority, migration and physical fencing of incompatible clients",
+    "Native macOS, laptop/phone previews and representative scale/recovery qualification"
+  ]
+}

@@ -8,9 +8,9 @@ here is not deployment proof; record exact checks and delivery identities below.
 ## Current state, 2026-11-01
 
 The shipped Cloud release is alpha.33, Fly release176, product revision
-`50771f8964f4ad2e04ee9533be0d9db56b64da7b`. The primary npm `next` package
-passed fresh installation and executable checks. npm accepted the legacy alias,
-which remains in registry processing. [Release evidence](verification-alpha33.json)
+`50771f8964f4ad2e04ee9533be0d9db56b64da7b`. Both npm `next` packages
+passed fresh installation, executable, revision and cross-platform manifest
+checks. Their package metadata is identical apart from the package name. [Release evidence](verification-alpha33.json)
 records those distinct facts and the unchanged original live home. The full v4
 rewrite remains incomplete. Entries below describe earlier checkpoints and
 unreleased work; their older version numbers are historical.

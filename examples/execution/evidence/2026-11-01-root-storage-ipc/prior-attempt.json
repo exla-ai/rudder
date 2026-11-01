@@ -1,0 +1,10 @@
+{
+  "nonce": "70aa1f55-16fc-4d68-afbd-8de83660c184",
+  "qualified": false,
+  "failure": "CONTROLLER_CALL_BOUND",
+  "providerCalls": 25,
+  "ownedDestruction": true,
+  "cleanupVerified": true,
+  "independentAbsence": true,
+  "utc": "2026-11-01T00:45:46.386Z"
+}

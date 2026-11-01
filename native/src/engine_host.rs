@@ -209,7 +209,7 @@ impl EngineSourceLease {
     /// Off-App existing writer, anchored to the actual owner's held database.
     /// Opening it creates neither a project nor a scheduler or source grant.
     #[cfg(target_os = "linux")]
-    fn open_source_writer(&self) -> Result<Journal> {
+    pub(crate) fn open_source_writer(&self) -> Result<Journal> {
         self.check_current()?;
         let journal = self.database.open_existing_writer(Duration::from_millis(100))?;
         self.check_journal(&journal)?;

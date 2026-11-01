@@ -1,0 +1,7 @@
+{
+  "formatVersion": 1,
+  "artifactSealSha256": "d878ec510e75911f46b44050e95810efe657afebc05eedbcbd764a0f1507e08e",
+  "correctedOriginDescription": "Root IPC libtest compiled by gate82; complete Main source frozen before native gate83; unchanged library inputs revalidated from Cargo cache by gate84",
+  "sourceFrozenAt": "2026-11-01T00:42:07.380706+00:00",
+  "noImageOrElfChanged": true
+}

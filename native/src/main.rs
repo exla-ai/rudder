@@ -76,8 +76,20 @@ mod source_connect_authority;
 mod source_shutdown_join;
 #[cfg(target_os = "linux")]
 mod source_controller;
+#[cfg(target_os = "linux")]
+mod managed_task_launch;
+#[cfg(target_os = "linux")]
+mod managed_initial_source;
+#[cfg(target_os = "linux")]
+mod managed_profile_loader;
+#[cfg(target_os = "linux")]
+mod managed_preparation_cache;
+#[cfg(target_os = "linux")]
+mod managed_checkpoint_accept;
 mod managed_launch;
 mod managed_app;
+#[cfg(target_os = "linux")]
+mod managed_seed_enrollment;
 mod managed_source_app;
 mod managed_store;
 mod board_access;
@@ -1944,6 +1956,7 @@ struct App {
     /// Machine notices are projected into independent attached views only when
     /// this App has no local terminal surface.
     engine_headless: bool,
+    managed_project_mode: bool,
     machine_notice: Option<(u64, String)>,
     machine_notice_cursor: u64,
     cloud_prompt: Option<CloudLaunchPrompt>,
@@ -2809,6 +2822,16 @@ struct InitialSelection {
     effort: Option<EffortLevel>,
 }
 
+/// Initial display DATA supplied by the managed bootstrap. It grants no task,
+/// owner or storage authority and reads no legacy state or implicit selection.
+struct ManagedAppInitialState {
+    repository: PathBuf,
+    selection: InitialSelection,
+    branch: String,
+    session_started_iso: String,
+}
+
+
 /// One request to fork an existing CLI conversation into a fresh worker row.
 struct ForkedConversation {
     backend: Backend,
@@ -3106,33 +3129,45 @@ impl App {
             .unwrap_or_else(|| self.active_plan_index())
     }
 
-    fn new() -> Self {
+    fn new() -> Self { Self::new_with_startup(None) }
+
+    /// Called only after managed bootstrap; DATA construction creates no
+    /// execution authority. The actual project/launch owners stay off App.
+    fn new_managed(initial: ManagedAppInitialState) -> Self {
+        Self::new_with_startup(Some(initial))
+    }
+
+    fn new_with_startup(initial: Option<ManagedAppInitialState>) -> Self {
+        let managed = initial.is_some();
         // In tests, default to a UNIQUE temp dir, never the real repo: App methods write
         // real files (DECISIONS.md, .rudder/, RUDDER.md, graph.json) keyed on cwd, so a test
         // that forgets to override app.cwd would otherwise pollute the working repo (this is
         // exactly how the repo's DECISIONS.md accumulated dozens of stray depth-cap entries).
         // The per-instance counter keeps tests from sharing a temp file and cross-contaminating.
-        #[cfg(test)]
-        let cwd = test_default_cwd();
-        #[cfg(not(test))]
-        let cwd = std::env::current_dir()
-            .map(|path| dashboard_root(&path))
-            .unwrap_or_else(|_| PathBuf::from("."));
-        let selection = initial_selection();
+        let legacy_cwd = || {
+            #[cfg(test)]
+            { test_default_cwd() }
+            #[cfg(not(test))]
+            { std::env::current_dir().map(|path| dashboard_root(&path)).unwrap_or_else(|_| PathBuf::from(".")) }
+        };
+        let (cwd, selection, managed_branch, managed_session) = match initial {
+            Some(initial) => (initial.repository, initial.selection, Some(initial.branch), Some(initial.session_started_iso)),
+            None => (legacy_cwd(), initial_selection(), None, None),
+        };
         // Read the per-repo cloud-mode flag BEFORE the struct literal takes
         // ownership of `cwd`. Tests pin it off (they share repo dirs).
-        let cloud_mode = if cfg!(test) {
+        let cloud_mode = if managed || cfg!(test) {
             false
         } else {
             read_cloud_mode(&cwd)
         };
         let bg_notices = mpsc::channel::<String>();
-        let dashboard_color_mode = if cfg!(test) {
+        let dashboard_color_mode = if managed || cfg!(test) {
             ColorMode::Terminal
         } else {
             config::initial_color_mode()
         };
-        set_color_mode(dashboard_color_mode);
+        if !managed { set_color_mode(dashboard_color_mode); }
         // The fleet and the live plans come back TOGETHER (see `restore_persisted_state`):
         // which planner rows survive depends on which plans returned, and which nodes a
         // plan still owes depends on which runs returned. It lives outside this
@@ -3141,7 +3176,7 @@ impl App {
         // so this arm must stay short-circuited, and that is precisely the blind spot
         // that let two concurrent plans collapse into one across a restart with a green
         // suite behind it.
-        let (agents, restored_plans) = if cfg!(test) {
+        let (agents, restored_plans) = if managed || cfg!(test) {
             (Vec::new(), PlanQueueFile::default().into_plans())
         } else {
             restore_persisted_state(&cwd)
@@ -3149,25 +3184,25 @@ impl App {
         // Restore the ingested-run ledger so a worker handled before the last exit is not
         // re-ingested (or re-summarized) when its Done record reloads. Empty in tests.
         // Loaded before `cwd` moves into the struct below.
-        let hardening_backlog = if cfg!(test) {
+        let hardening_backlog = if managed || cfg!(test) {
             Vec::new()
         } else {
             load_hardening_backlog(cwd.as_path())
         };
-        let followups_ingested = if cfg!(test) {
+        let followups_ingested = if managed || cfg!(test) {
             HashSet::new()
         } else {
             load_ingested_runs(&cwd)
         };
         // Same short-circuit as the restores above: every App::new() in the
         // suite would otherwise read the developer's own .rudder/.
-        let restored_task_history = if cfg!(test) {
+        let restored_task_history = if managed || cfg!(test) {
             Vec::new()
         } else {
             load_task_history(&cwd)
         };
         // Restore the auto-expansion depth map so MAX_FOLLOWUP_DEPTH survives a restart.
-        let followup_gen = if cfg!(test) {
+        let followup_gen = if managed || cfg!(test) {
             HashMap::new()
         } else {
             load_followup_gen(&cwd)
@@ -3176,19 +3211,19 @@ impl App {
         // /main from the task pane. Main records render in their own section
         // instead of being mixed into ordinary workspace agents.
         let (task_input, task_cursor) = (String::new(), 0);
-        let pending_migration_resumes = if cfg!(test) {
+        let pending_migration_resumes = if managed || cfg!(test) {
             Vec::new()
         } else {
             read_migration_manifest(&cwd)
         };
-        let cloud = read_cloud_summary();
-        let session_started_iso = load_or_init_session_started(&cwd);
+        let cloud = if managed { CloudSummary { connected: false, runtime: None } } else { read_cloud_summary() };
+        let session_started_iso = managed_session.unwrap_or_else(|| load_or_init_session_started(&cwd));
         let (task_summary_tx, task_summary_rx) = mpsc::channel();
         let (completion_summary_tx, completion_summary_rx) = mpsc::channel();
         let (final_gate_tx, final_gate_rx) = mpsc::channel();
-        let branch = current_branch_at(&cwd);
-        let _ = signals::cleanup_old_signals(Duration::from_secs(7 * 24 * 60 * 60));
-        let perf = PerfLogger::new();
+        let branch = if managed { managed_branch } else { current_branch_at(&cwd) };
+        if !managed { let _ = signals::cleanup_old_signals(Duration::from_secs(7 * 24 * 60 * 60)); }
+        let perf = if managed { PerfLogger::disabled() } else { PerfLogger::new() };
         let perf_stats = PerfStats::new(perf.enabled());
         let (gam_link_tx, gam_link_rx) = std::sync::mpsc::channel();
         let cloud_deletes = mpsc::channel();
@@ -3201,7 +3236,7 @@ impl App {
             gam_signals: HashMap::new(),
             gam_link_tx,
             gam_link_rx,
-            gam_links_enabled: !cfg!(test)
+            gam_links_enabled: !managed && !cfg!(test)
                 && std::env::var("RUDDER_GAM_LINK").map_or(true, |value| value != "0"),
             focus: FocusPane::Task,
             nav_mode: false,
@@ -3210,7 +3245,7 @@ impl App {
             gam_transcript_visible: true,
             // Tests never read the user's own pair (it would change what the
             // picker offers from one machine to the next).
-            gam_last: if cfg!(test) && std::env::var_os("RUDDER_HOME").is_none() {
+            gam_last: if managed || (cfg!(test) && std::env::var_os("RUDDER_HOME").is_none()) {
                 None
             } else {
                 load_rudder_config()
@@ -3239,7 +3274,7 @@ impl App {
             plans: restored_plans,
             // OFF by default: the automatic per-node review is disabled pending a
             // better design. Opt in explicitly with RUDDER_NODE_REVIEW=1.
-            node_review_enabled: std::env::var("RUDDER_NODE_REVIEW")
+            node_review_enabled: !managed && std::env::var("RUDDER_NODE_REVIEW")
                 .map(|value| {
                     let value = value.trim();
                     value == "1" || value.eq_ignore_ascii_case("true")
@@ -3247,12 +3282,12 @@ impl App {
                 .unwrap_or(false),
             final_gate_tx,
             final_gate_rx,
-            fast_mode: if cfg!(test) {
+            fast_mode: if managed || cfg!(test) {
                 false
             } else {
                 config::fast_mode_enabled()
             },
-            board_url: if cfg!(test) {
+            board_url: if managed || cfg!(test) {
                 None
             } else {
                 // Always show a web-UI address in the TUI. Prefer the URL the Node
@@ -3268,7 +3303,7 @@ impl App {
                 )
             },
             board_open_rx: None,
-            interactive_orchestrator: interactive_orchestrator(),
+            interactive_orchestrator: !managed && interactive_orchestrator(),
             scheduler_tick: 0,
             spinner_frame: 0,
             last_spinner_advance: Instant::now(),
@@ -3278,7 +3313,8 @@ impl App {
             model: selection.model,
             effort: selection.effort,
             notice: None,
-            engine_headless: false,
+            engine_headless: managed,
+            managed_project_mode: managed,
             machine_notice: None,
             machine_notice_cursor: 0,
             cloud_prompt: None,
@@ -3374,12 +3410,12 @@ impl App {
             completion_summary_rx,
             completion_summary_pending: HashSet::new(),
             last_user_activity: Instant::now(),
-            mouse_debug: env::var(MOUSE_DEBUG_ENV).is_ok_and(|value| value != "0"),
+            mouse_debug: !managed && env::var(MOUSE_DEBUG_ENV).is_ok_and(|value| value != "0"),
             mouse_debug_last: None,
             pending_migration_resumes,
             migration_resumes_attempted: false,
             focus_resume_attempted: HashSet::new(),
-            home_runtime: home_runtime_from_env(),
+            home_runtime: !managed && home_runtime_from_env(),
             home_boot_reopen_done: false,
             boot_orphaned_ids: HashSet::new(),
             rename_input: None,
@@ -20544,7 +20580,31 @@ What to do\n\
         );
     }
 
+    /// Managed protocols own status/checkpoint/helper lifetime. This bounded
+    /// pane drain does not run legacy discovery, hooks, scheduling or Git work.
+    fn poll_managed_panes(&mut self) {
+        let now = Instant::now();
+        let selected = self.selected_agent;
+        let mut background: Vec<_> = self.agents.iter().enumerate().filter_map(|(index, run)| {
+            let pane = run.terminal.as_ref()?;
+            (index != selected && pane.has_pending_output()
+                && run.last_drain_at.is_none_or(|at| now.duration_since(at) >= Duration::from_millis(500)))
+                .then_some((index, run.last_drain_at))
+        }).collect();
+        background.sort_by_key(|(_, at)| *at);
+        let indices = std::iter::once(selected).chain(background.into_iter().take(2).map(|(index,_)|index));
+        for index in indices {
+            let Some(run) = self.agents.get_mut(index) else { continue; };
+            let Some(pane) = run.terminal.as_mut() else { continue; };
+            run.last_drain_at = Some(now);
+            if !pane.drain_output().is_empty() { run.last_output_at = now; self.dirty = true; }
+            let _ = pane.take_notifications();
+        }
+        self.advance_spinner_if_due(now);
+    }
+
     fn poll_agents(&mut self) {
+        if self.managed_project_mode { self.poll_managed_panes(); return; }
         let poll_started = Instant::now();
         self.poll_board_open();
         // Background work (workspace removal) reports its outcome here.
@@ -23044,3 +23104,7 @@ pub(crate) fn remote_key_bytes(key: &str) -> Option<&'static [u8]> {
         _ => return None,
     })
 }
+
+#[cfg(all(test, target_os = "linux"))]
+#[path = "managed_app_startup_tests.rs"]
+mod managed_app_startup_tests;

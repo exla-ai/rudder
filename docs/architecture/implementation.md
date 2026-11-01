@@ -1,6 +1,6 @@
 # Rudder v4 implementation and restart record
 
-Updated: 2026-10-31. Read with [the plan](../../PLAN.md),
+Updated: 2026-11-01. Read with [the plan](../../PLAN.md),
 [research](research.md), [gates](experiments.md) and repository `AGENTS.md`.
 This file preserves the working agreement across context compaction. An entry
 here is not deployment proof; record exact checks and delivery identities below.
@@ -408,6 +408,96 @@ separate [Sign in with ChatGPT integration](https://developers.openai.com/siwc);
 the user confirmed that Rudder has no registered client ID yet. This external
 dependency does not block engine/cache implementation, and local/OSS CLI auth
 has a separate adapter and refresh/writeback qualification gate.
+
+## Managed task composition after alpha.23, unshipped
+
+The reviewed task admission, preparation cache, checkpoint acceptance, exact Git
+import, internal seed export, selected-profile handoff and actual worker joins
+are now in the main working tree. Default startup still follows the legacy path.
+Main TypeScript checking, eight actual-pipe handoff cases and the targeted VCS
+seed/import suites pass. The latest full native binary regression suite passed
+1,234 tests with zero failures and 18 ignored. The combined managed task suite
+passed 178 focused tests. The full Linux engine and native library suites also
+passed 198 and 58 tests respectively. Full release qualification and enabled
+managed startup remain in progress.
+
+The new initial-source producer preserves exact Git object/history preimages,
+sets and verifies the private Git HEAD, creates the jj integration bookmark and
+operation, materializes and verifies source bytes/modes, and pins runnable and
+VCS seed closures. Six tests pass, including original owner/budget loss, missing
+environment retention, and overlapping/aliased export refusal. These are source
+preparation facts; the caller still needs its held Engine/Journal authority.
+
+The frozen root seed producer passed on a disposable Fly VM at 23:17:50 UTC:
+Root and UID1500 EROFS, two independent metadata forks, actual child reap,
+live-reader/EBUSY cleanup refusal, normal unmount, owned pin removal and exact VM
+destruction with two absence checks. That fixture uses synthetic valid history
+identities. A second exact-source disposable Fly run passed at 23:44:30 UTC with
+real accepted Git/jj history: two UID1500 forks reopen the same baseline and
+operation, only the first writes a new private commit/operation, and the second
+stays unchanged and cannot read that new object. Root/UID1500 EROFS, actual reap,
+EBUSY retention, normal unmount and all fixture pins/VM cleanup also passed. The
+run does not provide Engine/Journal acceptance, production IPC, Spec3 or model
+execution evidence. Its frozen source/ELF/image identities are recorded below.
+
+The Native initial-source owner now captures the actual Fabric source lease,
+held Journal writer, managed namespace and current accepted head. It retains
+CAS/project/integration directory descriptors and rejects replacement or owner
+retirement. Six real Git/Fabric tests pass, including unknown final ACK retaining
+the actual workspace/pins without readback promotion. Initial capability issuance
+and active peer/expiry refresh now share the retained projection owner. Unknown
+publication or retirement retains both grants and refuses a third issuance.
+Those cases pass locally; actual guest refresh still needs physical qualification.
+
+[Real-history Fly evidence](../../examples/execution/evidence/2026-10-31-real-history-seed/README.md)
+binds the exact working source, libtest ELF, derived image, history/kernel receipt
+and owned VM cleanup. It is component qualification, not a new product release.
+
+The explicit managed App constructor now takes supplied display/selection DATA
+without reading legacy tasks, config, session files or implicit checkout state.
+Its pane loop drains selected/bounded background PTY output without legacy
+hooks, discovery, scheduling, filesystem housekeeping or process-exit completion.
+Three Linux checks pass, including actual inotify watches and real PTY output.
+The normal run loop still uses the legacy constructor/guard; this is not enabled
+managed startup or backend lifecycle proof.
+
+The managed task lifetime supervisor now retains actual preparation, broker,
+control, runtime and TLS joins. Worker admission remains held through actual
+join, and transferring a completed task to acceptance keeps the supervisor
+shutdown hold. The checkpoint acceptor can own that genuine joined capsule and
+requires its exact durable Published intent before task cleanup. The retaining
+PTY path, closed helper start barrier and acceptance bridge compile together.
+The borrowed enrollment hook, genuine Root ACK adapter and shared immutable
+template Arc are integrated. The combined 178 managed checks, seven PTY checks
+and seven activation checks pass.
+Root storage IPC passed 11 transport/codec/cancellation tests;
+five actual helper pidfd tests also pass. These do not qualify cross-process
+Root bootstrap, the closed helper start gate, typed actor-drain retirement or
+normal storage cleanup. No connected model run is claimed. The Cloud
+Docker build now includes the fixed root storage executable with root ownership
+and mode 0555. Its existing native build/package suite passes all 38 checks; the
+updated image itself has not been built or deployed.
+
+The separate Root IPC component passed on a disposable Fly VM at 00:50:37 UTC
+on 2026-11-01. Actual Root service/UID1500 engine bootstrap authenticated original
+pidfds, proc-exe witnesses and SCM credentials. Verified transfer published an
+independent Root CAS/seed pin and one read-only mount. Two actual enrolled helper
+children reopened real history, made isolated private forks and successfully
+reaped with pipe EOF; Root observed the first exit without releasing its sibling.
+A cancelled second preparation retained original owners. The successful run used
+17 provider calls, destroyed only its exact-owned VM and verified absence twice.
+The first attempt's polling-limit failure and successful VM cleanup are retained.
+
+This does not qualify the production launcher, managed App activation, Spec3,
+models or accepted Journal authority. Normal retirement remains blocked: actual
+service/engine storage owners remained alive until VM teardown. The
+[Root IPC evidence](../../examples/execution/evidence/2026-11-01-root-storage-ipc/README.md)
+binds the frozen source, ELF, image, actual receipt and bounded harness.
+
+Task startup/cleanup composition, Root IPC/image bootstrap and the actual
+connected model run remain activation gates. The profile loader currently accepts explicit API-key profiles only.
+Hosted ChatGPT subscription registration and OAuth refresh/writeback remain
+separate dependencies. See the [working verification record](verification-managed-launch-working.json).
 
 ## Current implementation track
 

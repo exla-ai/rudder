@@ -126,13 +126,15 @@ test("staging revalidates hashes and rejects oversized files before reading", as
   assert.deepEqual(await readNativeBinary(input), { size: data.length, sha256: createHash("sha256").update(data).digest("hex") });
 });
 
-test("Docker uses the same single Cargo graph and keeps cleanup plus paired output copies", async () => {
+test("Docker builds the native pair and root storage in one Cargo graph", async () => {
   const dockerfile = await fs.readFile(new URL("../cloud/worker/Dockerfile", import.meta.url), "utf8");
   const builder = dockerfile.split("FROM debian:")[0].replace(/\\\n\s*/g, " ");
   assert.equal([...builder.matchAll(/cargo build/g)].length, 1);
   const command = builder.match(/&& (cargo build .+?) && cp /)[1].replace(/\s+/g, " ").trim();
-  assert.deepEqual(command.split(" "), ["cargo", ...NATIVE_CARGO_ARGS]);
+  assert.deepEqual(command.split(" "), ["cargo", ...NATIVE_CARGO_ARGS, "--bin", "rudder-root-storage"]);
   assert.match(builder, /cargo clean --locked --release -p rudder-engine -p rudder-native -p rudder-vcs-bridge/);
   assert.match(builder, /cp target\/release\/rudder-native \/rudder-native/);
   assert.match(builder, /cp target\/release\/rudder-jj \/rudder-jj/);
+  assert.match(builder, /cp target\/release\/rudder-root-storage \/rudder-root-storage/);
+  assert.match(dockerfile, /COPY --from=native-builder --chown=0:0 --chmod=0555 \/rudder-root-storage \/usr\/local\/bin\/rudder-root-storage/);
 });

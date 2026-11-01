@@ -26,8 +26,13 @@ pub mod rpc_view;
 pub mod command_transport;
 #[cfg(feature = "jj")]
 pub mod host;
+#[cfg(feature = "jj")]
+pub mod accepted_git_import;
 pub mod seed;
 #[cfg(feature = "jj")]
 pub mod working_copy;
 
 pub use identity::*;
+
+#[cfg(feature = "jj")]
+pub mod initial_source;

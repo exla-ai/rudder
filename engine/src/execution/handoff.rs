@@ -9,6 +9,12 @@ pub mod source_shutdown;
 #[cfg(test)]
 #[path = "handoff/source_shutdown_tests.rs"]
 mod source_shutdown_tests;
+#[cfg(test)]
+#[path = "handoff/runtime_worker_join_tests.rs"]
+mod runtime_worker_join_tests;
+#[cfg(test)]
+#[path = "handoff/retained_activation_tests.rs"]
+mod retained_activation_tests;
 use super::finalization_budget::{
     FinalizationBudget, FinalizationConstraint, FINALIZATION_POLICY_LIMIT,
 };
@@ -34,6 +40,97 @@ use std::{
     sync::mpsc,
     time::{Duration, Instant},
 };
+
+// This observer owns the original JoinHandle while an off-App caller waits with
+// a deadline. Its result is written ONLY after actual join, including TLS drops.
+// The observer itself stays owned by every returned token and remaining alias.
+mod worker_join {
+    use anyhow::{ensure, Context, Result};
+    use std::{sync::{Arc, Mutex, TryLockError}, thread::JoinHandle, time::{Duration, Instant}};
+
+    struct State {
+        worker: Option<JoinHandle<()>>,
+        observer: Option<JoinHandle<()>>,
+        // Keep an actual panic payload privately owned; never format or discard
+        // it merely because a waiter timed out or another alias observed it.
+        result: Option<std::thread::Result<()>>,
+    }
+    /// Aliases retain ONE physical worker and one cached actual join result.
+    /// Drop never joins. Keep this owner through explicit off-App settlement.
+    #[derive(Clone)]
+    #[must_use = "retain until explicit actual worker join; dropping is not drain"]
+    pub struct OwnedWorkerJoin { state: Arc<Mutex<State>> }
+    /// Proves the original worker was actually joined, including its TLS.
+    /// Holds the fixed join observer; proves no helper/backend process exit.
+    #[must_use = "retain with the resources whose worker was joined"]
+    pub struct WorkerJoined { owner: OwnedWorkerJoin }
+    impl WorkerJoined {
+        pub fn same_worker(&self, other: &Self) -> bool { Arc::ptr_eq(&self.owner.state, &other.owner.state) }
+    }
+    impl OwnedWorkerJoin {
+        /// Infallible custody transfer from the actual successful spawn.
+        pub fn new(worker: JoinHandle<()>) -> Self {
+            Self { state: Arc::new(Mutex::new(State { worker: Some(worker), observer: None, result: None })) }
+        }
+        /// OFF App. Spawn at most one fixed observer. On spawn failure the actual
+        /// worker remains in this same owner, available for explicit retry.
+        pub fn start_join_observer(&self) -> Result<()> {
+            let mut state = self.state.lock().map_err(|_| anyhow::anyhow!("worker join ownership poisoned"))?;
+            if state.observer.is_some() || state.result.is_some() { return Ok(()); }
+            ensure!(state.worker.is_some(), "original worker join owner absent");
+            let owned = Arc::clone(&self.state);
+            // Hold the state lock until the newly spawned observer is recorded.
+            // It cannot take the original handle before spawn success is owned.
+            let observer = std::thread::Builder::new().name("rudder-worker-join".into()).spawn(move || {
+                let original = owned.lock().unwrap_or_else(|p| p.into_inner()).worker.take();
+                if let Some(original) = original {
+                    let result = original.join();
+                    owned.lock().unwrap_or_else(|p| p.into_inner()).result = Some(result);
+                }
+            }).context("spawn owned worker join observer")?;
+            state.observer = Some(observer);
+            Ok(())
+        }
+        /// App-pure observation: never spawn, join, block for the mutex or treat
+        /// a worker message/is_finished flag as physical thread settlement.
+        pub fn try_joined(&self) -> Result<Option<WorkerJoined>> {
+            let state = match self.state.try_lock() {
+                Ok(state) => state,
+                Err(TryLockError::WouldBlock) => return Ok(None),
+                Err(TryLockError::Poisoned(_)) => anyhow::bail!("worker join ownership poisoned"),
+            };
+            match state.result.as_ref() {
+                Some(Ok(())) => Ok(Some(WorkerJoined { owner: self.clone() })),
+                Some(Err(_)) => anyhow::bail!("original worker panicked; actual join result retained"),
+                None if state.observer.as_ref().is_some_and(JoinHandle::is_finished) =>
+                    anyhow::bail!("worker join observer ended without an actual join result"),
+                None => Ok(None),
+            }
+        }
+        /// OFF App, retryable and borrowed. Caller passes time remaining from
+        /// its ORIGINAL drain budget and retains this owner on every error.
+        /// Timeout never drops/detaches either original worker or join observer.
+        pub fn await_joined(&self, timeout: Duration) -> Result<WorkerJoined> {
+            let end = Instant::now().checked_add(timeout).context("worker join deadline overflow")?;
+            ensure!(!timeout.is_zero(), "worker join deadline expired; original owner retained");
+            self.start_join_observer()?;
+            loop {
+                let remaining = end.saturating_duration_since(Instant::now());
+                ensure!(!remaining.is_zero(), "worker join deadline expired; original owner retained");
+                if let Some(joined) = self.try_joined()? {
+                    ensure!(Instant::now() < end, "worker join deadline expired; original owner retained");
+                    return Ok(joined);
+                }
+                std::thread::sleep(remaining.min(Duration::from_millis(2)));
+            }
+        }
+        #[cfg(test)]
+        pub(super) fn joined_test_fixture() -> Self {
+            Self { state: Arc::new(Mutex::new(State { worker: None, observer: None, result: Some(Ok(())) })) }
+        }
+    }
+}
+pub use worker_join::{OwnedWorkerJoin, WorkerJoined};
 
 /// The actual controller process authenticated by a successful managed handoff.
 /// Construction stays private to `receive_managed`: a saved PID, pathname, raw
@@ -375,8 +472,20 @@ pub struct ManagedExecutionHandle {
     stop_v4: std::cell::RefCell<Option<PendingStopV4>>,
     authenticated: std::cell::Cell<bool>,
     closed: Arc<std::sync::atomic::AtomicBool>,
+    worker: OwnedWorkerJoin,
 }
 impl ManagedExecutionHandle {
+    /// Pure admission invalidation. This is neither thread join nor process exit.
+    pub fn close(&self) {
+        self.helper_process.revoke();
+        self.closed.store(true, std::sync::atomic::Ordering::Release);
+    }
+    /// OFF App. Borrow retains the same shared worker on timeout/panic. The
+    /// helper/backend must independently be stopped and physically reaped.
+    pub fn await_closed(&mut self, timeout: Duration) -> Result<WorkerJoined> {
+        self.close();
+        self.worker.await_joined(timeout)
+    }
     /// Opaque custody remains pending until the actual sealed three-FD handoff.
     pub fn helper_process_witness(&self) -> Arc<helper_process::HelperProcessWitness> {
         self.helper_process.clone()
@@ -485,9 +594,7 @@ impl ManagedExecutionHandle {
 }
 impl Drop for ManagedExecutionHandle {
     fn drop(&mut self) {
-        self.helper_process.revoke();
-        self.closed
-            .store(true, std::sync::atomic::Ordering::Release);
+        self.close();
     }
 }
 
@@ -499,77 +606,152 @@ pub struct ManagedExecutionHandoff {
     helper_control: UnixStream,
     request_digest: String,
 }
-impl ManagedExecutionHandoff {
-    pub fn binding(&self) -> &ManagedExecutionBinding {
-        &self.binding
+/// One actual staged worker's start/use barrier. No Deserialize/Clone/raw
+/// constructor. This is a retained release capability, NOT proof of Root IPC
+/// enrollment. Trusted host code must first validate that original Root ACK.
+#[must_use = "keep closed until exact actual Root seed enrollment ACK"]
+pub struct ManagedExecutionStartBarrier {
+    gate: Arc<std::sync::atomic::AtomicBool>,
+    closed: Arc<std::sync::atomic::AtomicBool>,
+    helper: Arc<helper_process::HelperProcessWitness>,
+    original: Option<(FinalizationBudget, Arc<std::sync::atomic::AtomicBool>)>,
+    released: bool,
+}
+impl ManagedExecutionStartBarrier {
+    /// Actual pending kernel witness; process DATA, not readiness/activation.
+    pub fn pending_helper_process(&self) -> Arc<helper_process::HelperProcessWitness> { self.helper.clone() }
+    pub fn is_pending(&self) -> bool { !self.released && !self.closed.load(std::sync::atomic::Ordering::Acquire) }
+    /// Pure one-shot release AFTER trusted caller validates the actual Root ACK
+    /// against this helper, source/seed, project and original request. Saved JSON
+    /// or a matching PID never supplies that validation. No budget renewal.
+    pub fn release_after_enrollment(&mut self) -> Result<()> {
+        ensure!(!self.released && !self.closed.load(std::sync::atomic::Ordering::Acquire), "managed start barrier closed/already released");
+        if let Some((budget, cancelled)) = &self.original {
+            ensure!(!cancelled.load(std::sync::atomic::Ordering::Acquire), "managed start barrier cancelled");budget.remaining()?;
+        }
+        self.gate.store(true,std::sync::atomic::Ordering::Release);self.released=true;Ok(())
     }
-    pub fn new(spec: &ExecutionSpec, binding: ManagedExecutionBinding) -> Result<Self> {
-        use sha2::{Digest, Sha256};
-        binding.validate(spec)?;
-        let request_digest = hex::encode(Sha256::digest(crate::protocol::canonical_json(spec)?));
-        let handoff = ExecutionHandoff::new(spec)?;
-        let binding_fd =
-            super::linux::sealed_bytes_fd(&crate::protocol::canonical_json(&binding)?)?;
-        let (parent_control, helper_control) = UnixStream::pair()?;
-        Ok(Self {
-            handoff,
-            binding,
-            binding_fd,
-            parent_control,
-            helper_control,
-            request_digest,
-        })
+}
+impl Drop for ManagedExecutionStartBarrier {
+    fn drop(&mut self) {
+        if !self.released { self.closed.store(true,std::sync::atomic::Ordering::Release);self.helper.revoke(); }
     }
-    pub fn helper_args(&self) -> Vec<String> {
-        let mut args = self.handoff.helper_args();
-        args[2] = "managed-helper".into();
-        args
+}
+
+/// Task-only pre-effect custody. An ordinary activation error never consumes
+/// the sealed listener/spec/control descriptors. A started descriptor worker
+/// remains distinct from either successful transfer or backend/process drain.
+#[must_use = "retain until transfer to live custody or explicit off-App settlement"]
+pub struct RetainedManagedExecutionActivation {
+    original: Arc<std::sync::Mutex<Option<ManagedExecutionHandoff>>>,
+    binding: ManagedExecutionBinding,
+    args: Vec<String>,
+    lifetime: Option<OwnedFd>,
+    live: Option<(HandoffReceipt, ManagedExecutionHandle)>,
+    control_join: Option<WorkerJoined>,
+    receipt_join: Option<WorkerJoined>,
+    start_barrier: Option<ManagedExecutionStartBarrier>,
+    phase: RetainedActivationPhase,
+    dispatch_attempted: Arc<std::sync::atomic::AtomicBool>,
+    attempted: bool,
+    settled: bool,
+}
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RetainedActivationPhase { Undispatched, SpawnInFlight, WorkerStarted, Transferred }
+impl RetainedManagedExecutionActivation {
+    /// Pure transfer of the actual handoff, never reconstruction from DATA.
+    pub fn new(handoff: ManagedExecutionHandoff) -> Self {
+        let binding = handoff.binding.clone();
+        let args = handoff.helper_args();
+        Self { original: Arc::new(std::sync::Mutex::new(Some(handoff))), binding,
+            args, lifetime: None, live: None, control_join: None, receipt_join: None, start_barrier: None,
+            phase: RetainedActivationPhase::Undispatched, dispatch_attempted: Arc::new(std::sync::atomic::AtomicBool::new(false)), attempted: false, settled: false }
     }
-    pub fn activate(self, child: u32) -> Result<(HandoffReceipt, ManagedExecutionHandle)> {
+    pub fn binding(&self) -> &ManagedExecutionBinding { &self.binding }
+    pub fn helper_args(&self) -> Vec<String> { self.args.clone() }
+    /// App starts a bounded worker only. This borrow keeps pre-spawn resources
+    /// in the caller even if a later validation, pidfd clone or spawn fails.
+    pub fn activate(&mut self, child: u32) -> Result<()> { self.activate_inner(child, None, false) }
+    /// Task path carries its SAME pre-admission clock/cancellation into the
+    /// descriptor worker; checks never create a fresh activation duration.
+    pub fn activate_bounded(&mut self, child: u32, budget: &FinalizationBudget,
+        cancelled: Arc<std::sync::atomic::AtomicBool>) -> Result<()> {
+        self.activate_inner(child, Some((budget.clone(), cancelled)), false)
+    }
+    /// Task-only stage. Descriptor/spec dispatch remains CLOSED until the
+    /// retained barrier is explicitly released after real Root enrollment ACK.
+    pub fn stage_bounded(&mut self, child: u32, budget: &FinalizationBudget,
+        cancelled: Arc<std::sync::atomic::AtomicBool>) -> Result<()> {
+        self.activate_inner(child, Some((budget.clone(), cancelled)), true)
+    }
+    pub fn take_start_barrier(&mut self) -> Result<ManagedExecutionStartBarrier> {
+        ensure!(self.phase==RetainedActivationPhase::WorkerStarted && self.start_barrier.is_some(), "actual staged start barrier absent");
+        Ok(self.start_barrier.take().unwrap())
+    }
+    fn activate_inner(&mut self, child: u32,
+        original: Option<(FinalizationBudget, Arc<std::sync::atomic::AtomicBool>)>, staged: bool) -> Result<()> {
+        let check_original = || -> Result<()> {
+            if let Some((budget, cancelled)) = &original {
+                ensure!(!cancelled.load(std::sync::atomic::Ordering::Acquire), "managed activation cancelled");
+                budget.remaining()?;
+            }
+            Ok(())
+        };
+        check_original()?;
+        ensure!(!self.attempted, "retained activation is one-shot");
+        self.attempted = true;
         let startup = binding_startup(&self.binding)?;
-        ensure!(
-            child > 1 && child != self.handoff.parent,
-            "invalid managed handoff child"
-        );
-        let lifetime = pidfd(child)?;
-        let Self {
-            handoff,
-            binding,
-            binding_fd,
-            parent_control,
-            helper_control,
-            request_digest,
-        } = self;
+        let held = self.original.lock().map_err(|_| anyhow::anyhow!("retained handoff poisoned"))?;
+        let handoff = held.as_ref().context("original managed handoff absent")?;
+        ensure!(child > 1 && child != handoff.handoff.parent, "invalid managed handoff child");
+        self.lifetime = Some(pidfd(child)?);
+        let lifetime = self.lifetime.as_ref().unwrap().try_clone()?;
         let (commands, receive_commands) = mpsc::sync_channel(2);
         let (send_events, events) = mpsc::sync_channel(4);
         let closed = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let helper_process = Arc::new(helper_process::HelperProcessWitness::pending(
-            lifetime.try_clone()?, child, handoff.uid, binding.clone(),
-        ));
-        let handle = ManagedExecutionHandle {
-            helper_process: helper_process.clone(),
-            binding: binding.clone(),
-            commands,
-            events,
-            pending: std::cell::RefCell::new(None),
-            stop_v4: std::cell::RefCell::new(None),
-            authenticated: std::cell::Cell::new(false),
-            closed: closed.clone(),
-        };
+            lifetime.try_clone()?, child, handoff.handoff.uid, self.binding.clone()));
+        drop(held);
+        check_original()?;
+        let handle_binding = self.binding.clone();
+        let worker_closed = closed.clone();
         let (send, result) = mpsc::sync_channel(1);
         let worker_helper = helper_process.clone();
-        std::thread::Builder::new()
-            .name("rudder-managed-control".into())
-            .spawn(move || {
+        let gate = Arc::new(std::sync::atomic::AtomicBool::new(!staged));
+        if staged { self.start_barrier=Some(ManagedExecutionStartBarrier { gate:gate.clone(),closed:closed.clone(),
+            helper:helper_process.clone(),original:original.clone(),released:false }); }
+        // The spawned closure takes from this already retained cell only AFTER
+        // successful OS thread creation. Spawn refusal cannot drop the original.
+        let pending = self.original.clone();
+        let dispatch_attempted = self.dispatch_attempted.clone();
+        let original_budget = original;
+        self.phase = RetainedActivationPhase::SpawnInFlight;
+        let run = move || {
+            let original = pending.lock().unwrap_or_else(|p| p.into_inner()).take()
+                .expect("single retained managed activation");
+            let ManagedExecutionHandoff { handoff, binding, binding_fd, parent_control,
+                helper_control, request_digest } = original;
+            let check_original = || -> Result<()> {
+                if let Some((budget, cancelled)) = &original_budget {
+                    ensure!(!cancelled.load(std::sync::atomic::Ordering::Acquire), "managed activation cancelled");
+                    budget.remaining()?;
+                }
+                Ok(())
+            };
                 let ready = (|| -> Result<()> {
                     let deadline = Instant::now() + Duration::from_secs(10);
                     let mut rejected = 0;
                     loop {
+                        check_original()?;
                         if let Some(startup) = &startup { startup.remaining()?; }
                         ensure!(
-                            Instant::now() < deadline && !exited(&lifetime)?,
+                            !worker_closed.load(std::sync::atomic::Ordering::Acquire)
+                                && Instant::now() < deadline && !exited(&lifetime)?,
                             "managed handoff deadline/lifetime ended"
                         );
+                        if !gate.load(std::sync::atomic::Ordering::Acquire) {
+                            std::thread::sleep(Duration::from_millis(5));continue;
+                        }
                         match handoff.listener.accept() {
                             Ok((stream, _)) => {
                                 let credentials = peer(&stream)?;
@@ -583,6 +765,19 @@ impl ManagedExecutionHandoff {
                                     continue;
                                 }
                                 stream.set_write_timeout(Some(Duration::from_secs(2)))?;
+                                check_original()?;
+                                if staged {
+                                    // Pending is still kernel/process DATA. The
+                                    // retained exporter checks the ORIGINAL
+                                    // helper cutoff/lifetime without promotion.
+                                    let _live = worker_helper.duplicate_live_pidfd_for_seed_enrollment()?;
+                                    check_original()?;
+                                    ensure!(!worker_closed.load(std::sync::atomic::Ordering::Acquire)
+                                        && !exited(&lifetime)?, "managed staged helper retired before dispatch");
+                                }
+                                // Absorbing BEFORE sendmsg: an error/unknown ACK
+                                // can already expose all three descriptors.
+                                dispatch_attempted.store(true, std::sync::atomic::Ordering::Release);
                                 send_descriptors(
                                     &stream,
                                     &[
@@ -591,6 +786,7 @@ impl ManagedExecutionHandoff {
                                         helper_control.as_raw_fd(),
                                     ],
                                 )?;
+                                check_original()?;
                                 if let Some(startup) = &startup { startup.remaining()?; }
                                 worker_helper.transferred()?;
                                 return Ok(());
@@ -620,21 +816,89 @@ impl ManagedExecutionHandoff {
                     &lifetime,
                     receive_commands,
                     &send_events,
-                    &closed,
+                    &worker_closed,
                 );
                 worker_helper.control_finished(&run);
                 if run.is_err() {
                     let _ = send_events.try_send(ManagedExecutionEvent::Uncertain);
                 }
-            })?;
-        Ok((
-            HandoffReceipt {
-                helper_process: Some(helper_process),
-                result,
-                completed: std::cell::Cell::new(false),
-            },
-            handle,
-        ))
+        };
+        #[cfg(test)] let refused = retained_activation_tests::refuse_spawn();
+        #[cfg(not(test))] let refused = false;
+        let spawned = if refused { Err(io::Error::other("injected managed control spawn refusal")) }
+            else { std::thread::Builder::new().name("rudder-managed-control".into()).spawn(run) };
+        let worker = match spawned {
+            Ok(worker) => worker,
+            Err(error) => { self.phase = RetainedActivationPhase::Undispatched; return Err(error.into()); }
+        };
+        let worker = OwnedWorkerJoin::new(worker);
+        let handle = ManagedExecutionHandle { helper_process: helper_process.clone(), binding: handle_binding,
+            commands, events, pending: std::cell::RefCell::new(None), stop_v4: std::cell::RefCell::new(None),
+            authenticated: std::cell::Cell::new(false), closed: closed.clone(), worker: worker.clone() };
+        self.live = Some((HandoffReceipt { helper_process: Some(helper_process), result,
+            completed: std::cell::Cell::new(false), closed, worker }, handle));
+        self.phase = RetainedActivationPhase::WorkerStarted;
+        Ok(())
+    }
+    /// Pure transfer of BOTH original worker aliases. No ACK/readiness claim.
+    pub fn take_live(&mut self) -> Result<(HandoffReceipt, ManagedExecutionHandle)> {
+        ensure!(self.phase == RetainedActivationPhase::WorkerStarted && self.live.is_some(), "retained activation is not live");
+        let live = self.live.take().unwrap(); self.phase = RetainedActivationPhase::Transferred; Ok(live)
+    }
+    /// Pure close request; never a worker/process-drain acknowledgment.
+    pub fn close(&self) {
+        if let Some((receipt, control)) = &self.live { receipt.close(); control.close(); }
+    }
+    /// OFF App. A worker may have transferred descriptors even without its ACK.
+    /// Join it if owned, but never authorize unused cleanup from that join alone.
+    pub fn settle_undispatched_off_app(&mut self, budget: &FinalizationBudget) -> Result<()> {
+        budget.remaining()?;
+        if self.settled { return Ok(()); }
+        if let Some((receipt, control)) = &mut self.live {
+            receipt.close(); control.close();
+            if self.control_join.is_none() { self.control_join = Some(control.await_closed(budget.remaining()?)?); }
+            if self.receipt_join.is_none() { self.receipt_join = Some(receipt.await_closed(budget.remaining()?)?); }
+            ensure!(self.control_join.as_ref().unwrap().same_worker(self.receipt_join.as_ref().unwrap()), "retained activation workers differ");
+        }
+        ensure!(matches!(self.phase, RetainedActivationPhase::Undispatched | RetainedActivationPhase::WorkerStarted)
+            && !self.dispatch_attempted.load(std::sync::atomic::Ordering::Acquire),
+            "descriptor dispatch is possible; backend/writer drain remains unknown");
+        self.original.lock().map_err(|_| anyhow::anyhow!("retained handoff poisoned"))?.take();
+        self.start_barrier = None; self.lifetime = None; budget.remaining()?; self.settled = true; Ok(())
+    }
+    pub fn is_settled(&self) -> bool { self.settled }
+}
+
+impl ManagedExecutionHandoff {
+    pub fn binding(&self) -> &ManagedExecutionBinding {
+        &self.binding
+    }
+    pub fn new(spec: &ExecutionSpec, binding: ManagedExecutionBinding) -> Result<Self> {
+        use sha2::{Digest, Sha256};
+        binding.validate(spec)?;
+        let request_digest = hex::encode(Sha256::digest(crate::protocol::canonical_json(spec)?));
+        let handoff = ExecutionHandoff::new(spec)?;
+        let binding_fd =
+            super::linux::sealed_bytes_fd(&crate::protocol::canonical_json(&binding)?)?;
+        let (parent_control, helper_control) = UnixStream::pair()?;
+        Ok(Self {
+            handoff,
+            binding,
+            binding_fd,
+            parent_control,
+            helper_control,
+            request_digest,
+        })
+    }
+    pub fn helper_args(&self) -> Vec<String> {
+        let mut args = self.handoff.helper_args();
+        args[2] = "managed-helper".into();
+        args
+    }
+    pub fn activate(self, child: u32) -> Result<(HandoffReceipt, ManagedExecutionHandle)> {
+        let mut owner = RetainedManagedExecutionActivation::new(self);
+        owner.activate(child)?;
+        owner.take_live()
     }
 }
 
@@ -1500,8 +1764,22 @@ pub struct HandoffReceipt {
     helper_process: Option<Arc<helper_process::HelperProcessWitness>>,
     result: mpsc::Receiver<std::result::Result<(), String>>,
     completed: std::cell::Cell<bool>,
+    closed: Arc<std::sync::atomic::AtomicBool>,
+    worker: OwnedWorkerJoin,
 }
 impl HandoffReceipt {
+    /// Pure close of this original handoff/control worker's admission. Does not
+    /// signal helper/backend exit or establish descriptor/actor drain.
+    pub fn close(&self) {
+        if let Some(helper) = &self.helper_process { helper.revoke(); }
+        self.closed.store(true, std::sync::atomic::Ordering::Release);
+    }
+    /// OFF App. Managed receipt and control share exactly this same actual join.
+    /// Keep both original carriers and returned tokens through source retirement.
+    pub fn await_closed(&mut self, timeout: Duration) -> Result<WorkerJoined> {
+        self.close();
+        self.worker.await_joined(timeout)
+    }
     /// Reports descriptor transfer only, not helper validation, process launch,
     /// namespace readiness or successful execution. Observe ExecutionRecord.
     pub fn try_result(&self) -> Option<std::result::Result<(), String>> {
@@ -1528,7 +1806,9 @@ impl HandoffReceipt {
             }
         }
     }
-    pub fn wait(self, timeout: Duration) -> Result<()> {
+    /// Descriptor receipt only. Borrowing preserves physical worker custody on
+    /// success/error; explicit off-App await_closed is the separate join gate.
+    pub fn wait(&self, timeout: Duration) -> Result<()> {
         let result = self.result.recv_timeout(timeout).context("execution handoff deadline")
             .and_then(|result| result.map_err(anyhow::Error::msg));
         if result.is_err() {
@@ -1569,13 +1849,15 @@ impl ExecutionHandoff {
         ensure!(child > 1 && child != self.parent, "invalid handoff child");
         let pidfd = pidfd(child)?;
         let (send, result) = mpsc::sync_channel(1);
-        std::thread::spawn(move || {
+        let closed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let worker_closed = closed.clone();
+        let worker = std::thread::Builder::new().name("rudder-execution-handoff".into()).spawn(move || {
             let r = (|| -> Result<()> {
                 let deadline = Instant::now() + Duration::from_secs(10);
                 let mut rejected = 0;
                 while Instant::now() < deadline {
                     ensure!(
-                        !exited(&pidfd)?,
+                        !worker_closed.load(std::sync::atomic::Ordering::Acquire) && !exited(&pidfd)?,
                         "execution child exited before spec handoff"
                     );
                     match self.listener.accept() {
@@ -1603,11 +1885,13 @@ impl ExecutionHandoff {
             })();
             drop(self);
             let _ = send.send(r.map_err(|e| e.to_string()));
-        });
+        })?;
         Ok(HandoffReceipt {
             helper_process: None,
             result,
             completed: std::cell::Cell::new(false),
+            closed,
+            worker: OwnedWorkerJoin::new(worker),
         })
     }
 }
@@ -1892,6 +2176,7 @@ mod managed_tests {
                 stop_v4: std::cell::RefCell::new(None),
                 authenticated: std::cell::Cell::new(false),
                 closed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                worker: OwnedWorkerJoin::joined_test_fixture(),
             },
             receive,
         )

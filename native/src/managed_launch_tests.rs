@@ -168,7 +168,7 @@ fn managed_transient_endpoints_require_explicit_short_private_parent_and_exact_b
     let endpoints=prepare_endpoints(&parent,&fence,&permanent,target.clone()).unwrap();
     assert!(endpoints.root.join("workspace/workspace.sock").as_os_str().as_encoded_bytes().len()<100);
     assert_eq!(fs::read_link(endpoints.root.join("backend.sock")).unwrap(),target);
-    let endpoint_root=endpoints.root.clone(); retire_endpoints(endpoints).unwrap();
+    let endpoint_root=endpoints.root.clone(); retire_endpoints(&endpoints).unwrap();
     assert!(!endpoint_root.exists()); assert_eq!(fs::read(permanent.join("history")).unwrap(),b"retain");
 }
 
@@ -178,10 +178,10 @@ fn managed_endpoint_cleanup_refuses_changed_marker_and_never_deletes_permanent_s
     let permanent=fixture.0.join("permanent"); fs::create_dir(&permanent).unwrap(); let marker=b"owned preparation".to_vec(); fs::write(permanent.join("preparation.json"),&marker).unwrap();
     let endpoints=prepare_endpoints(&parent,&fence(),&permanent,permanent.join("cx.sock")).unwrap(); let root=endpoints.root.clone(); let original=endpoints.marker.clone();
     fs::write(root.join("owner.json"),b"changed").unwrap();
-    assert!(retire_endpoints(ManagedEndpoints { root:root.clone(),marker:original.clone(),backend_target:permanent.join("cx.sock") }).is_err());
+    assert!(retire_endpoints(&ManagedEndpoints { root:root.clone(),marker:original.clone(),backend_target:permanent.join("cx.sock") }).is_err());
     assert!(root.exists()); fs::write(root.join("owner.json"),original).unwrap();
-    let retirement=Retirement { root:permanent.clone(),marker,pins:vec!["permanent-pin".into()],adopted:true,endpoints:Some(endpoints),endpoints_safe:true };
-    retire_unused(retirement).unwrap(); assert!(!root.exists()); assert!(permanent.join("preparation.json").exists());
+    let mut retirement=Retirement { root:permanent.clone(),marker,pins:vec!["permanent-pin".into()],adopted:true,endpoints:Some(endpoints),endpoints_safe:true };
+    retire_unused(&mut retirement).unwrap(); assert!(!root.exists()); assert!(permanent.join("preparation.json").exists());
 }
 
 #[test]

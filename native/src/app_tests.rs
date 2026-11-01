@@ -8171,7 +8171,7 @@ fn test_agent_run(id: &str, task: &str) -> AgentRun {
     }
 }
 
-fn test_agent_run_with_terminal(app: &App, terminal: TerminalPane) -> AgentRun {
+pub(super) fn test_agent_run_with_terminal(app: &App, terminal: TerminalPane) -> AgentRun {
     let mut run = test_agent_run("run-1", "test task");
     run.cwd = app.cwd.clone();
     run.execution_profile = terminal.execution_profile().map(str::to_string);

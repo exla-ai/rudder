@@ -1,0 +1,18 @@
+{
+  "formatVersion": 1,
+  "scope": "Main working-tree root storage IPC component qualifier; not a release",
+  "baseRevision": "4885ef6fdeb1992420bdda975dc9df6c198c421b",
+  "baseImage": "registry.fly.io/rudder-workers-exla:4.0.0-alpha.23@sha256:ea39437f476ea1c704afb7eca6596d79df9dfada97ae9dde74141562e7394f80",
+  "sourceTreeSha256": "5c48947ca489350374d5acde1ceb3bc36be0df090f56b18dfe53b6fecf56a509",
+  "sourceManifestSha256": "bb87f0b1a3247f75a415f8521750933ad15bc162088dd96fb0a032ef96126602",
+  "sourceUnchangedThroughCargo": true,
+  "cargoReceipt": "/workspace/home/.cache/rudder-release-build/alpha22-checks/main-root-ipc-artifact84.json",
+  "cargoReceiptSha256": "d031c6c71d08b6451d253c3a75a071ff21a94491da70fa0800747996fb8c799f",
+  "cachedCompilerArtifact": true,
+  "artifactBuildOrigin": "source frozen before root IPC compilation; exact artifact gate84, compiler freshness recorded",
+  "executable": "/workspace/code/exla-ai-rudder/target/debug/deps/rudder_native-89f7ff8238e34060",
+  "sealedExecutable": "/workspace/rudder-root-storage-ipc-qualified-artifact/image-context/rudder-root-seed-test",
+  "elfSha256": "fb5e307cf1833fd59e0e70239fd1cbbe516f0ef5c7a6254726d23f4a924542b1",
+  "elfBytes": 57151872,
+  "sealedAt": "2026-11-01T00:43:33.351319+00:00"
+}

@@ -59,6 +59,40 @@ impl HelperProcessWitness {
             self.revoke();
         }
     }
+    /// OFF App: duplicate the ACTUAL held original live pidfd for trusted seed
+    /// enrollment. Pending custody may export before descriptor handoff. This
+    /// process identity DATA grants no source admission, readiness or activation;
+    /// the caller retains the witness/use barrier and root independently checks
+    /// the received original process. Never reopen a saved numeric PID.
+    pub fn duplicate_live_pidfd_for_seed_enrollment(&self) -> Result<OwnedFd> {
+        let result = (|| {
+            self.check_seed_enrollment_pidfd(&self.lifetime)?;
+            let duplicate = self.lifetime.try_clone()?;
+            self.check_seed_enrollment_pidfd(&duplicate)?;
+            self.check_seed_enrollment_pidfd(&self.lifetime)?;
+            Ok(duplicate)
+        })();
+        if result.is_err() {
+            self.revoke();
+        }
+        result
+    }
+    fn check_seed_enrollment_pidfd(&self, process: &OwnedFd) -> Result<()> {
+        let check_state = || -> Result<()> {
+            let state = self.state.load(Ordering::Acquire);
+            ensure!(
+                state == CURRENT || state == PENDING && Instant::now() < self.deadline,
+                "managed helper seed enrollment custody retired"
+            );
+            Ok(())
+        };
+        check_state()?;
+        ensure!(
+            super::super::network_phase::live_pid(process)? == self.pid && !exited(process)?,
+            "managed helper seed enrollment original lifetime changed"
+        );
+        check_state()
+    }
     pub fn check_current(&self) -> Result<()> {
         let state = self.state.load(Ordering::Acquire);
         if state == PENDING && Instant::now() >= self.deadline {
@@ -98,6 +132,10 @@ impl HelperProcessWitness {
         self.check_current()
     }
 }
+
+#[cfg(test)]
+#[path = "helper_seed_enrollment_tests.rs"]
+mod seed_enrollment_tests;
 
 #[cfg(test)]
 mod tests {
@@ -197,6 +235,7 @@ mod tests {
             stop_v4: std::cell::RefCell::new(None),
             authenticated: std::cell::Cell::new(false),
             closed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            worker: OwnedWorkerJoin::joined_test_fixture(),
         };
         (child, source, handle)
     }
@@ -278,6 +317,8 @@ mod tests {
             helper_process: Some(witness.clone()),
             result,
             completed: std::cell::Cell::new(false),
+            closed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            worker: OwnedWorkerJoin::joined_test_fixture(),
         };
         assert!(receipt.wait(Duration::from_millis(1)).is_err());
         assert!(witness.check_current().is_err());

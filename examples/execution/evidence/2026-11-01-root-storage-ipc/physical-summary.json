@@ -1,0 +1,19 @@
+{
+  "formatVersion": 1,
+  "qualified": true,
+  "scope": "Actual Root service / UID1500 engine / two helper IPC component only",
+  "sourceTreeSha256": "5c48947ca489350374d5acde1ceb3bc36be0df090f56b18dfe53b6fecf56a509",
+  "elfSha256": "fb5e307cf1833fd59e0e70239fd1cbbe516f0ef5c7a6254726d23f4a924542b1",
+  "derivedImageDigest": "sha256:af9b8877bfb2102b69d6a090a3dae565e27ba0719f68ffa1f4da4ecc935ec86c",
+  "providerCalls": 17,
+  "verifiedAt": "2026-11-01T00:50:37.840Z",
+  "productionStartup": false,
+  "spec3": false,
+  "models": false,
+  "acceptedJournalAuthority": false,
+  "normalRetirementBlocked": true,
+  "normalCleanupPerformed": false,
+  "retainedUntilVmTeardown": true,
+  "ownedVmDestroyed": true,
+  "twoIndependentAbsenceChecks": true
+}

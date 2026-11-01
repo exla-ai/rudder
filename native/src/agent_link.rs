@@ -23,6 +23,101 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 #[cfg(target_os = "linux")]
+use rudder_engine::execution::handoff::{OwnedWorkerJoin, WorkerJoined};
+#[cfg(not(target_os = "linux"))]
+use worker_join::{OwnedWorkerJoin, WorkerJoined};
+
+// Same platform-independent custody protocol for legacy macOS link actors.
+// Linux uses the engine owner directly; no Linux handoff module is built on Mac.
+#[cfg(not(target_os = "linux"))]
+mod worker_join {
+    use anyhow::{ensure, Context, Result};
+    use std::{sync::{Arc, Mutex, TryLockError}, thread::JoinHandle, time::{Duration, Instant}};
+
+    struct State {
+        worker: Option<JoinHandle<()>>,
+        observer: Option<JoinHandle<()>>,
+        // Keep an actual panic payload privately owned; never format or discard
+        // it merely because a waiter timed out or another alias observed it.
+        result: Option<std::thread::Result<()>>,
+    }
+    /// Aliases retain ONE physical worker and one cached actual join result.
+    /// Drop never joins. Keep this owner through explicit off-App settlement.
+    #[derive(Clone)]
+    #[must_use = "retain until explicit actual worker join; dropping is not drain"]
+    pub struct OwnedWorkerJoin { state: Arc<Mutex<State>> }
+    /// Proves the original worker was actually joined, including its TLS.
+    /// Holds the fixed join observer; proves no helper/backend process exit.
+    #[must_use = "retain with the resources whose worker was joined"]
+    pub struct WorkerJoined { owner: OwnedWorkerJoin }
+    impl WorkerJoined {
+        pub fn same_worker(&self, other: &Self) -> bool { Arc::ptr_eq(&self.owner.state, &other.owner.state) }
+    }
+    impl OwnedWorkerJoin {
+        /// Infallible custody transfer from the actual successful spawn.
+        pub fn new(worker: JoinHandle<()>) -> Self {
+            Self { state: Arc::new(Mutex::new(State { worker: Some(worker), observer: None, result: None })) }
+        }
+        /// OFF App. Spawn at most one fixed observer. On spawn failure the actual
+        /// worker remains in this same owner, available for explicit retry.
+        pub fn start_join_observer(&self) -> Result<()> {
+            let mut state = self.state.lock().map_err(|_| anyhow::anyhow!("worker join ownership poisoned"))?;
+            if state.observer.is_some() || state.result.is_some() { return Ok(()); }
+            ensure!(state.worker.is_some(), "original worker join owner absent");
+            let owned = Arc::clone(&self.state);
+            // Hold the state lock until the newly spawned observer is recorded.
+            // It cannot take the original handle before spawn success is owned.
+            let observer = std::thread::Builder::new().name("rudder-worker-join".into()).spawn(move || {
+                let original = owned.lock().unwrap_or_else(|p| p.into_inner()).worker.take();
+                if let Some(original) = original {
+                    let result = original.join();
+                    owned.lock().unwrap_or_else(|p| p.into_inner()).result = Some(result);
+                }
+            }).context("spawn owned worker join observer")?;
+            state.observer = Some(observer);
+            Ok(())
+        }
+        /// App-pure observation: never spawn, join, block for the mutex or treat
+        /// a worker message/is_finished flag as physical thread settlement.
+        pub fn try_joined(&self) -> Result<Option<WorkerJoined>> {
+            let state = match self.state.try_lock() {
+                Ok(state) => state,
+                Err(TryLockError::WouldBlock) => return Ok(None),
+                Err(TryLockError::Poisoned(_)) => anyhow::bail!("worker join ownership poisoned"),
+            };
+            match state.result.as_ref() {
+                Some(Ok(())) => Ok(Some(WorkerJoined { owner: self.clone() })),
+                Some(Err(_)) => anyhow::bail!("original worker panicked; actual join result retained"),
+                None if state.observer.as_ref().is_some_and(JoinHandle::is_finished) =>
+                    anyhow::bail!("worker join observer ended without an actual join result"),
+                None => Ok(None),
+            }
+        }
+        /// OFF App, retryable and borrowed. Caller passes time remaining from
+        /// its ORIGINAL drain budget and retains this owner on every error.
+        /// Timeout never drops/detaches either original worker or join observer.
+        pub fn await_joined(&self, timeout: Duration) -> Result<WorkerJoined> {
+            let end = Instant::now().checked_add(timeout).context("worker join deadline overflow")?;
+            ensure!(!timeout.is_zero(), "worker join deadline expired; original owner retained");
+            self.start_join_observer()?;
+            loop {
+                let remaining = end.saturating_duration_since(Instant::now());
+                ensure!(!remaining.is_zero(), "worker join deadline expired; original owner retained");
+                if let Some(joined) = self.try_joined()? {
+                    ensure!(Instant::now() < end, "worker join deadline expired; original owner retained");
+                    return Ok(joined);
+                }
+                std::thread::sleep(remaining.min(Duration::from_millis(2)));
+            }
+        }
+        #[cfg(test)]
+        pub(super) fn joined_test_fixture() -> Self {
+            Self { state: Arc::new(Mutex::new(State { worker: None, observer: None, result: Some(Ok(())) })) }
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
 #[path = "managed_codex_auth.rs"]
 mod managed_codex_auth;
 #[cfg(target_os = "linux")]
@@ -179,9 +274,20 @@ pub(crate) struct AgentLinkHandle {
     pub(crate) attempt_id: String,
     commands: SyncSender<QueuedCommand>,
     stopped: Arc<AtomicBool>,
+    worker: OwnedWorkerJoin,
 }
 
+/// Actual link actor join, including TLS. No backend/helper exit claim.
+#[must_use = "retain with the original attempt's resources through cleanup"]
+pub(crate) struct AgentLinkWorkerJoined { _worker: WorkerJoined }
+
 impl AgentLinkHandle {
+    /// OFF App only. Borrow preserves actual worker/observer custody on every
+    /// timeout/panic. Caller passes the original drain budget's remaining time.
+    pub(crate) fn await_closed(&mut self, timeout: Duration) -> Result<AgentLinkWorkerJoined> {
+        self.close();
+        Ok(AgentLinkWorkerJoined { _worker: self.worker.await_joined(timeout)? })
+    }
     /// Queueing is not adapter acceptance. The actor emits CommandResult.
     pub(crate) fn submit(&self, command: AgentLinkCommand) -> Result<()> {
         ensure!(
@@ -730,13 +836,9 @@ fn spawn_link_with_process(launch: AgentLinkLaunch, cwd: PathBuf,
     let (tx, rx) = mpsc::sync_channel(COMMAND_QUEUE);
     let stopped = Arc::new(AtomicBool::new(false));
     let worker_stop = Arc::clone(&stopped);
-    let handle = AgentLinkHandle {
-        run_id: launch.run_id.clone(),
-        attempt_id: launch.attempt_id.clone(),
-        commands: tx,
-        stopped,
-    };
-    std::thread::Builder::new()
+    let run_id = launch.run_id.clone();
+    let attempt_id = launch.attempt_id.clone();
+    let worker = std::thread::Builder::new()
         .name("rudder-agent-link".into())
         .spawn(move || {
             let result = codex_loop(
@@ -772,7 +874,8 @@ fn spawn_link_with_process(launch: AgentLinkLaunch, cwd: PathBuf,
                 },
             );
         })?;
-    Ok(handle)
+    Ok(AgentLinkHandle { run_id, attempt_id, commands: tx, stopped,
+        worker: OwnedWorkerJoin::new(worker) })
 }
 
 fn emit(launch: &AgentLinkLaunch, events: &Sender<AgentLinkEvent>, kind: AgentLinkEventKind) {
@@ -1850,3 +1953,7 @@ fn codex_loop(
 #[cfg(test)]
 #[path = "agent_link_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "agent_link_worker_join_tests.rs"]
+mod worker_join_tests;

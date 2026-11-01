@@ -62,6 +62,96 @@ fn enqueue_output(
     }
 }
 
+// The legacy and retaining paths use exactly the same reader behavior. The
+// retaining path stages this input outside the spawn closure until OS success.
+struct PtyReaderWork {
+    reader: Box<dyn Read + Send>,
+    #[cfg(unix)] reader_readiness: PtyReadiness,
+    reply_writer: Arc<Mutex<Box<dyn Write + Send>>>,
+    reader_wants_theme_reports: Arc<AtomicBool>,
+    output_tx: SyncSender<Vec<u8>>,
+    reader_queued_output: Arc<AtomicUsize>,
+    reader_waker: Arc<Mutex<Option<PtyOutputWaker>>>,
+    stopped: Arc<AtomicBool>,
+}
+impl PtyReaderWork {
+    fn run(self) {
+        let Self { mut reader, #[cfg(unix)] reader_readiness, reply_writer,
+            reader_wants_theme_reports, output_tx, reader_queued_output, reader_waker, stopped } = self;
+        let mut buf = [0_u8; PTY_READ_CHUNK_BYTES];
+        // Answered here, not on the main loop: an unfocused pane is only
+        // drained every 500ms, and an agent asking for the terminal's
+        // colors at startup gives up long before that.
+        let mut queries = QueryScanner::default();
+        loop {
+            if stopped.load(Ordering::Acquire) {
+                break;
+            }
+            #[cfg(unix)]
+            {
+                let ready = reader_readiness.wait();
+                if stopped.load(Ordering::Acquire) {
+                    break;
+                }
+                match ready {
+                    Ok(true) => {}
+                    Ok(false) => continue,
+                    Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(_) => break,
+                }
+            }
+            match reader.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    let replies = queries.scan(&buf[..n]);
+                    reader_wants_theme_reports
+                        .store(queries.wants_theme_reports, Ordering::Relaxed);
+                    if !replies.is_empty() {
+                        if let Ok(mut writer) = reply_writer.lock() {
+                            let _ =
+                                writer.write_all(&replies).and_then(|()| writer.flush());
+                        }
+                    }
+                    if !enqueue_output(
+                        &output_tx,
+                        buf[..n].to_vec(),
+                        &stopped,
+                        &reader_queued_output,
+                    ) {
+                        break;
+                    }
+                    // Nudge the main event loop so freshly-arrived bytes are
+                    // drained and drawn immediately, instead of waiting up to a
+                    // full tick. The waker itself coalesces, so firing per read
+                    // burst is cheap; a poisoned lock just skips the wake and
+                    // falls back to the tick cadence.
+                    if let Ok(guard) = reader_waker.lock() {
+                        if let Some(waker) = guard.as_ref() {
+                            waker();
+                        }
+                    }
+                }
+                // A transient interruption (e.g. EINTR from a signal) is NOT
+                // end-of-stream: retry rather than tearing down the reader, or a
+                // still-running agent's output would freeze and completion would
+                // hang on the scrape fallback. Only a real EOF/error ends the loop.
+                Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(_) => break,
+            }
+        }
+        // Publish EOF only after the final chunk, then wake the actor
+        // even when the last read produced no bytes.
+        drop(output_tx);
+        let waker = reader_waker.lock().ok().and_then(|guard| guard.clone());
+        if let Some(waker) = waker { waker(); }
+    }
+}
+#[cfg(target_os = "linux")]
+#[path = "retained_managed_pty.rs"]
+mod retained_managed_pty;
+#[cfg(target_os = "linux")]
+pub use retained_managed_pty::{ManagedPtyActivationOwner, ManagedPtyDrainOwner};
+
 #[derive(Default)]
 struct ReapObservation {
     status: Option<portable_pty::ExitStatus>,
@@ -596,6 +686,21 @@ pub struct ManagedHelperCustody {
 }
 #[cfg(target_os = "linux")]
 impl SuccessfulManagedHelperExit {
+    /// Match genuine engine-validated checkpoint ACK to the original child
+    /// whose actual successful wait minted this exit. DATA alone creates none
+    /// of these three opaque runtime/ACK/custody owners.
+    pub fn matches_checkpoint(&self, custody: &ManagedHelperCustody,
+        shutdown: &rudder_engine::execution::handoff::ValidatedManagedShutdown) -> Result<()> {
+        self.matches_checkpoint_record(custody, shutdown.record())
+    }
+    fn matches_checkpoint_record(&self, custody: &ManagedHelperCustody,
+        record: &rudder_engine::execution::ExecutionRecord) -> Result<()> {
+        anyhow::ensure!(Arc::ptr_eq(&self.child,&custody.child)
+            && self.instance_id==custody.instance_id && self.pid==custody.pid
+            && record.execution_id()==self.instance_id && record.supervisor_pid()==self.pid,
+            "owned helper exit differs from checkpoint receipt");
+        record.checkpointed_data()?;Ok(())
+    }
     pub fn matches(&self, custody: &ManagedHelperCustody, provisional: &rudder_engine::execution::handoff::source_shutdown::ProvisionalSourceShutdown) -> Result<()> {
         anyhow::ensure!(Arc::ptr_eq(&self.child, &custody.child)
             && self.instance_id == custody.instance_id && self.pid == custody.pid
@@ -1109,79 +1214,10 @@ impl TerminalPane {
         let reader_waker = Arc::clone(&output_waker);
         let reader_stop = Arc::new(AtomicBool::new(false));
         let stopped = Arc::clone(&reader_stop);
-        let reader_thread = thread::Builder::new()
-            .name("rudder-pty-reader".to_string())
-            .spawn(move || {
-                let mut buf = [0_u8; PTY_READ_CHUNK_BYTES];
-                // Answered here, not on the main loop: an unfocused pane is only
-                // drained every 500ms, and an agent asking for the terminal's
-                // colors at startup gives up long before that.
-                let mut queries = QueryScanner::default();
-                loop {
-                    if stopped.load(Ordering::Acquire) {
-                        break;
-                    }
-                    #[cfg(unix)]
-                    {
-                        let ready = reader_readiness.wait();
-                        if stopped.load(Ordering::Acquire) {
-                            break;
-                        }
-                        match ready {
-                            Ok(true) => {}
-                            Ok(false) => continue,
-                            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
-                            Err(_) => break,
-                        }
-                    }
-                    match reader.read(&mut buf) {
-                        Ok(0) => break,
-                        Ok(n) => {
-                            let replies = queries.scan(&buf[..n]);
-                            reader_wants_theme_reports
-                                .store(queries.wants_theme_reports, Ordering::Relaxed);
-                            if !replies.is_empty() {
-                                if let Ok(mut writer) = reply_writer.lock() {
-                                    let _ =
-                                        writer.write_all(&replies).and_then(|()| writer.flush());
-                                }
-                            }
-                            if !enqueue_output(
-                                &output_tx,
-                                buf[..n].to_vec(),
-                                &stopped,
-                                &reader_queued_output,
-                            ) {
-                                break;
-                            }
-                            // Nudge the main event loop so freshly-arrived bytes are
-                            // drained and drawn immediately, instead of waiting up to a
-                            // full tick. The waker itself coalesces, so firing per read
-                            // burst is cheap; a poisoned lock just skips the wake and
-                            // falls back to the tick cadence.
-                            if let Ok(guard) = reader_waker.lock() {
-                                if let Some(waker) = guard.as_ref() {
-                                    waker();
-                                }
-                            }
-                        }
-                        // A transient interruption (e.g. EINTR from a signal) is NOT
-                        // end-of-stream: retry rather than tearing down the reader, or a
-                        // still-running agent's output would freeze and completion would
-                        // hang on the scrape fallback. Only a real EOF/error ends the loop.
-                        Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
-                        Err(_) => break,
-                    }
-                }
-                // Publish EOF only after the final chunk, then wake the actor
-                // even when the last read produced no bytes.
-                drop(output_tx);
-                if let Ok(guard) = reader_waker.lock() {
-                    if let Some(waker) = guard.as_ref() {
-                        waker();
-                    }
-                }
-            })
+        let reader_work = PtyReaderWork { reader, #[cfg(unix)] reader_readiness, reply_writer,
+            reader_wants_theme_reports, output_tx, reader_queued_output, reader_waker, stopped };
+        let reader_thread = thread::Builder::new().name("rudder-pty-reader".to_string())
+            .spawn(move || reader_work.run())
             .context("failed to start PTY reader thread")?;
 
         Ok(Self {

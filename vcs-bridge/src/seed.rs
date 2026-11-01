@@ -301,51 +301,121 @@ pub fn prepare_metadata_template(
     baseline: CommitIdentity,
     operation: JjOperationId,
 ) -> Result<MetadataTemplate> {
+    prepare_metadata_template_layout(
+        private_repository, destination, baseline, operation, PreparedGitLayout::Colocated,
+    )
+}
+
+/// Export an owned, quiesced `Workspace::init_internal_git` repository into the
+/// same sanitized seed format as `prepare_metadata_template`. The caller holds
+/// its source lock and supplies the exact already-verified baseline/operation;
+/// this byte exporter does not establish acceptance or source-proof authority.
+/// Internal objects are copied separately, never into mutable jj metadata.
+pub fn prepare_internal_metadata_template(
+    private_repository: &Path,
+    destination: &Path,
+    baseline: CommitIdentity,
+    operation: JjOperationId,
+) -> Result<MetadataTemplate> {
+    prepare_metadata_template_layout(
+        private_repository, destination, baseline, operation, PreparedGitLayout::Internal,
+    )
+}
+
+#[derive(Clone, Copy)]
+enum PreparedGitLayout { Colocated, Internal }
+const INTERNAL_GIT: &str = ".jj/repo/store/git";
+
+fn internal_git_directory(private_repository: &Path) -> Result<PathBuf> {
+    ensure_directory(private_repository)?;
+    let canonical = private_repository.canonicalize()?;
+    for part in [".jj", ".jj/repo", ".jj/repo/store", INTERNAL_GIT,
+        ".jj/repo/store/git/objects"] {
+        let path = private_repository.join(part);
+        ensure_directory(&path)?;
+        ensure!(path.canonicalize()? == canonical.join(part),
+            "internal seed hierarchy must not redirect outside its private repository");
+    }
+    let target = private_repository.join(".jj/repo/store/git_target");
+    let metadata = fs::symlink_metadata(&target)?;
+    ensure!(metadata.is_file() && metadata.len() == 3 && fs::read(target)? == b"git",
+        "internal seed requires the original internal Git target");
+    let git = private_repository.join(INTERNAL_GIT);
+    for path in [private_repository.join(".git"), git.join("commondir"),
+        git.join("objects/info/alternates"), git.join("objects/info/http-alternates")] {
+        match fs::symlink_metadata(path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
+            Err(error) => return Err(error.into()),
+            Ok(_) => anyhow::bail!("internal seed requires a self-contained private Git store"),
+        }
+    }
+    Ok(git)
+}
+
+fn prepare_metadata_template_layout(
+    private_repository: &Path,
+    destination: &Path,
+    baseline: CommitIdentity,
+    operation: JjOperationId,
+    layout: PreparedGitLayout,
+) -> Result<MetadataTemplate> {
     baseline.validate()?;
     operation.validate()?;
-    ensure_directory(&private_repository.join(".jj"))?;
-    ensure_directory(&private_repository.join(".git"))?;
-    ensure_directory(&private_repository.join(".jj/repo"))?;
-    ensure_directory(&private_repository.join(".git/objects"))?;
-    let git_target = fs::read(private_repository.join(".jj/repo/store/git_target"))?;
-    let git_target = std::str::from_utf8(&git_target).context("Git target path is not UTF-8")?;
-    ensure!(
-        private_repository
-            .join(".jj/repo/store")
-            .join(git_target)
-            .canonicalize()?
-            == private_repository.join(".git").canonicalize()?,
-        "metadata seed must use its own private colocated Git repository"
-    );
-    ensure!(
-        !private_repository
-            .join(".git/objects/info/alternates")
-            .try_exists()?,
-        "prepare a self-contained object closure before exporting a seed"
-    );
+    let git = match layout {
+        PreparedGitLayout::Internal => internal_git_directory(private_repository)?,
+        PreparedGitLayout::Colocated => {
+            ensure_directory(&private_repository.join(".jj"))?;
+            ensure_directory(&private_repository.join(".git"))?;
+            ensure_directory(&private_repository.join(".jj/repo"))?;
+            ensure_directory(&private_repository.join(".git/objects"))?;
+            let git_target = fs::read(private_repository.join(".jj/repo/store/git_target"))?;
+            let git_target = std::str::from_utf8(&git_target).context("Git target path is not UTF-8")?;
+            ensure!(
+                private_repository
+                    .join(".jj/repo/store")
+                    .join(git_target)
+                    .canonicalize()?
+                    == private_repository.join(".git").canonicalize()?,
+                "metadata seed must use its own private colocated Git repository"
+            );
+            ensure!(
+                !private_repository
+                    .join(".git/objects/info/alternates")
+                    .try_exists()?,
+                "prepare a self-contained object closure before exporting a seed"
+            );
+            private_repository.join(".git")
+        }
+    };
     create_private_directory(destination)?;
     create_private_directory(&destination.join("metadata"))?;
     create_private_directory(&destination.join("objects"))?;
     let mut metadata = BTreeMap::new();
     let mut objects = BTreeMap::new();
+    let excluded = match layout {
+        PreparedGitLayout::Internal => Some(Path::new(INTERNAL_GIT)),
+        PreparedGitLayout::Colocated => None,
+    };
     collect_copy(
-        private_repository,
+        &private_repository.join(".jj"),
         Path::new(".jj"),
         &destination.join("metadata"),
         &mut metadata,
         true,
+        excluded,
     )?;
     // Only operational Git metadata. Config, hooks, logs, worktrees, submodule
     // repositories and credential/remote settings are deliberately not copied.
+    // Input layout differs; output always uses the established .git namespace.
     for part in ["HEAD", "index", "refs", "packed-refs", "shallow"] {
-        let rel = Path::new(".git").join(part);
-        if private_repository.join(&rel).try_exists()? {
+        if git.join(part).try_exists()? {
             collect_copy(
-                private_repository,
-                &rel,
+                &git.join(part),
+                &Path::new(".git").join(part),
                 &destination.join("metadata"),
                 &mut metadata,
                 false,
+                None,
             )?;
         }
     }
@@ -362,12 +432,19 @@ pub fn prepare_metadata_template(
         &mut metadata,
     )?;
     collect_copy(
-        &private_repository.join(".git/objects"),
+        &git.join("objects"),
         Path::new(""),
         &destination.join("objects"),
         &mut objects,
         false,
+        None,
     )?;
+    // The caller owns quiescence; recheck the supported path layout before
+    // publishing the manifest. This is not an atomic namespace-mutation fence.
+    if matches!(layout, PreparedGitLayout::Internal) {
+        ensure!(internal_git_directory(private_repository)? == git,
+            "internal seed Git layout changed during export");
+    }
     let manifest = MetadataTemplate {
         format_version: 1,
         jj_version: "0.40.0".into(),
@@ -497,9 +574,12 @@ fn collect_copy(
     destination: &Path,
     manifest: &mut BTreeMap<String, SeedFile>,
     sanitize_jj: bool,
+    excluded: Option<&Path>,
 ) -> Result<()> {
-    let full = source.join(relative);
-    let metadata = fs::symlink_metadata(&full)?;
+    if excluded == Some(relative) {
+        return Ok(());
+    }
+    let metadata = fs::symlink_metadata(source)?;
     ensure!(
         !metadata.file_type().is_symlink(),
         "symlink in private VCS metadata"
@@ -517,14 +597,15 @@ fn collect_copy(
     }
     if metadata.is_dir() {
         create_parents_private(&destination.join(relative))?;
-        for entry in fs::read_dir(&full)? {
+        for entry in fs::read_dir(source)? {
             let entry = entry?;
             collect_copy(
-                source,
+                &entry.path(),
                 &relative.join(entry.file_name()),
                 destination,
                 manifest,
                 sanitize_jj,
+                excluded,
             )?;
         }
         File::open(destination.join(relative))?.sync_all()?;
@@ -538,7 +619,7 @@ fn collect_copy(
         if target.try_exists()? {
             fs::remove_file(&target)?;
         }
-        manifest.insert(name, copy_digest(&full, &target)?);
+        manifest.insert(name, copy_digest(source, &target)?);
     }
     Ok(())
 }

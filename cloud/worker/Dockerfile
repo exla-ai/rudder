@@ -16,9 +16,10 @@ RUN --mount=type=cache,id=rudder-cargo-registry,target=/usr/local/cargo/registry
     cargo clean --locked --release -p rudder-engine -p rudder-native -p rudder-vcs-bridge \
   && cargo build --release --locked --manifest-path Cargo.toml \
        -p rudder-native -p rudder-vcs-bridge --features rudder-vcs-bridge/cli \
-       --bin rudder-native --bin rudder-jj \
+       --bin rudder-native --bin rudder-jj --bin rudder-root-storage \
   && cp target/release/rudder-native /rudder-native \
-  && cp target/release/rudder-jj /rudder-jj
+  && cp target/release/rudder-jj /rudder-jj \
+  && cp target/release/rudder-root-storage /rudder-root-storage
 
 FROM debian:bookworm-slim AS git-builder
 # Git 2.41 introduced fetch --porcelain, required by pinned jj0.40. Build the
@@ -136,6 +137,7 @@ COPY assets ./assets
 RUN rm -rf ./dist/native && mkdir -p ./dist/native
 COPY --from=native-builder /rudder-native ./dist/native/rudder-native
 COPY --from=native-builder /rudder-jj ./dist/native/rudder-jj
+COPY --from=native-builder --chown=0:0 --chmod=0555 /rudder-root-storage /usr/local/bin/rudder-root-storage
 RUN chmod +x ./dist/native/rudder-native ./dist/native/rudder-jj \
   && RUDDER_SKIP_POSTINSTALL=1 npm link
 

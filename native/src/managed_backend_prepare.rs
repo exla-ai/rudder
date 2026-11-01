@@ -15,6 +15,32 @@ pub(crate) struct SelectedCredentials {
     pub(super) environment: std::collections::BTreeMap<String, String>,
 }
 
+/// Own raw selected input BEFORE any fallible profile/backend/key validation.
+/// This is backend-neutral input custody, not a Codex login authority.
+struct SelectedCredentialInput(String);
+impl SelectedCredentialInput {
+    fn into_validated(mut self) -> String { std::mem::take(&mut self.0) }
+}
+impl Drop for SelectedCredentialInput {
+    fn drop(&mut self) {
+        // Volatile stores keep the rejection-path erase observable even when
+        // the allocator would immediately release the String's allocation.
+        for byte in unsafe { self.0.as_bytes_mut() } {
+            unsafe { std::ptr::write_volatile(byte, 0); }
+        }
+        std::sync::atomic::compiler_fence(std::sync::atomic::Ordering::SeqCst);
+        #[cfg(test)]
+        let _ = SELECTED_INPUT_DROP_AUDIT.try_with(|audit| {
+            if let Some(drops) = audit.borrow_mut().as_mut() { drops.push(self.0.as_bytes().to_vec()); }
+        });
+    }
+}
+#[cfg(test)]
+thread_local! {
+    // Tests observe only bytes AFTER zeroization, before the allocation is freed.
+    static SELECTED_INPUT_DROP_AUDIT: std::cell::RefCell<Option<Vec<Vec<u8>>>> = const { std::cell::RefCell::new(None) };
+}
+
 /// One selected host-owned key. Never Debug/Serde, guest env, home JSON or CAS.
 pub(crate) struct ManagedCodexApiKey(String);
 impl ManagedCodexApiKey {
@@ -44,14 +70,15 @@ impl SelectedCredentials {
     /// The selected profile loader supplies exactly one key, never its HOME or
     /// inherited environment. API keys have no refresh/writeback semantics.
     pub(crate) fn api_key(profile_id: String, backend: crate::Backend, secret: String) -> Result<Self> {
+        let secret = SelectedCredentialInput(secret);
         ensure!(!profile_id.is_empty() && profile_id.len() <= 256 && !profile_id.chars().any(char::is_control), "invalid selected credential profile");
-        ensure!(!secret.is_empty() && secret.len() <= 16 * 1024 && !secret.contains(['\0', '\r', '\n']), "invalid selected provider credential");
+        ensure!(!secret.0.is_empty() && secret.0.len() <= 16 * 1024 && !secret.0.contains(['\0', '\r', '\n']), "invalid selected provider credential");
         let key = match backend {
             crate::Backend::Codex => "OPENAI_API_KEY",
             crate::Backend::Claude => "ANTHROPIC_API_KEY",
             _ => anyhow::bail!("managed provider profile is unsupported"),
         };
-        Ok(Self { profile_id, backend, environment: [(key.into(), secret)].into() })
+        Ok(Self { profile_id, backend, environment: [(key.into(), secret.into_validated())].into() })
     }
     /// Ordinary CLI profiles do not participate in a shared refresh lease.
     /// Refuse before reading/copying a refresh token or invalidating a live login.
@@ -218,6 +245,47 @@ pub(super) fn prepare_backend(fence: &ManagedLaunchFence, backend: &ManagedBacke
                 "format_version":1,"run_id":fence.run_id,"attempt_id":fence.attempt_id,"socket_path":socket,
                 "claude_program":claude,"claude_args":arguments,"initial_prompt":initial_prompt}))? });
             Ok((vec![node.clone(), rudder_cli.clone(), "__claude-sdk".into(), "--launch-file".into(), "/home/agent/.rudder/claude-launch.json".into()], None, files))
+        }
+    }
+}
+
+#[cfg(test)]
+mod selected_credential_input_regressions {
+    use super::*;
+
+    fn begin_audit() { SELECTED_INPUT_DROP_AUDIT.with(|audit| *audit.borrow_mut() = Some(Vec::new())); }
+    fn take_audit() -> Vec<Vec<u8>> { SELECTED_INPUT_DROP_AUDIT.with(|audit| audit.borrow_mut().take().unwrap()) }
+
+    #[test]
+    fn every_rejected_api_key_input_is_zeroized_without_secret_error_text() {
+        for (profile, backend, secret) in [
+            (String::new(), crate::Backend::Codex, "fixture-secret-invalid-profile".into()),
+            ("selected\nprofile".into(), crate::Backend::Claude, "fixture-secret-control-profile".into()),
+            ("p".repeat(257), crate::Backend::Codex, "fixture-secret-long-profile".into()),
+            ("selected".into(), crate::Backend::Opencode, "fixture-secret-unsupported-backend".into()),
+            ("selected".into(), crate::Backend::Codex, "fixture-secret-invalid-key\n".into()),
+            ("selected".into(), crate::Backend::Claude, "x".repeat(16 * 1024 + 1)),
+            ("selected".into(), crate::Backend::Codex, String::new()),
+        ] {
+            begin_audit();
+            let length = secret.len(); let original = secret.clone();
+            let error = match SelectedCredentials::api_key(profile, backend, secret) {
+                Ok(_) => panic!("invalid selected input must refuse"), Err(error) => error,
+            };
+            let drops = take_audit();
+            assert_eq!(drops, vec![vec![0; length]], "erase must happen before rejected input deallocation");
+            if !original.is_empty() { assert!(!format!("{error:#}").contains(&original)); }
+        }
+    }
+
+    #[test]
+    fn validated_input_moves_once_to_the_selected_backend_owner() {
+        for (backend, key) in [(crate::Backend::Codex, "OPENAI_API_KEY"), (crate::Backend::Claude, "ANTHROPIC_API_KEY")] {
+            begin_audit();
+            let selected = SelectedCredentials::api_key("selected".into(), backend, "fixture-valid-selected-key".into()).unwrap();
+            assert_eq!(selected.environment.get(key).map(String::as_str), Some("fixture-valid-selected-key"));
+            assert_eq!(selected.environment.len(), 1);
+            assert_eq!(take_audit(), vec![Vec::<u8>::new()], "input owner must relinquish the allocation only after successful validation");
         }
     }
 }

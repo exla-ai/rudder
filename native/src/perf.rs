@@ -83,7 +83,7 @@ impl PerfLogger {
         }
     }
 
-    fn disabled() -> Self {
+    pub(crate) fn disabled() -> Self {
         Self {
             path: PathBuf::new(),
             writer: None,

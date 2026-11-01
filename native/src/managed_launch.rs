@@ -255,7 +255,9 @@ pub(crate) struct ManagedLocalLaunchRequest {
     pub runnable_root: ObjectRef,
     /// Trusted accepted-history binding. Never inferred from a checkout/cwd.
     pub seed_source: ObjectRef,
-    pub seed: VerifiedMetadataTemplate,
+    /// Share the once-verified immutable template across sibling launches. The
+    /// machine's original Root storage owner retains its mount/read lifetime.
+    pub seed: Arc<VerifiedMetadataTemplate>,
     pub operation_id: String,
     pub view_id: String,
     /// New owned directory, ending in the reserved request UUID.
@@ -285,7 +287,7 @@ pub(crate) struct ManagedLocalLaunchInputs {
     pub store: rudder_engine::store::LocalStore,
     pub runnable_root: ObjectRef,
     pub seed_source: ObjectRef,
-    pub seed: VerifiedMetadataTemplate,
+    pub seed: Arc<VerifiedMetadataTemplate>,
     pub preparation_parent: PathBuf,
     /// Explicit short, canonical UID-owned0700 parent for transient sockets.
     pub endpoint_parent: PathBuf,
@@ -344,7 +346,7 @@ fn prepare_endpoints(parent: &Path, fence: &ManagedLaunchFence, permanent: &Path
     File::open(&root)?.sync_all()?; File::open(parent)?.sync_all()?;
     Ok(ManagedEndpoints { root,marker,backend_target })
 }
-fn retire_endpoints(endpoints:ManagedEndpoints) -> Result<()> {
+fn retire_endpoints(endpoints:&ManagedEndpoints) -> Result<()> {
     let parent=endpoints.root.parent().context("managed endpoint parent absent")?;
     ensure!(parent.canonicalize()? == parent,"managed endpoint parent changed");
     for directory in [parent,endpoints.root.as_path()] {
@@ -371,6 +373,8 @@ pub(crate) struct PreparedManagedLaunch {
     codex_api_key: Option<ManagedCodexApiKey>,
     spec: Option<ExecutionSpec>,
     retirement: Option<Retirement>,
+    #[cfg(target_os = "linux")]
+    pub preparation_reuse: Option<crate::managed_preparation_cache::ManagedPreparationReuse>,
 }
 impl PreparedManagedLaunch {
     pub(crate) fn take_codex_api_key(&mut self) -> Option<ManagedCodexApiKey> { self.codex_api_key.take() }
@@ -398,9 +402,9 @@ impl PreparedManagedLaunch {
     /// Explicit unused-result retirement on a background worker. Adopted or
     /// uncertain running attempts retain their recovery state conservatively.
     pub(crate) fn retire(mut self) -> Result<()> {
-        if let Some(retirement) = self.retirement.take() {
+        if let Some(mut retirement) = self.retirement.take() {
             ensure!(!retirement.adopted, "adopted managed execution requires receipt reconciliation");
-            retire_unused(retirement)?;
+            retire_unused(&mut retirement)?;
         }
         Ok(())
     }
@@ -424,7 +428,7 @@ struct Retirement {
     endpoints:Option<ManagedEndpoints>,
     endpoints_safe:bool,
 }
-fn retire_unused(retirement: Retirement) -> Result<()> {
+fn retire_unused(retirement: &mut Retirement) -> Result<()> {
     if retirement.adopted && !retirement.endpoints_safe { return Ok(()); }
     let file=OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW|libc::O_CLOEXEC|libc::O_NONBLOCK).open(retirement.root.join("preparation.json"))?;
     ensure!(file.metadata()?.is_file() && file.metadata()?.len()<=64*1024,"managed preparation marker exceeds bound");
@@ -433,7 +437,7 @@ fn retire_unused(retirement: Retirement) -> Result<()> {
         "managed preparation retirement identity changed");
     // Permanent history, workspace/checkpoints, reservation and pins survive
     // every automatic cleanup. Only exact owned transient endpoints retire.
-    if let Some(endpoints)=retirement.endpoints { retire_endpoints(endpoints)?; }
+    if let Some(endpoints)=&retirement.endpoints { retire_endpoints(endpoints)?; retirement.endpoints=None; }
     Ok(())
 }
 fn retirement_queue() -> Option<&'static SyncSender<Retirement>> {
@@ -441,7 +445,7 @@ fn retirement_queue() -> Option<&'static SyncSender<Retirement>> {
     QUEUE.get_or_init(|| {
         let (send, receive) = mpsc::sync_channel::<Retirement>(32);
         std::thread::Builder::new().name("rudder-managed-retirement".into()).spawn(move || {
-            while let Ok(retirement) = receive.recv() { let _ = retire_unused(retirement); }
+            while let Ok(mut retirement) = receive.recv() { let _ = retire_unused(&mut retirement); }
         }).ok().map(|_| send)
     }).as_ref()
 }
@@ -462,9 +466,87 @@ impl Drop for PreparedManagedLaunch {
 
 /// Blocking IO only. No App access, PTY spawn, capability grant, run observation
 /// or provider call. Every identity was reserved by the App before invocation.
-pub(crate) fn prepare_local(mut request: ManagedLocalLaunchRequest, cancelled: Arc<AtomicBool>) -> Result<PreparedManagedLaunch> {
+pub(crate) fn prepare_local(request: ManagedLocalLaunchRequest, cancelled: Arc<AtomicBool>) -> Result<PreparedManagedLaunch> {
+    let mut retained = ManagedLocalPreparationOwner::default();
+    let result = prepare_local_retaining(request, cancelled, None, None, &mut retained);
+    match result {
+        Ok(mut prepared) => { prepared.retirement = retained.retirement.take(); Ok(prepared) }
+        Err(error) => { let _ = retained.settle_unused(); Err(error) }
+    }
+}
+
+/// Actual synchronous view/cache custody, separate from the preparation permit.
+/// This value and its last owner must stay on the OFF-App lifetime supervisor.
+enum ManagedLaunchViewOwner {
+    Dedicated { manager: VfsManager, view: rudder_engine::vfs::VfsView },
+    #[cfg(target_os = "linux")]
+    Cached(crate::managed_preparation_cache::ManagedPreparedView),
+}
+impl ManagedLaunchViewOwner {
+    fn manager(&self) -> &VfsManager { match self { Self::Dedicated { manager, .. } => manager,
+        #[cfg(target_os = "linux")] Self::Cached(view) => view.manager() } }
+    fn view(&self) -> &rudder_engine::vfs::VfsView { match self { Self::Dedicated { view, .. } => view,
+        #[cfg(target_os = "linux")] Self::Cached(view) => view.view() } }
+}
+#[derive(Default)]
+pub(crate) struct ManagedLocalPreparationOwner {
+    view: Option<ManagedLaunchViewOwner>, retirement: Option<Retirement>, attempted:bool,
+    #[cfg(target_os = "linux")]
+    cache: Option<Arc<crate::managed_preparation_cache::ManagedPreparationCache>>,
+}
+impl ManagedLocalPreparationOwner {
+    #[cfg(target_os = "linux")]
+    pub(crate) fn set_cache(&mut self, cache:Option<Arc<crate::managed_preparation_cache::ManagedPreparationCache>>) -> Result<()> {
+        ensure!(!self.attempted && self.view.is_none() && self.retirement.is_none() && self.cache.is_none(), "managed task owner is not fresh");
+        self.cache=cache; Ok(())
+    }
+    /// Borrow across cleanup errors/panics; never consume a failed owner.
+    pub(crate) fn settle_unused(&mut self) -> Result<()> {
+        if let Some(retirement) = &mut self.retirement {
+            ensure!(!retirement.adopted, "live managed task still requires physical/helper/actor drain");
+            retire_unused(retirement)?;
+        }
+        self.retirement = None; self.view = None;
+        #[cfg(target_os = "linux")] { self.cache = None; }
+        Ok(())
+    }
+    /// Caller holds the original successful helper exit plus actual runtime,
+    /// control, handoff and broker joins. This method creates no such authority.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn settle_after_runtime_join(&mut self) -> Result<()> {
+        if let Some(retirement) = &mut self.retirement {
+            retirement.adopted = true; retirement.endpoints_safe = true;
+            retire_unused(retirement)?;
+        }
+        self.retirement = None; self.view = None; self.cache = None; Ok(())
+    }
+}
+#[cfg(target_os = "linux")]
+pub(crate) fn prepare_local_task(request: ManagedLocalLaunchRequest, cancelled: Arc<AtomicBool>,
+    journal:&Journal,
+    budget: &rudder_engine::execution::finalization_budget::FinalizationBudget,
+    cache: Option<Arc<crate::managed_preparation_cache::ManagedPreparationCache>>,
+    retained: &mut ManagedLocalPreparationOwner) -> Result<PreparedManagedLaunch> {
+    ensure!(retained.view.is_none() && retained.retirement.is_none() && retained.cache.is_none(), "managed task preparation already attempted");
+    retained.cache = cache;
+    prepare_local_task_retained(request,cancelled,journal,budget,retained)
+}
+#[cfg(target_os = "linux")]
+pub(crate) fn prepare_local_task_retained(request:ManagedLocalLaunchRequest,cancelled:Arc<AtomicBool>,
+    journal:&Journal,budget:&rudder_engine::execution::finalization_budget::FinalizationBudget,retained:&mut ManagedLocalPreparationOwner) -> Result<PreparedManagedLaunch> {
+    ensure!(!retained.attempted && retained.view.is_none() && retained.retirement.is_none(),"managed task preparation already attempted");
+    retained.attempted=true;
+    prepare_local_retaining(request, cancelled, Some(journal), Some(budget), retained)
+}
+fn prepare_local_retaining(mut request: ManagedLocalLaunchRequest, cancelled: Arc<AtomicBool>,
+    supplied_journal:Option<&Journal>,
+    budget: Option<&rudder_engine::execution::finalization_budget::FinalizationBudget>,
+    retained: &mut ManagedLocalPreparationOwner) -> Result<PreparedManagedLaunch> {
     ensure!(cfg!(target_os = "linux"), "managed local execution requires a qualified Linux worker");
-    let journal = Journal::open(&request.journal)?;
+    let reopened;
+    let journal=if let Some(journal)=supplied_journal { journal }
+        else { reopened=Journal::open(&request.journal)?;&reopened };
+    ensure!(journal.database_path()? == request.journal,"managed preparation Journal differs from actual held input");
     let managed_run = request.managed_store.run(&request.fence.run_id)?;
     ensure!(request.managed_store.binding().home == request.home
         && request.managed_store.binding().journal == request.journal
@@ -479,7 +561,10 @@ pub(crate) fn prepare_local(mut request: ManagedLocalLaunchRequest, cancelled: A
     validate_endpoint_parent(&request.endpoint_parent,&request.fence)?;
     let check = || -> Result<()> {
         ensure!(!cancelled.load(Ordering::Acquire), "managed launch preparation cancelled");
-        request.fence.check_current(&journal)
+        if let Some(budget) = budget { budget.remaining()?; }
+        request.fence.check_current(&journal)?;
+        ensure!(!cancelled.load(Ordering::Acquire), "managed launch preparation cancelled");
+        if let Some(budget) = budget { budget.remaining()?; } Ok(())
     };
     check()?;
     for id in [&request.operation_id, &request.view_id] {
@@ -499,9 +584,9 @@ pub(crate) fn prepare_local(mut request: ManagedLocalLaunchRequest, cancelled: A
         &[request.native_guest.as_str(), request.jj_guest.as_str()])?;
     ensure!(request.runnable_root.kind == ObjectKind::RunnableRoot, "managed local launch requires a RunnableRoot");
     let seed_ref = request.seed.retained_seed().context("managed local launch requires a retained private seed")?.clone();
-    let retained = request.store.retention()?;
+    let source_retention = request.store.retention()?;
     for root in [&request.runnable_root, &seed_ref] {
-        ensure!(retained.pins.values().any(|r| r == root), "managed launch input has no retained LOCAL authority");
+        ensure!(source_retention.pins.values().any(|r| r == root), "managed launch input has no retained LOCAL authority");
     }
     let runnable = rudder_engine::snapshot::decode_runnable(&request.store.read_object(&request.runnable_root)?)?;
     ensure!(request.seed_source == runnable.source, "private VCS seed belongs to another accepted source");
@@ -519,17 +604,34 @@ pub(crate) fn prepare_local(mut request: ManagedLocalLaunchRequest, cancelled: A
     let mut file = OpenOptions::new().create_new(true).write(true).mode(0o600)
         .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC).open(request.private_root.join("preparation.json"))?;
     file.write_all(&marker)?; file.sync_all()?; File::open(&request.private_root)?.sync_all()?;
-    let mut retirement = Retirement { root: request.private_root.clone(), marker,
-        pins: Vec::new(), adopted: false,endpoints:None,endpoints_safe:false };
+    retained.retirement = Some(Retirement { root: request.private_root.clone(), marker,
+        pins: Vec::new(), adopted: false,endpoints:None,endpoints_safe:false });
+    let retirement = retained.retirement.as_mut().unwrap();
     let prepared = (|| -> Result<PreparedManagedLaunch> {
         for (kind, root) in [("runnable", &request.runnable_root), ("seed", &seed_ref)] {
             let pin = format!("managed:{}:{kind}", request.fence.request_id);
             request.store.pin_existing(&pin, root)?; retirement.pins.push(pin);
         }
-        let manager = VfsManager::open(request.private_root.join("vfs"), request.store.clone())?;
         let snapshot = VfsCheckpoint { format_version: 1, directory: runnable.view_root.clone(), hardlinks: runnable.hardlinks.clone() };
-        manager.prepare_paged_snapshot(&snapshot)?;
-        let view = manager.fork_paged_snapshot(&request.view_id, &snapshot, request.fence.owner_epoch())?;
+        #[cfg(target_os = "linux")]
+        let selected_view = if let Some(cache) = &retained.cache {
+            ManagedLaunchViewOwner::Cached(cache.fork(&request, &journal, &cancelled,
+                budget.context("managed cache requires original task preparation budget")?)?)
+        } else {
+            let manager = VfsManager::open(request.private_root.join("vfs"), request.store.clone())?;
+            check()?; manager.prepare_paged_snapshot(&snapshot)?; check()?;
+            let view = manager.fork_paged_snapshot(&request.view_id, &snapshot, request.fence.owner_epoch())?;
+            ManagedLaunchViewOwner::Dedicated { manager, view }
+        };
+        #[cfg(not(target_os = "linux"))]
+        let selected_view = {
+            let manager = VfsManager::open(request.private_root.join("vfs"), request.store.clone())?;
+            check()?; manager.prepare_paged_snapshot(&snapshot)?; check()?;
+            let view = manager.fork_paged_snapshot(&request.view_id, &snapshot, request.fence.owner_epoch())?;
+            ManagedLaunchViewOwner::Dedicated { manager, view }
+        };
+        retained.view = Some(selected_view);
+        let held = retained.view.as_ref().unwrap(); let manager = held.manager(); let view = held.view();
         retirement.pins.extend([format!("vfs:view:{}:base", request.view_id), format!("vfs:view:{}:topology", request.view_id)]);
         check()?;
         let observation = ObservationBinding { format_version: 1,
@@ -600,12 +702,11 @@ pub(crate) fn prepare_local(mut request: ManagedLocalLaunchRequest, cancelled: A
         Ok(PreparedManagedLaunch { assignment, transport: ManagedTransportMapping { host_socket, guest_socket, guest_cwd: "/workspace".into() }, reports,
             managed_run,
             execution_profile: execution_profile.into(), frontend_start, identity_home: request.home.clone(),
-            identity_journal: request.journal.clone(), server_command, codex_api_key, spec: Some(spec), retirement: None })
+            identity_journal: request.journal.clone(), server_command, codex_api_key, spec: Some(spec), retirement: None,
+            #[cfg(target_os = "linux")]
+            preparation_reuse: match held { ManagedLaunchViewOwner::Cached(view) => Some(view.stats().clone()), _ => None } })
     })();
-    match prepared {
-        Ok(mut prepared) => { prepared.retirement = Some(retirement); Ok(prepared) }
-        Err(error) => { let _ = retire_unused(retirement); Err(error) }
-    }
+    prepared
 }
 
 #[cfg(test)]

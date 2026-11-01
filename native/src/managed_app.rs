@@ -8,13 +8,27 @@ use rudder_engine::journal::{Journal, OwnerFence};
 mod local {
     use super::*;
     use crate::{agent_broker::{AgentBroker, BrokerConfig}, managed_launch::{self, PreparedManagedLaunch}};
-    use rudder_engine::{execution::{handoff::{HandoffReceipt, ManagedExecutionHandoff, ManagedExecutionHandle, ManagedExecutionEvent, ValidatedManagedShutdown}, StopAndCheckpoint}, paths::FabricPaths};
+    use rudder_engine::{execution::{handoff::{HandoffReceipt, ManagedExecutionHandoff, ManagedExecutionHandle, ManagedExecutionEvent, ValidatedManagedShutdown, ManagedExecutionStartBarrier}, StopAndCheckpoint}, paths::FabricPaths};
     use std::sync::{atomic::{AtomicBool, AtomicUsize, Ordering}, Arc, mpsc::{self, Receiver, SyncSender}};
     use std::collections::BTreeMap;
+    use crate::{engine_host::EngineSourceLease,
+        managed_task_launch::{ManagedTaskAdmission, ManagedTaskLaunchPacket, PreparedManagedTask, ManagedTaskProject}};
+    use rudder_engine::execution::finalization_budget::FinalizationBudget;
+    use std::sync::{Mutex, atomic::{AtomicU8, AtomicU64}};
+    use rudder_native::pty_terminal::{ManagedHelperCustody, SuccessfulManagedHelperExit, ManagedPtyActivationOwner, ManagedPtyDrainOwner};
 
     const MAX_PREPARATIONS: usize = 2;
     const PREPARATION_DEADLINE: Duration = Duration::from_secs(120);
     const STOP_DEADLINE: Duration = Duration::from_secs(30);
+    const TASK_SLOTS: usize = 256;
+    const TASK_WORKERS: usize = 4;
+    const TASK_PENDING: u8 = 0;
+    const TASK_ADOPTED: u8 = 1;
+    const TASK_UNUSED: u8 = 2;
+    const TASK_DRAINING: u8 = 3;
+    const TASK_RECOVERY: u8 = 4;
+    const TASK_SETTLED: u8 = 5;
+    const TASK_JOINED: u8 = 6;
     fn now_ms() -> Result<i64> {
         Ok(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_millis().try_into()?)
     }
@@ -45,19 +59,438 @@ mod local {
             })?;
             Ok(())
         }
+        fn spawn_retaining(&self, permit: WorkerPermit, ticket: TaskWorkerTicket, waker: Option<PtyOutputWaker>,
+            work: impl FnOnce(SyncSender<T>) -> T + Send + 'static, on_panic: impl FnOnce() -> T + Send + 'static) -> Result<()> {
+            let send = self.send.clone();
+            let slot=ticket.slot.clone();
+            let worker = thread::Builder::new().name("rudder-managed-task-prepare".into()).spawn(move || {
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(||work(send.clone()))).unwrap_or_else(|_|on_panic());
+                if send.send(result).is_err() {
+                    slot.state.store(if slot.may_have_helper.load(Ordering::Acquire) { TASK_RECOVERY } else { TASK_UNUSED },Ordering::Release);
+                    slot.work.store(true,Ordering::Release);
+                }
+                if let Some(waker) = waker { waker(); }
+            })?;
+            // The ticket reserved one of this slot's four exact handle cells
+            // before spawn. No callback/result receipt releases that admission.
+            ticket.retain(RetainedTaskWorker { worker, permit }); Ok(())
+        }
     }
 
-    struct Pending { fence: ManagedLaunchFence, cancelled: Arc<AtomicBool>, started: Instant }
-    struct PreparedResult { prepared: PreparedManagedLaunch, broker: AgentBroker, projection_hash: [u8; 32],
-        handoff: ManagedExecutionHandoff, native_program: PathBuf, launch_json: String }
+    pub(crate) struct ManagedTaskJournalOwner { journal: Mutex<Journal>, lease: EngineSourceLease }
+    impl ManagedTaskJournalOwner {
+        pub(crate) fn owner(&self)->&OwnerFence { self.lease.owner() }
+        /// OFF-App only. Rotations borrow the same actual owner-bound writer;
+        /// no scheduler, saved path or independently opened database is used.
+        pub(crate) fn with_writer<T>(&self,budget:&FinalizationBudget,cancelled:&AtomicBool,
+            work:impl FnOnce(&mut Journal)->Result<T>) -> Result<T> {
+            let mut journal=loop {
+                task_time(budget,cancelled)?;
+                match self.journal.try_lock() { Ok(journal)=>break journal,
+                    Err(std::sync::TryLockError::WouldBlock)=>thread::sleep(budget.phase_limit(Duration::from_millis(10))?),
+                    Err(_)=>anyhow::bail!("managed task writer poisoned") }
+            };
+            self.lease.check_journal(&journal)?;task_time(budget,cancelled)?;
+            let result=work(&mut journal)?;
+            self.lease.check_journal(&journal)?;task_time(budget,cancelled)?;Ok(result)
+        }
+    }
+    struct TaskCarrier {
+        packet: Option<ManagedTaskLaunchPacket>, request: Option<managed_launch::ManagedLocalLaunchRequest>,
+        native: Option<PathBuf>, budget: Option<FinalizationBudget>, cancelled: Arc<AtomicBool>,
+        preparation: managed_launch::ManagedLocalPreparationOwner,
+        projection: fabric_runtime::AgentToolsProjectionOwner,
+        broker: crate::agent_broker::BrokerThreadOwner,
+        broker_joined: Option<crate::agent_broker::BrokerThreadsSettled>,
+        drain: Option<TaskDrain>, ready_owner:Option<PreparedResult>, activation_failure:Option<TaskActivationFailure>,
+        admission: Option<ManagedTaskAdmission>, preparation_joined: bool,
+        panics: Vec<Box<dyn std::any::Any + Send>>,
+    }
+    struct TaskDrain { live: Live, runtime: Option<fabric_runtime::ManagedRuntimeDrain>, pty:Option<ManagedPtyDrainOwner>,
+        _start:Option<ManagedExecutionStartBarrier>,
+        exit: Option<SuccessfulManagedHelperExit>,custody:Option<ManagedHelperCustody>,
+        control_join:Option<rudder_engine::execution::handoff::WorkerJoined>,
+        handoff_join:Option<rudder_engine::execution::handoff::WorkerJoined>,
+        runtime_join:Option<fabric_runtime::ManagedRuntimeJoined> }
+    struct TaskActivationFailure { ready:PreparedResult, activation:ManagedPtyActivationOwner,
+        _panic:Option<Box<dyn std::any::Any+Send>> }
+    enum TaskPayload { Live(TaskDrain), ReadyOwner(PreparedResult), ActivationFailure(TaskActivationFailure) }
+    /// Original completion/custody for the separate checkpoint acceptor. No
+    /// Serde/Clone/public constructor; callers keep/dispose it OFF-App only.
+    /// Field order closes actual actor/prepared resources, then view/cache/CAS
+    /// retention, and only then the final owner-bound Journal/Engine lease.
+    #[must_use="retain original joined custody through checkpoint acceptance or explicit discard"]
+    pub(crate) struct JoinedManagedTask { drain:TaskDrain,
+        _broker:crate::agent_broker::BrokerThreadOwner,_broker_join:crate::agent_broker::BrokerThreadsSettled,
+        _projection:fabric_runtime::AgentToolsProjectionOwner,
+        preparation:managed_launch::ManagedLocalPreparationOwner,_project:Arc<ManagedTaskJournalOwner>,
+        _slot:Arc<TaskSlot>,settled:bool }
+    impl JoinedManagedTask {
+        pub(crate) fn prepared(&self)->&PreparedManagedLaunch { &self.drain.live.prepared }
+        pub(crate) fn shutdown(&self)->&ValidatedManagedShutdown { self.drain.live.receipt.as_ref().unwrap() }
+        pub(crate) fn helper_exit(&self)->&SuccessfulManagedHelperExit { self.drain.exit.as_ref().unwrap() }
+        pub(crate) fn helper_custody(&self)->&ManagedHelperCustody { self.drain.custody.as_ref().unwrap() }
+        /// Acceptance and immutable checkpoint pinning remain separate. Call
+        /// only AFTER they used this original custody, or on explicit discard.
+        /// Every cleanup error leaves this SAME mutable capsule owned by caller.
+        pub(crate) fn settle_discard_off_app(&mut self,budget:&FinalizationBudget)->Result<()> {
+            anyhow::ensure!(!self.settled,"joined task capsule already settled");
+            budget.remaining()?;self.preparation.settle_after_runtime_join()?;budget.remaining()?;
+            self.settled=true;self._slot.acceptance_pending.store(false,Ordering::Release);
+            self._slot.work.store(true,Ordering::Release);Ok(())
+        }
+        pub(crate) fn is_settled(&self)->bool { self.settled }
+    }
+    /// This counter is released only after join includes the original TLS.
+    struct RetainedTaskWorker { worker:thread::JoinHandle<()>, permit:WorkerPermit }
+    impl RetainedTaskWorker {
+        fn join(self)->thread::Result<()> {
+            let Self {worker,permit}=self;
+            let result=worker.join();drop(permit);result
+        }
+    }
+    struct TaskSlot { occupied: AtomicBool, acceptance_pending:AtomicBool, generation:AtomicU64, may_have_helper:AtomicBool, activation_committed:AtomicBool, state: AtomicU8, work: AtomicBool, busy: AtomicBool,
+        handles: AtomicUsize, carrier: Mutex<TaskCarrier>,
+        joining:Mutex<TaskWorkerJoins>,
+        workers: [SyncSender<RetainedTaskWorker>; TASK_WORKERS],
+        worker_receivers: Mutex<[Receiver<RetainedTaskWorker>; TASK_WORKERS]>,
+        drain_send: SyncSender<TaskPayload>, drain_receive: Mutex<Receiver<TaskPayload>>,
+        project: Arc<ManagedTaskJournalOwner>, wake: Mutex<Option<PtyOutputWaker>> }
+    struct TaskWorkerJoins { worker:[Option<RetainedTaskWorker>;TASK_WORKERS],
+        preparation_joined:bool,panics:Vec<Box<dyn std::any::Any+Send>> }
+    #[derive(Clone)]
+    pub(crate) struct TaskHandle { slot:Arc<TaskSlot>, generation:u64,
+        budget:FinalizationBudget,cancelled:Arc<AtomicBool> }
+    struct TaskWorkerTicket { slot: Arc<TaskSlot>, index: usize, sent: bool }
+    impl TaskWorkerTicket {
+        fn retain(mut self, worker: RetainedTaskWorker) {
+            // Each non-Clone ticket exclusively owns one still-empty bounded
+            // channel; only its off-App receiver can remove the original handle.
+            self.slot.workers[self.index].try_send(worker).unwrap_or_else(|_| unreachable!("reserved task worker cell unavailable"));
+            self.sent = true; self.slot.work.store(true, Ordering::Release);
+        }
+    }
+    impl Drop for TaskWorkerTicket { fn drop(&mut self) {
+        if !self.sent { self.slot.handles.fetch_and(!(1 << self.index), Ordering::AcqRel); }
+    } }
+    impl TaskHandle {
+        fn current(&self) -> bool { self.slot.occupied.load(Ordering::Acquire)
+            && self.slot.generation.load(Ordering::Acquire)==self.generation }
+        fn time(&self) -> Result<()> { anyhow::ensure!(self.current(),"managed task lifetime replaced");task_time(&self.budget,&self.cancelled) }
+        fn worker(&self) -> Result<TaskWorkerTicket> {
+            anyhow::ensure!(self.current(),"managed task retention generation was replaced");
+            for index in 0..TASK_WORKERS {
+                let mask = 1 << index; let old = self.slot.handles.fetch_or(mask, Ordering::AcqRel);
+                if old & mask == 0 { return Ok(TaskWorkerTicket { slot: self.slot.clone(), index, sent: false }); }
+            }
+            anyhow::bail!("managed task worker settlement is full")
+        }
+        fn unused(&self) { if !self.current() { return; }
+            if self.slot.state.load(Ordering::Acquire)==TASK_SETTLED { return; }
+            self.slot.state.store(if self.slot.may_have_helper.load(Ordering::Acquire) { TASK_RECOVERY } else { TASK_UNUSED }, Ordering::Release);
+            self.slot.work.store(true, Ordering::Release); }
+        fn adopted(&self) { if !self.current() { return; } self.slot.may_have_helper.store(true,Ordering::Release);
+            self.slot.state.store(TASK_ADOPTED, Ordering::Release); self.slot.work.store(true, Ordering::Release); }
+        fn activated(&self) { if !self.current() { return; }
+            self.slot.activation_committed.store(true,Ordering::Release);self.slot.work.store(true,Ordering::Release); }
+        fn reject_activation(&self,ready:PreparedResult,activation:ManagedPtyActivationOwner,panic:Option<Box<dyn std::any::Any+Send>>) {
+            assert!(self.current(),"actual activation owner cannot target a reused cell");
+            self.slot.drain_send.try_send(TaskPayload::ActivationFailure(TaskActivationFailure { ready,activation,_panic:panic }))
+                .unwrap_or_else(|_|unreachable!("reserved task activation cell unavailable"));
+            self.unused();
+        }
+        fn retain_drain(&self, drain: TaskDrain) {
+            assert!(self.current(),"actual managed task drain cannot target a reused slot");
+            self.slot.drain_send.try_send(TaskPayload::Live(drain)).unwrap_or_else(|_| unreachable!("reserved task drain cell unavailable"));
+            self.slot.state.store(TASK_DRAINING, Ordering::Release); self.slot.work.store(true, Ordering::Release);
+        }
+        fn reject_ready(&self,ready:PreparedResult) {
+            assert!(self.current(),"actual task ready owner cannot target a reused cell");
+            self.slot.drain_send.try_send(TaskPayload::ReadyOwner(ready)).unwrap_or_else(|_|unreachable!("reserved unused task cell unavailable"));
+            self.unused();
+        }
+    }
+    #[must_use = "return the actual rejected owner to bounded OFF-App settlement"]
+    pub(crate) enum ManagedTaskStartFailure {
+        Prepared(PreparedManagedTask,anyhow::Error), Packet(ManagedTaskLaunchPacket,anyhow::Error),
+        Retained(TaskHandle,anyhow::Error),
+    }
+    impl ManagedTaskStartFailure {
+        pub(crate) fn settle_unqueued_off_app(self) -> Result<()> {
+            match self { Self::Prepared(owner,_)=>drop(owner),Self::Packet(owner,_)=>drop(owner),
+                Self::Retained(handle,_)=>{ handle.unused(); anyhow::bail!("queued task ownership remains in its lifetime supervisor"); } }
+            Ok(())
+        }
+    }
+    /// Cleanup custody only. Root constructs/retains this OFF-App with an actual
+    /// owner-bound writer/lease and keeps it until every task and pool joins.
+    /// Live storage slots are separate from the two charged prep admissions.
+    pub(crate) struct ManagedTaskLifetimeSupervisor { slots: Vec<Arc<TaskSlot>>, project: Arc<ManagedTaskJournalOwner>,
+        send: Option<SyncSender<Arc<TaskSlot>>>, workers: Vec<thread::JoinHandle<()>> }
+    impl ManagedTaskLifetimeSupervisor {
+        pub(crate) fn new_off_app(lease: EngineSourceLease, writer: crate::managed_source_app::SourceJournalFactory) -> Result<Arc<Self>> {
+            let journal = writer()?; lease.check_journal(&journal)?;
+            let project = Arc::new(ManagedTaskJournalOwner { journal: Mutex::new(journal), lease });
+            let slots = (0..TASK_SLOTS).map(|_| {
+                let channels: [(SyncSender<RetainedTaskWorker>,Receiver<RetainedTaskWorker>);TASK_WORKERS] = std::array::from_fn(|_|mpsc::sync_channel(1));
+                let (workers, receivers): (Vec<_>, Vec<_>) = channels.into_iter().unzip();
+                let (drain_send, drain_receive) = mpsc::sync_channel(1);
+                Arc::new(TaskSlot { occupied: AtomicBool::new(false),acceptance_pending:AtomicBool::new(false), generation:AtomicU64::new(0),may_have_helper:AtomicBool::new(false),activation_committed:AtomicBool::new(false),state: AtomicU8::new(TASK_PENDING),
+                    work: AtomicBool::new(false), busy: AtomicBool::new(false), handles: AtomicUsize::new(0),
+                    carrier: Mutex::new(TaskCarrier { packet:None,request:None,native:None,budget:None,cancelled:Arc::new(AtomicBool::new(false)),
+                        preparation:Default::default(),projection:fabric_runtime::AgentToolsProjectionOwner::new(),
+                        broker:crate::agent_broker::BrokerThreadOwner::new(),broker_joined:None,drain:None,ready_owner:None,activation_failure:None,
+                        admission:None,preparation_joined:false,panics:Vec::new() }),
+                    joining:Mutex::new(TaskWorkerJoins { worker:std::array::from_fn(|_|None),preparation_joined:false,panics:Vec::new() }),
+                    workers:workers.try_into().ok().unwrap(),worker_receivers:Mutex::new(receivers.try_into().ok().unwrap()),
+                    drain_send,drain_receive:Mutex::new(drain_receive),project:project.clone(),wake:Mutex::new(None) })
+            }).collect();
+            let (send, receive) = mpsc::sync_channel::<Arc<TaskSlot>>(MAX_PREPARATIONS);
+            let receive = Arc::new(Mutex::new(receive)); let mut workers = Vec::new();
+            for _ in 0..MAX_PREPARATIONS {
+                let receive = receive.clone();
+                let started=thread::Builder::new().name("rudder-managed-task-settle".into()).spawn(move ||loop {
+                    let next = receive.lock().unwrap_or_else(|p|p.into_inner()).recv(); let Ok(slot) = next else { break; };
+                    // Actual carrier remains in its pre-reserved cell outside
+                    // this catch, including panic/error and failed event delivery.
+                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(||settle_task_slot(&slot)));
+                    if !matches!(result, Ok(Ok(()))) { slot.state.store(TASK_RECOVERY, Ordering::Release); }
+                    if let Err(payload) = result { slot.carrier.lock().unwrap_or_else(|p|p.into_inner()).panics.push(payload); }
+                    slot.busy.store(false, Ordering::Release);
+                    let wake = slot.wake.lock().unwrap_or_else(|p|p.into_inner()).clone();
+                    if let Some(wake) = wake { wake(); }
+                });
+                match started { Ok(worker)=>workers.push(worker),Err(error)=>{
+                    drop(send);for worker in workers { let _=worker.join(); }return Err(error.into());
+                } }
+            }
+            Ok(Arc::new(Self { slots, project, send:Some(send), workers }))
+        }
+        fn reserve(&self, packet: ManagedTaskLaunchPacket, wake:Option<PtyOutputWaker>)
+            -> std::result::Result<TaskHandle,(ManagedTaskLaunchPacket,anyhow::Error)> {
+            for slot in &self.slots {
+                // A stale result/retained error owns a real Arc. Do not recycle
+                // its cell until every old handle and pool job has retired.
+                if Arc::strong_count(slot)!=1 { continue; }
+                if slot.occupied.compare_exchange(false,true,Ordering::AcqRel,Ordering::Acquire).is_err() { continue; }
+                let Ok(mut carrier) = slot.carrier.try_lock() else { slot.occupied.store(false,Ordering::Release); continue; };
+                let Ok(mut wake_cell) = slot.wake.try_lock() else { slot.occupied.store(false,Ordering::Release); continue; };
+                let generation = match slot.generation.fetch_update(Ordering::AcqRel,Ordering::Acquire,|old|old.checked_add(1)) {
+                    Ok(old)=>old+1,Err(_)=>{ slot.occupied.store(false,Ordering::Release); continue; } };
+                slot.state.store(TASK_PENDING,Ordering::Release);slot.may_have_helper.store(false,Ordering::Release);slot.activation_committed.store(false,Ordering::Release);
+                let budget=packet.budget.clone();let cancelled=packet.cancelled.clone();
+                carrier.budget=Some(budget.clone());carrier.cancelled = cancelled.clone(); carrier.packet = Some(packet);
+                *wake_cell = wake;
+                return Ok(TaskHandle { slot:slot.clone(), generation,budget,cancelled });
+            }
+            Err((packet,anyhow::anyhow!("managed task lifetime storage is full")))
+        }
+        pub(crate) fn poll(&self) {
+            for slot in &self.slots {
+                if slot.occupied.load(Ordering::Acquire) && slot.state.load(Ordering::Acquire)==TASK_SETTLED
+                    && Arc::strong_count(slot)==1 { slot.work.store(true,Ordering::Release); }
+                if !slot.occupied.load(Ordering::Acquire) || !slot.work.load(Ordering::Acquire)
+                    || slot.busy.compare_exchange(false,true,Ordering::AcqRel,Ordering::Acquire).is_err() { continue; }
+                slot.work.store(false,Ordering::Release);
+                if self.send.as_ref().unwrap().try_send(slot.clone()).is_err() {
+                    slot.work.store(true,Ordering::Release); slot.busy.store(false,Ordering::Release);
+                }
+            }
+        }
+        pub(crate) fn joined_fences_off_app(&self)->Vec<ManagedLaunchFence> {
+            self.slots.iter().filter(|slot|slot.state.load(Ordering::Acquire)==TASK_JOINED)
+                .filter_map(|slot|slot.carrier.try_lock().ok().and_then(|carrier|carrier.drain.as_ref()
+                    .map(|drain|drain.live.prepared.assignment.fence.clone()))).collect()
+        }
+        pub(crate) fn take_joined_off_app(&self,fence:&ManagedLaunchFence)->Result<Option<JoinedManagedTask>> {
+            for slot in &self.slots {
+                if slot.state.load(Ordering::Acquire)!=TASK_JOINED { continue; }
+                let Ok(mut carrier)=slot.carrier.try_lock() else { continue; };
+                if carrier.drain.as_ref().is_none_or(|drain|drain.live.prepared.assignment.fence!=*fence) { continue; }
+                anyhow::ensure!(carrier.broker_joined.is_some(),"actual task broker join proof absent");
+                anyhow::ensure!(!slot.acceptance_pending.swap(true,Ordering::AcqRel),"task acceptance already transferred");
+                let joined=JoinedManagedTask { drain:carrier.drain.take().unwrap(),
+                    _broker:std::mem::replace(&mut carrier.broker,crate::agent_broker::BrokerThreadOwner::new()),
+                    _broker_join:carrier.broker_joined.take().unwrap(),
+                    _projection:std::mem::replace(&mut carrier.projection,fabric_runtime::AgentToolsProjectionOwner::new()),
+                    preparation:std::mem::take(&mut carrier.preparation),_project:slot.project.clone(),_slot:slot.clone(),settled:false };
+                carrier.native=None;carrier.request=None;carrier.packet=None;carrier.broker_joined=None;
+                carrier.broker=crate::agent_broker::BrokerThreadOwner::new();carrier.projection=fabric_runtime::AgentToolsProjectionOwner::new();
+                carrier.preparation_joined=false;carrier.panics.clear();
+                slot.state.store(TASK_SETTLED,Ordering::Release);slot.work.store(true,Ordering::Release);return Ok(Some(joined));
+            }
+            Ok(None)
+        }
+        pub(crate) fn retry_recovery_off_app(&self)->usize {
+            self.slots.iter().filter(|slot|slot.occupied.load(Ordering::Acquire)
+                && slot.state.load(Ordering::Acquire)==TASK_RECOVERY).map(|slot|{
+                    slot.work.store(true,Ordering::Release);1 }).sum()
+        }
+        pub(crate) fn shutdown_ready(&self) -> bool { self.slots.iter().all(|slot|!slot.occupied.load(Ordering::Acquire)
+            && !slot.acceptance_pending.load(Ordering::Acquire) && !slot.busy.load(Ordering::Acquire) && Arc::strong_count(slot)==1) }
+        /// Root first detaches its App Arc. Refusal returns this SAME actual
+        /// supervisor; Engine ownership cannot be released while it is occupied.
+        pub(crate) fn stop_off_app(owner:Arc<Self>) -> std::result::Result<(),(Arc<Self>,anyhow::Error)> {
+            if !owner.shutdown_ready() { return Err((owner,anyhow::anyhow!("managed task resources still require recovery"))); }
+            let mut owner = match Arc::try_unwrap(owner) { Ok(owner)=>owner,Err(owner)=>return Err((owner,anyhow::anyhow!("managed task supervisor still has App owners"))) };
+            drop(owner.send.take()); for worker in owner.workers.drain(..) { let _ = worker.join(); } Ok(())
+        }
+    }
+    fn settle_task_slot(slot:&Arc<TaskSlot>) -> Result<()> {
+        // A dropped/unknown acceptance capsule cannot convert into cleanup ACK.
+        // Its original checkpoint/resources still require explicit recovery.
+        if slot.acceptance_pending.load(Ordering::Acquire) { return Ok(()); }
+
+        // Do not hold the preparation carrier mutex while joining its callback;
+        // the actual callback still needs that carrier until it returns.
+        let mut joining=slot.joining.lock().unwrap_or_else(|p|p.into_inner());
+        let receivers = slot.worker_receivers.lock().unwrap_or_else(|p|p.into_inner());
+        for index in 0..TASK_WORKERS {
+            if joining.worker[index].is_none() { joining.worker[index] = receivers[index].try_recv().ok(); }
+            if let Some(worker) = joining.worker[index].take() {
+                // OFF-App actual join, including TLS; no timeout/is_finished
+                // shortcut can release either charged preparation admission.
+                let result=worker.join();
+                if index == 0 { joining.preparation_joined = true; }
+                slot.handles.fetch_and(!(1 << index),Ordering::AcqRel);
+                if let Err(payload) = result { joining.panics.push(payload); anyhow::bail!("managed task worker panicked"); }
+            }
+        }
+        drop(receivers);let preparation_joined=joining.preparation_joined;drop(joining);
+        let mut carrier = slot.carrier.lock().unwrap_or_else(|p|p.into_inner());
+        carrier.preparation_joined |= preparation_joined;
+        if let Ok(payload) = slot.drain_receive.lock().unwrap_or_else(|p|p.into_inner()).try_recv() {
+            match payload { TaskPayload::Live(drain)=>carrier.drain=Some(drain),TaskPayload::ReadyOwner(ready)=>carrier.ready_owner=Some(ready),
+                TaskPayload::ActivationFailure(failure)=>carrier.activation_failure=Some(failure) }
+        }
+        let state = slot.state.load(Ordering::Acquire);
+        if state==TASK_JOINED { return Ok(()); }
+        if state==TASK_SETTLED {
+            carrier.ready_owner=None;
+            // Keep the original budget's actual clock owner off-App until no
+            // stale App/result handle can become its last owner on App.
+            if Arc::strong_count(slot)>2 { return Ok(()); }
+            carrier.budget=None;carrier.cancelled=Arc::new(AtomicBool::new(false));
+            *slot.wake.lock().unwrap_or_else(|p|p.into_inner())=None;
+            slot.occupied.store(false,Ordering::Release);return Ok(());
+        }
+        // Successful adoption separates preparation admission from live view
+        // lifetime. A failed/in-flight activation retains its admission until
+        // original child/reader/control and unused cleanup actually settle.
+        if slot.activation_committed.load(Ordering::Acquire) && carrier.preparation_joined { drop(carrier.admission.take()); }
+        if state == TASK_PENDING { return Ok(()); }
+        let budget = FinalizationBudget::begin(STOP_DEADLINE)?; // cleanup ONLY; never restarts preparation
+        if let Some(failure) = &mut carrier.activation_failure {
+            failure.activation.settle_unused_off_app(&budget)?;
+            anyhow::ensure!(failure.activation.is_settled(),"actual PTY activation cleanup remains uncertain");
+            // This proof requires no descriptor worker/possible backend launch,
+            // actual child reaping and original reader TLS join, not a timer.
+            slot.may_have_helper.store(false,Ordering::Release);
+        }
+        if let Some(drain) = &mut carrier.drain {
+            drain.live.control.close(); drain.live.handoff.close();
+            let pty=drain.pty.as_mut().context("original managed PTY cleanup custody was not transferred")?;
+            pty.settle_off_app(&budget)?;anyhow::ensure!(pty.is_settled(),"original managed PTY/reader remains unsettled");
+            if drain.control_join.is_none() { drain.control_join=Some(drain.live.control.await_closed(budget.remaining()?)?); } budget.remaining()?;
+            if drain.handoff_join.is_none() { drain.handoff_join=Some(drain.live.handoff.await_closed(budget.remaining()?)?); } budget.remaining()?;
+            anyhow::ensure!(drain.control_join.as_ref().unwrap().same_worker(drain.handoff_join.as_ref().unwrap()), "managed actor join carriers differ");
+            let runtime = drain.runtime.as_mut().context("exact managed runtime owner was not transferred")?;
+            if drain.runtime_join.is_none() { drain.runtime_join=Some(runtime.await_closed(budget.remaining()?)?); } budget.remaining()?;
+            anyhow::ensure!(drain.exit.is_some() && drain.custody.is_some() && drain.live.receipt.is_some(), "actual successful helper exit/shutdown absent; owners retained");
+            drain.exit.as_ref().unwrap().matches_checkpoint(drain.custody.as_ref().unwrap(),drain.live.receipt.as_ref().unwrap())?;
+        } else if slot.may_have_helper.load(Ordering::Acquire) { return Ok(()); }
+        anyhow::ensure!(slot.handles.load(Ordering::Acquire)==0,"managed task callbacks are not actually joined");
+        carrier.broker.close();
+        if carrier.broker_joined.is_none() { carrier.broker_joined = Some(carrier.broker.await_closed(budget.remaining()?)?); }
+        let mut journal = slot.project.journal.lock().map_err(|_|anyhow::anyhow!("managed task writer poisoned"))?;
+        slot.project.lease.check_journal(&journal)?;
+        carrier.projection.settle_unused(&mut journal, &budget)?;
+        anyhow::ensure!(carrier.projection.is_settled(), "managed task grant settlement remains uncertain");
+        drop(journal); budget.remaining()?;
+        if carrier.drain.is_some() { slot.state.store(TASK_JOINED,Ordering::Release);return Ok(()); }
+        carrier.preparation.settle_unused()?;
+        carrier.preparation=Default::default();
+        carrier.drain = None; carrier.ready_owner=None;carrier.activation_failure=None;carrier.request = None; carrier.packet = None; carrier.native = None;
+        carrier.broker_joined = None; carrier.panics.clear();
+        drop(carrier.admission.take());
+        carrier.broker=crate::agent_broker::BrokerThreadOwner::new();carrier.projection=fabric_runtime::AgentToolsProjectionOwner::new();
+        carrier.preparation_joined=false;
+        let mut joining=slot.joining.lock().unwrap_or_else(|p|p.into_inner());joining.panics.clear();joining.preparation_joined=false;
+        slot.state.store(TASK_SETTLED,Ordering::Release); Ok(())
+    }
+    fn task_time(budget:&FinalizationBudget,cancelled:&AtomicBool) -> Result<()> {
+        anyhow::ensure!(!cancelled.load(Ordering::Acquire),"managed task cancelled"); budget.remaining()?; Ok(())
+    }
+    fn prepare_task_worker(task:&TaskHandle,fence:&ManagedLaunchFence,location:&crate::managed_store::ManagedRunLocation,
+        reservation:&ManagedRunSource,projection_record:&serde_json::Value,events:SyncSender<WorkerResult>,wake:Option<PtyOutputWaker>) -> Result<PreparedResult> {
+        // This actual carrier outlives the worker catch and is never locked by
+        // App after dispatch. Every error leaves its cleanup-bearing fields.
+        let mut carrier=task.slot.carrier.lock().unwrap_or_else(|p|p.into_inner());
+        let budget=carrier.budget.as_ref().context("original task budget absent")?.clone();
+        let cancelled=carrier.cancelled.clone();task_time(&budget,&cancelled)?;
+        let mut worker_journal=task.slot.project.lease.open_source_writer()?;task_time(&budget,&cancelled)?;
+        location.persist_reservation(reservation)?;location.write_projection(reservation,projection_record)?;
+        task_time(&budget,&cancelled)?;
+        let request=carrier.request.take().context("managed task request absent")?;
+        let home=request.home.clone();let journal_path=request.journal.clone();let backend=request.backend.backend();
+        let prepared=managed_launch::prepare_local_task_retained(request,cancelled.clone(),&worker_journal,&budget,&mut carrier.preparation)?;
+        task_time(&budget,&cancelled)?;location.persist_assignment(&prepared.assignment)?;task_time(&budget,&cancelled)?;
+        let (proceed,receive)=mpsc::sync_channel(1);
+        events.send(WorkerResult { fence:fence.clone(),result:Ok(WorkerStep::TaskWorkspace { prepared,proceed,task:task.clone() }) })
+            .map_err(|_|anyhow::anyhow!("managed App retired before task workspace adoption"))?;
+        if let Some(wake)=wake { wake(); }
+        let prepared=receive.recv_timeout(budget.remaining()?).context("original managed task assignment deadline")?;
+        task_time(&budget,&cancelled)?;
+        task.slot.project.lease.check_journal(&worker_journal)?;
+        let projection=fabric_runtime::prepare_agent_tools_for_attempt_retaining(&mut carrier.projection,&mut worker_journal,backend,&home,
+            fence,Some(&prepared.assignment),&budget,&cancelled)?;
+        task_time(&budget,&cancelled)?;task.slot.project.lease.check_journal(&worker_journal)?;
+        let broker=AgentBroker::spawn_retaining(BrokerConfig { journal_path,identity_file:projection.identity_file,
+            socket_path:projection.broker_socket },&mut carrier.broker)?;
+        task_time(&budget,&cancelled)?;
+        let projection_owner=carrier.projection.share(task.slot.project.clone())?;task_time(&budget,&cancelled)?;
+        let handoff=prepared.prepare_handoff()?;
+        let launch_json=serde_json::to_string(&prepared.link_launch())?;task_time(&budget,&cancelled)?;
+        Ok(PreparedResult { prepared,broker:Some(broker),projection_owner:Some(projection_owner),projection_hash:projection.projection_hash,handoff:Some(handoff),
+            native_program:carrier.native.take().context("managed task native program absent")?,launch_json })
+    }
+
+    struct Pending { fence: ManagedLaunchFence, cancelled: Arc<AtomicBool>, started: Instant,
+        budget: Option<FinalizationBudget> }
+    struct PreparedResult { prepared: PreparedManagedLaunch, broker: Option<AgentBroker>, projection_hash: [u8; 32],
+        projection_owner:Option<fabric_runtime::SharedAgentToolsProjectionOwner>,
+        handoff: Option<ManagedExecutionHandoff>, native_program: PathBuf, launch_json: String }
     type BackendProcess = Arc<rudder_engine::execution::handoff::BackendProcessWitness>;
     enum WorkerStep { Workspace { prepared: PreparedManagedLaunch, proceed: SyncSender<PreparedManagedLaunch> }, Ready(PreparedResult), Reports(Result<CandidateReports>),
+        TaskWorkspace { prepared:PreparedManagedLaunch, proceed:SyncSender<PreparedManagedLaunch>, task:TaskHandle },
+        TaskReady { ready:PreparedResult, task:TaskHandle }, TaskFailed { task:TaskHandle },
         Authenticated { process:BackendProcess, result:std::result::Result<(),agent_link::ManagedCodexAuthError> } }
     struct WorkerResult { fence: ManagedLaunchFence, result: Result<WorkerStep> }
     struct PendingAuth { process:BackendProcess, cancelled:Arc<AtomicBool>, deadline:Instant, running:bool }
     struct Live { prepared: PreparedManagedLaunch, handoff: HandoffReceipt, control: ManagedExecutionHandle,
         receipt: Option<ValidatedManagedShutdown>, stop: Option<(StopAndCheckpoint, Instant)>, uncertain: bool,
-        orphan_reported: bool, backend_ready: bool, auth:Option<PendingAuth>, report_pending: bool, last_report: Option<Instant>, report_digest: Option<[u8;32]> }
+        orphan_reported: bool, backend_ready: bool, auth:Option<PendingAuth>, report_pending: bool, last_report: Option<Instant>, report_digest: Option<[u8;32]>,
+        task:Option<TaskLive> }
+    struct TaskLive { handle:TaskHandle, custody:Option<ManagedHelperCustody>, start:Option<ManagedExecutionStartBarrier> }
+    /// Actual pre-dispatch helper custody for a bounded trusted Root IPC worker.
+    /// No Serde/Clone/raw constructor. Retain on failed queue/event delivery;
+    /// the original slot alias also keeps Engine ownership through that worker.
+    pub(crate) struct PendingManagedTaskHelper {
+        fence:ManagedLaunchFence,
+        assignment:managed_launch::WorkspaceAssignment,
+        managed_run:crate::managed_store::ManagedRunLocation,
+        helper:Arc<rudder_engine::execution::handoff::helper_process::HelperProcessWitness>,
+        task:TaskHandle,
+    }
+    impl PendingManagedTaskHelper {
+        pub(crate) fn fence(&self)->&ManagedLaunchFence { &self.fence }
+        pub(crate) fn assignment(&self)->&managed_launch::WorkspaceAssignment { &self.assignment }
+        pub(crate) fn managed_run(&self)->&crate::managed_store::ManagedRunLocation { &self.managed_run }
+        pub(crate) fn journal_owner(&self)->&Arc<ManagedTaskJournalOwner> { &self.task.slot.project }
+        pub(crate) fn helper(&self)->&Arc<rudder_engine::execution::handoff::helper_process::HelperProcessWitness> { &self.helper }
+        pub(crate) fn original_budget(&self)->&FinalizationBudget { &self.task.budget }
+        pub(crate) fn cancellation(&self)->&AtomicBool { &self.task.cancelled }
+    }
     impl Drop for Live { fn drop(&mut self) { if let Some(auth) = &self.auth { auth.cancelled.store(true, Ordering::Release); } } }
     struct CandidateReports { summary: Option<String>, signal: Option<signals::SignalState>, digest: [u8;32] }
 
@@ -111,9 +544,34 @@ mod local {
         }
     }
 
-    pub(crate) struct ManagedAppState { queue: WorkerQueue<WorkerResult>, pending: BTreeMap<String, Pending>, live: BTreeMap<String, Live> }
-    impl Default for ManagedAppState { fn default() -> Self { Self { queue: WorkerQueue::new(), pending: BTreeMap::new(), live: BTreeMap::new() } } }
-    impl Drop for ManagedAppState { fn drop(&mut self) { for pending in self.pending.values() { pending.cancelled.store(true, Ordering::Release); } } }
+    pub(crate) struct ManagedAppState { queue: WorkerQueue<WorkerResult>, pending: BTreeMap<String, Pending>, live: BTreeMap<String, Live>,
+        task_supervisor:Option<Arc<ManagedTaskLifetimeSupervisor>> }
+    impl Default for ManagedAppState { fn default() -> Self { Self { queue: WorkerQueue::new(), pending: BTreeMap::new(), live: BTreeMap::new(),task_supervisor:None } } }
+    impl Drop for ManagedAppState { fn drop(&mut self) {
+        for pending in self.pending.values() { pending.cancelled.store(true, Ordering::Release); }
+        for (_,mut live) in std::mem::take(&mut self.live) {
+            if let Some(task)=live.task.take() {
+                // Emergency custody transfer is not helper/runtime drain.
+                // Core shutdown must normally use the App-aware method below.
+                task.handle.retain_drain(TaskDrain { live,runtime:None,pty:None,_start:task.start,exit:None,custody:task.custody,control_join:None,handoff_join:None,runtime_join:None });
+            }
+        }
+        if let Some(supervisor)=&self.task_supervisor { supervisor.poll(); }
+    } }
+    fn retain_task_live(app:&mut App,mut live:Live,exit:Option<SuccessfulManagedHelperExit>) {
+        let Some(task)=live.task.take() else { return; };
+        let runtime=app.fabric_runtime.take_managed_drain(&live.prepared.assignment).ok();
+        // Move only the original pane. A replacement row or matching saved PID
+        // cannot authorize taking another terminal or certify helper drain.
+        let pty=app.agents.iter_mut().find(|run|run.id==live.prepared.assignment.fence.run_id).and_then(|run| {
+            let custody=task.custody.as_ref()?;
+            if !run.terminal.as_ref().is_some_and(|terminal|terminal.matches_managed_helper_custody(custody)) { return None; }
+            match ManagedPtyDrainOwner::retire(run.terminal.take()?,custody) {
+                Ok(retired)=>Some(retired),Err((pane,_))=>{ run.terminal=Some(pane);None }
+            }
+        });
+        task.handle.retain_drain(TaskDrain { live,runtime,pty,_start:task.start,exit,custody:task.custody,control_join:None,handoff_join:None,runtime_join:None });
+    }
 
     fn still_pending(app: &App, fence: &ManagedLaunchFence, owner: &OwnerFence) -> bool {
         owner == &fence.owner && app.agents.iter().any(|run| run.id == fence.run_id
@@ -129,6 +587,134 @@ mod local {
     }
 
     impl App {
+        pub(crate) fn configure_managed_task_supervisor(&mut self, supervisor:Arc<ManagedTaskLifetimeSupervisor>) -> Result<()> {
+            anyhow::ensure!(self.managed_local.task_supervisor.is_none(), "managed task lifetime supervisor already configured");
+            self.managed_local.task_supervisor = Some(supervisor); Ok(())
+        }
+        /// Root must use this actual witness (then its held-pidfd exporter),
+        /// original budget/cancel and exact assignment for IPC enrollment.
+        pub(crate) fn managed_task_pending_helper(&self,fence:&ManagedLaunchFence)->Result<PendingManagedTaskHelper> {
+            let live=self.managed_local.live.get(&fence.run_id).context("managed task absent")?;
+            anyhow::ensure!(live.prepared.assignment.fence==*fence && !live.uncertain && live.stop.is_none(),"managed task start scope retired");
+            let task=live.task.as_ref().context("managed task start custody absent")?;task.handle.time()?;
+            let start=task.start.as_ref().filter(|start|start.is_pending()).context("original pending start barrier absent")?;
+            anyhow::ensure!(self.agents.iter().any(|run|run.id==fence.run_id && matches_workspace(run.managed_local.as_ref(),&live.prepared.assignment,false)
+                && task.custody.as_ref().is_some_and(|custody|run.terminal.as_ref().is_some_and(|pane|pane.matches_managed_helper_custody(custody)))),"original managed task pane replaced");
+            Ok(PendingManagedTaskHelper { fence:fence.clone(),assignment:live.prepared.assignment.clone(),
+                managed_run:live.prepared.managed_run.clone(),helper:start.pending_helper_process(),task:task.handle.clone() })
+        }
+        /// Trusted Root IPC adapter ONLY: invoke after verifying the actual
+        /// original enrollment ACK for this pending helper + exact seed/source.
+        /// This hook checks App/owner identity, not the external ACK's contents;
+        /// production startup stays gated until Root supplies that typed adapter.
+        pub(crate) fn release_managed_task_start_after_enrollment(&mut self,pending:PendingManagedTaskHelper)
+            -> std::result::Result<(),(PendingManagedTaskHelper,anyhow::Error)> {
+            match self.release_managed_task_start_after_enrollment_retaining(&pending) {
+                Ok(())=>Ok(()),Err(error)=>Err((pending,error))
+            }
+        }
+        /// The trusted IPC adapter retains pending custody outside its catch.
+        /// No unwind in App may consume that original helper/slot owner.
+        pub(crate) fn release_managed_task_start_after_enrollment_retaining(&mut self,pending:&PendingManagedTaskHelper)
+            -> Result<()> {
+                pending.task.time()?;
+                let live=self.managed_local.live.get_mut(&pending.fence.run_id).context("managed task absent after enrollment")?;
+                anyhow::ensure!(live.prepared.assignment.fence==pending.fence && !live.uncertain && live.stop.is_none(),"managed task enrollment result stale");
+                let task=live.task.as_mut().context("managed task ownership absent")?;
+                anyhow::ensure!(task.handle.generation==pending.task.generation && Arc::ptr_eq(&task.handle.slot,&pending.task.slot),"managed task enrollment owner replaced");
+                anyhow::ensure!(self.agents.iter().any(|run|run.id==pending.fence.run_id && matches_workspace(run.managed_local.as_ref(),&live.prepared.assignment,false)
+                    && task.custody.as_ref().is_some_and(|custody|run.terminal.as_ref().is_some_and(|pane|pane.matches_managed_helper_custody(custody)))),"managed task enrollment pane replaced");
+                let start=task.start.as_mut().context("managed task start barrier absent")?;
+                anyhow::ensure!(Arc::ptr_eq(&start.pending_helper_process(),&pending.helper),"Root enrollment belongs to another actual helper");
+                start.release_after_enrollment()?;task.handle.activated();Ok(())
+        }
+        pub(crate) fn ensure_managed_task_shutdown_ready(&self) -> Result<()> {
+            anyhow::ensure!(self.managed_local.task_supervisor.as_ref().is_none_or(|owner|owner.shutdown_ready()),
+                "managed task helper/actor/view ownership remains live or requires recovery"); Ok(())
+        }
+        pub(crate) fn take_managed_task_supervisor(&mut self) -> Result<Option<Arc<ManagedTaskLifetimeSupervisor>>> {
+            self.ensure_managed_task_shutdown_ready()?; Ok(self.managed_local.task_supervisor.take())
+        }
+        /// App-only emergency handoff before App/RuntimeState destruction. It
+        /// requests PTY termination but cannot certify reap, shutdown or joins;
+        /// supervisor/Engine shutdown stays blocked until explicit recovery.
+        pub(crate) fn retain_managed_task_shutdown(&mut self) {
+            let ids:Vec<_>=self.managed_local.live.iter().filter(|(_,live)|live.task.is_some()).map(|(id,_)|id.clone()).collect();
+            for id in ids {
+                if let Some(run)=self.agents.iter_mut().find(|run|run.id==id) {
+                    if let Some(terminal)=run.terminal.as_mut() { terminal.request_termination(); }
+                }
+                // Keep the live pane/control on App until its actual wait
+                // observation. Poll then transfers a retired cleanup capsule.
+                if let Some(live)=self.managed_local.live.get_mut(&id) { live.uncertain=true; }
+            }
+            for pending in self.managed_local.pending.values() { if pending.budget.is_some() { pending.cancelled.store(true,Ordering::Release); } }
+            if let Some(supervisor)=&self.managed_local.task_supervisor { supervisor.poll(); }
+        }
+        pub(crate) fn start_managed_task(&mut self, index:usize, prepared:PreparedManagedTask,
+            project:&Arc<ManagedTaskProject>, journal:&mut Journal, owner:&OwnerFence)
+            -> std::result::Result<ManagedLaunchFence,ManagedTaskStartFailure> {
+            let packet = prepared.adopt_retaining(self,index,project,journal,owner)
+                .map_err(|(prepared,error)|ManagedTaskStartFailure::Prepared(prepared,error))?;
+            self.start_managed_task_packet(index,packet,journal,owner)
+        }
+        pub(crate) fn start_managed_task_packet(&mut self, index:usize, packet:ManagedTaskLaunchPacket,
+            journal:&mut Journal, owner:&OwnerFence) -> std::result::Result<ManagedLaunchFence,ManagedTaskStartFailure> {
+            let validation = (|| -> Result<()> {
+                packet.matches_target(self,index)?;
+                let input = &packet.inputs;
+                anyhow::ensure!(packet.native_program.is_absolute() && self.agents[index].backend == input.backend.backend()
+                    && input.journal == FabricPaths::new(&input.home).journal && journal.database_path()? == input.journal
+                    && input.managed_store.binding().repository == self.cwd && input.managed_store.binding().home == input.home
+                    && input.managed_store.binding().journal == input.journal && input.managed_store.binding().project_id == owner.project_id
+                    && input.preparation_parent == input.managed_store.binding().directory.join("preparations")
+                    && journal.managed_project(&owner.project_id)?.as_ref() == Some(input.managed_store.receipt()),
+                    "managed task selected namespace/backend/program changed");
+                let supervisor = self.managed_local.task_supervisor.as_ref().context("managed task needs a retained lifetime supervisor")?;
+                anyhow::ensure!(supervisor.project.lease.owner() == owner, "managed task supervisor belongs to another owner");
+                Ok(())
+            })();
+            if let Err(error) = validation { return Err(ManagedTaskStartFailure::Packet(packet,error)); }
+            let permit = match self.managed_local.queue.admit() { Ok(permit)=>permit,Err(error)=>return Err(ManagedTaskStartFailure::Packet(packet,error)) };
+            let task = self.managed_local.task_supervisor.as_ref().unwrap().reserve(packet,self.pty_output_waker.clone())
+                .map_err(|(packet,error)|ManagedTaskStartFailure::Packet(packet,error))?;
+            let result = (|| -> Result<ManagedLaunchFence> {
+                // Fresh, not yet queued cell: try_lock cannot wait on worker IO.
+                let mut carrier = task.slot.carrier.try_lock().map_err(|_|anyhow::anyhow!("new managed task cell is busy"))?;
+                let packet = carrier.packet.as_ref().unwrap();
+                let run_id = self.agents[index].id.clone();
+                let attempt_id = uuid::Uuid::new_v4().to_string();
+                let run_epoch = journal.observe_run_attempt(owner,&run_id,&attempt_id,now_ms()?)?;
+                let fence = ManagedLaunchFence { owner:owner.clone(),run_id:run_id.clone(),run_epoch,attempt_id,
+                    request_id:uuid::Uuid::new_v4().to_string() };
+                let reservation = ManagedRunSource::Reserved { fence:fence.clone(),runnable_root:packet.inputs.runnable_root.clone() };
+                let location = packet.inputs.managed_store.run(&run_id)?;
+                let run = &mut self.agents[index]; run.managed_local=Some(reservation.clone());run.managed_store=Some(location.clone());
+                run.status=AgentStatus::Running;run.execution_profile=Some(packet.inputs.backend.execution_profile().into());
+                run.completed_at=None;run.last_error=Some("preparing explicit managed task".into());
+                save_native_run_record(&self.cwd,run)?;
+                let projection = serde_json::json!({"id":run_id,"task":run.task,"backend":run.backend.as_str(),"model":run.model,
+                    "status":"orphaned","mode":"execute","executionProfile":run.execution_profile});
+                let packet = carrier.packet.take().unwrap();
+                carrier.budget=Some(packet.budget); carrier.cancelled=packet.cancelled; carrier.admission=Some(packet.retention);
+                carrier.native=Some(packet.native_program); carrier.preparation.set_cache(packet.preparation_cache)?;
+                carrier.request=Some(packet.inputs.bind(fence.clone(),uuid::Uuid::new_v4().to_string(),uuid::Uuid::new_v4().to_string()));
+                let budget = carrier.budget.as_ref().unwrap().clone(); let cancelled=carrier.cancelled.clone(); drop(carrier);
+                self.managed_local.pending.insert(run_id,Pending { fence:fence.clone(),cancelled,started:Instant::now(),budget:Some(budget) });
+                let ticket = task.worker()?; let worker = task.clone(); let failed=task.clone();
+                let scope=fence.clone();let panic_scope=fence.clone();let wake=self.pty_output_waker.clone();
+                self.managed_local.queue.spawn_retaining(permit,ticket,self.pty_output_waker.clone(),move |events| {
+                    let result = prepare_task_worker(&worker,&scope,&location,&reservation,&projection,events,wake);
+                    WorkerResult { fence:scope,result:Ok(match result { Ok(ready)=>WorkerStep::TaskReady { ready,task:worker },
+                        Err(_)=>WorkerStep::TaskFailed { task:worker } }) }
+                },move ||WorkerResult { fence:panic_scope,result:Ok(WorkerStep::TaskFailed { task:failed }) })?;
+                Ok(fence)
+            })();
+            match result { Ok(fence)=>{ self.dirty=true;Ok(fence) },Err(error)=>{
+                task.unused(); if let Some(pending)=self.managed_local.pending.get(&self.agents[index].id) { pending.cancelled.store(true,Ordering::Release); }
+                orphan(&self.cwd,&mut self.agents[index],"managed task preparation was not queued; retained unused cleanup is pending");
+                Err(ManagedTaskStartFailure::Retained(task,error)) } }
+        }
         /// Explicit opt-in only. The caller supplies an existing stopped row and
         /// a retained local selection. No default/profile/cwd fallback exists.
         pub(crate) fn start_managed_local(&mut self, index: usize, inputs: ManagedLocalLaunchInputs,
@@ -174,7 +760,7 @@ mod local {
                 return Err(error.context("persist managed reservation before preparation"));
             }
             let cancelled = Arc::new(AtomicBool::new(false));
-            self.managed_local.pending.insert(run_id.clone(), Pending { fence: fence.clone(), cancelled: cancelled.clone(), started: Instant::now() });
+            self.managed_local.pending.insert(run_id.clone(), Pending { fence: fence.clone(), cancelled: cancelled.clone(), started: Instant::now(),budget:None });
             let request = inputs.bind(fence.clone(), operation_id, view_id);
             let worker_fence = fence.clone();
             let reservation = self.agents[index].managed_local.clone().unwrap();
@@ -209,7 +795,7 @@ mod local {
                     anyhow::ensure!(!cancelled.load(Ordering::Acquire), "managed launch cancelled before result");
                     worker_fence.check_current(&Journal::open(&journal_path)?)?;
                     let launch_json = serde_json::to_string(&prepared.link_launch())?;
-                    Ok(PreparedResult { prepared, broker, projection_hash: projection.projection_hash, handoff, native_program, launch_json })
+                    Ok(PreparedResult { prepared, broker:Some(broker),projection_owner:None,projection_hash: projection.projection_hash, handoff:Some(handoff), native_program, launch_json })
                 })();
                 WorkerResult { fence: worker_fence, result: result.map(WorkerStep::Ready) }
             }, move ||WorkerResult { fence:panic_fence, result:Err(anyhow::anyhow!("managed preparation worker failed without a result")) });
@@ -232,8 +818,10 @@ mod local {
     }
     impl ManagedAppState {
         fn poll(&mut self, app: &mut App, journal: &mut Journal, owner: &OwnerFence) -> Result<()> {
+            if let Some(supervisor)=&self.task_supervisor { supervisor.poll(); }
             for pending in self.pending.values() {
-                if pending.started.elapsed() >= PREPARATION_DEADLINE || !still_pending(app, &pending.fence, owner)
+                if pending.budget.as_ref().map_or_else(||pending.started.elapsed() >= PREPARATION_DEADLINE,|budget|budget.remaining().is_err())
+                    || !still_pending(app, &pending.fence, owner)
                     || pending.fence.check_current(journal).is_err() {
                     pending.cancelled.store(true, Ordering::Release);
                     if let Some(run) = app.agents.iter_mut().find(|run|run.id == pending.fence.run_id
@@ -245,6 +833,15 @@ mod local {
                 }
             }
             while let Ok(result) = self.queue.receive.try_recv() {
+                let (result, task)=match result {
+                    WorkerResult { fence,result:Ok(WorkerStep::TaskWorkspace { prepared,proceed,task }) }=>
+                        (WorkerResult { fence,result:Ok(WorkerStep::Workspace { prepared,proceed }) },Some(task)),
+                    WorkerResult { fence,result:Ok(WorkerStep::TaskReady { ready,task }) }=>
+                        (WorkerResult { fence,result:Ok(WorkerStep::Ready(ready)) },Some(task)),
+                    WorkerResult { fence,result:Ok(WorkerStep::TaskFailed { task }) }=>{
+                        task.unused();(WorkerResult { fence,result:Err(anyhow::anyhow!("explicit managed task preparation failed; unused settlement remains owned")) },Some(task)) },
+                    result=>(result,None),
+                };
                 if let Ok(WorkerStep::Authenticated { process, result:authenticated }) = result.result {
                     if let Some(live) = self.live.get_mut(&result.fence.run_id).filter(|live|live.prepared.assignment.fence == result.fence) {
                         if live.stop.is_some() || live.uncertain { continue; }
@@ -287,7 +884,12 @@ mod local {
                 if !workspace_stage && self.pending.get(&result.fence.run_id).is_some_and(|pending|pending.fence == result.fence) {
                     self.pending.remove(&result.fence.run_id);
                 }
-                if !exact || !still_pending(app, &result.fence, owner) || result.fence.check_current(journal).is_err() { continue; }
+                if !exact || !still_pending(app, &result.fence, owner) || result.fence.check_current(journal).is_err() {
+                    if let Some(task)=&task {
+                        if let Ok(WorkerStep::Ready(ready))=result.result { task.reject_ready(ready); }
+                        else { task.unused(); }
+                    } continue;
+                }
                 let index = app.agents.iter().position(|run|run.id == result.fence.run_id).unwrap();
                 match result.result {
                     Ok(WorkerStep::Workspace { prepared, proceed }) => {
@@ -295,14 +897,17 @@ mod local {
                             || app.agents[index].managed_store.as_ref() != Some(&prepared.managed_run)
                             || !matches_workspace(app.agents[index].managed_local.as_ref(), &prepared.assignment, true) {
                             orphan(&app.cwd, &mut app.agents[index], "managed workspace result changed its reserved source/journal; no capability granted");
+                            if let Some(task)=&task { task.unused(); }
                             continue;
                         }
                         app.agents[index].managed_local = Some(ManagedRunSource::Assigned { assignment: Box::new(prepared.assignment.clone()) });
                         if save_native_run_record(&app.cwd, &app.agents[index]).is_err() {
                             if let Some(pending) = self.pending.get(&result.fence.run_id) { pending.cancelled.store(true, Ordering::Release); }
                             orphan(&app.cwd, &mut app.agents[index], "managed assignment persistence failed; no capability was granted");
+                            if let Some(task)=&task { task.unused(); }
                         } else if proceed.try_send(prepared).is_err() {
                             orphan(&app.cwd, &mut app.agents[index], "managed assignment continuation retired; no helper was spawned");
+                            if let Some(task)=&task { task.unused(); }
                         }
                     }
                     Ok(WorkerStep::Ready(mut ready)) => {
@@ -310,43 +915,75 @@ mod local {
                             || app.agents[index].managed_store.as_ref() != Some(&ready.prepared.managed_run)
                             || !matches_workspace(app.agents[index].managed_local.as_ref(), &ready.prepared.assignment, false) {
                             orphan(&app.cwd, &mut app.agents[index], "managed helper result changed its assigned scope/journal; no helper spawned");
+                            if let Some(task)=&task { task.reject_ready(ready); }
                             continue;
                         }
                         let assignment = ready.prepared.assignment.clone();
                         app.agents[index].managed_local = Some(ManagedRunSource::Assigned { assignment: Box::new(assignment.clone()) });
                         if save_native_run_record(&app.cwd, &app.agents[index]).is_err() {
                             orphan(&app.cwd, &mut app.agents[index], "managed assignment could not be persisted; helper was not spawned");
+                            if let Some(task)=&task { task.reject_ready(ready); }
                             continue;
                         }
                         // A failed spawn/activation may still have created a child.
                         // From this point Drop cannot unpin/remove the live source.
+                        if let Some(task)=&task { if task.time().is_err() {
+                            task.reject_ready(ready);orphan(&app.cwd,&mut app.agents[index],"original managed task preparation deadline elapsed before helper admission");continue;
+                        } }
                         ready.prepared.adopt();
+                        if let Some(task)=&task { task.adopted(); }
                         let options = TerminalPaneOptions { size: app.agents[index].terminal_size.unwrap_or_default(),
                             cwd: None, ..TerminalPaneOptions::default() };
-                        match TerminalPane::spawn_managed(ready.native_program.display().to_string(), ready.handoff,
-                            &assignment.fence.attempt_id, &ready.prepared.execution_profile, Some(&ready.launch_json), options) {
-                            Ok((mut terminal, handoff, control)) => {
+                        // Keep the resource carrier OUTSIDE catch_unwind. The
+                        // reserved mailbox owns it on both ordinary Err and panic.
+                        let mut activation=if task.is_some() { Some(ManagedPtyActivationOwner::new(ready.handoff.take().expect("prepared handoff absent"))) } else { None };
+                        let mut activation_panic=None;
+                        let spawned=if let Some(activation)=&mut activation {
+                            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| activation.activate(
+                                ready.native_program.display().to_string(),&assignment.fence.attempt_id,
+                                &ready.prepared.execution_profile,Some(&ready.launch_json),options,
+                                &task.as_ref().unwrap().budget,task.as_ref().unwrap().cancelled.clone()))) {
+                                Ok(result)=>result.map(|(pane,handoff,control,barrier)|(pane,handoff,control,Some(barrier))),
+                                Err(panic)=>{ activation_panic=Some(panic);Err(anyhow::anyhow!("managed PTY activation unwound; original owner retained")) }
+                            }
+                        } else { TerminalPane::spawn_managed(ready.native_program.display().to_string(),ready.handoff.take().expect("prepared handoff absent"),
+                            &assignment.fence.attempt_id,&ready.prepared.execution_profile,Some(&ready.launch_json),options)
+                                .map(|(pane,handoff,control)|(pane,handoff,control,None)) };
+                        match spawned {
+                            Ok((mut terminal, handoff, control, start)) => {
+                                let task_live=match task { Some(handle)=>Some(TaskLive { handle,custody:terminal.retain_managed_helper_custody().ok(),start }),None=>None };
+                                let task_uncertain=task_live.as_ref().is_some_and(|task|task.custody.is_none());
                                 App::attach_output_waker(&app.pty_output_waker, &terminal);
-                                let adoption = app.fabric_runtime.adopt_managed_broker(owner, &assignment, &ready.prepared.identity_home,
-                                    &mut terminal, ready.broker, ready.projection_hash);
-                                if adoption.is_err() {
+                                let adoption = if let Some(projection)=&ready.projection_owner {
+                                    app.fabric_runtime.adopt_managed_broker_retaining(owner,&assignment,&ready.prepared.identity_home,
+                                        &mut terminal,&mut ready.broker,ready.projection_hash,projection)
+                                } else {
+                                    app.fabric_runtime.adopt_managed_broker(owner, &assignment, &ready.prepared.identity_home,
+                                        &mut terminal,ready.broker.take().expect("prepared broker absent"),ready.projection_hash)
+                                };
+                                if adoption.is_err() || task_uncertain {
                                     terminal.request_termination();
                                     orphan(&app.cwd, &mut app.agents[index], "managed broker adoption failed after helper spawn; source retained for recovery");
-                                } else {
+                                }
+                                if adoption.is_ok() || task_live.is_some() {
                                     app.agents[index].terminal = Some(terminal);
-                                    app.agents[index].last_error = None;
+                                    if adoption.is_ok() { app.agents[index].last_error = None; }
                                     self.live.insert(assignment.fence.run_id.clone(), Live { prepared: ready.prepared,
-                                        handoff, control, receipt: None, stop: None, uncertain: false, orphan_reported: false,
-                                        backend_ready: false, auth:None, report_pending: false, last_report: None, report_digest: None });
+                                        handoff, control, receipt: None, stop: None, uncertain: adoption.is_err() || task_uncertain, orphan_reported: adoption.is_err() || task_uncertain,
+                                        backend_ready: false, auth:None, report_pending: false, last_report: None, report_digest: None,task:task_live });
                                     let _ = save_native_run_record(&app.cwd, &app.agents[index]);
                                 }
                             }
-                            Err(_) => orphan(&app.cwd, &mut app.agents[index], "managed helper spawn/activation failed; source retained for recovery"),
+                            Err(_) => { if let Some(task)=&task {
+                                    task.reject_activation(ready,activation.take().expect("task activation carrier absent"),activation_panic);
+                                }
+                                orphan(&app.cwd, &mut app.agents[index], "managed helper activation failed; retained activation ownership requires actual cleanup"); },
                         }
                     }
                     Err(_) => orphan(&app.cwd, &mut app.agents[index], "managed local preparation failed; no checkout fallback was launched"),
                     Ok(WorkerStep::Reports(_)) => unreachable!(),
                     Ok(WorkerStep::Authenticated { .. }) => unreachable!(),
+                    Ok(WorkerStep::TaskWorkspace { .. } | WorkerStep::TaskReady { .. } | WorkerStep::TaskFailed { .. })=>unreachable!(),
                 }
                 app.dirty = true;
             }
@@ -354,27 +991,41 @@ mod local {
             for id in ids {
                 let pending_auth = self.live.values().filter(|live|live.auth.is_some()).count();
                 let live = self.live.get_mut(&id).unwrap();
+                'reports: {
                 if pending_auth == 0 && !live.report_pending && live.last_report.is_none_or(|last|last.elapsed() >= Duration::from_millis(500)) {
                     if let Ok(permit) = self.queue.admit() {
+                        let task_worker=if let Some(task)=&live.task {
+                            match task.handle.worker() { Ok(ticket)=>Some(ticket),Err(_)=>break 'reports }
+                        } else { None };
                         let paths = live.prepared.reports.clone(); let fence = live.prepared.assignment.fence.clone();
                         let panic_fence = fence.clone();
-                        if self.queue.spawn(permit, app.pty_output_waker.clone(), move |_|WorkerResult { fence, result: Ok(WorkerStep::Reports(read_reports(&paths))) },
-                            move ||WorkerResult { fence:panic_fence, result:Ok(WorkerStep::Reports(Err(anyhow::anyhow!("managed report worker failed")))) }).is_ok() {
+                        let work=move |_|WorkerResult { fence,result:Ok(WorkerStep::Reports(read_reports(&paths))) };
+                        let panic=move ||WorkerResult { fence:panic_fence,result:Ok(WorkerStep::Reports(Err(anyhow::anyhow!("managed report worker failed")))) };
+                        let spawn=if let Some(ticket)=task_worker { self.queue.spawn_retaining(permit,ticket,app.pty_output_waker.clone(),work,panic) }
+                            else { self.queue.spawn(permit,app.pty_output_waker.clone(),work,panic) };
+                        if spawn.is_ok() {
                             live.report_pending = true; live.last_report = Some(Instant::now());
                         }
                     }
                 }
+                }
                 let assignment = &live.prepared.assignment;
                 let Some(index) = app.agents.iter().position(|run|run.id == id
                     && matches_workspace(run.managed_local.as_ref(), assignment, false)) else {
-                    app.fabric_runtime.close_managed_assignment(assignment);
+                    if live.task.is_none() { app.fabric_runtime.close_managed_assignment(assignment); }
                     if let Some(run) = app.agents.iter_mut().find(|run|run.id == id && run.terminal.as_ref()
                         .is_some_and(|terminal|terminal.instance_id() == assignment.fence.attempt_id)) {
                         if let Some(terminal) = run.terminal.as_mut() { terminal.request_termination(); }
-                        run.terminal = None;
+                        if live.task.is_none() { run.terminal = None; }
                         orphan(&app.cwd, run, "managed helper assignment was replaced; old source retained without checkpoint acknowledgment");
                     }
-                    self.live.remove(&id); continue;
+                    if let Some(task)=&live.task {
+                        if let Some(terminal)=app.agents.iter_mut().find(|run|run.id==id).and_then(|run|run.terminal.as_mut()) {
+                            if task.custody.as_ref().is_some_and(|custody|terminal.matches_managed_helper_custody(custody))
+                                && !matches!(terminal.try_wait(),Ok(Some(_))) { live.uncertain=true;continue; }
+                        }
+                    }
+                    if let Some(live)=self.live.remove(&id) { retain_task_live(app,live,None); } continue;
                 };
                 if assignment.fence.owner != *owner || assignment.fence.check_current(journal).is_err() {
                     live.uncertain = true;
@@ -383,6 +1034,7 @@ mod local {
                 while let Some(event) = live.control.try_event() {
                     match event {
                         ManagedExecutionEvent::BackendReady { process } if !live.uncertain && live.stop.is_none() => {
+                            if live.task.is_some() && process.check_current().is_err() { live.uncertain=true;continue; }
                             if live.prepared.execution_profile == "codex-app-server" {
                                 if process.authenticated_start_required() && live.auth.is_none() && pending_auth < 8 {
                                     live.auth = Some(PendingAuth { process, cancelled:Arc::new(AtomicBool::new(false)),
@@ -419,19 +1071,24 @@ mod local {
                     if live.uncertain && !live.orphan_reported { terminal.request_termination(); }
                     terminal.try_wait_after_output()
                 } else { Ok(None) };
+                let task_exit=if let (Some(task),Some(terminal))=(&live.task,run.terminal.as_mut()) {
+                    if task.custody.as_ref().is_some_and(|held|terminal.matches_managed_helper_custody(held)) {
+                        terminal.successful_managed_helper_exit().ok().flatten()
+                    } else { None }
+                } else { None };
                 if live.uncertain {
                     let first = !live.orphan_reported;
-                    let ended = !matches!(exit, Ok(None)) || run.terminal.is_none();
+                    let ended = if live.task.is_some() { matches!(exit,Ok(Some(_))) || run.terminal.is_none() }
+                        else { !matches!(exit,Ok(None)) || run.terminal.is_none() };
                     if first {
-                        app.fabric_runtime.close_managed_assignment(assignment);
+                        if live.task.is_none() { app.fabric_runtime.close_managed_assignment(assignment); }
                         run.status = AgentStatus::Orphaned; run.completed_at = None;
                         run.last_error = Some("managed helper outcome is uncertain; no checkpoint acknowledged".into());
                         live.orphan_reported = true;
                     }
-                    if ended {
-                        run.terminal = None; self.live.remove(&id);
-                    }
+                    if ended && live.task.is_none() { run.terminal = None; }
                     if first || ended { let _ = save_native_run_record(&app.cwd, run); app.dirty = true; }
+                    if ended { if let Some(live)=self.live.remove(&id) { retain_task_live(app,live,task_exit); } }
                 } else if let Ok(Some(_)) = exit {
                     // The process reaper and private FD worker race to deliver
                     // their final events. Keep the owned terminal until the
@@ -439,13 +1096,14 @@ mod local {
                     if live.stop.is_some() && live.receipt.is_none() { continue; }
                     // Physical exit alone never certifies final bytes. Even an
                     // observed completed model turn still needs the FD receipt.
-                    let proved = live.receipt.is_some();
-                    app.fabric_runtime.close_managed_assignment(assignment); run.terminal = None; run.completed_at = None;
+                    let proved = live.receipt.is_some() && (live.task.is_none() || task_exit.is_some());
+                    if live.task.is_none() { app.fabric_runtime.close_managed_assignment(assignment); run.terminal = None; } run.completed_at = None;
                     if proved { live.prepared.confirm_transient_settlement(); }
                     run.status = if proved { AgentStatus::Paused } else { AgentStatus::Orphaned };
                     run.last_error = Some(if proved { "managed helper stopped with retained checkpoint; source acceptance remains pending".into() }
                         else { "managed helper exited without a matching shutdown receipt; recovery required".into() });
-                    let _ = save_native_run_record(&app.cwd, run); self.live.remove(&id); app.dirty = true;
+                    let _ = save_native_run_record(&app.cwd, run); app.dirty = true;
+                    if let Some(live)=self.live.remove(&id) { retain_task_live(app,live,task_exit); }
                 } else if exit.is_err() {
                     live.uncertain = true;
                 }
@@ -458,6 +1116,9 @@ mod local {
             for (_,id) in waiting {
                 let Ok(permit) = self.queue.admit() else { break; };
                 let live = self.live.get_mut(&id).unwrap();
+                let task_worker=if let Some(task)=&live.task {
+                    match task.handle.worker() { Ok(ticket)=>Some(ticket),Err(_)=>continue }
+                } else { None };
                 let auth = live.auth.as_mut().unwrap();
                 if Instant::now() >= auth.deadline || auth.cancelled.load(Ordering::Acquire) { live.uncertain = true; continue; }
                 let Some(key) = live.prepared.take_codex_api_key() else { live.uncertain = true; continue; };
@@ -465,11 +1126,15 @@ mod local {
                 let process = auth.process.clone(); let panic_process = process.clone(); let cancelled = auth.cancelled.clone();
                 let deadline = auth.deadline; let launch = live.prepared.link_launch();
                 auth.running = true;
-                if self.queue.spawn(permit, app.pty_output_waker.clone(), move |_| {
+                let work=move |_| {
                     let result = agent_link::authenticate_managed_codex_api_key(&launch, process.clone(), key, &cancelled, deadline);
                     WorkerResult { fence, result:Ok(WorkerStep::Authenticated { process, result }) }
-                }, move ||WorkerResult { fence:panic_fence, result:Ok(WorkerStep::Authenticated { process:panic_process,
-                    result:Err(agent_link::ManagedCodexAuthError::Transport) }) }).is_err() { live.uncertain = true; }
+                };
+                let panic=move ||WorkerResult { fence:panic_fence,result:Ok(WorkerStep::Authenticated { process:panic_process,
+                    result:Err(agent_link::ManagedCodexAuthError::Transport) }) };
+                let spawn=if let Some(ticket)=task_worker { self.queue.spawn_retaining(permit,ticket,app.pty_output_waker.clone(),work,panic) }
+                    else { self.queue.spawn(permit,app.pty_output_waker.clone(),work,panic) };
+                if spawn.is_err() { live.uncertain=true; }
             }
             Ok(())
         }
@@ -487,8 +1152,9 @@ mod local {
         app.pending_enters.retain(|pending|pending.run_id != run.id);
         if let Some(pending) = app.managed_local.pending.get(&run.id) {
             pending.cancelled.store(true, Ordering::Release);
-            run.status = AgentStatus::Stopped; run.completed_at = None;
-            run.last_error = Some("managed launch cancelled before helper adoption".into());
+            run.status = if pending.budget.is_some() { AgentStatus::Orphaned } else { AgentStatus::Stopped }; run.completed_at = None;
+            run.last_error = Some(if pending.budget.is_some() { "managed task cancellation requested; awaiting actual preparation and unused cleanup settlement".into() }
+                else { "managed launch cancelled before helper adoption".into() });
         } else if let Some(live) = app.managed_local.live.get_mut(&run.id) {
             if let Some(auth) = &live.auth { auth.cancelled.store(true, Ordering::Release); }
             if live.stop.is_none() && !live.uncertain {
@@ -512,10 +1178,19 @@ mod local {
 
     pub(crate) fn abandon(app: &mut App, run_id: &str) {
         if let Some(pending) = app.managed_local.pending.get(run_id) { pending.cancelled.store(true, Ordering::Release); }
+        if let Some(live)=app.managed_local.live.get_mut(run_id).filter(|live|live.task.is_some()) {
+            live.uncertain=true;
+            if let Some(terminal)=app.agents.iter_mut().find(|run|run.id==run_id).and_then(|run|run.terminal.as_mut()) {
+                if live.task.as_ref().and_then(|task|task.custody.as_ref()).is_some_and(|custody|terminal.matches_managed_helper_custody(custody)) {
+                    terminal.request_termination();
+                }
+            }
+            return; // original live pane/reap remains App-owned until poll
+        }
         app.fabric_runtime.close(run_id);
         // Dropping the handle closes the private control channel. The helper
         // must withhold checkpoint authority and retains its orphan resources.
-        app.managed_local.live.remove(run_id);
+        if let Some(live)=app.managed_local.live.remove(run_id) { retain_task_live(app,live,None); }
     }
 
     pub(crate) fn accepts_input(app: &App, index: usize) -> bool {
@@ -526,6 +1201,10 @@ mod local {
             && matches_workspace(run.managed_local.as_ref(), &live.prepared.assignment, false))
     }
 
+    #[cfg(test)]
+    mod task_retained_activation_tests { use super::*;include!("managed_task_retained_activation_tests.rs"); }
+    #[cfg(test)]
+    mod task_wiring_tests { use super::*;include!("managed_task_launch_wiring_tests.rs"); }
     #[cfg(test)]
     mod tests {
         use super::*;
@@ -566,7 +1245,7 @@ mod local {
                 run.managed_local = Some(marker); run.status = AgentStatus::Running; app.agents.push(run);
                 let mut state = ManagedAppState::default();
                 let cancelled = Arc::new(AtomicBool::new(false));
-                state.pending.insert("run".into(), Pending { fence:fence.clone(), cancelled:cancelled.clone(), started:Instant::now() });
+                state.pending.insert("run".into(), Pending { fence:fence.clone(), cancelled:cancelled.clone(), started:Instant::now(),budget:None });
                 let permit = state.queue.admit().unwrap();
                 let (release, receive) = mpsc::sync_channel(1);
                 state.queue.spawn(permit, None, move |_| { receive.recv().unwrap(); panic!("fixture panic payload must not enter App notices"); },
@@ -602,7 +1281,7 @@ mod local {
                 assert!(still_pending(&app, &fence, &owner));
                 let cancelled = Arc::new(AtomicBool::new(false));
                 let mut state = ManagedAppState::default();
-                state.pending.insert("run".into(), Pending { fence:fence.clone(), cancelled:cancelled.clone(), started:Instant::now() });
+                state.pending.insert("run".into(), Pending { fence:fence.clone(), cancelled:cancelled.clone(), started:Instant::now(),budget:None });
                 match kind {
                     "stopped" => app.agents[0].status = AgentStatus::Stopped,
                     "removed" => app.agents.clear(),
@@ -658,7 +1337,7 @@ mod local {
 }
 
 #[cfg(target_os = "linux")]
-pub(crate) use local::{ManagedAppState, poll, stop, abandon, accepts_input};
+pub(crate) use local::{ManagedAppState, JoinedManagedTask, ManagedTaskJournalOwner, ManagedTaskLifetimeSupervisor, ManagedTaskStartFailure, PendingManagedTaskHelper, poll, stop, abandon, accepts_input};
 
 #[cfg(not(target_os = "linux"))]
 #[derive(Default)]

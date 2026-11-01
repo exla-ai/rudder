@@ -664,9 +664,12 @@ alpha.7 image were unchanged. See [the delivery record](verification-alpha28.jso
 for exact image digests, checks and scope.
 
 The [tag publication workflow](https://github.com/exla-ai/rudder/actions/runs/41275825138),
-Mac and iOS jobs passed. Npm accepted both publications, but explicit alpha.28
-registry requests still returned 404 at 05:13:54Z; fresh installations and
-`next` availability remain pending. No republishing or retagging was attempted.
+Mac and iOS jobs passed. The primary `@exla/rudder` package passed a fresh
+unprivileged installation with its real postinstall, CLI/native/jj commands and
+all three platform artifact manifests at 2026-11-01T05:25:01Z. Its `next` tag
+names alpha.28; stable `latest` remains 3.9.13. The legacy `@viraatdas/rudder`
+version still returned registry HTTP404 at 05:32:14Z after accepted publication;
+its installation remains pending. No republishing or retagging was attempted.
 
 The default path remains legacy. Authenticated host ingress, a durable machine
 receipt store, fresh logical project/engine enrollment, immutable managed

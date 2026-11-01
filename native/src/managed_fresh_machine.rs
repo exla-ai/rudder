@@ -58,6 +58,10 @@ impl ManagedFreshMachine {
 impl Owner {
     fn run_retaining(&mut self,flows:&BTreeMap<String,Arc<FlowCell>>)->Result<()> {
         ensure!(!self.attempted,"fresh machine original bootstrap attempted");self.attempted=true;time(&self.admission,&self.cancelled)?;self.config.assert_current()?;self.registration.assert_current()?;
+        // Current source-only genesis retains a legacy host-imported image. A
+        // configured baked profile must not start that fallback before a real
+        // composed environment/preparation producer is available.
+        crate::managed_app::runtime_task::require_legacy_environment_backing(&self.config)?;
         let kernel=self.kernel.as_ref().context("fresh bootstrap requires the actual current kernel startup owner")?.clone();
         ensure!(Arc::ptr_eq(kernel.registration(),&self.registration),"fresh startup belongs to another original registration");kernel.assert_new_startup_off_app(&self.admission,&self.cancelled)?;ensure!(!flows.is_empty()&&flows.len()<=MAX_PROJECTS,"fresh profile supports at most two projects");
         ManagedMachineCas::capture_retaining(&mut self.cas_capture,self.config.clone(),self.registration.clone(),&self.admission,&self.cancelled)?;self.cas=Some(Arc::new(self.cas_capture.take().unwrap()));

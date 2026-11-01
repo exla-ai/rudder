@@ -46,6 +46,24 @@ impl ManagedSeedEnrollment {
     pub(crate) fn released(&self) -> bool { self.phase == Phase::Released }
     pub(crate) fn requires_recovery(&self) -> bool { self.phase == Phase::Recovery }
 
+    /// OFF App. Actual runtime client comes only from the SAME retained
+    /// bootstrap; seed/source ACK verification below remains independently
+    /// mandatory. This performs no App access and retains the task capsule on
+    /// every failed/late/unknown Root request.
+    pub(crate) fn enroll_runtime_retaining(&mut self,
+        machine:&mut rudder_native::root_storage_bootstrap::ManagedMachineBootstrap,
+        runtime:&mut crate::managed_app::runtime_task::MachineRuntimeImage,seed:&ObjectRef)->Result<()> {
+        ensure!(self.phase==Phase::Pending,"original enrollment cannot repeat runtime attachment");
+        let result=catch_unwind(AssertUnwindSafe(||->Result<()> {
+            check_time(self.pending.original_budget(),self.pending.cancellation())?;
+            self.check_current_assignment(seed)?;
+            runtime.enroll_helper_retaining(machine,self.pending.runtime_start(),
+                self.pending.original_budget(),self.pending.cancellation_owner())?;
+            self.check_current_assignment(seed)?;Ok(())
+        }));
+        self.retain_outcome(result,"runtime helper enrollment panicked; original task/barrier retained")
+    }
+
     /// OFF App, one attempt only. The actual mutable client/seed stay OUTSIDE
     /// this adapter and inner unwind boundary; their retained uncertain state
     /// must not be replaced, retried from paths, or promoted by readback.

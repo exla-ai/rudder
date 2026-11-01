@@ -15,7 +15,7 @@ fn fixture()->(EngineOperationAck,HostIngressConfig){
     let config=HostIngressConfig{seed_profile:None,version:1,machine_id:"fixture".into(),store_id:uuid::Uuid::new_v4().to_string(),incarnation:uuid::Uuid::new_v4().to_string(),account_id:"fixture-account".into(),home_id:"fixture-home".into(),cloud_origin:"https://rudder-cloud-control.fly.dev".into(),state_directory:home.clone(),store_policy:HostReceiptStorePolicy::InitializeEmptyV1,
         projects:vec![AllowedPreparedProject{alias:"fixture".into(),checkout,home:home.clone(),cas:home.join("cas"),endpoints:home.join("endpoints"),prepare:ManagedProjectPrepare{request_id:uuid::Uuid::new_v4().to_string(),namespace}}],
         runtime_profile:HostRuntimeProfile::FlyManagedImageV1{user_name:"Fixture".into(),user_email:"fixture@example.invalid".into()},runtime_manifest:ImageRuntimeManifest{profile_id:"fly-managed-image-v1".into(),manifest_sha256:"a".repeat(64),entries:Vec::new()},owner_lease_safety:None,
-        image_preseed:Some(HostImagePreseedPolicy{image:"registry.fly.io/fixture@sha256:".to_owned()+&"b".repeat(64),image_receipt_sha256:"e".repeat(64),full_manifest_sha256:manifest.digest,batch_transport:None})};
+        image_preseed:Some(HostImagePreseedPolicy{image:"registry.fly.io/fixture@sha256:".to_owned()+&"b".repeat(64),image_receipt_sha256:"e".repeat(64),full_manifest_sha256:manifest.digest,batch_transport:None,runtime_mount:None})};
     (ack,config)
 }
 #[test]

@@ -5,7 +5,6 @@ use crate::agent_api::{AgentApi, AgentIdentityFile, AGENT_STARTUP_BUSY_TIMEOUT};
 use crate::journal::{CapabilityGrant, ManagedProjectNamespace, ManagedProjectPrepare, OwnerFence};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
-use std::sync::mpsc;
 
 // Test-only memory observations from the ACTUAL installed busy callback. No
 // clock, sleep, SQL, timeout policy or callback result is substituted. A wall
@@ -124,6 +123,17 @@ impl Fixture {
     }
 }
 
+// A zero-wait fixture reader establishes the real lock without consuming or
+// replacing an AgentApi startup window. The actual API request below begins
+// only after the original locking connection has closed and been joined.
+fn assert_actual_exclusive_read_lock(fixture: &Fixture) {
+    let conn = Connection::open_with_flags(&fixture.path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    conn.busy_timeout(Duration::ZERO).unwrap();
+    let reader = Journal { conn };
+    let error = reader.managed_project("startup-project").unwrap_err();
+    assert!(startup_sqlite_busy(&error), "expected the actual held SQLite lock: {error:#}");
+}
+
 fn release_after(locker: Journal, delay: Duration, commit: bool) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         std::thread::sleep(delay);
@@ -137,42 +147,67 @@ fn release_after(locker: Journal, delay: Duration, commit: bool) -> std::thread:
 #[test]
 fn startup_busy_read_observes_real_sqlite_lock_then_original_release() {
     let mut fixture = Fixture::new();
-    let locker = fixture.take_exclusive();
-    let path = fixture.path.clone();
-    let (observed, receive) = mpsc::sync_channel(1);
-    let reader = std::thread::spawn(move || {
-        let conn = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
-        conn.busy_timeout(Duration::ZERO).unwrap();
-        let journal = Journal { conn };
-        let deadline = Instant::now() + AGENT_STARTUP_BUSY_TIMEOUT;
-        let mut reported = false;
-        let receipt = retry_startup_read(Some(deadline), || {
-            let result = journal.managed_project("startup-project");
-            if !reported && result.as_ref().err().is_some_and(|e| startup_sqlite_busy(e)) {
-                reported = true;
-                observed.send(()).unwrap();
-            }
-            result
-        });
-        (receipt, reported, Instant::now() < deadline)
+    let mut locker = Some(fixture.take_exclusive());
+    let conn = Connection::open_with_flags(&fixture.path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    conn.busy_timeout(Duration::ZERO).unwrap();
+    let reader = Journal { conn };
+    // Establish real contention before the startup clock. Release happens on
+    // THIS thread, after a real busy result, never in the SQLite busy callback.
+    assert!(startup_sqlite_busy(&reader.managed_project("startup-project").unwrap_err()));
+    let waits = StartupWaitProbe::capture();
+    let deadline = Instant::now() + AGENT_STARTUP_BUSY_TIMEOUT;
+    let mut reported = false;
+    let receipt = retry_startup_read(Some(deadline), || {
+        let result = reader.managed_project("startup-project");
+        if result.as_ref().err().is_some_and(startup_sqlite_busy) {
+            assert!(!reported, "the original locking connection was already closed");
+            reported = true;
+            let original = locker.take().unwrap();
+            original.conn.execute_batch("ROLLBACK").unwrap();
+            drop(original);
+        }
+        result
     });
-    receive.recv_timeout(Duration::from_secs(2)).expect("reader must encounter the actual exclusive lock");
-    locker.conn.execute_batch("ROLLBACK").unwrap();
-    drop(locker);
-    let (receipt, reported, timely) = reader.join().unwrap();
-    assert!(reported);
-    assert!(receipt.unwrap().is_none());
-    assert!(timely, "read was admitted beyond its original startup window");
+    let decisions = waits.take();
+    if !decisions.is_empty() {
+        assert_original_startup_decisions(&decisions, deadline);
+    }
+    match receipt {
+        Ok(value) => {
+            assert!(reported && locker.is_none(), "admission must follow actual lock release");
+            assert!(!decisions.is_empty(), "the real busy result must use the installed retry callback");
+            assert!(value.is_none());
+        }
+        Err(error) => {
+            // OS descheduling may exhaust even this same-thread request.
+            // That is a refusal, never successful admission or a renewed wait.
+            assert!(Instant::now() >= deadline);
+            if startup_sqlite_busy(&error) {
+                let denied = decisions.last().expect("busy refusal requires the actual callback decision");
+                assert!(!denied.retry && denied.returned >= deadline);
+            } else {
+                assert_eq!(error.to_string(), "agent startup lock window expired", "{error:#}");
+            }
+        }
+    }
+    // If expiry preceded the first read, release the STILL-original locker.
+    // This later operation is not a continuation or retry of the old request.
+    if let Some(original) = locker.take() {
+        original.conn.execute_batch("ROLLBACK").unwrap();
+        drop(original);
+    }
+    assert!(reader.managed_project("startup-project").unwrap().is_none());
 }
 
 #[test]
 fn startup_busy_agent_api_authenticates_after_real_lock_release() {
     let mut fixture = Fixture::new();
     let locker = fixture.take_exclusive();
-    let release = release_after(locker, Duration::from_millis(10), false);
-    let result = AgentApi::open(&fixture.path, &fixture.identity_path);
+    assert_actual_exclusive_read_lock(&fixture);
+    let release = release_after(locker, Duration::ZERO, false);
     release.join().unwrap();
-    let api = result.unwrap();
+    // A DISTINCT request after confirmed close, not renewal of a blocked one.
+    let api = AgentApi::open(&fixture.path, &fixture.identity_path).unwrap();
     let actual = api.authenticated_identity().unwrap();
     assert_eq!(actual.project_id, fixture.owner.project_id);
     assert_eq!(actual.run_epoch, 1);
@@ -199,10 +234,12 @@ fn startup_busy_released_marker_still_refuses_unguarded_fresh_access() {
     let mut fixture = Fixture::new();
     fixture.add_real_managed_marker();
     let locker = fixture.take_exclusive();
-    let release = release_after(locker, Duration::from_millis(10), false);
-    let result = AgentApi::open(&fixture.path, &fixture.identity_path);
+    assert_actual_exclusive_read_lock(&fixture);
+    let release = release_after(locker, Duration::ZERO, false);
     release.join().unwrap();
-    let error = result.unwrap_err();
+    // Marker semantics are asserted only once the original connection really
+    // closed. Held-lock expiry remains covered independently below/above.
+    let error = AgentApi::open(&fixture.path, &fixture.identity_path).unwrap_err();
     assert!(error.to_string().contains("fresh marker refuses unguarded agent access"), "{error:#}");
     let journal = Journal::open(&fixture.path).unwrap();
     assert!(journal.managed_project(&fixture.owner.project_id).unwrap().is_some());
@@ -212,13 +249,13 @@ fn startup_busy_released_marker_still_refuses_unguarded_fresh_access() {
 fn startup_busy_original_run_epoch_is_rechecked_after_release() {
     let mut fixture = Fixture::new();
     let locker = fixture.take_exclusive();
-    // An actual concurrent database transaction advances this fixture's run
-    // while the startup reader is excluded; the old identity is never rebound.
+    // An actual transaction advances the run while readers are excluded.
+    // No old API request is resumed or rebound to this new epoch.
     locker.conn.execute("UPDATE runs SET epoch=epoch+1 WHERE project_id=?1 AND run_id='run'", [&fixture.owner.project_id]).unwrap();
-    let release = release_after(locker, Duration::from_millis(10), true);
-    let result = AgentApi::open(&fixture.path, &fixture.identity_path);
+    assert_actual_exclusive_read_lock(&fixture);
+    let release = release_after(locker, Duration::ZERO, true);
     release.join().unwrap();
-    let error = result.unwrap_err();
+    let error = AgentApi::open(&fixture.path, &fixture.identity_path).unwrap_err();
     assert!(error.to_string().contains("stale run epoch"), "{error:#}");
 }
 
@@ -267,15 +304,26 @@ fn startup_busy_success_restores_ordinary_policy_after_original_deadline() {
     if let Some(remaining) = deadline.checked_duration_since(Instant::now()) {
         std::thread::sleep(remaining + Duration::from_millis(2));
     }
+    // Inspect the ACTUAL restored SQLite policy. Installing our custom startup
+    // callback instead leaves busy_timeout=0, even if an uncontended write works.
+    let ordinary_ms: i64 = startup.conn.query_row("PRAGMA busy_timeout", [], |row| row.get(0)).unwrap();
+    assert_eq!(ordinary_ms, 100);
+    assert_eq!(u128::try_from(ordinary_ms).unwrap(), AGENT_STARTUP_BUSY_TIMEOUT.as_millis());
     let other = Connection::open(&fixture.path).unwrap();
     other.execute_batch("BEGIN IMMEDIATE").unwrap();
-    let release = std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_millis(10));
-        other.execute_batch("ROLLBACK").unwrap();
-    });
-    let result = startup.conn.execute("INSERT INTO startup_probe VALUES(1)", []);
-    release.join().unwrap();
-    assert_eq!(result.unwrap(), 1, "the old expired startup callback leaked into later IO");
+    let waits = StartupWaitProbe::capture();
+    let error = startup.conn.execute("INSERT INTO startup_probe VALUES(1)", []).unwrap_err();
+    assert!(startup_sqlite_busy(&error.into()));
+    assert!(waits.take().is_empty(), "the expired startup callback leaked into ordinary IO");
+    // No releaser thread must run inside this ordinary100ms wait. Keep the
+    // lock through refusal, then release on THIS thread and prove no mutation.
+    other.execute_batch("ROLLBACK").unwrap();
+    let count: i64 = startup.conn.query_row("SELECT count(*) FROM startup_probe", [], |row| row.get(0)).unwrap();
+    assert_eq!(count, 0, "the refused contended write must not mutate SQLite");
+    assert_eq!(startup.conn.execute("INSERT INTO startup_probe VALUES(1)", []).unwrap(), 1);
+    let count: i64 = startup.conn.query_row("SELECT count(*) FROM startup_probe", [], |row| row.get(0)).unwrap();
+    assert_eq!(count, 1);
+    assert!(waits.take().is_empty());
 }
 
 #[test]

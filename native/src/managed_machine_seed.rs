@@ -140,7 +140,7 @@ pub(super) fn enrollment_closed(ticket:&EnrollmentTicket)->bool {
     if ticket.admission.as_ref().is_some_and(|gate|gate.check_open().is_err()){return true;}
     ticket.cell.owner.try_lock().ok().is_some_and(|held|held.seed.upgrade().is_none_or(|seed|seed.phase.load(Ordering::Acquire)!=READY))
 }
-pub(super) fn enroll(machine:&mut ManagedMachineBootstrap,ticket:&EnrollmentTicket)->Result<()> {
+pub(super) fn enroll(machine:&mut ManagedMachineBootstrap,runtime:&mut MachineRuntimeImage,ticket:&EnrollmentTicket)->Result<()> {
     let mut c=ticket.cell.owner.lock().map_err(|_|anyhow::anyhow!("managed enrollment carrier poisoned"))?;
     let result=catch_unwind(AssertUnwindSafe(||->Result<()> {
         let seed=c.seed.upgrade().context("original seed carrier no longer held")?;
@@ -151,6 +151,10 @@ pub(super) fn enroll(machine:&mut ManagedMachineBootstrap,ticket:&EnrollmentTick
             ensure!(task.enrollment.is_none()&&task.guard.is_some()&&task.fork_guard.is_some(),"original task enrollment already attempted/absent");
             task.enrollment=Some(ticket.clone());
         } else {owner.client_owner.as_ref().context("actual seed absent")?.latch_untracked_native_use();}
+        // OFF App, SAME original barrier/cancel/deadline. Runtime must attach
+        // before existing CoW/source/seed enrollment can issue its genuine ACK.
+        let actual_seed=owner.client_owner.as_ref().context("actual Root seed owner absent")?.seed().clone();
+        c.enrollment.as_mut().context("original enrollment already moved")?.enroll_runtime_retaining(machine,runtime,&actual_seed)?;
         let client=machine.client_mut_retaining()?;
         if let Some(task)=&c.task {
             let task=task.upgrade().context("original CoW task absent")?;let task=task.owner.lock().map_err(|_|anyhow::anyhow!("original CoW task poisoned"))?;

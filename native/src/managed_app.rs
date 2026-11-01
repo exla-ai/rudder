@@ -5,10 +5,15 @@ use crate::managed_launch::{ManagedLaunchFence, ManagedLocalLaunchInputs, Manage
 use rudder_engine::journal::{Journal, OwnerFence};
 
 #[cfg(target_os = "linux")]
+#[path = "managed_runtime_task.rs"]
+pub(crate) mod runtime_task;
+
+#[cfg(target_os = "linux")]
 mod local {
     use super::*;
+    use super::runtime_task::RuntimeTaskStart;
     use crate::{agent_broker::{AgentBroker, BrokerConfig}, managed_launch::{self, PreparedManagedLaunch}};
-    use rudder_engine::{execution::{handoff::{HandoffReceipt, ManagedExecutionHandoff, ManagedExecutionHandle, ManagedExecutionEvent, ValidatedManagedShutdown, ManagedExecutionStartBarrier}, StopAndCheckpoint}, paths::FabricPaths};
+    use rudder_engine::{execution::{handoff::{HandoffReceipt, ManagedExecutionHandoff, ManagedExecutionHandle, ManagedExecutionEvent, ValidatedManagedShutdown}, StopAndCheckpoint}, paths::FabricPaths};
     use std::sync::{atomic::{AtomicBool, AtomicUsize, Ordering}, Arc, mpsc::{self, Receiver, SyncSender}};
     use std::collections::BTreeMap;
     use crate::{engine_host::EngineSourceLease,
@@ -124,7 +129,7 @@ mod local {
         panics: Vec<Box<dyn std::any::Any + Send>>,
     }
     struct TaskDrain { live: Live, runtime: Option<fabric_runtime::ManagedRuntimeDrain>, pty:Option<ManagedPtyDrainOwner>,
-        _start:Option<ManagedExecutionStartBarrier>,
+        _start:Option<Arc<RuntimeTaskStart>>,
         exit: Option<SuccessfulManagedHelperExit>,custody:Option<ManagedHelperCustody>,
         control_join:Option<rudder_engine::execution::handoff::WorkerJoined>,
         handoff_join:Option<rudder_engine::execution::handoff::WorkerJoined>,
@@ -526,7 +531,7 @@ mod local {
         receipt: Option<ValidatedManagedShutdown>, stop: Option<(StopAndCheckpoint, Instant)>, uncertain: bool,
         orphan_reported: bool, backend_ready: bool, auth:Option<PendingAuth>, report_pending: bool, last_report: Option<Instant>, report_digest: Option<[u8;32]>,
         task:Option<TaskLive> }
-    struct TaskLive { handle:TaskHandle, custody:Option<ManagedHelperCustody>, start:Option<ManagedExecutionStartBarrier> }
+    struct TaskLive { handle:TaskHandle, custody:Option<ManagedHelperCustody>, start:Option<Arc<RuntimeTaskStart>> }
     /// Actual pre-dispatch helper custody for a bounded trusted Root IPC worker.
     /// No Serde/Clone/raw constructor. Retain on failed queue/event delivery;
     /// the original slot alias also keeps Engine ownership through that worker.
@@ -537,6 +542,7 @@ mod local {
         seed_fork:Option<Arc<crate::managed_seed_fork::ManagedSeedForkCell>>,
         helper:Arc<rudder_engine::execution::handoff::helper_process::HelperProcessWitness>,
         task:TaskHandle,
+        start:Arc<RuntimeTaskStart>, // SAME task barrier/grant retained through TaskDrain.
     }
     impl PendingManagedTaskHelper {
         pub(crate) fn fence(&self)->&ManagedLaunchFence { &self.fence }
@@ -547,6 +553,8 @@ mod local {
         pub(crate) fn helper(&self)->&Arc<rudder_engine::execution::handoff::helper_process::HelperProcessWitness> { &self.helper }
         pub(crate) fn original_budget(&self)->&FinalizationBudget { &self.task.budget }
         pub(crate) fn cancellation(&self)->&AtomicBool { &self.task.cancelled }
+        pub(crate) fn cancellation_owner(&self)->&Arc<AtomicBool> { &self.task.cancelled }
+        pub(crate) fn runtime_start(&self)->&Arc<RuntimeTaskStart> { &self.start }
     }
     impl Drop for Live { fn drop(&mut self) { if let Some(auth) = &self.auth { auth.cancelled.store(true, Ordering::Release); } } }
     struct CandidateReports { summary: Option<String>, signal: Option<signals::SignalState>, digest: [u8;32] }
@@ -673,11 +681,12 @@ mod local {
             let live=self.managed_local.live.get(&fence.run_id).context("managed task absent")?;
             anyhow::ensure!(live.prepared.assignment.fence==*fence && !live.uncertain && live.stop.is_none(),"managed task start scope retired");
             let task=live.task.as_ref().context("managed task start custody absent")?;task.handle.time()?;
-            let start=task.start.as_ref().filter(|start|start.is_pending()).context("original pending start barrier absent")?;
+            let start=task.start.as_ref().context("original pending start barrier absent")?;
+            let helper=start.pending_on_app()?;
             anyhow::ensure!(self.agents.iter().any(|run|run.id==fence.run_id && matches_workspace(run.managed_local.as_ref(),&live.prepared.assignment,false)
                 && task.custody.as_ref().is_some_and(|custody|run.terminal.as_ref().is_some_and(|pane|pane.matches_managed_helper_custody(custody)))),"original managed task pane replaced");
             Ok(PendingManagedTaskHelper { fence:fence.clone(),assignment:live.prepared.assignment.clone(),
-                managed_run:live.prepared.managed_run.clone(),seed_fork:live.prepared.seed_fork.clone(),helper:start.pending_helper_process(),task:task.handle.clone() })
+                managed_run:live.prepared.managed_run.clone(),seed_fork:live.prepared.seed_fork.clone(),helper,task:task.handle.clone(),start:Arc::clone(start) })
         }
         /// Trusted Root IPC adapter ONLY: invoke after verifying the actual
         /// original enrollment ACK for this pending helper + exact seed/source.
@@ -700,9 +709,9 @@ mod local {
                 anyhow::ensure!(task.handle.generation==pending.task.generation && Arc::ptr_eq(&task.handle.slot,&pending.task.slot),"managed task enrollment owner replaced");
                 anyhow::ensure!(self.agents.iter().any(|run|run.id==pending.fence.run_id && matches_workspace(run.managed_local.as_ref(),&live.prepared.assignment,false)
                     && task.custody.as_ref().is_some_and(|custody|run.terminal.as_ref().is_some_and(|pane|pane.matches_managed_helper_custody(custody)))),"managed task enrollment pane replaced");
-                let start=task.start.as_mut().context("managed task start barrier absent")?;
-                anyhow::ensure!(Arc::ptr_eq(&start.pending_helper_process(),&pending.helper),"Root enrollment belongs to another actual helper");
-                start.release_after_enrollment()?;task.handle.activated();Ok(())
+                let start=task.start.as_ref().context("managed task start barrier absent")?;
+                anyhow::ensure!(Arc::ptr_eq(start,&pending.start),"Root enrollment belongs to another original task barrier");
+                start.release_after_seed_ack_on_app(&pending.helper)?;task.handle.activated();Ok(())
         }
         pub(crate) fn ensure_managed_task_shutdown_ready(&self) -> Result<()> {
             anyhow::ensure!(self.managed_local.task_supervisor.as_ref().is_none_or(|owner|owner.shutdown_ready()),
@@ -1059,7 +1068,7 @@ mod local {
                                 .map(|(pane,handoff,control)|(pane,handoff,control,None)) };
                         match spawned {
                             Ok((mut terminal, handoff, control, start)) => {
-                                let task_live=match task { Some(handle)=>Some(TaskLive { handle,custody:terminal.retain_managed_helper_custody().ok(),start }),None=>None };
+                                let task_live=match task { Some(handle)=>Some(TaskLive { handle,custody:terminal.retain_managed_helper_custody().ok(),start:start.map(RuntimeTaskStart::capture) }),None=>None };
                                 let task_uncertain=task_live.as_ref().is_some_and(|task|task.custody.is_none());
                                 App::attach_output_waker(&app.pty_output_waker, &terminal);
                                 let adoption = if let Some(projection)=&ready.projection_owner {

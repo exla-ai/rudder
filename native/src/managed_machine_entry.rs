@@ -12,6 +12,7 @@ use rudder_engine::{execution::{finalization_budget::FinalizationBudget,handoff:
 use rudder_native::{root_storage_bootstrap::{self,ManagedMachineBootstrap},root_storage_client::ClientSeedOwner,
     engine_registration::RegisteredEngineOwner,host_ingress::HostIngress};
 use rudder_vcs_bridge::seed::VerifiedMetadataTemplate;
+use crate::managed_app::runtime_task::MachineRuntimeImage;
 use std::{any::Any,collections::BTreeMap,ffi::OsString,panic::{catch_unwind,AssertUnwindSafe},
     sync::{Arc,Mutex,TryLockError,atomic::{AtomicBool,AtomicU8,Ordering},mpsc::{self,Receiver,SyncSender}},time::Duration};
 
@@ -102,7 +103,7 @@ mod seeds;
 pub(crate) use seeds::{ManagedSeedCowFactory,SeedTicket,SeedTaskTicket,SeedCacheTicket,ManagedSeedTaskSource,SeedRetirementProgress,NeverStartedProgress,EnrollmentTicket};
 enum Job {Project(ProjectTicket),Seed(SeedTicket),Enroll(EnrollmentTicket)}
 struct WorkerCarrier {bootstrap:ManagedMachineBootstrap,projects:BTreeMap<String,ProjectTicket>,seeds:BTreeMap<String,SeedTicket>,retired_seeds:BTreeMap<String,SeedTicket>,
-    enrollments:BTreeMap<String,EnrollmentTicket>,root_rpc_held:bool,root_private_held:bool,registered_engine:Option<Arc<RegisteredEngineOwner>>,
+    enrollments:BTreeMap<String,EnrollmentTicket>,root_rpc_held:bool,root_private_held:bool,registered_engine:Option<Arc<RegisteredEngineOwner>>,runtime_image:MachineRuntimeImage,
     host_offered:bool,host_error:Option<anyhow::Error>,panic:Option<Box<dyn Any+Send>>,
     generations:BTreeMap<String,Arc<source_generations::SourceGeneration>>,
     source_reservations:BTreeMap<String,Arc<source_generations::RootSourceReservation>>}
@@ -160,7 +161,9 @@ fn worker(shared:&Arc<Shared>) {
                         owner.assert_current()?;
                         if let Some(host)=carrier.bootstrap.take_host_ingress_retaining()? {
                             let mut offer=shared.host_offer.lock().unwrap_or_else(|p|p.into_inner());
-                            *offer=Some(host);carrier.host_offered=true;
+                            *offer=Some(host); // Stage actual HostIngress BEFORE fallible policy capture.
+                            carrier.runtime_image.observe_config_retaining(offer.as_ref().unwrap().config().clone())?;
+                            carrier.host_offered=true;
                         }
                     }
                     Ok(())
@@ -170,6 +173,7 @@ fn worker(shared:&Arc<Shared>) {
                     eprintln!("MANAGED_MACHINE_INGRESS_FENCED");
                 }
             }
+            {let WorkerCarrier {bootstrap,runtime_image,..}=&mut *carrier;runtime_image.poll_retaining(bootstrap)?;}
             shared.kernel.poll_retaining(carrier.registered_engine.as_ref());
             for ticket in carrier.projects.values() {
                 if matches!(ticket.cell.phase.load(Ordering::Acquire),READY|SHARED_FENCED) {
@@ -197,7 +201,7 @@ fn worker(shared:&Arc<Shared>) {
                     if seeds::only_seed_shared_fence_recovery(&ticket)?
                         ||source_generations::is_generation_seed(&carrier,&ticket)&&seeds::known_generation_source_custody(&ticket)?{Ok(())}else{Err(error)}}},
                 Ok(Job::Enroll(ticket)) if shared.kernel.status()!=KernelStartupStatus::Ready=>{ticket.cell.phase.store(RECOVERY,Ordering::Release);Ok(())},
-                Ok(Job::Enroll(ticket))=>match seeds::enroll(&mut carrier.bootstrap,&ticket){Ok(())=>Ok(()),Err(error)=>{
+                Ok(Job::Enroll(ticket))=>match {let WorkerCarrier {bootstrap,runtime_image,..}=&mut *carrier;seeds::enroll(bootstrap,runtime_image,&ticket)}{Ok(())=>Ok(()),Err(error)=>{
                     let private_held={let client=carrier.bootstrap.client_mut_retaining()?;
                         if client.assert_authenticated_current().is_err(){client.retain_original_v2_private_io_custody()?;true}else{false}};
                     if private_held {carrier.root_private_held=true;return Ok(());}
@@ -258,7 +262,7 @@ impl ManagedMachineRuntime {
         let (send,receive)=mpsc::sync_channel(QUEUE);
         let shared=Arc::new(Shared {phase:AtomicU8::new(STARTING),worker_owned:AtomicBool::new(false),app_thread:std::thread::current().id(),receive:Mutex::new(receive),host_offer:Mutex::new(None),send:send.clone(),kernel:kernel_startup::KernelSlot::new(),carrier:Mutex::new(WorkerCarrier {
             bootstrap,projects:BTreeMap::new(),seeds:BTreeMap::new(),retired_seeds:BTreeMap::new(),enrollments:BTreeMap::new(),root_rpc_held:false,root_private_held:false,
-            registered_engine:None,host_offered:false,host_error:None,panic:None,generations:BTreeMap::new(),source_reservations:BTreeMap::new()})});
+            registered_engine:None,runtime_image:MachineRuntimeImage::new(std::thread::current().id()),host_offered:false,host_error:None,panic:None,generations:BTreeMap::new(),source_reservations:BTreeMap::new()})});
         Self {control:MachineControl {shared:shared.clone(),send},shared,worker:None,apps:BTreeMap::new(),app_thread:std::thread::current().id(),panic:None}
     }
     /// Spawn borrows an already retained carrier. Ordinary returned Err cannot

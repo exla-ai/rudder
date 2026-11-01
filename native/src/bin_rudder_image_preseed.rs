@@ -7,9 +7,11 @@ fn main()->anyhow::Result<()> {
     let args=std::env::args_os().skip(1).collect::<Vec<_>>();
     let verify=args.as_slice()==[std::ffi::OsString::from("--verify")];
     let bake=args.as_slice()==[std::ffi::OsString::from("--bake-cas-v1")];
-    anyhow::ensure!(args.is_empty()||verify||bake,"image DATA emitter accepts only fixed image profiles, never paths or runtime authority");
+    let compiler_bake=args.as_slice()==[std::ffi::OsString::from("--bake-compiler-cas-v1")];
+    anyhow::ensure!(args.is_empty()||verify||bake||compiler_bake,"image DATA emitter accepts only fixed image profiles, never paths or runtime authority");
     anyhow::ensure!(unsafe{libc::getuid()}==0&&unsafe{libc::geteuid()}==0,"image DATA build must run as actual image Root");
     if bake{return bake_complete_cas();}
+    if compiler_bake{return bake_complete_cas_profile(true);}
     let output=Path::new("/var/lib/rudder-image-preseed-v1");
     if verify {let m=fs::symlink_metadata(output)?;anyhow::ensure!(m.is_dir()&&!m.file_type().is_symlink()&&m.uid()==0&&m.gid()==0&&m.mode()&0o7777==0o555,"image DATA verification output is not protected");}
     else {anyhow::ensure!(output.symlink_metadata().err().is_some_and(|e|e.kind()==std::io::ErrorKind::NotFound),"image DATA output already exists; never overwrite");}
@@ -49,7 +51,12 @@ fn main()->anyhow::Result<()> {
 /// DATA directory, inaccessible at0700 until all actual IO/ACKs settle. No
 /// second payload copy, existing destination adoption or cleanup on error.
 #[cfg(target_os="linux")]
-fn bake_complete_cas()->anyhow::Result<()> {
+fn bake_complete_cas()->anyhow::Result<()> {bake_complete_cas_profile(false)}
+
+/// The compiler floor has a separate fixed input/output and the SAME original
+/// build clock. This common sealer preserves complete two-pin ACK/IO checks.
+#[cfg(target_os="linux")]
+fn bake_complete_cas_profile(compiler:bool)->anyhow::Result<()> {
     use anyhow::{ensure,Context};
     use std::{collections::{BTreeMap,BTreeSet},fs::{self,File,OpenOptions},io::Write,
         os::{fd::OwnedFd,unix::fs::{DirBuilderExt,FileExt,MetadataExt,OpenOptionsExt,PermissionsExt}},
@@ -64,14 +71,16 @@ fn bake_complete_cas()->anyhow::Result<()> {
     struct Owned {store:Option<LocalStore>,build:Option<ImageDataBuild>,io:Option<File>,dirs:Vec<File>,reader:Option<Arc<BakedImageCas>>}
     let mut owned=Owned{store:None,build:None,io:None,dirs:Vec::new(),reader:None};
     ensure!(unsafe{libc::getuid()}==0&&unsafe{libc::geteuid()}==0&&unsafe{libc::getgid()}==0&&unsafe{libc::getegid()}==0,"baked image profile requires Root0/gid0");
-    let original=ImagePreseedBudget::begin(Duration::from_secs(300))?;let output=Path::new(BAKED_IMAGE_DIRECTORY);
+    let original=ImagePreseedBudget::begin(Duration::from_secs(300))?;
+    let output=Path::new(if compiler{rudder_native::compiler_image_data::COMPILER_CAS_DIRECTORY}else{BAKED_IMAGE_DIRECTORY});
     for parent in output.parent().unwrap().ancestors(){original.remaining()?;let m=fs::symlink_metadata(parent)?;
         ensure!(m.is_dir()&&!m.file_type().is_symlink()&&m.uid()==0&&m.gid()==0&&m.mode()&0o022==0,"baked DATA ancestry not Root protected");}
     ensure!(output.symlink_metadata().err().is_some_and(|e|e.kind()==std::io::ErrorKind::NotFound),"baked image output exists; original recovery required");
     original.remaining()?;fs::DirBuilder::new().mode(0o700).create(output)?;
     owned.dirs.push(OpenOptions::new().read(true).custom_flags(libc::O_DIRECTORY|libc::O_CLOEXEC|libc::O_NOFOLLOW).open(output)?);
     original.remaining()?;owned.store=Some(LocalStore::open(output.join("cas"))?);
-    ImageDataBuild::capture_retaining(&mut owned.build,owned.store.as_ref().unwrap().clone(),original.clone(),Arc::new(AtomicBool::new(false)))?;
+    if compiler {rudder_native::compiler_image_data::capture_build_retaining(&mut owned.build,owned.store.as_ref().unwrap().clone(),original.clone(),Arc::new(AtomicBool::new(false)))?;}
+    else {ImageDataBuild::capture_retaining(&mut owned.build,owned.store.as_ref().unwrap().clone(),original.clone(),Arc::new(AtomicBool::new(false)))?;}
     let data=owned.build.as_ref().unwrap();data.check_deep_for_import()?;
     let pin=data.pin_data()?;let objects=data.objects_for_import()?;
     // These getters require the SAME successful LocalImageImport two-pin ACK
@@ -97,7 +106,10 @@ fn bake_complete_cas()->anyhow::Result<()> {
     inventory.validate()?;let inventory_bytes=canonical_json(&inventory)?;
     ensure!(inventory_bytes.len()as u64<=MAX_BAKED_INVENTORY_BYTES,"baked inventory DATA exceeds bound");
     let inventory_ref=ObjectRef::from_bytes(ObjectKind::Blob,&inventory_bytes);
-    for(name,bytes)in [("manifest.json",data.manifest_bytes()?.to_vec()),("pin.json",canonical_json(&roots)?),("inventory.json",inventory_bytes)]{
+    let compiler_binding=if compiler{Some(rudder_native::compiler_image_data::binding_data(data)?)}else{None};
+    let mut descriptors=vec![("manifest.json",data.manifest_bytes()?.to_vec()),("pin.json",canonical_json(&roots)?),("inventory.json",inventory_bytes)];
+    if let Some(binding)=&compiler_binding {descriptors.push(("compiler-source.json",canonical_json(&serde_json::json!({"format_version":1,"compiler":binding,"inventory":inventory_ref,"roots":roots,"scope":"compiler-cas-build-data-only","production_admission":false,"runtime_mount":false}))?));}
+    for(name,bytes)in descriptors{
         original.remaining()?;owned.io=Some(OpenOptions::new().write(true).create_new(true).mode(0o444).custom_flags(libc::O_CLOEXEC|libc::O_NOFOLLOW).open(output.join(name))?);
         for chunk in bytes.chunks(64*1024){original.remaining()?;owned.io.as_mut().unwrap().write_all(chunk)?;}
         owned.io.as_ref().unwrap().sync_all()?;original.remaining()?;owned.io.take();
@@ -147,9 +159,12 @@ fn bake_complete_cas()->anyhow::Result<()> {
     let inventory_fd:OwnedFd=OpenOptions::new().read(true).custom_flags(libc::O_CLOEXEC|libc::O_NOFOLLOW).open(output.join("inventory.json"))?.into();
     BakedImageCas::capture_retaining(&mut owned.reader,root,inventory_fd,inventory_ref.clone(),Arc::new(Clock(original.clone())))?;
     original.remaining()?;
-    println!("RUDDER_BAKED_IMAGE_CAS_DATA {}",serde_json::json!({"format_version":1,"layout":BAKED_IMAGE_LAYOUT,
+    if compiler {println!("RUDDER_BAKED_COMPILER_CAS_DATA {}",serde_json::json!({"format_version":1,"layout":BAKED_IMAGE_LAYOUT,
+        "directory":rudder_native::compiler_image_data::COMPILER_CAS_DIRECTORY,"inventory":inventory_ref,"roots":roots,"objects":inventory.objects.len(),"total_bytes":inventory.total_bytes,
+        "retention_generation":inventory.retention_generation,"compiler":compiler_binding,"scope":"immutable-compiler-cas-data-only","production_admission":false,"runtime_mount":false}));}
+    else {println!("RUDDER_BAKED_IMAGE_CAS_DATA {}",serde_json::json!({"format_version":1,"layout":BAKED_IMAGE_LAYOUT,
         "directory":BAKED_IMAGE_DIRECTORY,"inventory":inventory_ref,"roots":roots,"objects":inventory.objects.len(),"total_bytes":inventory.total_bytes,
-        "retention_generation":inventory.retention_generation,"scope":"immutable-image-cas-data-only","production_admission":false,"runtime_mount":false}));
+        "retention_generation":inventory.retention_generation,"scope":"immutable-image-cas-data-only","production_admission":false,"runtime_mount":false}));}
     Ok(())
 }
 #[cfg(not(target_os="linux"))]

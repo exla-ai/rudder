@@ -26,4 +26,7 @@ pub use root_storage_bootstrap::engine_registration;
 pub mod image_preseed_data;
 
 #[cfg(target_os="linux")]
+pub mod compiler_image_data;
+
+#[cfg(target_os="linux")]
 pub mod managed_owner_lease;

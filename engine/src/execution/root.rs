@@ -773,6 +773,13 @@ fn harden(path: &Path, readonly: bool, devices: bool) -> Result<()> {
     };
     Ok(())
 }
+fn bind_runtime_fd(source:&std::os::fd::OwnedFd,destination:&Path)->Result<()> {
+    // This original descriptor came from the authenticated Root service; no
+    // canonicalize/open of its private mount path or spec source occurs here.
+    let fd_path=PathBuf::from(format!("/proc/self/fd/{}",source.as_raw_fd()));
+    syscall(unsafe{libc::mount(c(&fd_path)?.as_ptr(),c(destination)?.as_ptr(),std::ptr::null(),libc::MS_BIND|libc::MS_REC,std::ptr::null())},"bind original authorized runtime FD")?;
+    harden(destination,true,false)
+}
 fn bind(source: &Path, destination: &Path, readonly: bool, devices: bool) -> Result<()> {
     // Pin source inode before mount, including runtime files. This prevents a
     // path rename/symlink swap from redirecting the trusted projection.
@@ -803,12 +810,17 @@ fn provider_kernel_mountpoint()->Result<fs::Metadata> {
     let metadata=fs::symlink_metadata(path)?;
     ensure!(metadata.is_dir()&&!metadata.file_type().is_symlink()&&metadata.mode()&0o022==0&&path.canonicalize()?==path,"provider kernel boundary is not an actual protected directory");Ok(metadata)
 }
-fn mask_provider_kernel(root:&Path)->Result<()> {
+fn mask_provider_kernel(root:&Path)->Result<()> {mask_provider_kernel_with_runtime(root,None)}
+fn mask_provider_kernel_with_runtime(root:&Path,runtime:Option<&super::runtime_image::RuntimeImageGrant>)->Result<()> {
     let boundary=super::provider_kernel::PROVIDER_KERNEL_DIRECTORY;
-    let source=OpenOptions::new().read(true).custom_flags(libc::O_DIRECTORY|libc::O_NOFOLLOW|libc::O_CLOEXEC).open(boundary)?;
-    let before=provider_kernel_mountpoint()?;let held=source.metadata()?;
-    let destination=target(root,boundary,true)?;let mounted=fs::symlink_metadata(&destination)?;
-    ensure!(mounted.is_dir()&&!mounted.file_type().is_symlink()&&(held.dev(),held.ino(),held.mode())==(before.dev(),before.ino(),before.mode())&&(mounted.dev(),mounted.ino(),mounted.mode())==(before.dev(),before.ino(),before.mode()),"guest kernel boundary differs from the actual bound parent runtime");
+    let destination=target(root,boundary,true)?;
+    let _original=if let Some(runtime)=runtime {
+        runtime.verify_provider_projection(root,true)?;None
+    }else{
+        let source=OpenOptions::new().read(true).custom_flags(libc::O_DIRECTORY|libc::O_NOFOLLOW|libc::O_CLOEXEC).open(boundary)?;
+        let before=provider_kernel_mountpoint()?;let held=source.metadata()?;let mounted=fs::symlink_metadata(&destination)?;
+        ensure!(mounted.is_dir()&&!mounted.file_type().is_symlink()&&(held.dev(),held.ino(),held.mode())==(before.dev(),before.ino(),before.mode())&&(mounted.dev(),mounted.ino(),mounted.mode())==(before.dev(),before.ino(),before.mode()),"guest kernel boundary differs from the actual bound parent runtime");Some(source)
+    };
     // AFTER all relevant parent binds. This is a fresh namespace-only empty
     // filesystem, never deletion/chmod/unlink of provider-owned host objects.
     syscall(unsafe{libc::mount(c"tmpfs".as_ptr(),c(&destination)?.as_ptr(),c"tmpfs".as_ptr(),libc::MS_RDONLY|libc::MS_NOSUID|libc::MS_NODEV|libc::MS_NOEXEC,c"size=4k,nr_inodes=16,mode=0555".as_ptr().cast())},"mask provider kernel payload from managed userspace")?;
@@ -825,12 +837,15 @@ fn provider_swap_mountpoint()->Result<fs::Metadata> {
     ensure!(metadata.is_file()&&!metadata.file_type().is_symlink()&&metadata.mode()&0o022==0&&path.canonicalize()?==path,"provider swap boundary is not an actual protected file");
     Ok(metadata)
 }
-fn mask_provider_swap(root:&Path)->Result<()> {
+fn mask_provider_swap(root:&Path)->Result<()> {mask_provider_swap_with_runtime(root,None)}
+fn mask_provider_swap_with_runtime(root:&Path,runtime:Option<&super::runtime_image::RuntimeImageGrant>)->Result<()> {
     let boundary=super::provider_kernel::PROVIDER_SWAP_TOOL;
-    let source=OpenOptions::new().read(true).custom_flags(libc::O_PATH|libc::O_NOFOLLOW|libc::O_CLOEXEC).open(boundary)?;
-    let before=provider_swap_mountpoint()?;let held=source.metadata()?;
-    let destination=target(root,boundary,false)?;let mounted=fs::symlink_metadata(&destination)?;
-    ensure!(mounted.is_file()&&!mounted.file_type().is_symlink()&&(held.dev(),held.ino(),held.mode())==(before.dev(),before.ino(),before.mode())&&(mounted.dev(),mounted.ino(),mounted.mode())==(before.dev(),before.ino(),before.mode()),"guest swap boundary differs from actual parent runtime");
+    let destination=target(root,boundary,false)?;
+    let _original=if let Some(runtime)=runtime {runtime.verify_provider_projection(root,false)?;None}else{
+        let source=OpenOptions::new().read(true).custom_flags(libc::O_PATH|libc::O_NOFOLLOW|libc::O_CLOEXEC).open(boundary)?;
+        let before=provider_swap_mountpoint()?;let held=source.metadata()?;let mounted=fs::symlink_metadata(&destination)?;
+        ensure!(mounted.is_file()&&!mounted.file_type().is_symlink()&&(held.dev(),held.ino(),held.mode())==(before.dev(),before.ino(),before.mode())&&(mounted.dev(),mounted.ino(),mounted.mode())==(before.dev(),before.ino(),before.mode()),"guest swap boundary differs from actual parent runtime");Some(source)
+    };
     // A sealed anonymous inode has no writable host pathname or external
     // provider alias. This namespace-only mask never changes Fly's helper.
     let empty=super::linux::sealed_bytes_fd(&[])?;
@@ -865,10 +880,12 @@ pub(crate) fn seed_home(layout: &Layout, spec: &ExecutionSpec) -> Result<()> {
     }
     Ok(())
 }
-pub(crate) fn restrict(
-    layout: &Layout,
-    spec: &ExecutionSpec,
-    application: Option<&GuestServiceProjection>,
+pub(crate) fn restrict(layout:&Layout,spec:&ExecutionSpec,application:Option<&GuestServiceProjection>)->Result<()>{
+    restrict_runtime(layout,spec,application,None)
+}
+pub(crate) fn restrict_runtime(
+    layout: &Layout,spec: &ExecutionSpec,application: Option<&GuestServiceProjection>,
+    runtime:Option<&super::runtime_image::RuntimeImageGrant>,
 ) -> Result<()> {
     ensure!(
         unsafe { libc::getpid() } == 1,
@@ -889,11 +906,9 @@ pub(crate) fn restrict(
     )?;
     // Create all destinations before any read-only parent binds appear.
     for r in &spec.runtime {
-        target(
-            &layout.root,
-            &r.guest_path,
-            fs::metadata(&r.source)?.is_dir(),
-        )?;
+        let authorized=runtime.map(|runtime|runtime.component(r)).transpose()?.flatten();
+        let directory=if let Some((_,directory))=authorized{directory}else{fs::metadata(&r.source)?.is_dir()};
+        target(&layout.root,&r.guest_path,directory)?;
     }
     for guest in [
         "/workspace",
@@ -931,18 +946,18 @@ pub(crate) fn restrict(
         )?;
     }
     for r in &spec.runtime {
-        let source = r.source.canonicalize()?;
-        bind(
-            &source,
-            &layout.root.join(guest_relative(&r.guest_path)?),
-            true,
-            false,
-        )?;
+        if let Some((source,_))=runtime.map(|runtime|runtime.component(r)).transpose()?.flatten(){
+            bind_runtime_fd(source,&layout.root.join(guest_relative(&r.guest_path)?))?;
+        }else{
+            // VM-specific declared network files retain the existing path
+            // contract; image-covered projections NEVER fall back here.
+            let source=r.source.canonicalize()?;bind(&source,&layout.root.join(guest_relative(&r.guest_path)?),true,false)?;
+        }
     }
     let mut mask_kernel=false;let mut mask_swap=false;
     for runtime in &spec.runtime {let source=runtime.source.canonicalize()?;mask_kernel|=super::provider_kernel::requires_provider_kernel_mask(&source,Path::new(&runtime.guest_path))?;mask_swap|=super::provider_kernel::requires_provider_swap_mask(&source,Path::new(&runtime.guest_path))?;}
-    if mask_kernel {mask_provider_kernel(&layout.root)?;}
-    if mask_swap {mask_provider_swap(&layout.root)?;}
+    if mask_kernel {mask_provider_kernel_with_runtime(&layout.root,runtime)?;}
+    if mask_swap {mask_provider_swap_with_runtime(&layout.root,runtime)?;}
     bind(&layout.view, &layout.root.join("workspace"), false, false)?;
     bind(&layout.home, &layout.root.join("home/agent"), false, false)?;
     bind(&layout.tmp, &layout.root.join("tmp"), false, false)?;

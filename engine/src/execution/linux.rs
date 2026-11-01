@@ -64,13 +64,13 @@ pub(crate) fn read_sealed_bytes(fd: OwnedFd) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 pub fn run_helper(_spec: ExecutionSpec) -> Result<ExecutionOutcome> {
-    supervisor(_spec, None, None, ServiceFamily::Legacy)
+    supervisor(_spec, None, None, ServiceFamily::Legacy, None)
 }
 pub fn run_helper_with_services(
     spec: ExecutionSpec,
     factory: HelperServicesFactory,
 ) -> Result<ExecutionOutcome> {
-    supervisor(spec, Some(factory), None, ServiceFamily::Legacy)
+    supervisor(spec, Some(factory), None, ServiceFamily::Legacy, None)
 }
 pub fn run_helper_with_managed_services(
     spec: ExecutionSpec,
@@ -78,7 +78,8 @@ pub fn run_helper_with_managed_services(
     control: super::handoff::ManagedControl,
 ) -> Result<ExecutionOutcome> {
     control.binding.validate(&spec)?;
-    supervisor(spec, Some(factory), Some(control), ServiceFamily::Legacy)
+    ensure!(!control.has_runtime_image(),"runtime attachment requires explicit host-runtime entry");
+    supervisor(spec, Some(factory), Some(control), ServiceFamily::Legacy, None)
 }
 
 /// Trusted fresh-process host entry. The caller must supply the native host
@@ -90,12 +91,24 @@ pub fn run_helper_with_managed_host_source_services(
     control: super::handoff::ManagedControl,
 ) -> Result<ExecutionOutcome> {
     control.binding.validate(&spec)?;
-    supervisor(
-        spec,
-        Some(factory),
-        Some(control),
-        ServiceFamily::HostSource,
-    )
+    ensure!(!control.has_runtime_image(),"runtime attachment cannot fall through to host-path execution");
+    supervisor(spec,Some(factory),Some(control),ServiceFamily::HostSource,None)
+}
+
+/// Explicit fixed native managed-runtime route. Authenticate the actual Root
+/// service/held capsule BEFORE any USER/MNT transition or factory work. A
+/// received runtime FD never falls through to an ordinary runtime path.
+pub fn run_helper_with_managed_runtime_host_source_services(spec:ExecutionSpec,factory:HelperServicesFactory,
+    mut control:super::handoff::ManagedControl)->Result<ExecutionOutcome>{
+    control.binding.validate(&spec)?;ensure!(spec.format_version==5,"runtime grant requires actual host-source execution family");
+    let endpoint=super::runtime_image::RuntimeEndpoint::capture(control.runtime_endpoint.take().context("actual runtime attachment absent")?)?;
+    let startup=spec.startup_budget()?;ensure!(startup.is_some(),"runtime receive lacks original startup clock");
+    let mut runtime=None;let mut pending=None;
+    loop{check_startup(startup.as_ref())?;control.controller_process().check_current()?;
+        if super::runtime_image::RuntimeImageGrant::receive_retaining(&mut runtime,&mut pending,&endpoint,&control.binding)?{break}
+        std::thread::sleep(startup_limit(startup.as_ref(),std::time::Duration::from_millis(2))?);}
+    check_startup(startup.as_ref())?;runtime.as_ref().context("runtime original grant missing")?.assert_spec(&spec)?;
+    supervisor(spec,Some(factory),Some(control),ServiceFamily::HostSource,runtime)
 }
 
 #[derive(Clone, Copy)]
@@ -1269,6 +1282,10 @@ struct ChildSpec {
     application_projection: Option<GuestServiceProjection>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     managed: Option<ManagedExecutionBinding>,
+    #[serde(default,skip_serializing_if="Option::is_none")]
+    runtime_image: Option<super::runtime_image::RuntimeImageCapsuleData>,
+    #[serde(default,skip_serializing_if="Option::is_none")]
+    runtime_handoff: Option<String>,
 }
 #[derive(Serialize, Deserialize)]
 struct InitReport {
@@ -1333,6 +1350,7 @@ fn supervisor(
     factory: Option<HelperServicesFactory>,
     mut control: Option<super::handoff::ManagedControl>,
     family: ServiceFamily,
+    runtime: Option<super::runtime_image::RuntimeImageGrant>,
 ) -> Result<ExecutionOutcome> {
     // No namespace, factory or reservation effects before owned admission.
     admit_services(&spec, &factory, control.as_ref(), family)?;
@@ -1348,7 +1366,9 @@ fn supervisor(
     );
     let parent = unsafe { libc::getppid() } as u32;
     let lifetime = arm_parent(parent)?;
+    let runtime_namespace=runtime.as_ref().map(|_|super::runtime_image::RuntimeNamespaceGuard::capture()).transpose()?;
     let namespace = PrivateMountNamespace::enter_for_current_user()?;
+    if let Some(guard)=&runtime_namespace{guard.check()?;}
     check_startup(startup.as_ref())?;
     check_lifetime(lifetime.as_raw_fd())?;
     ensure!(
@@ -1576,6 +1596,8 @@ fn supervisor(
             check_startup(startup.as_ref())?;
             let mut projected = spec.clone();
             projected.home_files.clear();
+            let mut runtime_exec=None;
+            if let Some(runtime)=&runtime{super::runtime_image::RuntimeExecHandoff::capture_retaining(&mut runtime_exec,runtime)?;}
             let childspec = ChildSpec {
                 spec: projected,
                 layout,
@@ -1583,6 +1605,8 @@ fn supervisor(
                 execution_request_digest: state.record().request_digest().to_owned(),
                 application_projection,
                 managed: control.as_ref().map(|c| c.binding.clone()),
+                runtime_image:runtime.as_ref().map(|r|r.data_for_exec()),
+                runtime_handoff:runtime_exec.as_ref().map(|h|h.name_data().to_owned()),
             };
             let payload = sealed_payload(&childspec)?;
             let (mut receive, send) = UnixStream::pair()?;
@@ -1601,6 +1625,7 @@ fn supervisor(
                 .stdin(Stdio::inherit())
                 .stdout(Stdio::inherit())
                 .stderr(Stdio::inherit());
+            if runtime.is_some(){command.env_clear();}
             unsafe {
                 command.pre_exec(move || {
                     if libc::dup2(fd3.as_raw_fd(), 3) < 0
@@ -1612,15 +1637,7 @@ fn supervisor(
                     {
                         return Err(std::io::Error::last_os_error());
                     }
-                    if libc::syscall(
-                        libc::SYS_close_range,
-                        if fd5.is_some() { 6u32 } else { 5u32 },
-                        u32::MAX,
-                        4u32,
-                    ) != 0
-                    {
-                        return Err(std::io::Error::last_os_error());
-                    }
+                    if libc::syscall(libc::SYS_close_range,if fd5.is_some(){6u32}else{5u32},u32::MAX,4u32)!=0{return Err(std::io::Error::last_os_error());}
                     Ok(())
                 });
             }
@@ -1635,6 +1652,10 @@ fn supervisor(
             drop(init_control);
             let mut guard = ProcessGuard(child.id() as i32);
             check_startup(startup.as_ref())?;
+            if let Some(handoff)=&mut runtime_exec {
+                handoff.dispatch_original_child_retaining(super::handoff::pidfd(child.id())?)?;
+                check_startup(startup.as_ref())?;
+            }
             let network_ready = if spec.profile.is_some() {
                 supervisor_control.set_read_timeout(Some(startup_limit(startup.as_ref(), Duration::from_secs(10))?))?;
                 let (frame, descriptors): (super::network_phase::NetworkReadyFrame, _) =
@@ -1938,11 +1959,20 @@ fn read_payload(fd: OwnedFd) -> Result<ChildSpec> {
 
 /// Internal fresh-exec entry; only sealed FD3 and private report FD4 survive.
 pub fn run_child() -> Result<()> {
+    ensure!(unsafe{libc::prctl(libc::PR_SET_DUMPABLE,0,0,0,0)}==0&&unsafe{libc::prctl(libc::PR_GET_DUMPABLE,0,0,0,0)}==0,
+        "runtime wrapper early descriptor protection unavailable");
     ensure!(
         fs::read_dir("/proc/self/task")?.count() == 1,
         "execution child wrapper must be fresh"
     );
     let payload = read_payload(unsafe { OwnedFd::from_raw_fd(3) })?;
+    let mut runtime=None;let mut runtime_receive=None;
+    ensure!(payload.runtime_image.is_some()==payload.runtime_handoff.is_some(),"runtime wrapper data/transport differs");
+    if let Some(data)=&payload.runtime_image{
+        super::runtime_image::RuntimeExecReceive::connect_retaining(&mut runtime_receive,payload.runtime_handoff.as_ref().unwrap(),data.clone())?;
+        while !runtime_receive.as_mut().unwrap().receive_retaining(&mut runtime)?{std::thread::sleep(std::time::Duration::from_millis(2));}
+    }
+    if let Some(runtime)=&runtime{runtime.assert_spec(&payload.spec)?;}
     let startup = payload.spec.startup_budget()?;
     check_startup(startup.as_ref())?;
     payload.spec.validate()?;
@@ -1965,7 +1995,9 @@ pub fn run_child() -> Result<()> {
     } else {
         None
     };
+    let runtime_namespace=runtime.as_ref().map(|_|super::runtime_image::RuntimeNamespaceGuard::capture()).transpose()?;
     let _namespace = PrivateMountNamespace::enter_for_current_user()?;
+    if let Some(guard)=&runtime_namespace{guard.check()?;}
     check_startup(startup.as_ref())?;
     let network = network_baseline
         .map(|baseline| unsafe { baseline.enter_after_new_user() })
@@ -2015,6 +2047,7 @@ pub fn run_child() -> Result<()> {
         let mut pipe = init_send;
         let result = namespace_init(
             &payload,
+            runtime.as_ref(),
             wrapper.as_raw_fd(),
             init_control,
             network.as_ref(),
@@ -2098,6 +2131,7 @@ pub fn run_child() -> Result<()> {
 }
 fn namespace_init(
     payload: &ChildSpec,
+    runtime: Option<&super::runtime_image::RuntimeImageGrant>,
     parent: RawFd,
     mut control: Option<UnixStream>,
     network: Option<&super::network::linux::OwnedChildNetwork>,
@@ -2134,10 +2168,8 @@ fn namespace_init(
             == payload.application_projection.is_some(),
         "sealed application/guest projection mismatch"
     );
-    super::root::restrict(
-        &payload.layout,
-        &payload.spec,
-        payload.application_projection.as_ref(),
+    super::root::restrict_runtime(
+        &payload.layout,&payload.spec,payload.application_projection.as_ref(),runtime,
     )?;
     check_startup(startup.as_ref())?;
     ensure!(
@@ -3124,7 +3156,7 @@ mod partial_source_lifetime_tests {
             let error = admit_services(&spec, factory, None, family).unwrap_err();
             assert!(error.to_string().contains(expected), "{error}");
         }
-        let error = supervisor(spec.clone(), factory, None, ServiceFamily::HostSource)
+        let error = supervisor(spec.clone(), factory, None, ServiceFamily::HostSource,None)
             .err().unwrap();
         assert!(error.to_string().contains("requires its owned managed controller"));
         spec.format_version = 4;

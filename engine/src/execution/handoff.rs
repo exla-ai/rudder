@@ -15,6 +15,9 @@ mod runtime_worker_join_tests;
 #[cfg(test)]
 #[path = "handoff/retained_activation_tests.rs"]
 mod retained_activation_tests;
+#[cfg(test)]
+#[path="handoff/runtime_image_handoff_tests.rs"]
+mod runtime_image_handoff_tests;
 use super::finalization_budget::{
     FinalizationBudget, FinalizationConstraint, FINALIZATION_POLICY_LIMIT,
 };
@@ -616,8 +619,29 @@ pub struct ManagedExecutionStartBarrier {
     helper: Arc<helper_process::HelperProcessWitness>,
     original: Option<(FinalizationBudget, Arc<std::sync::atomic::AtomicBool>)>,
     released: bool,
+    binding: ManagedExecutionBinding,
+    runtime: Arc<std::sync::Mutex<Option<super::runtime_image::RuntimeImageHandoffAttachment>>>,
+    runtime_required: Arc<std::sync::atomic::AtomicBool>,
 }
 impl ManagedExecutionStartBarrier {
+    pub fn binding_data(&self)->&ManagedExecutionBinding{&self.binding}
+    /// Actual stored time/cancellation carriers, not a constraint reconstructed
+    /// by a later caller. These restrict time only and issue no enrollment.
+    pub fn original_request_retaining(&self)->Result<(FinalizationBudget,Arc<std::sync::atomic::AtomicBool>)>{
+        ensure!(self.is_pending(),"managed original barrier is not pending");
+        let (budget,cancelled)=self.original.as_ref().context("runtime enrollment requires bounded original task barrier")?;
+        if cancelled.load(std::sync::atomic::Ordering::Acquire){budget.cancel();}
+        budget.remaining()?;Ok((budget.clone(),cancelled.clone()))
+    }
+    /// Pure restriction, never an image grant. Once a real client begins this
+    /// enrollment, missing/unknown runtime ACK cannot reopen a legacy path.
+    pub fn require_runtime_image_before_release(&self){self.runtime_required.store(true,std::sync::atomic::Ordering::Release)}
+    pub fn attach_runtime_image_retaining(&mut self,attachment:super::runtime_image::RuntimeImageHandoffAttachment)->Result<()> {
+        ensure!(self.is_pending(),"runtime attachment requires original closed start barrier");
+        let mut slot=self.runtime.try_lock().map_err(|_|anyhow::anyhow!("runtime handoff cell busy/poisoned"))?;
+        ensure!(slot.is_none(),"runtime attachment already staged");*slot=Some(attachment);Ok(())
+    }
+
     /// Actual pending kernel witness; process DATA, not readiness/activation.
     pub fn pending_helper_process(&self) -> Arc<helper_process::HelperProcessWitness> { self.helper.clone() }
     pub fn is_pending(&self) -> bool { !self.released && !self.closed.load(std::sync::atomic::Ordering::Acquire) }
@@ -628,6 +652,9 @@ impl ManagedExecutionStartBarrier {
         ensure!(!self.released && !self.closed.load(std::sync::atomic::Ordering::Acquire), "managed start barrier closed/already released");
         if let Some((budget, cancelled)) = &self.original {
             ensure!(!cancelled.load(std::sync::atomic::Ordering::Acquire), "managed start barrier cancelled");budget.remaining()?;
+        }
+        if self.runtime_required.load(std::sync::atomic::Ordering::Acquire){
+            ensure!(self.runtime.try_lock().map_err(|_|anyhow::anyhow!("runtime handoff cell busy/poisoned"))?.is_some(),"runtime original enrollment not attached");
         }
         self.gate.store(true,std::sync::atomic::Ordering::Release);self.released=true;Ok(())
     }
@@ -718,8 +745,10 @@ impl RetainedManagedExecutionActivation {
         let (send, result) = mpsc::sync_channel(1);
         let worker_helper = helper_process.clone();
         let gate = Arc::new(std::sync::atomic::AtomicBool::new(!staged));
+        let runtime=Arc::new(std::sync::Mutex::new(None::<super::runtime_image::RuntimeImageHandoffAttachment>));
+        let runtime_required=Arc::new(std::sync::atomic::AtomicBool::new(false));
         if staged { self.start_barrier=Some(ManagedExecutionStartBarrier { gate:gate.clone(),closed:closed.clone(),
-            helper:helper_process.clone(),original:original.clone(),released:false }); }
+            helper:helper_process.clone(),original:original.clone(),released:false,binding:self.binding.clone(),runtime:runtime.clone(),runtime_required:runtime_required.clone() }); }
         // The spawned closure takes from this already retained cell only AFTER
         // successful OS thread creation. Spawn refusal cannot drop the original.
         let pending = self.original.clone();
@@ -778,14 +807,14 @@ impl RetainedManagedExecutionActivation {
                                 // Absorbing BEFORE sendmsg: an error/unknown ACK
                                 // can already expose all three descriptors.
                                 dispatch_attempted.store(true, std::sync::atomic::Ordering::Release);
-                                send_descriptors(
-                                    &stream,
-                                    &[
-                                        handoff.spec.as_raw_fd(),
-                                        binding_fd.as_raw_fd(),
-                                        helper_control.as_raw_fd(),
-                                    ],
-                                )?;
+                                // Only actual staged runtime transport joins the
+                                // original sealed descriptor packet. The helper
+                                // independently authenticates Root before use.
+                                let runtime=runtime.lock().map_err(|_|anyhow::anyhow!("runtime handoff owner poisoned"))?.take();
+                                ensure!(!runtime_required.load(std::sync::atomic::Ordering::Acquire)||runtime.is_some(),"required original runtime attachment absent");
+                                let mut descriptors=vec![handoff.spec.as_raw_fd(),binding_fd.as_raw_fd(),helper_control.as_raw_fd()];
+                                if let Some(runtime)=&runtime{descriptors.push(runtime.descriptor());}
+                                send_descriptors(&stream,&descriptors)?;
                                 check_original()?;
                                 if let Some(startup) = &startup { startup.remaining()?; }
                                 worker_helper.transferred()?;
@@ -1361,8 +1390,10 @@ pub struct ManagedControl {
     stream: UnixStream,
     pub(crate) request: Option<StopAndCheckpoint>,
     pub(crate) authenticated: bool,
+    pub(crate) runtime_endpoint: Option<OwnedFd>,
 }
 impl ManagedControl {
+    pub fn has_runtime_image(&self)->bool{self.runtime_endpoint.is_some()}
     /// Clone the held controller identity from the successful authenticated
     /// handoff. Only trusted host services may retain this witness. It remains
     /// a process witness after control close, never a current owner/run grant.
@@ -1940,7 +1971,7 @@ fn send_fd(stream: &UnixStream, fd: &OwnedFd) -> Result<()> {
 }
 fn send_descriptors(stream: &UnixStream, descriptors: &[i32]) -> Result<()> {
     ensure!(
-        !descriptors.is_empty() && descriptors.len() <= 3,
+        !descriptors.is_empty() && descriptors.len() <= 4,
         "invalid execution descriptor count"
     );
     let mut byte = [1u8];
@@ -2099,6 +2130,8 @@ fn receive_descriptors_with_budget(
 }
 
 pub fn receive_managed(name: &str, parent: u32) -> Result<(ExecutionSpec, ManagedControl)> {
+    ensure!(unsafe{libc::prctl(libc::PR_SET_DUMPABLE,0,0,0,0)}==0
+        &&unsafe{libc::prctl(libc::PR_GET_DUMPABLE,0,0,0,0)}==0,"managed pre-handoff descriptor protection unavailable");
     let _parent_fence = super::linux::arm_parent(parent)?;
     ensure!(
         name.starts_with("rudder-execution-")
@@ -2117,9 +2150,10 @@ pub fn receive_managed(name: &str, parent: u32) -> Result<(ExecutionSpec, Manage
     );
     let (tag, mut descriptors) = receive_descriptors(&stream)?;
     ensure!(
-        tag == 1 && descriptors.len() == 3 && !exited(&lifetime)?,
+        tag == 1 && matches!(descriptors.len(),3|4) && !exited(&lifetime)?,
         "invalid managed handoff descriptors/lifetime"
     );
+    let runtime_endpoint=(descriptors.len()==4).then(||descriptors.pop().unwrap());
     let control = UnixStream::from(descriptors.pop().unwrap());
     control.set_read_timeout(Some(Duration::from_secs(2)))?;
     control.set_write_timeout(Some(Duration::from_secs(2)))?;
@@ -2144,6 +2178,7 @@ pub fn receive_managed(name: &str, parent: u32) -> Result<(ExecutionSpec, Manage
             stream: control,
             request: None,
             authenticated: false,
+            runtime_endpoint,
         },
     ))
 }
@@ -2192,6 +2227,7 @@ mod managed_tests {
                 stream: helper,
                 request: None,
                 authenticated: false,
+                runtime_endpoint: None,
             },
         )
     }
@@ -2706,6 +2742,7 @@ mod managed_tests {
             stream: helper,
             request: None,
             authenticated: false,
+            runtime_endpoint: None,
         };
         assert!(control.finalization_budget().is_none());
         let request = stop(&binding);
@@ -2828,6 +2865,7 @@ mod managed_tests {
             stream: helper,
             request: None,
             authenticated: false,
+            runtime_endpoint: None,
         };
         let request = stop(&binding);
         send_control_packet(
@@ -2891,6 +2929,7 @@ mod managed_tests {
             stream: helper,
             request: None,
             authenticated: false,
+            runtime_endpoint: None,
         };
         let actual = pidfd(std::process::id()).unwrap();
         control.backend_ready(&actual).unwrap();
@@ -3077,6 +3116,7 @@ mod managed_tests {
                 stream: helper,
                 request: None,
                 authenticated: false,
+                runtime_endpoint: None,
             };
             let mut request = stop(&binding);
             if !stale {

@@ -53,7 +53,10 @@ pub(crate) fn run(args: &[String]) -> Result<()> {
                 rudder_engine::execution::handoff::receive_managed(&args[2], args[4].parse()?)?;
             let host_source = spec.format_version == 5;
             let factory = services_factory(Some(control.controller_process()));
-            let outcome = if host_source {
+            let outcome = if control.has_runtime_image() {
+                anyhow::ensure!(host_source,"runtime FD cannot fall through to legacy execution");
+                rudder_engine::execution::linux::run_helper_with_managed_runtime_host_source_services(spec,factory,control)?
+            } else if host_source {
                 rudder_engine::execution::linux::run_helper_with_managed_host_source_services(
                     spec, factory, control,
                 )?

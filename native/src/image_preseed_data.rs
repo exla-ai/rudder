@@ -13,6 +13,7 @@ use std::{collections::{BTreeSet,BTreeMap},fs::{self,File,OpenOptions},io::Read,
 #[path="image_directory_custody.rs"]
 mod directory_custody;
 use directory_custody::DirectoryCustody;
+use crate::compiler_image_data::{CompilerSource,CompilerArtifactBindingData};
 const MAX_ENTRIES:usize=65536;
 const MAX_BYTES:u64=2*1024*1024*1024;
 const MAX_DEPTH:usize=128;
@@ -83,17 +84,45 @@ pub fn static_files()->&'static [(&'static str,&'static str)]{&STATIC_FILES}
 pub fn static_directories()->&'static [(&'static str,&'static str)]{&STATIC_DIRS}
 /// Mutable carrier is staged before any CAS writes. Errors leave actual staging,
 /// roots/content refs and named pin intents here for explicit retained recovery.
-pub struct ImageDataBuild {store:LocalStore,original:ImagePreseedBudget,cancelled:Arc<AtomicBool>,roots:Vec<Root>,provider_boundary:Option<Root>,provider_tool:Option<ProviderFile>,directories:DirectoryCustody,stamps:Vec<Stamp>,files:Vec<ImageFileData>,
+pub struct ImageDataBuild {compiler:Option<CompilerSource>,store:LocalStore,original:ImagePreseedBudget,cancelled:Arc<AtomicBool>,roots:Vec<Root>,provider_boundary:Option<Root>,provider_tool:Option<ProviderFile>,directories:DirectoryCustody,stamps:Vec<Stamp>,files:Vec<ImageFileData>,
     bulk:Option<LocalImageImport>,bulk_ack:Option<LocalImagePinAck>,
     stage:Option<String>,links:BTreeMap<(u64,u64),(u64,Vec<Vec<String>>)>,entries:usize,imported:ImportedFiles,installer:Option<ObjectRef>,manifest:Option<ObjectRef>,manifest_bytes:Option<Vec<u8>>,pin:String,pin_attempted:bool,pin_ack:bool,attempted:bool,ready:bool}
 impl ImageDataBuild {
     pub fn capture_retaining(out:&mut Option<Self>,store:LocalStore,original:ImagePreseedBudget,cancelled:Arc<AtomicBool>)->Result<()> {
         clock(&original,&cancelled)?;ensure!(out.is_none(),"original image DATA build already captured");
-        *out=Some(Self{store,original,cancelled,roots:Vec::new(),provider_boundary:None,provider_tool:None,directories:DirectoryCustody::default(),stamps:Vec::new(),files:Vec::new(),bulk:None,bulk_ack:None,stage:None,links:BTreeMap::new(),entries:0,imported:ImportedFiles::default(),installer:None,manifest:None,manifest_bytes:None,pin:format!("image-data-build:{}",uuid::Uuid::new_v4()),pin_attempted:false,pin_ack:false,attempted:false,ready:false});
+        *out=Some(Self::staged(store,original,cancelled));
         out.as_mut().unwrap().build_retaining()
+    }
+    fn staged(store:LocalStore,original:ImagePreseedBudget,cancelled:Arc<AtomicBool>)->Self {
+        Self{compiler:None,store,original,cancelled,roots:Vec::new(),provider_boundary:None,provider_tool:None,directories:DirectoryCustody::default(),stamps:Vec::new(),files:Vec::new(),bulk:None,bulk_ack:None,stage:None,links:BTreeMap::new(),entries:0,imported:ImportedFiles::default(),installer:None,manifest:None,manifest_bytes:None,pin:format!("image-data-build:{}",uuid::Uuid::new_v4()),pin_attempted:false,pin_ack:false,attempted:false,ready:false}
+    }
+    /// Crate-private fixed profile; the public build-only facade accepts no
+    /// source path, alternate manifest pin, runtime grant or destination.
+    pub(crate) fn capture_compiler_retaining(out:&mut Option<Self>,store:LocalStore,original:ImagePreseedBudget,cancelled:Arc<AtomicBool>)->Result<()> {
+        clock(&original,&cancelled)?;ensure!(out.is_none(),"original compiler DATA build already captured");
+        let mut staged=Self::staged(store,original,cancelled);staged.compiler=Some(CompilerSource::staged_fixed());*out=Some(staged);
+        out.as_mut().unwrap().build_retaining()
+    }
+    #[cfg(test)]
+    pub(crate) fn capture_compiler_fixture_retaining(out:&mut Option<Self>,store:LocalStore,original:ImagePreseedBudget,cancelled:Arc<AtomicBool>,source:CompilerSource)->Result<()> {
+        ensure!(out.is_none(),"compiler fixture carrier occupied");let mut staged=Self::staged(store,original,cancelled);staged.compiler=Some(source);*out=Some(staged);
+        out.as_mut().unwrap().build_retaining()
+    }
+    pub(crate) fn compiler_binding_data(&self)->Result<CompilerArtifactBindingData> {
+        self.pin_data()?;self.compiler.as_ref().context("not a compiler DATA profile")?.binding_data()
+    }
+    fn build_compiler_retaining(&mut self)->Result<()> {
+        self.compiler.as_mut().unwrap().capture(&self.original,&self.cancelled)?;
+        let root=self.compiler.as_ref().unwrap().root().to_owned();self.roots.push(Root::capture(&root)?);
+        LocalImageImport::stage_retaining(&mut self.bulk,self.store.clone(),Arc::new(ImportClock{original:self.original.clone(),cancelled:self.cancelled.clone()}))?;
+        self.stage=Some(self.bulk.as_ref().unwrap().staging_id_data()?);
+        let (mode,entries)=self.import_directory_entries(&root,0)?;ensure!(mode==0o555,"compiler installer root mode differs");
+        self.compiler.as_ref().unwrap().finish()?;self.roots.last().unwrap().current()?;
+        self.finish_retaining(entries)
     }
     fn build_retaining(&mut self)->Result<()> {
         ensure!(!self.attempted,"original image DATA build already attempted");self.attempted=true;clock(&self.original,&self.cancelled)?;
+        if self.compiler.is_some(){return self.build_compiler_retaining();}
         // Required baked mountpoint: actual host Root custody is retained even
         // when Fly boot supplies a separate payload below it. Never import it.
         self.provider_boundary=Some(Root::capture(Path::new(PROVIDER_KERNEL_DIRECTORY))?);
@@ -108,6 +137,10 @@ impl ImageDataBuild {
             let path=Path::new("/").join(name);let s=stamp(&path)?;ensure!(s.mode&libc::S_IFMT==libc::S_IFLNK&&path.canonicalize()?==Path::new(target),"merged usr alias differs from declared layout");
             roots.push(DirectoryEntry::new(name.as_bytes(),EntryNode::Symlink{target_hex:hex_bytes(fs::read_link(&path)?.as_os_str().as_encoded_bytes())})?);self.stamps.push(s);
         }
+        self.finish_retaining(roots)
+    }
+    fn finish_retaining(&mut self,mut roots:Vec<DirectoryEntry>)->Result<()> {
+        clock(&self.original,&self.cancelled)?;
         let topology=canonical_json(&hardlink_topology(&self.links)?)?;
         let topology_ref=ObjectRef::from_bytes(ObjectKind::Blob,&topology);self.bulk.as_ref().unwrap().receive(&topology_ref,&topology)?;
         roots.push(DirectoryEntry::new(b"hardlinks.json",EntryNode::File{object:topology_ref.clone(),logical_size:topology_ref.size_bytes,mode:0o444})?);
@@ -121,17 +154,26 @@ impl ImageDataBuild {
         self.bulk_ack=Some(self.bulk.as_ref().unwrap().commit_pins(&self.pin,&installer,&format!("{}:manifest",self.pin),&manifest)?);
         self.pin_ack=true;self.check_deep_for_import()?;clock(&self.original,&self.cancelled)?;self.ready=true;Ok(())
     }
-    fn import_directory(&mut self,path:&Path,depth:usize)->Result<ObjectRef>{clock(&self.original,&self.cancelled)?;ensure!(depth<=MAX_DEPTH,"image depth exceeds bound");let before=self.directories.capture(path)?;ensure!(before.mode&libc::S_IFMT==libc::S_IFDIR,"image directory changed type");
+    fn import_directory(&mut self,path:&Path,depth:usize)->Result<ObjectRef>{
+        // The runtime provider boundary remains an explicit empty DATA node.
+        // Compiler input is the distinct fixed root and cannot reach this path.
         if path==Path::new(PROVIDER_KERNEL_DIRECTORY){
+            clock(&self.original,&self.cancelled)?;ensure!(depth<=MAX_DEPTH,"image depth exceeds bound");let before=self.directories.capture(path)?;
+            ensure!(before.mode&libc::S_IFMT==libc::S_IFDIR,"image directory changed type");
             self.provider_boundary.as_ref().context("actual provider boundary custody absent")?.current()?;
             return empty_provider_directory_to(self.bulk.as_ref().unwrap());
         }
-        let mut children=Vec::new();for entry in fs::read_dir(path)?{self.entries+=1;ensure!(self.entries<=MAX_ENTRIES,"image namespace exceeds bound");children.push(entry?);}
+        let (mode,entries)=self.import_directory_entries(path,depth)?;PagedDirectory::new(self.bulk.as_ref().unwrap()).build(mode,entries)
+    }
+    fn import_directory_entries(&mut self,path:&Path,depth:usize)->Result<(u32,Vec<DirectoryEntry>)>{
+        clock(&self.original,&self.cancelled)?;ensure!(depth<=MAX_DEPTH,"image depth exceeds bound");let before=self.directories.capture(path)?;ensure!(before.mode&libc::S_IFMT==libc::S_IFDIR,"image directory changed type");
+        let mut children=Vec::new();for entry in fs::read_dir(path)?{clock(&self.original,&self.cancelled)?;self.entries+=1;ensure!(self.entries<=MAX_ENTRIES,"image namespace exceeds bound");children.push(entry?);}
         children.sort_by(|a,b|a.file_name().as_encoded_bytes().cmp(b.file_name().as_encoded_bytes()));let mut entries=Vec::new();
         for child in children{let p=child.path();let s=stamp(&p)?;let node=self.import_entry(&p,&s,depth+1)?;entries.push(DirectoryEntry::new(child.file_name().as_encoded_bytes(),node)?);if s.mode&libc::S_IFMT!=libc::S_IFDIR{self.stamps.push(s);}}
-        self.directories.check_path(path,&before)?;PagedDirectory::new(self.bulk.as_ref().unwrap()).build(before.mode&0o7777,entries)
+        self.directories.check_path(path,&before)?;Ok((before.mode&0o7777,entries))
     }
     fn import_entry(&mut self,path:&Path,before:&Stamp,depth:usize)->Result<EntryNode>{clock(&self.original,&self.cancelled)?;
+        if let Some(source)=&mut self.compiler {source.observe_entry(path,before.mode,before.len)?;}
         if path==Path::new(PROVIDER_SWAP_TOOL){
             self.provider_tool.as_ref().context("actual provider tool custody absent")?.current()?;
             return empty_provider_file_to(self.bulk.as_ref().unwrap());
@@ -144,7 +186,8 @@ impl ImageDataBuild {
                 // One physical inode is read once, while every original alias
                 // remains in the manifest, stamp checks and hardlink topology.
                 let (content,sha256)=self.imported.read_with(file,before,self.bulk.as_ref().unwrap(),&self.original,&self.cancelled)?;
-                let relative=installer_path(path)?;let links=self.links.entry((m.dev(),m.ino())).or_insert((m.nlink(),Vec::new()));ensure!(links.0==m.nlink(),"image hardlink count changed");links.1.push(relative);
+                if let Some(source)=&mut self.compiler {source.observe_file(path,&sha256,before.len)?;}
+                let relative=if let Some(source)=&self.compiler {source.installer_path(path)?}else{installer_path(path)?};let links=self.links.entry((m.dev(),m.ino())).or_insert((m.nlink(),Vec::new()));ensure!(links.0==m.nlink(),"image hardlink count changed");links.1.push(relative);
                 self.files.push(ImageFileData{path:path.into(),sha256,size_bytes:before.len,content:content.clone()});EntryNode::File{object:content,logical_size:before.len,mode:before.mode&0o7777}},
             _=>anyhow::bail!("unsupported image entry"),};
         if before.mode&libc::S_IFMT==libc::S_IFDIR{self.directories.check_path(path,before)?;}else{ensure!(stamp(path)?==*before,"image entry changed during import");}clock(&self.original,&self.cancelled)?;Ok(node)
@@ -152,7 +195,7 @@ impl ImageDataBuild {
     /// Light checks accompany each verified immutable CAS chunk. Root-qualified
     /// source roots, not all tens-thousands names, remain under held descriptors.
     /// Deep checks run before/after whole import and before publication/adoption.
-    fn check_source_roots(&self)->Result<()> {for root in &self.roots{root.current()?;}if let Some(boundary)=&self.provider_boundary{boundary.current()?;}if let Some(tool)=&self.provider_tool{tool.current()?;}Ok(())}
+    fn check_source_roots(&self)->Result<()> {if let Some(source)=&self.compiler {source.check_current()?;}for root in &self.roots{root.current()?;}if let Some(boundary)=&self.provider_boundary{boundary.current()?;}if let Some(tool)=&self.provider_tool{tool.current()?;}Ok(())}
     pub fn check_roots(&self)->Result<()> {self.check_source_roots()?;if self.pin_attempted{self.bulk.as_ref().context("original bulk image owner absent")?.assert_pins_current(self.bulk_ack.as_ref().context("image pin commit unknown; retain original bulk owner")?)?;}Ok(())}
     pub fn check_deep(&self)->Result<()> {self.check_roots()?;self.directories.check_all_with(||Ok(()))?;for previous in &self.stamps{ensure!(stamp(&previous.path)?==*previous,"captured image filesystem changed: {}",previous.path.display());}Ok(())}
     pub fn check_deep_for_import(&self)->Result<()> {clock(&self.original,&self.cancelled)?;self.check_source_roots()?;if self.pin_attempted{self.bulk.as_ref().context("original bulk image owner absent")?.assert_pins_current_for_import(self.bulk_ack.as_ref().context("image pin commit unknown; retain original bulk owner")?)?;}self.directories.check_all_with(||clock(&self.original,&self.cancelled))?;for previous in &self.stamps{clock(&self.original,&self.cancelled)?;ensure!(stamp(&previous.path)?==*previous,"captured image filesystem changed: {}",previous.path.display());}clock(&self.original,&self.cancelled)}

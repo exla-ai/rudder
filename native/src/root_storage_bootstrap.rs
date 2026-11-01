@@ -13,6 +13,8 @@ use std::{any::Any, ffi::CString, fmt, fs::{self, File, OpenOptions}, io::{self,
 pub mod host_ingress;
 #[path="engine_registration.rs"]
 pub mod engine_registration;
+#[path="root_runtime_image.rs"]
+pub mod runtime_image;
 
 pub const ENGINE_PATH: &str = "/opt/rudder/dist/native/rudder-native";
 pub const SERVICE_PATH: &str = "/usr/local/bin/rudder-root-storage";
@@ -68,7 +70,7 @@ fn read_data(fd:&OwnedFd)->Result<BootstrapData> {
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all="snake_case")]
-enum Message { EngineWaiting, ServicePidfd, ServiceImage, ClientAuthenticated, ParentAccepted, HostControlAbsent, HostControlOffer, HostControlFd(u8), HostServing(u32), EngineRegistered, EngineOperationsEndpoint, EngineRegistrationAccepted, EngineRegistrationFenced, Quarantine }
+enum Message { EngineWaiting, ServicePidfd, ServiceImage, ClientAuthenticated, ParentAccepted, HostControlAbsent, HostControlOffer, HostControlFd(u8), HostServing(u32), EngineRegistered, EngineOperationsEndpoint, EngineRegistrationAccepted, EngineRegistrationFenced, RuntimeImageEndpoint, Quarantine }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Frame { version:u32, serial:u64, nonce:String, constraint:FinalizationConstraint, message:Message }
@@ -104,6 +106,14 @@ impl Gate {
             && frame.nonce==self.data.nonce && frame.constraint==self.data.constraint && payload.is_empty(),"machine bootstrap frame binding differs");
         self.received=frame.serial;self.peer.live()?;
         let mut packet=self.pending_packet.take().unwrap();Ok(Some((frame.message,packet.fds.pop())))
+    }
+    /// Post-startup runtime offer uses its SAME separately captured original
+    /// request cutoff. The expired bootstrap constraint remains channel binding
+    /// DATA and is never refreshed or reused as a new request clock.
+    fn send_runtime_endpoint_retaining(&mut self,fd:&OwnedFd,original:&FinalizationBudget)->Result<()> {
+        original.remaining()?;let bytes=self.frame(Message::RuntimeImageEndpoint)?;
+        loop {original.remaining()?;self.peer.live()?;if self.endpoint.send(&bytes,Some(fd))?{original.remaining()?;return Ok(())}
+            std::thread::sleep(original.phase_limit(Duration::from_millis(2))?);}
     }
     fn receive_startup(&mut self,expected:Message)->Result<Option<OwnedFd>> {
         loop {self.budget.remaining()?;if let Some((message,fd))=self.poll()? {
@@ -253,7 +263,7 @@ fn finish_engine_floor(policy:&mut Option<PrivilegeDropPolicy>)->Result<()> {
 fn mapped_command(path:&str,args:&[&str],engine_bridge:bool,mapping:&[(&OwnedFd,i32)])->Result<(Command,Vec<OwnedFd>)> {
     let mut command=Command::new(path);command.args(args).env_clear().current_dir("/").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
     let mut keep=Vec::new();let mut raw=Vec::new();let mut targets=std::collections::BTreeSet::new();
-    for (fd,target) in mapping {ensure!((3..=7).contains(target) && targets.insert(*target),"machine inherited descriptor mapping invalid");
+    for (fd,target) in mapping {ensure!((3..=if path==SERVICE_PATH&&!engine_bridge{12}else{7}).contains(target) && targets.insert(*target),"machine inherited descriptor mapping invalid");
         let duplicate=unsafe {libc::fcntl(fd.as_raw_fd(),libc::F_DUPFD_CLOEXEC,20)};ensure!(duplicate>=20,"machine inherited descriptor duplication failed");
         keep.push(unsafe {OwnedFd::from_raw_fd(duplicate)});raw.push((duplicate,*target));}
     unsafe {command.pre_exec(move || {for &(from,to) in &raw {if libc::dup2(from,to)<0 {return Err(io::Error::last_os_error());}}
@@ -371,7 +381,7 @@ enum Stage { SpawnEngine, WaitEngine, SpawnService, SendService, WaitClient, Wai
 #[must_use="retain actual children and descriptors through explicit existing-owner drain or VM teardown"]
 pub struct MachineRootBootstrap {
     original:FinalizationBudget,data:BootstrapData,own:Process,launcher_image:Image,engine_image:Image,service_image:Image,
-    mnt:File,user:File,boot:Vec<u8>,root_caps:u64,drop_policy:PrivilegeDropPolicy,lock:Option<File>,lock_id:Option<(u64,u64)>,
+    mnt:File,user:File,pidns:File,boot:Vec<u8>,root_caps:u64,drop_policy:PrivilegeDropPolicy,runtime:Option<runtime_image::RootRuntimeParent>,lock:Option<File>,lock_id:Option<(u64,u64)>,
     launcher_exe:OwnedFd,data_fd:OwnedFd,service_endpoint:OwnedFd,engine_endpoint:Option<OwnedFd>,
     gate_parent:Option<OwnedFd>,gate_child:Option<OwnedFd>,gate:Option<Gate>,
     engine:Option<ChildOwner>,service:Option<ChildOwner>,service_exe:Option<OwnedFd>,stage:Stage,
@@ -395,13 +405,16 @@ impl MachineRootBootstrap {
         let (gate_parent,gate_child)=storage::bootstrap_socket_pair()?;
         let mut owner=Self {original,data,own,launcher_image,engine_image:Image::capture(Path::new(ENGINE_PATH))?,
             service_image:Image::capture(Path::new(SERVICE_PATH))?,mnt:storage::namespace(None,"mnt",libc::CLONE_NEWNS)?,
-            user:storage::namespace(None,"user",libc::CLONE_NEWUSER)?,boot:storage::proc_bytes("/proc/sys/kernel/random/boot_id",64)?,
-            root_caps,drop_policy:PrivilegeDropPolicy::capture()?,lock:None,lock_id:None,launcher_exe,data_fd,service_endpoint,engine_endpoint:Some(engine_endpoint),
+            user:storage::namespace(None,"user",libc::CLONE_NEWUSER)?,pidns:storage::namespace(None,"pid",libc::CLONE_NEWPID)?,boot:storage::proc_bytes("/proc/sys/kernel/random/boot_id",64)?,
+            root_caps,drop_policy:PrivilegeDropPolicy::capture()?,runtime:None,lock:None,lock_id:None,launcher_exe,data_fd,service_endpoint,engine_endpoint:Some(engine_endpoint),
             gate_parent:Some(gate_parent),gate_child:Some(gate_child),gate:None,engine:None,service:None,service_exe:None,
             stage:Stage::SpawnEngine,panic:None,retryable_spawn_error:false,host_worker_tid:None,observation:StartupObservationOwner::new(),host_control:None,registration:None};
         owner.host_control=host_ingress::RootHostControl::capture_optional(&owner.original,&owner.data.nonce)?;
         if let Some(host)=&owner.host_control {owner.registration=Some(engine_registration::RootRegistration::capture(&owner.original,&owner.data.nonce,host)?);}
         else {ensure!(fs::symlink_metadata("/run/rudder-host-control/registration-key").err().is_some_and(|e|e.kind()==io::ErrorKind::NotFound),"machine registration key has no explicit host config");}
+        if owner.host_control.as_ref().and_then(|h|h.registration_config().image_preseed.as_ref()).and_then(|p|p.runtime_mount.as_ref()).is_some(){
+            owner.runtime=Some(runtime_image::RootRuntimeParent::capture()?);
+        }
         owner.root_current()?;
         ensure!(Path::new("/run").canonicalize()?==Path::new("/run"),"machine /run redirects");
         let run=fs::symlink_metadata("/run")?;ensure!(run.is_dir() && run.uid()==0 && run.gid()==0 && run.mode() & 0o022==0,"machine /run not root controlled");
@@ -418,11 +431,12 @@ impl MachineRootBootstrap {
     fn root_current(&self)->Result<()> {
         ensure!(self.own.pid==std::process::id() && unsafe {libc::getuid()}==0 && unsafe {libc::geteuid()}==0
             && unsafe {libc::getgid()}==0 && unsafe {libc::getegid()}==0,"machine original root identity changed");
+        rudder_engine::execution::runtime_image::require_initial_id_maps(self.own.pid)?;
         self.own.live()?;storage::floor(self.own.pid,0)?;self.launcher_image.matches_process(&self.own)?;
         self.engine_image.check()?;self.service_image.check()?;
         ensure!(caps(&current_status()?)?==self.root_caps,"machine root capability custody changed");
         self.drop_policy.check()?;
-        for (held,name,kind) in [(&self.mnt,"mnt",libc::CLONE_NEWNS),(&self.user,"user",libc::CLONE_NEWUSER)] {
+        for (held,name,kind) in [(&self.mnt,"mnt",libc::CLONE_NEWNS),(&self.user,"user",libc::CLONE_NEWUSER),(&self.pidns,"pid",libc::CLONE_NEWPID)] {
             ensure!(storage::id(held)?==storage::id(&storage::namespace(None,name,kind)?)?
                 && storage::id(held)?==storage::id(&storage::namespace(Some(1),name,kind)?)?,"machine root left original global namespace");
         }
@@ -477,7 +491,11 @@ impl MachineRootBootstrap {
                 }
                 Stage::SpawnService=>{
                     self.engine_current()?;
-                    let (mut command,held)=mapped_command(SERVICE_PATH,&[],false,&[(&self.service_endpoint,3),(self.engine.as_ref().unwrap().original()?.fd(),4)])?;
+                    let mut inherited=vec![(&self.service_endpoint,3),(self.engine.as_ref().unwrap().original()?.fd(),4)];
+                    let namespaces:Vec<OwnedFd>=if self.runtime.is_some(){vec![self.user.try_clone()?.into(),self.mnt.try_clone()?.into(),self.pidns.try_clone()?.into()]}else{Vec::new()};
+                    if let Some(runtime)=&self.runtime {inherited.extend(runtime.inherited());inherited.extend([
+                        (self.own.fd(),7),(&self.launcher_exe,8),(&self.data_fd,9),(&namespaces[0],10),(&namespaces[1],11),(&namespaces[2],12)]);}
+                    let (mut command,held)=mapped_command(SERVICE_PATH,&[],false,&inherited)?;
                     self.original.remaining()?;
                     match spawn_retaining(&mut self.service,&mut command)? {
                         SpawnEffect::DefiniteError=>{self.retryable_spawn_error=true;anyhow::bail!("machine service returned ordinary spawn error");}
@@ -567,6 +585,18 @@ impl MachineRootBootstrap {
             // or reset an original source/acquire/renewal operation clock.
             if reg.poll_transport_retaining(host).is_err(){eprintln!("MACHINE_HOST_TRANSPORT_RECOVERY_RETAINED");}
             if reg.poll_operations_retaining(host).is_err(){eprintln!("MACHINE_ENGINE_OPERATION_UNKNOWN");}
+        }
+        // Runtime issuance is independent from source/task admission. A missing
+        // profile creates no channel; a configured failure retains its owner
+        // and never selects an ordinary host-path runtime as fallback.
+        if let Some(runtime)=&mut self.runtime {
+            if !runtime.is_closed(){
+                let result=(||->Result<()>{if runtime.poll_retaining(reg,host,self.service.as_ref().unwrap().original()?)?&&!runtime.endpoint_was_offered(){
+                    let fd=runtime.take_engine_endpoint_retaining()?;
+                    self.gate.as_mut().unwrap().send_runtime_endpoint_retaining(&fd,runtime.original()?)?;
+                }Ok(())})();
+                if result.is_err(){runtime.close_admission();eprintln!("MACHINE_RUNTIME_IMAGE_ISSUANCE_RETAINED");}
+            }
         }Ok(())
     }
     /// Explicit OFF-App/Root inspect-only reconciliation on this actual owner.
@@ -637,7 +667,7 @@ pub struct ManagedMachineBootstrap {
     service_image:Option<Image>,service_pidfd:Option<OwnedFd>,service_exe:Option<OwnedFd>,service:Option<Process>,
     mnt:Option<File>,user:Option<File>,boot:Vec<u8>,drop_policy:Option<PrivilegeDropPolicy>,data:Option<BootstrapData>,original:Option<FinalizationBudget>,
     host_transfer:Vec<OwnedFd>,host_ingress:Option<host_ingress::HostIngress>,
-    registration_fd:Option<OwnedFd>,operation_fd:Option<OwnedFd>,registered_engine:Option<Arc<engine_registration::RegisteredEngineOwner>>,registered_fence:Arc<AtomicBool>,registration_ready:bool,registration_failed:bool,
+    registration_fd:Option<OwnedFd>,operation_fd:Option<OwnedFd>,runtime_fd:Option<OwnedFd>,runtime_client:Option<Arc<runtime_image::RuntimeImageClient>>,registered_engine:Option<Arc<engine_registration::RegisteredEngineOwner>>,registered_fence:Arc<AtomicBool>,registration_ready:bool,registration_failed:bool,
     gate:Option<Gate>,client:Option<RootStorageClient>,parent_accepted:bool,host_ack:HostServingAck,quarantined:bool,panic:Option<Box<dyn Any+Send>>,
 }
 #[derive(Clone,Copy)]
@@ -654,7 +684,7 @@ impl ManagedMachineBootstrapFailure {
 }
 impl ManagedMachineBootstrap {
     fn empty()->Self {Self {raw:std::array::from_fn(|_|None),own:None,engine_image:None,launcher_image:None,service_image:None,
-        service_pidfd:None,service_exe:None,service:None,mnt:None,user:None,boot:Vec::new(),drop_policy:None,data:None,original:None,gate:None,client:None,host_transfer:Vec::new(),host_ingress:None,registration_fd:None,operation_fd:None,registered_engine:None,registered_fence:Arc::new(AtomicBool::new(false)),registration_ready:false,registration_failed:false,
+        service_pidfd:None,service_exe:None,service:None,mnt:None,user:None,boot:Vec::new(),drop_policy:None,data:None,original:None,gate:None,client:None,host_transfer:Vec::new(),host_ingress:None,registration_fd:None,operation_fd:None,runtime_fd:None,runtime_client:None,registered_engine:None,registered_fence:Arc::new(AtomicBool::new(false)),registration_ready:false,registration_failed:false,
         parent_accepted:false,host_ack:HostServingAck::Pending,
         quarantined:false,panic:None}}
     fn enter_inner(&mut self)->Result<()> {
@@ -736,9 +766,13 @@ impl ManagedMachineBootstrap {
                     else {self.registration_fd=fd;}},
                 Message::EngineOperationsEndpoint=>{if self.operation_fd.is_some(){if let Some(fd)=fd{self.host_transfer.push(fd);}self.registration_failed=true;self.registered_fence.store(true,Ordering::Release);}
                     else {self.operation_fd=fd;if self.adopt_registration_retaining().is_err(){self.registration_failed=true;self.registered_fence.store(true,Ordering::Release);}}},
+                Message::RuntimeImageEndpoint=>{if self.runtime_fd.is_some(){if let Some(fd)=fd{self.host_transfer.push(fd);}anyhow::bail!("duplicate runtime original endpoint offer");}
+                    self.runtime_fd=fd;self.adopt_runtime_image_retaining()?;},
                 Message::EngineRegistrationFenced=>{if let Some(fd)=fd {self.host_transfer.push(fd);}self.registration_failed=true;self.registered_fence.store(true,Ordering::Release);},
                 _=>anyhow::bail!("machine root requested quarantine or sent an unexpected frame"),
-            }}Ok(())
+            }}
+            if let Some(client)=&self.runtime_client{client.poll_original_cancellations_retaining()?;}
+            Ok(())
         })();
         if result.is_err() && !self.quarantined {self.quarantined=true;if let Some(gate)=&mut self.gate {gate.try_quarantine();}}result
     }
@@ -752,6 +786,23 @@ impl ManagedMachineBootstrap {
             self.service_pidfd.as_ref().unwrap(),self.service_exe.as_ref().unwrap(),&self.data.as_ref().unwrap().nonce,&self.data.as_ref().unwrap().constraint,tid,Arc::clone(&self.registered_fence))?;
         self.gate.as_mut().unwrap().send_startup(Message::EngineRegistrationAccepted,None)?;
         self.original.as_ref().unwrap().remaining()?;self.registration_ready=true;Ok(())
+    }
+    fn adopt_runtime_image_retaining(&mut self)->Result<()> {
+        ensure!(self.registration_ready&&!self.registration_failed,"runtime endpoint precedes actual completed Native registration");
+        let registered=self.registered_engine.as_ref().context("runtime actual registered owner absent")?.clone();
+        // Retained RegisteredEngineOwner owns the original protected config
+        // even after HostIngress has moved to its separate IO worker.
+        let config=registered.runtime_config_owner();
+        runtime_image::RuntimeImageClient::capture_original_retaining(&mut self.runtime_client,
+            self.runtime_fd.as_ref().context("runtime original endpoint absent")?.try_clone()?,registered,config,
+            self.service_pidfd.as_ref().unwrap(),self.service_exe.as_ref().unwrap())
+    }
+    /// OFF App actual original service/registration owner only. Configured but
+    /// pending runtime returns None for bounded waiting under the CALLER clock;
+    /// callers must not turn this into legacy-path runtime fallback.
+    pub fn runtime_image_client_retaining(&mut self)->Result<Option<Arc<runtime_image::RuntimeImageClient>>>{
+        self.check_current_retaining()?;if let Some(client)=&self.runtime_client{client.assert_current()?;}
+        Ok(self.runtime_client.clone())
     }
     /// OFF App on the SAME already-latched actual worker after HostServing.
     /// Acquisition uses the original startup constraint. A live returned owner

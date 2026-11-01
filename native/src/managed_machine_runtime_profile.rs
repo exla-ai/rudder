@@ -77,6 +77,7 @@ pub(crate) struct ManagedProfileInspection {config:Arc<HostIngressConfigOwner>,f
 impl ManagedProfileInspection {
     pub(crate) fn capture_retaining(out:&mut Option<Self>,config:Arc<HostIngressConfigOwner>,alias:&str,original:&FinalizationBudget,cancelled:&AtomicBool)->Result<()> {
         ensure!(out.is_none(),"original metadata selector already captured");config.assert_current()?;clock(original,cancelled)?;
+        crate::managed_app::runtime_task::require_legacy_environment_backing(&config)?;
         let home=config.data().projects.iter().find(|p|p.alias==alias).context("selector project outside original config")?.home.clone();
         *out=Some(Self{config,files:Vec::new(),anchors:DirectoryAnchors::default(),stamps:Vec::new(),hashes:Vec::new(),home});let owner=out.as_mut().unwrap();
         for name in [NODE,PROFILE] {owner.files.push(ImageFile::open_anchored(Path::new(name),512*1024*1024,original,cancelled,&mut owner.anchors)?);}
@@ -100,13 +101,15 @@ impl ManagedHostRuntime {
     pub(crate) fn capture_retaining(out:&mut Option<Self>,config:Arc<HostIngressConfigOwner>,alias:&str,
         original:&FinalizationBudget,cancelled:&AtomicBool)->Result<()> {
         clock(original,cancelled)?;config.assert_current()?;ensure!(out.is_none(),"runtime owner already captured");
+        crate::managed_app::runtime_task::require_legacy_environment_backing(&config)?;
         let project=config.data().projects.iter().find(|p|p.alias==alias).context("runtime project outside actual config")?.clone();
         *out=Some(Self {config,project,fresh:None,files:Vec::new(),dirs:Vec::new(),anchors:DirectoryAnchors::default(),network:None,loader:None,package_stamps:Vec::new(),package_hashes:Vec::new(),manifest_hash:String::new(),
             store:None,cas_dir:None,cas_id:None,environment:None,pin:format!("managed-ingress-env:{}",uuid::Uuid::new_v4()),pin_attempted:false,environment_ack:false,fenced:AtomicBool::new(false)});
         out.as_mut().unwrap().capture_inner(original,cancelled)
     }
     pub(crate) fn capture_from_fresh_retaining(out:&mut Option<Self>,fresh:Arc<fresh_environment::ManagedFreshEnvironment>,alias:&str,original:&FinalizationBudget,cancelled:&AtomicBool)->Result<()> {
-        clock(original,cancelled)?;fresh.current(original,cancelled)?;ensure!(out.is_none(),"actual fresh runtime output occupied");let config=fresh.machine().config().clone();
+        clock(original,cancelled)?;ensure!(out.is_none(),"actual fresh runtime output occupied");let config=fresh.machine().config().clone();
+        crate::managed_app::runtime_task::require_legacy_environment_backing(&config)?;fresh.current(original,cancelled)?;
         let project=config.data().projects.iter().find(|p|p.alias==alias&&p.prepare==*fresh.preparation().prepare()).context("fresh runtime outside actual original preparation")?.clone();
         let store=fresh.machine().store()?.clone();let environment=fresh.environment()?.clone();
         *out=Some(Self{config,project,fresh:Some(fresh),files:Vec::new(),dirs:Vec::new(),anchors:DirectoryAnchors::default(),network:None,loader:None,package_stamps:Vec::new(),package_hashes:Vec::new(),manifest_hash:String::new(),store:Some(store),cas_dir:None,cas_id:None,
@@ -153,6 +156,9 @@ impl ManagedHostRuntime {
         settings_from_config(&self.config)
     }
     pub(crate) fn resources(&self,source:crate::managed_machine_entry::ManagedSeedTaskSource,backend:HostBackend)->Result<ManagedTaskResources> {
+        // These owners retain host-imported environments only. Projection DATA
+        // cannot replace missing composed preparation/environment custody.
+        crate::managed_app::runtime_task::require_legacy_environment_backing(&self.config)?;
         let HostRuntimeProfile::FlyManagedImageV1 {user_name,user_email}=&self.config.data().runtime_profile;
         let mut runtime=vec![ReadOnlyRuntime {source:"/usr".into(),guest_path:"/usr".into()},ReadOnlyRuntime {source:"/opt/rudder".into(),guest_path:GUEST_PACKAGE.into()},ReadOnlyRuntime {source:ROOT.into(),guest_path:GUEST_MODEL.into()}];
         runtime.extend(self.network.as_ref().context("actual declared VM network inputs absent")?.mounts());

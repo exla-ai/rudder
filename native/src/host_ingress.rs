@@ -57,7 +57,15 @@ pub struct AllowedPreparedProject { pub alias:String, pub checkout:PathBuf, pub 
     pub endpoints:PathBuf, pub prepare:ManagedProjectPrepare }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct HostImagePreseedPolicy {pub image:String,pub image_receipt_sha256:String,pub full_manifest_sha256:String,#[serde(default,skip_serializing_if="Option::is_none")]pub batch_transport:Option<String>}
+pub struct HostBakedRuntimePolicy {pub profile:String,pub inventory:rudder_engine::protocol::ObjectRef}
+impl HostBakedRuntimePolicy {
+    pub(super) fn validate(&self)->Result<()>{self.inventory.validate()?;ensure!(self.profile=="baked-cas-v1"&&self.inventory.kind==rudder_engine::protocol::ObjectKind::Blob
+        &&self.inventory.size_bytes>0&&self.inventory.size_bytes<=16*1024*1024,"runtime baked inventory profile invalid");Ok(())}
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HostImagePreseedPolicy {pub image:String,pub image_receipt_sha256:String,pub full_manifest_sha256:String,#[serde(default,skip_serializing_if="Option::is_none")]pub batch_transport:Option<String>,
+    #[serde(default,skip_serializing_if="Option::is_none")]pub runtime_mount:Option<HostBakedRuntimePolicy>}
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HostOwnerLeaseSafety {pub qualification_receipt_sha256:String,pub margin_milliseconds:u32,pub engine_rate_error_ppm:u32,pub database_rate_error_ppm:u32,pub max_positive_clock_step_milliseconds:u32}
@@ -108,12 +116,16 @@ fn path(value:&Path)->Result<()> {ensure!(value.is_absolute() && value.as_os_str
     && value.to_str().is_some_and(|s|s.trim()==s && !s.chars().any(char::is_control)),"host explicit path invalid");Ok(())}
 fn sha(value:&str)->Result<()> {ensure!(value.len()==64 && value.bytes().all(|b|b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),"host image digest invalid");Ok(())}
 impl HostIngressConfig {
+    pub(super) fn validate_for_runtime_mount(&self)->Result<()> {self.validate()?;
+        ensure!(self.image_preseed.as_ref().and_then(|p|p.runtime_mount.as_ref()).is_some(),"runtime immutable image profile unconfigured");Ok(())}
     fn validate(&self)->Result<()> {
         ensure!(self.version==1 && !self.projects.is_empty() && self.projects.len()<=8,"host config version/count invalid");
         for value in [&self.machine_id,&self.store_id,&self.incarnation,&self.account_id,&self.home_id] {key(value)?;}
         // No arbitrary URL, credentials, path, redirect or cleartext transport.
         cloud_control_origin(&self.cloud_origin)?;
-        if let Some(p)=&self.image_preseed {ensure!(p.batch_transport.as_deref().is_none_or(|v|v=="batch-v1"),"unsupported image batch transport");sha(&p.image_receipt_sha256)?;sha(&p.full_manifest_sha256)?;
+        if let Some(p)=&self.image_preseed {
+            if let Some(runtime)=&p.runtime_mount {runtime.validate()?;}
+            ensure!(p.batch_transport.as_deref().is_none_or(|v|v=="batch-v1"),"unsupported image batch transport");sha(&p.image_receipt_sha256)?;sha(&p.full_manifest_sha256)?;
             let Some((name,digest))=p.image.split_once("@sha256:")else{return Err(anyhow::anyhow!("host image preseed image not pinned"));};
             ensure!(name=="registry.fly.io/rudder-workers-exla","host image registry policy invalid");sha(digest)?;}
         if let Some(safety)=&self.owner_lease_safety{safety.reserve_nanoseconds()?;}
@@ -389,6 +401,9 @@ impl RootHostControl {
         for (name,file,_) in &self.namespaces {let label=match name.as_str() {"mnt"=>"mnt","user"=>"user","net"=>"net","pid"=>"pid",_=>anyhow::bail!("host namespace invalid")};
             fds.push((label,file.try_clone()?.into()));}Ok(fds)
     }
+    /// Public config only. Root token and registration key NEVER cross this
+    /// private service/native channel or a helper's runtime FD capsule.
+    pub(super) fn duplicate_runtime_public_config(&self)->Result<OwnedFd>{self.current()?;Ok(self.file.try_clone()?.into())}
     pub(super) fn registration_config(&self)->&HostIngressConfig {&self.data}
     pub(super) fn registration_config_sha(&self)->&str {&self.digest}
     pub(super) fn registration_node_sha(&self)->&str {&self.node.sha256}

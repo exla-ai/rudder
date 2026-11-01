@@ -447,7 +447,7 @@
     "installedFullTreeVerified": false,
     "sourceIncludesReadonlyVfs": false
   },
-  "recordedAt": "2026-11-01T15:44:51.098301+00:00",
+  "recordedAt": "2026-11-01T16:25:32.632187+00:00",
   "repositoryReleaseAttempts": [
     {
       "check": "managed-main238-real-repo-packed-release",
@@ -1014,5 +1014,116 @@
       "SDK compilation or REAPI hits",
       "production enablement"
     ]
+  },
+  "releaseCheckAlpha32": {
+    "formatVersion": 1,
+    "version": "4.0.0-alpha.32",
+    "revision": "87f6cbcde66a306ec76bc52235dd670a7b34907a",
+    "runId": 41323038312,
+    "jobId": 124900887538,
+    "status": "failed-unpublished",
+    "observedAt": "2026-11-01T16:12:49.252183+00:00",
+    "nativePlatforms": {
+      "darwin-x64": "passed",
+      "darwin-arm64": "passed",
+      "linux-x64": "passed"
+    },
+    "typescriptAndJavascript": "passed",
+    "rustQualification": {
+      "platform": "macos",
+      "passed": 102,
+      "failed": 1,
+      "ignored": 3,
+      "test": "startup_busy_released_marker_still_refuses_unguarded_fresh_access",
+      "expected": "fresh marker refuses unguarded agent access",
+      "actual": "database is locked: errorcode5",
+      "cause": "positive10msrelease thread can be descheduled beyond original100ms underCIload; test-onlysemanticcorrection pending"
+    },
+    "logSha256": "5fbdb00b9008c7110fbda49efa074bc221a2e9e53ec9e6ca51744a2c4780d95a",
+    "stockCloudSmoke": "passed actual15calls; exactownedVMcleaned",
+    "pushedMain": false,
+    "npmPublished": false,
+    "deployed": false,
+    "tagPreserved": true
+  },
+  "runtimeCallerValidation": {
+    "formatVersion": 1,
+    "scope": "actualfuture runtime/caller source plus test-only SQLite correction; alpha32 frozen source unaffected",
+    "checks": [
+      {
+        "name": "managed-main267-current-normal-native",
+        "exitCode": 0,
+        "completedAt": "2026-11-01T16:13:26.952795+00:00",
+        "receiptSha256": "59da4ea66ee5b18f0ff0a253e6d2e022dd374e702a12c263b0f2aba3f2fc1a4b",
+        "logSha256": "1f8f088788ad5f434929087da029aec308872b0b95f13b4116469c941867ced2",
+        "results": []
+      },
+      {
+        "name": "managed-main268-current-full-javascript",
+        "exitCode": 0,
+        "completedAt": "2026-11-01T16:16:52.407160+00:00",
+        "receiptSha256": "d2b50628094528be3f2dc3495c79b34c79765ae1e20f4561c7dd7c94005d16c7",
+        "logSha256": "856c119e9410b3ba3a490f587e53fa61362c46b8102064c3a3ae1f7b0375e13a",
+        "results": [
+          "# tests 938",
+          "# pass 928",
+          "# fail 0",
+          "# skipped 10"
+        ]
+      },
+      {
+        "name": "managed-main271-startup-release-semantics",
+        "exitCode": 0,
+        "completedAt": "2026-11-01T16:19:04.162609+00:00",
+        "receiptSha256": "8b32da45f314598f0bc22b37b3fc398d422dd78f5b092aaad992fc0425a75b44",
+        "logSha256": "a31fdc195a25aa238e3df05c5db23fdc73cb045072199812dc4e2f0916fc3a0e",
+        "results": [
+          "test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 317 filtered out; finished in 0.28s"
+        ]
+      },
+      {
+        "name": "managed-main272-current-tui",
+        "exitCode": 0,
+        "completedAt": "2026-11-01T16:20:32.646746+00:00",
+        "receiptSha256": "704fd88428315dee9fd102c76b2e75fee4d27c1eabc51b6ee4599b7dce27d4c2",
+        "logSha256": "08b90ceaaf882bc7a8bfafc0c7715e0639313f54c3921e1bcb636f0326ec3f38",
+        "results": [
+          "# tests 59",
+          "# pass 59",
+          "# fail 0",
+          "# skipped 0"
+        ]
+      }
+    ],
+    "productionActivation": false,
+    "normalRetirement": false,
+    "macosFullQualification": "pendingnextcandidate",
+    "recordedAt": "2026-11-01T16:21:03.159483+00:00"
+  },
+  "runtimeNativeBinary": {
+    "formatVersion": 1,
+    "sourceCapture": "/workspace/rudder-runtime-callers-captured-v3.json",
+    "sourceCaptureSha256": "1a3ba7614318a965fe6a8318db96d661ea8c31b0ac500c3a634907706e68e514",
+    "scope": "actual currentnativebinary tests with runtime+caller integration31uncommittedfiles",
+    "passed": 1318,
+    "failed": 0,
+    "ignored": 21,
+    "completedAt": "2026-11-01T16:02:24.079371+00:00",
+    "receiptSha256": "9472deb7ffefcd7f4419fe513f75b9f0dfd2e38e4a0c41ec888b48331456459c",
+    "logSha256": "b8fc5fad70be5c4e5fd452b6a03a290b0765decd5d81e6d2d2213a8fb928e53a",
+    "productionRuntimeEnabled": false
+  },
+  "currentRuntimeFullWorkspace": {
+    "formatVersion": 1,
+    "scope": "actual current fullLinuxRustworkspace after runtime31files+SQLite/proc fixtures, beforeversion33only",
+    "completedAt": "2026-11-01T16:43:15.199991+00:00",
+    "passed": 2365,
+    "failed": 0,
+    "ignored": 65,
+    "suites": 65,
+    "receiptSha256": "4f5723c174e38f5606528b5a4fc24fc4549e1424ff5a5b17b86d81a61f3adbf4",
+    "logSha256": "56c27d6ca81a5d34a49826d578d573a53ceac24f38fe2da8d235c9223e5256cc",
+    "earlier274": "failed proc-self environ fixture afterrequiredND0; fixed275fivecases; originalfailedrun retained",
+    "productionActivation": false
   }
 }

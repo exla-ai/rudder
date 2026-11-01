@@ -1,0 +1,549 @@
+{
+  "formatVersion": 1,
+  "fullV4Complete": false,
+  "scope": "actual installed launcher/service/native original bootstrap with runtime profile absent; same-image baked metadata and allfourELFs; notconfiguredruntimefloor",
+  "sourceKind": "immutable-captured-working-tree",
+  "baseRevision": "87f6cbcde66a306ec76bc52235dd670a7b34907a",
+  "sourceManifestSha256": "1a3ba7614318a965fe6a8318db96d661ea8c31b0ac500c3a634907706e68e514",
+  "sourceTreeSha256": "d6de550c4aced6f6560dca5e24d08f1525d5d404c5d6997e1307a551a22629e6",
+  "imageDigest": "sha256:f26ab1dda848fc41a5b1305ad1058083fbe52347966328cee32f302fce341336",
+  "verifiedAt": "2026-11-01T16:27:29.102Z",
+  "qualified": true,
+  "providerCalls": 15,
+  "reportSha256": "cf7cfc2b8b08b59ef9091288ef8d183f637a67a1935ad6643a3c50a0dcd31238",
+  "guestProofSha256": "d865c9e4d1f1c94db88f17c350a09108cbf1082dce339b8e42ae2febf1998875",
+  "machine": {
+    "id": "843e4df2470038",
+    "instance": "01M6BYYC6RCWZQ8AZD1N0SPCV7",
+    "digest": "sha256:f26ab1dda848fc41a5b1305ad1058083fbe52347966328cee32f302fce341336",
+    "revisionLabel": "87f6cbcde66a306ec76bc52235dd670a7b34907a"
+  },
+  "bootstrap": {
+    "formatVersion": 1,
+    "kind": "production-bootstrap-original-supervisor",
+    "qualified": true,
+    "event": {
+      "boot_id": "7837f230-3bcb-422c-bee3-aba5ae8daee0",
+      "engine": {
+        "caps": {
+          "ambient": "0000000000000000",
+          "bounding": "0000000000000000",
+          "effective": "0000000000000000",
+          "inheritable": "0000000000000000",
+          "permitted": "0000000000000000"
+        },
+        "gid": [
+          1500,
+          1500,
+          1500,
+          1500
+        ],
+        "groups": [],
+        "image_id": {
+          "device": "23",
+          "inode": "22237"
+        },
+        "image_path": "/opt/rudder/dist/native/rudder-native",
+        "image_sha256": "e3d67bd65fbfebbe28e43950add5e6d086ec6e3bf91f5fea84bbf4dab0d477dc",
+        "mnt": {
+          "device": "4",
+          "inode": "4026531841"
+        },
+        "no_new_privs": 1,
+        "parent_pid": 659,
+        "pid": 660,
+        "tracer_pid": 0,
+        "uid": [
+          1500,
+          1500,
+          1500,
+          1500
+        ],
+        "user": {
+          "device": "4",
+          "inode": "4026531837"
+        }
+      },
+      "format_version": 1,
+      "host_worker_ack_authenticated": true,
+      "host_worker_tid": 662,
+      "kind": "rudder-machine-root-bootstrap-observation",
+      "launcher": {
+        "caps": {
+          "ambient": "0000000000000000",
+          "bounding": "000001ffffffffff",
+          "effective": "000001ffffffffff",
+          "inheritable": "0000000000000000",
+          "permitted": "000001ffffffffff"
+        },
+        "gid": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "groups": [],
+        "image_id": {
+          "device": "23",
+          "inode": "22240"
+        },
+        "image_path": "/usr/local/bin/rudder-machine-root",
+        "image_sha256": "64927a77380d4e7a81fe089b2ffc2dee91be73f7120c9ac46f4541268dea76bc",
+        "mnt": {
+          "device": "4",
+          "inode": "4026531841"
+        },
+        "no_new_privs": 0,
+        "parent_pid": 658,
+        "pid": 659,
+        "tracer_pid": 0,
+        "uid": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "user": {
+          "device": "4",
+          "inode": "4026531837"
+        }
+      },
+      "models": false,
+      "nonce": "ecaf1b5c-41a5-4665-83ce-56bc11e62944",
+      "normal_retirement_authority": false,
+      "observed_boottime_nanoseconds": "16376993521",
+      "original_constraint": {
+        "boottime_deadline_nanoseconds": "46266692839",
+        "format_version": 1,
+        "maximum_milliseconds": 30000
+      },
+      "original_service_pidfd_and_exe_bound": true,
+      "parent_authentication_accepted": true,
+      "root_client_authenticated": true,
+      "scheduler_ready": false,
+      "scope": "production-native-root-launcher-client-startup-only",
+      "service": {
+        "caps": {
+          "ambient": "0000000000000000",
+          "bounding": "000001ffffffffff",
+          "effective": "000001ffffffffff",
+          "inheritable": "0000000000000000",
+          "permitted": "000001ffffffffff"
+        },
+        "gid": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "groups": [],
+        "image_id": {
+          "device": "23",
+          "inode": "22239"
+        },
+        "image_path": "/usr/local/bin/rudder-root-storage",
+        "image_sha256": "13d66b6d72fd13ea238c4250550cd3f0e73a2feecf7d77c02146781a95860da2",
+        "mnt": {
+          "device": "4",
+          "inode": "4026531841"
+        },
+        "no_new_privs": 0,
+        "parent_pid": 659,
+        "pid": 661,
+        "tracer_pid": 0,
+        "uid": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "user": {
+          "device": "4",
+          "inode": "4026531837"
+        }
+      },
+      "source_authority": false
+    },
+    "stdout": {
+      "bytes": 2309,
+      "sha256": "2619dba98e6c810664bb6a23df842ae1872abd209d572c55028da9f2c33bbebb",
+      "base64": "eyJib290X2lkIjoiNzgzN2YyMzAtM2JjYi00MjJjLWJlZTMtYWJhNWFlOGRhZWUwIiwiZW5naW5lIjp7ImNhcHMiOnsiYW1iaWVudCI6IjAwMDAwMDAwMDAwMDAwMDAiLCJib3VuZGluZyI6IjAwMDAwMDAwMDAwMDAwMDAiLCJlZmZlY3RpdmUiOiIwMDAwMDAwMDAwMDAwMDAwIiwiaW5oZXJpdGFibGUiOiIwMDAwMDAwMDAwMDAwMDAwIiwicGVybWl0dGVkIjoiMDAwMDAwMDAwMDAwMDAwMCJ9LCJnaWQiOlsxNTAwLDE1MDAsMTUwMCwxNTAwXSwiZ3JvdXBzIjpbXSwiaW1hZ2VfaWQiOnsiZGV2aWNlIjoiMjMiLCJpbm9kZSI6IjIyMjM3In0sImltYWdlX3BhdGgiOiIvb3B0L3J1ZGRlci9kaXN0L25hdGl2ZS9ydWRkZXItbmF0aXZlIiwiaW1hZ2Vfc2hhMjU2IjoiZTNkNjdiZDY1ZmJmZWJiZTI4ZTQzOTUwYWRkNWU2ZDA4NmVjNmUzYmY5MWY1ZmVhODRiYmY0ZGFiMGQ0NzdkYyIsIm1udCI6eyJkZXZpY2UiOiI0IiwiaW5vZGUiOiI0MDI2NTMxODQxIn0sIm5vX25ld19wcml2cyI6MSwicGFyZW50X3BpZCI6NjU5LCJwaWQiOjY2MCwidHJhY2VyX3BpZCI6MCwidWlkIjpbMTUwMCwxNTAwLDE1MDAsMTUwMF0sInVzZXIiOnsiZGV2aWNlIjoiNCIsImlub2RlIjoiNDAyNjUzMTgzNyJ9fSwiZm9ybWF0X3ZlcnNpb24iOjEsImhvc3Rfd29ya2VyX2Fja19hdXRoZW50aWNhdGVkIjp0cnVlLCJob3N0X3dvcmtlcl90aWQiOjY2Miwia2luZCI6InJ1ZGRlci1tYWNoaW5lLXJvb3QtYm9vdHN0cmFwLW9ic2VydmF0aW9uIiwibGF1bmNoZXIiOnsiY2FwcyI6eyJhbWJpZW50IjoiMDAwMDAwMDAwMDAwMDAwMCIsImJvdW5kaW5nIjoiMDAwMDAxZmZmZmZmZmZmZiIsImVmZmVjdGl2ZSI6IjAwMDAwMWZmZmZmZmZmZmYiLCJpbmhlcml0YWJsZSI6IjAwMDAwMDAwMDAwMDAwMDAiLCJwZXJtaXR0ZWQiOiIwMDAwMDFmZmZmZmZmZmZmIn0sImdpZCI6WzAsMCwwLDBdLCJncm91cHMiOltdLCJpbWFnZV9pZCI6eyJkZXZpY2UiOiIyMyIsImlub2RlIjoiMjIyNDAifSwiaW1hZ2VfcGF0aCI6Ii91c3IvbG9jYWwvYmluL3J1ZGRlci1tYWNoaW5lLXJvb3QiLCJpbWFnZV9zaGEyNTYiOiI2NDkyN2E3NzM4MGQ0ZTdhODFmZTA4OWIyZmZjMmRlZTkxYmU3M2Y3MTIwYzlhYzQ2ZjQ1NDEyNjhkZWE3NmJjIiwibW50Ijp7ImRldmljZSI6IjQiLCJpbm9kZSI6IjQwMjY1MzE4NDEifSwibm9fbmV3X3ByaXZzIjowLCJwYXJlbnRfcGlkIjo2NTgsInBpZCI6NjU5LCJ0cmFjZXJfcGlkIjowLCJ1aWQiOlswLDAsMCwwXSwidXNlciI6eyJkZXZpY2UiOiI0IiwiaW5vZGUiOiI0MDI2NTMxODM3In19LCJtb2RlbHMiOmZhbHNlLCJub25jZSI6ImVjYWYxYjVjLTQxYTUtNDY2NS04M2NlLTU2YmMxMWU2Mjk0NCIsIm5vcm1hbF9yZXRpcmVtZW50X2F1dGhvcml0eSI6ZmFsc2UsIm9ic2VydmVkX2Jvb3R0aW1lX25hbm9zZWNvbmRzIjoiMTYzNzY5OTM1MjEiLCJvcmlnaW5hbF9jb25zdHJhaW50Ijp7ImJvb3R0aW1lX2RlYWRsaW5lX25hbm9zZWNvbmRzIjoiNDYyNjY2OTI4MzkiLCJmb3JtYXRfdmVyc2lvbiI6MSwibWF4aW11bV9taWxsaXNlY29uZHMiOjMwMDAwfSwib3JpZ2luYWxfc2VydmljZV9waWRmZF9hbmRfZXhlX2JvdW5kIjp0cnVlLCJwYXJlbnRfYXV0aGVudGljYXRpb25fYWNjZXB0ZWQiOnRydWUsInJvb3RfY2xpZW50X2F1dGhlbnRpY2F0ZWQiOnRydWUsInNjaGVkdWxlcl9yZWFkeSI6ZmFsc2UsInNjb3BlIjoicHJvZHVjdGlvbi1uYXRpdmUtcm9vdC1sYXVuY2hlci1jbGllbnQtc3RhcnR1cC1vbmx5Iiwic2VydmljZSI6eyJjYXBzIjp7ImFtYmllbnQiOiIwMDAwMDAwMDAwMDAwMDAwIiwiYm91bmRpbmciOiIwMDAwMDFmZmZmZmZmZmZmIiwiZWZmZWN0aXZlIjoiMDAwMDAxZmZmZmZmZmZmZiIsImluaGVyaXRhYmxlIjoiMDAwMDAwMDAwMDAwMDAwMCIsInBlcm1pdHRlZCI6IjAwMDAwMWZmZmZmZmZmZmYifSwiZ2lkIjpbMCwwLDAsMF0sImdyb3VwcyI6W10sImltYWdlX2lkIjp7ImRldmljZSI6IjIzIiwiaW5vZGUiOiIyMjIzOSJ9LCJpbWFnZV9wYXRoIjoiL3Vzci9sb2NhbC9iaW4vcnVkZGVyLXJvb3Qtc3RvcmFnZSIsImltYWdlX3NoYTI1NiI6IjEzZDY2YjZkNzJmZDEzZWEyMzhjNDI1MDU1MGNkM2YwZTczYTJmZWVjZjdkNzdjMDIxNDY3ODFhOTU4NjBkYTIiLCJtbnQiOnsiZGV2aWNlIjoiNCIsImlub2RlIjoiNDAyNjUzMTg0MSJ9LCJub19uZXdfcHJpdnMiOjAsInBhcmVudF9waWQiOjY1OSwicGlkIjo2NjEsInRyYWNlcl9waWQiOjAsInVpZCI6WzAsMCwwLDBdLCJ1c2VyIjp7ImRldmljZSI6IjQiLCJpbm9kZSI6IjQwMjY1MzE4MzcifX0sInNvdXJjZV9hdXRob3JpdHkiOmZhbHNlfQo="
+    },
+    "stderr": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "base64": ""
+    },
+    "defaultAbsent": {
+      "directory": "/run/rudder-host-control",
+      "files": [
+        "config.json",
+        "token",
+        "registration-key"
+      ],
+      "all_absent": true,
+      "checked_before_launcher": true,
+      "configured_floor_qualified": false
+    },
+    "bakedInputs": {
+      "profile": "baked-cas-v1",
+      "directory": "/var/lib/rudder-image-cas-v1",
+      "directory_fd": 15,
+      "metadata": {
+        "inventory.json": {
+          "fd": 16,
+          "identity": {
+            "device": "23",
+            "inode": "420792"
+          },
+          "bytes": 2936778,
+          "mode": 292,
+          "mtimeNs": "1793549860000000000",
+          "ctimeNs": "1793550415343434129"
+        },
+        "manifest.json": {
+          "fd": 17,
+          "identity": {
+            "device": "23",
+            "inode": "420793"
+          },
+          "bytes": 5673331,
+          "mode": 292,
+          "mtimeNs": "1793549860000000000",
+          "ctimeNs": "1793550415352088778"
+        },
+        "pin.json": {
+          "fd": 18,
+          "identity": {
+            "device": "23",
+            "inode": "420794"
+          },
+          "bytes": 318,
+          "mode": 292,
+          "mtimeNs": "1793549860000000000",
+          "ctimeNs": "1793550415352233931"
+        },
+        "cas/retention.json": {
+          "fd": 24,
+          "identity": {
+            "device": "23",
+            "inode": "420790"
+          },
+          "bytes": 535,
+          "mode": 292,
+          "mtimeNs": "1793549860000000000",
+          "ctimeNs": "1793550415338463264"
+        }
+      },
+      "inventory": {
+        "algorithm": "sha256",
+        "digest": "8654bab675d670ac9663e18072c5c18570ff06a2859d5a25e41a13a37bc27ddb",
+        "kind": "blob",
+        "size_bytes": 2936778
+      },
+      "manifest": {
+        "algorithm": "sha256",
+        "digest": "2218969d9db880ebe8ff5096bf91ace16b9049db2191b269bd60defc4400e6b5",
+        "kind": "blob",
+        "size_bytes": 5673331
+      },
+      "installerInput": {
+        "algorithm": "sha256",
+        "digest": "4376c44497f07b9129917fd351394eb8116e0bfe4b5df1c3a21312003d0c26af",
+        "kind": "directory",
+        "size_bytes": 231
+      },
+      "pinSha256": "4552c3249051c385b42c748ed2cae6240e03075d35b33d9ff254d1977510a071",
+      "imageReceiptSha256": "82ba3abf9b24ea45ed9f3e1addf190d7785d91c17133585a1ec79bffcdab8c64",
+      "objects": 22176,
+      "totalBytes": 1975378537,
+      "selectedElfs": {
+        "native": {
+          "path": "/opt/rudder/dist/native/rudder-native",
+          "sha256": "e3d67bd65fbfebbe28e43950add5e6d086ec6e3bf91f5fea84bbf4dab0d477dc",
+          "bytes": 36865680
+        },
+        "launcher": {
+          "path": "/usr/local/bin/rudder-machine-root",
+          "sha256": "64927a77380d4e7a81fe089b2ffc2dee91be73f7120c9ac46f4541268dea76bc",
+          "bytes": 2200944
+        },
+        "service": {
+          "path": "/usr/local/bin/rudder-root-storage",
+          "sha256": "13d66b6d72fd13ea238c4250550cd3f0e73a2feecf7d77c02146781a95860da2",
+          "bytes": 6760856
+        },
+        "buddy": {
+          "path": "/opt/rudder/dist/native/rudder-jj",
+          "sha256": "eb2bd6c82cfb9034132b1f855f6fcd1fdeb63200f95e2a5d5b43bbdb2bba699c",
+          "bytes": 30952928
+        }
+      },
+      "heldDirectory": {
+        "device": "21",
+        "inode": "81"
+      },
+      "inventory_fd": 16,
+      "manifest_fd": 17,
+      "pin_fd": 18,
+      "retention_fd": 24,
+      "metadataOnly": true,
+      "allPayloadsRead": false,
+      "runtimeFloorQualified": false,
+      "normalRetirement": false
+    },
+    "begin_boottime_ns": "16265247358",
+    "end_boottime_ns": "16391085773",
+    "boot_id": "7837f230-3bcb-422c-bee3-aba5ae8daee0",
+    "global_namespaces": {
+      "mnt": {
+        "device": "4",
+        "inode": "4026531841"
+      },
+      "user": {
+        "device": "4",
+        "inode": "4026531837"
+      }
+    },
+    "observed": {
+      "launcher": {
+        "pid": 659,
+        "parent_pid": 658,
+        "image_path": "/usr/local/bin/rudder-machine-root",
+        "image_sha256": "64927a77380d4e7a81fe089b2ffc2dee91be73f7120c9ac46f4541268dea76bc",
+        "image_id": {
+          "device": "23",
+          "inode": "22240"
+        },
+        "uid": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "gid": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "groups": [],
+        "caps": {
+          "effective": "000001ffffffffff",
+          "permitted": "000001ffffffffff",
+          "inheritable": "0000000000000000",
+          "ambient": "0000000000000000",
+          "bounding": "000001ffffffffff"
+        },
+        "no_new_privs": 0,
+        "tracer_pid": 0,
+        "mnt": {
+          "device": "4",
+          "inode": "4026531841"
+        },
+        "user": {
+          "device": "4",
+          "inode": "4026531837"
+        }
+      },
+      "engine": {
+        "pid": 660,
+        "parent_pid": 659,
+        "image_path": "/opt/rudder/dist/native/rudder-native",
+        "image_sha256": "e3d67bd65fbfebbe28e43950add5e6d086ec6e3bf91f5fea84bbf4dab0d477dc",
+        "image_id": {
+          "device": "23",
+          "inode": "22237"
+        },
+        "uid": [
+          1500,
+          1500,
+          1500,
+          1500
+        ],
+        "gid": [
+          1500,
+          1500,
+          1500,
+          1500
+        ],
+        "groups": [],
+        "caps": {
+          "effective": "0000000000000000",
+          "permitted": "0000000000000000",
+          "inheritable": "0000000000000000",
+          "ambient": "0000000000000000",
+          "bounding": "0000000000000000"
+        },
+        "no_new_privs": 1,
+        "tracer_pid": 0,
+        "mnt": {
+          "device": "4",
+          "inode": "4026531841"
+        },
+        "user": {
+          "device": "4",
+          "inode": "4026531837"
+        }
+      },
+      "service": {
+        "pid": 661,
+        "parent_pid": 659,
+        "image_path": "/usr/local/bin/rudder-root-storage",
+        "image_sha256": "13d66b6d72fd13ea238c4250550cd3f0e73a2feecf7d77c02146781a95860da2",
+        "image_id": {
+          "device": "23",
+          "inode": "22239"
+        },
+        "uid": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "gid": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "groups": [],
+        "caps": {
+          "effective": "000001ffffffffff",
+          "permitted": "000001ffffffffff",
+          "inheritable": "0000000000000000",
+          "ambient": "0000000000000000",
+          "bounding": "000001ffffffffff"
+        },
+        "no_new_privs": 0,
+        "tracer_pid": 0,
+        "mnt": {
+          "device": "4",
+          "inode": "4026531841"
+        },
+        "user": {
+          "device": "4",
+          "inode": "4026531837"
+        }
+      }
+    },
+    "role_starttimes": {
+      "launcher": "1626",
+      "engine": "1630",
+      "service": "1633"
+    },
+    "worker": {
+      "tid": 662,
+      "tgid": 660,
+      "directory_fd": 41,
+      "directory_identity": {
+        "device": "28",
+        "inode": "427"
+      },
+      "starttime": "1637",
+      "current_live": true
+    },
+    "parent_original_pidfds": {
+      "service": {
+        "fd_number": 8,
+        "pid": 661
+      },
+      "engine": {
+        "fd_number": 25,
+        "pid": 660
+      }
+    },
+    "custody": {
+      "supervisor_pid": 658,
+      "supervisor_parent_pid": 610,
+      "launcher_pid": 659,
+      "pidfd_number": 25,
+      "exe_number": 27,
+      "proc_directory_number": 44,
+      "pidfd_pid": 659,
+      "pidfd_exited": false,
+      "original_child_live": true,
+      "exe_identity": {
+        "device": "23",
+        "inode": "22240"
+      },
+      "retained_until_vm_teardown": true,
+      "restart_count": 0,
+      "event_pid_signals": 0
+    },
+    "sourceAuthority": false,
+    "scheduler": false,
+    "models": false,
+    "normalRetirement": false,
+    "normalCleanupPerformed": false,
+    "normalRetirementBlocked": true,
+    "retainedUntilVmTeardown": true,
+    "machineFailureInferredFromMissingEvent": false,
+    "supervisorImage": {
+      "path": "/usr/bin/python3.11",
+      "sha256": "9bee109da0dce17a7c9eeaca9f420cc6770a9fe143b9382d73bd22fe59b21a5f",
+      "identity": {
+        "device": "23",
+        "inode": "6787"
+      },
+      "held_node_exe_fd": 22
+    }
+  },
+  "artifacts": {
+    "node": {
+      "path": "/usr/local/bin/node",
+      "bytes": 124902584,
+      "sha256": "94efd062ed066c1a0b332e18249859c905e920eeada5df55d24c99b919629a90"
+    },
+    "native": {
+      "path": "/opt/rudder/dist/native/rudder-native",
+      "bytes": 36865680,
+      "sha256": "e3d67bd65fbfebbe28e43950add5e6d086ec6e3bf91f5fea84bbf4dab0d477dc"
+    },
+    "launcher": {
+      "path": "/usr/local/bin/rudder-machine-root",
+      "bytes": 2200944,
+      "sha256": "64927a77380d4e7a81fe089b2ffc2dee91be73f7120c9ac46f4541268dea76bc"
+    },
+    "service": {
+      "path": "/usr/local/bin/rudder-root-storage",
+      "bytes": 6760856,
+      "sha256": "13d66b6d72fd13ea238c4250550cd3f0e73a2feecf7d77c02146781a95860da2"
+    },
+    "buddy": {
+      "path": "/opt/rudder/dist/native/rudder-jj",
+      "bytes": 30952928,
+      "sha256": "eb2bd6c82cfb9034132b1f855f6fcd1fdeb63200f95e2a5d5b43bbdb2bba699c"
+    },
+    "python": {
+      "path": "/usr/bin/python3.11",
+      "bytes": 6809944,
+      "sha256": "9bee109da0dce17a7c9eeaca9f420cc6770a9fe143b9382d73bd22fe59b21a5f"
+    },
+    "cli": {
+      "path": "/opt/rudder/dist/index.js",
+      "bytes": 2940,
+      "sha256": "bef76b6a2e5b19e840998d50b4f88688ade163d0e5263c69f2a8bcbcede6e96d"
+    },
+    "package": {
+      "path": "/opt/rudder/package.json",
+      "bytes": 2889,
+      "sha256": "bc024cc1badd1d902802543732f27a794358274e9b4d9fa5aa8015a54b3de9e8"
+    }
+  },
+  "cleanup": {
+    "cleanupVerified": true,
+    "independentAbsence": true,
+    "ownedDestruction": true,
+    "reconciliationRequired": false
+  },
+  "notClaimed": [
+    "configured runtime ready ACK",
+    "environment/genesis backed preparation",
+    "helper runtime+source dual enrollment",
+    "SDK compile or REAPI cachehit",
+    "normal retirement/capacity release",
+    "stock alpha32 image parity",
+    "production activation"
+  ]
+}

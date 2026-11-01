@@ -41,6 +41,18 @@ fn main() {
         println!("controller-fd-exec-ok");
         return;
     }
+    // Open the real process-image readers BEFORE managed receive deliberately
+    // makes this helper non-dumpable. These readonly, CLOEXEC originals remain
+    // owned here; no proc permission is relaxed and no new path is opened later.
+    use std::{io::Read, os::{fd::AsRawFd, unix::ffi::OsStrExt}};
+    let process_images = ["/proc/self/cmdline", "/proc/self/environ"].map(|path| {
+        let file = std::fs::File::open(path).unwrap();
+        let flags = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETFD) };
+        assert!(flags >= 0 && flags & libc::FD_CLOEXEC != 0, "process-image reader must be CLOEXEC");
+        let access = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETFL) };
+        assert!(access >= 0 && access & libc::O_ACCMODE == libc::O_RDONLY, "process-image reader must be readonly");
+        (path, file)
+    });
     let managed = args.get(3).is_some_and(|mode| mode == "managed-controller");
     let spec = if managed {
         use std::{
@@ -55,6 +67,8 @@ fn main() {
             args[2].parse().unwrap(),
         )
         .unwrap();
+        assert_eq!(unsafe { libc::prctl(libc::PR_GET_DUMPABLE, 0, 0, 0, 0) }, 0,
+            "managed handoff must retain non-dumpable descriptor protection");
         let controller = control.controller_process();
         let retained = control.controller_process();
         assert!(Arc::ptr_eq(&controller, &retained));
@@ -105,11 +119,31 @@ fn main() {
     };
     let fixture = b"known-fixture-secret-never-argv";
     assert_eq!(spec.environment["CANARY_SECRET"].as_bytes(), fixture);
-    for path in ["/proc/self/cmdline", "/proc/self/environ"] {
-        assert!(!std::fs::read(path)
-            .unwrap()
-            .windows(fixture.len())
-            .any(|bytes| bytes == fixture));
+    if managed {
+        assert_eq!(unsafe { libc::prctl(libc::PR_GET_DUMPABLE, 0, 0, 0, 0) }, 0,
+            "controller checks and child exec must not relax helper protection");
+    }
+    const PROCESS_IMAGE_LIMIT: u64 = 2 * 1024 * 1024;
+    for (path, file) in process_images {
+        let mut bytes = Vec::new();
+        file.take(PROCESS_IMAGE_LIMIT + 1).read_to_end(&mut bytes).unwrap();
+        assert!(bytes.len() as u64 <= PROCESS_IMAGE_LIMIT, "actual process image exceeds fixture bound: {path}");
+        assert!(!bytes.windows(fixture.len()).any(|bytes| bytes == fixture),
+            "sealed fixture secret leaked into actual process image: {path}");
+    }
+    // /proc environ describes the initial process image; also inspect CURRENT
+    // libc/Rust environment and argv after receiving the sealed payload.
+    assert!(std::env::var_os("CANARY_SECRET").is_none(),
+        "sealed spec environment must not be installed into this helper");
+    for argument in std::env::args_os() {
+        assert!(!argument.as_bytes().windows(fixture.len()).any(|bytes| bytes == fixture),
+            "sealed fixture secret leaked into current argv");
+    }
+    for (key, value) in std::env::vars_os() {
+        for field in [key, value] {
+            assert!(!field.as_bytes().windows(fixture.len()).any(|bytes| bytes == fixture),
+                "sealed fixture secret leaked into current environment");
+        }
     }
     println!(
         "{}",

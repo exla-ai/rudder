@@ -416,7 +416,7 @@ pub struct RootStorageRetired { _instance: uuid::Uuid, _slot: uuid::Uuid }
 pub struct RootStorageService {
     endpoint: Endpoint, engine: Process, own: Process, engine_image: Image, service_image: Image,
     mnt: File, user: File, boot: Vec<u8>, instance: uuid::Uuid,
-    root: Option<RootDirectory>, root_caps: u64, paged:Option<paged::RootPagedStorage>,
+    root: Option<RootDirectory>, root_caps: u64, runtime:Option<crate::root_storage_bootstrap::runtime_image::RootRuntimeService>, paged:Option<paged::RootPagedStorage>,
     serial: u64, hello: bool, fenced: bool, slots: BTreeMap<uuid::Uuid, Slot>,
     retirement_answer:Option<RetirementAnswer>,outbox:Option<Vec<u8>>,pending_retired:Option<Slot>,
 }
@@ -436,7 +436,7 @@ impl RootStorageService {
             engine_image: Image::capture(Path::new(ENGINE_IMAGE))?, service_image,
             mnt: namespace(None, "mnt", libc::CLONE_NEWNS)?, user: namespace(None, "user", libc::CLONE_NEWUSER)?,
             boot: proc_bytes("/proc/sys/kernel/random/boot_id", 64)?, instance: uuid::Uuid::new_v4(), serial: 0,
-            root: None, root_caps: caps, paged:None, hello: false, fenced: false, slots: BTreeMap::new(),retirement_answer:None,outbox:None,pending_retired:None };
+            root: None, root_caps: caps, runtime:None, paged:None, hello: false, fenced: false, slots: BTreeMap::new(),retirement_answer:None,outbox:None,pending_retired:None };
         ensure!(value.engine.pid != value.own.pid, "root storage cannot enroll itself as engine");
         ensure!(Path::new("/run").canonicalize()? == Path::new("/run"), "root storage /run redirects");
         let run = fs::symlink_metadata("/run")?;
@@ -470,10 +470,11 @@ impl RootStorageService {
             && id(&self.user)? == id(&namespace(Some(self.engine.pid), "user", libc::CLONE_NEWUSER)?)?, "storage sender entered a guest namespace");
         self.engine.live()
     }
-    pub fn close_admission(&mut self) { if let Some(paged)=&mut self.paged{paged.close_admission();} self.fenced = true; for slot in self.slots.values_mut() { slot.fence(); } }
+    pub fn close_admission(&mut self) { if let Some(runtime)=&mut self.runtime{runtime.close_admission();} if let Some(paged)=&mut self.paged{paged.close_admission();} self.fenced = true; for slot in self.slots.values_mut() { slot.fence(); } }
     /// OFF App, one bounded packet. No error removes a slot or its actual owners.
     pub fn poll_once(&mut self) -> Result<bool> {
         self.current()?;
+        if let Some(runtime)=&mut self.runtime{if runtime.poll_retaining()?{return Ok(true)}}
         if let Some(bytes)=&self.outbox {
             if !self.endpoint.send(bytes,None)? {return Ok(false);}
             self.outbox=None;return Ok(true);
@@ -697,10 +698,38 @@ impl RootStorageService {
 pub fn run_inherited_root_service() -> Result<()> {
     static TAKEN: AtomicBool = AtomicBool::new(false);
     ensure!(!TAKEN.swap(true, Ordering::AcqRel), "root storage inherited bootstrap already consumed");
-    ensure!(std::env::args_os().count() == 1 && std::env::vars_os().next().is_none(), "root storage needs fixed image bootstrap environment");
-    for fd in [3, 4] { ensure!(unsafe { libc::fcntl(fd, libc::F_GETFD) } >= 0, "root storage original bootstrap descriptor absent"); }
-    let endpoint = unsafe { OwnedFd::from_raw_fd(3) }; let engine = unsafe { OwnedFd::from_raw_fd(4) };
-    let mut owner = RootStorageService::from_bootstrap(endpoint, engine)?;
+    // FIRST descriptor operation: no constructor/proc/image/namespace/file
+    // access may allocate into optional slots before their ownership snapshot.
+    let mut inherited=unsafe{crate::root_storage_bootstrap::runtime_image::CapturedRuntimeDescriptors::take_at_service_entry()};
+    let legacy_absent=inherited.is_absent_at_entry();
+    let mut originals:[Option<OwnedFd>;2]=[None,None];
+    let mut owner:Option<RootStorageService>=None;
+    let setup=std::panic::catch_unwind(std::panic::AssertUnwindSafe(||->Result<()> {
+        // Retain actual core inputs outside constructor/unwind as well. Their
+        // duplicates may allocate ONLY after the complete optional snapshot.
+        let mut core_fault=false;
+        for(index,raw)in [3,4].into_iter().enumerate(){let flags=unsafe{libc::fcntl(raw,libc::F_GETFD)};
+            if flags<0{core_fault=true;continue}
+            originals[index]=Some(unsafe{OwnedFd::from_raw_fd(raw)});
+            if unsafe{libc::fcntl(raw,libc::F_SETFD,flags|libc::FD_CLOEXEC)}!=0{core_fault=true;}}
+        inherited.validate_shape()?;ensure!(!core_fault,"root storage original bootstrap descriptor absent/unavailable");
+        ensure!(std::env::args_os().count()==1&&std::env::vars_os().next().is_none(),"root storage needs fixed image bootstrap environment");
+        owner=Some(RootStorageService::from_bootstrap(originals[0].as_ref().unwrap().try_clone()?,originals[1].as_ref().unwrap().try_clone()?)?);
+        let actual=owner.as_mut().unwrap();
+        crate::root_storage_bootstrap::runtime_image::RootRuntimeService::capture_entry_snapshot_retaining(&mut actual.runtime,&mut inherited,&actual.engine)
+    }));
+    let (setup_complete,retained_panic)=match setup {
+        Ok(Ok(()))=>(true,None),
+        Ok(Err(error)) if legacy_absent=>return Err(error),
+        Err(payload) if legacy_absent=>std::panic::resume_unwind(payload),
+        Ok(Err(_))=>(false,None),
+        Err(payload)=>(false,Some(payload)),
+    };
+    if !setup_complete {
+        if let Some(owner)=&mut owner{owner.close_admission();}
+        loop {std::hint::black_box((&inherited,&originals,&owner,&retained_panic));std::thread::sleep(Duration::from_secs(1));}
+    }
+    let mut owner=owner.unwrap();
     loop {
         match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| owner.poll_once())) {
             Ok(Ok(true)) => {}, Ok(Ok(false)) => std::thread::sleep(Duration::from_millis(2)),

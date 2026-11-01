@@ -7,7 +7,15 @@ use crate::execution::{finalization_budget::FinalizationBudget,
 use std::{os::fd::{AsRawFd,FromRawFd,OwnedFd},sync::atomic::AtomicU8};
 
 #[derive(Clone,Copy,Debug,PartialEq,Eq)]
-pub enum MetadataMountMode { ReadOnlySeed, PrivateCow }
+pub enum MetadataMountMode { ReadOnlySeed, PrivateCow,
+    /// Mechanical immutable EXEC-capable floor only. This is DATA, not a
+    /// runtime grant: execution independently requires the original Root
+    /// service/launcher/registered-engine capsule and held component FDs.
+    ReadOnlyRuntimeData }
+impl MetadataMountMode {
+    fn readonly(self)->bool {self!=Self::PrivateCow}
+    fn noexec(self)->bool {self!=Self::ReadOnlyRuntimeData}
+}
 /// Actual Root/process/MNT/boot custody, never deserialized or reconstructed.
 pub struct RootMetadataNamespace {pid:u32,pidfd:OwnedFd,namespace:File,identity:(u64,u64),boot:File,boot_bytes:Vec<u8>}
 impl RootMetadataNamespace {
@@ -96,9 +104,10 @@ impl RetainedMetadataMount {
         let target=CString::new(self.path.as_os_str().as_bytes())?;
         let options=CString::new(format!("fd={},rootmode=40700,user_id=1500,group_id=1500,default_permissions,allow_other",self.device.as_ref().unwrap().as_raw_fd()))?;
         ensure!(!self.view.as_ref().context("metadata view absent")?.0.mounted.swap(true,Ordering::AcqRel),"metadata view already mounted");
-        self.mount_attempted=true;let ro=if self.mode==MetadataMountMode::ReadOnlySeed{libc::MS_RDONLY}else{0};
+        self.mount_attempted=true;let ro=if self.mode.readonly(){libc::MS_RDONLY}else{0};
+        let noexec=if self.mode.noexec(){libc::MS_NOEXEC}else{0};
         if unsafe{libc::mount(CString::new(self.source.clone())?.as_ptr(),target.as_ptr(),c"fuse.rudder-seed".as_ptr(),
-            libc::MS_NOSUID|libc::MS_NODEV|libc::MS_NOEXEC|ro,options.as_ptr().cast())}!=0{
+            libc::MS_NOSUID|libc::MS_NODEV|noexec|ro,options.as_ptr().cast())}!=0{
             // A synchronous failed mount syscall has no mount effect; retain
             // original device/view and allow only explicit cleanup.
             return Err(std::io::Error::last_os_error().into());}
@@ -122,11 +131,20 @@ impl RetainedMetadataMount {
         self.parent_current()?;ensure!(!self.unmounted&&self.admission.load(Ordering::Acquire)<2,"metadata mount retired");
         let(id,kind,options)=mount_info(&self.path)?.context("metadata actual mount absent")?;
         ensure!(self.mount_id==Some(id)&&kind=="fuse.rudder-seed"&&options.split(',').any(|s|s=="nosuid")
-            &&options.split(',').any(|s|s=="nodev")&&options.split(',').any(|s|s=="noexec")
-            &&options.split(',').any(|s|s==if self.mode==MetadataMountMode::ReadOnlySeed{"ro"}else{"rw"}),"metadata kernel mount differs");
+            &&options.split(',').any(|s|s=="nodev")&&options.split(',').any(|s|s=="noexec")==self.mode.noexec()
+            &&options.split(',').any(|s|s==if self.mode.readonly(){"ro"}else{"rw"}),"metadata kernel mount differs");
         ensure!(self.result.result.lock().map_err(|_|error(libc::EIO))?.is_none(),"metadata worker exited before original retirement");Ok(())
     }
     pub fn root(&self)->Result<&Path>{ensure!(self.ready,"metadata mount original ready ACK absent");self.check_current()?;Ok(&self.path)}
+    /// Mechanical held-FD projection. No caller pathname, Root UID check or
+    /// this DATA pair itself authorizes helper execution. The native issuer
+    /// must retain its separately authenticated complete bootstrap chain.
+    pub fn duplicate_runtime_root_retaining(&self)->Result<(OwnedFd,u64)> {
+        ensure!(self.mode==MetadataMountMode::ReadOnlyRuntimeData&&self.ready,
+            "runtime floor original mount ACK absent");self.check_current()?;
+        let fd:OwnedFd=self.root.as_ref().context("runtime original root FD absent")?.try_clone()?.into();
+        self.check_current()?;Ok((fd,self.mount_id.context("runtime mount identity absent")?))
+    }
     pub fn view(&self)->Result<&VfsView>{self.view.as_ref().context("live metadata view already archived")}
     pub fn close_admission(&self){self.admission.fetch_max(1,Ordering::AcqRel);}
     /// Caller independently owns the genuine actor/helper/alias drain proof.
@@ -147,7 +165,7 @@ impl RetainedMetadataMount {
         ensure!(mount_info(&self.path)?.is_none(),"metadata normal unmount unconfirmed");
         if let Some(worker)=&self.worker {worker.start_join_observer()?;if self.joined.is_none(){self.joined=worker.try_joined()?;}if self.joined.is_none(){return Ok(false)}
             let result=self.result.result.lock().map_err(|_|error(libc::EIO))?;
-            ensure!(result.as_ref().is_some_and(|r|r.is_ok())||(!self.ready&&self.mode==MetadataMountMode::ReadOnlySeed&&result.is_some()),"metadata worker result uncertain; view retained");}
+            ensure!(result.as_ref().is_some_and(|r|r.is_ok())||(!self.ready&&self.mode.readonly()&&result.is_some()),"metadata worker result uncertain; view retained");}
         // Only a never-spawned worker can lack join custody. Such a failed
         // preparation cleanup never issues a private checkpoint.
         self.view.as_ref().context("metadata view absent")?.0.mounted.store(false,Ordering::Release);self.view.as_ref().unwrap().0.handles.lock().map_err(|_|error(libc::EIO))?.clear();
@@ -179,3 +197,7 @@ impl RetainedMetadataMount {
 #[cfg(test)]
 #[path="metadata_mount_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path="runtime_mount_tests.rs"]
+mod runtime_mount_tests;

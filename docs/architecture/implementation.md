@@ -12,6 +12,68 @@ are verified in [the release evidence](verification-alpha28.json). The full v4
 rewrite remains incomplete. Entries below describe earlier checkpoints and
 unreleased work; their older version numbers are historical.
 
+Latest continuation: alpha.32 remains unpublished. All three native builds,
+JavaScript qualification and its actual stock Fly worker smoke passed. macOS
+Rust qualification run 41323038312 then passed 102 cases and failed one fixture
+that assumed a 10ms releaser thread would close SQLite inside the original
+100ms startup window. The five related fixture scheduling assumptions are now
+separated from post-release API semantics. Actual contention, original callback
+deadline decisions, marker/epoch refusal, restored ordinary policy and zero
+mutation remain checked. Run 271 passed all eight cases with normal parallel
+execution. Production startup policy is unchanged. The next candidate is alpha.33;
+no alpha.29 through alpha.32 tag was pushed or retagged.
+
+The next uncommitted implementation connects the genuine optional Root runtime
+client to the original task barrier before the independent seed acknowledgment.
+It retains the same helper, clock and cancellation through off-App enrollment,
+App adoption and recovery. The inherited service FD snapshot occurs before any
+constructor allocations. The actual post-exec transport uses SO_PEERPIDFD and
+a new protected connection. Default absence preserves existing paths; selected
+baked genesis still refuses the old host-imported environment until genuine
+backed preparation exists. Normal runtime retirement remains unavailable.
+
+Current local checks passed: engine/native libraries run 262, 503 cases; full
+native binary run 266, 1,318 cases; JavaScript run 268, 928 with ten skipped;
+fresh-binary TUI run 272, all 59; full workspace compile 273. Full Rust run 274
+stopped on the managed handoff fixture opening `/proc/self/environ` after the
+receiver's required non-dumpable protection. The fixture was corrected to
+retain actual pre-handoff proc descriptors and assert both descriptor CLOEXEC
+and unchanged protection. Focused run 275 passed all five handoff cases, then
+complete run 276 passed 2,365 tests with zero failures and 65 ignored across 65
+suites at 16:43:15Z. The original failed full run remains retained. These results
+qualify their stated local scopes and do not
+replace the next final-source macOS matrix or installed bootstrap qualification.
+
+The new compiler CAS producer passed all seven real Root0 Bookworm tests and
+baked the actual pinned 852MB A2 compiler artifact in 14.466s under its unchanged
+300s budget. The complete CAS verification and two-pin acknowledgment produced
+1,320 objects and 853,092,522 encoded bytes. An initial Fly exporter 403 failed
+after successful bake; an exact immutable build-graph retry pushed digest
+`sha256:fdb88bde30c78585e9c932c434bf8ed5c82f47ceac41c0ff23fbe9962147860f`.
+This proves the build-only compiler data producer, not mounted compiler
+execution, REAPI hits or production activation.
+
+The new same-source runtime image contains its four freshly built executables
+before baking its complete immutable graph. Digest
+`sha256:f26ab1dda848fc41a5b1305ad1058083fbe52347966328cee32f302fce341336`
+is a working-source component image, not stock alpha.32. The first physical
+default-absent verifier stopped before launcher execution because it read the
+checksummed retention envelope at the wrong level. Its exact VM was destroyed
+and two inventories confirmed absence. The corrected verifier checks actual
+`state`/`checksum`, raw inventory/manifest/pin bindings and installed executable
+records. A provider inventory timeout in the next attempt also left no qualified
+guest result; that owned VM was destroyed and absence checked. The subsequent
+run passed the actual installed default-absent bootstrap, all four fresh ELF
+bindings and original process custody, with exact VM destruction and two absence
+checks in 15 provider calls. [Evidence](verification-managed-runtime-bootstrap-working.json)
+keeps the failed attempts separate. No configured-ready result is inferred from
+these data checks.
+
+The independent [communication and product-flow audit](communication-status.md)
+keeps the rest of v4 explicit: automatic mailbox delivery and interruption
+settlement, unified durable task routing/command migration, and trusted previews
+with sequenced terminal recovery and real-device qualification remain open.
+
 Current working source is unreleased. The full JavaScript run passed 928 with
 zero failures and 10 skipped at 12:20:28Z. The complete Rust checkpoint 225 passed
 2,257 tests and TUI 226 passed 59; these precede the later image backing components.

@@ -27,6 +27,8 @@ pub mod provider_kernel;
 pub mod handoff;
 #[cfg(target_os = "linux")]
 pub mod linux;
+#[cfg(target_os="linux")]
+pub mod runtime_image;
 pub mod network;
 #[cfg(target_os = "linux")]
 mod network_phase;

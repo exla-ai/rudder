@@ -100,6 +100,22 @@ struct ProofBody {version:u32,kind:String,challenge_id:String,challenge_nonce:St
 #[serde(deny_unknown_fields)]
 pub struct RegistrationAck {pub version:u32,pub kind:String,pub challenge_id:String,pub challenge_nonce:String,pub root_nonce:String,pub engine_instance_id:String,
     pub credential_id:String,pub binding:RegistrationBinding,pub constraint:FinalizationConstraint,pub boot_id:String,pub proof_sha256:String}
+/// DATA on the private ORIGINAL launcher-service channel only. A copied or
+/// deserialized value creates no runtime authority. Construction below requires
+/// actual Root HMAC verification and actual Native registration acceptance.
+#[derive(Clone,Serialize,Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct CompletedRuntimeRegistration {pub version:u32,pub kind:String,pub root_nonce:String,pub ack:RegistrationAck,pub worker_tid:u32,pub worker_start_ticks:String}
+impl RegistrationAck {
+    pub(super) fn config_bound(&self,config:&HostIngressConfig,sha:&str)->Result<bool>{
+        let b=&self.binding;let image=config.image_preseed.as_ref().context("runtime qualified image policy absent")?;
+        ensure!(self.version==1&&self.kind=="ack"&&b.account_id==config.account_id&&b.home_id==config.home_id&&b.machine_id==config.machine_id
+            &&b.store_id==config.store_id&&b.incarnation==config.incarnation&&b.config_sha256==sha&&b.image==image.image
+            &&b.runtime_manifest_sha256==config.runtime_manifest.manifest_sha256,"runtime registered config/epoch differs");
+        uuid(&self.engine_instance_id)?;uuid(&self.credential_id)?;unhex::<32>(self.proof_sha256.as_bytes())?;
+        ensure!(b.epoch.parse::<u64>().is_ok_and(|v|v>0&&v.to_string()==b.epoch),"runtime registration epoch invalid");Ok(true)
+    }
+}
 #[derive(Serialize,Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Relay<T>{kind:String,rpc_id:String,packet:T}
@@ -227,6 +243,12 @@ impl RootRegistration {
         self.notice=Some(bytes(&serde_json::json!({"kind":"engine_registration_complete_v1","challenge_id":self.ack.as_ref().unwrap().body.challenge_id}))?);self.phase=Phase::Complete;Ok(())}
     pub(super) fn flush_complete(&mut self,host:&mut RootHostControl)->Result<()> {if self.phase==Phase::Complete&&!self.notice_sent&&!self.notice_unknown {self.current()?;
         match host.registration_send(self.notice.as_ref().unwrap()) {Ok(true)=>self.notice_sent=true,Ok(false)=>{},Err(_)=>{self.notice_unknown=true;return Err(fault());}}}Ok(())}
+    pub(super) fn completed_runtime_registration(&self)->Result<CompletedRuntimeRegistration>{
+        ensure!(self.complete()&&self.native_ack_seen&&self.ack_verified&&self.derived.is_some(),"runtime requires actual completed Root/Native registration");self.current()?;
+        let evidence=self.evidence.as_ref().context("runtime original worker evidence absent")?;evidence.current()?;
+        Ok(CompletedRuntimeRegistration{version:1,kind:"completed_runtime_registration_v1".into(),root_nonce:self.nonce.clone(),ack:self.ack.as_ref().unwrap().body.clone(),
+            worker_tid:evidence.worker_tid,worker_start_ticks:evidence.worker_start.clone()})
+    }
     pub(super) fn complete(&self)->bool {self.phase==Phase::Complete&&self.notice_sent}
     pub(super) fn failed(&self)->bool {self.phase==Phase::Failed}
     pub(super) fn mark_failed(&mut self){self.phase=Phase::Failed;}
@@ -249,6 +271,7 @@ impl RegisteredEngineOwner {
     pub fn machine_id(&self)->&str {&self.data.binding.machine_id}pub fn incarnation(&self)->&str {&self.data.binding.incarnation}
     pub fn credential_id(&self)->&str {&self.data.credential_id}pub fn epoch(&self)->&str {&self.data.binding.epoch}
     pub fn data(&self)->&RegistrationAck {&self.data}
+    pub(super) fn runtime_config_owner(&self)->Arc<HostIngressConfigOwner>{Arc::clone(&self.config)}
     pub fn assert_current(&self)->Result<()> {let result=(||->Result<()>{ensure!(!self.fenced.load(Ordering::Acquire),"registered original engine fenced");self.config.assert_current()?;
         ensure!(self.own.pid==std::process::id(),"registered engine moved process");self.own.live()?;self.root.live()?;self.service.live()?;storage::floor(self.own.pid,1500)?;storage::floor(self.root.pid,0)?;
         self.image.matches_process(&self.own)?;self.service_image.check()?;self.service_image.matches_fd(&self.service_exe)?;self.root_image.check()?;self.root_image.matches_fd(&self.root_exe)?;

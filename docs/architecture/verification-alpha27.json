@@ -1,7 +1,7 @@
 {
   "formatVersion": 1,
   "version": "4.0.0-alpha.27",
-  "sourceKind": "verified immutable tag; primary npm availability pending",
+  "sourceKind": "verified immutable tag",
   "revision": "59d59ddb4045584908d4671a6756c37ce9ab4d44",
   "tag": "v4.0.0-alpha.27",
   "fullV4Complete": false,
@@ -193,18 +193,33 @@
     }
   },
   "npm": {
-    "status": "partial",
+    "status": "verified",
     "publicationCiSucceeded": true,
     "stableLatest": "3.9.13",
     "primary": {
       "package": "@exla/rudder",
       "version": "4.0.0-alpha.27",
-      "status": "pending",
-      "reason": "explicit_version_not_published",
-      "observedAt": "2026-11-01T03:09:30.399522Z",
-      "next": "4.0.0-alpha.23",
-      "freshInstall": "not run because explicit registry version is unavailable",
-      "receiptSha256": "5862fa2515b1b2485b4d71b02481e582e5fdc4b497749609f078deb3f410ca4f"
+      "status": "verified",
+      "observedAt": "2026-11-01T03:16:26.784450Z",
+      "registry": {
+        "git_head": "59d59ddb4045584908d4671a6756c37ce9ab4d44",
+        "git_head_match": true,
+        "integrity": "sha512-gX08No/VjbZ6i74V00+zk6EyKuUlM8aXy4uUqx1Eod38WrXqp7NUUQ2Hk5JcwoQ/++vHEd8NrAlsYg9N1k1BjQ==",
+        "provenance_metadata_present": true,
+        "repository": "git+https://github.com/exla-ai/rudder.git",
+        "shasum": "4d1ea1ab5a3aad8801ff95ca8b339b5cba033540",
+        "signature_verification": "not_performed",
+        "unpacked_size": 141637009
+      },
+      "distTags": {
+        "latest": "3.9.13",
+        "next": "4.0.0-alpha.27"
+      },
+      "realUnprivilegedPostinstall": true,
+      "cliNativeAndJjChecks": "passed",
+      "allThreePlatformManifests": true,
+      "privateFixtureRemoved": true,
+      "receiptSha256": "454fbeb8aeea56e2372fe7e6563e16c946b2b8bb042f76254e8113c06d5fc7db"
     },
     "legacy": {
       "package": "@viraatdas/rudder",
@@ -231,10 +246,15 @@
       "privateFixtureRemoved": true,
       "receiptSha256": "2d1d7225f1603c2741456358719413ef84419d7ca3320123530a1058bcbec5b0"
     },
-    "aliasEquality": "pending primary availability; no manual republish or retag"
+    "aliasEquality": {
+      "nativePairsIdentical": true,
+      "packageMetadataExceptNameIdentical": true
+    },
+    "verifiedAt": "2026-11-01T03:16:26.784450Z",
+    "earlierPrimaryVisibilityPendingUntil": "2026-11-01T03:16:06Z",
+    "manualRepublishOrRetag": false
   },
   "remainingGates": [
-    "Primary npm version/dist-tag availability, fresh installation and alias equality",
     "Normal managed machine/project/task control ingress and default activation",
     "Actual production-native/root-launcher/client bootstrap and retirement",
     "Durable private Git fork localization before shared seed capacity reuse",

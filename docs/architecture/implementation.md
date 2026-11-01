@@ -533,10 +533,13 @@ passed at 2026-11-01T02:49:47.939Z. The live home instance/image stayed unchange
 The legacy npm package passed an isolated fresh install, real postinstall,
 CLI/native/jj checks and all-platform artifact/revision checks at
 2026-11-01T03:01:16.405137Z. Its `next` tag names alpha.27; stable remains3.9.13.
-The primary `@exla/rudder` publish job also succeeded, but its explicit version
-still returns404 and its `next` tag remains alpha.23 at03:09:30Z. Primary fresh
-installation and alias equality are pending. No manual republish or retag was
-attempted. See the [partial npm and verified Cloud record](verification-alpha27.json).
+The primary `@exla/rudder` publish job succeeded while its explicit version
+returned404 through03:09:30Z. Registry visibility resolved without another
+publish. Its isolated fresh install and all CLI/native/jj/platform checks passed
+at03:16:26.784450Z. Both `next` tags now name alpha.27, both packages' native pairs
+and package metadata apart from name match, and both private fixtures were
+removed. Stable remains3.9.13. Original pending observations are retained.
+See the [verified npm and Cloud record](verification-alpha27.json).
 
 Task startup/cleanup composition, Root IPC/image bootstrap and the actual
 connected model run remain activation gates. The profile loader currently accepts explicit API-key profiles only.

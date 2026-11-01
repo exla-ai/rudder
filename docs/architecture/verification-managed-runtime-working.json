@@ -1,0 +1,87 @@
+{
+  "formatVersion": 1,
+  "scope": "production-native-root-launcher-client-startup-only",
+  "sourceKind": "uncommitted-working-tree",
+  "baseRevision": "c04997dcd7b23be83257268f34ebb4bcd1da7519",
+  "sourceManifestSha256": "586a29375513c83aab56a33fb717ce037d080b926d145d5a9852815729282595",
+  "packageVersion": "4.0.0-alpha.28",
+  "imageDigest": "sha256:6aa9ba078b75bc55e39a7b1e3f21a65d8970eef570156cf6518365efe7be42f9",
+  "verifiedAt": "2026-11-01T05:48:56.532Z",
+  "reportSha256": "8ac339c6e6aa1e765fab01389996ed8e91950e3e09b382358f5c3fc91f9ca8b4",
+  "harnessManifestSha256": "7585f1bdde682ee542aba53202ece2e03e35aff09152218b8d633b07e5a67580",
+  "checks": {
+    "qualified": true,
+    "productionBootstrapPassed": true,
+    "installedNativeBytesVerified": true,
+    "managedRuntimeClosureVerified": true,
+    "optionalConfigAbsent": true,
+    "cleanupVerified": true,
+    "independentAbsence": true,
+    "ownedDestruction": true,
+    "reconciliationRequired": false,
+    "providerCalls": 17,
+    "transportCalls": 17
+  },
+  "runtimePins": {
+    "sourcePolicySha256": "20b74332e938122249ddc8af13a53ed25c92ab4126f7d2e08c8307111ca53739",
+    "runtimeManifestSha256": "8a4c14050624c32eec93aea6b87ffc2ba99830d4f9e91b09d9f7f58111827e49",
+    "runtimeConfigPinSha256": "dd9c4aa9ab38eef3599fd2d78183827aa5d26d7334a8ded309176f877c6a14b4",
+    "sidecarManifestSha256": "fb25821fcf425efb4ee90b51b594b8d316d55763a8e8837856393a5f36c28c79",
+    "sidecarPolicyPinSha256": "8ab1e0bfed3cbbf34e24204a2c16814b6c1203eff9e9ee600e25cb87ab22fbd4"
+  },
+  "codexVersion": "0.166.0",
+  "runtimeFilesVerified": 2,
+  "sidecarFilesVerified": 25,
+  "nativeArtifacts": {
+    "node": {
+      "path": "/usr/local/bin/node",
+      "bytes": 124902584,
+      "sha256": "94efd062ed066c1a0b332e18249859c905e920eeada5df55d24c99b919629a90"
+    },
+    "native": {
+      "path": "/opt/rudder/dist/native/rudder-native",
+      "bytes": 29136360,
+      "sha256": "c1db94f0ef4f1e127cfa470e0b92ca280e35e121f25bb78bab0f9a981e96f6e0"
+    },
+    "launcher": {
+      "path": "/usr/local/bin/rudder-machine-root",
+      "bytes": 1206696,
+      "sha256": "aaf7910b08068d7f97dc0e545dcf8975b16ffc30071c6a9afbcaeffc1b36acb0"
+    },
+    "service": {
+      "path": "/usr/local/bin/rudder-root-storage",
+      "bytes": 2024816,
+      "sha256": "74d08417d71bb4825468f9fae3acf591547b3cf5adc6e873974ecb73965ae7a7"
+    },
+    "buddy": {
+      "path": "/opt/rudder/dist/native/rudder-jj",
+      "bytes": 30910232,
+      "sha256": "11a8c98e70ffc68ab2ac167841707ed399e763b8059e99391ccd064705152ce8"
+    },
+    "python": {
+      "path": "/usr/bin/python3.11",
+      "bytes": 6809944,
+      "sha256": "9bee109da0dce17a7c9eeaca9f420cc6770a9fe143b9382d73bd22fe59b21a5f"
+    },
+    "cli": {
+      "path": "/opt/rudder/dist/index.js",
+      "bytes": 2940,
+      "sha256": "bef76b6a2e5b19e840998d50b4f88688ade163d0e5263c69f2a8bcbcede6e96d"
+    },
+    "package": {
+      "path": "/opt/rudder/package.json",
+      "bytes": 2889,
+      "sha256": "d6f7dced453b70e3acdabfccf39817dc10009f23acd8474ccf6591d3d8af500b"
+    }
+  },
+  "notQualified": [
+    "configured sidecar authentication",
+    "Root engine registration",
+    "fresh volume/project/source authority",
+    "PostgreSQL authority/provider durability",
+    "real backend/model/authentication",
+    "normal retirement and third-seed capacity reuse",
+    "default production adoption",
+    "full v4 completion"
+  ]
+}

@@ -678,6 +678,40 @@ next private implementation batch. Its separate compile checks do not qualify
 those features in alpha.28. Normal Root retirement/reuse, real managed models,
 distributed cache/build performance and fleet/migration gates remain open.
 
+### Unreleased managed ingress integration
+
+The next working batch connects authenticated host transport, immutable runtime
+packaging, original Root engine registration, durable machine command receipts,
+prepared-local App/task ingress and fresh Cloud provisioning. The original
+worker now stages the host capability after HostServing and registration; an
+early pending registration can no longer leave ingress permanently absent.
+Only the App loop adopts that capability, using a nonblocking handoff.
+
+The frozen registration library passed 103 tests with zero failures and 13
+ignored. The combined native application passed its 204 managed tests with zero
+failures and six ignored; 1,077 unrelated tests were filtered out. Cloud compiled
+and its 23 focused provisioning, operation and HTTP tests passed. Another 79
+existing home transport, packaging and Fabric HTTP regression tests passed. The exact
+managed-runtime source-prefix test also passed. These are component checks,
+not physical registered-engine, PostgreSQL durability or model qualification.
+The initial application compile found two mutable-fixture errors, which were
+corrected before the passing run. Original failed receipts remain retained.
+
+The lean managed image was pushed from a separate, earlier frozen snapshot as
+`sha256:6aa9ba078b75bc55e39a7b1e3f21a65d8970eef570156cf6518365efe7be42f9`.
+Its first registry push failed with HTTP403; the identical-source cached retry
+succeeded. Its disposable Fly VM passed at 2026-11-01T05:48:56Z: all four native
+executables, the complete runtime and sidecar closure/permissions, real pinned
+Codex version execution, Node/ws loopback and original Root/storage/client
+startup were verified. Seventeen provider calls included exact VM destruction
+and two independent absence checks. See [the physical image record](verification-managed-runtime-working.json).
+The offline harness first omitted a Python fixture; a separate corrected copy
+passed all 12 injected scenarios before any provider call. This image predates
+registration and App integration and is not deployed. Fresh source initialization, verified S3 root publication followed
+by PostgreSQL admission/assignment, real backend execution and default migration
+remain open. S3 remains the content data plane; PostgreSQL holds fleet metadata
+and ownership, rather than introducing another blob store.
+
 ## Current implementation track
 
 Base: `91579cf631b1d9d78afbbd786a6dc1f8120cc1ca` on `origin/main` at start.

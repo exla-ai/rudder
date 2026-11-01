@@ -447,7 +447,7 @@
     "installedFullTreeVerified": false,
     "sourceIncludesReadonlyVfs": false
   },
-  "recordedAt": "2026-11-01T14:44:03.212693+00:00",
+  "recordedAt": "2026-11-01T15:44:51.098301+00:00",
   "repositoryReleaseAttempts": [
     {
       "check": "managed-main238-real-repo-packed-release",
@@ -806,5 +806,213 @@
     "published": false,
     "tagChanged": false,
     "fix": "u32::from for platform file-type constants; local246 passes, freshfullmatrix required"
+  },
+  "releaseCheckAlpha31": {
+    "formatVersion": 1,
+    "version": "4.0.0-alpha.31",
+    "revision": "5e6395fcc97f2182cf0c951fa480be296e5d4afc",
+    "runId": 41320051819,
+    "jobId": 124893854290,
+    "status": "failed-unpublished",
+    "observedAt": "2026-11-01T15:43:58.909669+00:00",
+    "nativePlatforms": {
+      "darwin-x64": "passed",
+      "darwin-arm64": "passed",
+      "linux-x64": "passed"
+    },
+    "typescriptAndJavascript": "passed",
+    "rustQualification": {
+      "platform": "macos",
+      "passed": 80,
+      "failed": 21,
+      "ignored": 3,
+      "firstCause": "canonical index root but noncanonical locks child through temporary-directory ancestor alias",
+      "otherFailure": "startup_busy_same_deadline_bounds_later_sqlite_waits"
+    },
+    "logSha256": "e75c2bdafe6b40b7eb6b0680a3311b91dc012cff3e4b073913bd1ba18bdad536",
+    "pushedMain": false,
+    "npmPublished": false,
+    "deployed": false,
+    "tagPreserved": true
+  },
+  "fullRustCheckpoint249": {
+    "scope": "full current Linux Rust workspace after retained preparation, image composition, source packs and mode fixes",
+    "revision": "5e6395fcc97f2182cf0c951fa480be296e5d4afc",
+    "completedAt": "2026-11-01T15:35:28.913671+00:00",
+    "passed": 2331,
+    "failed": 0,
+    "ignored": 61,
+    "suites": 65,
+    "receiptSha256": "5a242a31b71703e318b5c0ac30e73fa2809a79c50d392e2fd161686ab6bdd752",
+    "logSha256": "5b4e613e6b7acbf4989e5e76a5cd821c9296ee5af709995dd2d079cd4b1ba85f",
+    "earlierRun248": "stopped by original disk floor before completion; no assertion failure; exact generated test artifacts/temp fixture cleanup recorded privately"
+  },
+  "actualScaleReadonlyImageVfs": {
+    "formatVersion": 1,
+    "scope": "actual Linux immutable-image readonly VFS DATA component; no Root/runtime/FUSE/actor/native4 enablement",
+    "verifiedAt": "2026-11-01T15:20:51.049Z",
+    "qualified": true,
+    "providerCalls": 17,
+    "cleanupVerified": true,
+    "reconciliationRequired": false,
+    "reportSha256": "f374ddd0f4e5f7e03d079bc92c244d975e98003590051c964297cdbcda7dd7af",
+    "guestProofSha256": "d048c81fed58c38dba268de84e195ae4866e60ec7be39e81abfd732970a5c6b5",
+    "buildReceiptSha256": "6cb5cb03f67f028c78e3d6aa21806c3d36c8f593aacfbec955b640f44536b767",
+    "sourceManifestSha256": "e16f12bd02664b6fc52646ba02ffb43aea4d258a544a25a1faa12bf83363d31e",
+    "image": "registry.fly.io/rudder-workers-exla:runtime-floor-e16f12bd0266-23d76b84",
+    "imageDigest": "sha256:84cc3ee16e0fb127e74a26c4aec940b24849c8ae2d779fa2e62055e758cc5ee5",
+    "baseImage": "registry.fly.io/rudder-workers-exla@sha256:439a923ac90f375fe7eaad4743aa909f5968fb45355448e851899526e6fcddea",
+    "component": {
+      "scope": "readonly_baked_runtime_image_vfs_component",
+      "fixture_revision": 2,
+      "passed": true,
+      "phase": "complete",
+      "constructor_completed": true,
+      "constructor_ms": 5979,
+      "constructor_constraint_data": {
+        "boottime_deadline_nanoseconds": "36579455847",
+        "format_version": 1,
+        "maximum_milliseconds": 30000
+      },
+      "inventory": {
+        "algorithm": "sha256",
+        "digest": "170e940cba78878b9cd10b6d9e686158fdc1cac8e3c2d01b92e8b6c60a83118a",
+        "kind": "blob",
+        "size_bytes": 2936646
+      },
+      "inventory_objects": 22175,
+      "inventory_encoded_bytes": 1974041724,
+      "installer_input": {
+        "algorithm": "sha256",
+        "digest": "059e14df5a8634eef66b0247239dfa281e0df547049bac04adec664792326814",
+        "kind": "directory",
+        "size_bytes": 231
+      },
+      "manifest": {
+        "algorithm": "sha256",
+        "digest": "696437e287d8350364b562a8caa9904cae49b0ff56cba4c2ad3955931e56b59a",
+        "kind": "blob",
+        "size_bytes": 5673050
+      },
+      "manifest_bytes_verified": 5673050,
+      "manifest_files": 18990,
+      "complete_samples": [
+        {
+          "content": {
+            "algorithm": "sha256",
+            "digest": "615c46b39130a04a08da04163542ce7ce1164fa4b35408efb43aac0a8a9f7ae5",
+            "kind": "blob",
+            "size_bytes": 48536
+          },
+          "elapsed_ms": 5,
+          "path": "/usr/bin/env",
+          "sha256": "615c46b39130a04a08da04163542ce7ce1164fa4b35408efb43aac0a8a9f7ae5",
+          "size_bytes": 48536
+        },
+        {
+          "content": {
+            "algorithm": "sha256",
+            "digest": "55b89ab22bee4792a210f493a53fb066accd5d30b69837c28d98be5ff863efcf",
+            "kind": "blob",
+            "size_bytes": 1265648
+          },
+          "elapsed_ms": 9,
+          "path": "/usr/bin/bash",
+          "sha256": "55b89ab22bee4792a210f493a53fb066accd5d30b69837c28d98be5ff863efcf",
+          "size_bytes": 1265648
+        },
+        {
+          "content": {
+            "algorithm": "sha256",
+            "digest": "105cd777bb7031d8d228ac780781dcd2f942fdb4ab4de43d13d1441fa654a04c",
+            "kind": "file",
+            "size_bytes": 772
+          },
+          "elapsed_ms": 197,
+          "path": "/usr/local/bin/git",
+          "sha256": "98e364296f382d35b0695714058f0f71711eef42e940009fdbbe9ea7dafe41eb",
+          "size_bytes": 20693832
+        },
+        {
+          "content": {
+            "algorithm": "sha256",
+            "digest": "c5e7a4bf7eee48e84114eff34105ff81bd66fc74474a7cd57a80e571990343e8",
+            "kind": "blob",
+            "size_bytes": 10887
+          },
+          "elapsed_ms": 2,
+          "path": "/etc/ld.so.cache",
+          "sha256": "c5e7a4bf7eee48e84114eff34105ff81bd66fc74474a7cd57a80e571990343e8",
+          "size_bytes": 10887
+        },
+        {
+          "content": {
+            "algorithm": "sha256",
+            "digest": "7ae8cae2e64856b34c80276deb1dcf60f76da27bc1e00382201ba7bb7dc33311",
+            "kind": "blob",
+            "size_bytes": 12332
+          },
+          "elapsed_ms": 1,
+          "path": "/etc/ssl/openssl.cnf",
+          "sha256": "7ae8cae2e64856b34c80276deb1dcf60f76da27bc1e00382201ba7bb7dc33311",
+          "size_bytes": 12332
+        }
+      ],
+      "selected_git_path": "/usr/local/bin/git",
+      "selected_git_manifest": {
+        "content": {
+          "algorithm": "sha256",
+          "digest": "105cd777bb7031d8d228ac780781dcd2f942fdb4ab4de43d13d1441fa654a04c",
+          "kind": "file",
+          "size_bytes": 772
+        },
+        "path": "/usr/local/bin/git",
+        "sha256": "98e364296f382d35b0695714058f0f71711eef42e940009fdbbe9ea7dafe41eb",
+        "size_bytes": 20693832
+      },
+      "explicit_git_hardlink_members": 150,
+      "explicit_git_hardlink_checked_paths": 3,
+      "explicit_git_hardlink_inode": "8",
+      "local_objects_and_pins_empty": true,
+      "vfs_payload_bytes_returned": 22031235,
+      "backing_payload_bytes_verified": 22031235,
+      "actual_file_payload_bytes_observed": 44062470,
+      "payload_counter_scope": "actual verified buffers returned by VFS and independent backing complete-file reads, including both passes; excludes private failed-read bytes and metadata; not disk/network IO",
+      "read_verification_ms": 237,
+      "physical_disk_or_network_bytes": null,
+      "models_called": 0,
+      "executables_launched_by_test": 0,
+      "mount_performed": false,
+      "agent_count": 0,
+      "root_execution_or_mount_authority": false,
+      "worker_tls_or_actor_drain_claimed": false
+    },
+    "actualProcess": {
+      "elapsedMs": 6292,
+      "returncode": 0,
+      "stdoutEof": true,
+      "stderrEof": true,
+      "actualEchild": true,
+      "pidfdHeld": true,
+      "procHeld": true,
+      "procExeHeld": true,
+      "originalExeMatched": true,
+      "executedViaOriginalFd": true
+    },
+    "earlierA2Failure": {
+      "failure": "fixture selected Debian /usr/bin/git rather than recipe-pinned /usr/local/bin/git",
+      "wholeQualified": false,
+      "constructorCompleted": true,
+      "constructorMs": 5548,
+      "cleanupVerified": true
+    },
+    "notClaimed": [
+      "physical disk/network byte counters",
+      "50-agent throughput",
+      "kernel FUSE/mount/exec authorization",
+      "native image ELF parity",
+      "SDK compilation or REAPI hits",
+      "production enablement"
+    ]
   }
 }

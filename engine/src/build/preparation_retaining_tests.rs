@@ -53,6 +53,37 @@ fn cancelled() -> Arc<AtomicBool> { Arc::new(AtomicBool::new(false)) }
 fn expected_pin(owner: &RetainedPreparation) -> String { pin(owner.layout.category(), &owner.expected.as_ref().unwrap().key) }
 
 #[test]
+fn retained_preparation_uses_one_canonical_root_through_an_ancestor_alias() {
+    let f = Fixture::new();
+    let alias = f._temporary.path().join("index-parent-alias");
+    std::os::unix::fs::symlink(f.index.root.parent().unwrap(), &alias).unwrap();
+    let aliased = Arc::new(BuildIndex::open(alias.join("index"), f.index.store.clone()).unwrap());
+    assert_eq!(aliased.root, f.index.root);
+    assert_eq!(aliased.locks, f.index.root.join("locks"));
+    assert_eq!(aliased.locks.canonicalize().unwrap(), aliased.locks);
+    let mut out = None;
+    aliased.prepare_pinned_retaining(&mut out, f.spec.clone(), PreparedContentLayout::PagedChunkedV2,
+        f.directory.clone(), f.anchors.clone(), budget(), cancelled()).unwrap();
+    assert!(out.as_ref().unwrap().acknowledgment().is_ok());
+    aliased.validate_prepared(out.as_ref().unwrap().acknowledgment().unwrap().prepared()).unwrap();
+}
+
+#[test]
+fn retained_preparation_still_refuses_a_redirected_lock_directory() {
+    let f = Fixture::new();
+    let displaced = f.index.root.join("original-locks");
+    fs::rename(&f.index.locks, &displaced).unwrap();
+    std::os::unix::fs::symlink(&displaced, &f.index.locks).unwrap();
+    let mut out = None;
+    assert!(f.run(&mut out, PreparedContentLayout::PagedChunkedV2, budget(), cancelled()).is_err());
+    let owner = out.as_ref().unwrap();
+    assert!(owner.failure().unwrap().to_string().contains("redirects"));
+    assert!(owner.key_file.is_none() && owner.connection.is_none() && owner.store.is_none());
+    assert!(owner.acknowledgment().is_err());
+    assert_eq!(f.count(), 0);
+}
+
+#[test]
 fn retained_preparation_real_cas_sql_ack_preserves_both_layouts_and_installer_inputs() {
     let f = Fixture::new(); let mut results = Vec::new();
     for layout in [PreparedContentLayout::LegacyV1, PreparedContentLayout::PagedChunkedV2] {

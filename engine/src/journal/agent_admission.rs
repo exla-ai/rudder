@@ -184,11 +184,20 @@ fn startup_before(deadline:Instant)->Result<()> {
 }
 
 fn startup_wait(deadline:Instant)->bool {
-    let Some(remaining)=deadline.checked_duration_since(Instant::now()) else{return false;};
+    let entered=Instant::now();
+    let Some(remaining)=deadline.checked_duration_since(entered) else{
+        #[cfg(test)]
+        agent_startup_busy_tests::record_startup_wait(deadline,entered,Duration::ZERO,entered,false);
+        return false;
+    };
     // Off-App startup only. No SQL, filesystem, network or authority callback
     // runs from SQLite's busy handler; a tiny bounded sleep avoids hot spin.
-    std::thread::sleep(remaining.min(Duration::from_millis(1)));
-    Instant::now()<deadline
+    let requested=remaining.min(Duration::from_millis(1));
+    std::thread::sleep(requested);
+    let returned=Instant::now();let retry=returned<deadline;
+    #[cfg(test)]
+    agent_startup_busy_tests::record_startup_wait(deadline,entered,requested,returned,retry);
+    retry
 }
 
 fn startup_sqlite_busy(error:&anyhow::Error)->bool {

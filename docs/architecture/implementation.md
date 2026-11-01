@@ -41,6 +41,45 @@ Linux branch and a separate simulated Darwin negative branch. Real macOS and
 the full final-source matrix must still pass. Alpha.30 stays unpublished;
 the next candidate is alpha.31.
 
+Alpha.31 also stays unpublished. Its three native builds and JavaScript checks
+passed, but macOS Rust qualification run41320051819 failed with 20 retained
+preparation failures and one startup-budget test failure. The index canonicalized
+its root but retained a lock-directory path through macOS's temporary-directory
+ancestor alias. Both child paths now derive from the same canonical root. The
+existing redirect and actual SQLite replacement checks remain required. Focused
+Linux run 252 passed 26 cases with one subprocess fixture ignored; new cases cover
+successful preparation through an ancestor alias and refusal of a replaced lock
+directory. Run 254 also passed all 14 build-index regressions.
+The startup-budget callback keeps its original absolute deadline. The failing
+test inferred renewal from a scheduler-sensitive elapsed-time assertion. Its
+replacement observes the actual installed callback on two real contended SQL
+statements and requires the later statement to use the same expired deadline,
+request zero sleep and leave no mutation. Callback observations are test-only;
+the original 100ms policy and maximum 1ms sleep are unchanged. Engine library
+run 255 passed all 302 cases with zero failures and 12 ignored, including the
+real two-statement callback observations. macOS qualification remains pending.
+The next candidate is alpha.32.
+No candidate 29, 30 or 31 has been published, deployed or retagged.
+
+The final alpha.31 Linux workspace run 249 passed 2,331 tests with zero failures
+and 61 ignored at 15:35:28Z. Its preceding run 248 stopped at the original disk
+floor and is not a passing result. Fresh-binary TUI run 250 passed 58 and failed
+one transient `working` screen observation after both workers had already merged.
+The unchanged isolated run 251 passed. Test-only run 253 then passed the revised
+journey that binds both actual node/run/workspace identities, exact worker output
+bytes, completion and both durable merges. Approval keystrokes and all existing
+deadlines remain unchanged. These results do not waive macOS qualification.
+
+The actual-scale readonly image VFS component passed on an owned Fly VM at
+15:20:51Z. Metadata admission took 5,979ms for 22,175 baked objects representing
+1,974,041,724 encoded bytes and an 18,990-file manifest. Five complete verified
+file reads took 237ms, including the pinned 20.7MB Git FileNode and genuine hardlink
+aliases; the local CAS remained empty. The first attempt selected Debian's Git
+instead of the recipe's pinned Git and remains failed evidence. The corrected
+attempt retained actual original-process exit/pipe/pidfd proof and verified exact
+VM cleanup. This qualifies the readonly DATA component; it does not prove a
+runtime mount, compiler execution, agent launch or production enablement.
+
 The real S3/OIDC cache probe and all three physical Root FUSE metadata component
 tests pass, with original child/IO settlement and exact local/VM cleanup. The new
 complete runtime image built from frozen source 4d0 and printed its actual four

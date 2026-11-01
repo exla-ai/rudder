@@ -7,6 +7,48 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::sync::mpsc;
 
+// Test-only memory observations from the ACTUAL installed busy callback. No
+// clock, sleep, SQL, timeout policy or callback result is substituted. A wall
+// time assertion cannot distinguish an OS deschedule from renewed SQLite wait.
+#[derive(Clone,Debug)]
+struct StartupWaitDecision {deadline:Instant,entered:Instant,requested:Duration,returned:Instant,retry:bool}
+struct StartupWaitTrace {decisions:Vec<StartupWaitDecision>,overflow:bool}
+const MAX_STARTUP_WAIT_DECISIONS:usize=256;
+std::thread_local! {
+    static STARTUP_WAIT_TRACE:std::cell::RefCell<Option<StartupWaitTrace>>=const{std::cell::RefCell::new(None)};
+}
+pub(super) fn record_startup_wait(deadline:Instant,entered:Instant,requested:Duration,returned:Instant,retry:bool) {
+    // Never panic, allocate after the reserved capacity, lock or perform IO in
+    // the SQLite callback. Other tests' threads have no trace and do nothing.
+    STARTUP_WAIT_TRACE.with(|slot|{if let Ok(mut slot)=slot.try_borrow_mut(){if let Some(trace)=slot.as_mut(){
+        if trace.decisions.len()<MAX_STARTUP_WAIT_DECISIONS{trace.decisions.push(StartupWaitDecision{deadline,entered,requested,returned,retry});}
+        else{trace.overflow=true;}
+    }}});
+}
+struct StartupWaitProbe;
+impl StartupWaitProbe {
+    fn capture()->Self {STARTUP_WAIT_TRACE.with(|slot|{
+        assert!(slot.borrow().is_none());
+        *slot.borrow_mut()=Some(StartupWaitTrace{decisions:Vec::with_capacity(MAX_STARTUP_WAIT_DECISIONS),overflow:false});
+    });Self}
+    fn take(&self)->Vec<StartupWaitDecision> {STARTUP_WAIT_TRACE.with(|slot|{
+        let mut slot=slot.borrow_mut();let trace=slot.as_mut().unwrap();assert!(!trace.overflow,"actual SQLite wait trace exceeded its bound");
+        std::mem::replace(&mut trace.decisions,Vec::with_capacity(MAX_STARTUP_WAIT_DECISIONS))
+    })}
+}
+impl Drop for StartupWaitProbe {fn drop(&mut self){STARTUP_WAIT_TRACE.with(|slot|{*slot.borrow_mut()=None;});}}
+fn assert_original_startup_decisions(decisions:&[StartupWaitDecision],deadline:Instant) {
+    assert!(!decisions.is_empty(),"real SQLite contention must invoke the installed startup callback");
+    for decision in decisions {
+        assert_eq!(decision.deadline,deadline,"a later SQLite statement replaced the original startup deadline");
+        let remaining=deadline.checked_duration_since(decision.entered).unwrap_or(Duration::ZERO);
+        assert_eq!(decision.requested,remaining.min(Duration::from_millis(1)),"SQLite wait request exceeded original remaining budget");
+        assert!(decision.returned>=decision.entered);
+        assert_eq!(decision.retry,decision.returned<deadline,"SQLite retry decision ignored the original deadline");
+    }
+}
+
+
 struct Fixture {
     _directory: tempfile::TempDir,
     path: PathBuf,
@@ -186,19 +228,27 @@ fn startup_busy_same_deadline_bounds_later_sqlite_waits() {
     let journal = fixture.journal.take().unwrap();
     journal.conn.execute_batch("CREATE TABLE startup_probe(value INTEGER)").unwrap();
     drop(journal);
-    let started = Instant::now();
-    let deadline = started + AGENT_STARTUP_BUSY_TIMEOUT;
-    let startup = Journal::open_agent_startup_before(&fixture.path, deadline).unwrap();
+    // Ordinary fixture connection setup is outside the original startup clock;
+    // opening/configuring the actual startup connection remains inside it.
     let other = Connection::open(&fixture.path).unwrap();
+    let waits=StartupWaitProbe::capture();
+    let deadline = Instant::now() + AGENT_STARTUP_BUSY_TIMEOUT;
+    let startup = Journal::open_agent_startup_before(&fixture.path, deadline).unwrap();
     other.execute_batch("BEGIN IMMEDIATE").unwrap();
-    // Model time already spent in the refusal/identity stage of this SAME
-    // deadline, then exercise the real connection's installed SQLite callback.
-    std::thread::sleep(Duration::from_millis(60));
+    // First REAL contended statement consumes the original100ms allowance.
+    // No fixed60ms sleep or scheduler-sensitive150ms wall-time deadline.
     let error = startup.conn.execute("INSERT INTO startup_probe VALUES(1)", []).unwrap_err();
     assert!(startup_sqlite_busy(&error.into()));
+    let first=waits.take();assert_original_startup_decisions(&first,deadline);
+    assert!(!first.last().unwrap().retry);
     assert!(Instant::now() >= deadline);
-    assert!(started.elapsed() < AGENT_STARTUP_BUSY_TIMEOUT + Duration::from_millis(50),
-        "a later statement renewed the original startup wait");
+    // A second REAL statement must retain that SAME expired deadline and
+    // request ZERO additional sleep, even if CI descheduled this test thread.
+    let error = startup.conn.execute("INSERT INTO startup_probe VALUES(2)", []).unwrap_err();
+    assert!(startup_sqlite_busy(&error.into()));
+    let later=waits.take();assert_original_startup_decisions(&later,deadline);
+    assert!(later.iter().all(|decision|decision.entered>=deadline&&decision.requested.is_zero()&&!decision.retry),
+        "a later statement renewed the original startup wait: {later:?}");
     assert!(startup.finish_agent_startup_before(deadline, AGENT_STARTUP_BUSY_TIMEOUT).is_err());
     other.execute_batch("ROLLBACK").unwrap();
     let count: i64 = startup.conn.query_row("SELECT count(*) FROM startup_probe", [], |row| row.get(0)).unwrap();

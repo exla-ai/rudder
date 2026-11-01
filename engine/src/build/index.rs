@@ -73,7 +73,12 @@ impl BuildIndex {
             use std::os::unix::fs::PermissionsExt;
             fs::set_permissions(root.as_ref(), fs::Permissions::from_mode(0o700))?;
         }
-        let path = root.as_ref().join("index.sqlite");
+        // Anchor every child to the same canonical root. macOS's temporary
+        // directory commonly has a symlinked ancestor (/var -> /private/var).
+        // Retained preparation must not mistake that stable alias for a later
+        // index redirect or capture differently spelled lock/database paths.
+        let root = root.as_ref().canonicalize()?;
+        let path = root.join("index.sqlite");
         let connection = Connection::open(&path)?;
         connection.busy_timeout(Duration::from_secs(5))?;
         #[cfg(unix)]
@@ -82,13 +87,13 @@ impl BuildIndex {
             fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
         }
         connection.execute_batch("PRAGMA journal_mode=WAL;PRAGMA synchronous=FULL;CREATE TABLE IF NOT EXISTS build_index(format_version INTEGER NOT NULL,category TEXT NOT NULL,key_digest TEXT NOT NULL,key_json TEXT NOT NULL,receipt_json TEXT NOT NULL,PRIMARY KEY(category,key_digest));")?;
-        let locks = root.as_ref().join("locks");
+        let locks = root.join("locks");
         fs::create_dir_all(&locks)?;
         Ok(Self {
             store,
             connection: Mutex::new(connection),
             locks,
-            root: root.as_ref().canonicalize()?,
+            root,
         })
     }
     pub fn store(&self) -> &LocalStore {

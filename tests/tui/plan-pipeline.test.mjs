@@ -3,7 +3,9 @@
 // run as isolated workers, and their work merges into the checkout. This is a
 // journey because every step depends on the last, and the whole storyline is
 // worth keeping in the report when any of it breaks.
+import assert from "node:assert/strict";
 import fsp from "node:fs/promises";
+import path from "node:path";
 import test from "node:test";
 
 import { journey } from "tui-integration-tests";
@@ -13,6 +15,7 @@ import {
   planPipelineBackend,
   removeScratch,
   scratchRepo,
+  waitUntil,
 } from "./helpers.mjs";
 
 assertPrerequisites();
@@ -30,6 +33,62 @@ test("plan → approve → workers → merge lands every node's work", { timeout
     env: { RUDDER_INTERACTIVE_ORCHESTRATOR: "0" },
   });
   const story = journey(session, "plan pipeline: propose, approve, run, merge");
+  const nodeIds = Array.from({ length: nodeCount }, (_, i) => `n${i}`);
+  const observedWorkers = new Map();
+  const readIfPresent = async (file) => {
+    try { return await fsp.readFile(file, "utf8"); }
+    catch (error) { if (error.code === "ENOENT") return null; throw error; }
+  };
+  const nodeRecords = async () => {
+    const root = path.join(repo, ".rudder", "runs");
+    let entries;
+    try { entries = await fsp.readdir(root, { withFileTypes: true }); }
+    catch (error) { if (error.code === "ENOENT") return []; throw error; }
+    const records = await Promise.all(entries.filter((entry) => entry.isDirectory()).map(async (entry) => {
+      const raw = await readIfPresent(path.join(root, entry.name, "run.json"));
+      return raw === null ? null : JSON.parse(raw);
+    }));
+    return records.filter((record) => record && nodeIds.includes(record.nodeId));
+  };
+  const everyWorkerProducedOutput = async ({ finished = false, merged = false } = {}) => {
+    const records = await nodeRecords();
+    for (const nodeId of nodeIds) {
+      const matches = records.filter((record) => record.nodeId === nodeId);
+      if (matches.length === 0) return false;
+      assert.equal(matches.length, 1, `one actual run for ${nodeId}`);
+      const record = matches[0], workspace = record.workspace?.path;
+      assert.equal(record.vcs, "jj", `${nodeId} uses a jj workspace`);
+      assert.equal(typeof workspace, "string", `${nodeId} has its actual workspace path`);
+      assert(path.isAbsolute(workspace));
+      const relative = path.relative(path.join(repo, ".rudder-workspaces"), workspace);
+      assert(relative && !path.isAbsolute(relative) && relative !== ".." && !relative.startsWith(`..${path.sep}`), `${nodeId} writes in an isolated workspace`);
+      assert(record.workspace.enabled || record.status === "merged", `${nodeId} cannot execute in the main checkout`);
+      assert.equal(typeof record.planId, "string");
+      assert(record.planId.length > 0);
+      // Match the existing backend's actual output name; no extra marker or
+      // simulated status is introduced to keep a fast worker visible.
+      const slug = path.basename(workspace).replace(/[^a-z0-9]/g, "").slice(-6);
+      const file = `NODE-${slug}.txt`;
+      const identity = { runId: record.id, planId: record.planId, workspace, file };
+      if (observedWorkers.has(nodeId)) assert.deepEqual(identity, observedWorkers.get(nodeId));
+      else observedWorkers.set(nodeId, identity);
+      const integrated = record.status === "merged" && record.merge?.status === "merged";
+      if (finished && !["completed", "merged"].includes(record.status)) return false;
+      if (merged && !integrated) return false;
+      const isolated = await readIfPresent(path.join(workspace, file));
+      // The normal workspace sweep may already have removed a merged worker.
+      // Its durable merged record plus its actual landed bytes remain proof.
+      const landed = integrated ? await readIfPresent(path.join(repo, file)) : null;
+      if (merged && landed !== "node work\n") return false;
+      if (!merged && isolated !== "node work\n" && landed !== "node work\n") return false;
+    }
+    const workers = [...observedWorkers.values()];
+    assert.equal(new Set(workers.map((worker) => worker.runId)).size, nodeCount);
+    assert.equal(new Set(workers.map((worker) => worker.workspace)).size, nodeCount);
+    assert.equal(new Set(workers.map((worker) => worker.file)).size, nodeCount);
+    assert.equal(new Set(workers.map((worker) => worker.planId)).size, 1);
+    return true;
+  };
 
   await story.step("dashboard boots", async () => {
     await session.waitForText("Type a task", { timeout: 20_000 });
@@ -55,33 +114,21 @@ test("plan → approve → workers → merge lands every node's work", { timeout
       timeout: 10_000,
       label: "the orchestrator row selected",
     });
+    assert.equal((await nodeRecords()).length, 0, "both nodes await actual approval");
     await session.press("Enter");
-    await session.waitForText("working", { timeout: 40_000 });
+    await waitUntil(() => everyWorkerProducedOutput(), {
+      timeout: 40_000,
+      interval: 400,
+      label: "both approved workers produce their isolated outputs",
+    });
   });
 
   await story.step("both node workers finish", async () => {
-    // Each node writes NODE-<workspace>.txt in its isolated workspace.
-    const deadline = Date.now() + 60_000;
-    for (;;) {
-      const files = [];
-      const roots = await fsp.readdir(repo, { withFileTypes: true }).catch(() => []);
-      const wt = roots.find((e) => e.name === ".rudder-workspaces");
-      if (wt) {
-        const walk = async (dir) => {
-          for (const e of await fsp.readdir(dir, { withFileTypes: true }).catch(() => [])) {
-            const p = `${dir}/${e.name}`;
-            if (e.isDirectory()) await walk(p);
-            else if (e.name.startsWith("NODE-")) files.push(p);
-          }
-        };
-        await walk(`${repo}/.rudder-workspaces`);
-      }
-      if (files.length >= nodeCount) break;
-      if (Date.now() >= deadline) {
-        throw new Error(`only ${files.length}/${nodeCount} node files were produced`);
-      }
-      await new Promise((r) => setTimeout(r, 400));
-    }
+    await waitUntil(() => everyWorkerProducedOutput({ finished: true }), {
+      timeout: 60_000,
+      interval: 400,
+      label: "both actual node runs finish with their output intact",
+    });
   });
 
   await story.step("nodes auto-merge and every file lands in the checkout", async () => {
@@ -89,15 +136,13 @@ test("plan → approve → workers → merge lands every node's work", { timeout
     // merge). Wait for the merged state, then let the disk be the arbiter:
     // every node's file must be in the main checkout.
     await session.waitForText("merged", { timeout: 40_000 });
-    const deadline = Date.now() + 40_000;
-    for (;;) {
-      const landed = (await fsp.readdir(repo)).filter((n) => n.startsWith("NODE-"));
-      if (landed.length >= nodeCount) return;
-      if (Date.now() >= deadline) {
-        throw new Error(`only ${landed.length}/${nodeCount} node files reached the checkout`);
-      }
-      await new Promise((r) => setTimeout(r, 400));
-    }
+    await waitUntil(() => everyWorkerProducedOutput({ merged: true }), {
+      timeout: 40_000,
+      interval: 400,
+      label: "both actual merged node outputs land in the checkout",
+    });
+    const landed = (await fsp.readdir(repo)).filter((name) => name.startsWith("NODE-")).sort();
+    assert.deepEqual(landed, [...observedWorkers.values()].map((worker) => worker.file).sort());
   });
 
   await story.end();

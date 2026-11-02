@@ -24,8 +24,40 @@ import { check, fail, id, key, canonical, hash, snapshot, validateSpec, validate
 export interface RuntimeQualificationProvisionReceipt {provision:ProvisionReceipt;scope:RuntimeQualificationScope;compilerScope?:CompilerQualificationScope;}
 export type ManagedCommandSend=(method:string,params:Record<string,unknown>,remainingMs:number)=>Promise<unknown>;
 interface ProvisionCarrier {qualification?:{sdkReservationAttempted?:boolean;sdkPurpose?:CompilerQualificationPurpose;sdkReservation?:Promise<CompilerQualificationPurpose>;registrationCutoff?:RuntimeQualificationCutoff;reservationAttempted:boolean;purpose?:RuntimeQualificationPurpose;reservation?:Promise<RuntimeQualificationPurpose>;custody?:OriginalDisposableMachineCustody};intent:Intent;time:OriginalTime;cipher:Buffer;token:string;registrationKey:string;registrationCipher:Buffer;busy:boolean;held?:{effect:Effect;promise:Promise<EffectAck>;ack?:EffectAck;failed:boolean};}
-interface CommandCarrier {intent:Intent;time:OriginalTime;key:string;operation:HostOperation;busy:boolean;started:boolean;promise?:Promise<unknown>;rawReply?:unknown;reply?:unknown;replied:boolean;failed:boolean;}
+interface CommandCarrier {intent:Intent;time:OriginalTime;key:string;operation:HostOperation;busy:boolean;started:boolean;promise?:Promise<unknown>;rawReply?:unknown;reply?:unknown;replied:boolean;failed:boolean;observationBorrow?:StagingOriginalCommandBudgetBorrow;}
 const ISSUER=Symbol("actual managed-home registry");
+/** Opaque read-only restriction over the SAME original CommandCarrier.time.
+ * No deadline/value constructor is exported and no replacement OriginalTime is
+ * created. Holding a borrow/window retains the whole original command carrier,
+ * its actual promise and unknown outcome even after external history changes.
+ */
+class StagingOriginalCommandObservationWindow {
+  #carrier:CommandCarrier;#threshold:number;
+  private constructor(issuer:symbol,carrier:CommandCarrier,threshold:number){check(issuer===ISSUER);this.#carrier=carrier;this.#threshold=threshold;}
+  static issue(issuer:symbol,carrier:CommandCarrier,threshold:number){return new StagingOriginalCommandObservationWindow(issuer,carrier,threshold);}
+  remaining():number{check(this.#carrier.started&&!this.#carrier.replied,"effect_unknown");
+    const remaining=this.#carrier.time.remaining()-this.#threshold;check(remaining>0,"expired");return remaining;}
+  [inspect.custom](){return "StagingOriginalCommandObservationWindow [same original countdown only]";}
+  toJSON():never{fail("invalid_request");}
+}
+class StagingOriginalCommandBudgetBorrow {
+  #started=false;#window?:StagingOriginalCommandObservationWindow;#carrier:CommandCarrier;
+  private constructor(issuer:symbol,carrier:CommandCarrier){check(issuer===ISSUER);this.#carrier=carrier;}
+  static issue(issuer:symbol,carrier:CommandCarrier){return new StagingOriginalCommandBudgetBorrow(issuer,carrier);}
+  remaining():number{check(this.#carrier.started&&!this.#carrier.replied,"effect_unknown");return this.#carrier.time.remaining();}
+  startObservationWindowRetaining():StagingOriginalCommandObservationWindow{
+    check(!this.#started,"effect_unknown");this.#started=true; // arm before the fallible ORIGINAL sample
+    const remaining=this.remaining();
+    // Restrict the existing countdown by a threshold. No clock is read here
+    // except carrier.time.remaining(), no originalTime(15000), no DATA deadline.
+    this.#window=StagingOriginalCommandObservationWindow.issue(ISSUER,this.#carrier,Math.max(0,remaining-15000));
+    return this.#window;
+  }
+  [inspect.custom](){return "StagingOriginalCommandBudgetBorrow [non-serializable original carrier]";}
+  toJSON():never{fail("invalid_request");}
+}
+export type {StagingOriginalCommandBudgetBorrow,StagingOriginalCommandObservationWindow};
+export type StagingObservedCommandSend=(method:string,params:Record<string,unknown>,remainingMs:number,original:StagingOriginalCommandBudgetBorrow)=>Promise<unknown>;
 class ManagedHomeRoute {
   #current:()=>Promise<void>;#intent:Intent;#machine:MachineAck;
   private constructor(issuer:symbol,intent:Intent,machine:MachineAck,readonly projectAlias:string,current:()=>Promise<void>){check(issuer===ISSUER);this.#intent=intent;this.#machine=machine;this.#current=current;}
@@ -291,6 +323,23 @@ export class ManagedHomeRegistry {
   async managedImageBatchPut(worker:ManagedHomeWorker,transferId:string,batchId:string,req:IncomingMessage){this.#configured();check(this.freshStorage,"unconfigured");const home=this.#workers.get(worker);check(home,"identity_changed");this.#ordinary(home.intent);await worker.assertCredentialsCurrent();return this.freshStorage.putImageBatch(home,transferId,batchId,req);}
   async reconcileManagedImageBatch(worker:ManagedHomeWorker,transferId:string,batchId:string,input:unknown){this.#configured();check(this.freshStorage,"unconfigured");const home=this.#workers.get(worker);check(home,"identity_changed");this.#ordinary(home.intent);await worker.assertCredentialsCurrent();return this.freshStorage.reconcileImageBatch(home,transferId,batchId,input);}
   #original(route:ManagedHomeRoute):BoundHome{const home=this.#routes.get(route);check(home,"identity_changed");return home;}
+  /** Staging-only original OpenPreparedProject observation. The ordinary SDK
+   * lifecycle/policy and genuine route remain mandatory; no policy is broadened.
+   * Delegates the one mutation to the UNCHANGED original dispatcher. The borrow
+   * is issued only inside that dispatcher's same retained original send promise.
+   */
+  async dispatchStagingGenuineIngressCommand(route:ManagedHomeRoute,commandKey:string,input:HostOperation,send:StagingObservedCommandSend):Promise<unknown>{
+    this.#configured();const home=this.#original(route);const operation=validateOperation(input);
+    check(this.#retainStagingOrdinaryOriginal(home.intent)&&operation.op==="OpenPreparedProjectV1","unconfigured");
+    check(/^genuine-ingress:[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(commandKey),"invalid_request");
+    const mapKey=route.accountId+"\0"+route.homeId+"\0"+commandKey;
+    return this.dispatchManagedHomeCommand(route,commandKey,operation,(method,params,remaining)=>{
+      const c=this.#commands.get(mapKey);check(c&&c.started&&c.promise&&!c.replied&&c.operation.op==="OpenPreparedProjectV1","effect_unknown");
+      check(canonical(c.operation).equals(canonical(operation)),"identity_changed");
+      if(!c.observationBorrow)c.observationBorrow=StagingOriginalCommandBudgetBorrow.issue(ISSUER,c);
+      return send(method,params,remaining,c.observationBorrow);
+    });
+  }
   async dispatchManagedHomeCommand(route:ManagedHomeRoute,commandKey:string,input:HostOperation,send:ManagedCommandSend):Promise<unknown>{const {store}=this.#configured();key(commandKey);const operation=validateOperation(input);const home=this.#original(route);this.#ordinary(home.intent);
     const grant=this.#grants.get(route);check(grant,"unconfigured");await grant.assertOriginalCurrent();
     if(operation.op==="ReceiptV1"){await route.assertRoutableCurrent();const known=await store.command(home.intent,operation.lookup_command_key);check(known&&known.operation.op!=="ReceiptV1"&&known.operation.project_alias===route.projectAlias,"not_found");

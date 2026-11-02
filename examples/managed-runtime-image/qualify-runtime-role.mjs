@@ -7,6 +7,7 @@ import {constants,readSync} from 'node:fs';
 import path from 'node:path';
 import {randomUUID} from 'node:crypto';
 import {StagingSdkRuntimeFlow} from '../../cloud/dist/managed-home-provisioning/staging-sdk-runtime-flow.js';
+import {createStagingGenuineIngressExperiment} from '../../cloud/dist/managed-home-provisioning/staging-genuine-ingress-experiment.js';
 import {S3FabricObjectStorage} from '../../cloud/dist/fabric-cas.js';
 import {readManagedHomeStartupConfig} from '../../cloud/dist/managed-home-provisioning/startup-config.js';
 import {originalTime} from '../../cloud/dist/managed-home-provisioning/fly.js';
@@ -14,6 +15,7 @@ import {canonical,hash} from '../../cloud/dist/managed-home-provisioning/types.j
 import {RuntimeImageQualificationDriver} from '../../cloud/dist/managed-home-provisioning/runtime-qualification-driver.js';
 import {CompilerSdkQualificationDriver} from '../../cloud/dist/managed-home-provisioning/compiler-qualification-driver.js';
 
+const GENUINE_ENTRY_EFFECTS_ALLOWED=false;
 let driver;let output;let storage;let startupCheck='private-input';let outputFailure=false;let statusBusy=false;
 // Closed diagnostic DATA only. Never serialize input, exception text, provider
 // metadata or role identifiers, and never repeat a failed storage readback.
@@ -59,8 +61,11 @@ async function status(){if(!output||outputFailure||statusBusy)return;statusBusy=
 try{
  const i=await privateJson(process.env.RUDDER_RUNTIME_QUALIFICATION_INPUT);
  startupCheck='input-schema';
+ const genuine=Object.hasOwn(i??{},'genuine_ingress');
+ if(genuine&&!GENUINE_ENTRY_EFFECTS_ALLOWED)throw Error(); // before reading optional DATA or constructing its owner
  const flow=i.qualification_kind==='sdk-runtime-ordinary-v2';
- exact(i,flow?['format_version','qualification_kind','postgres','candidate','account_id','command_key','activation_authority','services','supervisor']:['format_version','qualification_kind','postgres','candidate','account_id','command_key']);if(i.format_version!==1||!['runtime-image-v1','compiler-sdk-v1','sdk-runtime-ordinary-v2'].includes(i.qualification_kind))throw Error();
+ if(genuine&&!flow)throw Error();
+ exact(i,flow?['format_version','qualification_kind','postgres','candidate','account_id','command_key','activation_authority','services','supervisor',...(genuine?['genuine_ingress']:[])]:['format_version','qualification_kind','postgres','candidate','account_id','command_key']);if(i.format_version!==1||!['runtime-image-v1','compiler-sdk-v1','sdk-runtime-ordinary-v2'].includes(i.qualification_kind))throw Error();
  if((flow||i.qualification_kind==='compiler-sdk-v1')!==Object.hasOwn(i.candidate??{},'sdk'))throw Error();
  exact(i.postgres,['mode','authority','registrationAuthority','policy','flyToken','tokenEncryptionKeyHex']);
  const hex=i.postgres.tokenEncryptionKeyHex;if(typeof hex!=='string'||!/^[a-f0-9]{64}$/.test(hex)||/^0+$/.test(hex))throw Error();
@@ -86,7 +91,17 @@ try{
   const storageClock=originalTime(Math.min(300000,setup.remaining()));retain.add(storageClock);
   const readback=storage.qualifyImmutableBatchRetentionRetaining({remaining:()=>Math.min(storageClock.remaining(),setup.remaining())});retain.add(readback);await readback;setup.remaining();storage.assertQualifiedBatchRetention();
   startupCheck='startup-config';const full=readManagedHomeStartupConfig(JSON.stringify({formatVersion:1,authority:postgres.authority,registrationAuthority:postgres.registrationAuthority,policy:postgres.policy,tokenEncryptionKeyHex:hex,storageReceiptSha256:i.services.storageReceiptSha256,serviceCredentials:i.services.serviceCredentials}),{storage,flyToken:postgres.flyToken});retain.add(full);
-  startupCheck='flow-construction';if(full.mode!=='postgres')throw Error();driver=new StagingSdkRuntimeFlow(full,i.activation_authority,i.candidate,i.account_id,i.command_key,setup);retain.add(driver);
+  startupCheck='flow-construction';if(full.mode!=='postgres')throw Error();
+  let genuineFlow;
+  if(genuine){
+   exact(i.genuine_ingress,['experiment','artifact_data']);
+   const experiment=createStagingGenuineIngressExperiment(i.genuine_ingress.experiment);retain.add(experiment);
+   setup.remaining();const captureOutput=path.join(output,'genuine-ingress-logs-v1');await fs.mkdir(captureOutput,{mode:0o700});
+   const captureDirectory=await fs.lstat(captureOutput);setup.remaining();
+   if(!captureDirectory.isDirectory()||captureDirectory.uid!==process.getuid()||captureDirectory.gid!==process.getgid()||(captureDirectory.mode&0o7777)!==0o700)throw Error();
+   genuineFlow={experiment,artifactData:i.genuine_ingress.artifact_data,output:captureOutput};retain.add(genuineFlow);
+  }
+  driver=new StagingSdkRuntimeFlow(full,i.activation_authority,i.candidate,i.account_id,i.command_key,setup,genuineFlow);retain.add(driver);
   startupCheck='flow-start';
   start=driver.runRetaining();
  }else{

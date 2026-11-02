@@ -3551,3 +3551,38 @@ builder cleanup remains unverified. A test-local `AssertUnwindSafe` correction
 preserves the original claim, panic and absorbing-state assertions. Its fresh
 full qualification is pending. The additional producer, Root-command and SDK
 diagnostic proposals remain outside Main until their relevant checks pass.
+
+
+### 2026-11-02 07:27Z: controller source integrated; Rust qualification hit its compile limit
+
+The twelve-file controller composition is integrated with all six optional
+experiment, collector, entry, flow, packaging and target-check guards disabled.
+It retains the original authenticated command and collector owners, adds a
+strict target DATA accessor, and binds the staging package to five compiled
+modules plus its entry source. The two Python payloads remain byte-identical
+to the reviewed collector sources. Fresh coherent five-module noEmit and
+syntax/lineage checks passed before integration. Source-manifest SHA:
+`b5204ce719d01e5bc2d2ff5c3eebb07d50402ca8ed143023a24914a04c69e460`.
+Independent source review SHA:
+`c2fa6f9fa2f63196cfe8e18451e35f4d13a679fb91b78fe55a8ca00e093dd6ea`.
+Actual artifact/revision, compiled module, target and genuine-capture bindings
+remain absent. The full Cloud build passed (original session 85599), as did
+all 68 selected registry/staging/policy regression tests across ten files
+(original session 79247), with zero skips. Actual compiled module hashes are
+recorded as local build DATA; the controller image has not been rebuilt.
+
+The corrected source35 attempt reached its fixed 1800-second compiler limit
+while linking the admission-wins harness. The original provider child settled
+with exit 1, actual wait, both pipe EOFs and held pidfd; compiler step 19 exited
+124. Default harnesses and the close-wins leaf compiled, but no test body ran.
+There is no overall compile or source acceptance. Remote builder resource
+cleanup remains unknown. Original session 93123 candidate-report SHA:
+`18c8cbd7695349c75f5a6994111080947d43d0ebf71d7039f2a5ee6d1ea94b3e`.
+Root terminal observation SHA:
+`baed30c5a60ce86b556873765ff3d2e40a6625c9f39cac143a27d1fd2a5125a4`.
+Independent actual failure review SHA:
+`b60630ff1dfae2b8934d437ac5c6e28ad77f759f92dcead7421859bf57ba7025`.
+The next source-only recipe keeps production feature binaries in release mode
+and uses explicit development profiles for test harnesses. The source36 bytes,
+original compile/test deadlines and all test/list requirements stay fixed.
+It has not been executed and establishes no SDK, runtime or deployment result.

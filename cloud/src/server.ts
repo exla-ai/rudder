@@ -323,6 +323,9 @@ ensureColumn("rudder_workspaces", "volume_id", "text");
 ensureColumn("rudder_workspaces", "source_kind", "text");
 ensureColumn("rudder_workspaces", "repo_url", "text");
 ensureColumn("rudder_workspaces", "git_ref", "text");
+// A replacement worker token handed to a home by its idle update. Both tokens
+// work until the home authenticates with the new one (see requireWorkerBearer).
+ensureColumn("rudder_workspaces", "worker_token_next_hash", "text");
 // Busy signal reported by the worker supervisor in each heartbeat: how many
 // rudder runs are actively working in that machine. The idle sweep must not
 // stop a workspace whose agents are mid-task just because nobody is attached
@@ -558,12 +561,38 @@ const updateWorkspaceSnapshot = database.prepare(`
       updated_at = @updatedAt
   where id = @id
 `);
+// A full token reset replaces the machine, so a replacement still pending from
+// an idle update is dropped with it.
 const updateWorkspaceWorkerToken = database.prepare(`
   update rudder_workspaces
   set worker_token_hash = @workerTokenHash,
+      worker_token_next_hash = null,
       updated_at = @updatedAt
   where id = @id
 `);
+const setNextWorkerToken = database.prepare(`
+  update rudder_workspaces
+  set worker_token_next_hash = @nextHash,
+      updated_at = @updatedAt
+  where id = @homeId or (home_id = @homeId and source_kind = 'home-repo')
+`);
+const homesWithNextWorkerToken = database.prepare(
+  "select id from rudder_workspaces where worker_token_next_hash = ? and source_kind = 'home'",
+);
+const promoteHomeWorkerToken = database.prepare(`
+  update rudder_workspaces
+  set worker_token_hash = @nextHash,
+      worker_token_next_hash = null,
+      updated_at = @updatedAt
+  where id = @homeId or (home_id = @homeId and source_kind = 'home-repo')
+`);
+// Repos added while a replacement was pending carry only the old hash, so the
+// whole home moves to the new token at once.
+const promoteWorkerToken = database.transaction((nextHash: string, updatedAt: string) => {
+  for (const home of homesWithNextWorkerToken.all(nextHash) as { id: string }[]) {
+    promoteHomeWorkerToken.run({ homeId: home.id, nextHash, updatedAt });
+  }
+});
 const updateWorkspaceActivity = database.prepare(`
   update rudder_workspaces
   set last_activity_at = @lastActivityAt,
@@ -4738,7 +4767,20 @@ function requireWorkerBearer(req: IncomingMessage, sailRow: Record<string, unkno
   const authHeader = req.headers.authorization || "";
   const token = authHeader.startsWith("Bearer ") ? authHeader.slice("Bearer ".length).trim() : "";
   const expected = optionalString(sailRow.worker_token_hash);
-  if (!token.startsWith("rdrw_") || !expected || tokenHash(token) !== expected) {
+  // A repo added while a replacement was pending copied only the old hash, so it
+  // also accepts the replacement its home is waiting on.
+  const homeRow = sailRow.source_kind === "home-repo" && optionalString(sailRow.home_id)
+    ? findWorkspaceById.get(String(sailRow.home_id)) as Record<string, unknown> | undefined
+    : undefined;
+  const next = optionalString(sailRow.worker_token_next_hash) ?? optionalString(homeRow?.worker_token_next_hash);
+  const hash = token.startsWith("rdrw_") ? tokenHash(token) : "";
+  if (hash && next && hash === next) {
+    // The home booted with the token its idle update gave it. From now on that
+    // is the only one: the token it replaced stops working.
+    promoteWorkerToken(next, new Date().toISOString());
+    return;
+  }
+  if (!hash || !expected || hash !== expected) {
     throw unauthorized();
   }
 }
@@ -5151,7 +5193,7 @@ const setHomeRepoStatus = database.prepare(`
   where home_id = @homeId and source_kind = 'home-repo' and status not in ('deleting')
 `);
 const setHomeRepoTokens = database.prepare(`
-  update rudder_workspaces set worker_token_hash = @workerTokenHash, updated_at = @updatedAt
+  update rudder_workspaces set worker_token_hash = @workerTokenHash, worker_token_next_hash = null, updated_at = @updatedAt
   where home_id = @homeId and source_kind = 'home-repo'
 `);
 const setRepoFailure = database.prepare(
@@ -5447,9 +5489,16 @@ async function sweepIdleHomeUpdates(): Promise<void> {
       }
       homeUpdating.set(home.id, now);
       console.log(`[home] ${home.id} idle on ${image}; updating to ${flyWorkerImage}`);
+      // The restart is also the one moment a home can take a new worker token
+      // without cutting off an agent. The new token is accepted alongside the
+      // old one until the home uses it, so a failed or uncertain update cannot
+      // lock the home out.
+      const workerToken = `rdrw_${randomBytes(32).toString("base64url")}`;
+      setNextWorkerToken.run({ homeId: home.id, nextHash: tokenHash(workerToken), updatedAt: new Date().toISOString() });
+      const env = config.env && typeof config.env === "object" ? config.env as JsonRecord : {};
       await flyRequest<FlyMachine>(
         `/v1/apps/${encodeURIComponent(flyAppName)}/machines/${encodeURIComponent(home.machineId)}`,
-        { method: "POST", body: { config: { ...config, image: flyWorkerImage } } },
+        { method: "POST", body: { config: { ...config, image: flyWorkerImage, env: { ...env, RUDDER_WORKER_TOKEN: workerToken } } } },
       );
       homeImageChecked.set(home.id, { at: now, image: flyWorkerImage });
     } catch (error) {

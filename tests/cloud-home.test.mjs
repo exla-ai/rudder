@@ -688,10 +688,42 @@ serverTest("a home on an old image is updated in place once its agents are idle,
   const update = await waitFor(() => flyCalls.find((call) => call.method === "POST"), { timeout: 8000 });
   assert.equal(update.body.config.image, "registry.fly.io/workers:new");
   assert.deepEqual(update.body.config.mounts, [{ volume: "vol_1", path: "/workspace" }]);
-  assert.deepEqual(update.body.config.env, { A: "1" });
+  // Same config, plus a fresh worker token for the restarted home.
+  const { RUDDER_WORKER_TOKEN: newToken, ...env } = update.body.config.env;
+  assert.deepEqual(env, { A: "1" });
+  assert.match(newToken, /^rdrw_/);
+  assert.notEqual(newToken, workerToken);
   // Once is enough.
   await sleep(2500);
   assert.equal(flyCalls.filter((call) => call.method === "POST").length, 1);
+
+  // A repo added while the update is in flight still moves with its home.
+  const live = new Database(dbPath);
+  live.prepare(`
+    insert into rudder_workspaces (id, account_id, workspace_key, repo_name, status, machine_id, worker_token_hash,
+      source_kind, repo_url, home_id, created_at, updated_at, last_activity_at)
+    values ('repo-idle', 'acct-idle', 'home:a/b', 'b', 'running', null, ?, 'home-repo', 'https://github.com/a/b.git', 'home-idle', ?, ?, ?)
+  `).run(tokenHash(workerToken), old, old, old);
+  const opens = (token, path = "home/home-idle/control") => new Promise((resolve) => {
+    const ws = new WebSocket(`ws://127.0.0.1:${port}/api/rudder/${path}`, { headers: { authorization: `Bearer ${token}` } });
+    ws.on("open", () => { ws.close(); resolve(true); });
+    ws.on("error", () => resolve(false));
+  });
+  const repo = "workspace/repo-idle/worker";
+  // Until the home boots with the new token, the old one keeps working, so an
+  // update that never landed cannot lock the home out.
+  assert.equal(await opens(workerToken), true, log());
+  // The restarted home's first call may come through that newer repo.
+  assert.equal(await opens(newToken, repo), true, log());
+  assert.equal(await opens(workerToken), false, "the replaced token stops working once the new one is used");
+  assert.equal(await opens(workerToken, repo), false, "the replaced token stops working for the home's repos too");
+  assert.equal(await opens(newToken), true, log());
+  const hashes = live.prepare("select id, worker_token_hash as hash, worker_token_next_hash as next from rudder_workspaces where id in ('home-idle', 'repo-idle') order by id").all();
+  live.close();
+  assert.deepEqual(hashes, [
+    { id: "home-idle", hash: tokenHash(newToken), next: null },
+    { id: "repo-idle", hash: tokenHash(newToken), next: null },
+  ]);
 });
 
 serverTest("a sleeping home's last state is a memory: live rows read paused, never working", async (t) => {

@@ -2878,3 +2878,45 @@ increase is claimed. A1 workload termination is separately reconciled in
 `/workspace/rudder-fifty-fork-build-overlay-a1-reconciliation-v1/REPORT.md`;
 Fly builder cleanup remains unknown, although the original test/RUN failure is
 terminal. Any new diagnostic experiment uses new custody, directory and nonce.
+
+### 2026-11-02 00:48Z: actual fifty-overlay component passed
+
+Fresh frozen source
+`2c20467e696c03c115eac24454d35e8a84229b3db2d69a535e66c038b9afbf88`
+passed all8 strict initial-source cases as actual UID0 in1.79 seconds, including
+the original retained-publication conflict regression. The subsequent original
+packed-history component passed:50 completed immutable forks,52 actual attempts
+with two negative cases, width1 and unchanged30/300/480-second restrictions.
+The original test child exited0, was waited with both EOFs and original pidfd/
+executable custody, without timeout, kill or truncation. The original build
+observer exited0 and reports no continuing remote build. Published component
+image digest is
+`sha256:e494db8761af71ca10635d2e4f7fdb54e959b25b3e6b508a18c2cc9057d1657e`.
+
+The50-sample publication median is23.82942ms, p95 28.802306ms, maximum30.815094ms;
+the49 warm-sample median is also23.82942ms. The prior full-publication A3 run's
+50-sample median was3724.429781ms, an observed156.30 ratio. Both report x86_64
+and available parallelism8; these remain separate warm-media component runs,
+not a controlled cold-worker population or agent-performance qualification.
+The50-fork campaign took10.605 seconds, with total per-fork median184.628355ms.
+Source preparation including the genuine parent completed in11.853 seconds
+under its unchanged original30-second constraint. This successful observation
+does not retroactively identify A1's omitted underlying failure.
+
+Actual publication instrumentation records250 local hash-read calls and250
+object-sync calls, each totaling2489350 bytes, all matching the verified new
+deltas. Counters exclude retention files, directory syncs, foreign/earlier parent
+and later served-read work; per-reference inherited IO is not independently
+tagged. All views share the exact genuine source parent and Environment Arcs;
+the overlay depth is3. The actual report and original transcript are retained
+at `/workspace/rudder-fifty-fork-build-overlay-a2`; bounded baseline comparison
+with input hashes is `/workspace/rudder-fifty-overlay-comparison-v1/comparison.json`.
+No Root mount, production Native parity, SDK, model-agent, normal drain or public
+deployment conclusion follows from this component. The corrected managed worker
+A5 remote build started only after this original benchmark/build terminated.
+
+Independent read-only review matched the original eight-pass strict marker,
+nonce/source/test-file-bound ELF, nested actual child report and pushed digest,
+all50 successful and two negative views, original limits, shared owner bindings,
+both served-read sets, per-delta counters and baseline arithmetic. It found no
+material issue or unwarranted claim in the scoped component comparison.

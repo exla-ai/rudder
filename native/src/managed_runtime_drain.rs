@@ -35,6 +35,10 @@ pub(crate) enum UncoveredRuntimeProducers {Pending}
 #[derive(Clone,Copy,Debug)]
 pub(crate) struct CoveredTaskGenerationProgress {
     pub covered_task_and_generation_reservations_closed:bool,
+    pub covered_ingress_fresh_roots_closed:bool,
+    pub original_ingress_owner_retained:bool,
+    pub original_ingress_roots_associated:bool,
+    pub retained_command_roots:usize,pub retained_fresh_roots:usize,
     pub original_boundary_roots_captured:bool,
     pub original_task_cells_captured:bool,
     pub retained_project_roots:usize,
@@ -85,19 +89,29 @@ impl CoveredRoots {
 /// not reopen admission or permit a replacement cleanup campaign.
 #[must_use="retain the original covered reservation campaign and partial roots"]
 pub(crate) struct CoveredTaskGenerationDrain {
-    shared:Arc<Shared>,campaign:Arc<CoveredCampaign>,roots:Option<CoveredRoots>,closed:bool,
+    shared:Arc<Shared>,ingress:crate::managed_machine_ingress::ManagedIngressControl,
+    campaign:Arc<CoveredCampaign>,roots:Option<CoveredRoots>,closed:bool,
+    producer_roots:Option<super::producer_reservations::CoveredProducerRoots>,producer_roots_associated:bool,
     runtime_uses:Option<RuntimeNativeUseObservation>,task_uses:OriginalTaskUseData,
     task_use_sample_current:bool,native_uses:RuntimeNativeUseData,
 }
 impl CoveredTaskGenerationDrain {
+    #[cfg(feature="managed-ingress-genuine-fixture")]
+    pub(super) fn fixture_contains_original_command_root(&self,actual:&Arc<IngressCommandRoot>)->bool {
+        self.producer_roots.as_ref().is_some_and(|roots|roots.fixture_contains_original_command_root(actual))
+    }
     /// Cached DATA only, usable after expiry. No locking, waiting, census retry,
     /// completion consumption, IO or authority follows from these counts.
     pub(crate) fn progress_data(&self)->CoveredTaskGenerationProgress {
         let roots=self.roots.as_ref();
         CoveredTaskGenerationProgress {
             covered_task_and_generation_reservations_closed:self.closed,
+            covered_ingress_fresh_roots_closed:self.producer_roots.is_some(),original_ingress_owner_retained:true,
+            original_ingress_roots_associated:self.producer_roots_associated,
+            retained_command_roots:self.producer_roots.as_ref().map_or(0,|r|r.command_count()),
+            retained_fresh_roots:self.producer_roots.as_ref().map_or(0,|r|r.fresh_count()),
             original_boundary_roots_captured:roots.is_some_and(|roots|roots.within_known_bounds),
-            original_task_cells_captured:roots.is_some_and(|roots|roots.within_known_bounds&&roots.seeds.iter().all(|seed|seed.tasks.is_some())),
+            original_task_cells_captured:self.producer_roots.as_ref().is_some_and(|r|r.command_count()==0&&r.fresh_count()==0)&&roots.is_some_and(|roots|roots.within_known_bounds&&roots.seeds.iter().all(|seed|seed.tasks.is_some())),
             retained_project_roots:roots.map_or(0,|roots|roots.projects.len()),
             retained_seed_roots:roots.map_or(0,|roots|roots.seeds.len()),
             retained_task_cells:roots.map_or(0,|roots|roots.seeds.iter().map(|seed|seed.tasks.as_ref().map_or(0,Vec::len)).sum()),
@@ -142,9 +156,9 @@ impl MachineControl {
     /// OFF App; publish original custody BEFORE fallible campaign admission,
     /// clock checks or capture. No effectful worker, replacement clock or join.
     pub(crate) fn begin_covered_task_generation_drain_retaining(&self,out:&mut Option<CoveredTaskGenerationDrain>,
-        original_cleanup:FinalizationBudget,cancelled:Arc<AtomicBool>)->Result<CoveredTaskGenerationProgress> {
+        ingress:crate::managed_machine_ingress::ManagedIngressControl,original_cleanup:FinalizationBudget,cancelled:Arc<AtomicBool>)->Result<CoveredTaskGenerationProgress> {
         ensure!(out.is_none(),"original covered reservation drain output occupied");
-        *out=Some(CoveredTaskGenerationDrain{shared:self.shared.clone(),
+        *out=Some(CoveredTaskGenerationDrain{shared:self.shared.clone(),ingress,producer_roots:None,producer_roots_associated:false,
             campaign:Arc::new(CoveredCampaign{original:original_cleanup,cancelled}),roots:None,closed:false,
             runtime_uses:None,task_uses:OriginalTaskUseData::default(),task_use_sample_current:false,native_uses:RuntimeNativeUseData::default()});
         self.poll_covered_task_generation_drain_retaining(out.as_mut().unwrap())
@@ -154,14 +168,19 @@ impl MachineControl {
     pub(crate) fn poll_covered_task_generation_drain_retaining(&self,owner:&mut CoveredTaskGenerationDrain)->Result<CoveredTaskGenerationProgress> {
         // Preserve last successful DATA while invalidating freshness BEFORE
         // entry guards, fallible clocks or borrows. Refusal leaves old counts stale.
-        owner.task_use_sample_current=false;owner.native_uses.sampled=false;
+        owner.task_use_sample_current=false;owner.native_uses.sampled=false;owner.producer_roots_associated=false;
         ensure!(Arc::ptr_eq(&self.shared,&owner.shared),"foreign original covered reservation machine");
+        ensure!(owner.ingress.belongs_to_machine(self),"foreign original ingress owner; retain close candidate");
         ensure!(self.shared.app_thread!=std::thread::current().id(),"covered reservation drain requires off App");
         // First retain the one original campaign in machine storage. Release
         // the mutex before sampling its clock; budget checks never run under it.
         match self.shared.carrier.try_lock() {
             Ok(mut carrier)=>carrier.covered_reservations.retain_campaign(&owner.campaign)?,
-            Err(TryLockError::WouldBlock)=>return Ok(owner.progress_data()),
+            Err(TryLockError::WouldBlock)=>{
+                #[cfg(feature="managed-ingress-genuine-fixture")]
+                if let Some(gate)=owner.ingress.fixture_gate(){gate.actual_carrier_would_block();}
+                return Ok(owner.progress_data())
+            },
             Err(TryLockError::Poisoned(_))=>anyhow::bail!("original machine carrier poisoned; covered drain retained"),
         }
         time(&owner.campaign.original,&owner.campaign.cancelled)?;
@@ -169,15 +188,24 @@ impl MachineControl {
             match self.shared.carrier.try_lock() {
                 Ok(mut carrier)=>{
                     carrier.covered_reservations.close(&owner.campaign)?;
+                    // Both root gates close in this one authoritative mutex.
+                    // No ingress/Job/environment payload lock is taken here.
+                    owner.producer_roots=Some(carrier.producer_roots.close_capture());
                     owner.closed=true;
                     // Pin original roots in this same critical section, before
                     // collector/discovery/task-reservation can run again.
                     owner.roots=Some(CoveredRoots::capture(&carrier));
                 },
-                Err(TryLockError::WouldBlock)=>return Ok(owner.progress_data()),
+                Err(TryLockError::WouldBlock)=>{
+                #[cfg(feature="managed-ingress-genuine-fixture")]
+                if let Some(gate)=owner.ingress.fixture_gate(){gate.actual_carrier_would_block();}
+                return Ok(owner.progress_data())
+            },
                 Err(TryLockError::Poisoned(_))=>anyhow::bail!("original machine carrier poisoned; campaign retained"),
             }
         }
+        owner.producer_roots_associated=owner.producer_roots.as_ref().context("original producer roots absent")?.validate_retained(&owner.ingress)?;
+        if !owner.producer_roots_associated{return Ok(owner.progress_data());}
         let roots=owner.roots.as_mut().unwrap();
         ensure!(roots.within_known_bounds,"covered registry exceeded known bounds; partial original roots retained");
         // No carrier lock here. Strong seed roots prevent retired collection;
@@ -197,7 +225,7 @@ impl MachineControl {
             Err(_)=>anyhow::bail!("original runtime client carrier poisoned; observation retained"),
         }
         if let Err(error)=owner.observe_retained_original_uses().and_then(|()|time(&owner.campaign.original,&owner.campaign.cancelled)) {
-            owner.task_use_sample_current=false;owner.native_uses.sampled=false;return Err(error);
+            owner.task_use_sample_current=false;owner.native_uses.sampled=false;owner.producer_roots_associated=false;return Err(error);
         }
         Ok(owner.progress_data())
     }

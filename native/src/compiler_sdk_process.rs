@@ -17,13 +17,31 @@ unsafe fn sdk_helper_exec_floor()->io::Result<()> {
     }
     crate::root_storage_bootstrap::clear_capabilities()?;Ok(())
 }
+// Diagnostic observation only. A closed startup receive direction cannot
+// acquire a result, reopen a handshake, settle a child or create a new clock.
+#[derive(Default)]
+struct StartupResultReadClosure {observed:bool}
+impl StartupResultReadClosure {
+    fn observe(&mut self,startup:bool)->Result<()> {
+        ensure!(startup,"SDK original helper endpoint closed without result; owners retained");
+        self.observed=true;Ok(())
+    }
+    fn poll_original(&self,exit:Option<&ExitStatus>,stdout_eof:bool,stderr_eof:bool)->Result<bool> {
+        ensure!(self.observed,"SDK startup read closure was not observed");
+        // Nonzero exits must go through the existing SAME Child/pidfd/wait/
+        // EOF validation above this call before any fixed stderr projection.
+        ensure!(exit.is_none_or(ExitStatus::success)||!stdout_eof||!stderr_eof,"SDK failed original helper identity checks remain required");
+        if exit.is_some()&&stdout_eof&&stderr_eof{return Err(anyhow::Error::new(BootstrapCheck::SdkHelperExitUnknown))}
+        Ok(false)
+    }
+}
 pub(super) struct SdkProcess {proof:Arc<RuntimeBootstrapProof>,admission:Arc<RuntimeReadAdmission>,original:FinalizationBudget,
-    diagnostic_check:BootstrapCheck,root:Option<OwnedFd>,data:Option<CompilerSdkMountData>,helper:Helper,job:Option<serde_json::Value>,job_fds:Option<(OwnedFd,OwnedFd)>,
+    diagnostic_check:BootstrapCheck,startup_read_closure:StartupResultReadClosure,root:Option<OwnedFd>,data:Option<CompilerSdkMountData>,helper:Helper,job:Option<serde_json::Value>,job_fds:Option<(OwnedFd,OwnedFd)>,
     job_child_disposal:Option<child_settlement::ChildSettlement>,terminal_failure:Option<terminal::OriginalHelperTerminalFailure>,pipe_error:bool,stdout:Option<std::process::ChildStdout>,stderr:Option<std::process::ChildStderr>,stdout_raw:Vec<u8>,stderr_raw:Vec<u8>,stdout_eof:bool,stderr_eof:bool,cancel:Option<OwnedFd>}
 impl SdkProcess {
     pub(super) fn capture_retaining(out:&mut Option<Self>,proof:Arc<RuntimeBootstrapProof>,admission:Arc<RuntimeReadAdmission>,original:FinalizationBudget,
         root:OwnedFd,data:CompilerSdkMountData,job:Option<serde_json::Value>,job_fds:Option<(OwnedFd,OwnedFd)>,cancel:Option<OwnedFd>)->Result<()> {
-        ensure!(out.is_none(),"original SDK process carrier occupied");*out=Some(Self{proof,admission,original,diagnostic_check:BootstrapCheck::SdkProcessOriginal,root:Some(root),data:Some(data),helper:Helper::staged(),job,job_fds,
+        ensure!(out.is_none(),"original SDK process carrier occupied");*out=Some(Self{proof,admission,original,diagnostic_check:BootstrapCheck::SdkProcessOriginal,startup_read_closure:StartupResultReadClosure::default(),root:Some(root),data:Some(data),helper:Helper::staged(),job,job_fds,
             job_child_disposal:None,terminal_failure:None,pipe_error:false,stdout:None,stderr:None,stdout_raw:Vec::new(),stderr_raw:Vec::new(),stdout_eof:false,stderr_eof:false,cancel});Ok(())
     }
     fn current_build(&self)->Result<()>{self.original.remaining()?;if let Some(fd)=&self.cancel{check_cancel(fd)?;}self.admission.current()?;self.proof.current()?;
@@ -84,6 +102,14 @@ impl SdkProcess {
                 "original failed SDK Child identity/wait/EOF differs");
             return Err(handshake_diagnostic::failed_original_stderr(&self.stderr_raw,self.job.is_none()));
         }
+        if self.startup_read_closure.observed {
+            self.diagnostic_check=BootstrapCheck::SdkProcessResult;
+            ensure!(self.job.is_none()&&self.helper.pending.is_none()&&self.helper.result.is_none(),"SDK original startup read closure state differs");
+            // No further endpoint read, accept, send or handshake is attempted.
+            // current_build and the original pipe/wait observations above are
+            // repeated under the SAME absolute cutoff until actual termination.
+            return self.startup_read_closure.poll_original(self.helper.exit.as_ref(),self.stdout_eof,self.stderr_eof)
+        }
         let helper=self.helper.process.as_ref().context("actual SDK helper pidfd absent")?;
         self.diagnostic_check=BootstrapCheck::SdkProcessPeer;
         if self.helper.endpoint.is_none(){let fd=unsafe{libc::accept4(self.helper.listener.as_ref().unwrap().as_raw_fd(),std::ptr::null_mut(),std::ptr::null_mut(),libc::SOCK_CLOEXEC|libc::SOCK_NONBLOCK)};
@@ -124,7 +150,7 @@ impl SdkProcess {
         }
         self.diagnostic_check=BootstrapCheck::SdkProcessResult;
         if self.helper.pending.is_none(){match self.helper.endpoint.as_ref().unwrap().receive_disposal_retaining(&mut self.helper.pending)?{
-            wire::RuntimeDisposalRead::Pending=>{},wire::RuntimeDisposalRead::Packet=>{},wire::RuntimeDisposalRead::ReadClosed{..}=>anyhow::bail!("SDK original helper endpoint closed without result; owners retained")}}
+            wire::RuntimeDisposalRead::Pending=>{},wire::RuntimeDisposalRead::Packet=>{},wire::RuntimeDisposalRead::ReadClosed{..}=>{self.startup_read_closure.observe(self.job.is_none())?;return Ok(false)}}}
         if self.helper.result.is_none(){let Some(packet)=self.helper.pending.as_ref()else{return Ok(false)};
             ensure!(packet.credentials.pid==helper.pid as i32&&packet.credentials.uid==1500&&packet.credentials.gid==1500&&packet.fds.is_empty(),"SDK fixed helper result origin differs");
             let result:CompilerSdkProbeData=serde_json::from_slice(&packet.bytes)?;ensure!(result.format_version==1&&result.kind=="original-sdk-fixed-helper-complete-v1"&&result.helper_pid==helper.pid&&result.helper_start_ticks==*self.helper.start.as_ref().unwrap()&&result.original_constraint==self.original.constraint(),"SDK fixed helper result binding differs");
@@ -168,3 +194,7 @@ mod handshake_privilege_tests;
 #[cfg(test)]
 #[path="compiler_sdk_peer_witness_tests.rs"]
 mod peer_witness_tests;
+
+#[cfg(test)]
+#[path="compiler_sdk_startup_read_closure_tests.rs"]
+mod startup_read_closure_tests;

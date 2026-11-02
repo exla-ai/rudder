@@ -25,13 +25,21 @@ fn borrowed<'a>(owner:&'a Mutex<Owner>)->Result<std::sync::MutexGuard<'a,Owner>>
 // No IO, join, owner release or authority publication runs in this Drop.
 struct PreparationDispatchWake<'a>(&'a AtomicBool);
 impl Drop for PreparationDispatchWake<'_>{fn drop(&mut self){self.0.store(true,Ordering::Release);}}
-pub(crate) struct SharedRuntimeEnvironment {machine:Arc<ManagedMachineCas>,owner:Mutex<Owner>,worker:Mutex<Option<OwnedWorkerJoin>>,preparation:Mutex<Option<RuntimePreparationUse>>,admitted:AtomicBool,owned:AtomicBool,
+pub(crate) struct SharedRuntimeEnvironment {continuation:OnceLock<Arc<crate::managed_machine_entry::OriginalFreshEnvironment>>,machine:Arc<ManagedMachineCas>,owner:Mutex<Owner>,worker:Mutex<Option<OwnedWorkerJoin>>,preparation:Mutex<Option<RuntimePreparationUse>>,admitted:AtomicBool,owned:AtomicBool,
     qualified:OnceLock<OriginalJoined>,late:Mutex<Option<WorkerJoined>>}
 impl SharedRuntimeEnvironment {
     pub(crate) fn capture(machine:Arc<ManagedMachineCas>,client:Arc<RuntimeImageClient>,original:FinalizationBudget,cancelled:Arc<AtomicBool>)->Arc<Self>{
-        Arc::new(Self{machine:machine.clone(),owner:Mutex::new(Owner{machine,client,original,cancelled,index_open:None,index:None,factory:None,attempted:false,ready:false,error:None,panic:None}),
+        Arc::new(Self{continuation:OnceLock::new(),machine:machine.clone(),owner:Mutex::new(Owner{machine,client,original,cancelled,index_open:None,index:None,factory:None,attempted:false,ready:false,error:None,panic:None}),
             worker:Mutex::new(None),preparation:Mutex::new(None),admitted:AtomicBool::new(false),owned:AtomicBool::new(false),qualified:OnceLock::new(),late:Mutex::new(None)})}
+    pub(crate) fn retain_original_fresh_admission(self:&Arc<Self>,control:&crate::managed_machine_entry::MachineControl,root:&Arc<crate::managed_machine_entry::FreshInitializationRoot>,original:&FinalizationBudget)->Result<()> {
+        // Carrier claim precedes ALL environment worker/preparation/owner locks.
+        // The same attached child is checked below without reentering carrier.
+        ensure!(self.continuation.get().is_none(),"original environment continuation already attached");
+        let child=control.claim_original_fresh_environment(root,self,original)?;
+        self.continuation.set(child).map_err(|_|anyhow::anyhow!("original environment continuation occupied"))
+    }
     pub(crate) fn start_retaining(self:&Arc<Self>)->Result<()> {
+        self.continuation.get().context("original fresh environment continuation absent")?.start_once(self)?;
         let mut slot=self.worker.try_lock().map_err(|_|anyhow::anyhow!("original environment worker registration busy"))?;
         ensure!(slot.is_none()&&!self.owned.load(Ordering::Acquire),"original environment worker already registered");
         let mut preparation=self.preparation.try_lock().map_err(|_|anyhow::anyhow!("original environment use registration busy"))?;

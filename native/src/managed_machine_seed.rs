@@ -64,6 +64,7 @@ impl SeedTicket {
 #[derive(Clone)]
 pub(crate) struct SeedTaskTicket {id:String,seed_id:String,seed:Weak<Cell<SeedCarrier>>,pub(super) cell:Arc<Cell<TaskScope>>,admission:Arc<SeedAdmission>,original:FinalizationBudget,app_thread:ThreadId}
 pub(super) struct TaskScope {
+    _original_command:Option<Arc<super::producer_reservations::OriginalTaskCommand>>,
     backed_inputs:Option<Arc<crate::managed_initial_source::task_backing::ManagedBackedTaskInputs>>,
     factory:SeedFactoryOwner,start:Option<SeedTaskUseGate>,factory_outcome:Option<Result<PreparedManagedTask>>,factory_refusal:Option<ManagedTaskStartFailure>,never:Option<NeverStartedScope>,guard:Option<SeedUseGuard>,fork_guard:Option<SeedUseGuard>,fork:Option<Arc<ManagedSeedForkCell>>,
     expected_run:Option<String>,bound:bool,enrollment:Option<EnrollmentTicket>,pub(super) completion:Option<Completion>,pub(super) generation:Option<Arc<super::source_generations::SourceGeneration>>,
@@ -255,8 +256,19 @@ impl MachineControl {
     /// only2 concurrent original factories; live task guards remain independent.
     pub(crate) fn admit_task_retaining(&self,out:&mut Option<SeedTaskTicket>,seed:&SeedTicket,project:&ProjectTicket,
         original:&FinalizationBudget,cancelled:Arc<AtomicBool>)->Result<()> {
-        ensure!(out.is_none(),"task scope output already exists");let c=self.carrier_off_app(original)?;
-        c.covered_reservations.require_task_reservation_open()?;
+        self.admit_task_with_original_retaining(out,seed,project,None,original,cancelled)
+    }
+    pub(crate) fn admit_task_from_original_command_retaining(&self,out:&mut Option<SeedTaskTicket>,origin:&crate::managed_machine_ingress::OriginalTaskCommandSelection,
+        original:&FinalizationBudget,cancelled:Arc<AtomicBool>)->Result<()> {
+        let (project,seed)=origin.selected_source();self.admit_task_with_original_retaining(out,seed,project,Some(origin),original,cancelled)
+    }
+    fn admit_task_with_original_retaining(&self,out:&mut Option<SeedTaskTicket>,seed:&SeedTicket,project:&ProjectTicket,
+        origin:Option<&crate::managed_machine_ingress::OriginalTaskCommandSelection>,original:&FinalizationBudget,cancelled:Arc<AtomicBool>)->Result<()> {
+        ensure!(out.is_none(),"task scope output already exists");let mut c=self.carrier_off_app(original)?;
+        // Attempt is charged under the closure mutex BEFORE any factory/start
+        // effect. Failure never restores this one original command role.
+        let original_command=if let Some(origin)=origin{let child=c.producer_roots.claim_task(origin)?;ensure!(child.matches(project,seed),"original command source association changed");Some(child)}
+            else{c.covered_reservations.require_task_reservation_open()?;None};
         ensure!(self.shared.phase.load(Ordering::Acquire)==SERVING&&!c.root_rpc_held&&!c.root_private_held,"machine new source work unavailable; original owners retained");original_seed(&c,seed)?;
         ensure!(c.projects.get(&project.id).is_some_and(|actual|Arc::ptr_eq(&actual.cell,&project.cell)),"foreign actual project");
         let mut s=lock(&seed.cell,original)?;s.admission.check_open()?;
@@ -270,7 +282,7 @@ impl MachineControl {
         let mut factory=None;let reserved=SeedFactoryOwner::reserve_retaining(&mut factory,&s.admission,original,cancelled);
         if factory.is_none(){return reserved;}
         let ticket=SeedTaskTicket {id,seed_id:seed.id.clone(),seed:Arc::downgrade(&seed.cell),admission:s.admission.clone(),original:original.clone(),app_thread:self.shared.app_thread,
-            cell:Cell::new(TaskScope {backed_inputs:None,factory:factory.take().unwrap(),start:None,factory_outcome:None,factory_refusal:None,never:None,guard:None,fork_guard:None,fork:None,expected_run:None,bound:false,enrollment:None,
+            cell:Cell::new(TaskScope {_original_command:original_command,backed_inputs:None,factory:factory.take().unwrap(),start:None,factory_outcome:None,factory_refusal:None,never:None,guard:None,fork_guard:None,fork:None,expected_run:None,bound:false,enrollment:None,
                 completion:None,generation:None,localized:None,cow:None,localize_attempted:false,fork_value:None,fork_close:None,fork_started:false,task_close:None,task_started:false})};
         s.tasks.insert(ticket.id.clone(),ticket.clone());*out=Some(ticket.clone());reserved?;
         let mut held=lock(&ticket.cell,original)?;let actual=s.client_owner.as_ref().context("actual seed owner absent")?;

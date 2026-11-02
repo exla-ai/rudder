@@ -51,3 +51,10 @@ name = "rudder-image-preseed"
 path = "src/bin_rudder_image_preseed.rs"
 test = false
 bench = false
+
+# Explicit qualification images only. Shipped/default recipes enable none.
+[features]
+managed-ingress-genuine-fixture = []
+managed-ingress-fixture-close-wins = ["managed-ingress-genuine-fixture"]
+managed-ingress-fixture-admission-wins = ["managed-ingress-genuine-fixture"]
+managed-ingress-fixture-carrier-contention = ["managed-ingress-genuine-fixture"]

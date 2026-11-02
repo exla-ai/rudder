@@ -114,7 +114,7 @@ struct WorkerCarrier {bootstrap:ManagedMachineBootstrap,projects:BTreeMap<String
     host_offered:bool,host_error:Option<anyhow::Error>,panic:Option<Box<dyn Any+Send>>,
     generations:BTreeMap<String,Arc<source_generations::SourceGeneration>>,
     source_reservations:BTreeMap<String,Arc<source_generations::RootSourceReservation>>,
-    covered_reservations:runtime_drain::CoveredTaskGenerationAdmission}
+    covered_reservations:runtime_drain::CoveredTaskGenerationAdmission,producer_roots:producer_reservations::CoveredIngressFreshRoots}
 struct Shared {phase:AtomicU8,worker_owned:AtomicBool,app_thread:std::thread::ThreadId,carrier:Mutex<WorkerCarrier>,receive:Mutex<Receiver<Job>>,
     host_offer:Mutex<Option<HostIngress>>,runtime_ready_data:Mutex<Option<rudder_native::root_storage_bootstrap::runtime_image::RuntimeReadyObservationData>>,send:SyncSender<Job>,kernel:Arc<kernel_startup::KernelSlot>}
 
@@ -285,7 +285,7 @@ impl ManagedMachineRuntime {
         let (send,receive)=mpsc::sync_channel(QUEUE);
         let shared=Arc::new(Shared {phase:AtomicU8::new(STARTING),worker_owned:AtomicBool::new(false),app_thread:std::thread::current().id(),receive:Mutex::new(receive),host_offer:Mutex::new(None),runtime_ready_data:Mutex::new(None),send:send.clone(),kernel:kernel_startup::KernelSlot::new(),carrier:Mutex::new(WorkerCarrier {
             bootstrap,projects:BTreeMap::new(),seeds:BTreeMap::new(),retired_seeds:BTreeMap::new(),enrollments:BTreeMap::new(),root_rpc_held:false,root_private_held:false,
-            registered_engine:None,runtime_image:MachineRuntimeImage::new(std::thread::current().id()),host_offered:false,host_error:None,panic:None,generations:BTreeMap::new(),source_reservations:BTreeMap::new(),covered_reservations:runtime_drain::CoveredTaskGenerationAdmission::new()})});
+            registered_engine:None,runtime_image:MachineRuntimeImage::new(std::thread::current().id()),host_offered:false,host_error:None,panic:None,generations:BTreeMap::new(),source_reservations:BTreeMap::new(),covered_reservations:runtime_drain::CoveredTaskGenerationAdmission::new(),producer_roots:producer_reservations::CoveredIngressFreshRoots::new()})});
         Self {control:MachineControl {shared:shared.clone(),send},shared,worker:None,apps:BTreeMap::new(),app_thread:std::thread::current().id(),panic:None}
     }
     /// Spawn borrows an already retained carrier. Ordinary returned Err cannot
@@ -361,22 +361,33 @@ impl ManagedMachineRuntime {
     pub(crate) fn quarantine(&mut self) {self.shared.phase.store(QUARANTINED,Ordering::Release);}
 }
 
+#[cfg(feature="managed-ingress-genuine-fixture")]
+#[path="managed_ingress_genuine_fixture.rs"]
+pub(crate) mod ingress_genuine_fixture;
+
 /// Diverges after ANY managed selection/capture, including failure. The real
 /// worker/Apps remain retained. No legacy serve/default/smoke fallback exists.
 pub(crate) fn run_selected()->! {
     let bootstrap=match root_storage_bootstrap::enter_managed_machine_early() {Ok(owner)=>owner,Err(failure)=>failure.retain_quarantined()};
     let mut runtime=ManagedMachineRuntime::capture(bootstrap);
     let mut ingress_error=None;
+    #[cfg(feature="managed-ingress-genuine-fixture")]
+    let mut fixture:Option<ingress_genuine_fixture::FixtureOwner>=None;
     let mut ingress:Option<crate::managed_machine_ingress::ManagedMachineIngress>=None;
     if runtime.start_worker_retaining().is_err() {runtime.quarantine();eprintln!("MANAGED_MACHINE_WORKER_QUARANTINED");}
     loop {
         if runtime.shared.phase.load(Ordering::Acquire)==QUARANTINED {
             if let Some(actual)=ingress.as_ref(){actual.fence_new_requests();}
             eprintln!("MANAGED_MACHINE_RUNTIME_QUARANTINED");
-            loop {std::hint::black_box((&runtime,&ingress,&ingress_error));std::thread::sleep(Duration::from_secs(1));}
+            loop {
+                #[cfg(feature="managed-ingress-genuine-fixture")]
+                std::hint::black_box(&fixture);
+                std::hint::black_box((&runtime,&ingress,&ingress_error));std::thread::sleep(Duration::from_secs(1));}
         }
         let result=catch_unwind(AssertUnwindSafe(||->Result<()> {
             runtime.poll_apps_on_app()?;
+            #[cfg(feature="managed-ingress-genuine-fixture")]
+            if let Some(actual)=fixture.as_mut(){actual.poll_cached_on_app()?;}
             // The original Root worker sends HostServing only after its actual
             // JoinHandle latch. Start command effects only once that is true.
             if runtime.shared.phase.load(Ordering::Acquire)==SERVING {
@@ -384,6 +395,10 @@ pub(crate) fn run_selected()->! {
                     if let Some(host)=runtime.take_host_offer_on_app()? {
                         ingress=Some(crate::managed_machine_ingress::ManagedMachineIngress::capture(host,runtime.control()));
                         let actual=ingress.as_mut().unwrap();
+                        #[cfg(feature="managed-ingress-genuine-fixture")]
+                        if let Err(error)=ingress_genuine_fixture::FixtureOwner::arm_retaining(&mut fixture,runtime.control(),actual.control()) {
+                            actual.fence_new_requests();ingress_error=Some(error);anyhow::bail!("genuine fixture arm refused; original partial owners retained");
+                        }
                         if let Err(error)=actual.start_worker_retaining(){actual.fence_new_requests();ingress_error=Some(error);}
                     }
                 }
@@ -392,6 +407,8 @@ pub(crate) fn run_selected()->! {
             Ok(())
         }));
         match result {Ok(Ok(()))=>{},Ok(Err(_))=>runtime.quarantine(),Err(panic)=>{runtime.panic=Some(panic);runtime.quarantine();}}
+        #[cfg(feature="managed-ingress-genuine-fixture")]
+        std::hint::black_box(&fixture);
         std::hint::black_box((&runtime,&ingress,&ingress_error));std::thread::sleep(Duration::from_millis(33));
     }
 }
@@ -419,6 +436,10 @@ impl MachineControl {
                 Err(TryLockError::WouldBlock)=>std::thread::sleep(original.phase_limit(Duration::from_millis(1))?),Err(_)=>anyhow::bail!("original machine carrier poisoned")}}
     }
 }
+
+#[path="managed_producer_reservations.rs"]
+mod producer_reservations;
+pub(crate) use producer_reservations::{IngressCommandRoot,FreshInitializationRoot,OriginalFreshEnvironment,OriginalFreshFlow};
 
 #[path="managed_runtime_drain.rs"]
 mod runtime_drain;

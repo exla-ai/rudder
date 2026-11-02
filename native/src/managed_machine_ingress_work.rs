@@ -155,7 +155,9 @@ fn start_task(shared:&Arc<Shared>,job:&Arc<Job>,original:&FinalizationBudget,can
         // Capability is consumed BEFORE any task/fork registration effect.
         held.task.factory_permit.take().context("original factory permit absent")?;
         held.task.factory=Some(Arc::new(Mutex::new(FactoryCarrier {admission:held.task.admission.take(),retention:Some(retention),prepared:None,outcome:None,error:None,panic:None,recorded:false,ready:false})));
-        shared.control.admit_task_retaining(&mut held.task.scope,&seed,&ticket,original,cancelled.clone())?;
+        ensure!(held.node.as_ref().is_some_and(|actual|Arc::ptr_eq(actual,&node))&&job.is_original_task_command(),"original StartTask project association changed");
+        let selection=OriginalTaskCommandSelection{actual:job.clone(),_node:node.clone(),project:ticket.clone(),seed:seed.clone(),root:job.covered_root().context("original StartTask root absent")?.clone()};
+        shared.control.admit_task_from_original_command_retaining(&mut held.task.scope,&selection,original,cancelled.clone())?;
         let scope=held.task.scope.as_ref().unwrap().clone();let actual_scope=scope.clone();let factory=held.task.factory.as_ref().unwrap().clone();let control=shared.control.clone();let owner=project.clone();let image=runtime.clone();
         held.task.factory_handle=Some(thread::Builder::new().name("rudder-ingress-task-factory".into()).spawn(move||{
             // Actual carrier is OUTSIDE catch. It preserves every error/panic,

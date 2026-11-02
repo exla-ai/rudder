@@ -20,6 +20,9 @@ mod sidecar_policy;
 mod transport_native;
 #[path="host_transport_io.rs"]
 mod transport_io;
+#[cfg(feature="managed-ingress-genuine-fixture")]
+#[path="host_root_command_receipt.rs"]
+mod root_command_receipt;
 
 pub const MAX_HOST_FRAME:usize=32*1024;
 pub const MAX_HOST_COMMAND_MS:u32=20_000;
@@ -325,14 +328,18 @@ fn complete_sidecar_files()->Result<std::collections::BTreeSet<PathBuf>> {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Ready {kind:String,version:u32,session_generation:String,nonce:String,home_id:String,incarnation:String,config_sha256:String}
-struct RootPending {command:HostCommand,bytes:Vec<u8>,forwarded:bool,reply:Option<storage::Packet>,sidecar_instance:String}
+struct RootPending {command:HostCommand,bytes:Vec<u8>,forwarded:bool,reply:Option<storage::Packet>,sidecar_instance:String,
+    #[cfg(feature="managed-ingress-genuine-fixture")]
+    fixture_receipt:Option<root_command_receipt::ReceiptHandle>,}
 /// Root-owned original effects; no Drop teardown/retry or external activation.
 pub(super) struct RootHostControl { transport:transport_io::TransportIo, volume_init:Option<volume_init::HostVolumeInit>,original:FinalizationBudget,nonce:String,file:File,stamp:Stamp,data:HostIngressConfig,digest:String,
     token:File,token_stamp:Stamp,images:Vec<ImmutableFile>,node:Image,sidecar_pair:Endpoint,child_endpoint:OwnedFd,
     native_pair:Endpoint,native_endpoint:OwnedFd,uptime:File,boot:Vec<u8>,child:Option<super::ChildOwner>,
     attempted:bool,generation:Option<String>,namespaces:Vec<(String,File,i32)>,exe:Option<OwnedFd>,
     runtime_qualification_inbound:Option<storage::Packet>,
-    runtime_received:Option<storage::Packet>,operation_inbound:Option<storage::Packet>,ready_packet:Option<storage::Packet>,pending:Option<RootPending>,fenced:bool,fence_sent:bool,fence_unknown:bool }
+    runtime_received:Option<storage::Packet>,operation_inbound:Option<storage::Packet>,ready_packet:Option<storage::Packet>,pending:Option<RootPending>,fenced:bool,fence_sent:bool,fence_unknown:bool,
+    #[cfg(feature="managed-ingress-genuine-fixture")]
+    fixture_receipts:root_command_receipt::ReceiptOwners, }
 impl RootHostControl {
     pub(super) fn capture_optional(original:&FinalizationBudget,nonce:&str)->Result<Option<Self>> {
         original.remaining()?;
@@ -366,7 +373,9 @@ impl RootHostControl {
         let mut stat:libc::statfs=unsafe {std::mem::zeroed()};ensure!(unsafe {libc::fstatfs(uptime.as_raw_fd(),&mut stat)}==0 && stat.f_type==0x9fa0,"host uptime is not actual procfs");
         let value=Self {transport:transport_io::TransportIo::new(sidecar_pair.try_clone()?),volume_init:None,original:original.clone(),nonce:nonce.into(),file,stamp,data,digest:format!("{:x}",Sha256::digest(&bytes)),token,token_stamp,images,
             node:Image::capture(Path::new(NODE))?,sidecar_pair:Endpoint::capture(sidecar_pair)?,child_endpoint,native_pair:Endpoint::capture(native_pair)?,native_endpoint,
-            uptime,boot:storage::proc_bytes("/proc/sys/kernel/random/boot_id",64)?,child:None,attempted:false,generation:None,namespaces:Vec::new(),exe:None,runtime_qualification_inbound:None,runtime_received:None,operation_inbound:None,ready_packet:None,pending:None,fenced:false,fence_sent:false,fence_unknown:false};
+            uptime,boot:storage::proc_bytes("/proc/sys/kernel/random/boot_id",64)?,child:None,attempted:false,generation:None,namespaces:Vec::new(),exe:None,runtime_qualification_inbound:None,runtime_received:None,operation_inbound:None,ready_packet:None,pending:None,fenced:false,fence_sent:false,fence_unknown:false,
+            #[cfg(feature="managed-ingress-genuine-fixture")]
+            fixture_receipts:root_command_receipt::ReceiptOwners::new(),};
         value.current()?;original.remaining()?;Ok(Some(value))
     }
     pub(super) fn check_transport_policy_current(&self)->Result<()> {
@@ -457,17 +466,36 @@ impl RootHostControl {
     }
     pub(super) fn generation(&self)->Result<&str> {self.generation.as_deref().context("host actual WebSocket generation absent")}
     pub(super) fn poll_retaining(&mut self,engine:&Process)->Result<()> {
+        #[cfg(feature="managed-ingress-genuine-fixture")]
+        self.fixture_receipts.poll_actual_join_observations();
         if self.fenced {self.try_fence_notice();return Ok(());}
         let result=(||->Result<()> {self.check_transport_policy_current()?;engine.live()?;storage::floor(engine.pid,1500)?;
             self.poll_transport_health_retaining(engine)?;
-            if let Some(pending)=&self.pending {if FinalizationBudget::from_constraint(&pending.command.constraint).and_then(|b|b.remaining()).is_err(){ensure!(self.transport.orphan_capacity(),"unknown original commands retained at bound");self.transport.retain_orphan(self.pending.take().unwrap());}}
+            // Diagnostic capture precedes the EXISTING original constraint
+            // sample; only fixed atomic DATA updates follow that sample.
+            #[cfg(feature="managed-ingress-genuine-fixture")]
+            if let Some(pending)=self.pending.as_mut(){self.fixture_receipts.capture_original_retaining(pending);}
+            if let Some(pending)=&self.pending {
+                let original_sample=FinalizationBudget::from_constraint(&pending.command.constraint).and_then(|b|b.remaining());
+                #[cfg(feature="managed-ingress-genuine-fixture")]
+                if let Some(receipt)=&pending.fixture_receipt{receipt.observe_original_constraint_sample(original_sample.is_ok());}
+                if original_sample.is_err(){ensure!(self.transport.orphan_capacity(),"unknown original commands retained at bound");self.transport.retain_orphan(self.pending.take().unwrap());}}
             if let Some(pending)=&mut self.pending {
                 self.data.assert_unscoped_operations()?;
-                if !pending.forwarded&&!self.transport.offline(){if !self.native_pair.send(&pending.bytes,None)?{return Ok(());}pending.forwarded=true;}
+                if !pending.forwarded&&!self.transport.offline(){
+                    #[cfg(feature="managed-ingress-genuine-fixture")]
+                    let receipt_attempt=pending.fixture_receipt.as_ref().and_then(root_command_receipt::ReceiptHandle::arm_original_forward);
+                    let sent=self.native_pair.send(&pending.bytes,None);
+                    #[cfg(feature="managed-ingress-genuine-fixture")]
+                    if let Some(attempt)=receipt_attempt{attempt.observe_original_result(&sent);}
+                    if !sent?{return Ok(());}pending.forwarded=true;}
                 if let Some(packet)=&pending.reply {if !self.transport.offline()&&Some(pending.command.session_generation.as_str())==self.generation.as_deref(){if self.sidecar_pair.send(&packet.bytes,None)?{self.pending.take();}}}
             }
             self.deliver_late_reply_data_retaining()?;self.check_transport_policy_current()?;engine.live()?;Ok(())})();
-        if result.is_err(){self.fenced=true;self.try_fence_notice();}result
+        if result.is_err(){
+            #[cfg(feature="managed-ingress-genuine-fixture")]
+            self.fixture_receipts.observe_original_control_refusal();
+            self.fenced=true;self.try_fence_notice();}result
     }
     fn try_fence_notice(&mut self) {
         if !self.fence_sent && !self.fence_unknown {

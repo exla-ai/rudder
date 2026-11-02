@@ -88,7 +88,9 @@ impl RootHostControl {
    Some("runtime_image_qualification_ack_v1")=>{ensure!(instance==self.transport.sidecar_instance,"qualification ACK from retired sidecar");if self.runtime_qualification_inbound.is_none(){self.runtime_qualification_inbound=Some(self.take_validated_runtime_packet()?);}},
    Some("engine_operation_ack_v1")=>{if self.operation_inbound.is_none(){self.operation_inbound=Some(self.take_validated_runtime_packet()?);}},
    Some("engine_operation_not_forwarded_v1")=>{ensure!(self.transport.unforwarded.len()<2,"original unforwarded packets retained at bound");let packet=self.take_validated_runtime_packet()?;self.transport.unforwarded.push_back(packet);},
-   _=>{let command:HostCommand=serde_json::from_value(v)?;command.validate()?;let bytes=self.runtime_received.as_ref().unwrap().bytes.clone();let pending=RootPending {command,bytes,forwarded:false,reply:None,sidecar_instance:instance.into()};
+   _=>{let command:HostCommand=serde_json::from_value(v)?;command.validate()?;let bytes=self.runtime_received.as_ref().unwrap().bytes.clone();let pending=RootPending {command,bytes,forwarded:false,reply:None,sidecar_instance:instance.into(),
+    #[cfg(feature="managed-ingress-genuine-fixture")]
+    fixture_receipt:None,};
     if instance!=self.transport.sidecar_instance||self.transport.offline||Some(pending.command.session_generation.as_str())!=self.generation.as_deref(){ensure!(self.transport.orphans.len()<8,"old original host commands retained at bound");self.transport.orphans.push(pending);}else{ensure!(self.pending.is_none(),"original host command slot occupied");self.pending=Some(pending);}let _=self.take_validated_runtime_packet()?;}
   }
    Ok(())})();

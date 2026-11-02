@@ -3186,3 +3186,29 @@ failed build evidence, not a failing execution of the Root privilege test.
 The production native build had completed in366.9 seconds. Build-only test
 compilation and bounded execution are being assessed separately; no timeout or
 assertion was weakened and no SDK fixture was launched.
+
+### 2026-11-02 02:25Z: corrected baked component image verified
+
+A8 separately prepared the locked release test harness without running tests,
+then ran the unchanged240-second Root test gate with its10-second kill tail.
+The actual privilege test passed1,0 ignored in0.01s. The following baked CAS
+metadata gate passed all nine component checks: timezone is now a114-byte File
+with the same captured Blob reference and raw manifest hash as canonical UTC.
+The preparation and qualification are separate build lifetimes; the240 seconds
+continue to cover the original timed Cargo command, not the preceding compile.
+
+The original build child exited0 at02:25:08Z with no remote continuation and
+pushed immutable base image `sha256:15b8dce89a219a7e6248d87cc9bedd22f7b0f3c650e79c1a640a3309751c0f9b`.
+Independent review verified the frozen40efcf98 source checkpoint, unchanged
+ce6a1a4d product bytes, all three nonce-bound build proofs, both complete
+four-ELF output steps, runtime CAS roots and final push. Structured component
+evidence preserves the source, receipt and log hashes. This is build evidence;
+the compiler overlay and actual SDK/runtime/ordinary flow remain separate.
+
+The compiler DATA overlay also exited0 and pushed immutable image
+`sha256:4b6d4148f8ac1e9ca8e7579913d2a7a2934a343897168b32d7c4ba007b57b415`
+at02:27:13Z. Independent final-chain review passed at02:27:54Z, binding all
+four actual descriptor outputs, ELF/CLI pins, source manifest, runtime CAS and
+the unchanged6,430-object compiler CAS layout. No runtime or SDK role was
+activated by either image build. A18 will use this exact image with a separately
+bound controller and retained original process custody.

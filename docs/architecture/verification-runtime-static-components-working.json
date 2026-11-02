@@ -2,7 +2,7 @@
   "formatVersion": 1,
   "scope": "unreleased local static-file capture correction and fixed component diagnostics; no runtime or SDK admission",
   "productRevision": "ce6a1a4d44ca03f9a294af7998d88bd884fb4238",
-  "recordedAt": "2026-11-02T02:12:04.796055+00:00",
+  "recordedAt": "2026-11-02T02:28:29.147Z",
   "sourceFiles": {
     "native/src/image_preseed_data.rs": {
       "sha256": "fcb50ba1a0a442cf081a62aec559ead9bcf8dfc5a11245a30ce79ed70781d9c2",
@@ -194,6 +194,280 @@
       "publishedDigest": null,
       "productionNativeBuildSeconds": 366.9,
       "frozenSourceReviewSha256": "49a3f0bb92ea18a4610480b793e880691929fa6cbfa74e84b9c9488ebaffac53"
+    },
+    {
+      "attempt": "A8",
+      "sourceManifestSha256": "e94b54b7d638dcc95a28885195b0f7f7cc618ac052a2f8126936e5244f5520a3",
+      "sourceRevision": "40efcf98e2c79e0be9d09e00ace893618c682224",
+      "qualificationDockerfileSha256": "6298d9ecf0bef6f81504eb5499988fbfd54c95abfb8ba9fd77ce895f619b3bea",
+      "originalBuildExitCode": 0,
+      "remoteBuildMayContinue": false,
+      "reportSha256": "ffaf7fc6dca484cea7b983cd1ce24e776e051fe51aa9869f30575634f00e8cca",
+      "logSha256": "ca6abb016feb222f5f42aa1ec54471fecd904a4e3a49a6872eb45ebd03677326",
+      "verifiedAt": "2026-11-02T02:25:08.885714+00:00",
+      "publishedDigest": "sha256:15b8dce89a219a7e6248d87cc9bedd22f7b0f3c650e79c1a640a3309751c0f9b",
+      "artifacts": {
+        "/opt/rudder/dist/native/rudder-native": {
+          "sha256": "3cc802756ae5d9714e8b69b0ccfa73904c98abd7195f14fa256907b10fabeb77",
+          "bytes": 40185312
+        },
+        "/opt/rudder/dist/native/rudder-jj": {
+          "sha256": "b6668e7602bf77bb41775b39b0f7907a34a4cd1dcc6ed32b0869cea66257fef4",
+          "bytes": 31307760
+        },
+        "/usr/local/bin/rudder-root-storage": {
+          "sha256": "1abc70bb952096f6cb8d6b13111e4d7e2f4a5c5b55bb3bf01313cf8f2ab48bee",
+          "bytes": 7891152
+        },
+        "/usr/local/bin/rudder-machine-root": {
+          "sha256": "ef5a6cc6c0cf4a7ef3d6b2172b12d10091af5bd2ac892eb6e74a97eb6d580fcc",
+          "bytes": 2929144
+        }
+      },
+      "testPreparation": {
+        "passed": true,
+        "scope": "build-only test-harness compilation; no tests run; separate from unchanged timed Cargo qualification",
+        "command": [
+          "cargo",
+          "test",
+          "--release",
+          "--locked",
+          "-p",
+          "rudder-native",
+          "--lib",
+          "--no-run"
+        ],
+        "beginCount": 1,
+        "passCount": 1,
+        "originalBuildStep": "20",
+        "originalBuildStepDone": true,
+        "sourceNonceBound": true,
+        "beforeTimedGate": true,
+        "noTestExecutionObserved": true,
+        "recipeSha256": "bb2b815f3486ed3efa2e2eaee5cefeecc23b399b813dad9b804daf55989dae7f",
+        "sourceManifestSha256": "e94b54b7d638dcc95a28885195b0f7f7cc618ac052a2f8126936e5244f5520a3",
+        "qualificationDockerfileSha256": "6298d9ecf0bef6f81504eb5499988fbfd54c95abfb8ba9fd77ce895f619b3bea"
+      },
+      "strictRootGate": {
+        "passed": true,
+        "test": "root_storage_bootstrap::runtime_image::compiler_sdk::sdk_process::privilege_tests::sdk_helper_exec_floor_drops_root_privileges_before_actual_exec",
+        "parentMarker": "RUDDER_SDK_HELPER_ROOT_EXEC_FLOOR_V1=passed",
+        "parentMarkerCount": 1,
+        "runningOneTestCount": 1,
+        "summary": "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 326 filtered out; finished in 0.01s",
+        "gateMarkerCount": 1,
+        "originalBuildStep": "21",
+        "originalBuildStepDone": true,
+        "sourceNonceBound": true,
+        "timeoutSeconds": 240,
+        "killTailSeconds": 10,
+        "scope": "actual ignored Root-to-UID1500 child-floor regression only; not SDK/runtime admission",
+        "qualificationDockerfileSha256": "6298d9ecf0bef6f81504eb5499988fbfd54c95abfb8ba9fd77ce895f619b3bea",
+        "sourceManifestSha256": "e94b54b7d638dcc95a28885195b0f7f7cc618ac052a2f8126936e5244f5520a3"
+      },
+      "staticComponents": {
+        "passed": true,
+        "scope": "build-only immutable component metadata DATA; no runtime/SDK admission",
+        "originalBuildStep": "91",
+        "originalBuildStepDone": true,
+        "sourceNonceBound": true,
+        "beginCount": 1,
+        "dataCount": 1,
+        "passCount": 1,
+        "data": {
+          "components": [
+            {
+              "name": "usr",
+              "object": {
+                "algorithm": "sha256",
+                "digest": "cc3fce83c678c33a36518c027f5c07b05b4d822314c12762a818ab7296387271",
+                "kind": "directory",
+                "size_bytes": 232
+              },
+              "type": "directory"
+            },
+            {
+              "name": "package",
+              "object": {
+                "algorithm": "sha256",
+                "digest": "46dcf1217b776ed790fa4c39ca13fcb96762d1f9732cb69a44563beda2327b41",
+                "kind": "directory",
+                "size_bytes": 230
+              },
+              "type": "directory"
+            },
+            {
+              "name": "model",
+              "object": {
+                "algorithm": "sha256",
+                "digest": "03ce63c2dfa083d597b77f94772804958fbafaf96732c979b1ca7db0bca7415f",
+                "kind": "directory",
+                "size_bytes": 229
+              },
+              "type": "directory"
+            },
+            {
+              "name": "certificates",
+              "object": {
+                "algorithm": "sha256",
+                "digest": "ab4628bce5f511da624710b898a28fda4770683769edffc11463c78b71cb2b72",
+                "kind": "directory",
+                "size_bytes": 233
+              },
+              "type": "directory"
+            },
+            {
+              "name": "alternatives",
+              "object": {
+                "algorithm": "sha256",
+                "digest": "0c65090beddcf5d7d62b33c14ac7d9f184bc0c64973cd2034eb53980f4f4c439",
+                "kind": "directory",
+                "size_bytes": 233
+              },
+              "type": "directory"
+            },
+            {
+              "logical_size": 10887,
+              "mode": 420,
+              "name": "loader-cache",
+              "object": {
+                "algorithm": "sha256",
+                "digest": "c5e7a4bf7eee48e84114eff34105ff81bd66fc74474a7cd57a80e571990343e8",
+                "kind": "blob",
+                "size_bytes": 10887
+              },
+              "type": "file"
+            },
+            {
+              "logical_size": 114,
+              "mode": 420,
+              "name": "timezone",
+              "object": {
+                "algorithm": "sha256",
+                "digest": "8b85846791ab2c8a5463c83a5be3c043e2570d7448434d41398969ed47e3e6f2",
+                "kind": "blob",
+                "size_bytes": 114
+              },
+              "type": "file"
+            },
+            {
+              "logical_size": 12332,
+              "mode": 420,
+              "name": "ssl-config",
+              "object": {
+                "algorithm": "sha256",
+                "digest": "7ae8cae2e64856b34c80276deb1dcf60f76da27bc1e00382201ba7bb7dc33311",
+                "kind": "blob",
+                "size_bytes": 12332
+              },
+              "type": "file"
+            },
+            {
+              "logical_size": 155,
+              "mode": 420,
+              "name": "python-site",
+              "object": {
+                "algorithm": "sha256",
+                "digest": "43d81125d92376b1a69d53a71126a041cc9a18d8080e92dea0a2ae23be138b1e",
+                "kind": "blob",
+                "size_bytes": 155
+              },
+              "type": "file"
+            }
+          ],
+          "directoryShard": {
+            "algorithm": "sha256",
+            "digest": "3920c27ff475461dddfd2422b98595caf8b16d86ab2894fc3f4fda7f0b85fe57",
+            "kind": "directory_shard",
+            "size_bytes": 2648
+          },
+          "formatVersion": 1,
+          "installerInput": {
+            "algorithm": "sha256",
+            "digest": "ff3987c601d456af2da597faebdcc205f73c7275da1bc25ec49f510e6d3a2bf1",
+            "kind": "directory",
+            "size_bytes": 231
+          },
+          "manifest": {
+            "algorithm": "sha256",
+            "digest": "b1164926d080c272a2b35697e20b05d561c3d249effd28fe345da650b8231f28",
+            "kind": "blob",
+            "size_bytes": 5673590
+          },
+          "manifestRows": [
+            {
+              "content": {
+                "algorithm": "sha256",
+                "digest": "8b85846791ab2c8a5463c83a5be3c043e2570d7448434d41398969ed47e3e6f2",
+                "kind": "blob",
+                "size_bytes": 114
+              },
+              "path": "/etc/localtime",
+              "sha256": "8b85846791ab2c8a5463c83a5be3c043e2570d7448434d41398969ed47e3e6f2",
+              "size_bytes": 114
+            },
+            {
+              "content": {
+                "algorithm": "sha256",
+                "digest": "8b85846791ab2c8a5463c83a5be3c043e2570d7448434d41398969ed47e3e6f2",
+                "kind": "blob",
+                "size_bytes": 114
+              },
+              "path": "/usr/share/zoneinfo/Etc/UTC",
+              "sha256": "8b85846791ab2c8a5463c83a5be3c043e2570d7448434d41398969ed47e3e6f2",
+              "size_bytes": 114
+            }
+          ],
+          "nonce": "e94b54b7d638dcc95a28885195b0f7f7cc618ac052a2f8126936e5244f5520a3",
+          "payloadReads": 0,
+          "scope": "build-only immutable component metadata DATA; no runtime/SDK admission",
+          "verifiedCasBytes": 5676469,
+          "verifiedCasObjects": 3
+        },
+        "sourceManifestSha256": "e94b54b7d638dcc95a28885195b0f7f7cc618ac052a2f8126936e5244f5520a3",
+        "qualificationDockerfileSha256": "6298d9ecf0bef6f81504eb5499988fbfd54c95abfb8ba9fd77ce895f619b3bea"
+      },
+      "independentBaseReviewSha256": "37a94738dd1474916ecd1e5b99af0aa3861aae97ea86f309f35b7b292e3d8d7d",
+      "sdkQualified": false,
+      "runtimeQualified": false,
+      "deployed": false
     }
-  ]
+  ],
+  "a8Overlay": {
+    "originalBuildExitCode": 0,
+    "remoteBuildMayContinue": false,
+    "reportSha256": "178b7b65611aba2c3203a421825ec6b3e71a32d7187a0fcbfc834e3dc63891bb",
+    "logSha256": "862018c93c14fbd76e96b8c1d66c984b735ab31eb9f578917d6deefd3bc02746",
+    "verifiedAt": "2026-11-02T02:27:13.799386+00:00",
+    "publishedDigest": "sha256:4b6d4148f8ac1e9ca8e7579913d2a7a2934a343897168b32d7c4ba007b57b415",
+    "inputManifestSha256": "3df139466c663266f0f217c1a65d683751782de9db0311c1a90d3dd0d298609c",
+    "baseReceiptSha256": "ffaf7fc6dca484cea7b983cd1ce24e776e051fe51aa9869f30575634f00e8cca",
+    "workerSourceManifestSha256": "e94b54b7d638dcc95a28885195b0f7f7cc618ac052a2f8126936e5244f5520a3",
+    "descriptors": {
+      "runtime-config-pin.json": {
+        "path": "/usr/local/share/rudder-managed-image/runtime-config-pin.json",
+        "sha256": "a1f5f3dd8d9b3316111a832bc4ffd9a2120cb828b7d6e344c5f103160f2e0897",
+        "size_bytes": 430
+      },
+      "sidecar-policy-pin.json": {
+        "path": "/usr/local/share/rudder-managed-image/sidecar-policy-pin.json",
+        "sha256": "e3aac458b318d8e3187c25269b77a5669bf4f8e42b47622e478513258cf2c7c0",
+        "size_bytes": 3935
+      },
+      "components.json": {
+        "path": "/usr/local/share/rudder-managed-image/components.json",
+        "sha256": "6f930771fc5a2dd68f3d1026938d2cccd8cf33265d0b8903e2daeaac1bd2ce2e",
+        "size_bytes": 1584
+      },
+      "policy.json": {
+        "path": "/usr/local/share/rudder-managed-image/policy.json",
+        "sha256": "8a3a151a5ffd9b07612da0e57908ad218e84239284872d7bfea861117a445694",
+        "size_bytes": 2689
+      }
+    },
+    "independentFinalChainSha256": "b8bb0601ba6dbef6aa7ca93402d53569dcb05100f397738feccf9a1d323eeed1",
+    "sdkQualified": false,
+    "runtimeQualified": false,
+    "deployed": false
+  }
 }

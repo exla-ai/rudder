@@ -3312,7 +3312,38 @@ uses that production helper with real immutable CAS files, verifies a payload
 read, reproduces the old descriptor's ENOENT, and refuses missing or replaced
 named inventory while checking original descriptor identities.
 
-Independent source review and syntax parsing passed. Cargo compilation and the
-strict UID0/GID0 test remain pending a fresh worker build. The new test is an
-immutable reader check; actual SDK admission and workload completion still
-require a separate staged run.
+Independent source review and syntax parsing passed. A9 then compiled the
+production binaries and separate test harness from revision `ba5fcd098d04`.
+Its actual UID0/GID0 descriptor regression passed with one test and no ignored
+tests, as did the unchanged privilege regression. These remain immutable reader
+and process privilege checks; actual SDK admission and workload completion
+still require a separate staged run.
+
+### 2026-11-02 03:29Z: fresh SDK descriptor worker build passes
+
+The original A9 build process exited with code 0 and pushed base image
+`sha256:7ef42ea99d627ca569a46baa0d217660495dca9cbcd3433c7252dc5d2195579f`
+at 03:28:59Z. All four separate gates passed: test harness preparation, the
+existing Root privilege regression, the new Root SDK descriptor regression,
+and static component metadata verification. Both actual tests reported one
+pass, no failures and no ignored tests in 0.01s. Their original 240s bounds and
+10s kill tails were unchanged.
+
+Independent review checked the frozen source, actual ordered test output,
+four ELF hashes, metadata roots, push digest and original build command. The
+base report SHA is
+`ab5bdc629f39053f3e8b8e508ee931f52bba4b012ab256620ccfc5d717e0c9d4`;
+the independent review SHA is
+`3301ddbb23cf5f5f1bff5f613cab206a4454c94c161b62b9acd19b0248ac00a2`.
+The original C1 overlay build then exited with code 0 at 03:31:48Z and pushed
+`sha256:fc448f9d80435c6423a93b0c0ea665d7c39f942a599a9b31253d9126a72a02d0`.
+It combines that exact base with the existing immutable compiler data image.
+All four descriptor files were recovered with matching sizes and hashes. Its
+report SHA is
+`487307f4438d431f849540a3d7b3dc80ec942e2cca9243fbf4e82d28e7d982a3`.
+Independent final chain review passed, with receipt SHA
+`759a0933172b05eeaac73763b72ee4215464ec290bd04e05526721ad169868a5`.
+It checked the complete frozen source, ordered gates, original process receipts,
+four ELF outputs, all descriptors and the final immutable digest. SDK, runtime
+and ordinary workload qualification remain pending. No public release or
+production deployment occurred.

@@ -138,13 +138,34 @@ impl ImageDataBuild {
         self.stage=Some(self.bulk.as_ref().unwrap().staging_id_data()?);let mut roots=Vec::new();
         for(name,path)in WHOLE_DIRS.into_iter().chain(STATIC_DIRS){clock(&self.original,&self.cancelled)?;self.roots.push(Root::capture(Path::new(path))?);let directory=self.import_directory(Path::new(path),0)?;
             roots.push(DirectoryEntry::new(name.as_bytes(),EntryNode::Directory{object:directory})?);self.roots.last().unwrap().current()?;}
-        for(name,path)in STATIC_FILES {clock(&self.original,&self.cancelled)?;let s=stamp(Path::new(path))?;let node=self.import_entry(Path::new(path),&s,0)?;roots.push(DirectoryEntry::new(name.as_bytes(),node)?);self.stamps.push(s);}
+        for(name,path)in STATIC_FILES {let node=self.import_static_file(Path::new(path))?;roots.push(DirectoryEntry::new(name.as_bytes(),node)?);}
         // Preserve declared merged-/usr aliases as actual original links.
         for(name,target)in [("bin","/usr/bin"),("lib","/usr/lib"),("lib64","/usr/lib64"),("sbin","/usr/sbin")] {
             let path=Path::new("/").join(name);let s=stamp(&path)?;ensure!(s.mode&libc::S_IFMT==libc::S_IFLNK&&path.canonicalize()?==Path::new(target),"merged usr alias differs from declared layout");
             roots.push(DirectoryEntry::new(name.as_bytes(),EntryNode::Symlink{target_hex:hex_bytes(fs::read_link(&path)?.as_os_str().as_encoded_bytes())})?);self.stamps.push(s);
         }
         self.finish_retaining(roots)
+    }
+    fn import_static_file(&mut self,path:&Path)->Result<EntryNode>{
+        clock(&self.original,&self.cancelled)?;
+        ensure!(STATIC_FILES.iter().any(|(_,file)|path==Path::new(file)),"static component is not a fixed declared input");
+        self.roots.push(Root::capture(path.parent().context("static component parent absent")?)?);
+        let before=stamp(path)?;self.stamps.push(before.clone());
+        if before.mode&libc::S_IFMT!=libc::S_IFLNK {
+            regular_readable(&before)?;return self.import_entry(path,&before,0)
+        }
+        // Build/import only. Reuse a file ALREADY captured under an immutable
+        // whole-directory root; never follow a link when mounting the runtime.
+        // Original source-link and target stamps survive in this same owner.
+        let target=static_link_target(path,&fs::read_link(path)?)?;
+        let(node,alias,captured)=static_alias_data(path,&target,&self.stamps,&self.files)?;
+        self.check_source_roots()?;
+        ensure!(stamp(path)?==before&&stamp(&target)?==captured,
+            "static component source/target changed after original capture");
+        clock(&self.original,&self.cancelled)?;
+        // This is a materialized copy, not an original physical hardlink alias.
+        // Keep the canonical target row and original nlink topology unchanged.
+        self.files.push(alias);Ok(node)
     }
     fn finish_retaining(&mut self,mut roots:Vec<DirectoryEntry>)->Result<()> {
         clock(&self.original,&self.cancelled)?;
@@ -232,6 +253,33 @@ fn hardlink_topology(links:&BTreeMap<(u64,u64),(u64,Vec<Vec<String>>)>) -> Resul
     let mut groups=Vec::new();for (_, (links,paths))in links {ensure!(*links==paths.len() as u64,"image hardlink has an undeclared alias");if paths.len()>1{let mut paths=paths.clone();paths.sort();groups.push(rudder_engine::tree::HardlinkGroup{paths_hex:paths});}}
     groups.sort_by(|a,b|a.paths_hex.cmp(&b.paths_hex));Ok(rudder_engine::tree::HardlinkTopology{format_version:1,groups})
 }
+fn static_link_target(path:&Path,link:&Path)->Result<PathBuf>{
+    ensure!(STATIC_FILES.iter().any(|(_,file)|path==Path::new(file))&&!link.as_os_str().is_empty()
+        &&link.as_os_str().as_encoded_bytes().len()<=4096&&!link.as_os_str().as_encoded_bytes().contains(&0),
+        "static symlink source/target is outside fixed bounds");
+    let raw=if link.is_absolute(){link.to_owned()}else{path.parent().context("static symlink parent absent")?.join(link)};
+    let mut target=PathBuf::from("/");
+    for part in raw.components(){match part {
+        std::path::Component::RootDir|std::path::Component::CurDir=>{},
+        std::path::Component::Normal(name)=>target.push(name),
+        std::path::Component::ParentDir=>anyhow::bail!("static symlink target contains parent traversal"),
+        _=>anyhow::bail!("static symlink target component invalid"),
+    }}
+    Ok(target)
+}
+fn static_alias_data(path:&Path,target:&Path,stamps:&[Stamp],files:&[ImageFileData])->Result<(EntryNode,ImageFileData,Stamp)>{
+    ensure!(STATIC_FILES.iter().any(|(_,file)|path==Path::new(file)),"static alias source is not fixed");
+    ensure!(target.is_absolute()&&target.components().all(|c|matches!(c,std::path::Component::RootDir|std::path::Component::Normal(_)))
+        &&!is_provider_kernel_path(target)&&WHOLE_DIRS.iter().chain(STATIC_DIRS.iter()).any(|(_,root)|target.starts_with(root)),
+        "static alias target is outside captured immutable directories");
+    let mut captured=stamps.iter().filter(|s|s.path==target);let before=captured.next().context("static alias target stamp was not captured")?;
+    ensure!(captured.next().is_none()&&before.mode&0o022==0,"duplicate or mutable static alias target stamp");regular_readable(before)?;
+    let mut records=files.iter().filter(|f|f.path==target);let record=records.next().context("static alias target file was not captured")?;
+    ensure!(records.next().is_none()&&record.size_bytes==before.len,"static alias target manifest differs from original stamp");
+    let alias=ImageFileData{path:path.into(),sha256:record.sha256.clone(),size_bytes:record.size_bytes,content:record.content.clone()};
+    let node=EntryNode::File{object:record.content.clone(),logical_size:before.len,mode:before.mode&0o7777};
+    Ok((node,alias,before.clone()))
+}
 fn regular_readable(before:&Stamp)->Result<()> {ensure!(before.mode&libc::S_IFMT==libc::S_IFREG&&before.mode&0o004!=0,"image regular file is not readable by the unprivileged engine");Ok(())}
 #[cfg(test)]
 fn graph_objects(store:&LocalStore,installer:&ObjectRef,manifest:&ObjectRef)->Result<Vec<ObjectRef>> {
@@ -266,3 +314,7 @@ mod provider_kernel_tests;
 #[cfg(test)]
 #[path="image_preseed_bulk_tests.rs"]
 mod bulk_tests;
+
+#[cfg(test)]
+#[path="image_preseed_static_link_tests.rs"]
+mod static_link_tests;

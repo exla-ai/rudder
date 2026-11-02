@@ -66,9 +66,56 @@ fn original_stat(pid:u32)->Result<(u32,String)>{let bytes=storage::proc_bytes(&f
 fn protected_directory(path:&Path)->Result<File>{ensure!(path.canonicalize()?==path,"runtime protected directory redirects");
     for ancestor in path.ancestors(){let m=fs::symlink_metadata(ancestor)?;ensure!(m.is_dir()&&!m.file_type().is_symlink()&&m.uid()==0&&m.gid()==0&&m.mode()&0o022==0,"runtime original directory is not image Root custody");}
     Ok(OpenOptions::new().read(true).custom_flags(libc::O_DIRECTORY|libc::O_NOFOLLOW|libc::O_CLOEXEC).open(path)?)}
+// Fixed identifiers only. Neither a component pathname nor an underlying
+// error's Display/Debug participates in the public bootstrap diagnostic.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RuntimeComponent {
+    Usr, Package, Model, Certificates, Alternatives, LoaderCache,
+    Timezone, SslConfig, PythonSite,
+}
+fn runtime_component(name: &str) -> Result<RuntimeComponent> {
+    Ok(match name {
+        "usr" => RuntimeComponent::Usr,
+        "package" => RuntimeComponent::Package,
+        "model" => RuntimeComponent::Model,
+        "certificates" => RuntimeComponent::Certificates,
+        "alternatives" => RuntimeComponent::Alternatives,
+        "loader-cache" => RuntimeComponent::LoaderCache,
+        "timezone" => RuntimeComponent::Timezone,
+        "ssl-config" => RuntimeComponent::SslConfig,
+        "python-site" => RuntimeComponent::PythonSite,
+        _ => return Err(anyhow::Error::new(BootstrapCheck::RuntimeComponentSet)),
+    })
+}
 fn readonly_at(parent:&OwnedFd,name:&str,directory:bool)->Result<OwnedFd>{ensure!(!name.is_empty()&&!name.contains(['/', '\0'])&&name!="."&&name!="..","runtime child name invalid");let name=CString::new(name)?;
     let raw=unsafe{libc::openat(parent.as_raw_fd(),name.as_ptr(),libc::O_PATH|libc::O_NOFOLLOW|libc::O_CLOEXEC|if directory{libc::O_DIRECTORY}else{0})};
     ensure!(raw>=0,"runtime original child open failed");let fd=unsafe{OwnedFd::from_raw_fd(raw)};let m=File::from(fd.try_clone()?).metadata()?;ensure!(!m.file_type().is_symlink()&&(if directory{m.is_dir()}else{m.is_file()}),"runtime child role differs");Ok(fd)}
+fn readonly_component_at(parent:&OwnedFd,name:&str,directory:bool,component:RuntimeComponent)->Result<OwnedFd>{
+    let name=proof_check(BootstrapCheck::RuntimeComponentName(component),||{
+        ensure!(!name.is_empty()&&!name.contains(['/', '\0'])&&name!="."&&name!="..","runtime child name invalid");
+        Ok(CString::new(name)?)
+    })?;
+    let raw=unsafe{libc::openat(parent.as_raw_fd(),name.as_ptr(),libc::O_PATH|libc::O_NOFOLLOW|libc::O_CLOEXEC|if directory{libc::O_DIRECTORY}else{0})};
+    if raw<0 {
+        // Capture errno before any other syscall. Retain its actual kind/code;
+        // the diagnostic projector never formats the private error chain.
+        return Err(anyhow::Error::new(io::Error::last_os_error())
+            .context(BootstrapCheck::RuntimeComponentOpen(component)))
+    }
+    let fd=unsafe{OwnedFd::from_raw_fd(raw)};
+    let duplicate=proof_check(BootstrapCheck::RuntimeComponentDuplicate(component),||Ok(fd.try_clone()?))?;
+    let m=proof_check(BootstrapCheck::RuntimeComponentMetadata(component),||Ok(File::from(duplicate).metadata()?))?;
+    proof_check(BootstrapCheck::RuntimeComponentRole(component),||{
+        ensure!(!m.file_type().is_symlink()&&(if directory{m.is_dir()}else{m.is_file()}),"runtime child role differs");Ok(())
+    })?;
+    Ok(fd)
+}
+fn check_runtime_component_mount(fd:&OwnedFd,mount_id:u64,component:RuntimeComponent)->Result<()>{
+    let data=proof_check(BootstrapCheck::RuntimeComponentFdData(component),||wire::fd_data(fd))?;
+    proof_check(BootstrapCheck::RuntimeComponentMount(component),||{
+        ensure!(data.mount_id==mount_id,"runtime component escaped original FUSE mount");Ok(())
+    })
+}
 fn read_control(file:&File,max:usize,original:&FinalizationBudget)->Result<Vec<u8>>{let m=file.metadata()?;ensure!(m.len()>0&&m.len()<=max as u64,"runtime control DATA exceeds bound");let before=stamp(file)?;let mut bytes=vec![0;m.len()as usize];let mut at=0;
     while at<bytes.len(){original.remaining()?;let end=(at+65536).min(bytes.len());let n=file.read_at(&mut bytes[at..end],at as u64)?;ensure!(n>0,"runtime control read incomplete");at+=n;}
     original.remaining()?;ensure!(stamp(file)?==before,"runtime original control file changed");Ok(bytes)}
@@ -181,6 +228,15 @@ enum BootstrapCheck {
     RuntimeMountReadFloor,
     RuntimeMountFuse,
     RuntimeMountComponents,
+    RuntimeComponentSet,
+    RuntimeComponentName(RuntimeComponent),
+    RuntimeComponentClock(RuntimeComponent),
+    RuntimeComponentOpen(RuntimeComponent),
+    RuntimeComponentDuplicate(RuntimeComponent),
+    RuntimeComponentMetadata(RuntimeComponent),
+    RuntimeComponentRole(RuntimeComponent),
+    RuntimeComponentFdData(RuntimeComponent),
+    RuntimeComponentMount(RuntimeComponent),
     RuntimeMountSelectedElves,
     RuntimeMountSelectedBinding,
     RuntimeMountReady,
@@ -480,7 +536,12 @@ impl RuntimeImageMountOwner {
         self.mount.as_mut().unwrap().mount_retaining(&self.original,&AtomicBool::new(false))?;
         let(root,mount_id)=self.mount.as_ref().unwrap().duplicate_runtime_root_retaining()?;self.root_fd=Some(root);
         self.prepare_check=BootstrapCheck::RuntimeMountComponents;
-        for(name,_,_,dir)in COMPONENTS{self.original.remaining()?;self.components.push(readonly_at(self.root_fd.as_ref().unwrap(),name,dir)?);ensure!(wire::fd_data(self.components.last().unwrap())?.mount_id==mount_id,"runtime component escaped original FUSE mount");}
+        for(name,_,_,dir)in COMPONENTS{
+            let component=runtime_component(name)?;
+            proof_check(BootstrapCheck::RuntimeComponentClock(component),||{self.original.remaining()?;Ok(())})?;
+            self.components.push(readonly_component_at(self.root_fd.as_ref().unwrap(),name,dir,component)?);
+            check_runtime_component_mount(self.components.last().unwrap(),mount_id,component)?;
+        }
         // Four selected installed native ELFs are fully read through the SAME
         // verified FUSE/chunk path before the floor's ready ACK. No host /usr
         // traversal/import/body copy or mtime-only executable acceptance.
@@ -782,3 +843,7 @@ mod bootstrap_diagnostic_tests {
     }
 }
 
+
+#[cfg(test)]
+#[path = "root_runtime_component_diagnostic_tests.rs"]
+mod component_diagnostic_tests;

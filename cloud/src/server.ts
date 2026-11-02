@@ -5433,6 +5433,7 @@ const homeBusyAt = new Map<string, number>();
 const homeBusyNow = new Map<string, boolean>();
 const homeImageChecked = new Map<string, { at: number; image: string | null }>();
 const homeUpdating = new Map<string, number>();
+const homeUpdateFlights = new Set<string>();
 const listHomeRows = database.prepare("select * from rudder_workspaces where source_kind = 'home' and status <> 'deleting'");
 
 function homeAgentsBusy(projects: HomeProject[]): boolean {
@@ -5473,6 +5474,12 @@ async function sweepIdleHomeUpdates(): Promise<void> {
     if (!homeStates.has(home.id) || homeBusyNow.get(home.id) !== false) {
       continue;
     }
+    // Keep an unresolved provider update's replacement token until the home
+    // authenticates with it. A read or a server restart cannot settle that
+    // original update, and must not replace its pending token with another.
+    if (optionalString(raw.worker_token_next_hash) || homeUpdateFlights.has(home.id)) {
+      continue;
+    }
     const quietSince = Math.max(homeBusyAt.get(home.id) ?? now, Date.parse(home.lastActivityAt ?? "") || 0);
     if (now - quietSince < HOME_IDLE_UPDATE_MS || now - (homeUpdating.get(home.id) ?? 0) < 15 * 60_000) {
       continue;
@@ -5481,10 +5488,21 @@ async function sweepIdleHomeUpdates(): Promise<void> {
     if (checked && now - checked.at < 5 * 60_000 && checked.image === flyWorkerImage) {
       continue;
     }
+    // Claim before the first await: a slow provider GET can overlap sweeps.
+    homeUpdateFlights.add(home.id);
     try {
       const { image, config } = await homeMachineImage(home.machineId);
       homeImageChecked.set(home.id, { at: now, image });
       if (!config || !image || image === flyWorkerImage) {
+        continue;
+      }
+      // The home may have become busy or been replaced while the GET waited.
+      const current = findWorkspaceById.get(home.id) as Record<string, unknown> | undefined;
+      const stillQuietSince = Math.max(homeBusyAt.get(home.id) ?? Date.now(), Date.parse(String(current?.last_activity_at ?? "")) || 0);
+      if (!current || current.status === "deleting" || current.machine_id !== home.machineId
+        || current.worker_token_hash !== raw.worker_token_hash || optionalString(current.worker_token_next_hash)
+        || !isOpen(homeControls.get(home.id)) || homeBusyNow.get(home.id) !== false
+        || Date.now() - stillQuietSince < HOME_IDLE_UPDATE_MS) {
         continue;
       }
       homeUpdating.set(home.id, now);
@@ -5503,6 +5521,10 @@ async function sweepIdleHomeUpdates(): Promise<void> {
       homeImageChecked.set(home.id, { at: now, image: flyWorkerImage });
     } catch (error) {
       console.log(`[home] ${home.id} idle update failed: ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      // Release only this local flight. Any attempted POST's pending token
+      // remains in SQLite through failure/uncertainty until authenticated use.
+      homeUpdateFlights.delete(home.id);
     }
   }
 }

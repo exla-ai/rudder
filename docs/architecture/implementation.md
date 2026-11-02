@@ -3806,3 +3806,87 @@ failure; a fresh genuine run on newly built worker images remains required.
 Source-test acceptance does not establish SDK/runtime admission, genuine
 bootstrap, delivered ingress, reverse ptrace, release runtime parity or normal
 retirement. No public release, deployment or Mac installation was performed.
+
+### 2026-11-02 23:23Z: SDK helper namespace failure found and fixed
+
+Claude took over this work after Sol hit its usage limit. A lean sixth
+close-wins attempt reached SDK admission at 22:51:05Z. Unlike earlier
+attempts, the SDK machine's own log carried the fixed failure frame:
+`SdkHelperNamespaceWorkload`, class `io`, errno 13 (`permission_denied`), at
+`serve_runtime`. The phase then expired, as before. Operator cleanup completed
+40 calls, and the attempt's temporary org token was revoked and confirmed
+rejected. No qualification apps, machines or secrets remained.
+
+The cause is in the helper itself. It sets itself non-dumpable before it
+connects, then unshares a user namespace and writes its own `uid_map`. After
+`unshare(CLONE_NEWUSER)` a non-dumpable process keeps its proc files owned by
+global root, so that open fails with EACCES. A Python probe on the Fly kernel
+(6.12) reproduced it exactly: dumpable succeeds and non-dumpable gets errno 13.
+No earlier test ran this helper unprivileged on Linux.
+
+Turning the helper dumpable for the map writes would let any UID1500 process
+`pidfd_getfd` its SDK descriptors. Instead the helper forks a child before it
+connects. That child holds no descriptor or capsule data and waits
+non-dumpable. When asked, it creates the namespace and writes the maps, and
+the helper joins it with `setns`, staying non-dumpable throughout. New Linux
+tests cover the kernel refusal, the join, a same-UID `pidfd_getfd` attempt
+(EPERM) and reaping an unused child. All 36 SDK library tests pass locally as
+UID1500.
+
+A fresh close-wins base (`sha256:89e9f1fd…`, native `ca92e991…`) and overlay
+(`sha256:9e5682ce…`) were built at `8bd01d58`. Every in-image gate passed,
+including the Root exec floor and baked descriptor tests. The base review is
+an operator self-check recomputed from the build log, not an independent
+review. The new namespace tests are compiled in the image but run only on the
+local Linux host.
+
+Lean attempt7 reached SDK admission at 00:13:52Z on 2026-11-03. The EACCES is
+gone: the SDK machine's fixed frame is still `SdkHelperNamespaceWorkload` at
+`serve_runtime`, but now with class `validation_or_other` and no errno. No
+workload stderr was relayed, so the helper fails before or at the workload
+spawn, after the uid map step. The phase expired at 00:18:34Z. Cleanup
+completed 40 calls, no qualification machines or secrets remained, and the
+temporary org token was revoked and confirmed rejected. The remaining cause is
+unknown. SDK, runtime and ordinary admission remain unverified.
+
+### 2026-11-03: Resume after attempt7, descriptor namespace correction
+
+Sol reviewed Opus's retained attempt6/7 evidence and resumed at `8bd01d58`.
+The old full Cargo run ended with one failure in a 30ms preparation fixture;
+the other reported suites passed. Both preparation contention fixtures now
+allow two seconds for fixture capture and the blocked stage on their same
+original clock. The focused preparation run passed all 20 tests. Production
+deadlines are unchanged.
+
+A local reproduction found another SDK helper failure: an FD retained before
+mount-namespace cloning still names the original mount. Using it as a proc-FD
+bind source fails with EINVAL. The helper now holds cwd at the original floor
+while cloning, then opens the kernel-rebased cwd and checks its original inode.
+This avoids traversing Root-private ancestors as UID1500. Workspace, source
+and output reopenings require the same held inode and type; unavailable,
+deleted, replaced or symlink locators refuse. Mount, namespace and chdir
+failures retain their errno in the fixed diagnostic frame. This reproduction
+does not establish the exact cause of attempt7's frame, which lacked errno.
+
+All 38 focused SDK library tests passed locally; seven tests requiring other
+environments were ignored. A separate ignored regression requires genuine
+global Root, a Root-owned 0700 ancestor and the actual irreversible UID1500
+capability floor. It must run in an isolated qualifying environment before
+claiming coverage of that production layout. No permissions or privilege floor
+were relaxed. TypeScript checking and the Cloud build passed; broader checks
+are still running at this source checkpoint.
+
+The idle worker-token rotation also now claims each home before its first
+provider await, rechecks whether the home became busy, and retains a pending
+replacement across uncertain POST results and server restart. Three focused
+Cloud tests passed, including actual restart after losing the provider reply.
+Authenticated use of the same pending token settles the transition. A pending
+token that never reaches the home requires explicit reconciliation; this
+change does not automatically clear it or invalidate existing open sockets.
+
+The fresh worker image and genuine SDK/runtime admission remain pending. The
+historical source37 qualification does not qualify these changed Rust inputs.
+The diagnostic lean controller omitted original binder-completion gates;
+those gates must be restored for the next qualifying run. No release,
+deployment, Mac installation or protected live-home restart occurred during
+this checkpoint.

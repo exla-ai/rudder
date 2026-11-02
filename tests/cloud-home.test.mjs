@@ -61,7 +61,7 @@ async function waitFor(fn, { timeout = 8000, interval = 50 } = {}) {
 async function bootServer(t, extraEnv = {}) {
   const port = await freePort();
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "rudder-home-test-"));
-  const dbPath = path.join(dataDir, "state.sqlite");
+  const dbPath = extraEnv.RUDDER_CLOUD_DB ?? path.join(dataDir, "state.sqlite");
   const base = `http://127.0.0.1:${port}`;
   const child = spawn(process.execPath, [path.join(cloudDir, "dist", "server.js")], {
     cwd: cloudDir,
@@ -90,7 +90,7 @@ async function bootServer(t, extraEnv = {}) {
   await waitFor(async () => (await fetch(`${base}/health`).catch(() => null))?.ok);
   await waitFor(() => fs.existsSync(dbPath));
   await sleep(150);
-  return { port, base, dbPath, log: () => log };
+  return { port, base, dbPath, child, log: () => log };
 }
 
 serverTest("a home machine's repos, state and phone requests flow over its control socket", async (t) => {
@@ -724,6 +724,105 @@ serverTest("a home on an old image is updated in place once its agents are idle,
     { id: "home-idle", hash: tokenHash(newToken), next: null },
     { id: "repo-idle", hash: tokenHash(newToken), next: null },
   ]);
+});
+
+async function idleRotationFixture(t, respond) {
+  const calls = [];
+  const fly = (await import("node:http")).createServer(async (req, res) => {
+    let body = "";
+    for await (const chunk of req) body += chunk;
+    const call = { method: req.method, body: body ? JSON.parse(body) : null };
+    calls.push(call);
+    await respond(call, res);
+  });
+  await new Promise((resolve) => fly.listen(0, "127.0.0.1", resolve));
+  t.after(() => { fly.closeAllConnections(); fly.close(); });
+  const env = {
+    FLY_API_TOKEN: "fly-fixture-only",
+    FLY_API_HOSTNAME: `http://127.0.0.1:${fly.address().port}`,
+    RUDDER_FLY_APP_NAME: "workers",
+    RUDDER_WORKER_IMAGE: "registry.fly.io/workers:new",
+    RUDDER_HOME_IDLE_UPDATE_MS: "1",
+    RUDDER_HOME_UPDATE_SWEEP_MS: "1000",
+  };
+  const server = await bootServer(t, env);
+  const oldToken = "rdrw_rotation_fixture_only";
+  const db = new Database(server.dbPath);
+  const old = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+  db.prepare(`insert into rudder_workspaces (id, account_id, workspace_key, repo_name, status, machine_id,
+    worker_token_hash, source_kind, created_at, updated_at, last_activity_at)
+    values ('home-rotation', 'acct-rotation', 'home', 'home', 'running', 'm-rotation', ?, 'home', ?, ?, ?)`)
+    .run(tokenHash(oldToken), old, old, old);
+  t.after(() => db.close());
+  const connect = async (target = server, token = oldToken) => {
+    const socket = new WebSocket(`ws://127.0.0.1:${target.port}/api/rudder/home/home-rotation/control`,
+      { headers: { authorization: `Bearer ${token}` } });
+    t.after(() => socket.close());
+    await new Promise((resolve, reject) => { socket.once("open", resolve); socket.once("error", reject); });
+    return socket;
+  };
+  const publish = (socket, busy = false) => socket.send(JSON.stringify({ type: "state", projects: [
+    { workspaceId: "repo", repo: "a/b", name: "b", agents: [{ id: "agent", status: busy ? "working" : "done", asks: [] }] },
+  ] }));
+  return { server, env, db, calls, connect, publish, oldToken };
+}
+
+const oldRotationConfig = () => ({ image: "registry.fly.io/workers:old", env: { A: "1" }, mounts: [{ volume: "vol_1", path: "/workspace" }] });
+
+serverTest("idle rotation claims a slow provider read before another sweep and rechecks busy state", async (t) => {
+  const reads = [];
+  const f = await idleRotationFixture(t, async (call, res) => {
+    if (call.method === "GET") { reads.push(res); return; }
+    res.end(JSON.stringify({ id: "m-rotation", state: "replacing" }));
+  });
+  const control = await f.connect(); f.publish(control);
+  await waitFor(() => reads.length);
+  // Multiple sweep ticks happen while the original GET remains outstanding.
+  // Previously a later GET could return first and both sweeps would POST.
+  await sleep(2200);
+  assert.equal(reads.length, 1, "one unresolved GET owns this home's update flight");
+  f.publish(control, true);
+  await sleep(100);
+  reads[0].end(JSON.stringify({ id: "m-rotation", config: oldRotationConfig() }));
+  await sleep(1200);
+  assert.equal(f.calls.filter((call) => call.method === "POST").length, 0, "becoming busy during GET prevents mutation");
+  // The read-only refusal releases the local flight, so a later idle read can run.
+  f.publish(control);
+  await waitFor(() => reads.length === 2);
+  reads[1].end(JSON.stringify({ id: "m-rotation", config: oldRotationConfig() }));
+  await waitFor(() => f.calls.some((call) => call.method === "POST"));
+  assert.equal(f.calls.filter((call) => call.method === "POST").length, 1);
+});
+
+serverTest("an uncertain idle update retains its pending token across restart without another mutation", async (t) => {
+  const f = await idleRotationFixture(t, async (call, res) => {
+    if (call.method === "GET") {
+      res.end(JSON.stringify({ id: "m-rotation", config: oldRotationConfig() }));
+    } else {
+      // The request body arrived; losing the reply cannot establish whether
+      // the provider applied it. A subsequent old-image GET cannot settle it.
+      res.destroy();
+    }
+  });
+  const control = await f.connect(); f.publish(control);
+  await waitFor(() => f.server.log().includes("idle update failed"));
+  const post = f.calls.find((call) => call.method === "POST");
+  assert(post);
+  const pending = f.db.prepare("select worker_token_hash as current, worker_token_next_hash as next from rudder_workspaces where id = 'home-rotation'").get();
+  assert.equal(pending.current, tokenHash(f.oldToken));
+  assert.equal(pending.next, tokenHash(post.body.config.env.RUDDER_WORKER_TOKEN));
+  const exited = new Promise((resolve) => f.server.child.once("exit", resolve));
+  f.server.child.kill("SIGTERM"); await exited;
+  const restarted = await bootServer(t, { ...f.env, RUDDER_CLOUD_DB: f.server.dbPath });
+  const oldControl = await f.connect(restarted); f.publish(oldControl);
+  await sleep(2200);
+  assert.equal(f.calls.filter((call) => call.method === "POST").length, 1, "persisted pending token fences a second update after restart");
+  assert.deepEqual(f.db.prepare("select worker_token_hash as current, worker_token_next_hash as next from rudder_workspaces where id = 'home-rotation'").get(), pending);
+  // Actual authenticated use of that same replacement resolves the pending
+  // transition, even though the provider response was lost.
+  await f.connect(restarted, post.body.config.env.RUDDER_WORKER_TOKEN);
+  assert.deepEqual(f.db.prepare("select worker_token_hash as current, worker_token_next_hash as next from rudder_workspaces where id = 'home-rotation'").get(),
+    { current: pending.next, next: null });
 });
 
 serverTest("a sleeping home's last state is a memory: live rows read paused, never working", async (t) => {

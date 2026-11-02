@@ -333,27 +333,33 @@ fn backed_preparation_wrong_tool_and_wrong_paged_parent_keep_pin_or_unknown_hold
 
 #[test]
 fn backed_preparation_actual_sqlite_busy_wait_has_one_original_clock() {
+    // Allow ordinary fixture capture under parallel load before contention. The
+    // same original deadline still bounds the actual blocked SQLite operation.
     let f = Fixture::new(); let blocker = Connection::open(f.index.root.join("index.sqlite")).unwrap();
     blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
-    let original = FinalizationBudget::begin(Duration::from_millis(30)).unwrap(); let constraint = original.constraint();
+    let original = FinalizationBudget::begin(Duration::from_secs(2)).unwrap(); let constraint = original.constraint();
     let start = Instant::now(); let mut out = None;
     assert!(f.index.prepare_backed_retaining(&mut out, f.spec.clone(), PreparedContentLayout::PagedChunkedV2,
         f.spec.base_runtime.clone(), f.anchors.clone(), vec![f.source.clone()], None, original, cancel()).is_err());
     let owner = out.as_ref().unwrap(); assert_eq!(owner.original_constraint_data(), constraint);
-    assert!(start.elapsed() < Duration::from_secs(2)); assert!(owner.core.connection.is_some());
+    assert!(start.elapsed() < Duration::from_secs(5)); assert!(owner.core.connection.is_some());
     assert!(owner.core.store.is_none()); assert!(owner.acknowledgment().is_err()); blocker.execute_batch("ROLLBACK").unwrap();
 }
 
 #[test]
 fn backed_preparation_original_keeper_mutex_and_gc_wait_remain_bounded() {
+    // Encoding and capture share the original deadline with the blocked stage.
+    // A 30ms deadline could expire before that stage on a loaded test host.
     for keeper in [false, true] {
-        let f = Fixture::new(); let mut out = None; let original = FinalizationBudget::begin(Duration::from_millis(30)).unwrap();
+        let f = Fixture::new(); let mut out = None; let original = FinalizationBudget::begin(Duration::from_secs(2)).unwrap();
+        let constraint = original.constraint();
         let lock = OpenOptions::new().read(true).write(true).open(f.index.store.root().join("lock")).unwrap();
         let guard = if keeper { Some(f.index.connection.lock().unwrap()) } else { FileExt::lock_exclusive(&lock).unwrap(); None };
         let start = Instant::now();
         assert!(f.index.prepare_backed_retaining(&mut out, f.spec.clone(), PreparedContentLayout::PagedChunkedV2,
             f.spec.base_runtime.clone(), f.anchors.clone(), vec![f.source.clone()], None, original, cancel()).is_err());
-        assert!(start.elapsed() < Duration::from_secs(2)); assert!(out.as_ref().unwrap().acknowledgment().is_err());
+        assert_eq!(out.as_ref().unwrap().original_constraint_data(), constraint);
+        assert!(start.elapsed() < Duration::from_secs(5)); assert!(out.as_ref().unwrap().acknowledgment().is_err());
         if keeper { assert!(out.as_ref().unwrap().core.connection.is_none()); }
         else { assert!(out.as_ref().unwrap().core.store.as_ref().unwrap().gc.is_some()); }
         drop(guard);

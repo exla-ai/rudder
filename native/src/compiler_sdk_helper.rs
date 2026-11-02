@@ -63,7 +63,7 @@ fn run_inner(check:&mut BootstrapCheck,reaped_inner_stderr:&mut Option<File>)->R
     let cwd=fs::metadata(".")?;ensure!((cwd.dev(),cwd.ino())==(m.dev(),m.ino()),"SDK helper changed original work directory");
     let job=if data.job.is_null(){ensure!(packet.fds.len()==7,"SDK fixed descriptor count differs");None}else{ensure!(packet.fds.len()==10,"SDK selected descriptor count differs");Some((&data.job,&packet.fds[7],&packet.fds[8],&packet.fds[9]))};
     *check=BootstrapCheck::SdkHelperNamespaceWorkload;
-    let workload=run_namespace_retaining(userns,&packet.fds[5],&original,job,reaped_inner_stderr)?;if job.is_none(){validate_workload(&workload,&constraint)?;}
+    let workload=run_namespace_retaining(userns,&packet.fds[5],&packet.fds[6],&original,job,reaped_inner_stderr)?;if job.is_none(){validate_workload(&workload,&constraint)?;}
     let result=CompilerSdkProbeData{format_version:1,kind:"original-sdk-fixed-helper-complete-v1".into(),helper_pid:std::process::id(),helper_start_ticks:start,original_constraint:constraint,workload};
     *check=BootstrapCheck::SdkHelperResultSend;
     let bytes=canonical_json(&result)?;ensure!(bytes.len()<=16*1024,"SDK fixed result bound");
@@ -71,7 +71,44 @@ fn run_inner(check:&mut BootstrapCheck,reaped_inner_stderr:&mut Option<File>)->R
 }
 fn mount(source:Option<&str>,target:&str,kind:Option<&str>,flags:libc::c_ulong)->Result<()> {
     let s=source.map(CString::new).transpose()?;let t=CString::new(target)?;let k=kind.map(CString::new).transpose()?;
-    ensure!(unsafe{libc::mount(s.as_ref().map_or(std::ptr::null(),|v|v.as_ptr()),t.as_ptr(),k.as_ref().map_or(std::ptr::null(),|v|v.as_ptr()),flags,std::ptr::null())}==0,"SDK private namespace mount failed");Ok(())
+    if unsafe{libc::mount(s.as_ref().map_or(std::ptr::null(),|v|v.as_ptr()),t.as_ptr(),k.as_ref().map_or(std::ptr::null(),|v|v.as_ptr()),flags,std::ptr::null())}!=0{
+        return Err(io::Error::last_os_error()).context("SDK private namespace mount failed")
+    }Ok(())
+}
+/// A retained descriptor still refers to its original mount after unshare.
+/// A proc-FD bind source on that foreign mount fails EINVAL. Locate the same
+/// inode through the new namespace, retaining the original as authority. The
+/// reopened FD, rather than the pathname, is then the bind source.
+fn rebase_mount_fd(original:&OwnedFd)->Result<OwnedFd>{
+    let path=fs::read_link(format!("/proc/self/fd/{}",original.as_raw_fd()))?;
+    rebase_mount_fd_at(original,&path)
+}
+fn rebase_mount_fd_at(original:&OwnedFd,path:&Path)->Result<OwnedFd>{
+    ensure!(path.is_absolute()&&!path.as_os_str().as_encoded_bytes().ends_with(b" (deleted)"),"SDK retained mount locator unavailable");
+    let file=File::from(original.try_clone()?);let before=file.metadata()?;
+    ensure!(before.is_dir()||before.is_file(),"SDK retained mount role differs");
+    let reopened=OpenOptions::new().read(true).custom_flags(libc::O_PATH|libc::O_NOFOLLOW|libc::O_CLOEXEC).open(path)
+        .context("SDK retained mount reopen failed")?;
+    let actual=reopened.metadata()?;let after=file.metadata()?;
+    let identity=|m:&fs::Metadata|(m.dev(),m.ino(),m.mode()&libc::S_IFMT);
+    ensure!(identity(&before)==identity(&actual)&&identity(&before)==identity(&after),"SDK retained mount inode differs");
+    Ok(reopened.into())
+}
+/// The Root-private ancestors of the runtime floor cannot be traversed by
+/// UID1500. Pin cwd to the held floor before cloning the mount namespace: the
+/// kernel rebases cwd into the clone, without looking up those ancestors.
+fn clone_mount_namespace_at(floor:&OwnedFd,workspace:&OwnedFd)->Result<OwnedFd>{
+    if unsafe{libc::fchdir(floor.as_raw_fd())}!=0{return Err(io::Error::last_os_error()).context("SDK retained floor chdir failed")}
+    if unsafe{libc::unshare(libc::CLONE_NEWNS|libc::CLONE_NEWNET|libc::CLONE_NEWPID)}!=0{return Err(io::Error::last_os_error()).context("SDK actual isolated namespaces unavailable")}
+    mount(None,"/",None,(libc::MS_REC|libc::MS_PRIVATE)as _)?;
+    let rebased:OwnedFd=OpenOptions::new().read(true).custom_flags(libc::O_PATH|libc::O_DIRECTORY|libc::O_CLOEXEC).open(".")?.into();
+    let before=wire::fd_data(floor)?;let after=wire::fd_data(&rebased)?;
+    ensure!((before.device,before.inode,before.directory)==(after.device,after.inode,after.directory),"SDK cloned floor inode differs");
+    // The independently validated UID1500 scratch lives under /workspace;
+    // reopening it still compares against its original held inode.
+    let cwd=rebase_mount_fd(workspace)?;
+    if unsafe{libc::fchdir(cwd.as_raw_fd())}!=0{return Err(io::Error::last_os_error()).context("SDK retained workspace chdir failed")}
+    Ok(rebased)
 }
 /// Holds the workload user namespace for a helper that stays non-dumpable.
 ///
@@ -108,7 +145,7 @@ impl WorkloadUserNamespace{
             ensure!(n==0||io::Error::last_os_error().kind()==io::ErrorKind::Interrupted,"SDK user namespace wait failed");
         }
         let mut byte=0u8;ensure!(unsafe{libc::read(ready.as_raw_fd(),(&mut byte as *mut u8).cast(),1)}==1&&byte==b'1',"SDK user namespace child failed");
-        ensure!(unsafe{libc::setns(pidfd.as_raw_fd(),libc::CLONE_NEWUSER)}==0,"SDK user namespace join failed");
+        if unsafe{libc::setns(pidfd.as_raw_fd(),libc::CLONE_NEWUSER)}!=0{return Err(io::Error::last_os_error()).context("SDK user namespace join failed")}
         ensure!(unsafe{libc::getuid()==0&&libc::geteuid()==0&&libc::getgid()==0&&libc::getegid()==0},"SDK user namespace identity differs");
         for(path,expected)in[("/proc/self/uid_map","0 1500 1"),("/proc/self/gid_map","0 1500 1"),("/proc/self/setgroups","deny")]{
             ensure!(fs::read_to_string(path)?.split_whitespace().collect::<Vec<_>>().join(" ")==expected,"SDK user namespace map differs");
@@ -143,20 +180,20 @@ unsafe fn user_namespace_child(go:i32,ready:i32)->!{
     while read_byte(go)>0{}
     libc::_exit(0)
 }
-fn run_namespace_retaining(userns:WorkloadUserNamespace,floor:&OwnedFd,original:&FinalizationBudget,job:Option<(&serde_json::Value,&OwnedFd,&OwnedFd,&OwnedFd)>,reaped_inner_stderr:&mut Option<File>)->Result<serde_json::Value> {
+fn run_namespace_retaining(userns:WorkloadUserNamespace,floor:&OwnedFd,workspace:&OwnedFd,original:&FinalizationBudget,job:Option<(&serde_json::Value,&OwnedFd,&OwnedFd,&OwnedFd)>,reaped_inner_stderr:&mut Option<File>)->Result<serde_json::Value> {
     original.remaining()?;
     userns.join(||original.remaining())?;
-    ensure!(unsafe{libc::unshare(libc::CLONE_NEWNS|libc::CLONE_NEWNET|libc::CLONE_NEWPID)}==0,"SDK actual isolated namespaces unavailable");
-    mount(None,"/",None,(libc::MS_REC|libc::MS_PRIVATE)as _)?;
+    let floor=clone_mount_namespace_at(floor,workspace)?;
     for name in ["root","workspace","tmp"]{fs::DirBuilder::new().mode(0o700).create(name)?;}
     if job.is_some(){fs::DirBuilder::new().mode(0o700).create("observer-proc")?;}
     mount(Some(&format!("/proc/self/fd/{}/prepared",floor.as_raw_fd())),"root",None,(libc::MS_BIND|libc::MS_REC)as _)?;
     mount(None,"root",None,(libc::MS_BIND|libc::MS_REMOUNT|libc::MS_RDONLY|libc::MS_NOSUID|libc::MS_NODEV)as _)?;
-    let buck2=readonly_at(floor,"buck2",false)?;
+    let buck2=readonly_at(&floor,"buck2",false)?;
     OpenOptions::new().write(true).create_new(true).mode(0o500).open("workspace/buck2")?;
     mount(Some(&format!("/proc/self/fd/{}",buck2.as_raw_fd())),"workspace/buck2",None,libc::MS_BIND as _)?;
     mount(None,"workspace/buck2",None,(libc::MS_BIND|libc::MS_REMOUNT|libc::MS_RDONLY|libc::MS_NOSUID|libc::MS_NODEV)as _)?;
     if let Some((_,source,output,cancel))=job{check_cancel(cancel)?;
+        let source=rebase_mount_fd(source)?;let output=rebase_mount_fd(output)?;
         for name in ["workspace/src","workspace/out"]{fs::DirBuilder::new().mode(0o700).create(name)?;}
         let rules:serde_json::Value=serde_json::from_str(include_str!("compiler_sdk_rules.json"))?;
         ensure!(rules["sandbox_profile"]=="uid1500-user-mount-net-pid-procless-seccomp-sdk-v3"&&rules["source_root"]=="/workspace/src"&&rules["output_root"]=="/workspace/out","SDK execution rule layout differs from actual isolated mounts");

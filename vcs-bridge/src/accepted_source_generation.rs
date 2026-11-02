@@ -17,6 +17,9 @@ pub struct AcceptedSourceGeneration {
     #[cfg(target_os="linux")] publication:Option<rudder_engine::store::environment_dependencies::EnvironmentDependentPublication>,
     #[cfg(target_os="linux")] read:Option<rudder_engine::store::environment_dependencies::EnvironmentDependentRead>,
     #[cfg(target_os="linux")] stage:Option<String>,
+    #[cfg(target_os="linux")] overlay:Option<Arc<rudder_engine::store::environment_dependencies::SourceOverlayPinOwner>>,
+    #[cfg(target_os="linux")] overlay_read:Option<rudder_engine::store::environment_dependencies::SourceOverlayRead>,
+    #[cfg(target_os="linux")] source_parent:Option<Arc<rudder_engine::store::environment_dependencies::RetainedSourceParent>>,
 }
 impl AcceptedSourceGeneration {
     #[allow(clippy::too_many_arguments)]
@@ -27,7 +30,8 @@ impl AcceptedSourceGeneration {
         ensure!(out.is_none(),"original accepted source generation occupied");
         *out=Some(Self{store,repo,verified,cache,source,runnable,environment,previous,previous_seed,original,cancelled,
             pin,seed_pin,pin_attempted:false,pin_ack:false,seed:None,paged:None,prepared:None,attempted:false,acknowledged:false,
-            #[cfg(target_os="linux")] inputs:None,#[cfg(target_os="linux")] publication:None,#[cfg(target_os="linux")] read:None,#[cfg(target_os="linux")] stage:None});
+            #[cfg(target_os="linux")] inputs:None,#[cfg(target_os="linux")] publication:None,#[cfg(target_os="linux")] read:None, #[cfg(target_os="linux")] stage:None,
+            #[cfg(target_os="linux")] overlay:None,#[cfg(target_os="linux")] overlay_read:None,#[cfg(target_os="linux")] source_parent:None});
         out.as_mut().unwrap().prepare(&mut check_owner)
     }
     #[cfg(target_os="linux")]
@@ -37,12 +41,32 @@ impl AcceptedSourceGeneration {
         pin:String,seed_pin:String,original:FinalizationBudget,cancelled:Arc<AtomicBool>,mut check_owner:impl FnMut()->Result<()>)->Result<()> {
         ensure!(out.is_none(),"original backed accepted generation occupied");let runnable=inputs.root_data().clone();let environment=inputs.environment().root_data()?.clone();
         *out=Some(Self{store,repo,verified,cache,source,runnable,environment,previous,previous_seed,original,cancelled,pin,seed_pin,pin_attempted:false,pin_ack:false,
-            seed:None,paged:None,prepared:None,attempted:false,acknowledged:false,inputs:Some(inputs),publication:None,read:None,stage:None});out.as_mut().unwrap().prepare(&mut check_owner)
+            seed:None,paged:None,prepared:None,attempted:false,acknowledged:false,inputs:Some(inputs),publication:None,read:None,stage:None,overlay:None,overlay_read:None,source_parent:None});out.as_mut().unwrap().prepare(&mut check_owner)
+    }
+    /// Explicit full flatten of an actual published overlay. The overlay stays
+    /// owned through every fallible phase and is never used as a source parent.
+    #[cfg(target_os="linux")]
+    #[allow(clippy::too_many_arguments)]
+    pub fn prepare_overlay_retaining(out:&mut Option<Self>,store:LocalStore,repo:Arc<ReadonlyRepo>,verified:Arc<VerifiedSourceProjection>,cache:Arc<RetainedSeedCasCache>,
+        source:ObjectRef,overlay:Arc<rudder_engine::store::environment_dependencies::SourceOverlayPinOwner>,previous:CommitIdentity,previous_seed:ObjectRef,
+        pin:String,seed_pin:String,original:FinalizationBudget,cancelled:Arc<AtomicBool>,mut check_owner:impl FnMut()->Result<()>)->Result<()> {
+        ensure!(out.is_none(),"original overlay accepted generation occupied");let runnable=overlay.root_data().clone();
+        let environment=overlay.source_parent().original_owner().environment().root_data()?.clone();
+        *out=Some(Self{store,repo,verified,cache,source,runnable,environment,previous,previous_seed,original,cancelled,pin,seed_pin,pin_attempted:false,pin_ack:false,
+            seed:None,paged:None,prepared:None,attempted:false,acknowledged:false,inputs:None,publication:None,read:None,stage:None,overlay:Some(overlay),overlay_read:None,source_parent:None});
+        out.as_mut().unwrap().prepare(&mut check_owner)
+    }
+    #[cfg(target_os="linux")]
+    fn environment_owner(&self)->Option<&Arc<rudder_engine::store::environment_dependencies::RetainedEnvironmentSubgraph>> {
+        self.inputs.as_ref().map(|owner|owner.environment()).or_else(||self.overlay.as_ref().map(|owner|owner.source_parent().original_owner().environment()))
     }
     #[cfg(target_os="linux")]
     fn check_backed(&mut self)->Result<()> {if let Some(owner)=&self.inputs{ensure!(self.read.is_none(),"original accepted input read unresolved");
         owner.read_retaining(&mut self.read,self.runnable.clone(),Arc::new(backed::Clock{original:self.original.clone(),cancelled:self.cancelled.clone()}))?;
-        self.read.as_ref().unwrap().verified_bytes()?;self.time()?;self.read.take();}Ok(())}
+        self.read.as_ref().unwrap().verified_bytes()?;self.time()?;self.read.take();}
+        if let Some(owner)=&self.overlay{ensure!(self.overlay_read.is_none(),"original accepted overlay read unresolved");
+            owner.read_retaining(&mut self.overlay_read,self.runnable.clone(),Arc::new(backed::Clock{original:self.original.clone(),cancelled:self.cancelled.clone()}))?;
+            self.overlay_read.as_ref().unwrap().verified_bytes()?;self.time()?;self.overlay_read.take();}Ok(())}
     fn time(&self)->Result<()> {if self.cancelled.load(Ordering::Acquire){self.original.cancel();anyhow::bail!("accepted source generation cancelled");}self.original.remaining()?;Ok(())}
     fn validate(&self,check_owner:&mut impl FnMut()->Result<()>)->Result<CommitIdentity> {
         self.phase(check_owner)?;self.previous.validate()?;self.cache.check_current()?;
@@ -63,6 +87,9 @@ impl AcceptedSourceGeneration {
         for root in [&self.runnable,&self.environment,self.verified.evidence(),&self.previous_seed] {
             #[cfg(target_os="linux")] if let Some(owner)=&self.inputs{if root==&self.runnable||root==&self.environment{
                 ensure!(owner.matches_record_data(&pins,owner.pin_name_data())&&owner.root_data()==&self.runnable&&owner.environment().root_data()?==&self.environment,"accepted input original dependency changed");continue;}}
+            #[cfg(target_os="linux")] if let Some(owner)=&self.overlay{if root==&self.runnable||root==&self.environment{
+                ensure!(owner.matches_record_data(&pins,owner.pin_name_data())&&owner.root_data()==&self.runnable
+                    &&owner.source_parent().original_owner().environment().root_data()?==&self.environment,"accepted input original overlay changed");continue;}}
             ensure!(pins.pins.values().any(|r|r==root),"accepted source input lost original retention");
         }
         self.phase(check_owner)?;Ok(baseline)
@@ -74,9 +101,14 @@ impl AcceptedSourceGeneration {
         let baseline=self.validate(check_owner)?;let operation=JjOperationId(self.repo.op_id().hex());
         ensure!(!self.store.retention()?.pins.contains_key(&self.pin),"accepted source original pin already exists");
         self.phase(check_owner)?;self.pin_attempted=true;
-        #[cfg(target_os="linux")] if let Some(owner)=&self.inputs{
+        #[cfg(target_os="linux")] if let Some(environment)=self.environment_owner().cloned(){
             self.stage=Some(self.store.begin_staging(Duration::from_secs(120))?.id);
-            self.store.publish_environment_dependent_retaining(&mut self.publication,self.stage.as_ref().unwrap().clone(),self.pin.clone(),self.runnable.clone(),owner.environment().clone(),
+            // This full publisher traverses/verifies the actual accepted source
+            // graph. No overlay record or ordinary repin can mint the next parent.
+            self.store.publish_environment_dependent_retaining(&mut self.publication,self.stage.as_ref().unwrap().clone(),self.pin.clone(),self.runnable.clone(),environment,
+                Arc::new(backed::Clock{original:self.original.clone(),cancelled:self.cancelled.clone()}))?;
+            self.pin_ack=true;self.check_backed()?;self.phase(check_owner)?;
+            self.publication.as_ref().unwrap().acknowledgment()?.derive_source_parent_retaining(&mut self.source_parent,
                 Arc::new(backed::Clock{original:self.original.clone(),cancelled:self.cancelled.clone()}))?;
         }else{self.store.pin_existing(&self.pin,&self.runnable)?;}
         #[cfg(not(target_os="linux"))] self.store.pin_existing(&self.pin,&self.runnable)?;
@@ -91,7 +123,8 @@ impl AcceptedSourceGeneration {
             runnable_root:self.runnable.clone(),source_root:self.source.clone(),seed_root,runnable_pin:self.pin.clone(),
             seed_pin:self.seed_pin.clone(),verified:self.verified.clone(),seed_cache:self.cache.clone(),
             #[cfg(target_os="linux")] runnable_backing:None,
-            #[cfg(target_os="linux")] runnable_dependency:self.publication.as_ref().map(|p|p.acknowledgment().cloned()).transpose()?});
+            #[cfg(target_os="linux")] runnable_dependency:self.publication.as_ref().map(|p|p.acknowledgment().cloned()).transpose()?,
+            #[cfg(target_os="linux")] source_parent:self.source_parent.clone()});
         self.phase(check_owner)?;self.acknowledged=true;Ok(())
     }
     /// Original output is stored before native final checks. Calling this late

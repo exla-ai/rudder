@@ -12,16 +12,17 @@ impl ImageImportFence for Clock{fn remaining(&self)->Result<Duration>{if self.ca
 pub struct BackedInitialEnvironment {environment:ObjectRef,owner:Option<Arc<BackedPinOwner>>,subgraph:Option<Arc<RetainedEnvironmentSubgraph>>,sources:Vec<Arc<VerifiedBakedInputs>>,
     pin:String,original:FinalizationBudget,cancelled:Arc<AtomicBool>,clock:Arc<Clock>,read:Option<BackedRead>,publication:Option<BackedPublication>,
     environment_read:Option<EnvironmentSubgraphRead>,dependent:Option<EnvironmentDependentPublication>,
+    source_parent:Option<Arc<rudder_engine::store::environment_dependencies::RetainedSourceParent>>,
     runnable:Option<ObjectRef>,environment_attempted:bool,environment_checked:bool}
 impl BackedInitialEnvironment {
     pub fn stage_retaining(out:&mut Option<Self>,environment:ObjectRef,owner:Arc<BackedPinOwner>,sources:Vec<Arc<VerifiedBakedInputs>>,
         pin:String,original:FinalizationBudget,cancelled:Arc<AtomicBool>)->Result<()> {
         ensure!(out.is_none(),"original backed initial environment occupied");let clock=Arc::new(Clock{original:original.clone(),cancelled:cancelled.clone()});
-        *out=Some(Self{environment,owner:Some(owner),subgraph:None,sources,pin,original,cancelled,clock,read:None,publication:None,environment_read:None,dependent:None,runnable:None,environment_attempted:false,environment_checked:false});Ok(())
+        *out=Some(Self{environment,owner:Some(owner),subgraph:None,sources,pin,original,cancelled,clock,read:None,publication:None,environment_read:None,dependent:None,source_parent:None,runnable:None,environment_attempted:false,environment_checked:false});Ok(())
     }
     pub fn stage_subgraph_retaining(out:&mut Option<Self>,subgraph:Arc<RetainedEnvironmentSubgraph>,pin:String,original:FinalizationBudget,cancelled:Arc<AtomicBool>)->Result<()> {
         ensure!(out.is_none(),"original dependent initial environment occupied");let environment=subgraph.root_data()?.clone();let clock=Arc::new(Clock{original:original.clone(),cancelled:cancelled.clone()});
-        *out=Some(Self{environment,owner:None,subgraph:Some(subgraph),sources:Vec::new(),pin,original,cancelled,clock,read:None,publication:None,environment_read:None,dependent:None,runnable:None,environment_attempted:false,environment_checked:false});Ok(())
+        *out=Some(Self{environment,owner:None,subgraph:Some(subgraph),sources:Vec::new(),pin,original,cancelled,clock,read:None,publication:None,environment_read:None,dependent:None,source_parent:None,runnable:None,environment_attempted:false,environment_checked:false});Ok(())
     }
     fn same_request(&self,original:&FinalizationBudget,cancelled:&Arc<AtomicBool>)->Result<()> {
         ensure!(original.constraint()==self.original.constraint()&&Arc::ptr_eq(cancelled,&self.cancelled),"backed initial source replaced original clock/cancellation");self.clock.remaining()?;Ok(())
@@ -40,9 +41,17 @@ impl BackedInitialEnvironment {
         self.same_request(original,cancelled)?;ensure!(self.environment_checked&&self.publication.is_none()&&self.runnable.is_none(),"backed initial environment ACK absent/original publication attempted");
         self.runnable=Some(runnable.clone());if let Some(subgraph)=&self.subgraph{
             store.publish_environment_dependent_retaining(&mut self.dependent,stage.into(),self.pin.clone(),runnable.clone(),subgraph.clone(),self.clock.clone())?;
-            ensure!(self.dependent.as_ref().unwrap().acknowledgment()?.root_data()==runnable,"original dependent runnable ACK differs");
+            let owner=self.dependent.as_ref().unwrap().acknowledgment()?;
+            ensure!(owner.root_data()==runnable,"original dependent runnable ACK differs");
+            // Stage in the whole original environment carrier before deriving;
+            // uncertain capture is retained and never replaced or replayed.
+            owner.derive_source_parent_retaining(&mut self.source_parent,self.clock.clone())?;
         }else{store.publish_backed_retaining(&mut self.publication,stage.into(),self.pin.clone(),runnable.clone(),self.sources.clone(),self.clock.clone())?;
             ensure!(self.publication.as_ref().unwrap().acknowledgment()?.root_data()==runnable,"original backed runnable ACK differs");}self.same_request(original,cancelled)
+    }
+    pub fn source_parent(&self)->Result<Option<Arc<rudder_engine::store::environment_dependencies::RetainedSourceParent>>>{
+        if let Some(parent)=&self.source_parent{parent.binding_data()?;}
+        ensure!(self.dependent.is_none()||self.source_parent.is_some(),"original dependent source parent absent");Ok(self.source_parent.clone())
     }
     pub fn pin_name(&self)->&str{&self.pin}
     pub fn runnable_owner(&self)->Result<&Arc<BackedPinOwner>>{self.publication.as_ref().context("actual backed initial publication absent")?.acknowledgment()}

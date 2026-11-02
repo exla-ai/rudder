@@ -126,7 +126,7 @@ pub(crate) struct ManagedCheckpointAcceptance {
     projected: Option<jj_lib::merged_tree::MergedTree>, stages: Vec<String>,
     request: Option<VcsIntentRequest>, intent: Option<VcsIntentReceipt>, publish_attempted: bool,
     candidate_attempted: bool, preparation_attempted: bool, generation_identity:Option<Arc<()>>,
-    backed_work:Option<Arc<AcceptanceClock>>,intent_work:Option<Arc<AcceptanceClock>>,backed_candidate:Option<rudder_engine::store::environment_dependencies::EnvironmentDependentPublication>,
+    backed_work:Option<Arc<AcceptanceClock>>,intent_work:Option<Arc<AcceptanceClock>>,backed_candidate:Option<rudder_engine::store::environment_dependencies::SourceOverlayPublication>,
     retained_inputs:Option<rudder_engine::journal::VcsRetainedInputs>,publication_acknowledged:bool,
 }
 struct AcceptanceClock{lease:EngineSourceLease,original:rudder_engine::execution::finalization_budget::FinalizationBudget,cancelled:Arc<std::sync::atomic::AtomicBool>}
@@ -200,7 +200,7 @@ impl ManagedCheckpointAcceptance {
     /// Candidate DATA only. Canonical execution/evidence is a separate genuine
     /// producer; this accessor cannot certify a gate or a backend completion.
     pub(crate) fn candidate_binding(&self)->Option<&AttemptBinding>{self.binding.as_ref()}
-    /// Full-local/source-only first slice. No live capture, partial overlay,
+    /// Full-local/source-only first slice. No live or partial checkpoint,
     /// ignored/prepared partition derivation or inherited environment mutation.
     pub(crate) fn prepare_candidate(&mut self, journal: &Journal, budget: ProjectionBudget) -> Result<()> {
         ensure!(self.completion.prepared().backed_inputs.is_none(),"backed candidate requires its original retained work clock");
@@ -241,10 +241,9 @@ impl ManagedCheckpointAcceptance {
         self.candidate = Some(candidate);let candidate=self.candidate.as_ref().unwrap();
         let pin=format!("managed-accept:{}:candidate", assignment.fence.request_id);
         if let Some(inputs)=&self.completion.prepared().backed_inputs{
-            let environment=match inputs.retention(){rudder_engine::store::environment_dependencies::RetainedRunnableInputs::Environment(owner)=>owner.environment().clone(),
-                _=>anyhow::bail!("legacy flat-backed candidate requires genuine Environment derivation before this path")};
+            let parent=inputs.source_parent()?.clone();
             let original=self.backed_work.as_ref().context("actual backed candidate clock absent")?.clone();
-            self.store.publish_environment_dependent_retaining(&mut self.backed_candidate,stage.id.clone(),pin,candidate.runnable.clone(),environment,original)?;
+            self.store.publish_source_overlay_retaining(&mut self.backed_candidate,stage.id.clone(),pin,candidate.runnable.clone(),parent,original)?;
         }else{self.store.pin(&pin,&candidate.runnable)?;}
         self.binding = Some(binding);
         let repository = self.repository.as_ref().unwrap();
@@ -273,7 +272,7 @@ impl ManagedCheckpointAcceptance {
         ensure!(self.intent_work.is_none()&&!self.preparation_attempted,"acceptance original intent already staged");
         self.intent_work=Some(Arc::new(AcceptanceClock{lease:self.lease.clone(),original,cancelled}));
         if let Some(publication)=&self.backed_candidate{let owner=publication.acknowledgment()?.clone();
-            rudder_engine::journal::VcsRetainedInputs::stage_retaining(&mut self.retained_inputs,rudder_engine::store::environment_dependencies::RetainedRunnableInputs::Environment(owner),self.intent_work.as_ref().unwrap().clone())?;}
+            rudder_engine::journal::VcsRetainedInputs::stage_retaining(&mut self.retained_inputs,rudder_engine::store::environment_dependencies::RetainedRunnableInputs::Overlay(owner),self.intent_work.as_ref().unwrap().clone())?;}
         self.prepare_acceptance_inner(journal,evidence,versions)
     }
     fn intent_time(&self)->Result<()>{if let Some(work)=&self.intent_work{rudder_engine::store::ImageImportFence::remaining(&**work)?;self.lease.wait_shared_current(&work.original,&work.cancelled)?;}Ok(())}

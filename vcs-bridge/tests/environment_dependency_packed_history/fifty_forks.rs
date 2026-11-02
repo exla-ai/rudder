@@ -10,8 +10,8 @@ use rudder_engine::{
     protocol::{CheckpointConsistency, ObjectKind, ObjectRef, OwnerEpoch},
     snapshot::{self, RunnableRoot, SourceV2},
     store::{backed_inputs::VerifiedBakedInputs, environment_dependencies::{
-        EnvironmentDependentPinOwner, EnvironmentDependentPublication, EnvironmentDependentRead,
-        RetainedEnvironmentSubgraph}, ImageImportFence, ImportPolicy, LocalStore, StagingLease},
+        EnvironmentDependentPinOwner, EnvironmentDependentRead, RetainedEnvironmentSubgraph,
+        RetainedSourceParent, SourceOverlayPublication, SourceOverlayPinOwner, SourceOverlayRead, SourceOverlayWorkData}, ImageImportFence, ImportPolicy, LocalStore, StagingLease},
     vfs::{HardlinkTopology, NodeKind, ObservationBudget, VfsCheckpoint, VfsManager, VfsView},
 };
 use rudder_vcs_bridge::{initial_source::PreparedInitialSource, seed::RetainedSeedCasCache};
@@ -121,10 +121,12 @@ enum Purpose { Completed(usize), Failed, Cancelled }
 struct Attempt {
     id: String, purpose: Purpose, clock: Arc<Clock>, constraint: Value,
     environment: Arc<RetainedEnvironmentSubgraph>, parent: Arc<EnvironmentDependentPinOwner>,
+    source_parent: Arc<RetainedSourceParent>,
     seed: Arc<RetainedSeedCasCache>, view: Option<VfsView>, scratch: Option<File>,
     snapshot: Option<VfsCheckpoint>, stage: Option<StagingLease>, source: Option<ObjectRef>,
-    runnable: Option<ObjectRef>, publication: Option<EnvironmentDependentPublication>,
-    published: Option<Arc<EnvironmentDependentPinOwner>>, read: Option<EnvironmentDependentRead>,
+    runnable: Option<ObjectRef>, publication: Option<SourceOverlayPublication>,
+    published: Option<Arc<SourceOverlayPinOwner>>, read: Option<SourceOverlayRead>,
+    inherited_read: Option<SourceOverlayRead>,
     prefix: Vec<u8>, phase: &'static str, times: BTreeMap<&'static str, f64>,
     read_bytes: u64, scratch_bytes: u64, fork_private_bytes: u64, private_bytes: u64,
     expected_failure: bool,
@@ -132,7 +134,8 @@ struct Attempt {
 }
 impl Attempt {
     fn new(purpose: Purpose, campaign: Instant, environment: Arc<RetainedEnvironmentSubgraph>,
-        parent: Arc<EnvironmentDependentPinOwner>, seed: Arc<RetainedSeedCasCache>) -> Result<Self> {
+        parent: Arc<EnvironmentDependentPinOwner>, source_parent: Arc<RetainedSourceParent>,
+        seed: Arc<RetainedSeedCasCache>) -> Result<Self> {
         // Capture the actual unchanged <=30s restriction BEFORE this wave's IO.
         let clock = restriction(campaign)?;
         let constraint = serde_json::to_value(clock.0.constraint())?;
@@ -142,9 +145,9 @@ impl Attempt {
             Purpose::Cancelled => "rudder-negative-cancelled".into(),
         }.into_bytes();
         Ok(Self { id: uuid::Uuid::new_v4().to_string(), purpose, clock, constraint,
-            environment, parent, seed, view: None, scratch: None, snapshot: None,
+            environment, parent, source_parent, seed, view: None, scratch: None, snapshot: None,
             stage: None, source: None, runnable: None, publication: None, published: None,
-            read: None, prefix, phase: "staged-before-effects", times: BTreeMap::new(),
+            read: None, inherited_read: None, prefix, phase: "staged-before-effects", times: BTreeMap::new(),
             read_bytes: 0, scratch_bytes: 0, fork_private_bytes: 0, private_bytes: 0,
             expected_failure: false, before_publication: None, after_attempt: None, publication_failure: None })
     }
@@ -156,15 +159,36 @@ impl Attempt {
             "privatePayloadBytesAfterEdit":self.private_bytes,
             "snapshot":self.snapshot,"source":self.source,"runnable":self.runnable,
             "actualPublicationAcknowledged":self.published.is_some(),
+            "publicationProfile":"retained-source-overlay-v1",
+            "sourceParentBindingId":self.source_parent.binding_data().and_then(|b|b.id_data()).ok(),
+            "publishedDependencyDepth":self.published.as_ref().map(|p|p.record_data().depth),
+            "publishedSourceParentBindingId":self.published.as_ref().map(|p|&p.record_data().parent_id),
+            "sameActualSourceParentArc":self.published.as_ref().map(|p|Arc::ptr_eq(p.source_parent(),&self.source_parent)),
+            "sameOriginalFlatSourceOwnerArc":Arc::ptr_eq(self.source_parent.original_owner(),&self.parent),
+            "sameActualEnvironmentArc":Arc::ptr_eq(self.source_parent.original_owner().environment(),&self.environment),
+            "overlayPublicationWork":self.publication.as_ref().map(|p|work_data(p.work_data())),
+            "verifiedPublishedRunnableRead":self.read.as_ref().is_some_and(|r|r.verified_bytes().is_ok()),
+            "verifiedInheritedCargoRead":self.inherited_read.as_ref().is_some_and(|r|r.verified_bytes().is_ok()),
             "expectedFailureObserved":self.expected_failure,
             "beforePublicationResources":self.before_publication,"afterAttemptResources":self.after_attempt,
             "retainedPublicationFailure":self.publication_failure,
             "originalOwnersRetained":true,"physicalWriterDrainClaim":false})
     }
 }
+fn work_data(work: SourceOverlayWorkData)->Value {
+    json!({"verifiedDeltaObjects":work.verified_delta_objects,"verifiedDeltaBytes":work.verified_delta_bytes,
+        "reusedParentEdges":work.reused_parent_edges,"sourceEntries":work.source_entries,"sourceLogicalBytes":work.source_logical_bytes,
+        "actualIoComplete":work.actual_io_complete,"actualLocalHashReads":work.actual_local_hash_reads,
+        "actualLocalHashBytes":work.actual_local_hash_bytes,"actualLocalObjectSyncs":work.actual_local_object_syncs,
+        "actualLocalObjectSyncBytes":work.actual_local_object_sync_bytes,
+        "scope":"successful-original-publication-local-object-calls-only",
+        "excludesRetentionFilesDirectorySyncsForeignReadsAndEarlierParentWork":true,
+        "perReferenceInheritedIoSeparatelyTagged":false})
+}
 struct Owners {
     manager: Option<VfsManager>, environment: Arc<RetainedEnvironmentSubgraph>,
-    parent: Arc<EnvironmentDependentPinOwner>, inputs: Arc<VerifiedBakedInputs>,
+    parent: Arc<EnvironmentDependentPinOwner>, source_parent: Option<Arc<RetainedSourceParent>>,
+    inputs: Arc<VerifiedBakedInputs>,
     parent_read: Option<EnvironmentDependentRead>, attempts: Vec<Attempt>,
 }
 fn restriction(start: Instant) -> Result<Arc<Clock>> {
@@ -237,13 +261,17 @@ fn samples(values: impl Iterator<Item=f64>) -> Value {
         "p99Ms":if values.len()>=100 {Some(rank(0.99))}else{None},
         "p99NotQualified":values.len()<100,"rawMs":values})
 }
-fn root_file(store: &LocalStore, directory: &ObjectRef, name: &[u8]) -> Result<Vec<u8>> {
+fn root_blob(store: &LocalStore, directory: &ObjectRef, name: &[u8]) -> Result<ObjectRef> {
     let reader = LocalDirectoryStore::read_only(store);
     let entry = PagedDirectory::new(&reader).lookup(directory, name)?.context("actual corpus file absent")?;
     let EntryNode::File {object,logical_size,..} = entry.node else { anyhow::bail!("corpus entry must be file") };
     ensure!(object.kind == ObjectKind::Blob && logical_size == object.size_bytes
         && (64..=1024*1024).contains(&logical_size), "bounded genuine corpus blob required");
-    let raw = store.read_object(&object)?; ensure!(raw.len() as u64 == logical_size, "corpus file length differs"); Ok(raw)
+    Ok(object)
+}
+fn root_file(store: &LocalStore, directory: &ObjectRef, name: &[u8]) -> Result<Vec<u8>> {
+    let object=root_blob(store,directory,name)?;
+    let raw=store.read_object(&object)?;ensure!(raw.len() as u64==object.size_bytes,"corpus file length differs");Ok(raw)
 }
 fn private_bytes(manager: &VfsManager, id: &str) -> Result<u64> {
     Ok(disk(&manager.root().join("views").join(id).join("files"))?.bytes)
@@ -325,7 +353,7 @@ fn run_attempt(a: &mut Attempt, manager: &VfsManager, store: &LocalStore, scratc
     ensure!(rudder_engine::vfs::errno(&view.write(file.ino,0,b"MUST_REFUSE",true).unwrap_err())==libc::EROFS,
         "sealed logical fork still admits writes");
     a.times.insert("seal",step.elapsed().as_secs_f64()*1000.0);
-    a.phase="stage-and-publish-actual-dependent-Runnable";let step=Instant::now();
+    a.phase="stage-and-publish-actual-source-overlay-Runnable";let step=Instant::now();
     a.stage=Some(store.begin_staging(a.clock.remaining()?)?);
     let stage=&a.stage.as_ref().unwrap().id;let snapshot=a.snapshot.as_ref().unwrap();
     a.source=Some(snapshot::stage(store,stage,ObjectKind::SourceRoot,&SourceV2{format_version:2,
@@ -335,8 +363,8 @@ fn run_attempt(a: &mut Attempt, manager: &VfsManager, store: &LocalStore, scratc
         environment:Some(a.environment.root_data()?.clone()),view_root:snapshot.directory.clone(),
         profile:parent.profile.clone(),hardlinks:snapshot.hardlinks.clone(),knowledge_cursor:parent.knowledge_cursor})?);
     a.before_publication = Some(resource_data(store,&a.clock,a.stage.as_ref()));
-    let result = store.publish_environment_dependent_retaining(&mut a.publication,stage.clone(),format!("fifty:fork:{}",a.id),
-        a.runnable.as_ref().unwrap().clone(),a.environment.clone(),a.clock.clone());
+    let result = store.publish_source_overlay_retaining(&mut a.publication,stage.clone(),format!("fifty:fork:{}",a.id),
+        a.runnable.as_ref().unwrap().clone(),a.source_parent.clone(),a.clock.clone());
     if let Err(error) = result {
         // Capture the EXISTING retained original cause immediately. The public
         // call's generic error must not erase an actual IO/retention refusal.
@@ -348,7 +376,16 @@ fn run_attempt(a: &mut Attempt, manager: &VfsManager, store: &LocalStore, scratc
     a.published=Some(a.publication.as_ref().unwrap().acknowledgment()?.clone()); // BEFORE fallible postchecks.
     a.clock.remaining()?;
     ensure!(serde_json::to_value(a.clock.0.constraint())?==a.constraint,"fork original constraint changed");
-    ensure!(Arc::ptr_eq(a.published.as_ref().unwrap().environment(),&a.environment),"fork lost actual shared Environment");
+    let owner=a.published.as_ref().unwrap();
+    ensure!(Arc::ptr_eq(owner.source_parent(),&a.source_parent)
+        &&Arc::ptr_eq(owner.source_parent().original_owner(),&a.parent)
+        &&Arc::ptr_eq(owner.source_parent().original_owner().environment(),&a.environment),"fork lost actual shared Source/Environment owners");
+    let work=a.publication.as_ref().unwrap().work_data();
+    ensure!(work.actual_io_complete&&work.verified_delta_objects>0&&work.reused_parent_edges>0
+        &&work.actual_local_hash_reads==work.verified_delta_objects
+        &&work.actual_local_hash_bytes==work.verified_delta_bytes
+        &&work.actual_local_object_syncs==work.verified_delta_objects
+        &&work.actual_local_object_sync_bytes==work.verified_delta_bytes,"actual successful local object IO differs from verified new delta");
     a.times.insert("dependentPublish",step.elapsed().as_secs_f64()*1000.0);
     a.times.insert("total",entire.elapsed().as_secs_f64()*1000.0);a.phase="actual-immutable-publication-acknowledged";Ok(())
 }
@@ -361,7 +398,7 @@ pub(super) fn run(output:&Path,store:&LocalStore,source:&PreparedInitialSource,
     let parent=source.runnable_dependency().context("actual original dependent source owner absent")?.clone();
     ensure!(Arc::ptr_eq(parent.environment(),&environment),"benchmark Environment differs from actual source");
     // Staged BEFORE manager/fork/read/publication effects; retained even on panic.
-    let held=Box::leak(Box::new(Owners{manager:None,environment,parent,inputs,parent_read:None,attempts:Vec::new()}));
+    let held=Box::leak(Box::new(Owners{manager:None,environment,parent,source_parent:source.source_parent().cloned(),inputs,parent_read:None,attempts:Vec::new()}));
     let mut report=json!({"formatVersion":1,"scope":"actual-full-Rudder-logical-source-CoW-and-retained-runtime-component-only",
         "passed":false,"requestedCompletedForks":FORKS,"attemptCap":ATTEMPTS,"waveWidth":WAVE_WIDTH,
         "maximumConcurrentMutatingJobs":1,"campaignRestrictionSeconds":CAMPAIGN_SECONDS,"originalOperationLimitMs":30000,
@@ -369,9 +406,28 @@ pub(super) fn run(output:&Path,store:&LocalStore,source:&PreparedInitialSource,
         "actualAgentLaunch":false,"RootMountAuthority":false,"privateJjForksQualified":false,
         "normalDrain":false,"compilerSDK":false,"coldMedia":false,"coldWorkerPopulationQualified":false,
         "networkDataPlaneConfigured":false,"remoteFetchBytes":0,"cancelIsProcessStop":false,
-        "logicalVfsIoPreemptivelyBounded":false,"payloadHashReadsSeparatelyInstrumented":false});
+        "logicalVfsIoPreemptivelyBounded":false,"payloadHashReadsSeparatelyInstrumented":true,
+        "actualLocalObjectSyncsSeparatelyInstrumented":true,"sourceOverlayDependencyDepth":3,
+        "originalWholeComponentLimitSeconds":480,"nofileLimitChangedByFixture":false,
+        "payloadIoScope":"original-overlay-publication-local-objects-only",
+        "sourceParentDerivationIoIncludedInPublicationCounters":false,"perReferenceInheritedIoSeparatelyTagged":false});
     let result=(||->Result<()> {
         let clock=restriction(campaign)?;
+        // Retain the genuine parent already derived by original initial-source
+        // preparation; setup and all 52 attempts reuse this exact Arc.
+        let setup_constraint=clock.0.constraint();let capture_start=Instant::now();
+        let shared_parent=held.source_parent.as_ref().context("prepared initial Source parent absent")?;
+        ensure!(Arc::ptr_eq(shared_parent,source.source_parent().context("original prepared Source parent absent")?)
+            &&Arc::ptr_eq(shared_parent.original_owner(),&held.parent)
+            &&Arc::ptr_eq(shared_parent.original_owner().environment(),&held.environment)
+            &&clock.0.constraint()==setup_constraint,"prepared Source parent changed original custody/clock");
+        report["sourceParentBinding"]=json!(shared_parent.binding_data()?);clock.remaining()?;
+        report["capturePreparedSourceParentMs"]=json!(capture_start.elapsed().as_secs_f64()*1000.0);
+        // This one derivation belongs to original initial-source preparation;
+        // the fixture captures that completed fact and performs no derivation.
+        report["sourceParentDerivations"]=json!(1);
+        report["sourceParentCapture"]=json!("prepared-initial-source");
+        report["samePreparedSourceParentArc"]=json!(true);
         held.parent.read_retaining(&mut held.parent_read,source.runnable_root.clone(),clock.clone())?;
         let parent=snapshot::decode_runnable(held.parent_read.as_ref().unwrap().verified_bytes()?)?;
         let original_source=snapshot::decode_source(&store.read_object(&source.source_root)?)?;
@@ -381,6 +437,7 @@ pub(super) fn run(output:&Path,store:&LocalStore,source:&PreparedInitialSource,
         ensure!(topology.groups.is_empty(),"accepted SourceOnly parent topology contract changed");
         let base=VfsCheckpoint{format_version:1,directory:parent.view_root.clone(),hardlinks:parent.hardlinks.clone()};
         let readme=root_file(store,&base.directory,b"README.md")?;let cargo=root_file(store,&base.directory,b"Cargo.toml")?;
+        let cargo_object=root_blob(store,&base.directory,b"Cargo.toml")?;
         let start=Instant::now();held.manager=Some(VfsManager::open(root.join("manager"),store.clone())?);
         held.manager.as_ref().unwrap().prepare_paged_snapshot(&base)?;clock.remaining()?;
         report["prepareSourceVfsMs"]=json!(start.elapsed().as_secs_f64()*1000.0);
@@ -388,6 +445,7 @@ pub(super) fn run(output:&Path,store:&LocalStore,source:&PreparedInitialSource,
         let scratch=root.join("scratch");fs::DirBuilder::new().mode(0o700).create(&scratch)?;
         let before=disk(&store.root().join("objects"))?;let initial_state=store.retention()?;
         let original_count=initial_state.environment_dependencies.as_ref().context("original dependency namespace absent")?.pins.len();
+        ensure!(initial_state.source_dependencies.is_none(),"fresh sibling campaign unexpectedly has prior Source overlays");
         let before_foreign=local_runtime_objects(store,&held.inputs)?;
         let io_before=proc_io()?;
         let usage_before=usage()?;
@@ -397,7 +455,7 @@ pub(super) fn run(output:&Path,store:&LocalStore,source:&PreparedInitialSource,
             if ordinal==FORKS/2 {purposes.extend([Purpose::Failed,Purpose::Cancelled]);}
             for purpose in purposes {
                 ensure!(held.attempts.len()<ATTEMPTS,"fixed benchmark attempt bound");
-                held.attempts.push(Attempt::new(purpose,campaign,held.environment.clone(),held.parent.clone(),source.seed_cache().clone())?);
+                held.attempts.push(Attempt::new(purpose,campaign,held.environment.clone(),held.parent.clone(),held.source_parent.as_ref().unwrap().clone(),source.seed_cache().clone())?);
                 let actual=held.attempts.last_mut().unwrap();
                 // No retry/reconstruction if the original view/publication errs.
                 let result=run_attempt(actual,&manager,store,&scratch,&parent,&original_source,&base,&readme,&cargo);
@@ -412,7 +470,8 @@ pub(super) fn run(output:&Path,store:&LocalStore,source:&PreparedInitialSource,
         for a in &mut held.attempts {
             let clock=restriction(campaign)?;let view=a.view.as_ref().context("actual original fork absent")?;
             ensure!(ids.insert(a.id.clone())&&Arc::ptr_eq(&a.environment,&held.environment)
-                &&Arc::ptr_eq(&a.parent,&held.parent)&&Arc::ptr_eq(&a.seed,source.seed_cache()),"fork identity/actual retained parent changed");
+                &&Arc::ptr_eq(&a.parent,&held.parent)&&Arc::ptr_eq(&a.source_parent,held.source_parent.as_ref().unwrap())
+                &&Arc::ptr_eq(&a.seed,source.seed_cache()),"fork identity/actual retained parent changed");
             let file=view.lookup(1,b"README.md")?;let bytes=view.read(file.ino,0,readme.len())?;
             ensure!(bytes.len()==readme.len()&&bytes[..a.prefix.len()]==a.prefix
                 &&bytes[a.prefix.len()..]==readme[a.prefix.len()..],"sibling divergence/isolation failed");
@@ -424,12 +483,17 @@ pub(super) fn run(output:&Path,store:&LocalStore,source:&PreparedInitialSource,
             logical_read+=a.read_bytes+readme.len()as u64+cargo.len()as u64;
             match a.purpose {
                 Purpose::Completed(_) => {
-                    let owner=a.published.as_ref().context("no actual dependent publication ACK")?;
+                    let owner=a.published.as_ref().context("no actual source overlay publication ACK")?;
                     ensure!(roots.insert(owner.root_data().clone())&&directories.insert(a.snapshot.as_ref().unwrap().directory.clone()),"immutable fork roots were not distinct");
                     owner.read_retaining(&mut a.read,owner.root_data().clone(),clock.clone())?;
                     let actual=snapshot::decode_runnable(a.read.as_ref().unwrap().verified_bytes()?)?;
                     ensure!(actual.source==*a.source.as_ref().unwrap()&&actual.view_root==a.snapshot.as_ref().unwrap().directory
-                        &&actual.environment.as_ref()==Some(held.environment.root_data()?)&&owner.record_data().depth==2,"published immutable fork lost exact shared Environment");
+                        &&actual.environment.as_ref()==Some(held.environment.root_data()?)&&owner.record_data().depth==3
+                        &&Arc::ptr_eq(owner.source_parent(),held.source_parent.as_ref().unwrap())
+                        &&Arc::ptr_eq(owner.source_parent().original_owner(),&held.parent)
+                        &&Arc::ptr_eq(owner.source_parent().original_owner().environment(),&held.environment),"published immutable fork lost exact shared Source/Environment");
+                    owner.read_retaining(&mut a.inherited_read,cargo_object.clone(),clock.clone())?;
+                    ensure!(a.inherited_read.as_ref().unwrap().verified_bytes()?==cargo,"overlay verified read lost original inherited Cargo payload");
                 }
                 Purpose::Failed|Purpose::Cancelled => ensure!(a.expected_failure&&a.published.is_none()
                     &&a.publication.is_none()&&a.runnable.is_none(),"negative attempt manufactured a publication"),
@@ -442,11 +506,24 @@ pub(super) fn run(output:&Path,store:&LocalStore,source:&PreparedInitialSource,
             &&root_file(store,&base.directory,b"Cargo.toml")?==cargo,"accepted parent changed");
         ensure!(source.repository().op_id().hex()==source.operation.0,"accepted jj operation changed during private logical forks");
         let state=store.retention()?;let dependencies=state.environment_dependencies.as_ref().context("dependent retention disappeared")?;
-        ensure!(dependencies.pins.len()==original_count+FORKS&&dependencies.environments.len()==1&&dependencies.holds.is_empty(),"dependent publication/Environment obligations differ");
+        ensure!(dependencies.pins.len()==original_count&&dependencies.environments.len()==1&&dependencies.holds.is_empty(),"original flat Source/Environment obligations changed");
+        let overlays=state.source_dependencies.as_ref().context("Source overlay namespace absent")?;
+        let shared_parent=held.source_parent.as_ref().unwrap();
+        ensure!(Arc::ptr_eq(shared_parent,source.source_parent().context("original prepared Source parent absent")?),
+            "final Source parent differs from original initial-source preparation");
+        let parent_binding=shared_parent.binding_data()?;let parent_id=parent_binding.id_data()?;
+        ensure!(overlays.pins.len()==FORKS&&overlays.parents.len()==1&&overlays.holds.is_empty()
+            &&overlays.parents.get(&parent_id)==Some(parent_binding),"Source overlay siblings/parent obligations differ");
+        report["dependencyNamespaces"]=json!({"environmentPinsBefore":original_count,"environmentPinsAfter":dependencies.pins.len(),
+            "environmentAnchors":dependencies.environments.len(),"environmentPendingHolds":dependencies.holds.len(),
+            "sourceOverlayPins":overlays.pins.len(),"sourceParents":overlays.parents.len(),"sourcePendingHolds":overlays.holds.len(),
+            "sharedSourceParentId":parent_id,"sourceOverlayDepth":3});
         ensure!(state.pins.get(&source.seed_pin)==Some(&source.seed_root)
             &&held.parent.matches_record_data(&state,&source.runnable_pin),"old source/history retention lost");
         for a in &held.attempts {if let Some(owner)=&a.published {ensure!(owner.matches_record_data(&state,&format!("fifty:fork:{}",a.id))
-                &&!state.pins.values().any(|r|r==owner.root_data()),"fork forged ordinary foreign-root LocalPin");}}
+                &&owner.record_data().parent_id==parent_id&&owner.record_data().depth==3
+                &&!dependencies.pins.contains_key(&format!("fifty:fork:{}",a.id))
+                &&!state.pins.values().any(|r|r==owner.root_data()),"fork forged ordinary/flat pin or lost shared Source parent");}}
         let after_foreign=local_runtime_objects(store,&held.inputs)?;
         let newly_local=after_foreign.difference(&before_foreign).collect::<Vec<_>>();
         ensure!(newly_local.is_empty(),"fork copied runtime backing objects into writable CAS");
@@ -456,6 +533,20 @@ pub(super) fn run(output:&Path,store:&LocalStore,source:&PreparedInitialSource,
         let warm=completed.iter().skip(1).copied().collect::<Vec<_>>();
         report["passed"]=json!(true);report["completedImmutableForks"]=json!(roots.len());report["actualPrivateAttempts"]=json!(ids.len());
         report["allOriginalPrivateViewsRetained"]=json!(true);report["sameActualEnvironmentArc"]=json!(true);
+        report["sameActualSourceParentArc"]=json!(true);report["sameOriginalFlatSourceOwnerArc"]=json!(true);
+        report["successfulVerifiedOverlayRunnableReads"]=json!(completed.iter().filter(|a|a.read.as_ref().is_some_and(|r|r.verified_bytes().is_ok())).count());
+        report["successfulVerifiedInheritedCargoReads"]=json!(completed.iter().filter(|a|a.inherited_read.as_ref().is_some_and(|r|r.verified_bytes().is_ok())).count());
+        let mut hash_reads=0u64;let mut hash_bytes=0u64;let mut syncs=0u64;let mut sync_bytes=0u64;
+        for a in &completed {let work=a.publication.as_ref().unwrap().work_data();
+            ensure!(work.actual_io_complete,"successful publication IO metrics incomplete");
+            hash_reads=hash_reads.checked_add(work.actual_local_hash_reads).context("hash-read metric overflow")?;
+            hash_bytes=hash_bytes.checked_add(work.actual_local_hash_bytes).context("hash-byte metric overflow")?;
+            syncs=syncs.checked_add(work.actual_local_object_syncs).context("sync metric overflow")?;
+            sync_bytes=sync_bytes.checked_add(work.actual_local_object_sync_bytes).context("sync-byte metric overflow")?;}
+        report["actualOverlayPublicationLocalIo"]=json!({"successfulPublications":completed.len(),"actualLocalHashReads":hash_reads,
+            "actualLocalHashBytes":hash_bytes,"actualLocalObjectSyncs":syncs,"actualLocalObjectSyncBytes":sync_bytes,
+            "allMatchVerifiedNewDelta":true,"perReferenceInheritedIoSeparatelyTagged":false,
+            "excludesRetentionFilesDirectorySyncsForeignReadsEarlierParentAndServedReadWork":true});
         report["firstUseForkMs"]=json!(completed[0].times["fork"]);
         report["firstUseSampleCount"]=json!(1);report["coldForkPercentiles"]=json!(null);
         report["coldForkPercentilesReason"]=json!("one first-use VFS sample; no cold-media/worker population or independent cold trials");
@@ -484,6 +575,7 @@ pub(super) fn run(output:&Path,store:&LocalStore,source:&PreparedInitialSource,
     })();
     report["campaignElapsedMs"]=json!(campaign.elapsed().as_secs_f64()*1000.0);
     report["attempts"]=json!(held.attempts.iter().map(Attempt::data).collect::<Vec<_>>());
+    report["retainedSourceParentFailure"]=held.source_parent.as_ref().and_then(|p|p.failure()).map(error_data).unwrap_or(Value::Null);
     if let Err(error)=&result {report["passed"]=json!(false);report["failure"]=json!({"retainedOriginals":true,"detail":format!("{error:#}").chars().take(2048).collect::<String>()});}
     if let Err(write_error)=emit(&root.join("result.json"),&report){
         // Descriptor/disk exhaustion must not erase the original retained

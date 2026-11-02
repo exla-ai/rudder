@@ -2754,3 +2754,29 @@ Actual publication counters now measure successful local hash-read and object
 fsync calls, excluding retention files, directory fsyncs, foreign reads, parent
 capture and later served reads. Counters are complete only after original ACK.
 The fifty-view fixture and caller selection remain pending integration/checks.
+
+### 2026-11-02 00:18Z: caller and actual-fifty variants integrated, qualification pending
+
+The Native/VCS source path now retains the genuine parent from initial source
+preparation, shares that exact Arc with task candidates and uses actual typed
+overlay owners through canonical/Journal inputs and Published source capture.
+A successor fully republishes the accepted graph with the same Environment
+before deriving a distinct flat parent. The existing owner, lease, canonical,
+verification, operation/WC, acceptance and original-clock gates remain.
+Independent review found no blocking production issue and added an original
+cancellation regression immediately after the successor's full pin ACK.
+
+The actual-fifty fixture now uses that same prepared parent rather than
+deriving a second parent, retains both dependency namespaces and emits actual
+publication hash-read/fsync counters plus verified inherited/Runnable reads.
+Its original50 successes/52 attempts, width1,30/300/480s restrictions, corpus
+and NOFILE provisioning are unchanged. Private controller v2 rejects obsolete
+legacy and incomplete instrumentation reports;5 offline synthetic tests pass
+with36 rejection mutations. These are predicate checks, not performance proof.
+
+Caller target405 compiles, but its6 explicitly selected strict tests refuse
+the actual local UID1500 at their unchanged UID0 gate. This is not a successful
+runtime qualification. A seventh cancellation-window case is now integrated.
+Fresh Bookworm build-only Root execution is being prepared; Native binary
+check406 and relevant VCS/Native suites407/408 are still active. No worker
+image, SDK/runtime qualification, release or deployment is claimed here.

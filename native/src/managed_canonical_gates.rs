@@ -75,7 +75,7 @@ impl ManagedCanonicalAcceptance{
         self.policy=Some(RetainedCanonicalPolicy::staged());self.policy.as_mut().unwrap().capture(a,self.writer.as_ref().unwrap(),&self.snapshot_clock,&self.cancelled)?;
         let candidate=a.candidate.as_ref().unwrap().clone();let binding=a.binding.as_ref().unwrap().clone();
         let mut limits=InputBudget::default();limits.max_elapsed_ms=u64::try_from(self.snapshot_clock.remaining()?.as_millis().min(30_000))?;
-        if let Some(actual)=&a.backed_candidate{let inputs=RetainedRunnableInputs::Environment(actual.acknowledgment()?.clone());
+        if let Some(actual)=&a.backed_candidate{let inputs=RetainedRunnableInputs::Overlay(actual.acknowledgment()?.clone());
             RetainedRunnableBuildInput::capture_retaining(&mut self.input,a.store.clone(),inputs,binding.projection_policy.clone(),limits,Arc::new(Fence{lease:a.lease.clone(),original:self.snapshot_clock.clone(),cancelled:self.cancelled.clone()}))?;
         }else{self.local_input=Some(rudder_engine::workspace::runnable_build_input_view(&a.store,&candidate.runnable,&binding.projection_policy,&limits)?);}
         self.work.capture(&a.location.store().binding().directory,&self.snapshot_clock,&self.cancelled)?;time(&self.snapshot_clock,&self.cancelled)?;

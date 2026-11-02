@@ -124,3 +124,115 @@ fn backed_initial_refuses_corrupted_backing_and_keeps_original_publication_guard
     assert!(f.run(&mut context,&original,cancel,||Ok(())).is_err());assert!(context.runnable_owner().is_err());assert!(!f.seed.exists());
     assert!(!f.store.object_path(&f.payload).unwrap().exists());assert!(f.store.gc(Duration::ZERO).is_err());
 }
+
+// These remain storage/jj component tests. No fixture path or canonical tree
+// grants Native source, project, task, mount or Journal acceptance authority.
+fn source_parent_context(f:&Fixture,original:&FinalizationBudget,cancel:&Arc<AtomicBool>)
+    ->(Arc<rudder_engine::store::environment_dependencies::RetainedEnvironmentSubgraph>,BackedInitialEnvironment) {
+    let mut environment=None;f.preparation.derive_environment_subgraph_retaining(&mut environment,Arc::new(Clock(original.clone()))).unwrap();
+    let environment=environment.unwrap();let mut context=None;
+    BackedInitialEnvironment::stage_subgraph_retaining(&mut context,environment.clone(),"component-dependent-runnable".into(),original.clone(),cancel.clone()).unwrap();
+    (environment,context.unwrap())
+}
+fn changed_source_candidate(f:&Fixture,prepared:&PreparedInitialSource,bytes:&[u8])->(ObjectRef,ObjectRef) {
+    use rudder_engine::{protocol::CheckpointConsistency,snapshot::{RunnableRoot,SourceV2}};
+    let base=decode_runnable(&f.store.read_object(&prepared.runnable_root).unwrap()).unwrap();
+    let source=decode_source(&f.store.read_object(&base.source).unwrap()).unwrap();let blob=f.store.put_blob(bytes).unwrap();
+    let stage=f.store.begin_staging(Duration::from_secs(120)).unwrap();
+    let adapter=rudder_engine::directory::LocalDirectoryStore::new(&f.store,&stage.id);let pages=PagedDirectory::new(&adapter);
+    let inherited=pages.lookup(&source.directory,b"tracked").unwrap().unwrap();
+    let directory=pages.build(0o755,vec![inherited,DirectoryEntry::new(b"private",EntryNode::File{object:blob.clone(),logical_size:blob.size_bytes,mode:0o644}).unwrap()]).unwrap();
+    let source=f.store.put_metadata(ObjectKind::SourceRoot,&SourceV2{format_version:2,consistency:CheckpointConsistency::Quiesced,directory:directory.clone(),projection_policy:source.projection_policy}).unwrap();
+    let runnable=f.store.put_metadata(ObjectKind::RunnableRoot,&RunnableRoot{source:source.clone(),view_root:directory,..base}).unwrap();(source,runnable)
+}
+fn publish_component_overlay(f:&Fixture,prepared:&PreparedInitialSource,runnable:ObjectRef,pin:&str)
+    ->rudder_engine::store::environment_dependencies::SourceOverlayPublication {
+    let stage=f.store.begin_staging(Duration::from_secs(120)).unwrap();let mut out=None;
+    f.store.publish_source_overlay_retaining(&mut out,stage.id,pin.into(),runnable,prepared.source_parent().unwrap().clone(),clock()).unwrap();out.unwrap()
+}
+
+#[test]#[ignore="strict Root-owned baked DATA + real initial source; shared source parent component"]
+fn completed_flat_source_parent_is_shared_by_siblings_after_its_old_clock_expires(){
+    let f=Fixture::new();let original=budget();let cancel=Arc::new(AtomicBool::new(false));let (environment,mut context)=source_parent_context(&f,&original,&cancel);
+    let prepared=f.run(&mut context,&original,cancel,||Ok(())).unwrap();let parent=prepared.source_parent().unwrap();
+    assert!(Arc::ptr_eq(parent,&context.source_parent().unwrap().unwrap()));
+    assert!(Arc::ptr_eq(parent.original_owner(),prepared.runnable_dependency().unwrap()));
+    assert!(Arc::ptr_eq(parent.original_owner().environment(),&environment));
+    original.cancel();assert!(original.remaining().is_err());
+    let (_,one)=changed_source_candidate(&f,&prepared,b"first private sibling\n");let one=publish_component_overlay(&f,&prepared,one,"component-sibling-one");
+    let (_,two)=changed_source_candidate(&f,&prepared,b"second private sibling\n");let two=publish_component_overlay(&f,&prepared,two,"component-sibling-two");
+    assert!(Arc::ptr_eq(one.acknowledgment().unwrap().source_parent(),parent));
+    assert!(Arc::ptr_eq(two.acknowledgment().unwrap().source_parent(),parent));
+    assert_eq!(one.acknowledgment().unwrap().record_data().depth,3);assert_eq!(two.acknowledgment().unwrap().record_data().depth,3);
+    let mut read=None;one.acknowledgment().unwrap().read_retaining(&mut read,one.acknowledgment().unwrap().root_data().clone(),clock()).unwrap();read.as_ref().unwrap().verified_bytes().unwrap();
+    assert!(!f.store.object_path(&f.payload).unwrap().exists());assert!(f.store.gc(Duration::ZERO).is_err());
+}
+
+#[test]#[ignore="strict Root-owned baked DATA + actual jj child; full accepted-overlay flatten component"]
+fn accepted_overlay_is_fully_published_before_a_distinct_flat_successor_parent(){
+    use jj_lib::{backend::CommitId,op_store::RefTarget,ref_name::{RefName,WorkspaceName},repo::Repo};
+    use rudder_vcs_bridge::{initial_source::AcceptedSourceGeneration,projection::{project_source,verify_versioned_source},projection_io::ProjectionBudget,publication::INTEGRATION_BOOKMARK};
+    let f=Fixture::new();let original=budget();let cancel=Arc::new(AtomicBool::new(false));let (environment,mut context)=source_parent_context(&f,&original,&cancel);
+    let prepared=f.run(&mut context,&original,cancel,||Ok(())).unwrap();let old_parent=prepared.source_parent().unwrap().clone();
+    let (source,runnable)=changed_source_candidate(&f,&prepared,b"actually accepted child source\n");let overlay=publish_component_overlay(&f,&prepared,runnable.clone(),"component-accepted-overlay");
+    let repo=prepared.repository();let previous=repo.store().get_commit(&CommitId::new(hex::decode(&prepared.baseline.commit.0).unwrap())).unwrap();
+    let source_value=decode_source(&f.store.read_object(&source).unwrap()).unwrap();let stage=f.store.begin_staging(Duration::from_secs(120)).unwrap();
+    let projected=pollster::block_on(project_source(f.store.clone(),&source_value.directory,&previous.tree(),&source_value.projection_policy,None,None,ProjectionBudget::default())).unwrap();
+    let verified=Arc::new(pollster::block_on(verify_versioned_source(f.store.clone(),&stage.id,&source,&source_value.projection_policy,&projected.tree,Some(&projected.record),ProjectionBudget::default())).unwrap());
+    let mut tx=repo.start_transaction();let commit=pollster::block_on(tx.repo_mut().new_commit(vec![previous.id().clone()],projected.tree).write()).unwrap();
+    tx.repo_mut().set_wc_commit(WorkspaceName::DEFAULT.to_owned(),commit.id().clone()).unwrap();
+    tx.repo_mut().set_local_bookmark_target(RefName::new(INTEGRATION_BOOKMARK),RefTarget::normal(commit.id().clone()));
+    let accepted=pollster::block_on(tx.commit("actual overlay component accepted operation")).unwrap();
+    original.cancel();let original=budget();let cancel=Arc::new(AtomicBool::new(false));let mut successor=None;
+    AcceptedSourceGeneration::prepare_overlay_retaining(&mut successor,f.store.clone(),accepted,verified,prepared.seed_cache().clone(),source.clone(),overlay.acknowledgment().unwrap().clone(),
+        prepared.baseline.clone(),prepared.seed_root.clone(),"component-flat-successor".into(),"component-successor-seed".into(),original,cancel,||Ok(())).unwrap();
+    let mut next=None;successor.as_mut().unwrap().take_prepared_retaining(&mut next).unwrap();let next=next.unwrap();let next_parent=next.source_parent().unwrap();let flat=next.runnable_dependency().unwrap();
+    assert!(!Arc::ptr_eq(next_parent,&old_parent));assert!(Arc::ptr_eq(next_parent.original_owner(),flat));assert!(Arc::ptr_eq(flat.environment(),&environment));
+    assert_eq!(next.runnable_root,runnable);assert_eq!(next.source_root,source);assert_eq!(flat.record_data().depth,2);
+    let state=f.store.retention().unwrap();assert!(flat.matches_record_data(&state,&next.runnable_pin));
+    assert!(overlay.acknowledgment().unwrap().matches_record_data(&state,"component-accepted-overlay"));
+    assert!(prepared.runnable_dependency().unwrap().matches_record_data(&state,&prepared.runnable_pin));
+    assert_eq!(state.pins.get(&prepared.seed_pin),Some(&prepared.seed_root));assert!(!f.store.object_path(&f.payload).unwrap().exists());
+    let (_,child)=changed_source_candidate(&f,&next,b"new private child of flattened successor\n");let child=publish_component_overlay(&f,&next,child,"component-next-sibling");
+    assert!(Arc::ptr_eq(child.acknowledgment().unwrap().source_parent(),next_parent));assert_eq!(child.acknowledgment().unwrap().record_data().depth,3);
+}
+
+
+#[test]#[ignore="strict Root-owned baked DATA + accepted-overlay full-pin cancellation window"]
+fn cancelled_after_full_successor_pin_keeps_original_carrier_and_refuses_prepared_or_retry(){
+    use jj_lib::{backend::CommitId,op_store::RefTarget,ref_name::{RefName,WorkspaceName},repo::Repo};
+    use rudder_vcs_bridge::{initial_source::AcceptedSourceGeneration,projection::{project_source,verify_versioned_source},projection_io::ProjectionBudget,publication::INTEGRATION_BOOKMARK};
+    let f=Fixture::new();let initial=budget();let initial_cancel=Arc::new(AtomicBool::new(false));let (_,mut context)=source_parent_context(&f,&initial,&initial_cancel);
+    let prepared=f.run(&mut context,&initial,initial_cancel,||Ok(())).unwrap();
+    let (source,runnable)=changed_source_candidate(&f,&prepared,b"accepted overlay awaiting successor parent\n");
+    let overlay=publish_component_overlay(&f,&prepared,runnable.clone(),"component-window-overlay");let overlay_owner=overlay.acknowledgment().unwrap().clone();
+    let repo=prepared.repository();let previous=repo.store().get_commit(&CommitId::new(hex::decode(&prepared.baseline.commit.0).unwrap())).unwrap();
+    let source_value=decode_source(&f.store.read_object(&source).unwrap()).unwrap();let stage=f.store.begin_staging(Duration::from_secs(120)).unwrap();
+    let projected=pollster::block_on(project_source(f.store.clone(),&source_value.directory,&previous.tree(),&source_value.projection_policy,None,None,ProjectionBudget::default())).unwrap();
+    let verified=Arc::new(pollster::block_on(verify_versioned_source(f.store.clone(),&stage.id,&source,&source_value.projection_policy,&projected.tree,Some(&projected.record),ProjectionBudget::default())).unwrap());
+    let mut tx=repo.start_transaction();let commit=pollster::block_on(tx.repo_mut().new_commit(vec![previous.id().clone()],projected.tree).write()).unwrap();
+    tx.repo_mut().set_wc_commit(WorkspaceName::DEFAULT.to_owned(),commit.id().clone()).unwrap();
+    tx.repo_mut().set_local_bookmark_target(RefName::new(INTEGRATION_BOOKMARK),RefTarget::normal(commit.id().clone()));
+    let accepted=pollster::block_on(tx.commit("accepted overlay full-pin cancellation window")).unwrap();
+    let original=budget();let cancel=Arc::new(AtomicBool::new(false));let observed=AtomicBool::new(false);let mut successor=None;
+    let result=AcceptedSourceGeneration::prepare_overlay_retaining(&mut successor,f.store.clone(),accepted.clone(),verified.clone(),prepared.seed_cache().clone(),source.clone(),overlay_owner.clone(),
+        prepared.baseline.clone(),prepared.seed_root.clone(),"component-window-full".into(),"component-window-seed".into(),original.clone(),cancel.clone(),||{
+            let state=f.store.retention()?;
+            if state.environment_dependencies.as_ref().is_some_and(|data|data.pins.contains_key("component-window-full")){
+                observed.store(true,Ordering::Release);cancel.store(true,Ordering::Release);original.cancel();
+                anyhow::bail!("cancel original successor immediately after actual full pin ACK");
+            }Ok(())
+        });
+    assert!(result.is_err());assert!(observed.load(Ordering::Acquire));assert!(cancel.load(Ordering::Acquire));assert!(original.remaining().is_err());assert!(successor.is_some());
+    // No process-loss/drop is needed: the whole original successor still owns
+    // its acknowledged full publication and overlay through this late failure.
+    let before=f.store.retention().unwrap();let full=before.environment_dependencies.as_ref().unwrap().pins.get("component-window-full").unwrap();
+    assert_eq!(full.root,runnable);assert_eq!(full.depth,2);assert!(overlay_owner.matches_record_data(&before,"component-window-overlay"));
+    assert!(prepared.runnable_dependency().unwrap().matches_record_data(&before,&prepared.runnable_pin));assert_eq!(before.pins.get(&prepared.seed_pin),Some(&prepared.seed_root));assert!(!before.pins.contains_key("component-window-seed"));
+    let mut transferred=None;assert!(successor.as_mut().unwrap().take_prepared_retaining(&mut transferred).is_err());assert!(transferred.is_none());
+    // Reusing the original occupied carrier cannot reopen the attempt. Neither
+    // transfer nor replay receives a replacement clock or cancellation owner.
+    assert!(AcceptedSourceGeneration::prepare_overlay_retaining(&mut successor,f.store.clone(),accepted,verified,prepared.seed_cache().clone(),source,overlay_owner,
+        prepared.baseline.clone(),prepared.seed_root.clone(),"component-window-full".into(),"component-window-seed".into(),original.clone(),cancel.clone(),||Ok(())).is_err());
+    assert!(successor.is_some());assert_eq!(f.store.retention().unwrap(),before);assert!(original.remaining().is_err());assert!(!f.store.object_path(&f.payload).unwrap().exists());
+}

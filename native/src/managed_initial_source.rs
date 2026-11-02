@@ -190,7 +190,7 @@ impl ManagedInitialSourceOwner {
         // renewal waits use that clock and never become a new source attempt.
         let lease=&self.lease;
         if let Some(backed)=input.backed(){
-            rudder_vcs_bridge::initial_source::AcceptedSourceGeneration::prepare_backed_retaining(&mut self.successor,self.store.clone(),input.repository().clone(),input.verified().clone(),previous.cache.clone(),
+            rudder_vcs_bridge::initial_source::AcceptedSourceGeneration::prepare_overlay_retaining(&mut self.successor,self.store.clone(),input.repository().clone(),input.verified().clone(),previous.cache.clone(),
                 input.integration().proposed_source_root.clone(),backed.clone(),previous.baseline.clone(),previous.seed.clone(),format!("{pin}:runnable"),format!("{pin}:seed"),budget.clone(),cancelled.clone(),||lease.wait_shared_current(budget,&cancelled))?;
         }else{rudder_vcs_bridge::initial_source::AcceptedSourceGeneration::prepare_retaining(&mut self.successor,self.store.clone(),input.repository().clone(),input.verified().clone(),previous.cache.clone(),
             input.integration().proposed_source_root.clone(),input.receipt().request.recovery_root.clone(),input.integration().proposed_environment_root.clone(),previous.baseline.clone(),previous.seed.clone(),

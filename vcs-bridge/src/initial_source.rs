@@ -45,6 +45,7 @@ pub struct PreparedInitialSource {
     seed_cache: Arc<crate::seed::RetainedSeedCasCache>,
     #[cfg(target_os="linux")] runnable_backing:Option<Arc<rudder_engine::store::backed_retention::BackedPinOwner>>,
     #[cfg(target_os="linux")] runnable_dependency:Option<Arc<rudder_engine::store::environment_dependencies::EnvironmentDependentPinOwner>>,
+    #[cfg(target_os="linux")] source_parent:Option<Arc<rudder_engine::store::environment_dependencies::RetainedSourceParent>>,
 }
 impl PreparedInitialSource {
     #[cfg(target_os="linux")]
@@ -54,6 +55,9 @@ impl PreparedInitialSource {
     #[cfg(target_os="linux")]
     pub fn runnable_inputs(&self)->Option<rudder_engine::store::environment_dependencies::RetainedRunnableInputs>{use rudder_engine::store::environment_dependencies::RetainedRunnableInputs;
         self.runnable_dependency.as_ref().map(|p|RetainedRunnableInputs::Environment(p.clone())).or_else(||self.runnable_backing.as_ref().map(|p|RetainedRunnableInputs::Flat(p.clone())))}
+    /// Shared completed immutable DATA fact from the actual flat publication.
+    #[cfg(target_os="linux")]
+    pub fn source_parent(&self)->Option<&Arc<rudder_engine::store::environment_dependencies::RetainedSourceParent>>{self.source_parent.as_ref()}
     pub fn repository(&self) -> &Arc<ReadonlyRepo> { &self.repository }
     pub fn seed_cache(&self)->&Arc<crate::seed::RetainedSeedCasCache>{&self.seed_cache}
 }
@@ -223,6 +227,7 @@ async fn prepare_initial_source_with_retention(store:LocalStore,request:InitialS
         runnable_root, source_root, seed_root, runnable_pin, seed_pin, verified:Arc::new(verified),seed_cache,
         #[cfg(target_os="linux")] runnable_backing:match &retention{InitialEnvironmentRetention::Backed(owner)=>owner.flat_runnable_owner()?,_=>None},
         #[cfg(target_os="linux")] runnable_dependency:match &retention{InitialEnvironmentRetention::Backed(owner)=>owner.dependent_runnable_owner()?,_=>None},
+        #[cfg(target_os="linux")] source_parent:match &retention{InitialEnvironmentRetention::Backed(owner)=>owner.source_parent()?,_=>None},
     })
 }
 

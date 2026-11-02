@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicBool,Ordering};
 
 pub(crate) struct AcceptedSourceInput {
     identity:Arc<()>,owner:OwnerFence,receipt:VcsIntentReceipt,repo:Arc<jj_lib::repo::ReadonlyRepo>,
-    verified:Arc<VerifiedSourceProjection>,backed:Option<Arc<rudder_engine::store::environment_dependencies::EnvironmentDependentPinOwner>>,directories:Vec<IntegrationDirectory>,
+    verified:Arc<VerifiedSourceProjection>,backed:Option<Arc<rudder_engine::store::environment_dependencies::SourceOverlayPinOwner>>,directories:Vec<IntegrationDirectory>,
 }
 impl AcceptedSourceInput {
     pub(crate) fn same_origin(&self,identity:&Arc<()>)->bool{Arc::ptr_eq(&self.identity,identity)}
@@ -15,7 +15,7 @@ impl AcceptedSourceInput {
     pub(crate) fn receipt(&self)->&VcsIntentReceipt{&self.receipt}
     pub(crate) fn integration(&self)->&IntegrationReceipt{self.receipt.integration.as_ref().unwrap()}
     pub(crate) fn repository(&self)->&Arc<jj_lib::repo::ReadonlyRepo>{&self.repo}
-    pub(crate) fn backed(&self)->Option<&Arc<rudder_engine::store::environment_dependencies::EnvironmentDependentPinOwner>>{self.backed.as_ref()}
+    pub(crate) fn backed(&self)->Option<&Arc<rudder_engine::store::environment_dependencies::SourceOverlayPinOwner>>{self.backed.as_ref()}
     pub(crate) fn verified(&self)->&Arc<VerifiedSourceProjection>{&self.verified}
     pub(crate) fn check_physical(&self)->Result<()> {for directory in &self.directories{directory.check_current()?;}Ok(())}
     pub(crate) fn check_current(&self,lease:&EngineSourceLease,journal:&Journal,budget:&FinalizationBudget,cancel:&AtomicBool)->Result<()> {
@@ -83,8 +83,10 @@ impl ManagedCheckpointAcceptance {
             &&repo.view().get_wc_commit_id(jj_lib::ref_name::WorkspaceName::DEFAULT)==Some(commit.id()),
             "Published operation lacks exact accepted WC/commit identity");
         let backed=self.backed_candidate.as_ref().map(|p|p.acknowledgment().cloned()).transpose()?;
-        if let Some(backed)=&backed{let previous=previous.runnable_dependency().context("backed acceptance predecessor boundary absent")?;
-            ensure!(Arc::ptr_eq(backed.environment(),previous.environment())&&backed.root_data()==&receipt.request.recovery_root,"Published acceptor changed original Environment boundary");}
+        if let Some(backed)=&backed{let parent=previous.source_parent().context("backed acceptance predecessor source parent absent")?;
+            let dependency=previous.runnable_dependency().context("backed acceptance predecessor boundary absent")?;
+            ensure!(Arc::ptr_eq(backed.source_parent(),parent)&&Arc::ptr_eq(parent.original_owner(),dependency)
+                &&backed.root_data()==&receipt.request.recovery_root,"Published acceptor changed original source/Environment boundary");}
         let identity=self.generation_identity.get_or_insert_with(||Arc::new(())).clone();
         let mut directories=Vec::with_capacity(repository.directories.len()+1);
         directories.push(IntegrationDirectory{path:repository.path.clone(),held:repository.directory.try_clone()?});

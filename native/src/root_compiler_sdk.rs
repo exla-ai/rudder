@@ -24,51 +24,69 @@ impl Helper {fn staged()->Self{Self{listener:None,name:format!("rudder-sdk-q-{}"
 pub(super) struct RootCompilerSdkOwner {proof:Arc<RuntimeBootstrapProof>,admission:Arc<RuntimeReadAdmission>,original:FinalizationBudget,catalog:CompilerSdkCatalogData,
     placeholder:Option<File>,descriptors:Vec<OwnedFd>,source_binding:Option<File>,baked:Option<Arc<BakedImageCas>>,inputs:Option<Arc<VerifiedBakedInputs>>,semantic:Option<CompilerSdkSemanticInputs>,read:Option<VerifiedBakedRead>,
     local:Option<LocalStore>,floor:Option<ReadonlyRuntimeImage>,mount:Option<RetainedMetadataMount>,root:Option<OwnedFd>,data:Option<CompilerSdkMountData>,helper:Option<sdk_process::SdkProcess>,
-    ready:bool,failed:bool,failure:Option<anyhow::Error>}
+    prepare_check:BootstrapCheck,ready:bool,failed:bool,failure:Option<anyhow::Error>}
 impl RootCompilerSdkOwner {
     pub(super) fn capture_retaining(out:&mut Option<Self>,proof:Arc<RuntimeBootstrapProof>,admission:Arc<RuntimeReadAdmission>,original:FinalizationBudget,catalog:CompilerSdkCatalogData,qualification:bool)->Result<()> {
-        ensure!(out.is_none(),"original SDK mount carrier occupied");original.remaining()?;admission.current()?;catalog.validate_data()?;
+        ensure!(out.is_none(),"original SDK mount carrier occupied");
+        original.remaining().map_err(|error|bootstrap_failure_context(error,BootstrapCheck::SdkPrepareOriginal))?;
+        admission.current().map_err(|error|bootstrap_failure_context(error,BootstrapCheck::SdkPrepareOriginal))?;
+        catalog.validate_data().map_err(|error|bootstrap_failure_context(error,BootstrapCheck::SdkCatalog))?;
         *out=Some(Self{proof,admission,original,catalog,
-            placeholder:None,descriptors:Vec::new(),source_binding:None,baked:None,inputs:None,semantic:None,read:None,local:None,floor:None,mount:None,root:None,data:None,helper:None,ready:false,failed:false,failure:None});
+            placeholder:None,descriptors:Vec::new(),source_binding:None,baked:None,inputs:None,semantic:None,read:None,local:None,floor:None,mount:None,root:None,data:None,helper:None,prepare_check:BootstrapCheck::SdkPrepareOriginal,ready:false,failed:false,failure:None});
         let owner=out.as_mut().unwrap();if let Err(error)=owner.prepare(qualification){
-            owner.failed=true;owner.failure=Some(error);anyhow::bail!("original SDK floor/qualification failed; retain every effect and helper")}
+            let diagnostic=retained_bootstrap_diagnostic(&error,owner.prepare_check);
+            owner.failed=true;owner.failure=Some(error);return Err(diagnostic)}
         Ok(())
     }
     fn current_build(&self)->Result<()> {self.original.remaining()?;self.admission.current()?;self.proof.current()}
     fn prepare(&mut self,qualification:bool)->Result<()> {
-        self.current_build()?;self.placeholder=Some(protected_directory(Path::new(SDK_SOURCE))?);
+        self.prepare_check=BootstrapCheck::SdkPrepareOriginal;self.current_build()?;
+        self.prepare_check=BootstrapCheck::SdkPlaceholder;self.placeholder=Some(protected_directory(Path::new(SDK_SOURCE))?);
         let m=self.placeholder.as_ref().unwrap().metadata()?;ensure!(m.mode()&0o7777==0o555&&fs::read_dir(SDK_SOURCE)?.next().is_none(),"SDK DATA placeholder is not immutable empty image directory");
+        self.prepare_check=BootstrapCheck::SdkBackingDescriptors;
         let sdk_cas=self.catalog.profile_data()?.cas_directory;
         let dir=protected_directory(Path::new(sdk_cas))?;
         let root=OpenOptions::new().read(true).custom_flags(libc::O_DIRECTORY|libc::O_NOFOLLOW|libc::O_CLOEXEC).open(Path::new(sdk_cas).join("cas"))?;
         self.descriptors.push(dir.into());self.descriptors.push(root.into());
         self.descriptors.push(OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW|libc::O_CLOEXEC).open(Path::new(sdk_cas).join("inventory.json"))?.into());
+        self.prepare_check=BootstrapCheck::SdkSourceBinding;
         self.source_binding=Some(OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW|libc::O_CLOEXEC).open(Path::new(sdk_cas).join("compiler-source.json"))?);
         let source=self.source_binding.as_ref().unwrap();let m=source.metadata()?;ensure!(m.is_file()&&m.uid()==0&&m.gid()==0&&m.nlink()==1&&m.mode()&0o7777==0o444,"SDK producer binding owner differs");
         let raw=read_control(source,4096,&self.original)?;ensure!(digest(&raw)==self.catalog.source_binding_sha256,"SDK producer binding differs");
         let fence:Arc<dyn ImageImportFence>=Arc::new(CaptureFence(self.original.clone()));
+        self.prepare_check=BootstrapCheck::SdkBakedInventory;
         BakedImageCas::capture_retaining(&mut self.baked,self.descriptors[1].try_clone()?,self.descriptors[2].try_clone()?,self.catalog.inventory.clone(),fence.clone())?;
         let baked=self.baked.as_ref().unwrap();let inventory=baked.inventory_data()?;ensure!(inventory.roots.manifest==self.catalog.manifest&&inventory.roots.installer_input==self.catalog.installer_input,"SDK roots differ from original catalog");
+        self.prepare_check=BootstrapCheck::SdkVerifiedManifest;
         VerifiedBakedInputs::capture_retaining(&mut self.inputs,baked.clone(),fence.clone())?;
         self.inputs.as_ref().unwrap().read_retaining(&mut self.read,self.catalog.manifest.clone(),fence.clone())?;
         let manifest:crate::image_preseed_data::ImageManifestData=serde_json::from_slice(self.read.as_ref().unwrap().verified_bytes()?)?;
         ensure!(manifest.format_version==1&&manifest.installer_input==self.catalog.installer_input,"SDK full manifest differs");
+        self.prepare_check=BootstrapCheck::SdkSemanticInputs;
         CompilerSdkSemanticInputs::capture_retaining(&mut self.semantic,self.inputs.as_ref().unwrap().clone(),&self.catalog,&*fence)?;
         let semantic=self.semantic.as_ref().unwrap().data()?.clone();
+        self.prepare_check=BootstrapCheck::SdkToolchains;
         let toolchains=catalog_derivation::derive_toolchains_data(self.inputs.as_ref().unwrap(),&self.catalog,&semantic,&manifest,&*fence)?;
+        self.prepare_check=BootstrapCheck::SdkArtifactBinding;
         let original=self.inputs.as_ref().unwrap().compiler_file_content_data(&self.catalog,"manifest.json",&*fence)?;
         ensure!(original.content==self.catalog.artifact_manifest,"SDK installer lost actual original artifact manifest binding");
+        self.prepare_check=BootstrapCheck::SdkStorage;
         self.read.take();self.current_build()?;fs::DirBuilder::new().mode(0o700).create(SDK_ROOT)?;
         self.local=Some(LocalStore::open(Path::new(SDK_ROOT).join("metadata-cache"))?);
         let restriction:Arc<dyn RuntimeImageReadRestriction>=self.admission.clone();
+        self.prepare_check=BootstrapCheck::SdkReadFloor;
         ReadonlyRuntimeImage::capture_retaining(&mut self.floor,self.local.as_ref().unwrap().clone(),baked.clone(),restriction,fence)?;
         ensure!(self.floor.as_ref().unwrap().installer_root()?==&self.catalog.installer_input,"SDK floor changed complete closure");
+        self.prepare_check=BootstrapCheck::SdkFuse;
         fs::DirBuilder::new().mode(0o700).create(SDK_FLOOR)?;
         RetainedMetadataMount::capture_retaining(&mut self.mount,RootMetadataNamespace::capture()?,self.floor.as_ref().unwrap().view()?,PathBuf::from(SDK_FLOOR),MetadataMountMode::ReadOnlyRuntimeData,uuid::Uuid::new_v4().to_string())?;
         self.mount.as_mut().unwrap().mount_retaining(&self.original,&AtomicBool::new(false))?;
         self.root=Some(self.mount.as_ref().unwrap().duplicate_runtime_root_retaining()?.0);
+        self.prepare_check=BootstrapCheck::SdkMountData;
         self.data=Some(CompilerSdkMountData{catalog:self.catalog.clone(),semantic,floor:wire::fd_data(self.root.as_ref().unwrap())?,toolchains});self.data.as_ref().unwrap().validate_data()?;
-        if qualification{sdk_process::SdkProcess::capture_retaining(&mut self.helper,self.proof.clone(),self.admission.clone(),self.original.clone(),self.root.as_ref().unwrap().try_clone()?,self.data.as_ref().unwrap().clone(),None,None,None)?;self.helper.as_mut().unwrap().run_retaining()?;}self.current_build()?;self.ready=true;Ok(())
+        self.prepare_check=BootstrapCheck::SdkQualification;
+        if qualification{sdk_process::SdkProcess::capture_retaining(&mut self.helper,self.proof.clone(),self.admission.clone(),self.original.clone(),self.root.as_ref().unwrap().try_clone()?,self.data.as_ref().unwrap().clone(),None,None,None)?;self.helper.as_mut().unwrap().run_retaining()?;}
+        self.prepare_check=BootstrapCheck::SdkReady;self.current_build()?;self.ready=true;Ok(())
     }
     pub(super) fn current(&self)->Result<()> {ensure!(self.ready&&!self.failed,"original SDK floor incomplete/failed");self.admission.current()?;self.mount.as_ref().unwrap().check_current()?;self.inputs.as_ref().unwrap().binding_data()?;
         let held=self.placeholder.as_ref().context("original SDK placeholder absent")?.metadata()?;let named=fs::symlink_metadata(SDK_SOURCE)?;

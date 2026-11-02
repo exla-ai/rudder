@@ -2920,3 +2920,108 @@ nonce/source/test-file-bound ELF, nested actual child report and pushed digest,
 all50 successful and two negative views, original limits, shared owner bindings,
 both served-read sets, per-delta counters and baseline arithmetic. It found no
 material issue or unwarranted claim in the scoped component comparison.
+
+
+### 2026-11-02 01:00Z: corrected managed worker build and fresh qualification start
+
+The A5 remote base build completed with original observer exit0 at00:57:14Z,
+source manifest `4ebbfd5881ca9081b8007873399b4ee38179028c205366d532649576a070ec5f`
+and immutable digest
+`sha256:527aae8fe1223a7f9a3ea2c8bc776bd484b4de29a8bda4f7890d23a6c3966017`.
+It includes the corrected procfs protection predicate and retained publication
+diagnostics from product revision9952e60e. The exact C1 data overlay then
+completed with original observer exit0 at00:59:03Z and immutable worker digest
+`sha256:399c946b8551b7017a69ee114a82c9dd26fb99d9fb657161d891ff750d919fc6`.
+Both reports explicitly record no continuing remote build and no deployment,
+SDK or runtime qualification. Build receipts and original logs remain in
+`/workspace/rudder-managed-c1-worker-build-a5` and
+`/workspace/rudder-managed-c1-overlay-build-a5`.
+
+A fresh isolated A16 qualification began using that exact worker, a newly
+created45-minute organization credential and new original boot nonce
+`7cce17be-7276-4cf5-ace1-aeee28b200dc`. ControllerV9 changes only the immutable
+worker digest fromV8 and passes all8 offline controller cases. ProducerV6
+binds new bundleA18 to the actual original nonce. The unchanged control image
+is independently bound to the original A17 build receipt. Initial observation
+confirms the original control VM started and acknowledged the injected files'
+expected hashes. The original900-second controller clock and all nested
+qualification constraints remain unchanged. SDK, runtime and ordinary task
+results are pending; this start establishes none of their readiness claims.
+No production or protected live-home mutation occurred.
+
+
+### 2026-11-02 01:08Z: A16 retained runtime failure and narrower diagnostics
+
+A16's exact configured SDK worker started with the original start HTTP ACK and
+owned readback. The actual launcher observation confirms Root client, parent
+and host-worker authentication accepted. The driver received6 messages, then
+its original SDK window expired without an SDK ACK send attempt. The original
+controller quarantined at70 settled requests; runtime and ordinary cases were
+never entered. The actual fixed diagnostic is
+`root_storage/serve_runtime/validation_or_other`, with no narrower check or IO
+errno. A read-only process observation found the original engine and Root
+service but no SDK helper at observation time. This does not identify the
+underlying prepare failure or prove that earlier SDK prepare was never entered.
+Private evidence is `/workspace/rudder-staging-flow-control-run-a16`, including
+`root-fixed-diagnostic-observation.json` and original logs hash
+`86f9037237fd98dfec3b79795d70182a89b3bbe777237ca79e16b27fed90543f`.
+
+The private A16 cleanup helper's first actual attempt refused at preflight:
+five pre-existing control-app volumes are already `pending_destroy`, all
+unattached. Its6 original requests were GETs, all settled; no DELETE occurred,
+and the final protected-home read matched. These unrelated volumes are preserved.
+A corrected fresh preflight will guard the original control VM's empty mounts
+and preserve pre-existing control volumes. The prior attempt is retained and
+will not be rewritten or reused to replay mutations. Disposable resources and
+the original local controller remain retained until exact teardown succeeds.
+
+Runtime and SDK preparation now attach fixed typed phase labels while preserving
+narrower existing checks. The SDK owner retains the actual full failure and
+returns only check/IO-kind/errno diagnostic DATA, closing the previous generic
+wrapper's diagnostic loss. There are no formatted private causes, replacement
+clocks, retries or changed prepare effects. Guarded414 passed all3 diagnostic
+regressions, including panic-on-Display redaction and original cancellation.
+
+The ordinary runtime helper's later capsule gate also used the invalid0555
+`/proc/PID` ownership predicate. It now observes the real0500 fd directory:
+root ownership means protected, UID/GID1500 means the same helper is still
+pending, other type/mode/ownership refuses. Strict engine/SDK protection still
+rejects pending. The real isolated exec regression covers dumpable0→1→0 in the
+same process. Guarded415 passed69 runtime-image tests,2 ignored,0 failures.
+This later correction is not established as A16's hidden failure and does not
+claim an actual successful helper handoff or runtime qualification.
+
+
+A16 exact fixture teardown subsequently passed at01:09:55Z in40 calls. Both
+original machine DELETEs were acknowledged, each original instance version
+reached `destroyed`, and both inventories twice confirmed absence. The original
+SDK volume DELETE was acknowledged and its inactive state twice observed; this
+establishes no physical erasure. The SDK app reached two404 observations, the
+three exact temporary secrets are absent, and the protected live-home identity
+matched before and after. V2 explicitly forbids control-app volume DELETEs and
+preserves the five observed unrelated volumes. The local controller was then
+signaled through its original pidfd, reached terminal state and disappeared
+from procfs; its wrapper terminated241. The temporary organization token was
+revoked with exit0 at01:10:01Z. Evidence is `operator-cleanup-v2/report.json` and
+`post-cleanup-retirement.json` under the A16 directory. Original controller
+report flags remain the earlier retained state and are not rewritten. This is
+operator fixture teardown, not normal runtime retirement or provider fencing.
+
+
+At01:13Z the SDK helper child transition was corrected: Command's built-in
+UID/GID setters ran before pre-exec and could remove the authority needed to
+clear supplementary groups. The forked child now uses raw Linux syscalls to
+clear groups and bounding capabilities while privileged, disables kept and
+ambient capabilities, sets NNP1, drops all UID/GID IDs to1500 and clears
+remaining capabilities. Existing process custody, original clocks, cancellation
+and effect accounting remain unchanged. Its later protection check uses the
+actual protected fd directory, retaining the strict parent and image checks.
+Guarded416 passed the genuine UID1500 exec/refusal/ND0 regression; the strict
+Root positive test is ignored locally and awaits actual Root execution in the
+next frozen build. Independent review found no authority or custody blocker;
+raw syscalls also address its narrow glibc-wrapper observation. This correction
+is not established as the cause of A16's hidden prepare failure.
+
+Guarded417 native binary cargo check passed at01:15:17Z (91.662s).
+No image, production update or successful SDK handoff is implied by these
+local checks.

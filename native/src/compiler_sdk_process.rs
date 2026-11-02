@@ -2,6 +2,21 @@
 //! the startup fixed qualifier and exact ordinary selected-source invocations.
 use super::*;
 use std::io::Read;
+// Command::uid/gid run before pre_exec. Keep the forked child Root until
+// CAP_SETPCAP has removed every bounding bit, then irreversibly drop all IDs.
+// This runs only in Command's child: syscalls and errno conversion, no locks,
+// allocation, environment, filesystem access, new budget or retry.
+unsafe fn sdk_helper_exec_floor()->io::Result<()> {
+    if libc::syscall(libc::SYS_setgroups,0usize,std::ptr::null::<libc::gid_t>())!=0{return Err(io::Error::last_os_error())}
+    crate::root_storage_bootstrap::restrict_bounding(0)?;
+    if libc::prctl(libc::PR_SET_KEEPCAPS,0,0,0,0)!=0
+        ||libc::prctl(libc::PR_CAP_AMBIENT,libc::PR_CAP_AMBIENT_CLEAR_ALL,0,0,0)!=0
+        ||libc::prctl(libc::PR_SET_NO_NEW_PRIVS,1,0,0,0)!=0
+        ||libc::syscall(libc::SYS_setresgid,1500u32,1500u32,1500u32)!=0||libc::syscall(libc::SYS_setresuid,1500u32,1500u32,1500u32)!=0 {
+        return Err(io::Error::last_os_error())
+    }
+    crate::root_storage_bootstrap::clear_capabilities()?;Ok(())
+}
 pub(super) struct SdkProcess {proof:Arc<RuntimeBootstrapProof>,admission:Arc<RuntimeReadAdmission>,original:FinalizationBudget,
     root:Option<OwnedFd>,data:Option<CompilerSdkMountData>,helper:Helper,job:Option<serde_json::Value>,job_fds:Option<(OwnedFd,OwnedFd)>,
     job_child_disposal:Option<child_settlement::ChildSettlement>,terminal_failure:Option<terminal::OriginalHelperTerminalFailure>,pipe_error:bool,stdout:Option<std::process::ChildStdout>,stderr:Option<std::process::ChildStderr>,stdout_raw:Vec<u8>,stderr_raw:Vec<u8>,stdout_eof:bool,stderr_eof:bool,cancel:Option<OwnedFd>}
@@ -33,8 +48,8 @@ impl SdkProcess {
         self.helper.work=Some(OpenOptions::new().read(true).custom_flags(libc::O_DIRECTORY|libc::O_NOFOLLOW|libc::O_CLOEXEC).open(&work)?);
         ensure!(unsafe{libc::fchown(self.helper.work.as_ref().unwrap().as_raw_fd(),1500,1500)}==0,"SDK actual private helper directory owner unavailable");
         let mut command=Command::new(ENGINE_PATH);command.args([HELPER_ARG,&self.helper.name]).env_clear().current_dir(&work).stdin(Stdio::null()).stdout(Stdio::piped())
-            .stderr(Stdio::piped()).uid(1500).gid(1500);
-        unsafe{command.pre_exec(||{if libc::setgroups(0,std::ptr::null())!=0{return Err(io::Error::last_os_error())}Ok(())});}
+            .stderr(Stdio::piped());
+        unsafe{command.pre_exec(||sdk_helper_exec_floor());}
         self.helper.child=Some(command.spawn()?);
         self.stdout=self.helper.child.as_mut().unwrap().stdout.take();self.stderr=self.helper.child.as_mut().unwrap().stderr.take();
         for fd in [self.stdout.as_ref().unwrap().as_raw_fd(),self.stderr.as_ref().unwrap().as_raw_fd()]{let f=unsafe{libc::fcntl(fd,libc::F_GETFL)};ensure!(f>=0&&unsafe{libc::fcntl(fd,libc::F_SETFL,f|libc::O_NONBLOCK)}==0,"SDK actual pipe nonblocking unavailable");}
@@ -55,7 +70,8 @@ impl SdkProcess {
         }
         if !self.helper.sent{
             helper.live()?;storage::floor(helper.pid,1500)?;self.proof.engine_image.matches_process(helper)?;wire::require_initial_id_maps(helper.pid)?;
-            ensure!(original_stat(helper.pid)?.0==self.proof.own.pid&&fs::metadata(format!("/proc/{}",helper.pid))?.uid()==0,"SDK original helper parent/ND0 differs");
+            ensure!(original_stat(helper.pid)?.0==self.proof.own.pid,"SDK original helper parent differs");
+            require_protected_descriptor_directory(helper.pid)?;
             let data=serde_json::json!({"version":1,"kind":"root-compiler-sdk-fixed-helper-v1","service_pid":self.proof.own.pid,"launcher_pid":self.proof.root.pid,
                 "helper_pid":helper.pid,"helper_start_ticks":self.helper.start,"constraint":self.original.constraint(),"mount":self.data,"job":self.job,"service_sha256":self.proof.service_image.sha256,"launcher_sha256":self.proof.root_image.sha256});
             if self.helper.bytes.is_none(){self.helper.bytes=Some(canonical_json(&data)?);ensure!(self.helper.bytes.as_ref().unwrap().len()<=16*1024,"SDK original helper capsule exceeds fixed bound");self.helper.certificate=Some(super::super::sealed_bytes(self.helper.bytes.as_ref().unwrap())?);
@@ -93,3 +109,7 @@ pub(super) mod disposal;
 mod child_settlement;
 
 #[path="compiler_sdk_terminal_process.rs"]pub(super) mod terminal;
+
+#[cfg(test)]
+#[path="compiler_sdk_process_privilege_tests.rs"]
+mod privilege_tests;

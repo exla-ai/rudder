@@ -45,6 +45,17 @@ fn protected_fd_directory_accepts_nondumpable_engine_and_refuses_dumpable_peer()
                     unsafe { libc::getegid() }
                 }
             );
+            let ready = protected_descriptor_directory_ready(pid);
+            if dumpable == 0 {
+                assert!(ready.unwrap());
+            } else if unsafe { libc::geteuid() } == 1500 && unsafe { libc::getegid() } == 1500 {
+                // A genuine pending helper has no ND0 floor yet. The next
+                // observation in this SAME process must become ready.
+                assert!(!ready.unwrap());
+            } else {
+                // Other unprivileged test UIDs are not a UID1500 helper.
+                assert!(ready.is_err());
+            }
             let result = proof_check(BootstrapCheck::EngineProtectedProc, || {
                 require_protected_descriptor_directory(pid)
             });

@@ -46,15 +46,19 @@ fn stamp(file:&File)->Result<(u64,u64,u64,u32,i64,i64)>{let m=file.metadata()?;O
 // Linux keeps /proc/PID (0555) owned by the effective UID even at
 // dumpable=0. The protected fd directory (0500) follows task_dump_owner's
 // nondumpable ownership rule; inspect that directory, never its entries.
-fn require_protected_descriptor_directory(pid: u32) -> Result<()> {
+fn protected_descriptor_directory_ready(pid: u32) -> Result<bool> {
     let metadata = fs::symlink_metadata(format!("/proc/{pid}/fd"))?;
-    ensure!(
-        metadata.is_dir()
-            && metadata.uid() == 0
-            && metadata.gid() == 0
-            && metadata.mode() & 0o7777 == 0o500,
-        "runtime original engine lost protected descriptor floor"
-    );
+    ensure!(metadata.is_dir() && metadata.mode() & 0o7777 == 0o500,
+        "runtime original descriptor directory role/mode differs");
+    match (metadata.uid(), metadata.gid()) {
+        (0, 0) => Ok(true),
+        (1500, 1500) => Ok(false),
+        _ => anyhow::bail!("runtime original descriptor directory ownership differs"),
+    }
+}
+fn require_protected_descriptor_directory(pid: u32) -> Result<()> {
+    ensure!(protected_descriptor_directory_ready(pid)?,
+        "runtime original engine lost protected descriptor floor");
     Ok(())
 }
 fn original_stat(pid:u32)->Result<(u32,String)>{let bytes=storage::proc_bytes(&format!("/proc/{pid}/stat"),4096)?;let text=std::str::from_utf8(&bytes)?;let(_,fields)=text.rsplit_once(')').context("runtime original stat incomplete")?;let fields:Vec<_>=fields.split_whitespace().collect();
@@ -163,6 +167,40 @@ enum BootstrapCheck {
     UserNamespace,
     MountNamespace,
     PidNamespace,
+    RuntimeMountOriginal,
+    RuntimeMountOfferDescriptors,
+    RuntimeMountPublicConfig,
+    RuntimeMountRegistration,
+    RuntimeMountRegisteredImages,
+    RuntimeMountPolicy,
+    RuntimeMountAdmission,
+    RuntimeMountBacking,
+    RuntimeMountBakedInventory,
+    RuntimeMountManifest,
+    RuntimeMountStorage,
+    RuntimeMountReadFloor,
+    RuntimeMountFuse,
+    RuntimeMountComponents,
+    RuntimeMountSelectedElves,
+    RuntimeMountSelectedBinding,
+    RuntimeMountReady,
+    RuntimeMountSdk,
+    SdkPrepareOriginal,
+    SdkCatalog,
+    SdkPlaceholder,
+    SdkBackingDescriptors,
+    SdkSourceBinding,
+    SdkBakedInventory,
+    SdkVerifiedManifest,
+    SdkSemanticInputs,
+    SdkToolchains,
+    SdkArtifactBinding,
+    SdkStorage,
+    SdkReadFloor,
+    SdkFuse,
+    SdkMountData,
+    SdkQualification,
+    SdkReady,
 }
 impl std::fmt::Display for BootstrapCheck {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -179,6 +217,27 @@ pub(crate) fn bootstrap_failure_check(error: &anyhow::Error) -> Option<String> {
 }
 fn proof_check<T>(check: BootstrapCheck, operation: impl FnOnce() -> Result<T>) -> Result<T> {
     operation().context(check)
+}
+// Add a fixed phase only when a more precise typed check is absent. No raw
+// error text is inspected, and the original chain stays intact for its owner.
+fn bootstrap_failure_context(error: anyhow::Error, fallback: BootstrapCheck) -> anyhow::Error {
+    if error.downcast_ref::<BootstrapCheck>().is_some() { error } else { error.context(fallback) }
+}
+// The SDK carrier retains the original error. This separate diagnostic carries
+// only a fixed check and an OS error reconstructed from errno/kind, never a
+// private path/message or an authority/receipt derived from that error.
+fn retained_bootstrap_diagnostic(error: &anyhow::Error, fallback: BootstrapCheck) -> anyhow::Error {
+    let check = error.downcast_ref::<BootstrapCheck>().copied().unwrap_or(fallback);
+    match error.chain().find_map(|cause| cause.downcast_ref::<io::Error>()) {
+        Some(os) => {
+            let fixed = match os.raw_os_error() {
+                Some(errno) => io::Error::from_raw_os_error(errno),
+                None => io::Error::from(os.kind()),
+            };
+            anyhow::Error::new(fixed).context(check)
+        }
+        None => anyhow::Error::new(check),
+    }
 }
 impl RuntimeBootstrapProof {
     fn capture(raw: Vec<OwnedFd>, engine: &Process) -> Result<Self> {
@@ -366,52 +425,66 @@ pub(crate) struct RuntimeImageMountOwner {
     raw_offer:RuntimePacket,admission:Option<Arc<RuntimeReadAdmission>>,config:Option<HostIngressConfig>,
     baked:Option<Arc<BakedImageCas>>,original_backing:Option<environment::RootBackingDescriptors>,manifest_read:Option<BakedImageRead>,floor:Option<ReadonlyRuntimeImage>,
     local:Option<LocalStore>,mount:Option<RetainedMetadataMount>,root_fd:Option<OwnedFd>,components:Vec<OwnedFd>,
-    compiler_sdk:Option<compiler_sdk::RootCompilerSdkOwner>,selected:Vec<RuntimeExecutableData>,pending_file:Option<File>,ready:bool,failed:bool,
+    compiler_sdk:Option<compiler_sdk::RootCompilerSdkOwner>,selected:Vec<RuntimeExecutableData>,pending_file:Option<File>,prepare_check:BootstrapCheck,ready:bool,failed:bool,
 }
 impl RuntimeImageMountOwner {
     fn capture_retaining(out:&mut Option<Self>,proof:Arc<RuntimeBootstrapProof>,packet:RuntimePacket,request:Enable)->Result<()>{ensure!(out.is_none(),"runtime mount original owner already exists");
-        let original=FinalizationBudget::from_constraint(&request.constraint)?;
-        *out=Some(Self{proof,original,request,raw_offer:packet,admission:None,config:None,baked:None,original_backing:None,manifest_read:None,floor:None,local:None,mount:None,root_fd:None,components:Vec::new(),compiler_sdk:None,selected:Vec::new(),pending_file:None,ready:false,failed:false});
-        let owner=out.as_mut().unwrap();let result=owner.prepare();if result.is_err(){owner.failed=true;if let Some(a)=&owner.admission{a.closed.store(true,Ordering::Release);a.reads_closed.store(true,Ordering::Release)}
+        let original=FinalizationBudget::from_constraint(&request.constraint).map_err(|error|bootstrap_failure_context(error,BootstrapCheck::RuntimeMountOriginal))?;
+        *out=Some(Self{proof,original,request,raw_offer:packet,admission:None,config:None,baked:None,original_backing:None,manifest_read:None,floor:None,local:None,mount:None,root_fd:None,components:Vec::new(),compiler_sdk:None,selected:Vec::new(),pending_file:None,prepare_check:BootstrapCheck::RuntimeMountOriginal,ready:false,failed:false});
+        let owner=out.as_mut().unwrap();let result=owner.prepare().map_err(|error|bootstrap_failure_context(error,owner.prepare_check));if result.is_err(){owner.failed=true;if let Some(a)=&owner.admission{a.closed.store(true,Ordering::Release);a.reads_closed.store(true,Ordering::Release)}
             if let Some(floor)=&owner.floor{floor.close_admission()}if let Some(m)=&owner.mount{m.close_admission();}}result
     }
-    fn prepare(&mut self)->Result<()>{self.original.remaining()?;self.proof.current()?;
+    fn prepare(&mut self)->Result<()>{self.prepare_check=BootstrapCheck::RuntimeMountOriginal;self.original.remaining()?;self.proof.current()?;
+        self.prepare_check=BootstrapCheck::RuntimeMountOfferDescriptors;
         ensure!(self.raw_offer.fds.len()==2,"runtime Root offer must contain exact public config/certificate FDs");
+        self.prepare_check=BootstrapCheck::RuntimeMountPublicConfig;
         let config=File::from(self.raw_offer.fds[0].try_clone()?);let m=config.metadata()?;
         ensure!(m.is_file()&&m.uid()==0&&m.gid()==0&&m.mode()&0o7777==0o600&&m.nlink()==1
             &&unsafe{libc::fcntl(config.as_raw_fd(),libc::F_GETFL)}&libc::O_ACCMODE==libc::O_RDONLY,"runtime public config is not original readonly Root-protected file");
         let bytes=read_control(&config,host_ingress::MAX_HOST_FRAME,&self.original)?;let data:HostIngressConfig=serde_json::from_slice(&bytes)?;data.validate_for_runtime_mount()?;
+        self.prepare_check=BootstrapCheck::RuntimeMountRegistration;
         let certificate=super::read_sealed_bytes(&self.raw_offer.fds[1],16*1024)?;let reg:CompletedRuntimeRegistration=serde_json::from_slice(&certificate)?;
         ensure!(reg.version==1&&reg.kind=="completed_runtime_registration_v1"&&reg.root_nonce==self.proof.data.nonce&&reg.root_nonce==self.request.bootstrap_nonce
             &&reg.ack.root_nonce==reg.root_nonce&&reg.ack.config_bound(&data,&digest(&bytes))?&&reg.ack.boot_id==String::from_utf8(self.proof.boot.clone())?.trim(),"runtime completed original registration binding differs");
+        self.prepare_check=BootstrapCheck::RuntimeMountRegisteredImages;
         ensure!(reg.ack.binding.native_sha256==self.proof.engine_image.sha256&&reg.ack.binding.launcher_sha256==self.proof.root_image.sha256
             &&reg.ack.binding.service_sha256==self.proof.service_image.sha256,"runtime original registered images differ");
+        self.prepare_check=BootstrapCheck::RuntimeMountPolicy;
         let policy=data.image_preseed.as_ref().context("runtime qualified image policy absent")?;let runtime=policy.runtime_mount.as_ref().context("runtime image profile absent")?;
+        self.prepare_check=BootstrapCheck::RuntimeMountAdmission;
         self.admission=Some(Arc::new(RuntimeReadAdmission{proof:Arc::clone(&self.proof),config_stamp:stamp(&config)?,config,config_sha:digest(&bytes),registration:reg,closed:AtomicBool::new(false),reads_closed:AtomicBool::new(false)}));
         self.config=Some(data.clone());self.admission.as_ref().unwrap().current()?;
+        self.prepare_check=BootstrapCheck::RuntimeMountBacking;
         environment::RootBackingDescriptors::capture_retaining(&mut self.original_backing)?;
         let(root,inventory)=self.original_backing.as_ref().unwrap().duplicate_for_baked()?;
         let fence:Arc<dyn ImageImportFence>=Arc::new(CaptureFence(self.original.clone()));
+        self.prepare_check=BootstrapCheck::RuntimeMountBakedInventory;
         BakedImageCas::capture_retaining(&mut self.baked,root,inventory,runtime.inventory.clone(),Arc::clone(&fence))?;
         let baked=self.baked.as_ref().unwrap();let inventory=baked.inventory_data()?;
         ensure!(inventory.roots.manifest.digest==policy.full_manifest_sha256,"runtime manifest differs from qualified image pin");
+        self.prepare_check=BootstrapCheck::RuntimeMountManifest;
         baked.read_manifest_retaining(&mut self.manifest_read,Arc::clone(&fence))?;
         let manifest:crate::image_preseed_data::ImageManifestData=serde_json::from_slice(self.manifest_read.as_ref().unwrap().verified_bytes()?)?;
         ensure!(manifest.format_version==1&&manifest.installer_input==inventory.roots.installer_input&&manifest.files.len()<=65536,"runtime complete manifest/installer roots differ");
+        self.prepare_check=BootstrapCheck::RuntimeMountStorage;
         self.original.remaining()?;protected_directory(Path::new(SERVICE_ROOT))?;fs::DirBuilder::new().mode(0o700).create(RUNTIME_ROOT)?;
         self.local=Some(LocalStore::open(Path::new(RUNTIME_ROOT).join("read-cache"))?);
         let restriction:Arc<dyn RuntimeImageReadRestriction>=self.admission.as_ref().unwrap().clone();
+        self.prepare_check=BootstrapCheck::RuntimeMountReadFloor;
         ReadonlyRuntimeImage::capture_retaining(&mut self.floor,self.local.as_ref().unwrap().clone(),Arc::clone(baked),restriction,Arc::clone(&fence))?;
         ensure!(self.floor.as_ref().unwrap().installer_root()?==&inventory.roots.installer_input,"runtime floor changed exact installer root");
+        self.prepare_check=BootstrapCheck::RuntimeMountFuse;
         let target=Path::new(RUNTIME_ROOT).join("floor");self.original.remaining()?;fs::DirBuilder::new().mode(0o700).create(&target)?;
         RetainedMetadataMount::capture_retaining(&mut self.mount,RootMetadataNamespace::capture()?,self.floor.as_ref().unwrap().view()?,target,
             MetadataMountMode::ReadOnlyRuntimeData,self.request.request_nonce.clone())?;
         self.mount.as_mut().unwrap().mount_retaining(&self.original,&AtomicBool::new(false))?;
         let(root,mount_id)=self.mount.as_ref().unwrap().duplicate_runtime_root_retaining()?;self.root_fd=Some(root);
+        self.prepare_check=BootstrapCheck::RuntimeMountComponents;
         for(name,_,_,dir)in COMPONENTS{self.original.remaining()?;self.components.push(readonly_at(self.root_fd.as_ref().unwrap(),name,dir)?);ensure!(wire::fd_data(self.components.last().unwrap())?.mount_id==mount_id,"runtime component escaped original FUSE mount");}
         // Four selected installed native ELFs are fully read through the SAME
         // verified FUSE/chunk path before the floor's ready ACK. No host /usr
         // traversal/import/body copy or mtime-only executable acceptance.
+        self.prepare_check=BootstrapCheck::RuntimeMountSelectedElves;
         for(installer_path,host_path)in [("package/dist/native/rudder-native",ENGINE_PATH),("package/dist/native/rudder-jj","/opt/rudder/dist/native/rudder-jj"),("usr/local/bin/rudder-root-storage",SERVICE_PATH),("usr/local/bin/rudder-machine-root",LAUNCHER_PATH)]{
             let record=manifest.files.iter().find(|f|f.path==Path::new(host_path)).context("selected native ELF absent from qualified full manifest")?;
             self.selected.push(RuntimeExecutableData{installer_path:installer_path.into(),sha256:record.sha256.clone(),size_bytes:record.size_bytes});
@@ -419,8 +492,11 @@ impl RuntimeImageMountOwner {
             let file=self.pending_file.as_ref().unwrap();ensure!(file.metadata()?.len()==record.size_bytes,"runtime selected ELF size differs");let before=stamp(file)?;let mut hash=Sha256::new();let mut chunk=[0;65536];let mut at=0;
             while at<record.size_bytes{self.original.remaining()?;let n=file.read_at(&mut chunk[..usize::try_from((record.size_bytes-at).min(65536))?],at)?;ensure!(n>0,"runtime selected ELF read incomplete");hash.update(&chunk[..n]);at+=n as u64;}
             ensure!(stamp(file)?==before&&format!("{:x}",hash.finalize())==record.sha256,"runtime selected ELF whole SHA differs");self.pending_file.take();}
+        self.prepare_check=BootstrapCheck::RuntimeMountSelectedBinding;
         let a=self.admission.as_ref().unwrap();ensure!(self.selected[0].sha256==a.registration.ack.binding.native_sha256&&self.selected[2].sha256==a.registration.ack.binding.service_sha256&&self.selected[3].sha256==a.registration.ack.binding.launcher_sha256,"runtime full-image selected ELF differs from original registration");
+        self.prepare_check=BootstrapCheck::RuntimeMountReady;
         a.current()?;self.original.remaining()?;self.ready=true;
+        self.prepare_check=BootstrapCheck::RuntimeMountSdk;
         if let Some(catalog)=&data.compiler_sdk {
             compiler_sdk::RootCompilerSdkOwner::capture_retaining(&mut self.compiler_sdk,self.proof.clone(),self.admission.as_ref().unwrap().clone(),self.original.clone(),catalog.clone(),data.compiler_qualification.is_some())?;
         }Ok(())
@@ -430,12 +506,10 @@ impl RuntimeImageMountOwner {
         session.helper.as_ref().context("runtime original helper pidfd absent")?.live()?;let helper=session.helper.as_ref().unwrap();
         storage::floor(helper.pid,1500)?;ensure!(original_stat(helper.pid)?.0==self.proof.engine.pid,"runtime helper is not child of original engine");
         self.proof.engine_image.matches_process(helper)?;
-        // Fixed native managed receive sets ND0 BEFORE its original descriptor
-        // connect. Root proc directory ownership observes that actual floor;
-        // the fixed executable's FIRST receive path rechecks ND0 itself.
-        let proc_owner=fs::metadata(format!("/proc/{}",helper.pid))?.uid();
-        if proc_owner==1500{return Ok(false)}
-        ensure!(proc_owner==0,"runtime helper protection ownership differs");
+        // The fixed receiver sets ND0 before connecting. Its protected fd
+        // directory, rather than the always-effective-owned 0555 /proc/PID,
+        // observes that floor. Before ND0, keep this same session pending.
+        if !protected_descriptor_directory_ready(helper.pid)?{return Ok(false)}
         for(name,kind)in [("mnt",libc::CLONE_NEWNS),("user",libc::CLONE_NEWUSER),("pid",libc::CLONE_NEWPID)]{ensure!(storage::id(&storage::namespace(Some(helper.pid),name,kind)?)?==storage::id(&storage::namespace(Some(self.proof.engine.pid),name,kind)?)?,"runtime pending helper already entered guest namespace");}
         let inventory=self.baked.as_ref().unwrap().inventory_data()?;
         let data=RuntimeImageCapsuleData{compiler_sdk:self.compiler_sdk.as_ref().map(|s|s.enable_data().map(|d|d.mount)).transpose()?,version:1,request_nonce:session.request.request_nonce.clone(),binding_sha256:session.request.binding_sha256.clone(),engine_instance_id:ack.engine_instance_id.clone(),epoch:ack.binding.epoch.clone(),config_sha256:a.config_sha.clone(),registration_proof_sha256:ack.proof_sha256.clone(),boot_id:ack.boot_id.clone(),
@@ -672,6 +746,10 @@ mod inherited_tests;
 #[cfg(test)]
 #[path = "root_runtime_protection_tests.rs"]
 mod protection_tests;
+
+#[cfg(test)]
+#[path = "root_runtime_prepare_diagnostic_tests.rs"]
+mod prepare_diagnostic_tests;
 
 #[cfg(test)]
 mod bootstrap_diagnostic_tests {

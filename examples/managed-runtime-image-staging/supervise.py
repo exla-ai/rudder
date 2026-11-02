@@ -7,6 +7,7 @@ import hashlib,json,os,pwd,selectors,signal,stat,subprocess,sys,time,uuid
 from pathlib import Path
 ROOT=Path('/opt/rudder-runtime-qualification')
 NODE=Path('/usr/local/bin/rudder-runtime-qualification-node')
+FLY=Path('/workspace/home/.fly/bin/flyctl')
 PGBIN=Path('/usr/lib/postgresql/17/bin')
 INPUT=Path('/run/rudder-runtime-qualification')
 clock=lambda:time.clock_gettime(time.CLOCK_BOOTTIME)
@@ -174,7 +175,7 @@ try:
  for rel,entry in manifest['files'].items():
   if rel=='node':continue
   assert not rel.startswith('/') and '..' not in rel.split('/')
-  got=digest_file(ROOT/rel);assert got['sha256']==entry['sha256'] and got['bytes']==entry['bytes']
+  got=digest_file(FLY if rel=='flyctl' else ROOT/rel);assert got['sha256']==entry['sha256'] and got['bytes']==entry['bytes']
  health=ChildOwner('health',[str(NODE),str(ROOT/'examples/managed-runtime-image-staging/health.mjs')],NODE);health.observe_exe(min(setup_end,clock()+10))
  status()
  while not (INPUT/'operator.json').exists():

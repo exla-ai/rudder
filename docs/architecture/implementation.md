@@ -3586,3 +3586,38 @@ The next source-only recipe keeps production feature binaries in release mode
 and uses explicit development profiles for test harnesses. The source36 bytes,
 original compile/test deadlines and all test/list requirements stay fixed.
 It has not been executed and establishes no SDK, runtime or deployment result.
+
+### 2026-11-02 07:54Z: protected optional operator data reaches the existing driver
+
+The staging installer now validates optional `genuine_ingress` data on the
+original protected operator and projects a detached, frozen snapshot into the
+existing driver input. Its new guard remains false. The optional route requires
+the existing staging flow, exact case/feature and artifact fields, and the same
+validated policy image. Optional admission checks the full original operator
+hash against the same retained migration record before PostgreSQL access.
+Default configuration, read ordering and migration/admission SQL are preserved.
+
+The single reviewed output is
+`examples/managed-runtime-image-staging/install.mjs`, SHA
+`5f77440b901d126e41315df7042b2261b6990ce12bf578dc709fb9ea3be76710`.
+Root's fresh 16 source-reused pure tests and syntax check passed. Independent
+review repeated the 16 tests, syntax, exact patch and lineage checks; receipt
+SHA `ca3ae38e33b4c5ba7120cdebfff99b5ee6e4992698615177d75c11476aa15cb0`.
+No installer main, PostgreSQL or provider action was run for this change.
+Controller source inventory and externally qualified Rust artifact provenance
+remain separate; future activation must bind both to the actual integrated
+revision and final compiled bytes.
+
+The revised source36 qualifier separately requires explicit dev and release
+package cleans within its original 1800-second compiler limit, plus exact
+`fresh: false` on all eleven selected Cargo artifacts. Root's isolated tiny
+Cargo probe showed that an unqualified package clean retained release output.
+The corrected disabled recipe passed 61 pure tests and independent review.
+One new context prepared successfully in original session 49855; Root's
+preflight session 74651 checked 633 source files, 646 context files, modes,
+fresh nonce, literal includes and the unchanged disk reserve. Independent
+actual-context review cleared at 07:54:35Z, receipt SHA
+`e7569a6b666a9ad2e7aad43f81ea6240b271fd203db4c03ac8a69531325202c6`.
+The one original remote build started in session 11132. It has no terminal
+result yet. Source, SDK, runtime, retirement and deployment acceptance remain
+absent.

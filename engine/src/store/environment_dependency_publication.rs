@@ -64,21 +64,53 @@ impl EnvironmentDependentPinOwner{
         let data=state.environment_dependencies.as_ref().context("dependent original record absent")?;ensure!(data.pins.get(&self.pin)==Some(&self.record),"dependent original pin changed");
         self.environment.check_locked(io,state)?;let binding=self.environment.binding_data()?;ensure!(binding.id_data()?==self.record.environment_id&&data.environments.get(&self.record.environment_id)==Some(&binding),"dependent original Environment binding differs");io.current()?;Ok(())}
 }
+// Diagnostic DATA only. The closed stage is set before the original effect;
+// observing it performs no IO, clock sampling, retry or ACK recovery.
+#[derive(Clone,Copy,Debug,PartialEq,Eq,serde::Serialize)]
+#[serde(rename_all="snake_case")]
+enum DependentPublicationStage{Captured,ValidateRequest,BeforeVersions,AcquireStore,ReadState,ValidateState,
+    WriteHold,LocalGraph,SyncDirectories,AfterVersions,ValidateStageExpiry,BuildRecord,WriteCommit,
+    CaptureOwner,ValidateOwner,FinalClock,ReleaseKnown,Complete}
+fn dependent_failure_data(error:Option<&anyhow::Error>)->serde_json::Value{
+    let io=error.and_then(|e|e.chain().find_map(|cause|cause.downcast_ref::<std::io::Error>()));
+    serde_json::json!({"present":error.is_some(),"class":if io.is_some(){"io"}else if error.is_some(){"validation_or_budget"}else{"none"},
+        "ioKind":io.map(|e|format!("{:?}",e.kind())),"ioRawOsError":io.and_then(std::io::Error::raw_os_error)})
+}
 pub struct EnvironmentDependentPublication{io:StoreIo,environment:Arc<RetainedEnvironmentSubgraph>,stage:String,pin:String,root:ObjectRef,operation:String,
     before:Vec<Option<crate::store::baked_image::BakedVersionSweep>>,after:Vec<Option<crate::store::baked_image::BakedVersionSweep>>,attempted:bool,ready:bool,
-    record:Option<DependentPinData>,ack:Option<Arc<EnvironmentDependentPinOwner>>,failure:Option<anyhow::Error>,#[cfg(test)]fault:Option<TestPoint>}
+    record:Option<DependentPinData>,ack:Option<Arc<EnvironmentDependentPinOwner>>,failure:Option<anyhow::Error>,diagnostic_stage:DependentPublicationStage,#[cfg(test)]fault:Option<TestPoint>}
 impl LocalStore{
     pub fn publish_environment_dependent_retaining(&self,out:&mut Option<EnvironmentDependentPublication>,stage:String,pin:String,root:ObjectRef,environment:Arc<RetainedEnvironmentSubgraph>,original:Arc<dyn ImageImportFence>)->Result<()> {
-        ensure!(out.is_none(),"original dependent publication occupied");*out=Some(EnvironmentDependentPublication{io:StoreIo::staged(self.clone(),original),environment,stage,pin,root,operation:Uuid::new_v4().to_string(),before:Vec::new(),after:Vec::new(),attempted:false,ready:false,record:None,ack:None,failure:None,#[cfg(test)]fault:None});out.as_mut().unwrap().run()
+        ensure!(out.is_none(),"original dependent publication occupied");*out=Some(EnvironmentDependentPublication{io:StoreIo::staged(self.clone(),original),environment,stage,pin,root,operation:Uuid::new_v4().to_string(),before:Vec::new(),after:Vec::new(),attempted:false,ready:false,record:None,ack:None,failure:None,diagnostic_stage:DependentPublicationStage::Captured,#[cfg(test)]fault:None});out.as_mut().unwrap().run()
     }
 }
 impl EnvironmentDependentPublication{
     pub fn acknowledgment(&self)->Result<&Arc<EnvironmentDependentPinOwner>>{ensure!(self.ready,"original dependent publication ACK absent/unknown");self.ack.as_ref().context("actual dependent owner absent")}
     pub fn failure(&self)->Option<&anyhow::Error>{self.failure.as_ref()}
+    /// No arbitrary error formatting and no observation of mutable store/clock.
+    /// Counts describe successful original local calls, including partial work;
+    /// they grant no completion, readiness, retry or per-reference IO proof.
+    pub fn diagnostic_data(&self)->serde_json::Value{
+        serde_json::json!({"diagnosticOnly":true,"lastStage":self.diagnostic_stage,
+            "attempted":self.attempted,"acknowledged":self.ready,"recordConstructed":self.record.is_some(),
+            "actualOwnerRetained":self.ack.is_some(),"gcLocked":self.io.locked,
+            "pendingFileRetained":self.io.pending.is_some(),"directoryIoRetained":self.io.directory_io.is_some(),
+            "failure":dependent_failure_data(self.failure.as_ref()),
+            "beforeVersionSlots":self.before.len(),"afterVersionSlots":self.after.len(),
+            "actualLocalHashReads":self.io.actual_local_hash_reads,"actualLocalHashBytes":self.io.actual_local_hash_bytes,
+            "actualLocalObjectSyncs":self.io.actual_local_object_syncs,"actualLocalObjectSyncBytes":self.io.actual_local_object_sync_bytes,
+            "actualLocalIoScope":"successful-original-dependent-publication-local-object-calls-including-partial-work",
+            "actualIoComplete":self.ready,"perReferenceInheritedIoSeparatelyTagged":false})
+    }
     fn run(&mut self)->Result<()> {ensure!(!self.attempted,"original dependent publication cannot replay");self.attempted=true;if let Err(e)=self.run_inner(){self.failure=Some(e);bail!("dependent publication failed; retain original intents/IO/owners")}Ok(())}
     fn run_inner(&mut self)->Result<()> {
+        self.diagnostic_stage=DependentPublicationStage::ValidateRequest;
         validate_pin(&self.pin)?;let binding=self.environment.binding_data()?;let id=binding.id_data()?;
-        self.environment.check_versions_retaining(&mut self.before,self.io.original.clone())?;self.io.acquire(true)?;let mut state=self.io.read_state()?;self.environment.check_locked(&self.io,&state)?;
+        self.diagnostic_stage=DependentPublicationStage::BeforeVersions;
+        self.environment.check_versions_retaining(&mut self.before,self.io.original.clone())?;
+        self.diagnostic_stage=DependentPublicationStage::AcquireStore;self.io.acquire(true)?;
+        self.diagnostic_stage=DependentPublicationStage::ReadState;let mut state=self.io.read_state()?;
+        self.diagnostic_stage=DependentPublicationStage::ValidateState;self.environment.check_locked(&self.io,&state)?;
         ensure!(state.staging.get(&self.stage).is_some_and(|s|s.expires_at_ms>now_ms().unwrap_or(u64::MAX)),"dependent publication live staging absent");
         ensure!(!state.pins.contains_key(&self.pin)&&!state.backed_retention.as_ref().is_some_and(|p|p.pins.contains_key(&self.pin)),"dependent root conflicts with existing complete-local/backed pin");
         let source_pins=state.source_dependencies.as_ref().map_or(0,|d|d.pins.len());
@@ -89,19 +121,30 @@ impl EnvironmentDependentPublication{
         let data=state.environment_dependencies.get_or_insert_with(EnvironmentDependenciesData::default);ensure!(data.pins.len()<data::MAX_DEPENDENT_PINS&&data.holds.len()<data::MAX_DEPENDENT_HOLDS
             &&!data.pins.contains_key(&self.pin)&&!data.holds.values().any(|h|h.pin==self.pin),"dependent root original/unknown publication already exists or capacity reached");
         if let Some(old)=data.environments.get(&id){ensure!(old==&binding,"Environment dependency binding collision");}else{data.environments.insert(id.clone(),binding);}
+        self.diagnostic_stage=DependentPublicationStage::WriteHold;
         data.holds.insert(self.operation.clone(),DependentHoldData{format_version:1,operation_id:self.operation.clone(),pin:self.pin.clone(),root:self.root.clone(),environment_id:id.clone(),staging_id:self.stage.clone()});
         state=self.io.write_state(state)?;#[cfg(test)]if self.fault==Some(TestPoint::AfterHold){bail!("injected dependent hold")}
+        self.diagnostic_stage=DependentPublicationStage::LocalGraph;
         self.io.durable_reads=true;let graph=local_graph(&mut self.io,&state,&self.root,&self.environment)?;
+        self.diagnostic_stage=DependentPublicationStage::SyncDirectories;
         let shards=self.io.shards.values().map(|(f,_)|f.try_clone()).collect::<std::io::Result<Vec<_>>>()?;for shard in shards{self.io.sync_directory(shard)?;}
         self.io.sync_directory(self.io.objects.as_ref().unwrap().try_clone()?)?;self.io.sync_directory(self.io.tmp.as_ref().unwrap().try_clone()?)?;
+        self.diagnostic_stage=DependentPublicationStage::AfterVersions;
         self.environment.check_versions_retaining(&mut self.after,self.io.original.clone())?;
+        self.diagnostic_stage=DependentPublicationStage::ValidateStageExpiry;
         ensure!(state.staging[&self.stage].expires_at_ms>now_ms()?,"dependent original stage expired");
+        self.diagnostic_stage=DependentPublicationStage::BuildRecord;
         let record=DependentPinData{format_version:1,operation_id:self.operation.clone(),root:self.root.clone(),environment_id:id,local_graph_sha256:local_digest(&graph)?,local_objects:graph.members.len()as u64,local_bytes:graph.bytes,depth:2,generation:state.generation.checked_add(1).context("dependent generation overflow")?};
         self.record=Some(record.clone());let data=state.environment_dependencies.as_mut().unwrap();data.pins.insert(self.pin.clone(),record.clone());data.holds.remove(&self.operation);state.staging.remove(&self.stage);
         #[cfg(test)]if self.fault==Some(TestPoint::FinalRename){self.io.fail_after_rename=true;}
+        self.diagnostic_stage=DependentPublicationStage::WriteCommit;
         state=self.io.write_state(state)?;#[cfg(test)]if self.fault==Some(TestPoint::AfterCommit){bail!("injected dependent late ACK")}
+        self.diagnostic_stage=DependentPublicationStage::CaptureOwner;
         self.ack=Some(Arc::new(EnvironmentDependentPinOwner{store:self.io.store.clone(),custody:StoreCustody::capture(&self.io)?,pin:self.pin.clone(),record,environment:self.environment.clone(),local:Arc::new(graph.members),source_failed:AtomicBool::new(false),origin:DependentOwnerOrigin::OriginalPublication}));
-        self.ack.as_ref().unwrap().check(&self.io,&state)?;self.io.original.remaining()?;self.io.release_known()?;self.ready=true;Ok(())
+        self.diagnostic_stage=DependentPublicationStage::ValidateOwner;self.ack.as_ref().unwrap().check(&self.io,&state)?;
+        self.diagnostic_stage=DependentPublicationStage::FinalClock;self.io.original.remaining()?;
+        self.diagnostic_stage=DependentPublicationStage::ReleaseKnown;self.io.release_known()?;
+        self.ready=true;self.diagnostic_stage=DependentPublicationStage::Complete;Ok(())
     }
 }
 pub struct EnvironmentDependentRead{owner:Arc<EnvironmentDependentPinOwner>,io:StoreIo,reference:ObjectRef,bytes:Option<Vec<u8>>,attempted:bool,ready:bool}
@@ -152,4 +195,32 @@ pub(in crate::store::backed_retention) fn gc_local(owners:&[Arc<EnvironmentDepen
         if result.as_ref().err().is_some_and(observed_failure){owner.fence_local_source();}let graph=result?;
         ensure!(local_digest(&graph)?==owner.record.local_graph_sha256&&graph.members.len()as u64==owner.record.local_objects&&graph.bytes==owner.record.local_bytes,"dependent GC local graph changed");
         retained.extend(graph.members.into_iter().map(|r|r.digest));}Ok(retained)
+}
+
+#[cfg(test)]mod dependent_publication_diagnostic_tests{
+    use super::*;
+    #[test]fn closed_stage_labels_and_failure_data_never_format_arbitrary_errors(){
+        let stages=[DependentPublicationStage::Captured,DependentPublicationStage::ValidateRequest,DependentPublicationStage::BeforeVersions,
+            DependentPublicationStage::AcquireStore,DependentPublicationStage::ReadState,DependentPublicationStage::ValidateState,
+            DependentPublicationStage::WriteHold,DependentPublicationStage::LocalGraph,DependentPublicationStage::SyncDirectories,
+            DependentPublicationStage::AfterVersions,DependentPublicationStage::ValidateStageExpiry,DependentPublicationStage::BuildRecord,
+            DependentPublicationStage::WriteCommit,DependentPublicationStage::CaptureOwner,DependentPublicationStage::ValidateOwner,
+            DependentPublicationStage::FinalClock,DependentPublicationStage::ReleaseKnown,DependentPublicationStage::Complete];
+        let labels=["captured","validate_request","before_versions","acquire_store","read_state","validate_state","write_hold",
+            "local_graph","sync_directories","after_versions","validate_stage_expiry","build_record","write_commit","capture_owner",
+            "validate_owner","final_clock","release_known","complete"];
+        for(stage,label)in stages.into_iter().zip(labels){assert_eq!(serde_json::to_value(stage).unwrap(),label);}
+        let io=anyhow::Error::new(std::io::Error::from_raw_os_error(libc::EMFILE)).context("PRIVATE_SENTINEL_MUST_NOT_FORMAT");
+        let data=dependent_failure_data(Some(&io));assert_eq!(data["ioRawOsError"],libc::EMFILE);assert_eq!(data["class"],"io");
+        assert!(!data.to_string().contains("PRIVATE_SENTINEL"));
+        let validation=anyhow::anyhow!("PRIVATE_VALIDATION_SENTINEL");let data=dependent_failure_data(Some(&validation));
+        assert_eq!(data["class"],"validation_or_budget");assert!(data["ioRawOsError"].is_null());
+        assert!(!data.to_string().contains("PRIVATE_VALIDATION"));
+        assert_eq!(dependent_failure_data(None)["class"],"none");
+        #[derive(Debug)]struct MustNotFormat;
+        impl std::fmt::Display for MustNotFormat{fn fmt(&self,_:&mut std::fmt::Formatter<'_>)->std::fmt::Result{panic!("diagnostic must not format retained errors")}}
+        impl std::error::Error for MustNotFormat{}
+        let opaque=anyhow::Error::new(MustNotFormat);
+        assert_eq!(dependent_failure_data(Some(&opaque))["class"],"validation_or_budget");
+    }
 }

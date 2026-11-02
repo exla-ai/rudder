@@ -53,6 +53,11 @@ impl BackedInitialEnvironment {
         if let Some(parent)=&self.source_parent{parent.binding_data()?;}
         ensure!(self.dependent.is_none()||self.source_parent.is_some(),"original dependent source parent absent");Ok(self.source_parent.clone())
     }
+    /// Borrow original retained failure without consuming, retrying or reading
+    /// back a pin. Product callers can use closed diagnostic DATA instead.
+    pub fn dependent_publication_failure(&self)->Option<&anyhow::Error>{self.dependent.as_ref().and_then(|p|p.failure())}
+    pub fn source_parent_failure(&self)->Option<&anyhow::Error>{self.source_parent.as_ref().and_then(|p|p.failure())}
+    pub fn dependent_publication_diagnostic_data(&self)->Option<serde_json::Value>{self.dependent.as_ref().map(|p|p.diagnostic_data())}
     pub fn pin_name(&self)->&str{&self.pin}
     pub fn runnable_owner(&self)->Result<&Arc<BackedPinOwner>>{self.publication.as_ref().context("actual backed initial publication absent")?.acknowledgment()}
     pub fn flat_runnable_owner(&self)->Result<Option<Arc<BackedPinOwner>>>{self.publication.as_ref().map(|p|p.acknowledgment().cloned()).transpose()}

@@ -56,7 +56,19 @@ fn full_rudder_packed_history_source_seed_and_runtime_use_one_retained_environme
     BackedInitialEnvironment::stage_subgraph_retaining(&mut held.context,environment.clone(),"actual-rudder-runnable".into(),original.0.clone(),cancelled.clone())?;
     let source_result=pollster::block_on(prepare_initial_source_backed_history_retaining(store.clone(),InitialSourceRequest{source_git:&source_git,private_repository:&private,seed_destination:&seed,expected_head:&head,environment:&environment_root,settings:&common::settings()},
         SeedProfile::PagedCowV2,GitHistoryProfile::PackedHistoryV2,&mut held.paged,&mut held.import,held.context.as_mut().unwrap(),&original.0,cancelled.clone(),||{original.remaining()?;Ok(())}));
-    if let Err(error)=&source_result{if let Some(actual)=&held.import{eprintln!("RUDDER_PACKED_HISTORY_FAILURE_DATA={}",serde_json::json!({"progress":actual.progress(),"packed":actual.packed_progress_data()}));}return Err(anyhow::anyhow!("{error:#}"));}
+    if let Err(error)=&source_result{
+        let source_elapsed=start.elapsed();
+        eprintln!("RUDDER_PACKED_HISTORY_FAILURE_DATA={}",serde_json::json!({
+            "progress":held.import.as_ref().map(|actual|actual.progress()),
+            "packed":held.import.as_ref().and_then(|actual|actual.packed_progress_data()),
+            "importElapsedScope":"since-import-carrier-capture-at-observation-not-import-ACK-duration",
+            "sourceElapsedMs":source_elapsed.as_millis(),"sourceOriginalConstraint":constraint.clone(),
+            "sourceError":fifty_forks::error_data(error),
+            "dependentPublication":held.context.as_ref().and_then(|actual|actual.dependent_publication_diagnostic_data()),
+            "retainedDependentFailure":held.context.as_ref().and_then(|actual|actual.dependent_publication_failure()).map(fifty_forks::error_data),
+            "retainedSourceParentFailure":held.context.as_ref().and_then(|actual|actual.source_parent_failure()).map(fifty_forks::error_data),
+            "resources":fifty_forks::source_failure_resource_data()}));
+    }
     held.source=Some(source_result?);
     original.remaining()?;ensure!(original.0.constraint()==constraint,"initial source clock replaced");timings.insert("source_seed_runnable_ms",start.elapsed().as_millis());
     let source=held.source.as_ref().unwrap();ensure!(source.baseline.commit==head&&source.baseline.parents.len()>0,"actual accepted history changed/truncated");

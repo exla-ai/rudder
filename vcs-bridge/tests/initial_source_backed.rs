@@ -236,3 +236,23 @@ fn cancelled_after_full_successor_pin_keeps_original_carrier_and_refuses_prepare
         prepared.baseline.clone(),prepared.seed_root.clone(),"component-window-full".into(),"component-window-seed".into(),original.clone(),cancel.clone(),||Ok(())).is_err());
     assert!(successor.is_some());assert_eq!(f.store.retention().unwrap(),before);assert!(original.remaining().is_err());assert!(!f.store.object_path(&f.payload).unwrap().exists());
 }
+
+#[test]#[ignore="strict Root-owned baked DATA; original dependent failure diagnostics preserve carrier"]
+fn dependent_initial_failure_diagnostics_preserve_original_error_and_active_stage(){
+    let f=Fixture::new();let original=budget();let cancel=Arc::new(AtomicBool::new(false));
+    let (_environment,mut context)=source_parent_context(&f,&original,&cancel);
+    let conflict=f.store.put_blob(b"existing complete-local pin").unwrap();f.store.pin("component-dependent-runnable",&conflict).unwrap();
+    let error=f.run(&mut context,&original,cancel,||Ok(())).err().expect("conflicting original pin must fail");
+    assert!(error.to_string().contains("dependent publication failed"));
+    let failure=context.dependent_publication_failure().expect("original cause retained");
+    assert_eq!(failure.to_string(),"dependent root conflicts with existing complete-local/backed pin");
+    let data=context.dependent_publication_diagnostic_data().unwrap();
+    assert_eq!(data["lastStage"],"validate_state");assert_eq!(data["failure"]["present"],true);
+    assert_eq!(data["failure"]["class"],"validation_or_budget");assert!(data["failure"]["ioRawOsError"].is_null());
+    assert_eq!(data["acknowledged"],false);assert_eq!(data["gcLocked"],true);
+    assert_eq!(data["actualLocalHashReads"],0);assert_eq!(data["actualLocalObjectSyncs"],0);
+    assert_eq!(data["actualIoComplete"],false);assert_eq!(data["recordConstructed"],false);
+    assert!(context.dependent_runnable_owner().is_err());assert!(context.source_parent().is_err());assert!(!f.seed.exists());
+    assert!(std::ptr::eq(failure,context.dependent_publication_failure().unwrap()));
+    // No retention readback while this unknown publication retains its GC lock.
+}

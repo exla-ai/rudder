@@ -43,13 +43,33 @@ impl std::fmt::Write for DiagnosticText {
         Ok(())
     }
 }
-fn error_data(error: &anyhow::Error) -> Value {
+pub(super) fn error_data(error: &anyhow::Error) -> Value {
     let mut text = DiagnosticText::default();
     let _ = write!(&mut text, "{error:#}");
     let io = error.chain().take(8).find_map(|cause|cause.downcast_ref::<std::io::Error>());
     json!({"detail":text.text,"truncated":text.truncated,"maximumUtf8Bytes":DIAGNOSTIC_BYTES,
         "ioRawOsError":io.and_then(std::io::Error::raw_os_error),
         "ioKind":io.map(|error|format!("{:?}",error.kind())),"diagnosticOnly":true})
+}
+// Failure-only fixture observations. No CAS/retention access or new clock:
+// an unknown publication may retain the original GC lock and expired budget.
+pub(super) fn source_failure_resource_data() -> Value {
+    let mut data=json!({"diagnosticOnly":true,"fdCountIncludesObservationDirectory":true,
+        "maximumFdEntriesObserved":DIAGNOSTIC_FDS});
+    let mut limit=std::mem::MaybeUninit::<libc::rlimit>::uninit();
+    if unsafe{libc::getrlimit(libc::RLIMIT_NOFILE,limit.as_mut_ptr())}==0 {
+        let limit=unsafe{limit.assume_init()};
+        data["rlimitNofile"]=json!({"soft":limit.rlim_cur.to_string(),"hard":limit.rlim_max.to_string(),
+            "infinityValue":libc::RLIM_INFINITY.to_string()});
+    }else{data["rlimitObservationError"]=error_data(&std::io::Error::last_os_error().into());}
+    let result=(||->Result<()> {
+        let mut count=0usize;
+        for entry in fs::read_dir("/proc/self/fd")?.take(DIAGNOSTIC_FDS+1){entry?;count+=1;}
+        data["fdEntriesObserved"]=json!(count.min(DIAGNOSTIC_FDS));
+        data["fdCountExact"]=json!(count<=DIAGNOSTIC_FDS);Ok(())
+    })();
+    if let Err(error)=result{data["fdObservationError"]=error_data(&error);}
+    data
 }
 fn resource_data(store: &LocalStore, clock: &Clock, stage: Option<&StagingLease>) -> Value {
     // These observations never acquire the CAS lock: a failed publication may

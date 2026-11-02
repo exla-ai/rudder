@@ -43,6 +43,20 @@ struct HelperRequest {version:u32,request_nonce:String,binding_sha256:String,eng
 struct HelperAck {version:u32,request_nonce:String,binding_sha256:String,engine_instance_id:String,epoch:String,helper_pid:u32,helper_start_ticks:String}
 fn digest(bytes:&[u8])->String{format!("{:x}",Sha256::digest(bytes))}
 fn stamp(file:&File)->Result<(u64,u64,u64,u32,i64,i64)>{let m=file.metadata()?;Ok((m.dev(),m.ino(),m.len(),m.mode(),m.ctime(),m.ctime_nsec()))}
+// Linux keeps /proc/PID (0555) owned by the effective UID even at
+// dumpable=0. The protected fd directory (0500) follows task_dump_owner's
+// nondumpable ownership rule; inspect that directory, never its entries.
+fn require_protected_descriptor_directory(pid: u32) -> Result<()> {
+    let metadata = fs::symlink_metadata(format!("/proc/{pid}/fd"))?;
+    ensure!(
+        metadata.is_dir()
+            && metadata.uid() == 0
+            && metadata.gid() == 0
+            && metadata.mode() & 0o7777 == 0o500,
+        "runtime original engine lost protected descriptor floor"
+    );
+    Ok(())
+}
 fn original_stat(pid:u32)->Result<(u32,String)>{let bytes=storage::proc_bytes(&format!("/proc/{pid}/stat"),4096)?;let text=std::str::from_utf8(&bytes)?;let(_,fields)=text.rsplit_once(')').context("runtime original stat incomplete")?;let fields:Vec<_>=fields.split_whitespace().collect();
     ensure!(fields.len()>=20,"runtime original stat fields absent");Ok((fields[1].parse()?,fields[19].into()))}
 fn protected_directory(path:&Path)->Result<File>{ensure!(path.canonicalize()?==path,"runtime protected directory redirects");
@@ -265,11 +279,7 @@ impl RuntimeBootstrapProof {
             storage::floor(self.engine.pid, 1500)
         })?;
         proof_check(BootstrapCheck::EngineProtectedProc, || {
-            ensure!(
-                fs::metadata(format!("/proc/{}", self.engine.pid))?.uid() == 0,
-                "runtime original engine lost protected descriptor floor"
-            );
-            Ok(())
+            require_protected_descriptor_directory(self.engine.pid)
         })?;
         proof_check(BootstrapCheck::LauncherParentage, || {
             ensure!(
@@ -658,6 +668,10 @@ mod tests;
 #[cfg(test)]
 #[path="root_runtime_inherited_tests.rs"]
 mod inherited_tests;
+
+#[cfg(test)]
+#[path = "root_runtime_protection_tests.rs"]
+mod protection_tests;
 
 #[cfg(test)]
 mod bootstrap_diagnostic_tests {

@@ -2780,3 +2780,101 @@ runtime qualification. A seventh cancellation-window case is now integrated.
 Fresh Bookworm build-only Root execution is being prepared; Native binary
 check406 and relevant VCS/Native suites407/408 are still active. No worker
 image, SDK/runtime qualification, release or deployment is claimed here.
+
+### 2026-11-02 00:34Z: current checks and Root component evidence
+
+Current-source Native binary check406 passed. VCS library407 passed61 with6
+ignored. Native binary managed selection408 passed262 and failed9 at missing
+profile-loader environment before child spawn. With the actual Node and built
+helper paths supplied, the profile-loader selection409 passed all10 cases;
+source and helper hashes are retained in the private input receipt. No source
+change or broader retest was needed for that environment correction.
+
+The frozen Bookworm component build at
+`/workspace/rudder-fifty-fork-build-overlay-a1` executed all7 strict initial
+source tests as actual UID0:7 passed in1.68 seconds. This resolves the earlier
+local UID1500 refusal for these component cases. It does not qualify managed
+Root storage, SDK or agent operation.
+
+The same original build then failed its packed-history component before parent
+preparation completed. Its retained actual test child exited101 after53 seconds,
+was reaped with both EOFs, and did not time out or truncate output. The error
+was the generic dependent-publication failure; the actual underlying error is
+still retained but not exposed by this fixture. Import progress reports an
+acknowledged complete import with12260 objects and no import error. Its29866ms
+field is elapsed time at failure observation, not measured import duration.
+There is no fifty-workspace result, p50 or established performance gain. No
+retry of that failed original operation is authorized by these observations.
+
+Build-only managed worker source manifest
+`5a80479e2fc2153a935739a34df6c197bae7bf4601260a04b3de0d255a8309f9`
+produced base digest
+`sha256:b40dc77d3aaa2bcfd745f9ffeaba74c1502b2bf20b9142ab757f620c603a769c`
+at00:28:05Z. Its exact four production ELF hashes are in
+`/workspace/rudder-managed-c1-worker-build-a4/report.json`. The immutable C1 CAS
+overlay built successfully at00:30:28Z as
+`sha256:da4120c2decfcd776457d46e9eb7c9db781570b8df37d57779012d33d2212b2c`;
+its report binds1981517179 runtime encoded bytes and22177 objects. Both original
+build observers terminated successfully. Neither artifact is a production
+deployment or SDK/runtime qualification. A fresh isolated A15 control run is
+using this exact overlay to observe the new bounded startup diagnostics.
+
+### 2026-11-02 00:37Z: actual Root startup failure identified
+
+Fresh isolated A15 used the exact successful A4 overlay. Its original SDK
+configure update and start were acknowledged. Private log capture returned0
+and retained24036 bytes; the closed diagnostic reports `root_storage`,
+`capture_runtime`, `EngineProtectedProc`, `validation_or_other`, with no IO
+kind or errno. The launcher subsequently reports `wait_client`. No Root ACK,
+SDK success or subsequent role qualification is established by this capture.
+
+Two fixed read-only guest observations returned HTTP200 and child exit0. The
+original engine process623 has UID/GID1500, effective capabilities0 and
+NoNewPrivs1. Its `/proc/623` directory is UID/GID1500 mode0555; its `fd`
+directory is UID/GID0 mode0500. The protected-directory distinction matches a
+separate real-process dumpable0/1/0 reproduction. The startup predicate checks
+the general proc directory and therefore rejects this protected engine. A
+narrow correction to inspect the protected fd directory is being prepared;
+no deadline or credential/protection guard relaxation is intended.
+
+Original observation hashes and fixed labels are retained in
+`/workspace/rudder-staging-flow-control-run-a15/root-fixed-diagnostic-observation.json`;
+fixed proc observations are in the same private run directory. The original
+control remains retained while its SDK observation settles. The live protected
+user home has not been changed.
+
+A15's unchanged SDK window expired with no Root ACK; runtime and ordinary were
+not reached. Exact disposable fixture cleanup completed at00:39:58Z in28
+bounded calls: both original Machine versions reached destroyed with list
+absence, the known volume delete was acknowledged and inactive state observed,
+the SDK app returned two404 reads, and all three exact temporary secrets were
+absent. Protected user-home identity was unchanged before and after. Evidence:
+`/workspace/rudder-staging-flow-control-run-a15/operator-cleanup-v1/report.json`.
+The retained controller was stopped through its original pidfd after cleanup,
+its process was absent, and the short-lived credential revocation returned0
+at00:40:10Z. This is fixture teardown, not normal runtime retirement or provider
+fencing qualification.
+
+### 2026-11-02 00:41Z: targeted startup correction verified locally
+
+The Root proof now checks the actual protected `/proc/PID/fd` directory,
+requiring nonsymlink directory metadata, UID/GID0 and exact mode0500. Existing
+pidfd liveness, complete engine credential/capability/group/NoNewPrivs floor,
+parentage, image, idmap, namespaces and original deadlines are unchanged.
+Independent review found no blocking issue. Guarded412 passed the real isolated
+exec regression: dumpable0 is accepted, dumpable1 refused with the same typed
+marker, then dumpable0 accepted again; a sentinel rejects zero-test children.
+Guarded413 passed66 runtime-proof cases with2 ignored and no failures. Actual
+SDK qualification of this corrected worker still requires a new artifact/run.
+
+The packed-history failure fixture now borrows the original retained dependent
+failure, closed active stage and actual partial local IO counts, preserving
+carriers and the original returned error. Failure-only resource observations
+avoid CAS/retention readback while the original GC lock may remain held. Engine
+diagnostic test410 passed without formatting arbitrary errors; fixture/strict
+target compile411 passed. A new strict original-pin-conflict regression awaits
+actual UID0 execution, making8 strict cases. No performance fix or deadline
+increase is claimed. A1 workload termination is separately reconciled in
+`/workspace/rudder-fifty-fork-build-overlay-a1-reconciliation-v1/REPORT.md`;
+Fly builder cleanup remains unknown, although the original test/RUN failure is
+terminal. Any new diagnostic experiment uses new custody, directory and nonce.

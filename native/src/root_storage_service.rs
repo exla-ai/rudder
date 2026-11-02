@@ -444,7 +444,7 @@ impl ServiceStage {
         }
     }
 }
-fn retained_failure_data(
+pub(crate) fn retained_failure_data(
     component: &'static str,
     stage: &'static str,
     error: Option<&anyhow::Error>,

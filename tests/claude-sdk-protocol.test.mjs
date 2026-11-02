@@ -71,27 +71,18 @@ test("actual CLI started lifecycle accepts a synthetic peer before model output 
   assert.equal(f.events.filter(frame => frame.method === "turn/completed").length, 0);
 });
 
-test("SDK busy steer confirms cancellation and old interruption before replacement", async (t) => {
-  const f = await fixture(t); const initial = await f.start();
-  const steering = f.core.execute(cmd("steer", "steer", initial.uuid), "session-one");
-  const interrupt = f.writes.at(-1);
-  assert.equal(interrupt.request.subtype, "interrupt"); assert.equal(interrupt.request.cancel_queued, true);
-  f.core.ingest(receipt(interrupt, { cancelled: ["queued-before-stop"] }));
-  await immediate(); assert.equal(f.writes.filter((frame) => frame.type === "user").length, 1);
-  f.core.ingest(result(initial, "aborted_tools", { user_message_uuid: "wrong-input" }));
-  await immediate(); assert.equal(f.writes.filter((frame) => frame.type === "user").length, 1);
-  f.core.ingest(result(initial, "aborted_tools"));
-  await immediate();
-  const replacement = f.writes.at(-1);
-  assert.equal(replacement.type, "user"); assert.notEqual(replacement.uuid, initial.uuid);
-  assert.deepEqual(replacement.origin, { kind: "peer", from: "authenticated-peer" });
-  let completed = false; steering.then(() => { completed = true; });
-  await immediate(); assert.equal(completed, false);
-  f.core.ingest(replay(replacement));
-  assert.deepEqual(await steering, { turnId: replacement.uuid, replacedTurnId: initial.uuid });
-  assert.deepEqual(f.events.map((event) => [event.method, event.params.turn.id, event.params.turn.status]), [
-    ["turn/started", initial.uuid, "inProgress"], ["turn/completed", initial.uuid, "interrupted"], ["turn/started", replacement.uuid, "inProgress"],
-  ]);
+test("SDK replacement refuses before interrupt or input and keeps the original command receipt", async (t) => {
+  const f = await fixture(t); const initial = await f.start(); const length = f.writes.length;
+  const command = cmd("steer", "steer", initial.uuid);
+  const first = f.core.execute(command, "session-one");
+  assert.equal(f.core.execute(command, "session-one"), first);
+  await assert.rejects(first, (error) => error.kind === "unsupported");
+  await assert.rejects(f.core.execute({ ...command, operation: { kind: "steer", message: peer("changed") } }, "session-one"), /reused/);
+  await assert.rejects(f.core.execute(command, "session-one"), (error) => error.kind === "unsupported");
+  assert.equal(f.writes.length, length);
+  assert.equal(f.core.snapshot().activeTurnId, initial.uuid);
+  assert.equal(f.core.snapshot().lastInterruptedTurnId, null);
+  assert.equal(f.core.snapshot().uncertain, false);
 });
 
 test("SDK interruption result arriving before receipt does not permit early resume", async (t) => {
@@ -104,8 +95,10 @@ test("SDK interruption result arriving before receipt does not permit early resu
   f.core.ingest(receipt(interrupt)); await stopping;
   assert.equal(f.core.snapshot().lastInterruptedTurnId, initial.uuid);
   await assert.rejects(f.core.execute(cmd("wake", "deliver"), "session-one"), /idle non-interrupted/);
-  const resume = f.core.execute(cmd("resume", "resume", initial.uuid), "session-one");
-  const next = f.writes.at(-1); f.core.ingest(replay(next)); await resume;
+  const length = f.writes.length;
+  await assert.rejects(f.core.execute(cmd("resume", "resume", initial.uuid), "session-one"), (error) => error.kind === "unsupported");
+  assert.equal(f.writes.length, length);
+  assert.equal(f.core.snapshot().lastInterruptedTurnId, initial.uuid);
 });
 
 test("SDK receipt alone and wrong/subagent result cannot confirm stopped turn", async (t) => {
@@ -119,7 +112,7 @@ test("SDK receipt alone and wrong/subagent result cannot confirm stopped turn", 
 
 test("SDK normal result never falsely confirms interruption or triggers replacement", async (t) => {
   const f = await fixture(t); const initial = await f.start();
-  const steer = f.core.execute(cmd("steer", "steer", initial.uuid), "session-one");
+  const steer = f.core.execute(cmd("stop", "interrupt", initial.uuid), "session-one");
   const rejected = assert.rejects(steer, /completed, not interrupted/);
   f.core.ingest(receipt(f.writes.at(-1))); f.core.ingest(result(initial)); await rejected;
   assert.equal(f.writes.filter((frame) => frame.type === "user").length, 1);
@@ -129,14 +122,14 @@ test("SDK normal result never falsely confirms interruption or triggers replacem
 test("SDK retained queued work or malformed receipt leaves uncertainty without replacement", async (t) => {
   for (const payload of [{ still_queued: ["still-live"], cancelled: [] }, { cancelled: [] }]) {
     const f = await fixture(t); const initial = await f.start();
-    const steer = f.core.execute(cmd("steer", "steer", initial.uuid), "session-one");
+    const steer = f.core.execute(cmd("stop", "interrupt", initial.uuid), "session-one");
     const rejected = assert.rejects(steer, (error) => error.kind === "uncertain");
     const interrupt = f.writes.at(-1);
     f.core.ingest({ type: "control_response", response: { subtype: "success", request_id: interrupt.request_id, response: payload } });
     await rejected;
     assert.equal(f.core.snapshot().uncertain, true);
     assert.equal(f.writes.filter((frame) => frame.type === "user").length, 1);
-    await assert.rejects(f.core.execute(cmd("retry", "steer", initial.uuid), "session-one"), /unresolved/);
+    await assert.rejects(f.core.execute(cmd("retry", "interrupt", initial.uuid), "session-one"), /unresolved/);
   }
 });
 
@@ -209,7 +202,7 @@ test("SDK peer result may be safely unclassified but can never become human auth
   }
 });
 
-test("SDK late simple-interrupt proof permits explicit resume without automatic retry", async (t) => {
+test("SDK late simple-interrupt proof retains the interrupted turn without authorizing resume", async (t) => {
   const f = await fixture(t, { timeout: 20 }); const initial = await f.start();
   const stop = f.core.execute(cmd("stop", "interrupt", initial.uuid), "session-one");
   const interrupt = f.writes.at(-1); f.core.ingest(receipt(interrupt));
@@ -217,8 +210,10 @@ test("SDK late simple-interrupt proof permits explicit resume without automatic 
   assert.equal(f.core.snapshot().uncertain, true);
   f.core.ingest(result(initial, "aborted_tools"));
   assert.equal(f.core.snapshot().uncertain, false);
-  const resume = f.core.execute(cmd("explicit-resume", "resume", initial.uuid), "session-one");
-  const next = f.writes.at(-1); f.core.ingest(replay(next)); await resume;
+  const length = f.writes.length;
+  await assert.rejects(f.core.execute(cmd("explicit-resume", "resume", initial.uuid), "session-one"), (error) => error.kind === "unsupported");
+  assert.equal(f.writes.length, length);
+  assert.equal(f.core.snapshot().lastInterruptedTurnId, initial.uuid);
   assert.equal(f.writes.filter((frame) => frame.request?.subtype === "interrupt").length, 1);
 });
 
@@ -238,14 +233,16 @@ test("SDK trusted session selectors never misbind an implicit fork", () => {
   assert.throws(() => selectedClaudeSdkSession(["--resume", "one", "--session-id", "another"]), /Conflicting/);
 });
 
-test("SDK caller deadline covers stop and replacement together; late stop never creates a turn", async (t) => {
+test("SDK simple interrupt keeps the caller deadline and late reconciliation never submits input", async (t) => {
   const f = await fixture(t); const initial = await f.start();
-  const steer = f.core.execute({ ...cmd("bounded-steer", "steer", initial.uuid), deadline_unix_ms: Date.now() + 20 }, "session-one");
+  const stopping = f.core.execute({ ...cmd("bounded-stop", "interrupt", initial.uuid), deadline_unix_ms: Date.now() + 20 }, "session-one");
   const interrupt = f.writes.at(-1); f.core.ingest(receipt(interrupt));
-  await assert.rejects(steer, (error) => error.kind === "uncertain");
+  await assert.rejects(stopping, (error) => error.kind === "uncertain");
   f.core.ingest(result(initial, "aborted_tools")); await immediate();
   assert.equal(f.writes.filter((frame) => frame.type === "user").length, 1);
-  assert.equal(f.core.snapshot().uncertain, true);
+  assert.equal(f.core.snapshot().uncertain, false);
+  assert.equal(f.core.snapshot().lastInterruptedTurnId, initial.uuid);
+  await assert.rejects(f.core.execute(cmd("resume", "resume", initial.uuid), "session-one"), (error) => error.kind === "unsupported");
 });
 
 test("SDK expired command rejects before any backend write", async (t) => {
@@ -300,4 +297,27 @@ test("SDK unknown terminal reason fails closed instead of declaring completion",
   f.core.ingest(result(input, "future_unqualified_reason"));
   assert.equal(f.core.snapshot().uncertain, true);
   assert(!f.events.some((event) => event.params.turn.status === "completed"));
+});
+
+
+test("SDK explicit keyboard input remains available after an observed interruption", async (t) => {
+  const f = await fixture(t); const initial = await f.start();
+  const stopping = f.core.humanInterrupt();
+  f.core.ingest(receipt(f.writes.at(-1))); f.core.ingest(result(initial, "aborted_tools")); await stopping;
+  const length = f.writes.length;
+  await assert.rejects(f.core.execute(cmd("peer-resume", "resume", initial.uuid), "session-one"), (error) => error.kind === "unsupported");
+  assert.equal(f.writes.length, length);
+  const human = f.core.humanInput("The human explicitly continues the task"); const next = f.writes.at(-1);
+  assert.deepEqual(next.origin, { kind: "human" });
+  assert.notEqual(next.uuid, initial.uuid);
+  f.core.ingest(replay(next)); await human;
+});
+
+test("SDK rejected peer continuation preserves original target and expiry checks", async (t) => {
+  const f = await fixture(t); const initial = await f.start(); const length = f.writes.length;
+  await assert.rejects(f.core.execute(cmd("wrong-turn", "steer", "foreign-turn"), "session-one"), (error) => error.kind === "rejected");
+  await assert.rejects(f.core.execute({ ...cmd("expired-steer", "steer", initial.uuid), deadline_unix_ms: Date.now() - 1 }, "session-one"), /expired before dispatch/);
+  await assert.rejects(f.core.execute(cmd("resume-active", "resume", initial.uuid), "session-one"), (error) => error.kind === "rejected");
+  assert.equal(f.writes.length, length);
+  assert.equal(f.core.snapshot().activeTurnId, initial.uuid);
 });

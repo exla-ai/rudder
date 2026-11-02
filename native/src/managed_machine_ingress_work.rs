@@ -136,6 +136,11 @@ fn start_task(shared:&Arc<Shared>,job:&Arc<Job>,original:&FinalizationBudget,can
         crate::managed_machine_entry::CurrentSourceAdmission::Pending=>return Ok(serde_json::json!({"phase":"rejected","reason":"accepted_source_generation_pending"})),
         crate::managed_machine_entry::CurrentSourceAdmission::Fenced=>return Ok(serde_json::json!({"phase":"rejected","reason":"project_shared_admission_fenced"})),
     };
+    // Retain the actual selected project/seed BEFORE currentness, App handoff,
+    // role claim or factory effects can fail. This capsule never points to Job.
+    {let mut held=job.carrier.lock().unwrap_or_else(|p|p.into_inner());
+        ensure!(held.task.selected_source.is_none(),"original StartTask source already selected");
+        held.task.selected_source=Some(OriginalTaskSelectedSource{project:ticket.clone(),seed:seed.clone()});}
     {let mut held=node.work.lock().unwrap_or_else(|p|p.into_inner());held.seed=Some(seed.clone());held.cache=Some(cache.clone());}
     runtime.assert_current(original,cancelled)?;
     job.step.store(STEP_ADMIT,Ordering::Release);
@@ -156,7 +161,7 @@ fn start_task(shared:&Arc<Shared>,job:&Arc<Job>,original:&FinalizationBudget,can
         held.task.factory_permit.take().context("original factory permit absent")?;
         held.task.factory=Some(Arc::new(Mutex::new(FactoryCarrier {admission:held.task.admission.take(),retention:Some(retention),prepared:None,outcome:None,error:None,panic:None,recorded:false,ready:false})));
         ensure!(held.node.as_ref().is_some_and(|actual|Arc::ptr_eq(actual,&node))&&job.is_original_task_command(),"original StartTask project association changed");
-        let selection=OriginalTaskCommandSelection{actual:job.clone(),_node:node.clone(),project:ticket.clone(),seed:seed.clone(),root:job.covered_root().context("original StartTask root absent")?.clone()};
+        let selection=OriginalTaskCommandSelection{actual:job.clone(),_node:node.clone(),source:held.task.selected_source.as_ref().context("original StartTask selected source absent")?.clone(),root:job.covered_root().context("original StartTask root absent")?.clone()};
         shared.control.admit_task_from_original_command_retaining(&mut held.task.scope,&selection,original,cancelled.clone())?;
         let scope=held.task.scope.as_ref().unwrap().clone();let actual_scope=scope.clone();let factory=held.task.factory.as_ref().unwrap().clone();let control=shared.control.clone();let owner=project.clone();let image=runtime.clone();
         held.task.factory_handle=Some(thread::Builder::new().name("rudder-ingress-task-factory".into()).spawn(move||{

@@ -1710,7 +1710,11 @@ integrated current-source tests and all three release platforms remain pending.
   before dispatch. Retired pending targets receive a rejected receipt; started
   effects remain uncertain. Real Claude 2.1.314 and Codex 0.166.0 engine/dashboard
   steering passed, including attributed peer input and explicit same-thread
-  resume. Ordinary mail still requires inbox/ack; automatic wake is not shipped.
+  resume in that historical profile. Automatic idle delivery is now wired through
+  journal claims and the Native owned actor; actual backend/profile wake and
+  model adoption remain separate qualification, and delivery never supplies ACK.
+  Peer resume and interrupt-then-replace are refused pending tool/child
+  reconciliation; exact simple-interrupt receipts and ActiveAppend remain.
   Codex model-turn interruption can leave a yielded shell running until process
   cancellation or engine shutdown. See [actual provider evidence](../../examples/agent-runtime/evidence/2026-10-30/README.md).
 - Rudder's Rust VFS has immutable prepared directory indexes and private
@@ -3750,3 +3754,55 @@ clock; the expired attempt is retained without replay or deadline renewal.
 SDK/runtime admission, the three genuine cases and normal retirement remain
 unverified. No public
 release, control-plane deployment or Mac installation follows from these builds.
+
+### 2026-11-02 14:26Z: genuine attempt reaches SDK startup; cleanup verified
+
+The third close-wins attempt completed setup and admission, then expired its
+original 300-second SDK phase. All 70 controller effects settled without an
+unknown outcome. A bounded diagnostic against the original SDK machine
+completed with an actual child wait and both stream EOFs. Its sole fixed record
+was `SdkHelperExitUnknown` at `serve_runtime`; the underlying cause remains
+unknown. Independent diagnostic receipt SHA:
+`a26af952f6b0f1b4ca59b07b1b29c455de2297b443e28106df6bf9fb4f6901f6`.
+
+Original operator cleanup completed 40 settled calls at 14:17:48Z. It verified
+the control and SDK machine terminal states and repeated absences, SDK app
+absence, SDK volume inactivity, and removal of three temporary secrets. The
+protected live worker's identity matched before and after cleanup. This does
+not establish physical volume erasure or normal retirement. Cleanup receipt
+SHA `7986296be369d16ec9baf1b3f25b8d1d597b090d8386b8f739eccaf88760e69c`.
+The original supervisor session 24511 then reaped its controller after a stop
+through the held original pidfd and exited 0. Token revocation was acknowledged
+at 14:25:38Z, receipt SHA
+`38960697770916458b1ab8fc63451fbbbe423f2dc0c607fa323f1e77a4ba31cf`.
+
+Source review identified two diagnostic gaps: the UID1500 helper can fail to
+reopen its Root-owned inherited stderr pipe, and relayed inner stderr can
+precede the fixed failure frame. A private repair and strict Root-to-UID1500
+pipe regression are being prepared. They are not integrated or qualified.
+SDK/runtime admission and all three genuine cases remain unverified.
+
+### 2026-11-02 15:18Z: source37 diagnostic and continuation checks passed
+
+The fresh source37 qualification completed in original session 57624 with
+exit 0. All 102 selected tests passed: 69 ordinary tests, three Root tests and
+30 feature tests. All eleven selected artifacts reported `fresh: false`;
+compilation took 1503.4 seconds within the unchanged 1800-second limit.
+Independent replay accepted the complete source proof, receipt SHA
+`014440ff69233c9bf5415779e968c1250af43c4783b34e479a8351e160475e79`.
+The integrated TypeScript passed `npm run check` and all 26 SDK protocol tests.
+The qualified 635-file source map SHA is
+`b23c55aadfcf49ffe4bb8fddb922a891c389adb30454fe448673900eff60316b`.
+
+The integrated changes retain original command descendants through admission
+failure, refuse peer resume and interrupt-then-replace pending tool/child
+reconciliation, and repair fixed helper failure reporting. The strict Root test
+exercised the original Root-owned stderr pipe across the actual UID1500 floor:
+the old generic emitter wrote no bytes, while the helper emitted one fixed
+frame through its inherited writer. Relayed workload stderr follows that frame
+as bounded hex data. These checks do not explain the third attempt's SDK
+failure; a fresh genuine run on newly built worker images remains required.
+
+Source-test acceptance does not establish SDK/runtime admission, genuine
+bootstrap, delivered ingress, reverse ptrace, release runtime parity or normal
+retirement. No public release, deployment or Mac installation was performed.

@@ -7,6 +7,17 @@ use std::io::Read;
 // This runs only in Command's child: syscalls and errno conversion, no locks,
 // allocation, environment, filesystem access, new budget or retry.
 unsafe fn sdk_helper_exec_floor()->io::Result<()> {
+    // Command created this original stderr pipe while Root. The child owns its
+    // sole writer OFD; parent owns only the reader. Preserve that inherited
+    // writer across UID1500 exec rather than reopening its Root-owned inode.
+    let mut stderr:libc::stat=std::mem::zeroed();
+    if libc::fstat(libc::STDERR_FILENO,&mut stderr)!=0{return Err(io::Error::last_os_error())}
+    if stderr.st_mode&libc::S_IFMT!=libc::S_IFIFO{return Err(io::Error::from_raw_os_error(libc::EINVAL))}
+    let flags=libc::fcntl(libc::STDERR_FILENO,libc::F_GETFL);
+    if flags<0{return Err(io::Error::last_os_error())}
+    if flags&libc::O_ACCMODE==libc::O_RDONLY{return Err(io::Error::from_raw_os_error(libc::EINVAL))}
+    if libc::fcntl(libc::STDERR_FILENO,libc::F_SETFL,flags|libc::O_NONBLOCK)!=0{return Err(io::Error::last_os_error())}
+
     if libc::syscall(libc::SYS_setgroups,0usize,std::ptr::null::<libc::gid_t>())!=0{return Err(io::Error::last_os_error())}
     crate::root_storage_bootstrap::restrict_bounding(0)?;
     if libc::prctl(libc::PR_SET_KEEPCAPS,0,0,0,0)!=0
@@ -31,7 +42,7 @@ impl StartupResultReadClosure {
         // Nonzero exits must go through the existing SAME Child/pidfd/wait/
         // EOF validation above this call before any fixed stderr projection.
         ensure!(exit.is_none_or(ExitStatus::success)||!stdout_eof||!stderr_eof,"SDK failed original helper identity checks remain required");
-        if exit.is_some()&&stdout_eof&&stderr_eof{return Err(anyhow::Error::new(BootstrapCheck::SdkHelperExitUnknown))}
+        if exit.is_some()&&stdout_eof&&stderr_eof{return Err(anyhow::Error::new(BootstrapCheck::SdkHelperExitedWithoutResult))}
         Ok(false)
     }
 }
@@ -198,3 +209,7 @@ mod peer_witness_tests;
 #[cfg(test)]
 #[path="compiler_sdk_startup_read_closure_tests.rs"]
 mod startup_read_closure_tests;
+
+#[cfg(test)]
+#[path="compiler_sdk_helper_pipe_tests.rs"]
+mod helper_pipe_tests;

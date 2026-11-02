@@ -2,7 +2,7 @@
 //! retirement issuer. All mutations below require the original WorkerCarrier.
 use super::*;
 use std::{any::Any,marker::PhantomData,sync::{OnceLock,Weak}};
-use crate::managed_machine_ingress::{IngressJob,FreshInitializationAttempt,OriginalTaskCommandSelection};
+use crate::managed_machine_ingress::{IngressJob,FreshInitializationAttempt,OriginalTaskCommandSelection,OriginalTaskSelectedSource};
 use crate::managed_fresh_machine::FlowCell;
 use crate::managed_machine_runtime_profile::runtime_environment::SharedRuntimeEnvironment;
 
@@ -22,7 +22,14 @@ impl<O:Any+Send+Sync> OriginalOwnerWeak<O> {
     fn matches(&self,actual:&Arc<O>)->bool{self.actual.ptr_eq(&Self::capture(actual).actual)}
 }
 struct Root<O,C> {actual:OriginalOwnerWeak<O>,children:C}
-impl<O:Any+Send+Sync,C> Root<O,C> {fn belongs(&self,actual:&Arc<O>)->bool{self.actual.matches(actual)}}
+impl<O:Any+Send+Sync,C> Root<O,C> {
+    fn belongs(&self,actual:&Arc<O>)->bool{self.actual.matches(actual)}
+    fn retain_actual(&self,out:&mut Option<Arc<O>>)->Result<bool> {
+        if out.is_none(){*out=self.actual.upgrade();}
+        let Some(actual)=out else{return Ok(false)};
+        ensure!(self.belongs(actual),"foreign original root owner; captured owner retained");Ok(true)
+    }
+}
 /// Private once-only role, with actual weak payload identity. Retrying a failed
 /// post-claim start does not mint another role or erase the original attempt.
 struct OriginalRole<O> {actual:OriginalOwnerWeak<O>,started:AtomicBool}
@@ -101,6 +108,17 @@ impl CoveredIngressFreshRoots {
         charge_role(slot,child)
     }
 }
+impl IngressCommandRoot {
+    pub(crate) fn retain_original_job(&self,out:&mut Option<Arc<IngressJob>>)->Result<bool>{self.0.retain_actual(out)}
+    pub(crate) fn same_selected_source(&self,left:&OriginalTaskSelectedSource,right:&OriginalTaskSelectedSource)->bool {
+        let(lp,ls)=left.originals();let(rp,rs)=right.originals();
+        Arc::ptr_eq(&lp.cell,&rp.cell)&&Arc::ptr_eq(&ls.cell,&rs.cell)
+    }
+    pub(super) fn matches_original_task_role(self:&Arc<Self>,actual:&Arc<OriginalTaskCommand>,project:&ProjectTicket,seed:&SeedTicket)->bool {
+        self.0.children.task.get().is_some_and(|charged|Arc::ptr_eq(charged,actual))
+            &&actual.root.upgrade().is_some_and(|root|Arc::ptr_eq(&root,self))&&actual.matches(project,seed)
+    }
+}
 impl OriginalTaskCommand {
     pub(super) fn matches(&self,project:&ProjectTicket,seed:&SeedTicket)->bool {
         self.root.upgrade().is_some()&&self.project.matches(&project.cell)&&self.seed.matches(&seed.cell)
@@ -121,6 +139,7 @@ impl IngressCommandRoot {
     pub(crate) fn fixture_no_descendants(&self)->bool {self.0.children.task.get().is_none()}
 }
 impl CoveredProducerRoots {
+    pub(super) fn command_roots(&self)->&[Arc<IngressCommandRoot>]{&self.commands}
     #[cfg(feature="managed-ingress-genuine-fixture")]
     pub(super) fn fixture_contains_original_command_root(&self,actual:&Arc<IngressCommandRoot>)->bool {
         self.commands.iter().any(|root|Arc::ptr_eq(root,actual))

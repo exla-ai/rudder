@@ -78,7 +78,7 @@ fn sdk_helper_unprivileged_exec_refuses_root_transition_and_checks_actual_nd0() 
         // A UID1500 caller cannot run the production Root-only transition.
         // spawn must return the actual pre_exec errno, not an executed child.
         let mut refused=Command::new(std::env::current_exe().unwrap());
-        refused.args(["--list"]).env_clear().stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+        refused.args(["--list"]).env_clear().stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped());
         unsafe{refused.pre_exec(||sdk_helper_exec_floor());}
         let error=match refused.spawn(){
             Err(error)=>error,

@@ -25,10 +25,17 @@ struct ObservationRequest {job:Arc<Job>,original:FinalizationBudget,result:Mutex
 struct FactoryPermit; // private linear capability, never reconstructed from an absence flag.
 struct FactoryCarrier {admission:Option<ManagedTaskAdmission>,retention:Option<ManagedTaskFactoryRetention>,
     prepared:Option<PreparedManagedTask>,outcome:Option<Result<PreparedManagedTask>>,error:Option<anyhow::Error>,panic:Option<Box<dyn Any+Send>>,recorded:bool,ready:bool}
-struct TaskWork {refused_before_factory:Option<&'static str>,admission:Option<ManagedTaskAdmission>,factory_permit:Option<FactoryPermit>,factory:Option<Arc<Mutex<FactoryCarrier>>>,
+/// Strong original selected source only. Never stores its Job or a TaskScope;
+/// TaskScope's original command continuation remains weak in the reverse direction.
+#[derive(Clone)]
+pub(crate) struct OriginalTaskSelectedSource {project:ProjectTicket,seed:SeedTicket}
+impl OriginalTaskSelectedSource {
+    pub(crate) fn originals(&self)->(&ProjectTicket,&SeedTicket){(&self.project,&self.seed)}
+}
+struct TaskWork {selected_source:Option<OriginalTaskSelectedSource>,refused_before_factory:Option<&'static str>,admission:Option<ManagedTaskAdmission>,factory_permit:Option<FactoryPermit>,factory:Option<Arc<Mutex<FactoryCarrier>>>,
     factory_handle:Option<thread::JoinHandle<()>>,scope:Option<SeedTaskTicket>,started:Option<ManagedLaunchFence>,refusal:Option<ManagedTaskStartFailure>,
     pending_helper:Option<crate::managed_app::PendingManagedTaskHelper>,enrollment:Option<EnrollmentTicket>,enrollment_submitted:bool,released:bool,cleanup:Option<(FinalizationBudget,Arc<AtomicBool>)>,joined:Option<JoinedManagedTask>}
-impl TaskWork {fn new()->Self {Self {refused_before_factory:None,admission:None,factory_permit:None,factory:None,factory_handle:None,scope:None,started:None,refusal:None,
+impl TaskWork {fn new()->Self {Self {selected_source:None,refused_before_factory:None,admission:None,factory_permit:None,factory:None,factory_handle:None,scope:None,started:None,refusal:None,
     pending_helper:None,enrollment:None,enrollment_submitted:false,released:false,cleanup:None,joined:None}}}
 struct JobCarrier {accepted:Option<AcceptedHostCommand>,original:FinalizationBudget,cancelled:Arc<AtomicBool>,
     node:Option<Arc<ProjectNode>>,profile_inspection:Option<ManagedProfileInspection>,task:TaskWork,result:Option<serde_json::Value>,error:Option<anyhow::Error>,panic:Option<Box<dyn Any+Send>>,
@@ -58,13 +65,35 @@ impl IngressJob {
     pub(crate) fn retain_covered_root(&self,root:Arc<crate::managed_machine_entry::IngressCommandRoot>)->Result<()>{self.root.set(root).map_err(|_|anyhow::anyhow!("original command root already attached"))}
     pub(crate) fn is_original_task_command(&self)->bool{matches!(&self.command.operation,HostOperation::StartTaskV1{..})}
     pub(crate) fn belongs_to_machine(&self,machine:&MachineControl)->bool{self.machine.same_original_machine(machine)}
+    /// Caller already retains this SAME Job. Pin partial descendants before
+    /// validating them; busy remains Pending. Release Job before seed/task locks.
+    pub(crate) fn retain_original_task_descendants(&self,root:&Arc<crate::managed_machine_entry::IngressCommandRoot>,
+        selected:&mut Option<OriginalTaskSelectedSource>,scope:&mut Option<SeedTaskTicket>)->Result<bool> {
+        let (held,poisoned)=match self.carrier.try_lock() {
+            Ok(held)=>(held,false),Err(std::sync::TryLockError::WouldBlock)=>return Ok(false),
+            Err(std::sync::TryLockError::Poisoned(error))=>(error.into_inner(),true),
+        };
+        if selected.is_none(){*selected=held.task.selected_source.clone();}
+        if scope.is_none(){*scope=held.task.scope.clone();}
+        ensure!(!poisoned,"original command carrier poisoned; Job and partial descendants retained");
+        ensure!(self.covered_root().is_some_and(|actual|Arc::ptr_eq(actual,root)),"foreign original command root; Job retained");
+        if !self.is_original_task_command(){
+            ensure!(selected.is_none()&&scope.is_none(),"non-task original command has task descendants");return Ok(true);
+        }
+        let (Some(selected),Some(actual_selected))=(selected.as_ref(),held.task.selected_source.as_ref()) else{return Ok(false)};
+        ensure!(root.same_selected_source(selected,actual_selected),"original command selected source changed; owners retained");
+        let (Some(scope),Some(actual_scope))=(scope.as_ref(),held.task.scope.as_ref()) else{return Ok(false)};
+        ensure!(scope.same_original_task(actual_scope),"original command task changed; owners retained");
+        drop(held);
+        scope.observe_original_command_association(root,selected)
+    }
 }
 /// Constructed only at this actual StartTask's selected-source boundary. This
 /// temporary call owner is never stored in its TaskScope/root registry.
-pub(crate) struct OriginalTaskCommandSelection {actual:Arc<Job>,_node:Arc<ProjectNode>,project:ProjectTicket,seed:SeedTicket,root:Arc<crate::managed_machine_entry::IngressCommandRoot>}
+pub(crate) struct OriginalTaskCommandSelection {actual:Arc<Job>,_node:Arc<ProjectNode>,source:OriginalTaskSelectedSource,root:Arc<crate::managed_machine_entry::IngressCommandRoot>}
 impl OriginalTaskCommandSelection {
-    pub(crate) fn originals(&self)->(&Arc<crate::managed_machine_entry::IngressCommandRoot>,&Arc<Job>,&ProjectTicket,&SeedTicket){(&self.root,&self.actual,&self.project,&self.seed)}
-    pub(crate) fn selected_source(&self)->(&ProjectTicket,&SeedTicket){(&self.project,&self.seed)}
+    pub(crate) fn originals(&self)->(&Arc<crate::managed_machine_entry::IngressCommandRoot>,&Arc<Job>,&ProjectTicket,&SeedTicket){let(project,seed)=self.source.originals();(&self.root,&self.actual,project,seed)}
+    pub(crate) fn selected_source(&self)->(&ProjectTicket,&SeedTicket){self.source.originals()}
 }
 struct FreshAttemptState {attempted:bool,original:Option<FinalizationBudget>,cancelled:Arc<AtomicBool>,kernel:Option<Arc<crate::managed_machine_entry::ManagedKernelStartup>>,
     registration:Option<Arc<rudder_native::engine_registration::RegisteredEngineOwner>>,client:Option<Arc<rudder_native::root_storage_bootstrap::runtime_image::RuntimeImageClient>>,
@@ -121,7 +150,7 @@ impl ManagedIngressControl {
                 (held.accepted.is_none()&&held.node.is_none()&&held.profile_inspection.is_none()
                     &&held.result.is_none()&&held.panic.is_none()&&held.worker.is_none()&&held.joined.is_none()
                     &&!held.charged&&!held.settled&&held.sdk.is_none()&&held.canonical.is_none()&&held.canonical_wait.is_none()
-                    &&task.refused_before_factory.is_none()&&task.admission.is_none()&&task.factory_permit.is_none()
+                    &&task.selected_source.is_none()&&task.refused_before_factory.is_none()&&task.admission.is_none()&&task.factory_permit.is_none()
                     &&task.factory.is_none()&&task.factory_handle.is_none()&&task.scope.is_none()&&task.started.is_none()
                     &&task.refusal.is_none()&&task.pending_helper.is_none()&&task.enrollment.is_none()
                     &&!task.enrollment_submitted&&!task.released&&task.cleanup.is_none()&&task.joined.is_none()

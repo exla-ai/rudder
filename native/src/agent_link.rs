@@ -178,7 +178,7 @@ pub(crate) enum AgentLinkOperation {
         message: PeerMessage,
     },
     Interrupt,
-    /// Continue only the exact turn previously observed to be interrupted.
+    /// Retained wire shape; peer continuation is unsupported pending tool/child reconciliation.
     Resume {
         message: PeerMessage,
     },
@@ -1347,6 +1347,12 @@ impl Session {
                     self.reject(&id, "steer requires the exact active turn");
                     return Ok(None);
                 }
+                if self.replace_steer {
+                    self.result(&id, AgentLinkOutcome::Unsupported {
+                        reason: "Peer continuation requires tool/child reconciliation; no backend input was written".into(),
+                    });
+                    return Ok(None);
+                }
                 ("turn/steer", {
                     let mut params = self.peer_params(message, false)?;
                     params["expectedTurnId"] = json!(command.expected_turn_id);
@@ -1375,7 +1381,7 @@ impl Session {
                 }
                 ("turn/start", self.peer_params(message, true)?)
             }
-            AgentLinkOperation::Resume { message } => {
+            AgentLinkOperation::Resume { .. } => {
                 if self.active_turn.is_some()
                     || command.expected_turn_id.is_none()
                     || command.expected_turn_id != self.last_interrupted
@@ -1383,7 +1389,10 @@ impl Session {
                     self.reject(&id, "resume requires the exact observed interrupted turn");
                     return Ok(None);
                 }
-                ("turn/start", self.peer_params(message, true)?)
+                self.result(&id, AgentLinkOutcome::Unsupported {
+                    reason: "Peer continuation requires tool/child reconciliation; no backend input was written".into(),
+                });
+                return Ok(None);
             }
         };
         self.pending = Some(Pending {
@@ -1471,7 +1480,7 @@ impl Session {
         match &pending.command.operation {
             AgentLinkOperation::Interrupt => {
                 // {} accepts the request. Only a matching completed lifecycle
-                // event can finish this effect or permit an explicit resume.
+                // event can finish this effect; it cannot qualify tool/child settlement.
                 if !result.is_object() {
                     self.uncertain("invalid interrupt acceptance response");
                 }

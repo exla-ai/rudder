@@ -39,6 +39,8 @@ pub(crate) struct CoveredTaskGenerationProgress {
     pub original_ingress_owner_retained:bool,
     pub original_ingress_roots_associated:bool,
     pub retained_command_roots:usize,pub retained_fresh_roots:usize,
+    pub retained_command_jobs:usize,pub retained_command_selected_sources:usize,pub retained_command_scopes:usize,
+    pub original_command_descendants_associated:bool,
     pub original_boundary_roots_captured:bool,
     pub original_task_cells_captured:bool,
     pub retained_project_roots:usize,
@@ -59,6 +61,15 @@ pub(crate) struct OriginalTaskUseData {
     pub started_legacy_tasks:usize,pub never_started_tasks:usize,
 }
 struct SeedRoots {original:SeedTicket,tasks:Option<Vec<SeedTaskTicket>>}
+/// External-only custody. Job -> selected source is strong; the reverse task
+/// continuation remains weak. No node here is stored back into a producer.
+struct CommandDescendants {
+    root:Arc<IngressCommandRoot>,actual:Option<Arc<crate::managed_machine_ingress::IngressJob>>,
+    selected:Option<crate::managed_machine_ingress::OriginalTaskSelectedSource>,scope:Option<SeedTaskTicket>,associated:bool,
+}
+fn retain_original_task(out:&mut Vec<SeedTaskTicket>,actual:&SeedTaskTicket) {
+    if !out.iter().any(|held|held.same_original_task(actual)){out.push(actual.clone());}
+}
 struct CoveredRoots {
     projects:Vec<ProjectTicket>,seeds:Vec<SeedRoots>,
     generations:Vec<Arc<source_generations::SourceGeneration>>,
@@ -92,6 +103,7 @@ pub(crate) struct CoveredTaskGenerationDrain {
     shared:Arc<Shared>,ingress:crate::managed_machine_ingress::ManagedIngressControl,
     campaign:Arc<CoveredCampaign>,roots:Option<CoveredRoots>,closed:bool,
     producer_roots:Option<super::producer_reservations::CoveredProducerRoots>,producer_roots_associated:bool,
+    command_descendants:Vec<CommandDescendants>,task_cells:Vec<SeedTaskTicket>,
     runtime_uses:Option<RuntimeNativeUseObservation>,task_uses:OriginalTaskUseData,
     task_use_sample_current:bool,native_uses:RuntimeNativeUseData,
 }
@@ -110,11 +122,15 @@ impl CoveredTaskGenerationDrain {
             original_ingress_roots_associated:self.producer_roots_associated,
             retained_command_roots:self.producer_roots.as_ref().map_or(0,|r|r.command_count()),
             retained_fresh_roots:self.producer_roots.as_ref().map_or(0,|r|r.fresh_count()),
+            retained_command_jobs:self.command_descendants.iter().filter(|c|c.actual.is_some()).count(),
+            retained_command_selected_sources:self.command_descendants.iter().filter(|c|c.selected.is_some()).count(),
+            retained_command_scopes:self.command_descendants.iter().filter(|c|c.scope.is_some()).count(),
+            original_command_descendants_associated:self.producer_roots.is_some()&&self.command_descendants.iter().all(|c|c.associated),
             original_boundary_roots_captured:roots.is_some_and(|roots|roots.within_known_bounds),
             original_task_cells_captured:self.producer_roots.as_ref().is_some_and(|r|r.command_count()==0&&r.fresh_count()==0)&&roots.is_some_and(|roots|roots.within_known_bounds&&roots.seeds.iter().all(|seed|seed.tasks.is_some())),
             retained_project_roots:roots.map_or(0,|roots|roots.projects.len()),
             retained_seed_roots:roots.map_or(0,|roots|roots.seeds.len()),
-            retained_task_cells:roots.map_or(0,|roots|roots.seeds.iter().map(|seed|seed.tasks.as_ref().map_or(0,Vec::len)).sum()),
+            retained_task_cells:self.task_cells.len(),
             retained_generation_roots:roots.map_or(0,|roots|roots.generations.len()),
             retained_source_reservation_roots:roots.map_or(0,|roots|roots.source_reservations.len()),
             retained_original_runtime_client:self.runtime_uses.is_some(),
@@ -123,30 +139,50 @@ impl CoveredTaskGenerationDrain {
             other_runtime_producers:UncoveredRuntimeProducers::Pending,
         }
     }
+    /// Incremental capture outside every carrier lock. Command roots are fixed
+    /// at closure, but an already admitted command can select/admit after that.
+    /// No poll replaces a captured Job/source/scope or discards a partial cell.
+    fn retain_command_descendants(&mut self)->Result<()> {
+        let roots=self.producer_roots.as_ref().context("original command roots absent")?;
+        for root in roots.command_roots() {
+            if !self.command_descendants.iter().any(|held|Arc::ptr_eq(&held.root,root)) {
+                self.command_descendants.push(CommandDescendants{root:root.clone(),actual:None,selected:None,scope:None,associated:false});
+            }
+        }
+        for held in &mut self.command_descendants {
+            time(&self.campaign.original,&self.campaign.cancelled)?;
+            if !held.root.retain_original_job(&mut held.actual)?{continue;}
+            let actual=held.actual.as_ref().unwrap();
+            // Original Job is retained BEFORE map lookup or payload association.
+            if !self.ingress.retains_original_command(actual)?{continue;}
+            held.associated=actual.retain_original_task_descendants(&held.root,&mut held.selected,&mut held.scope)?;
+            if held.associated {if let Some(scope)=&held.scope{retain_original_task(&mut self.task_cells,scope);}}
+        }
+        Ok(())
+    }
     /// Only original retained task cells, outside carrier/ledger locks. Keep
     /// one cached DATA sample, never a strong per-poll history of completions.
     fn observe_retained_original_uses(&mut self)->Result<()> {
         let Some(roots)=&self.roots else {return Ok(());};
         let mut tasks=OriginalTaskUseData::default();let mut helpers=Vec::new();
-        for seed in &roots.seeds {
-            let Some(originals)=&seed.tasks else {return Ok(());};
-            for original in originals {
-                time(&self.campaign.original,&self.campaign.cancelled)?;
-                tasks.visited_tasks+=1;
-                match original.observe_original_runtime_use()? {
-                    seeds::TaskRuntimeObservation::Pending=>tasks.pending_tasks+=1,
-                    seeds::TaskRuntimeObservation::NeverStarted=>tasks.never_started_tasks+=1,
-                    seeds::TaskRuntimeObservation::Started(OriginalTaskRuntimeUse::Legacy)=>tasks.started_legacy_tasks+=1,
-                    seeds::TaskRuntimeObservation::Started(OriginalTaskRuntimeUse::Image(actual))=>{
-                        tasks.started_image_tasks+=1;helpers.push(actual);
-                    },
-                }
+        if roots.seeds.iter().any(|seed|seed.tasks.is_none()){return Ok(());}
+        for original in &self.task_cells {
+            time(&self.campaign.original,&self.campaign.cancelled)?;
+            tasks.visited_tasks+=1;
+            match original.observe_original_runtime_use()? {
+                seeds::TaskRuntimeObservation::Pending=>tasks.pending_tasks+=1,
+                seeds::TaskRuntimeObservation::NeverStarted=>tasks.never_started_tasks+=1,
+                seeds::TaskRuntimeObservation::Started(OriginalTaskRuntimeUse::Legacy)=>tasks.started_legacy_tasks+=1,
+                seeds::TaskRuntimeObservation::Started(OriginalTaskRuntimeUse::Image(actual))=>{
+                    tasks.started_image_tasks+=1;helpers.push(actual);
+                },
             }
         }
-        self.task_uses=tasks;self.task_use_sample_current=true;
-        if let Some(actual)=&self.runtime_uses {
+        self.task_uses=tasks;
+        self.task_use_sample_current=self.command_descendants.iter().all(|held|held.associated);
+        if self.task_use_sample_current {if let Some(actual)=&self.runtime_uses {
             if let Some(data)=actual.sample_original_helpers(&helpers)? {self.native_uses=data;}
-        }
+        }}
         // A missing actual client, unmatched helper, legacy task, live sibling,
         // read alias or uncovered producer never turns into complete admission.
         Ok(())
@@ -160,6 +196,7 @@ impl MachineControl {
         ensure!(out.is_none(),"original covered reservation drain output occupied");
         *out=Some(CoveredTaskGenerationDrain{shared:self.shared.clone(),ingress,producer_roots:None,producer_roots_associated:false,
             campaign:Arc::new(CoveredCampaign{original:original_cleanup,cancelled}),roots:None,closed:false,
+            command_descendants:Vec::new(),task_cells:Vec::new(),
             runtime_uses:None,task_uses:OriginalTaskUseData::default(),task_use_sample_current:false,native_uses:RuntimeNativeUseData::default()});
         self.poll_covered_task_generation_drain_retaining(out.as_mut().unwrap())
     }
@@ -169,6 +206,7 @@ impl MachineControl {
         // Preserve last successful DATA while invalidating freshness BEFORE
         // entry guards, fallible clocks or borrows. Refusal leaves old counts stale.
         owner.task_use_sample_current=false;owner.native_uses.sampled=false;owner.producer_roots_associated=false;
+        for held in &mut owner.command_descendants{held.associated=false;}
         ensure!(Arc::ptr_eq(&self.shared,&owner.shared),"foreign original covered reservation machine");
         ensure!(owner.ingress.belongs_to_machine(self),"foreign original ingress owner; retain close candidate");
         ensure!(self.shared.app_thread!=std::thread::current().id(),"covered reservation drain requires off App");
@@ -204,6 +242,7 @@ impl MachineControl {
                 Err(TryLockError::Poisoned(_))=>anyhow::bail!("original machine carrier poisoned; campaign retained"),
             }
         }
+        owner.retain_command_descendants()?;
         owner.producer_roots_associated=owner.producer_roots.as_ref().context("original producer roots absent")?.validate_retained(&owner.ingress)?;
         if !owner.producer_roots_associated{return Ok(owner.progress_data());}
         let roots=owner.roots.as_mut().unwrap();
@@ -215,6 +254,7 @@ impl MachineControl {
                 time(&owner.campaign.original,&owner.campaign.cancelled)?;
                 seed.original.capture_task_roots_retaining(&mut seed.tasks)?;
             }
+            if let Some(tasks)=&seed.tasks {for task in tasks{retain_original_task(&mut owner.task_cells,task);}}
         }
         time(&owner.campaign.original,&owner.campaign.cancelled)?;
         // Capture only an alias here. This method performs no client/ledger

@@ -5,13 +5,18 @@ use std::os::unix::fs::PermissionsExt;
 use std::{io::Read,os::unix::process::CommandExt};
 pub(super) fn run()->Result<()> {
     let mut check=BootstrapCheck::SdkHelperEntry;
-    let result=run_inner(&mut check).map_err(|error|bootstrap_failure_context(error,check));
+    let mut reaped_inner_stderr=None;
+    let result=run_inner(&mut check,&mut reaped_inner_stderr).map_err(|error|bootstrap_failure_context(error,check));
     // Fixed bounded best-effort DATA on this ORIGINAL helper's stderr pipe.
     // Return the SAME error; neither logging nor a projection grants admission.
-    if let Err(error)=&result{storage::emit_retained_failure("compiler_sdk_helper","handshake",Some(error));}
+    if let Err(error)=&result{
+        // Never place arbitrary tool bytes ahead of the trusted fixed frame.
+        // A failed/unknown first write suppresses the secondary relay.
+        if emit_helper_failure(error){if let Some(inner)=&reaped_inner_stderr{relay_inner_stderr_after_reap(inner);}}
+    }
     result
 }
-fn run_inner(check:&mut BootstrapCheck)->Result<()> {
+fn run_inner(check:&mut BootstrapCheck,reaped_inner_stderr:&mut Option<File>)->Result<()> {
     let args:Vec<_>=std::env::args().collect();ensure!(args.len()==3&&args[1]==HELPER_ARG&&std::env::vars_os().next().is_none(),"SDK helper fixed entry differs");
     ensure!(unsafe{libc::getuid()}==1500&&unsafe{libc::geteuid()}==1500&&unsafe{libc::getgid()}==1500,"SDK helper requires actual unprivileged UID1500");
     ensure!(unsafe{libc::prctl(libc::PR_SET_DUMPABLE,0,0,0,0)}==0&&unsafe{libc::prctl(libc::PR_GET_DUMPABLE,0,0,0,0)}==0,"SDK helper ND0 unavailable");
@@ -56,7 +61,7 @@ fn run_inner(check:&mut BootstrapCheck)->Result<()> {
     let cwd=fs::metadata(".")?;ensure!((cwd.dev(),cwd.ino())==(m.dev(),m.ino()),"SDK helper changed original work directory");
     let job=if data.job.is_null(){ensure!(packet.fds.len()==7,"SDK fixed descriptor count differs");None}else{ensure!(packet.fds.len()==10,"SDK selected descriptor count differs");Some((&data.job,&packet.fds[7],&packet.fds[8],&packet.fds[9]))};
     *check=BootstrapCheck::SdkHelperNamespaceWorkload;
-    let workload=run_namespace_retaining(&packet.fds[5],&original,job)?;if job.is_none(){validate_workload(&workload,&constraint)?;}
+    let workload=run_namespace_retaining(&packet.fds[5],&original,job,reaped_inner_stderr)?;if job.is_none(){validate_workload(&workload,&constraint)?;}
     let result=CompilerSdkProbeData{format_version:1,kind:"original-sdk-fixed-helper-complete-v1".into(),helper_pid:std::process::id(),helper_start_ticks:start,original_constraint:constraint,workload};
     *check=BootstrapCheck::SdkHelperResultSend;
     let bytes=canonical_json(&result)?;ensure!(bytes.len()<=16*1024,"SDK fixed result bound");
@@ -66,7 +71,7 @@ fn mount(source:Option<&str>,target:&str,kind:Option<&str>,flags:libc::c_ulong)-
     let s=source.map(CString::new).transpose()?;let t=CString::new(target)?;let k=kind.map(CString::new).transpose()?;
     ensure!(unsafe{libc::mount(s.as_ref().map_or(std::ptr::null(),|v|v.as_ptr()),t.as_ptr(),k.as_ref().map_or(std::ptr::null(),|v|v.as_ptr()),flags,std::ptr::null())}==0,"SDK private namespace mount failed");Ok(())
 }
-fn run_namespace_retaining(floor:&OwnedFd,original:&FinalizationBudget,job:Option<(&serde_json::Value,&OwnedFd,&OwnedFd,&OwnedFd)>)->Result<serde_json::Value> {
+fn run_namespace_retaining(floor:&OwnedFd,original:&FinalizationBudget,job:Option<(&serde_json::Value,&OwnedFd,&OwnedFd,&OwnedFd)>,reaped_inner_stderr:&mut Option<File>)->Result<serde_json::Value> {
     original.remaining()?;
     ensure!(unsafe{libc::unshare(libc::CLONE_NEWUSER|libc::CLONE_NEWNS|libc::CLONE_NEWNET|libc::CLONE_NEWPID)}==0,"SDK actual isolated namespaces unavailable");
     fs::write("/proc/self/setgroups",b"deny")?;fs::write("/proc/self/uid_map",b"0 1500 1\n")?;fs::write("/proc/self/gid_map",b"0 1500 1\n")?;
@@ -156,26 +161,52 @@ fn run_namespace_retaining(floor:&OwnedFd,original:&FinalizationBudget,job:Optio
         // cleanup keeps this helper alive and Root retains its original child
         // pidfd; it cannot become an execution/normal-retirement ACK.
         let _=child.kill();loop{match child.try_wait(){Ok(Some(_))=>{
-            relay_inner_stderr_after_reap(&error);return Err(failure)
+            // Transfer the SAME reaped workload stderr File to the outer helper.
+            // Its trusted fixed frame must be attempted before any relay.
+            *reaped_inner_stderr=Some(error);return Err(failure)
         },Ok(None)|Err(_)=>std::thread::sleep(Duration::from_millis(1))}}
     }
     let m=output.metadata()?;ensure!(m.len()>0&&m.len()<=16*1024&&error.metadata()?.len()<=64*1024,"SDK actual workload output bound");
     let mut raw=vec![0;m.len()as usize];ensure!(output.read_at(&mut raw,0)?==raw.len(),"SDK actual workload result incomplete");original.remaining()?;Ok(serde_json::from_slice(&raw)?)
 }
 
-/// Secondary private DATA only, called after the SAME actual Child was reaped.
-/// One bounded pread and the existing SIGPIPE-safe nonblocking single writer;
-/// no retry, new clock, compiler-status claim or change to the original error.
+/// Helper-only same inherited writer. Root established O_NONBLOCK before the
+/// credential floor/exec; no proc reopen, DAC grant, OFD flag change or retry.
+/// Logging is best effort and cannot create a result or settle a child.
+pub(super) fn try_helper_diagnostic_write(fd:i32,bytes:&[u8])->bool {
+    if bytes.is_empty()||bytes.len()>4096{return false}
+    let mut metadata:libc::stat=unsafe{std::mem::zeroed()};
+    if unsafe{libc::fstat(fd,&mut metadata)}!=0||metadata.st_mode&libc::S_IFMT!=libc::S_IFIFO{return false}
+    let flags=unsafe{libc::fcntl(fd,libc::F_GETFL)};
+    if flags<0||flags&libc::O_NONBLOCK==0||flags&libc::O_ACCMODE==libc::O_RDONLY{return false}
+    let mut action:libc::sigaction=unsafe{std::mem::zeroed()};
+    if unsafe{libc::sigaction(libc::SIGPIPE,std::ptr::null(),&mut action)}!=0||action.sa_sigaction!=libc::SIG_IGN{return false}
+    unsafe{libc::write(fd,bytes.as_ptr().cast(),bytes.len())==bytes.len()as isize}
+}
+pub(super) fn emit_helper_failure(error:&anyhow::Error)->bool {
+    let Ok(mut bytes)=serde_json::to_vec(&storage::retained_failure_data("compiler_sdk_helper","handshake",Some(error)))else{return false};
+    if bytes.len()>=4096{return false}bytes.push(b'\n');
+    try_helper_diagnostic_write(libc::STDERR_FILENO,&bytes)
+}
+const INNER_STDERR_HEX_PREFIX:&[u8]=b"SDK_INNER_STDERR_HEX_PREFIX_DATA (not execution evidence) ";
+fn inner_stderr_relay_bytes(raw:&[u8])->Vec<u8> {
+    const HEX:&[u8;16]=b"0123456789abcdef";
+    let maximum=(4096-INNER_STDERR_HEX_PREFIX.len()-1)/2;
+    let mut bytes=Vec::with_capacity(4096);bytes.extend_from_slice(INNER_STDERR_HEX_PREFIX);
+    for byte in raw.iter().take(maximum){bytes.push(HEX[(byte>>4)as usize]);bytes.push(HEX[(byte&15)as usize]);}
+    bytes.push(b'\n');bytes
+}
+/// Secondary private DATA only, after SAME actual workload Child reaped and
+/// trusted fixed frame delivered. Exactly one bounded pread; raw line/JSON
+/// injection is impossible because every observed byte is hex encoded.
 fn relay_inner_stderr_after_reap(inner:&File) {
     let _=(||->Result<()> {
-        const PREFIX:&[u8]=b"SDK_INNER_STDERR_PREFIX_DATA (not execution evidence)\n";
-        let mut bytes=[0u8;4096];bytes[..PREFIX.len()].copy_from_slice(PREFIX);
-        let n=inner.read_at(&mut bytes[PREFIX.len()..],0)?;
-        if n==0{return Ok(())}
-        let raw=unsafe{libc::fcntl(libc::STDERR_FILENO,libc::F_DUPFD_CLOEXEC,3)};
-        if raw<0{return Ok(())}
-        let output=unsafe{OwnedFd::from_raw_fd(raw)};
-        let _=crate::root_storage_bootstrap::try_observation_write(&output,&bytes[..PREFIX.len()+n]);
-        Ok(())
+        let mut raw=[0u8;(4096-INNER_STDERR_HEX_PREFIX.len()-1)/2];
+        let n=inner.read_at(&mut raw,0)?;if n==0{return Ok(())}
+        let bytes=inner_stderr_relay_bytes(&raw[..n]);
+        let _=try_helper_diagnostic_write(libc::STDERR_FILENO,&bytes);Ok(())
     })();
 }
+#[cfg(test)]
+#[path="compiler_sdk_fixed_first_diagnostic_tests.rs"]
+mod fixed_first_diagnostic_tests;

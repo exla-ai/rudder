@@ -273,6 +273,7 @@ enum BootstrapCheck {
     SdkHelperNamespaceWorkload,
     SdkHelperResultSend,
     SdkHelperExitUnknown,
+    SdkHelperExitedWithoutResult,
     SdkProcessOriginal,
     SdkProcessSpawn,
     SdkProcessCapture,

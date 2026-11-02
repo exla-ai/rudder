@@ -308,7 +308,7 @@ fn uncertainty_blocks_followup_and_late_evidence_can_reconcile() {
 }
 
 #[test]
-fn explicit_resume_requires_observed_interrupted_turn_and_never_ordinary_delivery() {
+fn observed_interrupted_turn_never_authorizes_peer_resume() {
     let mut state = Session::new("thread-main".into(), Some("turn-one".into()));
     state.notification(&lifecycle("thread-main", "turn-one", "interrupted"));
     assert!(state
@@ -339,24 +339,16 @@ fn explicit_resume_requires_observed_interrupted_turn_and_never_ordinary_deliver
         )
         .unwrap()
         .is_none());
-    let (method, params) = state
-        .begin(
-            queued(command(
-                "resume",
-                AgentLinkOperation::Resume {
-                    message: peer("go"),
-                },
-                Some("turn-one"),
-            )),
-            3,
-            Instant::now(),
-        )
-        .unwrap()
-        .unwrap();
-    assert_eq!(method, "turn/start");
-    assert_eq!(params["threadId"], "thread-main");
-    state.response(&json!({"id":3,"result":{"turn":{"id":"next-turn","status":"inProgress"}}}));
-    assert_eq!(state.active_turn.as_deref(), Some("next-turn"));
+    let resume = command("resume", AgentLinkOperation::Resume { message: peer("go") }, Some("turn-one"));
+    for rpc_id in [3, 4] {
+        assert!(state.begin(queued(resume.clone()), rpc_id, Instant::now()).unwrap().is_none());
+        assert!(matches!(state.output.last().unwrap(), AgentLinkEventKind::CommandResult {
+            command_id, outcome: AgentLinkOutcome::Unsupported { .. }
+        } if command_id == "resume"));
+    }
+    assert!(state.pending.is_none());
+    assert!(state.active_turn.is_none());
+    assert_eq!(state.last_interrupted.as_deref(), Some("turn-one"));
 }
 
 #[test]
@@ -715,124 +707,59 @@ fn managed_claude_ambiguous_prompt_does_not_rewrite_command() {
 }
 
 #[test]
-fn sdk_steer_requires_observed_interruption_before_accepting_new_turn() {
+fn replacement_steer_refuses_before_rpc_and_preserves_original_replay() {
     let mut state = Session::new("thread-main".into(), Some("turn-one".into()));
     state.replace_steer = true;
-    let (method, params) = state
-        .begin(
-            queued(command(
-                "steer",
-                AgentLinkOperation::Steer {
-                    message: peer("replace plan"),
-                },
-                Some("turn-one"),
-            )),
-            1,
-            Instant::now(),
-        )
-        .unwrap()
-        .unwrap();
-    assert_eq!(method, "turn/steer");
-    assert_eq!(params["expectedTurnId"], "turn-one");
-    state.response(&json!({"id":1,"result":{"turnId":"replacement","replacedTurnId":"turn-one"}}));
-    assert!(state.pending.is_some());
-    assert!(matches!(
-        state.output.last().unwrap(),
-        AgentLinkEventKind::CommandResult {
-            outcome: AgentLinkOutcome::Uncertain { .. },
-            ..
-        }
-    ));
-}
-
-#[test]
-fn sdk_steer_accepts_replacement_only_after_exact_old_interruption() {
-    let mut state = Session::new("thread-main".into(), Some("turn-one".into()));
-    state.replace_steer = true;
-    state
-        .begin(
-            queued(command(
-                "steer",
-                AgentLinkOperation::Steer {
-                    message: peer("replace plan"),
-                },
-                Some("turn-one"),
-            )),
-            1,
-            Instant::now(),
-        )
-        .unwrap();
-    state.notification(&lifecycle("thread-main", "turn-one", "interrupted"));
-    assert!(state.pending.is_some());
-    assert!(!state.output.iter().any(|event| matches!(
-        event,
-        AgentLinkEventKind::CommandResult {
-            outcome: AgentLinkOutcome::InterruptConfirmed { .. },
-            ..
-        }
-    )));
-    state.notification(&started("replacement"));
-    state.response(&json!({"id":1,"result":{"turnId":"replacement","replacedTurnId":"turn-one"}}));
+    let original = command("steer", AgentLinkOperation::Steer { message: peer("replace plan") }, Some("turn-one"));
+    for rpc_id in [1, 2] {
+        assert!(state.begin(queued(original.clone()), rpc_id, Instant::now()).unwrap().is_none());
+        assert!(matches!(state.output.last().unwrap(), AgentLinkEventKind::CommandResult {
+            outcome: AgentLinkOutcome::Unsupported { .. }, ..
+        }));
+    }
+    let changed = command("steer", AgentLinkOperation::Steer { message: peer("different plan") }, Some("turn-one"));
+    assert!(state.begin(queued(changed), 3, Instant::now()).unwrap().is_none());
+    assert!(matches!(state.output.last().unwrap(), AgentLinkEventKind::CommandResult {
+        outcome: AgentLinkOutcome::Rejected { .. }, ..
+    }));
+    assert!(state.begin(queued(original), 4, Instant::now()).unwrap().is_none());
+    assert!(matches!(state.output.last().unwrap(), AgentLinkEventKind::CommandResult {
+        outcome: AgentLinkOutcome::Unsupported { .. }, ..
+    }));
     assert!(state.pending.is_none());
-    assert_eq!(state.active_turn.as_deref(), Some("replacement"));
-    assert!(
-        matches!(state.output.last().unwrap(), AgentLinkEventKind::CommandResult { outcome: AgentLinkOutcome::TransportAccepted { turn_id }, .. } if turn_id == "replacement")
-    );
+    assert_eq!(state.active_turn.as_deref(), Some("turn-one"));
+    assert!(state.last_interrupted.is_none());
 }
 
 #[test]
-fn sdk_normal_completion_rejects_replacement_and_premature_start_stays_uncertain() {
+fn replacement_profile_interruption_observation_retains_resume_barrier() {
     let mut state = Session::new("thread-main".into(), Some("turn-one".into()));
     state.replace_steer = true;
-    state
-        .begin(
-            queued(command(
-                "steer",
-                AgentLinkOperation::Steer {
-                    message: peer("replace plan"),
-                },
-                Some("turn-one"),
-            )),
-            1,
-            Instant::now(),
-        )
-        .unwrap();
-    state.notification(&lifecycle("thread-main", "turn-one", "completed"));
-    assert!(matches!(
-        state.output.last().unwrap(),
-        AgentLinkEventKind::CommandResult {
-            outcome: AgentLinkOutcome::Rejected { .. },
-            ..
-        }
-    ));
-    let mut state = Session::new("thread-main".into(), Some("turn-one".into()));
-    state.replace_steer = true;
-    state
-        .begin(
-            queued(command(
-                "steer",
-                AgentLinkOperation::Steer {
-                    message: peer("replace plan"),
-                },
-                Some("turn-one"),
-            )),
-            1,
-            Instant::now(),
-        )
-        .unwrap();
-    state.notification(&started("replacement"));
     state.notification(&lifecycle("thread-main", "turn-one", "interrupted"));
-    state.response(&json!({"id":1,"result":{"turnId":"replacement","replacedTurnId":"turn-one"}}));
+    assert!(state.begin(queued(command("resume", AgentLinkOperation::Resume { message: peer("continue") }, Some("turn-one"))), 1, Instant::now()).unwrap().is_none());
+    assert!(matches!(state.output.last().unwrap(), AgentLinkEventKind::CommandResult {
+        outcome: AgentLinkOutcome::Unsupported { .. }, ..
+    }));
+    assert!(state.pending.is_none());
+    assert!(state.active_turn.is_none());
+    assert_eq!(state.last_interrupted.as_deref(), Some("turn-one"));
+}
+
+#[test]
+fn replacement_profile_simple_interrupt_still_requires_exact_interruption() {
+    let mut state = Session::new("thread-main".into(), Some("turn-one".into()));
+    state.replace_steer = true;
+    let (method, _) = state.begin(queued(command("stop", AgentLinkOperation::Interrupt, Some("turn-one"))), 1, Instant::now()).unwrap().unwrap();
+    assert_eq!(method, "turn/interrupt");
+    state.response(&json!({"id":1,"result":{}}));
     assert!(state.pending.is_some());
-    assert!(
-        matches!(
-            state.output.last().unwrap(),
-            AgentLinkEventKind::CommandResult {
-                outcome: AgentLinkOutcome::TransportAccepted { .. },
-                ..
-            }
-        ) == false
-    );
+    state.notification(&lifecycle("thread-main", "turn-one", "completed"));
+    assert!(matches!(state.output.last().unwrap(), AgentLinkEventKind::CommandResult {
+        outcome: AgentLinkOutcome::Rejected { .. }, ..
+    }));
+    assert!(!state.output.iter().any(|event| matches!(event, AgentLinkEventKind::CommandResult {
+        outcome: AgentLinkOutcome::InterruptConfirmed { .. }, ..
+    })));
 }
 
 #[test]
@@ -1327,7 +1254,7 @@ fn real_websocket_steer_error_never_starts_substitute_conversation_or_turn() {
 }
 
 #[test]
-fn real_websocket_interrupt_ack_timeout_reconciles_only_exact_turn_then_explicit_resume() {
+fn real_websocket_interrupt_ack_timeout_reconciles_only_exact_turn_without_resume() {
     let server = MockServer::new(Some("turn-one"), false);
     let (link, events) = server.spawn();
     until(&events, |event| {
@@ -1377,17 +1304,12 @@ fn real_websocket_interrupt_ack_timeout_reconciles_only_exact_turn_then_explicit
         Some("turn-one"),
     ))
     .unwrap();
-    let resume = server.next_request();
-    assert_eq!(resume["method"], "turn/start");
-    assert_eq!(resume["params"]["threadId"], "thread-main");
-    server.frame(started("turn-two"));
-    server.frame(
-        json!({"id":resume["id"],"result":{"turn":{"id":"turn-two","status":"inProgress"}}}),
-    );
     until(
         &events,
-        |event| matches!(event, AgentLinkEventKind::CommandResult { command_id, outcome: AgentLinkOutcome::TransportAccepted { turn_id } } if command_id == "resume" && turn_id == "turn-two"),
+        |event| matches!(event, AgentLinkEventKind::CommandResult { command_id, outcome: AgentLinkOutcome::Unsupported { .. } } if command_id == "resume"),
     );
+    assert!(server.requests.recv_timeout(Duration::from_millis(70)).is_err());
+    assert!(!server.all_requests.lock().unwrap().iter().any(|request| request["method"] == "turn/start"));
     link.close();
     assert!(link
         .submit(command(

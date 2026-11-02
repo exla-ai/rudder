@@ -119,3 +119,33 @@ fn actual_covered_original_payloads_and_roots_are_send_sync() {
     checked::<IngressCommandRoot>();checked::<FreshInitializationRoot>();
     checked::<OriginalTaskCommand>();checked::<OriginalFreshEnvironment>();checked::<OriginalFreshFlow>();
 }
+
+#[test]
+fn root_capture_pins_same_original_before_foreign_refusal_and_missing_stays_pending() {
+    let actual=Arc::new(AtomicBool::new(false));let weak=Arc::downgrade(&actual);
+    let root=Root{actual:OriginalOwnerWeak::capture(&actual),children:()};
+    let mut retained=None;assert!(root.retain_actual(&mut retained).unwrap());
+    drop(actual);assert!(Arc::ptr_eq(retained.as_ref().unwrap(),&weak.upgrade().unwrap()));
+    let other=Arc::new(AtomicBool::new(false));let foreign=Root{actual:OriginalOwnerWeak::capture(&other),children:()};
+    assert!(foreign.retain_actual(&mut retained).is_err());
+    assert!(Arc::ptr_eq(retained.as_ref().unwrap(),&weak.upgrade().unwrap()),"failed association must not replace/drop the original");
+    drop(other);let mut missing=None;assert!(!foreign.retain_actual(&mut missing).unwrap());assert!(missing.is_none());
+    drop(retained);assert!(weak.upgrade().is_none(),"external root capture cannot create a producer cycle");
+}
+
+#[test]
+fn late_original_root_capture_retains_real_worker_tls_without_starting_or_replacing_a_join() {
+    use std::{cell::RefCell,sync::mpsc,thread};
+    struct Held{entered:mpsc::SyncSender<()>,release:mpsc::Receiver<()>}
+    impl Drop for Held{fn drop(&mut self){let _=self.entered.send(());let _=self.release.recv_timeout(Duration::from_secs(5));}}
+    thread_local!{static ORIGINAL_TLS:RefCell<Option<Held>>=const{RefCell::new(None)};}
+    let(entered,wait)=mpsc::sync_channel(1);let(release,released)=mpsc::sync_channel(1);
+    let actual=Arc::new(rudder_engine::execution::handoff::OwnedWorkerJoin::new(thread::spawn(move||ORIGINAL_TLS.with(|slot|*slot.borrow_mut()=Some(Held{entered,release:released})))));
+    let root=Root{actual:OriginalOwnerWeak::capture(&actual),children:()};
+    actual.start_join_observer().unwrap();wait.recv_timeout(Duration::from_secs(2)).unwrap();
+    let mut retained=None;assert!(root.retain_actual(&mut retained).unwrap());drop(actual);
+    assert!(retained.as_ref().unwrap().try_joined().unwrap().is_none());
+    release.send(()).unwrap();let original=retained.as_ref().unwrap().await_joined(Duration::from_secs(2)).unwrap();
+    assert!(root.retain_actual(&mut retained).unwrap());
+    assert!(retained.as_ref().unwrap().try_joined().unwrap().unwrap().same_worker(&original));
+}

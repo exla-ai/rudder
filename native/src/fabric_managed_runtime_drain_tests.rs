@@ -20,7 +20,7 @@ fn slot(assignment: &WorkspaceAssignment) -> RuntimeLink {
     RuntimeLink { attempt: assignment.fence.attempt_id.clone(), epoch: assignment.fence.run_epoch,
         profile: "claude-sdk".into(), backend: Backend::Claude, transport_uncertain: false,
         link: None, broker: None, broker_work: None, projection_hash: None, broker_failed_hash: None,
-        thread: None, active: None, interrupted: None, phase: RuntimePhase::Starting, qualified: false,
+        thread: None, active: None, interrupted: None, steer_mode: None, phase: RuntimePhase::Starting, qualified: false,
         uncertain: false, closed: false, draining: false, workspace: Some(assignment.clone()),
         managed_home: Some("/missing/runtime-drain-home".into()), owned_backend: None }
 }

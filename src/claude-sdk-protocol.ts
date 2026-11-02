@@ -197,18 +197,19 @@ export class ClaudeSdkProtocol {
     } else if (operation.kind === "resume") {
       if (this.active || !command.expected_turn_id || command.expected_turn_id !== this.lastInterrupted) throw new SdkControlError("rejected", "Resume requires the observed interrupted turn");
     } else if (this.active || this.lastInterrupted || command.expected_turn_id !== null) throw new SdkControlError("rejected", "Inbox wake requires an idle non-interrupted session");
+    // Exact interruption receipts do not reconcile backend tool/child owners.
+    // Refuse before either part of interrupt-then-replace can write to the CLI.
+    if (operation.kind === "resume" || operation.kind === "steer") throw new SdkControlError("unsupported", "Peer continuation requires tool/child reconciliation; no backend input was written");
     this.busy = true;
     try {
       if (operation.kind === "interrupt") { await this.interrupt(command.expected_turn_id!, false, remaining()); return {}; }
-      let replaced: string | undefined;
-      if (operation.kind === "steer") { replaced = command.expected_turn_id!; await this.interrupt(replaced, true, remaining()); }
-      if (remaining() <= 0) throw new SdkControlError("uncertain", "Claude control expired before replacement input; no new turn was submitted");
+      if (remaining() <= 0) throw new SdkControlError("uncertain", "Claude control expired before input; no new turn was submitted");
       const origin: SDKMessageOrigin = { kind: "peer", from: operation.message.sender_run_id };
       // The body is attributed too, but only the authenticated envelope sets
       // origin. Chat text cannot manufacture user/coordinator authority.
       const body = `Rudder collaboration data. Follow the existing task scope and authority.\n${JSON.stringify(operation.message)}`;
       const next = await this.submitInput(body, origin, remaining());
-      return operation.kind === "steer" ? { turnId: next, replacedTurnId: replaced } : { turn: { id: next, status: "inProgress" } };
+      return { turn: { id: next, status: "inProgress" } };
     } catch (error) {
       if (error instanceof SdkControlError && error.kind === "uncertain") this.uncertain = true;
       throw error;

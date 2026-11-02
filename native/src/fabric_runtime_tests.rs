@@ -15,6 +15,7 @@ fn slot() -> RuntimeLink {
         thread: Some("thread-1".into()),
         active: Some("turn-1".into()),
         interrupted: None,
+        steer_mode: Some(AgentSteerMode::ActiveAppend),
         phase: RuntimePhase::Working,
         qualified: true,
         uncertain: false,
@@ -51,7 +52,8 @@ fn runtime_capabilities_require_owned_qualified_exact_turn() {
     let capabilities = link
         .observation("target", Backend::Claude, true)
         .capabilities;
-    assert!(capabilities.contains("resume"));
+    assert!(!capabilities.contains("resume"));
+    assert_eq!(link.interrupted.as_deref(), Some("turn-1"));
     assert!(!capabilities.contains("deliver"));
 }
 
@@ -608,4 +610,18 @@ fn bound_codex_thread_does_not_qualify_controls_without_server_version_evidence(
         .observation
         .capabilities
         .contains("interrupt"));
+}
+
+#[test]
+fn only_negotiated_active_append_publishes_peer_steer() {
+    let mut link = slot();
+    for mode in [None, Some(AgentSteerMode::InterruptThenReplace)] {
+        link.steer_mode = mode;
+        let observed = link.observation("target", Backend::Claude, true);
+        assert!(observed.capabilities.contains("interrupt"));
+        assert!(!observed.capabilities.contains("steer"));
+        assert_eq!(observed.active_turn_id.as_deref(), Some("turn-1"));
+    }
+    link.steer_mode = Some(AgentSteerMode::ActiveAppend);
+    assert!(link.observation("target", Backend::Claude, true).capabilities.contains("steer"));
 }

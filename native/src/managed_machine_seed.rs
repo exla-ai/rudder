@@ -87,6 +87,23 @@ pub(super) fn original_factory_join_observed(factory:&SeedFactoryOwner)->Result<
     Ok(actual.try_joined()?.is_some()) // cached ORIGINAL join only; no start/wait
 }
 impl SeedTaskTicket {
+    pub(crate) fn same_original_task(&self,other:&Self)->bool{Arc::ptr_eq(&self.cell,&other.cell)}
+    /// Typed association only, sampled outside Job/WorkerCarrier locks. Both
+    /// owners were pinned before this call; no factory/start/finalizer or IO.
+    pub(crate) fn observe_original_command_association(&self,root:&Arc<IngressCommandRoot>,
+        selected:&crate::managed_machine_ingress::OriginalTaskSelectedSource)->Result<bool> {
+        let(project,seed)=selected.originals();
+        ensure!(self.seed.upgrade().is_some_and(|actual|Arc::ptr_eq(&actual,&seed.cell)),"original command task uses another seed");
+        let registered=match seed.cell.owner.try_lock() {
+            Ok(held)=>held.tasks.get(&self.id).is_some_and(|actual|self.same_original_task(actual)),
+            Err(TryLockError::WouldBlock)=>return Ok(false),Err(_)=>anyhow::bail!("original selected seed poisoned; descendants retained"),
+        };
+        ensure!(registered,"original command task missing from same selected seed; descendants retained");
+        match self.cell.owner.try_lock() {
+            Ok(held)=>Ok(held._original_command.as_ref().is_some_and(|actual|root.matches_original_task_role(actual,project,seed))),
+            Err(TryLockError::WouldBlock)=>Ok(false),Err(_)=>anyhow::bail!("original command task poisoned; descendants retained"),
+        }
+    }
     /// The phase1 owner pins this SAME cell before calling here. No move/drop
     /// of whole completions, finalizer, Root IO, cleanup start or clock renewal.
     pub(super) fn observe_original_runtime_use(&self)->Result<TaskRuntimeObservation> {

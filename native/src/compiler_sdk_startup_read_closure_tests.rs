@@ -10,7 +10,7 @@ fn startup_read_closed_waits_original_exit_and_each_original_pipe_eof() {
     for exit in [None,Some(&success)] {for out in [false,true] {for err in [false,true] {
         let actual=state.poll_original(exit,out,err);
         if exit.is_some()&&out&&err {
-            let error=actual.unwrap_err();assert_eq!(bootstrap_failure_check(&error).as_deref(),Some("SdkHelperExitUnknown"));
+            let error=actual.unwrap_err();assert_eq!(bootstrap_failure_check(&error).as_deref(),Some("SdkHelperExitedWithoutResult"));
         } else {assert!(!actual.unwrap());}
     }}}
     assert!(state.observed); // observation never reopens the receive direction

@@ -15,6 +15,7 @@ fn slot() -> RuntimeLink {
         thread: Some("thread".into()),
         active: None,
         interrupted: None,
+        steer_mode: Some(AgentSteerMode::ActiveAppend),
         phase: RuntimePhase::Waiting,
         qualified: true,
         uncertain: false,

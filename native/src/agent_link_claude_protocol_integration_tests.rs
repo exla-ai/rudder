@@ -218,14 +218,12 @@ fn execute(owner:&mut Owner,binary:&Path,node:&Path,provider_script:&Path,bridge
     owner.actor.as_ref().unwrap().submit(make("wrong-turn",AgentLinkOperation::Steer{message:message.clone()},Some("wrong-turn".into())))?;
     owner.actor_until(&rx,|e|matches!(e,AgentLinkEventKind::CommandResult{command_id,outcome:AgentLinkOutcome::Rejected{..}} if command_id=="wrong-turn"),&run,&attempt)?;
     owner.actor.as_ref().unwrap().submit(make("steer",AgentLinkOperation::Steer{message:message.clone()},Some(first.clone())))?;
-    let replaced=owner.actor_until(&rx,|e|matches!(e,AgentLinkEventKind::CommandResult{command_id,outcome:AgentLinkOutcome::TransportAccepted{turn_id}} if command_id=="steer"&&turn_id!=&first),&run,&attempt)?;
-    let AgentLinkEventKind::CommandResult{outcome:AgentLinkOutcome::TransportAccepted{turn_id:second},..}=replaced.kind else{bail!("replacement result differs")};
-    owner.provider_until(|v|v["kind"]=="held"&&v["sawPeer"]==true)?;
-    {let state=owner.relay.lock().unwrap();ensure!(state.peer_inputs.len()==1,"peer input replay/substitute");let frame=&state.peer_inputs[0];ensure!(frame["origin"]==json!({"kind":"peer","from":message.sender_run_id})&&frame["isSynthetic"]==true&&frame["priority"]=="next","peer became human/trusted input");let body=frame["message"]["content"].as_str().context("actual attributed peer text absent")?;let (prefix,payload)=body.split_once('\n').context("actual attributed peer payload absent")?;ensure!(prefix=="Rudder collaboration data. Follow the existing task scope and authority."&&serde_json::from_str::<Value>(payload)?==serde_json::to_value(&message)?,"actual CLI peer identity/text differs");}
-    {let tap=owner.tap.as_ref().unwrap().state.lock().unwrap();let sent=tap.frames.iter().find(|v|v["direction"]=="adapter_to_claude"&&v["frame"]["method"]=="turn/steer").context("production Rust steer absent")?;ensure!(sent["frame"]["params"]["_rudder"]["operation"]==json!({"kind":"steer","message":message}),"typed original native peer envelope differs");}
+    owner.actor_until(&rx,|e|matches!(e,AgentLinkEventKind::CommandResult{command_id,outcome:AgentLinkOutcome::Unsupported{..}} if command_id=="steer"),&run,&attempt)?;
+    ensure!(owner.relay.lock().unwrap().peer_inputs.is_empty(),"unsupported replacement wrote peer input");
+    let second=first.clone(); // Retain the actual original turn; no replacement exists.
     owner.relay.lock().unwrap().hold_terminal=true;owner.tap.as_ref().unwrap().state.lock().unwrap().hold_turn=Some(second.clone());
     owner.actor.as_ref().unwrap().submit(make("interrupt",AgentLinkOperation::Interrupt,Some(second.clone())))?;
-    loop{owner.bounds()?;let state=owner.relay.lock().unwrap();if state.interrupts.len()==2&&state.held.is_some()&&state.forwarded_receipts.contains(&state.interrupts[1]){let id=&state.interrupts[1];ensure!(state.receipts.iter().any(|v|v["response"]["request_id"]==*id&&v["response"]["response"]["still_queued"]==json!([])),"actual matching CLI interrupt receipt absent");break;}drop(state);std::thread::sleep(Duration::from_millis(2));}
+    loop{owner.bounds()?;let state=owner.relay.lock().unwrap();if state.interrupts.len()==1&&state.held.is_some()&&state.forwarded_receipts.contains(&state.interrupts[0]){let id=&state.interrupts[0];ensure!(state.receipts.iter().any(|v|v["response"]["request_id"]==*id&&v["response"]["response"]["still_queued"]==json!([])),"actual matching CLI interrupt receipt absent");break;}drop(state);std::thread::sleep(Duration::from_millis(2));}
     // Forwarded actual CLI receipt alone must not finish the original command.
     owner.no_interrupt_confirmation(&rx,&run,&attempt)?;
     let original=owner.relay.lock().unwrap().held.clone().context("original CLI terminal absent")?;
@@ -235,9 +233,11 @@ fn execute(owner:&mut Owner,binary:&Path,node:&Path,provider_script:&Path,bridge
     // notification remains held. No invented replacement/stop notification.
     owner.no_interrupt_confirmation(&rx,&run,&attempt)?;owner.tap.as_ref().unwrap().state.lock().unwrap().release=true;
     owner.actor_until(&rx,|e|matches!(e,AgentLinkEventKind::CommandResult{command_id,outcome:AgentLinkOutcome::InterruptConfirmed{turn_id}} if command_id=="interrupt"&&turn_id==&second),&run,&attempt)?;
-    owner.actor.as_ref().unwrap().submit(make("stale-steer",AgentLinkOperation::Steer{message},Some(second)))?;
+    owner.actor.as_ref().unwrap().submit(make("stale-steer",AgentLinkOperation::Steer{message:message.clone()},Some(second.clone())))?;
     owner.actor_until(&rx,|e|matches!(e,AgentLinkEventKind::CommandResult{command_id,outcome:AgentLinkOutcome::Rejected{..}} if command_id=="stale-steer"),&run,&attempt)?;
-    let tap=owner.tap.as_ref().unwrap().state.lock().unwrap();ensure!(tap.frames.iter().filter(|v|v["direction"]=="adapter_to_claude"&&v["frame"]["method"]=="turn/steer").count()==1&&tap.frames.iter().filter(|v|v["direction"]=="adapter_to_claude"&&v["frame"]["method"]=="turn/interrupt").count()==1,"wrong/stale native controls escaped");ensure!(!tap.frames.iter().any(|v|v["direction"]=="adapter_to_claude"&&matches!(v["frame"]["method"].as_str(),Some("thread/start"|"thread/fork"|"turn/start"))),"native adapter created substitute conversation/turn");Ok(())
+    owner.actor.as_ref().unwrap().submit(make("resume",AgentLinkOperation::Resume{message},Some(second)))?;
+    owner.actor_until(&rx,|e|matches!(e,AgentLinkEventKind::CommandResult{command_id,outcome:AgentLinkOutcome::Unsupported{..}} if command_id=="resume"),&run,&attempt)?;
+    let tap=owner.tap.as_ref().unwrap().state.lock().unwrap();ensure!(tap.frames.iter().filter(|v|v["direction"]=="adapter_to_claude"&&v["frame"]["method"]=="turn/steer").count()==0&&tap.frames.iter().filter(|v|v["direction"]=="adapter_to_claude"&&v["frame"]["method"]=="turn/interrupt").count()==1,"wrong/stale native controls escaped");ensure!(!tap.frames.iter().any(|v|v["direction"]=="adapter_to_claude"&&matches!(v["frame"]["method"].as_str(),Some("thread/start"|"thread/fork"|"turn/start"))),"native adapter created substitute conversation/turn");Ok(())
 }
 
 #[test]

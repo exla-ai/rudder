@@ -5,7 +5,7 @@ use super::*;
 use crate::agent_broker::{self, AgentBroker, BrokerConfig};
 use crate::agent_link::{
     self, AgentLinkCommand, AgentLinkEvent, AgentLinkEventKind, AgentLinkHandle, AgentLinkLaunch,
-    AgentLinkOperation, AgentLinkOutcome, PeerMessage,
+    AgentLinkOperation, AgentLinkOutcome, AgentSteerMode, PeerMessage,
 };
 use rudder_engine::agent_api::AgentIdentityFile;
 use rudder_engine::journal::{CapabilityGrant, Journal, OwnerFence};
@@ -63,6 +63,7 @@ struct RuntimeLink {
     thread: Option<String>,
     active: Option<String>,
     interrupted: Option<String>,
+    steer_mode: Option<AgentSteerMode>,
     phase: RuntimePhase,
     qualified: bool,
     uncertain: bool,
@@ -240,11 +241,13 @@ impl RuntimeLink {
             if self.qualified {
                 match self.phase {
                     RuntimePhase::Working => {
-                        capabilities.extend(["steer".into(), "interrupt".into()]);
+                        capabilities.insert("interrupt".into());
+                        if self.steer_mode == Some(AgentSteerMode::ActiveAppend) {
+                            capabilities.insert("steer".into());
+                        }
                     }
-                    RuntimePhase::Interrupted => {
-                        capabilities.insert("resume".into());
-                    }
+                    // Interrupted is a turn observation, not tool/child settlement.
+                    RuntimePhase::Interrupted => {}
                     RuntimePhase::Waiting | RuntimePhase::Completed => {
                         capabilities.insert("deliver".into());
                     }
@@ -375,7 +378,7 @@ impl RuntimeState {
         let slot = RuntimeLink { attempt: fence.attempt_id.clone(), epoch: fence.run_epoch,
             profile: profile.into(), backend, transport_uncertain: false, link: None,
             broker: Some(broker), broker_work: None, projection_hash: Some(projection_hash), broker_failed_hash: None,
-            thread: None, active: None, interrupted: None, phase: RuntimePhase::Starting,
+            thread: None, active: None, interrupted: None, steer_mode: None, phase: RuntimePhase::Starting,
             qualified: false, uncertain: false, closed: false, draining: false, workspace: Some(assignment.clone()), managed_home: Some(home.into()),
             #[cfg(target_os = "linux")]
             owned_backend: None };
@@ -408,7 +411,7 @@ impl RuntimeState {
             "previous managed runtime must be taken before replacement");
         let slot=RuntimeLink { attempt:fence.attempt_id.clone(),epoch:fence.run_epoch,profile:profile.into(),backend,
             transport_uncertain:false,link:None,broker:broker.take(),broker_work:None,projection_hash:Some(projection_hash),broker_failed_hash:None,
-            thread:None,active:None,interrupted:None,phase:RuntimePhase::Starting,qualified:false,uncertain:false,
+            thread:None,active:None,interrupted:None,steer_mode:None,phase:RuntimePhase::Starting,qualified:false,uncertain:false,
             closed:false,draining:false,workspace:Some(assignment.clone()),managed_home:Some(home.into()),owned_backend:None };
         terminal.set_before_terminate(slot.close_callback());
         self.managed_projections.insert(fence.run_id.clone(),projection.clone()); self.links.insert(fence.run_id.clone(),slot); Ok(())
@@ -725,6 +728,7 @@ impl RuntimeState {
                     thread: None,
                     active: None,
                     interrupted: None,
+                    steer_mode: None,
                     phase: RuntimePhase::Starting,
                     qualified: false,
                     uncertain: failed,
@@ -1084,6 +1088,7 @@ impl RuntimeState {
                 thread_id,
                 active_turn_id,
                 last_interrupted_turn_id,
+                steer_mode,
                 ..
             } => {
                 if slot
@@ -1096,6 +1101,7 @@ impl RuntimeState {
                 slot.thread = Some(thread_id);
                 slot.active = active_turn_id;
                 slot.interrupted = last_interrupted_turn_id;
+                slot.steer_mode = Some(steer_mode);
                 slot.phase = if slot.active.is_some() {
                     RuntimePhase::Working
                 } else if slot.interrupted.is_some() {

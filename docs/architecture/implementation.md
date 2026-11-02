@@ -2695,3 +2695,62 @@ credential, new bound boot UUID and the unchanged control38cd7c07db70… /
 worker104f13a76d74… artifacts. It is still running; no SDK/runtime/ordinary
 qualification or production delivery is claimed. The private source-overlay
 draft remains outside Main pending review and compilation.
+
+
+### 2026-11-02 00:05Z: A14 settles configure, startup quarantines, fixture cleaned
+
+The fresh isolated A14 run used an explicitly created 30-minute organization
+credential, private controller v7 and bundle producer v4. The controller now
+distinguishes authorization failures from absence and never falls back to a
+short-lived `flyctl auth token`. Eight offline controller cases passed.
+
+Actual provider responses prove the configured SDK Machine reached its exact
+acknowledged settled version and strict stopped readback before start. Start
+was acknowledged. The Root launcher then emitted its fixed startup quarantine
+marker at its original 30-second deadline. The original SDK qualification
+expired with no Root acknowledgment, message or successful qualification.
+Runtime and ordinary stages were not reached. Read-only process observations
+showed the original launcher, Native and Root service retained, with no Node
+sidecar. Runtime proof capture is a diagnostic lead, not an established cause.
+
+The exact disposable control and SDK Machines were destroyed, each original
+version reached terminal `destroyed`, and list reads confirmed absence. The
+known volume delete was acknowledged and inactive state observed; this is not
+physical-erasure evidence. App deletion returned 202, the first read still
+returned 200, and a later pair returned 404. All three exact original temporary
+control secrets were deleted and absence verified. The protected user home
+identity remained unchanged before and after. Cleanup evidence is in
+`/workspace/rudder-staging-flow-control-run-a14/operator-cleanup-v1/report.json`
+and `operator-cleanup-v2/report.json` (20 plus 10 calls); v1 records the
+intermediate pending app deletion honestly. The retained local controller was
+stopped after cleanup and the qualification credential revoked successfully at
+2026-11-02T00:05:34.753397Z. No normal retirement or provider-owner fencing
+qualification is claimed. No production release or deployment occurred.
+
+A local checkpoint, `e03c1356`, records the existing v4 implementation and green
+latest-source Node fixes. Subsequent Source parent and sibling overlay work is
+an engine component in progress; Native/VCS callers have not switched to it.
+
+### 2026-11-02 00:15Z: retained source-parent engine component green
+
+The engine now derives one genuine flat source parent and publishes private
+sibling overlays against that exact retained parent and Environment owner.
+Warm publication walks and verifies changed local objects; served bytes still
+verify, and explicit cold reattachment fully validates the original flat graph.
+Observed physical custody failures remain absorbing across repair, including
+failures first seen through the original flat owner. Cancellation and resource
+exhaustion remain unknown and retain their carriers. Existing pin/hold limits
+are shared across both dependency namespaces. Overlay inputs dispatch through
+the actual retained build-input owner. No Native/VCS caller selection or large
+performance conclusion is claimed by this component checkpoint.
+
+The final 28 source-overlay cases pass in guarded run403. Full engine library
+run404 passes444 with14 ignored and zero failures at00:15:02Z. Native library
+run402 passes288 with21 ignored, including five bounded diagnostic cases. The
+Root startup diagnostic emits only fixed typed stage/check labels and bounded
+IO kind/errno through nonblocking socket/FIFO writes; full or broken output
+cannot block the retained service. It adds no error-chain text or new clock.
+Actual publication counters now measure successful local hash-read and object
+fsync calls, excluding retention files, directory fsyncs, foreign reads, parent
+capture and later served reads. Counters are complete only after original ACK.
+The fifty-view fixture and caller selection remain pending integration/checks.

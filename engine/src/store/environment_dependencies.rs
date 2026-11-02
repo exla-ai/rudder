@@ -31,29 +31,35 @@ pub(super) use publication::{gc_check,gc_local};
 /// These variants retain genuine owners. The enum supplies no constructor
 /// from a root, path, saved record or callback and adds no execution authority.
 #[derive(Clone)]
-pub enum RetainedRunnableInputs{Flat(Arc<BackedPinOwner>),Environment(Arc<EnvironmentDependentPinOwner>)}
+pub enum RetainedRunnableInputs{Flat(Arc<BackedPinOwner>),Environment(Arc<EnvironmentDependentPinOwner>),Overlay(Arc<SourceOverlayPinOwner>)}
 impl RetainedRunnableInputs{
-    pub fn root_data(&self)->&ObjectRef{match self{Self::Flat(p)=>p.root_data(),Self::Environment(p)=>p.root_data()}}
-    pub fn pin_name_data(&self)->&str{match self{Self::Flat(p)=>&p.pin,Self::Environment(p)=>p.pin_name_data()}}
-    pub fn store_root_data(&self)->&std::path::Path{match self{Self::Flat(p)=>p.store.root(),Self::Environment(p)=>p.store_root_data()}}
-    pub fn contains_data(&self,r:&ObjectRef,original:&dyn ImageImportFence)->Result<bool>{original.remaining()?;match self{Self::Flat(p)=>Ok(p.members.contains(r)),Self::Environment(p)=>p.contains_data(r,original)}}
+    pub fn root_data(&self)->&ObjectRef{match self{Self::Flat(p)=>p.root_data(),Self::Environment(p)=>p.root_data(),Self::Overlay(p)=>p.root_data()}}
+    pub fn pin_name_data(&self)->&str{match self{Self::Flat(p)=>&p.pin,Self::Environment(p)=>p.pin_name_data(),Self::Overlay(p)=>p.pin_name_data()}}
+    pub fn store_root_data(&self)->&std::path::Path{match self{Self::Flat(p)=>p.store.root(),Self::Environment(p)=>p.store_root_data(),Self::Overlay(p)=>p.store_root_data()}}
+    pub fn contains_data(&self,r:&ObjectRef,original:&dyn ImageImportFence)->Result<bool>{original.remaining()?;match self{Self::Flat(p)=>Ok(p.members.contains(r)),Self::Environment(p)=>p.contains_data(r,original),Self::Overlay(p)=>p.contains_data(r,original)}}
     pub fn matches_record_data(&self,state:&RetentionState,pin:&str)->bool{match self{
         Self::Flat(p)=>p.pin==pin&&state.backed_retention.as_ref().and_then(|d|d.pins.get(pin))==Some(p.record_data()),
-        Self::Environment(p)=>p.matches_record_data(state,pin)}}
+        Self::Environment(p)=>p.matches_record_data(state,pin),Self::Overlay(p)=>p.matches_record_data(state,pin)}}
     pub fn read_retaining(&self,out:&mut Option<RetainedRunnableRead>,reference:ObjectRef,original:Arc<dyn ImageImportFence>)->Result<()>{
-        ensure!(out.is_none(),"original retained Runnable read occupied");*out=Some(match self{Self::Flat(_)=>RetainedRunnableRead::Flat(None),Self::Environment(_)=>RetainedRunnableRead::Environment(None)});
+        ensure!(out.is_none(),"original retained Runnable read occupied");*out=Some(match self{Self::Flat(_)=>RetainedRunnableRead::Flat(None),Self::Environment(_)=>RetainedRunnableRead::Environment(None),Self::Overlay(_)=>RetainedRunnableRead::Overlay(None)});
         match(self,out.as_mut().unwrap()){(Self::Flat(p),RetainedRunnableRead::Flat(r))=>p.read_retaining(r,reference,original),
-            (Self::Environment(p),RetainedRunnableRead::Environment(r))=>p.read_retaining(r,reference,original),_=>unreachable!()}}
+            (Self::Environment(p),RetainedRunnableRead::Environment(r))=>p.read_retaining(r,reference,original),
+            (Self::Overlay(p),RetainedRunnableRead::Overlay(r))=>p.read_retaining(r,reference,original),_=>unreachable!()}}
 }
-pub enum RetainedRunnableRead{Flat(Option<BackedRead>),Environment(Option<EnvironmentDependentRead>)}
+pub enum RetainedRunnableRead{Flat(Option<BackedRead>),Environment(Option<EnvironmentDependentRead>),Overlay(Option<SourceOverlayRead>)}
 impl RetainedRunnableRead{pub fn verified_bytes(&self)->Result<&[u8]>{match self{
     Self::Flat(r)=>r.as_ref().context("original flat read not staged")?.verified_bytes(),
-    Self::Environment(r)=>r.as_ref().context("original dependent read not staged")?.verified_bytes()}}}
+    Self::Environment(r)=>r.as_ref().context("original dependent read not staged")?.verified_bytes(),
+    Self::Overlay(r)=>r.as_ref().context("original overlay read not staged")?.verified_bytes()}}}
 impl LocalStore{
     /// ALL actual flat parents and ALL actual dependent roots are mandatory.
     /// Saved records, absent owners or unknown holds cannot authorize a sweep.
     pub fn gc_environment_dependencies_retaining(&self,out:&mut Option<BackedGc>,parents:Vec<Arc<BackedPinOwner>>,dependents:Vec<Arc<EnvironmentDependentPinOwner>>,
         grace:Duration,original:Arc<dyn ImageImportFence>)->Result<()> {
-        ensure!(out.is_none(),"original dependency-aware GC output occupied");*out=Some(BackedGc{io:StoreIo::staged(self.clone(),original),owners:parents,dependency_owners:dependents,grace,report:None,object_sets:None,candidates:Vec::new(),unlink_intent:None,attempted:false,ready:false,failure:None});out.as_mut().unwrap().run()
+        ensure!(out.is_none(),"original dependency-aware GC output occupied");*out=Some(BackedGc{io:StoreIo::staged(self.clone(),original),owners:parents,dependency_owners:dependents,source_owners:Vec::new(),grace,report:None,object_sets:None,candidates:Vec::new(),unlink_intent:None,attempted:false,ready:false,failure:None});out.as_mut().unwrap().run()
     }
 }
+
+#[path="source_dependencies.rs"]
+pub mod source;
+pub use source::{RetainedSourceParent,SourceOverlayPublication,SourceOverlayPinOwner,SourceOverlayRead,SourceOverlayReattachment,SourceOverlayWorkData};

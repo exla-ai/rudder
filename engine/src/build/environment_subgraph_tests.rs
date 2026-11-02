@@ -105,3 +105,5 @@ fn readonly_membership_does_not_convert_unknown_root_or_foreign_parent_into_inpu
     let owner=publish(&f,boundary(&prep),"known",b"source");let outside=f.index.store.put_blob(b"not retained here").unwrap();let mut failed=None;assert!(owner.read_retaining(&mut failed,outside,Clock::new()).is_err());assert!(failed.is_some());assert!(failed.as_ref().unwrap().verified_bytes().is_err());
     let inputs=RetainedRunnableInputs::Environment(owner);assert!(inputs.root_data().kind==ObjectKind::RunnableRoot);
 }
+
+#[path="source_overlay_tests.rs"]mod source_overlay;

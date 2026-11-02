@@ -411,10 +411,149 @@ pub struct RootStorageActorDrain { instance: uuid::Uuid, slot: uuid::Uuid, retir
     helper_readers: BTreeSet<uuid::Uuid> }
 pub struct RootStorageRetired { _instance: uuid::Uuid, _slot: uuid::Uuid }
 
+// Diagnostics accept only closed stage/check labels and numeric OS errors.
+// Never serialize anyhow Display/Debug: those chains may contain private paths.
+#[derive(Clone, Copy)]
+enum ServiceStage {
+    Entry,
+    CaptureCore,
+    CaptureRuntime,
+    ServingCurrent,
+    ServingRuntime,
+    SendReply,
+    Receive,
+    Authenticate,
+    Decode,
+    Dispatch,
+    Encode,
+}
+impl ServiceStage {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Entry => "entry",
+            Self::CaptureCore => "capture_core",
+            Self::CaptureRuntime => "capture_runtime",
+            Self::ServingCurrent => "serve_current",
+            Self::ServingRuntime => "serve_runtime",
+            Self::SendReply => "send_reply",
+            Self::Receive => "receive",
+            Self::Authenticate => "authenticate",
+            Self::Decode => "decode",
+            Self::Dispatch => "dispatch",
+            Self::Encode => "encode",
+        }
+    }
+}
+fn retained_failure_data(
+    component: &'static str,
+    stage: &'static str,
+    error: Option<&anyhow::Error>,
+) -> serde_json::Value {
+    let os = error.and_then(|e| {
+        e.chain()
+            .find_map(|cause| cause.downcast_ref::<std::io::Error>())
+    });
+    let class = match (error, os) {
+        (None, _) => "panic",
+        (_, Some(_)) => "io",
+        _ => "validation_or_other",
+    };
+    let io_kind = os.map(|e| match e.kind() {
+        std::io::ErrorKind::PermissionDenied => "permission_denied",
+        std::io::ErrorKind::NotFound => "not_found",
+        std::io::ErrorKind::TimedOut => "timed_out",
+        std::io::ErrorKind::WouldBlock => "would_block",
+        std::io::ErrorKind::Interrupted => "interrupted",
+        std::io::ErrorKind::InvalidData => "invalid_data",
+        _ => "other",
+    });
+    serde_json::json!({"kind":"rudder-root-retained-failure-v1","component":component,"stage":stage,"class":class,
+        "io_kind":io_kind,"errno":os.and_then(|e|e.raw_os_error()),
+        "check":error.and_then(crate::root_storage_bootstrap::runtime_image::bootstrap_failure_check)})
+}
+const RETAINED_DIAGNOSTIC_LIMIT: usize = 4096;
+// A single bounded, nonblocking attempt. Reopening a pipe through procfs gives
+// this writer its own OFD: never change flags shared with inherited stderr.
+fn try_retained_diagnostic_write(fd: i32, bytes: &[u8]) -> bool {
+    if bytes.is_empty() || bytes.len() > RETAINED_DIAGNOSTIC_LIMIT {
+        return false;
+    }
+    let mut original: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstat(fd, &mut original) } != 0 {
+        return false;
+    }
+    match original.st_mode & libc::S_IFMT {
+        libc::S_IFSOCK => unsafe {
+            libc::send(
+                fd,
+                bytes.as_ptr().cast(),
+                bytes.len(),
+                libc::MSG_DONTWAIT | libc::MSG_NOSIGNAL,
+            ) == bytes.len() as isize
+        },
+        libc::S_IFIFO => {
+            // Do not change a process-wide signal disposition for logging.
+            let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
+            if unsafe { libc::sigaction(libc::SIGPIPE, std::ptr::null(), &mut action) } != 0
+                || action.sa_sigaction != libc::SIG_IGN
+            {
+                return false;
+            }
+            let Ok(path) = std::ffi::CString::new(format!("/proc/self/fd/{fd}")) else {
+                return false;
+            };
+            let raw = unsafe {
+                libc::open(
+                    path.as_ptr(),
+                    libc::O_WRONLY | libc::O_NONBLOCK | libc::O_CLOEXEC | libc::O_NOCTTY,
+                )
+            };
+            if raw < 0 {
+                return false;
+            }
+            let output = unsafe { OwnedFd::from_raw_fd(raw) };
+            let mut actual: libc::stat = unsafe { std::mem::zeroed() };
+            if unsafe { libc::fstat(output.as_raw_fd(), &mut actual) } != 0
+                || actual.st_mode & libc::S_IFMT != libc::S_IFIFO
+                || actual.st_dev != original.st_dev
+                || actual.st_ino != original.st_ino
+            {
+                return false;
+            }
+            // Linux PIPE_BUF is 4096. An at-most-PIPE_BUF nonblocking write
+            // either fits atomically or returns; no retry can delay custody.
+            unsafe {
+                libc::write(output.as_raw_fd(), bytes.as_ptr().cast(), bytes.len())
+                    == bytes.len() as isize
+            }
+        }
+        _ => false,
+    }
+}
+pub(crate) fn emit_retained_failure(
+    component: &'static str,
+    stage: &'static str,
+    error: Option<&anyhow::Error>,
+) {
+    let mut bytes = [0u8; RETAINED_DIAGNOSTIC_LIMIT];
+    let mut output = std::io::Cursor::new(bytes.as_mut_slice());
+    if serde_json::to_writer(&mut output, &retained_failure_data(component, stage, error)).is_err()
+    {
+        return;
+    }
+    let length = output.position() as usize;
+    let Some(newline) = bytes.get_mut(length) else {
+        return;
+    };
+    *newline = b'\n';
+    let _ = try_retained_diagnostic_write(libc::STDERR_FILENO, &bytes[..length + 1]);
+}
+
 /// Root keeps this actual owner outside callbacks/catch_unwind/result delivery.
 /// Every failed/unknown effect remains in its original slot. Drop never unmounts.
 pub struct RootStorageService {
     endpoint: Endpoint, engine: Process, own: Process, engine_image: Image, service_image: Image,
+    diagnostic_stage:ServiceStage,
     mnt: File, user: File, boot: Vec<u8>, instance: uuid::Uuid,
     root: Option<RootDirectory>, root_caps: u64, runtime:Option<crate::root_storage_bootstrap::runtime_image::RootRuntimeService>, paged:Option<paged::RootPagedStorage>,
     serial: u64, hello: bool, fenced: bool, slots: BTreeMap<uuid::Uuid, Slot>,
@@ -432,7 +571,7 @@ impl RootStorageService {
         ensure!(caps & (1 << 21) != 0 && caps & (1 << 19) != 0, "root storage requires actual SYS_ADMIN and SYS_PTRACE");
         let own = Process::current()?;
         let service_image = Image::capture(Path::new(SERVICE_IMAGE))?; service_image.matches_process(&own)?;
-        let mut value = Self { endpoint: Endpoint::capture(endpoint)?, engine: Process::capture(original_engine_pidfd)?, own,
+        let mut value = Self { diagnostic_stage:ServiceStage::CaptureCore,endpoint: Endpoint::capture(endpoint)?, engine: Process::capture(original_engine_pidfd)?, own,
             engine_image: Image::capture(Path::new(ENGINE_IMAGE))?, service_image,
             mnt: namespace(None, "mnt", libc::CLONE_NEWNS)?, user: namespace(None, "user", libc::CLONE_NEWUSER)?,
             boot: proc_bytes("/proc/sys/kernel/random/boot_id", 64)?, instance: uuid::Uuid::new_v4(), serial: 0,
@@ -473,14 +612,18 @@ impl RootStorageService {
     pub fn close_admission(&mut self) { if let Some(runtime)=&mut self.runtime{runtime.close_admission();} if let Some(paged)=&mut self.paged{paged.close_admission();} self.fenced = true; for slot in self.slots.values_mut() { slot.fence(); } }
     /// OFF App, one bounded packet. No error removes a slot or its actual owners.
     pub fn poll_once(&mut self) -> Result<bool> {
-        self.current()?;
+        self.diagnostic_stage=ServiceStage::ServingCurrent;self.current()?;
+        self.diagnostic_stage=ServiceStage::ServingRuntime;
         if let Some(runtime)=&mut self.runtime{if runtime.poll_retaining()?{return Ok(true)}}
+        self.diagnostic_stage=ServiceStage::SendReply;
         if let Some(bytes)=&self.outbox {
             if !self.endpoint.send(bytes,None)? {return Ok(false);}
             self.outbox=None;return Ok(true);
         }
+        self.diagnostic_stage=ServiceStage::Receive;
         let Some(mut packet)=self.endpoint.receive()? else {return Ok(false);};
-        self.authenticate(&packet.credentials)?;
+        self.diagnostic_stage=ServiceStage::Authenticate;self.authenticate(&packet.credentials)?;
+        self.diagnostic_stage=ServiceStage::Decode;
         let (envelope,payload):(Envelope,_)=decode(&packet.bytes)?;
         ensure!(envelope.version==1&&packet.fds.len()<=1,"storage invalid envelope/descriptors");
         let digest=Sha256::digest(&packet.bytes).to_vec();
@@ -494,6 +637,7 @@ impl RootStorageService {
         self.serial=envelope.serial;
         let retirement=match &envelope.request {
             Request::RetireSeed {slot,retirement,..}|Request::ReleaseSeed {slot,retirement}=>Some((*slot,*retirement)),_=>None};
+        self.diagnostic_stage=ServiceStage::Dispatch;
         let result=(||->Result<Reply>{
             let wire_budget=FinalizationBudget::from_constraint(&envelope.constraint)?;wire_budget.remaining()?;
             self.dispatch(envelope.request,payload,packet.fds.pop(),&envelope.constraint)
@@ -502,6 +646,7 @@ impl RootStorageService {
             Some((slot,retirement))=>Reply::RetirementPending {slot,retirement},
             None=>{for slot in self.slots.values_mut(){slot.fence();}Reply::Rejected}
         }};
+        self.diagnostic_stage=ServiceStage::Encode;
         let bytes=encode(&Answer {version:1,serial:self.serial,reply},&[])?;
         if retirement.is_some() {self.retirement_answer=Some(RetirementAnswer {serial:self.serial,digest,bytes:bytes.clone(),_retired:self.pending_retired.take()});}
         else {self.retirement_answer=None;}
@@ -704,6 +849,7 @@ pub fn run_inherited_root_service() -> Result<()> {
     let legacy_absent=inherited.is_absent_at_entry();
     let mut originals:[Option<OwnedFd>;2]=[None,None];
     let mut owner:Option<RootStorageService>=None;
+    let mut setup_stage=ServiceStage::Entry;
     let setup=std::panic::catch_unwind(std::panic::AssertUnwindSafe(||->Result<()> {
         // Retain actual core inputs outside constructor/unwind as well. Their
         // duplicates may allocate ONLY after the complete optional snapshot.
@@ -714,16 +860,17 @@ pub fn run_inherited_root_service() -> Result<()> {
             if unsafe{libc::fcntl(raw,libc::F_SETFD,flags|libc::FD_CLOEXEC)}!=0{core_fault=true;}}
         inherited.validate_shape()?;ensure!(!core_fault,"root storage original bootstrap descriptor absent/unavailable");
         ensure!(std::env::args_os().count()==1&&std::env::vars_os().next().is_none(),"root storage needs fixed image bootstrap environment");
+        setup_stage=ServiceStage::CaptureCore;
         owner=Some(RootStorageService::from_bootstrap(originals[0].as_ref().unwrap().try_clone()?,originals[1].as_ref().unwrap().try_clone()?)?);
-        let actual=owner.as_mut().unwrap();
+        let actual=owner.as_mut().unwrap();setup_stage=ServiceStage::CaptureRuntime;
         crate::root_storage_bootstrap::runtime_image::RootRuntimeService::capture_entry_snapshot_retaining(&mut actual.runtime,&mut inherited,&actual.engine)
     }));
     let (setup_complete,retained_panic)=match setup {
         Ok(Ok(()))=>(true,None),
         Ok(Err(error)) if legacy_absent=>return Err(error),
         Err(payload) if legacy_absent=>std::panic::resume_unwind(payload),
-        Ok(Err(_))=>(false,None),
-        Err(payload)=>(false,Some(payload)),
+        Ok(Err(error))=>{emit_retained_failure("root_storage",setup_stage.label(),Some(&error));(false,None)},
+        Err(payload)=>{emit_retained_failure("root_storage",setup_stage.label(),None);(false,Some(payload))},
     };
     if !setup_complete {
         if let Some(owner)=&mut owner{owner.close_admission();}
@@ -733,7 +880,9 @@ pub fn run_inherited_root_service() -> Result<()> {
     loop {
         match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| owner.poll_once())) {
             Ok(Ok(true)) => {}, Ok(Ok(false)) => std::thread::sleep(Duration::from_millis(2)),
-            Ok(Err(_)) | Err(_) => {
+            outcome @ (Ok(Err(_)) | Err(_)) => {
+                let error=match &outcome {Ok(Err(error))=>Some(error),_=>None};
+                emit_retained_failure("root_storage",owner.diagnostic_stage.label(),error);
                 owner.close_admission();
                 // Preserve the actual carrier after disconnect/unknown effects.
                 // Supervisor/VM shutdown owns recovery; no restart or TTL cleanup.
@@ -761,3 +910,115 @@ pub(crate) mod paged;
 #[cfg(test)]
 #[path="root_storage_paged_tests.rs"]
 mod paged_tests;
+
+#[cfg(test)]
+mod retained_diagnostic_tests {
+    use super::*;
+
+    fn pipe() -> (OwnedFd, OwnedFd) {
+        let mut pair = [-1; 2];
+        assert_eq!(
+            unsafe { libc::pipe2(pair.as_mut_ptr(), libc::O_CLOEXEC) },
+            0
+        );
+        unsafe { (OwnedFd::from_raw_fd(pair[0]), OwnedFd::from_raw_fd(pair[1])) }
+    }
+
+    #[test]
+    fn diagnostic_pipe_write_preserves_inherited_flags_and_skips_full_or_closed_pipe() {
+        let (reader, writer) = pipe();
+        let flags = unsafe { libc::fcntl(writer.as_raw_fd(), libc::F_GETFL) };
+        assert_eq!(flags & libc::O_NONBLOCK, 0);
+        assert!(try_retained_diagnostic_write(
+            writer.as_raw_fd(),
+            b"fixed\n"
+        ));
+        assert_eq!(
+            unsafe { libc::fcntl(writer.as_raw_fd(), libc::F_GETFL) },
+            flags
+        );
+        let path = std::ffi::CString::new(format!("/proc/self/fd/{}", writer.as_raw_fd())).unwrap();
+        let raw = unsafe {
+            libc::open(
+                path.as_ptr(),
+                libc::O_WRONLY | libc::O_NONBLOCK | libc::O_CLOEXEC,
+            )
+        };
+        assert!(raw >= 0);
+        let fill = unsafe { OwnedFd::from_raw_fd(raw) };
+        let block = [0u8; RETAINED_DIAGNOSTIC_LIMIT];
+        while unsafe { libc::write(fill.as_raw_fd(), block.as_ptr().cast(), block.len()) } > 0 {}
+        assert!(!try_retained_diagnostic_write(writer.as_raw_fd(), &block));
+        assert_eq!(
+            unsafe { libc::fcntl(writer.as_raw_fd(), libc::F_GETFL) },
+            flags
+        );
+        drop(reader);
+        assert!(!try_retained_diagnostic_write(
+            writer.as_raw_fd(),
+            b"fixed\n"
+        ));
+        assert_eq!(
+            unsafe { libc::fcntl(writer.as_raw_fd(), libc::F_GETFL) },
+            flags
+        );
+        assert!(!try_retained_diagnostic_write(-1, b"fixed\n"));
+        assert!(!try_retained_diagnostic_write(
+            writer.as_raw_fd(),
+            &[0; RETAINED_DIAGNOSTIC_LIMIT + 1]
+        ));
+    }
+
+    #[test]
+    fn diagnostic_socket_write_skips_disconnected_peer() {
+        let (writer, reader) = std::os::unix::net::UnixStream::pair().unwrap();
+        let flags = unsafe { libc::fcntl(writer.as_raw_fd(), libc::F_GETFL) };
+        assert!(try_retained_diagnostic_write(
+            writer.as_raw_fd(),
+            b"fixed\n"
+        ));
+        drop(reader);
+        assert!(!try_retained_diagnostic_write(
+            writer.as_raw_fd(),
+            b"fixed\n"
+        ));
+        assert_eq!(
+            unsafe { libc::fcntl(writer.as_raw_fd(), libc::F_GETFL) },
+            flags
+        );
+    }
+
+    #[test]
+    fn retained_diagnostic_redacts_error_chain_but_keeps_os_class() {
+        let error = anyhow::Error::new(std::io::Error::from_raw_os_error(libc::EACCES))
+            .context("private-token-and-config-path-must-not-be-emitted");
+        let data = retained_failure_data(
+            "root_storage",
+            ServiceStage::CaptureRuntime.label(),
+            Some(&error),
+        );
+        assert_eq!(data["class"], "io");
+        assert_eq!(data["io_kind"], "permission_denied");
+        assert_eq!(data["errno"], libc::EACCES);
+        assert_eq!(data["stage"], "capture_runtime");
+        assert!(data["check"].is_null());
+        assert!(!data.to_string().contains("private-token"));
+    }
+
+    #[test]
+    fn retained_diagnostic_reports_fixed_validation_and_panic_classes() {
+        let error = anyhow::anyhow!("secret-validation-details");
+        let data = retained_failure_data(
+            "root_storage",
+            ServiceStage::ServingRuntime.label(),
+            Some(&error),
+        );
+        assert_eq!(data["class"], "validation_or_other");
+        assert!(data["errno"].is_null());
+        assert!(!data.to_string().contains("secret"));
+        let panic = retained_failure_data("root_storage", ServiceStage::CaptureCore.label(), None);
+        assert_eq!(panic["class"], "panic");
+        assert!(panic["io_kind"].is_null());
+    }
+}
+

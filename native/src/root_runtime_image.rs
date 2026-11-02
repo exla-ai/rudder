@@ -120,33 +120,215 @@ impl RootRuntimeParent {
 /// All inherited original descriptors, acquired before any runtime mount/view
 /// effects. This private type can only be built by the fixed service entry.
 struct RuntimeBootstrapProof {raw:Vec<OwnedFd>,root:Process,engine:Process,own:Process,root_image:Image,engine_image:Image,service_image:Image,data:BootstrapData,boot:Vec<u8>}
-impl RuntimeBootstrapProof {
-    fn capture(raw:Vec<OwnedFd>,engine:&Process)->Result<Self>{ensure!(raw.len()==8,"runtime inherited bootstrap set incomplete");
-        // raw: parent channel, engine channel, launcher pidfd/exe, sealed data,
-        // actual USER/MNT/PID namespace FDs. No serialized FD reconstruction.
-        let root=Process::capture(raw[2].try_clone()?)?;let own=Process::current()?;let engine=Process::capture(engine.fd().try_clone()?)?;
-        let root_image=Image::capture(Path::new(LAUNCHER_PATH))?;root_image.matches_fd(&raw[3])?;
-        let value=Self{data:read_data(&raw[4])?,boot:storage::proc_bytes("/proc/sys/kernel/random/boot_id",64)?,raw,root,engine,own,root_image,
-            engine_image:Image::capture(Path::new(ENGINE_PATH))?,service_image:Image::capture(Path::new(SERVICE_PATH))?};value.current()?;Ok(value)
-    }
-    fn backing_current(&self)->Result<()>{self.own.live()?;ensure!(self.own.pid==std::process::id()&&unsafe{libc::getuid()}==0&&unsafe{libc::geteuid()}==0,"runtime original service read owner changed");
-        storage::floor(self.own.pid,0)?;self.service_image.matches_process(&self.own)?;
-        for(index,name,kind)in [(5,"user",libc::CLONE_NEWUSER),(6,"mnt",libc::CLONE_NEWNS),(7,"pid",libc::CLONE_NEWPID)]{
-            ensure!(storage::id(&File::from(self.raw[index].try_clone()?))?==storage::id(&storage::namespace(None,name,kind)?)?,"runtime original backing namespace changed");}
-        ensure!(self.boot==storage::proc_bytes("/proc/sys/kernel/random/boot_id",64)?,"runtime original backing boot changed");Ok(())
-    }
-    fn current(&self)->Result<()>{self.backing_current()?;self.root.live()?;self.engine.live()?;self.own.live()?;ensure!(self.own.pid==std::process::id()&&unsafe{libc::geteuid()}==0&&unsafe{libc::getuid()}==0,"runtime issuer moved from original Root service");
-        storage::floor(self.root.pid,0)?;storage::floor(self.own.pid,0)?;storage::floor(self.engine.pid,1500)?;
-        ensure!(fs::metadata(format!("/proc/{}",self.engine.pid))?.uid()==0,"runtime original engine lost protected descriptor floor");
-        ensure!(original_stat(self.own.pid)?.0==self.root.pid&&original_stat(self.engine.pid)?.0==self.root.pid,"runtime original launcher parentage differs");
-        self.root_image.matches_process(&self.root)?;self.root_image.matches_fd(&self.raw[3])?;self.engine_image.matches_process(&self.engine)?;self.service_image.matches_process(&self.own)?;
-        for process in [&self.root,&self.own,&self.engine]{wire::require_initial_id_maps(process.pid)?;}
-        for(index,name,kind)in [(5,"user",libc::CLONE_NEWUSER),(6,"mnt",libc::CLONE_NEWNS),(7,"pid",libc::CLONE_NEWPID)]{
-            let held=File::from(self.raw[index].try_clone()?);ensure!(unsafe{libc::ioctl(held.as_raw_fd(),libc::NS_GET_NSTYPE as libc::c_ulong)}==kind,"runtime original namespace FD type differs");
-            for pid in [self.root.pid,self.own.pid,self.engine.pid,1]{ensure!(storage::id(&held)?==storage::id(&storage::namespace(Some(pid),name,kind)?)?,"runtime issuer left original global namespace");}}
-        ensure!(self.boot==storage::proc_bytes("/proc/sys/kernel/random/boot_id",64)?,"runtime original boot changed");Ok(())
+#[derive(Clone, Copy, Debug)]
+enum BootstrapCheck {
+    InheritedDescriptors,
+    ParentEndpoint,
+    EngineEndpoint,
+    RootProcess,
+    ServiceProcess,
+    EngineProcess,
+    LauncherImage,
+    SealedData,
+    Boot,
+    EngineImage,
+    ServiceImage,
+    BackingProcess,
+    BackingFloor,
+    BackingImage,
+    BackingNamespace,
+    BackingBoot,
+    ProcessLiveness,
+    CredentialFloor,
+    EngineProtectedProc,
+    LauncherParentage,
+    ProcessImages,
+    RootIdMaps,
+    ServiceIdMaps,
+    EngineIdMaps,
+    UserNamespace,
+    MountNamespace,
+    PidNamespace,
+}
+impl std::fmt::Display for BootstrapCheck {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{self:?}")
     }
 }
+impl std::error::Error for BootstrapCheck {}
+// A typed context is the only error-chain content the public diagnostic reads.
+// Display/Debug for the underlying error (including private paths) is never used.
+pub(crate) fn bootstrap_failure_check(error: &anyhow::Error) -> Option<String> {
+    error
+        .downcast_ref::<BootstrapCheck>()
+        .map(|check| format!("{check:?}"))
+}
+fn proof_check<T>(check: BootstrapCheck, operation: impl FnOnce() -> Result<T>) -> Result<T> {
+    operation().context(check)
+}
+impl RuntimeBootstrapProof {
+    fn capture(raw: Vec<OwnedFd>, engine: &Process) -> Result<Self> {
+        proof_check(BootstrapCheck::InheritedDescriptors, || {
+            ensure!(raw.len() == 8, "runtime inherited bootstrap set incomplete");
+            Ok(())
+        })?;
+        // raw: parent channel, engine channel, launcher pidfd/exe, sealed data,
+        // actual USER/MNT/PID namespace FDs. No serialized FD reconstruction.
+        let root = proof_check(BootstrapCheck::RootProcess, || {
+            Process::capture(raw[2].try_clone()?)
+        })?;
+        let own = proof_check(BootstrapCheck::ServiceProcess, Process::current)?;
+        let engine = proof_check(BootstrapCheck::EngineProcess, || {
+            Process::capture(engine.fd().try_clone()?)
+        })?;
+        let root_image = proof_check(BootstrapCheck::LauncherImage, || {
+            let image = Image::capture(Path::new(LAUNCHER_PATH))?;
+            image.matches_fd(&raw[3])?;
+            Ok(image)
+        })?;
+        let value = Self {
+            data: proof_check(BootstrapCheck::SealedData, || read_data(&raw[4]))?,
+            boot: proof_check(BootstrapCheck::Boot, || {
+                storage::proc_bytes("/proc/sys/kernel/random/boot_id", 64)
+            })?,
+            raw,
+            root,
+            engine,
+            own,
+            root_image,
+            engine_image: proof_check(BootstrapCheck::EngineImage, || {
+                Image::capture(Path::new(ENGINE_PATH))
+            })?,
+            service_image: proof_check(BootstrapCheck::ServiceImage, || {
+                Image::capture(Path::new(SERVICE_PATH))
+            })?,
+        };
+        value.current()?;
+        Ok(value)
+    }
+    fn backing_current(&self) -> Result<()> {
+        proof_check(BootstrapCheck::BackingProcess, || {
+            self.own.live()?;
+            ensure!(
+                self.own.pid == std::process::id()
+                    && unsafe { libc::getuid() } == 0
+                    && unsafe { libc::geteuid() } == 0,
+                "runtime original service read owner changed"
+            );
+            Ok(())
+        })?;
+        proof_check(BootstrapCheck::BackingFloor, || {
+            storage::floor(self.own.pid, 0)
+        })?;
+        proof_check(BootstrapCheck::BackingImage, || {
+            self.service_image.matches_process(&self.own)
+        })?;
+        proof_check(BootstrapCheck::BackingNamespace, || {
+            for (index, name, kind) in [
+                (5, "user", libc::CLONE_NEWUSER),
+                (6, "mnt", libc::CLONE_NEWNS),
+                (7, "pid", libc::CLONE_NEWPID),
+            ] {
+                ensure!(
+                    storage::id(&File::from(self.raw[index].try_clone()?))?
+                        == storage::id(&storage::namespace(None, name, kind)?)?,
+                    "runtime original backing namespace changed"
+                );
+            }
+            Ok(())
+        })?;
+        proof_check(BootstrapCheck::BackingBoot, || {
+            ensure!(
+                self.boot == storage::proc_bytes("/proc/sys/kernel/random/boot_id", 64)?,
+                "runtime original backing boot changed"
+            );
+            Ok(())
+        })
+    }
+    fn current(&self) -> Result<()> {
+        self.backing_current()?;
+        proof_check(BootstrapCheck::ProcessLiveness, || {
+            self.root.live()?;
+            self.engine.live()?;
+            self.own.live()?;
+            ensure!(
+                self.own.pid == std::process::id()
+                    && unsafe { libc::geteuid() } == 0
+                    && unsafe { libc::getuid() } == 0,
+                "runtime issuer moved from original Root service"
+            );
+            Ok(())
+        })?;
+        proof_check(BootstrapCheck::CredentialFloor, || {
+            storage::floor(self.root.pid, 0)?;
+            storage::floor(self.own.pid, 0)?;
+            storage::floor(self.engine.pid, 1500)
+        })?;
+        proof_check(BootstrapCheck::EngineProtectedProc, || {
+            ensure!(
+                fs::metadata(format!("/proc/{}", self.engine.pid))?.uid() == 0,
+                "runtime original engine lost protected descriptor floor"
+            );
+            Ok(())
+        })?;
+        proof_check(BootstrapCheck::LauncherParentage, || {
+            ensure!(
+                original_stat(self.own.pid)?.0 == self.root.pid
+                    && original_stat(self.engine.pid)?.0 == self.root.pid,
+                "runtime original launcher parentage differs"
+            );
+            Ok(())
+        })?;
+        proof_check(BootstrapCheck::ProcessImages, || {
+            self.root_image.matches_process(&self.root)?;
+            self.root_image.matches_fd(&self.raw[3])?;
+            self.engine_image.matches_process(&self.engine)?;
+            self.service_image.matches_process(&self.own)
+        })?;
+        for (process, check) in [
+            (&self.root, BootstrapCheck::RootIdMaps),
+            (&self.own, BootstrapCheck::ServiceIdMaps),
+            (&self.engine, BootstrapCheck::EngineIdMaps),
+        ] {
+            proof_check(check, || wire::require_initial_id_maps(process.pid))?;
+        }
+        for (index, name, kind, check) in [
+            (
+                5,
+                "user",
+                libc::CLONE_NEWUSER,
+                BootstrapCheck::UserNamespace,
+            ),
+            (6, "mnt", libc::CLONE_NEWNS, BootstrapCheck::MountNamespace),
+            (7, "pid", libc::CLONE_NEWPID, BootstrapCheck::PidNamespace),
+        ] {
+            proof_check(check, || {
+                let held = File::from(self.raw[index].try_clone()?);
+                ensure!(
+                    unsafe { libc::ioctl(held.as_raw_fd(), libc::NS_GET_NSTYPE as libc::c_ulong) }
+                        == kind,
+                    "runtime original namespace FD type differs"
+                );
+                for pid in [self.root.pid, self.own.pid, self.engine.pid, 1] {
+                    ensure!(
+                        storage::id(&held)?
+                            == storage::id(&storage::namespace(Some(pid), name, kind)?)?,
+                        "runtime issuer left original global namespace"
+                    );
+                }
+                Ok(())
+            })?;
+        }
+        proof_check(BootstrapCheck::Boot, || {
+            ensure!(
+                self.boot == storage::proc_bytes("/proc/sys/kernel/random/boot_id", 64)?,
+                "runtime original boot changed"
+            );
+            Ok(())
+        })
+    }
+}
+
 struct RuntimeReadAdmission {proof:Arc<RuntimeBootstrapProof>,config:File,config_stamp:(u64,u64,u64,u32,i64,i64),config_sha:String,registration:CompletedRuntimeRegistration,closed:AtomicBool,reads_closed:AtomicBool}
 impl RuntimeReadAdmission {
     fn current(&self)->Result<()>{ensure!(!self.closed.load(Ordering::Acquire),"runtime image admission closed");self.proof.current()?;
@@ -314,8 +496,10 @@ impl RootRuntimeService {
         let s=out.as_mut().unwrap();ensure!(captured.take_complete_into_retaining(&mut s.raw)?,"runtime complete entry snapshot absent");
         // Validate ONLY the owned entry snapshot against the actual constructed
         // service/engine. Never inspect numeric slots after allocation.
-        s.parent=Some(RuntimeEndpoint::capture(s.raw[0].try_clone()?)?);s.engine=Some(RuntimeEndpoint::capture(s.raw[1].try_clone()?)?);
-        s.proof=Some(Arc::new(RuntimeBootstrapProof::capture(s.raw.iter().map(|f|f.try_clone()).collect::<io::Result<_>>()?,engine)?));Ok(())
+        s.parent=Some(proof_check(BootstrapCheck::ParentEndpoint,||RuntimeEndpoint::capture(s.raw[0].try_clone()?))?);
+        s.engine=Some(proof_check(BootstrapCheck::EngineEndpoint,||RuntimeEndpoint::capture(s.raw[1].try_clone()?))?);
+        let raw=proof_check(BootstrapCheck::InheritedDescriptors,||Ok(s.raw.iter().map(|f|f.try_clone()).collect::<io::Result<_>>()?))?;
+        s.proof=Some(Arc::new(RuntimeBootstrapProof::capture(raw,engine)?));Ok(())
     }
     pub(crate) fn close_admission(&mut self){self.failed=true;if let Some(owner)=&self.owner{owner.close_admission()}}
     pub(crate) fn poll_retaining(&mut self)->Result<bool>{ensure!(!self.failed,"runtime original service admission quarantined");let result=self.poll_inner();if result.is_err(){self.close_admission()}result}
@@ -474,3 +658,35 @@ mod tests;
 #[cfg(test)]
 #[path="root_runtime_inherited_tests.rs"]
 mod inherited_tests;
+
+#[cfg(test)]
+mod bootstrap_diagnostic_tests {
+    use super::*;
+
+    #[test]
+    fn bootstrap_check_exposes_only_typed_fixed_label() {
+        let error = proof_check(BootstrapCheck::EngineIdMaps, || -> Result<()> {
+            Err(std::io::Error::from_raw_os_error(libc::EACCES))
+                .context("private-config-and-credential")
+        })
+        .unwrap_err()
+        .context("private-outer-path");
+        assert_eq!(
+            bootstrap_failure_check(&error).as_deref(),
+            Some("EngineIdMaps")
+        );
+        assert_eq!(
+            error
+                .chain()
+                .find_map(|cause| cause.downcast_ref::<std::io::Error>())
+                .unwrap()
+                .raw_os_error(),
+            Some(libc::EACCES)
+        );
+        assert!(
+            bootstrap_failure_check(&anyhow::anyhow!("EngineIdMaps private credential")).is_none()
+        );
+        assert_eq!(proof_check(BootstrapCheck::Boot, || Ok(7)).unwrap(), 7);
+    }
+}
+

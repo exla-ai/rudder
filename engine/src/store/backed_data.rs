@@ -55,6 +55,7 @@ fn ids(ids:&[String],bindings:&BTreeMap<String,BakedInputsBindingData>)->Result<
 }
 pub(crate) fn validate_retention(state:&RetentionState)->Result<()> {
     super::environment_dependency_data::validate_retention(state)?;
+    super::source_dependency_data::validate_retention(state)?;
     let Some(data)=&state.backed_retention else{return Ok(())};
     ensure!(matches!(state.format_version,1|2)&&data.format_version==1&&data.bindings.len()<=MAX_BACKINGS
         &&data.pins.len()<=MAX_BACKED_PINS&&data.holds.len()<=MAX_BACKED_HOLDS,"backed retention DATA profile");

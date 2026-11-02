@@ -266,6 +266,9 @@ fn finish_engine_floor(policy:&mut Option<PrivilegeDropPolicy>)->Result<()> {
 }
 fn mapped_command(path:&str,args:&[&str],engine_bridge:bool,mapping:&[(&OwnedFd,i32)])->Result<(Command,Vec<OwnedFd>)> {
     let mut command=Command::new(path);command.args(args).env_clear().current_dir("/").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    // Only the fixed Root service emits closed diagnostic labels. Its binary
+    // also replaces panic/error text with fixed markers; native/Node stay private.
+    if path==SERVICE_PATH&&!engine_bridge {command.stderr(Stdio::inherit());}
     let mut keep=Vec::new();let mut raw=Vec::new();let mut targets=std::collections::BTreeSet::new();
     for (fd,target) in mapping {ensure!((3..=if path==SERVICE_PATH&&!engine_bridge{12}else{7}).contains(target) && targets.insert(*target),"machine inherited descriptor mapping invalid");
         let duplicate=unsafe {libc::fcntl(fd.as_raw_fd(),libc::F_DUPFD_CLOEXEC,20)};ensure!(duplicate>=20,"machine inherited descriptor duplication failed");
@@ -380,6 +383,22 @@ fn try_observation_write(fd:&OwnedFd,bytes:&[u8])->Result<StartupObservationDeli
 
 #[derive(Clone,Copy,PartialEq,Eq)]
 enum Stage { PrepareHost, SpawnEngine, WaitEngine, SpawnService, SendService, WaitClient, WaitHostServing, Established, Quarantined }
+impl Stage {
+    fn diagnostic_label(self) -> &'static str {
+        match self {
+            Self::PrepareHost => "prepare_host",
+            Self::SpawnEngine => "spawn_engine",
+            Self::WaitEngine => "wait_engine",
+            Self::SpawnService => "spawn_service",
+            Self::SendService => "send_service",
+            Self::WaitClient => "wait_client",
+            Self::WaitHostServing => "wait_host_serving",
+            Self::Established => "established",
+            Self::Quarantined => "quarantined",
+        }
+    }
+}
+
 /// Actual original machine process/FD/image custody. No Clone/Serde, no Drop
 /// cleanup. Keep outside catch_unwind and retain after every uncertain result.
 #[must_use="retain actual children and descriptors through explicit existing-owner drain or VM teardown"]
@@ -464,9 +483,11 @@ impl MachineRootBootstrap {
         let result=std::panic::catch_unwind(std::panic::AssertUnwindSafe(||self.start_inner()));
         match result {
             Ok(Ok(()))=>Ok(()),
-            Ok(Err(_))=>{if !self.retryable_spawn_error {self.quarantine();}
+            Ok(Err(error))=>{storage::emit_retained_failure("machine_root",self.stage.diagnostic_label(),Some(&error));
+                if !self.retryable_spawn_error {self.quarantine();}
                 Err(anyhow::anyhow!("machine startup failed; original carriers retained"))}
-            Err(panic)=>{self.panic=Some(panic);self.quarantine();Err(anyhow::anyhow!("machine startup panicked; original carriers retained"))}
+            Err(panic)=>{storage::emit_retained_failure("machine_root",self.stage.diagnostic_label(),None);
+                self.panic=Some(panic);self.quarantine();Err(anyhow::anyhow!("machine startup panicked; original carriers retained"))}
         }
     }
     fn start_inner(&mut self)->Result<()> {

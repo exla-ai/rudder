@@ -28,6 +28,7 @@ mod image_import;
 pub(crate) mod preparation;
 pub mod backed_data;
 pub mod environment_dependency_data;
+pub mod source_dependency_data;
 #[cfg(target_os = "linux")]
 pub mod backed_inputs;
 #[cfg(target_os = "linux")]
@@ -220,6 +221,9 @@ pub struct RetentionState {
     /// this field; DATA never reconstructs actual nested owners or their ACKs.
     #[serde(default,skip_serializing_if="Option::is_none")]
     pub environment_dependencies:Option<environment_dependency_data::EnvironmentDependenciesData>,
+    /// Explicit sibling source dependencies. Saved DATA never reattaches owners.
+    #[serde(default,skip_serializing_if="Option::is_none")]
+    pub source_dependencies:Option<source_dependency_data::SourceDependenciesData>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -283,6 +287,7 @@ impl LocalStore {
                 image_import_holds: BTreeMap::new(),
                 backed_retention: None,
                 environment_dependencies:None,
+                source_dependencies:None,
             })?;
         }
         sync_directory(&store.root)?;
@@ -667,7 +672,8 @@ impl LocalStore {
         let _lock = self.lock()?;
         let mut state = self.read_state()?;
         ensure!(!state.backed_retention.as_ref().is_some_and(|data|data.pins.contains_key(pin))
-            &&!state.environment_dependencies.as_ref().is_some_and(|data|data.pins.contains_key(pin)||data.holds.values().any(|h|h.pin==pin)),
+            &&!state.environment_dependencies.as_ref().is_some_and(|data|data.pins.contains_key(pin)||data.holds.values().any(|h|h.pin==pin))
+            &&!state.source_dependencies.as_ref().is_some_and(|data|data.pins.contains_key(pin)||data.holds.values().any(|h|h.pin==pin)),
             "ordinary unpin cannot release backed/dependent retention");
         if state.pins.remove(pin).is_some() {
             self.commit_state(&mut state)?;
@@ -683,7 +689,7 @@ impl LocalStore {
     pub fn gc(&self, grace: Duration) -> Result<GcReport> {
         let _lock = self.lock()?;
         let state = self.read_state()?;
-        ensure!(state.backed_retention.is_none()&&state.environment_dependencies.is_none(),
+        ensure!(state.backed_retention.is_none()&&state.environment_dependencies.is_none()&&state.source_dependencies.is_none(),
             "backed retention requires actual current owners and bounded gc_backed_retaining");
         let mut report = GcReport {
             generation: state.generation,

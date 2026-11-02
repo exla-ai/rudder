@@ -10,7 +10,7 @@ fn local_graph(io:&mut StoreIo,state:&RetentionState,root:&ObjectRef,environment
     while let Some(r)=pending.pop(){io.current()?;if r==boundary{boundary_seen=true;continue;}if !graph.members.insert(r.clone()){continue;}
         ensure!(graph.members.len()as u64<=data::MAX_LOCAL_OBJECTS,"dependent local object count bound");
         let maximum=bound(&r,&[])?;graph.bytes=graph.bytes.checked_add(r.size_bytes).context("dependent local bytes overflow")?;ensure!(graph.bytes<=data::MAX_LOCAL_BYTES,"dependent local source bytes bound");
-        let raw=io.read_object(&r,maximum)?.context("dependent local graph object absent; no backing fallback outside exact Environment boundary")?;
+        let raw=io.read_required_object(&r,maximum)?;
         if r.kind!=ObjectKind::Blob{pending.extend(metadata_references(r.kind,&raw)?);ensure!(pending.len()<=100_000*4,"dependent local frontier bound");graph.metadata.insert(r,raw);}
     }
     ensure!(boundary_seen,"dependent RunnableRoot has no exact acknowledged Environment edge");
@@ -47,7 +47,7 @@ fn local_graph(io:&mut StoreIo,state:&RetentionState,root:&ObjectRef,environment
 }
 #[derive(Clone,Copy,Debug,PartialEq,Eq)]pub enum DependentOwnerOrigin{OriginalPublication,ExplicitReattachment}
 pub struct EnvironmentDependentPinOwner{store:LocalStore,custody:Arc<StoreCustody>,pin:String,record:DependentPinData,
-    environment:Arc<RetainedEnvironmentSubgraph>,local:Arc<BTreeSet<ObjectRef>>,origin:DependentOwnerOrigin}
+    environment:Arc<RetainedEnvironmentSubgraph>,local:Arc<BTreeSet<ObjectRef>>,source_failed:AtomicBool,origin:DependentOwnerOrigin}
 impl EnvironmentDependentPinOwner{
     pub fn root_data(&self)->&ObjectRef{&self.record.root}
     pub fn record_data(&self)->&DependentPinData{&self.record}
@@ -55,9 +55,12 @@ impl EnvironmentDependentPinOwner{
     pub fn origin_data(&self)->DependentOwnerOrigin{self.origin}
     pub fn pin_name_data(&self)->&str{&self.pin}
     pub fn store_root_data(&self)->&std::path::Path{self.store.root()}
+    pub(super) fn local_store(&self)->&LocalStore{&self.store}
+    pub(super) fn local_members(&self)->&Arc<BTreeSet<ObjectRef>>{&self.local}
+    pub(super) fn fence_local_source(&self){self.source_failed.store(true,Ordering::Release);}
     pub fn contains_data(&self,r:&ObjectRef,original:&dyn ImageImportFence)->Result<bool>{Ok(self.local.contains(r)||self.environment.contains(r,original)?)}
     pub fn matches_record_data(&self,state:&RetentionState,pin:&str)->bool{self.pin==pin&&state.environment_dependencies.as_ref().and_then(|d|d.pins.get(pin))==Some(&self.record)}
-    pub(super) fn check(&self,io:&StoreIo,state:&RetentionState)->Result<()> {io.current()?;ensure!(io.store.root==self.store.root,"dependent actual local store differs");self.custody.current(io)?;
+    pub(super) fn check(&self,io:&StoreIo,state:&RetentionState)->Result<()> {io.current()?;ensure!(!self.source_failed.load(Ordering::Acquire),"original local source physically fenced");ensure!(io.store.root==self.store.root,"dependent actual local store differs");self.custody.current(io)?;
         let data=state.environment_dependencies.as_ref().context("dependent original record absent")?;ensure!(data.pins.get(&self.pin)==Some(&self.record),"dependent original pin changed");
         self.environment.check_locked(io,state)?;let binding=self.environment.binding_data()?;ensure!(binding.id_data()?==self.record.environment_id&&data.environments.get(&self.record.environment_id)==Some(&binding),"dependent original Environment binding differs");io.current()?;Ok(())}
 }
@@ -78,6 +81,11 @@ impl EnvironmentDependentPublication{
         self.environment.check_versions_retaining(&mut self.before,self.io.original.clone())?;self.io.acquire(true)?;let mut state=self.io.read_state()?;self.environment.check_locked(&self.io,&state)?;
         ensure!(state.staging.get(&self.stage).is_some_and(|s|s.expires_at_ms>now_ms().unwrap_or(u64::MAX)),"dependent publication live staging absent");
         ensure!(!state.pins.contains_key(&self.pin)&&!state.backed_retention.as_ref().is_some_and(|p|p.pins.contains_key(&self.pin)),"dependent root conflicts with existing complete-local/backed pin");
+        let source_pins=state.source_dependencies.as_ref().map_or(0,|d|d.pins.len());
+        let source_holds=state.source_dependencies.as_ref().map_or(0,|d|d.holds.len());
+        ensure!(!state.source_dependencies.as_ref().is_some_and(|d|d.pins.contains_key(&self.pin)||d.holds.values().any(|h|h.pin==self.pin)),"dependent pin conflicts with source overlay/unknown intent");
+        ensure!(state.environment_dependencies.as_ref().map_or(0,|d|d.pins.len())+source_pins<data::MAX_DEPENDENT_PINS
+            &&state.environment_dependencies.as_ref().map_or(0,|d|d.holds.len())+source_holds<data::MAX_DEPENDENT_HOLDS,"combined source dependency capacity reached");
         let data=state.environment_dependencies.get_or_insert_with(EnvironmentDependenciesData::default);ensure!(data.pins.len()<data::MAX_DEPENDENT_PINS&&data.holds.len()<data::MAX_DEPENDENT_HOLDS
             &&!data.pins.contains_key(&self.pin)&&!data.holds.values().any(|h|h.pin==self.pin),"dependent root original/unknown publication already exists or capacity reached");
         if let Some(old)=data.environments.get(&id){ensure!(old==&binding,"Environment dependency binding collision");}else{data.environments.insert(id.clone(),binding);}
@@ -92,7 +100,7 @@ impl EnvironmentDependentPublication{
         self.record=Some(record.clone());let data=state.environment_dependencies.as_mut().unwrap();data.pins.insert(self.pin.clone(),record.clone());data.holds.remove(&self.operation);state.staging.remove(&self.stage);
         #[cfg(test)]if self.fault==Some(TestPoint::FinalRename){self.io.fail_after_rename=true;}
         state=self.io.write_state(state)?;#[cfg(test)]if self.fault==Some(TestPoint::AfterCommit){bail!("injected dependent late ACK")}
-        self.ack=Some(Arc::new(EnvironmentDependentPinOwner{store:self.io.store.clone(),custody:StoreCustody::capture(&self.io)?,pin:self.pin.clone(),record,environment:self.environment.clone(),local:Arc::new(graph.members),origin:DependentOwnerOrigin::OriginalPublication}));
+        self.ack=Some(Arc::new(EnvironmentDependentPinOwner{store:self.io.store.clone(),custody:StoreCustody::capture(&self.io)?,pin:self.pin.clone(),record,environment:self.environment.clone(),local:Arc::new(graph.members),source_failed:AtomicBool::new(false),origin:DependentOwnerOrigin::OriginalPublication}));
         self.ack.as_ref().unwrap().check(&self.io,&state)?;self.io.original.remaining()?;self.io.release_known()?;self.ready=true;Ok(())
     }
 }
@@ -102,8 +110,11 @@ impl EnvironmentDependentPinOwner{
         *out=Some(EnvironmentDependentRead{owner:self.clone(),io:StoreIo::staged(self.store.clone(),original),reference,bytes:None,attempted:false,ready:false});out.as_mut().unwrap().run()}
 }
 impl EnvironmentDependentRead{
-    fn run(&mut self)->Result<()> {ensure!(!self.attempted,"original dependent read cannot retry");self.attempted=true;self.io.acquire(false)?;let state=self.io.read_state()?;self.owner.check(&self.io,&state)?;
-        self.bytes=Some(if self.owner.local.contains(&self.reference){self.io.read_object(&self.reference,bound(&self.reference,&[])?)?.context("recorded dependent local object absent")?}
+    fn run(&mut self)->Result<()> {ensure!(!self.attempted,"original dependent read cannot retry");self.attempted=true;let state=super::source::source_state(&mut self.io,&self.owner,false)?;self.owner.check(&self.io,&state)?;
+        self.bytes=Some(if self.owner.local.contains(&self.reference){
+            let result=self.io.read_required_object(&self.reference,bound(&self.reference,&[])?);
+            if result.as_ref().err().is_some_and(observed_failure){self.owner.fence_local_source();}
+            result?}
             else{ensure!(self.owner.environment.contains(&self.reference,&*self.io.original)?,"read outside actual dependent graph");parent_bytes(&mut self.io,&state,self.owner.environment.parent(),&self.reference)?});
         self.owner.check(&self.io,&state)?;self.io.original.remaining()?;self.io.release_known()?;self.ready=true;Ok(())}
     pub fn verified_bytes(&self)->Result<&[u8]>{ensure!(self.ready,"original dependent read incomplete/unknown");self.bytes.as_deref().context("actual dependent bytes absent")}
@@ -127,7 +138,7 @@ impl EnvironmentDependentReattachment{
         let shards=self.io.shards.values().map(|(f,_)|f.try_clone()).collect::<std::io::Result<Vec<_>>>()?;for shard in shards{self.io.sync_directory(shard)?;}
         self.io.sync_directory(self.io.objects.as_ref().unwrap().try_clone()?)?;self.io.sync_directory(self.io.tmp.as_ref().unwrap().try_clone()?)?;
         self.environment.check_versions_retaining(&mut self.after,self.io.original.clone())?;
-        self.owner=Some(Arc::new(EnvironmentDependentPinOwner{store:self.io.store.clone(),custody:StoreCustody::capture(&self.io)?,pin:self.pin.clone(),record,environment:self.environment.clone(),local:Arc::new(graph.members),origin:DependentOwnerOrigin::ExplicitReattachment}));
+        self.owner=Some(Arc::new(EnvironmentDependentPinOwner{store:self.io.store.clone(),custody:StoreCustody::capture(&self.io)?,pin:self.pin.clone(),record,environment:self.environment.clone(),local:Arc::new(graph.members),source_failed:AtomicBool::new(false),origin:DependentOwnerOrigin::ExplicitReattachment}));
         self.owner.as_ref().unwrap().check(&self.io,&state)?;self.io.original.remaining()?;self.io.release_known()?;self.ready=true;Ok(())}
 }
 
@@ -137,7 +148,8 @@ pub(in crate::store::backed_retention) fn gc_check(owners:&[Arc<EnvironmentDepen
     if let Some(d)=&state.environment_dependencies{ensure!(d.holds.is_empty(),"unknown dependent publication blocks GC");}Ok(())
 }
 pub(in crate::store::backed_retention) fn gc_local(owners:&[Arc<EnvironmentDependentPinOwner>],io:&mut StoreIo,state:&RetentionState)->Result<BTreeSet<String>> {let mut retained=BTreeSet::new();
-    for owner in owners{owner.check(io,state)?;let graph=local_graph(io,state,&owner.record.root,&owner.environment)?;
+    for owner in owners{owner.check(io,state)?;let result=local_graph(io,state,&owner.record.root,&owner.environment);
+        if result.as_ref().err().is_some_and(observed_failure){owner.fence_local_source();}let graph=result?;
         ensure!(local_digest(&graph)?==owner.record.local_graph_sha256&&graph.members.len()as u64==owner.record.local_objects&&graph.bytes==owner.record.local_bytes,"dependent GC local graph changed");
         retained.extend(graph.members.into_iter().map(|r|r.digest));}Ok(retained)
 }

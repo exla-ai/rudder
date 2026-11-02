@@ -8,6 +8,34 @@ use std::{ffi::CString,os::fd::{AsRawFd,FromRawFd},sync::Arc};
 const RETENTION:u64=16*1024*1024;
 const REFS:usize=65_536;
 const WORK:u64=128*1024*1024;
+// Actual physical observations are tagged before any later clock callback.
+// Clock cancellation is never classified by re-reading its remaining time.
+#[derive(Debug)]struct ObservedObjectFailure(anyhow::Error);
+impl std::fmt::Display for ObservedObjectFailure{fn fmt(&self,f:&mut std::fmt::Formatter<'_>)->std::fmt::Result{write!(f,"{}",self.0)}}
+impl std::error::Error for ObservedObjectFailure{fn source(&self)->Option<&(dyn std::error::Error+'static)>{Some(self.0.as_ref())}}
+#[cfg(test)]thread_local!{static PHYSICAL_FAILURE_HOOK:std::cell::RefCell<Option<Box<dyn FnOnce()>>>=std::cell::RefCell::new(None);}
+// Rc's marker makes the guard !Send/!Sync: cleanup must occur on the thread
+// where this one-shot hook was installed, including unwinding test paths.
+#[cfg(test)]pub(crate) struct PhysicalFailureHookGuard(std::marker::PhantomData<std::rc::Rc<()>>);
+#[cfg(test)]impl Drop for PhysicalFailureHookGuard{fn drop(&mut self){PHYSICAL_FAILURE_HOOK.with(|slot|{slot.borrow_mut().take();});}}
+#[cfg(test)]pub(crate) fn physical_failure_hook_for_test(hook:Box<dyn FnOnce()>)->PhysicalFailureHookGuard{
+    PHYSICAL_FAILURE_HOOK.with(|slot|{let mut slot=slot.borrow_mut();assert!(slot.is_none(),"physical failure hook already installed on this test thread");*slot=Some(hook);});
+    PhysicalFailureHookGuard(std::marker::PhantomData)
+}
+fn observed<T>(result:Result<T>)->Result<T>{result.map_err(|error|{
+    // Failed syscalls such as EMFILE/EIO do not by themselves establish that
+    // immutable data changed. Only an observed namespace absence/type/loop or
+    // a completed in-memory validation failure can physically fence an owner.
+    if error.chain().filter_map(|cause|cause.downcast_ref::<std::io::Error>()).any(|io|
+        io.kind()!=std::io::ErrorKind::NotFound&&!matches!(io.raw_os_error(),Some(libc::ENOTDIR)|Some(libc::ELOOP))){return error;}
+    let tagged:anyhow::Error=ObservedObjectFailure(error).into();
+    // Test cancellation exactly after the physical observation is tagged,
+    // before a caller can make a later remaining-time query.
+    #[cfg(test)]PHYSICAL_FAILURE_HOOK.with(|slot|{let hook=slot.borrow_mut().take();if let Some(hook)=hook{hook();}});
+    tagged
+})}
+fn observed_failure(error:&anyhow::Error)->bool{error.chain().any(|cause|cause.is::<ObservedObjectFailure>())}
+
 
 #[derive(Clone,Debug,PartialEq,Eq)]
 struct Identity {dev:u64,ino:u64,mode:u32,uid:u32,gid:u32}
@@ -23,29 +51,35 @@ fn at(parent:&File,name:&str,directory:bool)->std::io::Result<File>{
 }
 fn directory(file:&File)->Result<Identity>{let id=identity(file)?;ensure!(id.mode&libc::S_IFMT==libc::S_IFDIR&&id.uid==unsafe{libc::geteuid()}&&id.mode&0o022==0,"backed local directory not current private owner");Ok(id)}
 struct StoreIo {store:LocalStore,original:Arc<dyn ImageImportFence>,root:Option<File>,objects:Option<File>,tmp:Option<File>,gc:Option<File>,
+    actual_local_hash_reads:u64,actual_local_hash_bytes:u64,actual_local_object_syncs:u64,actual_local_object_sync_bytes:u64,
     ids:Option<[Identity;4]>,locked:bool,shards:BTreeMap<String,(File,Identity)>,pending:Option<File>,pending_name:Option<String>,partial:Vec<u8>,
-    directory_io:Option<File>,intent:Option<RetentionState>,durable_reads:bool,foreign:Option<VerifiedBakedRead>,
-    #[cfg(test)] fail_after_rename:bool}
+    directory_io:Option<File>,intent:Option<RetentionState>,durable_reads:bool,foreign:Option<VerifiedBakedRead>,required_object:bool,
+    #[cfg(test)] object_read_bytes:BTreeMap<ObjectRef,u64>,#[cfg(test)] object_syncs:BTreeMap<ObjectRef,u64>,
+    #[cfg(test)] fail_after_rename:bool,#[cfg(test)]capture_open_error:Option<i32>}
 impl StoreIo {
     fn staged(store:LocalStore,original:Arc<dyn ImageImportFence>)->Self{Self{store,original,root:None,objects:None,tmp:None,gc:None,ids:None,locked:false,
-        shards:BTreeMap::new(),pending:None,pending_name:None,partial:Vec::new(),directory_io:None,intent:None,durable_reads:false,foreign:None,#[cfg(test)]fail_after_rename:false}}
+        actual_local_hash_reads:0,actual_local_hash_bytes:0,actual_local_object_syncs:0,actual_local_object_sync_bytes:0,
+        shards:BTreeMap::new(),pending:None,pending_name:None,partial:Vec::new(),directory_io:None,intent:None,durable_reads:false,foreign:None,required_object:false,#[cfg(test)]object_read_bytes:BTreeMap::new(),#[cfg(test)]object_syncs:BTreeMap::new(),#[cfg(test)]fail_after_rename:false,#[cfg(test)]capture_open_error:None}}
     fn capture(&mut self)->Result<()> {
-        self.original.remaining()?;ensure!(self.root.is_none()&&self.store.root.canonicalize()?==self.store.root,"backed store capture repeated/redirected");
-        self.root=Some(OpenOptions::new().read(true).custom_flags(libc::O_DIRECTORY|libc::O_NOFOLLOW|libc::O_CLOEXEC).open(&self.store.root)?);
-        let root=directory(self.root.as_ref().unwrap())?;self.objects=Some(at(self.root.as_ref().unwrap(),"objects",true)?);let objects=directory(self.objects.as_ref().unwrap())?;
-        self.tmp=Some(at(self.root.as_ref().unwrap(),"tmp",true)?);let tmp=directory(self.tmp.as_ref().unwrap())?;self.gc=Some(at(self.root.as_ref().unwrap(),"lock",false)?);
+        self.original.remaining()?;ensure!(self.root.is_none(),"backed store capture repeated");
+        let named=observed(self.store.root.canonicalize().map_err(Into::into))?;
+        observed((||->Result<()>{ensure!(named==self.store.root,"backed store capture redirected");Ok(())})())?;
+        #[cfg(test)]if let Some(errno)=self.capture_open_error.take(){return observed(Err(std::io::Error::from_raw_os_error(errno).into()));}
+        self.root=Some(observed(OpenOptions::new().read(true).custom_flags(libc::O_DIRECTORY|libc::O_NOFOLLOW|libc::O_CLOEXEC).open(&self.store.root).map_err(Into::into))?);
+        let root=observed(directory(self.root.as_ref().unwrap()))?;self.objects=Some(observed(at(self.root.as_ref().unwrap(),"objects",true).map_err(Into::into))?);let objects=observed(directory(self.objects.as_ref().unwrap()))?;
+        self.tmp=Some(observed(at(self.root.as_ref().unwrap(),"tmp",true).map_err(Into::into))?);let tmp=observed(directory(self.tmp.as_ref().unwrap()))?;self.gc=Some(observed(at(self.root.as_ref().unwrap(),"lock",false).map_err(Into::into))?);
         let m=self.gc.as_ref().unwrap().metadata()?;let gc=identity(self.gc.as_ref().unwrap())?;
-        ensure!(m.is_file()&&m.nlink()==1&&m.len()==0&&m.uid()==unsafe{libc::geteuid()}&&m.mode()&0o022==0,"backed actual GC file unsafe");
+        observed((||->Result<()>{ensure!(m.is_file()&&m.nlink()==1&&m.len()==0&&m.uid()==unsafe{libc::geteuid()}&&m.mode()&0o022==0,"backed actual GC file unsafe");Ok(())})())?;
         self.ids=Some([root,objects,tmp,gc]);self.current()
     }
     fn current(&self)->Result<()> {
         self.original.remaining()?;let ids=self.ids.as_ref().context("backed original store capture incomplete")?;
-        ensure!(self.store.root.canonicalize()?==self.store.root,"backed original store redirects");
+        observed((||->Result<()>{ensure!(self.store.root.canonicalize()?==self.store.root,"backed original store redirects");
         let named=OpenOptions::new().read(true).custom_flags(libc::O_DIRECTORY|libc::O_NOFOLLOW|libc::O_CLOEXEC).open(&self.store.root)?;
         ensure!(directory(&named)?==ids[0]&&directory(self.root.as_ref().unwrap())?==ids[0],"backed original store replaced");
         for(name,held,id)in [("objects",self.objects.as_ref().unwrap(),&ids[1]),("tmp",self.tmp.as_ref().unwrap(),&ids[2])]{
             ensure!(directory(held)?==*id&&directory(&at(self.root.as_ref().unwrap(),name,true)?)?==*id,"backed original store child changed");}
-        ensure!(identity(self.gc.as_ref().unwrap())?==ids[3]&&identity(&at(self.root.as_ref().unwrap(),"lock",false)?)?==ids[3],"backed original GC inode changed");
+        ensure!(identity(self.gc.as_ref().unwrap())?==ids[3]&&identity(&at(self.root.as_ref().unwrap(),"lock",false)?)?==ids[3],"backed original GC inode changed");Ok(())})())?;
         self.original.remaining()?;Ok(())
     }
     fn acquire(&mut self,exclusive:bool)->Result<()> {self.capture()?;loop{self.current()?;
@@ -53,37 +87,56 @@ impl StoreIo {
         match result{Ok(())=>{self.locked=true;return self.current()},Err(e)if e.kind()==std::io::ErrorKind::WouldBlock=>std::thread::sleep(self.original.remaining()?.min(Duration::from_millis(1))),Err(e)=>return Err(e.into())}}
     }
     fn shard(&mut self,name:&str)->Result<bool>{self.current()?;if !self.shards.contains_key(name){
-        let file=match at(self.objects.as_ref().unwrap(),name,true){Ok(f)=>f,Err(e)if e.kind()==std::io::ErrorKind::NotFound=>{self.current()?;return Ok(false)},Err(e)=>return Err(e.into())};
-        let id=directory(&file)?;ensure!(self.shards.len()<256,"backed shard FD bound");self.shards.insert(name.into(),(file,id));}
-        let(file,id)=&self.shards[name];ensure!(directory(file)?==*id&&directory(&at(self.objects.as_ref().unwrap(),name,true)?)?==*id,"backed original shard changed");Ok(true)}
+        let file=match at(self.objects.as_ref().unwrap(),name,true){Ok(f)=>f,Err(e)if e.kind()==std::io::ErrorKind::NotFound=>{if self.required_object{return observed(Err(anyhow::anyhow!("required original local CAS shard absent")))}self.current()?;return Ok(false)},Err(e)=>return observed(Err(e.into()))};
+        let id=observed(directory(&file))?;ensure!(self.shards.len()<256,"backed shard FD bound");self.shards.insert(name.into(),(file,id));}
+        let(file,id)=&self.shards[name];observed((||->Result<()>{ensure!(directory(file)?==*id&&directory(&at(self.objects.as_ref().unwrap(),name,true)?)?==*id,"backed original shard changed");Ok(())})())?;Ok(true)}
     fn read_pending(&mut self,maximum:u64,immutable:bool)->Result<()> {
-        self.current()?;let file=self.pending.as_ref().context("backed actual pending file absent")?;let before=version(file)?;
+        self.current()?;let file=self.pending.as_ref().context("backed actual pending file absent")?;let before=observed((||->Result<Version>{let before=version(file)?;
         ensure!(before.id.mode&libc::S_IFMT==libc::S_IFREG&&before.id.uid==unsafe{libc::geteuid()}&&before.links==1&&before.len<=maximum
-            &&(if immutable{before.id.mode&0o7777==0o444}else{before.id.mode&0o077==0}),"backed local file type/mode/size changed");
+            &&(if immutable{before.id.mode&0o7777==0o444}else{before.id.mode&0o077==0}),"backed local file type/mode/size changed");Ok(before)})())?;
         self.partial.clear();self.partial.try_reserve_exact(usize::try_from(before.len)?)?;let mut chunk=vec![0;64*1024];
-        loop{self.original.remaining()?;let n=self.pending.as_mut().unwrap().read(&mut chunk)?;if n==0{break;}
-            ensure!((self.partial.len()as u64).checked_add(n as u64).is_some_and(|n|n<=before.len),"backed object grew");self.partial.extend_from_slice(&chunk[..n]);}
-        ensure!(self.partial.len()as u64==before.len&&version(self.pending.as_ref().unwrap())?==before,"backed object changed during read");self.current()?;
+        loop{self.original.remaining()?;let n=observed(self.pending.as_mut().unwrap().read(&mut chunk).map_err(Into::into))?;if n==0{break;}
+            observed((||->Result<()>{ensure!((self.partial.len()as u64).checked_add(n as u64).is_some_and(|n|n<=before.len),"backed object grew");Ok(())})())?;self.partial.extend_from_slice(&chunk[..n]);}
+        observed((||->Result<()>{ensure!(self.partial.len()as u64==before.len&&version(self.pending.as_ref().unwrap())?==before,"backed object changed during read");Ok(())})())?;self.current()?;
         Ok(())
     }
     fn read_state(&mut self)->Result<RetentionState>{ensure!(self.locked&&self.pending.is_none(),"backed state requires actual original GC owner");
-        self.pending=Some(at(self.root.as_ref().unwrap(),"retention.json",false)?);self.read_pending(RETENTION,false)?;
-        let envelope:StateEnvelope=serde_json::from_slice(&self.partial)?;ensure!(canonical_json(&envelope)?==self.partial,"backed retention envelope not canonical");
-        ensure!(ObjectRef::from_bytes(ObjectKind::Blob,&canonical_json(&envelope.state)?).digest==envelope.checksum,"backed retention checksum differs");
-        ensure!(matches!(envelope.state.format_version,1|2),"unsupported base retention version");if envelope.state.format_version==2{object_sets::validate_presence(&self.store)?;}
-        for(name,r)in &envelope.state.pins{validate_pin(name)?;r.validate()?;}for(id,lease)in &envelope.state.staging{ensure!(*id==lease.id&&!id.is_empty(),"backed staging DATA invalid");}
-        image_import::validate_holds(&envelope.state.image_import_holds)?;backed_data::validate_retention(&envelope.state)?;self.current()?;
-        ensure!(version(&at(self.root.as_ref().unwrap(),"retention.json",false)?)?==version(self.pending.as_ref().unwrap())?,"backed retention name changed during read");
+        self.pending=Some(observed(at(self.root.as_ref().unwrap(),"retention.json",false).map_err(Into::into))?);self.read_pending(RETENTION,false)?;
+        let envelope=observed((||->Result<StateEnvelope>{
+            let envelope:StateEnvelope=serde_json::from_slice(&self.partial)?;ensure!(canonical_json(&envelope)?==self.partial,"backed retention envelope not canonical");
+            ensure!(ObjectRef::from_bytes(ObjectKind::Blob,&canonical_json(&envelope.state)?).digest==envelope.checksum,"backed retention checksum differs");
+            ensure!(matches!(envelope.state.format_version,1|2),"unsupported base retention version");if envelope.state.format_version==2{object_sets::validate_presence(&self.store)?;}
+            for(name,r)in &envelope.state.pins{validate_pin(name)?;r.validate()?;}for(id,lease)in &envelope.state.staging{ensure!(*id==lease.id&&!id.is_empty(),"backed staging DATA invalid");}
+            image_import::validate_holds(&envelope.state.image_import_holds)?;backed_data::validate_retention(&envelope.state)?;Ok(envelope)
+        })())?;self.current()?;
+        observed((||->Result<()>{ensure!(version(&at(self.root.as_ref().unwrap(),"retention.json",false)?)?==version(self.pending.as_ref().unwrap())?,"backed retention name changed during read");Ok(())})())?;
         self.pending.take();self.partial.clear();Ok(envelope.state)
     }
     fn read_object(&mut self,r:&ObjectRef,maximum:u64)->Result<Option<Vec<u8>>>{self.current()?;ensure!(self.locked&&self.pending.is_none(),"backed object read GC/pending owner absent");r.validate()?;
         let shard=&r.digest[..2];if !self.shard(shard)?{return Ok(None)}
-        self.pending=match at(&self.shards[shard].0,&r.digest[2..],false){Ok(f)=>Some(f),Err(e)if e.kind()==std::io::ErrorKind::NotFound=>{self.current()?;return Ok(None)},Err(e)=>return Err(e.into())};
-        ensure!(self.pending.as_ref().unwrap().metadata()?.len()==r.size_bytes,"backed local object size differs");self.read_pending(maximum,true)?;
-        r.verify(&self.partial)?;metadata_references(r.kind,&self.partial)?;self.current()?;
-        if self.durable_reads{sync_file(self.pending.as_ref().unwrap())?;self.current()?;}
-        ensure!(version(&at(&self.shards[shard].0,&r.digest[2..],false)?)?==version(self.pending.as_ref().unwrap())?,"backed local object name changed");
+        self.pending=match at(&self.shards[shard].0,&r.digest[2..],false){Ok(f)=>Some(f),Err(e)if e.kind()==std::io::ErrorKind::NotFound=>{if self.required_object{return observed(Err(anyhow::anyhow!("required original local CAS object absent")))}self.current()?;return Ok(None)},Err(e)=>return observed(Err(e.into()))};
+        observed((||->Result<()>{ensure!(self.pending.as_ref().unwrap().metadata()?.len()==r.size_bytes,"backed local object size differs");Ok(())})())?;self.read_pending(maximum,true)?;
+        #[cfg(test)]{*self.object_read_bytes.entry(r.clone()).or_default()+=self.partial.len()as u64;}
+        observed(r.verify(&self.partial))?;
+        self.actual_local_hash_reads=self.actual_local_hash_reads.checked_add(1).context("actual local hash count overflow")?;
+        self.actual_local_hash_bytes=self.actual_local_hash_bytes.checked_add(self.partial.len()as u64).context("actual local hash bytes overflow")?;
+        observed(metadata_references(r.kind,&self.partial))?;self.current()?;
+        if self.durable_reads{sync_file(self.pending.as_ref().unwrap())?;
+            self.actual_local_object_syncs=self.actual_local_object_syncs.checked_add(1).context("actual local object sync count overflow")?;
+            self.actual_local_object_sync_bytes=self.actual_local_object_sync_bytes.checked_add(self.partial.len()as u64).context("actual local object sync bytes overflow")?;
+            #[cfg(test)]{*self.object_syncs.entry(r.clone()).or_default()+=1;}
+            self.current()?;}
+        observed((||->Result<()>{ensure!(version(&at(&self.shards[shard].0,&r.digest[2..],false)?)?==version(self.pending.as_ref().unwrap())?,"backed local object name changed");Ok(())})())?;
         self.pending.take();Ok(Some(std::mem::take(&mut self.partial)))}
+    // A required local obligation cannot be substituted from backing. Tag a
+    // missing name before any later clock callback; leave the original pending
+    // descriptor and required-read disposition in this carrier on failure.
+    fn read_required_object(&mut self,r:&ObjectRef,maximum:u64)->Result<Vec<u8>> {
+        ensure!(!self.required_object,"original required local read still unsettled");
+        self.required_object=true;
+        let raw=self.read_object(r,maximum)?.context("required original local object absent")?;
+        self.required_object=false;Ok(raw)
+    }
     fn sync_directory(&mut self,file:File)->Result<()> {self.directory_io=Some(file);self.current()?;sync_file(self.directory_io.as_ref().unwrap())?;self.current()?;self.directory_io.take();Ok(())}
     fn write_state(&mut self,mut state:RetentionState)->Result<RetentionState>{self.current()?;ensure!(self.locked&&self.pending.is_none(),"backed state writer not original GC owner");
         state.generation=state.generation.checked_add(1).context("backed retention generation overflow")?;backed_data::validate_retention(&state)?;
@@ -114,8 +167,10 @@ impl StoreIo {
 struct StoreCustody {files:[File;4],ids:[Identity;4]}
 impl StoreCustody {
     fn capture(io:&StoreIo)->Result<Arc<Self>> {io.current()?;let value=Arc::new(Self{files:[io.root.as_ref().unwrap().try_clone()?,io.objects.as_ref().unwrap().try_clone()?,io.tmp.as_ref().unwrap().try_clone()?,io.gc.as_ref().unwrap().try_clone()?],ids:io.ids.as_ref().unwrap().clone()});value.current(io)?;Ok(value)}
-    fn current(&self,io:&StoreIo)->Result<()> {io.current()?;ensure!(io.ids.as_ref()==Some(&self.ids),"actual retained local store descriptors differ");
-        for(index,file)in self.files.iter().enumerate(){ensure!(identity(file)?==self.ids[index],"actual retained original local descriptor changed");}io.original.remaining()?;Ok(())}
+    fn current(&self,io:&StoreIo)->Result<()> {io.current()?;
+        observed((||->Result<()>{ensure!(io.ids.as_ref()==Some(&self.ids),"actual retained local store descriptors differ");
+            for(index,file)in self.files.iter().enumerate(){ensure!(identity(file)?==self.ids[index],"actual retained original local descriptor changed");}Ok(())})())?;
+        io.original.remaining()?;Ok(())}
 }
 fn bound(r:&ObjectRef,sources:&[Arc<VerifiedBakedInputs>])->Result<u64>{r.validate()?;let maximum=match r.kind{
     ObjectKind::Blob=>if sources.iter().any(|s|s.binding_data().is_ok_and(|b|b.manifest==*r)){32*1024*1024}else{4*1024*1024},
@@ -270,11 +325,11 @@ impl BackedRead {
 struct Candidate {shard:String,leaf:String,version:Version,size:u64}
 /// Holds every actual backing, GC lock, SQLite read snapshot, partial read and
 /// unlink intent through failure. No Drop IO or implicit capacity release.
-pub struct BackedGc {io:StoreIo,owners:Vec<Arc<BackedPinOwner>>,dependency_owners:Vec<Arc<environment_dependencies::EnvironmentDependentPinOwner>>,grace:Duration,report:Option<GcReport>,object_sets:Option<RetainedObjectSetScan>,
+pub struct BackedGc {io:StoreIo,owners:Vec<Arc<BackedPinOwner>>,dependency_owners:Vec<Arc<environment_dependencies::EnvironmentDependentPinOwner>>,source_owners:Vec<Arc<environment_dependencies::SourceOverlayPinOwner>>,grace:Duration,report:Option<GcReport>,object_sets:Option<RetainedObjectSetScan>,
     candidates:Vec<Candidate>,unlink_intent:Option<usize>,attempted:bool,ready:bool,failure:Option<anyhow::Error>}
 impl LocalStore {
     pub fn gc_backed_retaining(&self,out:&mut Option<BackedGc>,owners:Vec<Arc<BackedPinOwner>>,grace:Duration,original:Arc<dyn ImageImportFence>)->Result<()> {
-        ensure!(out.is_none(),"backed GC original output occupied");*out=Some(BackedGc{io:StoreIo::staged(self.clone(),original),owners,dependency_owners:Vec::new(),grace,report:None,object_sets:None,candidates:Vec::new(),unlink_intent:None,attempted:false,ready:false,failure:None});out.as_mut().unwrap().run()
+        ensure!(out.is_none(),"backed GC original output occupied");*out=Some(BackedGc{io:StoreIo::staged(self.clone(),original),owners,dependency_owners:Vec::new(),source_owners:Vec::new(),grace,report:None,object_sets:None,candidates:Vec::new(),unlink_intent:None,attempted:false,ready:false,failure:None});out.as_mut().unwrap().run()
     }
 }
 impl BackedGc {
@@ -288,10 +343,13 @@ impl BackedGc {
         let mut names=BTreeSet::new();for owner in &self.owners{ensure!(names.insert(owner.pin.clone()),"duplicate actual backed GC owner");owner.check(&self.io,state)?;}
         if let Some(data)=&state.backed_retention{ensure!(data.holds.is_empty(),"unresolved backed original hold blocks all GC");}
         environment_dependencies::gc_check(&self.dependency_owners,&self.io,state)?;
+        environment_dependencies::source::gc_check(&self.source_owners,&self.io,state)?;
         self.io.current()
     }
     fn run_inner(&mut self)->Result<()> {
-        self.io.acquire(true)?;let state=self.io.read_state()?;self.report=Some(GcReport{generation:state.generation,retained_objects:0,removed_objects:0,removed_bytes:0,blocked_by_staging:false});self.owners_current(&state)?;
+        let initial=(||->Result<RetentionState>{self.io.acquire(true)?;self.io.read_state()})();
+        if initial.as_ref().err().is_some_and(observed_failure){environment_dependencies::source::fence_initial_io(&self.dependency_owners,&self.source_owners,self.io.store.root());}
+        let state=initial?;self.report=Some(GcReport{generation:state.generation,retained_objects:0,removed_objects:0,removed_bytes:0,blocked_by_staging:false});self.owners_current(&state)?;
         if !state.image_import_holds.is_empty()||state.staging.values().any(|l|l.expires_at_ms>now_ms().unwrap_or(0)){
             self.report.as_mut().unwrap().blocked_by_staging=true;self.io.original.remaining()?;self.io.release_known()?;self.ready=true;return Ok(())}
         let mut retained=BTreeSet::new();
@@ -303,6 +361,7 @@ impl BackedGc {
                 &&graph_digest(&current)?==owner.record.graph_sha256,"backed GC original partition differs");
             retained.extend(current.local.into_iter().map(|r|r.digest));}
         retained.extend(environment_dependencies::gc_local(&self.dependency_owners,&mut self.io,&state)?);
+        retained.extend(environment_dependencies::source::gc_local(&self.source_owners,&mut self.io,&state)?);
         if state.format_version==2 {
             RetainedObjectSetScan::capture_retaining(&mut self.object_sets,self.io.store.clone(),self.io.original.clone())?;
             for r in self.object_sets.as_ref().unwrap().references()?.to_vec(){ensure!(self.io.read_object(&r,bound(&r,&[])?)?.is_some(),"explicit retained object disappeared");retained.insert(r.digest);}

@@ -49,6 +49,31 @@ impl Drop for Fixture {
 }
 
 #[test]
+fn actual_pending_and_required_child_barriers_cannot_issue_observed_runtime_identity() {
+    let mut fixture=Fixture::new();let start=fixture.start();let helper=start.pending_on_app().unwrap();
+    let actual=start.clone();let original=fixture.original.clone();let flag=fixture.cancelled.clone();
+    thread::spawn(move||{
+        assert!(actual.observe_joined_original_off_app().is_err());
+        actual.require_image_off_app(&original,&flag).unwrap();
+        assert!(actual.observe_joined_original_off_app().is_err());
+        original.cancel();assert!(actual.observe_joined_original_off_app().is_err());
+        assert!(original.remaining().is_err());
+    }).join().unwrap();
+    assert!(fixture.child.as_mut().unwrap().try_wait().unwrap().is_none());
+    assert!(Arc::ptr_eq(&start.pending_on_app().unwrap(),&helper));
+    let state=start.state.try_lock().unwrap();assert!(state.grant.is_none()&&!state.attached&&state.barrier.is_pending());
+    drop(state);drop(start);drop(helper);fixture.finish();
+}
+
+#[test]
+fn observed_runtime_identity_refuses_same_actual_poisoned_child_carrier() {
+    let fixture=Fixture::new();let start=fixture.start();let actual=start.clone();
+    assert!(thread::spawn(move||{let _held=actual.state.lock().unwrap();panic!("actual original child carrier panic");}).join().is_err());
+    let actual=start.clone();thread::spawn(move||assert!(actual.observe_joined_original_off_app().is_err())).join().unwrap();
+    assert!(start.state.is_poisoned());drop(start);fixture.finish();
+}
+
+#[test]
 fn same_barrier_helper_and_original_cancel_survive_off_app_validation_and_alias_drop() {
     let fixture = Fixture::new(); let start = fixture.start();
     let helper = start.pending_on_app().unwrap(); let alias = Arc::clone(&start);
@@ -145,4 +170,17 @@ fn unknown_machine_policy_cannot_select_legacy_or_mint_a_client() {
     let machine = MachineRuntimeImage::new(thread::current().id());
     assert!(machine.selected().is_err());
     assert!(machine.client.is_none() && machine.config.is_none());
+}
+
+#[test]
+fn actual_undispatched_start_cannot_match_a_joined_runtime_completion() {
+    let mut fixture=Fixture::new();let start=fixture.start();
+    assert!(start.check_joined_original_off_app().is_err()); // App cannot assert completion.
+    let original=start.clone();thread::spawn(move||{
+        assert!(original.check_joined_original_off_app().is_err()); // Actual pending barrier.
+        let state=original.state.try_lock().unwrap();assert!(state.barrier.is_pending());
+        assert!(state.client.is_none()&&state.grant.is_none()&&!state.attached);
+    }).join().unwrap();
+    assert!(fixture.child.as_mut().unwrap().try_wait().unwrap().is_none());
+    drop(start);fixture.finish();
 }

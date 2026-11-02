@@ -1,0 +1,212 @@
+//! Binary-only closure of covered task and generation reservations. This owns
+//! no complete runtime census, task completion proof, Root intent or release.
+use super::*;
+use rudder_native::root_storage_bootstrap::runtime_image::{RuntimeNativeUseObservation,RuntimeNativeUseData};
+use crate::managed_app::runtime_task::OriginalTaskRuntimeUse;
+
+/// Stored INSIDE WorkerCarrier. No Shared/cell/root back-reference: retaining
+/// this campaign cannot create Shared -> campaign -> Shared ownership cycles.
+pub(super) struct CoveredTaskGenerationAdmission {
+    campaign:Option<Arc<CoveredCampaign>>,
+    closed:bool,
+}
+struct CoveredCampaign {original:FinalizationBudget,cancelled:Arc<AtomicBool>}
+impl CoveredTaskGenerationAdmission {
+    pub(super) fn new()->Self{Self{campaign:None,closed:false}}
+    fn retain_campaign(&mut self,original:&Arc<CoveredCampaign>)->Result<()> {
+        if let Some(actual)=&self.campaign {ensure!(Arc::ptr_eq(actual,original),"different original covered reservation cleanup campaign");}
+        else {self.campaign=Some(original.clone());}
+        Ok(())
+    }
+    fn close(&mut self,original:&Arc<CoveredCampaign>)->Result<()> {
+        ensure!(self.campaign.as_ref().is_some_and(|actual|Arc::ptr_eq(actual,original)),"original covered reservation campaign absent");
+        self.closed=true;Ok(())
+    }
+    pub(super) fn require_task_reservation_open(&self)->Result<()> {
+        ensure!(!self.closed,"covered new task reservations closed; original work retained");Ok(())
+    }
+    pub(super) fn generation_discovery_closed(&self)->bool{self.closed}
+}
+
+/// These obligations are ALWAYS Pending in this slice, including empty covered
+/// registries and physically joined workers. No public completion constructor.
+#[derive(Clone,Copy,Debug,PartialEq,Eq)]
+pub(crate) enum UncoveredRuntimeProducers {Pending}
+#[derive(Clone,Copy,Debug)]
+pub(crate) struct CoveredTaskGenerationProgress {
+    pub covered_task_and_generation_reservations_closed:bool,
+    pub original_boundary_roots_captured:bool,
+    pub original_task_cells_captured:bool,
+    pub retained_project_roots:usize,
+    pub retained_seed_roots:usize,
+    pub retained_task_cells:usize,
+    pub retained_generation_roots:usize,
+    pub retained_source_reservation_roots:usize,
+    pub retained_original_runtime_client:bool,
+    pub original_task_use_sample_current:bool,
+    pub original_task_uses:OriginalTaskUseData,
+    pub original_native_uses:RuntimeNativeUseData,
+    pub other_runtime_producers:UncoveredRuntimeProducers,
+}
+/// Last successful bounded task-cell sample only, never an aggregate issuer.
+#[derive(Clone,Copy,Debug,Default)]
+pub(crate) struct OriginalTaskUseData {
+    pub visited_tasks:usize,pub pending_tasks:usize,pub started_image_tasks:usize,
+    pub started_legacy_tasks:usize,pub never_started_tasks:usize,
+}
+struct SeedRoots {original:SeedTicket,tasks:Option<Vec<SeedTaskTicket>>}
+struct CoveredRoots {
+    projects:Vec<ProjectTicket>,seeds:Vec<SeedRoots>,
+    generations:Vec<Arc<source_generations::SourceGeneration>>,
+    source_reservations:Vec<Arc<source_generations::RootSourceReservation>>,
+    within_known_bounds:bool,
+}
+impl CoveredRoots {
+    /// Called once at closure while holding the SAME mutex used by task reserve,
+    /// generation discovery and registry removal. Clone original typed roots;
+    /// never borrow their payloads, invoke callbacks, do IO or join under it.
+    fn capture(c:&WorkerCarrier)->Self {
+        let max_seeds=MAX_SEEDS+seeds::MAX_RETIRED_SEEDS;
+        let max_generations=source_generations::MAX_GENERATIONS;
+        let within_known_bounds=c.projects.len()<=MAX_PROJECTS&&c.seeds.len()<=MAX_SEEDS
+            &&c.retired_seeds.len()<=seeds::MAX_RETIRED_SEEDS&&c.generations.len()<=max_generations
+            &&c.source_reservations.len()<=max_generations;
+        Self {projects:c.projects.values().take(MAX_PROJECTS).cloned().collect(),
+            seeds:c.seeds.values().chain(c.retired_seeds.values()).take(max_seeds)
+                .map(|seed|SeedRoots{original:seed.clone(),tasks:None}).collect(),
+            generations:c.generations.values().take(max_generations).cloned().collect(),
+            source_reservations:c.source_reservations.values().take(max_generations).cloned().collect(),
+            within_known_bounds}
+    }
+}
+
+/// EXTERNAL retained owner. The machine stores only the campaign above, never
+/// this owner or its roots. Dropping this value grants no drain/release and does
+/// not reopen admission or permit a replacement cleanup campaign.
+#[must_use="retain the original covered reservation campaign and partial roots"]
+pub(crate) struct CoveredTaskGenerationDrain {
+    shared:Arc<Shared>,campaign:Arc<CoveredCampaign>,roots:Option<CoveredRoots>,closed:bool,
+    runtime_uses:Option<RuntimeNativeUseObservation>,task_uses:OriginalTaskUseData,
+    task_use_sample_current:bool,native_uses:RuntimeNativeUseData,
+}
+impl CoveredTaskGenerationDrain {
+    /// Cached DATA only, usable after expiry. No locking, waiting, census retry,
+    /// completion consumption, IO or authority follows from these counts.
+    pub(crate) fn progress_data(&self)->CoveredTaskGenerationProgress {
+        let roots=self.roots.as_ref();
+        CoveredTaskGenerationProgress {
+            covered_task_and_generation_reservations_closed:self.closed,
+            original_boundary_roots_captured:roots.is_some_and(|roots|roots.within_known_bounds),
+            original_task_cells_captured:roots.is_some_and(|roots|roots.within_known_bounds&&roots.seeds.iter().all(|seed|seed.tasks.is_some())),
+            retained_project_roots:roots.map_or(0,|roots|roots.projects.len()),
+            retained_seed_roots:roots.map_or(0,|roots|roots.seeds.len()),
+            retained_task_cells:roots.map_or(0,|roots|roots.seeds.iter().map(|seed|seed.tasks.as_ref().map_or(0,Vec::len)).sum()),
+            retained_generation_roots:roots.map_or(0,|roots|roots.generations.len()),
+            retained_source_reservation_roots:roots.map_or(0,|roots|roots.source_reservations.len()),
+            retained_original_runtime_client:self.runtime_uses.is_some(),
+            original_task_use_sample_current:self.task_use_sample_current,
+            original_task_uses:self.task_uses,original_native_uses:self.native_uses,
+            other_runtime_producers:UncoveredRuntimeProducers::Pending,
+        }
+    }
+    /// Only original retained task cells, outside carrier/ledger locks. Keep
+    /// one cached DATA sample, never a strong per-poll history of completions.
+    fn observe_retained_original_uses(&mut self)->Result<()> {
+        let Some(roots)=&self.roots else {return Ok(());};
+        let mut tasks=OriginalTaskUseData::default();let mut helpers=Vec::new();
+        for seed in &roots.seeds {
+            let Some(originals)=&seed.tasks else {return Ok(());};
+            for original in originals {
+                time(&self.campaign.original,&self.campaign.cancelled)?;
+                tasks.visited_tasks+=1;
+                match original.observe_original_runtime_use()? {
+                    seeds::TaskRuntimeObservation::Pending=>tasks.pending_tasks+=1,
+                    seeds::TaskRuntimeObservation::NeverStarted=>tasks.never_started_tasks+=1,
+                    seeds::TaskRuntimeObservation::Started(OriginalTaskRuntimeUse::Legacy)=>tasks.started_legacy_tasks+=1,
+                    seeds::TaskRuntimeObservation::Started(OriginalTaskRuntimeUse::Image(actual))=>{
+                        tasks.started_image_tasks+=1;helpers.push(actual);
+                    },
+                }
+            }
+        }
+        self.task_uses=tasks;self.task_use_sample_current=true;
+        if let Some(actual)=&self.runtime_uses {
+            if let Some(data)=actual.sample_original_helpers(&helpers)? {self.native_uses=data;}
+        }
+        // A missing actual client, unmatched helper, legacy task, live sibling,
+        // read alias or uncovered producer never turns into complete admission.
+        Ok(())
+    }
+}
+impl MachineControl {
+    /// OFF App; publish original custody BEFORE fallible campaign admission,
+    /// clock checks or capture. No effectful worker, replacement clock or join.
+    pub(crate) fn begin_covered_task_generation_drain_retaining(&self,out:&mut Option<CoveredTaskGenerationDrain>,
+        original_cleanup:FinalizationBudget,cancelled:Arc<AtomicBool>)->Result<CoveredTaskGenerationProgress> {
+        ensure!(out.is_none(),"original covered reservation drain output occupied");
+        *out=Some(CoveredTaskGenerationDrain{shared:self.shared.clone(),
+            campaign:Arc::new(CoveredCampaign{original:original_cleanup,cancelled}),roots:None,closed:false,
+            runtime_uses:None,task_uses:OriginalTaskUseData::default(),task_use_sample_current:false,native_uses:RuntimeNativeUseData::default()});
+        self.poll_covered_task_generation_drain_retaining(out.as_mut().unwrap())
+    }
+    /// Poll takes NO budget, IDs, completion booleans or callbacks from callers.
+    /// Busy is Pending; errors retain this same owner and every partial root.
+    pub(crate) fn poll_covered_task_generation_drain_retaining(&self,owner:&mut CoveredTaskGenerationDrain)->Result<CoveredTaskGenerationProgress> {
+        // Preserve last successful DATA while invalidating freshness BEFORE
+        // entry guards, fallible clocks or borrows. Refusal leaves old counts stale.
+        owner.task_use_sample_current=false;owner.native_uses.sampled=false;
+        ensure!(Arc::ptr_eq(&self.shared,&owner.shared),"foreign original covered reservation machine");
+        ensure!(self.shared.app_thread!=std::thread::current().id(),"covered reservation drain requires off App");
+        // First retain the one original campaign in machine storage. Release
+        // the mutex before sampling its clock; budget checks never run under it.
+        match self.shared.carrier.try_lock() {
+            Ok(mut carrier)=>carrier.covered_reservations.retain_campaign(&owner.campaign)?,
+            Err(TryLockError::WouldBlock)=>return Ok(owner.progress_data()),
+            Err(TryLockError::Poisoned(_))=>anyhow::bail!("original machine carrier poisoned; covered drain retained"),
+        }
+        time(&owner.campaign.original,&owner.campaign.cancelled)?;
+        if owner.roots.is_none() {
+            match self.shared.carrier.try_lock() {
+                Ok(mut carrier)=>{
+                    carrier.covered_reservations.close(&owner.campaign)?;
+                    owner.closed=true;
+                    // Pin original roots in this same critical section, before
+                    // collector/discovery/task-reservation can run again.
+                    owner.roots=Some(CoveredRoots::capture(&carrier));
+                },
+                Err(TryLockError::WouldBlock)=>return Ok(owner.progress_data()),
+                Err(TryLockError::Poisoned(_))=>anyhow::bail!("original machine carrier poisoned; campaign retained"),
+            }
+        }
+        let roots=owner.roots.as_mut().unwrap();
+        ensure!(roots.within_known_bounds,"covered registry exceeded known bounds; partial original roots retained");
+        // No carrier lock here. Strong seed roots prevent retired collection;
+        // task maps never remove individual cells. Busy owners stay Pending.
+        for seed in &mut roots.seeds {
+            if seed.tasks.is_none() {
+                time(&owner.campaign.original,&owner.campaign.cancelled)?;
+                seed.original.capture_task_roots_retaining(&mut seed.tasks)?;
+            }
+        }
+        time(&owner.campaign.original,&owner.campaign.cancelled)?;
+        // Capture only an alias here. This method performs no client/ledger
+        // lock, bootstrap/currentness IO or admission closure under carrier.
+        match self.shared.carrier.try_lock() {
+            Ok(carrier)=>carrier.runtime_image.retain_original_use_observation(&mut owner.runtime_uses)?,
+            Err(TryLockError::WouldBlock)=>return Ok(owner.progress_data()),
+            Err(_)=>anyhow::bail!("original runtime client carrier poisoned; observation retained"),
+        }
+        if let Err(error)=owner.observe_retained_original_uses().and_then(|()|time(&owner.campaign.original,&owner.campaign.cancelled)) {
+            owner.task_use_sample_current=false;owner.native_uses.sampled=false;return Err(error);
+        }
+        Ok(owner.progress_data())
+    }
+}
+
+#[cfg(test)]
+#[path="managed_runtime_drain_tests.rs"]
+mod tests;
+
+#[cfg(test)]
+#[path="managed_runtime_observation_tests.rs"]
+mod observation_tests;

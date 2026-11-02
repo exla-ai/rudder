@@ -18,9 +18,9 @@ pub struct CompilerSdkProbeData {pub format_version:u32,pub kind:String,pub help
 pub struct CompilerSdkEnableData {pub mount:CompilerSdkMountData,#[serde(default,skip_serializing_if="Option::is_none")]pub probe:Option<CompilerSdkProbeData>}
 struct Helper {listener:Option<OwnedFd>,name:String,child:Option<Child>,process:Option<Process>,start:Option<String>,
     endpoint:Option<RuntimeEndpoint>,peer:Option<OwnedFd>,accepted:Vec<OwnedFd>,pidfd:Option<OwnedFd>,pending:Option<RuntimePacket>,certificate:Option<OwnedFd>,fds:Vec<OwnedFd>,
-    bytes:Option<Vec<u8>>,sent:bool,result:Option<CompilerSdkProbeData>,exit:Option<ExitStatus>,attempted:bool,stderr:Option<File>,work:Option<File>,work_path:Option<PathBuf>}
+    bytes:Option<Vec<u8>>,sent:bool,capsule_failed:bool,peer_witness:Option<peer_witness::OriginalSdkPeerImages>,result:Option<CompilerSdkProbeData>,exit:Option<ExitStatus>,attempted:bool,stderr:Option<File>,work:Option<File>,work_path:Option<PathBuf>}
 impl Helper {fn staged()->Self{Self{listener:None,name:format!("rudder-sdk-q-{}",uuid::Uuid::new_v4()),child:None,process:None,start:None,endpoint:None,peer:None,accepted:Vec::new(),pidfd:None,pending:None,
-    certificate:None,fds:Vec::new(),bytes:None,sent:false,result:None,exit:None,attempted:false,stderr:None,work:None,work_path:None}}}
+    certificate:None,fds:Vec::new(),bytes:None,sent:false,capsule_failed:false,peer_witness:None,result:None,exit:None,attempted:false,stderr:None,work:None,work_path:None}}}
 pub(super) struct RootCompilerSdkOwner {proof:Arc<RuntimeBootstrapProof>,admission:Arc<RuntimeReadAdmission>,original:FinalizationBudget,catalog:CompilerSdkCatalogData,
     placeholder:Option<File>,descriptors:Vec<OwnedFd>,source_binding:Option<File>,baked:Option<Arc<BakedImageCas>>,inputs:Option<Arc<VerifiedBakedInputs>>,semantic:Option<CompilerSdkSemanticInputs>,read:Option<VerifiedBakedRead>,
     local:Option<LocalStore>,floor:Option<ReadonlyRuntimeImage>,mount:Option<RetainedMetadataMount>,root:Option<OwnedFd>,data:Option<CompilerSdkMountData>,helper:Option<sdk_process::SdkProcess>,
@@ -130,8 +130,10 @@ pub(in crate::root_storage_bootstrap) fn validate_selected_rules_workload(worklo
     }Ok(())
 }
 
+#[path="compiler_sdk_handshake_diagnostic.rs"]mod handshake_diagnostic;
 #[path="compiler_sdk_process.rs"]mod sdk_process;
 #[path="compiler_sdk_jobs.rs"]pub(super) mod jobs;
+#[path="compiler_sdk_peer_witness.rs"]mod peer_witness;
 #[path="compiler_sdk_helper.rs"]mod helper;
 #[path="compiler_sdk_read_policy.rs"]mod read_policy;
 pub fn helper_selected_early()->bool{std::env::args().nth(1).as_deref()==Some(HELPER_ARG)}

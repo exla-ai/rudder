@@ -27,6 +27,9 @@ mod sdk_job_protocol;
 pub mod compiler_qualification;
 #[path="root_runtime_backing.rs"]
 pub mod environment;
+#[path="root_runtime_uses.rs"]
+mod uses;
+pub use uses::{RuntimePreparationUse,RuntimeNativeUseData};
 #[derive(Clone,Serialize,Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Enable {version:u32,kind:String,bootstrap_nonce:String,request_nonce:String,constraint:FinalizationConstraint}
@@ -257,6 +260,36 @@ enum BootstrapCheck {
     SdkMountData,
     SdkQualification,
     SdkReady,
+    SdkHelperEntry,
+    SdkHelperConnect,
+    SdkHelperParent,
+    SdkHelperParentImage,
+    SdkHelperCapsule,
+    SdkHelperServiceImage,
+    SdkHelperLauncher,
+    SdkHelperLauncherImage,
+    SdkHelperFloor,
+    SdkHelperWorkspace,
+    SdkHelperNamespaceWorkload,
+    SdkHelperResultSend,
+    SdkHelperExitUnknown,
+    SdkProcessOriginal,
+    SdkProcessSpawn,
+    SdkProcessCapture,
+    SdkProcessPipes,
+    SdkProcessChildExit,
+    SdkProcessPeer,
+    SdkProcessHelperFloor,
+    SdkProcessHelperImage,
+    SdkProcessHelperParent,
+    SdkProcessCapsule,
+    SdkProcessResult,
+    SdkProcessWorkload,
+    SdkProcessInterpreter,
+    SdkProcessNamespaces,
+    SdkProcessCapabilities,
+    SdkProcessClock,
+    SdkProcessExitEof,
 }
 impl std::fmt::Display for BootstrapCheck {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -711,21 +744,61 @@ struct ClientRequest {original:FinalizationBudget,cancelled:Arc<AtomicBool>,help
 /// Actual registered Native owner + original authenticated service endpoint.
 /// No public path/JSON constructor. A pending/unknown request remains owned by
 /// this machine client even if its task caller drops its output alias.
-pub struct RuntimeImageClient {compiler_sdk:Mutex<Option<Arc<CompilerSdkClient>>>,ready:ready::ReadyOrigin,state:Mutex<ClientState>,registration:Arc<RegisteredEngineOwner>,config:Arc<HostIngressConfigOwner>,service:Process,service_image:Image,service_exe:OwnedFd}
+pub struct RuntimeImageClient {uses:uses::RuntimeUseLedger,compiler_sdk:Mutex<Option<Arc<CompilerSdkClient>>>,ready:ready::ReadyOrigin,state:Mutex<ClientState>,registration:Arc<RegisteredEngineOwner>,config:Arc<HostIngressConfigOwner>,service:Process,service_image:Image,service_exe:OwnedFd}
 /// Per-helper actual request/carrier. No source/task/lease authority. Its only
 /// transferable value is a transport FD which the original helper independently
 /// authenticates against the actual Root service and sealed managed binding.
 pub struct RuntimeHelperGrant {client:Arc<RuntimeImageClient>,state:Arc<Mutex<ClientRequest>>}
+/// Exact original grant identity only, never proof that its task/readers joined.
+/// No constructor, Clone, Serde or operation that polls/attaches a helper.
+pub struct RuntimeHelperUseIdentity {client:Arc<RuntimeImageClient>,state:Arc<Mutex<ClientRequest>>}
+/// One live appendable ledger owner; no per-poll retained history or final set.
+#[must_use="retain the original runtime client and its appendable use ledger"]
+pub struct RuntimeNativeUseObservation {client:Arc<RuntimeImageClient>,uses:uses::RuntimeUseObservation}
+impl RuntimeNativeUseObservation {
+    /// OFF App, fixed diagnostic DATA only. Arbitrary counts/IDs cannot provide
+    /// identities here. These exact identities themselves grant no completion.
+    pub fn sample_original_helpers(&self,actual:&[RuntimeHelperUseIdentity])->Result<Option<RuntimeNativeUseData>> {
+        ensure!(actual.len()<=MAX_HELPERS,"original helper observation bound exceeded");
+        let Some(sample)=self.uses.try_sample()? else {return Ok(None);};
+        let mut data=sample.data()?;
+        for (index,identity) in actual.iter().enumerate() {
+            ensure!(Arc::ptr_eq(&identity.client,&self.client),"original runtime-use observation has foreign client");
+            ensure!(!actual[..index].iter().any(|old|Arc::ptr_eq(&old.state,&identity.state)),"original helper observed twice");
+            ensure!(sample.helpers.iter().any(|held|Arc::ptr_eq(held,&identity.state)),"observed helper absent from original ledger sample");
+            data.associated_original_helpers+=1;
+        }
+        data.unmatched_helpers=data.helper_uses-data.associated_original_helpers;Ok(Some(data))
+    }
+}
 impl RuntimeImageClient {
     pub(super) fn capture_original_retaining(out:&mut Option<Arc<Self>>,observation:&mut Option<RuntimeReadyObservation>,endpoint:OwnedFd,ready_fd:&OwnedFd,bootstrap_nonce:&str,registration:Arc<RegisteredEngineOwner>,config:Arc<HostIngressConfigOwner>,service:&OwnedFd,service_exe:&OwnedFd)->Result<()> {
         ensure!(out.is_none()&&observation.is_none(),"runtime actual client/observation already captured");registration.assert_current()?;config.assert_current()?;
         ensure!(config.data().image_preseed.as_ref().and_then(|p|p.runtime_mount.as_ref()).is_some(),"runtime image profile absent");
         let service=Process::capture(service.try_clone()?)?;let image=Image::capture(Path::new(SERVICE_PATH))?;image.matches_fd(service_exe)?;service.live()?;
         let ready=ready::ReadyOrigin::capture_from_original_bootstrap(ready_fd,&registration,&service,bootstrap_nonce)?;
-        *out=Some(Arc::new(Self{compiler_sdk:Mutex::new(None),ready,state:Mutex::new(ClientState{endpoint:RuntimeEndpoint::capture(endpoint)?,active:None,retained:Vec::new(),backing_active:None,backing_retained:None}),registration,config,service,service_image:image,service_exe:service_exe.try_clone()?}));
+        *out=Some(Arc::new(Self{uses:uses::RuntimeUseLedger::new(),compiler_sdk:Mutex::new(None),ready,state:Mutex::new(ClientState{endpoint:RuntimeEndpoint::capture(endpoint)?,active:None,retained:Vec::new(),backing_active:None,backing_retained:None}),registration,config,service,service_image:image,service_exe:service_exe.try_clone()?}));
         let client=out.as_ref().unwrap();client.current()?;client.ready.original_receipt_current()?;
         if client.config.data().compiler_sdk.is_some(){let mut slot=client.compiler_sdk.lock().unwrap_or_else(|p|p.into_inner());CompilerSdkClient::capture_retaining(&mut slot,client.clone())?;}
         *observation=Some(RuntimeReadyObservation::issue_on_original_client(client)?);Ok(())
+    }
+    /// Local absorbing admission only. Existing request polling, immutable
+    /// DATA reads and SDK disposal keep their original custody. No Root packet,
+    /// floor close, release, cancellation or capacity recycling is issued here.
+    pub fn close_original_use_admission(&self)->Result<()> {self.uses.close()}
+    /// Pure retained alias capture only. Do not close admission: previously
+    /// admitted tasks may still be preparing their first helper enrollment.
+    /// No currentness/clock/Root IO and no authority reconstructed from DATA.
+    pub fn capture_native_use_observation_retaining(self:&Arc<Self>,out:&mut Option<RuntimeNativeUseObservation>)->Result<()> {
+        if let Some(actual)=out {
+            ensure!(Arc::ptr_eq(&actual.client,self),"original runtime observation client replaced");
+        } else {*out=Some(RuntimeNativeUseObservation {client:self.clone(),uses:self.uses.observation()});}
+        Ok(())
+    }
+    /// Reserve before the original preparation spawn/queue. This is custody,
+    /// not permission to retire the runtime or release immutable source pins.
+    pub fn reserve_original_preparation_retaining(&self,out:&mut Option<RuntimePreparationUse>)->Result<()> {
+        self.uses.preparation_retaining(out)
     }
     pub fn compiler_sdk_client(&self)->Result<Option<Arc<CompilerSdkClient>>>{self.current()?;let slot=self.compiler_sdk.try_lock().map_err(|_|anyhow::anyhow!("original SDK alias temporarily borrowed"))?;
         if let Some(sdk)=&*slot{sdk.assert_current()?;}Ok(slot.clone())}
@@ -741,6 +814,7 @@ impl RuntimeImageClient {
         let mut client=match self.state.try_lock(){Ok(v)=>v,Err(TryLockError::WouldBlock)=>return Ok(false),Err(TryLockError::Poisoned(_))=>anyhow::bail!("runtime original client ownership poisoned")};
         if client.active.is_some()||client.backing_active.is_some(){return Ok(false)}ensure!(client.retained.len()<MAX_HELPERS,"runtime retained helper/session bound reached; actual drain required");
         let state=Arc::new(Mutex::new(ClientRequest{original:actual_original,cancelled,helper:barrier.pending_helper_process(),binding:barrier.binding_data().clone(),request:None,bytes:None,pidfd:None,delivery:None,receive:None,cancel:None,pid:0,start:String::new(),sent:false,unknown:false,pending:None,ready:false,attached:false}));
+        self.uses.helper(&state)?;
         client.active=Some(Arc::clone(&state));client.retained.push(Arc::clone(&state));*out=Some(RuntimeHelperGrant{client:Arc::clone(self),state});
         let mut state=out.as_ref().unwrap().state.lock().map_err(|_|anyhow::anyhow!("runtime helper owner poisoned"))?;
         state.pidfd=Some(state.helper.duplicate_live_pidfd_for_seed_enrollment()?);let process=Process::capture(state.pidfd.as_ref().unwrap().try_clone()?)?;
@@ -770,6 +844,29 @@ impl RuntimeImageClient {
         ensure!(self.config.data().compiler_sdk.as_ref()==Some(&sdk.mount.catalog),"actual SDK client/config origin differs");Ok(Some(sdk.mount.toolchains.clone()))}
 }
 impl RuntimeHelperGrant {
+    /// Identity for a fixed whole-completion observer. The caller must retain
+    /// that real carrier; this token alone cannot certify task settlement.
+    pub fn observe_original_start(&self,client:&Arc<RuntimeImageClient>,barrier:&ManagedExecutionStartBarrier)->Result<RuntimeHelperUseIdentity> {
+        ensure!(Arc::ptr_eq(client,&self.client),"observed runtime start changed original client");
+        self.client.uses.try_contains_helper(&self.state)?;
+        let state=self.state.try_lock().map_err(|_|anyhow::anyhow!("observed original runtime helper busy/poisoned"))?;
+        ensure!(state.ready&&state.attached&&!state.unknown&&!barrier.is_pending()
+            &&barrier.binding_data()==&state.binding&&Arc::ptr_eq(&barrier.pending_helper_process(),&state.helper),
+            "observed runtime start differs from original attached helper grant");
+        Ok(RuntimeHelperUseIdentity {client:self.client.clone(),state:self.state.clone()})
+    }
+    /// Exact retained-start identity only, after the binary's genuine whole
+    /// completion checks. Do not require a live helper or renew its old clock:
+    /// the original successful helper exit remains separately owned by caller.
+    pub fn check_original_start(&self,client:&Arc<RuntimeImageClient>,barrier:&ManagedExecutionStartBarrier)->Result<()> {
+        ensure!(Arc::ptr_eq(client,&self.client),"joined runtime start changed original client");
+        self.client.uses.contains_helper(&self.state)?;
+        let state=self.state.try_lock().map_err(|_|anyhow::anyhow!("original runtime helper custody busy/poisoned"))?;
+        ensure!(state.ready&&state.attached&&!state.unknown&&!barrier.is_pending()
+            &&barrier.binding_data()==&state.binding&&Arc::ptr_eq(&barrier.pending_helper_process(),&state.helper),
+            "joined runtime start differs from original attached helper grant");Ok(())
+    }
+
     pub fn poll_retaining(&mut self)->Result<bool>{let mut client=match self.client.state.try_lock(){Ok(v)=>v,Err(TryLockError::WouldBlock)=>return Ok(false),Err(TryLockError::Poisoned(_))=>anyhow::bail!("runtime client owner poisoned")};
         let mut state=self.state.lock().map_err(|_|anyhow::anyhow!("runtime helper owner poisoned"))?;
         if state.ready{return Ok(true)}ensure!(!state.unknown&&client.active.as_ref().is_some_and(|a|Arc::ptr_eq(a,&self.state)),"runtime request unknown or belongs to another active owner");

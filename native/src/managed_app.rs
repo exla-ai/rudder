@@ -152,6 +152,12 @@ mod local {
         pub(crate) fn shutdown(&self)->&ValidatedManagedShutdown { self.drain.live.receipt.as_ref().unwrap() }
         pub(crate) fn helper_exit(&self)->&SuccessfulManagedHelperExit { self.drain.exit.as_ref().unwrap() }
         pub(crate) fn helper_custody(&self)->&ManagedHelperCustody { self.drain.custody.as_ref().unwrap() }
+        /// Match the actual start retained by this WHOLE joined task capsule.
+        /// A copied assignment/helper id cannot substitute for its original Arc.
+        pub(crate) fn check_runtime_start(&self,expected:&Arc<RuntimeTaskStart>)->Result<()> {
+            anyhow::ensure!(self.settled&&self.drain._start.as_ref().is_some_and(|actual|Arc::ptr_eq(actual,expected)),
+                "joined task differs from original runtime start");Ok(())
+        }
         /// OFF App. Original stopped run identity remains in the genuine
         /// capsule; this checks the SAME held Journal/project owner epoch. A
         /// later run attempt is not authority to rewrite this old private fork.

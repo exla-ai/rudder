@@ -10,9 +10,9 @@ use rudder_engine::protocol::ObjectRef;
 use std::{sync::Weak,thread::{JoinHandle,ThreadId}};
 const CLOSING:u8=3;
 const RETIRED:u8=4;
-const MAX_TASK_SCOPES:usize=128; // two registered uses per task + bounded host scopes.
+pub(super) const MAX_TASK_SCOPES:usize=128; // two registered uses per task + bounded host scopes.
 const MAX_CACHE_SCOPES:usize=2;
-const MAX_RETIRED_SEEDS:usize=2;
+pub(super) const MAX_RETIRED_SEEDS:usize=2;
 
 pub(super) struct SeedCarrier {
     pub(super) source:ManagedInitialSourceOwner,pub(super) store:LocalStore,budget:FinalizationBudget,pub(super) cancelled:Arc<AtomicBool>,
@@ -25,6 +25,18 @@ struct Campaign {original:FinalizationBudget,cancelled:Arc<AtomicBool>}
 #[derive(Clone)]
 pub(crate) struct SeedTicket {pub(super) id:String,pub(super) cell:Arc<Cell<SeedCarrier>>}
 impl SeedTicket {
+    /// Nonblocking capture of the SAME registered task cells. The caller has
+    /// already pinned this original seed while closing covered reservations.
+    /// Task entries are never removed; archive collection requires no aliases.
+    pub(super) fn capture_task_roots_retaining(&self,out:&mut Option<Vec<SeedTaskTicket>>)->Result<bool> {
+        ensure!(out.is_none(),"original task roots already captured");
+        match self.cell.owner.try_lock() {
+            Ok(owner)=>{ensure!(owner.tasks.len()<=MAX_TASK_SCOPES,"original task registry exceeds covered bound");
+                *out=Some(owner.tasks.values().cloned().collect());Ok(true)},
+            Err(TryLockError::WouldBlock)=>Ok(false),
+            Err(TryLockError::Poisoned(_))=>anyhow::bail!("original seed task registry poisoned; seed root retained"),
+        }
+    }
     pub(crate) fn ingress_ready(&self)->bool {self.cell.phase.load(Ordering::Acquire)==READY}
     pub(crate) fn ingress_recovery(&self)->bool {self.cell.phase.load(Ordering::Acquire)==RECOVERY}
     pub(crate) fn capture(source:ManagedInitialSourceOwner,store:LocalStore,budget:FinalizationBudget,cancelled:Arc<AtomicBool>)->Self {
@@ -63,6 +75,45 @@ pub(super) enum Completion {Discarded(Option<JoinedManagedTask>),Published(Optio
 impl Completion {fn joined(&self)->Result<&JoinedManagedTask> {match self {
     Self::Discarded(value)=>{let value=value.as_ref().context("original task transferred to drain")?;ensure!(value.is_settled(),"discard not actually settled");Ok(value)},
     Self::Published(value)=>value.as_ref().context("original acceptor transferred to drain")?.settled_joined_task(),}}}
+/// Per-original-cell observations only. None of these variants closes a client
+/// ledger, counts every runtime producer or authorizes seed/runtime retirement.
+pub(super) enum TaskRuntimeObservation {
+    Pending,Started(crate::managed_app::runtime_task::OriginalTaskRuntimeUse),NeverStarted,
+}
+pub(super) fn original_factory_join_observed(factory:&SeedFactoryOwner)->Result<bool> {
+    if !factory.registration_present() {return Ok(false);}
+    let (actual,_original)=factory.join_driver()?;
+    Ok(actual.try_joined()?.is_some()) // cached ORIGINAL join only; no start/wait
+}
+impl SeedTaskTicket {
+    /// The phase1 owner pins this SAME cell before calling here. No move/drop
+    /// of whole completions, finalizer, Root IO, cleanup start or clock renewal.
+    pub(super) fn observe_original_runtime_use(&self)->Result<TaskRuntimeObservation> {
+        ensure!(self.app_thread!=std::thread::current().id(),"original task observation requires off App");
+        let held=match self.cell.owner.try_lock() {
+            Ok(held)=>held,Err(TryLockError::WouldBlock)=>return Ok(TaskRuntimeObservation::Pending),
+            Err(_)=>anyhow::bail!("original task observation cell poisoned; same owners retained"),
+        };
+        if !original_factory_join_observed(&held.factory)? {return Ok(TaskRuntimeObservation::Pending);}
+        if held.never.is_some() {return observe_original_never_started(&held);}
+        if let Some(actual)=&held.task_close {
+            return Ok(match actual.observe_original_runtime_use()? {
+                Some(actual)=>TaskRuntimeObservation::Started(actual),None=>TaskRuntimeObservation::Pending,
+            });
+        }
+        let Some(completion)=&held.completion else {return Ok(TaskRuntimeObservation::Pending);};
+        // Transfer is serialized by this same task cell. Missing original
+        // values without a cached joined drain never imply successful exit.
+        if matches!(completion,Completion::Discarded(None)|Completion::Published(None)) {return Ok(TaskRuntimeObservation::Pending);}
+        let Some(enrollment)=&held.enrollment else {return Ok(TaskRuntimeObservation::Pending);};
+        let enrollment=match enrollment.cell.owner.try_lock() {
+            Ok(enrollment)=>enrollment,Err(TryLockError::WouldBlock)=>return Ok(TaskRuntimeObservation::Pending),
+            Err(_)=>anyhow::bail!("original observed enrollment poisoned; whole completion retained"),
+        };
+        let Some(enrollment)=&enrollment.enrollment else {return Ok(TaskRuntimeObservation::Pending);};
+        Ok(TaskRuntimeObservation::Started(enrollment.observe_joined_runtime_use(completion.joined()?)?))
+    }
+}
 #[derive(Clone)]
 pub(crate) struct SeedCacheTicket {id:String,seed_id:String,seed:Weak<Cell<SeedCarrier>>,cell:Arc<Cell<CacheScope>>,original:FinalizationBudget,app_thread:ThreadId}
 struct CacheScope {factory:SeedFactoryOwner,guard:Option<SeedUseGuard>,cache:Option<Arc<ManagedPreparationCache>>,
@@ -205,6 +256,7 @@ impl MachineControl {
     pub(crate) fn admit_task_retaining(&self,out:&mut Option<SeedTaskTicket>,seed:&SeedTicket,project:&ProjectTicket,
         original:&FinalizationBudget,cancelled:Arc<AtomicBool>)->Result<()> {
         ensure!(out.is_none(),"task scope output already exists");let c=self.carrier_off_app(original)?;
+        c.covered_reservations.require_task_reservation_open()?;
         ensure!(self.shared.phase.load(Ordering::Acquire)==SERVING&&!c.root_rpc_held&&!c.root_private_held,"machine new source work unavailable; original owners retained");original_seed(&c,seed)?;
         ensure!(c.projects.get(&project.id).is_some_and(|actual|Arc::ptr_eq(&actual.cell,&project.cell)),"foreign actual project");
         let mut s=lock(&seed.cell,original)?;s.admission.check_open()?;

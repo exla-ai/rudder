@@ -1,45 +1,64 @@
 //! Fixed hidden qualifier entry. An arbitrary CLI invocation can only fail:
-//! actual global-Root parent/peer/proc-exe/sealed capsule are all mandatory.
+//! actual Root parent/peer, approved producer witness and sealed capsule are mandatory.
 use super::*;
 use std::os::unix::fs::PermissionsExt;
 use std::{io::Read,os::unix::process::CommandExt};
 pub(super) fn run()->Result<()> {
+    let mut check=BootstrapCheck::SdkHelperEntry;
+    let result=run_inner(&mut check).map_err(|error|bootstrap_failure_context(error,check));
+    // Fixed bounded best-effort DATA on this ORIGINAL helper's stderr pipe.
+    // Return the SAME error; neither logging nor a projection grants admission.
+    if let Err(error)=&result{storage::emit_retained_failure("compiler_sdk_helper","handshake",Some(error));}
+    result
+}
+fn run_inner(check:&mut BootstrapCheck)->Result<()> {
     let args:Vec<_>=std::env::args().collect();ensure!(args.len()==3&&args[1]==HELPER_ARG&&std::env::vars_os().next().is_none(),"SDK helper fixed entry differs");
     ensure!(unsafe{libc::getuid()}==1500&&unsafe{libc::geteuid()}==1500&&unsafe{libc::getgid()}==1500,"SDK helper requires actual unprivileged UID1500");
     ensure!(unsafe{libc::prctl(libc::PR_SET_DUMPABLE,0,0,0,0)}==0&&unsafe{libc::prctl(libc::PR_GET_DUMPABLE,0,0,0,0)}==0,"SDK helper ND0 unavailable");
     wire::require_initial_id_maps(std::process::id())?;
     // Fresh connect only AFTER exec+ND0. No pre-exec inherited receiver socket
     // can be stolen and later receive this SDK descriptor capability.
+    *check=BootstrapCheck::SdkHelperConnect;
     let raw=unsafe{libc::socket(libc::AF_UNIX,libc::SOCK_SEQPACKET|libc::SOCK_CLOEXEC|libc::SOCK_NONBLOCK,0)};
     ensure!(raw>=0,"SDK helper original connection unavailable");let socket=unsafe{OwnedFd::from_raw_fd(raw)};
+    // Enable credentials BEFORE connect can let the original producer queue
+    // its capsule. Endpoint capture keeps its existing same-socket recheck.
+    let passcred:libc::c_int=1;ensure!(unsafe{libc::setsockopt(socket.as_raw_fd(),libc::SOL_SOCKET,libc::SO_PASSCRED,(&passcred as *const libc::c_int).cast(),std::mem::size_of_val(&passcred)as _)}==0,"SDK helper original credential reception unavailable");
     let(address,len)=abstract_address(&args[2])?;
     ensure!(unsafe{libc::connect(socket.as_raw_fd(),(&address as *const libc::sockaddr_un).cast(),len)}==0,"SDK helper original connect refused");
+    *check=BootstrapCheck::SdkHelperParent;
     let peer=peer_pidfd(socket.as_raw_fd())?;let parent=Process::capture(peer)?;
     ensure!(parent.pid==unsafe{libc::getppid()}as u32,"SDK helper peer is not actual original parent");storage::floor(parent.pid,0)?;wire::require_initial_id_maps(parent.pid)?;
-    Image::capture(Path::new(SERVICE_PATH))?.matches_process(&parent)?;
+    *check=BootstrapCheck::SdkHelperParentImage;
+    let service_image=Image::capture(Path::new(SERVICE_PATH))?;service_image.check()?;
+    *check=BootstrapCheck::SdkHelperCapsule;
     let endpoint=RuntimeEndpoint::capture(socket)?;let mut packet=None;
     // No new enable budget: only wait for the original parent's one capsule.
     // Poll is bounded by parent's existing liveness; its cutoff is adopted
     // only from its actual sealed capsule, never a caller-provided CLI clock.
     while packet.is_none(){parent.live()?;packet=endpoint.receive_data()?;if packet.is_none(){std::thread::sleep(Duration::from_millis(1));}}
-    let packet=packet.unwrap();ensure!(packet.credentials.pid==parent.pid as i32&&packet.credentials.uid==0&&packet.credentials.gid==0&&[7,10].contains(&packet.fds.len()),"SDK helper capsule origin/FD set differs");
-    let raw=super::super::super::read_sealed_bytes(&packet.fds[0],16*1024)?;
-    ensure!(raw==packet.bytes,"SDK helper sealed original bytes differ");let data:serde_json::Value=serde_json::from_slice(&raw)?;
-    ensure!(data["version"]==1&&data["kind"]=="root-compiler-sdk-fixed-helper-v1"&&data["service_pid"]==parent.pid&&data["helper_pid"]==std::process::id(),"SDK helper original identities differ");
-    let service=Process::capture(packet.fds[1].try_clone()?)?;ensure!(service.pid==parent.pid,"SDK helper original service pidfd differs");
-    Image::capture(Path::new(SERVICE_PATH))?.matches_fd(&packet.fds[2])?;
-    let launcher=Process::capture(packet.fds[3].try_clone()?)?;ensure!(original_stat(parent.pid)?.0==launcher.pid&&data["launcher_pid"]==launcher.pid,"SDK helper original launcher parent differs");
-    wire::require_initial_id_maps(launcher.pid)?;storage::floor(launcher.pid,0)?;
-    let launcher_image=Image::capture(Path::new(LAUNCHER_PATH))?;launcher_image.matches_fd(&packet.fds[4])?;launcher_image.matches_process(&launcher)?;
-    let mount:CompilerSdkMountData=serde_json::from_value(data["mount"].clone())?;mount.validate_data()?;
+    let packet=packet.unwrap();let data=peer_witness::receive_capsule_data(&packet,&parent)?;
+    *check=BootstrapCheck::SdkHelperServiceImage;
+    peer_witness::validate_service_tuple_data(&data,&packet,&parent,&service_image)?;
+    *check=BootstrapCheck::SdkHelperLauncher;
+    // Association is the approved ORIGINAL Root producer assertion, not an
+    // independent unprivileged proc-exe oracle for a hostile Root peer.
+    *check=BootstrapCheck::SdkHelperLauncherImage;
+    let launcher_image=Image::capture(Path::new(LAUNCHER_PATH))?;
+    peer_witness::validate_launcher_tuple_data(&data,&packet,&parent,&launcher_image)?;
+    *check=BootstrapCheck::SdkHelperFloor;
+    let mount=&data.mount;mount.validate_data()?;
     ensure!(wire::fd_data(&packet.fds[5])?==mount.floor,"SDK helper held floor differs");
-    let constraint:FinalizationConstraint=serde_json::from_value(data["constraint"].clone())?;let original=FinalizationBudget::from_constraint(&constraint)?;original.remaining()?;
-    let start=original_stat(std::process::id())?.1;ensure!(data["helper_start_ticks"]==start,"SDK helper original start differs");
+    let constraint=data.constraint.clone();let original=FinalizationBudget::from_constraint(&constraint)?;original.remaining()?;
+    let start=original_stat(std::process::id())?.1;ensure!(data.helper_start_ticks==start,"SDK helper original start differs");
+    *check=BootstrapCheck::SdkHelperWorkspace;
     let workspace=File::from(packet.fds[6].try_clone()?);let m=workspace.metadata()?;ensure!(m.is_dir()&&m.uid()==1500&&m.gid()==1500&&m.mode()&0o7777==0o700,"SDK helper private work directory differs");
     let cwd=fs::metadata(".")?;ensure!((cwd.dev(),cwd.ino())==(m.dev(),m.ino()),"SDK helper changed original work directory");
-    let job=if data["job"].is_null(){ensure!(packet.fds.len()==7,"SDK fixed descriptor count differs");None}else{ensure!(packet.fds.len()==10,"SDK selected descriptor count differs");Some((&data["job"],&packet.fds[7],&packet.fds[8],&packet.fds[9]))};
+    let job=if data.job.is_null(){ensure!(packet.fds.len()==7,"SDK fixed descriptor count differs");None}else{ensure!(packet.fds.len()==10,"SDK selected descriptor count differs");Some((&data.job,&packet.fds[7],&packet.fds[8],&packet.fds[9]))};
+    *check=BootstrapCheck::SdkHelperNamespaceWorkload;
     let workload=run_namespace_retaining(&packet.fds[5],&original,job)?;if job.is_none(){validate_workload(&workload,&constraint)?;}
     let result=CompilerSdkProbeData{format_version:1,kind:"original-sdk-fixed-helper-complete-v1".into(),helper_pid:std::process::id(),helper_start_ticks:start,original_constraint:constraint,workload};
+    *check=BootstrapCheck::SdkHelperResultSend;
     let bytes=canonical_json(&result)?;ensure!(bytes.len()<=16*1024,"SDK fixed result bound");
     loop{original.remaining()?;parent.live()?;if endpoint.send_data(&bytes,&[])?{break}std::thread::sleep(original.remaining()?.min(Duration::from_millis(1)));}Ok(())
 }

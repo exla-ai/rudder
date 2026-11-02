@@ -4,7 +4,7 @@ use super::*;
 use rudder_engine::execution::handoff::WorkerJoined;
 use crate::managed_checkpoint_accept::AcceptedInputRelease;
 use std::sync::{Weak,OnceLock};
-const MAX_GENERATIONS:usize=4;
+pub(super) const MAX_GENERATIONS:usize=4;
 
 pub(crate) enum CurrentSourceAdmission {Ready {seed:SeedTicket,cache:SeedCacheTicket},Pending,Fenced}
 pub(super) struct CurrentSource {seed:SeedTicket,cache:SeedCacheTicket,generation:Option<Arc<SourceGeneration>>}
@@ -193,6 +193,8 @@ fn advance(c:&mut WorkerCarrier,generation:&Arc<SourceGeneration>,shared:&Arc<Sh
 }
 
 fn discover(c:&mut WorkerCarrier,shared:&Arc<Shared>)->Result<()> {
+    // Existing generations still advance above; only new discovery closes.
+    if c.covered_reservations.generation_discovery_closed(){return Ok(());}
     if c.generations.len()>=MAX_GENERATIONS{return Ok(());}
     let projects=c.projects.values().cloned().collect::<Vec<_>>();
     for project in projects {

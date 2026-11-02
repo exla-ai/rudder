@@ -3484,3 +3484,37 @@ Independent actual-evidence review SHA:
 The next unused qualification workflow prepares the provider boundaries already
 specified in the worker Dockerfile before rerunning the full selected suite.
 No source, SDK, runtime or retirement qualification follows from this metadata.
+
+
+### 2026-11-02 05:44Z: full runtime ledger and witness source qualification passes
+
+The fresh remote qualification compiled the production binary and both test
+harnesses, then passed all 39 selected ordinary tests under UID/GID1500,
+zero capabilities and no-new-privileges. Both separate Root DATA fixtures also
+passed, including the receiver witness matrix. Exact executable-list preflight,
+original child waits, both output EOFs and held pidfds were verified. The test
+image now prepares the provider boundaries already specified in the worker
+Dockerfile. This passing attempt does not establish the hidden cause of older
+fixture failures.
+
+Original session 91229 exited 0 with the matching acceptance marker at
+05:43:50Z. Candidate report SHA:
+`dbb54310d3490b56f0b7df5d60fc7d0c8367c93b7118d689b908e49206eb456b`.
+Root's strict original-session acceptance SHA:
+`c6484e55b55014dce332bab0e5642a1a12b3a0e0e9a79b337f61376310f1b0aa`.
+The actual raw stream hashes and strict proof were replayed at
+05:44:04.540301Z; observation SHA:
+`b33c5b0a41003b63549cf664c63c75f3c2e19fc5755a393968e48980f26b3a83`.
+Independent actual-chain review SHA:
+`b82dbdd17cfa5a0d3367ec09c34dd645e4886fa296c48686cb58f8f1653b2876`.
+The frozen source patch SHA is
+`2e20b6c734f3dd8aae282b90e58569a5a617a31b1c639b880ed5e0e2ff26aa6c`.
+
+This source slice retains covered task/source reservations and their original
+observations through partial failure, adds a fail-closed runtime-use ledger,
+and validates SDK executable witness DATA from the genuine Root issuer.
+Uncovered producers and retained aliases continue to block complete closure.
+No final producer census, automatic release/unmount, normal runtime retirement,
+reverse ptrace, genuine SDK bootstrap or ordinary runtime qualification follows
+from the build fixtures. A newly built artifact and genuine SDK attempt remain
+required. No image publication or deployment occurred in this qualification.

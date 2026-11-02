@@ -6,7 +6,8 @@ use rudder_engine::execution::{finalization_budget::FinalizationBudget,
     handoff::{ManagedExecutionStartBarrier, helper_process::HelperProcessWitness}};
 use rudder_native::{host_ingress::{HostIngressConfigOwner, HostBakedRuntimePolicy},
     root_storage_bootstrap::{ManagedMachineBootstrap,
-        runtime_image::{RuntimeImageClient, RuntimeHelperGrant, RuntimeReadyObservation, RuntimeReadyObservationData}}};
+        runtime_image::{RuntimeImageClient, RuntimeHelperGrant, RuntimeReadyObservation, RuntimeReadyObservationData,
+            RuntimeHelperUseIdentity,RuntimeNativeUseObservation}}};
 use std::{sync::{Arc, Mutex, MutexGuard, TryLockError,
     atomic::{AtomicBool, Ordering}}, thread::{self, ThreadId}, time::Duration};
 
@@ -85,6 +86,14 @@ impl MachineRuntimeImage {
     }
     /// Pure last checked DATA, never a readiness or original owner constructor.
     pub(crate) fn ready_observation_data(&self)->Option<RuntimeReadyObservationData> {self.ready_data.clone()}
+    /// OFF App, pure alias retention. None is Pending, never permission for a
+    /// legacy fallback. No bootstrap/currentness IO or renewed request clock.
+    pub(crate) fn retain_original_use_observation(&self,out:&mut Option<RuntimeNativeUseObservation>)->Result<()> {
+        self.off_app()?;
+        if let Some(client)=&self.client {client.capture_native_use_observation_retaining(out)?;}
+        else {ensure!(out.is_none(),"retained original runtime observation lost machine client association");}
+        Ok(())
+    }
     pub(crate) fn enroll_helper_retaining(&mut self, bootstrap: &mut ManagedMachineBootstrap,
         start: &RuntimeTaskStart, original: &FinalizationBudget, cancelled: &Arc<AtomicBool>) -> Result<()> {
         self.off_app()?; time(original, cancelled)?;
@@ -109,6 +118,7 @@ struct StartState {
     attached: bool,
     failed: bool,
 }
+pub(crate) enum OriginalTaskRuntimeUse {Image(RuntimeHelperUseIdentity),Legacy}
 /// SAME original barrier shared with its existing task, Pending helper and
 /// TaskDrain. No replacement barrier, receipt deserialization or IO in Drop.
 /// Its mutex protects only this retained capsule; a worker never borrows App.
@@ -149,6 +159,38 @@ impl RuntimeTaskStart {
                 Err(TryLockError::WouldBlock) => thread::sleep(original.phase_limit(Duration::from_millis(2))?),
                 Err(TryLockError::Poisoned(_)) => anyhow::bail!("original runtime task barrier poisoned; custody retained"),
             }
+        }
+    }
+    /// Called only while the existing whole completion/enrollment carrier is
+    /// retained. Matching is a prerequisite, never a runtime drain proof.
+    pub(crate) fn check_joined_original_off_app(&self)->Result<()> {
+        ensure!(thread::current().id()!=self.app_thread,"runtime completion matching requires off-App worker");
+        let state=self.state.try_lock().map_err(|_|anyhow::anyhow!("original runtime start busy/poisoned"))?;
+        ensure!(!state.failed&&!state.barrier.is_pending()&&Arc::ptr_eq(&state.barrier.pending_helper_process(),&self.helper),
+            "original runtime start failed/pending/replaced");
+        if state.required {
+            ensure!(state.attached,"original runtime helper attachment absent");
+            let client=state.client.as_ref().context("original runtime client absent")?;
+            if let Some(environment)=&state.environment{ensure!(environment.matches_runtime_client(client),"joined task environment changed original runtime client");}
+            state.grant.as_ref().context("original runtime grant absent")?.check_original_start(client,&state.barrier)?;
+        } else {ensure!(!state.attached&&state.environment.is_none()&&state.client.is_none()&&state.grant.is_none(),"legacy completion changed runtime profile");}
+        Ok(())
+    }
+    /// Called ONLY through the fixed whole completion/enrollment observer.
+    /// New borrowing is by try-lock; no task clock, pidfd/currentness or IO.
+    pub(crate) fn observe_joined_original_off_app(&self)->Result<OriginalTaskRuntimeUse> {
+        ensure!(thread::current().id()!=self.app_thread,"runtime use observation requires off App");
+        let state=self.state.try_lock().map_err(|_|anyhow::anyhow!("observed original runtime start busy/poisoned"))?;
+        ensure!(!state.failed&&!state.barrier.is_pending()&&Arc::ptr_eq(&state.barrier.pending_helper_process(),&self.helper),
+            "observed original runtime start failed/pending/replaced");
+        if state.required {
+            ensure!(state.attached,"observed original runtime attachment absent");
+            let client=state.client.as_ref().context("observed original runtime client absent")?;
+            if let Some(environment)=&state.environment {ensure!(environment.matches_runtime_client(client),"observed environment changed runtime client");}
+            Ok(OriginalTaskRuntimeUse::Image(state.grant.as_ref().context("observed original runtime grant absent")?.observe_original_start(client,&state.barrier)?))
+        } else {
+            ensure!(!state.attached&&state.environment.is_none()&&state.client.is_none()&&state.grant.is_none(),"observed legacy completion changed runtime profile");
+            Ok(OriginalTaskRuntimeUse::Legacy)
         }
     }
     pub(crate) fn pending_on_app(&self) -> Result<Arc<HelperProcessWitness>> {

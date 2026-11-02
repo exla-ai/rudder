@@ -113,7 +113,8 @@ struct WorkerCarrier {bootstrap:ManagedMachineBootstrap,projects:BTreeMap<String
     enrollments:BTreeMap<String,EnrollmentTicket>,root_rpc_held:bool,root_private_held:bool,registered_engine:Option<Arc<RegisteredEngineOwner>>,runtime_image:MachineRuntimeImage,
     host_offered:bool,host_error:Option<anyhow::Error>,panic:Option<Box<dyn Any+Send>>,
     generations:BTreeMap<String,Arc<source_generations::SourceGeneration>>,
-    source_reservations:BTreeMap<String,Arc<source_generations::RootSourceReservation>>}
+    source_reservations:BTreeMap<String,Arc<source_generations::RootSourceReservation>>,
+    covered_reservations:runtime_drain::CoveredTaskGenerationAdmission}
 struct Shared {phase:AtomicU8,worker_owned:AtomicBool,app_thread:std::thread::ThreadId,carrier:Mutex<WorkerCarrier>,receive:Mutex<Receiver<Job>>,
     host_offer:Mutex<Option<HostIngress>>,runtime_ready_data:Mutex<Option<rudder_native::root_storage_bootstrap::runtime_image::RuntimeReadyObservationData>>,send:SyncSender<Job>,kernel:Arc<kernel_startup::KernelSlot>}
 
@@ -284,7 +285,7 @@ impl ManagedMachineRuntime {
         let (send,receive)=mpsc::sync_channel(QUEUE);
         let shared=Arc::new(Shared {phase:AtomicU8::new(STARTING),worker_owned:AtomicBool::new(false),app_thread:std::thread::current().id(),receive:Mutex::new(receive),host_offer:Mutex::new(None),runtime_ready_data:Mutex::new(None),send:send.clone(),kernel:kernel_startup::KernelSlot::new(),carrier:Mutex::new(WorkerCarrier {
             bootstrap,projects:BTreeMap::new(),seeds:BTreeMap::new(),retired_seeds:BTreeMap::new(),enrollments:BTreeMap::new(),root_rpc_held:false,root_private_held:false,
-            registered_engine:None,runtime_image:MachineRuntimeImage::new(std::thread::current().id()),host_offered:false,host_error:None,panic:None,generations:BTreeMap::new(),source_reservations:BTreeMap::new()})});
+            registered_engine:None,runtime_image:MachineRuntimeImage::new(std::thread::current().id()),host_offered:false,host_error:None,panic:None,generations:BTreeMap::new(),source_reservations:BTreeMap::new(),covered_reservations:runtime_drain::CoveredTaskGenerationAdmission::new()})});
         Self {control:MachineControl {shared:shared.clone(),send},shared,worker:None,apps:BTreeMap::new(),app_thread:std::thread::current().id(),panic:None}
     }
     /// Spawn borrows an already retained carrier. Ordinary returned Err cannot
@@ -418,3 +419,7 @@ impl MachineControl {
                 Err(TryLockError::WouldBlock)=>std::thread::sleep(original.phase_limit(Duration::from_millis(1))?),Err(_)=>anyhow::bail!("original machine carrier poisoned")}}
     }
 }
+
+#[path="managed_runtime_drain.rs"]
+mod runtime_drain;
+pub(crate) use runtime_drain::{CoveredTaskGenerationDrain,CoveredTaskGenerationProgress,UncoveredRuntimeProducers};

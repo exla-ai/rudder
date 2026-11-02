@@ -4,7 +4,7 @@
 use super::*;
 use crate::managed_machine_cas::ManagedMachineCas;
 use super::backed_environment::{ManagedRuntimeEnvironmentFactory,ManagedRuntimeBackedEnvironment};
-use rudder_native::root_storage_bootstrap::runtime_image::{RuntimeImageClient,environment::RuntimeEnvironmentBacking};
+use rudder_native::root_storage_bootstrap::runtime_image::{RuntimeImageClient,RuntimePreparationUse,environment::RuntimeEnvironmentBacking};
 use rudder_engine::{build::{BuildIndex,index_acquisition::RetainedIndexAcquisition},
     execution::handoff::{OwnedWorkerJoin,WorkerJoined},store::{ImageImportFence,backed_retention::BackedPinOwner}};
 use std::{any::Any,sync::{Mutex,OnceLock},thread,time::Duration};
@@ -20,26 +20,46 @@ impl std::fmt::Display for EnvironmentBusy{fn fmt(&self,f:&mut std::fmt::Formatt
 impl std::error::Error for EnvironmentBusy{}
 pub(crate) fn is_busy(error:&anyhow::Error)->bool{error.downcast_ref::<EnvironmentBusy>().is_some()||error.downcast_ref::<rudder_native::root_storage_bootstrap::runtime_image::environment::RuntimeBackingBusy>().is_some()}
 fn borrowed<'a>(owner:&'a Mutex<Owner>)->Result<std::sync::MutexGuard<'a,Owner>>{match owner.try_lock(){Ok(g)=>Ok(g),Err(std::sync::TryLockError::WouldBlock)=>Err(EnvironmentBusy.into()),Err(_)=>anyhow::bail!("original runtime environment custody poisoned")}}
-pub(crate) struct SharedRuntimeEnvironment {machine:Arc<ManagedMachineCas>,owner:Mutex<Owner>,worker:Mutex<Option<OwnedWorkerJoin>>,owned:AtomicBool,
+// Only wakes the already-retained original thread. Default admitted=false
+// makes failed association/unwinding return retained failure before any work.
+// No IO, join, owner release or authority publication runs in this Drop.
+struct PreparationDispatchWake<'a>(&'a AtomicBool);
+impl Drop for PreparationDispatchWake<'_>{fn drop(&mut self){self.0.store(true,Ordering::Release);}}
+pub(crate) struct SharedRuntimeEnvironment {machine:Arc<ManagedMachineCas>,owner:Mutex<Owner>,worker:Mutex<Option<OwnedWorkerJoin>>,preparation:Mutex<Option<RuntimePreparationUse>>,admitted:AtomicBool,owned:AtomicBool,
     qualified:OnceLock<OriginalJoined>,late:Mutex<Option<WorkerJoined>>}
 impl SharedRuntimeEnvironment {
     pub(crate) fn capture(machine:Arc<ManagedMachineCas>,client:Arc<RuntimeImageClient>,original:FinalizationBudget,cancelled:Arc<AtomicBool>)->Arc<Self>{
         Arc::new(Self{machine:machine.clone(),owner:Mutex::new(Owner{machine,client,original,cancelled,index_open:None,index:None,factory:None,attempted:false,ready:false,error:None,panic:None}),
-            worker:Mutex::new(None),owned:AtomicBool::new(false),qualified:OnceLock::new(),late:Mutex::new(None)})}
+            worker:Mutex::new(None),preparation:Mutex::new(None),admitted:AtomicBool::new(false),owned:AtomicBool::new(false),qualified:OnceLock::new(),late:Mutex::new(None)})}
     pub(crate) fn start_retaining(self:&Arc<Self>)->Result<()> {
         let mut slot=self.worker.try_lock().map_err(|_|anyhow::anyhow!("original environment worker registration busy"))?;
-        ensure!(slot.is_none()&&!self.owned.load(Ordering::Acquire),"original environment worker already registered");let shared=self.clone();
+        ensure!(slot.is_none()&&!self.owned.load(Ordering::Acquire),"original environment worker already registered");
+        let mut preparation=self.preparation.try_lock().map_err(|_|anyhow::anyhow!("original environment use registration busy"))?;
+        // Reserve before spawn. A spawn/association failure leaves this same
+        // reservation charged; never retry with a new ledger entry or clock.
+        {let owner=self.owner.try_lock().map_err(|_|anyhow::anyhow!("original environment owner busy"))?;
+            clock(&owner.original,&owner.cancelled)?;owner.client.reserve_original_preparation_retaining(&mut preparation)?;}
+        let shared=self.clone();
         let worker=thread::Builder::new().name("rudder-runtime-backed-environment".into()).spawn(move||{
             while !shared.owned.load(Ordering::Acquire){thread::yield_now();}let mut owner=shared.owner.lock().unwrap_or_else(|p|p.into_inner());
+            if !shared.admitted.load(Ordering::Acquire){owner.error=Some(anyhow::anyhow!("original environment worker use registration failed; retain custody"));return;}
             match std::panic::catch_unwind(std::panic::AssertUnwindSafe(||owner.run())){Ok(Ok(()))=>{},Ok(Err(e))=>owner.error=Some(e),Err(p)=>owner.panic=Some(p)}
-        })?;*slot=Some(OwnedWorkerJoin::new(worker));self.owned.store(true,Ordering::Release);Ok(())
+        })?;*slot=Some(OwnedWorkerJoin::new(worker));
+        let wake=PreparationDispatchWake(&self.owned);
+        let registered=preparation.as_ref().unwrap().retain_original_worker(slot.as_ref().unwrap());
+        self.admitted.store(registered.is_ok(),Ordering::Release);
+        // Always release this SAME retained thread, including failed registry
+        // association, so it can return and later be actually joined through TLS.
+        drop(wake);registered
     }
     pub(crate) fn poll_ready_retaining(&self)->Result<bool>{
         if self.qualified.get().is_some(){return Ok(true)}let worker=match self.worker.try_lock(){Ok(w)=>w,Err(std::sync::TryLockError::WouldBlock)=>return Ok(false),Err(_)=>anyhow::bail!("original environment worker custody poisoned")};
         if self.qualified.get().is_some(){return Ok(true)}
         let worker=worker.as_ref().context("actual original environment worker absent")?;worker.start_join_observer()?;
         let Some(joined)=worker.try_joined()?else{return Ok(false)};
-        *self.late.lock().unwrap_or_else(|p|p.into_inner())=Some(joined);
+        *self.late.lock().unwrap_or_else(|p|p.into_inner())=Some(joined.clone());
+        self.preparation.try_lock().map_err(|_|anyhow::anyhow!("original environment use custody busy/poisoned"))?
+            .as_ref().context("original environment use reservation absent")?.retain_original_joined(&joined)?;
         let owner=match self.owner.try_lock(){Ok(o)=>o,Err(std::sync::TryLockError::WouldBlock)=>return Ok(false),Err(_)=>anyhow::bail!("original environment result poisoned")};
         let known=clock(&owner.original,&owner.cancelled).is_ok()&&owner.ready&&owner.error.is_none()&&owner.panic.is_none();
         if !known{anyhow::bail!("original environment failed/late; retain all owners and actual join")}
@@ -83,3 +103,23 @@ impl Owner {fn run(&mut self)->Result<()> {
     loop{fence.remaining()?;if self.factory.as_mut().unwrap().poll_retaining()?{break;}thread::sleep(self.original.remaining()?.min(Duration::from_millis(2)));}
     self.factory.as_ref().unwrap().environment()?.assert_custody(&self.original,&self.cancelled)?;fence.remaining()?;self.ready=true;Ok(())
 }}
+
+#[cfg(test)]
+mod preparation_dispatch_tests {
+    use super::*;
+    #[test]
+    fn association_failure_or_panic_wakes_same_worker_without_dispatching_work() {
+        for panic in [false,true] {
+            let owned=Arc::new(AtomicBool::new(false));let admitted=Arc::new(AtomicBool::new(false));
+            let work=Arc::new(AtomicBool::new(false));let gate=owned.clone();let allowed=admitted.clone();let ran=work.clone();
+            let original=OwnedWorkerJoin::new(thread::spawn(move||{
+                while !gate.load(Ordering::Acquire){thread::yield_now();}
+                if allowed.load(Ordering::Acquire){ran.store(true,Ordering::Release);}
+            }));
+            let result=std::panic::catch_unwind(||{let _wake=PreparationDispatchWake(&owned);
+                if panic{panic!("test-only preparation association panic");}});
+            assert_eq!(result.is_err(),panic);original.await_joined(Duration::from_secs(2)).unwrap();
+            assert!(owned.load(Ordering::Acquire));assert!(!admitted.load(Ordering::Acquire));assert!(!work.load(Ordering::Acquire));
+        }
+    }
+}

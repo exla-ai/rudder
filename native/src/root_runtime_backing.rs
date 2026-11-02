@@ -161,6 +161,7 @@ impl RuntimeImageClient {
         if client.active.is_some()||client.backing_active.is_some(){return Ok(false)}
         ensure!(client.backing_retained.is_none(),"runtime backing original already staged; retain that original owner");
         let state=Arc::new(Mutex::new(NativeBackingState::staged(original,cancelled)));
+        self.uses.backing(&state)?;
         client.backing_active=Some(state.clone());client.backing_retained=Some(state.clone());
         *out=Some(RuntimeBackingTransfer{client:self.clone(),state:state.clone()});
         let mut state=state.try_lock().map_err(|_|anyhow::anyhow!("original runtime backing state unexpectedly borrowed/poisoned"))?;
@@ -216,12 +217,13 @@ impl RuntimeEnvironmentBacking {
     /// Physical original-owner check only, for retaining immutable old inputs
     /// after acquisition. No deadline/admission/retirement authority is minted.
     pub fn assert_original_custody(&self)->Result<()> {
+        self.client.uses.contains_backing(&self.state)?;
         self.client.current()?;let state=match self.state.try_lock(){Ok(s)=>s,Err(TryLockError::WouldBlock)=>return Err(RuntimeBackingBusy.into()),Err(_)=>anyhow::bail!("original runtime backing custody poisoned")};
         ensure!(state.ready&&state.issued&&!state.failed,"original runtime backing ACK absent");packet_current(&state)?;
         self.inputs.binding_data()?;Ok(())
     }
     pub fn assert_current(&self,original:&dyn ImageImportFence)->Result<()> {
-        original.remaining()?;self.client.current()?;
+        original.remaining()?;self.client.uses.contains_backing(&self.state)?;self.client.current()?;
         loop{original.remaining()?;match self.state.try_lock(){Ok(s)=>{ensure!(s.ready&&s.issued&&!s.failed,"original runtime backing incomplete/fenced");packet_current(&s)?;break;},
             Err(TryLockError::WouldBlock)=>thread::sleep(original.remaining()?.min(Duration::from_millis(1))),Err(_)=>anyhow::bail!("original runtime backing custody poisoned")}}
         self.inputs.current(original)?;original.remaining()?;Ok(())

@@ -133,7 +133,17 @@ impl ManagedSeedEnrollment {
     pub(crate) fn matches_joined(&self, joined: &JoinedManagedTask) -> Result<()> {
         ensure!(self.phase == Phase::Released && self.receipt.is_some(), "managed seed start is not known released");
         ensure!(joined.prepared().assignment == *self.pending.assignment(), "joined task differs from enrolled assignment");
+        if let Some(backed)=&joined.prepared().backed_inputs{backed.check_reads_settled()?;}
+        joined.check_runtime_start(self.pending.runtime_start())?;
+        self.pending.runtime_start().check_joined_original_off_app()?;
         joined.helper_exit().matches_checkpoint(joined.helper_custody(), joined.shutdown())
+    }
+    /// Borrow the SAME whole completion and original enrollment. Returning an
+    /// identity is diagnostic association only, never release/drain authority.
+    pub(crate) fn observe_joined_runtime_use(&self,joined:&JoinedManagedTask)
+        ->Result<crate::managed_app::runtime_task::OriginalTaskRuntimeUse> {
+        self.matches_joined(joined)?;
+        self.pending.runtime_start().observe_joined_original_off_app()
     }
     /// OFF App. Only distinguishes ordinary shared fencing for retained
     /// recovery. Caller separately checks the actual Root client; this neither

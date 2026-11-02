@@ -26,6 +26,44 @@ fn finish_never_task_after_join(value:&mut NeverTaskClose)->Result<()> {
 }
 #[derive(Debug,Clone,Copy,PartialEq,Eq)]
 pub(crate) enum NeverStartedProgress {WaitingPreparation,Joined}
+/// Fixed read-only observation of originals already owned by this task scope.
+/// A seal alone, missing helper, empty payload slot or callback return is not
+/// the actual factory + fork + task cleanup/TLS join required here.
+fn observe_original_never_started(task:&TaskScope)->Result<TaskRuntimeObservation> {
+    let Some(actual)=&task.never else {return Ok(TaskRuntimeObservation::Pending);};
+    ensure!(task.completion.is_none()&&task.enrollment.is_none()&&task.task_close.is_none(),"unused task observation conflicts with started owners");
+    if !original_factory_join_observed(&task.factory)? {return Ok(TaskRuntimeObservation::Pending);}
+    let Some(seal)=&actual.seal else {return Ok(TaskRuntimeObservation::Pending);};
+    let gate=task.start.as_ref().context("original unused task gate absent")?;
+    seal.check_original(gate)?;
+    if actual.dependency.is_none() {return Ok(TaskRuntimeObservation::Pending);}
+    let Some(fork)=&actual.fork_close else {return Ok(TaskRuntimeObservation::Pending);};
+    let Some(fork)=fork.reconcile_joined()? else {return Ok(TaskRuntimeObservation::Pending);};
+    fork.with_value(|value|{
+        ensure!(value.original.constraint()==actual.original.constraint()&&Arc::ptr_eq(&value.cancelled,&actual.cancelled),"observed unused fork changed original cleanup campaign");
+        ensure!(match (&value._cell,&task.fork) {(None,None)=>seal.fork_was_never_claimed(),(Some(a),Some(b))=>Arc::ptr_eq(a,b),_=>false},"observed unused fork changed original owner");
+        Ok(())
+    })?;
+    let Some(work)=&actual.task_close else {return Ok(TaskRuntimeObservation::Pending);};
+    let Some(joined)=work.reconcile_joined()? else {return Ok(TaskRuntimeObservation::Pending);};
+    joined.with_value(|value|{
+        ensure!(value.original.constraint()==actual.original.constraint()&&Arc::ptr_eq(&value.cancelled,&actual.cancelled),"observed unused task changed original cleanup campaign");
+        match &value.payload {
+            NeverTaskPayload::Factory {..}=>ensure!(seal.before_dispatch(),"observed original factory payload had dispatched"),
+            NeverTaskPayload::App(unused)=>{
+                ensure!(!seal.before_dispatch(),"observed unused App payload preceded dispatch");
+                unused.seal().check_original(gate)?;
+                ensure!(task.fork.as_ref().is_some_and(|fork|Arc::ptr_eq(fork,unused.fork())),"observed unused App payload changed original fork");
+            },
+        }
+        // This private payload exists only through the fixed original cleanup
+        // callback. Its successful cached join includes settle_off_app and TLS.
+        // Existing finalization may already have disposed inputs/reused slots;
+        // do not inspect a replacement slot or perform that finalization here.
+        Ok(())
+    })?;
+    Ok(TaskRuntimeObservation::NeverStarted)
+}
 impl SeedTaskTicket {
     /// OFF-App ORIGINAL factory thread, before it returns. Store the WHOLE
     /// actual success or failure, not a flag saying no helper exists. Errors

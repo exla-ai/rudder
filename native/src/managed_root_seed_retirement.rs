@@ -33,6 +33,17 @@ pub(crate) struct ManagedSeedTaskDrain {
     joined:Option<JoinedSeedUse<OriginalTaskOwners>>,original:FinalizationBudget,
 }
 impl ManagedSeedTaskDrain {
+    /// No start, wait, retry or finalization. Empty pre-transfer slots are not
+    /// completion: only this SAME existing cleanup's actual cached join may
+    /// expose the original whole discarded/published owner and enrollment.
+    pub(crate) fn observe_original_runtime_use(&self)
+        ->Result<Option<crate::managed_app::runtime_task::OriginalTaskRuntimeUse>> {
+        let observed=if self.joined.is_none() {
+            if let Some(worker)=&self.worker {worker.reconcile_joined()?} else {None}
+        } else {None};
+        let Some(joined)=self.joined.as_ref().or(observed.as_ref()) else {return Ok(None);};
+        joined.with_value(|owners|owners.enrollment.observe_joined_runtime_use(owners.completion.joined()?)).map(Some)
+    }
     fn validate(client:&RootStorageClient,seed:&ClientSeedOwner,guard:&Option<SeedUseGuard>,
         joined:&JoinedManagedTask,enrollment:&ManagedSeedEnrollment,original:&FinalizationBudget)->Result<()> {
         original.remaining()?;ensure!(joined.is_settled(),"task acceptance/discard cleanup not settled");

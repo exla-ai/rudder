@@ -3378,3 +3378,37 @@ The retained original controller was signaled through its original pidfd and
 actually reaped at 03:44:52Z. The fresh token was revoked by an actually waited
 child at 03:44:56Z. No normal runtime retirement, SDK admission, public release
 or production deployment was established.
+
+### 2026-11-02 04:24Z: combined source compiles; SDK privilege boundary reproduced
+
+The original combined ledger, reservation drain and SDK diagnostic build
+finished at 04:23:35Z. Production binary checking and both test harness builds
+passed in the original 1800s compile bound. A separate actual Root test then
+passed: the original UID1500 helper, with all capability sets empty,
+NoNewPrivs enabled and dumpability disabled, could not read its Root parent's
+`/proc/<pid>/exe`. The original child was waited and both streams reached EOF.
+This reproduces an unavailable operation in the SDK handshake; it does not
+identify A20's unobserved nested failure.
+
+The first seven nonroot tests passed. The eighth selector used the source
+filename's module name instead of its declared `managed_app::runtime_task`
+alias and selected zero tests. The runner correctly refused its zero-test
+success. The remaining nineteen tests did not run, and the combined candidate
+was rejected. No source from that candidate was integrated into Main. The
+original report SHA is
+`ac9469817217a39d6865011fa8069ac2bfd225c5b989440af876d7a2a96ce16a`;
+the terminal observation SHA is
+`3b9fb585af785fed82222b540e110ad143bdf3403f5de3d3c3dc733109097fd2`.
+Remote builder release remains unverified. No image was published or deployed.
+
+The next SDK change explicitly uses the genuine original Root issuer's
+retained executable witnesses, consistent with the existing storage bootstrap.
+It preserves the helper's unprivileged pre-exec floor and the original child,
+kernel peer, process birth, installed image, namespace, sealed capsule and
+clock checks. This changes the trust contract: a received witness is validated
+DATA from that issuer, not an independent proof that an actively hostile Root
+parent executes a particular image. Such DATA cannot construct the private
+SDK owner, readiness acknowledgment or runtime client. Containment of a
+hostile global Root that controls protected code, state or original endpoints
+is outside this boundary. Implementation, independent review and actual SDK
+qualification are still pending.

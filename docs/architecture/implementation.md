@@ -3441,3 +3441,24 @@ The combined source remains outside Main. Remote builder release is unverified;
 no image publication, VM deployment or SDK/runtime qualification occurred.
 The next unused workflow adds bounded diagnostics from the same original
 failed test capture before another explicitly prepared attempt.
+
+### 2026-11-02 05:12Z: fresh diagnostic localizes fixture setup failure
+
+A separate fresh diagnostic reused cached compiler and Root layers as DATA,
+then ran only the eighth test on the same pinned executable under UID/GID1500,
+empty groups, zero capabilities and no-new-privileges. Its actual child exited
+101 with complete wait, both EOFs and a held pidfd. Bounded output identifies
+`managed_runtime_task_tests.rs:19:129`: fixture setup's `prepare_owned` returned
+`ManagedSourcePrepareFailure` with unsettled cleanup before the barrier
+assertions ran. The nested cause remains unknown; this does not establish the
+old qualification attempt's nested cause.
+
+Original diagnostic tool session 62618 exited 0 with a matching observation
+marker and unconditional `qualificationAccepted:false`. Candidate SHA:
+`e8885022348031182f2c943d32ede47db977fb22fedadf3197b72a165bcc9e6b`.
+Root terminal-observation SHA:
+`3cbd0a57459a5117c9491e01ec2919189eafa128918c8aea79910ef864cf341c`.
+Independent actual-evidence review SHA:
+`ff471ee883d7118bd412a1efc7ea4b823ca66c1d47a91f7641b32124d6b97793`.
+This diagnostic grants no source, SDK, runtime or retirement qualification.
+The complete suite and genuine SDK attempt remain required.

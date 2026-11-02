@@ -3701,3 +3701,52 @@ Independent actual failed-attempt review SHA:
 `c37e19210362b1a099fa1d4e11fc03d14dc62923861b4cd396665fa1103fa8d1`.
 No acceptance file was created. The sixteen pending Rust paths remain outside
 Main, with no new source, SDK, runtime, image or deployment qualification.
+
+### 2026-11-02 13:35Z: source checks and image builds passed; runtime remains pending
+
+The subsequent source36 qualification completed in original session 9129 with
+exit 0. All eleven selected artifacts reported `fresh: false`; compilation
+took 1482 seconds within the unchanged 1800-second limit. All 86 selected tests
+passed, including both Root tests, 54 ordinary tests and 30 feature tests.
+Independent review accepted this source qualification at 10:13:22Z, receipt
+SHA `60aa8769f9e6b5eb5177f32b2fdbdf71294f00f6a294989c080015d7578f80d6`.
+The source changes were integrated in revision
+`aea4b817a3abaf810cc6cd67a09ed9a25e902bb5`. Source-test acceptance does not
+establish genuine bootstrap, SDK/runtime admission or normal retirement.
+
+All three exclusive worker image builds completed and were pushed as private
+build artifacts. Their immutable digests are:
+
+- Close-wins: `sha256:51af34e6a8eede0536b581067d2516f35dd9b32dbd053a13ef5632704fbf0b3b`.
+- Admission-wins: `sha256:cc5c1113c4c1378b07a2412d136ca648ae2e56dc2e67bdb631249aa16b4271a5`.
+- Carrier-contention: `sha256:32333c97a2739e0ea4d6bf88f4eb2f69f48c6c9a3af76ae16a1bc373769056f8`.
+
+The first close-wins controller failed during setup before admission. Its
+original cleanup completed and its temporary token was revoked. The retained
+status has no nested setup exception. Source inspection identified a path
+mismatch: `flyctl` was checked beneath the context root although the image
+installs it at `/workspace/home/.fly/bin/flyctl`. Revision
+`620fd66b17f755f069536006b4dfc64f5c5cec91` fixes that check; eight focused tests
+passed. A new controller context and image were built from the corrected setup,
+with image digest
+`sha256:8988856b61aa3271ee95eeddf13a79827d64b69aab31092d1d591cf2f982e5ad`.
+This setup revision and the historical controller compiler result remain
+separate provenance facts.
+
+The second attempt's original supervisor session 1886 exited 0 after the
+unchanged 900-second deadline expired at 13:28:38Z while awaiting the completion
+gate. The binder had completed, but completion publication was never invoked.
+The original report records zero controller provider calls, an empty effect
+list, no created resources and verified cleanup through the no-owned-resource
+route. No protected-resource comparison or provider absence scan occurred.
+Independent cleanup receipt SHA:
+`671bf385d30795237445164e9d25a264427ffddfb156999dc4166005cccc765d`.
+The temporary token's original revocation command exited 0 at 13:34:42Z, with
+an acknowledged revocation, original child wait and no observer errors.
+Revocation receipt SHA:
+`c993c4f417f6da28709dd1e4e3945fb137d44a05aa8a050b40b91dcf902418b7`.
+Preparation for a fresh attempt moves static gate review before the runtime
+clock; the expired attempt is retained without replay or deadline renewal.
+SDK/runtime admission, the three genuine cases and normal retirement remain
+unverified. No public
+release, control-plane deployment or Mac installation follows from these builds.

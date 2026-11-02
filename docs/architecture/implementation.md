@@ -3462,3 +3462,25 @@ Independent actual-evidence review SHA:
 `ff471ee883d7118bd412a1efc7ea4b823ca66c1d47a91f7641b32124d6b97793`.
 This diagnostic grants no source, SDK, runtime or retirement qualification.
 The complete suite and genuine SDK attempt remain required.
+
+
+### 2026-11-02 05:23Z: fresh metadata confirms absent test-image boundary
+
+A second diagnostic ran the same pinned test once under the same privilege
+floor and bounds. Closed metadata from that fresh uncached step confirms
+`/usr/lib/modules` is absent (`lstat` returned `ENOENT`, errno 2).
+`/usr/sbin/swapon` is a canonical, nonsymlink, Root-owned regular file, mode
+0755. The test again exited 101 during fixture source preparation with complete
+original wait, both EOFs and a held pidfd. The nested preparation cause remains
+unknown, as does the old qualification attempt's nested cause.
+
+Original tool session 6084 exited 0 with a matching diagnostic-only marker and
+`qualificationAccepted:false`. Candidate SHA:
+`f8cb31babc11d7ec7b1afaec36f4c417a9ef1be06af81785aba0bfb5579e4203`.
+Root terminal-observation SHA:
+`417c1a104ba7f5e19a593e1d3ee61fe7dbcd7fc78030cf8f550ca5afe3830169`.
+Independent actual-evidence review SHA:
+`ce5e753cde836efeee53034bfd79084bc172fa95958eb69faa97d09ede6d21f8`.
+The next unused qualification workflow prepares the provider boundaries already
+specified in the worker Dockerfile before rerunning the full selected suite.
+No source, SDK, runtime or retirement qualification follows from this metadata.

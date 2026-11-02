@@ -3347,3 +3347,34 @@ It checked the complete frozen source, ordered gates, original process receipts,
 four ELF outputs, all descriptors and the final immutable digest. SDK, runtime
 and ordinary workload qualification remain pending. No public release or
 production deployment occurred.
+
+
+### 2026-11-02 03:45Z: new worker reaches SDK qualification, remains unqualified
+
+A20 used the exact verified A9 worker, a fresh scoped credential and the
+reviewed V13 controller. Root observed the original supervisor's completed
+process capture and retained pidfd before binding the single fresh nonce.
+The control VM acknowledged its injected files and started the SDK stage.
+
+The SDK's original deadline expired with six messages, no helper qualification
+and no Root acknowledgment. The controller retained quarantine at 03:43:51Z;
+runtime and ordinary workload stages did not start. All 70 controller effects
+settled with no unknown effects. One guarded, bounded diagnostic read of the
+original SDK machine completed at 03:44:02Z. Its closed projection reported
+`serve_runtime / SdkQualification / validation_or_other`, with no IO kind or
+errno. This is a later check than the previous `SdkBakedInventory` failure;
+it does not identify the nested qualification predicate.
+
+The independent diagnostic review SHA is
+`5e6d1dc811995f4197cbb0789baa31b495dfab2c04454d20b476a63f6127d947`.
+Exact operator teardown then completed with 40 settled calls at 03:44:29Z,
+including original machine terminal waits and two absence observations,
+temporary secret absence, and the protected live home guard. The SDK volume
+had an original DELETE acknowledgment and was inactive; physical erasure was
+not established. Five preexisting control volumes were preserved. Cleanup
+report SHA:
+`f70bc871d6210d586ccdd770782ebb3bfd4e7bfaef054287c9b9b852bfbde63b`.
+The retained original controller was signaled through its original pidfd and
+actually reaped at 03:44:52Z. The fresh token was revoked by an actually waited
+child at 03:44:56Z. No normal runtime retirement, SDK admission, public release
+or production deployment was established.

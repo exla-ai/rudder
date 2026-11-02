@@ -3241,3 +3241,19 @@ fixed driver catch marker. This narrows the failure to later startup work; it
 does not establish S3 request settlement or identify the failing operation.
 The first local collector refused a changed wrapper hash before any network
 dispatch and was reaped; its evidence is retained separately.
+
+A18's original controller reached its unchanged900-second setup deadline at
+02:44:45Z with all106 recorded effects settled and no captured homes. Operator
+cleanup then passed20 calls at02:45:11Z, removing only the exact original
+control VM and three original temporary secrets, verifying absence and the
+protected live home's identity. The supervisor used its original held pidfd to
+stop and reap the controller at02:45:18Z; temporary token revocation exited0 at
+02:45:31Z. This is disposable fixture cleanup, not normal runtime retirement.
+
+The separate control image containing the reviewed diagnostics built and
+pushed successfully at02:43:50Z as
+`sha256:e6fdd33e84c99ffd139ea775ef869a243213c900ccdf79e27d2d651d016f68b0`.
+Independent review verified all4,000 actual context files against A17, finding
+only the reviewed driver change, and bound the actual log to the final push.
+The original build child exited0 with no remote continuation. No production
+deployment or SDK/runtime readiness follows from this control image build.

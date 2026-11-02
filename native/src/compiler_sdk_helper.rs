@@ -21,6 +21,8 @@ fn run_inner(check:&mut BootstrapCheck,reaped_inner_stderr:&mut Option<File>)->R
     ensure!(unsafe{libc::getuid()}==1500&&unsafe{libc::geteuid()}==1500&&unsafe{libc::getgid()}==1500,"SDK helper requires actual unprivileged UID1500");
     ensure!(unsafe{libc::prctl(libc::PR_SET_DUMPABLE,0,0,0,0)}==0&&unsafe{libc::prctl(libc::PR_GET_DUMPABLE,0,0,0,0)}==0,"SDK helper ND0 unavailable");
     wire::require_initial_id_maps(std::process::id())?;
+    // Forked before connect, so it never holds an SDK descriptor or capsule.
+    let userns=WorkloadUserNamespace::fork()?;
     // Fresh connect only AFTER exec+ND0. No pre-exec inherited receiver socket
     // can be stolen and later receive this SDK descriptor capability.
     *check=BootstrapCheck::SdkHelperConnect;
@@ -61,7 +63,7 @@ fn run_inner(check:&mut BootstrapCheck,reaped_inner_stderr:&mut Option<File>)->R
     let cwd=fs::metadata(".")?;ensure!((cwd.dev(),cwd.ino())==(m.dev(),m.ino()),"SDK helper changed original work directory");
     let job=if data.job.is_null(){ensure!(packet.fds.len()==7,"SDK fixed descriptor count differs");None}else{ensure!(packet.fds.len()==10,"SDK selected descriptor count differs");Some((&data.job,&packet.fds[7],&packet.fds[8],&packet.fds[9]))};
     *check=BootstrapCheck::SdkHelperNamespaceWorkload;
-    let workload=run_namespace_retaining(&packet.fds[5],&original,job,reaped_inner_stderr)?;if job.is_none(){validate_workload(&workload,&constraint)?;}
+    let workload=run_namespace_retaining(userns,&packet.fds[5],&original,job,reaped_inner_stderr)?;if job.is_none(){validate_workload(&workload,&constraint)?;}
     let result=CompilerSdkProbeData{format_version:1,kind:"original-sdk-fixed-helper-complete-v1".into(),helper_pid:std::process::id(),helper_start_ticks:start,original_constraint:constraint,workload};
     *check=BootstrapCheck::SdkHelperResultSend;
     let bytes=canonical_json(&result)?;ensure!(bytes.len()<=16*1024,"SDK fixed result bound");
@@ -71,10 +73,80 @@ fn mount(source:Option<&str>,target:&str,kind:Option<&str>,flags:libc::c_ulong)-
     let s=source.map(CString::new).transpose()?;let t=CString::new(target)?;let k=kind.map(CString::new).transpose()?;
     ensure!(unsafe{libc::mount(s.as_ref().map_or(std::ptr::null(),|v|v.as_ptr()),t.as_ptr(),k.as_ref().map_or(std::ptr::null(),|v|v.as_ptr()),flags,std::ptr::null())}==0,"SDK private namespace mount failed");Ok(())
 }
-fn run_namespace_retaining(floor:&OwnedFd,original:&FinalizationBudget,job:Option<(&serde_json::Value,&OwnedFd,&OwnedFd,&OwnedFd)>,reaped_inner_stderr:&mut Option<File>)->Result<serde_json::Value> {
+/// Holds the workload user namespace for a helper that stays non-dumpable.
+///
+/// After unshare(CLONE_NEWUSER) a non-dumpable process keeps its proc files
+/// owned by global root, so opening its own uid_map fails with EACCES. Making
+/// the helper dumpable for the map writes would let any UID1500 process
+/// pidfd_getfd the SDK descriptors it holds. Instead a child forked before the
+/// helper connects (it holds no descriptor or capsule DATA) waits
+/// non-dumpable, and only when asked turns dumpable, creates the namespace and
+/// writes the maps. The helper joins it with setns and never stops being ND0.
+pub(super) struct WorkloadUserNamespace{pid:libc::pid_t,pidfd:Option<OwnedFd>,go:Option<OwnedFd>,ready:Option<OwnedFd>}
+impl WorkloadUserNamespace{
+    /// Call while single-threaded: the child runs raw syscalls only.
+    pub(super) fn fork()->Result<Self>{
+        let pipe=||->Result<(OwnedFd,OwnedFd)>{let mut fds=[-1;2];ensure!(unsafe{libc::pipe2(fds.as_mut_ptr(),libc::O_CLOEXEC)}==0,"SDK user namespace pipe unavailable");Ok(unsafe{(OwnedFd::from_raw_fd(fds[0]),OwnedFd::from_raw_fd(fds[1]))})};
+        let(go_read,go_write)=pipe()?;let(ready_read,ready_write)=pipe()?;
+        let pid=unsafe{libc::fork()};ensure!(pid>=0,"SDK user namespace child unavailable");
+        if pid==0{unsafe{user_namespace_child(go_read.as_raw_fd(),ready_write.as_raw_fd())}}
+        drop((go_read,ready_write));
+        let mut holder=Self{pid,pidfd:None,go:Some(go_write),ready:Some(ready_read)};
+        // An unreaped child keeps its PID, so this pidfd names the same child.
+        let raw=unsafe{libc::syscall(libc::SYS_pidfd_open,pid,0)}as i32;ensure!(raw>=0,"SDK user namespace child pidfd unavailable");
+        holder.pidfd=Some(unsafe{OwnedFd::from_raw_fd(raw)});Ok(holder)
+    }
+    /// Joins the child's namespace as UID/GID0 mapped to the actual UID/GID1500.
+    /// Dropping self afterwards kills and reaps the child.
+    pub(super) fn join(self,remaining:impl Fn()->Result<Duration>)->Result<()>{
+        let(Some(go),Some(ready),Some(pidfd))=(&self.go,&self.ready,&self.pidfd)else{anyhow::bail!("SDK user namespace child absent")};
+        ensure!(unsafe{libc::write(go.as_raw_fd(),b"1".as_ptr().cast(),1)}==1,"SDK user namespace request failed");
+        loop{
+            let wait=remaining()?.as_millis().clamp(1,1000)as i32;let mut poll=libc::pollfd{fd:ready.as_raw_fd(),events:libc::POLLIN,revents:0};
+            let n=unsafe{libc::poll(&mut poll,1,wait)};
+            if n>0{break}
+            ensure!(n==0||io::Error::last_os_error().kind()==io::ErrorKind::Interrupted,"SDK user namespace wait failed");
+        }
+        let mut byte=0u8;ensure!(unsafe{libc::read(ready.as_raw_fd(),(&mut byte as *mut u8).cast(),1)}==1&&byte==b'1',"SDK user namespace child failed");
+        ensure!(unsafe{libc::setns(pidfd.as_raw_fd(),libc::CLONE_NEWUSER)}==0,"SDK user namespace join failed");
+        ensure!(unsafe{libc::getuid()==0&&libc::geteuid()==0&&libc::getgid()==0&&libc::getegid()==0},"SDK user namespace identity differs");
+        for(path,expected)in[("/proc/self/uid_map","0 1500 1"),("/proc/self/gid_map","0 1500 1"),("/proc/self/setgroups","deny")]{
+            ensure!(fs::read_to_string(path)?.split_whitespace().collect::<Vec<_>>().join(" ")==expected,"SDK user namespace map differs");
+        }
+        Ok(())
+    }
+}
+impl Drop for WorkloadUserNamespace{
+    fn drop(&mut self){
+        self.go.take();self.ready.take();
+        unsafe{libc::kill(self.pid,libc::SIGKILL);let mut status=0;while libc::waitpid(self.pid,&mut status,0)<0&&io::Error::last_os_error().kind()==io::ErrorKind::Interrupted{}}
+        self.pidfd.take();
+    }
+}
+/// Forked child only: raw syscalls, no allocation, never returns.
+unsafe fn user_namespace_child(go:i32,ready:i32)->!{
+    unsafe fn read_byte(fd:i32)->isize{let mut byte=0u8;loop{let n=libc::read(fd,(&mut byte as *mut u8).cast(),1);if n<0&&*libc::__errno_location()==libc::EINTR{continue}return n}}
+    unsafe fn write_file(path:&std::ffi::CStr,data:&[u8])->bool{
+        let fd=libc::open(path.as_ptr(),libc::O_WRONLY|libc::O_CLOEXEC);if fd<0{return false}
+        let written=libc::write(fd,data.as_ptr().cast(),data.len())==data.len()as isize;libc::close(fd)==0&&written
+    }
+    let close=|from:i32,to:i32|from>to||libc::syscall(libc::SYS_close_range,from as u32,to as u32,0u32)==0;
+    let(low,high)=(go.min(ready),go.max(ready));
+    // Keep only the two pipes: no inherited stdio, so the Root parent's pipe
+    // EOF never waits for this child.
+    if !(close(0,low-1)&&close(low+1,high-1)&&libc::syscall(libc::SYS_close_range,(high+1)as u32,u32::MAX,0u32)==0){libc::_exit(1)}
+    if read_byte(go)!=1{libc::_exit(1)}
+    let created=libc::prctl(libc::PR_SET_DUMPABLE,1,0,0,0)==0&&libc::unshare(libc::CLONE_NEWUSER)==0
+        &&write_file(c"/proc/self/setgroups",b"deny")&&write_file(c"/proc/self/uid_map",b"0 1500 1\n")&&write_file(c"/proc/self/gid_map",b"0 1500 1\n");
+    if !created||libc::write(ready,b"1".as_ptr().cast(),1)!=1{libc::_exit(1)}
+    // Keep the namespace alive until the helper has joined and closes go.
+    while read_byte(go)>0{}
+    libc::_exit(0)
+}
+fn run_namespace_retaining(userns:WorkloadUserNamespace,floor:&OwnedFd,original:&FinalizationBudget,job:Option<(&serde_json::Value,&OwnedFd,&OwnedFd,&OwnedFd)>,reaped_inner_stderr:&mut Option<File>)->Result<serde_json::Value> {
     original.remaining()?;
-    ensure!(unsafe{libc::unshare(libc::CLONE_NEWUSER|libc::CLONE_NEWNS|libc::CLONE_NEWNET|libc::CLONE_NEWPID)}==0,"SDK actual isolated namespaces unavailable");
-    fs::write("/proc/self/setgroups",b"deny")?;fs::write("/proc/self/uid_map",b"0 1500 1\n")?;fs::write("/proc/self/gid_map",b"0 1500 1\n")?;
+    userns.join(||original.remaining())?;
+    ensure!(unsafe{libc::unshare(libc::CLONE_NEWNS|libc::CLONE_NEWNET|libc::CLONE_NEWPID)}==0,"SDK actual isolated namespaces unavailable");
     mount(None,"/",None,(libc::MS_REC|libc::MS_PRIVATE)as _)?;
     for name in ["root","workspace","tmp"]{fs::DirBuilder::new().mode(0o700).create(name)?;}
     if job.is_some(){fs::DirBuilder::new().mode(0o700).create("observer-proc")?;}
@@ -210,3 +282,6 @@ fn relay_inner_stderr_after_reap(inner:&File) {
 #[cfg(test)]
 #[path="compiler_sdk_fixed_first_diagnostic_tests.rs"]
 mod fixed_first_diagnostic_tests;
+#[cfg(test)]
+#[path="compiler_sdk_helper_userns_tests.rs"]
+mod userns_tests;

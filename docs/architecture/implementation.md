@@ -3618,6 +3618,34 @@ preflight session 74651 checked 633 source files, 646 context files, modes,
 fresh nonce, literal includes and the unchanged disk reserve. Independent
 actual-context review cleared at 07:54:35Z, receipt SHA
 `e7569a6b666a9ad2e7aad43f81ea6240b271fd203db4c03ac8a69531325202c6`.
-The one original remote build started in session 11132. It has no terminal
-result yet. Source, SDK, runtime, retirement and deployment acceptance remain
-absent.
+The one original remote build started in session 11132. Its terminal failure
+and the remaining qualification gap are recorded below.
+
+### 2026-11-02 08:19Z: all source36 artifacts compiled; Root witness test failed
+
+Original session 11132 settled with exit 1 and an explicit false acceptance
+marker. The compiler stage completed in 1336.6 seconds, inside its unchanged
+1800-second limit. All eleven selected Cargo artifacts reported exact
+`fresh: false`, including the three production feature binaries built with
+the original release recipe. This establishes compilation DATA only.
+
+The first Root privilege-boundary test passed. The second Root test,
+`sdk_helper_root_producer_witness_real_scm_data_checks`, exited 101. The Root
+stage ended after 39.86 seconds, before the non-Root test stage ran. Its
+original child wait, both stream EOFs and held pidfd were observed; no outer
+observer error, timeout or truncation was reported. The failed test's output
+hashes were retained, but its error text was not exported from the failed
+build layer. The nested cause remains unknown. Remote builder resource
+cleanup remains unverified.
+
+Candidate-report SHA:
+`d6dd0e87268cb9117aadd3ce2da1e6a049b0c6e15110cc9805f50df2b9a73153`.
+Root's original-terminal observation SHA:
+`9453708e3796c10c2723bda4a4323e878f2fe277b0cea05a4d3cbcd923962e35`.
+Independent actual failed-attempt review SHA:
+`c9d6cd89a2e25c1ae80bd46a6d17b6a8431754aed59e806d8040f9769f98d1f5`.
+No source acceptance file was created. The sixteen pending Rust changes
+remain outside Main, and no new product image, SDK/runtime qualification,
+retirement result or deployment follows from this attempt. The next step is
+a bounded diagnostic of the failed Root test with its original budget and
+child ownership preserved.

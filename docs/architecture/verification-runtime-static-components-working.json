@@ -1,0 +1,199 @@
+{
+  "formatVersion": 1,
+  "scope": "unreleased local static-file capture correction and fixed component diagnostics; no runtime or SDK admission",
+  "productRevision": "ce6a1a4d44ca03f9a294af7998d88bd884fb4238",
+  "recordedAt": "2026-11-02T02:12:04.796055+00:00",
+  "sourceFiles": {
+    "native/src/image_preseed_data.rs": {
+      "sha256": "fcb50ba1a0a442cf081a62aec559ead9bcf8dfc5a11245a30ce79ed70781d9c2",
+      "bytes": 31046
+    },
+    "native/src/image_preseed_static_link_tests.rs": {
+      "sha256": "ee1b928041f033fd5ac1978710bb5e4cbc2e011408cbb57ca5c06482244480ba",
+      "bytes": 9432
+    },
+    "native/src/root_runtime_image.rs": {
+      "sha256": "66860dcc3340e9072124c3edc4ad63b9836958c87b3bd7927528241f13c976f2",
+      "bytes": 68577
+    },
+    "native/src/root_runtime_component_diagnostic_tests.rs": {
+      "sha256": "05fcf514940079d53c6fe17f0af5be5dd13f5c47b9d77d3636ce0cf7bf300dbb",
+      "bytes": 7787
+    }
+  },
+  "actualFailure": {
+    "attempt": "A17",
+    "workerDigest": "sha256:da09d12625e92c6f8b61ecc6a5604f163aaebdf15e73236769ea9bffcc8cc6e5",
+    "fixedDiagnostic": "RuntimeMountComponents",
+    "observedComponent": {
+      "name": "timezone",
+      "type": "symlink",
+      "target": "/usr/share/zoneinfo/Etc/UTC"
+    },
+    "metadataObjectsReadAndVerified": 2,
+    "probeReceiptSha256": "5fbbf56171f2c17263c6282b919a2be6ccb1ae8d72e87fe9cb67a09dfd385922",
+    "fixedDiagnosticReceiptSha256": "dd53bcc01632d0ed77e792b7203e2e1cd88346d50c5f40673f03151295016de9",
+    "earliestFailingCheckProved": false,
+    "sdkWindowExpired": true,
+    "sdkAckSendAttemptObserved": false,
+    "runtimeEntered": false,
+    "ordinaryEntered": false
+  },
+  "correction": {
+    "reuseAlreadyCapturedRegularTargetOnly": true,
+    "retainOriginalSourceAndTargetCustody": true,
+    "rejectEveryParentDirComponent": true,
+    "retainCanonicalManifestRow": true,
+    "physicalHardlinkTopologyPreserved": true,
+    "runtimeNoFollowUnchanged": true,
+    "runtimeRoleAndMountChecksUnchanged": true,
+    "originalClocksUnchanged": true
+  },
+  "localChecks": [
+    {
+      "name": "419-runtime-component-diagnostics",
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "rudder-native",
+        "--lib",
+        "runtime_image::component_diagnostic_tests"
+      ],
+      "exitCode": 0,
+      "completedAt": "2026-11-02T01:49:39.494010+00:00",
+      "elapsedSeconds": 79.673,
+      "receiptSha256": "97a502c2684cbfc75367e2969583c36436eff379477201217eecb9bcc1c7eed6",
+      "logSha256": "6ae9e265bd538b7445ce0fb41068de161b122720e0670493340d9b90560dd509",
+      "testSummaries": [
+        "test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 323 filtered out; finished in 0.00s"
+      ]
+    },
+    {
+      "name": "420-image-static-and-preseed",
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "rudder-native",
+        "--lib",
+        "image_preseed_data"
+      ],
+      "exitCode": 0,
+      "completedAt": "2026-11-02T01:51:11.908951+00:00",
+      "elapsedSeconds": 72.684,
+      "receiptSha256": "282d764e59a456bd092f1b41bd1f5adcc1e463bcc3ba8cb276989ca1a89f4ae2",
+      "logSha256": "06d91f5d7ab7c1bc7819155fd15a6e89aa9a1543451e0646dd284c4bb207ead3",
+      "testSummaries": [
+        "test result: ok. 28 passed; 0 failed; 1 ignored; 0 measured; 298 filtered out; finished in 4.39s"
+      ]
+    },
+    {
+      "name": "421-actual-fixed-timezone-custody",
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "rudder-native",
+        "--lib",
+        "image_preseed_data::static_link_tests::actual_fixed_timezone_alias_materializes_captured_content_and_retains_original_custody",
+        "--",
+        "--exact",
+        "--ignored",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "exitCode": 0,
+      "completedAt": "2026-11-02T01:51:22.871506+00:00",
+      "elapsedSeconds": 1.009,
+      "receiptSha256": "d9893838cd6d599bb73db6f2614534a31c000cda4336db28d6145efc097187fa",
+      "logSha256": "4697f33e2a5859f82bd8687f22006a74002f4937e941404e40a0face4eb9b2b9",
+      "testSummaries": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 326 filtered out; finished in 0.03s"
+      ]
+    },
+    {
+      "name": "422-runtime-image-after-static-fix",
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "rudder-native",
+        "--lib",
+        "runtime_image"
+      ],
+      "exitCode": 0,
+      "completedAt": "2026-11-02T01:51:35.614454+00:00",
+      "elapsedSeconds": 2.511,
+      "receiptSha256": "d698a1ecfeddba5c165fed16f06127b775cda071e8ecb947e2d89237792b233d",
+      "logSha256": "3e9452416d5bfd411b1ca99bba2fd27b38eb3706fa770b0ad6701f108bcb5699",
+      "testSummaries": [
+        "test result: ok. 74 passed; 0 failed; 3 ignored; 0 measured; 250 filtered out; finished in 1.67s"
+      ]
+    },
+    {
+      "name": "423-native-bin-static-fix",
+      "command": [
+        "cargo",
+        "check",
+        "-p",
+        "rudder-native",
+        "--bin",
+        "rudder-native"
+      ],
+      "exitCode": 0,
+      "completedAt": "2026-11-02T01:52:49.957077+00:00",
+      "elapsedSeconds": 63.151,
+      "receiptSha256": "971a080d6e0a13f13331d6320dffcad773d2439c57b23aa1080e896f2986be13",
+      "logSha256": "fc567e424d14d2b33a04fead7be5ea4a5d9c7397a60078b0672a31103f096cb8",
+      "testSummaries": []
+    }
+  ],
+  "actualFixedTimezoneTestScope": "actual Root-owned source and target metadata plus captured CAS content; no privileged execution or runtime mount",
+  "retainedFailedCheck": {
+    "name": "418-runtime-component-diagnostics",
+    "reason": "compile-time E0061 after shared SDK descriptor helper signature changed; original SDK helper restored before fresh checks"
+  },
+  "operatorCleanup": {
+    "attempt": "A17",
+    "complete": true,
+    "reportSha256": "be970a6277e1bd5398191bcbc139a6960f6d856232a72a7d9bc8bae4c09920be",
+    "providerCalls": 40,
+    "preexistingControlVolumesPreserved": 5,
+    "protectedLiveHomeUnchanged": true,
+    "originalControllerActuallyWaitedAndReaped": true,
+    "temporaryTokenRevokedAt": "2026-11-02T01:44:43.849861Z",
+    "normalRuntimeRetirementQualified": false,
+    "physicalVolumeErasureProved": false
+  },
+  "sdkQualified": false,
+  "runtimeQualified": false,
+  "ordinaryQualified": false,
+  "deployed": false,
+  "buildAttempts": [
+    {
+      "attempt": "A7",
+      "sourceManifestSha256": "cfd9e52e3b724478f0d089517140cc4bce00df53763108b5b8e773d0ed000d9c",
+      "sourceRevision": "ce6a1a4d44ca03f9a294af7998d88bd884fb4238",
+      "qualificationDockerfileSha256": "cd6d5a8f856bb02b31e90ba74ad2fd168bdda43459ecfce88211734e594f324a",
+      "originalBuildExitCode": 1,
+      "remoteBuildMayContinue": false,
+      "reportSha256": "d2c8896578065468e96bf74b4c2ee88fa576224ff6c9e183cf8b31b4c8d30753",
+      "logSha256": "e16b3e218f336678da784a9268874a9dca710cef0e189dc4156b3d7c2c825c75",
+      "verifiedAt": "2026-11-02T02:08:25.470403+00:00",
+      "strictRootGate": {
+        "testBuildTimedOut": true,
+        "timeoutExitCode": 124,
+        "elapsedSeconds": 240.1,
+        "timeoutSeconds": 240,
+        "killTailSeconds": 10,
+        "runningOneTestCount": 0,
+        "passed": false
+      },
+      "staticComponentGateEntered": false,
+      "publishedDigest": null,
+      "productionNativeBuildSeconds": 366.9,
+      "frozenSourceReviewSha256": "49a3f0bb92ea18a4610480b793e880691929fa6cbfa74e84b9c9488ebaffac53"
+    }
+  ]
+}

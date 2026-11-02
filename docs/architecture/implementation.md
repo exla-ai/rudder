@@ -3150,3 +3150,39 @@ image, mount, SDK and ordinary qualification remain required.
 
 Guarded423 native binary cargo check passed at01:52:49Z in63.151s.
 No worker image or runtime qualification follows from these local checks.
+
+### 2026-11-02 02:08Z: corrected component source frozen
+
+[Structured component evidence](verification-runtime-static-components-working.json)
+records the actual A17 failure, exact importer/diagnostic source hashes, all five
+passing local checks and separate operator cleanup. Product checkpoint
+`ce6a1a4d44ca03f9a294af7998d88bd884fb4238` is committed locally and unreleased.
+
+A7 froze769 source files /15,556,641 bytes and227 generated CLI/board files /
+2,610,121 bytes. Source manifest SHA256 is
+`cfd9e52e3b724478f0d089517140cc4bce00df53763108b5b8e773d0ed000d9c`.
+Independent review matched every frozen source file to that committed revision
+and all generated hashes, sizes and modes. The separate qualification Dockerfile
+retains the original product Dockerfile and strict Root child-floor test. It adds
+a bounded immutable metadata check after the actual CAS bake: five directory
+components, four regular file components, and the exact shared captured content
+reference, logical size and raw manifest hash for timezone and UTC. Small Blob
+and larger File content representations are both accepted. It reads exactly
+three metadata CAS objects, verifies their raw sizes/hashes and reads no file
+payload or content descriptor. Its result supplies no runtime or SDK grant.
+
+The private helper patch and independent fresh20-case offline run passed.
+Actual build-only/push is still running on its original child, currently at the
+unchanged240-second strict Root test gate. There is no completed A7 image or
+SDK/runtime/ordinary qualification result at this record's timestamp. No new
+provider fixture, temporary credential or production deployment was created.
+
+A7 subsequently failed with a known terminal build result at02:08:25Z. The
+original strict Root gate exited124 after240.1 seconds during test compilation;
+it emitted no `running 1 test`, no result and no success marker. The original
+build child exited1, remote continuation is false, no immutable digest was
+published and the baked component gate was never reached. This is retained
+failed build evidence, not a failing execution of the Root privilege test.
+The production native build had completed in366.9 seconds. Build-only test
+compilation and bounded execution are being assessed separately; no timeout or
+assertion was weakened and no SDK fixture was launched.

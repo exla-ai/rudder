@@ -3518,3 +3518,36 @@ No final producer census, automatic release/unmount, normal runtime retirement,
 reverse ptrace, genuine SDK bootstrap or ordinary runtime qualification follows
 from the build fixtures. A newly built artifact and genuine SDK attempt remain
 required. No image publication or deployment occurred in this qualification.
+
+### 2026-11-02 06:54Z: worker artifact built; genuine SDK attempt remains blocked
+
+The source25 managed worker base and its C1 CAS overlay completed their actual
+builds and private image publication. The resulting immutable worker image is
+`registry.fly.io/rudder-workers-exla@sha256:4de965c64b3b87ad94f523c11d09d65593158cb1799a55a270d0b8d98a50f678`.
+Root observed both original build exits, and independent review checked the
+four installed executable hashes, runtime inventory and descriptor bindings.
+Overlay report SHA:
+`d75192c98d72845512b656e0091ba5942e9c307ab37881f0fc2af49afb38d22e`.
+This private build publication is not a control-plane deployment or SDK success.
+
+A fresh disposable SDK attempt using that artifact expired without a helper
+result or Root acknowledgment. Its one-shot retained diagnostic identifies
+`root_storage/serve_runtime/SdkProcessResult`, class `validation_or_other`;
+the nested helper cause remains unknown. Exact operator cleanup verified both
+disposable machines absent, the SDK app absent, and three temporary secrets
+absent. The original controller was reaped through its held pidfd and its
+temporary token was revoked. Protected live-home responses matched before and
+after cleanup. Volume deletion was acknowledged and inactivity observed;
+physical erasure and normal runtime retirement were not established.
+Root settled-observation SHA:
+`316fcaad0db9d89694c7309f2a2e9a2bf8a94d396c4b4303455766f09eceef07`.
+Independent settled-data review SHA:
+`0b7bfcd9d5bc750423ff92bff4faf7099ee9c451149c8e79ae74c6494183c307`.
+
+The separate source35 qualification passed the default production check and
+compiled the library harness, then failed to compile a deliberate panic test
+with `E0277` at `catch_unwind`. No test body or feature leaf ran, and remote
+builder cleanup remains unverified. A test-local `AssertUnwindSafe` correction
+preserves the original claim, panic and absorbing-state assertions. Its fresh
+full qualification is pending. The additional producer, Root-command and SDK
+diagnostic proposals remain outside Main until their relevant checks pass.

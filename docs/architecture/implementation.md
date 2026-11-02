@@ -3212,3 +3212,32 @@ four actual descriptor outputs, ELF/CLI pins, source manifest, runtime CAS and
 the unchanged6,430-object compiler CAS layout. No runtime or SDK role was
 activated by either image build. A18 will use this exact image with a separately
 bound controller and retained original process custody.
+
+### 2026-11-02 02:37Z: staging startup diagnostics
+
+A18 used that reviewed A8 image with the exact bound V11 controller. Its
+control VM migrated and admitted the isolated setup, but the driver reported
+`qualification_driver_start_failed` with `owners_retained:false` before
+constructing a staged flow owner. No SDK home, runtime home or ordinary home
+was captured. The original control supervisor and controller remain held for
+read-only diagnosis and operator cleanup; this is not an A8 Root regression
+result or a completed qualification. The existing failure record does not
+identify which startup check failed.
+
+The future control driver now records one of13 fixed startup check labels and
+only the existing S3 retention state's closed enum and boolean/null settlement
+observation. It reads that adapter's in-memory status without repeating its
+readback or serializing exception text, credentials, role identifiers or policy
+metadata. Independent review reconstructed the entire prior source after
+removing only these diagnostic additions, confirming unchanged checks, clocks,
+requests and custody. Syntax validation and all5 focused diagnostic/birth tests
+passed. The active A18 image and processes do not contain this future change.
+
+A fixed read-only probe completed against the original control VM at02:40Z.
+Its actual guest child exited0 with both output streams closed. All observed
+pre-storage predicates passed, including private input, supervisor birth,
+remaining setup time and exact policy/candidate hashes. It also confirmed the
+fixed driver catch marker. This narrows the failure to later startup work; it
+does not establish S3 request settlement or identify the failing operation.
+The first local collector refused a changed wrapper hash before any network
+dispatch and was reaped; its evidence is retained separately.

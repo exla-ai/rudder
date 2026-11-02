@@ -3674,3 +3674,30 @@ only the default library harness using the existing release profile, preserving
 the source bytes, selected tests and all original deadlines. Its effectiveness
 requires a fresh complete qualification; no source integration or deployment
 has occurred.
+
+### 2026-11-02 09:28Z: source qualification canceled before test execution
+
+The fresh mixed-profile qualifier's original session 14982 settled with exit 1
+and a false acceptance marker. Its default library release harness compiled,
+and the close-wins and admission-wins feature compile markers were observed.
+BuildKit canceled compile step 19 while the carrier-contention production
+binary was compiling. The overall compile completion marker is absent, and
+no Root or non-Root test ran. This does not establish an inner compiler timeout
+or a Rust test failure; the profile's effect on the Root deadline is untested.
+
+The retained output also reports Depot/GraphQL `401 Unauthorized`, health
+`Invalid token`, and a builder-release deadline error. Their exact causal
+relationship to cancellation is unknown. A separate bounded Fly identity
+probe completed successfully, so configured-identity expiry is not established.
+The original local child completed its wait, both stream EOFs and held pidfd,
+without an outer timeout, truncation or observer error. Remote compiler
+termination and builder cleanup remain unverified.
+
+Candidate-report SHA:
+`39fb8c89bf401cf9d11702f058667d1b8e55e25ed5f6956ee78c8c3f26997617`.
+Root original-terminal observation SHA:
+`79101bff23028e365a69562a1107c138839f176ae319fb97520f9585f13abe66`.
+Independent actual failed-attempt review SHA:
+`c37e19210362b1a099fa1d4e11fc03d14dc62923861b4cd396665fa1103fa8d1`.
+No acceptance file was created. The sixteen pending Rust paths remain outside
+Main, with no new source, SDK, runtime, image or deployment qualification.

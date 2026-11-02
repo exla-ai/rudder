@@ -55,7 +55,7 @@ impl RootCompilerSdkOwner {
         let raw=read_control(source,4096,&self.original)?;ensure!(digest(&raw)==self.catalog.source_binding_sha256,"SDK producer binding differs");
         let fence:Arc<dyn ImageImportFence>=Arc::new(CaptureFence(self.original.clone()));
         self.prepare_check=BootstrapCheck::SdkBakedInventory;
-        BakedImageCas::capture_retaining(&mut self.baked,self.descriptors[1].try_clone()?,self.descriptors[2].try_clone()?,self.catalog.inventory.clone(),fence.clone())?;
+        capture_sdk_baked_retaining(&mut self.baked,&self.descriptors,self.catalog.inventory.clone(),fence.clone())?;
         let baked=self.baked.as_ref().unwrap();let inventory=baked.inventory_data()?;ensure!(inventory.roots.manifest==self.catalog.manifest&&inventory.roots.installer_input==self.catalog.installer_input,"SDK roots differ from original catalog");
         self.prepare_check=BootstrapCheck::SdkVerifiedManifest;
         VerifiedBakedInputs::capture_retaining(&mut self.inputs,baked.clone(),fence.clone())?;
@@ -95,6 +95,12 @@ impl RootCompilerSdkOwner {
     pub(super) fn duplicate_floor(&self)->Result<OwnedFd>{self.current()?;Ok(self.root.as_ref().unwrap().try_clone()?)}
     pub(super) fn close_admission(&self){if let Some(m)=&self.mount{m.close_admission()}if let Some(f)=&self.floor{f.close_admission()}}
 
+}
+// BakedImageCas needs the original parent containing inventory.json and cas/.
+// The separately retained cas descriptor at [1] remains in the SDK owner.
+fn capture_sdk_baked_retaining(out:&mut Option<Arc<BakedImageCas>>,descriptors:&[OwnedFd],
+    inventory:rudder_engine::protocol::ObjectRef,fence:Arc<dyn ImageImportFence>)->Result<()> {
+    BakedImageCas::capture_retaining(out,descriptors[0].try_clone()?,descriptors[2].try_clone()?,inventory,fence)
 }
 fn abstract_address(name:&str)->Result<(libc::sockaddr_un,libc::socklen_t)>{ensure!(!name.is_empty()&&name.len()<=100&&!name.contains('\0'),"SDK abstract name invalid");let mut a:libc::sockaddr_un=unsafe{std::mem::zeroed()};a.sun_family=libc::AF_UNIX as _;for(i,b)in name.bytes().enumerate(){a.sun_path[i+1]=b as _;}let n=(std::mem::offset_of!(libc::sockaddr_un,sun_path)+1+name.len())as libc::socklen_t;Ok((a,n))}
 fn peer_pidfd(fd:i32)->Result<OwnedFd>{let mut raw=-1;let mut len=std::mem::size_of::<i32>()as libc::socklen_t;ensure!(unsafe{libc::getsockopt(fd,libc::SOL_SOCKET,77,(&mut raw as *mut i32).cast(),&mut len)}==0&&raw>=0,"SDK kernel SO_PEERPIDFD unavailable");Ok(unsafe{OwnedFd::from_raw_fd(raw)})}
@@ -149,3 +155,7 @@ pub fn run_helper()->Result<()>{helper::run()}
         assert!(validate_workload(&serde_json::json!({"format_version":1,"kind":"actual-fixed-rust-library-typescript-sdk-workload-v1","models":false,"source_authority":false,"normal_retirement_authority":false,"started_boottime_nanoseconds":"1","completed_boottime_nanoseconds":serde_json::to_value(original.constraint()).unwrap()["boottime_deadline_nanoseconds"]}),&original.constraint()).is_err());
     }
 }
+
+#[cfg(test)]
+#[path="compiler_sdk_baked_descriptor_tests.rs"]
+mod baked_descriptor_tests;

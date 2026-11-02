@@ -3257,3 +3257,62 @@ Independent review verified all4,000 actual context files against A17, finding
 only the reviewed driver change, and bound the actual log to the final push.
 The original build child exited0 with no remote continuation. No production
 deployment or SDK/runtime readiness follows from this control image build.
+
+### 2026-11-02 02:56Z: SDK qualification reached its original deadline
+
+A19 used that exact diagnostic control image and the reviewed A8 worker image.
+Control startup succeeded and the original controller captured one SDK home.
+The SDK session reached its unchanged300-second deadline with six messages and
+no publication acknowledgment. The flow quarantined at02:56:45Z with all70
+controller effects and44 SDK transport responses settled, and no pending SDK
+effect. Runtime and ordinary qualification were not started; helper and
+scheduler readiness remain false.
+
+The first fixed diagnostic collector refused locally before canonicalization,
+token access or network dispatch. Its guard required a nested custody flag that
+the actual SDK projection omits; the enclosing original home record carries the
+required false flag. Both independent replay and Root inspection confirmed the
+schema mismatch. The original collector output is retained separately while a
+corrected guard is reviewed. This local refusal identifies no Root failure and
+does not renew the SDK session or authorize a replacement owner.
+
+After that correction, the original machine guard passed. The installed Fly
+CLI rejected the collector's log-command syntax; its child exited1 with an
+actual wait and both streams closed. A separately reviewed correction used
+the installed CLI's supported command and completed at03:03:31Z. Independent
+review matched the original VM, instance, config and image, all original
+capture receipts, and the retained raw log hash. The closed projection contains
+one failure: `serve_runtime / SdkBakedInventory / io / not_found / errno 2`.
+This identifies the failed SDK check without establishing a missing pathname.
+
+Operator cleanup completed40 calls at03:04:18Z, verifying the original control
+and SDK machines' absence, the SDK app's absence, the three temporary secrets'
+absence, and the protected live home's unchanged identity. SDK volume deletion
+was acknowledged; two reads showed it unattached and waiting for detach.
+Physical erasure was not verified. The five existing control volumes were
+preserved. The
+supervisor stopped and reaped its original controller through its held pidfd;
+temporary token revocation exited0 at03:04:56Z. Historical flow cleanup flags
+remain unchanged. These are separate operator cleanup facts, not normal runtime
+retirement or a passing SDK result.
+
+### 2026-11-02 03:10Z: SDK baked reader receives its original parent
+
+The SDK owner retained three original descriptors: the catalogue parent, its
+`cas/` subdirectory, and the parent's inventory file. It supplied the second
+descriptor to `BakedImageCas`, whose reader checks `inventory.json` and `cas/`
+relative to its root. The frozen image has the expected parent layout. The
+incorrect descriptor therefore explains the observed check and errno through
+source inspection; the actual diagnostic did not expose a pathname.
+
+A private helper now supplies the original parent and inventory descriptors,
+while retaining all three originals in the SDK owner. Existing checks, clocks,
+failure custody and image layout remain unchanged. The strict Root regression
+uses that production helper with real immutable CAS files, verifies a payload
+read, reproduces the old descriptor's ENOENT, and refuses missing or replaced
+named inventory while checking original descriptor identities.
+
+Independent source review and syntax parsing passed. Cargo compilation and the
+strict UID0/GID0 test remain pending a fresh worker build. The new test is an
+immutable reader check; actual SDK admission and workload completion still
+require a separate staged run.

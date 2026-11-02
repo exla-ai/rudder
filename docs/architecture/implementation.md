@@ -3649,3 +3649,28 @@ remain outside Main, and no new product image, SDK/runtime qualification,
 retirement result or deployment follows from this attempt. The next step is
 a bounded diagnostic of the failed Root test with its original budget and
 child ownership preserved.
+
+### 2026-11-02 08:49Z: retained Root diagnostic identifies the fixture deadline
+
+A separate diagnostic reused the exact prior compiler prefix and executable
+as historical DATA, then ran only the failed Root test with a fresh diagnostic
+nonce. Original session 81219 settled with exit 0 and a matching diagnostic
+marker. The selected test exited 101 after 30.01 seconds. Its complete bounded
+output identifies `compiler_sdk_peer_witness_tests.rs:246:112`: the original
+fixture wait/EOF deadline expired. Both the provider child and selected test
+had completed actual waits, both stream EOFs and held pidfds, with no capture
+timeout, truncation or observer error. The nested operation consuming the
+fixture's budget remains unknown.
+
+Diagnostic report SHA:
+`40f76cb986c48d490888b6a2df1898748a585319a229fc58e67b14abe7111318`.
+Root original-terminal observation SHA:
+`8d246d5cede08458633c593d6ce4ecb5864b4e9c1723c1dce3547676bc98ceb1`.
+Independent actual diagnostic review SHA:
+`1f77e60148776fbcc9ee84acf2cfeb8550ec62fd5b358fe8bd9bb2b4cd49b59b`.
+All source, SDK, runtime and qualification flags remain false. Cached compiler
+output establishes no new freshness. The proposed next qualifier optimizes
+only the default library harness using the existing release profile, preserving
+the source bytes, selected tests and all original deadlines. Its effectiveness
+requires a fresh complete qualification; no source integration or deployment
+has occurred.

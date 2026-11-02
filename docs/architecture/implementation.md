@@ -3412,3 +3412,32 @@ SDK owner, readiness acknowledgment or runtime client. Containment of a
 hostile global Root that controls protected code, state or original endpoints
 is outside this boundary. Implementation, independent review and actual SDK
 qualification are still pending.
+
+### 2026-11-02 04:59Z: witness DATA fixtures pass; ordinary test panics
+
+The next original source qualification compiled the production binary and both
+test harnesses in 701.5s. Held original executable descriptors passed the exact
+test-list preflight. Both separate Root fixtures passed: the unprivileged
+helper's Root-parent executable denial and the fifteen-case receiver witness
+DATA validation. The latter does not qualify a genuine Root issuer, SDK
+bootstrap, runtime admission or reverse Root-to-helper executable inspection.
+
+The ordinary suite's four executable-list children passed. Seven selected
+tests then passed before
+`managed_app::runtime_task::tests::same_barrier_helper_and_original_cancel_survive_off_app_validation_and_alias_drop`
+exited 101. Its original child was actually waited with both output streams at
+EOF, a held pidfd and no timeout or observer error. The remaining thirty-one
+tests did not run. The inner panic text was retained only inside the failed
+build, so its cause is not established by the locally available output hashes.
+
+The original qualification tool session exited 1 with a matching false
+acceptance marker at 04:59:14Z. Candidate report SHA:
+`ed842f5ad0696c13cd2b809f5759134a769df46a5c065a71669d25b5715cad92`.
+Root terminal-observation SHA:
+`94efccae501bea598130a1ffded948f63f3c2dca530d367eb695cb1010df03ee`.
+Independent actual-evidence review SHA:
+`41831f767e5881b4789191596d89965db0e472f10124dfaf03637a754927bb1d`.
+The combined source remains outside Main. Remote builder release is unverified;
+no image publication, VM deployment or SDK/runtime qualification occurred.
+The next unused workflow adds bounded diagnostics from the same original
+failed test capture before another explicitly prepared attempt.

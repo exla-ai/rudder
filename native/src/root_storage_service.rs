@@ -467,9 +467,13 @@ pub(crate) fn retained_failure_data(
         std::io::ErrorKind::InvalidData => "invalid_data",
         _ => "other",
     });
-    serde_json::json!({"kind":"rudder-root-retained-failure-v1","component":component,"stage":stage,"class":class,
+    let mut data = serde_json::json!({"kind":"rudder-root-retained-failure-v1","component":component,"stage":stage,"class":class,
         "io_kind":io_kind,"errno":os.and_then(|e|e.raw_os_error()),
-        "check":error.and_then(crate::root_storage_bootstrap::runtime_image::bootstrap_failure_check)})
+        "check":error.and_then(crate::root_storage_bootstrap::runtime_image::bootstrap_failure_check)});
+    if let Some(text) = error.and_then(|error| crate::root_storage_bootstrap::runtime_image::sdk_helper_failure_text(error, io_kind, os.and_then(|e| e.raw_os_error()))) {
+        data["error_text"] = serde_json::Value::String(text);
+    }
+    data
 }
 const RETAINED_DIAGNOSTIC_LIMIT: usize = 4096;
 // A single bounded, nonblocking attempt. Reopening a pipe through procfs gives

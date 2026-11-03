@@ -11,6 +11,8 @@ import {createManagedHomeMigrator,createManagedHomeOperationMigrator,createManag
 import {validatePolicy,canonical,hash} from '../../cloud/dist/managed-home-provisioning/types.js';
 import {validateRuntimeQualificationCandidate} from '../../cloud/dist/managed-home-provisioning/runtime-qualification-protocol.js';
 import {validateCompilerQualificationCandidate} from '../../cloud/dist/managed-home-provisioning/compiler-qualification-protocol.js';
+import {validateStagingCodexAccessSnapshot} from '../../cloud/dist/managed-home-provisioning/staging-codex-profile-import.js';
+import {validatePositiveIngressInput} from '../../cloud/dist/managed-home-provisioning/staging-positive-ingress-driver.js';
 import {RESTRICTED_ROLE_CHECK} from '../../cloud/dist/project-authority/pool.js';
 import {RENEWAL_MIGRATION_SHA256} from '../../cloud/dist/managed-home-provisioning/renewal-schema.js';
 const require=createRequire(new URL('../../cloud/package.json',import.meta.url)),pg=require('pg');
@@ -42,6 +44,12 @@ function projectGenuineIngressData(plan,flow,image){
  // Construct all levels from validated primitive strings; no caller aliases.
  return Object.freeze({experiment:Object.freeze({case:experiment.case,experimentNonce:experiment.experimentNonce,model:experiment.model,profileId:experiment.profileId}),artifact_data:Object.freeze({feature:artifact.feature,image_digest:artifact.image_digest,integrated_revision:artifact.integrated_revision,source_manifest_sha256:artifact.source_manifest_sha256,root_receipt_manifest_sha256:artifact.root_receipt_manifest_sha256,fixture_manifest_sha256:artifact.fixture_manifest_sha256,native_elf_sha256:artifact.native_elf_sha256,engine_elf_sha256:artifact.engine_elf_sha256})});
 }
+// Positive selection is protected DATA, validated before migrations or driver effects.
+function projectPositiveIngressData(plan,flow,genuine){
+ if(!Object.hasOwn(plan,'positive_ingress'))return undefined;
+ assert(flow===true&&!genuine);
+ return validatePositiveIngressInput(plan.positive_ingress);
+}
 const sig=s=>[s.dev,s.ino,s.mode,s.size,s.mtimeNs,s.ctimeNs].map(String).join(':');
 async function readRoot(file,max=262144){const f=await fs.open(file,constants.O_RDONLY|constants.O_CLOEXEC|constants.O_NOFOLLOW);retained.push(f);const before=await f.stat({bigint:true});
  assert(before.isFile()&&before.uid===0n&&before.gid===0n&&before.nlink===1n&&(before.mode&0o7777n)===0o600n&&before.size>0n&&before.size<=BigInt(max));
@@ -55,9 +63,9 @@ async function main(){
  const state=JSON.parse(await readRoot(work+'/supervisor.json'));uuid(state.boot_nonce);assert(work.endsWith(state.boot_nonce)&&state.supervisor_pid===process.ppid);
  const pgWork='/var/lib/rudder-runtime-qualification-pg/run-'+state.boot_nonce;assert(state.pg_work===pgWork);
  const raw=await readRoot(P+'/operator.json'),plan=JSON.parse(raw);
- const flow=Object.hasOwn(plan,'staging_flow'),genuine=Object.hasOwn(plan,'genuine_ingress');
+ const flow=Object.hasOwn(plan,'staging_flow'),genuine=Object.hasOwn(plan,'genuine_ingress'),positive=Object.hasOwn(plan,'positive_ingress'),profileSnapshot=Object.hasOwn(plan,'positive_profile_snapshot');
  if(genuine)assert(GENUINE_OPERATOR_PROJECTION_ALLOWED); // before optional value access
- exact(plan,['format_version','boot_nonce','qualification_id','authority_id','account_id','command_key','policy','candidate','fly_token',...(flow?['staging_flow']:[]),...(genuine?['genuine_ingress']:[])]);
+ exact(plan,['format_version','boot_nonce','qualification_id','authority_id','account_id','command_key','policy','candidate','fly_token',...(flow?['staging_flow']:[]),...(genuine?['genuine_ingress']:[]),...(positive?['positive_ingress']:[]),...(profileSnapshot?['positive_profile_snapshot']:[])]);
  assert(plan.format_version===1&&plan.boot_nonce===state.boot_nonce);uuid(plan.qualification_id);uuid(plan.authority_id);
  assert(typeof plan.account_id==='string'&&/^[A-Za-z0-9_:.@-]{1,180}$/.test(plan.account_id)&&typeof plan.command_key==='string'&&/^[A-Za-z0-9_:.\-]{1,128}$/.test(plan.command_key));
  assert(typeof plan.fly_token==='string'&&plan.fly_token.length>20&&plan.fly_token.length<=16384&&!/[\r\n\0]/.test(plan.fly_token));
@@ -65,6 +73,8 @@ async function main(){
  const compilerSdk=Object.hasOwn(plan.candidate??{},'sdk');
  const candidate=compilerSdk?validateCompilerQualificationCandidate(plan.candidate,policy):validateRuntimeQualificationCandidate(plan.candidate,policy);
  const qualificationKind=flow?'sdk-runtime-ordinary-v2':compilerSdk?'compiler-sdk-v1':'runtime-image-v1',policySha=hash(canonical(policy)),candidateSha=hash(canonical(candidate));
+ const positiveIngress=projectPositiveIngressData(plan,flow,genuine);
+ if(profileSnapshot){assert(positiveIngress&&flow&&!genuine);const validated=validateStagingCodexAccessSnapshot(plan.positive_profile_snapshot,positiveIngress.profileId);validated.fill(0);}
  const genuineIngress=projectGenuineIngressData(plan,flow,policy.image); // shared migrate/admit validation before PG
  let services;
  if(flow){
@@ -131,7 +141,7 @@ async function main(){
    const wrong=new pg.Client({...runtimeConnection,host,ssl,connectionTimeoutMillis:1000});wrong.on('error',()=>{});let refused=false;
    try{await wrong.connect();}catch{refused=true;}finally{await wrong.end().catch(()=>{});}assert(refused);
   }
-  const cfg={format_version:1,qualification_kind:qualificationKind,postgres:{mode:'postgres',authority:config(ROLE.runtime,secrets.runtime),registrationAuthority:config(ROLE.registration,secrets.registration),policy,flyToken:plan.fly_token,tokenEncryptionKeyHex:secrets.encryption},candidate,account_id:plan.account_id,command_key:plan.command_key,...(flow?{activation_authority:ac,services,supervisor:state}:{}),...(genuineIngress===undefined?{}:{genuine_ingress:genuineIngress})};
+  const cfg={format_version:1,qualification_kind:qualificationKind,postgres:{mode:'postgres',authority:config(ROLE.runtime,secrets.runtime),registrationAuthority:config(ROLE.registration,secrets.registration),policy,flyToken:plan.fly_token,tokenEncryptionKeyHex:secrets.encryption},candidate,account_id:plan.account_id,command_key:plan.command_key,...(flow?{activation_authority:ac,services,supervisor:state}:{}),...(genuineIngress===undefined?{}:{genuine_ingress:genuineIngress}),...(positiveIngress===undefined?{}:{positive_ingress:positiveIngress}),...(profileSnapshot?{positive_profile_snapshot:plan.positive_profile_snapshot}:{})};
   // SAME actual driver factory later produces config; no manual guest JSON.
   await writeJson(work+'/driver-input.json',cfg);
   for(const m of migrators)await m.close();await admin.end();await writeJson(work+'/migrated.json',{...out,state:'frozen',lease_schema_dependency_only:RENEWAL_MIGRATION_SHA256});return;

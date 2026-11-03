@@ -8,10 +8,12 @@ import {handleManagedStorageHttp} from "./storage-http.js";
 import type {CommittedHostTransport} from "./transport.js";
 import type {ManagedHomeRegistry,ManagedHomeRoute} from "./registry.js";
 import {originalTime,type OriginalTime} from "./fly.js";
-import {check,fail,snapshot,QUALIFICATION_CONTROL_ORIGIN,type ProvisionReceipt,type HostOperation} from "./types.js";
+import {check,fail,snapshot,canonical,QUALIFICATION_CONTROL_ORIGIN,type ProvisionReceipt,type HostOperation} from "./types.js";
+import {OriginalStagingCodexProfileImport,validateStagingCodexAccessSnapshot} from "./staging-codex-profile-import.js";
 import type {StagingSetupRestriction} from "./staging-role-activation.js";
 
 import {assertStagingGenuineIngressExperiment,type StagingGenuineIngressExperiment} from "./staging-genuine-ingress-experiment.js";
+import {preparePositiveIngressRetaining,validatePositiveIngressInput,type PositiveIngressDriver,type PositiveIngressInput} from "./staging-positive-ingress-driver.js";
 
 export type OriginalGenuineIngressTargetData=Readonly<{app:string;machine:string;instance_id:string}>;
 const custodyKeys=["scope","home_id","app_name","network_name","provision_nonce","process_owner","app","volume","machine","configured","started","pending_effect","owners_retained","teardown_authority"];
@@ -41,7 +43,14 @@ export class StagingOrdinarySdkDriver {
  #sessions=new HomeControlSessions<WebSocket,unknown>({isOpen:s=>s.readyState===WebSocket.OPEN,send:(s,b)=>{if(s.readyState!==WebSocket.OPEN)return false;this.genuine?.observeOriginalSerializedSend(s,b);s.send(b,error=>{this.genuine?.observeOriginalSendCallback(!!error);if(error)this.#error=true;});return true;}});
  #started=false;#time?:OriginalTime;#error=false;#expired=false;#pending=0;#messages=0;#admissions=0;
  #custody:unknown=null;#provision?:Promise<ProvisionReceipt>;#receipt?:ProvisionReceipt;#route?:ManagedHomeRoute;#commands:Command[]=[];#fuse?:NodeJS.Timeout;#genuineRun?:Promise<void>;
- constructor(config:ManagedHomePostgresConfig,private readonly account:string,private readonly key:string,private readonly setup:StagingSetupRestriction,private readonly genuine?:StagingGenuineIngressExperiment<WebSocket>){
+ #positiveDriver?:PositiveIngressDriver<WebSocket>;#positiveRun?:Promise<void>;
+ #profileImport?:OriginalStagingCodexProfileImport<WebSocket>;#profileImportRun?:Promise<void>;
+ readonly #snapshot?:Buffer;readonly #flyToken:string;
+ constructor(config:ManagedHomePostgresConfig,private readonly account:string,private readonly key:string,private readonly setup:StagingSetupRestriction,private readonly genuine?:StagingGenuineIngressExperiment<WebSocket>,private readonly positive?:PositiveIngressInput,positiveProfileSnapshot?:Buffer){
+  check(!(genuine&&positive),"invalid_request");
+  if(positive!==undefined)this.positive=validatePositiveIngressInput(positive);
+  if(positiveProfileSnapshot!==undefined){check(this.positive,"invalid_request");this.#snapshot=validateStagingCodexAccessSnapshot(positiveProfileSnapshot,this.positive.profileId);}
+  this.#flyToken=config.flyToken;
   if(genuine)assertStagingGenuineIngressExperiment(genuine);
   check(config.policy.controlPlane?.profile==="qualification-v1"&&config.freshStorage&&config.policy.compilerSdk&&config.policy.sdkInitialSource==="sdk-fixed-suite-v1","unconfigured");
   // ProviderFenced is explicit, first-owner only. No clock-policy fabrication.
@@ -88,7 +97,7 @@ export class StagingOrdinarySdkDriver {
  #reply(home:string,ws:WebSocket,m:any){const s=this.#attached.get(ws);check(s&&s.homeId===home&&this.#sessions.isCurrent(s),"identity_changed");this.#sessions.reply(s,m.id,m.result,typeof m.error==="string"?m.error:undefined);}
  async #wait(){this.#current();await new Promise<void>(resolve=>setTimeout(resolve,100));this.#current();}
  async runCasesRetaining():Promise<void>{
-  check(!this.genuine,"unconfigured");this.#current();check(this.#receipt?.projects.length===1&&!this.#commands.length,"effect_unknown");
+  check(!this.genuine&&!this.positive,"unconfigured");this.#current();check(this.#receipt?.projects.length===1&&!this.#commands.length,"effect_unknown");
   const receipt=this.#receipt,project=receipt.projects[0];
   while(!this.#route){this.#current();try{this.#route=await this.registry.resolveManagedHomeRoute(this.account,receipt.homeId,project.workspaceId);await this.#route.assertRoutableCurrent();}
    catch{this.#route=undefined;await this.#wait();}}
@@ -122,7 +131,7 @@ export class StagingOrdinarySdkDriver {
   * The original experiment is retained by this listener before any await.
   */
  runGenuineIngressRetaining():Promise<void>{
-  check(this.genuine&&!this.#genuineRun&&!this.#commands.length,"unconfigured");
+  check(this.genuine&&!this.positive&&!this.#genuineRun&&!this.#commands.length,"unconfigured");
   const original=this.genuine;
   this.#genuineRun=(async()=>{try{this.#current();check(this.#receipt?.projects.length===1,"effect_unknown");
    const receipt=this.#receipt,project=receipt.projects[0];
@@ -130,6 +139,32 @@ export class StagingOrdinarySdkDriver {
    await route.assertRoutableCurrent();this.#current();
    await original.runRetaining(this.registry,route,this.#sessions,this.setup,this.#time!);
   }catch(error){original.refuseOriginalObservationBeforeDispatch();throw error;}})();return this.#genuineRun;
+ }
+ /** Explicit task arm on the same authenticated listener. Both the driver and
+  * original promise remain held on failure. Backend readiness is observation
+  * DATA, not enrollment, completion, checkpoint or teardown authority. */
+ runPositiveIngressRetaining():Promise<void>{
+  check(this.positive&&!this.genuine&&!this.#positiveRun&&!this.#commands.length,"unconfigured");
+  this.#positiveRun=Promise.resolve().then(async()=>{
+   this.#current();check(this.#receipt?.projects.length===1,"effect_unknown");
+   const receipt=this.#receipt;
+   const route=await this.registry.resolveManagedHomeRoute(this.account,receipt.homeId,receipt.projects[0].workspaceId);
+   this.#route=route;await route.assertRoutableCurrent();this.#current();
+   const held=this.#committed.get(route.homeId);check(held,"not_found");
+   const session=this.#attached.get(held.socket);check(session&&this.#sessions.isCurrent(session),"identity_changed");
+   if(this.#snapshot){
+    const target=this.registry.stagingOrdinaryProfileImportTargetData(route);
+    this.#profileImport=new OriginalStagingCodexProfileImport({registry:this.registry,route,sessions:this.#sessions,session,
+     socket:held.socket,owner:held.owner,setup:this.setup,driver:this.#time!,assertTargetCurrent:async expected=>{
+      this.#current();await route.assertRoutableCurrent();this.#current();
+      check(canonical(this.registry.stagingOrdinaryProfileImportTargetData(route)).equals(canonical(expected)),"identity_changed");
+     }},this.#snapshot,this.positive!.profileId,target,this.#flyToken);
+    this.#profileImportRun=this.#profileImport.startRetaining();await this.#profileImportRun;this.#current();this.#snapshot.fill(0);
+   }
+   this.#positiveDriver=preparePositiveIngressRetaining({registry:this.registry,route,sessions:this.#sessions,session,
+    socket:held.socket,owner:held.owner,setup:this.setup,driver:this.#time!},this.positive!);
+   await this.#positiveDriver.runRetaining();this.#current();
+  });return this.#positiveRun;
  }
  /** Genuine non-serializable SAME-HOST original holder, never status JSON or
   * a remote timeout. Collector invokes its remaining method BEFORE effects.
@@ -156,5 +191,5 @@ export class StagingOrdinarySdkDriver {
  originalGenuineIngressObservationRetaining():StagingGenuineIngressExperiment<WebSocket>{
   check(this.genuine&&this.#genuineRun,"unconfigured");return this.genuine;
  }
- statusData(){return snapshot({scope:"ordinary-source-sdk-staging-data-only",receipt:this.#receipt??null,custody:this.#custody,...(this.genuine?{genuine_ingress:this.genuine.statusData()}:{}),commands:this.#commands.map(v=>({case:v.case,command_key:v.key,acceptance:v.acceptance??null,last:v.last??null,unknown:v.unknown,receipt_queries:v.queries.length})),expired:this.#expired,error:this.#error,owners_retained:true,source_acceptance_claim:false,cache_reuse_claim:false,negative_kernel_reason_claim:false,shared_floor_retirement_claim:false});}
+ statusData(){return snapshot({scope:"ordinary-source-sdk-staging-data-only",receipt:this.#receipt??null,custody:this.#custody,profile_import:this.#profileImport?.statusData()??null,...(this.genuine?{genuine_ingress:this.genuine.statusData()}:{}),...(this.positive?{positive_ingress:this.#positiveDriver?.statusData()??null}:{}),commands:this.#commands.map(v=>({case:v.case,command_key:v.key,acceptance:v.acceptance??null,last:v.last??null,unknown:v.unknown,receipt_queries:v.queries.length})),expired:this.#expired,error:this.#error,owners_retained:true,source_acceptance_claim:false,cache_reuse_claim:false,negative_kernel_reason_claim:false,shared_floor_retirement_claim:false});}
 }

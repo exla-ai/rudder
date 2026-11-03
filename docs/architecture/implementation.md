@@ -1,9 +1,75 @@
 # Rudder v4 implementation and restart record
 
-Updated: 2026-11-01. Read with [the plan](../../PLAN.md),
+Updated: 2026-11-03. Read with [the plan](../../PLAN.md),
 [research](research.md), [gates](experiments.md) and repository `AGENTS.md`.
 This file preserves the working agreement across context compaction. An entry
 here is not deployment proof; record exact checks and delivery identities below.
+
+## Current continuation, 2026-11-03
+
+Alpha.34 Cloud is deployed from `17939790dd111acb0b7f4401ace41920f500a82b`.
+Fly release177 `JLxbo4k22JZxnTvbbXQo22yG7`, control machine
+`8911d61a434978`, instance `01M6FGP37GQFGBFXWD8DFAAG5T`, runs control image
+`sha256:9d5b20bf3b6851ab9606be4cc2e876c1752a6183c4bb144987bdb7901dbddf80`.
+Its worker setting is the separately built image
+`sha256:c3422372125197468cf58b3f7ec59764648d1d35c6edf1c8d5cdca90ba7d891d`.
+[Delivery evidence](verification-alpha34-working.json) records the actual target.
+Registry manifest/config digests and source labels match. At
+2026-11-03T01:35:41Z, the canonical app and both canonical/provider health
+endpoints returned HTTP200; Fly reported its machine health check passing.
+The active home was not restarted. Idle adoption remains separate from deployment.
+The first alpha.34 release-check built all three native platforms, then failed
+one JS fixture that calls Linux `/proc/uptime` on macOS (1,044 passed). The
+fixture now explicitly requires Linux; all 14 lifecycle tests pass on Linux.
+Fresh release qualification uses `77f6b5f245a60fca099ee57144859801fd06821a`.
+No alpha.34 npm tag has been pushed. The test-only follow-up does not change the
+deployed Cloud product. Its isolated stock worker smoke passed Root startup and
+UID1500 command checks, then verified destruction and two inventories of absence.
+
+The deployed fixes rebase retained SDK mount descriptors after entering the
+helper mount namespace and fence idle worker token rotation before asynchronous
+provider reads. They reuse the pending token instead of minting a second token
+while its first update is uncertain. They do not revoke an already-open socket.
+
+New source adds bounded typed SDK operation/error text to the original Root
+failure frame and collects fixed failure frames from the exact SDK machine.
+The driver fails as soon as it receives that frame. Collection retains its
+original child and clock, accepts only the disposable machine from original
+custody, bounds output, and never exports arbitrary raw provider logs or
+credential-bearing error chains. Forty focused Rust diagnostic checks passed;
+11 Node diagnostic cases passed, including the retained actual Fly line format.
+Actual attempt6/7 custody objects satisfy the disposable-target predicate.
+
+The explicit Linux helper harness passed two cases in 1.33 seconds as UID1500.
+It runs the real helper namespace/mount path, checks zero capabilities and
+no-new-privileges, readonly source and durable output, and waits for the actual
+child. A stand-in Root parent and static payload replace the compiler, so this
+is local helper verification, not SDK admission. Native fixture exporters now
+compile each harness once per test process on the canonical Cargo feature/profile
+graph and run exports directly; cold compilation has its own bounded allowance.
+The real broker and MCP fixture exports passed all eight Node tests in 10.19
+seconds. Heavy image builds use Fly with its compiler cache. Only one local
+Cargo runs.
+
+The next candidate uses one committed archive for the managed+C1 image and
+controller JavaScript. Its receipt binds the revision, generated module map,
+actual build wait and immutable image. Separate per-layer review receipts and
+repeated source-qualification compilation are removed. Physical filesystem,
+boot, completion and resource-cleanup checks remain required.
+
+Access-only Codex OAuth snapshots and explicit positive Open/Start/Stop ingress
+are implemented in source. OAuth snapshots contain no refresh token and use the
+pinned Codex experimental protocol. The optional private snapshot is transferred
+over stdin to the same newly provisioned ordinary home before Open/Start. The
+transfer requires its original current route, committed socket and machine
+instance, and an existing private UID1500 home. An exclusive access-only store
+is separate from the normal OAuth store; invalid or mismatched imports refuse
+without refresh or fallback. Nine store/CLI checks and nine retained-transfer
+cases pass; entry/positive/diagnostic integration passed 26 cases. Stop targets the retained original Start
+receipt/fence and App control. Enrollment, checkpoint and physical join are
+separate observations; missing custody remains unknown. Genuine SDK admission,
+runtime admission, ordinary OAuth task execution and normal retirement remain
+unqualified. The earlier continuation below preserves historical evidence.
 
 ## Current state, 2026-11-01
 

@@ -149,6 +149,11 @@ mod local {
         _slot:Arc<TaskSlot>,settled:bool }
     impl JoinedManagedTask {
         pub(crate) fn prepared(&self)->&PreparedManagedLaunch { &self.drain.live.prepared }
+        /// Historical observations from this same whole completion owner. The
+        /// App has already removed Live by the time physical joining finishes.
+        pub(crate) fn ingress_shutdown_observation(&self)->(bool,bool,bool) {
+            (self.drain.live.stop.is_some(),self.drain.live.receipt.is_some(),self.drain.live.uncertain)
+        }
         pub(crate) fn shutdown(&self)->&ValidatedManagedShutdown { self.drain.live.receipt.as_ref().unwrap() }
         pub(crate) fn helper_exit(&self)->&SuccessfulManagedHelperExit { self.drain.exit.as_ref().unwrap() }
         pub(crate) fn helper_custody(&self)->&ManagedHelperCustody { self.drain.custody.as_ref().unwrap() }
@@ -527,7 +532,7 @@ mod local {
         projection_owner:Option<fabric_runtime::SharedAgentToolsProjectionOwner>,
         handoff: Option<ManagedExecutionHandoff>, native_program: PathBuf, launch_json: String }
     type BackendProcess = Arc<rudder_engine::execution::handoff::BackendProcessWitness>;
-    enum WorkerStep { Workspace { prepared: PreparedManagedLaunch, proceed: SyncSender<PreparedManagedLaunch> }, Ready(PreparedResult), Reports(Result<CandidateReports>),
+    enum WorkerStep { Workspace { prepared: PreparedManagedLaunch, proceed: SyncSender<PreparedManagedLaunch> }, Ready(PreparedResult), Reports { reports:Result<CandidateReports>, renewal_stop:bool },
         TaskWorkspace { prepared:PreparedManagedLaunch, proceed:SyncSender<PreparedManagedLaunch>, task:TaskHandle },
         TaskReady { ready:PreparedResult, task:TaskHandle }, TaskFailed { task:TaskHandle },
         Authenticated { process:BackendProcess, result:std::result::Result<(),agent_link::ManagedCodexAuthError> } }
@@ -535,7 +540,7 @@ mod local {
     struct PendingAuth { process:BackendProcess, cancelled:Arc<AtomicBool>, deadline:Instant, running:bool }
     struct Live { prepared: PreparedManagedLaunch, handoff: HandoffReceipt, control: ManagedExecutionHandle,
         receipt: Option<ValidatedManagedShutdown>, stop: Option<(StopAndCheckpoint, Instant)>, uncertain: bool,
-        orphan_reported: bool, backend_ready: bool, auth:Option<PendingAuth>, report_pending: bool, last_report: Option<Instant>, report_digest: Option<[u8;32]>,
+        orphan_reported: bool, backend_ready: bool, auth:Option<PendingAuth>, auth_session:Option<Arc<agent_link::ManagedCodexAuthSession>>, snapshot_stop_attempted:bool, report_pending: bool, last_report: Option<Instant>, report_digest: Option<[u8;32]>,
         task:Option<TaskLive> }
     struct TaskLive { handle:TaskHandle, custody:Option<ManagedHelperCustody>, start:Option<Arc<RuntimeTaskStart>> }
     /// Actual pre-dispatch helper custody for a bounded trusted Root IPC worker.
@@ -658,6 +663,21 @@ mod local {
     }
 
     impl App {
+        /// App-only request to the exact retained task control. This returns
+        /// after the request is recorded, never after inferred termination.
+        pub(crate) fn request_managed_task_ingress_stop(&mut self,fence:&ManagedLaunchFence,owner:&OwnerFence)->Result<()> {
+            anyhow::ensure!(owner==&fence.owner,"original task owner changed");
+            let index=self.agents.iter().position(|run|run.id==fence.run_id).context("original task row absent")?;
+            let row=&self.agents[index];
+            let live=self.managed_local.live.get(&fence.run_id).context("original live task absent")?;
+            anyhow::ensure!(live.task.is_some()&&live.prepared.assignment.fence==*fence
+                &&matches_workspace(row.managed_local.as_ref(),&live.prepared.assignment,false),"original task control/fence changed");
+            anyhow::ensure!(!live.uncertain,"original task stop is uncertain");
+            stop(self,index).context("original task stop route absent")?;
+            anyhow::ensure!(self.managed_local.live.get(&fence.run_id).is_some_and(|live|live.task.is_some()
+                &&live.prepared.assignment.fence==*fence&&live.stop.is_some()&&!live.uncertain),"original stop request not recorded");
+            Ok(())
+        }
         /// App-only observation DATA. It does not issue a process witness,
         /// readiness, checkpoint, join, acceptance or retirement receipt. No
         /// live carrier means unknown, never evidence that a task stopped.
@@ -959,14 +979,17 @@ mod local {
                                     app.fabric_runtime.attach_managed_backend(owner, &live.prepared.assignment, terminal, live.prepared.link_launch(),
                                         live.prepared.transport.guest_cwd.clone(), expected, process));
                                 if attached.is_ok() && live.control.backend_authenticated().is_ok() { live.backend_ready = true; live.auth = None; }
-                                else { live.uncertain = true; }
-                            } else { live.uncertain = true; }
-                        } else { live.uncertain = true; }
+                                else { live.uncertain = true; if let Some(session)=&live.auth_session {session.refuse();} }
+                            } else { live.uncertain = true; if let Some(session)=&live.auth_session {session.refuse();} }
+                        } else {
+                            if current {if let Some(session)=&live.auth_session {session.refuse();}else{live.uncertain=true;}}
+                            else {live.uncertain=true;}
+                        }
                     }
                     continue;
                 }
-                if let Ok(WorkerStep::Reports(reports)) = result.result {
-                    if let Some(live) = self.live.get_mut(&result.fence.run_id).filter(|live|live.prepared.assignment.fence == result.fence) { live.report_pending = false; }
+                if let Ok(WorkerStep::Reports {reports,renewal_stop}) = result.result {
+                    if let Some(live) = self.live.get_mut(&result.fence.run_id).filter(|live|live.prepared.assignment.fence == result.fence) { live.report_pending = false; if renewal_stop {if let Some(session)=&live.auth_session {session.refuse();}} }
                     if result.fence.owner == *owner && result.fence.check_current(journal).is_ok() {
                         if let (Ok(reports), Some(run)) = (reports, app.agents.iter_mut().find(|run|run.id == result.fence.run_id
                             && run.managed_local.as_ref().and_then(ManagedRunSource::fence) == Some(&result.fence))) {
@@ -1093,7 +1116,7 @@ mod local {
                                     if adoption.is_ok() { app.agents[index].last_error = None; }
                                     self.live.insert(assignment.fence.run_id.clone(), Live { prepared: ready.prepared,
                                         handoff, control, receipt: None, stop: None, uncertain: adoption.is_err() || task_uncertain, orphan_reported: adoption.is_err() || task_uncertain,
-                                        backend_ready: false, auth:None, report_pending: false, last_report: None, report_digest: None,task:task_live });
+                                        backend_ready: false, auth:None, auth_session:None, snapshot_stop_attempted:false, report_pending: false, last_report: None, report_digest: None,task:task_live });
                                     let _ = save_native_run_record(&app.cwd, &app.agents[index]);
                                 }
                             }
@@ -1104,7 +1127,7 @@ mod local {
                         }
                     }
                     Err(_) => orphan(&app.cwd, &mut app.agents[index], "managed local preparation failed; no checkout fallback was launched"),
-                    Ok(WorkerStep::Reports(_)) => unreachable!(),
+                    Ok(WorkerStep::Reports {..}) => unreachable!(),
                     Ok(WorkerStep::Authenticated { .. }) => unreachable!(),
                     Ok(WorkerStep::TaskWorkspace { .. } | WorkerStep::TaskReady { .. } | WorkerStep::TaskFailed { .. })=>unreachable!(),
                 }
@@ -1115,15 +1138,20 @@ mod local {
                 let pending_auth = self.live.values().filter(|live|live.auth.is_some()).count();
                 let live = self.live.get_mut(&id).unwrap();
                 'reports: {
-                if pending_auth == 0 && !live.report_pending && live.last_report.is_none_or(|last|last.elapsed() >= Duration::from_millis(500)) {
+                if (pending_auth == 0 || (live.auth_session.is_some() && live.auth.is_none())) && !live.report_pending && live.last_report.is_none_or(|last|last.elapsed() >= Duration::from_millis(500)) {
                     if let Ok(permit) = self.queue.admit() {
                         let task_worker=if let Some(task)=&live.task {
                             match task.handle.worker() { Ok(ticket)=>Some(ticket),Err(_)=>break 'reports }
                         } else { None };
                         let paths = live.prepared.reports.clone(); let fence = live.prepared.assignment.fence.clone();
                         let panic_fence = fence.clone();
-                        let work=move |_|WorkerResult { fence,result:Ok(WorkerStep::Reports(read_reports(&paths))) };
-                        let panic=move ||WorkerResult { fence:panic_fence,result:Ok(WorkerStep::Reports(Err(anyhow::anyhow!("managed report worker failed")))) };
+                        let session=live.auth_session.clone(); let snapshot_owned=session.is_some();
+                        let work=move |_| {
+                            if let Some(session)=&session {session.poll_off_app();}
+                            let renewal_stop=session.as_ref().is_some_and(|session|session.stop_requested());
+                            WorkerResult { fence,result:Ok(WorkerStep::Reports {reports:read_reports(&paths),renewal_stop}) }
+                        };
+                        let panic=move ||WorkerResult { fence:panic_fence,result:Ok(WorkerStep::Reports {reports:Err(anyhow::anyhow!("managed report worker failed")),renewal_stop:snapshot_owned}) };
                         let spawn=if let Some(ticket)=task_worker { self.queue.spawn_retaining(permit,ticket,app.pty_output_waker.clone(),work,panic) }
                             else { self.queue.spawn(permit,app.pty_output_waker.clone(),work,panic) };
                         if spawn.is_ok() {
@@ -1154,6 +1182,24 @@ mod local {
                     live.uncertain = true;
                 }
                 if let Some(Err(_)) = live.handoff.try_result() { live.uncertain = true; }
+                if live.auth_session.as_ref().is_some_and(|session|session.stop_requested()) && live.stop.is_none() && !live.snapshot_stop_attempted
+                    && assignment.fence.owner==*owner && assignment.fence.check_current(journal).is_ok() {
+                    live.snapshot_stop_attempted=true;
+                    if let Some(auth)=&live.auth {auth.cancelled.store(true,Ordering::Release);}
+                    // SAME original control/assignment/PTY owner. This request is
+                    // neither a physical stop acknowledgment nor a checkpoint.
+                    let fence=&assignment.fence;
+                    let request=StopAndCheckpoint {request_id:uuid::Uuid::new_v4().to_string(),execution_id:fence.attempt_id.clone(),
+                        operation_id:assignment.observation.attempt.operation_id.clone(),view_id:assignment.observation.view_id.clone(),
+                        run_id:fence.run_id.clone(),run_epoch:fence.run_epoch,owner:fence.owner_epoch()};
+                    let result=app.agents[index].terminal.as_ref().context("managed terminal is absent").and_then(|terminal|
+                        app.fabric_runtime.begin_managed_shutdown(&fence.owner,assignment,terminal))
+                        .and_then(|_|live.control.stop_and_checkpoint(request.clone()));
+                    if result.is_ok() {live.stop=Some((request,Instant::now()));}
+                    else {live.uncertain=true;}
+                    app.agents[index].last_error=Some("managed OAuth access snapshot renewal required; awaiting original task shutdown".into());
+                    app.dirty=true;
+                }
                 while let Some(event) = live.control.try_event() {
                     match event {
                         ManagedExecutionEvent::BackendReady { process } if !live.uncertain && live.stop.is_none() => {
@@ -1244,20 +1290,24 @@ mod local {
                 } else { None };
                 let auth = live.auth.as_mut().unwrap();
                 if Instant::now() >= auth.deadline || auth.cancelled.load(Ordering::Acquire) { live.uncertain = true; continue; }
-                let Some(key) = live.prepared.take_codex_api_key() else { live.uncertain = true; continue; };
+                let Some(credential) = live.prepared.take_codex_credential() else { live.uncertain = true; continue; };
                 let fence = live.prepared.assignment.fence.clone(); let panic_fence = fence.clone();
                 let process = auth.process.clone(); let panic_process = process.clone(); let cancelled = auth.cancelled.clone();
                 let deadline = auth.deadline; let launch = live.prepared.link_launch();
+                if matches!(&credential,managed_launch::ManagedCodexCredential::AccessSnapshot(_)) {
+                    live.auth_session=Some(agent_link::ManagedCodexAuthSession::new(process.clone()));
+                }
+                let session=live.auth_session.clone();
                 auth.running = true;
                 let work=move |_| {
-                    let result = agent_link::authenticate_managed_codex_api_key(&launch, process.clone(), key, &cancelled, deadline);
+                    let result = agent_link::authenticate_managed_codex(&launch, process.clone(), credential, session.as_deref(), &cancelled, deadline);
                     WorkerResult { fence, result:Ok(WorkerStep::Authenticated { process, result }) }
                 };
                 let panic=move ||WorkerResult { fence:panic_fence,result:Ok(WorkerStep::Authenticated { process:panic_process,
                     result:Err(agent_link::ManagedCodexAuthError::Transport) }) };
                 let spawn=if let Some(ticket)=task_worker { self.queue.spawn_retaining(permit,ticket,app.pty_output_waker.clone(),work,panic) }
                     else { self.queue.spawn(permit,app.pty_output_waker.clone(),work,panic) };
-                if spawn.is_err() { live.uncertain=true; }
+                if spawn.is_err() { live.uncertain=true; if let Some(session)=&live.auth_session {session.refuse();} }
             }
             Ok(())
         }

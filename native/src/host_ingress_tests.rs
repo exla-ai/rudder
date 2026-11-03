@@ -34,6 +34,25 @@ fn host_original_constraint_never_accepts_fresh_thirty_second_policy() {
     let mut cmd=command();cmd.constraint=FinalizationBudget::begin(Duration::from_secs(30)).unwrap().constraint();assert!(cmd.validate().is_err());
 }
 #[test]
+fn host_stop_requires_exact_original_identity_and_a_distinct_command_key() {
+    let mut cmd=command();cmd.operation=HostOperation::StopTaskV1 {project_alias:"prepared".into(),lookup_command_key:"original-start".into(),
+        command_id:uuid::Uuid::new_v4().to_string(),run_id:"original-run".into(),run_epoch:"7".into(),attempt_id:uuid::Uuid::new_v4().to_string()};
+    cmd.validate().unwrap();
+    for epoch in ["0","07","+7","-7","18446744073709551616"] {
+        let mut bad=cmd.clone();if let HostOperation::StopTaskV1 {run_epoch,..}=&mut bad.operation {*run_epoch=epoch.into();}
+        assert!(bad.validate().is_err());
+    }
+    let mut bad=cmd.clone();if let HostOperation::StopTaskV1 {lookup_command_key,..}=&mut bad.operation {*lookup_command_key=bad.command_key.clone();}
+    assert!(bad.validate().is_err());
+    let value=serde_json::to_value(&cmd).unwrap();
+    for field in ["project_alias","lookup_command_key","command_id","run_id","run_epoch","attempt_id"] {
+        let mut missing=value.clone();missing["operation"].as_object_mut().unwrap().remove(field);
+        assert!(serde_json::from_value::<HostCommand>(missing).is_err());
+    }
+    let mut unknown=value.clone();unknown["operation"]["force"]=true.into();assert!(serde_json::from_value::<HostCommand>(unknown).is_err());
+    let mut numeric=value;numeric["operation"]["run_epoch"]=7.into();assert!(serde_json::from_value::<HostCommand>(numeric).is_err());
+}
+#[test]
 fn host_original_prepare_namespace_and_explicit_path_are_bound() {
     let mut c=config();c.projects[0].checkout="/workspace/foreign".into();assert!(c.validate().is_err());
     let mut c=config();c.projects[0].home=PathBuf::from("/workspace/private/home ");assert!(c.validate().is_err());

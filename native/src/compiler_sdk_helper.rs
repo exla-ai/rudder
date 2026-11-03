@@ -72,7 +72,7 @@ fn run_inner(check:&mut BootstrapCheck,reaped_inner_stderr:&mut Option<File>)->R
 fn mount(source:Option<&str>,target:&str,kind:Option<&str>,flags:libc::c_ulong)->Result<()> {
     let s=source.map(CString::new).transpose()?;let t=CString::new(target)?;let k=kind.map(CString::new).transpose()?;
     if unsafe{libc::mount(s.as_ref().map_or(std::ptr::null(),|v|v.as_ptr()),t.as_ptr(),k.as_ref().map_or(std::ptr::null(),|v|v.as_ptr()),flags,std::ptr::null())}!=0{
-        return Err(io::Error::last_os_error()).context("SDK private namespace mount failed")
+        return Err(io::Error::last_os_error()).context(SdkHelperOperation::NamespaceMount)
     }Ok(())
 }
 /// A retained descriptor still refers to its original mount after unshare.
@@ -88,7 +88,7 @@ fn rebase_mount_fd_at(original:&OwnedFd,path:&Path)->Result<OwnedFd>{
     let file=File::from(original.try_clone()?);let before=file.metadata()?;
     ensure!(before.is_dir()||before.is_file(),"SDK retained mount role differs");
     let reopened=OpenOptions::new().read(true).custom_flags(libc::O_PATH|libc::O_NOFOLLOW|libc::O_CLOEXEC).open(path)
-        .context("SDK retained mount reopen failed")?;
+        .context(SdkHelperOperation::RetainedMountReopen)?;
     let actual=reopened.metadata()?;let after=file.metadata()?;
     let identity=|m:&fs::Metadata|(m.dev(),m.ino(),m.mode()&libc::S_IFMT);
     ensure!(identity(&before)==identity(&actual)&&identity(&before)==identity(&after),"SDK retained mount inode differs");
@@ -98,8 +98,8 @@ fn rebase_mount_fd_at(original:&OwnedFd,path:&Path)->Result<OwnedFd>{
 /// UID1500. Pin cwd to the held floor before cloning the mount namespace: the
 /// kernel rebases cwd into the clone, without looking up those ancestors.
 fn clone_mount_namespace_at(floor:&OwnedFd,workspace:&OwnedFd)->Result<OwnedFd>{
-    if unsafe{libc::fchdir(floor.as_raw_fd())}!=0{return Err(io::Error::last_os_error()).context("SDK retained floor chdir failed")}
-    if unsafe{libc::unshare(libc::CLONE_NEWNS|libc::CLONE_NEWNET|libc::CLONE_NEWPID)}!=0{return Err(io::Error::last_os_error()).context("SDK actual isolated namespaces unavailable")}
+    if unsafe{libc::fchdir(floor.as_raw_fd())}!=0{return Err(io::Error::last_os_error()).context(SdkHelperOperation::RetainedFloorChdir)}
+    if unsafe{libc::unshare(libc::CLONE_NEWNS|libc::CLONE_NEWNET|libc::CLONE_NEWPID)}!=0{return Err(io::Error::last_os_error()).context(SdkHelperOperation::IsolatedNamespaces)}
     mount(None,"/",None,(libc::MS_REC|libc::MS_PRIVATE)as _)?;
     let rebased:OwnedFd=OpenOptions::new().read(true).custom_flags(libc::O_PATH|libc::O_DIRECTORY|libc::O_CLOEXEC).open(".")?.into();
     let before=wire::fd_data(floor)?;let after=wire::fd_data(&rebased)?;
@@ -107,7 +107,7 @@ fn clone_mount_namespace_at(floor:&OwnedFd,workspace:&OwnedFd)->Result<OwnedFd>{
     // The independently validated UID1500 scratch lives under /workspace;
     // reopening it still compares against its original held inode.
     let cwd=rebase_mount_fd(workspace)?;
-    if unsafe{libc::fchdir(cwd.as_raw_fd())}!=0{return Err(io::Error::last_os_error()).context("SDK retained workspace chdir failed")}
+    if unsafe{libc::fchdir(cwd.as_raw_fd())}!=0{return Err(io::Error::last_os_error()).context(SdkHelperOperation::RetainedWorkspaceChdir)}
     Ok(rebased)
 }
 /// Holds the workload user namespace for a helper that stays non-dumpable.
@@ -145,7 +145,7 @@ impl WorkloadUserNamespace{
             ensure!(n==0||io::Error::last_os_error().kind()==io::ErrorKind::Interrupted,"SDK user namespace wait failed");
         }
         let mut byte=0u8;ensure!(unsafe{libc::read(ready.as_raw_fd(),(&mut byte as *mut u8).cast(),1)}==1&&byte==b'1',"SDK user namespace child failed");
-        if unsafe{libc::setns(pidfd.as_raw_fd(),libc::CLONE_NEWUSER)}!=0{return Err(io::Error::last_os_error()).context("SDK user namespace join failed")}
+        if unsafe{libc::setns(pidfd.as_raw_fd(),libc::CLONE_NEWUSER)}!=0{return Err(io::Error::last_os_error()).context(SdkHelperOperation::UserNamespaceJoin)}
         ensure!(unsafe{libc::getuid()==0&&libc::geteuid()==0&&libc::getgid()==0&&libc::getegid()==0},"SDK user namespace identity differs");
         for(path,expected)in[("/proc/self/uid_map","0 1500 1"),("/proc/self/gid_map","0 1500 1"),("/proc/self/setgroups","deny")]{
             ensure!(fs::read_to_string(path)?.split_whitespace().collect::<Vec<_>>().join(" ")==expected,"SDK user namespace map differs");
@@ -262,8 +262,8 @@ fn run_namespace_retaining(userns:WorkloadUserNamespace,floor:&OwnedFd,workspace
         let header=Header{version:0x20080522,pid:0};let data=[Data{effective:0,permitted:0,inheritable:0};2];
         if libc::syscall(libc::SYS_capset,&header as *const Header,data.as_ptr())!=0{return Err(io::Error::last_os_error())}Ok(())
     });}
-    let mut child=command.spawn()?;
-    let waited=(||->Result<()>{loop{original.remaining()?;if let Some((_,_,_,cancel))=job{check_cancel(cancel)?;}if let Some(exit)=child.try_wait()?{ensure!(exit.success(),"SDK actual isolated workload exit failed");return Ok(())}std::thread::sleep(original.remaining()?.min(Duration::from_millis(1)));}})();
+    let mut child=command.spawn().context(SdkHelperOperation::WorkloadSpawn)?;
+    let waited=(||->Result<()>{loop{original.remaining()?;if let Some((_,_,_,cancel))=job{check_cancel(cancel)?;}if let Some(exit)=child.try_wait().context(SdkHelperOperation::WorkloadWait)?{if !exit.success(){return Err(anyhow::Error::new(SdkHelperOperation::WorkloadExit))}return Ok(())}std::thread::sleep(original.remaining()?.min(Duration::from_millis(1)));}})();
     if let Err(failure)=waited{
         // This is the actual PID-namespace init Child, never a receipt/PID
         // lookup. Killing init fences its namespace descendants. Unknown
@@ -276,7 +276,7 @@ fn run_namespace_retaining(userns:WorkloadUserNamespace,floor:&OwnedFd,workspace
         },Ok(None)|Err(_)=>std::thread::sleep(Duration::from_millis(1))}}
     }
     let m=output.metadata()?;ensure!(m.len()>0&&m.len()<=16*1024&&error.metadata()?.len()<=64*1024,"SDK actual workload output bound");
-    let mut raw=vec![0;m.len()as usize];ensure!(output.read_at(&mut raw,0)?==raw.len(),"SDK actual workload result incomplete");original.remaining()?;Ok(serde_json::from_slice(&raw)?)
+    let mut raw=vec![0;m.len()as usize];ensure!(output.read_at(&mut raw,0)?==raw.len(),"SDK actual workload result incomplete");original.remaining()?;serde_json::from_slice(&raw).context(SdkHelperOperation::WorkloadResultParse)
 }
 
 /// Helper-only same inherited writer. Root established O_NONBLOCK before the
@@ -322,3 +322,6 @@ mod fixed_first_diagnostic_tests;
 #[cfg(test)]
 #[path="compiler_sdk_helper_userns_tests.rs"]
 mod userns_tests;
+#[cfg(all(test,target_os="linux"))]
+#[path="compiler_sdk_helper_local_tests.rs"]
+mod local_tests;

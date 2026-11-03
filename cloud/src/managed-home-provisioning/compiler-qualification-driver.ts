@@ -1,3 +1,4 @@
+import {OriginalSdkDiagnosticRead,sdkDiagnosticTarget,type SdkFailureDiagnostic} from "./staging-sdk-diagnostics.js";
 import {StagingListenerAdmissionClosure} from "./staging-listener-admission.js";
 import type {OriginalSdkRoleActivationPermit} from "./compiler-qualification.js";
 import {createServer,type Server} from "node:http";
@@ -19,12 +20,15 @@ import type {ManagedHomeRegistry,RuntimeQualificationProvisionReceipt} from "./r
  */
 export class CompilerSdkQualificationDriver {
  readonly registry:ManagedHomeRegistry;readonly wire:ManagedHomeRegistrationWire;
+ #diagnosticToken:string;
  #server?:Server;#wss?:WebSocketServer;#listen?:Promise<void>;#sockets=new Set<WebSocket>();
  #acceptingClosed=false;#listenerClosure?:StagingListenerAdmissionClosure;
  #admissions=0;#pendingUpgrades=0;#messages=0;#started=false;#time?:OriginalTime;#provision?:Promise<RuntimeQualificationProvisionReceipt>;
  #receipt?:RuntimeQualificationProvisionReceipt;#error?:Code;#expired=false;#fuse?:NodeJS.Timeout;
+ #diagnosticRead?:OriginalSdkDiagnosticRead;#diagnosticLoop?:Promise<void>;#diagnosticReads=0;#diagnosticFailure?:SdkFailureDiagnostic;#roleObserved=false;
  #ack?:Envelope<CompilerQualificationAck>;#sendAttempted=false;#sendCallback=false;#sendUnknown=false;
- constructor(config:ManagedHomePostgresConfig,candidate:CompilerQualificationCandidate,private readonly accountId:string,private readonly commandKey:string){
+ constructor(config:ManagedHomePostgresConfig,candidate:CompilerQualificationCandidate,private readonly accountId:string,private readonly commandKey:string,private readonly diagnosticsExecutable="/usr/local/bin/rudder-staging-fly"){
+  this.#diagnosticToken=config.flyToken;
   check(config.policy.controlPlane?.profile==="qualification-v1"&&controlOrigin(config.policy)===QUALIFICATION_CONTROL_ORIGIN,"unconfigured");
   this.registry=createManagedCompilerSdkQualificationRegistry(config,candidate);this.wire=new ManagedHomeRegistrationWire(this.registry);
  }
@@ -64,7 +68,23 @@ export class CompilerSdkQualificationDriver {
   // Stage the actual promise before first provider/PG effects; timeout/error
   // cannot throw away its registry/cipher/key/creation/purpose/unknown owners.
   this.#provision=this.registry.provisionRuntimeImageQualification(this.accountId,this.commandKey);
-  try{this.#receipt=await this.#provision;check(this.#receipt.compilerScope?.scope==="disposable-fixed-compiler-sdk-only","identity_changed");this.#time.remaining();}catch{this.#error="effect_unknown";}
+  try{this.#receipt=await this.#provision;check(this.#receipt.compilerScope?.scope==="disposable-fixed-compiler-sdk-only","identity_changed");this.#time.remaining();this.#diagnosticLoop=this.#observeDiagnosticsRetaining();}catch{this.#error="effect_unknown";}
+ }
+ /** Logs are observations of the SAME originally created disposable machine.
+  * A negative fixed Root frame stops waiting immediately; it never releases
+  * any registry/socket/process owner or supplies successful qualification. */
+ async #observeDiagnosticsRetaining():Promise<void>{
+  try{
+   const target=sdkDiagnosticTarget(this.registry.runtimeImageQualificationCustodyData(this.accountId,this.commandKey));
+   while(!this.#error&&!this.#expired&&!this.#roleObserved&&this.#diagnosticReads<100){
+    this.#time!.remaining();this.#diagnosticReads++;
+    const read=new OriginalSdkDiagnosticRead(target,this.#time!,this.diagnosticsExecutable,this.#diagnosticToken,failure=>{
+     this.#diagnosticFailure=failure;this.#error??="unavailable";
+    });this.#diagnosticRead=read;
+    await read.startRetaining();if(this.#error||this.#roleObserved)return;
+    const delay=Math.min(2000,this.#time!.remaining());await new Promise<void>(resolve=>setTimeout(resolve,delay));
+   }
+  }catch{/* Missing/unavailable logs cannot become a helper result or erase original custody. */}
  }
  /** One-way listener restriction. Existing WS, registry, provider and PG
   * owners remain held; close-listener completion is NOT actor/WS retirement. */
@@ -74,7 +94,8 @@ export class CompilerSdkQualificationDriver {
  }
  takeOriginalRoleActivationPermit():OriginalSdkRoleActivationPermit|undefined {
   check(!this.#error&&!this.#expired&&!this.#sendUnknown,"effect_unknown");if(!this.#sendCallback)return undefined;
-  return this.registry.takeOriginalRoleActivationPermit(this.accountId,this.commandKey) as OriginalSdkRoleActivationPermit|undefined;
+  const permit=this.registry.takeOriginalRoleActivationPermit(this.accountId,this.commandKey) as OriginalSdkRoleActivationPermit|undefined;
+  if(permit)this.#roleObserved=true;return permit;
  }
  /** Bounded public DATA for a private fixture output file. A send callback is
   * NOT Root ACK receipt or a readiness/lease/helper/drain constructor. */
@@ -82,6 +103,7 @@ export class CompilerSdkQualificationDriver {
   let custody:unknown=null;try{custody=this.registry.runtimeImageQualificationCustodyData(this.accountId,this.commandKey);}catch{}
   return snapshot({format_version:1,scope:"disposable-compiler-sdk-qualification-driver-data-only",
    state:this.#ack?.body.kind==="compiler_sdk_qualification_ack"&&this.#ack.body.result?.state==="published"?"sdk_role_commit_observed":this.#error??"pending",expired:this.#expired,error:this.#error??null,
+   sdk_failure:this.#diagnosticFailure??null,sdk_machine_logs:this.#diagnosticRead?.statusData()??null,sdk_log_reads:this.#diagnosticReads,
    receipt:this.#receipt??null,custody,publication_ack_data:this.#ack??null,
    ack_send_attempted:this.#sendAttempted,ack_send_callback_observed:this.#sendCallback,ack_send_unknown:this.#sendUnknown,
    root_ack_receipt_observed:false,source_authority:false,helper_qualified:false,scheduler_ready:false,normal_retirement:false,

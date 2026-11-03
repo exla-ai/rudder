@@ -8,7 +8,8 @@ fn run_command(shared:&Arc<Shared>,job:&Arc<Job>)->Result<()> {
     // Metadata-only actual selected profile inspection before creating any
     // project owner/task row/seed use. It never reads inherited credentials or
     // substitutes another profile, and its real child is reaped before return.
-    let result=if sdk_driver::is_sdk(&job.command.operation){sdk_driver::run_original(shared,job,&original,&cancelled)?}
+    let result=if matches!(&job.command.operation,HostOperation::StopTaskV1 {..}) {stop_task(shared,job,&original,&cancelled)?}
+    else if sdk_driver::is_sdk(&job.command.operation){sdk_driver::run_original(shared,job,&original,&cancelled)?}
     else if let Some(rejected)=inspect_profile(shared,job,&original,&cancelled)? {rejected}
     else {match &job.command.operation {
         HostOperation::OpenPreparedProjectV1 {..}=>open_project(shared,job,&original,&cancelled)?,
@@ -37,9 +38,39 @@ fn inspect_profile(shared:&Shared,job:&Job,original:&FinalizationBudget,cancelle
     let metadata=inspect_selected_managed_task_profile(&loader,profile,native_backend(backend),cancelled,original);
     if let Some(runtime)=&runtime {runtime.assert_current(original,cancelled)?;}else{held.profile_inspection.as_ref().unwrap().current(original,cancelled)?;}
     shared.config.assert_current()?;time(original,cancelled)?;
-    Ok(match metadata {Ok(meta) if meta.kind==ManagedProfileCredentialKind::ApiKeyV1=>None,
+    Ok(match metadata {Ok(meta) if meta.kind==ManagedProfileCredentialKind::ApiKeyV1 || meta.supports_codex_access_snapshot()=>None,
         Ok(meta)=>Some(serde_json::json!({"phase":"rejected","reason":if meta.kind==ManagedProfileCredentialKind::OAuthV1 {"unsupported_oauth"}else{"unsupported_token"}})),
         Err(_)=>Some(serde_json::json!({"phase":"rejected","reason":"explicit_api_profile_unavailable"}))})
+}
+
+// DATA matching is necessary but never sufficient to stop a task: the App
+// callback also borrows the original project and its actual live task control.
+fn stop_target_matches(operation:&HostOperation,target:&HostCommand,receipt:&crate::managed_machine_receipts::MachineReceipt,fence:&ManagedLaunchFence)->bool {
+    let HostOperation::StopTaskV1 {project_alias,lookup_command_key,command_id,run_id,run_epoch,attempt_id}=operation else {return false;};
+    let HostOperation::StartTaskV1 {project_alias:actual_alias,..}=&target.operation else {return false;};
+    project_alias==actual_alias && lookup_command_key==&target.command_key && lookup_command_key==&receipt.command_key
+        && project_alias==&receipt.project_alias && command_id==&receipt.command_id
+        && run_id==&fence.run_id && run_epoch==&fence.run_epoch.to_string() && attempt_id==&fence.attempt_id
+}
+fn stop_task(shared:&Arc<Shared>,job:&Arc<Job>,original:&FinalizationBudget,cancelled:&AtomicBool)->Result<serde_json::Value> {
+    time(original,cancelled)?;
+    let HostOperation::StopTaskV1 {lookup_command_key,..}=&job.command.operation else {anyhow::bail!("actual stop command absent");};
+    let target=original_lock(&shared.jobs,original)?.get(lookup_command_key).cloned();
+    let Some(target)=target else {return Ok(serde_json::json!({"phase":"rejected","reason":"original_task_unavailable"}));};
+    ensure!(!Arc::ptr_eq(job,&target)&&target.belongs_to_machine(&job.machine)&&target.is_original_task_command(),"stop target is not an original task on this machine");
+    // Retain the SAME target before queuing any App effect. The target does not
+    // refer back to this stop job; failed/expired dispatch never releases it.
+    original_lock(&job.carrier,original)?.stop_target=Some(target.clone());
+    {
+        let held=original_lock(&target.carrier,original)?;
+        let receipt=&held.accepted.as_ref().context("original task receipt owner absent")?.receipt;
+        let fence=held.task.started.as_ref().context("original task not started")?;
+        ensure!(stop_target_matches(&job.command.operation,&target.command,receipt,fence),"original task identity mismatch");
+    }
+    time(original,cancelled)?;job.step.store(STEP_STOP,Ordering::Release);
+    shared.send.try_send(AppEvent::Work(job.clone())).map_err(|_|anyhow::anyhow!("actual App stop queue unavailable; same target retained"))?;
+    wait_step(job,STEP_STOP_RECORDED,original,cancelled)?;
+    original_lock(&job.carrier,original)?.result.clone().context("actual App stop observation absent")
 }
 
 fn open_project(shared:&Arc<Shared>,job:&Arc<Job>,original:&FinalizationBudget,cancelled:&Arc<AtomicBool>)->Result<serde_json::Value> {

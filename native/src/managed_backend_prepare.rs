@@ -7,11 +7,16 @@ use rudder_engine::{execution::{HomeFile, ManagedFrontendStart, ReadOnlyRuntime}
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, path::{Path, PathBuf}};
 use super::ManagedLaunchFence;
+#[path="managed_codex_snapshot.rs"]
+mod codex_snapshot;
+pub(crate) use codex_snapshot::CodexOAuthAccessSnapshotV1;
+pub(crate) enum ManagedCodexCredential { ApiKey(ManagedCodexApiKey), AccessSnapshot(CodexOAuthAccessSnapshotV1) }
 
 /// No Debug/Serialize implementation: values belong only in a sealed spec.
 pub(crate) struct SelectedCredentials {
     pub(super) profile_id: String,
     backend: crate::Backend,
+    codex_snapshot: Option<CodexOAuthAccessSnapshotV1>,
     pub(super) environment: std::collections::BTreeMap<String, String>,
 }
 
@@ -59,7 +64,7 @@ impl SelectedCredentials {
     /// Codex's key must already have moved into its zeroizing host-only owner.
     pub(crate) fn guest_environment(&self, fence: &ManagedLaunchFence,
         reports: &ManagedReportMapping) -> Result<BTreeMap<String, String>> {
-        ensure!(self.backend != crate::Backend::Codex || self.environment.is_empty(),
+        ensure!(self.backend != crate::Backend::Codex || (self.environment.is_empty() && self.codex_snapshot.is_none()),
             "selected Codex API key must move to host custody before guest preparation");
         let mut environment = self.environment.clone();
         environment.extend([("RUDDER_FABRIC_ATTEMPT_ID".into(), fence.attempt_id.clone()),
@@ -78,7 +83,19 @@ impl SelectedCredentials {
             crate::Backend::Claude => "ANTHROPIC_API_KEY",
             _ => anyhow::bail!("managed provider profile is unsupported"),
         };
-        Ok(Self { profile_id, backend, environment: [(key.into(), secret.into_validated())].into() })
+        Ok(Self { profile_id, backend, codex_snapshot:None, environment: [(key.into(), secret.into_validated())].into() })
+    }
+    pub(crate) fn codex_access_snapshot(profile_id:String, snapshot:CodexOAuthAccessSnapshotV1)->Result<Self> {
+        ensure!(!profile_id.is_empty() && profile_id.len()<=256 && !profile_id.chars().any(char::is_control), "invalid selected credential profile");
+        ensure!(snapshot.profile()==profile_id, "selected Codex access snapshot belongs to another profile");
+        Ok(Self {profile_id,backend:crate::Backend::Codex,codex_snapshot:Some(snapshot),environment:BTreeMap::new()})
+    }
+    pub(crate) fn take_host_codex_credential(&mut self)->Result<Option<ManagedCodexCredential>> {
+        if let Some(snapshot)=self.codex_snapshot.take() {
+            ensure!(self.backend==crate::Backend::Codex && self.environment.is_empty(), "invalid selected Codex credential owner");
+            return Ok(Some(ManagedCodexCredential::AccessSnapshot(snapshot)));
+        }
+        Ok(self.take_host_codex_key()?.map(ManagedCodexCredential::ApiKey))
     }
     /// Ordinary CLI profiles do not participate in a shared refresh lease.
     /// Refuse before reading/copying a refresh token or invalidating a live login.

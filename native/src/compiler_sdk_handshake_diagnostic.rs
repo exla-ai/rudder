@@ -3,7 +3,7 @@
 use super::*;
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Frame {kind:String,component:String,stage:String,class:String,io_kind:Option<String>,errno:Option<i32>,check:Option<String>}
+struct Frame {kind:String,component:String,stage:String,class:String,io_kind:Option<String>,errno:Option<i32>,check:Option<String>,#[serde(default)]error_text:Option<String>}
 fn helper_check(name:&str)->Option<BootstrapCheck>{Some(match name{
     "SdkHelperEntry"=>BootstrapCheck::SdkHelperEntry,
     "SdkHelperConnect"=>BootstrapCheck::SdkHelperConnect,
@@ -35,9 +35,16 @@ fn project(raw:&[u8])->Option<anyhow::Error>{
     if first.len()>4096||lines.any(|line|line.iter().copied().skip_while(u8::is_ascii_whitespace).next()==Some(b'{')){return None}
     let frame:Frame=serde_json::from_slice(first).ok()?; // rejects duplicate/unknown fields
     let value:serde_json::Value=serde_json::from_slice(first).ok()?;
-    if value.as_object()?.len()!=7||frame.kind!="rudder-root-retained-failure-v1"||frame.component!="compiler_sdk_helper"||frame.stage!="handshake"{return None}
+    let object=value.as_object()?;
+    if ![7,8].contains(&object.len())||["kind","component","stage","class","io_kind","errno","check"].iter().any(|key|!object.contains_key(*key))
+        ||frame.kind!="rudder-root-retained-failure-v1"||frame.component!="compiler_sdk_helper"||frame.stage!="handshake"{return None}
+    let operation=match frame.error_text.as_deref(){
+        Some(text)=>Some(SdkHelperOperation::from_text(text,frame.io_kind.as_deref(),frame.errno)?),
+        None if object.contains_key("error_text")=>return None,
+        None=>None,
+    };
     let check=helper_check(frame.check.as_deref()?)?;
-    match(frame.class.as_str(),frame.io_kind.as_deref(),frame.errno){
+    let error=match(frame.class.as_str(),frame.io_kind.as_deref(),frame.errno){
         ("validation_or_other",None,None)=>Some(anyhow::Error::new(check)),
         ("io",Some(label),errno)=>{
             let kind=closed_kind(label)?;
@@ -45,7 +52,8 @@ fn project(raw:&[u8])->Option<anyhow::Error>{
             if kind_label(os.kind())!=label{return None}Some(anyhow::Error::new(os).context(check))
         }
         _=>None,
-    }
+    }?;
+    Some(match operation{Some(operation)=>error.context(operation),None=>error})
 }
 pub(super) fn failed_original_stderr(raw:&[u8],startup:bool)->anyhow::Error{
     // Selected compiler stderr is arbitrary input, even with original custody.

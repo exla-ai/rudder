@@ -323,6 +323,18 @@ export class ManagedHomeRegistry {
   async managedImageBatchPut(worker:ManagedHomeWorker,transferId:string,batchId:string,req:IncomingMessage){this.#configured();check(this.freshStorage,"unconfigured");const home=this.#workers.get(worker);check(home,"identity_changed");this.#ordinary(home.intent);await worker.assertCredentialsCurrent();return this.freshStorage.putImageBatch(home,transferId,batchId,req);}
   async reconcileManagedImageBatch(worker:ManagedHomeWorker,transferId:string,batchId:string,input:unknown){this.#configured();check(this.freshStorage,"unconfigured");const home=this.#workers.get(worker);check(home,"identity_changed");this.#ordinary(home.intent);await worker.assertCredentialsCurrent();return this.freshStorage.reconcileImageBatch(home,transferId,batchId,input);}
   #original(route:ManagedHomeRoute):BoundHome{const home=this.#routes.get(route);check(home,"identity_changed");return home;}
+  /** Target DATA from this retained ordinary creation. Every transfer must also
+   * check the original route, socket and current provider instance. */
+  stagingOrdinaryProfileImportTargetData(route:ManagedHomeRoute){
+    const home=this.#original(route),i=home.intent;this.#ordinary(i);
+    const c=this.#provisions.get(i.accountId+"\0"+i.commandKey);
+    check(c&&!c.qualification&&this.#retainStagingOrdinaryOriginal(i)&&canonical(c.intent).equals(canonical(i))&&!c.held&&home.phase==="routable","identity_changed");
+    const project=i.freshProjects.find(p=>p.workspaceId===route.projectAlias),spec=i.spec.projects.find(p=>p.alias===route.projectAlias);
+    const started=home.acks.start as MachineAck,configured=home.acks.configure as MachineAck;
+    check(project&&spec&&started&&configured&&started.id===configured.id&&started.instanceId===configured.instanceId&&started.configSha256===configured.configSha256&&started.state==="started","identity_changed");
+    check(spec.home===`/workspace/fresh-v4/${project.projectId}/home`,"identity_changed");
+    return Object.freeze({app:i.appName,machine:started.id,instanceId:started.instanceId,projectId:project.projectId,home:spec.home});
+  }
   /** Staging-only original OpenPreparedProject observation. The ordinary SDK
    * lifecycle/policy and genuine route remain mandatory; no policy is broadened.
    * Delegates the one mutation to the UNCHANGED original dispatcher. The borrow
@@ -346,14 +358,21 @@ export class ManagedHomeRegistry {
       // Receipt queries create NO accepted-command row or task/prep budget.
       // This is only a bounded transport observation of an existing key.
       const time=originalTime(20_000);try{return nativeStatusReply(await send("managed.receiptV1",{command_key:commandKey,lookup_command_key:operation.lookup_command_key},time.remaining()),operation.lookup_command_key,known.operation);}catch{fail("effect_unknown");}}
-    check(operation.project_alias===route.projectAlias,"not_found");if(operation.op==="BuildCurrentSourceSdkV1")check(home.intent.policy.compilerSdk,"unconfigured");const mapKey=route.accountId+"\0"+route.homeId+"\0"+commandKey;let c=this.#commands.get(mapKey);
+    check(operation.project_alias===route.projectAlias,"not_found");
+    if(operation.op==="StopTaskV1"){
+      const original=await store.command(home.intent,operation.lookup_command_key);
+      check(original?.operation.op==="StartTaskV1"&&original.operation.project_alias===route.projectAlias,"not_found");
+      check(original.phase==="replied"&&original.reply!==null&&typeof original.reply==="object"&&
+        (original.reply as {receipt?:{command_id?:unknown}}).receipt?.command_id===operation.command_id,"identity_changed");
+    }
+    if(operation.op==="BuildCurrentSourceSdkV1")check(home.intent.policy.compilerSdk,"unconfigured");const mapKey=route.accountId+"\0"+route.homeId+"\0"+commandKey;let c=this.#commands.get(mapKey);
     if(c)check(canonical(c.operation).equals(canonical(operation)),"conflict");
     else{check(this.#commands.size<32,"busy");c={intent:home.intent,time:originalTime(20_000),key:commandKey,operation,busy:false,started:false,replied:false,failed:false};this.#commands.set(mapKey,c);}
     check(!c.busy,"busy");c.busy=true;try{await route.assertRoutableCurrent();c.time.remaining();const stored=await store.reserveCommand(c.intent,commandKey,operation,this.#processOwner);
       if(stored.phase==="replied")return snapshot(stored.reply);
       check(stored.processOwner===this.#processOwner&&stored.phase==="accepted"&&!c.started,"effect_unknown");
       await store.startCommand(c.intent,commandKey,this.#processOwner);c.started=true;c.time.remaining();
-      const {op,...params}=operation;const method=op==="BuildCurrentSourceSdkV1"?"managed.buildCurrentSourceSdkV1":op==="StartTaskV1"?"managed.startTaskV1":"managed.openPreparedProjectV1";
+      const {op,...params}=operation;const method=op==="BuildCurrentSourceSdkV1"?"managed.buildCurrentSourceSdkV1":op==="StartTaskV1"?"managed.startTaskV1":op==="StopTaskV1"?"managed.stopTaskV1":"managed.openPreparedProjectV1";
       // The actual same homeRpc promise/reply remains in this carrier. A
       // local HTTP timeout or DB uncertainty never creates another send.
       c.promise=Promise.resolve().then(()=>send(method,{command_key:commandKey,...params},c!.time.remaining())).then(reply=>{c!.rawReply=reply;c!.reply=nativeReply(reply,commandKey,operation);c!.replied=true;return c!.reply;},()=>{c!.failed=true;throw new Error("Managed home command effect unknown");});

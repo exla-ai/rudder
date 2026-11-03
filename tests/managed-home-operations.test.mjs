@@ -3,7 +3,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {createHmac,randomUUID} from "node:crypto";
-import {canonical,hash,nativeStatusReply} from "../cloud/dist/managed-home-provisioning/types.js";
+import {canonical,hash,nativeStatusReply,validateOperation} from "../cloud/dist/managed-home-provisioning/types.js";
 import {RootEngineOperations} from "../cloud/dist/managed-home-provisioning/operations.js";
 import {OPERATIONS_MIGRATION_SHA256} from "../cloud/dist/managed-home-provisioning/operations-schema.js";
 import {originalTime} from "../cloud/dist/managed-home-provisioning/fly.js";
@@ -15,6 +15,19 @@ test("status separately accepts exact same-job App observations without changing
   const result=nativeStatusReply({receipt:r,task_observation:observation},r.command_key,op);assert.equal(result.task_observation.run_epoch,observation.run_epoch);assert.deepEqual(r,original);
   assert.throws(()=>nativeStatusReply({receipt:r,task_observation:{...observation,command_id:randomUUID()}},r.command_key,op),{code:"identity_changed"});assert.throws(()=>nativeStatusReply({receipt:r,task_observation:{...observation,run_epoch:"01"}},r.command_key,op),{code:"identity_changed"});});
 test("null status is unavailable DATA and cannot carry an invented observation",()=>{assert.deepEqual(nativeStatusReply({receipt:null,task_observation:null},"original-task",op),{receipt:null,task_observation:null});assert.throws(()=>nativeStatusReply({receipt:null,task_observation:{}},"original-task",op),{code:"identity_changed"});});
+test("explicit StopTask requires the original command and canonical fence",()=>{
+ const stop={op:"StopTaskV1",project_alias:op.project_alias,lookup_command_key:"original-task",command_id:randomUUID(),run_id:"run",run_epoch:"4",attempt_id:randomUUID()};
+ assert.deepEqual(validateOperation(stop),stop);
+ for(const change of [s=>delete s.command_id,s=>s.run_epoch="04",s=>s.run_epoch="0",s=>s.run_epoch="18446744073709551616",s=>s.pid=1234,s=>s.backend="codex"]){const wrong={...stop};change(wrong);assert.throws(()=>validateOperation(wrong));}
+});
+test("lifecycle data keeps a missing physical join unknown and refuses invented boolean completion",()=>{
+ const r=receipt(),o={command_id:r.command_id,run_id:"run",run_epoch:"4",attempt_id:randomUUID(),row_status:"stopped",preparing_observed:false,
+  backend_ready_last_observed:false,stop_requested_observed:true,uncertain_observed:false,validated_checkpoint_observed:true,
+  enrollment_submitted_observed:true,enrollment_released_observed:true,helper_joined_observed:null};
+ const data={receipt:r,task_observation:o};assert.equal(nativeStatusReply(data,r.command_key,op).task_observation.helper_joined_observed,null);
+ assert.equal(nativeStatusReply({...data,task_observation:{...o,helper_joined_observed:true}},r.command_key,op).task_observation.helper_joined_observed,true);
+ for(const change of [s=>s.helper_joined_observed=false,s=>s.enrollment_submitted_observed=false,s=>delete s.enrollment_released_observed,s=>s.helper_joined_observed="true"]){const wrong=structuredClone(data);change(wrong.task_observation);assert.throws(()=>nativeStatusReply(wrong,r.command_key,op));}
+});
 test("ReceiptV1 always queries original native key despite cached accepted/completed dispatch DATA",async()=>{const r=receipt("completed"),i={authorityId:randomUUID(),accountId:"account",homeId:"mh-model",storeId:randomUUID(),incarnation:randomUUID(),nonce:randomUUID(),epoch:"1",appName:"app",networkName:"network",policy:{},spec:{projects:[{alias:op.project_alias}]}};
   const bound={intent:i,acks:{app:{id:"app"},volume:{id:"volume"},start:{id:"machine",instanceId:"original"}},phase:"routable",tokenHash:"1".repeat(64)};const assignment={projectId:randomUUID(),ownerEpoch:"2",engineInstance:randomUUID(),bootId:randomUUID(),ownerReceipt:{model:true}};
   let queries=0;const db={bound:async()=>structuredClone(bound),repo:async()=>({home:{id:i.homeId},repo:{id:op.project_alias}}),currentAssignment:async()=>structuredClone(assignment),command:async()=>({phase:"replied",operation:op,reply:{receipt:r}})};

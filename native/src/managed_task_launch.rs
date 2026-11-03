@@ -1,5 +1,5 @@
 //! Explicit Linux managed-local task entry. No default route, profile lookup,
-//! environment/OAuth fallback, source import, acceptance, model call or scheduler.
+//! environment fallback, refresh, source import, acceptance, model call or scheduler.
 //! Root wires the returned packet into the EXISTING managed_app launch worker.
 #![cfg(target_os = "linux")]
 use anyhow::{ensure, Context, Result};
@@ -16,14 +16,15 @@ const MAX_PREPARATIONS: usize = 2;
 const PREPARATION_LIMIT: Duration = Duration::from_secs(30);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum SelectedTaskCredentialKind { ApiKeyV1, OAuthV1 }
+pub(crate) enum SelectedTaskCredentialKind { ApiKeyV1, OAuthV1, CodexOAuthAccessSnapshotV1, SelectedProfileV1 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ManagedTaskNetworkSelection { OrdinaryNetworkV1 }
 
-/// Intent DATA only; there is no Default/Serde/env constructor. Reject selected
-/// OAuth here BEFORE project migration, secret reads, admission or launch effects.
+/// Intent DATA only; there is no Default/Serde/env constructor. Generic OAuth
+/// stays refused. SelectedProfileV1 resolves only independently inspected API
+/// metadata or the explicit Codex ACCESS-only snapshot adapter.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct ManagedTaskOptIn { profile_id: String, backend: Backend }
+pub(crate) struct ManagedTaskOptIn { profile_id: String, backend: Backend, kind: SelectedTaskCredentialKind }
 impl ManagedTaskOptIn {
     pub(crate) fn selected(profile_id: String, backend: Backend, kind: SelectedTaskCredentialKind,
         _network: ManagedTaskNetworkSelection) -> Result<Self> {
@@ -34,10 +35,13 @@ impl ManagedTaskOptIn {
             return Err(std::io::Error::new(std::io::ErrorKind::Unsupported,
                 "selected OAuth profile is unsupported for managed task launch; an exclusive refresh and protected writeback adapter must be qualified first").into());
         }
-        Ok(Self { profile_id, backend })
+        ensure!(kind != SelectedTaskCredentialKind::CodexOAuthAccessSnapshotV1 || backend == Backend::Codex, "selected access snapshot requires Codex");
+        Ok(Self { profile_id, backend, kind })
     }
     pub(crate) fn profile_id(&self) -> &str { &self.profile_id }
     pub(crate) fn backend(&self) -> Backend { self.backend }
+    pub(crate) fn accepts_codex_snapshot(&self)->bool { self.backend==Backend::Codex && matches!(self.kind,SelectedTaskCredentialKind::CodexOAuthAccessSnapshotV1|SelectedTaskCredentialKind::SelectedProfileV1) }
+    pub(crate) fn accepts_api_key(&self)->bool { matches!(self.kind,SelectedTaskCredentialKind::ApiKeyV1|SelectedTaskCredentialKind::SelectedProfileV1) }
 }
 
 /// Actual selected secret owner, never Debug/Clone/Serde. This metadata wrapper
@@ -49,8 +53,15 @@ impl SelectedTaskProfile {
     /// explicitly selected API profile's key, never inherited env/login material.
     pub(crate) fn api_key(selected: ManagedTaskOptIn, secret: String) -> Result<Self> {
         let credentials = SelectedCredentials::api_key(selected.profile_id.clone(), selected.backend, secret)?;
+        ensure!(selected.accepts_api_key(), "selected managed credential kind differs");
         Ok(Self { selected, credentials })
     }
+    pub(crate) fn codex_access_snapshot(selected:ManagedTaskOptIn,snapshot:crate::managed_launch::CodexOAuthAccessSnapshotV1)->Result<Self> {
+        ensure!(selected.accepts_codex_snapshot(), "selected managed credential kind differs");
+        let credentials=SelectedCredentials::codex_access_snapshot(selected.profile_id.clone(),snapshot)?;
+        Ok(Self {selected,credentials})
+    }
+
 }
 
 /// OFF-APP bootstrap from the ACTUAL current Fabric owner and explicit prepared

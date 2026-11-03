@@ -1464,6 +1464,15 @@ From `package.json`:
 - Native/engine tests: `cargo test --workspace --locked --features
   rudder-vcs-bridge/cli`. Explicitly ignored provider/VM qualification fixtures
   require their documented inputs; do not run every ignored fixture together.
+- Local SDK namespace regression: run `scripts/test-sdk-helper-local.sh` in a
+  Linux development container as real/effective UID and GID 1500, with writable
+  `/workspace`, enabled user namespaces, `cc` and static libc development
+  libraries. It explicitly runs only the two ignored local helper tests,
+  serially, using the full locked workspace graph, bridge CLI feature and
+  `target/` cache with development debug info and incremental compilation off;
+  custom Rust flags are cleared to reuse that graph. The tests exercise the
+  actual helper namespace/mount carrier with a tiny static stand-in payload.
+  They do not qualify genuine Root custody, Python, Buck2 or SDK compilation.
 - **Native TUI harness** (`app_tests.rs`): drive the REAL `App` end-to-end with no
   auth/network. `render_screen(app, w, h)` renders the actual dashboard
   (`render::render`) to a `TestBackend` and returns the screen as text, so tests assert

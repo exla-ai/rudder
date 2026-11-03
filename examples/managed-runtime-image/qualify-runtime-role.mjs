@@ -7,6 +7,8 @@ import {constants,readSync} from 'node:fs';
 import path from 'node:path';
 import {randomUUID} from 'node:crypto';
 import {StagingSdkRuntimeFlow} from '../../cloud/dist/managed-home-provisioning/staging-sdk-runtime-flow.js';
+import {validateStagingCodexAccessSnapshot} from '../../cloud/dist/managed-home-provisioning/staging-codex-profile-import.js';
+import {validatePositiveIngressInput} from '../../cloud/dist/managed-home-provisioning/staging-positive-ingress-driver.js';
 import {createStagingGenuineIngressExperiment} from '../../cloud/dist/managed-home-provisioning/staging-genuine-ingress-experiment.js';
 import {S3FabricObjectStorage} from '../../cloud/dist/fabric-cas.js';
 import {readManagedHomeStartupConfig} from '../../cloud/dist/managed-home-provisioning/startup-config.js';
@@ -28,6 +30,19 @@ function startupFailureData(check,ownersRetained,retention){
 }
 const retain=new Set(); // original config FD/driver/promises retained on errors
 const exact=(o,names)=>{if(!o||typeof o!=='object'||Array.isArray(o)||Object.keys(o).length!==names.length||names.some(k=>!Object.hasOwn(o,k)))throw Error();};
+// Validate optional task selection before output/storage/driver effects.
+function qualificationSelection(i){
+ const genuine=Object.hasOwn(i??{},'genuine_ingress');
+ const positive=Object.hasOwn(i??{},'positive_ingress');
+ const profileSnapshot=Object.hasOwn(i??{},'positive_profile_snapshot');
+ if(genuine&&!GENUINE_ENTRY_EFFECTS_ALLOWED)throw Error();
+ const flow=i?.qualification_kind==='sdk-runtime-ordinary-v2';
+ if((genuine||positive)&&!flow||genuine&&positive||profileSnapshot&&!positive)throw Error();
+ exact(i,flow?['format_version','qualification_kind','postgres','candidate','account_id','command_key','activation_authority','services','supervisor',...(genuine?['genuine_ingress']:[]),...(positive?['positive_ingress']:[]),...(profileSnapshot?['positive_profile_snapshot']:[])]:['format_version','qualification_kind','postgres','candidate','account_id','command_key']);
+ if(i.format_version!==1||!['runtime-image-v1','compiler-sdk-v1','sdk-runtime-ordinary-v2'].includes(i.qualification_kind))throw Error();
+ const positiveInput=positive?validatePositiveIngressInput(i.positive_ingress):undefined;
+ return {flow,genuine,positiveInput,positiveProfileSnapshot:profileSnapshot?validateStagingCodexAccessSnapshot(i.positive_profile_snapshot,positiveInput.profileId):undefined};
+}
 // Optional identity/restriction DATA only; no role/owner/clock authority.
 function validateSupervisorBirthData(supervisor){
  const withBirth=Object.hasOwn(supervisor??{},'birth_selection');
@@ -61,11 +76,7 @@ async function status(){if(!output||outputFailure||statusBusy)return;statusBusy=
 try{
  const i=await privateJson(process.env.RUDDER_RUNTIME_QUALIFICATION_INPUT);
  startupCheck='input-schema';
- const genuine=Object.hasOwn(i??{},'genuine_ingress');
- if(genuine&&!GENUINE_ENTRY_EFFECTS_ALLOWED)throw Error(); // before reading optional DATA or constructing its owner
- const flow=i.qualification_kind==='sdk-runtime-ordinary-v2';
- if(genuine&&!flow)throw Error();
- exact(i,flow?['format_version','qualification_kind','postgres','candidate','account_id','command_key','activation_authority','services','supervisor',...(genuine?['genuine_ingress']:[])]:['format_version','qualification_kind','postgres','candidate','account_id','command_key']);if(i.format_version!==1||!['runtime-image-v1','compiler-sdk-v1','sdk-runtime-ordinary-v2'].includes(i.qualification_kind))throw Error();
+ const {flow,genuine,positiveInput,positiveProfileSnapshot}=qualificationSelection(i);
  if((flow||i.qualification_kind==='compiler-sdk-v1')!==Object.hasOwn(i.candidate??{},'sdk'))throw Error();
  exact(i.postgres,['mode','authority','registrationAuthority','policy','flyToken','tokenEncryptionKeyHex']);
  const hex=i.postgres.tokenEncryptionKeyHex;if(typeof hex!=='string'||!/^[a-f0-9]{64}$/.test(hex)||/^0+$/.test(hex))throw Error();
@@ -101,7 +112,7 @@ try{
    if(!captureDirectory.isDirectory()||captureDirectory.uid!==process.getuid()||captureDirectory.gid!==process.getgid()||(captureDirectory.mode&0o7777)!==0o700)throw Error();
    genuineFlow={experiment,artifactData:i.genuine_ingress.artifact_data,output:captureOutput};retain.add(genuineFlow);
   }
-  driver=new StagingSdkRuntimeFlow(full,i.activation_authority,i.candidate,i.account_id,i.command_key,setup,genuineFlow);retain.add(driver);
+  driver=new StagingSdkRuntimeFlow(full,i.activation_authority,i.candidate,i.account_id,i.command_key,setup,genuineFlow,positiveInput,positiveProfileSnapshot);retain.add(driver);
   startupCheck='flow-start';
   start=driver.runRetaining();
  }else{

@@ -6,7 +6,7 @@
 pub(crate) mod source_prepare;
 #[path = "managed_backend_prepare.rs"]
 pub(crate) mod backend_prepare;
-pub(crate) use backend_prepare::{SelectedCredentials, ManagedCodexApiKey,
+pub(crate) use backend_prepare::{SelectedCredentials, ManagedCodexApiKey, ManagedCodexCredential, CodexOAuthAccessSnapshotV1,
     ManagedBackendProfile, ManagedReportMapping};
 use backend_prepare::{selected_protected_roots, validate_runtime_program};
 #[cfg(test)]
@@ -377,7 +377,7 @@ pub(crate) struct PreparedManagedLaunch {
     pub identity_journal: PathBuf,
     pub managed_run: crate::managed_store::ManagedRunLocation,
     pub server_command: Option<Vec<String>>,
-    codex_api_key: Option<ManagedCodexApiKey>,
+    codex_api_key: Option<ManagedCodexCredential>,
     spec: Option<ExecutionSpec>,
     retirement: Option<Retirement>,
     #[cfg(target_os = "linux")]
@@ -386,7 +386,7 @@ pub(crate) struct PreparedManagedLaunch {
     pub seed_fork:Option<Arc<crate::managed_seed_fork::ManagedSeedForkCell>>,
 }
 impl PreparedManagedLaunch {
-    pub(crate) fn take_codex_api_key(&mut self) -> Option<ManagedCodexApiKey> { self.codex_api_key.take() }
+    pub(crate) fn take_codex_credential(&mut self) -> Option<ManagedCodexCredential> { self.codex_api_key.take() }
     /// App calls only after the exact checkpoint receipt AND actual PTY exit.
     /// This queues transient endpoint cleanup on Drop; permanent data/pins stay.
     pub(crate) fn confirm_transient_settlement(&mut self) { if let Some(retirement)=&mut self.retirement { retirement.endpoints_safe=true; } }
@@ -609,7 +609,7 @@ fn prepare_local_retaining(mut request: ManagedLocalLaunchRequest, cancelled: Ar
     ensure!((1..=24 * 60 * 60).contains(&request.timeout_seconds), "invalid managed execution timeout");
     request.credentials.check_backend(&request.backend)?;
     let protected_roots = selected_protected_roots(&request.home, &request.protected_credential_roots)?;
-    let codex_api_key = request.credentials.take_host_codex_key()?;
+    let codex_api_key = request.credentials.take_host_codex_credential()?;
     request.backend.validate_runtime(&request.runtime,
         &[request.native_guest.as_str(), request.jj_guest.as_str()])?;
     ensure!(request.runnable_root.kind == ObjectKind::RunnableRoot, "managed local launch requires a RunnableRoot");

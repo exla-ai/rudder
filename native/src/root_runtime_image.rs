@@ -298,6 +298,49 @@ impl std::fmt::Display for BootstrapCheck {
     }
 }
 impl std::error::Error for BootstrapCheck {}
+/// Only these source-defined operation names may leave the SDK error chain.
+/// Never serialize an arbitrary context, path, compiler message or io Display.
+#[derive(Clone, Copy, Debug)]
+enum SdkHelperOperation {
+    NamespaceMount, RetainedMountReopen, RetainedFloorChdir, IsolatedNamespaces,
+    RetainedWorkspaceChdir, UserNamespaceJoin, WorkloadSpawn, WorkloadWait,
+    WorkloadExit, WorkloadResultParse,
+}
+impl SdkHelperOperation {
+    const ALL: [Self; 10] = [Self::NamespaceMount, Self::RetainedMountReopen,
+        Self::RetainedFloorChdir, Self::IsolatedNamespaces, Self::RetainedWorkspaceChdir,
+        Self::UserNamespaceJoin, Self::WorkloadSpawn, Self::WorkloadWait,
+        Self::WorkloadExit, Self::WorkloadResultParse];
+    fn label(self) -> &'static str { match self {
+        Self::NamespaceMount => "SDK private namespace mount failed",
+        Self::RetainedMountReopen => "SDK retained mount reopen failed",
+        Self::RetainedFloorChdir => "SDK retained floor chdir failed",
+        Self::IsolatedNamespaces => "SDK actual isolated namespaces unavailable",
+        Self::RetainedWorkspaceChdir => "SDK retained workspace chdir failed",
+        Self::UserNamespaceJoin => "SDK user namespace join failed",
+        Self::WorkloadSpawn => "SDK actual isolated workload spawn failed",
+        Self::WorkloadWait => "SDK actual isolated workload wait failed",
+        Self::WorkloadExit => "SDK actual isolated workload exit failed",
+        Self::WorkloadResultParse => "SDK actual workload result parse failed",
+    }}
+    fn text(self, io_kind: Option<&str>, errno: Option<i32>) -> String {
+        let mut text = self.label().to_owned();
+        if let Some(kind) = io_kind { text.push_str(": io_kind="); text.push_str(kind); }
+        if let Some(number) = errno { text.push_str(" errno="); text.push_str(&number.to_string()); }
+        text
+    }
+    fn from_text(text: &str, io_kind: Option<&str>, errno: Option<i32>) -> Option<Self> {
+        if text.len() > 384 || !text.is_ascii() { return None; }
+        Self::ALL.into_iter().find(|operation| operation.text(io_kind, errno) == text)
+    }
+}
+impl std::fmt::Display for SdkHelperOperation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.write_str(self.label()) }
+}
+impl std::error::Error for SdkHelperOperation {}
+pub(crate) fn sdk_helper_failure_text(error: &anyhow::Error, io_kind: Option<&str>, errno: Option<i32>) -> Option<String> {
+    error.downcast_ref::<SdkHelperOperation>().map(|operation| operation.text(io_kind, errno))
+}
 // A typed context is the only error-chain content the public diagnostic reads.
 // Display/Debug for the underlying error (including private paths) is never used.
 pub(crate) fn bootstrap_failure_check(error: &anyhow::Error) -> Option<String> {
@@ -314,11 +357,11 @@ fn bootstrap_failure_context(error: anyhow::Error, fallback: BootstrapCheck) -> 
     if error.downcast_ref::<BootstrapCheck>().is_some() { error } else { error.context(fallback) }
 }
 // The SDK carrier retains the original error. This separate diagnostic carries
-// only a fixed check and an OS error reconstructed from errno/kind, never a
+// only a fixed check/operation and an OS error reconstructed from errno/kind, never a
 // private path/message or an authority/receipt derived from that error.
 fn retained_bootstrap_diagnostic(error: &anyhow::Error, fallback: BootstrapCheck) -> anyhow::Error {
     let check = error.downcast_ref::<BootstrapCheck>().copied().unwrap_or(fallback);
-    match error.chain().find_map(|cause| cause.downcast_ref::<io::Error>()) {
+    let diagnostic = match error.chain().find_map(|cause| cause.downcast_ref::<io::Error>()) {
         Some(os) => {
             let fixed = match os.raw_os_error() {
                 Some(errno) => io::Error::from_raw_os_error(errno),
@@ -327,6 +370,10 @@ fn retained_bootstrap_diagnostic(error: &anyhow::Error, fallback: BootstrapCheck
             anyhow::Error::new(fixed).context(check)
         }
         None => anyhow::Error::new(check),
+    };
+    match error.downcast_ref::<SdkHelperOperation>() {
+        Some(operation) => diagnostic.context(*operation),
+        None => diagnostic,
     }
 }
 impl RuntimeBootstrapProof {

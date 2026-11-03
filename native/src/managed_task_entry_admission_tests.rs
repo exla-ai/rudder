@@ -156,3 +156,14 @@ fn new_entry_paths_never_infer_a_current_directory_or_credential_home() {
     let row = target(Backend::Codex);
     assert_eq!(row.run_id(), "new-execute-row"); assert_eq!(row.backend(), Backend::Codex);
 }
+
+#[test]
+fn explicit_snapshot_intent_is_codex_only_and_selected_profile_metadata_decides_the_actual_owner() {
+    let snapshot=ManagedTaskOptIn::selected("selected".into(),Backend::Codex,SelectedTaskCredentialKind::CodexOAuthAccessSnapshotV1,ManagedTaskNetworkSelection::OrdinaryNetworkV1).unwrap();
+    assert!(snapshot.accepts_codex_snapshot());assert!(!snapshot.accepts_api_key());
+    assert!(ManagedTaskOptIn::selected("selected".into(),Backend::Claude,SelectedTaskCredentialKind::CodexOAuthAccessSnapshotV1,ManagedTaskNetworkSelection::OrdinaryNetworkV1).is_err());
+    let profile=ManagedTaskOptIn::selected("selected".into(),Backend::Codex,SelectedTaskCredentialKind::SelectedProfileV1,ManagedTaskNetworkSelection::OrdinaryNetworkV1).unwrap();
+    assert!(profile.accepts_codex_snapshot());assert!(profile.accepts_api_key());
+    let claude=ManagedTaskOptIn::selected("selected".into(),Backend::Claude,SelectedTaskCredentialKind::SelectedProfileV1,ManagedTaskNetworkSelection::OrdinaryNetworkV1).unwrap();
+    assert!(!claude.accepts_codex_snapshot());
+}

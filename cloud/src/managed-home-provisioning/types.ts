@@ -135,8 +135,11 @@ export type EffectAck=AppAck|VolumeAck|MachineAck|SecretAck;
 export type ProvisionPhase="pending"|"effect_unknown"|"resource_provisioned"|"routable";
 export interface ProvisionReceipt {homeId:string;commandKey:string;epoch:string;phase:ProvisionPhase;projects:{projectId:string;workspaceId:string;title:string;state:"reserved"}[];nativeIngressReady:false;taskReady:false;}
 export interface BoundHome {intent:Intent;acks:Partial<Record<Effect,EffectAck>>;phase:ProvisionPhase;tokenHash:string;}
-export type HostOperation={op:"OpenPreparedProjectV1"|"StartTaskV1";project_alias:string;backend:"codex";model:string;profile_id:string;text?:string}|{op:"BuildCurrentSourceSdkV1";project_alias:string;case:"accepted"|"proc-deny"|"job-deny";repeat_identical:boolean}|{op:"ReceiptV1";lookup_command_key:string};
+export type HostOperation={op:"OpenPreparedProjectV1"|"StartTaskV1";project_alias:string;backend:"codex";model:string;profile_id:string;text?:string}|{op:"StopTaskV1";project_alias:string;lookup_command_key:string;command_id:string;run_id:string;run_epoch:string;attempt_id:string}|{op:"BuildCurrentSourceSdkV1";project_alias:string;case:"accepted"|"proc-deny"|"job-deny";repeat_identical:boolean}|{op:"ReceiptV1";lookup_command_key:string};
 export function validateOperation(input:HostOperation):HostOperation {const op=snapshot(input,32*1024);if(op.op==="ReceiptV1"){exact(op,["op","lookup_command_key"]);key(op.lookup_command_key);return op;}
+  if(op.op==="StopTaskV1"){exact(op,["op","project_alias","lookup_command_key","command_id","run_id","run_epoch","attempt_id"]);
+    for(const field of [op.project_alias,op.lookup_command_key,op.run_id,op.attempt_id])key(field);uuid(op.command_id);
+    check(typeof op.run_epoch==="string"&&/^[1-9][0-9]{0,19}$/.test(op.run_epoch)&&BigInt(op.run_epoch)<=18446744073709551615n);return op;}
   if(op.op==="BuildCurrentSourceSdkV1"){exact(op,["op","project_alias","case","repeat_identical"]);key(op.project_alias);check(["accepted","proc-deny","job-deny"].includes(op.case)&&typeof op.repeat_identical==="boolean");return op;}
   exact(op,op.op==="StartTaskV1"?["op","project_alias","backend","model","profile_id","text"]:["op","project_alias","backend","model","profile_id"]);
   check(op.op==="OpenPreparedProjectV1"||op.op==="StartTaskV1");key(op.project_alias);check(op.backend==="codex");for(const v of [op.model,op.profile_id])check(typeof v==="string"&&v.length>0&&Buffer.byteLength(v)<=256&&!/[\x00-\x1f\x7f]/.test(v));
@@ -153,7 +156,14 @@ export function nativeStatusReply(value:unknown,commandKey:string,operation:Host
     check(operation.op==="BuildCurrentSourceSdkV1"&&s.command_key===commandKey&&s.command_id===(data.receipt as Record<string,unknown>).command_id&&s.project_alias===operation.project_alias&&typeof s.build_worker_join_observed==="boolean"&&typeof s.cleanup_worker_join_observed==="boolean"&&["pending","retained","settled"].includes(String(s.job_disposal))&&s.source_authority===false&&s.shared_floor_retirement===false,"identity_changed");
     check(s.job_disposal!=="settled"||s.build_worker_join_observed===true&&s.cleanup_worker_join_observed===true,"identity_changed");}
   if(data.task_observation===undefined||data.task_observation===null)return data;
-  const o=data.task_observation;exact(o,["command_id","run_id","run_epoch","attempt_id","row_status","preparing_observed","backend_ready_last_observed","stop_requested_observed","uncertain_observed","validated_checkpoint_observed"]);
+  const o=data.task_observation;exact(o,["command_id","run_id","run_epoch","attempt_id","row_status","preparing_observed","backend_ready_last_observed","stop_requested_observed","uncertain_observed","validated_checkpoint_observed","enrollment_submitted_observed","enrollment_released_observed","helper_joined_observed"]);
+  // Historical workers omit lifecycle observations. Missing fields remain
+  // unknown; a stopped row or a stop ACK cannot establish physical completion.
+  const lifecycle=["enrollment_submitted_observed","enrollment_released_observed","helper_joined_observed"];
+  if(lifecycle.some(field=>Object.hasOwn(o,field))){
+    check(typeof o.enrollment_submitted_observed==="boolean"&&typeof o.enrollment_released_observed==="boolean"&&(o.helper_joined_observed===true||o.helper_joined_observed===null),"identity_changed");
+    check(!o.enrollment_released_observed||o.enrollment_submitted_observed,"identity_changed");
+  }
   check(o.command_id===(data.receipt as Record<string,unknown>).command_id,"identity_changed");uuid(o.command_id);key(o.run_id);key(o.attempt_id);
   check(typeof o.run_epoch==="string"&&/^(0|[1-9][0-9]{0,19})$/.test(o.run_epoch)&&BigInt(o.run_epoch)<=18446744073709551615n&&typeof o.row_status==="string"&&o.row_status.length>0&&Buffer.byteLength(o.row_status)<=64&&!/[\x00-\x1f\x7f]/.test(o.row_status)&&typeof o.preparing_observed==="boolean","identity_changed");
   for(const f of ["backend_ready_last_observed","stop_requested_observed","uncertain_observed","validated_checkpoint_observed"])check(o[f]===null||typeof o[f]==="boolean","identity_changed");return data;}

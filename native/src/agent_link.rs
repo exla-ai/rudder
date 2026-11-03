@@ -121,7 +121,7 @@ mod worker_join {
 #[path = "managed_codex_auth.rs"]
 mod managed_codex_auth;
 #[cfg(target_os = "linux")]
-pub(crate) use managed_codex_auth::{authenticate_managed_codex_api_key, ManagedCodexAuthError};
+pub(crate) use managed_codex_auth::{authenticate_managed_codex, ManagedCodexAuthSession, ManagedCodexAuthError};
 
 const MAX_MESSAGE: usize = 64 * 1024;
 const MAX_COMMANDS: usize = 4096;

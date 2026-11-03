@@ -9,6 +9,7 @@ use std::{fs, io, os::{fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd}, unix::{fs::
     sync::atomic::{AtomicBool, Ordering}, time::Duration};
 
 const KEY_LIMIT: usize = 4092;
+const SNAPSHOT_LIMIT:usize=65536;
 const CONTROL_LIMIT: usize = 4096;
 const STDERR_LIMIT: usize = 2048;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -27,6 +28,11 @@ pub(crate) enum ManagedProfileCredentialKind { ApiKeyV1, OAuthV1, TokenV1 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ManagedProfileMetadata { pub profile_id: String, pub backend: Backend,
     pub kind: ManagedProfileCredentialKind, provider: String }
+impl ManagedProfileMetadata {
+    pub(crate) fn supports_codex_access_snapshot(&self)->bool {
+        self.backend==Backend::Codex && self.kind==ManagedProfileCredentialKind::OAuthV1 && self.provider=="openai-codex"
+    }
+}
 fn check(budget: &FinalizationBudget, cancelled: &AtomicBool) -> Result<()> {
     if cancelled.load(Ordering::Acquire) { return Err(ManagedProfileLoadError::Cancelled); }
     budget.remaining().map(|_| ()).map_err(|_| ManagedProfileLoadError::Deadline)
@@ -146,10 +152,14 @@ unsafe fn inherit_writer(r: i32, w: i32) -> io::Result<()> {
 }
 fn run(runtime: &ManagedProfileLoaderRuntime, profile_id: &str, backend: Backend, handoff: bool,
     cancelled: &AtomicBool, budget: &FinalizationBudget) -> Result<Collected> {
+    run_verb(runtime,profile_id,backend,if handoff {"handoff-api-key"} else {"inspect"},cancelled,budget)
+}
+fn run_verb(runtime:&ManagedProfileLoaderRuntime,profile_id:&str,backend:Backend,verb:&str,cancelled:&AtomicBool,budget:&FinalizationBudget)->Result<Collected> {
+    let handoff=verb!="inspect";
     check(budget, cancelled)?; validate_selection(profile_id, backend)?; validate_runtime(runtime)?; check(budget, cancelled)?;
     let pipes = if handoff { Some(pipe()?) } else { None };
     let mut command = Command::new(&runtime.node);
-    command.arg(&runtime.helper).arg(if handoff { "handoff-api-key" } else { "inspect" }).arg(profile_id).arg(backend_name(backend)?)
+    command.arg(&runtime.helper).arg(verb).arg(profile_id).arg(backend_name(backend)?)
         .env_clear().env("RUDDER_HOME", &runtime.rudder_home).current_dir(&runtime.rudder_home)
         .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     if let Some((reader, writer)) = &pipes {
@@ -164,7 +174,7 @@ fn run(runtime: &ManagedProfileLoaderRuntime, profile_id: &str, backend: Backend
     let err = child.child.stderr.take().ok_or(ManagedProfileLoadError::Transport)?;
     let mut output = Capture::new(Some(unsafe { OwnedFd::from_raw_fd(out.into_raw_fd()) }), CONTROL_LIMIT)?;
     let mut error = Capture::new(Some(unsafe { OwnedFd::from_raw_fd(err.into_raw_fd()) }), STDERR_LIMIT)?;
-    let mut key = Capture::new(key_fd, KEY_LIMIT + 4)?;
+    let mut key = Capture::new(key_fd, if verb=="handoff-codex-oauth-access-snapshot" {SNAPSHOT_LIMIT} else {KEY_LIMIT+4})?;
     loop {
         check(budget, cancelled)?;
         for channel in [&mut output, &mut error, &mut key] { check(budget, cancelled)?; channel.drain()?; }
@@ -234,13 +244,22 @@ fn key(bytes: &[u8]) -> Result<&str> {
 pub(crate) fn load_selected_managed_task_profile(runtime: &ManagedProfileLoaderRuntime, selected: &ManagedTaskOptIn,
     cancelled: &AtomicBool, budget: &FinalizationBudget) -> Result<SelectedTaskProfile> {
     let expected = inspect_selected_managed_task_profile(runtime, selected.profile_id(), selected.backend(), cancelled, budget)?;
-    match expected.kind { ManagedProfileCredentialKind::OAuthV1 => return Err(ManagedProfileLoadError::UnsupportedOAuth),
-        ManagedProfileCredentialKind::TokenV1 => return Err(ManagedProfileLoadError::UnsupportedToken), _ => {} }
-    let mut collected = run(runtime, selected.profile_id(), selected.backend(), true, cancelled, budget)?;
+    let snapshot=match expected.kind {
+        ManagedProfileCredentialKind::OAuthV1 if selected.accepts_codex_snapshot() && expected.supports_codex_access_snapshot()=>true,
+        ManagedProfileCredentialKind::OAuthV1=>return Err(ManagedProfileLoadError::UnsupportedOAuth),
+        ManagedProfileCredentialKind::TokenV1=>return Err(ManagedProfileLoadError::UnsupportedToken),
+        _ if selected.accepts_api_key()=>false,
+        _=>return Err(ManagedProfileLoadError::Selection),
+    };
+    let mut collected = run_verb(runtime, selected.profile_id(), selected.backend(), if snapshot {"handoff-codex-oauth-access-snapshot"} else {"handoff-api-key"}, cancelled, budget)?;
     if metadata(&collected, selected.profile_id(), selected.backend())? != expected { return Err(ManagedProfileLoadError::Protocol); }
     check(budget, cancelled)?;
-    let loaded = SelectedTaskProfile::api_key(selected.clone(), key(&collected.key.0)?.to_owned())
-        .map_err(|_| ManagedProfileLoadError::Credential);
+    let loaded = if snapshot {
+        let now=std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_err(|_|ManagedProfileLoadError::Credential)?.as_millis();
+        let snapshot=crate::managed_launch::CodexOAuthAccessSnapshotV1::from_frame(&collected.key.0,selected.profile_id(),
+            now.try_into().map_err(|_|ManagedProfileLoadError::Credential)?).map_err(|_|ManagedProfileLoadError::Credential)?;
+        SelectedTaskProfile::codex_access_snapshot(selected.clone(),snapshot)
+    } else {SelectedTaskProfile::api_key(selected.clone(),key(&collected.key.0)?.to_owned())}.map_err(|_|ManagedProfileLoadError::Credential);
     collected.key.erase(); check(budget, cancelled)?; loaded
 }
 

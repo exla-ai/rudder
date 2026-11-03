@@ -108,6 +108,7 @@ pub enum HostBackend { Codex, Claude }
 pub enum HostOperation {
     OpenPreparedProjectV1 { project_alias:String, backend:HostBackend, model:String, profile_id:String },
     StartTaskV1 { project_alias:String, backend:HostBackend, model:String, profile_id:String, text:String },
+    StopTaskV1 { project_alias:String, lookup_command_key:String, command_id:String, run_id:String, run_epoch:String, attempt_id:String },
     BuildCurrentSourceSdkV1 {project_alias:String,case:SdkBuildCase,repeat_identical:bool},
     ReceiptV1 { lookup_command_key:String },
 }
@@ -172,6 +173,12 @@ impl HostCommand {
         ensure!(self.version==1,"host command version invalid");uuid(&self.session_generation)?;key(&self.rpc_id)?;key(&self.command_key)?;
         match &self.operation {
             HostOperation::ReceiptV1 {lookup_command_key}=>key(lookup_command_key)?,
+            HostOperation::StopTaskV1 {project_alias,lookup_command_key,command_id,run_id,run_epoch,attempt_id}=>{
+                key(project_alias)?;key(lookup_command_key)?;uuid(command_id)?;key(run_id)?;key(attempt_id)?;
+                let epoch=run_epoch.parse::<u64>().context("invalid original task epoch")?;
+                ensure!(epoch>0&&epoch.to_string()==*run_epoch,"invalid original task epoch");
+                ensure!(lookup_command_key!=&self.command_key,"stop cannot target its own command");
+            },
             HostOperation::BuildCurrentSourceSdkV1 {project_alias,..}=>key(project_alias)?,
             HostOperation::OpenPreparedProjectV1 {project_alias,model,profile_id,..} |
             HostOperation::StartTaskV1 {project_alias,model,profile_id,..}=>{key(project_alias)?;text(model,256)?;text(profile_id,256)?;}

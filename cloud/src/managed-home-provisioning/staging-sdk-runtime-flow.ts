@@ -7,7 +7,9 @@ import type {OriginalSdkRoleActivationPermit} from "./compiler-qualification.js"
 import type {OriginalRuntimeRoleActivationPermit} from "./runtime-qualification.js";
 import {CompilerSdkQualificationDriver} from "./compiler-qualification-driver.js";
 import {RuntimeImageQualificationDriver} from "./runtime-qualification-driver.js";
+import {validateStagingCodexAccessSnapshot} from "./staging-codex-profile-import.js";
 import {StagingOrdinarySdkDriver} from "./staging-ordinary-sdk-driver.js";
+import {validatePositiveIngressInput,type PositiveIngressInput} from "./staging-positive-ingress-driver.js";
 import {assertStagingGenuineIngressExperiment,type StagingGenuineIngressExperiment} from "./staging-genuine-ingress-experiment.js";
 import {createOriginalGenuineIngressCollector,type OriginalGenuineIngressCollector,type GenuineIngressExternalData} from "./staging-genuine-ingress-collector.js";
 import {StagingRoleActivationAdmin,type StagingSetupRestriction} from "./staging-role-activation.js";
@@ -34,10 +36,15 @@ export class StagingSdkRuntimeFlow {
  #sdk?:CompilerSdkQualificationDriver;#runtime?:RuntimeImageQualificationDriver;#ordinary?:StagingOrdinarySdkDriver;
  #sdkPermit?:OriginalSdkRoleActivationPermit;#runtimePermit?:OriginalRuntimeRoleActivationPermit;
  readonly #policyHash:string;readonly #genuine?:StagingGenuineIngressFlowInput;
+ readonly #positive?:PositiveIngressInput;
+ readonly #positiveProfileSnapshot?:Buffer;
  #genuineCommand?:Promise<void>;#genuineCollector?:OriginalGenuineIngressCollector;#genuineCapture?:Promise<void>;
  #genuineSettlement?:Promise<PromiseSettledResult<void>[]>;
  constructor(private readonly config:ManagedHomePostgresConfig,admin:PostgresAuthorityConfig,private readonly candidate:CompilerQualificationCandidate,
- private readonly account:string,private readonly commandKey:string,private readonly setup:StagingSetupRestriction,genuine?:StagingGenuineIngressFlowInput){
+ private readonly account:string,private readonly commandKey:string,private readonly setup:StagingSetupRestriction,genuine?:StagingGenuineIngressFlowInput,positive?:PositiveIngressInput,positiveProfileSnapshot?:Buffer){
+  check(!(genuine&&positive),"invalid_request");
+  if(positive!==undefined)this.#positive=validatePositiveIngressInput(positive);
+  if(positiveProfileSnapshot!==undefined){check(this.#positive,"invalid_request");this.#positiveProfileSnapshot=validateStagingCodexAccessSnapshot(positiveProfileSnapshot,this.#positive.profileId);}
   if(genuine!==undefined){
    check(GENUINE_FLOW_EFFECTS_ALLOWED,"unconfigured"); // before optional input/config/admin access
    check(exactFlowData(genuine,["experiment","artifactData","output"]),"invalid_request");assertStagingGenuineIngressExperiment(genuine.experiment);
@@ -65,7 +72,7 @@ export class StagingSdkRuntimeFlow {
   while(!this.#runtimePermit){this.#current();this.#runtimePermit=this.#runtime.takeOriginalRoleActivationPermit();if(!this.#runtimePermit)await this.#wait();}
   this.#stage="runtime-admin-activation";await this.#activation.activateRetaining(this.#runtimePermit);this.#current();
   this.#stage="runtime-new-listener-restricted";await this.#runtime.closeNewListenerAdmissionRetaining();this.#current();
-  this.#stage="ordinary-provision";this.#ordinary=new StagingOrdinarySdkDriver(this.config,this.account,this.commandKey,this.setup,this.#genuine?.experiment);await this.#ordinary.startRetaining();
+  this.#stage="ordinary-provision";this.#ordinary=new StagingOrdinarySdkDriver(this.config,this.account,this.commandKey,this.setup,this.#genuine?.experiment,this.#positive,this.#positiveProfileSnapshot);await this.#ordinary.startRetaining();
   if(this.#genuine){
    this.#current();const target=this.#ordinary.originalGenuineIngressTargetDataRetaining();
    const data:GenuineIngressExternalData={...this.#genuine.artifactData,...target};this.#stage="ordinary-genuine-ingress-historical-observation";
@@ -79,6 +86,9 @@ export class StagingSdkRuntimeFlow {
    this.#genuineSettlement=Promise.allSettled([this.#genuineCommand,this.#genuineCapture]);
    const settled=await this.#genuineSettlement;check(settled.every(v=>v.status==="fulfilled"),"effect_unknown");
    this.#current();this.#stage="ordinary-genuine-ingress-settled-historical-data";
+  }else if(this.#positive){
+   this.#stage="ordinary-positive-task-observation";await this.#ordinary.runPositiveIngressRetaining();this.#current();
+   this.#stage=this.#positive.stopCommandKey?"ordinary-positive-lifecycle-observed-data":"ordinary-positive-backend-ready-data";
   }else{
    this.#stage="ordinary-sdk-cases";await this.#ordinary.runCasesRetaining();this.#current();this.#stage="ordinary-cases-settled-data";
   }
@@ -86,5 +96,6 @@ export class StagingSdkRuntimeFlow {
  statusData(){return snapshot({format_version:1,scope:"one-original-staging-sdk-runtime-ordinary-flow-data-only",stage:this.#stage,failed:this.#failed,policy_sha256:this.#policyHash,
   sdk:this.#sdk?.statusData()??null,runtime:this.#runtime?.statusData()??null,activation:this.#activation.statusData(),ordinary:this.#ordinary?.statusData()??null,
   ...(this.#genuine?{genuine_ingress:{experiment:this.#genuine.experiment.statusData(),collector:this.#genuineCollector?.statusData()??null,command_retained:!!this.#genuineCommand,capture_retained:!!this.#genuineCapture,historical_data_only:true,qualified:false,current_claim:false}}:{}),
+  ...(this.#positive?{positive_ingress:{scope:this.#positive.stopCommandKey?"original-task-lifecycle-observation-only":"backend-ready-observation-only",lifecycle_requested:!!this.#positive.stopCommandKey,qualified:false}}:{}),
   owners_retained:true,production_enabled:false,source_acceptance_claim:false,cache_reuse_claim:false,shared_floor_retirement_claim:false},128*1024);}
 }

@@ -5,26 +5,28 @@ import os from "node:os";
 import path from "node:path";
 import net from "node:net";
 import readline from "node:readline";
-import { spawn, spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
+import { createNativeFixtureExporter } from "./helpers/native-fixture-exporter.mjs";
 
 const repo = fileURLToPath(new URL("..", import.meta.url));
+const exportFixture = createNativeFixtureExporter(repo, { kind: "bin", name: "rudder-native", source: "native/src/main.rs", selector: "agent_broker::tests::export_broker_fixture", directoryVariable: "RUDDER_AGENT_BROKER_FIXTURE_DIR" });
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 async function fixture(t) {
   const binary = process.env.RUDDER_NATIVE_BIN || path.join(repo, "target/debug/rudder-native");
   if (!(await fs.stat(binary).catch(() => null))) { if (process.env.CI) assert.fail("agent broker tests require the current native artifact"); t.skip("build rudder-native or set RUDDER_NATIVE_BIN"); return; }
   const base = path.join(os.homedir(), ".cache/rudder-agent-broker-tests"); await fs.mkdir(base, { recursive: true, mode: 0o700 });
   const directory = await fs.mkdtemp(path.join(base, "case-"));
-  const generated = spawnSync("cargo", ["test", "--workspace", "--locked", "--features", "rudder-vcs-bridge/cli", "--bin", "rudder-native", "agent_broker::tests::export_broker_fixture", "--", "--exact", "--ignored"], { cwd: repo, env: { ...process.env, RUDDER_AGENT_BROKER_FIXTURE_DIR: directory }, encoding: "utf8", timeout: 180_000, maxBuffer: 2 * 1024 * 1024 });
-  assert.equal(generated.status, 0, generated.stderr || generated.error?.message);
-  const f = { binary, directory, ...JSON.parse(await fs.readFile(path.join(directory, "fixture.json"), "utf8")) };
+  let f;
   const children = new Set();
   t.after(async () => {
     for (const child of children) { child.stdin.end(); if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL"); }
-    for (const socket of [f.a_socket, f.b_socket]) await fs.rm(path.dirname(socket), { recursive: true, force: true });
+    for (const socket of [f?.a_socket, f?.b_socket].filter(Boolean)) await fs.rm(path.dirname(socket), { recursive: true, force: true });
     await fs.rm(directory, { recursive: true, force: true });
   });
+  exportFixture(directory);
+  f = { binary, directory, ...JSON.parse(await fs.readFile(path.join(directory, "fixture.json"), "utf8")) };
   async function stop(child) {
     if (child.exitCode !== null || child.signalCode !== null) return;
     const closed = new Promise((resolve) => child.once("close", resolve)); child.stdin.end();

@@ -2,13 +2,15 @@ import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { spawn, spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { once } from "node:events";
 import readline from "node:readline";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
+import { createNativeFixtureExporter } from "./helpers/native-fixture-exporter.mjs";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
+const exportFixture = createNativeFixtureExporter(root, { kind: "test", name: "agent_api_tools", source: "engine/tests/agent_api_tools.rs", selector: "export_agent_mcp_fixture", directoryVariable: "RUDDER_AGENT_MCP_FIXTURE_DIR" });
 async function binary(t) {
   const candidates = [process.env.RUDDER_NATIVE_BIN,
     path.join(root, "prebuilt-native", `rudder-native-${process.platform}-${process.arch}`, "rudder-native"),
@@ -25,10 +27,7 @@ async function fixture(t) {
   const exe = await binary(t); if (!exe) return null;
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "rudder-agent-mcp-"));
   t.after(() => fs.rm(dir, { recursive: true, force: true }));
-  const generated = spawnSync("cargo", ["test", "--workspace", "--locked", "--features", "rudder-vcs-bridge/cli", "--test", "agent_api_tools", "--", "--exact", "export_agent_mcp_fixture", "--ignored"], {
-    cwd: root, env: { ...process.env, RUDDER_AGENT_MCP_FIXTURE_DIR: dir }, encoding: "utf8", timeout: 180_000, maxBuffer: 1024 * 1024,
-  });
-  assert.equal(generated.status, 0, generated.stderr || generated.error?.message);
+  exportFixture(dir);
   return { exe, dir, ...JSON.parse(await fs.readFile(path.join(dir, "fixture.json"), "utf8")) };
 }
 

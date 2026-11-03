@@ -1,7 +1,8 @@
 // App-only fixed typed messages. No transport/SQLite/profile/Git/model call.
 // Existing start_managed_task retains its inherited local Journal/save IO.
 fn poll_app_job(job:&Arc<Job>,runtime:&mut ManagedMachineRuntime)->Result<bool> {
-    let step=job.step.load(Ordering::Acquire);if !matches!(step,STEP_ADMIT|STEP_LAUNCH){return Ok(true);}
+    let step=job.step.load(Ordering::Acquire);if step==STEP_STOP{return poll_app_stop(job,runtime);}
+    if !matches!(step,STEP_ADMIT|STEP_LAUNCH){return Ok(true);}
     let mut held=match job.carrier.try_lock(){Ok(h)=>h,Err(_)=>return Ok(false)};
     if time(&held.original,&held.cancelled).is_err(){job.step.store(STEP_REFUSED,Ordering::Release);return Ok(true);}
     let node=held.node.as_ref().context("actual task project absent")?.clone();
@@ -34,6 +35,25 @@ fn poll_app_job(job:&Arc<Job>,runtime:&mut ManagedMachineRuntime)->Result<bool> 
     match adapter.start_scoped_task(&scope,index,prepared) {Ok(fence)=>held.task.started=Some(fence),Err(refusal)=>held.task.refusal=Some(refusal)}
     job.step.store(STEP_LAUNCHED,Ordering::Release);Ok(true)
 }
+fn poll_app_stop(job:&Arc<Job>,runtime:&mut ManagedMachineRuntime)->Result<bool> {
+    let mut held=match job.carrier.try_lock(){Ok(h)=>h,Err(_)=>return Ok(false)};
+    time(&held.original,&held.cancelled)?;
+    let target=held.stop_target.as_ref().context("original stop target absent")?.clone();
+    ensure!(!Arc::ptr_eq(job,&target)&&target.belongs_to_machine(&job.machine),"foreign original stop target");
+    let task=match target.carrier.try_lock(){Ok(h)=>h,Err(_)=>return Ok(false)};
+    let receipt=&task.accepted.as_ref().context("original task receipt owner absent")?.receipt;
+    let fence=task.task.started.as_ref().context("original started task absent")?;
+    ensure!(stop_target_matches(&job.command.operation,&target.command,receipt,fence),"original task stop identity changed");
+    let node=task.node.as_ref().context("original task project absent")?;
+    let project=match node.work.try_lock(){Ok(p)=>p,Err(_)=>return Ok(false)};
+    let ticket=project.ticket.as_ref().context("original task project ticket absent")?.clone();drop(project);
+    let Some(mut adapter)=runtime.project_adapter(&ticket)? else {return Ok(false);};
+    time(&held.original,&held.cancelled)?;
+    let (app,_,_,owner)=adapter.task_parts();app.request_managed_task_ingress_stop(fence,owner)?;
+    held.result=Some(serde_json::json!({"phase":"stop_requested","project_alias":node.alias,"run_id":fence.run_id,
+        "run_epoch":fence.run_epoch.to_string(),"attempt_id":fence.attempt_id,"stop_requested_observed":true}));
+    job.step.store(STEP_STOP_RECORDED,Ordering::Release);Ok(true)
+}
 fn poll_app_enrollment(shared:&Shared,job:&Arc<Job>,runtime:&mut ManagedMachineRuntime)->Result<()> {
     let mut held=match job.carrier.try_lock(){Ok(h)=>h,Err(_)=>return Ok(())};
     if held.task.released||held.task.joined.is_some(){return Ok(());}
@@ -57,7 +77,7 @@ fn poll_app_enrollment(shared:&Shared,job:&Arc<Job>,runtime:&mut ManagedMachineR
     }
     if !held.task.enrollment_submitted {
         let ticket=held.task.enrollment.as_ref().unwrap().clone();
-        match shared.control.submit_enrollment(ticket) {Ok(actual)=>{held.task.enrollment=Some(actual);held.task.enrollment_submitted=true;},
+        match shared.control.submit_enrollment(ticket) {Ok(actual)=>{held.task.enrollment=Some(actual);held.task.enrollment_submitted=true;held.task.enrollment_submission_observed=true;},
             Err((actual,error))=>{held.task.enrollment_submitted=!actual.ingress_queue_retryable();held.task.enrollment=Some(actual);held.error=Some(error);return Ok(());}}
     }
     if adapter.release_enrollment_retaining(held.task.enrollment.as_ref().unwrap())? {held.task.released=true;}
@@ -75,7 +95,23 @@ fn poll_app_observation(request:&Arc<ObservationRequest>,runtime:&mut ManagedMac
     let Some(ticket)=project.ticket.as_ref().cloned() else {request.done.store(true,Ordering::Release);return Ok(true);};drop(project);
     let Some(mut adapter)=runtime.project_adapter(&ticket)? else {return Ok(false);};
     let (app,_,_,_)=adapter.task_parts();let observation=app.managed_task_ingress_observation(&fence);
-    let value=observation.map(|mut value|{value["command_id"]=serde_json::Value::String(held.accepted.as_ref().unwrap().receipt.command_id.clone());value});
+    let value=observation.map(|mut value|{value["command_id"]=serde_json::Value::String(held.accepted.as_ref().unwrap().receipt.command_id.clone());
+        append_task_lifecycle_observation(&mut value,&held.task,&fence);value});
     if request.original.remaining().is_ok(){match request.result.try_lock(){Ok(mut result)=>*result=value,Err(_)=>return Ok(false)}}
     request.done.store(true,Ordering::Release);Ok(true)
+}
+fn append_task_lifecycle_observation(value:&mut serde_json::Value,task:&TaskWork,fence:&ManagedLaunchFence) {
+    // The existing submitted latch also suppresses replay after a failed queue
+    // effect. Only the actual successful original submit is positive DATA.
+    value["enrollment_submitted_observed"]=task.enrollment_submission_observed.into();
+    value["enrollment_released_observed"]=task.released.into();
+    // A stop request, callback-worker join, row status or missing process is
+    // never a physical helper join. Transfer removes this local observation.
+    let joined=task.joined.as_ref().filter(|joined|joined.prepared().assignment.fence==*fence);
+    value["helper_joined_observed"]=joined.map(|_|true).into();
+    if let Some(joined)=joined {
+        let (stop,checkpoint,uncertain)=joined.ingress_shutdown_observation();
+        value["stop_requested_observed"]=stop.into();value["validated_checkpoint_observed"]=checkpoint.into();
+        value["uncertain_observed"]=uncertain.into();
+    }
 }

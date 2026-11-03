@@ -9,10 +9,16 @@ import { discoverModelOptions, fallbackModelOptions } from "../dist/models.js";
 async function withTempRudderHome(t) {
   const root = await fsp.mkdtemp(path.join(os.tmpdir(), "rudder-models-"));
   const previousHome = process.env.RUDDER_HOME;
+  const previousUserHome = process.env.HOME;
   process.env.RUDDER_HOME = root;
+  // Model discovery also reads ~/.codex and ~/.claude/projects. Keep those
+  // lookups in the same disposable home instead of scanning the real account.
+  process.env.HOME = root;
   t.after(async () => {
     if (previousHome === undefined) delete process.env.RUDDER_HOME;
     else process.env.RUDDER_HOME = previousHome;
+    if (previousUserHome === undefined) delete process.env.HOME;
+    else process.env.HOME = previousUserHome;
     await fsp.rm(root, { recursive: true, force: true }).catch(() => {});
   });
   return root;
@@ -27,6 +33,7 @@ function jsonResponse(body) {
 
 test("model discovery merges account-specific OpenAI and Anthropic model APIs ahead of fallbacks", async (t) => {
   const rudderHome = await withTempRudderHome(t);
+  assert.equal(os.homedir(), rudderHome);
   const oldFetch = globalThis.fetch;
   const oldOpenAI = process.env.OPENAI_API_KEY;
   const oldAnthropic = process.env.ANTHROPIC_API_KEY;

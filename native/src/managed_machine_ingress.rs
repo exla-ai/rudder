@@ -20,6 +20,7 @@ const WORKERS:usize=2;
 const APP_EVENTS:usize=8;
 const OPENING:u8=0;const READY:u8=1;const RECOVERY:u8=2;
 const STEP_NONE:u8=0;const STEP_ADMIT:u8=1;const STEP_ADMITTED:u8=2;const STEP_LAUNCH:u8=3;const STEP_LAUNCHED:u8=4;const STEP_REFUSED:u8=5;
+const STEP_STOP:u8=6;const STEP_STOP_RECORDED:u8=7;
 enum AppEvent {Work(Arc<Job>),Observe(Arc<ObservationRequest>)}
 struct ObservationRequest {job:Arc<Job>,original:FinalizationBudget,result:Mutex<Option<serde_json::Value>>,done:AtomicBool}
 struct FactoryPermit; // private linear capability, never reconstructed from an absence flag.
@@ -34,10 +35,11 @@ impl OriginalTaskSelectedSource {
 }
 struct TaskWork {selected_source:Option<OriginalTaskSelectedSource>,refused_before_factory:Option<&'static str>,admission:Option<ManagedTaskAdmission>,factory_permit:Option<FactoryPermit>,factory:Option<Arc<Mutex<FactoryCarrier>>>,
     factory_handle:Option<thread::JoinHandle<()>>,scope:Option<SeedTaskTicket>,started:Option<ManagedLaunchFence>,refusal:Option<ManagedTaskStartFailure>,
-    pending_helper:Option<crate::managed_app::PendingManagedTaskHelper>,enrollment:Option<EnrollmentTicket>,enrollment_submitted:bool,released:bool,cleanup:Option<(FinalizationBudget,Arc<AtomicBool>)>,joined:Option<JoinedManagedTask>}
+    pending_helper:Option<crate::managed_app::PendingManagedTaskHelper>,enrollment:Option<EnrollmentTicket>,enrollment_submitted:bool,enrollment_submission_observed:bool,released:bool,cleanup:Option<(FinalizationBudget,Arc<AtomicBool>)>,joined:Option<JoinedManagedTask>}
 impl TaskWork {fn new()->Self {Self {selected_source:None,refused_before_factory:None,admission:None,factory_permit:None,factory:None,factory_handle:None,scope:None,started:None,refusal:None,
-    pending_helper:None,enrollment:None,enrollment_submitted:false,released:false,cleanup:None,joined:None}}}
+    pending_helper:None,enrollment:None,enrollment_submitted:false,enrollment_submission_observed:false,released:false,cleanup:None,joined:None}}}
 struct JobCarrier {accepted:Option<AcceptedHostCommand>,original:FinalizationBudget,cancelled:Arc<AtomicBool>,
+    stop_target:Option<Arc<Job>>,
     node:Option<Arc<ProjectNode>>,profile_inspection:Option<ManagedProfileInspection>,task:TaskWork,result:Option<serde_json::Value>,error:Option<anyhow::Error>,panic:Option<Box<dyn Any+Send>>,
     worker:Option<OwnedWorkerJoin>,joined:Option<WorkerJoined>,charged:bool,settled:bool,sdk:Option<Arc<sdk_driver::Slot>>,canonical:Option<Arc<canonical_driver::Campaign>>,canonical_wait:Option<&'static str>}
 #[cfg(feature="managed-ingress-genuine-fixture")]
@@ -314,7 +316,7 @@ fn receive_one(shared:&Arc<Shared>)->Result<()> {
                 #[cfg(feature="managed-ingress-genuine-fixture")]
                 fixture_gate:OnceLock::new(),
                 command:command.clone(),machine:shared.control.clone(),root:OnceLock::new(),step:AtomicU8::new(STEP_NONE),worker_owned:AtomicBool::new(false),carrier:Mutex::new(JobCarrier {
-                accepted:None,original:original.clone(),cancelled:Arc::new(AtomicBool::new(false)),node:None,profile_inspection:None,task:TaskWork::new(),result:None,error:None,panic:None,worker:None,joined:None,charged:false,settled:false,sdk:None,canonical:None,canonical_wait:None})});
+                accepted:None,original:original.clone(),cancelled:Arc::new(AtomicBool::new(false)),stop_target:None,node:None,profile_inspection:None,task:TaskWork::new(),result:None,error:None,panic:None,worker:None,joined:None,charged:false,settled:false,sdk:None,canonical:None,canonical_wait:None})});
             let mut jobs=shared.jobs.lock().unwrap_or_else(|p|p.into_inner());ensure!(!jobs.contains_key(&command.command_key),"original acceptance uncertain/missing; same carrier retained");
             jobs.insert(command.command_key.clone(),job.clone());drop(jobs);
             #[cfg(feature="managed-ingress-genuine-fixture")]
@@ -349,6 +351,10 @@ fn receive_one(shared:&Arc<Shared>)->Result<()> {
 }
 fn validate_policy(config:&HostIngressConfigOwner,command:&HostCommand)->Result<()> {
     config.assert_current()?;
+    if let HostOperation::StopTaskV1 {project_alias,..}=&command.operation {
+        ensure!(config.data().runtime_qualification.is_none()&&config.data().compiler_qualification.is_none(),"qualification scope refuses ordinary stop");
+        ensure!(config.data().projects.iter().any(|p|p.alias==*project_alias),"stop project outside actual host config");return Ok(());
+    }
     if let HostOperation::BuildCurrentSourceSdkV1{project_alias,..}=&command.operation {ensure!(config.data().projects.iter().any(|p|p.alias==*project_alias)&&config.data().compiler_sdk.is_some()&&config.data().runtime_qualification.is_none()&&config.data().compiler_qualification.is_none(),"SDK request is outside actual ordinary configured project");return Ok(());}
     let (alias,backend,model,profile)=operation_selection(&command.operation)?;
     ensure!(config.data().projects.iter().any(|p|p.alias==alias),"project outside actual host config");
@@ -360,7 +366,7 @@ fn validate_policy(config:&HostIngressConfigOwner,command:&HostCommand)->Result<
 fn operation_selection(op:&HostOperation)->Result<(&str,HostBackend,&str,&str)> {match op {
     HostOperation::OpenPreparedProjectV1 {project_alias,backend,model,profile_id}|HostOperation::StartTaskV1 {project_alias,backend,model,profile_id,..}=>Ok((project_alias,*backend,model,profile_id)),_=>anyhow::bail!("query has no effect selection")}}
 fn selected(op:&HostOperation)->Result<ManagedTaskOptIn> {let (_,backend,_,profile)=operation_selection(op)?;
-    ManagedTaskOptIn::selected(profile.to_owned(),native_backend(backend),SelectedTaskCredentialKind::ApiKeyV1,ManagedTaskNetworkSelection::OrdinaryNetworkV1)}
+    ManagedTaskOptIn::selected(profile.to_owned(),native_backend(backend),if matches!(backend,HostBackend::Codex) {SelectedTaskCredentialKind::SelectedProfileV1}else{SelectedTaskCredentialKind::ApiKeyV1},ManagedTaskNetworkSelection::OrdinaryNetworkV1)}
 fn native_backend(backend:HostBackend)->Backend {match backend {HostBackend::Codex=>Backend::Codex,HostBackend::Claude=>Backend::Claude}}
 fn time(original:&FinalizationBudget,cancelled:&AtomicBool)->Result<()> {if cancelled.load(Ordering::Acquire){original.cancel();anyhow::bail!("original accepted preparation cancelled");}original.remaining()?;Ok(())}
 fn start_queued_work(shared:&Arc<Shared>) {
@@ -392,6 +398,9 @@ fn poll_actual_joins(shared:&Arc<Shared>) {
 }
 include!("managed_machine_ingress_work.rs");
 include!("managed_machine_ingress_app.rs");
+#[cfg(test)]
+#[path="managed_machine_ingress_lifecycle_tests.rs"]
+mod lifecycle_tests;
 
 fn original_lock<'a,T>(owner:&'a Mutex<T>,original:&FinalizationBudget)->Result<std::sync::MutexGuard<'a,T>>{loop{original.remaining()?;match owner.try_lock(){
     Ok(held)=>return Ok(held),Err(std::sync::TryLockError::WouldBlock)=>thread::sleep(original.phase_limit(Duration::from_millis(1))?),Err(_)=>anyhow::bail!("original canonical carrier poisoned")}}}

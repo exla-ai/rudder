@@ -30,3 +30,40 @@ fn check(bytes:&[u8],startup:bool)->String{bootstrap_failure_check(&failed_origi
     let mut validation=frame();validation["class"]=serde_json::json!("validation_or_other");validation["errno"]=serde_json::Value::Null;validation["io_kind"]=serde_json::Value::Null;
     assert_eq!(check(&raw(&validation),true),"SdkHelperParentImage");
 }
+#[test]fn typed_operation_survives_original_helper_and_root_projection_without_private_text(){
+    let error=anyhow::Error::new(io::Error::from_raw_os_error(libc::EACCES))
+        .context("private path, compiler source and token must stay private")
+        .context(SdkHelperOperation::RetainedMountReopen)
+        .context(BootstrapCheck::SdkHelperNamespaceWorkload);
+    let helper=storage::retained_failure_data("compiler_sdk_helper","handshake",Some(&error));
+    assert_eq!(helper.as_object().unwrap().len(),8);
+    assert_eq!(helper["error_text"],"SDK retained mount reopen failed: io_kind=permission_denied errno=13");
+    let projected=failed_original_stderr(&raw(&helper),true);
+    let diagnostic=retained_bootstrap_diagnostic(&projected,BootstrapCheck::SdkQualification);
+    let root=storage::retained_failure_data("root_storage","serve_runtime",Some(&diagnostic));
+    assert_eq!(root["error_text"],helper["error_text"]);
+    assert_eq!(root["errno"],libc::EACCES);
+    assert_eq!(root["check"],"SdkHelperNamespaceWorkload");
+    assert!(!serde_json::to_string(&root).unwrap().contains("private"));
+    assert!(!format!("{diagnostic:#}").contains("private"));
+    let arbitrary=anyhow::anyhow!("SDK retained mount reopen failed").context(BootstrapCheck::SdkHelperNamespaceWorkload);
+    assert!(storage::retained_failure_data("compiler_sdk_helper","handshake",Some(&arbitrary)).get("error_text").is_none());
+}
+#[test]fn optional_operation_text_is_closed_exact_and_never_required_for_historical_frames(){
+    for operation in SdkHelperOperation::ALL{
+        let mut data=frame();data["error_text"]=operation.text(Some("permission_denied"),Some(libc::EACCES)).into();
+        assert_eq!(check(&raw(&data),true),"SdkHelperParentImage");
+        assert_eq!(check(&raw(&data),false),"SdkHelperExitUnknown");
+    }
+    for invalid in [serde_json::Value::Null,serde_json::json!(true),
+        serde_json::json!("private error"),serde_json::json!("SDK retained mount reopen failed: io_kind=not_found errno=13"),
+        serde_json::json!("SDK retained mount reopen failed: io_kind=permission_denied errno=2"),
+        serde_json::json!("SDK retained mount reopen failed: io_kind=permission_denied errno=13\n"),
+        serde_json::json!("SDK retained mount reopen failed: io_kind=permission_denied errno=13 secret")]{
+        let mut data=frame();data["error_text"]=invalid;assert_eq!(check(&raw(&data),true),"SdkHelperExitUnknown");
+    }
+    let mut data=frame();data["error_text"]=SdkHelperOperation::NamespaceMount.text(Some("permission_denied"),Some(libc::EACCES)).into();
+    data.as_object_mut().unwrap().remove("io_kind");
+    assert_eq!(check(&raw(&data),true),"SdkHelperExitUnknown");
+    assert_eq!(check(&raw(&frame()),true),"SdkHelperParentImage");
+}

@@ -172,3 +172,37 @@ fn reader_originally_at3_is_replaced_only_in_designated_child_and_parent_stays_c
     assert_ne!(unsafe { libc::fcntl(reader.as_raw_fd(), libc::F_GETFD) } & libc::FD_CLOEXEC, 0);
     let mut bytes = [0u8;2]; assert_eq!(unsafe { libc::read(reader.as_raw_fd(),bytes.as_mut_ptr().cast(),2) }, 2); assert_eq!(&bytes,b"ok");
 }
+
+fn snapshot_selection()->ManagedTaskOptIn {
+    ManagedTaskOptIn::selected("selected".into(),Backend::Codex,SelectedTaskCredentialKind::SelectedProfileV1,ManagedTaskNetworkSelection::OrdinaryNetworkV1).unwrap()
+}
+fn snapshot_fixture_token()->String {
+    const T:&[u8]=b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    let exp=std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs()+3600;
+    let bytes=serde_json::json!({"exp":exp,"https://api.openai.com/auth":{"chatgpt_account_id":"fixture-account","chatgpt_plan_type":"plus"}}).to_string().into_bytes();
+    let(mut bits,mut count)=(0u32,0u32);let mut encoded=String::new();for b in bytes {bits=(bits<<8)|b as u32;count+=8;while count>=6{count-=6;encoded.push(T[((bits>>count)&63)as usize]as char);}}
+    if count>0{encoded.push(T[((bits<<(6-count))&63)as usize]as char);}format!("e30.{encoded}.c2ln")
+}
+#[test]
+fn actual_node_codex_access_snapshot_uses_selected_account_and_jwt_not_store_mtime_or_refresh() {
+    let token=snapshot_fixture_token();
+    let f=Fixture::new(serde_json::json!({"selected":{"type":"oauth","provider":"openai-codex","access":token,"refresh":"FIXTURE_REFRESH_NEVER_HANDOFF","idToken":"FIXTURE_ID_NEVER_HANDOFF","expires":1,"accountId":"fixture-account"},
+        "other":{"type":"api_key","provider":"openai","key":"FIXTURE_NOT_SELECTED"}}));
+    let original=budget();let cancel=AtomicBool::new(false);let before=original.remaining().unwrap();
+    let metadata=inspect_selected_managed_task_profile(&f.runtime,"selected",Backend::Codex,&cancel,&original).unwrap();
+    assert!(metadata.supports_codex_access_snapshot());
+    let captured=run_verb(&f.runtime,"selected",Backend::Codex,"handoff-codex-oauth-access-snapshot",&cancel,&original).unwrap();
+    assert!(captured.status.success());let frame=std::str::from_utf8(&captured.key.0[4..]).unwrap();
+    assert!(!frame.contains("FIXTURE_REFRESH_NEVER_HANDOFF"));assert!(!frame.contains("FIXTURE_ID_NEVER_HANDOFF"));
+    assert!(!frame.contains("FIXTURE_NOT_SELECTED"));
+    assert!(load_selected_managed_task_profile(&f.runtime,&snapshot_selection(),&cancel,&original).is_ok());
+    assert!(original.remaining().unwrap()<=before,"handoff never resets original budget");
+}
+#[test]
+fn actual_node_access_snapshot_refuses_foreign_account_and_explicit_snapshot_never_falls_back_to_api_key() {
+    let f=Fixture::new(serde_json::json!({"selected":{"type":"oauth","provider":"openai-codex","access":snapshot_fixture_token(),"refresh":"FIXTURE_REFRESH","accountId":"foreign-account"}}));
+    assert_eq!(load_error(&f,&snapshot_selection()),ManagedProfileLoadError::Rejected);
+    let f=Fixture::new(serde_json::json!({"selected":{"type":"api_key","provider":"openai","key":"FIXTURE_KEY"}}));
+    let snapshot_only=ManagedTaskOptIn::selected("selected".into(),Backend::Codex,SelectedTaskCredentialKind::CodexOAuthAccessSnapshotV1,ManagedTaskNetworkSelection::OrdinaryNetworkV1).unwrap();
+    assert_eq!(load_error(&f,&snapshot_only),ManagedProfileLoadError::Selection);
+}

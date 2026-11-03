@@ -13,8 +13,12 @@ RUN test -x /usr/lib/postgresql/17/bin/postgres \
  && chmod 0700 /run/rudder-runtime-qualification /run/rudder-runtime-qualification/receipts /var/lib/rudder-runtime-qualification \
  && mkdir /var/lib/rudder-runtime-qualification-pg \
  && chgrp postgres /var/lib/rudder-runtime-qualification-pg && chmod 0710 /var/lib/rudder-runtime-qualification-pg
-# Future separately enabled target mechanics check. Never calls Fly or listener mains.
-RUN /usr/local/bin/rudder-runtime-qualification-node /opt/rudder-runtime-qualification/examples/managed-runtime-image-staging/genuine-ingress-target-check.mjs
+# Optional genuine mechanics check retains its separate source guard.
+# Positive ingress uses the ordinary real service probes during runtime.
+ARG RUN_GENUINE_INGRESS_TARGET_CHECK=false
+RUN if [ "$RUN_GENUINE_INGRESS_TARGET_CHECK" = true ]; then \
+      /usr/local/bin/rudder-runtime-qualification-node /opt/rudder-runtime-qualification/examples/managed-runtime-image-staging/genuine-ingress-target-check.mjs; \
+    else test "$RUN_GENUINE_INGRESS_TARGET_CHECK" = false; fi
 EXPOSE 8080
 ENTRYPOINT ["/usr/bin/python3","/opt/rudder-runtime-qualification/examples/managed-runtime-image-staging/supervise.py"]
 CMD []

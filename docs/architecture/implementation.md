@@ -80,15 +80,35 @@ startup race where the transport commits before Native creates the home. The
 same remote process waits only for absence, validates the private home and then
 invokes the actual CLI once; the original deadline covers both steps. Linux
 tests use UID/GID1500 and the actual emitted CLI/store. The controller image installs the pinned Fly ELF at
-the path used by diagnostics and the private import process. The first captured
-remote build is running; its generated JavaScript and source archive are retained
-without repeating source qualification or per-layer review receipts. The final
-shared capture includes the controller readiness fix. The first remote build
+the path used by diagnostics and the private import process. Generated JavaScript
+and the source archive are retained without repeating source qualification or
+per-layer review receipts. The shared capture includes the controller readiness fix. The first remote build
 completed native compilation in 6m20s, then correctly refused unreadable generated
 CLI files: the private capture umask had reached the Docker payload. The builder
 now normalizes generated code to readable file/directory modes while keeping its
 capture parent and logs private. The local regression and all 11 volume-input
 checks pass; the unchanged native Docker layer can be reused.
+
+Capture `f48e076e59466c0a44c79d017faf6deb46e4c603` also normalizes
+archived source permissions and checks the actual worker payload locally before
+any remote build. Python 3.11 preserved Git archive group-write modes, which the
+image correctly refused. A probe using the previous real archive and generated
+CLI passed in 0.75 seconds after normalization; an injected mutable script was
+refused locally. The managed and managed+C1 image layout checks now pass on Fly.
+The original worker build exited zero and published
+`sha256:af78998375eb9b8d37a0817cdf0fb3be062c533afeade6d737d8368e0896a35b`.
+Actual registry manifest/config bytes and the revision label match. A first
+registry read refused without a useful error; subsequent immutable reads passed.
+SDK and runtime admission are pending.
+The same-capture controller was pushed as
+`sha256:3d5419bb228c8ba60658bb7061a0c2023f25fcdd7f67645cc704219ac4cf5f6b`.
+Its original remote child exited zero, but the wrapper failed afterward without
+retaining a useful error. A separate read verified actual registry manifest and
+config bytes, the exact revision label and unchanged context; no rebuild was run.
+
+The requested project file/document viewer is queued in PLAN.md section 18.5.
+It covers project files and task outputs, rendered documents and website files,
+and private access to Cloud files. It is not implemented yet.
 
 ## Current state, 2026-11-01
 

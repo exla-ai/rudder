@@ -258,6 +258,14 @@ def extract_archive(archive, destination):
             tar.extractall(destination, filter="data")
         else:
             tar.extractall(destination)
+        # git archive defaults to group-writable modes. Older Python's fallback
+        # does not apply data_filter's mode stripping, and implicit parents can
+        # inherit our private umask. Normalize only captured source, retaining
+        # its private root; bytes and executable intent remain unchanged.
+        for path in destination.rglob("*"):
+            s = path.lstat()
+            need(stat.S_ISDIR(s.st_mode) or stat.S_ISREG(s.st_mode), "invalid extracted source")
+            path.chmod(0o755 if stat.S_ISDIR(s.st_mode) or s.st_mode & 0o111 else 0o644)
 
 
 def generated_files(source):
@@ -369,6 +377,23 @@ def prepare_generated_modes(source):
                 path.chmod(0o755 if s.st_mode & 0o111 else 0o644)
 
 
+def validate_worker_payload(source):
+    # Cheap local preflight before any remote compiler/image work. These are
+    # the source and generated paths copied into the unprivileged worker.
+    for root in (source / name for name in ("dist", "assets", "scripts", "cloud/worker")):
+        need(root.is_dir(), "worker payload missing")
+        for path in (root, *root.rglob("*")):
+            s = path.lstat()
+            directory = stat.S_ISDIR(s.st_mode)
+            need(directory or stat.S_ISREG(s.st_mode), "invalid worker payload file")
+            need(not s.st_mode & 0o022 and s.st_mode & (0o555 if directory else 0o444)
+                 == (0o555 if directory else 0o444), "worker payload is mutable or unreadable")
+    for name in ("package.json", "package-lock.json"):
+        s = (source / name).lstat()
+        need(stat.S_ISREG(s.st_mode) and not s.st_mode & 0o022 and s.st_mode & 0o444 == 0o444,
+             "worker package metadata is mutable or unreadable")
+
+
 def self_test():
     import tempfile
     import io
@@ -398,10 +423,16 @@ def self_test():
         destination = Path(directory) / "source"
         destination.mkdir()
         with tarfile.open(archive, "w") as tar:
-            item = tarfile.TarInfo("nested/source.txt"); item.size = 5
+            item = tarfile.TarInfo("nested/source.txt"); item.size = 5; item.mode = 0o664
             tar.addfile(item, io.BytesIO(b"hello"))
+            item = tarfile.TarInfo("nested/executable.sh"); item.size = 4; item.mode = 0o775
+            tar.addfile(item, io.BytesIO(b"true"))
         extract_archive(archive, destination)
         need((destination / "nested/source.txt").read_bytes() == b"hello", "archive extraction failed")
+        need(stat.S_IMODE((destination / "nested/source.txt").stat().st_mode) == 0o644
+             and stat.S_IMODE((destination / "nested/executable.sh").stat().st_mode) == 0o755
+             and stat.S_IMODE((destination / "nested").stat().st_mode) == 0o755,
+             "archived public source remains mutable or unreadable")
         with tarfile.open(archive, "w") as tar:
             item = tarfile.TarInfo("escape"); item.type = tarfile.SYMTYPE; item.linkname = "/tmp"
             tar.addfile(item)
@@ -483,6 +514,7 @@ def main():
     run("npm-cloud", ["npm", "ci", "--ignore-scripts", "--no-audit", "--no-fund"], source / "cloud")
     run("typescript-cloud", ["npm", "run", "build"], source / "cloud")
     prepare_generated_modes(source)
+    validate_worker_payload(source)
     js, assets = generated_files(source)
     dockerfile = source / "candidate.Dockerfile"
     write_new(dockerfile, render_dockerfile((source / "cloud/worker/Dockerfile").read_text(), revision).encode())

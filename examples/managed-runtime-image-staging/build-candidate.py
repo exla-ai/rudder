@@ -354,6 +354,21 @@ def synthetic_product():
                                "inventory": {"kind": "blob", "algorithm": "sha256", "digest": C1_PINS["inventory.json"], "size_bytes": 1}}}
 
 
+def prepare_generated_modes(source):
+    # The enclosing capture/logs stay private. Public build products must still
+    # be readable after Docker copies them into a UID1500 worker. tsc inherits
+    # our private umask and otherwise emits mode0600 files/mode0700 directories.
+    for root in (source / "dist", source / "cloud/dist"):
+        for path in (root, *root.rglob("*")):
+            s = path.lstat()
+            need(not stat.S_ISLNK(s.st_mode), "generated output contains a symlink")
+            if stat.S_ISDIR(s.st_mode):
+                path.chmod(0o755)
+            else:
+                need(stat.S_ISREG(s.st_mode) and s.st_nlink == 1, "invalid generated output")
+                path.chmod(0o755 if s.st_mode & 0o111 else 0o644)
+
+
 def self_test():
     import tempfile
     import io
@@ -364,6 +379,21 @@ def self_test():
     product = synthetic_product()
     log = f'#12 0.1 {MARKER}{json.dumps(product)}\n#13 pushing manifest for {image}@sha256:{"b" * 64} done\n'
     with tempfile.TemporaryDirectory() as directory:
+        private_source = Path(directory) / "private-source"
+        private_source.mkdir(mode=0o700)
+        for root in (private_source / "dist", private_source / "cloud/dist"):
+            root.mkdir(parents=True, mode=0o700)
+            (root / "module.js").write_bytes(b"export {};\n")
+            (root / "module.js").chmod(0o600)
+            (root / "main.js").write_bytes(b"#!/usr/bin/env node\n")
+            (root / "main.js").chmod(0o700)
+        prepare_generated_modes(private_source)
+        need(stat.S_IMODE(private_source.stat().st_mode) == 0o700, "private capture mode changed")
+        for root in (private_source / "dist", private_source / "cloud/dist"):
+            need(stat.S_IMODE(root.stat().st_mode) == 0o755
+                 and stat.S_IMODE((root / "module.js").stat().st_mode) == 0o644
+                 and stat.S_IMODE((root / "main.js").stat().st_mode) == 0o755,
+                 "generated output remains unreadable to the worker")
         archive = Path(directory) / "source.tar"
         destination = Path(directory) / "source"
         destination.mkdir()
@@ -452,6 +482,7 @@ def main():
     run("chmod-cli", ["npm", "run", "chmod-cli"])
     run("npm-cloud", ["npm", "ci", "--ignore-scripts", "--no-audit", "--no-fund"], source / "cloud")
     run("typescript-cloud", ["npm", "run", "build"], source / "cloud")
+    prepare_generated_modes(source)
     js, assets = generated_files(source)
     dockerfile = source / "candidate.Dockerfile"
     write_new(dockerfile, render_dockerfile((source / "cloud/worker/Dockerfile").read_text(), revision).encode())

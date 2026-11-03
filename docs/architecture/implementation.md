@@ -83,7 +83,12 @@ tests use UID/GID1500 and the actual emitted CLI/store. The controller image ins
 the path used by diagnostics and the private import process. The first captured
 remote build is running; its generated JavaScript and source archive are retained
 without repeating source qualification or per-layer review receipts. The final
-shared capture includes the controller readiness fix.
+shared capture includes the controller readiness fix. The first remote build
+completed native compilation in 6m20s, then correctly refused unreadable generated
+CLI files: the private capture umask had reached the Docker payload. The builder
+now normalizes generated code to readable file/directory modes while keeping its
+capture parent and logs private. The local regression and all 11 volume-input
+checks pass; the unchanged native Docker layer can be reused.
 
 ## Current state, 2026-11-01
 

@@ -128,13 +128,13 @@
   "npm": {
     "required": true,
     "kind": "npm",
-    "status": "provider_processing",
+    "status": "publication_accepted_async_processing_registry_unavailable",
     "target": "@exla/rudder@next and @viraatdas/rudder@next",
     "provider": "npmjs.org / GitHub Actions",
     "version": "4.0.0-alpha.34",
     "revision": "368c72f2e53962fe730f33de5a8b4d4126be7331",
     "url": "https://github.com/exla-ai/rudder/actions/runs/41728551815",
-    "verifiedAt": "2026-11-03T22:20:57.612570+00:00",
+    "verifiedAt": "2026-11-03T23:07:53.104341+00:00",
     "qualificationRun": "https://github.com/exla-ai/rudder/actions/runs/41566733699",
     "checks": [
       {
@@ -164,11 +164,11 @@
       },
       {
         "check": "both registry exact versions",
-        "result": "404 as of22:19:39Z"
+        "result": "alpha34 absent from both metadata responses at 2026-11-03T23:07:53.104341+00:00"
       },
       {
         "check": "both npm next tags",
-        "result": "alpha33 as of22:20:48Z"
+        "result": "alpha33 at 2026-11-03T23:07:53.104341+00:00"
       },
       {
         "check": "both disposable actual installs",
@@ -191,7 +191,28 @@
         "at": "2026-11-03T22:14:05Z"
       }
     ],
-    "scope": "Release CI and asynchronous publication acceptance verified; public registry and actual install pending."
+    "scope": "Publication accepted by CI; registry availability and actual installation remain pending.",
+    "latestRegistryObservation": [
+      {
+        "package": "@exla/rudder",
+        "distTags": {
+          "latest": "3.9.13",
+          "next": "4.0.0-alpha.33"
+        },
+        "alpha34": null,
+        "verifiedAt": "2026-11-03T23:07:52.779467+00:00"
+      },
+      {
+        "package": "@viraatdas/rudder",
+        "distTags": {
+          "latest": "3.9.13",
+          "next": "4.0.0-alpha.33"
+        },
+        "alpha34": null,
+        "verifiedAt": "2026-11-03T23:07:53.104341+00:00"
+      }
+    ],
+    "publicAvailabilityVerified": false
   },
   "managedSdkQualified": false,
   "managedRuntimeQualified": false,

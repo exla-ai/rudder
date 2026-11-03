@@ -7,6 +7,23 @@ here is not deployment proof; record exact checks and delivery identities below.
 
 ## Current continuation, 2026-11-03
 
+The 23:02 fresh-volume attempt retained an original machine ID but Fly's CLI
+reported startup failure. Exact-machine logs show a 72.5-second cold image pull
+and successful startup at 23:03:42Z. The verifier held before cleanup because it
+treated that failed startup acknowledgement as an unknown create, despite the
+retained ID. Root reconciled the exact original ID, nonce, config, instance and
+volume, destroyed those two resources once each, and verified two absences and
+the unchanged protected home at 23:07:39Z. The failed original then exited143
+after an explicit pidfd stop; it supplies no passing volume receipt. Private
+evidence is `/workspace/rudder-volume-create-failure-9aea4c94/cleanup-report.json`.
+The verifier now reconciles a settled failed CLI response using its original
+machine ID, exact configuration and unchanged workload deadline. It records
+the failed CLI acknowledgement separately; only an observed started instance,
+the existing guest filesystem proof and verified cleanup can pass. Unknown IDs
+or changed bindings still refuse. Bounded stderr and exact-machine failure logs
+are retained without stranding cleanup. Twenty-five pure checks pass, including
+a 78-second cold start and an expired workload that cleans up without probing.
+
 Alpha.34 Cloud is deployed from `17939790dd111acb0b7f4401ace41920f500a82b`.
 Fly release177 `JLxbo4k22JZxnTvbbXQo22yG7`, control machine
 `8911d61a434978`, instance `01M6FGP37GQFGBFXWD8DFAAG5T`, runs control image

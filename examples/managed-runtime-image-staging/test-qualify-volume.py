@@ -9,6 +9,8 @@ import sys
 import tarfile
 import tempfile
 import unittest
+import contextlib
+from types import SimpleNamespace
 from unittest.mock import patch
 
 HERE = Path(__file__).resolve().parent
@@ -257,6 +259,155 @@ class ReceiptTests(unittest.TestCase):
             with self.assertRaisesRegex(AssertionError, 'original hold'):
                 owner.finish(failed, create_state=(True, False, False, False, None, None, None))
 
+    def test_failed_create_cleanup_requires_known_id_and_settled_original_child(self):
+        child = dict(exitCode=1, constructorCompleted=True, actualChildWait=True, stdoutEOF=True,
+                     stderrEOF=True, pidfdHeld=True, observerError=None, timedOut=False, truncated=False)
+        result = dict(exitCode=1, timedOut=False, child=child)
+        machine = {'id': '84e691f2147978'}
+        self.assertTrue(v.failed_create_cleanup_candidate(machine, result))
+        for changed in (None, {}, {'id': v.PROTECTED_ID}, {'id': 'foreign'}, dict(machine, adopted=True)):
+            self.assertFalse(v.failed_create_cleanup_candidate(changed, result))
+        for key, value in [('actualChildWait', False), ('stdoutEOF', False), ('stderrEOF', False),
+                           ('pidfdHeld', False), ('observerError', 'lost'), ('timedOut', True), ('truncated', True)]:
+            self.assertFalse(v.failed_create_cleanup_candidate(machine, dict(result, child=dict(child, **{key: value}))))
+        self.assertFalse(v.failed_create_cleanup_candidate(machine, dict(result, exitCode=0)))
+
+    def test_provider_failure_retains_full_bounded_raw_stderr_reference(self):
+        message = b'Error: machine failed to reach desired start state; restart policy no\n'
+        result = dict(stderr=message, exitCode=1, timedOut=False)
+        failure = v.provider_failure(result, '008-machine-create-once', self.parent)
+        self.assertEqual(failure['message'], message.decode())
+        self.assertFalse(failure['messageTruncated'])
+        self.assertEqual(failure['stderrBytes'], len(message))
+        self.assertEqual(failure['stderrSha256'], v.digest(message))
+        failure = v.provider_failure(dict(result, stderr=b'x' * 17000), '008-machine-create-once', self.parent)
+        self.assertEqual(len(failure['message']), 16384)
+        self.assertTrue(failure['messageTruncated'])
+        self.assertEqual(failure['stderrBytes'], 17000)
+
+    def test_settled_readonly_log_timeout_is_finite_and_exactly_scoped(self):
+        owner = v.ComponentOwner(); owner.output = self.parent
+        row = dict(exitCode=-15, constructorCompleted=True, actualChildWait=True, stdoutEOF=True,
+                   stderrEOF=True, pidfdHeld=True, observerError=None, timedOut=True, truncated=False,
+                   stdout=b'partial exact machine logs', stderr=b'diagnostic deadline')
+        args = ['logs', '--app', v.APP, '--machine', '84e691f2147978', '--no-tail', '--json']
+        with patch.object(v, 'now', return_value=100), patch.object(v, 'FLY', '/test-fly'), \
+             patch.object(v, 'capture', return_value=row) as capture, \
+             patch.object(owner, 'current_inputs'), patch.object(owner, 'persist'), \
+             patch.object(owner, 'hold', side_effect=AssertionError('hold forbidden')):
+            observed, out, err = owner.call(args, 'failed-logs', 220, 15, diagnostic=True)
+            capture.assert_called_once_with(['/test-fly', *args], 105)
+            self.assertTrue(observed['timedOut']); self.assertEqual(out, b'partial exact machine logs')
+            self.assertIsNone(owner.remoteUnknown)
+            with self.assertRaisesRegex(RuntimeError, 'exact-read-only-machine-diagnostic'):
+                owner.call(['machine', 'destroy', '84e691f2147978'], 'invalid', 220, 15, diagnostic=True)
+
+    def exercise_failed_create(self, *, missing_id=False, changed_nonce=False, expire_original=False):
+        nonce = 'b' * 32; expected = v.protected_expectation(); calls = []; persisted = {}; timer=[100.0]
+        original_unknown, original_finish = v.ComponentOwner.unknown_create, v.ComponentOwner.finish
+        class FakeOwner:
+            def __init__(self):
+                self.calls=[]; self.remoteUnknown=None; self.effectAttempted=False
+                self.machine_live=False; self.volume_live=False
+            def preflight(self): return b'// no probe accepted after failed create'
+            def start_output(self, output): self.output=output; self.effectAttempted=True
+            def persist(self, path, raw): persisted[path.name]=json.loads(raw)
+            def current_inputs(self): pass
+            def current_output(self): pass
+            def hold(self): raise AssertionError('original hold retained')
+            def unknown_create(self, *args, **kwargs): return original_unknown(self, *args, **kwargs)
+            def finish(self, *args, **kwargs): return original_finish(self, *args, **kwargs)
+            def call(self, args, label, end, timeout, **kwargs):
+                calls.append((args,label,end,timeout,kwargs)); code=0; err=b''
+                volume=dict(id='vol_test',name='rudder_qv_'+nonce[:12],region=v.REGION,
+                            size_gb=1,encrypted=True,attached_machine_id=None)
+                home=dict(id=v.PROTECTED_ID,instance_id=expected['instanceId'],state='started',
+                          image_ref={'digest':'sha256:'+expected['digest']},config={'mounts':[{'volume':'vol_protected'}]})
+                machine=None
+                if self.machine_live:
+                    config=json.loads(json.dumps(persisted['machine.json']))
+                    if changed_nonce: config['metadata']['qualification']='foreign'
+                    machine=dict(id='84e691f2147978',name='rudder-volume-'+nonce[:12],region=v.REGION,
+                                 config=config,instance_id='A'*26,state=('starting'if expire_original else('started'if timer[0]>=177 else'starting')),image_ref={'digest':'sha256:'+'b'*64})
+                if args[:2]==['machine','list']: data=[home]if args[3]==v.PROTECTED_APP else([machine]if machine else[])
+                elif args[:2]==['volumes','list']: data=[volume]if self.volume_live else[]
+                elif args[:2]==['secrets','list']: data=[]
+                elif args[:2]==['volumes','create']: self.volume_live=True; data=volume
+                elif args[:2]==['volumes','show']:
+                    if expire_original and not self.machine_live: timer[0]=210
+                    if self.machine_live: volume['attached_machine_id']='84e691f2147978'
+                    data=volume
+                elif args[:2]==['machine','run']:
+                    self.machine_live=True; timer[0]=269 if expire_original else 160; code=1; data=b'no known ID'if missing_id else b'Machine ID: 84e691f2147978\n'
+                    err=b'Error: machine failed to reach desired start state; restart policy no\n'
+                elif args[:2]==['machine','exec']:
+                    expected_bytes=b'rudder-fresh-volume-probe-v1\nnonce='+nonce.encode()+b'\n'+bytes(i%251 for i in range(4096))
+                    data=dict(nonce=nonce,volumeId='vol_test',machineId='84e691f2147978',instanceId='A'*26,
+                              probeSha256=v.digest(self.preflight()),mountPath=v.MOUNT,
+                              scope='fresh-Fly-volume-filesystem-component-only',writeBytes=len(expected_bytes),
+                              sha256=v.digest(expected_bytes),preRenameSha256=v.digest(expected_bytes))
+                    for key in ['passed','newEmptyExceptLostFound','rootOwned','exclusiveCreate','noFollow','fileFsync',
+                                'directoryFsync','atomicRename','exactReadback','originalMountRetained','ownedFileHandlesClosed']: data[key]=True
+                    for key in ['coldRestartPerformed','restartDurabilityQualified','encryptionVerifiedByGuest','physicalRootQualified',
+                                'sourceAuthority','sdkAuthority','haQualified','fleetDurability','normalRuntimeRetirement','productionEnablement','models']: data[key]=False
+                elif args[:2]==['machine','destroy']: self.machine_live=False; data={}
+                elif args[:2]==['volumes','destroy']: self.volume_live=False; data={}
+                elif args[0]=='logs': data={'message':'machine started after image pull'}
+                else: raise AssertionError('unexpected provider command '+repr(args))
+                raw=data if type(data)is bytes else v.canonical(data)
+                row=dict(exitCode=code,constructorCompleted=True,actualChildWait=True,stdoutEOF=True,
+                         stderrEOF=True,pidfdHeld=True,observerError=None,timedOut=False,truncated=False)
+                self.calls.append(row); return row,raw,err
+        owner=FakeOwner()
+        with patch.object(v,'ComponentOwner',return_value=owner), patch.object(v,'now',side_effect=lambda:timer[0]), \
+             patch.object(v,'BINDING',{'workerImage':'registry.fly.io/rudder-workers-exla@sha256:'+'b'*64}), \
+             patch.object(v.uuid,'uuid4',return_value=SimpleNamespace(hex=nonce)), patch.object(v.time,'sleep',side_effect=lambda seconds:timer.__setitem__(0,timer[0]+seconds)), \
+             patch.object(sys,'argv',['qualifier','--build-receipt','/workspace/test/build-receipt.json',
+                                      '--flyctl-sha256','a'*64,'--output','/workspace/rudder-fresh-volume-run-pure-failed-create']), \
+             patch('subprocess.Popen',side_effect=AssertionError('child forbidden')), \
+             contextlib.redirect_stdout(io.StringIO()):
+            if missing_id or changed_nonce:
+                with self.assertRaisesRegex(AssertionError,'original hold retained'): v.main()
+            else: self.assertEqual(v.main(),1 if expire_original else 0)
+        return owner,calls,persisted
+
+    def test_cold_start_failed_cli_reconciles_same_original_then_requires_probe_and_cleanup(self):
+        owner,calls,files=self.exercise_failed_create()
+        report=files['report.json']
+        self.assertTrue(report['componentPassed']); self.assertTrue(report['cleanupVerified'])
+        self.assertFalse(report['originalMachineCreateAcknowledged'])
+        self.assertTrue(report['originalMachineCreateReconciled'])
+        self.assertFalse(report['machineCreateUncertain'])
+        self.assertFalse(owner.machine_live); self.assertFalse(owner.volume_live)
+        self.assertEqual(sum(args[:2]==['machine','run']for args,*_ in calls),1)
+        self.assertEqual(sum(args[:2]==['machine','exec']for args,*_ in calls),1)
+        self.assertGreater(sum('original-machine-observe'in label for _,label,*_ in calls),8)
+        reconciliation=files['original-machine-create-reconciled.json']
+        self.assertEqual(reconciliation['originalWorkEndBoottime'],280)
+        self.assertEqual(reconciliation['observedAtBoottime'],178)
+        self.assertFalse(reconciliation['qualificationGranted'])
+        self.assertEqual(report['providerFailures'][0]['message'],'Error: machine failed to reach desired start state; restart policy no\n')
+
+    def test_expired_original_work_never_probes_or_passes_but_cleans_known_create(self):
+        owner,calls,files=self.exercise_failed_create(expire_original=True)
+        report=files['report.json']
+        self.assertFalse(report['componentPassed']); self.assertTrue(report['cleanupVerified'])
+        self.assertFalse(report['originalMachineCreateAcknowledged'])
+        self.assertFalse(report['originalMachineCreateReconciled'])
+        self.assertFalse(any(args[:2]==['machine','exec']for args,*_ in calls))
+        self.assertFalse(owner.machine_live); self.assertFalse(owner.volume_live)
+        self.assertEqual(report['error']['reason'],'original-boot-window-expired')
+        logs=[call for call in calls if call[0][0]=='logs']; self.assertEqual(len(logs),1)
+        self.assertEqual(logs[0][0],['logs','--app',v.APP,'--machine','84e691f2147978','--no-tail','--json'])
+        self.assertEqual(logs[0][3],15); self.assertTrue(logs[0][4]['diagnostic'])
+
+    def test_failed_create_without_original_id_or_matching_nonce_keeps_hold(self):
+        for options in (dict(missing_id=True),dict(changed_nonce=True)):
+            owner,calls,files=self.exercise_failed_create(**options)
+            self.assertTrue(owner.machine_live); self.assertTrue(owner.volume_live)
+            self.assertFalse(any(args[:2]in(['machine','destroy'],['volumes','destroy'])for args,*_ in calls))
+            self.assertFalse(any(args[0]=='logs'for args,*_ in calls))
+
     def test_existing_deadlines_and_carrier_unchanged(self):
         self.assertEqual((v.WORK_SECONDS, v.CLEANUP_SECONDS, v.MAX_CALLS, v.CLEANUP_RESERVE), (180,120,64,16))
         expected = {'owned_child.py': '22ee38a91c9f4764f831d3cf19949b4be1c2a562730951788ade8b29d45f7ae9', 'probe.mjs': 'b3ae62ba84ce86ce7dfe89afaa3f9baabb2d35f495c10f8ee38d7d785b695577'}
@@ -265,14 +416,14 @@ class ReceiptTests(unittest.TestCase):
 
     def test_provider_ownership_and_cleanup_source_preserved(self):
         # Original reviewed V3 bodies, independent of the historical filesystem.
-        expected = {'__init__': '5d394e77b56858de31e3f9c896b2824282c0f46d4a40a85654258dbadb2cb284', 'hold': '7367754119f6a48c3d991e48b94054782b216640bcfbc9f08d72ba35bdba914e', 'read': '38ca1a59a37a75854121f4e34ee4eba78ffd415d3b37d5ee1c6331c8be636dfb', 'current_inputs': '22a900690c4776ecdbd82e75f13c370b7e38ed72526d63d76c193338afd7df68', 'start_output': '22193aa74503986842ca6082f91f2bc520f2f4c91d46fd4483a99c6c11061e47', 'current_output': '534b3961b049a10749f43e5f90914d16e15c5c8cc5b14d8e3f4cf4280d0f3da8', 'persist': '7ba51903b586434f2ec433a36c790239826dbc7f0c391ef70b9fd859d983743e', 'call': 'a9b9c50cd39755edc05a946e67e53f3824732ff89e44ec6c682c666d12284ada', 'unknown_create': '34d6382c8a12695d0b168ac5e22500fbcf3b0152676a2120fcd083d2e75907f0', 'finish': 'ea4832e7c3f266fec9f0fb6586017fc496ee06c749c4aa30b9b4a4448270930c'}
+        expected = {'__init__': '5d394e77b56858de31e3f9c896b2824282c0f46d4a40a85654258dbadb2cb284', 'hold': '7367754119f6a48c3d991e48b94054782b216640bcfbc9f08d72ba35bdba914e', 'read': '38ca1a59a37a75854121f4e34ee4eba78ffd415d3b37d5ee1c6331c8be636dfb', 'current_inputs': '22a900690c4776ecdbd82e75f13c370b7e38ed72526d63d76c193338afd7df68', 'start_output': '22193aa74503986842ca6082f91f2bc520f2f4c91d46fd4483a99c6c11061e47', 'current_output': '534b3961b049a10749f43e5f90914d16e15c5c8cc5b14d8e3f4cf4280d0f3da8', 'persist': '7ba51903b586434f2ec433a36c790239826dbc7f0c391ef70b9fd859d983743e', 'call': '7079c3cfb713d69b9ac30e2bc1b160f2e466e934f042cc7e97de0f3f1a5cba00', 'unknown_create': 'ab6a3895d8d3545faba6e0f0f2df92e22d80e941bac56d95e8ebcf539a94f94d', 'finish': 'ea4832e7c3f266fec9f0fb6586017fc496ee06c749c4aa30b9b4a4448270930c'}
         source = (HERE / 'qualify-volume.py').read_text()
         owner = next(n for n in ast.parse(source).body if isinstance(n, ast.ClassDef))
         actual = {n.name: v.digest(ast.dump(n, include_attributes=False).encode())
                   for n in owner.body if isinstance(n, ast.FunctionDef) and n.name != 'preflight'}
         self.assertEqual(actual, expected)
         body = source[source.index('    output = Path(args.output)'):]
-        self.assertEqual(v.digest(body.encode()), 'ece42dbea6c22024b4e5d7c0fe95614c6907c05e8bfe5c242985998b2c299b9a')
+        self.assertEqual(v.digest(body.encode()), '3f97de117243f23db758fe0137bb8838b176799c69d5cca66189639837a4b955')
 
     def test_real_retained_input_refuses_replacement(self):
         with tempfile.TemporaryDirectory(dir='/workspace') as directory:

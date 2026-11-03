@@ -122,6 +122,24 @@ def settled_no_create(create_state,children,remote_unknown):
             and remote_unknown is None and type(children)is list
             and all(custody(child)and child.get('timedOut')is False and child.get('truncated')is False for child in children))
 
+def failed_create_cleanup_candidate(machine,result):
+    """Only an original settled failed response can nominate cleanup readback.
+    This grants neither successful creation nor permission to delete anything.
+    The original ID/config/nonce/instance/image must still match at readback.
+    """
+    return (type(machine)is dict and set(machine)=={'id'}and type(machine['id'])is str
+            and re.fullmatch(r'[0-9a-f]{14}',machine['id'])is not None and machine['id']!=PROTECTED_ID
+            and type(result)is dict and type(result.get('exitCode'))is int and result['exitCode']!=0
+            and result.get('timedOut')is False and custody(result.get('child'))
+            and result['child'].get('exitCode')==result['exitCode']
+            and result['child'].get('timedOut')is False and result['child'].get('truncated')is False)
+
+def provider_failure(result,stem,output):
+    stderr=result['stderr'];text=stderr.decode('utf8','replace');message=text[:16384]
+    return {'exitCode':result['exitCode'],'timedOut':result['timedOut'],
+            'stderrPath':str(output/(stem+'.stderr.private')),'stderrBytes':len(stderr),
+            'stderrSha256':digest(stderr),'message':message,'messageTruncated':len(text)>len(message)}
+
 def validate_build(receipt,raw,receipt_path,read,builder,builder_raw,fly_sha256):
     """Validate retained build DATA. Root must observe the original invocation;
     these hashes cannot authenticate an actual tool event or registry by themselves.
@@ -265,23 +283,32 @@ class ComponentOwner:
             need(stat.S_ISREG(s.st_mode)and s.st_nlink==1 and stat.S_IMODE(s.st_mode)==0o600 and s.st_size==len(raw)and stamp(s)==stamp(path.lstat()),'same-original-persisted-file')
             self.current_output();return fd
         except BaseException:self.hold()
-    def call(self,arguments,label,end,timeout):
+    def call(self,arguments,label,end,timeout,*,diagnostic=False):
         # Reserve reviewed carrier's fixed10s tail INSIDE the original call window.
+        if diagnostic:
+            logs=(len(arguments)==7 and arguments[:4]==['logs','--app',APP,'--machine']
+                 and type(arguments[4])is str and re.fullmatch(r'[0-9a-f]{14}',arguments[4])is not None
+                 and arguments[4]!=PROTECTED_ID and arguments[5:]==['--no-tail','--json'])
+            need(logs or arguments==['machine','list','-a',APP,'--json'],'exact-read-only-machine-diagnostic')
         call_end=min(end,now()+timeout);need(call_end-now()>10,'original-call-window-no-renewal')
         self.current_inputs()
         try:
             row=capture_original(capture,[FLY,*arguments],call_end-10)
             out=row.pop('stdout');err=row.pop('stderr')
             need(type(out)is bytes and type(err)is bytes,'actual-original-stream-bytes')
+            if diagnostic:
+                row['diagnosticStdoutTruncated']=len(out)>MAX_OUTPUT
+                row['diagnosticStderrTruncated']=len(err)>MAX_OUTPUT
+                out,err=out[:MAX_OUTPUT],err[:MAX_OUTPUT]
             self.calls.append(row)
             self.persist(self.output/(label+'.stdout.private'),out);self.persist(self.output/(label+'.stderr.private'),err)
             need(len(out)<=MAX_OUTPUT and len(err)<=MAX_OUTPUT,'provider-output-bound')
-            if row['timedOut']is not False or row['truncated']is not False or now()>=call_end:
+            if not diagnostic and (row['timedOut']is not False or row['truncated']is not False or now()>=call_end):
                 self.remoteUnknown=label;return self.hold()
             self.current_inputs();return row,out,err
         except BaseException:return self.hold()
-    def unknown_create(self,volume_started,volume_ack,machine_started,machine_ack):
-        if (volume_started and not volume_ack)or(machine_started and not machine_ack):
+    def unknown_create(self,volume_started,volume_ack,machine_started,machine_ack,*,machine_cleanup_candidate=False):
+        if (volume_started and not volume_ack)or(machine_started and not machine_ack and machine_cleanup_candidate is not True):
             self.remoteUnknown='original-create-outcome-unknown';return self.hold()
     def finish(self,report,*,create_state):
         try:
@@ -351,9 +378,11 @@ def main():
     volume = machine = instance = protected = original_config_sha = None
     volume_started = machine_started = False
     volume_ack = machine_ack = False
+    machine_cleanup_candidate = machine_cleanup_verified = False
+    machine_create_reconciled = False
     config = None
 
-    def call(arguments, label, timeout=20, cleanup=False, allow_failure=False):
+    def call(arguments, label, timeout=20, cleanup=False, allow_failure=False,diagnostic=False):
         nonlocal calls
         need(calls < (MAX_CALLS if cleanup else MAX_CALLS - CLEANUP_RESERVE),
              'provider-call-bound-with-cleanup-reserve')
@@ -361,18 +390,26 @@ def main():
         need(end is not None and end - now() > 5, 'original-controller-budget-expired')
         calls += 1
         stem = f'{calls:03d}-{label}'
-        row,data,stderr=ACTIVE.call(arguments,stem,end,timeout)
+        row,data,stderr=ACTIVE.call(arguments,stem,end,timeout,diagnostic=diagnostic)
         code=row['exitCode'];timed_out=row['timedOut']
-        result={'exitCode':code,'timedOut':timed_out,'stdout':data}
+        result={'exitCode':code,'timedOut':timed_out,'stdout':data,'stderr':stderr,'child':row,
+                'stdoutPath':str(output/(stem+'.stdout.private')),'stderrPath':str(output/(stem+'.stderr.private'))}
         report['steps'].append({'label':label,'exitCode':code,'timedOut':timed_out,
                                'stdoutSha256':digest(data),'stderrSha256':digest(stderr),'actualCliChildWait':True,
                                'child':row})
+        if code!=0 or timed_out:
+            failure=provider_failure(result,stem,output)
+            report['providerFailureCount']=report.get('providerFailureCount',0)+1
+            if len(report.setdefault('providerFailures',[]))<4:
+                report['providerFailures'].append({'label':label,**failure})
+            durable_new(output/(stem+'.failure.json'),failure)
         if not allow_failure:
-            need(code == 0 and not timed_out, 'provider-observation-failed:' + label)
+            need(code == 0 and not timed_out and row['truncated']is False
+                 and not row.get('diagnosticStdoutTruncated',False), 'provider-observation-failed:' + label)
         return result
 
-    def machines(label, app=APP, cleanup=False):
-        rows = json.loads(call(['machine', 'list', '-a', app, '--json'], label, cleanup=cleanup)['stdout'])
+    def machines(label, app=APP, cleanup=False,settled_read_only=False):
+        rows = json.loads(call(['machine', 'list', '-a', app, '--json'], label, cleanup=cleanup,diagnostic=settled_read_only)['stdout'])
         need(isinstance(rows, list), 'machine-inventory-schema')
         return rows
 
@@ -490,18 +527,30 @@ def main():
         machine = {'id': ids[0].decode('ascii')}
         durable_new(output / 'original-machine-create-id.json', {**machine, 'nonce': nonce,
                     'stdoutSha256': digest(result['stdout']), 'exitCode': result['exitCode'], 'timedOut': result['timedOut']})
-        need(result['exitCode'] == 0 and not result['timedOut'], 'original-machine-create-not-acknowledged')
-        machine_ack = True
-        for poll in range(8):
-            current = find_original_machine(machines('original-machine-observe'))
+        machine_cleanup_candidate=failed_create_cleanup_candidate(machine,result)
+        machine_ack = result['exitCode'] == 0 and not result['timedOut']
+        need(machine_ack or machine_cleanup_candidate,'original-machine-create-outcome-unknown')
+        for poll in range(16):
+            need(work_end-now()>10,'original-boot-window-expired')
+            current = find_original_machine(machines('original-machine-observe',settled_read_only=True))
             need(current is not None, 'original-machine-not-observed')
             assert_machine(current, allow_first_instance=True)
+            if machine_cleanup_candidate:machine_cleanup_verified=True
             if current.get('state') == 'started':
+                need(now()<work_end,'original-boot-window-expired')
+                if not machine_ack:
+                    machine_create_reconciled=True
+                    durable_new(output/'original-machine-create-reconciled.json',
+                                {'id':machine['id'],'instanceId':instance,'configSha256':original_config_sha,
+                                 'createAcknowledged':False,'sameOriginalCreate':True,
+                                 'originalWorkEndBoottime':work_end,'observedAtBoottime':now(),
+                                 'qualificationGranted':False})
                 break
-            need(poll < 7 and work_end - now() > 2, 'original-boot-window-expired')
+            need(poll < 15 and work_end - now() > 12, 'original-boot-window-expired')
             time.sleep(min(2, work_end - now()))
         else:
             raise RuntimeError('original-boot-window-expired')
+        need(machine_ack or machine_create_reconciled,'original-machine-create-not-reconciled')
         assert_volume(json.loads(call(['volumes', 'show', volume['id'], '-a', APP, '--json'], 'attached-volume-readback')['stdout']), machine['id'])
         command = shlex.join([NODE, '--input-type=module', '-e', probe.decode('utf8'), '--',
                               nonce, volume['id'], machine['id'], instance, probe_sha])
@@ -543,15 +592,16 @@ def main():
     except BaseException:
         ACTIVE.hold()
     finally:
-        ACTIVE.unknown_create(volume_started,volume_ack,machine_started,machine_ack)
+        ACTIVE.unknown_create(volume_started,volume_ack,machine_started,machine_ack,machine_cleanup_candidate=machine_cleanup_candidate)
         # This separate cleanup clock cannot reopen the expired workload or
         # repeat an uncertain create. All effect attempts keep their raw logs.
         cleanup_end = min(start + WORK_SECONDS + CLEANUP_SECONDS, now() + CLEANUP_SECONDS)
         report['workloadElapsedSeconds'] = round(now() - start, 3)
         report['originalVolumeCreateAcknowledged'] = volume_ack
         report['originalMachineCreateAcknowledged'] = machine_ack
+        report['originalMachineCreateReconciled'] = machine_create_reconciled
         report['volumeCreateUncertain'] = volume_started and not volume_ack
-        report['machineCreateUncertain'] = machine_started and not machine_ack
+        report['machineCreateUncertain'] = machine_started and not machine_ack and not machine_cleanup_verified
         report['volumeId'] = volume.get('id') if volume else None
         report['machineId'] = machine.get('id') if machine else None
         report['instanceId'] = instance
@@ -560,6 +610,21 @@ def main():
             current = find_original_machine(rows)
             if current is not None:
                 assert_machine(current, allow_first_instance=True)
+                if machine_cleanup_candidate:
+                    machine_cleanup_verified=True
+                    report['machineCreateUncertain']=False
+                    report['failedMachineCreateCleanupReconciled']=True
+                    durable_new(output/'failed-machine-create-cleanup-reconciliation.json',
+                                {'id':machine['id'],'instanceId':instance,'configSha256':original_config_sha,
+                                 'cleanupOnly':True,'createAcknowledged':False,'qualificationGranted':False})
+                if report['componentPassed']is False and cleanup_end-now()>105 and calls<MAX_CALLS-12:
+                    diagnostic=call(['logs','--app',APP,'--machine',machine['id'],'--no-tail','--json'],
+                                    'failed-original-machine-logs',15,cleanup=True,allow_failure=True,diagnostic=True)
+                    report['machineFailureDiagnostics']={'machineId':machine['id'],'app':APP,
+                        'exitCode':diagnostic['exitCode'],'timedOut':diagnostic['timedOut'],
+                        'stdoutPath':diagnostic['stdoutPath'],'stderrPath':diagnostic['stderrPath'],
+                        'stdoutSha256':digest(diagnostic['stdout']),'stderrSha256':digest(diagnostic['stderr']),
+                        'child':diagnostic['child']}
                 report['machineDestroyIssued'] = True
                 result = call(['machine', 'destroy', machine['id'], '-a', APP, '--force'],
                               'cleanup-destroy-original-machine-once', 25, cleanup=True, allow_failure=True)
@@ -576,7 +641,7 @@ def main():
                         time.sleep(min(1, max(0, cleanup_end - now())))
             # An unobserved/unknown Machine create might still attach later.
             # Even a currently detached volume cannot be deleted in that case.
-            need(not (machine_started and not machine_ack), 'unknown-machine-create-retains-volume')
+            need(not (machine_started and not machine_ack and not machine_cleanup_verified), 'unknown-machine-create-retains-volume')
             if volume is not None:
                 need(volume['id'] not in (protected or {}).get('volumeIds', []), 'protected-volume-cleanup-refused')
                 rows = volumes('cleanup-original-volume', cleanup=True)

@@ -105,6 +105,7 @@ fn capture_sdk_baked_retaining(out:&mut Option<Arc<BakedImageCas>>,descriptors:&
 fn abstract_address(name:&str)->Result<(libc::sockaddr_un,libc::socklen_t)>{ensure!(!name.is_empty()&&name.len()<=100&&!name.contains('\0'),"SDK abstract name invalid");let mut a:libc::sockaddr_un=unsafe{std::mem::zeroed()};a.sun_family=libc::AF_UNIX as _;for(i,b)in name.bytes().enumerate(){a.sun_path[i+1]=b as _;}let n=(std::mem::offset_of!(libc::sockaddr_un,sun_path)+1+name.len())as libc::socklen_t;Ok((a,n))}
 fn peer_pidfd(fd:i32)->Result<OwnedFd>{let mut raw=-1;let mut len=std::mem::size_of::<i32>()as libc::socklen_t;ensure!(unsafe{libc::getsockopt(fd,libc::SOL_SOCKET,77,(&mut raw as *mut i32).cast(),&mut len)}==0&&raw>=0,"SDK kernel SO_PEERPIDFD unavailable");Ok(unsafe{OwnedFd::from_raw_fd(raw)})}
 pub(super) fn validate_workload(value:&serde_json::Value,constraint:&FinalizationConstraint)->Result<()> {
+    constraint.validate_sdk_qualification()?;
     ensure!(value["format_version"]==1&&value["kind"]=="actual-fixed-rust-library-typescript-sdk-workload-v1"&&value["models"]==false&&value["source_authority"]==false&&value["normal_retirement_authority"]==false,"SDK actual workload shape differs");
     let start:u128=value["started_boottime_nanoseconds"].as_str().context("SDK workload start absent")?.parse()?;let end:u128=value["completed_boottime_nanoseconds"].as_str().context("SDK workload end absent")?.parse()?;
     let constraint_data=serde_json::to_value(constraint)?;let cutoff:u128=constraint_data["boottime_deadline_nanoseconds"].as_str().context("SDK original cutoff absent")?.parse()?;ensure!(start>0&&start<=end&&end<cutoff,"SDK workload left original enable clock");
@@ -152,9 +153,18 @@ pub fn run_helper()->Result<()>{helper::run()}
         for field in ["command","environment","working_directory"]{let mut changed=actual.clone();changed["checks"][0][field]=serde_json::json!("different");assert!(validate_selected_rules_workload(&changed,&job).is_err());}
     }
     #[test]fn sdk_fixed_workload_rejects_missing_data_capabilities_and_late_constraints(){
-        let original=FinalizationBudget::begin(Duration::from_secs(30)).unwrap();
-        assert!(validate_workload(&serde_json::json!({}),&original.constraint()).is_err());
-        assert!(validate_workload(&serde_json::json!({"format_version":1,"kind":"actual-fixed-rust-library-typescript-sdk-workload-v1","models":false,"source_authority":false,"normal_retirement_authority":false,"started_boottime_nanoseconds":"1","completed_boottime_nanoseconds":serde_json::to_value(original.constraint()).unwrap()["boottime_deadline_nanoseconds"]}),&original.constraint()).is_err());
+        let original=FinalizationBudget::begin_sdk_qualification().unwrap();let constraint=original.constraint();
+        let cutoff=serde_json::to_value(&constraint).unwrap()["boottime_deadline_nanoseconds"].as_str().unwrap().parse::<u128>().unwrap();
+        let mut workload=serde_json::json!({"format_version":1,"kind":"actual-fixed-rust-library-typescript-sdk-workload-v1","models":false,"source_authority":false,"normal_retirement_authority":false,
+            "started_boottime_nanoseconds":(cutoff-2).to_string(),"completed_boottime_nanoseconds":(cutoff-1).to_string(),"buck2_static":true,
+            "compiler_capabilities":{"CapEff":"0000000000000000","CapPrm":"0000000000000000","CapInh":"0000000000000000","CapAmb":"0000000000000000","CapBnd":"0000000000000000"},
+            "buck2":{"exit_code":0},"rust":{"exit_code":0},"rust_result":{"exit_code":0,"stdout_sha256":digest(b"")},"typescript":{"exit_code":0},
+            "typescript_result":{"exit_code":0,"stdout_sha256":digest(b"rudder-sdk-typescript-ok\n")}});
+        validate_workload(&workload,&constraint).unwrap();
+        assert!(validate_workload(&serde_json::json!({}),&constraint).is_err());
+        let mut capabilities=workload.clone();capabilities["compiler_capabilities"]["CapBnd"]="0000000000000001".into();
+        assert!(validate_workload(&capabilities,&constraint).is_err());
+        workload["completed_boottime_nanoseconds"]=cutoff.to_string().into();assert!(validate_workload(&workload,&constraint).is_err());
     }
 }
 

@@ -232,7 +232,7 @@ impl RootQualification {
     fn poll_inner(&mut self, runtime: &RootRuntimeParent, registration: &mut engine_registration::RootRegistration, host: &mut RootHostControl) -> Result<()> {
         if self.original.is_none() { self.original = Some(runtime.original()?.clone()); }
         self.original.as_ref().unwrap().remaining()?;
-        registration.qualification_original_registration_current()?;
+        registration.qualification_original_registration_current(runtime)?;
         if !host.runtime_qualification_transport_current()? {return Ok(());}
         if self.export.is_none() { let raw = read_native_witness(&self.original_fd)?;
             self.export = Some(serde_json::from_slice(&raw)?); ensure!(canonical_json(self.export.as_ref().unwrap())? == raw, "qualification Native export not canonical"); }

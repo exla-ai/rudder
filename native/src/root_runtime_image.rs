@@ -30,6 +30,24 @@ pub mod environment;
 #[path="root_runtime_uses.rs"]
 mod uses;
 pub use uses::{RuntimePreparationUse,RuntimeNativeUseData};
+/// Select the clock domain only from the authenticated, closed role config.
+/// A serialized constraint alone never selects the larger qualification domain.
+fn sdk_qualification_role(config:&HostIngressConfig)->Result<bool>{
+    config.validate_for_runtime_mount()?;
+    if let Some(scope)=&config.compiler_qualification{scope.validate_config(config)?;Ok(true)}else{Ok(false)}
+}
+pub(super) fn validate_enable_clock_role(constraint:&FinalizationConstraint,config:&HostIngressConfig)->Result<bool>{
+    let qualification=sdk_qualification_role(config)?;
+    if qualification{constraint.validate_sdk_qualification()?;}else{FinalizationConstraint::from_json(&canonical_json(constraint)?)?;}
+    Ok(qualification)
+}
+fn validate_sdk_process_clock(constraint:&FinalizationConstraint,fixed:bool)->Result<()> {
+    if fixed{constraint.validate_sdk_qualification()}else{FinalizationConstraint::from_json(&canonical_json(constraint)?).map(|_|())}
+}
+fn adopt_enable_clock(constraint:&FinalizationConstraint,config:&HostIngressConfig)->Result<FinalizationBudget>{
+    if validate_enable_clock_role(constraint,config)?{FinalizationBudget::from_sdk_qualification_constraint(constraint)}
+    else{FinalizationBudget::from_constraint(constraint)}
+}
 #[derive(Clone,Serialize,Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Enable {version:u32,kind:String,bootstrap_nonce:String,request_nonce:String,constraint:FinalizationConstraint}
@@ -145,7 +163,8 @@ impl RootRuntimeParent {
     pub(super) fn poll_retaining(&mut self,reg:&RootRegistration,host:&RootHostControl,service:&Process)->Result<bool>{
         ensure!(!self.failed&&!self.send_unknown,"runtime original Root offer outcome unknown/closed");
         if !reg.complete(){return Ok(false)}
-        if self.request.is_none(){let original=FinalizationBudget::begin(Duration::from_secs(30))?;original.remaining()?;
+        if self.request.is_none(){let original=if sdk_qualification_role(host.registration_config())?{
+                FinalizationBudget::begin_sdk_qualification()?}else{FinalizationBudget::begin(Duration::from_secs(30))?};original.remaining()?;
             self.original=Some(original);let data=reg.completed_runtime_registration()?;
             ensure!(host.registration_config().image_preseed.as_ref().and_then(|p|p.runtime_mount.as_ref()).is_some(),"runtime image profile not explicitly configured");
             self.request=Some(Enable{version:1,kind:"runtime_image_enable_v1".into(),bootstrap_nonce:data.root_nonce.clone(),request_nonce:uuid::Uuid::new_v4().to_string(),constraint:self.original.as_ref().unwrap().constraint()});
@@ -173,8 +192,8 @@ impl RootRuntimeParent {
     pub(super) fn take_ready_evidence_retaining(&mut self)->Result<OwnedFd>{
         ensure!(self.ready&&!self.failed&&!self.ready_offered,"runtime original ready evidence absent/already offered");
         self.original.as_ref().unwrap().remaining()?;
-        if self.ready_file.is_none(){let bytes=canonical_json(self.ready_evidence.as_ref().context("runtime actual ready ACK evidence absent")?)?;
-            ensure!(bytes.len()<=ready::READY_LIMIT,"runtime ready evidence exceeds bound");self.ready_file=Some(super::sealed_bytes(&bytes)?);}
+        if self.ready_file.is_none(){let bytes=ready::encode_evidence(self.ready_evidence.as_ref().context("runtime actual ready ACK evidence absent")?)?;
+            self.ready_file=Some(super::sealed_bytes(&bytes)?);}
         self.original.as_ref().unwrap().remaining()?;let copy=self.ready_file.as_ref().unwrap().try_clone()?;self.ready_offered=true;Ok(copy)
     }
     pub(super) fn take_engine_endpoint_retaining(&mut self)->Result<OwnedFd>{ensure!(self.ready&&!self.endpoint_offered,"runtime original service ready ACK absent/already offered");
@@ -304,13 +323,15 @@ impl std::error::Error for BootstrapCheck {}
 enum SdkHelperOperation {
     NamespaceMount, RetainedMountReopen, RetainedFloorChdir, IsolatedNamespaces,
     RetainedWorkspaceChdir, UserNamespaceJoin, WorkloadSpawn, WorkloadWait,
-    WorkloadExit, WorkloadResultParse,
+    WorkloadExit, WorkloadResultParse, OriginalClock, OriginalCancellation,
+    OriginalAdmission, OriginalFloor,
 }
 impl SdkHelperOperation {
-    const ALL: [Self; 10] = [Self::NamespaceMount, Self::RetainedMountReopen,
+    const ALL: [Self; 14] = [Self::NamespaceMount, Self::RetainedMountReopen,
         Self::RetainedFloorChdir, Self::IsolatedNamespaces, Self::RetainedWorkspaceChdir,
         Self::UserNamespaceJoin, Self::WorkloadSpawn, Self::WorkloadWait,
-        Self::WorkloadExit, Self::WorkloadResultParse];
+        Self::WorkloadExit, Self::WorkloadResultParse, Self::OriginalClock,
+        Self::OriginalCancellation, Self::OriginalAdmission, Self::OriginalFloor];
     fn label(self) -> &'static str { match self {
         Self::NamespaceMount => "SDK private namespace mount failed",
         Self::RetainedMountReopen => "SDK retained mount reopen failed",
@@ -322,6 +343,10 @@ impl SdkHelperOperation {
         Self::WorkloadWait => "SDK actual isolated workload wait failed",
         Self::WorkloadExit => "SDK actual isolated workload exit failed",
         Self::WorkloadResultParse => "SDK actual workload result parse failed",
+        Self::OriginalClock => "SDK original execution clock unavailable",
+        Self::OriginalCancellation => "SDK original execution cancellation check failed",
+        Self::OriginalAdmission => "SDK original execution admission check failed",
+        Self::OriginalFloor => "SDK original execution floor changed",
     }}
     fn text(self, io_kind: Option<&str>, errno: Option<i32>) -> String {
         let mut text = self.label().to_owned();
@@ -566,7 +591,16 @@ pub(crate) struct RuntimeImageMountOwner {
 }
 impl RuntimeImageMountOwner {
     fn capture_retaining(out:&mut Option<Self>,proof:Arc<RuntimeBootstrapProof>,packet:RuntimePacket,request:Enable)->Result<()>{ensure!(out.is_none(),"runtime mount original owner already exists");
-        let original=FinalizationBudget::from_constraint(&request.constraint).map_err(|error|bootstrap_failure_context(error,BootstrapCheck::RuntimeMountOriginal))?;
+        // Role selection precedes clock adoption and every mount/effect. The
+        // original authenticated Root packet retains these exact descriptors.
+        ensure!(packet.fds.len()==2,"runtime Root offer descriptor count differs");
+        let config=File::from(packet.fds[0].try_clone()?);let m=config.metadata()?;
+        ensure!(m.is_file()&&m.uid()==0&&m.gid()==0&&m.mode()&0o7777==0o600&&m.nlink()==1
+            &&unsafe{libc::fcntl(config.as_raw_fd(),libc::F_GETFL)}&libc::O_ACCMODE==libc::O_RDONLY
+            &&m.len()>0&&m.len()<=host_ingress::MAX_HOST_FRAME as u64,"runtime clock role config differs");
+        let mut bytes=vec![0;usize::try_from(m.len())?];config.read_exact_at(&mut bytes,0)?;
+        let role_config:HostIngressConfig=serde_json::from_slice(&bytes)?;
+        let original=adopt_enable_clock(&request.constraint,&role_config).map_err(|error|bootstrap_failure_context(error,BootstrapCheck::RuntimeMountOriginal))?;
         *out=Some(Self{proof,original,request,raw_offer:packet,admission:None,config:None,baked:None,original_backing:None,manifest_read:None,floor:None,local:None,mount:None,root_fd:None,components:Vec::new(),compiler_sdk:None,selected:Vec::new(),pending_file:None,prepare_check:BootstrapCheck::RuntimeMountOriginal,ready:false,failed:false});
         let owner=out.as_mut().unwrap();let result=owner.prepare().map_err(|error|bootstrap_failure_context(error,owner.prepare_check));if result.is_err(){owner.failed=true;if let Some(a)=&owner.admission{a.closed.store(true,Ordering::Release);a.reads_closed.store(true,Ordering::Release)}
             if let Some(floor)=&owner.floor{floor.close_admission()}if let Some(m)=&owner.mount{m.close_admission();}}result
@@ -579,6 +613,7 @@ impl RuntimeImageMountOwner {
         ensure!(m.is_file()&&m.uid()==0&&m.gid()==0&&m.mode()&0o7777==0o600&&m.nlink()==1
             &&unsafe{libc::fcntl(config.as_raw_fd(),libc::F_GETFL)}&libc::O_ACCMODE==libc::O_RDONLY,"runtime public config is not original readonly Root-protected file");
         let bytes=read_control(&config,host_ingress::MAX_HOST_FRAME,&self.original)?;let data:HostIngressConfig=serde_json::from_slice(&bytes)?;data.validate_for_runtime_mount()?;
+        validate_enable_clock_role(&self.request.constraint,&data)?;
         self.prepare_check=BootstrapCheck::RuntimeMountRegistration;
         let certificate=super::read_sealed_bytes(&self.raw_offer.fds[1],16*1024)?;let reg:CompletedRuntimeRegistration=serde_json::from_slice(&certificate)?;
         ensure!(reg.version==1&&reg.kind=="completed_runtime_registration_v1"&&reg.root_nonce==self.proof.data.nonce&&reg.root_nonce==self.request.bootstrap_nonce

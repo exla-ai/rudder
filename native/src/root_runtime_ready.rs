@@ -2,7 +2,9 @@
 //! Constructors are private to the actual bootstrap/client receipt path.
 use super::*;
 
-pub(super) const READY_LIMIT: usize = 4096;
+// The original ACK includes the finite SDK catalogue, nine C1 tool identities
+// and fixed workload result. Keep writer and sealed reader on the same bound.
+pub(super) const READY_LIMIT: usize = 16 * 1024;
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct ReadyEvidenceData {
@@ -18,6 +20,12 @@ pub(super) struct ReadyEvidenceData {
     pub(super) root_ack_observed_boottime_nanoseconds: String,
 }
 
+pub(super) fn encode_evidence(data: &ReadyEvidenceData) -> Result<Vec<u8>> {
+    let bytes = canonical_json(data)?;
+    ensure!(bytes.len() <= READY_LIMIT, "runtime ready evidence exceeds bound");
+    Ok(bytes)
+}
+
 fn decimal(value: &str) -> Result<u128> {
     ensure!(!value.is_empty() && value.len() <= 20 && value.as_bytes()[0] != b'0'
         && value.bytes().all(|b| b.is_ascii_digit()), "runtime ready original time DATA invalid");
@@ -27,11 +35,13 @@ fn decimal(value: &str) -> Result<u128> {
 /// budget adoption, later readback, lease or replacement deadline is created.
 pub(super) fn original_receipt_window(constraint: &FinalizationConstraint, root: &str, native: &str) -> Result<()> {
     let data = serde_json::to_value(constraint)?;
-    ensure!(data["format_version"] == 1 && data["maximum_milliseconds"] == 30000,
-        "runtime ready original enable bound changed");
+    let milliseconds=if constraint.validate_sdk_qualification().is_ok(){240_000u128}else{
+        FinalizationConstraint::from_json(&canonical_json(constraint)?)?;
+        ensure!(data["maximum_milliseconds"]==30000,"runtime ready original enable bound changed");30_000};
+    let interval=milliseconds*1_000_000;
     let end = decimal(data["boottime_deadline_nanoseconds"].as_str().context("runtime ready original cutoff absent")?)?;
     let root = decimal(root)?; let native = decimal(native)?;
-    ensure!(end >= 30_000_000_000 && root >= end - 30_000_000_000 && root <= native && native < end,
+    ensure!(end >= interval && root >= end - interval && root <= native && native < end,
         "runtime ready original receipt was late/reordered"); Ok(())
 }
 
@@ -53,6 +63,7 @@ impl ReadyOrigin {
         let bytes = super::super::read_sealed_bytes(fd, READY_LIMIT)?;
         let data: ReadyEvidenceData = serde_json::from_slice(&bytes)?;
         let received = super::super::boottime_stamp()?;
+        validate_enable_clock_role(&data.request.constraint,registration.runtime_config_owner().data())?;
         original_receipt_window(&data.request.constraint, &data.root_ack_observed_boottime_nanoseconds, &received)?;
         let r = registration.data();
         ensure!(data.version == 1 && data.kind == "original-runtime-enable-ready-evidence-v1"

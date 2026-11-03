@@ -56,7 +56,12 @@ fn run_inner(check:&mut BootstrapCheck,reaped_inner_stderr:&mut Option<File>)->R
     *check=BootstrapCheck::SdkHelperFloor;
     let mount=&data.mount;mount.validate_data()?;
     ensure!(wire::fd_data(&packet.fds[5])?==mount.floor,"SDK helper held floor differs");
-    let constraint=data.constraint.clone();let original=FinalizationBudget::from_constraint(&constraint)?;original.remaining()?;
+    let constraint=data.constraint.clone();
+    // The fixed workload is selected only by the actual authenticated sealed
+    // Root capsule. A selected source/job cannot adopt this domain.
+    validate_sdk_process_clock(&constraint,data.job.is_null())?;
+    let original=if data.job.is_null(){FinalizationBudget::from_sdk_qualification_constraint(&constraint)?}
+        else{FinalizationBudget::from_constraint(&constraint)?};original.remaining()?;
     let start=original_stat(std::process::id())?.1;ensure!(data.helper_start_ticks==start,"SDK helper original start differs");
     *check=BootstrapCheck::SdkHelperWorkspace;
     let workspace=File::from(packet.fds[6].try_clone()?);let m=workspace.metadata()?;ensure!(m.is_dir()&&m.uid()==1500&&m.gid()==1500&&m.mode()&0o7777==0o700,"SDK helper private work directory differs");

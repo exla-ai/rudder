@@ -39,7 +39,7 @@ impl RootCompilerQualification {
     pub(in crate::root_storage_bootstrap) fn staged(scope:CompilerQualificationScope)->Self{Self{scope,request:None,wire:None,sent:false,pending:None,ack:None,published:false}}
     pub(in crate::root_storage_bootstrap) fn poll_retaining(&mut self,runtime:&RootRuntimeParent,registration:&mut engine_registration::RootRegistration,
         host:&mut RootHostControl,export:&NativeExportData)->Result<bool>{
-        if self.published{return Ok(true)}runtime.original()?.remaining()?;registration.qualification_original_registration_current()?;
+        if self.published{return Ok(true)}runtime.original()?.remaining()?;registration.qualification_original_registration_current(runtime)?;
         self.scope.validate_config(host.registration_config())?;ensure!(export.scope==self.scope.runtime_scope()?,"SDK Native observation belongs to another original purpose");
         if self.request.is_none(){self.request=Some(registration.sign_original_compiler_qualification(runtime,export,&self.scope)?);
             self.wire=Some(canonical_json(&serde_json::json!({"kind":"runtime_image_qualification_ready_v1","rpc_id":export.observation["request_nonce"],"packet":self.request}))?);

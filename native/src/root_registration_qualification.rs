@@ -6,12 +6,12 @@ const REQUEST: &[u8] = b"rudder_runtime_image_qualification_ready_v1\0";
 const RESPONSE: &[u8] = b"rudder_runtime_image_qualification_ack_v1\0";
 
 impl RootRegistration {
-    pub(in crate::root_storage_bootstrap) fn qualification_original_registration_current(&self) -> Result<()> {
-        self.original.remaining()?;self.completed_runtime_registration()?;self.current()?;self.original.remaining()?;Ok(())
+    pub(in crate::root_storage_bootstrap) fn qualification_original_registration_current(&self,runtime:&RootRuntimeParent) -> Result<()> {
+        runtime.original()?.remaining()?;self.completed_runtime_registration()?;self.current()?;runtime.original()?.remaining()?;Ok(())
     }
     pub(in crate::root_storage_bootstrap) fn sign_original_runtime_qualification(&self,
         runtime: &RootRuntimeParent, export: &NativeExportData) -> Result<Envelope<RequestBody>> {
-        self.qualification_original_registration_current()?;
+        self.qualification_original_registration_current(runtime)?;
         let registration = self.completed_runtime_registration()?;
         runtime.check_original_qualification_export(export, &registration, &self.config)?;
         self.current()?;
@@ -19,7 +19,8 @@ impl RootRegistration {
         // Sample the SAME original enable budget immediately before signing.
         // The expired registration/startup budget is not reused or renewed.
         let remaining = u32::try_from(runtime.original()?.remaining()?.as_millis())?;
-        ensure!((1..=30_000).contains(&remaining), "qualification original remaining bound differs");
+        let sdk=super::super::runtime_image::validate_enable_clock_role(&runtime.original()?.constraint(),&self.config)?;
+        ensure!((1..=if sdk{240_000}else{30_000}).contains(&remaining), "qualification original remaining bound differs");
         let body = RequestBody { version: 1, kind: "runtime_image_qualification_ready".into(),
             qualification_id: export.scope.qualification_id.clone(), qualification_nonce: export.scope.qualification_nonce.clone(),
             registration_binding: registration.ack.binding.clone(), root_nonce: self.nonce.clone(),
@@ -27,11 +28,11 @@ impl RootRegistration {
             observation: export.observation.clone(), selected_executables: selected, remaining_milliseconds: remaining };
         let packet = Envelope { mac: sign(&self.key.key.0, REQUEST, &body)?, body };
         ensure!(bytes(&packet)?.len() <= qualification::LIMIT, "qualification signed packet bound");
-        self.current()?;self.original.remaining()?; runtime.original()?.remaining()?; Ok(packet)
+        self.current()?; runtime.original()?.remaining()?; Ok(packet)
     }
     pub(in crate::root_storage_bootstrap) fn verify_original_runtime_qualification_ack(&self,
         runtime: &RootRuntimeParent, request: &Envelope<RequestBody>, ack: &Envelope<AckBody>) -> Result<()> {
-        self.qualification_original_registration_current()?;
+        self.qualification_original_registration_current(runtime)?;
         let registered = self.completed_runtime_registration()?;
         runtime.original()?.remaining()?;
         // Revalidate the genuine current Root owners as well as this request's
@@ -42,7 +43,7 @@ impl RootRegistration {
         verify(&self.key.key.0, REQUEST, &Signed { body: request.body.clone(), mac: request.mac.clone() })?;
         verify(&self.key.key.0, RESPONSE, &Signed { body: ack.body.clone(), mac: ack.mac.clone() })?;
         check_ack_data(&request.body, &ack.body)?;
-        self.current()?;self.original.remaining()?; runtime.original()?.remaining()?; Ok(())
+        self.current()?; runtime.original()?.remaining()?; Ok(())
     }
 }
 

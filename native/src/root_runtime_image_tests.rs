@@ -48,3 +48,13 @@ fn root_uid_and_namespace_alone_do_not_create_runtime_bootstrap_proof(){
     let originals:Vec<_>=raw.iter().map(|fd|fd.try_clone().unwrap()).collect();
     assert!(RuntimeBootstrapProof::capture(raw,&own).is_err());assert!(originals.iter().all(|fd|unsafe{libc::fcntl(fd.as_raw_fd(),libc::F_GETFD)}>=0));drop((b,d));
 }
+
+#[test]
+fn sdk_fixed_and_selected_jobs_require_distinct_clock_domains() {
+    let ordinary=FinalizationBudget::begin(Duration::from_secs(30)).unwrap().constraint();
+    let sdk=FinalizationBudget::begin_sdk_qualification().unwrap().constraint();
+    validate_sdk_process_clock(&ordinary,false).unwrap();
+    validate_sdk_process_clock(&sdk,true).unwrap();
+    assert!(validate_sdk_process_clock(&ordinary,true).is_err());
+    assert!(validate_sdk_process_clock(&sdk,false).is_err());
+}

@@ -21,9 +21,16 @@ The active home was not restarted. Idle adoption remains separate from deploymen
 The first alpha.34 release-check built all three native platforms, then failed
 one JS fixture that calls Linux `/proc/uptime` on macOS (1,044 passed). The
 fixture now explicitly requires Linux; all 14 lifecycle tests pass on Linux.
-Fresh release qualification uses `77f6b5f245a60fca099ee57144859801fd06821a`.
-No alpha.34 npm tag has been pushed. The test-only follow-up does not change the
-deployed Cloud product. Its isolated stock worker smoke passed Root startup and
+The corrected release candidate `368c72f2e53962fe730f33de5a8b4d4126be7331`
+passed all three native platform builds and the qualification suite in
+[CI run 41566733699](https://github.com/exla-ai/rudder/actions/runs/41566733699).
+Its main commit and annotated `v4.0.0-alpha.34` tag were pushed atomically
+without force at 2026-11-03T22:11:11Z. The
+[release workflow](https://github.com/exla-ai/rudder/actions/runs/41728551815)
+reuses the exact revision's qualified artifacts instead of compiling again.
+Registry publication and installation verification remain pending. The
+test-only follow-up does not change the deployed Cloud product.
+Its isolated stock worker smoke passed Root startup and
 UID1500 command checks, then verified destruction and two inventories of absence.
 
 The deployed fixes rebase retained SDK mount descriptors after entering the
@@ -106,8 +113,23 @@ failure frame; a separate retained exact-machine read exited zero and recovered
 that frame. The controller driver has no HOME, and the pinned Fly ELF reproduces
 the same exit/output sizes locally when HOME is absent. Native source also
 applies the ordinary 30-second finalization budget to complete compiler
-qualification. Bounded qualification-domain separation and the log-child HOME
-fix are in progress; no admission is claimed. [Attempt evidence](verification-managed-single-capture-working.json)
+qualification. The log child now uses its existing private input directory as
+HOME and cwd, checks the held directory identity, and retains bounded exit
+diagnostics. Compiler qualification has an explicit
+`compiler_sdk_qualification_v1` domain with one original 240-second deadline;
+ordinary finalization retains its three-field constraint and 30-second limit.
+The deadline is carried unchanged through the fixed helper, ready evidence,
+Native export and signed acknowledgment. Qualification checks actual completed
+registration and current physical owners instead of reusing its expired startup
+clock. The Cloud build, 48 focused protocol/relay/diagnostic tests and TypeScript
+checking pass. Native verification passed seven Engine budget tests, 112 runtime
+tests (12 ignored), 16 role/signing tests and three explicitly selected Linux
+cases: two actual UID1500 helper carriers and one actual sealed-reader case.
+The helper carriers use stand-in payloads, so these results do not authenticate
+a genuine compiler capsule or establish SDK qualification. Local review also found that
+the ready evidence's 4 KiB limit cannot contain either SDK catalog. Its shared
+sealed writer/reader bound is now 16 KiB, with finite A2/C1 payload and oversize
+regressions. No admission is claimed. [Attempt evidence](verification-managed-single-capture-working.json)
 records actual builds, the fresh volume pass and the failed stage. Cleanup
 completed with 40 calls, the protected home unchanged, original controller
 reaped and temporary token revocation acknowledged.

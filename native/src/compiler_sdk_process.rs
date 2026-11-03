@@ -52,11 +52,15 @@ pub(super) struct SdkProcess {proof:Arc<RuntimeBootstrapProof>,admission:Arc<Run
 impl SdkProcess {
     pub(super) fn capture_retaining(out:&mut Option<Self>,proof:Arc<RuntimeBootstrapProof>,admission:Arc<RuntimeReadAdmission>,original:FinalizationBudget,
         root:OwnedFd,data:CompilerSdkMountData,job:Option<serde_json::Value>,job_fds:Option<(OwnedFd,OwnedFd)>,cancel:Option<OwnedFd>)->Result<()> {
-        ensure!(out.is_none(),"original SDK process carrier occupied");*out=Some(Self{proof,admission,original,diagnostic_check:BootstrapCheck::SdkProcessOriginal,startup_read_closure:StartupResultReadClosure::default(),root:Some(root),data:Some(data),helper:Helper::staged(),job,job_fds,
+        ensure!(out.is_none(),"original SDK process carrier occupied");validate_sdk_process_clock(&original.constraint(),job.is_none())?;*out=Some(Self{proof,admission,original,diagnostic_check:BootstrapCheck::SdkProcessOriginal,startup_read_closure:StartupResultReadClosure::default(),root:Some(root),data:Some(data),helper:Helper::staged(),job,job_fds,
             job_child_disposal:None,terminal_failure:None,pipe_error:false,stdout:None,stderr:None,stdout_raw:Vec::new(),stderr_raw:Vec::new(),stdout_eof:false,stderr_eof:false,cancel});Ok(())
     }
-    fn current_build(&self)->Result<()>{self.original.remaining()?;if let Some(fd)=&self.cancel{check_cancel(fd)?;}self.admission.current()?;self.proof.current()?;
-        ensure!(wire::fd_data(self.root.as_ref().unwrap())?==self.data.as_ref().unwrap().floor,"SDK original execution floor changed");Ok(())}
+    fn current_build(&self)->Result<()>{
+        self.original.remaining().context(SdkHelperOperation::OriginalClock)?;
+        if let Some(fd)=&self.cancel{check_cancel(fd).context(SdkHelperOperation::OriginalCancellation)?;}
+        self.admission.current().context(SdkHelperOperation::OriginalAdmission)?;self.proof.current()?;
+        (||->Result<()>{ensure!(wire::fd_data(self.root.as_ref().unwrap())?==self.data.as_ref().unwrap().floor,"SDK original execution floor changed");Ok(())})()
+            .context(SdkHelperOperation::OriginalFloor)?;Ok(())}
     pub(super) fn result_data(&self)->Result<&CompilerSdkProbeData>{ensure!(self.helper.exit.as_ref().is_some_and(ExitStatus::success)&&self.stdout_eof&&self.stderr_eof,"SDK actual exit/full pipe EOF absent");self.helper.result.as_ref().context("SDK actual original result absent")}
     fn drain_retaining(&mut self)->Result<()> {
         fn read(fd:i32,raw:&mut Vec<u8>,eof:&mut bool)->Result<()>{if *eof{return Ok(())}let mut bytes=[0u8;4096];for _ in 0..16{let n=unsafe{libc::read(fd,bytes.as_mut_ptr().cast(),bytes.len())};
@@ -64,7 +68,7 @@ impl SdkProcess {
         let result=(||->Result<()>{if let Some(fd)=&self.stdout{read(fd.as_raw_fd(),&mut self.stdout_raw,&mut self.stdout_eof)?;}if let Some(fd)=&self.stderr{read(fd.as_raw_fd(),&mut self.stderr_raw,&mut self.stderr_eof)?;}Ok(())})();
         if result.is_err(){self.pipe_error=true;}result
     }
-    pub(super) fn run_retaining(&mut self)->Result<()> {self.start_retaining()?;loop{if self.poll_retaining()?{return Ok(())}std::thread::sleep(self.original.remaining().map_err(|error|bootstrap_failure_context(error,BootstrapCheck::SdkProcessOriginal))?.min(Duration::from_millis(1)));}}
+    pub(super) fn run_retaining(&mut self)->Result<()> {self.start_retaining()?;loop{if self.poll_retaining()?{return Ok(())}std::thread::sleep(self.original.remaining().context(SdkHelperOperation::OriginalClock).map_err(|error|bootstrap_failure_context(error,BootstrapCheck::SdkProcessOriginal))?.min(Duration::from_millis(1)));}}
     pub(super) fn poll_retaining(&mut self)->Result<bool>{
         self.diagnostic_check=BootstrapCheck::SdkProcessOriginal;
         let result=(||{self.current_build()?;self.poll_helper()})();

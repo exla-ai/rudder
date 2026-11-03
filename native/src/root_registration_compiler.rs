@@ -12,11 +12,11 @@ impl RootRegistration {
         let sdk=runtime.compiler_qualification_ack_data()?;ensure!(sdk.mount.catalog==scope.sdk,"SDK fixed workload differs from original protected catalog");
         let mut body=serde_json::to_value(base.body)?;body["kind"]="compiler_sdk_qualification_ready".into();body["scope"]=serde_json::to_value(scope)?;body["sdk_proof"]=serde_json::to_value(sdk)?;body["sdk_proof"]["mount"].as_object_mut().unwrap().remove("catalog"); // scope already binds this exact catalog.
         let request=Envelope{mac:sign(&self.key.key.0,SDK_REQUEST,&body)?,body};ensure!(bytes(&request)?.len()<=qualification::LIMIT,"SDK signed request bound");
-        self.qualification_original_registration_current()?;runtime.original()?.remaining()?;Ok(request)
+        self.qualification_original_registration_current(runtime)?;runtime.original()?.remaining()?;Ok(request)
     }
     pub(in crate::root_storage_bootstrap) fn verify_original_compiler_qualification_ack(&self,runtime:&RootRuntimeParent,export:&NativeExportData,
         scope:&CompilerQualificationScope,request:&Envelope<serde_json::Value>,ack:&Envelope<serde_json::Value>)->Result<()> {
-        self.qualification_original_registration_current()?;scope.validate_config(&self.config)?;
+        self.qualification_original_registration_current(runtime)?;scope.validate_config(&self.config)?;
         let registered=self.completed_runtime_registration()?;
         runtime.check_original_qualification_export(export,&registered,&self.config)?;
         let sdk=runtime.compiler_qualification_ack_data()?;
@@ -38,6 +38,6 @@ impl RootRegistration {
             &&result["inventory"]==serde_json::to_value(&scope.sdk.inventory)?&&result["manifest"]==serde_json::to_value(&scope.sdk.manifest)?&&result["installer_input"]==serde_json::to_value(&scope.sdk.installer_input)?,"SDK published semantic role differs");
         let expected=serde_json::json!({"format_version":1,"role":"immutable-compiler-sdk-role-v1","profile_id":scope.sdk.profile_id,"artifact_manifest":scope.sdk.artifact_manifest,"manifest":scope.sdk.manifest,"installer_input":scope.sdk.installer_input});
         ensure!(result["role_binding_sha256"]==hex(&Sha256::digest(bytes(&expected)?)),"SDK acknowledged a different semantic role");
-        self.qualification_original_registration_current()?;runtime.original()?.remaining()?;Ok(())
+        self.qualification_original_registration_current(runtime)?;runtime.original()?.remaining()?;Ok(())
     }
 }

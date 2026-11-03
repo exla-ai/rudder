@@ -16,7 +16,21 @@ use std::{
 
 const MAX_MILLISECONDS: u32 = 30_000;
 pub const FINALIZATION_POLICY_LIMIT: Duration = Duration::from_millis(MAX_MILLISECONDS as u64);
+/// Separate fixed qualification clock, below the outer SDK driver's 300s.
+pub const SDK_QUALIFICATION_POLICY_LIMIT: Duration = Duration::from_secs(240);
 const MAX_CONSTRAINT_BYTES: usize = 256;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+enum ConstraintDomain {
+    #[default]
+    #[serde(skip)]
+    Ordinary,
+    #[serde(rename = "compiler_sdk_qualification_v1")]
+    SdkQualification,
+}
+impl ConstraintDomain {
+    fn ordinary(&self) -> bool { *self == Self::Ordinary }
+}
 const NS_PER_MS: u128 = 1_000_000;
 type Clock = Arc<dyn Fn() -> Result<u128> + Send + Sync>;
 
@@ -32,6 +46,8 @@ pub struct FinalizationConstraint {
     format_version: u32,
     maximum_milliseconds: u32,
     boottime_deadline_nanoseconds: String,
+    #[serde(default, skip_serializing_if = "ConstraintDomain::ordinary")]
+    domain: ConstraintDomain,
 }
 
 impl FinalizationConstraint {
@@ -49,11 +65,22 @@ impl FinalizationConstraint {
         Ok(value)
     }
 
-    fn deadline(&self) -> Result<u128> {
+    /// Explicit DATA validation for a fixed, authenticated SDK qualification.
+    /// Callers must validate their role/mode before adopting this time bound.
+    pub fn validate_sdk_qualification(&self) -> Result<()> {
+        self.deadline_in(ConstraintDomain::SdkQualification).map(|_| ())
+    }
+
+    fn deadline(&self) -> Result<u128> { self.deadline_in(ConstraintDomain::Ordinary) }
+
+    fn deadline_in(&self, domain: ConstraintDomain) -> Result<u128> {
+        let valid_maximum = match domain {
+            ConstraintDomain::Ordinary => (1..=MAX_MILLISECONDS).contains(&self.maximum_milliseconds),
+            ConstraintDomain::SdkQualification => self.maximum_milliseconds == 240_000,
+        };
         let text = &self.boottime_deadline_nanoseconds;
         ensure!(
-            self.format_version == 1
-                && (1..=MAX_MILLISECONDS).contains(&self.maximum_milliseconds)
+            self.format_version == 1 && self.domain == domain && valid_maximum
                 && !text.is_empty()
                 && text.len() <= 20
                 && !text.starts_with('0')
@@ -88,6 +115,18 @@ impl FinalizationBudget {
     /// clock. A saved constraint creates no authority and cannot renew its time.
     pub fn from_constraint(constraint: &FinalizationConstraint) -> Result<Self> {
         Self::adopt_with_clock(constraint.clone(), Self::host_clock()?)
+    }
+
+    /// Begin ONCE, only after authenticated fixed SDK qualification admission.
+    /// Selected jobs and ordinary runtime/finalization must use begin().
+    pub fn begin_sdk_qualification() -> Result<Self> {
+        Self::begin_in(SDK_QUALIFICATION_POLICY_LIMIT, Self::host_clock()?, ConstraintDomain::SdkQualification)
+    }
+
+    /// Explicit qualification-only adopter. Ordinary from_constraint rejects it.
+    /// This bounds time; it does not authenticate the caller's role or request.
+    pub fn from_sdk_qualification_constraint(constraint: &FinalizationConstraint) -> Result<Self> {
+        Self::adopt_in(constraint.clone(), Self::host_clock()?, ConstraintDomain::SdkQualification)
     }
 
     pub fn constraint(&self) -> FinalizationConstraint {
@@ -175,8 +214,15 @@ impl FinalizationBudget {
     }
 
     pub(super) fn begin_with_clock(maximum: Duration, clock: Clock) -> Result<Self> {
+        Self::begin_in(maximum, clock, ConstraintDomain::Ordinary)
+    }
+
+    fn begin_in(maximum: Duration, clock: Clock, domain: ConstraintDomain) -> Result<Self> {
         ensure!(
-            !maximum.is_zero() && maximum <= FINALIZATION_POLICY_LIMIT,
+            !maximum.is_zero() && match domain {
+                ConstraintDomain::Ordinary => maximum <= FINALIZATION_POLICY_LIMIT,
+                ConstraintDomain::SdkQualification => maximum == SDK_QUALIFICATION_POLICY_LIMIT,
+            },
             "finalization budget exceeds bounded policy"
         );
         let milliseconds = u32::try_from(maximum.as_millis()).map_err(|_| fault())?;
@@ -193,18 +239,22 @@ impl FinalizationBudget {
         let constraint = FinalizationConstraint {
             format_version: 1,
             maximum_milliseconds: milliseconds,
-            boottime_deadline_nanoseconds: deadline.to_string(),
+            boottime_deadline_nanoseconds: deadline.to_string(), domain,
         };
-        Self::from_sample(constraint, clock, now)
+        Self::from_sample(constraint, clock, now, domain)
     }
 
     pub(super) fn adopt_with_clock(constraint: FinalizationConstraint, clock: Clock) -> Result<Self> {
-        let now = clock().map_err(|_| fault())?;
-        Self::from_sample(constraint, clock, now)
+        Self::adopt_in(constraint, clock, ConstraintDomain::Ordinary)
     }
 
-    fn from_sample(constraint: FinalizationConstraint, clock: Clock, now: u128) -> Result<Self> {
-        let deadline = constraint.deadline()?;
+    fn adopt_in(constraint: FinalizationConstraint, clock: Clock, domain: ConstraintDomain) -> Result<Self> {
+        let now = clock().map_err(|_| fault())?;
+        Self::from_sample(constraint, clock, now, domain)
+    }
+
+    fn from_sample(constraint: FinalizationConstraint, clock: Clock, now: u128, domain: ConstraintDomain) -> Result<Self> {
+        let deadline = constraint.deadline_in(domain)?;
         ensure!(
             deadline > now && deadline - now <= constraint.maximum_milliseconds as u128 * NS_PER_MS,
             "finalization constraint expired or differs from host clock"
@@ -321,6 +371,66 @@ mod tests {
         ] {
             assert!(FinalizationBudget::begin_with_clock(duration, clock.clone()).is_err());
         }
+    }
+
+    #[test]
+    fn sdk_domain_is_explicit_and_ordinary_encoding_and_limits_stay_strict() {
+        let (_, ordinary) = fixture(1_000_000_000, 30_000);
+        let raw = serde_json::to_value(ordinary.constraint()).unwrap();
+        assert_eq!(raw.as_object().unwrap().len(), 3);
+        assert!(raw.get("domain").is_none());
+        let clock: Clock = Arc::new(|| Ok(1_000_000_000));
+        let sdk = FinalizationBudget::begin_in(SDK_QUALIFICATION_POLICY_LIMIT, clock.clone(), ConstraintDomain::SdkQualification).unwrap();
+        let constraint = sdk.constraint();
+        constraint.validate_sdk_qualification().unwrap();
+        assert!(constraint.maximum().is_err());
+        assert!(FinalizationConstraint::from_json(&serde_json::to_vec(&constraint).unwrap()).is_err());
+        assert!(FinalizationBudget::adopt_with_clock(constraint.clone(), clock.clone()).is_err());
+        assert!(FinalizationBudget::adopt_in(ordinary.constraint(), clock.clone(), ConstraintDomain::SdkQualification).is_err());
+        for maximum in [0, 30_000, 239_999, 240_001] {
+            let mut invalid = constraint.clone(); invalid.maximum_milliseconds = maximum;
+            assert!(invalid.validate_sdk_qualification().is_err());
+        }
+        for domain in [serde_json::Value::Null, serde_json::json!("ordinary"), serde_json::json!("compiler_sdk_qualification_v2")] {
+            let mut value = serde_json::to_value(&constraint).unwrap(); value["domain"] = domain;
+            assert!(serde_json::from_value::<FinalizationConstraint>(value).is_err());
+        }
+        assert!(FinalizationBudget::begin_with_clock(Duration::from_secs(240), clock.clone()).is_err());
+        assert!(FinalizationBudget::begin_in(Duration::from_secs(241), clock, ConstraintDomain::SdkQualification).is_err());
+    }
+
+    #[test]
+    fn sdk_cross_phase_time_is_charged_once_beyond_thirty_seconds_without_sleep() {
+        let now = Arc::new(AtomicU64::new(1_000_000_000));
+        let sampled = now.clone();
+        let clock: Clock = Arc::new(move || Ok(sampled.load(Ordering::Acquire) as u128));
+        let original = FinalizationBudget::begin_in(SDK_QUALIFICATION_POLICY_LIMIT, clock.clone(), ConstraintDomain::SdkQualification).unwrap();
+        let constraint = original.constraint();
+        now.store(41_000_000_000, Ordering::Release);
+        let helper = FinalizationBudget::adopt_in(constraint.clone(), clock.clone(), ConstraintDomain::SdkQualification).unwrap();
+        assert_eq!(helper.remaining().unwrap(), Duration::from_secs(200));
+        now.store(101_000_000_000, Ordering::Release);
+        assert_eq!(original.remaining().unwrap(), Duration::from_secs(140));
+        assert_eq!(helper.remaining().unwrap(), Duration::from_secs(140));
+        assert_eq!(helper.constraint(), constraint);
+        now.store(240_000_000_000, Ordering::Release);
+        assert_eq!(helper.remaining().unwrap(), Duration::from_secs(1));
+        now.store(241_000_000_000, Ordering::Release);
+        assert!(helper.remaining().is_err()); assert!(original.remaining().is_err());
+        assert!(FinalizationBudget::adopt_in(constraint.clone(), clock, ConstraintDomain::SdkQualification).is_err());
+        assert_eq!(original.constraint(), constraint);
+    }
+
+    #[test]
+    fn sdk_cancellation_and_clock_faults_remain_absorbing() {
+        let now = Arc::new(AtomicU64::new(1_000_000_000)); let sampled = now.clone();
+        let clock: Clock = Arc::new(move || Ok(sampled.load(Ordering::Acquire) as u128));
+        let original = FinalizationBudget::begin_in(SDK_QUALIFICATION_POLICY_LIMIT, clock.clone(), ConstraintDomain::SdkQualification).unwrap();
+        let retained = original.clone(); original.cancel();
+        assert!(retained.remaining().is_err()); assert_eq!(retained.constraint(), original.constraint());
+        let regressed = FinalizationBudget::begin_in(SDK_QUALIFICATION_POLICY_LIMIT, clock, ConstraintDomain::SdkQualification).unwrap();
+        now.store(999_999_999, Ordering::Release); assert!(regressed.remaining().is_err());
+        now.store(2_000_000_000, Ordering::Release); assert!(regressed.remaining().is_err());
     }
 
     #[cfg(unix)]

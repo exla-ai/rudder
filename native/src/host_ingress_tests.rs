@@ -132,3 +132,23 @@ fn qualification_scope_requires_exact_protected_image_roots_and_nonces() {
     let mut changed=scope.clone();changed.inventory.digest="0".repeat(64);assert!(changed.validate_config(&data).is_err());
     let mut changed=scope;changed.manifest.size_bytes=32*1024*1024+1;assert!(changed.validate_config(&data).is_err());
 }
+
+#[test]
+fn sdk_qualification_clock_requires_exact_closed_role_and_mode() {
+    use super::super::runtime_image::validate_enable_clock_role;
+    let mut data=config();let scope=qualification_scope_data_for_test();
+    data.image_preseed=Some(HostImagePreseedPolicy{image:scope.image.clone(),image_receipt_sha256:scope.image_receipt_sha256.clone(),
+        full_manifest_sha256:scope.manifest.digest.clone(),batch_transport:None,
+        runtime_mount:Some(HostBakedRuntimePolicy{profile:"baked-cas-v1".into(),inventory:scope.inventory.clone()})});
+    data.runtime_qualification=Some(scope.clone());
+    let ordinary=FinalizationBudget::begin(Duration::from_secs(30)).unwrap().constraint();
+    let sdk=FinalizationBudget::begin_sdk_qualification().unwrap().constraint();
+    assert!(!validate_enable_clock_role(&ordinary,&data).unwrap());
+    assert!(validate_enable_clock_role(&sdk,&data).is_err());
+    let catalog=rudder_engine::execution::compiler_sdk::compiler_sdk_profiles_data()[0].catalog_data();
+    let mut raw=serde_json::to_value(scope).unwrap();raw["scope"]=serde_json::json!("disposable-fixed-compiler-sdk-only");raw["sdk"]=serde_json::to_value(&catalog).unwrap();
+    data.compiler_sdk=Some(catalog);data.compiler_qualification=Some(serde_json::from_value(raw).unwrap());
+    assert!(validate_enable_clock_role(&sdk,&data).unwrap());
+    assert!(validate_enable_clock_role(&ordinary,&data).is_err());
+    data.compiler_sdk=None;assert!(validate_enable_clock_role(&sdk,&data).is_err());
+}

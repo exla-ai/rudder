@@ -102,3 +102,26 @@ fn prepare_validation_diagnostic_keeps_original_clock_cancelled_and_never_format
     drop(error);
     assert_eq!(drops.load(Ordering::SeqCst), 1);
 }
+
+#[test]
+fn sdk_original_execution_subchecks_emit_only_fixed_operation_context() {
+    for operation in [SdkHelperOperation::OriginalClock,SdkHelperOperation::OriginalCancellation,
+        SdkHelperOperation::OriginalAdmission,SdkHelperOperation::OriginalFloor] {
+        let drops=Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let original=anyhow::Error::new(PrivateCause(drops.clone())).context(operation)
+            .context(BootstrapCheck::SdkProcessOriginal);
+        let diagnostic=retained_bootstrap_diagnostic(&original,BootstrapCheck::RuntimeMountSdk);
+        let frame=storage::retained_failure_data("root_storage","serve_runtime",Some(&diagnostic));
+        assert_eq!(frame["check"],"SdkProcessOriginal");
+        assert_eq!(frame["class"],"validation_or_other");
+        assert_eq!(frame["error_text"],operation.label());
+        assert!(frame["io_kind"].is_null()&&frame["errno"].is_null());
+        assert_eq!(drops.load(Ordering::SeqCst),0);
+        drop(original);assert_eq!(drops.load(Ordering::SeqCst),1);
+    }
+    let original=FinalizationBudget::begin_sdk_qualification().unwrap();original.cancel();
+    let error=original.remaining().context(SdkHelperOperation::OriginalClock).unwrap_err()
+        .context(BootstrapCheck::SdkProcessOriginal);
+    let frame=storage::retained_failure_data("root_storage","serve_runtime",Some(&error));
+    assert_eq!(frame["error_text"],"SDK original execution clock unavailable");
+}

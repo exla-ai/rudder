@@ -111,7 +111,13 @@ fn exercise(selected: bool) {
             ensure!(raw >= 0, "local original cancellation unavailable");
             let cancel = unsafe { OwnedFd::from_raw_fd(raw) };
             let request = serde_json::json!({"kind":"local-test-data-only"});
-            let original = FinalizationBudget::begin(Duration::from_secs(10))?;
+            let original = if selected { FinalizationBudget::begin(Duration::from_secs(10))? }
+                else { FinalizationBudget::begin_sdk_qualification()? };
+            let constraint = original.constraint();
+            validate_sdk_process_clock(&constraint, !selected)?;
+            let original = if selected { FinalizationBudget::from_constraint(&constraint)? }
+                else { FinalizationBudget::from_sdk_qualification_constraint(&constraint)? };
+            ensure!(original.constraint() == constraint, "local original SDK constraint changed");
             let mut stderr = None;
             let result = run_namespace_retaining(userns, &floor, &workspace, &original,
                 selected.then_some((&request, &source, &output, &cancel)), &mut stderr);

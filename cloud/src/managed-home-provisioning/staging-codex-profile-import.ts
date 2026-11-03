@@ -12,6 +12,45 @@ import {check,fail,snapshot,uuid} from "./types.js";
 
 const ACK=Buffer.from("CODEX_OAUTH_ACCESS_SNAPSHOT_IMPORTED_V1\n");
 const HELD=new Set<OriginalStagingCodexProfileImport<any>>();
+/** The committed transport can precede Native's independent home creation.
+ * Wait inside the SAME remote process without consuming credential stdin or
+ * invoking the importer until that exact private home exists. Only absence
+ * waits; an invalid/replaced home refuses. The original host deadline still
+ * owns this invocation and bounds readiness plus the one actual import. */
+export const STAGING_CODEX_IMPORT_REMOTE_SOURCE=String.raw`
+import {constants} from 'node:fs';
+import {lstat,realpath,open} from 'node:fs/promises';
+import {performance} from 'node:perf_hooks';
+import {setTimeout as sleep} from 'node:timers/promises';
+import {pathToFileURL} from 'node:url';
+let held,timer;
+try {
+ const [home,budgetText,cli]=process.argv.slice(1),budget=Number(budgetText);
+ if(process.argv.length!==4||process.geteuid()!==1500||process.getegid()!==1500
+  ||!Number.isSafeInteger(budget)||budget<=0||budget>20000)throw 0;
+ const end=performance.now()+budget;
+ timer=setTimeout(()=>process.exit(1),budget);
+ let before;
+ for(;;){
+  if(performance.now()>=end)throw 0;
+  try{before=await lstat(home,{bigint:true});break;}
+  catch(error){if(error?.code!=='ENOENT')throw 0;}
+  await sleep(Math.min(25,Math.max(1,end-performance.now())));
+ }
+ const same=s=>s.dev===before.dev&&s.ino===before.ino&&s.mode===before.mode
+  &&s.uid===before.uid&&s.gid===before.gid;
+ if(!before.isDirectory()||before.uid!==1500n||before.gid!==1500n
+  ||(before.mode&0o7777n)!==0o700n||await realpath(home)!==home)throw 0;
+ held=await open(home,constants.O_RDONLY|constants.O_DIRECTORY|constants.O_NOFOLLOW);
+ if(!same(await held.stat({bigint:true}))||!same(await lstat(home,{bigint:true}))
+  ||await realpath(home)!==home||performance.now()>=end)throw 0;
+ process.env.RUDDER_HOME=home;
+ process.argv=[process.execPath,cli,'import-codex-oauth-access-snapshot'];
+ await import(pathToFileURL(cli).href);
+}catch{process.exitCode=1;}
+finally{if(timer)clearTimeout(timer);try{await held?.close();}catch{process.exitCode=1;}}
+`;
+function shellQuote(value:string){return "'"+value.replace(/'/g,"'\\''")+"'";}
 export type CodexImportTarget=Readonly<{app:string;machine:string;instanceId:string;projectId:string;home:string}>;
 export type CodexImportOriginal<S extends object>=Readonly<{
  registry:ManagedHomeRegistry;route:ManagedHomeRoute;sessions:HomeControlSessions<S,unknown>;
@@ -107,7 +146,7 @@ export class OriginalStagingCodexProfileImport<S extends object>{
   child.on("error",()=>this.#stop("original_child_error"));
   child.once("exit",(code,signal)=>{this.#exit=code;this.#signal=signal;this.#exitObserved=typeof code==="number"&&Number.isInteger(code)||typeof signal==="string"&&signal.length>0;if(!this.#exitObserved)this.#error("invalid_original_exit");this.#finish();});
   child.once("close",()=>{this.#closed=true;this.#finish();});
-  const command=`/usr/bin/env RUDDER_HOME=${this.#target.home} /usr/local/bin/node /opt/rudder/dist/managed-task-profile-cli.js import-codex-oauth-access-snapshot`;
+  const command=`/usr/local/bin/node --input-type=module -e ${shellQuote(STAGING_CODEX_IMPORT_REMOTE_SOURCE)} ${shellQuote(this.#target.home)} ${this.#remaining()} /opt/rudder/dist/managed-task-profile-cli.js`;
   const args=[this.executable,"ssh","console","--app",this.#target.app,"--machine",this.#target.machine,"--user","rudder","--quiet","-C",command];
   const env:NodeJS.ProcessEnv={...process.env,FLY_API_TOKEN:this.#token};delete env.FLY_ACCESS_TOKEN;
   this.#local();check(!this.#errors.length,"expired");this.#spawnAttempted=true;

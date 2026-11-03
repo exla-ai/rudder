@@ -71,6 +71,20 @@ separate observations; missing custody remains unknown. Genuine SDK admission,
 runtime admission, ordinary OAuth task execution and normal retirement remain
 unqualified. The earlier continuation below preserves historical evidence.
 
+The access-snapshot validators now accept the provider's observed multiday token
+lifetime with a 14-day input sanity bound; they still require matching JWT
+expiry, account and selected profile. Six Native snapshot checks and 17 Cloud
+import/entry checks passed. No refresh token is transferred and the normal
+profile store is unchanged. Fourteen retained-import checks also cover the
+startup race where the transport commits before Native creates the home. The
+same remote process waits only for absence, validates the private home and then
+invokes the actual CLI once; the original deadline covers both steps. Linux
+tests use UID/GID1500 and the actual emitted CLI/store. The controller image installs the pinned Fly ELF at
+the path used by diagnostics and the private import process. The first captured
+remote build is running; its generated JavaScript and source archive are retained
+without repeating source qualification or per-layer review receipts. The final
+shared capture includes the controller readiness fix.
+
 ## Current state, 2026-11-01
 
 The shipped Cloud release is alpha.33, Fly release176, product revision

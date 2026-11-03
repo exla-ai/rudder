@@ -4,7 +4,12 @@ import {EventEmitter} from 'node:events';
 import {PassThrough} from 'node:stream';
 import {setImmediate as turn} from 'node:timers/promises';
 import {inspect} from 'node:util';
-import {OriginalStagingCodexProfileImport,validateStagingCodexAccessSnapshot} from '../cloud/dist/managed-home-provisioning/staging-codex-profile-import.js';
+import {spawn} from 'node:child_process';
+import {mkdtemp,mkdir,writeFile,readFile,rm,symlink,stat,chmod} from 'node:fs/promises';
+import {tmpdir} from 'node:os';
+import {join} from 'node:path';
+import {setTimeout as delay} from 'node:timers/promises';
+import {OriginalStagingCodexProfileImport,validateStagingCodexAccessSnapshot,STAGING_CODEX_IMPORT_REMOTE_SOURCE} from '../cloud/dist/managed-home-provisioning/staging-codex-profile-import.js';
 const profile='openai-codex:default';
 const target={app:'rudder-mh-0123456789ab4cde81230123456789ab',machine:'1855366c049e08',instanceId:'01M670MG4A8E0DWE9GA1C0PQ92',projectId:'01234567-89ab-4cde-8123-0123456789ab',home:'/workspace/fresh-v4/01234567-89ab-4cde-8123-0123456789ab/home'};
 const ack='CODEX_OAUTH_ACCESS_SNAPSHOT_IMPORTED_V1\n';
@@ -30,7 +35,11 @@ test('strict closed snapshot independently binds JWT expiration/account/plan and
 test('original one-shot sends only stdin to exact home; env sanitizes Fly alternate token',async()=>{
  const old=process.env.FLY_ACCESS_TOKEN;process.env.FLY_ACCESS_TOKEN='inherited';try{
  const f=fixture(),expected=Buffer.from(f.raw),{run}=await spawned(f);f.raw.fill(120);const o=f.child.options;
- assert.deepEqual(o.args,['/explicit/flyctl','ssh','console','--app',target.app,'--machine',target.machine,'--user','rudder','--quiet','-C',`/usr/bin/env RUDDER_HOME=${target.home} /usr/local/bin/node /opt/rudder/dist/managed-task-profile-cli.js import-codex-oauth-access-snapshot`]);
+ assert.deepEqual(o.args.slice(0,-1),['/explicit/flyctl','ssh','console','--app',target.app,'--machine',target.machine,'--user','rudder','--quiet','-C']);
+ const command=o.args.at(-1),escaped=STAGING_CODEX_IMPORT_REMOTE_SOURCE.replace(/'/g,"'\\''");
+ assert(command.startsWith(`/usr/local/bin/node --input-type=module -e '${escaped}' '${target.home}' `));
+ const budget=Number(command.slice(command.lastIndexOf(`'${target.home}' `)+target.home.length+3).split(' ')[0]);assert(Number.isInteger(budget)&&budget>0&&budget<=10000);
+ assert(command.endsWith(' /opt/rudder/dist/managed-task-profile-cli.js'));
  assert.deepEqual(Buffer.concat(f.child.input),expected);assert(!JSON.stringify(o).includes(JSON.parse(expected).accessToken));assert(o.envPairs.includes('FLY_API_TOKEN=private-fly-token'));assert(!o.envPairs.some(x=>x.startsWith('FLY_ACCESS_TOKEN=')));
  assert(!inspect(f.read).includes('private-fly-token'));assert.throws(()=>JSON.stringify(f.read));assert.throws(()=>f.read.startRetaining());f.child.settle();await run;assert(f.read.statusData().imported);assert.equal(f.allocations(),1);assert.equal(f.targets(),2);
  }finally{if(old===undefined)delete process.env.FLY_ACCESS_TOKEN;else process.env.FLY_ACCESS_TOKEN=old;}
@@ -68,4 +77,66 @@ test('valid multiday access retains exact JWT expiry without renewing finite tra
  }
  const exp=Math.floor(Date.now()/1000)+14*86400+2;
  assert.throws(()=>validateStagingCodexAccessSnapshot(wire({expiresAtMs:exp*1000},{exp}),profile));
+});
+
+const localHomePrerequisite=process.platform!=='linux'||process.geteuid?.()!==1500||process.getegid?.()!==1500
+ ? 'Actual remote readiness regression requires Linux UID/GID1500.' : false;
+async function remoteFixture(t){
+ const root=await mkdtemp(join(tmpdir(),'rudder-profile-home-')),home=join(root,'home'),cli=join(root,'cli.mjs'),flag=join(root,'imported');
+ t.after(()=>rm(root,{recursive:true,force:true}));
+ await writeFile(cli,`import assert from 'node:assert/strict';import {appendFile} from 'node:fs/promises';
+assert.equal(process.env.RUDDER_HOME,${JSON.stringify(home)});
+assert.deepEqual(process.argv.slice(2),['import-codex-oauth-access-snapshot']);
+let input='';for await(const part of process.stdin)input+=part;
+assert.equal(input,'synthetic-stdin-only');
+await appendFile(${JSON.stringify(flag)},String(process.pid)+'\\n',{mode:0o600});
+process.stdout.write(${JSON.stringify(ack)});`,{mode:0o600});
+ function run(budget=1000,entry=cli,input='synthetic-stdin-only'){
+  const child=spawn(process.execPath,['--input-type=module','-e',STAGING_CODEX_IMPORT_REMOTE_SOURCE,home,String(budget),entry],{stdio:['pipe','pipe','pipe']});
+  const out=[],err=[];child.stdout.on('data',b=>out.push(b));child.stderr.on('data',b=>err.push(b));
+  child.stdin.on('error',()=>{});child.stdin.end(input);
+  const timer=setTimeout(()=>child.kill('SIGKILL'),5000);
+  const result=new Promise((resolve,reject)=>{child.once('error',reject);child.once('close',(code,signal)=>{clearTimeout(timer);resolve({code,signal,out:Buffer.concat(out).toString(),err:Buffer.concat(err).toString()});});});
+  return {child,result};
+ }
+ return {root,home,flag,run};
+}
+test('actual UID1500 remote process waits for Native home then imports once in that same process',{skip:localHomePrerequisite},async t=>{
+ const f=await remoteFixture(t),{child,result}=f.run();
+ await delay(125);await assert.rejects(readFile(f.flag),{code:'ENOENT'});
+ await mkdir(f.home,{mode:0o700});
+ assert.deepEqual(await result,{code:0,signal:null,out:ack,err:''});
+ assert.equal(await readFile(f.flag,'utf8'),`${child.pid}\n`);
+});
+test('absent home consumes the existing readiness budget without invoking credential importer',{skip:localHomePrerequisite},async t=>{
+ const f=await remoteFixture(t),{result}=f.run(100);
+ assert.deepEqual(await result,{code:1,signal:null,out:'',err:''});
+ await assert.rejects(readFile(f.flag),{code:'ENOENT'});
+ await assert.rejects(readFile(f.home),{code:'ENOENT'});
+});
+test('present nonprivate or symlink home refuses without import or repair',{skip:localHomePrerequisite},async t=>{
+ for(const kind of ['nonprivate','symlink']){
+  const f=await remoteFixture(t);
+  if(kind==='nonprivate'){await mkdir(f.home,{mode:0o755});await chmod(f.home,0o755);}
+  else{const actual=join(f.root,'actual');await mkdir(actual,{mode:0o700});await symlink(actual,f.home);}
+  assert.deepEqual(await f.run().result,{code:1,signal:null,out:'',err:''});
+  await assert.rejects(readFile(f.flag),{code:'ENOENT'});
+ }
+});
+test('readiness wrapper executes actual CLI argv selection and exclusive durable access-only importer',{skip:localHomePrerequisite},async t=>{
+ const f=await remoteFixture(t),ts=await import('typescript');
+ // Emit only the actual CLI import closure privately: no shared dist writes,
+ // substituted store, provider, credential fixture or second remote process.
+ await writeFile(join(f.root,'package.json'),JSON.stringify({type:'module'}));
+ for(const name of ['managed-task-profile-cli','managed-codex-access-snapshot-store','managed-codex-access-snapshot','util','task-summary']){
+  const source=await readFile(new URL(`../src/${name}.ts`,import.meta.url),'utf8');
+  const compiled=ts.transpileModule(source,{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.ES2022}});
+  await writeFile(join(f.root,`${name}.js`),compiled.outputText,{mode:0o600});
+ }
+ const raw=wire(),{result}=f.run(3000,join(f.root,'managed-task-profile-cli.js'),raw);
+ await delay(100);await mkdir(f.home,{mode:0o700});
+ assert.deepEqual(await result,{code:0,signal:null,out:ack,err:''});
+ const stored=join(f.home,'managed-codex-access-snapshot-v1.json');
+ assert.deepEqual(await readFile(stored),Buffer.concat([raw,Buffer.from('\n')]));
+ assert.equal((await stat(stored)).mode&0o7777,0o600);
 });

@@ -4,7 +4,7 @@ import {constants as C} from 'node:fs';
 import path from 'node:path';
 import {pathToFileURL} from 'node:url';
 import {createHash,randomUUID,randomBytes} from 'node:crypto';
-import {need,validateLifecycle,parseStrict,validatePositive,canonical as hostCanonical,hash as hostHash} from './host-contract.mjs';
+import {need,validateLifecycle,parseStrict,parseReportStrict,validatePositive,canonical as hostCanonical,hash as hostHash} from './host-contract.mjs';
 const sha=b=>createHash('sha256').update(b).digest('hex');
 const encode=v=>Buffer.from(JSON.stringify(v,null,2)+'\n');
 const stamp=s=>[s.dev,s.ino,s.uid,s.gid,s.mode,s.nlink,s.size,s.mtimeNs,s.ctimeNs].map(String).join(':');
@@ -53,7 +53,7 @@ export async function prepare(bindingPath,output,volumePath){
  const controller={...binding.controller};delete controller.receiptSha256;need(hostCanonical(controller)===hostCanonical(values.controllerBuildReceipt));
  const source=binding.source_directory;need(await fs.realpath(source)===source&&sha(await readStable(worker.sourceArchive,512*1024*1024))===binding.capture.sourceArchiveSha256);
  for(const [relative,pin]of Object.entries(worker.generatedJs)){need(!path.isAbsolute(relative)&&!relative.split('/').some(s=>s==='..'||s==='.')&&relative.endsWith('.js'));const raw=await readStable(path.join(source,relative));need(raw.length===pin.bytes&&sha(raw)===pin.sha256);}
- const reportRaw=await readStable(values.volumeReceipt.raw_report_path);need(sha(reportRaw)===values.volumeReceipt.raw_report_sha256);const report=parseStrict(reportRaw.toString()),a=report.artifactBinding;
+ const reportRaw=await readStable(values.volumeReceipt.raw_report_path);need(sha(reportRaw)===values.volumeReceipt.raw_report_sha256);const report=parseReportStrict(reportRaw.toString()),a=report.artifactBinding;
  need(a.workerImage===binding.worker_image&&a.sourceRevision===binding.capture.sourceRevision&&a.sourceArchiveSha256===binding.capture.sourceArchiveSha256&&a.buildReceiptPath===binding.inputs.workerBuildReceipt.path&&a.buildReceiptSha256===binding.inputs.workerBuildReceipt.sha256&&report.componentPassed===true&&report.cleanupVerified===true);
  const load=relative=>{need(Object.hasOwn(worker.generatedJs,relative));return import(pathToFileURL(path.join(source,relative)).href);};
  const types=await load('cloud/dist/managed-home-provisioning/types.js'),protocol=await load('cloud/dist/managed-home-provisioning/compiler-qualification-protocol.js'),catalog=await load('cloud/dist/managed-home-provisioning/compiler-sdk-catalog.js'),positive=await load('cloud/dist/managed-home-provisioning/staging-positive-ingress-driver.js');

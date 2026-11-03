@@ -20,6 +20,18 @@ def binding(root=Path('/workspace/fixture')):
  b.update(dict(bundle_directory=str(root/'run/bundle'),fresh_volume_receipt_path=refs['volumeReceipt']['path'],controller_source_path=str(root/'run/controller/run.py'),control_output_path=str(root/'run/control-run'),control_build_receipt_path=refs['controllerBuildReceipt']['path'],cleanup_output_path=str(root/'run/control-run/operator-cleanup-v1'),credential_store_path=str(root/'credentials.json'),binder_completion_path=str(root/'run/gates/completion.json'),boot_binding_path=str(root/'run/gates/boot.json'),source_directory=str(root/'source')))
  return b,c
 class Host(unittest.TestCase):
+ def test_fractional_physical_report_timings_keep_strict_protocol_receipts(self):
+  script=r'''
+import assert from 'node:assert/strict';
+import {parseStrict,parseReportStrict} from './examples/managed-runtime-image-staging/host-contract.mjs';
+const raw='{"componentPassed":true,"calls":[{"elapsedSeconds":0.125,"budget":1.8e2}]}';
+assert.deepEqual(parseReportStrict(raw),JSON.parse(raw));
+assert.throws(()=>parseStrict(raw));
+for(const bad of ['{"elapsed":1e999}','{"elapsed":.1}','{"elapsed":01}','{"elapsed":1.}','{"x":0.1,"x":0.2}','{"__proto__":{}}'])assert.throws(()=>parseReportStrict(bad));
+assert.deepEqual(parseStrict('{"epoch":180}'),{epoch:180});
+'''
+  result=subprocess.run(['node','--input-type=module','-e',script],cwd=ROOT,capture_output=True,text=True,timeout=10)
+  self.assertEqual(result.returncode,0,result.stderr)
  def test_same_capture_rejects_changed_revision_archive_and_generated_map(self):
   b,c=binding();w={**b['capture'],'generatedJs':{}};self.assertEqual(D.same_capture(w,c),b['capture'])
   for key in b['capture']:

@@ -86,6 +86,21 @@ fn second_attempt_reuses_exact_floor_but_writable_views_and_namespaces_are_priva
 }
 
 #[test]
+fn preparation_caller_rejects_source_that_is_not_the_sealed_view_complement() {
+    let mut f=Fixture::new();
+    let selected=f.root(b"selected source",None,false);
+    let other=f.root(b"different source",None,false);
+    let mut forged=decode_runnable(&f.store.read_object(&selected).unwrap()).unwrap();
+    forged.source=decode_runnable(&f.store.read_object(&other).unwrap()).unwrap().source;
+    let forged=f.store.put_metadata(ObjectKind::RunnableRoot,&forged).unwrap();
+    f.store.pin("forged-complement-test",&forged).unwrap();
+    assert!(f.fork(&forged,"forged-source-complement").is_err());
+    assert_eq!(f.cache.counts(),(0,0));
+    let good=f.fork(&selected,"valid-after-refusal").unwrap();
+    assert!(!good.stats().cache_hit);
+}
+
+#[test]
 fn source_snapshot_environment_and_format_changes_never_borrow_an_old_hit() {
     let mut f=Fixture::new(); let a=f.root(b"a",Some("abi-a"),false);
     let same=f.root(b"a",Some("abi-a"),false); assert_eq!(a,same);

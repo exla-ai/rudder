@@ -16,6 +16,9 @@ use std::path::{Component, Path};
 
 mod frontend;
 mod index;
+mod sealed_inputs;
+mod execution_control;
+pub use execution_control::BuildExecutionControl;
 pub use frontend::{Buck2Adapter, BuildRun};
 pub use index::{BuildIndex, PreparedEnvironment, StoredBuild};
 pub use index::{PreparationAcknowledgment, RetainedPreparation, RetainedPreparationStatus};
@@ -102,7 +105,7 @@ fn source_directory(store: &LocalStore, root: &ObjectRef) -> Result<ObjectRef> {
 /// Produced by workspace::build_input_view after validating a complete sealed
 /// checkpoint and its source/prepared partition. No peer deserializer or bare
 /// source/base-environment fallback can assert this proof.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct BuildInputView {
     checkpoint: ObjectRef,
     source_root: ObjectRef,

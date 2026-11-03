@@ -1,0 +1,501 @@
+//! Real App, real local sockets and owned fake backend PTYs. These tests do
+//! not qualify model protocols, managed helpers, Cloud, or hardware surfaces.
+use super::*;
+use anyhow::anyhow;
+use std::os::unix::{
+    fs::DirBuilderExt,
+    net::{UnixListener, UnixStream},
+};
+
+struct Harness {
+    root: PathBuf,
+    home: PathBuf,
+    app: App,
+    lifecycle: Option<AppEngineLifecycle>,
+    owner: EngineOwnership,
+}
+
+impl Harness {
+    fn new() -> Self {
+        let storage = if cfg!(target_os = "linux") {
+            PathBuf::from("/workspace/rudder-tmp")
+        } else {
+            std::env::temp_dir()
+        };
+        let root = storage.join(format!("app-engine-{}", uuid::Uuid::new_v4().simple()));
+        fs::create_dir_all(&root).unwrap();
+        let repository = root.join("repo");
+        let home = root.join("home");
+        fs::create_dir(&repository).unwrap();
+        let repository = repository.canonicalize().unwrap();
+        fs::DirBuilder::new().mode(0o700).create(&home).unwrap();
+        let mut owner =
+            EngineOwnership::acquire_in_home(&repository, NativeAuthority::Fabric, &home).unwrap();
+        let lifecycle = Some(AppEngineLifecycle::prepare(&mut owner).unwrap());
+        let mut app = App::new();
+        app.cwd = repository;
+        app.engine_headless = true;
+        Self {
+            root,
+            home,
+            app,
+            lifecycle,
+            owner,
+        }
+    }
+
+    fn start(&mut self) {
+        self.lifecycle
+            .as_mut()
+            .unwrap()
+            .start(&mut self.app, &mut self.owner)
+            .unwrap();
+    }
+
+    fn fake_backend(&mut self) -> u32 {
+        let pane = TerminalPane::spawn_shell_or_command(
+            Some(TerminalCommand::with_args(
+                "/bin/sh",
+                ["-c", "printf 'fake backend ready\\n'; exec cat"],
+            )),
+            TerminalPaneOptions {
+                size: TerminalSize { rows: 24, cols: 80 },
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let mut run = crate::app_tests::test_agent_run_with_terminal(&self.app, pane);
+        // A local fake backend has no qualified model transport or tool broker.
+        run.plain_process = true;
+        let pid = run.terminal.as_ref().unwrap().child_process_id().unwrap();
+        self.app.agents.push(run);
+        save_native_run_record(&self.app.cwd, &self.app.agents[0]).unwrap();
+        pid
+    }
+
+    fn pump_until(&mut self, predicate: impl Fn(&App) -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            assert!(!self
+                .lifecycle
+                .as_mut()
+                .unwrap()
+                .poll(&mut self.app, &mut self.owner)
+                .unwrap());
+            self.app.service_attach_clients();
+            if predicate(&self.app) {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "App did not apply the actual socket event"
+            );
+            thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    fn surface(&self) -> UnixStream {
+        let mut stream = UnixStream::connect(self.app.attach_socket_path()).unwrap();
+        writeln!(
+            stream,
+            "{}",
+            serde_json::to_string(&ClientMsg::Dashboard { rows: 24, cols: 80 }).unwrap()
+        )
+        .unwrap();
+        stream
+    }
+
+    fn record(&self) -> serde_json::Value {
+        serde_json::from_slice(
+            &fs::read(native_run_dir(&self.app.cwd, "run-1").join("run.json")).unwrap(),
+        )
+        .unwrap()
+    }
+
+    fn projection(&self) -> serde_json::Value {
+        serde_json::from_slice(&fs::read(self.app.cwd.join(".rudder/engine/owner.json")).unwrap())
+            .unwrap()
+    }
+
+    fn finish(&mut self, outcome: Result<()>) -> Result<()> {
+        self.lifecycle
+            .take()
+            .unwrap()
+            .finish(&mut self.app, &mut self.owner, outcome)
+    }
+}
+
+impl Drop for Harness {
+    fn drop(&mut self) {
+        self.app.close_attach_clients("test finished");
+        self.app.agents.clear();
+        self.lifecycle.take();
+        let _ = fs::remove_dir_all(&self.root);
+    }
+}
+
+#[test]
+fn startup_binds_the_actual_owner_writer_and_excludes_duplicate_schedulers() {
+    let mut h = Harness::new();
+    let lifecycle = h.lifecycle.as_ref().unwrap();
+    let fence = lifecycle.fence.clone();
+    let writer = lifecycle.writer.as_ref().unwrap();
+    assert_eq!(
+        writer.project_state(&fence.project_id).unwrap().owner,
+        fence
+    );
+    let (original, _) = h.owner.journal_parts();
+    assert_eq!(
+        writer.database_path().unwrap(),
+        original.database_path().unwrap()
+    );
+    h.start();
+    assert!(h.app.migration_resumes_attempted);
+    assert_eq!(h.projection()["state"], "ready");
+    for authority in [NativeAuthority::Fabric, NativeAuthority::Legacy] {
+        assert!(EngineOwnership::acquire_in_home(&h.app.cwd, authority, &h.home).is_err());
+    }
+    assert!(h
+        .lifecycle
+        .as_mut()
+        .unwrap()
+        .start(&mut h.app, &mut h.owner)
+        .is_err());
+    h.finish(Ok(())).unwrap();
+}
+
+#[test]
+fn multiple_surfaces_close_reopen_and_reconnect_without_replacing_live_work() {
+    let mut h = Harness::new();
+    h.start();
+    let pid = h.fake_backend();
+    let fence = h.owner.app_identity().1.clone();
+    let first = h.surface();
+    let second = h.surface();
+    h.pump_until(|app| {
+        app.attach_clients
+            .iter()
+            .filter(|client| client.dashboard.is_some())
+            .count()
+            == 2
+    });
+    let id = h.app.attach_clients[0].id;
+    assert!(h.app.handle_view_event(
+        id,
+        Event::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL))
+    ));
+    h.app.close_attach_client(id, "surface closed");
+    drop(first);
+    drop(second);
+    h.pump_until(|app| app.attach_clients.is_empty());
+    assert_eq!(h.app.agents.len(), 1);
+    let pane = h.app.agents[0].terminal.as_mut().unwrap();
+    assert!(pane.try_wait().unwrap().is_none());
+    assert_eq!(pane.child_process_id(), Some(pid));
+    assert_eq!(h.app.agents[0].status, AgentStatus::Running);
+    assert_eq!(h.owner.app_identity().1, &fence);
+    let mut reconnected = h.surface();
+    h.pump_until(|app| app.attach_clients.len() == 1 && app.attach_clients[0].dashboard.is_some());
+    writeln!(
+        reconnected,
+        "{}",
+        serde_json::to_string(&ClientMsg::Detach).unwrap()
+    )
+    .unwrap();
+    h.pump_until(|app| app.attach_clients.is_empty());
+    let mut pane_surface = UnixStream::connect(h.app.attach_socket_path()).unwrap();
+    writeln!(
+        pane_surface,
+        "{}",
+        serde_json::to_string(&ClientMsg::Attach {
+            selector: "run-1".into(),
+            rows: 30,
+            cols: 100,
+        })
+        .unwrap()
+    )
+    .unwrap();
+    h.pump_until(|app| {
+        app.attach_clients.len() == 1 && app.attach_clients[0].run_id.as_deref() == Some("run-1")
+    });
+    assert_eq!(
+        (h.app.attach_clients[0].rows, h.app.attach_clients[0].cols),
+        (30, 100)
+    );
+    drop(pane_surface);
+    h.pump_until(|app| app.attach_clients.is_empty());
+    assert_eq!(
+        h.app.agents[0]
+            .terminal
+            .as_ref()
+            .unwrap()
+            .child_process_id(),
+        Some(pid)
+    );
+    h.finish(Ok(())).unwrap();
+}
+
+#[test]
+fn explicit_engine_shutdown_observes_exit_persists_paused_and_removes_process() {
+    let mut h = Harness::new();
+    h.start();
+    let pid = h.fake_backend();
+    assert_eq!(h.record()["process"]["pid"], pid);
+    let fence = h.owner.app_identity().1.clone();
+    h.finish(Ok(())).unwrap();
+    assert_eq!(h.app.agents[0].status, AgentStatus::Paused);
+    assert!(h.app.agents[0].terminal.is_none());
+    let record = h.record();
+    assert_eq!(record["status"], "paused");
+    assert!(record.get("process").is_none());
+    assert_eq!(h.projection()["state"], "stopped");
+    assert!(
+        !h.owner
+            .journal_parts()
+            .0
+            .project_state(&fence.project_id)
+            .unwrap()
+            .owner_active
+    );
+    assert_eq!(
+        unsafe { libc::kill(pid as i32, 0) },
+        -1,
+        "direct child was actually reaped"
+    );
+}
+
+#[test]
+fn control_shutdown_is_an_acceptance_receipt_before_actual_app_retirement() {
+    let mut h = Harness::new();
+    h.start();
+    h.fake_backend();
+    let repository = h.app.cwd.clone();
+    let (send, receive) = mpsc::sync_channel(1);
+    let client = thread::spawn(move || {
+        send.send(engine_status(&repository, true)).unwrap();
+    });
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        if h.lifecycle
+            .as_mut()
+            .unwrap()
+            .poll(&mut h.app, &mut h.owner)
+            .unwrap()
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "actual App did not accept shutdown control"
+        );
+        thread::sleep(Duration::from_millis(5));
+    }
+    let receipt = receive
+        .recv_timeout(Duration::from_secs(3))
+        .unwrap()
+        .unwrap();
+    client.join().unwrap();
+    assert_eq!(receipt["state"], "stopping");
+    assert!(
+        h.app.agents[0].terminal.is_some(),
+        "acceptance is not process exit"
+    );
+    h.finish(Ok(())).unwrap();
+    assert_eq!(h.record()["status"], "paused");
+    assert!(h.record().get("process").is_none());
+    assert_eq!(h.projection()["state"], "stopped");
+}
+
+#[test]
+fn partial_startup_failure_stops_owned_work_and_records_uncertain_authority() {
+    let mut h = Harness::new();
+    let _existing_control = EngineControl::bind(&h.owner, None).unwrap();
+    h.fake_backend();
+    let startup = h
+        .lifecycle
+        .as_mut()
+        .unwrap()
+        .start(&mut h.app, &mut h.owner);
+    assert!(
+        startup.is_err(),
+        "the second control socket must fail startup"
+    );
+    assert!(
+        !h.app.migration_resumes_attempted,
+        "bind failure must precede resume"
+    );
+    assert!(h.finish(startup.map(|_| ())).is_err());
+    assert!(h.app.attach_server.is_none());
+    assert!(h.app.agents[0].terminal.is_none());
+    assert_eq!(h.record()["status"], "paused");
+    assert!(h.record().get("process").is_none());
+    assert_eq!(h.projection()["state"], "uncertain");
+    let project = h.owner.app_identity().1.project_id.clone();
+    assert!(
+        h.owner
+            .journal_parts()
+            .0
+            .project_state(&project)
+            .unwrap()
+            .owner_active
+    );
+}
+
+#[test]
+fn readiness_write_failure_revokes_admission_but_still_persists_owned_child_exit() {
+    let mut h = Harness::new();
+    h.fake_backend();
+    let projection = h.app.cwd.join(".rudder/engine/owner.json");
+    fs::remove_file(&projection).unwrap();
+    fs::create_dir(&projection).unwrap();
+    let startup = h
+        .lifecycle
+        .as_mut()
+        .unwrap()
+        .start(&mut h.app, &mut h.owner);
+    assert!(startup.is_err());
+    assert!(h.app.migration_resumes_attempted);
+    assert!(h
+        .lifecycle
+        .as_ref()
+        .unwrap()
+        .lease
+        .as_ref()
+        .unwrap()
+        .check_active_for_adoption()
+        .is_err());
+    assert!(h.finish(startup.map(|_| ())).is_err());
+    assert!(h.app.attach_server.is_none());
+    assert!(h.app.agents[0].terminal.is_none());
+    assert_eq!(h.record()["status"], "paused");
+    assert!(h.record().get("process").is_none());
+    let project = h.owner.app_identity().1.project_id.clone();
+    assert!(
+        h.owner
+            .journal_parts()
+            .0
+            .project_state(&project)
+            .unwrap()
+            .owner_active
+    );
+    assert!(projection.is_dir(), "no stopped projection was published");
+}
+
+#[test]
+fn app_cannot_bind_a_different_checkout_or_resume_before_ingress() {
+    let mut h = Harness::new();
+    let original = h.app.cwd.clone();
+    h.app.cwd = h.root.clone();
+    assert!(h
+        .lifecycle
+        .as_mut()
+        .unwrap()
+        .start(&mut h.app, &mut h.owner)
+        .is_err());
+    assert!(h.app.attach_server.is_none());
+    assert!(!h.app.migration_resumes_attempted);
+    h.app.cwd = original;
+    h.finish(Err(anyhow!("wrong checkout rejected")))
+        .unwrap_err();
+    assert_eq!(h.projection()["state"], "uncertain");
+}
+
+#[test]
+fn owner_epoch_change_fences_writer_readiness_poll_and_shutdown_projection() {
+    let mut h = Harness::new();
+    h.start();
+    h.fake_backend();
+    let original_run = h.record();
+    let control_path = h
+        .lifecycle
+        .as_ref()
+        .unwrap()
+        .control
+        .as_ref()
+        .unwrap()
+        .path()
+        .to_path_buf();
+    fs::remove_file(&control_path).unwrap();
+    let successor_control = UnixListener::bind(&control_path).unwrap();
+    let lease = h
+        .lifecycle
+        .as_ref()
+        .unwrap()
+        .lease
+        .as_ref()
+        .unwrap()
+        .clone();
+    let (journal, fence) = h.owner.journal_parts();
+    let successor = journal
+        .transfer_owner(&fence.clone(), "successor", 100)
+        .unwrap();
+    let projection = b"{\"state\":\"successor-ready\"}";
+    fs::write(h.app.cwd.join(".rudder/engine/owner.json"), projection).unwrap();
+    assert!(
+        lease.open_source_writer().is_err(),
+        "actual epoch is checked before returning a writer"
+    );
+    assert!(h.owner.ready(None).is_err());
+    assert!(h
+        .lifecycle
+        .as_mut()
+        .unwrap()
+        .poll(&mut h.app, &mut h.owner)
+        .is_err());
+    assert!(h.finish(Err(anyhow!("owner epoch changed"))).is_err());
+    assert!(
+        control_path.exists(),
+        "stale teardown must preserve the successor's control endpoint"
+    );
+    drop(successor_control);
+    fs::remove_file(control_path).unwrap();
+    assert_eq!(
+        fs::read(h.app.cwd.join(".rudder/engine/owner.json")).unwrap(),
+        projection
+    );
+    assert_eq!(
+        h.owner
+            .journal_parts()
+            .0
+            .project_state(&successor.project_id)
+            .unwrap()
+            .owner,
+        successor
+    );
+    assert_eq!(
+        h.record(),
+        original_run,
+        "stale cleanup cannot overwrite run projections"
+    );
+    assert!(
+        h.app.agents[0].terminal.is_none(),
+        "the original local PTY is still retired"
+    );
+}
+
+#[test]
+fn failed_paused_record_write_cannot_advertise_clean_engine_shutdown() {
+    let mut h = Harness::new();
+    h.start();
+    h.fake_backend();
+    let path = native_run_dir(&h.app.cwd, "run-1").join("run.json");
+    fs::remove_file(&path).unwrap();
+    fs::create_dir(&path).unwrap();
+    let error = h.finish(Err(anyhow!("original loop failure"))).unwrap_err();
+    assert!(format!("{error:#}").contains("original loop failure"));
+    assert!(format!("{error:#}").contains("could not persist paused engine state"));
+    assert!(
+        h.app.agents[0].terminal.is_none(),
+        "confirmed exit still retires the pane"
+    );
+    assert_eq!(h.projection()["state"], "uncertain");
+    let project = h.owner.app_identity().1.project_id.clone();
+    assert!(
+        h.owner
+            .journal_parts()
+            .0
+            .project_state(&project)
+            .unwrap()
+            .owner_active
+    );
+}

@@ -281,6 +281,24 @@ impl Drop for Reservation {fn drop(&mut self){if self.active{self.source.active.
 pub struct BakedImageRead {source:Arc<BakedImageCas>,reference:ObjectRef,manifest:bool,original:Arc<dyn ImageImportFence>,
     file:Option<File>,original_stamp:Option<Stamp>,bytes:Vec<u8>,reservation:Option<Reservation>,attempted:bool,verified:bool,
     #[cfg(test)] panic_after_first_chunk:bool,#[cfg(test)]cancel_after_first_chunk:Option<Arc<std::sync::atomic::AtomicBool>>}
+/// Verified immutable Blob DATA plus its same original leaf. This owns no
+/// operation clock/admission and consumes no active-read reservation.
+pub(super) struct VerifiedBakedBlob {source:Arc<BakedImageCas>,reference:ObjectRef,file:File,original_stamp:Stamp,bytes:Vec<u8>}
+impl VerifiedBakedBlob {
+    pub(super) fn current(&self,original:&dyn ImageImportFence)->Result<()> {
+        original.remaining()?;let state=self.source.lock(original)?;
+        ensure!(state.captured&&!state.failed,"cached baked source incomplete/fenced");
+        let shard=&self.reference.digest[..2];let leaf=&self.reference.digest[2..];
+        self.source.check(&state,Some(shard),original)?;
+        self.source.physical((||->Result<()>{
+            ensure!(state.object_versions.get(&self.reference)==Some(&self.original_stamp)
+                &&regular(&self.file,self.source.owner,CHUNK)?==self.original_stamp
+                &&stamp(&open_at(&state.shards[shard].file,leaf,false)?)?==self.original_stamp,
+                "cached baked original object version changed");Ok(())})())?;
+        self.source.check(&state,Some(shard),original)?;original.remaining()?;Ok(())
+    }
+    pub(super) fn bytes(&self)->&[u8]{&self.bytes}
+}
 impl BakedImageRead {
     fn stage(source:Arc<BakedImageCas>,reference:ObjectRef,manifest:bool,original:Arc<dyn ImageImportFence>)->Self {
         Self{source,reference,manifest,original,file:None,original_stamp:None,bytes:Vec::new(),reservation:None,attempted:false,verified:false,
@@ -288,6 +306,12 @@ impl BakedImageRead {
     }
     pub fn reference_data(&self)->&ObjectRef{&self.reference}
     pub fn verified_bytes(&self)->Result<&[u8]>{ensure!(self.verified,"original baked bytes unverified/unknown");Ok(&self.bytes)}
+    pub(super) fn verified_blob_data(&self)->Result<VerifiedBakedBlob>{
+        ensure!(self.verified&&!self.manifest&&self.reference.kind==ObjectKind::Blob,"only verified ordinary baked Blobs may be cached");
+        Ok(VerifiedBakedBlob{source:self.source.clone(),reference:self.reference.clone(),
+            file:self.file.as_ref().context("verified baked leaf absent")?.try_clone()?,
+            original_stamp:self.original_stamp.clone().context("verified baked stamp absent")?,bytes:self.bytes.clone()})
+    }
     fn run(&mut self)->Result<()> {
         ensure!(!self.attempted,"original baked read cannot retry");self.attempted=true;self.original.remaining()?;bound(&self.reference,self.manifest)?;
         let source=self.source.clone();let mut state=source.lock(&*self.original)?;

@@ -71,7 +71,7 @@ fn composed_actual_paged_directory_and_file_node_reads_fall_back_without_copying
     for r in [&f.installer,&f.file,&f.payload]{assert!(!f.local.object_path(r).unwrap().exists());}
     let mut read=None;let clock=Clock::new();source.read_object_retaining(&mut read,f.payload.clone(),clock.clone()).unwrap();
     let read=read.unwrap();assert!(Arc::ptr_eq(&read.original,&(clock as Arc<dyn ImageImportFence>)));
-    assert_eq!(read.source_data(),Some(ComposedReadSource::BakedImage));assert!(read.baked.is_some());assert!(!read.gc_locked);
+    assert_eq!(read.source_data(),Some(ComposedReadSource::BakedImage));assert!(read.baked.is_some()||read.cached.is_some());assert!(!read.gc_locked);
     assert_eq!(read.verified_bytes().unwrap(),vec![b'X';128*1024]);
 }
 

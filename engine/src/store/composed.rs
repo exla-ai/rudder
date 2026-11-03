@@ -2,7 +2,7 @@
 //! No pin, complete closure, image, source, Root or execution authority is made.
 //! Reads never repair/copy the backing or call LocalStore's unbounded GC lock.
 use super::*;
-use super::baked_image::{BakedImageCas, BakedImageRead};
+use super::baked_image::{BakedImageCas, BakedImageRead, VerifiedBakedBlob};
 use crate::{content::{ContentStore, FileNode}, directory::DirectoryStore};
 use std::{ffi::CString, os::fd::{AsRawFd, FromRawFd}, os::unix::fs::FileExt as ReadAt,
     sync::{Arc, Mutex, MutexGuard, atomic::{AtomicBool, AtomicUsize, Ordering}}};
@@ -11,6 +11,24 @@ const CHUNK: u64 = 4 * 1024 * 1024;
 const METADATA: u64 = 64 * 1024;
 const MAX_READS: usize = 8;
 const MAX_BYTES: usize = 32 * 1024 * 1024;
+const MAX_BLOB_CACHE_BYTES: usize = 64 * 1024 * 1024;
+const MAX_BLOB_CACHE_ENTRIES: usize = 32;
+#[derive(Default)]
+struct BlobCache {entries:std::collections::VecDeque<(ObjectRef,Arc<VerifiedBakedBlob>)>,bytes:usize}
+impl BlobCache {
+    fn get(&mut self,reference:&ObjectRef)->Option<Arc<VerifiedBakedBlob>>{
+        let index=self.entries.iter().position(|(r,_)|r==reference)?;
+        let entry=self.entries.remove(index).unwrap();let value=entry.1.clone();self.entries.push_back(entry);Some(value)
+    }
+    fn insert(&mut self,reference:ObjectRef,value:Arc<VerifiedBakedBlob>){
+        if let Some(index)=self.entries.iter().position(|(r,_)|r==&reference){self.bytes-=self.entries.remove(index).unwrap().1.bytes().len();}
+        let size=value.bytes().len();if size>MAX_BLOB_CACHE_BYTES{return;}
+        while self.entries.len()>=MAX_BLOB_CACHE_ENTRIES||self.bytes+size>MAX_BLOB_CACHE_BYTES{
+            self.bytes-=self.entries.pop_front().unwrap().1.bytes().len();
+        }
+        self.bytes+=size;self.entries.push_back((reference,value));
+    }
+}
 
 fn bound(reference: &ObjectRef) -> Result<()> {
     reference.validate()?;
@@ -68,13 +86,16 @@ pub struct ComposedImageStore {
     root:Option<File>, root_id:Option<Identity>, objects:Option<File>, objects_id:Option<Identity>,
     lock:Option<File>, lock_id:Option<Identity>, captured:bool, fenced:AtomicBool,
     active:AtomicUsize, bytes:AtomicUsize,
+    blob_cache:Mutex<BlobCache>,
+    #[cfg(test)]baked_blob_reads:AtomicUsize,
 }
 impl ComposedImageStore {
     pub fn capture_retaining(out:&mut Option<Arc<Self>>,local:LocalStore,baked:Arc<BakedImageCas>,
         original:Arc<dyn ImageImportFence>)->Result<()> {
         ensure!(out.is_none(),"composed original capture output occupied");
         *out=Some(Arc::new(Self{local,baked,capture_original:original,root:None,root_id:None,objects:None,
-            objects_id:None,lock:None,lock_id:None,captured:false,fenced:AtomicBool::new(false),active:AtomicUsize::new(0),bytes:AtomicUsize::new(0)}));
+            objects_id:None,lock:None,lock_id:None,captured:false,fenced:AtomicBool::new(false),active:AtomicUsize::new(0),bytes:AtomicUsize::new(0),
+            blob_cache:Mutex::new(BlobCache::default()),#[cfg(test)]baked_blob_reads:AtomicUsize::new(0)}));
         let source=Arc::get_mut(out.as_mut().unwrap()).context("composed capture already aliased")?;
         let result=source.capture();if result.is_err(){source.fenced.store(true,Ordering::Release);}result
     }
@@ -112,6 +133,11 @@ impl ComposedImageStore {
         ensure!(self.captured,"composed original capture incomplete");
         self.current_inner(original)
     }
+    fn cache(&self,original:&dyn ImageImportFence)->Result<MutexGuard<'_,BlobCache>>{
+        loop{original.remaining()?;match self.blob_cache.try_lock(){Ok(cache)=>return Ok(cache),
+            Err(std::sync::TryLockError::WouldBlock)=>std::thread::sleep(original.remaining()?.min(Duration::from_millis(1))),
+            Err(_)=>bail!("composed verified Blob cache poisoned")}}
+    }
     pub fn read_object_retaining(self:&Arc<Self>,out:&mut Option<ComposedRead>,reference:ObjectRef,
         original:Arc<dyn ImageImportFence>)->Result<()> {
         ensure!(out.is_none(),"composed original read output occupied");
@@ -136,21 +162,21 @@ impl Drop for Reservation {fn drop(&mut self){
 pub struct ComposedRead {
     source:Arc<ComposedImageStore>,reference:ObjectRef,original:Arc<dyn ImageImportFence>,
     reservation:Option<Reservation>,gc:Option<File>,gc_locked:bool,shard:Option<File>,shard_id:Option<Identity>,
-    file:Option<File>,file_stamp:Option<Stamp>,bytes:Vec<u8>,baked:Option<BakedImageRead>,
+    file:Option<File>,file_stamp:Option<Stamp>,bytes:Vec<u8>,baked:Option<BakedImageRead>,cached:Option<Arc<VerifiedBakedBlob>>,
     selected:Option<ComposedReadSource>,attempted:bool,verified:bool,
     #[cfg(test)] cancel_after_first_chunk:Option<Arc<AtomicBool>>,
 }
 impl ComposedRead {
     fn stage(source:Arc<ComposedImageStore>,reference:ObjectRef,original:Arc<dyn ImageImportFence>)->Self {
         Self{source,reference,original,reservation:None,gc:None,gc_locked:false,shard:None,shard_id:None,file:None,
-            file_stamp:None,bytes:Vec::new(),baked:None,selected:None,attempted:false,verified:false,#[cfg(test)]cancel_after_first_chunk:None}
+            file_stamp:None,bytes:Vec::new(),baked:None,cached:None,selected:None,attempted:false,verified:false,#[cfg(test)]cancel_after_first_chunk:None}
     }
     pub fn reference_data(&self)->&ObjectRef{&self.reference}
     pub fn source_data(&self)->Option<ComposedReadSource>{self.selected}
     pub fn verified_bytes(&self)->Result<&[u8]> {
         ensure!(self.verified,"composed original bytes unverified/unknown");
         match self.selected{Some(ComposedReadSource::WritableLocal)=>Ok(&self.bytes),Some(ComposedReadSource::BakedImage)=>
-            self.baked.as_ref().context("composed actual baked read absent")?.verified_bytes(),None=>bail!("composed read source absent")}
+            if let Some(cached)=&self.cached{Ok(cached.bytes())}else{self.baked.as_ref().context("composed actual baked read absent")?.verified_bytes()},None=>bail!("composed read source absent")}
     }
     fn run(&mut self)->Result<()> {
         ensure!(!self.attempted,"composed original read cannot retry");self.attempted=true;
@@ -167,7 +193,19 @@ impl ComposedRead {
             // Only a known absent shard/leaf under the actual original shared
             // GC lock reaches here. No corruption/permission/custody error does.
             self.gc.take();self.gc_locked=false;self.selected=Some(ComposedReadSource::BakedImage);
-            self.source.baked.read_object_retaining(&mut self.baked,self.reference.clone(),self.original.clone())?;
+            if self.reference.kind==ObjectKind::Blob{
+                self.cached=self.source.cache(&*self.original)?.get(&self.reference);
+            }
+            if let Some(cached)=&self.cached{cached.current(&*self.original)?;}
+            else{
+                #[cfg(test)]if self.reference.kind==ObjectKind::Blob{self.source.baked_blob_reads.fetch_add(1,Ordering::AcqRel);}
+                self.source.baked.read_object_retaining(&mut self.baked,self.reference.clone(),self.original.clone())?;
+                if self.reference.kind==ObjectKind::Blob{
+                    let cached=Arc::new(self.baked.as_ref().unwrap().verified_blob_data()?);
+                    cached.current(&*self.original)?;
+                    self.source.cache(&*self.original)?.insert(self.reference.clone(),cached);
+                }
+            }
         }
         self.source.current(&*self.original)?;self.original.remaining()?;self.verified=true;
         // A successful immutable byte snapshot needs no further mutable CAS
@@ -242,12 +280,13 @@ impl ComposedReadSession {
             Err(_)=>bail!("composed read session poisoned; original read retained"),
         }}
     }
-    fn read(&self,reference:&ObjectRef)->Result<Vec<u8>> {
+    fn with_read<T>(&self,reference:&ObjectRef,read:impl FnOnce(&[u8])->Result<T>)->Result<T> {
         let mut state=self.lock()?;ensure!(!state.failed && state.pending.is_none(),"composed session retains an unsettled original read");
         let result=(||{self.source.read_object_retaining(&mut state.pending,reference.clone(),self.original.clone())?;
-            let bytes=state.pending.as_ref().unwrap().verified_bytes()?.to_vec();self.original.remaining()?;Ok(bytes)})();
+            let value=read(state.pending.as_ref().unwrap().verified_bytes()?)?;self.original.remaining()?;Ok(value)})();
         match result{Ok(bytes)=>{state.pending.take();Ok(bytes)},Err(e)=>{state.failed=true;Err(e)}}
     }
+    fn read(&self,reference:&ObjectRef)->Result<Vec<u8>>{self.with_read(reference,|bytes|Ok(bytes.to_vec()))}
     /// Pure nonblocking custody transfer after the actual caller/worker has
     /// returned/unwound. Even an expired/poisoned session preserves its carrier;
     /// this is not a join, cleanup receipt, retry permission or successful read.
@@ -268,9 +307,9 @@ impl ContentStore for ComposedReadSession {
     fn read_object(&self,reference:&ObjectRef)->Result<Vec<u8>>{self.read(reference)}
     fn read_blob_range(&self,reference:&ObjectRef,offset:u64,length:usize)->Result<Vec<u8>> {
         ensure!(reference.kind==ObjectKind::Blob && length<=crate::content::MAX_RANGE_BYTES,"invalid composed raw range");
-        let bytes=self.read(reference)?;self.original.remaining()?;
-        let start=usize::try_from(offset.min(reference.size_bytes))?;let count=(bytes.len()-start).min(length);
-        let result=bytes[start..start+count].to_vec();self.original.remaining()?;Ok(result)
+        self.with_read(reference,|bytes|{
+            let start=usize::try_from(offset.min(reference.size_bytes))?;let count=(bytes.len()-start).min(length);
+            Ok(bytes[start..start+count].to_vec())})
     }
     fn copy_blob_to(&self,reference:&ObjectRef,writer:&mut dyn Write)->Result<()> {
         ensure!(reference.kind==ObjectKind::Blob,"composed copy requires Blob");let bytes=self.read(reference)?;
@@ -283,3 +322,6 @@ impl ContentStore for ComposedReadSession {
 #[cfg(test)]
 #[path="composed_tests.rs"]
 mod tests;
+#[cfg(test)]
+#[path="composed_blob_cache_tests.rs"]
+mod blob_cache_tests;

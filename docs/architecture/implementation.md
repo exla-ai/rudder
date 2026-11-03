@@ -7,6 +7,32 @@ here is not deployment proof; record exact checks and delivery identities below.
 
 ## Current continuation, 2026-11-03
 
+The `9aea4c94` hardware run expired in the SDK stage before helper
+qualification; runtime and ordinary were not reached. Exact-machine process
+and I/O observations show storage setup reading about 20.9 GB through 14.6
+million read calls before the helper started. The four runtime executables
+are read through the mounted store first. Each small filesystem range reread
+and hashed a complete immutable 4 MiB blob, then discarded it with that
+request's session. This is a separate storage amplification problem from the
+previous helper namespace errors. No helper failure frame was observed.
+
+Operator cleanup completed at 2026-11-03T23:26:56Z with 40 calls, verified
+resource absence and an unchanged protected home. The original supervisor
+reaped its controller at 23:27:11Z after cleanup; the temporary token's
+revocation was acknowledged. The retained report is
+`/workspace/rudder-one-capture-execution-9aea4c94/lifecycle/control-run/operator-cleanup-v1/report.json`.
+This teardown does not establish normal retirement or stage qualification.
+
+The mounted composed store now retains at most 64 MiB and 32 entries of
+fully verified baked blob bytes across read sessions. Hits recheck the same
+captured file, named leaf, source identity and caller fence; writable-local
+reads retain precedence. Range reads copy only the requested bytes. All 46
+focused composed/baked checks passed in 10.74 seconds after a 51.98-second
+incremental compile, with one existing ignored case. Six new real-CAS tests
+include 64 fresh 64 KiB sessions verifying a single 4 MiB blob once, eviction,
+corruption, replacement and expired/cancelled callers. This local result does
+not establish a hardware speedup or SDK qualification; a new image run is next.
+
 The 23:02 fresh-volume attempt retained an original machine ID but Fly's CLI
 reported startup failure. Exact-machine logs show a 72.5-second cold image pull
 and successful startup at 23:03:42Z. The verifier held before cleanup because it

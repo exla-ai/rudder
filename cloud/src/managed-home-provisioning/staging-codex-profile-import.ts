@@ -53,7 +53,7 @@ export function validateStagingCodexAccessSnapshot(value:unknown,profileId:strin
   const plan=auth.chatgpt_plan_type;
   check(plan===undefined||plan===null||text(plan,128));
   check(p.chatgptPlanType===(typeof plan==="string"?plan:undefined));
-  check(p.expiresAtMs===claims.exp*1000&&p.expiresAtMs>now&&p.expiresAtMs-now<=86400000);
+  check(p.expiresAtMs===claims.exp*1000&&p.expiresAtMs>now&&p.expiresAtMs-now<=14*86400000);
   const wire=Buffer.from(JSON.stringify({formatVersion:p.formatVersion,kind:p.kind,profileId:p.profileId,backend:p.backend,provider:p.provider,accessToken:p.accessToken,chatgptAccountId:p.chatgptAccountId,expiresAtMs:p.expiresAtMs,...(Object.hasOwn(p,"chatgptPlanType")?{chatgptPlanType:p.chatgptPlanType}:{})}));
   if(Buffer.isBuffer(value))check(wire.equals(raw));
   return wire;

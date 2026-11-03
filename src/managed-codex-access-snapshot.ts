@@ -4,7 +4,7 @@ import type { AuthProfileCredential } from "./types.js";
 
 export const MAX_CODEX_ACCESS_TOKEN_BYTES = 48 * 1024;
 export const MAX_CODEX_ACCESS_SNAPSHOT_BYTES = 65532;
-const MAX_FUTURE_MS = 24 * 60 * 60 * 1000;
+const MAX_FUTURE_MS = 14 * 24 * 60 * 60 * 1000;
 export type CodexOAuthAccessSnapshotV1 = {
   formatVersion: 1; kind: "CodexOAuthAccessSnapshotV1"; profileId: string;
   backend: "codex"; provider: "openai-codex"; accessToken: string;

@@ -5,7 +5,8 @@ use serde::Deserialize;
 
 const TOKEN_LIMIT: usize = 48 * 1024;
 const SNAPSHOT_LIMIT: usize = 65532;
-const MAX_FUTURE_SECONDS: u64 = 24 * 60 * 60;
+// Input sanity only: retain the JWT's exact deadline, never a refreshed lease.
+const MAX_FUTURE_SECONDS: u64 = 14 * 24 * 60 * 60;
 
 #[cfg(test)]
 thread_local! {static ERASED:std::cell::Cell<usize>=const {std::cell::Cell::new(0)};}

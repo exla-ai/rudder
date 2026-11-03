@@ -49,9 +49,19 @@ test("malformed, expired, foreign-account or wrong-provider snapshots always hav
     error => error.message === "The selected Codex OAuth access snapshot is unavailable or expired.");
   for (const now of [NaN, Infinity, -1, 2000000000000])
     assert.throws(() => codexOAuthAccessSnapshot("selected", oauth(jwt(claims(2000000000))), now));
-  const boundary = 2000000000000 - 24 * 60 * 60 * 1000;
-  assert.equal(codexOAuthAccessSnapshot("selected", oauth(jwt(claims(2000000000))), boundary).expiresAtMs, 2000000000000);
-  assert.throws(() => codexOAuthAccessSnapshot("selected", oauth(jwt(claims(2000000000))), boundary - 1));
+});
+
+test("53-hour access snapshots retain exact JWT expiry within the 14-day sanity limit", () => {
+  const expiry = 2000000000000;
+  const credential = oauth(jwt(claims(expiry / 1000)));
+  for (const remaining of [53 * 60 * 60 * 1000, 14 * 24 * 60 * 60 * 1000]) {
+    const result = codexOAuthAccessSnapshot("selected", credential, expiry - remaining);
+    assert.equal(result.expiresAtMs, expiry, "JWT deadline is neither shortened nor extended");
+    assert.equal(result.accessToken, credential.access);
+    assert.ok(!Object.hasOwn(result, "refresh"));
+  }
+  assert.throws(() => codexOAuthAccessSnapshot("selected", credential,
+    expiry - 14 * 24 * 60 * 60 * 1000 - 1));
 });
 
 const runner = String.raw`

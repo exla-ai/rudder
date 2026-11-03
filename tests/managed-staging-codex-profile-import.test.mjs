@@ -60,3 +60,12 @@ test('fixed ACK/empty stderr required; errors/output bounds discard secret text'
 test('stdin failure is fixed and same child remains held until actual terminal',async()=>{
  const f=fixture(),{run}=await spawned(f);f.child.stdin.emit('error',Error('private credential'));assert.deepEqual(f.child.kills,['SIGKILL']);f.child.settle(1,'');await assert.rejects(run);assert(!JSON.stringify(f.read.statusData()).includes('private credential'));
 });
+
+test('valid multiday access retains exact JWT expiry without renewing finite transfer budget',()=>{
+ for(const seconds of [53*3600,14*86400]){
+  const exp=Math.floor(Date.now()/1000)+seconds,b=wire({expiresAtMs:exp*1000},{exp});
+  assert.equal(JSON.parse(validateStagingCodexAccessSnapshot(b,profile)).expiresAtMs,exp*1000);
+ }
+ const exp=Math.floor(Date.now()/1000)+14*86400+2;
+ assert.throws(()=>validateStagingCodexAccessSnapshot(wire({expiresAtMs:exp*1000},{exp}),profile));
+});

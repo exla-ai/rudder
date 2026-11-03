@@ -30,11 +30,27 @@ fn closed_snapshot_refuses_unknown_refresh_id_token_duplicate_and_foreign_profil
 }
 #[test]
 fn jwt_expiry_is_exact_bounded_data_and_never_file_mtime() {
-    for exp in [json!(null),json!(true),json!(1.5),json!(-1),json!(NOW/1000),json!(u64::MAX),json!(NOW/1000+86401)] {
+    for exp in [json!(null),json!(true),json!(1.5),json!(-1),json!(NOW/1000),json!(u64::MAX),json!(NOW/1000+MAX_FUTURE_SECONDS+1)] {
         let mut c=claims();c["exp"]=exp;let mut w=wire();w["accessToken"]=json!(token(c));refuses(w);
     }
     let mut w=wire();w["expiresAtMs"]=json!(NOW+3_600_001);refuses(w);
     let mut c=claims();c.as_object_mut().unwrap().remove("exp");let mut w=wire();w["accessToken"]=json!(token(c));refuses(w);
+}
+#[test]
+fn multiday_access_preserves_exact_jwt_expiry_with_fourteen_day_sanity_bound() {
+    for seconds in [53*60*60,14*24*60*60] {
+        let expiry=NOW+seconds*1000;
+        let mut c=claims();c["exp"]=json!(expiry/1000);
+        let mut w=wire();w["accessToken"]=json!(token(c));w["expiresAtMs"]=json!(expiry);
+        let snapshot=CodexOAuthAccessSnapshotV1::from_frame(&frame(w.clone()),"selected",NOW).unwrap();
+        assert_eq!(snapshot.expires_at_ms(),expiry);
+        assert_eq!(snapshot.account(),"account-fixture");
+        w["expiresAtMs"]=json!(expiry+1);refuses(w);
+    }
+    let expiry=NOW+(14*24*60*60+1)*1000;
+    let mut c=claims();c["exp"]=json!(expiry/1000);
+    let mut w=wire();w["accessToken"]=json!(token(c));w["expiresAtMs"]=json!(expiry);
+    refuses(w);
 }
 #[test]
 fn jwt_selected_account_and_optional_plan_cannot_be_substituted() {

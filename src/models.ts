@@ -5,7 +5,7 @@ import path from "node:path";
 import type { BackendId } from "./types.js";
 import type { AuthProfileCredential, AuthProfileStore } from "./types.js";
 import { loadAuthStore, loadConfig } from "./state.js";
-import { rudderHome } from "./util.js";
+import { rudderHome, writeJson } from "./util.js";
 
 const MODELS_DEV_URL = "https://models.dev/api.json";
 const OPENAI_MODELS_URL = "https://api.openai.com/v1/models";
@@ -149,7 +149,7 @@ async function discoverClaudeModelsDev(): Promise<ModelOption[]> {
 }
 
 async function discoverCodexModelsLocal(): Promise<ModelOption[]> {
-  const file = path.join(os.homedir(), ".codex", "models_cache.json");
+  const file = path.join(process.env.CODEX_HOME || path.join(os.homedir(), ".codex"), "models_cache.json");
   const raw = await fsp.readFile(file, "utf8").catch(() => "");
   if (!raw) {
     return [];
@@ -163,7 +163,7 @@ async function discoverCodexModelsLocal(): Promise<ModelOption[]> {
     return [];
   }
   return (parsed.models ?? [])
-    .filter((model) => model.slug && model.slug !== "codex-auto-review")
+    .filter((model) => model.slug && model.slug !== "codex-auto-review" && model.visibility !== "hide")
     .map((model) => ({
       label: model.slug || model.display_name || "model",
       value: model.slug,
@@ -255,8 +255,7 @@ async function readModelsDevCache(): Promise<{ data: ModelsDevCache; mtimeMs: nu
 
 async function writeModelsDevCache(data: ModelsDevCache): Promise<void> {
   const file = modelsDevCachePath();
-  await fsp.mkdir(path.dirname(file), { recursive: true });
-  await fsp.writeFile(file, JSON.stringify(data), { mode: 0o600 });
+  await writeJson(file, data);
 }
 
 function modelsDevCachePath(): string {
@@ -502,7 +501,12 @@ async function providerCredentials(provider: "openai" | "anthropic"): Promise<Ar
     if (!id) {
       continue;
     }
-    addCredential(values, store.profiles[id]);
+    const credential = store.profiles[id];
+    // Subscription access belongs to the Codex protocol, not the public API.
+    // Never probe billing/API endpoints with a subscription bearer or a profile
+    // belonging to another provider. Codex's local catalog remains available.
+    if (credential?.provider !== provider || (provider === "openai" && credential.type !== "api_key")) continue;
+    addCredential(values, credential);
   }
   const seen = new Set<string>();
   return values.filter((credential) => {

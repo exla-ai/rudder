@@ -1153,10 +1153,11 @@ pub(crate) fn model_suggestions_for(backend_filter: Backend, query: &str) -> Vec
 }
 
 pub(crate) fn cached_codex_local_rows() -> Vec<(Backend, String, String)> {
-    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+    let Some(home) = std::env::var_os("CODEX_HOME").filter(|p| !p.is_empty()).map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|p| PathBuf::from(p).join(".codex"))) else {
         return Vec::new();
     };
-    let Ok(raw) = fs::read_to_string(home.join(".codex").join("models_cache.json")) else {
+    let Ok(raw) = fs::read_to_string(home.join("models_cache.json")) else {
         return Vec::new();
     };
     let Ok(data) = serde_json::from_str::<serde_json::Value>(&raw) else {

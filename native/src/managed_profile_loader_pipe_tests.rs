@@ -36,6 +36,23 @@ fn load_error(f: &Fixture, selection: &ManagedTaskOptIn) -> ManagedProfileLoadEr
 const GOOD_METADATA: &str = r#"{"ok":true,"metadata":{"formatVersion":1,"profileId":"selected","backend":"codex","credentialKind":"api_key","provider":"openai"}}"#;
 
 #[test]
+fn model_selection_is_checked_against_the_actual_private_profile_before_handoff() {
+    let f = Fixture::new(serde_json::json!({"selected":{"type":"api_key","provider":"openai","key":"FIXTURE_KEY"}}));
+    let selection = serde_json::json!({"format_version":1,"backend":"codex","profile_id":"selected",
+        "provider":"openai","credential_kind":"api_key","requested_model":"account-model","model":"account-model",
+        "requested_effort":"max","effort":"xhigh","backend_version":"installed-version"});
+    let cancel = AtomicBool::new(false);
+    let loaded = load_selected_managed_model_profile(&f.runtime, &selected(Backend::Codex), &selection, &cancel, &budget()).unwrap();
+    let (_profile, retained) = loaded.into_parts();
+    assert_eq!(retained, selection);
+    for (field, value) in [("profile_id", "different"), ("backend", "claude"), ("provider", "openai-codex"),
+        ("credential_kind", "oauth"), ("effort", "high")] {
+        let mut changed = selection.clone(); changed[field] = serde_json::json!(value);
+        assert!(load_selected_managed_model_profile(&f.runtime, &selected(Backend::Codex), &changed, &cancel, &budget()).is_err());
+    }
+}
+
+#[test]
 fn actual_node_private_store_pipe_frame_and_selected_owner_for_both_backends() {
     for (backend, provider, key_text) in [(Backend::Codex, "openai", "FIXTURE_CODEX_KEY"), (Backend::Claude, "anthropic", "FIXTURE_CLAUDE_KEY")] {
         let f = Fixture::new(serde_json::json!({"selected":{"mode":"api_key","provider":provider,"apiKey":key_text},

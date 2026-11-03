@@ -1739,7 +1739,7 @@ impl WorkspaceManager {
         let private = self.view_path(id)?.join("private");
         if private.try_exists()? {
             ensure_real_directory(&private)?;
-            fs::remove_dir_all(&private)?;
+            remove_managed_tree(&private)?;
         }
         descriptor.status = WorkspaceStatus::Destroyed;
         descriptor.revision += 1;
@@ -1959,7 +1959,7 @@ impl WorkspaceManager {
         }
         if tree.try_exists()? {
             ensure_real_directory(&tree)?;
-            fs::remove_dir_all(&tree)?;
+            remove_managed_tree(&tree)?;
         }
         self.store.export_tree(directory, &tree)?;
         self.store
@@ -2131,6 +2131,41 @@ fn valid_digest(value: &str) -> Result<()> {
         "invalid prepared identity"
     );
     Ok(())
+}
+/// Removes a managed private tree even when the kernel left part of it
+/// unreadable. Linux overlayfs leaves its internal `work/work` directory with
+/// no read or search permission, so a plain `remove_dir_all` fails on it and
+/// the whole view leaks on disk. On a permission error this restores owner
+/// rwx on real directories inside `path` (never following symlinks) and
+/// retries once. The caller has already checked `path` is a real directory.
+pub fn remove_managed_tree(path: &Path) -> std::io::Result<()> {
+    match fs::remove_dir_all(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+            restore_owner_access(path);
+            fs::remove_dir_all(path)
+        }
+        result => result,
+    }
+}
+fn restore_owner_access(path: &Path) {
+    let Ok(metadata) = fs::symlink_metadata(path) else {
+        return;
+    };
+    if !metadata.is_dir() {
+        return;
+    }
+    #[cfg(unix)]
+    {
+        let mode = metadata.permissions().mode();
+        if mode & 0o700 != 0o700 {
+            let _ = fs::set_permissions(path, fs::Permissions::from_mode(mode | 0o700));
+        }
+    }
+    if let Ok(entries) = fs::read_dir(path) {
+        for entry in entries.flatten() {
+            restore_owner_access(&entry.path());
+        }
+    }
 }
 fn ensure_real_directory(path: &Path) -> Result<()> {
     ensure!(

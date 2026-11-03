@@ -368,6 +368,47 @@ serverTest("a signed-in laptop pairs a phone with a one-time code", async (t) =>
   assert.equal(last, 429);
 });
 
+serverTest("signing out of the app revokes its token and the next sign-in can pick another account", async (t) => {
+  const { base, dbPath } = await bootServer(t, {
+    GOOGLE_CLIENT_ID: "test-google-client",
+    GOOGLE_CLIENT_SECRET: "test-google-secret",
+    GITHUB_CLIENT_ID: "test-github-client",
+    GITHUB_CLIENT_SECRET: "test-github-secret",
+  });
+  const appToken = "rdr_signout_test_app";
+  const otherToken = "rdr_signout_test_other";
+  const now = new Date().toISOString();
+  const db = new Database(dbPath);
+  db.pragma("journal_mode = WAL");
+  const insertToken = db.prepare(
+    "insert or replace into rudder_tokens (token_hash, account_id, email, created_at, last_used_at) values (?,?,?,?,?)",
+  );
+  insertToken.run(tokenHash(appToken), "acct-first", "first@example.com", now, now);
+  insertToken.run(tokenHash(otherToken), "acct-first", "first@example.com", now, now);
+  db.close();
+  const bearer = (token) => ({ authorization: `Bearer ${token}` });
+
+  assert.equal((await fetch(`${base}/api/app/state`, { headers: bearer(appToken) })).status, 200);
+  assert.equal((await fetch(`${base}/api/app/sign-out`)).status, 405);
+  const out = await fetch(`${base}/api/app/sign-out`, { method: "POST", headers: bearer(appToken) });
+  assert.equal(out.status, 200);
+  assert.equal((await fetch(`${base}/api/app/state`, { headers: bearer(appToken) })).status, 401, "the signed-out token is revoked");
+  assert.equal((await fetch(`${base}/api/app/state`, { headers: bearer(otherToken) })).status, 200, "other devices stay signed in");
+  // Already signed out, or no token at all: still fine.
+  assert.equal((await fetch(`${base}/api/app/sign-out`, { method: "POST", headers: bearer(appToken) })).status, 200);
+  assert.equal((await fetch(`${base}/api/app/sign-out`, { method: "POST" })).status, 200);
+
+  // The shells share the system browser's Google and GitHub sessions, so the
+  // provider must show its account picker instead of reusing the old account.
+  for (const [provider, host] of [["google", "accounts.google.com"], ["github", "github.com"]]) {
+    const login = await fetch(`${base}/app/login?native=1&provider=${provider}`, { redirect: "manual" });
+    assert.equal(login.status, 302, `${provider} login redirects`);
+    const target = new URL(login.headers.get("location"));
+    assert.equal(target.host, host);
+    assert.equal(target.searchParams.get("prompt"), "select_account", `${provider} shows the account picker`);
+  }
+});
+
 serverTest("a failed worker heartbeat records why", async (t) => {
   const { base, dbPath } = await bootServer(t);
   const workerToken = "rdrw_fail_test";

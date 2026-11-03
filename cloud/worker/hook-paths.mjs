@@ -7,6 +7,7 @@
 // it, and a hook whose command still starts with an absolute path that is not
 // on this machine is dropped (it can only ever fail).
 
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -62,8 +63,10 @@ export function missingHomePath(command, home, exists = fs.existsSync) {
 // Rewrite and prune one parsed hook config (Claude settings.json or Codex
 // hooks.json: `{ hooks: { <Event>: [{ matcher?, hooks: [{ type, command }] }] } }`).
 // Returns { config, changed, rewritten, dropped } and never mutates the input.
+// `kept` lists every surviving command hook with its new group/handler index
+// and the declaration it had before the rewrite (Codex trust carries over).
 export function sanitizeHookConfig(config, { home, exists = fs.existsSync } = {}) {
-  const result = { config, changed: false, rewritten: [], dropped: [] };
+  const result = { config, changed: false, rewritten: [], dropped: [], kept: [] };
   if (!config || typeof config !== "object" || Array.isArray(config)) {
     return result;
   }
@@ -98,7 +101,9 @@ export function sanitizeHookConfig(config, { home, exists = fs.existsSync } = {}
           result.dropped.push({ event, command, missing: program });
           continue;
         }
-        nextHooks.push(command === hook.command ? hook : { ...hook, command });
+        const next = command === hook.command ? hook : { ...hook, command };
+        result.kept.push({ event, group: nextGroups.length, handler: nextHooks.length, matcher: group.matcher, from: hook, to: next });
+        nextHooks.push(next);
       }
       if (nextHooks.length === 0 && group.hooks.length > 0) {
         continue;
@@ -138,6 +143,9 @@ export function sanitizeHomeHookConfigs(home, log = () => {}) {
       continue;
     }
     const outcome = sanitizeHookConfig(parsed, { home });
+    if (file.endsWith(path.join(".codex", "hooks.json"))) {
+      carryHomeCodexHookTrust(home, file, outcome.kept, log);
+    }
     if (!outcome.changed) {
       continue;
     }
@@ -156,6 +164,149 @@ export function sanitizeHomeHookConfigs(home, log = () => {}) {
     for (const entry of outcome.dropped) {
       log(`hooks ${name}: dropped ${entry.event} hook \`${entry.command}\` (${entry.missing} is not on this machine)`);
     }
+  }
+}
+
+// Codex asks "Hooks need review ... Trust all and continue" for any hook whose
+// approval it cannot find, and it keys approvals by the hooks.json path, the
+// hook's position and a hash of its declaration. All three change when the
+// laptop's config lands here (another home, dropped hooks shift positions,
+// rewritten commands), so every boot asked again. A hook the user approved on
+// the laptop keeps that approval here: the laptop declaration must hash to a
+// recorded trusted_hash, and only then is the rewritten declaration recorded
+// under its new key. A new or edited hook is never approved by this.
+const CODEX_MATCHER_EVENTS = new Set([
+  "PreToolUse", "PermissionRequest", "PostToolUse", "SessionStart", "SessionEnd",
+  "SubagentStart", "SubagentStop", "PreCompact", "PostCompact",
+]);
+const CODEX_CONTEXT_LIMIT_EVENTS = new Set(["PreToolUse", "PostToolUse", "SessionStart", "UserPromptSubmit", "SubagentStart"]);
+const CODEX_DEFAULT_CONTEXT_LIMIT = 2500;
+
+export function codexEventLabel(event) {
+  return event.replace(/([a-z0-9])([A-Z])/g, "$1_$2").toLowerCase();
+}
+
+// Codex's declaration hash (hooks discovery `hook_hash` + config
+// `version_for_toml`): sha256 of the key-sorted compact JSON of the
+// normalized { event_name, matcher?, hooks: [handler] }. Null for handlers
+// Codex would not run as a command hook.
+export function codexHookHash(event, matcher, handler) {
+  if (!handler || handler.type !== "command" || typeof handler.command !== "string" || !handler.command.trim()) {
+    return null;
+  }
+  const raw = Number.isInteger(handler.timeout) && handler.timeout >= 0 ? handler.timeout : null;
+  const timeout = event === "SessionEnd" || event === "Interrupt"
+    ? Math.min(Math.max(raw ?? 1, 1), 3)
+    : Math.max(raw ?? 600, 1);
+  const normalized = { type: "command", command: handler.command, timeout, async: handler.async === true };
+  if (typeof handler.statusMessage === "string") {
+    normalized.statusMessage = handler.statusMessage;
+  }
+  const limit = handler.additionalContextLimit;
+  if (CODEX_CONTEXT_LIMIT_EVENTS.has(event) && Number.isInteger(limit) && limit !== CODEX_DEFAULT_CONTEXT_LIMIT) {
+    normalized.additionalContextLimit = limit;
+  }
+  const identity = { event_name: codexEventLabel(event), hooks: [normalized] };
+  if (CODEX_MATCHER_EVENTS.has(event) && typeof matcher === "string") {
+    identity.matcher = matcher;
+  }
+  return `sha256:${createHash("sha256").update(JSON.stringify(sortKeys(identity))).digest("hex")}`;
+}
+
+function sortKeys(value) {
+  if (Array.isArray(value)) {
+    return value.map(sortKeys);
+  }
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.keys(value).sort().map((key) => [key, sortKeys(value[key])]));
+  }
+  return value;
+}
+
+function tomlString(value) {
+  return `"${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/[\u0000-\u001f\u007f]/g, (ch) => `\\u${ch.charCodeAt(0).toString(16).padStart(4, "0").toUpperCase()}`)}"`;
+}
+
+// The edited config.toml text, or null when nothing changes. `hooksPaths` are
+// the spellings Codex may key this machine's hooks.json by.
+export function carryCodexHookTrust(text, { hooksPaths, kept }) {
+  const trusted = new Set();
+  const existing = new Set();
+  const header = /^\s*\[hooks\.state\.("(?:[^"\\]|\\.)*")\]\s*$/;
+  const lines = text.split("\n");
+  for (let index = 0; index < lines.length; index += 1) {
+    const match = header.exec(lines[index]);
+    if (!match) {
+      continue;
+    }
+    let key;
+    try {
+      key = JSON.parse(match[1]);
+    } catch {
+      continue;
+    }
+    existing.add(key);
+    for (let next = index + 1; next < lines.length && !/^\s*\[/.test(lines[next]); next += 1) {
+      const hash = /^\s*trusted_hash\s*=\s*"(sha256:[0-9a-f]{64})"\s*$/.exec(lines[next]);
+      // Only the user's own hooks.json approvals (any home), never a plugin's.
+      if (hash && /\/\.codex\/hooks\.json:[a-z_]+:\d+:\d+$/.test(key)) {
+        trusted.add(hash[1]);
+      }
+    }
+  }
+  let additions = "";
+  for (const hook of kept) {
+    const before = codexHookHash(hook.event, hook.matcher, hook.from);
+    const after = codexHookHash(hook.event, hook.matcher, hook.to);
+    if (!before || !after || !trusted.has(before)) {
+      continue;
+    }
+    for (const source of hooksPaths) {
+      const key = `${source}:${codexEventLabel(hook.event)}:${hook.group}:${hook.handler}`;
+      if (existing.has(key)) {
+        continue;
+      }
+      existing.add(key);
+      additions += `\n[hooks.state.${tomlString(key)}]\ntrusted_hash = "${after}"\n`;
+    }
+  }
+  if (!additions) {
+    return null;
+  }
+  return `${text}${text === "" || text.endsWith("\n") ? "" : "\n"}${additions}`;
+}
+
+function carryHomeCodexHookTrust(home, hooksFile, kept, log) {
+  const config = path.join(home, ".codex", "config.toml");
+  let text;
+  try {
+    text = fs.readFileSync(config, "utf8");
+  } catch {
+    return;
+  }
+  const hooksPaths = [hooksFile];
+  try {
+    const real = fs.realpathSync(hooksFile);
+    if (real !== hooksFile) {
+      hooksPaths.push(real);
+    }
+  } catch {
+    // keep the plain path
+  }
+  const next = carryCodexHookTrust(text, { hooksPaths, kept });
+  if (next === null) {
+    return;
+  }
+  try {
+    const target = fs.realpathSync(config);
+    const mode = fs.statSync(target).mode & 0o7777;
+    const tmp = `${target}.rudder-tmp`;
+    fs.writeFileSync(tmp, next, { mode });
+    fs.renameSync(tmp, target);
+    const carried = (next.slice(text.length).match(/^\[hooks\.state\./gm) ?? []).length;
+    log(`hooks .codex/config.toml: kept the laptop's approval for ${carried} hook entr${carried === 1 ? "y" : "ies"}`);
+  } catch (error) {
+    log(`hooks .codex/config.toml: ${error?.message || error}`);
   }
 }
 

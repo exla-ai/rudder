@@ -1058,6 +1058,19 @@ good metric. Publish samples and bounds, including p95/p99 and memory growth
 on a suitable sample size. E13 qualifies networking and terminal changes on
 real laptop/Cloud connections as well as deterministic fault tests.
 
+### 18.5 Project file and document viewer
+
+- [ ] `project-file-document-viewer`: Add a built-in, browser-style viewer for
+  project files and agent outputs. Make files easy to discover from the project
+  tree and task output, with readable previews for documents, Markdown, PDFs,
+  images and text, plus rendered previews of website files. Support local and
+  Cloud projects through the existing private access path.
+
+Done when a user can open a generated file or folder from a task, browse nearby
+files, switch between a rendered document/website and its source, and see saved
+changes without manually finding paths or downloading each file. This task is
+queued; implementation has not started.
+
 ## 19. Implementation, context handoff and delivery
 
 This is a staged multi-month rewrite, not a single version-number change.

@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
-import net from "node:net";
+import http from "node:http";
+import https from "node:https";
 
 type RecordValue = Record<string, unknown>;
 const object = (value: unknown): RecordValue => value !== null && typeof value === "object" && !Array.isArray(value)
@@ -54,7 +55,7 @@ export function cloudPreviews(value: unknown, project?: { repo?: string | null; 
   return previews.sort((a, b) => a.port - b.port || a.project.localeCompare(b.project));
 }
 
-export function previewAccess(value: unknown, dnsName: string): { ok: boolean; error?: string } {
+export function previewAccess(value: unknown, dnsName: string, deviceId?: string): { ok: boolean; error?: string } {
   const status = object(value);
   const self = object(status.Self);
   if (status.BackendState !== "Running" || self.Online !== true) {
@@ -64,19 +65,37 @@ export function previewAccess(value: unknown, dnsName: string): { ok: boolean; e
   const peers = [self, ...Object.values(object(status.Peer)).map(object)];
   const peer = peers.find((entry) => typeof entry.DNSName === "string" && entry.DNSName.toLowerCase().replace(/\.$/, "") === target);
   if (!peer) return { ok: false, error: "This Tailscale connection cannot see the cloud machine. Use its tailnet or an existing device share." };
+  if (deviceId && peer.ID !== deviceId) return { ok: false, error: "The private preview belongs to a different device. Refresh project discovery." };
   if (peer.Online !== true) return { ok: false, error: "The cloud machine is offline on Tailscale. Retry once it reconnects." };
   return { ok: true };
 }
 
-export async function localTailnetStatus(): Promise<unknown> {
-  const socket = process.env.RUDDER_TAILSCALE_SOCKET || (process.env.RUDDER_CLOUD_RUNTIME === "home" ? "/tmp/tailscaled.sock" : undefined);
+export async function localTailnetStatus(options: { timeoutMs?: number; command?: string; socket?: string } = {}): Promise<unknown> {
+  const deadline = performance.now() + Math.max(1, options.timeoutMs ?? 5000);
+  const socket = options.socket ?? process.env.RUDDER_TAILSCALE_SOCKET ?? (process.env.RUDDER_CLOUD_RUNTIME === "home" ? "/tmp/tailscaled.sock" : undefined);
   const args = [...(socket ? ["--socket", socket] : []), "status", "--json"];
-  const commands = process.platform === "darwin"
+  const commands = options.command ? [options.command] : process.platform === "darwin"
     ? ["tailscale", "/Applications/Tailscale.app/Contents/MacOS/Tailscale"] : ["tailscale"];
   for (const command of commands) {
+    const remaining = Math.floor(deadline - performance.now());
+    if (remaining < 1) break;
     const result = await new Promise<{ stdout: string; missing: boolean }>((resolve) => {
-      execFile(command, args, { timeout: 5000, maxBuffer: 2 * 1024 * 1024, encoding: "utf8" }, (error, stdout) => {
-        resolve({ stdout: error ? "" : stdout, missing: (error as NodeJS.ErrnoException | null)?.code === "ENOENT" });
+      let settled = false;
+      const finish = (stdout: string, missing = false) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve({ stdout, missing });
+      };
+      // A forked descendant can keep execFile's output pipes open after its
+      // parent exits. Bound the promise independently of the close callback.
+      const timer = setTimeout(() => {
+        child.kill("SIGKILL");
+        child.stdin?.destroy(); child.stdout?.destroy(); child.stderr?.destroy();
+        finish("");
+      }, remaining);
+      const child = execFile(command, args, { timeout: remaining, killSignal: "SIGKILL", maxBuffer: 2 * 1024 * 1024, encoding: "utf8" }, (error, stdout) => {
+        finish(error ? "" : stdout, (error as NodeJS.ErrnoException | null)?.code === "ENOENT");
       });
     });
     if (result.missing) continue;
@@ -86,12 +105,28 @@ export async function localTailnetStatus(): Promise<unknown> {
 }
 
 export function previewReachable(url: string, timeoutMs = 3000): Promise<boolean> {
-  const target = new URL(url);
   return new Promise((resolve) => {
-    const socket = net.createConnection({ host: target.hostname, port: Number(target.port || (target.protocol === "https:" ? 443 : 80)) });
-    const finish = (ok: boolean) => { socket.destroy(); resolve(ok); };
-    socket.setTimeout(timeoutMs, () => finish(false));
-    socket.once("connect", () => finish(true));
-    socket.once("error", () => finish(false));
+    let request: http.ClientRequest | undefined;
+    let settled = false;
+    const finish = (ok: boolean) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      request?.destroy();
+      resolve(ok);
+    };
+    // A TCP accept does not establish an ACL-capable HTTP route. A total
+    // deadline also bounds DNS, TLS and peers that dribble partial headers.
+    const timer = setTimeout(() => finish(false), Math.max(1, timeoutMs));
+    try {
+      const target = new URL(url);
+      if (!["http:", "https:"].includes(target.protocol) || target.username || target.password) return finish(false);
+      request = (target.protocol === "https:" ? https : http).request(target, { method: "HEAD" }, (response) => {
+        response.destroy();
+        finish(true);
+      });
+      request.once("error", () => finish(false));
+      request.end();
+    } catch { finish(false); }
   });
 }

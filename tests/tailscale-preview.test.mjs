@@ -325,6 +325,7 @@ test("HTTP readiness and local reachability perform real bounded loopback checks
   await new Promise((resolve) => other.listen(0, "127.0.0.1", resolve));
   t.after(() => other.close());
   assert.equal(await probePreview(`http://127.0.0.1:${other.address().port}/`, 100), false);
+  assert.equal(await previewReachable(`http://127.0.0.1:${other.address().port}/`, 100), false);
 });
 
 test("an incomplete HTTP response is bounded by the total probe deadline", { timeout: 3000 }, async (t) => {
@@ -339,4 +340,383 @@ test("an incomplete HTTP response is bounded by the total probe deadline", { tim
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   t.after(() => { for (const socket of sockets) socket.destroy(); server.close(); });
   assert.equal(await probePreview(`http://127.0.0.1:${server.address().port}/`, 80), false);
+  assert.equal(await previewReachable(`http://127.0.0.1:${server.address().port}/`, 80), false);
+});
+
+// v4 uses complete project/attempt/process/device references. Legacy discovery
+// tests above remain coverage for the deployed home-state adapter.
+const { PrivatePreviewDirectory, loopbackPreviewOrigin, observeLinuxPreviewListeners, previewProcessMatches } = await import("../dist/private-access/previews.js");
+const binding = { tenantId: "tenant-a", projectId: "project-a", workspaceId: "workspace-a", attemptId: "attempt-a", workspacePath: "/workspace/project-a" };
+const scopedListener = (extra = {}) => ({ ...binding, pid: 42, processStart: "100", port: 3000, protocol: "http", origin: "http://127.0.0.1:3000/", role: "preview", ...extra });
+const scopedOnline = () => ({ ...online(), Self: { ...online().Self, ID: "device-a" } });
+function privateHarness(options = {}) {
+  const calls = [];
+  let clock = 0;
+  let status = scopedOnline();
+  const configured = { TCP: {}, Web: {} };
+  const directory = new PrivatePreviewDirectory({ timeoutMs: 30, now: () => clock,
+    processMatches: async () => true, probe: async () => true, ...options,
+    execute: async (args, signal) => {
+      calls.push(args);
+      let result = options.execute ? await options.execute(args, signal)
+        : { code: 0, stdout: args[0] === "status" ? JSON.stringify(status) : args[1] === "status" ? "{}" : "" };
+      if (args[0] === "serve" && args[1] === "status" && result.code === 0 && result.stdout === "{}") {
+        result = { ...result, stdout: JSON.stringify(configured) };
+      }
+      const mode = args.find((arg) => /^--(?:http|https)=/.test(arg));
+      if (result.code === 0 && args[0] === "serve" && mode) {
+        const port = Number(mode.split("=")[1]);
+        const service = `${host}:${port}`;
+        if (args.includes("off")) { delete configured.TCP[port]; delete configured.Web[service]; }
+        else if (args.includes("--bg")) {
+          configured.TCP[port] = mode.startsWith("--https=") ? { HTTPS: true } : { HTTP: true };
+          configured.Web[service] = { Handlers: { "/": { Proxy: args.at(-1) } } };
+        }
+      }
+      return result;
+    } });
+  return { directory, calls, time: (value) => { clock = value; }, status: (value) => { status = value; } };
+}
+const localScopedStatus = () => ({ BackendState: "Running", Self: { ID: "laptop", Online: true }, Peer: { worker: { ID: "device-a", DNSName: host, Online: true } } });
+const openOptions = (extra = {}) => ({ authorize: async () => true, localStatus: async () => localScopedStatus(), probe: async () => true, ...extra });
+
+test("v4 private discovery binds readiness to project, workspace, attempt, process and device", async () => {
+  const h = privateHarness();
+  await h.directory.reconcile([scopedListener()]);
+  const original = h.directory.snapshot(binding)[0];
+  assert.equal(original.deviceId, "device-a");
+  assert.equal(original.processStart, "100");
+  assert.equal(original.attemptId, "attempt-a");
+  assert.equal(h.directory.snapshot({ ...binding, projectId: "project-b" }).length, 0);
+  await h.directory.reconcile([scopedListener({ attemptId: "attempt-b", processStart: "101" })]);
+  const replacement = h.directory.snapshot()[0];
+  assert.notEqual(replacement.id, original.id);
+  assert.equal(h.directory.snapshot(binding).length, 0);
+  assert.ok(h.calls.findIndex((args) => args.join(" ") === "serve --http=3000 off") < h.calls.findLastIndex((args) => args.includes("--bg")));
+  await assert.rejects(h.directory.open(original.id, binding, openOptions()), /no longer ready/);
+  await h.directory.reconcile([]);
+  assert.deepEqual(h.directory.snapshot(), []);
+});
+
+test("same-device identical ports and infrastructure listeners fail closed", async () => {
+  const h = privateHarness();
+  await h.directory.reconcile([scopedListener(), scopedListener({ projectId: "other-project", workspaceId: "other-workspace" })]);
+  assert.deepEqual(h.directory.snapshot(), []);
+  assert.equal(h.calls.filter((args) => args[0] === "serve" && args[1] !== "status").length, 0);
+  await h.directory.reconcile([scopedListener({ role: "control" }), scopedListener({ port: 41641, origin: "http://127.0.0.1:41641/" })]);
+  assert.deepEqual(h.directory.snapshot(), []);
+  assert.equal(loopbackPreviewOrigin("::1", 3000), "http://[::1]:3000/");
+  assert.equal(loopbackPreviewOrigin("[::1]", 3000), "http://[::1]:3000/");
+  assert.equal(loopbackPreviewOrigin("127.0.0.2", 3000), "http://127.0.0.2:3000/");
+  assert.equal(loopbackPreviewOrigin("10.0.0.1", 3000), null);
+});
+
+test("v4 requires live device identity and expires observations using a local monotonic clock", async () => {
+  const h = privateHarness();
+  h.status(online());
+  await h.directory.reconcile([scopedListener()]);
+  assert.deepEqual(h.directory.snapshot(), []);
+  h.status(scopedOnline());
+  await h.directory.reconcile([scopedListener()]);
+  assert.equal(h.directory.snapshot().length, 1);
+  h.time(10_001);
+  assert.deepEqual(h.directory.snapshot(), []);
+  await h.directory.reconcile([scopedListener()]);
+  assert.equal(h.directory.snapshot().length, 1);
+  h.status({ ...scopedOnline(), BackendState: "NeedsLogin" });
+  await h.directory.reconcile([scopedListener()]);
+  assert.deepEqual(h.directory.snapshot(), []);
+});
+
+test("hung Tailscale and readiness probes stay bounded and do not serialize all work forever", { timeout: 2000 }, async () => {
+  let calls = 0;
+  const h = privateHarness({ execute: async () => { calls++; return new Promise(() => {}); } });
+  const before = performance.now();
+  await h.directory.reconcile([scopedListener()]);
+  await h.directory.reconcile([scopedListener()]);
+  assert.equal(calls, 2);
+  assert.ok(performance.now() - before < 1000);
+  assert.deepEqual(h.directory.snapshot(), []);
+  const slow = privateHarness({ probe: () => new Promise(() => {}) });
+  await slow.directory.reconcile([scopedListener()]);
+  assert.deepEqual(slow.directory.snapshot(), []);
+  assert.equal(slow.calls.filter((args) => args[0] === "serve" && args[1] !== "status").length, 0);
+});
+
+test("uncertain route effects cannot publish or race a replacement owner", { timeout: 2000 }, async () => {
+  let release;
+  const calls = [];
+  const h = privateHarness({ execute: async (args) => {
+    calls.push(args);
+    if (args[0] === "status") return { code: 0, stdout: JSON.stringify(scopedOnline()) };
+    if (args[1] === "status") return { code: 0, stdout: "{}" };
+    if (args.includes("--bg") && !release) return new Promise((resolve) => { release = resolve; });
+    return success;
+  } });
+  await h.directory.reconcile([scopedListener()]);
+  assert.deepEqual(h.directory.snapshot(), []);
+  await h.directory.reconcile([scopedListener({ attemptId: "attempt-b" })]);
+  assert.equal(calls.filter((args) => args.includes("--bg")).length, 1, "hung old mutation prevents replacement effects");
+  release(success);
+  await new Promise((resolve) => setImmediate(resolve));
+  await h.directory.reconcile([scopedListener({ attemptId: "attempt-b" })]);
+  assert.equal(h.directory.snapshot()[0].attemptId, "attempt-b");
+  const cleanup = calls.findIndex((args) => args.join(" ") === "serve --http=3000 off");
+  assert.ok(cleanup >= 0 && cleanup < calls.findLastIndex((args) => args.includes("--bg")));
+  assert.ok(calls.every((args) => !args.includes("funnel") && !args.includes("up") && !args.includes("login")));
+});
+
+test("private HTTP fallback is explicit and failed retirement blocks reassignment", async () => {
+  let cleanupFails = false;
+  const h = privateHarness({ execute: async (args) => args[0] === "status"
+    ? { code: 0, stdout: JSON.stringify(scopedOnline()) }
+    : args[1] === "status" ? { code: 0, stdout: "{}" } : { code: cleanupFails || args.includes("--bg") ? 1 : 0, stdout: "" } });
+  await h.directory.reconcile([scopedListener()]);
+  assert.deepEqual(h.directory.snapshot(), []);
+  const fallback = privateHarness({ allowPrivateHttp: true, execute: async (args) => args[0] === "status"
+    ? { code: 0, stdout: JSON.stringify(scopedOnline()) }
+    : args[1] === "status" ? { code: 0, stdout: "{}" } : { code: args.includes("--https=3000") && args.includes("--bg") ? 1 : 0, stdout: "" } });
+  await fallback.directory.reconcile([scopedListener()]);
+  assert.equal(fallback.directory.snapshot()[0].url, `http://${host}:3000/`);
+  cleanupFails = true;
+  await h.directory.reconcile([scopedListener({ attemptId: "attempt-b" })]);
+  assert.deepEqual(h.directory.snapshot(), []);
+});
+
+test("opening requires fresh authorization, matching project and device, and an HTTP route", async () => {
+  const h = privateHarness();
+  await h.directory.reconcile([scopedListener()]);
+  const preview = h.directory.snapshot()[0];
+  assert.deepEqual(await h.directory.open(preview.id, binding, openOptions()), { url: preview.url, access: "tailnet" });
+  await assert.rejects(h.directory.open(preview.id, binding, openOptions({ authorize: async () => false })), /denied/);
+  await assert.rejects(h.directory.open(preview.id, { ...binding, workspaceId: "other" }, openOptions()), /no longer ready/);
+  await assert.rejects(h.directory.open(preview.id, binding, openOptions({ probe: async () => false })), /unreachable/);
+  const wrongDevice = localScopedStatus(); wrongDevice.Peer.worker.ID = "retired-device";
+  await assert.rejects(h.directory.open(preview.id, binding, openOptions({ localStatus: async () => wrongDevice })), /unreachable/);
+  assert.deepEqual(await h.directory.open(preview.id, binding, openOptions({ localStatus: async () => null,
+    relay: async () => "https://relay.example.test/authorized/project-a" })), { url: "https://relay.example.test/authorized/project-a", access: "relay" });
+  let checks = 0;
+  await assert.rejects(h.directory.open(preview.id, binding, openOptions({ authorize: async () => ++checks === 1 })), /denied/);
+});
+
+test("process replacement during an asynchronous open never launches its previous URL", async () => {
+  const h = privateHarness();
+  await h.directory.reconcile([scopedListener()]);
+  const preview = h.directory.snapshot()[0];
+  await assert.rejects(h.directory.open(preview.id, binding, openOptions({ probe: async () => {
+    await h.directory.reconcile([scopedListener({ processStart: "new-process" })]); return true;
+  } })), /unreachable/);
+});
+
+test("actual process discovery attributes IPv4/IPv6 inodes only to registered live preview attempts", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "rudder-preview-proc-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const workspacePath = path.join(root, "workspace");
+  const procRoot = path.join(root, "proc");
+  const pidRoot = path.join(procRoot, "42");
+  fs.mkdirSync(workspacePath, { recursive: true });
+  fs.mkdirSync(path.join(pidRoot, "fd"), { recursive: true });
+  fs.mkdirSync(path.join(pidRoot, "net"), { recursive: true });
+  fs.symlinkSync(workspacePath, path.join(pidRoot, "cwd"));
+  fs.symlinkSync("socket:[123]", path.join(pidRoot, "fd", "5"));
+  fs.symlinkSync("socket:[124]", path.join(pidRoot, "fd", "6"));
+  const stat = `42 (name with ) spaces) S ${Array(18).fill("0").join(" ")} 100 0`;
+  fs.writeFileSync(path.join(pidRoot, "stat"), stat);
+  const row = (address, inode) => `0: ${address}:0BB8 00000000:0000 0A 0 0 0 0 0 ${inode}`;
+  fs.writeFileSync(path.join(pidRoot, "net", "tcp"), `header\n${row("0100007F", 123)}\n${row("0100007F", 999)}\n`);
+  fs.writeFileSync(path.join(pidRoot, "net", "tcp6"), `header\n${row("00000000000000000000000001000000", 124)}\n`);
+  const process = { ...binding, workspacePath, pid: 42, processStart: "100", role: "preview" };
+  const observations = await observeLinuxPreviewListeners([process], { procRoot });
+  assert.deepEqual(observations.map((row) => row.origin), ["http://127.0.0.1:3000/", "http://[::1]:3000/"]);
+  assert.ok(observations.every((row) => row.attemptId === binding.attemptId && row.processStart === "100"));
+  assert.deepEqual(await observeLinuxPreviewListeners([{ ...process, role: "control" }], { procRoot }), []);
+  assert.deepEqual(await observeLinuxPreviewListeners([{ ...process, processStart: "99" }], { procRoot }), []);
+});
+
+test("local status kills a hung fake Tailscale CLI without requiring enrollment", { timeout: 2000 }, async (t) => {
+  const { localTailnetStatus } = await import("../dist/tailscale-preview.js");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "rudder-tailscale-hung-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const command = path.join(root, "tailscale");
+  fs.writeFileSync(command, `#!${process.execPath}\nsetInterval(() => {}, 1000);\n`, { mode: 0o700 });
+  const before = performance.now();
+  assert.equal(await localTailnetStatus({ command, timeoutMs: 40 }), null);
+  assert.ok(performance.now() - before < 1000);
+});
+
+test("private URL readiness is verified separately from local HTTP and Serve configuration", async () => {
+  const probes = [];
+  const h = privateHarness({ probe: async (url) => { probes.push(url); return url.startsWith("http://127."); } });
+  await h.directory.reconcile([scopedListener()]);
+  assert.deepEqual(probes, ["http://127.0.0.1:3000/", `https://${host}:3000/`]);
+  assert.deepEqual(h.directory.snapshot(), [], "ACL-denied private route is never ready");
+  assert.ok(h.calls.some((args) => args.join(" ") === "serve --https=3000 off"));
+});
+
+test("discovery never overwrites an unrelated Serve or public Funnel service", async () => {
+  for (const config of [{ TCP: { "3000": { TCPForward: "127.0.0.1:9999" } } },
+    { Web: { [`${host}:3000`]: { Handlers: { "/": { Proxy: "http://127.0.0.1:9999" } } } } },
+    { AllowFunnel: { [`${host}:3000`]: true } }]) {
+    const calls = [];
+    const h = privateHarness({ execute: async (args) => {
+      calls.push(args);
+      return { code: 0, stdout: JSON.stringify(args[0] === "status" ? scopedOnline() : config) };
+    } });
+    await h.directory.reconcile([scopedListener()]);
+    assert.deepEqual(h.directory.snapshot(), []);
+    assert.equal(calls.filter((args) => args[0] === "serve" && args[1] !== "status").length, 0);
+  }
+});
+
+test("malformed or hung Serve configuration cannot authorize a route mutation", { timeout: 2000 }, async () => {
+  for (const config of ["", "null", "[]", "malformed"]) {
+    let effects = 0;
+    const h = privateHarness({ execute: async (args) => {
+      if (args[0] === "status") return { code: 0, stdout: JSON.stringify(scopedOnline()) };
+      if (args[1] === "status") return { code: 0, stdout: config };
+      effects++; return success;
+    } });
+    await h.directory.reconcile([scopedListener()]);
+    assert.equal(effects, 0);
+    assert.deepEqual(h.directory.snapshot(), []);
+  }
+  const h = privateHarness({ execute: async (args) => args[0] === "status"
+    ? { code: 0, stdout: JSON.stringify(scopedOnline()) } : new Promise(() => {}) });
+  await h.directory.reconcile([scopedListener()]);
+  assert.deepEqual(h.directory.snapshot(), []);
+});
+
+const ts = await import("typescript");
+const cloudPreviewSource = new URL("../cloud/src/private-access/preview-access.ts", import.meta.url);
+const cloudPreviewCode = ts.transpileModule(fs.readFileSync(cloudPreviewSource, "utf8"), {
+  compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ES2022 },
+}).outputText;
+const { AuthorizedPreviewReports } = await import(`data:text/javascript;base64,${Buffer.from(cloudPreviewCode).toString("base64")}`);
+
+test("Cloud preview boundary strictly typechecks without importing the server", () => {
+  const program = ts.createProgram([cloudPreviewSource.pathname], {
+    target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.NodeNext, moduleResolution: ts.ModuleResolutionKind.NodeNext,
+    strict: true, noEmit: true, skipLibCheck: true, types: ["node"],
+  });
+  const diagnostics = ts.getPreEmitDiagnostics(program);
+  assert.deepEqual(diagnostics.map((entry) => ts.flattenDiagnosticMessageText(entry.messageText, "\n")), []);
+});
+
+test("Cloud preview reports are tenant/attempt authorized with local receipt freshness and retirement", async () => {
+  const h = privateHarness();
+  await h.directory.reconcile([scopedListener()]);
+  const preview = h.directory.snapshot()[0];
+  let clock = 50;
+  const reports = new AuthorizedPreviewReports(async (actor, scope) => actor.tenantId === scope.tenantId, { now: () => clock });
+  const actor = { tenantId: binding.tenantId };
+  reports.receive(binding, [preview, { ...preview, projectId: "other-project" }, null, [], 42, {},
+    { ...preview, dnsName: null }, { ...preview, url: {} }, { ...preview, id: "not-a-reference" },
+    { ...preview, pid: -1 }, { ...preview, url: "https://public.example.com:3000/" }]);
+  assert.equal((await reports.list(actor, binding)).length, 1);
+  assert.equal((await reports.resolve(actor, binding, preview.id)).id, preview.id);
+  await assert.rejects(reports.list({ tenantId: "other-tenant" }, binding), /denied/);
+  await assert.rejects(reports.resolve(actor, { ...binding, attemptId: "other-attempt" }, preview.id), /no longer ready/);
+  clock += 10_001;
+  assert.deepEqual(await reports.list(actor, binding), []);
+  reports.receive(binding, [preview]);
+  reports.retire(binding);
+  assert.deepEqual(await reports.list(actor, binding), []);
+  reports.receive(binding, null);
+  assert.deepEqual(await reports.list(actor, binding), []);
+});
+
+test("Cloud preview authorization hangs are bounded and denied", { timeout: 2000 }, async () => {
+  const reports = new AuthorizedPreviewReports(() => new Promise(() => {}), { timeoutMs: 25 });
+  await assert.rejects(reports.list({}, binding), /denied/);
+});
+
+test("a previously ready port becoming public is withdrawn without altering unrelated Funnel configuration", async () => {
+  let config = {};
+  const calls = [];
+  const h = privateHarness({ execute: async (args) => {
+    calls.push(args);
+    return { code: 0, stdout: args[0] === "status" ? JSON.stringify(scopedOnline()) : args[1] === "status" ? JSON.stringify(config) : "" };
+  } });
+  await h.directory.reconcile([scopedListener()]);
+  assert.equal(h.directory.snapshot().length, 1);
+  config = { Foreground: { session: { AllowFunnel: { [`${host}:3000`]: true } } } };
+  const before = calls.length;
+  await h.directory.reconcile([scopedListener()]);
+  assert.deepEqual(h.directory.snapshot(), []);
+  assert.equal(calls.slice(before).filter((args) => args[0] === "serve" && args[1] !== "status").length, 0);
+});
+
+test("an owned ready Serve port repointed to another origin is withdrawn and never overwritten", async () => {
+  let override = null;
+  const h = privateHarness({ execute: async (args) => ({ code: 0, stdout: args[0] === "status"
+    ? JSON.stringify(scopedOnline()) : args[1] === "status" ? JSON.stringify(override ?? {}) : "" }) });
+  await h.directory.reconcile([scopedListener()]);
+  const preview = h.directory.snapshot()[0];
+  assert.ok(preview);
+  override = { TCP: { 3000: { HTTPS: true } }, Web: { [`${host}:3000`]: {
+    Handlers: { "/": { Proxy: "http://127.0.0.1:9999/" } },
+  } } };
+  const before = h.calls.length;
+  await h.directory.reconcile([scopedListener()]);
+  await h.directory.reconcile([scopedListener({ attemptId: "attempt-b" })]);
+  assert.deepEqual(h.directory.snapshot(), []);
+  assert.equal(h.calls.slice(before).filter((args) => args[0] === "serve" && args[1] !== "status").length, 0);
+  await assert.rejects(h.directory.open(preview.id, binding, openOptions()), /no longer ready/);
+});
+
+test("a numeric persisted ownership journal cannot overwrite a repointed service after restart", async () => {
+  const config = { TCP: { 3000: { HTTPS: true } }, Web: { [`${host}:3000`]: {
+    Handlers: { "/": { Proxy: "http://127.0.0.1:9999/" } },
+  } } };
+  const h = privateHarness({ ownedPorts: [3000], execute: async (args) => ({ code: 0,
+    stdout: JSON.stringify(args[0] === "status" ? scopedOnline() : config) }) });
+  await h.directory.reconcile([scopedListener()]);
+  assert.deepEqual(h.directory.snapshot(), []);
+  assert.equal(h.calls.filter((args) => args[0] === "serve" && args[1] !== "status").length, 0);
+});
+
+test("listener ownership rechecks inode and exact origin even while PID/start/cwd remain unchanged", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "rudder-preview-inode-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const workspacePath = path.join(root, "workspace");
+  const procRoot = path.join(root, "proc");
+  const pidRoot = path.join(procRoot, "42");
+  fs.mkdirSync(workspacePath, { recursive: true });
+  fs.mkdirSync(path.join(pidRoot, "fd"), { recursive: true });
+  fs.mkdirSync(path.join(pidRoot, "net"), { recursive: true });
+  fs.symlinkSync(workspacePath, path.join(pidRoot, "cwd"));
+  fs.symlinkSync("socket:[123]", path.join(pidRoot, "fd", "5"));
+  fs.writeFileSync(path.join(pidRoot, "stat"), `42 (preview) S ${Array(18).fill("0").join(" ")} 100 0`);
+  const table = (inode) => `header\n0: 0100007F:0BB8 00000000:0000 0A 0 0 0 0 0 ${inode}\n`;
+  const tcp = path.join(pidRoot, "net", "tcp");
+  fs.writeFileSync(tcp, table(123));
+  const listener = scopedListener({ workspacePath });
+  assert.equal(await previewProcessMatches(listener, procRoot), true);
+  // The original process still owns a different socket, but another process
+  // has reused its former port. A PID/start/cwd-only check would accept it.
+  fs.writeFileSync(tcp, table(999));
+  assert.equal(await previewProcessMatches(listener, procRoot), false);
+  fs.writeFileSync(tcp, table(123).replace("0100007F", "0200007F"));
+  assert.equal(await previewProcessMatches(listener, procRoot), false);
+  fs.writeFileSync(tcp, table(123));
+  fs.unlinkSync(path.join(pidRoot, "fd", "5"));
+  assert.equal(await previewProcessMatches(listener, procRoot), false);
+});
+
+test("local status deadline closes inherited pipes held by a forked CLI descendant", { timeout: 3000 }, async (t) => {
+  const { localTailnetStatus } = await import("../dist/tailscale-preview.js");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "rudder-tailscale-fork-"));
+  const pidFile = path.join(root, "child.pid");
+  t.after(() => {
+    if (fs.existsSync(pidFile)) {
+      try { process.kill(Number(fs.readFileSync(pidFile, "utf8")), "SIGKILL"); } catch (error) { if (error.code !== "ESRCH") throw error; }
+    }
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+  const command = path.join(root, "tailscale");
+  fs.writeFileSync(command, `#!${process.execPath}\nconst {spawn}=require('node:child_process');\nconst fs=require('node:fs');\nconst child=spawn(process.execPath,['-e','setInterval(() => {}, 1000)'],{stdio:['ignore','inherit','inherit']});\nfs.writeFileSync(${JSON.stringify(pidFile)},String(child.pid));\nchild.unref();\nprocess.exit(0);\n`, { mode: 0o700 });
+  const before = performance.now();
+  assert.equal(await localTailnetStatus({ command, timeoutMs: 350 }), null);
+  assert.ok(performance.now() - before < 1200);
+  assert.ok(fs.existsSync(pidFile), "the forked descendant actually inherited the output pipe");
 });

@@ -99,7 +99,18 @@ The original worker build exited zero and published
 `sha256:af78998375eb9b8d37a0817cdf0fb3be062c533afeade6d737d8368e0896a35b`.
 Actual registry manifest/config bytes and the revision label match. A first
 registry read refused without a useful error; subsequent immutable reads passed.
-SDK and runtime admission are pending.
+The isolated SDK attempt failed before runtime admission. The exact machine
+reported `root_storage/serve_runtime: SdkProcessOriginal` at 02:29:58Z, about
+31 seconds after bootstrap. The automatic Fly log child exited one without a
+failure frame; a separate retained exact-machine read exited zero and recovered
+that frame. The controller driver has no HOME, and the pinned Fly ELF reproduces
+the same exit/output sizes locally when HOME is absent. Native source also
+applies the ordinary 30-second finalization budget to complete compiler
+qualification. Bounded qualification-domain separation and the log-child HOME
+fix are in progress; no admission is claimed. [Attempt evidence](verification-managed-single-capture-working.json)
+records actual builds, the fresh volume pass and the failed stage. Cleanup
+completed with 40 calls, the protected home unchanged, original controller
+reaped and temporary token revocation acknowledged.
 The same-capture controller was pushed as
 `sha256:3d5419bb228c8ba60658bb7061a0c2023f25fcdd7f67645cc704219ac4cf5f6b`.
 Its original remote child exited zero, but the wrapper failed afterward without

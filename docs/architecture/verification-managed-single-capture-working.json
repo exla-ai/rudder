@@ -1,0 +1,103 @@
+{
+  "formatVersion": 1,
+  "scope": "isolated single capture managed staging evidence; no production admission",
+  "sourceRevision": "f48e076e59466c0a44c79d017faf6deb46e4c603",
+  "sourceArchiveSha256": "703a2b6ffc0c8c6b28fddf956d2caac5e5ced453af316b5a9c82707fb9fed0e5",
+  "generatedJsSha256": "b2e24e9a9d8fafd37d1d8cce39fc8fc77b69173d58e602bb0d2af47daf85509e",
+  "worker": {
+    "image": "registry.fly.io/rudder-workers-exla@sha256:af78998375eb9b8d37a0817cdf0fb3be062c533afeade6d737d8368e0896a35b",
+    "build": {
+      "path": "/workspace/rudder-one-capture-f48e076e/build-receipt.json",
+      "sha256": "7112fd93d46be4f81487e494efb00802b2ad2848bef9aa81f3e46d5830e0b3a9"
+    },
+    "registryProof": {
+      "path": "/workspace/rudder-one-capture-worker-registry-f48e076e/registry-proof.json",
+      "sha256": "61a6d2a2a11693347d50ad5bfb4368a04c59eeb709819bc10cc844b3b53034e4"
+    },
+    "actualOriginalBuildExit": 0,
+    "layoutPassed": true
+  },
+  "controller": {
+    "image": "registry.fly.io/rudder-workers-exla@sha256:3d5419bb228c8ba60658bb7061a0c2023f25fcdd7f67645cc704219ac4cf5f6b",
+    "build": {
+      "path": "/workspace/rudder-one-capture-controller-build-f48e076e/controller-build-receipt.json",
+      "sha256": "f4e0e80ba5c82ce31ea6598f9f13f418acae64e89c779cf4efa308dcd1385a8b"
+    },
+    "registryProof": {
+      "path": "/workspace/rudder-one-capture-controller-build-f48e076e/registry-proof.json",
+      "sha256": "a775b07fc228dc2cfa83fde8c4fced4602d8397ce1c84bc0f21deaa0624bf15e"
+    },
+    "postBuildReadback": {
+      "path": "/workspace/rudder-one-capture-controller-build-f48e076e/post-build-readback.json",
+      "sha256": "2965becfe85c3fe8656c35ae6589ff987f9a31a3febde6d6e2f1ef3aa26e9605"
+    }
+  },
+  "freshVolume": {
+    "componentPassed": true,
+    "cleanupVerified": true,
+    "protectedHomeUnchanged": true,
+    "providerCalls": 24,
+    "report": {
+      "path": "/workspace/rudder-fresh-volume-run-f48e076e/report.json",
+      "sha256": "3c4a521267efc131675ea72906187198c108c71be7f909563a2ea3118c92700f"
+    }
+  },
+  "sdk": {
+    "qualified": false,
+    "state": "expired",
+    "observedRootFailure": {
+      "kind": "rudder-root-retained-failure-v1",
+      "component": "root_storage",
+      "stage": "serve_runtime",
+      "check": "SdkProcessOriginal",
+      "class": "validation_or_other",
+      "errno": null,
+      "io_kind": null
+    },
+    "observedFailureAt": "2026-11-03T02:29:58Z",
+    "bootstrapObservedAt": "2026-11-03T02:29:27Z",
+    "automaticLogRead": {
+      "exitCode": 1,
+      "stdoutBytes": 52,
+      "stderrBytes": 28,
+      "failureProjected": false
+    },
+    "separateExactMachineRead": {
+      "exitCode": 0,
+      "actualChildWait": true,
+      "bothEOF": true,
+      "failureProjected": true,
+      "actual": {
+        "path": "/workspace/rudder-one-capture-execution-f48e076e/sdk-log-diagnostic/actual.json",
+        "sha256": "9b3ea15feb8b774d3636bc27dbf469b6e213c8754ea0ab96087cfe7c5c0115ed"
+      }
+    },
+    "deadlineDiagnosis": "Root source applies a 30-second finalization constraint to complete compiler qualification; observed failure timing is consistent with expiration. Distinct qualification budget fix is in progress."
+  },
+  "runtimeQualified": false,
+  "ordinaryOAuthTaskQualified": false,
+  "cleanup": {
+    "complete": true,
+    "calls": 40,
+    "protectedAfterVerified": true,
+    "resourcesCompleteBeforeProtectedRead": true,
+    "report": {
+      "path": "/workspace/rudder-one-capture-execution-f48e076e/lifecycle-v2/control-run/operator-cleanup-v1/report.json",
+      "sha256": "5c29d2014f420d1a06c13ec93b6899eada84f67307fce27a49c73fe378d8780b"
+    },
+    "actualOriginalControllerReaped": true,
+    "originalSupervisorClean": true,
+    "freshTokenRevocationAcknowledged": true,
+    "tokenRevocationActual": {
+      "path": "/workspace/rudder-one-capture-execution-f48e076e/credentials/revoke.actual.json",
+      "sha256": "9fa3f8762def1db6b13c16b4bdff19230d3a01daad5bb072076cdcf39b711f95"
+    },
+    "verifiedAt": "2026-11-03T02:35:52.300089+00:00"
+  },
+  "normalRetirementQualified": false,
+  "followups": [
+    "Fix Fly diagnostic child HOME and retain bounded nonzero exit diagnostics.",
+    "Separate bounded compiler qualification domain from ordinary 30-second finalization.",
+    "Run SDK, runtime and ordinary OAuth lifecycle with a new common source capture."
+  ]
+}

@@ -5,11 +5,11 @@ import assert from 'node:assert/strict';
 import {randomUUID} from 'node:crypto';
 import {compilerSdkSemanticMembersData} from '../cloud/dist/managed-home-provisioning/compiler-sdk-semantic-data.js';
 import {A2_COMPILER_SDK,validateCompilerSdkCatalog} from '../cloud/dist/managed-home-provisioning/compiler-sdk-catalog.js';
-import {COMPILER_QUALIFICATION_SCOPE,compilerQualificationMac,compilerRoleBindingData,authenticateCompilerQualificationReady,validateCompilerQualificationScope} from '../cloud/dist/managed-home-provisioning/compiler-qualification-protocol.js';
+import {COMPILER_QUALIFICATION_SCOPE,compilerQualificationMac,compilerRoleBindingData,authenticateCompilerQualificationReady,publishedCompilerQualificationAck,validateCompilerQualificationScope} from '../cloud/dist/managed-home-provisioning/compiler-qualification-protocol.js';
 import {assertOriginalRuntimeQualificationPurpose} from '../cloud/dist/managed-home-provisioning/runtime-qualification.js';
 import {RootCompilerSdkQualifications} from '../cloud/dist/managed-home-provisioning/compiler-qualification.js';
 import {originalTime} from '../cloud/dist/managed-home-provisioning/fly.js';
-import {runtimeQualificationMac} from '../cloud/dist/managed-home-provisioning/runtime-qualification-protocol.js';
+import {runtimeQualificationMac,authenticateRuntimeQualificationReady} from '../cloud/dist/managed-home-provisioning/runtime-qualification-protocol.js';
 import {RUNTIME_QUALIFICATION_SQL} from '../cloud/dist/managed-home-provisioning/runtime-qualification-schema.js';
 import {COMPILER_QUALIFICATION_SQL} from '../cloud/dist/managed-home-provisioning/compiler-qualification-schema.js';
 import {COMPILER_ROLE_COMPLETION_SQL} from '../cloud/dist/managed-home-provisioning/compiler-qualification-completion-schema.js';
@@ -17,7 +17,7 @@ import {hash,canonical} from '../cloud/dist/managed-home-provisioning/types.js';
 import {policy,ready} from './fixtures/managed-runtime-qualification/data.mjs';
 const key=Buffer.alloc(32,23); // TEST ONLY, never a Root key.
 function data(){
- const p={...policy(),compilerSdk:structuredClone(A2_COMPILER_SDK)},base=ready(p),s={...base.scope,scope:COMPILER_QUALIFICATION_SCOPE,sdk:structuredClone(A2_COMPILER_SDK)};
+ const p={...policy(),compilerSdk:structuredClone(A2_COMPILER_SDK)},base=ready(p,'compiler_sdk'),s={...base.scope,scope:COMPILER_QUALIFICATION_SCOPE,sdk:structuredClone(A2_COMPILER_SDK)};
  const semantic=compilerSdkSemanticMembersData({kind:'directory',algorithm:'sha256',digest:'a'.repeat(64),size_bytes:230},{kind:'blob',algorithm:'sha256',digest:'1'.repeat(64),size_bytes:1},1,0o555);
  const tools={};for(const[name,path]of Object.entries({buck2:'buck2',rustc:'prepared/tools/rust/bin/rustc',node:'prepared/tools/node',typescript:'prepared/tools/node',python:'prepared/tools/python/bin/python3'})){
   tools[name]={version:semantic.directory.digest,closure:semantic.directory,executable:{kind:'blob',algorithm:'sha256',digest:'1'.repeat(64),size_bytes:1},executable_path:path,
@@ -61,6 +61,18 @@ test('Root SDK and runtime signing domains remain disjoint; no DATA purpose befo
  let effects=0;const pool={run:async()=>{effects++;throw Error('must not reach SQL')}};
  const source=new RootCompilerSdkQualifications(pool,pool,'fixture-authority',f.p);
  await assert.rejects(source.reserveRetaining({authorityId:'fixture-authority',compilerQualification:f.s},originalTime(30000),{assertOriginal(){}}));assert.equal(effects,0);
+});
+test('SDK qualification keeps its explicit four-minute domain across workload and ACK; runtime refuses it',()=>{
+ const f=data(),b=f.b,c=b.observation.original_enable_constraint;
+ b.sdk_proof.probe.workload.started_boottime_nanoseconds=String(BigInt(b.sdk_proof.probe.workload.completed_boottime_nanoseconds)-90_000_000_000n);
+ assert.deepEqual(authenticateCompilerQualificationReady(f.packet(),key,f.s,b.registration_binding,b.registration_proof_sha256).body,b);
+ for(const change of [x=>delete x.domain,x=>x.domain='other',x=>x.maximum_milliseconds=30000,x=>x.maximum_milliseconds=240001,x=>x.extra=true]){
+  const bad=structuredClone(b);change(bad.observation.original_enable_constraint);bad.sdk_proof.probe.original_constraint=structuredClone(bad.observation.original_enable_constraint);
+  assert.throws(()=>authenticateCompilerQualificationReady({body:bad,mac:compilerQualificationMac(key,'ready',bad)},key,f.s,bad.registration_binding,bad.registration_proof_sha256));
+ }
+ assert.deepEqual(publishedCompilerQualificationAck(key,b).body.original_enable_constraint,c);
+ const runtime=ready();runtime.observation.original_enable_constraint=structuredClone(c);
+ assert.throws(()=>authenticateRuntimeQualificationReady({body:runtime,mac:runtimeQualificationMac(key,'ready',runtime)},key,runtime.scope,runtime.registration_binding,runtime.registration_proof_sha256));
 });
 test('SDK schema is additive, immutable, and prepared-only rows cannot stand in for completion',()=>{
  assert(!RUNTIME_QUALIFICATION_SQL.includes('managed_compiler_'));

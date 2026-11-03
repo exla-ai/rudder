@@ -63,3 +63,11 @@ test('real loopback WebSocket carries opaque original bytes and retains malforme
   const [bad]=await reply;assert.throws(()=>f.relay.receive(JSON.parse(bad.toString()),f.generation));
   assert.equal(f.emitted.length,0);assert.ok(f.relay.retainedData().receivedBytes>0);
 });
+
+test('ordinary runtime relay rejects the compiler qualification domain and longer deadline',()=>{
+ for(const constraint of [{format_version:1,domain:'compiler_sdk_qualification_v1',maximum_milliseconds:240000,boottime_deadline_nanoseconds:'340000000000'},
+  {format_version:1,maximum_milliseconds:240000,boottime_deadline_nanoseconds:'340000000000'}]){
+  const f=fixture();f.message.packet.body.observation.original_enable_constraint=constraint;
+  assert.throws(()=>f.relay.forward(f.message,f.generation,true));assert.equal(f.sent.length,0);
+ }
+});

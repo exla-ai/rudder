@@ -28,7 +28,7 @@ test('A2 overlay and five identities remain unchanged; C1 adds metadata paths on
  assert.notDeepEqual(compilerRoleBindingData({sdk:A2_COMPILER_SDK}),compilerRoleBindingData({sdk:C1_COMPILER_SDK}));
 });
 function packetData(sdk){
- const p={...policy(),compilerSdk:structuredClone(sdk)},base=ready(p),scope={...base.scope,scope:COMPILER_QUALIFICATION_SCOPE,sdk:structuredClone(sdk)};
+ const p={...policy(),compilerSdk:structuredClone(sdk)},base=ready(p,'compiler_sdk'),scope={...base.scope,scope:COMPILER_QUALIFICATION_SCOPE,sdk:structuredClone(sdk)};
  const semantic=compilerSdkSemanticMembersData({kind:'directory',algorithm:'sha256',digest:'a'.repeat(64),size_bytes:230},{kind:'blob',algorithm:'sha256',digest:'1'.repeat(64),size_bytes:1},1,0o555);
  const tools={};for(const spec of compilerSdkProfileData(sdk).tools){tools[spec.name]={version:semantic.directory.digest,closure:semantic.directory,executable:{kind:'blob',algorithm:'sha256',digest:'1'.repeat(64),size_bytes:1},executable_path:spec.relative_path,configuration:{executable_raw_sha256:'2'.repeat(64),...(spec.compiler_entrypoint?{compiler_entrypoint:spec.compiler_entrypoint}:{})}};}
  const step=out=>({exit_code:0,stdout_sha256:hash(out),stderr_sha256:hash(''),stdout_bytes:Buffer.byteLength(out),stderr_bytes:0});const end=BigInt(base.observation.root_ack_observed_boottime_nanoseconds)-1n;

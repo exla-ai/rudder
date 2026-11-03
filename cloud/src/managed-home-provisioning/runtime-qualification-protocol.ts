@@ -4,6 +4,8 @@ import {BINDING_FIELDS,type Envelope,type RegistrationBinding,type RootConstrain
 import {check,exact,canonical,hash,sha,uuid,snapshot,runtimeMountConfigData,type ManagedHomePolicy} from "./types.js";
 
 export const RUNTIME_QUALIFICATION_SCOPE="disposable-runtime-floor-and-original-client-only" as const;
+export const SDK_QUALIFICATION_BUDGET_DOMAIN="compiler_sdk_qualification_v1" as const;
+export interface SdkQualificationConstraint extends RootConstraint {domain:typeof SDK_QUALIFICATION_BUDGET_DOMAIN;}
 export const RUNTIME_QUALIFICATION_DOMAINS={ready:"rudder_runtime_image_qualification_ready_v1\0",ack:"rudder_runtime_image_qualification_ack_v1\0"} as const;
 /** Operator/canonical-config DATA; never a ready owner, project grant or lease. */
 export interface RuntimeQualificationCandidate {
@@ -68,12 +70,17 @@ const executablePaths=["package/dist/native/rudder-native","package/dist/native/
 function selected(list:RuntimeExecutableData[],scope:RuntimeQualificationScope){check(Array.isArray(list)&&list.length===4);const hashes=[scope.native_sha256,scope.buddy_sha256,scope.service_sha256,scope.launcher_sha256];
  for(let i=0;i<4;i++){const e=list[i];fields(e,["installer_path","sha256","size_bytes"]);check(e.installer_path===executablePaths[i]&&e.sha256===hashes[i]&&Number.isSafeInteger(e.size_bytes)&&e.size_bytes>0&&e.size_bytes<=512*1024*1024,"identity_changed");}}
 function decimal(v:unknown):bigint{check(typeof v==="string"&&/^[1-9][0-9]{0,19}$/.test(v));return BigInt(v);}
-export function validateRuntimeReadyObservation(o:RuntimeReadyObservationData,s:RuntimeQualificationScope,b:RegistrationBinding,proof:string){
+export function validateRuntimeReadyObservation(o:RuntimeReadyObservationData,s:RuntimeQualificationScope,b:RegistrationBinding,proof:string,role:"runtime"|"compiler_sdk"="runtime"){
  fields(o,["format_version","kind","scope","request_nonce","bootstrap_nonce","engine_instance_id","epoch","mount_id_data","original_enable_constraint","root_ack_observed_boottime_nanoseconds","native_received_boottime_nanoseconds","native_issued_boottime_nanoseconds","client_current_checked_boottime_nanoseconds","registration_proof_sha256","config_sha256","boot_id","service_pid_data","source_authority","helper_enrolled","scheduler_ready","normal_retirement_authority","inventory","manifest","installer_input","selected_executables"]);
  check(o.format_version===1&&o.kind==="runtime-image-ready-observation-data-v1"&&o.scope==="original-enable-ack-and-current-original-client-only");uuid(o.request_nonce);uuid(o.bootstrap_nonce);uuid(o.engine_instance_id);
  check(o.epoch===b.epoch&&o.registration_proof_sha256===proof&&o.config_sha256===b.config_sha256,"identity_changed");decimal(o.mount_id_data);check(/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(o.boot_id));check(Number.isSafeInteger(o.service_pid_data)&&o.service_pid_data>0);
  check(o.source_authority===false&&o.helper_enrolled===false&&o.scheduler_ready===false&&o.normal_retirement_authority===false,"identity_changed");
- const c=o.original_enable_constraint;fields(c,["format_version","maximum_milliseconds","boottime_deadline_nanoseconds"]);check(c.format_version===1&&Number.isSafeInteger(c.maximum_milliseconds)&&c.maximum_milliseconds>=1&&c.maximum_milliseconds<=30_000);const end=decimal(c.boottime_deadline_nanoseconds);
+ const c=o.original_enable_constraint as RootConstraint&{domain?:unknown};
+ fields(c,["format_version","maximum_milliseconds","boottime_deadline_nanoseconds",...(role==="compiler_sdk"?["domain"]:[])]);
+ check(c.format_version===1&&Number.isSafeInteger(c.maximum_milliseconds)&&c.maximum_milliseconds>=1);
+ if(role==="compiler_sdk")check(c.domain===SDK_QUALIFICATION_BUDGET_DOMAIN&&c.maximum_milliseconds===240_000);
+ else check(c.maximum_milliseconds<=30_000);
+ const end=decimal(c.boottime_deadline_nanoseconds);
  const stamps=[o.root_ack_observed_boottime_nanoseconds,o.native_received_boottime_nanoseconds,o.native_issued_boottime_nanoseconds,o.client_current_checked_boottime_nanoseconds].map(decimal);
  check(stamps.every((n,i)=>n<end&&(i===0||n>=stamps[i-1]))&&end-stamps[0]<=BigInt(c.maximum_milliseconds)*1_000_000n,"expired");
  for(const k of ["inventory","manifest","installer_input"] as const)check(canonical(o[k]).equals(canonical(s[k])),"identity_changed");selected(o.selected_executables,s);

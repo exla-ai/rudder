@@ -10,7 +10,7 @@ const hex=v=>typeof v==='string'&&/^[0-9a-f]{64}$/.test(v);
 const uuid=v=>typeof v==='string'&&/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(v);
 const canonical=v=>JSON.stringify(canonicalData(v));
 const bytes=v=>{const raw=Buffer.from(JSON.stringify(v));if(!raw.length||raw.length>LIMIT)throw Error('QUALIFICATION_BOUND');return raw;};
-const end=c=>{if(!exact(c,['format_version','maximum_milliseconds','boottime_deadline_nanoseconds'])||c.format_version!==1||c.maximum_milliseconds!==30000||typeof c.boottime_deadline_nanoseconds!=='string'||!/^[1-9][0-9]{0,19}$/.test(c.boottime_deadline_nanoseconds))throw Error('QUALIFICATION_CUTOFF');return BigInt(c.boottime_deadline_nanoseconds);};
+const end=(c,sdk)=>{if(!exact(c,['format_version','maximum_milliseconds','boottime_deadline_nanoseconds',...(sdk?['domain']:[])])||c.format_version!==1||c.maximum_milliseconds!==(sdk?240000:30000)||(sdk&&c.domain!=='compiler_sdk_qualification_v1')||typeof c.boottime_deadline_nanoseconds!=='string'||!/^[1-9][0-9]{0,19}$/.test(c.boottime_deadline_nanoseconds))throw Error('QUALIFICATION_CUTOFF');return BigInt(c.boottime_deadline_nanoseconds);};
 export class RuntimeQualificationRelay {
   #scope;#scopeBytes;#sdk=false;#config;#now;#send;#emit;#attempt=null;
   constructor({scope,compilerScope,config,now,send,emit}) {
@@ -38,8 +38,8 @@ export class RuntimeQualificationRelay {
         ||!plain(b.registration_binding)||b.registration_binding.config_sha256!==this.#config.configSha
         ||b.registration_binding.home_id!==this.#config.home_id||b.registration_binding.incarnation!==this.#config.incarnation
         ||!Array.isArray(b.selected_executables)||b.selected_executables.length!==4
-        ||!Number.isInteger(b.remaining_milliseconds)||b.remaining_milliseconds<1||b.remaining_milliseconds>30000)throw Error('QUALIFICATION_BINDING');
-      held.cutoff=end(b.observation.original_enable_constraint);
+        ||!Number.isInteger(b.remaining_milliseconds)||b.remaining_milliseconds<1||b.remaining_milliseconds>(this.#sdk?240000:30000))throw Error('QUALIFICATION_BINDING');
+      held.cutoff=end(b.observation.original_enable_constraint,this.#sdk);
       if(this.#now()>=held.cutoff)throw Error('QUALIFICATION_EXPIRED');
       this.#send(generation,{type:READY,rpc_id:message.rpc_id,packet:message.packet});held.sent=true;
     }catch(error){held.unknown=true;throw error;}

@@ -1,16 +1,16 @@
 import {validateCompilerSdkSemanticData,type CompilerSdkSemanticData} from "./compiler-sdk-semantic-data.js";
 import {createHmac,timingSafeEqual} from "node:crypto";
-import {BINDING_FIELDS,type Envelope,type RegistrationBinding,type RootConstraint} from "./registration.js";
+import {BINDING_FIELDS,type Envelope,type RegistrationBinding} from "./registration.js";
 import {check,exact,canonical,hash,sha,uuid,snapshot,type ManagedHomePolicy} from "./types.js";
 import {validateRuntimeQualificationCandidate,validateRuntimeReadyObservation,RUNTIME_QUALIFICATION_SCOPE,
- type RuntimeQualificationCandidate,type RuntimeQualificationScope,type RuntimeQualificationReady,type RuntimeReadyObservationData} from "./runtime-qualification-protocol.js";
+ type RuntimeQualificationCandidate,type RuntimeQualificationScope,type RuntimeQualificationReady,type RuntimeReadyObservationData,type SdkQualificationConstraint} from "./runtime-qualification-protocol.js";
 import {validateCompilerSdkCatalog,compilerSdkProfileData,type CompilerSdkCatalogData} from "./compiler-sdk-catalog.js";
 export const COMPILER_QUALIFICATION_SCOPE="disposable-fixed-compiler-sdk-only" as const;
 export const COMPILER_QUALIFICATION_DOMAINS={ready:"rudder_compiler_sdk_qualification_ready_v1\0",ack:"rudder_compiler_sdk_qualification_ack_v1\0"} as const;
 export interface CompilerQualificationCandidate extends RuntimeQualificationCandidate {sdk:CompilerSdkCatalogData;}
 export type CompilerQualificationScope=Omit<RuntimeQualificationScope,"scope">&{scope:typeof COMPILER_QUALIFICATION_SCOPE;sdk:CompilerSdkCatalogData};
-export type CompilerQualificationReady=Omit<RuntimeQualificationReady,"kind"|"scope">&{kind:"compiler_sdk_qualification_ready";scope:CompilerQualificationScope;sdk_proof:{mount:{semantic:CompilerSdkSemanticData;floor:unknown;toolchains:Record<string,unknown>};probe:unknown}};
-export interface CompilerQualificationAck {version:1;kind:"compiler_sdk_qualification_ack";qualification_id:string;qualification_nonce:string;request_sha256:string;registration_proof_sha256:string;original_enable_constraint:RootConstraint;
+export type CompilerQualificationReady=Omit<RuntimeQualificationReady,"kind"|"scope"|"observation">&{kind:"compiler_sdk_qualification_ready";scope:CompilerQualificationScope;observation:Omit<RuntimeReadyObservationData,"original_enable_constraint">&{original_enable_constraint:SdkQualificationConstraint};sdk_proof:{mount:{semantic:CompilerSdkSemanticData;floor:unknown;toolchains:Record<string,unknown>};probe:unknown}};
+export interface CompilerQualificationAck {version:1;kind:"compiler_sdk_qualification_ack";qualification_id:string;qualification_nonce:string;request_sha256:string;registration_proof_sha256:string;original_enable_constraint:SdkQualificationConstraint;
  result:null|{scope:"immutable-compiler-sdk-role-only";state:"published";role_binding_sha256:string;image:string;inventory:CompilerSdkCatalogData["inventory"];manifest:CompilerSdkCatalogData["manifest"];installer_input:CompilerSdkCatalogData["installer_input"]};error:null|string;}
 const candidateFields=["image","image_receipt_sha256","source_manifest_sha256","inventory","manifest","installer_input","native_sha256","buddy_sha256","service_sha256","launcher_sha256","sdk"] as const;
 const fields=(v:unknown,names:readonly string[])=>{exact(v,names);check(Object.keys(v as object).length===names.length);};
@@ -61,7 +61,7 @@ export function authenticateCompilerQualificationReady(input:unknown,key:Buffer,
  const b=e.body;fields(b,["version","kind","qualification_id","qualification_nonce","registration_binding","root_nonce","registration_proof_sha256","scope","observation","selected_executables","remaining_milliseconds","sdk_proof"]);
  check(b.version===1&&b.kind==="compiler_sdk_qualification_ready"&&b.qualification_id===scope.qualification_id&&b.qualification_nonce===scope.qualification_nonce,"identity_changed");uuid(b.root_nonce);fields(b.registration_binding,BINDING_FIELDS);
  check(canonical(b.scope).equals(canonical(scope))&&canonical(b.registration_binding).equals(canonical(expected))&&b.registration_proof_sha256===proof,"identity_changed");
- validateRuntimeReadyObservation(b.observation,runtimeScopeData(scope),expected,proof);check(canonical(b.selected_executables).equals(canonical(b.observation.selected_executables)),"identity_changed");validateSdkProof(b.sdk_proof,scope,b.observation);
+ validateRuntimeReadyObservation(b.observation,runtimeScopeData(scope),expected,proof,"compiler_sdk");check(canonical(b.selected_executables).equals(canonical(b.observation.selected_executables)),"identity_changed");validateSdkProof(b.sdk_proof,scope,b.observation);
  check(Number.isInteger(b.remaining_milliseconds)&&b.remaining_milliseconds>=1&&b.remaining_milliseconds<=b.observation.original_enable_constraint.maximum_milliseconds,"expired");return e;
 }
 export function publishedCompilerQualificationAck(key:Buffer,r:CompilerQualificationReady):Envelope<CompilerQualificationAck>{

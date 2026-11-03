@@ -1,4 +1,4 @@
-"""Explicit actual-kernel component fixtures, UNRUN by source author.
+"""Explicit actual-kernel component fixtures. Results belong to the test runner.
 No Root/SDK role or compiler outcome is manufactured. Private /workspace only.
 """
 import ctypes
@@ -46,6 +46,14 @@ def drop_caps():
 def filter_probe_and_fork():
     require(libc.prctl(38,1,0,0,0)==0,'fixture NNP')
     fence=module._CompilerSeccomp(module.SDK_COMPILER_INPUT_POLICY);fence.install();fence.probe()
+    for name,number in fence.denied_syscalls().items():
+        ctypes.set_errno(0)
+        require(libc.syscall(number,0,0,0,0,0,0)==-1 and ctypes.get_errno()==errno.EPERM, 'actual denial '+name)
+    for flag in (0x10000000,0x00020000,0x20000000,0x40000000,0x04000000,0x08000000,0x02000000,1<<32):
+        ctypes.set_errno(0);value=libc.syscall(fence.numbers['clone'],ctypes.c_ulonglong(flag|signal.SIGCHLD),0,0,0,0)
+        if value==0:os._exit(44)
+        if value>0:os.waitpid(value,0)
+        require(value==-1 and ctypes.get_errno()==errno.EPERM, 'namespace/high-word clone denial')
     # Real threads exercise glibc's clone3->clone route beneath the same fence.
     ran=[];worker=threading.Thread(target=lambda:ran.append('actual-thread'));worker.start();worker.join()
     require(not worker.is_alive() and ran==['actual-thread'],'ordinary thread blocked')
@@ -56,7 +64,7 @@ def filter_probe_and_fork():
     actual,status=os.waitpid(child,0);require(actual==child and os.waitstatus_to_exitcode(status)==0,'descendant filter')
     return {'actual_filter':True,'normal_thread':True,'normal_fork':True,'descendant_filter':True}
 
-def namespace_child(root,old_proc):
+def namespace_child(root,old_proc,variant):
     # This executes in the actual first child after CLONE_NEWPID, before chroot.
     require(os.getpid()==1,'fixture is not actual fresh PID1')
     try:module.SdkObserverProc(old_proc)
@@ -66,6 +74,12 @@ def namespace_child(root,old_proc):
     mount('proc',root/'observer-proc','proc',2|4|8)
     proc_fd=os.open(root/'observer-proc',os.O_PATH|os.O_DIRECTORY|os.O_NOFOLLOW|os.O_CLOEXEC)
     observer=module.SdkObserverProc(proc_fd)
+    # Actual excluded host input and a high-numbered alias of observer proc.
+    # Deliberately inheritable: the compiler hook must close both on exec.
+    host_fd=os.open(root/'excluded-secret',os.O_RDONLY)
+    os.set_inheritable(host_fd,True)
+    proc_alias=fcntl.fcntl(proc_fd,fcntl.F_DUPFD,8192)
+    os.set_inheritable(proc_alias,True)
     view=root/'view';mount(view,view,flags=4096);mount(None,view,flags=4096|32|1|2|4)
     origin=root/'workspace'
     mount(root/'source',origin/'src',flags=4096);mount(None,origin/'src',flags=4096|32|1|2|4|8)
@@ -74,43 +88,34 @@ def namespace_child(root,old_proc):
     workspace=view/'workspace';mount(origin,workspace,flags=4096|16384)
     mount(None,workspace,flags=4096|32|1|2|4|8)
     mount(root/'tmp',view/'tmp',flags=4096);mount(None,view/'tmp',flags=4096|32|2|4|8)
+    if variant=='nested-proc':
+        mount(root/'observer-proc',view/'alternate-proc',flags=4096)
+        mount(None,view/'alternate-proc',flags=4096|32|1|2|4|8)
     os.chroot(view);os.chdir('/workspace');drop_caps()
     # The real proc is inaccessible by path yet reachable by the observer's FD.
     require(b'CapEff:\t0000000000000000' in observer.read('self/status',65536),'actual caps0 absent')
-    policy=module.SdkCompilerReadPolicy(module.SDK_COMPILER_INPUT_POLICY,observer)
-    require(Path('/workspace/src/input').read_bytes()==b'immutable-input','positive source read')
-    require(Path('/workspace/buck2').read_bytes()==b'OS fixture only; not a compiler or qualified SDK','actual nested tool bind omitted')
-    try:open('/proc/sys/kernel/random/uuid','rb')
-    except OSError as error:require(error.errno==errno.ENOENT,'actual proc not absent')
-    else:raise AssertionError('proc UUID visible')
-    # Component only: invoke the genuine compiler pre-exec mechanism on this
-    # disposable process. No actual exec/outcome/Root receipt is claimed here.
-    policy.before_exec()
-    try:os.fstat(proc_fd)
-    except OSError as error:require(error.errno==errno.EBADF,'observer FD not closed')
-    else:raise AssertionError('observer proc FD leaked')
-    for path in ('/workspace/job.json','/workspace/src/forbidden'):
-        try:open(path,'wb')
-        except OSError as error:require(error.errno==errno.EROFS,'readonly parent/source not enforced')
-        else:raise AssertionError('readonly view was writable')
-    for base in ('/workspace/out','/tmp'):
-        p=Path(base)/'actual-output';p.write_bytes(b'private');require(p.read_bytes()==b'private','private output')
-    for flags in (0x10000000,0x00020000):
-        ctypes.set_errno(0);value=libc.syscall(policy.filter.numbers['clone'],flags|signal.SIGCHLD,0,0,0,0)
-        if value==0:os._exit(44)
-        if value>0:os.waitpid(value,0)
-        require(value==-1 and ctypes.get_errno()==errno.EPERM,'namespace clone escaped filter')
-    child=os.fork()
-    if child==0:
-        policy.filter.probe()
-        try:open('/workspace/job.json','rb')
-        except OSError as error:os._exit(0 if error.errno==errno.ENOENT else 4)
-        os._exit(5)
-    actual,status=os.waitpid(child,0);require(actual==child and os.waitstatus_to_exitcode(status)==0,'descendant view/fence')
-    print(json.dumps({'actual_fresh_pid_proc_fd':True,'old_proc_refused':True,'observer_caps0':True,'compiler_proc_absent':True,
-        'observer_fd_closed':True,'readonly_parents':True,'private_writes':True,'descendant_fence':True}),flush=True)
+    if variant!='normal':
+        expected='UNDECLARED_MOUNT' if variant=='nested-proc' else 'UNDECLARED_SOURCE_FILES' if variant=='undeclared' else 'SOURCE_LINK_OR_SPECIAL_FILE'
+        try:module.SdkCompilerReadPolicy(module.SDK_COMPILER_INPUT_POLICY,observer,{'input'})
+        except RuntimeError as error:require(expected in str(error),'unexpected refusal '+str(error))
+        else:raise AssertionError('unsafe original source/mount accepted')
+        print(json.dumps({'actual_precondition_refusal':variant}),flush=True)
+        return
+    policy=module.SdkCompilerReadPolicy(module.SDK_COMPILER_INPUT_POLICY,observer,{'input'})
+    # Leave the original observer alive. The adversary is a real native exec
+    # through the exact compiler pre-exec path, with the original proc FD held.
+    read_fd,write_fd=os.pipe2(os.O_CLOEXEC);os.close(write_fd)
+    os.dup2(read_fd,0,inheritable=False);os.close(read_fd)
+    completed=subprocess.run(['/probe'],stdin=0,stdout=subprocess.PIPE,stderr=subprocess.PIPE,
+        close_fds=False,preexec_fn=policy.before_exec,timeout=10)
+    require(completed.returncode==0,'actual exec boundary probe: '+completed.stderr.decode(errors='replace'))
+    actual=json.loads(completed.stdout)
+    require(all(actual.values()),'adversarial probe')
+    observer.current()
+    os.close(host_fd);os.close(proc_alias)
+    print(json.dumps({'observer_alive':True,'actual_mount_count':policy.mount_count,**actual}),flush=True)
 
-def namespace_worker(root):
+def namespace_worker(root,variant):
     require(os.getuid()==1500 and os.geteuid()==1500 and os.getgid()==1500,'fixture requires actual nonRoot UID1500')
     old_proc=os.open('/proc',os.O_PATH|os.O_DIRECTORY|os.O_CLOEXEC)
     require(libc.unshare(0x10000000|0x00020000|0x40000000|0x20000000)==0,'actual namespaces unavailable')
@@ -124,7 +129,7 @@ def namespace_worker(root):
         watch=select.poll();watch.register(parent,select.POLLIN)
         if watch.poll(0):os._exit(20)
         os.close(parent)
-        try:namespace_child(root,old_proc)
+        try:namespace_child(root,old_proc,variant)
         except BaseException:
             traceback.print_exc();os._exit(21)
         os._exit(0)
@@ -148,22 +153,52 @@ class ActualKernelComponent(unittest.TestCase):
         self.assertEqual(self.run_worker('--filter-worker'),{
             'actual_filter':True,'normal_thread':True,'normal_fork':True,'descendant_filter':True})
 
-    def test_actual_procless_readonly_view_and_observer_only_descriptor(self):
+    @classmethod
+    def setUpClass(cls):
+        cls.probe_dir=Path(tempfile.mkdtemp(prefix='rudder-sdk-native-probe-',dir='/workspace'))
+        cls.probe=cls.probe_dir/'probe'
+        # A static syscall adversary, never a substitute compiler/SDK fixture.
+        subprocess.run(['gcc','-static','-O2','-Wall','-Werror',str(Path(__file__).with_name('sdk_compiler_isolation')/'adversary.c'),'-o',str(cls.probe)],check=True,capture_output=True)
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.probe_dir)
+
+    def namespace_fixture(self,variant):
         root=Path(tempfile.mkdtemp(prefix='rudder-sdk-procless-',dir='/workspace')).resolve()
-        for name in ('view','view/proc','view/workspace','view/tmp','workspace','workspace/src','workspace/out','source','out','tmp','observer-proc'):
+        for name in ('view','view/proc','view/workspace','view/tmp','workspace','workspace/src','workspace/out','source','out','tmp','observer-proc','view/alternate-proc'):
             (root/name).mkdir(mode=0o700)
         (root/'workspace/rules.json').write_text('{}')
         (root/'workspace/buck2').write_bytes(b'')
         (root/'tool-image').write_bytes(b'OS fixture only; not a compiler or qualified SDK')
         (root/'source/input').write_bytes(b'immutable-input')
+        (root/'excluded-secret').write_bytes(b'excluded host input')
+        shutil.copyfile(self.probe,root/'view/probe');(root/'view/probe').chmod(0o755)
+        if variant=='source-symlink':(root/'source/escape').symlink_to('/excluded-secret')
+        if variant=='source-hardlink':os.link(root/'excluded-secret',root/'source/escape')
+        if variant=='undeclared':(root/'source/undeclared').write_text('undeclared')
         try:
-            actual=self.run_worker('--namespace-worker',str(root))
-            self.assertTrue(all(actual.values()));self.assertEqual(len(actual),8)
-            self.assertEqual((root/'out/actual-output').read_bytes(),b'private')
-            self.assertEqual((root/'tmp/actual-output').read_bytes(),b'private')
-        except BaseException:
-            print('Retained original failed fixture '+str(root),file=sys.stderr);raise
-        else:shutil.rmtree(root)
+            actual=self.run_worker('--namespace-worker',str(root),variant)
+            if variant=='normal':
+                self.assertTrue(all(actual.values()));self.assertEqual(actual['actual_mount_count'],6)
+                self.assertTrue((root/'out/native').is_file());self.assertTrue((root/'tmp/native').is_file())
+            else:self.assertEqual(actual,{'actual_precondition_refusal':variant})
+        finally:shutil.rmtree(root)
+
+    def test_actual_procless_readonly_view_native_exec_and_observer_only_descriptor(self):
+        self.namespace_fixture('normal')
+
+    def test_actual_nested_proc_mount_is_refused(self):
+        self.namespace_fixture('nested-proc')
+
+    def test_actual_source_symlink_is_refused(self):
+        self.namespace_fixture('source-symlink')
+
+    def test_actual_source_hardlink_is_refused(self):
+        self.namespace_fixture('source-hardlink')
+
+    def test_actual_undeclared_source_is_refused(self):
+        self.namespace_fixture('undeclared')
 
     def test_actual_x32_syscall_bit_is_killed_before_number_matching(self):
         if module._sc_platform.machine()=='x86_64':
@@ -172,10 +207,19 @@ class ActualKernelComponent(unittest.TestCase):
             self.assertEqual(module._sc_platform.machine(),'aarch64')
             self.assertEqual(module.SDK_COMPILER_INPUT_POLICY['architectures']['aarch64']['audit_arch'],0xc00000b7)
 
+    def test_actual_foreign_i386_abi_is_killed_before_number_matching(self):
+        if module._sc_platform.machine()!='x86_64':
+            self.skipTest('actual foreign ABI probe requires x86_64 int80; no foreign ELF stand-in')
+        self.assertEqual(self.run_worker('--foreign-worker',str(self.probe),expected=-signal.SIGSYS),b'')
+
+    def test_inline_mechanism_policy_matches_rust_validation_data(self):
+        actual=json.loads(Path(__file__).with_name('sdk_compiler_isolation').joinpath('policy.json').read_text())
+        self.assertEqual(module.SDK_COMPILER_ISOLATION,actual)
+
     def test_policy_change_cannot_enable_ambient_proc_or_descriptor_inheritance(self):
         changed=dict(module.SDK_COMPILER_INPUT_POLICY,compiler_proc='ambient-proc')
         with self.assertRaisesRegex(RuntimeError,'FIXED_VIEW_POLICY_DIFFERS'):
-            module.SdkCompilerReadPolicy(changed,None)
+            module.SdkCompilerReadPolicy(changed,None,{'input'})
 
     def test_real_sealed_request_is_replaced_by_empty_pipe(self):
         raw=os.memfd_create('test-only-observer-data',os.MFD_CLOEXEC|os.MFD_ALLOW_SEALING)
@@ -198,7 +242,12 @@ if __name__=='__main__':
         libc.syscall(fence.numbers['denied_syscalls']['unshare']|0x40000000,0)
         raise AssertionError('x32 syscall was not killed')
     elif len(sys.argv)>1 and sys.argv[1]=='--namespace-worker':
-        sys.exit(namespace_worker(Path(sys.argv[2])))
+        sys.exit(namespace_worker(Path(sys.argv[2]),sys.argv[3]))
+    elif len(sys.argv)>1 and sys.argv[1]=='--foreign-worker':
+        resource.setrlimit(resource.RLIMIT_CORE,(0,0))
+        require(libc.prctl(38,1,0,0,0)==0,'fixture NNP')
+        fence=module._CompilerSeccomp(module.SDK_COMPILER_INPUT_POLICY);fence.install()
+        os.execv(sys.argv[2],[sys.argv[2],'foreign-abi'])
     elif len(sys.argv)>1 and sys.argv[1]=='--stdin-worker':
         job=module.consume_sdk_observer_job();require(job=={'private_test_data':'never-compiler-stdin'},'actual request differs')
         require(os.read(0,1)==b'' and module._sc_stat.S_ISFIFO(os.fstat(0).st_mode),'actual EOF pipe absent')

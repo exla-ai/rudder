@@ -11,7 +11,6 @@ deadline=int(sys.argv[1])/1e9
 if len(sys.argv)!=3:raise RuntimeError('SDK_OBSERVER_FIXED_ARGUMENTS')
 observer_proc=SdkObserverProc(int(sys.argv[2]))
 job=consume_sdk_observer_job()
-input_policy=SdkCompilerReadPolicy(rules['compiler_input_policy'],observer_proc)
 def remaining():
     n=deadline-time.clock_gettime(time.CLOCK_BOOTTIME)
     if n<=0:raise RuntimeError('SDK_ORIGINAL_BUILD_EXPIRED')
@@ -20,6 +19,10 @@ def relative(value):
     p=pathlib.PurePosixPath(value)
     if not value or p.is_absolute()or any(c in ('','..','.')for c in value.split('/'))or len(value)>1024:raise RuntimeError('SDK_SOURCE_PATH')
     return p
+# Every compiler sees the immutable union declared by this selected job.
+# Extra materialized files refuse; target-specific visibility is not claimed.
+declared_sources={str(relative(source)) for target in job['profile']['targets'] for source in target['sources']}
+input_policy=SdkCompilerReadPolicy(rules['compiler_input_policy'],observer_proc,declared_sources)
 children=[]
 def emit_compiler_failure_output(stdout,stderr,fd=2):
     # Secondary private DATA only. Bounded prefixes preserve real bytes as

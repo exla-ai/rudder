@@ -86,6 +86,57 @@ SDK_COMPILER_INPUT_POLICY = {'format_version': 2,
  'x32_syscall_bit': 1073741824,
  'x32_action': 'kill-process'}
 
+# Kept inline because the authenticated helper embeds this file, not imports.
+# The Rust observer validator includes the identical canonical policy JSON.
+SDK_COMPILER_ISOLATION = {'cache_reuse': False,
+ 'compiler_stdio': 'empty-read-pipe-and-two-write-pipes',
+ 'format_version': 3,
+ 'interpreters_and_anonymous_jit': 'not-a-semantic-code-execution-boundary',
+ 'kind': 'compiler-procless-boundary-v3',
+ 'mounts': ['/', '/tmp', '/workspace', '/workspace/buck2', '/workspace/out', '/workspace/src'],
+ 'native_writable_exec': 'noexec-mounts-no-memfd-no-execveat',
+ 'source_declarations': 'job-union-exact-regular-files-no-symlinks-or-hardlinks',
+ 'syscall_additions': {'aarch64': {'add_key': 217,
+                                   'execveat': 281,
+                                   'io_uring_enter': 426,
+                                   'io_uring_register': 427,
+                                   'io_uring_setup': 425,
+                                   'keyctl': 219,
+                                   'memfd_create': 279,
+                                   'msgctl': 187,
+                                   'msgget': 186,
+                                   'msgrcv': 188,
+                                   'msgsnd': 189,
+                                   'request_key': 218,
+                                   'semctl': 191,
+                                   'semget': 190,
+                                   'semop': 193,
+                                   'semtimedop': 192,
+                                   'shmat': 196,
+                                   'shmctl': 195,
+                                   'shmdt': 197,
+                                   'shmget': 194},
+                       'x86_64': {'add_key': 248,
+                                  'execveat': 322,
+                                  'io_uring_enter': 426,
+                                  'io_uring_register': 427,
+                                  'io_uring_setup': 425,
+                                  'keyctl': 250,
+                                  'memfd_create': 319,
+                                  'msgctl': 71,
+                                  'msgget': 68,
+                                  'msgrcv': 70,
+                                  'msgsnd': 69,
+                                  'request_key': 249,
+                                  'semctl': 66,
+                                  'semget': 64,
+                                  'semop': 65,
+                                  'semtimedop': 220,
+                                  'shmat': 30,
+                                  'shmctl': 31,
+                                  'shmdt': 67,
+                                  'shmget': 29}}}
+
 def consume_sdk_observer_job():
     """Consume only sealed bounded DATA, then permanently replace fd0 by EOF."""
     meta = _sc_os.fstat(0)
@@ -114,7 +165,7 @@ def consume_sdk_observer_job():
 class SdkObserverProc:
     """An actual descriptor, never a proc capability reconstructed from DATA."""
     _allowed = {'self', 'self/exe', 'self/status', 'self/task',
-                'self/ns/user', 'self/ns/mnt', 'self/ns/pid', 'self/ns/net'}
+                'self/ns/user', 'self/ns/mnt', 'self/ns/pid', 'self/ns/net', 'self/mountinfo'}
 
     def __init__(self, fd):
         if not isinstance(fd, int) or fd < 3:
@@ -155,7 +206,7 @@ class SdkObserverProc:
 
     def read(self, path, maximum):
         self.current()
-        if path not in ('self/exe', 'self/status') or not 0 < maximum <= 64 * 1024 * 1024:
+        if path not in ('self/exe', 'self/status', 'self/mountinfo') or not 0 < maximum <= 64 * 1024 * 1024:
             raise RuntimeError('SDK_OBSERVER_PROC_READ_BOUND')
         fd = _sc_os.open(path, _sc_os.O_RDONLY | _sc_os.O_CLOEXEC, dir_fd=self.fd)
         try:
@@ -196,7 +247,8 @@ class _CompilerSeccomp:
     def __init__(self, policy):
         if policy != SDK_COMPILER_INPUT_POLICY:
             raise RuntimeError('SDK_FIXED_SYSCALL_POLICY_DIFFERS')
-        if _sc_platform.system() != 'Linux' or _sc_sys.byteorder != 'little':
+        if (_sc_platform.system() != 'Linux' or _sc_sys.byteorder != 'little' or
+            _sc_ctypes.sizeof(_sc_ctypes.c_void_p) != 8 or _sc_ctypes.sizeof(_sc_ctypes.c_long) != 8):
             raise RuntimeError('SDK_SECCOMP_PLATFORM_UNSUPPORTED')
         self.architecture = _sc_platform.machine()
         if self.architecture not in policy['architectures']:
@@ -216,7 +268,7 @@ class _CompilerSeccomp:
             (0x20, 0, 0, 20), (0x15, 1, 0, 0), (0x06, 0, 0, deny),
             (0x20, 0, 0, 16), (0x45, 0, 1, policy['namespace_clone_mask']),
             (0x06, 0, 0, deny), (0x06, 0, 0, allow)]
-        for number in sorted(set(self.numbers['denied_syscalls'].values())):
+        for number in sorted(set(self.denied_syscalls().values())):
             instructions.extend([(0x15, 0, 1, number), (0x06, 0, 0, deny)])
         instructions.append((0x06, 0, 0, allow))
         if len(instructions) > 256 or _sc_ctypes.sizeof(_SockFilter) != 8:
@@ -224,6 +276,10 @@ class _CompilerSeccomp:
         self.instructions = (_SockFilter * len(instructions))(
             *(_SockFilter(*item) for item in instructions))
         self.program = _SockProgram(len(instructions), self.instructions)
+
+    def denied_syscalls(self):
+        return {**self.numbers['denied_syscalls'],
+                **SDK_COMPILER_ISOLATION['syscall_additions'][self.architecture]}
 
     def install(self):
         if self.libc.prctl(39, 0, 0, 0, 0) != 1:
@@ -234,9 +290,13 @@ class _CompilerSeccomp:
             raise RuntimeError('SDK_SECCOMP_FILTER_NOT_ACTIVE')
 
     def probe(self):
-        for name, expected in (('unshare', _sc_errno.EPERM), ('clone3', _sc_errno.ENOSYS)):
+        for name, expected in (('unshare', _sc_errno.EPERM), ('clone3', _sc_errno.ENOSYS),
+                               ('memfd_create', _sc_errno.EPERM),
+                               ('execveat', _sc_errno.EPERM),
+                               ('io_uring_setup', _sc_errno.EPERM),
+                               ('shmget', _sc_errno.EPERM), ('keyctl', _sc_errno.EPERM)):
             number = (self.numbers['clone3'] if name == 'clone3'
-                      else self.numbers['denied_syscalls'][name])
+                      else self.denied_syscalls()[name])
             _sc_ctypes.set_errno(0)
             value = self.libc.syscall(number, 0, 0)
             if value != -1 or _sc_ctypes.get_errno() != expected:
@@ -244,7 +304,7 @@ class _CompilerSeccomp:
 
 
 class SdkCompilerReadPolicy:
-    def __init__(self, policy, observer_proc):
+    def __init__(self, policy, observer_proc, declared_sources):
         if policy != SDK_COMPILER_INPUT_POLICY:
             raise RuntimeError('SDK_FIXED_VIEW_POLICY_DIFFERS')
         observer_proc.current()
@@ -272,16 +332,80 @@ class SdkCompilerReadPolicy:
             with _sc_os.scandir(path) as entries:
                 if next(entries, None) is not None:
                     raise RuntimeError('SDK_COMPILER_PRIVATE_DIRECTORY_NOT_EMPTY')
+        self.mount_count = self.validate_mounts(observer_proc)
+        self.validate_sources(declared_sources)
+        status = dict(line.split(':', 1) for line in observer_proc.read('self/status', 65536).decode().splitlines() if ':' in line)
+        if any(int(status[key].strip(), 16) for key in ('CapEff', 'CapPrm', 'CapInh', 'CapAmb', 'CapBnd')) or status['NoNewPrivs'].strip() != '1':
+            raise RuntimeError('SDK_COMPILER_ORIGINAL_PRIVILEGE_FLOOR_REQUIRED')
         self.proc = observer_proc
         self.filter = _CompilerSeccomp(policy)
         self.policy_sha256 = _sc_hashlib.sha256(_sc_json.dumps(
             policy, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+
+    @staticmethod
+    def validate_mounts(observer_proc):
+        # statvfs on a handful of paths misses recursive child mounts and aliases.
+        # The fresh observer proc reports the actual chroot-relative mount table.
+        expected = set(SDK_COMPILER_ISOLATION['mounts'])
+        seen = set()
+        for line in observer_proc.read('self/mountinfo', 65536).decode('ascii').splitlines():
+            fields = line.split()
+            if len(fields) < 10 or '-' not in fields:
+                raise RuntimeError('SDK_COMPILER_MOUNT_TABLE_INVALID')
+            path = fields[4]
+            options = set(fields[5].split(','))
+            kind = fields[fields.index('-') + 1]
+            if path not in expected or path in seen or kind in ('proc', 'sysfs', 'devtmpfs', 'devpts', 'mqueue', 'cgroup', 'cgroup2'):
+                raise RuntimeError('SDK_COMPILER_UNDECLARED_MOUNT_' + path)
+            required = {'nosuid', 'nodev'}
+            required.add('rw' if path in ('/workspace/out', '/tmp') else 'ro')
+            if path not in ('/', '/workspace/buck2'):
+                required.add('noexec')
+            if not required <= options:
+                raise RuntimeError('SDK_COMPILER_MOUNT_TABLE_FLAGS_' + path)
+            seen.add(path)
+        if seen != expected:
+            raise RuntimeError('SDK_COMPILER_MOUNT_TABLE_INCOMPLETE')
+        return len(seen)
+
+    @staticmethod
+    def validate_sources(declared_sources):
+        if not isinstance(declared_sources, set) or not declared_sources or len(declared_sources) > 100000:
+            raise RuntimeError('SDK_COMPILER_SOURCE_DECLARATION_REQUIRED')
+        actual = set()
+        pending = [('/workspace/src', '')]
+        count = 0
+        while pending:
+            base, relative = pending.pop()
+            with _sc_os.scandir(base) as entries:
+                for entry in entries:
+                    count += 1
+                    if count > 100000:
+                        raise RuntimeError('SDK_COMPILER_SOURCE_ENTRY_BOUND')
+                    name = relative + entry.name
+                    meta = entry.stat(follow_symlinks=False)
+                    if _sc_stat.S_ISDIR(meta.st_mode):
+                        if name.count('/') >= 256:
+                            raise RuntimeError('SDK_COMPILER_SOURCE_DEPTH_BOUND')
+                        pending.append((entry.path, name + '/'))
+                    elif _sc_stat.S_ISREG(meta.st_mode) and meta.st_nlink == 1:
+                        actual.add(name)
+                    else:
+                        raise RuntimeError('SDK_COMPILER_SOURCE_LINK_OR_SPECIAL_FILE')
+        if actual != declared_sources:
+            raise RuntimeError('SDK_COMPILER_UNDECLARED_SOURCE_FILES')
 
     def before_exec(self):
         # Only the real compiler fork enters this path. Its observer keeps the
         # original proc FD. No protected descriptor is allowed through exec.
         if self.filter.libc.prctl(3, 0, 0, 0, 0) != 0:
             raise RuntimeError('SDK_COMPILER_ORIGINAL_ND0_ABSENT')
+        # Popen reuses fd0 without dup2 when stdin=0. Undo CLOEXEC only here,
+        # after checking it is the consumed request's empty pipe.
+        for fd, mode in ((0, _sc_os.O_RDONLY), (1, _sc_os.O_WRONLY), (2, _sc_os.O_WRONLY)):
+            if not _sc_stat.S_ISFIFO(_sc_os.fstat(fd).st_mode) or _sc_fcntl.fcntl(fd, _sc_fcntl.F_GETFL) & _sc_os.O_ACCMODE != mode:
+                raise RuntimeError('SDK_COMPILER_STDIO_MUST_BE_PRIVATE_PIPES')
+            _sc_os.set_inheritable(fd, True)
         _sc_os.close(self.proc.fd)
         try:
             _sc_fcntl.fcntl(self.proc.fd, _sc_fcntl.F_GETFD)
@@ -311,7 +435,12 @@ class SdkCompilerReadPolicy:
 
     def completed_spawn_data(self):
         # Called only after genuine exec, successful Child exit and both EOFs.
-        return {'format_version': 2, 'kind': 'actual-a2-procless-seccomp-child-v2',
+        return {'format_version': 3, 'kind': 'actual-a2-procless-seccomp-child-v3',
+                'isolation_sha256': _sc_hashlib.sha256(_sc_json.dumps(SDK_COMPILER_ISOLATION, sort_keys=True, separators=(',', ':')).encode()).hexdigest(),
+                'mount_count': self.mount_count, 'source_declarations': 'job-union-exact',
+                'memfd_errno': _sc_errno.EPERM, 'execveat_errno': _sc_errno.EPERM,
+                'io_uring_errno': _sc_errno.EPERM, 'sysv_ipc_errno': _sc_errno.EPERM,
+                'keyring_errno': _sc_errno.EPERM,
                 'policy_sha256': self.policy_sha256,
                 'architecture': self.filter.architecture, 'seccomp_mode': 2,
                 'unshare_errno': _sc_errno.EPERM, 'clone3_errno': _sc_errno.ENOSYS,

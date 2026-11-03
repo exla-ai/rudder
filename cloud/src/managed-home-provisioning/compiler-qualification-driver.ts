@@ -37,7 +37,7 @@ export class CompilerSdkQualificationDriver {
  async startRetaining():Promise<void>{check(!this.#started,"effect_unknown");this.#started=true;this.#time=originalTime(300_000);
   // Reference the actual lifetime timer. An unresolved Promise alone does not
   // retain Node/VM lifetime; the live server and this timer both do so.
-  this.#fuse=setTimeout(()=>{this.#expired=true;this.#error??="expired";},300_000);
+  this.#fuse=setTimeout(()=>{if(!this.#roleObserved){this.#expired=true;this.#error??="expired";}},300_000);
   const wss=new WebSocketServer({noServer:true,maxPayload:24*1024,perMessageDeflate:false});this.#wss=wss;
   const server=createServer((_req,res)=>{res.writeHead(404);res.end();});this.#server=server;
   server.on("error",()=>{this.#error??="unavailable";});wss.on("error",()=>{this.#error??="unavailable";});
@@ -93,9 +93,16 @@ export class CompilerSdkQualificationDriver {
   const held=new StagingListenerAdmissionClosure(this.#server);this.#listenerClosure=held;await held.closeRetaining();
  }
  takeOriginalRoleActivationPermit():OriginalSdkRoleActivationPermit|undefined {
-  check(!this.#error&&!this.#expired&&!this.#sendUnknown,"effect_unknown");if(!this.#sendCallback)return undefined;
+  check(!this.#roleObserved&&!this.#error&&!this.#expired&&!this.#sendUnknown,"effect_unknown");
+  check(this.#time,"effect_unknown");
+  // A queued timer callback cannot extend the original admission deadline.
+  try{this.#time.remaining();}catch{this.#expired=true;this.#error??="expired";fail("expired");}
+  if(!this.#sendCallback)return undefined;
   const permit=this.registry.takeOriginalRoleActivationPermit(this.accountId,this.commandKey) as OriginalSdkRoleActivationPermit|undefined;
-  if(permit)this.#roleObserved=true;return permit;
+  // Only the registry's original one-shot physical publication permit settles
+  // this stage. ACK queue/send alone never clears or renews the live fuse.
+  if(permit){this.#roleObserved=true;clearTimeout(this.#fuse);this.#fuse=undefined;}
+  return permit;
  }
  /** Bounded public DATA for a private fixture output file. A send callback is
   * NOT Root ACK receipt or a readiness/lease/helper/drain constructor. */

@@ -7,10 +7,26 @@ import type {OriginalTime} from "./fly.js";
 import {check,fail,snapshot} from "./types.js";
 
 const LIMIT=64*1024;
-const HELD=new Set<OriginalSdkDiagnosticRead>();
+const HELD=new Set<OriginalQualificationDiagnosticRead>();
 const OPERATIONS=new Set(["SDK private namespace mount failed","SDK retained mount reopen failed","SDK retained floor chdir failed","SDK actual isolated namespaces unavailable","SDK retained workspace chdir failed","SDK user namespace join failed","SDK actual isolated workload spawn failed","SDK actual isolated workload wait failed","SDK actual isolated workload exit failed","SDK actual workload result parse failed","SDK original execution clock unavailable","SDK original execution cancellation check failed","SDK original execution admission check failed","SDK original execution floor changed"]);
 const FIELDS=["kind","component","stage","check","class","io_kind","errno"];
-const CHECKS=new Set(("RuntimeMountSdk SdkPrepareOriginal SdkCatalog SdkPlaceholder SdkBackingDescriptors SdkSourceBinding SdkBakedInventory SdkVerifiedManifest SdkSemanticInputs SdkToolchains SdkArtifactBinding SdkStorage SdkReadFloor SdkFuse SdkMountData SdkQualification SdkReady SdkHelperEntry SdkHelperConnect SdkHelperParent SdkHelperParentImage SdkHelperCapsule SdkHelperServiceImage SdkHelperLauncher SdkHelperLauncherImage SdkHelperFloor SdkHelperWorkspace SdkHelperNamespaceWorkload SdkHelperResultSend SdkHelperExitUnknown SdkHelperExitedWithoutResult SdkProcessOriginal SdkProcessSpawn SdkProcessCapture SdkProcessPipes SdkProcessChildExit SdkProcessPeer SdkProcessHelperFloor SdkProcessHelperImage SdkProcessHelperParent SdkProcessCapsule SdkProcessResult SdkProcessWorkload SdkProcessInterpreter SdkProcessNamespaces SdkProcessCapabilities SdkProcessClock SdkProcessExitEof").split(" "));
+// Closed Debug spellings from Native BootstrapCheck, including every finite component.
+const CHECKS=new Set(`InheritedDescriptors ParentEndpoint EngineEndpoint RootProcess ServiceProcess EngineProcess LauncherImage
+SealedData Boot EngineImage ServiceImage BackingProcess BackingFloor BackingImage
+BackingNamespace BackingBoot ProcessLiveness CredentialFloor EngineProtectedProc LauncherParentage ProcessImages
+RootIdMaps ServiceIdMaps EngineIdMaps UserNamespace MountNamespace PidNamespace RuntimeMountOriginal
+RuntimeMountOfferDescriptors RuntimeMountPublicConfig RuntimeMountRegistration RuntimeMountRegisteredImages RuntimeMountPolicy RuntimeMountAdmission RuntimeMountBacking
+RuntimeMountBakedInventory RuntimeMountManifest RuntimeMountStorage RuntimeMountReadFloor RuntimeMountFuse RuntimeMountComponents RuntimeComponentSet
+RuntimeMountSelectedElves RuntimeMountSelectedBinding RuntimeMountReady RuntimeMountSdk SdkPrepareOriginal SdkCatalog SdkPlaceholder
+SdkBackingDescriptors SdkSourceBinding SdkBakedInventory SdkVerifiedManifest SdkSemanticInputs SdkToolchains SdkArtifactBinding
+SdkStorage SdkReadFloor SdkFuse SdkMountData SdkQualification SdkReady SdkHelperEntry
+SdkHelperConnect SdkHelperParent SdkHelperParentImage SdkHelperCapsule SdkHelperServiceImage SdkHelperLauncher SdkHelperLauncherImage
+SdkHelperFloor SdkHelperWorkspace SdkHelperNamespaceWorkload SdkHelperResultSend SdkHelperExitUnknown SdkHelperExitedWithoutResult SdkProcessOriginal
+SdkProcessSpawn SdkProcessCapture SdkProcessPipes SdkProcessChildExit SdkProcessPeer SdkProcessHelperFloor SdkProcessHelperImage
+SdkProcessHelperParent SdkProcessCapsule SdkProcessResult SdkProcessWorkload SdkProcessInterpreter SdkProcessNamespaces SdkProcessCapabilities
+SdkProcessClock SdkProcessExitEof`.split(/\s+/));
+for(const operation of ["RuntimeComponentName", "RuntimeComponentClock", "RuntimeComponentOpen", "RuntimeComponentDuplicate", "RuntimeComponentMetadata", "RuntimeComponentRole", "RuntimeComponentFdData", "RuntimeComponentMount"])
+ for(const component of ["Usr","Package","Model","Certificates","Alternatives","LoaderCache","Timezone","SslConfig","PythonSite"])CHECKS.add(`${operation}(${component})`);
 const STAGES:Record<string,readonly string[]>={root_storage:["entry","capture_core","capture_runtime","serve_current","serve_runtime","send_reply","receive","authenticate","decode","dispatch","encode"],machine_root:["prepare_host","spawn_engine","wait_engine","spawn_service","send_service","wait_client","wait_host_serving","established","quarantined"],compiler_sdk_helper:["handshake"]};
 function uniqueJson(text:string):any {
  const parsed=JSON.parse(text),tokens=text.match(/"(?:\\.|[^"\\])*"|[{}\[\]:,]|[^\s{}\[\]:,]+/g)??[],stack:(Set<string>|null)[]=[];
@@ -75,7 +91,7 @@ export function projectSdkFailureLogs(raw:Buffer,target:SdkDiagnosticTarget):Sdk
  }
  return found;
 }
-/** Select only the exact disposable SDK machine retained by this registry's
+/** Select only the exact disposable qualification machine retained by this registry's
  * original creation/start path. Inventory alone does not issue an owner. */
 export function sdkDiagnosticTarget(custody:any):SdkDiagnosticTarget {
  check(custody?.scope==="retained-disposable-provider-response-data-only"&&custody.original_creation_captured===true&&custody.pending_effect===null,"effect_unknown");
@@ -89,18 +105,19 @@ export function sdkDiagnosticTarget(custody:any):SdkDiagnosticTarget {
 /** One original read-only logs child. Stored before spawn; failure/termination
  * never drops/replaces the child or pretends that close means a Root join.
  * The child has at most five seconds, bounded by the SAME stage deadline.
- * Timeout/overflow kills only this local logs CLI, never the SDK machine. */
-export class OriginalSdkDiagnosticRead {
+ * Timeout/overflow kills only this local logs CLI, never the qualification machine. */
+export class OriginalQualificationDiagnosticRead {
  #child?:ChildProcess;#run?:Promise<void>;#resolve?:()=>void;#timer?:NodeJS.Timeout;
  #home?:DiagnosticHome;
  #raw:Buffer[]=[];#bytes=0;#stderrBytes=0;#hash=createHash("sha256");#sha?:string;
  #eof={stdout:false,stderr:false};#exited=false;#closed=false;#exit:number|null=null;#signal:string|null=null;
  #errors:string[]=[];#terminated=false;#finished=false;#constructorCompleted=false;#diagnostics:SdkFailureDiagnostic[]=[];
  constructor(private readonly target:SdkDiagnosticTarget,private readonly time:OriginalTime,private readonly executable:string,
-  private readonly token:string,private readonly onFailure:(failure:SdkFailureDiagnostic)=>void=()=>{},private readonly allocate:()=>ChildProcess=()=>new ChildProcess()){
+  private readonly token:string,private readonly onFailure:(failure:SdkFailureDiagnostic)=>void=()=>{},private readonly allocate:()=>ChildProcess=()=>new ChildProcess(),private readonly role:"sdk"|"runtime"="sdk"){
+  check(role==="sdk"||role==="runtime","invalid_request");
   check(/^\/[^\0\r\n]+$/.test(executable)&&typeof token==="string"&&token.length>0,"unconfigured");
  }
- [inspect.custom](){return "OriginalSdkDiagnosticRead [original child retained; filtered DATA only]";}
+ [inspect.custom](){return "OriginalQualificationDiagnosticRead [original child retained; filtered DATA only]";}
  toJSON():never{fail("invalid_request");}
  #error(code:string){if(!this.#errors.includes(code))this.#errors.push(code);}
  #closeHome(){if(this.#home){try{closeSync(this.#home.fd);}catch{this.#error("diagnostic_home_close_error");}this.#home=undefined;}}
@@ -148,8 +165,11 @@ export class OriginalSdkDiagnosticRead {
   return this.#run;
  }
  failures():readonly SdkFailureDiagnostic[]{return snapshot(this.#diagnostics);}
- statusData(){return snapshot({scope:"original-sdk-machine-log-diagnostics-data-only",target:this.target,constructor_completed:this.#constructorCompleted,
+ statusData(){return snapshot({scope:`original-${this.role}-machine-log-diagnostics-data-only`,target:this.target,constructor_completed:this.#constructorCompleted,
   actual_exit_observed:this.#exited,close_observed:this.#closed,stdout_eof:this.#eof.stdout,stderr_eof:this.#eof.stderr,exit_code:this.#exit,exit_signal:this.#signal,
   stdout_bytes:this.#bytes,stderr_bytes:this.#stderrBytes,stdout_sha256:this.#sha??null,errors:this.#errors,failures:this.#diagnostics,owners_retained:true,
   root_helper_join_proved:false,qualification_authority:false});}
 }
+
+// Keep the SDK driver on the same constructor and default attribution.
+export {OriginalQualificationDiagnosticRead as OriginalSdkDiagnosticRead, sdkDiagnosticTarget as qualificationDiagnosticTarget};

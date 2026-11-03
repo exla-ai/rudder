@@ -4,10 +4,10 @@ import {EventEmitter} from 'node:events';
 import {PassThrough} from 'node:stream';
 import {setImmediate as turn} from 'node:timers/promises';
 import {inspect} from 'node:util';
-import {mkdtempSync,mkdirSync,writeFileSync,chmodSync,rmSync,symlinkSync} from 'node:fs';
+import {mkdtempSync,mkdirSync,writeFileSync,readFileSync,chmodSync,rmSync,symlinkSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
-import {OriginalSdkDiagnosticRead,projectSdkFailureLogs,sdkDiagnosticTarget} from '../cloud/dist/managed-home-provisioning/staging-sdk-diagnostics.js';
+import {OriginalSdkDiagnosticRead,OriginalQualificationDiagnosticRead,projectSdkFailureLogs,sdkDiagnosticTarget,qualificationDiagnosticTarget} from '../cloud/dist/managed-home-provisioning/staging-sdk-diagnostics.js';
 
 const target={app:'rudder-mh-0123456789ab4cde81230123456789ab',machine:'1855366c049e08'};
 const frame={kind:'rudder-root-retained-failure-v1',component:'root_storage',stage:'serve_runtime',class:'io',check:'SdkProcessResult',io_kind:'permission_denied',errno:13};
@@ -39,6 +39,21 @@ test('projects actual Root fixed frame in observed Fly ANSI prefix and exact-mac
  }
  const raw=line()+JSON.stringify({instance:target.machine,message:'Bearer secret-token arbitrary config.env text'})+'\n';
  assert(!JSON.stringify(projectSdkFailureLogs(Buffer.from(raw),target)).includes('secret-token'));
+});
+
+test('every fixed Native bootstrap check survives projection, including all runtime component cases',()=>{
+ const source=readFileSync(new URL('../native/src/root_runtime_image.rs',import.meta.url),'utf8');
+ const components=source.match(/enum RuntimeComponent \{([\s\S]*?)\n\}/)[1].split(',').map(v=>v.trim()).filter(Boolean);
+ const variants=[...source.match(/enum BootstrapCheck \{([\s\S]*?)\n\}/)[1].matchAll(/^\s*(\w+)(?:\((\w+)\))?,/gm)];
+ for(const [,name,parameter] of variants){
+  assert(!parameter||parameter==='RuntimeComponent');
+  for(const check of parameter?components.map(component=>`${name}(${component})`):[name]){
+   const row={...frame,check};const actual=projectSdkFailureLogs(Buffer.from(line(row)),target);
+   assert.equal(actual.length,1,check);assert.equal(actual[0].check,check);
+  }
+ }
+ for(const check of ['RuntimeComponentOpen(SecretValue)','RuntimeMountSelectedElves secret','SdkCatalog()'])
+  assert.deepEqual(projectSdkFailureLogs(Buffer.from(line({...frame,check})),target),[]);
 });
 
 test('rejects foreign, unframed, duplicate-key, secret-shaped and invalid fixed data',()=>{
@@ -167,4 +182,18 @@ test('actual original child works with otherwise empty controller environment an
   read=new OriginalSdkDiagnosticRead(target,time,standin,'synthetic-private-token');run=read.startRetaining();
  }finally{process.env=previous;}
  await run;const data=read.statusData();assert.equal(data.exit_code,0);assert.equal(data.actual_exit_observed,true);assert.equal(data.close_observed,true);assert.equal(data.stdout_eof,true);assert.equal(data.stderr_eof,true);assert.deepEqual(data.errors,[]);assert.equal(read.failures()[0].check,'SdkProcessResult');
+});
+
+test('runtime original child exports a runtime failure with private HOME and retains its own attribution',async()=>{
+ assert.equal(qualificationDiagnosticTarget,sdkDiagnosticTarget);
+ const failure={...frame,check:'RuntimeComponentOpen(Usr)'},standin=join(privateHome,'runtime-logs-standin');
+ writeFileSync(standin,`#!${process.execPath}\nif(process.env.HOME!==${JSON.stringify(privateHome)}||process.cwd()!==${JSON.stringify(privateHome)}||Object.hasOwn(process.env,'FLY_ACCESS_TOKEN'))process.exit(2);process.stdout.write(${JSON.stringify(line(failure))});`,{mode:0o700});
+ let observed;const read=new OriginalQualificationDiagnosticRead(target,time,standin,'synthetic-runtime-private-token',value=>{observed=value;},undefined,'runtime');
+ await read.startRetaining();const data=read.statusData();
+ assert.equal(observed.check,'RuntimeComponentOpen(Usr)');assert.equal(data.scope,'original-runtime-machine-log-diagnostics-data-only');
+ assert.equal(data.target.machine,target.machine);assert.equal(data.actual_exit_observed,true);assert.equal(data.stdout_eof,true);assert.equal(data.stderr_eof,true);
+ assert.equal(data.root_helper_join_proved,false);assert.equal(data.qualification_authority,false);assert.deepEqual(data.errors,[]);
+ assert(!JSON.stringify(data).includes('synthetic-runtime-private-token'));
+ const sdk=fixture();const run=sdk.read.startRetaining();sdk.child.settle();await run;
+ assert.equal(sdk.read.statusData().scope,'original-sdk-machine-log-diagnostics-data-only');
 });

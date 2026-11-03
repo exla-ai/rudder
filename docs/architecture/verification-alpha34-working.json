@@ -90,18 +90,108 @@
       "instance_id": "01M670MG4A8E0DWE9GA1C0PQ92",
       "state": "started",
       "imageDigest": "sha256:404f46396aca77324d9b53c55d2824a5401af56ba5362d0bdae67e16108fc245"
+    },
+    "latestHttpRecheck": {
+      "verifiedAt": "2026-11-03T22:16:37.629957+00:00",
+      "scope": "current HTTP availability only; deployment revision remains separately evidenced",
+      "checks": [
+        {
+          "url": "https://rudder.exla.ai/app",
+          "status": 200,
+          "expected": 200,
+          "ok": true,
+          "finalUrl": "https://rudder-cloud-control.fly.dev/app",
+          "bytes": 1574,
+          "sha256": "ad8e4ec8bc626f63aa8c037d5de25ae3e6f05cb084dcb0ae11d7aab47f77f013"
+        },
+        {
+          "url": "https://rudder.exla.ai/health",
+          "status": 200,
+          "expected": 200,
+          "ok": true,
+          "finalUrl": "https://rudder.exla.ai/health",
+          "bytes": 144,
+          "sha256": "984ba5251efefe89eabc5fd5f49fe1e128c975697095b173199983e0d660d692"
+        },
+        {
+          "url": "https://rudder-cloud-control.fly.dev/api/app/state",
+          "status": 401,
+          "expected": 401,
+          "ok": true,
+          "finalUrl": "https://rudder-cloud-control.fly.dev/api/app/state",
+          "bytes": 24,
+          "sha256": "782eeaa7f1915f6783146f8180751785584f0f24bd4e503165c7fc4a597da600"
+        }
+      ]
     }
   },
   "npm": {
-    "status": "pending",
-    "qualificationRun": "https://github.com/exla-ai/rudder/actions/runs/41561923576",
-    "revision": "77f6b5f245a60fca099ee57144859801fd06821a",
-    "priorQualification": {
-      "run": "https://github.com/exla-ai/rudder/actions/runs/41558606130",
-      "status": "failed",
-      "revision": "17939790dd111acb0b7f4401ace41920f500a82b",
-      "reason": "Linux-only provider clock fixture executed on macOS; 1044 JS passed, 1 failed, 37 skipped; three native artifact builds passed."
-    }
+    "required": true,
+    "kind": "npm",
+    "status": "provider_processing",
+    "target": "@exla/rudder@next and @viraatdas/rudder@next",
+    "provider": "npmjs.org / GitHub Actions",
+    "version": "4.0.0-alpha.34",
+    "revision": "368c72f2e53962fe730f33de5a8b4d4126be7331",
+    "url": "https://github.com/exla-ai/rudder/actions/runs/41728551815",
+    "verifiedAt": "2026-11-03T22:20:57.612570+00:00",
+    "qualificationRun": "https://github.com/exla-ai/rudder/actions/runs/41566733699",
+    "checks": [
+      {
+        "check": "exact candidate qualification",
+        "result": "success"
+      },
+      {
+        "check": "atomic nonforce main and annotated tag push",
+        "result": "success",
+        "at": "2026-11-03T22:11:11.131008Z"
+      },
+      {
+        "check": "remote main/tag exact368 target",
+        "result": "success",
+        "at": "2026-11-03T22:17:00.726016Z"
+      },
+      {
+        "check": "tag release CI",
+        "result": "success",
+        "completedAt": "2026-11-03T22:14:12Z"
+      },
+      {
+        "check": "qualification artifact reuse",
+        "result": "success",
+        "nativeBuilds": "skipped",
+        "qualification": "skipped"
+      },
+      {
+        "check": "both registry exact versions",
+        "result": "404 as of22:19:39Z"
+      },
+      {
+        "check": "both npm next tags",
+        "result": "alpha33 as of22:20:48Z"
+      },
+      {
+        "check": "both disposable actual installs",
+        "result": "pending registry availability"
+      }
+    ],
+    "installationVerified": false,
+    "macInstallationVerified": false,
+    "publicationProvenance": "publication-provenance/publication-provenance.json",
+    "followup": "Continue live registry checks; once both versions available run verify-registry-install.py. Do not manually republish or rewrite shipped tag.",
+    "publicationAcknowledged": true,
+    "registryAvailabilityVerified": false,
+    "processingAcknowledgments": [
+      {
+        "package": "@exla/rudder",
+        "at": "2026-11-03T22:13:38Z"
+      },
+      {
+        "package": "@viraatdas/rudder",
+        "at": "2026-11-03T22:14:05Z"
+      }
+    ],
+    "scope": "Release CI and asynchronous publication acceptance verified; public registry and actual install pending."
   },
   "managedSdkQualified": false,
   "managedRuntimeQualified": false,

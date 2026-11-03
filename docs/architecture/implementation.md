@@ -28,7 +28,7 @@ Its main commit and annotated `v4.0.0-alpha.34` tag were pushed atomically
 without force at 2026-11-03T22:11:11Z. The
 [release workflow](https://github.com/exla-ai/rudder/actions/runs/41728551815)
 reuses the exact revision's qualified artifacts instead of compiling again.
-Registry publication and installation verification remain pending. The
+The release workflow passed at 2026-11-03T22:14:12Z. Both npm publishes acknowledged processing before availability; public registry availability and installation verification remain pending. The
 test-only follow-up does not change the deployed Cloud product.
 Its isolated stock worker smoke passed Root startup and
 UID1500 command checks, then verified destruction and two inventories of absence.
@@ -138,6 +138,30 @@ The same-capture controller was pushed as
 Its original remote child exited zero, but the wrapper failed afterward without
 retaining a useful error. A separate read verified actual registry manifest and
 config bytes, the exact revision label and unchanged context; no rebuild was run.
+
+The next captured source, `2117ed70a63732e02a16c2565972896da86483b0`,
+corrects a stale qualification script SHA in the managed asset policy. All six
+sidecar source pins are now checked locally before dependency installation or
+remote builds. The previous `5ca1a8b0` worker build failed inside the generic
+asset chain; its retained output cannot identify the first failing command.
+The old captured source-policy mismatch reproduces locally, and real Codex/ws
+archive downloads passed full integrity and extraction checks. Asset failures
+now retain fixed command, artifact, phase, validation check and HTTP/OS codes.
+Seventeen Python checks pass, two Root-only checks are skipped, and the builder's
+local self-check passes. The corrected remote worker/controller builds are
+pending. The previous controller did publish; a later immutable read verified
+its original digest without rebuilding it. No hardware admission follows from
+that build proof.
+
+Runtime qualification now uses the same retained exact-machine diagnostic
+reader as SDK qualification; all 165 finite Native bootstrap check spellings
+are accepted. Both stage timers settle only when the registry returns its
+actual original activation permit. Queued or sent ACKs do not settle them;
+live expiry, the same original clock and later genuine owner failures remain
+checked. This prevents a completed early stage expiring during ordinary task
+verification. Cloud compilation and 44 focused Node checks pass, including
+actual driver timer callbacks across both stages. Hardware qualification is
+still pending.
 
 The requested project file/document viewer is queued in PLAN.md section 18.5.
 It covers project files and task outputs, rendered documents and website files,

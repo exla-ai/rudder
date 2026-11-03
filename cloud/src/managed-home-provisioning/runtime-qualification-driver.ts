@@ -1,3 +1,4 @@
+import {OriginalQualificationDiagnosticRead,qualificationDiagnosticTarget,type SdkFailureDiagnostic} from "./staging-sdk-diagnostics.js";
 import {StagingListenerAdmissionClosure} from "./staging-listener-admission.js";
 import type {OriginalRuntimeRoleActivationPermit} from "./runtime-qualification.js";
 import {createServer,type Server} from "node:http";
@@ -19,13 +20,16 @@ import type {ManagedHomeRegistry,RuntimeQualificationProvisionReceipt} from "./r
  */
 export class RuntimeImageQualificationDriver {
  readonly registry:ManagedHomeRegistry;readonly wire:ManagedHomeRegistrationWire;
+ #diagnosticToken:string;
  #server?:Server;#wss?:WebSocketServer;#listen?:Promise<void>;#sockets=new Set<WebSocket>();
  #acceptingClosed=false;#listenerClosure?:StagingListenerAdmissionClosure;
  #admissions=0;#pendingUpgrades=0;#messages=0;#started=false;#time?:OriginalTime;#provision?:Promise<RuntimeQualificationProvisionReceipt>;
  #receipt?:RuntimeQualificationProvisionReceipt;#error?:Code;#expired=false;#fuse?:NodeJS.Timeout;
+ #diagnosticRead?:OriginalQualificationDiagnosticRead;#diagnosticLoop?:Promise<void>;#diagnosticReads=0;#diagnosticFailure?:SdkFailureDiagnostic;#roleObserved=false;
  #ack?:Envelope<RuntimeQualificationAck>;#sendAttempted=false;#sendCallback=false;#sendUnknown=false;
- constructor(config:ManagedHomePostgresConfig,candidate:RuntimeQualificationCandidate,private readonly accountId:string,private readonly commandKey:string){
+ constructor(config:ManagedHomePostgresConfig,candidate:RuntimeQualificationCandidate,private readonly accountId:string,private readonly commandKey:string,private readonly diagnosticsExecutable="/usr/local/bin/rudder-staging-fly"){
   check(config.policy.controlPlane?.profile==="qualification-v1"&&controlOrigin(config.policy)===QUALIFICATION_CONTROL_ORIGIN,"unconfigured");
+  this.#diagnosticToken=config.flyToken;
   this.registry=createManagedRuntimeImageQualificationRegistry(config,candidate);this.wire=new ManagedHomeRegistrationWire(this.registry);
  }
  [inspect.custom](){return "RuntimeImageQualificationDriver [original disposable fixture owners retained]";}
@@ -33,7 +37,7 @@ export class RuntimeImageQualificationDriver {
  async startRetaining():Promise<void>{check(!this.#started,"effect_unknown");this.#started=true;this.#time=originalTime(300_000);
   // Reference the actual lifetime timer. An unresolved Promise alone does not
   // retain Node/VM lifetime; the live server and this timer both do so.
-  this.#fuse=setTimeout(()=>{this.#expired=true;this.#error??="expired";},300_000);
+  this.#fuse=setTimeout(()=>{if(!this.#roleObserved){this.#expired=true;this.#error??="expired";}},300_000);
   const wss=new WebSocketServer({noServer:true,maxPayload:24*1024,perMessageDeflate:false});this.#wss=wss;
   const server=createServer((_req,res)=>{res.writeHead(404);res.end();});this.#server=server;
   server.on("error",()=>{this.#error??="unavailable";});wss.on("error",()=>{this.#error??="unavailable";});
@@ -64,7 +68,22 @@ export class RuntimeImageQualificationDriver {
   // Stage the actual promise before first provider/PG effects; timeout/error
   // cannot throw away its registry/cipher/key/creation/purpose/unknown owners.
   this.#provision=this.registry.provisionRuntimeImageQualification(this.accountId,this.commandKey);
-  try{this.#receipt=await this.#provision;this.#time.remaining();}catch{this.#error="effect_unknown";}
+  try{this.#receipt=await this.#provision;this.#time.remaining();this.#diagnosticLoop=this.#observeDiagnosticsRetaining();}catch{this.#error="effect_unknown";}
+ }
+ /** Observe only this stage's original disposable machine under its existing
+  * deadline. A fixed failure ends the wait without releasing any owner. */
+ async #observeDiagnosticsRetaining():Promise<void>{
+  try{
+   const target=qualificationDiagnosticTarget(this.registry.runtimeImageQualificationCustodyData(this.accountId,this.commandKey));
+   while(!this.#error&&!this.#expired&&!this.#roleObserved&&this.#diagnosticReads<100){
+    this.#time!.remaining();this.#diagnosticReads++;
+    const read=new OriginalQualificationDiagnosticRead(target,this.#time!,this.diagnosticsExecutable,this.#diagnosticToken,failure=>{
+     this.#diagnosticFailure=failure;this.#error??="unavailable";
+    },undefined,"runtime");this.#diagnosticRead=read;
+    await read.startRetaining();if(this.#error||this.#roleObserved)return;
+    const delay=Math.min(2000,this.#time!.remaining());await new Promise<void>(resolve=>setTimeout(resolve,delay));
+   }
+  }catch{/* Unavailable logs cannot become a result or erase original custody. */}
  }
  /** One-way listener restriction. Existing WS, registry, provider and PG
   * owners remain held; close-listener completion is NOT actor/WS retirement. */
@@ -73,8 +92,16 @@ export class RuntimeImageQualificationDriver {
   const held=new StagingListenerAdmissionClosure(this.#server);this.#listenerClosure=held;await held.closeRetaining();
  }
  takeOriginalRoleActivationPermit():OriginalRuntimeRoleActivationPermit|undefined {
-  check(!this.#error&&!this.#expired&&!this.#sendUnknown,"effect_unknown");if(!this.#sendCallback)return undefined;
-  return this.registry.takeOriginalRoleActivationPermit(this.accountId,this.commandKey) as OriginalRuntimeRoleActivationPermit|undefined;
+  check(!this.#roleObserved&&!this.#error&&!this.#expired&&!this.#sendUnknown,"effect_unknown");
+  check(this.#time,"effect_unknown");
+  // A queued timer callback cannot extend the original admission deadline.
+  try{this.#time.remaining();}catch{this.#expired=true;this.#error??="expired";fail("expired");}
+  if(!this.#sendCallback)return undefined;
+  const permit=this.registry.takeOriginalRoleActivationPermit(this.accountId,this.commandKey) as OriginalRuntimeRoleActivationPermit|undefined;
+  // Only the registry's original one-shot physical publication permit settles
+  // this stage. ACK queue/send alone never clears or renews the live fuse.
+  if(permit){this.#roleObserved=true;clearTimeout(this.#fuse);this.#fuse=undefined;}
+  return permit;
  }
  /** Bounded public DATA for a private fixture output file. A send callback is
   * NOT Root ACK receipt or a readiness/lease/helper/drain constructor. */
@@ -82,6 +109,7 @@ export class RuntimeImageQualificationDriver {
   let custody:unknown=null;try{custody=this.registry.runtimeImageQualificationCustodyData(this.accountId,this.commandKey);}catch{}
   return snapshot({format_version:1,scope:"disposable-runtime-floor-qualification-driver-data-only",
    state:this.#ack?"role_commit_observed":this.#error??"pending",expired:this.#expired,error:this.#error??null,
+   runtime_failure:this.#diagnosticFailure??null,runtime_machine_logs:this.#diagnosticRead?.statusData()??null,runtime_log_reads:this.#diagnosticReads,
    receipt:this.#receipt??null,custody,publication_ack_data:this.#ack??null,
    ack_send_attempted:this.#sendAttempted,ack_send_callback_observed:this.#sendCallback,ack_send_unknown:this.#sendUnknown,
    root_ack_receipt_observed:false,source_authority:false,helper_qualified:false,scheduler_ready:false,normal_retirement:false,

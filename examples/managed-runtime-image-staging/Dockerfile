@@ -3,6 +3,7 @@ FROM registry.fly.io/rudder-workers-exla@sha256:b0c21439e441671351766e8a2f4e8781
 USER root
 COPY --chown=0:0 --chmod=0555 payload/node /usr/local/bin/rudder-runtime-qualification-node
 COPY --chown=0:0 --chmod=0555 payload/flyctl /workspace/home/.fly/bin/flyctl
+COPY --chown=0:0 --chmod=0555 payload/flyctl /usr/local/bin/rudder-staging-fly
 COPY --chown=0:0 payload/cloud /opt/rudder-runtime-qualification/cloud
 COPY --chown=0:0 payload/examples /opt/rudder-runtime-qualification/examples
 COPY --chown=0:0 --chmod=0444 payload/context-manifest.json /opt/rudder-runtime-qualification/context-manifest.json

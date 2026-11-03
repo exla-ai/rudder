@@ -183,6 +183,25 @@ service avoids Depot's publication path; its cache is separate. Thirteen pure
 volume receipt checks and the builder self-check pass. This enables a separate
 fallback build, with the earlier publication failures retained.
 
+At 22:54:12Z the original `9aea4c94` worker's immutable manifest and config
+became available and verified, about 15 minutes after its build completed.
+The next filesystem check refused before any resource creation: the protected
+home had legitimately adopted the deployed alpha.34 worker at 03:01:46Z.
+Both retained reads show instance `01M6FNM2N7HR0SYWYCSYK9MQJM` and the deployed
+`c3422372...` image. Its old hard-coded instance was therefore stale. No
+qualification VM, volume or token was created. The failed original was reaped;
+its failed report is retained.
+
+The operator verifier now accepts an explicit protected instance/image while
+keeping the app/machine and all pre/post guards fixed. It uses archive-verified
+builder/probe bytes from the unchanged image capture and records the operator
+source separately. Lifecycle derivation changes only the expected identity
+literals before hashing its generated sources; its boot/completion predicates
+are unchanged. Nineteen pure volume and five derive checks pass. A settled
+preflight failure before any create now exits one while preserving its failed
+report; uncertain effects still retain their original owners. These operator
+changes do not require rebuilding the worker or controller.
+
 The requested project file/document viewer is queued in PLAN.md section 18.5.
 It covers project files and task outputs, rendered documents and website files,
 and private access to Cloud files. It is not implemented yet.

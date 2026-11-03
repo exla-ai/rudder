@@ -40,6 +40,7 @@ class ReceiptTests(unittest.TestCase):
                           pax_headers={'comment': self.revision}) as archive:
             for name, raw in {
                 'examples/managed-runtime-image-staging/build-candidate.py': self.raw_builder,
+                'examples/managed-runtime-image-staging/probe.mjs': b'// synthetic captured probe\n',
                 'cloud/worker/Dockerfile': self.original_docker.encode(),
                 'cloud/worker/managed-runtime/policy.json': v.canonical(policy),
             }.items():
@@ -81,6 +82,8 @@ class ReceiptTests(unittest.TestCase):
         self.files = {str(self.parent / 'source.tar'): self.archive,
                       str(self.parent.with_name(self.parent.name + '.intent.json')): intent,
                       '/workspace/test-fly': self.fly,
+                      str(source / 'examples/managed-runtime-image-staging/build-candidate.py'): self.raw_builder,
+                      str(source / 'examples/managed-runtime-image-staging/probe.mjs'): b'// synthetic captured probe\n',
                       str(self.parent / 'remote-build.log'): self.log}
         self.sync_rows()
 
@@ -182,6 +185,78 @@ class ReceiptTests(unittest.TestCase):
     def test_duplicate_keys_refused(self):
         with self.assertRaises(RuntimeError): v.strict(b'{"x":1,"x":2}')
 
+    def test_preflight_uses_authenticated_captured_builder_and_probe(self):
+        self.files[str(HERE / 'qualify-volume.py')] = (HERE / 'qualify-volume.py').read_bytes()
+        self.files[str(self.path)] = v.canonical(self.receipt)
+        def read(path, maximum):
+            raw = self.files[str(path)]
+            self.assertLessEqual(len(raw), maximum)
+            return raw
+        owner = v.ComponentOwner()
+        with patch.object(owner, 'read', side_effect=read), patch.object(v, 'BUILD_RECEIPT', self.path), \
+             patch.object(v, 'FLY_SHA256', self.fly_sha), \
+             patch('subprocess.Popen', side_effect=AssertionError('child forbidden')):
+            self.assertEqual(owner.preflight(), b'// synthetic captured probe\n')
+        self.assertEqual(v.BINDING['operatorSource'], {'path': str(HERE / 'qualify-volume.py'),
+                         'sha256': v.digest((HERE / 'qualify-volume.py').read_bytes())})
+        self.assertEqual(v.BINDING['sourceRevision'], self.revision)
+
+    def test_captured_builder_and_probe_cannot_differ_from_archive(self):
+        for name in ('build-candidate.py', 'probe.mjs'):
+            key = str(self.parent / 'source/examples/managed-runtime-image-staging' / name)
+            original = self.files[key]; self.files[key] = b'changed'
+            with self.assertRaisesRegex(RuntimeError, 'same-captured-source-bytes'):
+                v.captured_sources(self.receipt, self.path, lambda path, maximum: self.files[str(path)])
+            self.files[key] = original
+
+    def test_protected_identity_is_explicit_and_stays_fixed_midrun(self):
+        expected = v.protected_expectation('01M6FNM2N7HR0SYWYCSYK9MQJM', 'c' * 64)
+        home = {'id': v.PROTECTED_ID, 'instance_id': expected['instanceId'],
+                'image_ref': {'digest': 'sha256:' + expected['digest']}, 'state': 'started',
+                'config': {'mounts': [{'volume': 'protected-volume'}]}}
+        before = v.protected_identity([home], expected)
+        self.assertEqual(before['volumeIds'], ['protected-volume'])
+        self.assertEqual(v.protected_identity([home], expected), before)
+        for key, value in [('instance_id', v.PROTECTED_INSTANCE), ('image_ref', {'digest': 'sha256:' + 'd' * 64}),
+                           ('state', 'stopped'), ('id', 'foreign')]:
+            changed = dict(home, **{key: value})
+            with self.assertRaises(RuntimeError): v.protected_identity([changed], expected)
+        self.assertEqual(expected['instanceId'], '01M6FNM2N7HR0SYWYCSYK9MQJM')
+
+    def test_protected_configuration_refuses_partial_or_invalid_values(self):
+        self.assertEqual(v.protected_expectation()['id'], v.PROTECTED_ID)
+        for instance, image in [(None, 'c' * 64), ('A' * 26, None), (True, 'c' * 64),
+                                ('A' * 26, 'sha256:' + 'c' * 64), ('A' * 26, 'C' * 64),
+                                ('../not-an-instance', 'c' * 64)]:
+            with self.assertRaises(RuntimeError): v.protected_expectation(instance, image)
+
+    def test_failed_no_create_can_exit_only_with_settled_original_carriers(self):
+        state = (False, False, False, False, None, None, None)
+        child = dict(exitCode=0, constructorCompleted=True, actualChildWait=True,
+                     stdoutEOF=True, stderrEOF=True, pidfdHeld=True, observerError=None,
+                     timedOut=False, truncated=False)
+        self.assertTrue(v.settled_no_create(state, [child], None))
+        for index in range(7):
+            changed = list(state); changed[index] = True if index < 4 else {'id': 'original'}
+            self.assertFalse(v.settled_no_create(tuple(changed), [child], None))
+        self.assertFalse(v.settled_no_create(state, [child], 'unknown'))
+        for key, value in [('actualChildWait', False), ('stdoutEOF', False), ('stderrEOF', False),
+                           ('observerError', 'unknown'), ('timedOut', True), ('truncated', True)]:
+            self.assertFalse(v.settled_no_create(state, [dict(child, **{key: value})], None))
+
+    def test_no_create_negative_exit_preserves_failed_report_and_create_holds(self):
+        owner = v.ComponentOwner(); owner.output = Path('/workspace/test-only-no-effect')
+        failed = dict(componentPassed=False, cleanupVerified=False)
+        state = (False, False, False, False, None, None, None)
+        with patch.object(owner, 'current_inputs'), patch.object(owner, 'current_output'), \
+             patch.object(v, 'durable_new') as persist, \
+             patch.object(owner, 'hold', side_effect=AssertionError('original hold')):
+            self.assertEqual(owner.finish(failed, create_state=state), 1)
+            self.assertEqual(failed, dict(componentPassed=False, cleanupVerified=False))
+            persist.assert_called_once_with(owner.output / 'report.json', failed)
+            with self.assertRaisesRegex(AssertionError, 'original hold'):
+                owner.finish(failed, create_state=(True, False, False, False, None, None, None))
+
     def test_existing_deadlines_and_carrier_unchanged(self):
         self.assertEqual((v.WORK_SECONDS, v.CLEANUP_SECONDS, v.MAX_CALLS, v.CLEANUP_RESERVE), (180,120,64,16))
         expected = {'owned_child.py': '22ee38a91c9f4764f831d3cf19949b4be1c2a562730951788ade8b29d45f7ae9', 'probe.mjs': 'b3ae62ba84ce86ce7dfe89afaa3f9baabb2d35f495c10f8ee38d7d785b695577'}
@@ -190,14 +265,14 @@ class ReceiptTests(unittest.TestCase):
 
     def test_provider_ownership_and_cleanup_source_preserved(self):
         # Original reviewed V3 bodies, independent of the historical filesystem.
-        expected = {'__init__': '5d394e77b56858de31e3f9c896b2824282c0f46d4a40a85654258dbadb2cb284', 'hold': '7367754119f6a48c3d991e48b94054782b216640bcfbc9f08d72ba35bdba914e', 'read': '38ca1a59a37a75854121f4e34ee4eba78ffd415d3b37d5ee1c6331c8be636dfb', 'current_inputs': '22a900690c4776ecdbd82e75f13c370b7e38ed72526d63d76c193338afd7df68', 'start_output': '22193aa74503986842ca6082f91f2bc520f2f4c91d46fd4483a99c6c11061e47', 'current_output': '534b3961b049a10749f43e5f90914d16e15c5c8cc5b14d8e3f4cf4280d0f3da8', 'persist': '7ba51903b586434f2ec433a36c790239826dbc7f0c391ef70b9fd859d983743e', 'call': 'a9b9c50cd39755edc05a946e67e53f3824732ff89e44ec6c682c666d12284ada', 'unknown_create': '34d6382c8a12695d0b168ac5e22500fbcf3b0152676a2120fcd083d2e75907f0', 'finish': 'd9268a94c0dc51ed7701b26561d70960912a085d50ee8864108279367d4ec4ad'}
+        expected = {'__init__': '5d394e77b56858de31e3f9c896b2824282c0f46d4a40a85654258dbadb2cb284', 'hold': '7367754119f6a48c3d991e48b94054782b216640bcfbc9f08d72ba35bdba914e', 'read': '38ca1a59a37a75854121f4e34ee4eba78ffd415d3b37d5ee1c6331c8be636dfb', 'current_inputs': '22a900690c4776ecdbd82e75f13c370b7e38ed72526d63d76c193338afd7df68', 'start_output': '22193aa74503986842ca6082f91f2bc520f2f4c91d46fd4483a99c6c11061e47', 'current_output': '534b3961b049a10749f43e5f90914d16e15c5c8cc5b14d8e3f4cf4280d0f3da8', 'persist': '7ba51903b586434f2ec433a36c790239826dbc7f0c391ef70b9fd859d983743e', 'call': 'a9b9c50cd39755edc05a946e67e53f3824732ff89e44ec6c682c666d12284ada', 'unknown_create': '34d6382c8a12695d0b168ac5e22500fbcf3b0152676a2120fcd083d2e75907f0', 'finish': 'ea4832e7c3f266fec9f0fb6586017fc496ee06c749c4aa30b9b4a4448270930c'}
         source = (HERE / 'qualify-volume.py').read_text()
         owner = next(n for n in ast.parse(source).body if isinstance(n, ast.ClassDef))
         actual = {n.name: v.digest(ast.dump(n, include_attributes=False).encode())
                   for n in owner.body if isinstance(n, ast.FunctionDef) and n.name != 'preflight'}
         self.assertEqual(actual, expected)
         body = source[source.index('    output = Path(args.output)'):]
-        self.assertEqual(v.digest(body.encode()), 'd461147ebf9c7465742da70381f2e0909000e7f423bc42501bb529d8816d28dd')
+        self.assertEqual(v.digest(body.encode()), 'ece42dbea6c22024b4e5d7c0fe95614c6907c05e8bfe5c242985998b2c299b9a')
 
     def test_real_retained_input_refuses_replacement(self):
         with tempfile.TemporaryDirectory(dir='/workspace') as directory:

@@ -74,6 +74,54 @@ def strict(raw):
         return out
     return json.loads(raw,object_pairs_hook=pairs,parse_constant=lambda _:need(False,'nonfinite-input'))
 
+def protected_expectation(instance=None,image_digest=None):
+    need((instance is None)==(image_digest is None),'paired-protected-identity-required')
+    if instance is None:instance,image_digest=PROTECTED_INSTANCE,PROTECTED_DIGEST
+    need(type(instance)is str and re.fullmatch(r'[A-Za-z0-9]{20,64}',instance)is not None,'expected-protected-instance')
+    need(type(image_digest)is str and re.fullmatch(r'[a-f0-9]{64}',image_digest)is not None,'expected-protected-digest')
+    return {'app':PROTECTED_APP,'id':PROTECTED_ID,'instanceId':instance,'digest':image_digest}
+
+def protected_identity(rows,expected):
+    need(type(rows)is list and all(type(row)is dict for row in rows),'machine-inventory-schema')
+    matches=[row for row in rows if row.get('id')==PROTECTED_ID]
+    need(len(matches)==1,'protected-home-missing-or-ambiguous')
+    home=matches[0]
+    image=(home.get('image_ref')or{}).get('digest','').removeprefix('sha256:')
+    need(home.get('instance_id')==expected['instanceId']and image==expected['digest'],'protected-original-home-changed')
+    need(home.get('state')=='started','protected-home-not-live')
+    return {'id':home['id'],'instanceId':home['instance_id'],'digest':image,
+            'state':home['state'],'configSha256':digest(canonical(home.get('config')or{})),
+            'volumeIds':sorted(m['volume']for m in(home.get('config')or{}).get('mounts',[])if'volume'in m)}
+
+def captured_sources(receipt,receipt_path,read):
+    """Authenticate fixed captured source bytes before importing the builder."""
+    parent=receipt_path.parent
+    need(receipt_path.name=='build-receipt.json'and receipt.get('sourceDirectory')==str(parent/'source')
+         and receipt.get('sourceArchive')==str(parent/'source.tar'),'exact-candidate-source-paths')
+    archive=read(parent/'source.tar',128*1024*1024)
+    need(digest(archive)==receipt.get('sourceArchiveSha256'),'exact-captured-source-archive')
+    names=('build-candidate.py','probe.mjs');out={}
+    with tarfile.open(fileobj=io.BytesIO(archive),mode='r:')as tar:
+        need(tar.pax_headers.get('comment')==receipt.get('sourceRevision'),'archive-committed-revision-mismatch')
+        for name in names:
+            relative='examples/managed-runtime-image-staging/'+name
+            members=[m for m in tar.getmembers()if m.name==relative]
+            need(len(members)==1 and members[0].isfile()and 0<members[0].size<=(32768 if name=='probe.mjs'else 262144),'required-captured-source-file')
+            raw=tar.extractfile(members[0]).read()
+            need(raw==read(parent/'source'/relative,262144),'same-captured-source-bytes')
+            out[name]=raw
+    need(digest(out['build-candidate.py'])==receipt.get('builderSourceSha256'),'original-builder-source-bytes')
+    return out
+
+def settled_no_create(create_state,children,remote_unknown):
+    # This tuple comes directly from the original invocation's local carriers,
+    # never from the report or a saved receipt. No uncertain effect may exit.
+    return (type(create_state)is tuple and len(create_state)==7
+            and all(value is False for value in create_state[:4])
+            and all(value is None for value in create_state[4:])
+            and remote_unknown is None and type(children)is list
+            and all(custody(child)and child.get('timedOut')is False and child.get('truncated')is False for child in children))
+
 def validate_build(receipt,raw,receipt_path,read,builder,builder_raw,fly_sha256):
     """Validate retained build DATA. Root must observe the original invocation;
     these hashes cannot authenticate an actual tool event or registry by themselves.
@@ -185,14 +233,16 @@ class ComponentOwner:
         global BINDING, FLY
         raw=self.read(BUILD_RECEIPT,4194304)
         receipt=strict(raw)
-        builder_path=Path(__file__).resolve().with_name('build-candidate.py')
-        builder_raw=self.read(builder_path,262144)
+        sources=captured_sources(receipt,Path(BUILD_RECEIPT),self.read)
+        builder_path=Path(BUILD_RECEIPT).parent/'source/examples/managed-runtime-image-staging/build-candidate.py'
+        builder_raw=sources['build-candidate.py']
         builder={'__name__':'candidate_build_validation','__file__':str(builder_path)}
         exec(compile(builder_raw,str(builder_path),'exec'),builder)
         BINDING=validate_build(receipt,raw,Path(BUILD_RECEIPT),self.read,builder,builder_raw,FLY_SHA256)
         FLY=receipt['flyExecutable']['path']
-        self.read(Path(__file__).resolve(),262144)
-        probe=self.read(Path(__file__).resolve().with_name('probe.mjs'),32768)
+        operator=Path(__file__).resolve();operator_raw=self.read(operator,262144)
+        BINDING['operatorSource']={'path':str(operator),'sha256':digest(operator_raw)}
+        probe=sources['probe.mjs']
         self.current_inputs();return probe
     def start_output(self,output):
         self.effectAttempted=True # uncertain mkdir is retained, never retried
@@ -233,10 +283,12 @@ class ComponentOwner:
     def unknown_create(self,volume_started,volume_ack,machine_started,machine_ack):
         if (volume_started and not volume_ack)or(machine_started and not machine_ack):
             self.remoteUnknown='original-create-outcome-unknown';return self.hold()
-    def finish(self,report):
+    def finish(self,report,*,create_state):
         try:
             self.current_inputs();self.current_output();durable_new(self.output/'report.json',report)
             if report.get('cleanupVerified')is not True:
+                if report.get('componentPassed')is False and settled_no_create(create_state,self.calls,self.remoteUnknown):
+                    return 1
                 self.remoteUnknown='original-cleanup-not-verified';return self.hold()
             print(json.dumps({key:report.get(key)for key in ['componentPassed','cleanupVerified','protectedHomeUnchanged','volumeId','machineId','instanceId','providerCalls','restartDurabilityQualified']},sort_keys=True),flush=True)
             return 0 if report['componentPassed']and report['cleanupVerified']and report.get('protectedHomeUnchanged')and report['actualCliChildrenReaped']else 1
@@ -247,7 +299,10 @@ def main():
     parser.add_argument('--build-receipt', required=True)
     parser.add_argument('--flyctl-sha256', required=True)
     parser.add_argument('--output', required=True)
+    parser.add_argument('--expected-protected-instance')
+    parser.add_argument('--expected-protected-digest')
     args = parser.parse_args()
+    expected_protected=protected_expectation(args.expected_protected_instance,args.expected_protected_digest)
     global ACTIVE, IMAGE, IMAGE_DIGEST, BUILD_RECEIPT, FLY_SHA256
     BUILD_RECEIPT=Path(args.build_receipt)
     FLY_SHA256=args.flyctl_sha256
@@ -275,8 +330,7 @@ def main():
                                 'scheduled_snapshots': False, 'snapshot_id': None},
               'workloadSeconds': WORK_SECONDS, 'cleanupSeconds': CLEANUP_SECONDS,
               'maximumCalls': MAX_CALLS, 'cleanupCallReserve': CLEANUP_RESERVE,
-              'protected': {'app': PROTECTED_APP, 'id': PROTECTED_ID,
-                            'instanceId': PROTECTED_INSTANCE, 'digest': PROTECTED_DIGEST},
+              'protected': expected_protected,
               'coldRestart': False, 'createdAt': utc(), 'artifactBinding': BINDING,
               'capture': 'original-bounded-pipes-actual-wait-and-both-EOF',
               'processExecutableFdHeld': False}
@@ -327,18 +381,6 @@ def main():
         need(isinstance(rows, list), 'volume-inventory-schema')
         return rows
 
-    def protected_identity(rows):
-        matches = [row for row in rows if row.get('id') == PROTECTED_ID]
-        need(len(matches) == 1, 'protected-home-missing-or-ambiguous')
-        home = matches[0]
-        image = (home.get('image_ref') or {}).get('digest', '').removeprefix('sha256:')
-        need(home.get('instance_id') == PROTECTED_INSTANCE and image == PROTECTED_DIGEST,
-             'protected-original-home-changed')
-        need(home.get('state') == 'started', 'protected-home-not-live')
-        return {'id': home['id'], 'instanceId': home['instance_id'], 'digest': image,
-                'state': home['state'], 'configSha256': digest(canonical(home.get('config') or {})),
-                'volumeIds': sorted(m['volume'] for m in (home.get('config') or {}).get('mounts', []) if 'volume' in m)}
-
     def assert_volume(row, attached=None, require_contract=True):
         need(volume is not None and row.get('id') == volume.get('id'), 'volume-id-changed')
         need(row.get('name') == volume_name and row.get('region') == REGION, 'volume-original-context-changed')
@@ -372,7 +414,7 @@ def main():
         need(all((actual.get('guest') or {}).get(k) == v for k, v in config['guest'].items()), 'machine-guest-size-changed')
         observed = row.get('instance_id')
         need(isinstance(observed, str) and re.fullmatch(r'[A-Za-z0-9]{20,64}', observed) is not None
-             and observed != PROTECTED_INSTANCE, 'machine-original-instance-absent')
+             and observed != expected_protected['instanceId'], 'machine-original-instance-absent')
         if instance is None:
             need(allow_first_instance, 'no-original-instance-carrier')
             instance = observed
@@ -383,7 +425,7 @@ def main():
         need(observed == instance, 'machine-instance-replaced')
         need(digest(canonical(actual)) == original_config_sha, 'machine-original-config-changed')
         image = (row.get('image_ref') or {}).get('digest', '').removeprefix('sha256:')
-        need(image == IMAGE_DIGEST and image != PROTECTED_DIGEST, 'machine-resolved-image-changed')
+        need(image == IMAGE_DIGEST and image != expected_protected['digest'], 'machine-resolved-image-changed')
 
     def find_original_machine(rows):
         # No name/nonce inventory adoption: an ID must already be retained from
@@ -395,7 +437,7 @@ def main():
         return matches[0] if matches else None
 
     try:
-        protected = protected_identity(machines('protected-preflight', PROTECTED_APP))
+        protected = protected_identity(machines('protected-preflight', PROTECTED_APP),expected_protected)
         report['protectedHomeBefore'] = protected
         initial_machines, initial_volumes = machines('staging-machine-preflight'), volumes('staging-volume-preflight')
         need(not any(m.get('name') == name or (m.get('config') or {}).get('metadata', {}).get('qualification') == nonce
@@ -550,7 +592,7 @@ def main():
             for index in range(2):
                 ms = machines('cleanup-final-machine-absence-' + str(index), cleanup=True)
                 vs = volumes('cleanup-final-volume-absence-' + str(index), cleanup=True)
-                unchanged = protected_identity(machines('cleanup-protected-home-' + str(index), PROTECTED_APP, cleanup=True))
+                unchanged = protected_identity(machines('cleanup-protected-home-' + str(index), PROTECTED_APP, cleanup=True),expected_protected)
                 need(protected is not None and unchanged == protected, 'protected-home-not-unchanged')
                 machine_absent = not any((machine is not None and m.get('id') == machine['id']) or m.get('name') == name
                                          or (m.get('config') or {}).get('metadata', {}).get('qualification') == nonce for m in ms)
@@ -574,7 +616,7 @@ def main():
         report['processExecutableFdHeld']=False
         report['verifiedAt'] = utc()
         report['elapsedSeconds'] = round(now() - start, 3)
-        return ACTIVE.finish(report)
+        return ACTIVE.finish(report,create_state=(volume_started,volume_ack,machine_started,machine_ack,volume,machine,instance))
 
 if __name__ == '__main__':
     try:code=main()

@@ -11,10 +11,31 @@ BASELINE_FILES=('controller/run.py','controller/exec-wrapper.py','controller/gue
 # Original owner source identities. These are recovery/compatibility DATA, not
 # independent approval or a transfer of any historical qualification.
 BASELINE_SHA={'controller/run.py': '0bec97aba30bab1dc3a3510f15397372f01d265f2edd9c00992267b56cbe2548', 'controller/exec-wrapper.py': '280231a36f45a4b04cd2a0660924339610d1257d491d5986fc3a796cb8516bcf', 'controller/guest-read.py': 'dc6a980a781f2c41d563441d80df630dfe592f4f17051b154386088d3087f627', 'controller/nonsecret_policy.py': '66e4f8dd9c1de68bcd43bb8c668e869279c9b6ddbceda3019e77b384a7cd79fa', 'supervision/run.py': '9ef8e812dd7236d9601efcdaba0e856e9b50932e163b842da83bc79873a1c75f', 'supervision/original_controller.py': 'e72bee91aa3aeeff21714e6d624e06a47de569e9dfa819d8c98be5ebf70377f9', 'cleanup/cleanup.py': 'd6ecc73d2facdd83746fde4a5f68969f7b4e567454a012861ef6537105f901e7', 'cleanup/canonical.mjs': 'b4d5b8e7fbdce49d02f009d9f8861a88199fcb247859e33b70cf88542b6c8270', 'producer/bind.mjs': 'f3cf3e300bf6e66c6d4b64342141f9cac5f792176d045217a411a468705a332c', 'producer/durable-bundle.mjs': '36805fc8f7225bb536777b35760ade3bd9d62afe8c498c0fba3ece909e0b7576', 'controller/genuine_contract.py': '282320c4c5f943a226f023f75c50afae249fca7d4c4c787483bb137e39c65d96'}
+PROTECTED_HOME={'app':'rudder-workers-exla','id':'8edd225a7d0378','instanceId':'01M670MG4A8E0DWE9GA1C0PQ92','digest':'404f46396aca77324d9b53c55d2824a5401af56ba5362d0bdae67e16108fc245'}
 
 def encode(v):return h.canonical(v)+b'\n'
 def replace_once(text,before,after):
  h.need(text.count(before)==1);return text.replace(before,after,1)
+def protected_home(config):
+ value=config.get('protectedHome',PROTECTED_HOME)
+ h.exact(value,['app','id','instanceId','digest'])
+ h.need(value['app']==PROTECTED_HOME['app']and value['id']==PROTECTED_HOME['id'])
+ h.need(type(value['instanceId'])is str and re.fullmatch('[A-Za-z0-9]{20,64}',value['instanceId'])is not None)
+ h.need(type(value['digest'])is str and re.fullmatch('[a-f0-9]{64}',value['digest'])is not None)
+ return dict(value)
+def rewrite_protected(rows,expected):
+ # Only the known identity literals change. The baseline hashes are checked
+ # before this adapter runs; every pre/post read and deletion guard stays intact.
+ rows=dict(rows);run=rows['controller/run.py'].decode();cleanup=rows['cleanup/cleanup.py'].decode()
+ for name,key,prefix in [('PROTECTED_INSTANCE','instanceId',''),('PROTECTED_IMAGE','digest','sha256:')]:
+  run=replace_once(run,name+'='+repr(prefix+PROTECTED_HOME[key]),name+'='+repr(prefix+expected[key]))
+ old=tuple(PROTECTED_HOME[k]if k!='digest'else 'sha256:'+PROTECTED_HOME[k]for k in ['id','instanceId','digest'])
+ new=tuple(expected[k]if k!='digest'else 'sha256:'+expected[k]for k in ['id','instanceId','digest'])
+ cleanup=replace_once(cleanup,'PROTECTED = '+repr(old),'PROTECTED = '+repr(new))
+ rows['controller/run.py']=run.encode();rows['cleanup/cleanup.py']=cleanup.encode();return rows
+def operator_source():
+ path=Path(__file__).resolve()
+ return {'path':str(path),'sha256':hashlib.sha256(h.read_raw(path)).hexdigest()}
 def sync_dir(p):
  fd=os.open(p,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
  try:os.fsync(fd)
@@ -35,7 +56,7 @@ def same_capture(worker,controller):
  h.need(h.digest(worker['generatedJs'])==capture['generatedJsSha256']);return capture
 
 def validate_inputs(config):
- h.exact(config,'formatVersion workerBuildReceipt controllerBuildReceipt volumeReceipt pgEvidence s3Evidence positiveIngress controlAppId credentialStorePath'.split()+(['positiveProfileSnapshot']if 'positiveProfileSnapshot'in config else []));h.need(type(config['formatVersion'])is int and config['formatVersion']==1);h.validate_positive(config['positiveIngress'])
+ h.exact(config,'formatVersion workerBuildReceipt controllerBuildReceipt volumeReceipt pgEvidence s3Evidence positiveIngress controlAppId credentialStorePath'.split()+[k for k in ['positiveProfileSnapshot','protectedHome']if k in config]);h.need(type(config['formatVersion'])is int and config['formatVersion']==1);h.validate_positive(config['positiveIngress']);expected_protected=protected_home(config)
  refs={k:config[k]for k in ['workerBuildReceipt','controllerBuildReceipt','volumeReceipt','pgEvidence','s3Evidence']+(['positiveProfileSnapshot']if 'positiveProfileSnapshot'in config else [])};values={k:h.read_ref(v)for k,v in refs.items()}
  worker,controller=values['workerBuildReceipt'],values['controllerBuildReceipt'];capture=same_capture(worker,controller)
  c=dict(controller,receiptSha256=refs['controllerBuildReceipt']['sha256']);h.validate_control_receipt(h.read_raw(refs['controllerBuildReceipt']['path']),c)
@@ -58,6 +79,7 @@ def validate_inputs(config):
  report=h.read_ref({'path':volume['raw_report_path'],'sha256':volume['raw_report_sha256']});binding=report.get('artifactBinding');h.need(type(binding)is dict)
  h.need(binding.get('workerImage')==image and binding.get('sourceRevision')==capture['sourceRevision']and binding.get('sourceArchiveSha256')==capture['sourceArchiveSha256']and binding.get('buildReceiptPath')==refs['workerBuildReceipt']['path']and binding.get('buildReceiptSha256')==refs['workerBuildReceipt']['sha256'])
  h.need(report.get('componentPassed')is True and report.get('cleanupVerified')is True and report.get('protectedHomeUnchanged')is True and report.get('actualCliChildrenReaped')is True and report.get('allOriginalBothEOF')is True)
+ h.need(report.get('protected')==expected_protected)
  h.need(report.get('machineId')==volume['machine_id']and report.get('instanceId')==volume['instance_id']and report.get('volumeId')==volume['volume_id'])
  h.need(values['pgEvidence'].get('ok')is True and values['pgEvidence'].get('cleanupVerified')is True and values['s3Evidence'].get('actualCasPassed')is True)
  return refs,worker,c,capture
@@ -67,6 +89,7 @@ def render(baseline,config,output):
  originals={n:h.read_raw(baseline/n)for n in BASELINE_FILES}
  for n,raw in originals.items():h.need(hashlib.sha256(raw).hexdigest()==BASELINE_SHA[n])
  rows={n:raw for n,raw in originals.items()if n!='controller/genuine_contract.py'}
+ rows=rewrite_protected(rows,protected_home(config))
  for n in ['controller/run.py','supervision/run.py','cleanup/cleanup.py']:rows[n]=replace_once(rows[n].decode(),'LIFECYCLE_BINDINGS_FINALIZED = False','LIFECYCLE_BINDINGS_FINALIZED = True').encode()
  run=rows['controller/run.py'].decode();run=replace_once(run,"WORKER=BINDING['worker_artifact']['artifactBinding']['workerImage']","WORKER=BINDING['worker_image']")
  run=replace_once(run,"self.genuine=validate_genuine(o.get('genuine_ingress'),WORKER)if 'genuine_ingress'in o else None","self.genuine=validate_genuine(o.get('positive_ingress'),WORKER)")
@@ -95,12 +118,13 @@ def render(baseline,config,output):
 def derive(args):
  output=args.output;h.need(output.is_absolute()and not os.path.lexists(output));private_dir(output.parent)
  config=h.loads(h.read_raw(args.config));rows,b,originals=render(args.baseline,config,output)
- intent=output.with_name(output.name+'.intent.json');write_new(intent,encode({'scope':'derive full original staging lifecycle DATA; no provider action','configSha256':hashlib.sha256(h.read_raw(args.config)).hexdigest(),'files':{k:hashlib.sha256(v).hexdigest()for k,v in rows.items()}}))
+ operator=operator_source();expected_protected=protected_home(config)
+ intent=output.with_name(output.name+'.intent.json');write_new(intent,encode({'scope':'derive full original staging lifecycle DATA; no provider action','configSha256':hashlib.sha256(h.read_raw(args.config)).hexdigest(),'protectedHome':expected_protected,'operatorSource':operator,'imageCaptureRevision':b['capture']['sourceRevision'],'files':{k:hashlib.sha256(v).hexdigest()for k,v in rows.items()}}))
  try:
   output.mkdir(mode=0o700);sync_dir(output.parent)
   for directory in ['controller','supervision','cleanup','producer','gates']:(output/directory).mkdir(mode=0o700);sync_dir(output)
   for name,raw in rows.items():write_new(output/name,raw)
-  write_new(output/'derived.json',encode({'formatVersion':1,'baseline':str(args.baseline),'originals':{n:hashlib.sha256(raw).hexdigest()for n,raw in originals.items()},'derived':{n:hashlib.sha256(raw).hexdigest()for n,raw in rows.items()},'scope':'same-capture isolated lifecycle source DATA; external original tool observation required','sourceQualified':False,'sdkQualified':False,'runtimeQualified':False}))
+  write_new(output/'derived.json',encode({'formatVersion':1,'baseline':str(args.baseline),'originals':{n:hashlib.sha256(raw).hexdigest()for n,raw in originals.items()},'derived':{n:hashlib.sha256(raw).hexdigest()for n,raw in rows.items()},'protectedHome':expected_protected,'operatorSource':operator,'imageCaptureRevision':b['capture']['sourceRevision'],'scope':'operator adapter source DATA over the declared image capture; external original tool observation required','sourceQualified':False,'sdkQualified':False,'runtimeQualified':False}))
  except BaseException:
   # A partial output consumes the paths. Never erase it or retry publication.
   raise

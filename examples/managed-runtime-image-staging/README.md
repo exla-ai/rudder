@@ -38,6 +38,17 @@ a new invocation and unused output paths. The builders have separate caches.
 An exporter push acknowledgment does not establish registry availability. Read
 back the immutable manifest/config before starting the filesystem qualification.
 
+Check the protected home's current identity before spending time on a build.
+After an observed idle update, pass its expected instance and hex SHA256 with
+`--expected-protected-instance INSTANCE --expected-protected-digest SHA256` to
+the volume verifier. These flags are paired; the protected app and machine ID
+stay fixed. The verifier refuses any later identity or configuration change.
+It authenticates the builder and probe from the image's captured archive while
+recording its own operator source separately, so this input change does not
+require another image build. A derived lifecycle accepts the same identity as
+`protectedHome: {app, id, instanceId, digest}` and requires the volume report to
+match. Its original boot, completion and deletion guards remain in effect.
+
 Qualify a fresh isolated filesystem volume against that exact pushed worker:
 
 ```sh

@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+import { reservePlanningLaunch, recordPlanningLaunch, planForNode, ownedWorkerPrompt, type PlanningGraph } from "./planning-ownership/index.js";
 import type { RudderBus } from "./bus.js";
 import { assertLegacyWriterAllowed } from "./engine-authority.js";
 import {
@@ -21,6 +23,7 @@ import {
   projectNodeStatus,
   readGraph,
   readyNodes,
+  isReady,
   updateGraph,
 } from "./graph.js";
 import { reconcile } from "./planner.js";
@@ -220,31 +223,67 @@ export async function launchNode(
   node: TaskNode,
   bus: RudderBus,
 ): Promise<void> {
+  assertLegacyWriterAllowed(repoRoot);
+  // Persist a reservation before the first workspace/run/process side effect.
+  // A crash at any later step is uncertain, never permission to replay launch.
+  const claimId = randomUUID();
+  let reserved = false;
+  let currentGraph = graph;
+  let currentNode = node;
+  let intendedRunId = newRunId(node.prompt);
+  await updateGraph(repoRoot, (g) => {
+    const fresh = g.nodes[node.id];
+    if (!fresh || !isReady(g, fresh)) return;
+    reserved = reservePlanningLaunch(g, node.id, claimId);
+    if (reserved) {
+      const plan = planForNode(g, node.id);
+      if (plan?.routing.route === "execute") intendedRunId = plan.ownerRunId;
+      recordPlanningLaunch(g, node.id, claimId, "reserved", intendedRunId);
+      currentGraph = g; currentNode = structuredClone(fresh);
+    }
+  });
+  if (!reserved) return;
+  try {
+    await launchReservedNode(repoRoot, currentGraph, currentNode, claimId, intendedRunId, bus);
+  } catch (error) {
+    await updateGraph(repoRoot, g => { recordPlanningLaunch(g, node.id, claimId, "uncertain"); });
+    throw error;
+  }
+}
+
+async function launchReservedNode(repoRoot: string, graph: RudderGraph, node: TaskNode, claimId: string, intendedRunId: string, bus: RudderBus): Promise<void> {
   // Determine the base change: the node's scaffolded empty change if present,
   // else the integration trunk, else `@`.
   const baseChange = node.jjChangeId || graph.integrationChangeId || (await currentJjChangeId(repoRoot)) || "@";
 
-  const workspace = await createNodeWorkspace({
+  const owned = planForNode(graph, node.id);
+  const selection = owned?.nodes[node.id]?.scope;
+  if (selection && (selection.checkoutPath !== repoRoot || selection.location !== "local")) {
+    throw new Error("Owned task must launch on its selected checkout and location");
+  }
+  const isolated = selection?.workspaceMode !== "selected";
+  const workspace = isolated ? await createNodeWorkspace({
     repoRoot,
     nodeId: node.id,
     atChangeId: baseChange,
     task: node.title,
-  });
+  }) : { path: repoRoot, workspaceName: undefined };
   // Seed the shared-knowledge surface into the workspace if absent so the agent
   // edits it in its jj workspace (jj merges concurrent edits on fan-in).
   await ensureDecisionsFile(workspace.path).catch(() => undefined);
   const jjChangeId = (await currentJjChangeId(workspace.path)) || node.jjChangeId;
 
   const run = await createRunRecord({
+    id: intendedRunId,
     repoRoot,
-    task: node.prompt,
+    task: owned ? ownedWorkerPrompt(owned, node.id) : node.prompt,
     backend: node.backend,
     model: node.model,
     effort: node.effort,
     targetBranch: baseChange,
     baseCommit: baseChange,
     vcs: "jj",
-    useWorkspace: true,
+    useWorkspace: isolated,
     workspaceName: workspace.workspaceName,
     workspaceChangeId: jjChangeId,
     workspacePath: workspace.path,
@@ -254,9 +293,10 @@ export async function launchNode(
   // re-select this node and double-launch it.
   await updateGraph(repoRoot, (g) => {
     const current = g.nodes[node.id];
-    if (!current) {
-      return g;
-    }
+    if (!current) throw new Error("Reserved node disappeared; reconcile before retrying");
+    const reservation = (g as PlanningGraph).launchReservations?.[node.id];
+    if (!reservation || reservation.claimId !== claimId || current.status !== "planned" || current.runId) throw new Error("Launch reservation changed; reconcile before retrying");
+    recordPlanningLaunch(g, node.id, claimId, "reserved", run.id);
     current.runId = run.id;
     current.status = "running";
     current.workspace = { path: workspace.path, workspaceName: workspace.workspaceName };
@@ -272,6 +312,7 @@ export async function launchNode(
   run.status = "running";
   run.process = { pid, controllerPid: pid, attemptId, startedAt: nowIso() };
   await saveRunRecord(run);
+  await updateGraph(repoRoot, g => { recordPlanningLaunch(g, node.id, claimId, "started", run.id); });
 
   bus.publish({
     ts: nowIso(),
@@ -291,6 +332,7 @@ export async function launchNode(
  * + merge.conflict. The resolver-agent spawn is Phase 5; for now hold it blocked.
  */
 export async function mergeNodeIntoIntegration(repoRoot: string, node: TaskNode, bus: RudderBus): Promise<void> {
+  assertLegacyWriterAllowed(repoRoot);
   // Same cross-process integration lock as mergeJjRunIntoCurrentWorkspace:
   // withSchedulerLock only serializes THIS process; a `rudder merge` CLI call
   // racing a daemon tick would otherwise stack merges on a moving @.
@@ -298,6 +340,12 @@ export async function mergeNodeIntoIntegration(repoRoot: string, node: TaskNode,
 }
 
 async function mergeNodeIntoIntegrationLocked(repoRoot: string, node: TaskNode, bus: RudderBus): Promise<void> {
+  const live = await readGraph(repoRoot);
+  const owned = planForNode(live, node.id);
+  if (owned && !owned.nodes[node.id].scope.permissions.includes("integrate")) {
+    bus.publish({ ts: nowIso(), runId: node.runId ?? node.id, nodeId: node.id, type: "node.review", message: "Work is ready for review; integration requires owner authorization" });
+    return;
+  }
   // A change id can become divergent when jj snapshots a live workspace while
   // sibling workspaces are integrating. The workspace's immutable @ commit id
   // always identifies the exact finished revision, so prefer it at this seam.
@@ -759,6 +807,10 @@ async function scheduleTickCore(repoRoot: string, bus: RudderBus): Promise<void>
     await renderLiveRudderMd(repoRoot).catch(() => undefined);
   }
 
+  for (const [id, reservation] of Object.entries((graph as PlanningGraph).launchReservations ?? {})) {
+    if ((reservation.state === "reserved" || reservation.state === "uncertain") && graph.nodes[id]?.status !== "running") runningCount++;
+  }
+
   // Integrate review nodes. Skip fan-out variants (nodes
   // that feed a judge node via a judge edge): only the judge node merges; the
   // variants end in review, superseded by the judge's choice.
@@ -772,7 +824,8 @@ async function scheduleTickCore(repoRoot: string, bus: RudderBus): Promise<void>
       node.status === "review" &&
       !node.supersededBy &&
       node.reviewState !== "changes-requested" &&
-      !isJudgedVariant(fresh, node.id)
+      !isJudgedVariant(fresh, node.id) &&
+      (!planForNode(fresh, node.id) || planForNode(fresh, node.id)!.nodes[node.id].scope.permissions.includes("integrate"))
     ) {
       await mergeNodeIntoIntegration(repoRoot, node, bus);
     }
@@ -1015,7 +1068,11 @@ async function reconcileInjectionCore(
   input: { prompt: string; title?: string; backend?: TaskNode["backend"]; model?: string; effort?: TaskNode["effort"] },
   bus: RudderBus,
 ): Promise<{ nodeId: string }> {
+  assertLegacyWriterAllowed(repoRoot);
   const graph = await readGraph(repoRoot);
+  if (Object.keys((graph as PlanningGraph).planningOwnership ?? {}).length) {
+    throw new Error("Owned tasks require a versioned add, replace or cancel command; a routine message cannot start another planner");
+  }
   const frontierNodes: PlanNode[] = graphFrontier(graph).map((node) => ({
     id: node.id,
     title: node.title,

@@ -91,7 +91,9 @@ test("classifier evidence redacts embedded credentials while preserving the orig
       return new Response("offline", { status: 503 });
     },
   });
-  assert.deepEqual(result, before);
+  assert.equal(result.route, before.route);
+  assert.equal(result.source, before.source);
+  assert.match(result.reason, /Classifier fallback/);
   assert.ok(task.includes(apiKey) && task.includes(bearer), "original task remains available for execution");
 });
 

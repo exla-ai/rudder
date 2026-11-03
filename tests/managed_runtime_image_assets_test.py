@@ -4,7 +4,7 @@ create no native runtime, process, source, receipt or credential authority.
 """
 from pathlib import Path
 from types import SimpleNamespace
-import base64, hashlib, importlib.util, io, json, os, stat, sys, tarfile, tempfile, unittest
+import base64, hashlib, importlib.util, io, json, os, stat, sys, tarfile, tempfile, unittest, urllib.error
 
 ROOT=Path(__file__).resolve().parents[1]
 spec=importlib.util.spec_from_file_location('managed_image_assets',ROOT/'cloud/worker/managed-runtime/assets.py')
@@ -26,6 +26,50 @@ def synthetic_spec(raw,body=ELF):
     return {'archive_member':MEMBER,'bytes':len(body),'sha256':hashlib.sha256(body).hexdigest(),
         'integrity':'sha512-'+base64.b64encode(hashlib.sha512(raw).digest()).decode(),
         'max_compressed_bytes':1048576,'max_expanded_bytes':1048576}
+
+class BuildDiagnosticTests(unittest.TestCase):
+    def setUp(self):
+        self.context=dict(assets._diagnostic_context)
+        assets._diagnostic_context.update(command='acquire',artifact='codex',phase='entry')
+
+    def tearDown(self):assets._diagnostic_context.update(self.context)
+
+    def test_actual_archive_integrity_failure_retains_fixed_phase_and_check(self):
+        raw=archive([(MEMBER,ELF,tarfile.REGTYPE)]);p=synthetic_spec(raw);p['integrity']='sha512-invalid'
+        with tempfile.TemporaryDirectory() as name:
+            with self.assertRaises(assets.Rejected) as caught:
+                assets.extract(io.BytesIO(raw),p,Path(name)/'codex','codex',assets.original_end())
+            diagnostic=assets.failure_diagnostic(caught.exception)
+            self.assertEqual(diagnostic['command'],'acquire');self.assertEqual(diagnostic['artifact'],'codex')
+            self.assertEqual(diagnostic['phase'],'archive_integrity');self.assertEqual(diagnostic['check'],'ARCHIVE_FULL_INTEGRITY')
+            self.assertEqual(diagnostic['class'],'validation');self.assertFalse((Path(name)/'codex').exists())
+
+    def test_private_errors_are_never_formatted_or_projected_as_validation_codes(self):
+        class PrivateError(Exception):
+            def __str__(self):raise AssertionError('private exception formatting attempted')
+        errors=[PrivateError('private-token'),assets.Rejected('private-token'),
+                urllib.error.HTTPError('https://private.invalid/private-token',503,'private-token',{'Authorization':'private-token'},None),
+                urllib.error.URLError(PrivateError('private-token')),OSError(28,'private-token','private-token')]
+        diagnostics=[assets.failure_diagnostic(error) for error in errors]
+        encoded=json.dumps(diagnostics)
+        self.assertNotIn('private-token',encoded);self.assertNotIn('private.invalid',encoded)
+        self.assertIsNone(diagnostics[1]['check']);self.assertEqual(diagnostics[2]['status'],503)
+        self.assertEqual(diagnostics[3]['class'],'url_error');self.assertEqual(diagnostics[4]['errno'],28)
+        self.assertLess(len(encoded),2048)
+
+    def test_source_policy_mismatch_reports_sidecar_phase_without_paths(self):
+        p=assets.policy_at(POLICY);files={name:('a'*64,1) for name in assets.SIDECAR_FILES}
+        for name,field in [('host-control.mjs','sidecar_script_sha256'),('host-control-core.mjs','sidecar_core_sha256'),
+                           ('runtime-qualification.mjs','qualification_script_sha256'),('root-upload.mjs','uploader_script_sha256'),
+                           ('package.json','sidecar_package_sha256'),('package-lock.json','sidecar_lock_sha256')]:files[name]=(p[field],1)
+        files['runtime-qualification.mjs']=('0'*64,1)
+        assets._diagnostic_context.update(command='manifest',artifact='sidecar')
+        assets.diagnostic_phase('source_policy')
+        with self.assertRaises(assets.Rejected) as caught:
+            assets.expected_sidecar(Path('unused'),files,p,Path('unused-receipt'))
+        diagnostic=assets.failure_diagnostic(caught.exception)
+        self.assertEqual(diagnostic['phase'],'source_policy');self.assertEqual(diagnostic['check'],'SIDECAR_SOURCE_POLICY')
+        self.assertEqual(diagnostic['artifact'],'sidecar');self.assertNotIn('traceback',diagnostic)
 
 class ArchiveTests(unittest.TestCase):
     def test_selected_file_and_full_archive_integrity_both_required(self):

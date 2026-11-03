@@ -3,7 +3,7 @@
 Public pinned archives only; no installers, model requests, auth store or hooks.
 """
 from pathlib import Path, PurePosixPath
-import argparse, base64, ctypes, gzip, hashlib, io, json, os, shutil, stat, tarfile, time, urllib.request, uuid
+import argparse, base64, ctypes, gzip, hashlib, io, json, os, shutil, stat, sys, tarfile, time, urllib.error, urllib.request, uuid
 
 RUNTIME = '/opt/rudder-managed-runtime/v1'
 SIDECAR = '/opt/rudder-host-control'
@@ -20,6 +20,49 @@ DENY = b"'use strict';\nthrow new Error('RUDDER_OPTIONAL_ADDON_DISABLED');\n"
 SIDECAR_FILES = ('host-control-core.mjs', 'host-control.mjs', 'node_modules/ws/LICENSE', 'node_modules/ws/README.md', 'node_modules/ws/browser.js', 'node_modules/ws/index.js', 'node_modules/ws/lib/buffer-util.js', 'node_modules/ws/lib/constants.js', 'node_modules/ws/lib/event-target.js', 'node_modules/ws/lib/extension.js', 'node_modules/ws/lib/limiter.js', 'node_modules/ws/lib/permessage-deflate.js', 'node_modules/ws/lib/receiver.js', 'node_modules/ws/lib/sender.js', 'node_modules/ws/lib/stream.js', 'node_modules/ws/lib/subprotocol.js', 'node_modules/ws/lib/validation.js', 'node_modules/ws/lib/websocket-server.js', 'node_modules/ws/lib/websocket.js', 'node_modules/ws/node_modules/bufferutil/index.js', 'node_modules/ws/node_modules/utf-8-validate/index.js', 'node_modules/ws/package.json', 'node_modules/ws/wrapper.mjs', 'package-lock.json', 'package.json', 'root-upload.mjs', 'runtime-qualification.mjs')
 
 class Rejected(Exception): pass
+
+# Only fixed build stages and validation identifiers leave this process. Never
+# format network exceptions: they can contain URLs, headers or response bodies.
+CHECKS = frozenset('''ACQUISITION_FREE_FLOOR ACQUISITION_FREE_SPACE ARCHIVE_BYTE_BOUND
+ARCHIVE_DUPLICATE_MEMBER ARCHIVE_FULL_INTEGRITY ARCHIVE_MEMBER_BYTES ARCHIVE_MEMBER_POLICY ARCHIVE_ROOT_FILE
+ARTIFACT_ALREADY_EXISTS ARTIFACT_GREW ARTIFACT_INCOMPLETE ARTIFACT_WRITE_UNCERTAIN CLAUDE_CANDIDATE_PIN
+CLOSURE_ENTRY_BOUND CLOSURE_FILE_BOUND CLOSURE_SPECIAL_FILE CLOSURE_SYMLINK CLOSURE_TOTAL_BYTES
+CODEX_ELF_DIGEST CODEX_MEMBER_IDENTITY CODEX_MEMBER_MISSING CODEX_NOT_ELF FILE_BYTE_BOUND FILE_CHANGED
+FILE_OPEN_CHANGED FREE_FLOOR_INVALID IMAGE_BUILD_REQUIRES_ROOT JSON_BOUND MANIFEST_ALREADY_EXISTS
+MANIFEST_BYTE_BOUND MANIFEST_FILE_POLICY MANIFEST_MISMATCH METADATA_PIN_MISMATCH NOREPLACE_RENAME_FAILED
+NOREPLACE_RENAME_UNAVAILABLE OPTIONAL_ADDON_LOOKUP_NOT_CLOSED ORIGINAL_BUILD_DEADLINE POLICY_IDENTITY
+PROTECTED_CLOSURE_CHANGED PROTECTED_MODE_MISMATCH PUBLIC_ARCHIVE_ORIGIN PUBLIC_ARCHIVE_REDIRECT
+PUBLIC_ARCHIVE_RESPONSE ROOT_DIRECTORY_OWNER ROOT_FILE_POLICY ROOT_PATH_REDIRECT
+RUNTIME_EXACT_PINNED_CANDIDATES_REQUIRED SIDECAR_EXACT_27_FILE_CLOSURE SIDECAR_MANIFEST_ENTRY_SHAPE
+SIDECAR_MANIFEST_SHAPE SIDECAR_MANIFEST_TOTAL_BYTES SIDECAR_POLICY_PIN_MISMATCH SIDECAR_SOURCE_DIGEST
+SIDECAR_SOURCE_POLICY SIDECAR_UNDECLARED_PACKAGE SIDECAR_WRAPPER_MISSING SOURCE_METADATA_CHANGED
+WRITE_UNCERTAIN WS_BUILD_RECEIPT_CLOSURE WS_BUILD_RECEIPT_IDENTITY WS_CLOSURE_MISSING WS_IDENTITY
+WS_PACKAGE_IDENTITY'''.split())
+_diagnostic_context = {'command': 'entry', 'artifact': None, 'phase': 'entry'}
+
+def diagnostic_phase(phase):
+    need(phase in {'entry','policy','metadata','space','public_download','extract','archive_integrity',
+                  'publication','enumerate','source_policy','manifest','verify','components','addons'}, 'POLICY_IDENTITY')
+    _diagnostic_context['phase'] = phase
+
+def failure_diagnostic(error):
+    value = {'kind': 'RUDDER_MANAGED_IMAGE_ASSET_REJECTED', **_diagnostic_context,
+             'class': 'unexpected', 'check': None, 'status': None, 'errno': None}
+    if isinstance(error, Rejected):
+        value['class'] = 'validation'
+        if len(error.args) == 1 and type(error.args[0]) is str and error.args[0] in CHECKS:
+            value['check'] = error.args[0]
+    elif isinstance(error, urllib.error.HTTPError):
+        value['class'] = 'http_error'
+        if type(error.code) is int and 100 <= error.code <= 599: value['status'] = error.code
+    elif isinstance(error, TimeoutError): value['class'] = 'timeout'
+    elif isinstance(error, urllib.error.URLError): value['class'] = 'url_error'
+    elif isinstance(error, OSError):
+        value['class'] = 'os_error'
+        if type(error.errno) is int and 0 < error.errno <= 4095: value['errno'] = error.errno
+    elif isinstance(error, (ValueError, KeyError, TypeError, tarfile.TarError)):
+        value['class'] = 'data_error'
+    return value
 
 def need(value, code):
     if not value: raise Rejected(code)
@@ -120,7 +163,7 @@ def extract(raw, spec, output, artifact, end, bounds=lambda:None):
     Production CLI obtains spec ONLY from checked immutable source policy.
     No archive member is executed. Nothing is published before full SRI.
     """
-    check_time(end);bounds()
+    diagnostic_phase('extract');check_time(end);bounds()
     compressed=CountReader(raw,spec['max_compressed_bytes'],end,hashlib.sha512())
     expanded=CountReader(gzip.GzipFile(fileobj=compressed,mode='rb'),spec['max_expanded_bytes'],end)
     staging=output.parent/('.'+output.name+'.pending-'+uuid.uuid4().hex)
@@ -160,6 +203,7 @@ def extract(raw, spec, output, artifact, end, bounds=lambda:None):
     while expanded.read(CHUNK):pass
     while compressed.read(CHUNK):pass
     check_time(end);bounds()
+    diagnostic_phase('archive_integrity')
     need('sha512-'+base64.b64encode(compressed.digest.digest()).decode()==spec['integrity'],'ARCHIVE_FULL_INTEGRITY')
     if artifact=='codex':
         need(selected is not None,'CODEX_MEMBER_MISSING')
@@ -172,14 +216,15 @@ def extract(raw, spec, output, artifact, end, bounds=lambda:None):
         for path in sorted(staging.rglob('*'),reverse=True):
             if path.is_dir():os.chmod(path,0o555);fsync_dir(path)
         os.chmod(staging,0o555);fsync_dir(staging)
-    check_time(end);bounds();rename_new(staging,output);fsync_dir(output.parent)
+    diagnostic_phase('publication');check_time(end);bounds();rename_new(staging,output);fsync_dir(output.parent)
     return {'artifact':artifact,'archiveIntegrityVerified':True,'registrySignaturesVerified':False,
             'archiveRetained':False,'compressedBytesRead':compressed.count,'expandedBytesRead':expanded.count,
             'memberCount':members,'selected':selected,'integrity':spec['integrity'],'files':sorted(recorded,key=lambda v:v['path']),'paidModelCalls':0}
 
 def acquire(args):
-    p=policy_at(args.policy);end=original_end();need(args.free_floor_bytes>=0,'FREE_FLOOR_INVALID');out=Path(args.output);directory(out.parent)
+    diagnostic_phase('policy');p=policy_at(args.policy);end=original_end();need(args.free_floor_bytes>=0,'FREE_FLOOR_INVALID');out=Path(args.output);directory(out.parent)
     if args.artifact=='codex':
+        diagnostic_phase('metadata')
         metadata,raw=read_json(args.metadata,1024*1024);need(sha(raw)==p['codex']['metadata_sha256'],'SOURCE_METADATA_CHANGED')
         need(metadata['registryMetadata']['dist']['tarball']==p['codex']['url']
              and metadata['registryMetadata']['dist']['integrity']==p['codex']['integrity']
@@ -187,16 +232,17 @@ def acquire(args):
     spec=p[args.artifact]
     # This is acquisition additional-output reserve, NOT Docker build peak.
     required=CODEX_BYTES if args.artifact=='codex' else 8*1024*1024
-    need(shutil.disk_usage(out.parent).free>args.free_floor_bytes+required+16*1024*1024,'ACQUISITION_FREE_SPACE')
+    diagnostic_phase('space');need(shutil.disk_usage(out.parent).free>args.free_floor_bytes+required+16*1024*1024,'ACQUISITION_FREE_SPACE')
     bounds=lambda:need(shutil.disk_usage(out.parent).free>args.free_floor_bytes+16*1024*1024,'ACQUISITION_FREE_FLOOR')
     if args.archive:
         with open(args.archive,'rb') as source:receipt=extract(source,spec,out,args.artifact,end,bounds)
     else:
+        diagnostic_phase('public_download')
         opener=urllib.request.build_opener(urllib.request.ProxyHandler({}),NoRedirect())
         with opener.open(spec['url'],timeout=20) as response:
             need(response.status==200 and response.geturl()==spec['url'],'PUBLIC_ARCHIVE_RESPONSE')
             receipt=extract(response,spec,out,args.artifact,end,bounds)
-    check_time(end);bounds()
+    diagnostic_phase('publication');check_time(end);bounds()
     receipt['sourcePolicySha256']=sha(Path(args.policy).read_bytes());receipt['url']=spec['url']
     write_new(Path(args.receipt),canonical(receipt),0o444);fsync_dir(Path(args.receipt).parent)
 
@@ -259,12 +305,16 @@ def pin_value(value, raw, kind, policy):
             'sidecar_core_sha256':policy['sidecar_core_sha256'],'files':value['files']}
 
 def manifest(args):
-    p=policy_at(args.policy);end=original_end();root=directory(args.root);files,dirs=enumerate_files(root,args.kind,end)
+    diagnostic_phase('policy');p=policy_at(args.policy);end=original_end();root=directory(args.root)
+    diagnostic_phase('enumerate');files,dirs=enumerate_files(root,args.kind,end)
+    diagnostic_phase('source_policy')
     if args.kind=='sidecar':expected_sidecar(root,files,p,args.ws_receipt)
+    diagnostic_phase('manifest')
     value=manifest_value(files,args.kind,p)
     data=canonical(value);need(len(data)<=(65536 if args.kind=='runtime' else 32768),'MANIFEST_BYTE_BOUND')
     named=root/'manifest.json'
     if args.verify:
+        diagnostic_phase('verify')
         s=named.lstat();need(stat.S_ISREG(s.st_mode) and stat.S_IMODE(s.st_mode)==0o444 and s.st_uid==s.st_gid==0 and s.st_nlink==1,'MANIFEST_FILE_POLICY')
         actual,raw=read_json(named)
         need(actual==value and raw==data,'MANIFEST_MISMATCH')
@@ -281,12 +331,14 @@ def manifest(args):
     if args.pin:write_new(Path(args.pin),canonical(pin),0o444);fsync_dir(Path(args.pin).parent)
 
 def deny_addons(args):
+    diagnostic_phase('addons')
     root=directory(args.root)
     for name in ['bufferutil','utf-8-validate']:
         target=root/'node_modules/ws/node_modules'/name;target.mkdir(parents=True,mode=0o755)
         write_new(target/'index.js',DENY,0o555)
 
 def components(args):
+    diagnostic_phase('components')
     p=policy_at(args.policy);end=original_end();runtime,rb=read_json(Path(RUNTIME)/'manifest.json');sidecar,sb=read_json(Path(SIDECAR)/'manifest.json')
     pin_path=Path('/usr/local/share/rudder-managed-image/sidecar-policy-pin.json');file_hash(pin_path,65536,end)
     actual_pin,pin_raw=read_json(pin_path);expected_pin=pin_value(sidecar,sb,'sidecar',p)
@@ -310,8 +362,12 @@ def main():
     m.add_argument('--root',required=True);m.add_argument('--pin');m.add_argument('--ws-receipt');m.add_argument('--verify',action='store_true');m.set_defaults(run=manifest)
     d=sub.add_parser('deny-addons');d.add_argument('--root',required=True);d.set_defaults(run=deny_addons)
     c=sub.add_parser('components');c.add_argument('--output',required=True);c.add_argument('--policy',required=True);c.set_defaults(run=components)
-    args=parser.parse_args();need(os.geteuid()==0 and os.getegid()==0,'IMAGE_BUILD_REQUIRES_ROOT');args.run(args)
+    args=parser.parse_args()
+    _diagnostic_context.update(command=args.command,artifact=getattr(args,'artifact',getattr(args,'kind',None)),phase='entry')
+    need(os.geteuid()==0 and os.getegid()==0,'IMAGE_BUILD_REQUIRES_ROOT');args.run(args)
 
 if __name__=='__main__':
     try:main()
-    except Exception:raise SystemExit('RUDDER_MANAGED_IMAGE_ASSET_REJECTED')
+    except Exception as error:
+        print(json.dumps(failure_diagnostic(error),sort_keys=True,separators=(',',':')),file=sys.stderr)
+        raise SystemExit(1)

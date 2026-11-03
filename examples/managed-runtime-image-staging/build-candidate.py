@@ -392,6 +392,30 @@ def validate_worker_payload(source):
         s = (source / name).lstat()
         need(stat.S_ISREG(s.st_mode) and not s.st_mode & 0o022 and s.st_mode & 0o444 == 0o444,
              "worker package metadata is mutable or unreadable")
+    validate_sidecar_sources(source)
+
+
+SIDECAR_SOURCE_PINS = {
+    "sidecar_script_sha256": "host-control.mjs",
+    "sidecar_core_sha256": "host-control-core.mjs",
+    "uploader_script_sha256": "root-upload.mjs",
+    "qualification_script_sha256": "runtime-qualification.mjs",
+    "sidecar_package_sha256": "managed-runtime/sidecar-package.json",
+    "sidecar_lock_sha256": "managed-runtime/sidecar-package-lock.json",
+}
+
+
+def validate_sidecar_sources(source):
+    # Check immutable source pins before installing dependencies or starting a
+    # remote build. Docker repeats this check against the actual image closure.
+    worker = source / "cloud/worker"
+    policy = json.loads((worker / "managed-runtime/policy.json").read_bytes())
+    for field, name in SIDECAR_SOURCE_PINS.items():
+        path = worker / name
+        s = path.lstat()
+        need(stat.S_ISREG(s.st_mode) and s.st_nlink == 1,
+             "sidecar source is not a regular file: " + field)
+        need(policy.get(field) == sha_file(path), "sidecar source pin differs: " + field)
 
 
 def self_test():
@@ -404,6 +428,29 @@ def self_test():
     product = synthetic_product()
     log = f'#12 0.1 {MARKER}{json.dumps(product)}\n#13 pushing manifest for {image}@sha256:{"b" * 64} done\n'
     with tempfile.TemporaryDirectory() as directory:
+        pinned_source = Path(directory) / "pinned-source"
+        worker = pinned_source / "cloud/worker"
+        (worker / "managed-runtime").mkdir(parents=True)
+        policy = {}
+        for field, name in SIDECAR_SOURCE_PINS.items():
+            path = worker / name
+            path.write_bytes((field + "\n").encode())
+            policy[field] = sha_file(path)
+        policy_path = worker / "managed-runtime/policy.json"
+        policy_path.write_bytes(json_bytes(policy))
+        validate_sidecar_sources(pinned_source)
+        for field, name in SIDECAR_SOURCE_PINS.items():
+            path = worker / name
+            original = path.read_bytes()
+            path.write_bytes(original + b"changed\n")
+            try:
+                validate_sidecar_sources(pinned_source)
+            except ValueError as error:
+                need(str(error) == "sidecar source pin differs: " + field,
+                     "source mismatch did not identify the changed pin")
+            else:
+                raise AssertionError("changed sidecar source accepted")
+            path.write_bytes(original)
         private_source = Path(directory) / "private-source"
         private_source.mkdir(mode=0o700)
         for root in (private_source / "dist", private_source / "cloud/dist"):
@@ -507,6 +554,7 @@ def main():
     archive = output / "source.tar"
     run("archive", ["git", "-C", str(args.repo.absolute()), "archive", "--format=tar", revision], args.repo.absolute(), archive)
     extract_archive(archive, source)
+    validate_sidecar_sources(source)
     run("npm-root", ["npm", "ci", "--ignore-scripts", "--no-audit", "--no-fund"])
     run("typescript-cli", [str(source / "node_modules/.bin/tsc"), "-p", "tsconfig.json"])
     run("board", ["npm", "run", "build-board"])

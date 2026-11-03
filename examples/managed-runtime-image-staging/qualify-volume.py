@@ -140,6 +140,22 @@ def provider_failure(result,stem,output):
             'stderrPath':str(output/(stem+'.stderr.private')),'stderrBytes':len(stderr),
             'stderrSha256':digest(stderr),'message':message,'messageTruncated':len(text)>len(message)}
 
+def selected_region(value):
+    need(type(value)is str and re.fullmatch(r'[a-z]{3}',value)is not None,'explicit-Fly-region-required')
+    return value
+
+def volume_capacity_rejection(result):
+    """Recognize only the original provider's explicit capacity-hold rejection.
+    This permits absence checks, never successful creation or ID adoption.
+    """
+    message=(rb'Error: failed to create volume: failed_precondition: machine capacity hold failed: '
+             rb'insufficient CPUs available to fulfill request \(Request ID: [A-Za-z0-9_-]{1,256}\)\n?')
+    return (type(result)is dict and type(result.get('exitCode'))is int and result['exitCode']==1
+            and result.get('stdout')==b''and type(result.get('stderr'))is bytes
+            and re.fullmatch(message,result['stderr'])is not None and result.get('timedOut')is False
+            and custody(result.get('child'))and result['child'].get('exitCode')==1
+            and result['child'].get('timedOut')is False and result['child'].get('truncated')is False)
+
 def validate_build(receipt,raw,receipt_path,read,builder,builder_raw,fly_sha256):
     """Validate retained build DATA. Root must observe the original invocation;
     these hashes cannot authenticate an actual tool event or registry by themselves.
@@ -307,8 +323,8 @@ class ComponentOwner:
                 self.remoteUnknown=label;return self.hold()
             self.current_inputs();return row,out,err
         except BaseException:return self.hold()
-    def unknown_create(self,volume_started,volume_ack,machine_started,machine_ack,*,machine_cleanup_candidate=False):
-        if (volume_started and not volume_ack)or(machine_started and not machine_ack and machine_cleanup_candidate is not True):
+    def unknown_create(self,volume_started,volume_ack,machine_started,machine_ack,*,machine_cleanup_candidate=False,volume_rejection_candidate=False):
+        if (volume_started and not volume_ack and volume_rejection_candidate is not True)or(machine_started and not machine_ack and machine_cleanup_candidate is not True):
             self.remoteUnknown='original-create-outcome-unknown';return self.hold()
     def finish(self,report,*,create_state):
         try:
@@ -326,9 +342,11 @@ def main():
     parser.add_argument('--build-receipt', required=True)
     parser.add_argument('--flyctl-sha256', required=True)
     parser.add_argument('--output', required=True)
+    parser.add_argument('--region',default=REGION)
     parser.add_argument('--expected-protected-instance')
     parser.add_argument('--expected-protected-digest')
     args = parser.parse_args()
+    region=selected_region(args.region)
     expected_protected=protected_expectation(args.expected_protected_instance,args.expected_protected_digest)
     global ACTIVE, IMAGE, IMAGE_DIGEST, BUILD_RECEIPT, FLY_SHA256
     BUILD_RECEIPT=Path(args.build_receipt)
@@ -350,7 +368,7 @@ def main():
     name, volume_name = 'rudder-volume-' + nonce[:12], 'rudder_qv_' + nonce[:12]
     probe_sha = digest(probe)
     metadata = {'rudder_role': ROLE, 'qualification': nonce, 'probe_sha256': probe_sha}
-    intent = {'formatVersion': 1, 'app': APP, 'region': REGION, 'nonce': nonce,
+    intent = {'formatVersion': 1, 'app': APP, 'region': region, 'nonce': nonce,
               'name': name, 'volumeName': volume_name, 'image': IMAGE,
               'mountPath': MOUNT, 'probeSha256': probe_sha, 'controllerSha256': digest(controller.read_bytes()),
               'volumeRequest': {'size_gb': 1, 'encrypted': True, 'count': 1,
@@ -380,6 +398,7 @@ def main():
     volume_ack = machine_ack = False
     machine_cleanup_candidate = machine_cleanup_verified = False
     machine_create_reconciled = False
+    volume_rejection_candidate = False
     config = None
 
     def call(arguments, label, timeout=20, cleanup=False, allow_failure=False,diagnostic=False):
@@ -420,7 +439,7 @@ def main():
 
     def assert_volume(row, attached=None, require_contract=True):
         need(volume is not None and row.get('id') == volume.get('id'), 'volume-id-changed')
-        need(row.get('name') == volume_name and row.get('region') == REGION, 'volume-original-context-changed')
+        need(row.get('name') == volume_name and row.get('region') == region, 'volume-original-context-changed')
         for key in ['id', 'name', 'region', 'size_gb', 'encrypted', 'created_at', 'host_id', 'zone']:
             if key in volume:
                 need(row.get(key) == volume[key], 'volume-original-binding-changed:' + key)
@@ -432,7 +451,7 @@ def main():
         nonlocal instance, original_config_sha
         need(machine is not None and row.get('id') == machine['id'] and row.get('id') != PROTECTED_ID,
              'machine-original-id-changed')
-        need(row.get('name') == name and row.get('region') == REGION, 'machine-original-context-changed')
+        need(row.get('name') == name and row.get('region') == region, 'machine-original-context-changed')
         actual = row.get('config') or {}
         need(actual.get('image') == IMAGE and all((actual.get('metadata') or {}).get(k) == v for k, v in metadata.items()),
              'machine-image-or-nonce-changed')
@@ -485,11 +504,17 @@ def main():
 
         volume_started = True
         durable_new(output / 'volume-create-started.json', {'nonce': nonce, 'request': intent['volumeRequest'],
-                                                          'name': volume_name, 'app': APP, 'region': REGION})
-        result = call(['volumes', 'create', volume_name, '-a', APP, '--region', REGION,
+                                                          'name': volume_name, 'app': APP, 'region': region})
+        result = call(['volumes', 'create', volume_name, '-a', APP, '--region', region,
                        '--size', '1', '--count', '1', '--no-encryption=false',
                        '--scheduled-snapshots=false', '--json', '--yes'], 'volume-create-once', 45,
                       allow_failure=True)
+        if volume_capacity_rejection(result):
+            volume_rejection_candidate=True
+            durable_new(output/'original-volume-capacity-rejection.json',
+                        {'kind':'original-provider-capacity-hold-rejection','stderrSha256':digest(result['stderr']),
+                         'name':volume_name,'region':region,'createAcknowledged':False,'qualificationGranted':False})
+            raise RuntimeError('original-volume-create-capacity-rejected')
         try:
             decoded = json.loads(result['stdout'])
             if isinstance(decoded, list):
@@ -518,9 +543,9 @@ def main():
         durable_new(output / 'machine.json', config)
         machine_started = True
         durable_new(output / 'machine-create-started.json', {'nonce': nonce, 'name': name, 'app': APP,
-                       'region': REGION, 'volumeId': volume['id'], 'configSha256': digest(canonical(config))})
+                       'region': region, 'volumeId': volume['id'], 'configSha256': digest(canonical(config))})
         result = call(['machine', 'run', IMAGE, '-a', APP, '--machine-config', str(output / 'machine.json'),
-                       '--name', name, '--region', REGION, '--detach', '--skip-dns-registration'],
+                       '--name', name, '--region', region, '--detach', '--skip-dns-registration'],
                       'machine-create-once', 100, allow_failure=True)
         ids = re.findall(rb'(?m)^\s*Machine ID:\s*([0-9a-f]{14})\s*$', result['stdout'])
         need(len(ids) == 1, 'original-machine-create-id-absent')
@@ -592,12 +617,16 @@ def main():
     except BaseException:
         ACTIVE.hold()
     finally:
-        ACTIVE.unknown_create(volume_started,volume_ack,machine_started,machine_ack,machine_cleanup_candidate=machine_cleanup_candidate)
+        ACTIVE.unknown_create(volume_started,volume_ack,machine_started,machine_ack,
+                              machine_cleanup_candidate=machine_cleanup_candidate,
+                              volume_rejection_candidate=volume_rejection_candidate and volume is None
+                              and machine_started is False and machine is None and instance is None)
         # This separate cleanup clock cannot reopen the expired workload or
         # repeat an uncertain create. All effect attempts keep their raw logs.
         cleanup_end = min(start + WORK_SECONDS + CLEANUP_SECONDS, now() + CLEANUP_SECONDS)
         report['workloadElapsedSeconds'] = round(now() - start, 3)
         report['originalVolumeCreateAcknowledged'] = volume_ack
+        report['originalVolumeCreateCapacityRejected'] = volume_rejection_candidate
         report['originalMachineCreateAcknowledged'] = machine_ack
         report['originalMachineCreateReconciled'] = machine_create_reconciled
         report['volumeCreateUncertain'] = volume_started and not volume_ack
@@ -668,6 +697,10 @@ def main():
                     time.sleep(min(1, max(0, cleanup_end - now())))
             report['cleanupObservations'] = observations
             report['protectedHomeUnchanged'] = True
+            if volume_rejection_candidate:
+                need(volume is None and machine is None and machine_started is False,'capacity-rejection-created-resource-refused')
+                report['volumeCreateUncertain']=False
+                report['volumeCapacityRejectionAbsenceVerified']=True
             need(now() < cleanup_end, 'original-cleanup-window-expired')
             report['cleanupVerified'] = (not report['volumeCreateUncertain'] and not report['machineCreateUncertain']
                                          and (machine is None or (report.get('machineDestroyIssued') is True and report.get('machineDestroyAcknowledged') is True))

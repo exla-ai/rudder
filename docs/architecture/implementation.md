@@ -24,6 +24,19 @@ or changed bindings still refuse. Bounded stderr and exact-machine failure logs
 are retained without stranding cleanup. Twenty-five pure checks pass, including
 a 78-second cold start and an expired workload that cleans up without probing.
 
+A subsequent fresh-volume request was explicitly rejected by Fly for insufficient
+CPU capacity in `sjc`. No ID was returned and two inventories found neither
+original nonce nor volume name; the protected home stayed unchanged. Root
+settled the held original after that rejection at 23:14Z. This failure supplies
+no volume receipt. The verifier now handles that exact settled rejection with
+two absence checks and a failed terminal result, while unknown errors retain
+the hold. An explicit region option allows a new isolated attempt in `iad`;
+29 pure verifier checks pass. The traditional remote builder also completed its original
+push, but the wrapper rejected its different log format. The parser now binds
+that format's exact tag digest, completed push and full image name; its self-test
+and the retained traditional and Depot logs pass. This changes future parsing,
+without promoting the failed wrapper or rebuilding an image.
+
 Alpha.34 Cloud is deployed from `17939790dd111acb0b7f4401ace41920f500a82b`.
 Fly release177 `JLxbo4k22JZxnTvbbXQo22yG7`, control machine
 `8911d61a434978`, instance `01M6FGP37GQFGBFXWD8DFAAG5T`, runs control image

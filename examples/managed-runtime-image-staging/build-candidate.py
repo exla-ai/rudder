@@ -284,23 +284,43 @@ def generated_files(source):
 
 
 def parse_build_lines(lines, image):
-    pushes, product = [], []
+    pushes, product, traditional, summaries = [], [], [], []
     ansi = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
     prefix = r"(?:#[0-9]{1,6}[ \t]+(?:[0-9]{1,9}\.[0-9]{1,6}[ \t]+)?)?"
     duration = r"[0-9]{1,6}(?:\.[0-9]{1,6})?s"
     pattern = prefix + "pushing manifest for " + re.escape(image) + r"@(sha256:[a-f0-9]{64})(?:[ \t]+" + duration + r")?(?:[ \t]+(done)(?:[ \t]+" + duration + r")?)?[ \t]*"
-    for raw in lines:
+    for number, raw in enumerate(lines):
         need(len(raw) <= 65536, "oversized build log line")
         line = ansi.sub("", raw.decode("utf8", "strict")).rstrip("\r\n")
         if "pushing manifest for " in line:
             match = re.fullmatch(pattern, line)
             need(match is not None, "unexpected manifest push output")
             pushes.append((match[1], match[2] == "done"))
+        if ": digest:" in line:
+            # Traditional Fly builds report the tag here, then complete the
+            # push and print the full image. Bind all three from this one log.
+            tag = image.rsplit("/", 1)[-1].partition(":")[2]
+            match = re.fullmatch(re.escape(tag) + r": digest: (sha256:[a-f0-9]{64}) size: [1-9][0-9]{0,18}", line)
+            need(tag and match is not None, "unexpected traditional push digest")
+            traditional.append(("digest", match[1], number))
+        if "Pushing image done" in line:
+            need(line == "--> Pushing image done", "unexpected traditional push completion")
+            traditional.append(("done", None, number))
+        if line.startswith("image:"):
+            need(line == "image: " + image, "unexpected pushed image summary")
+            summaries.append(number)
         match = re.fullmatch(prefix + re.escape(MARKER) + r"(\{.*\})", line)
         if match:
             product.append(json.loads(match[1]))
-    need(pushes and pushes[-1][1] and sum(done for _, done in pushes) == 1 and len({d for d, _ in pushes}) == 1,
-         "one completed immutable image push required")
+    if traditional:
+        need(not pushes and [kind for kind, _, _ in traditional] == ["digest", "done"]
+             and len(summaries) == 1 and summaries[0] > traditional[-1][2],
+             "one completed traditional image push required without mixed output")
+        digest = traditional[0][1]
+    else:
+        need(pushes and pushes[-1][1] and sum(done for _, done in pushes) == 1 and len({d for d, _ in pushes}) == 1,
+             "one completed immutable image push required")
+        digest = pushes[-1][0]
     need(len(product) == 1 and product[0].get("compilerC1") == C1_PINS and product[0].get("sdkQualified") is False and product[0].get("runtimeQualified") is False,
          "same-build managed/C1 product marker missing or ambiguous")
     files = product[0].get("managedFiles")
@@ -340,7 +360,7 @@ def parse_build_lines(lines, image):
     need(type(descriptor) is dict and set(descriptor) == {"kind", "algorithm", "digest", "size_bytes"}
          and descriptor["kind"] == "blob" and descriptor["algorithm"] == "sha256" and descriptor["digest"] == C1_PINS["inventory.json"]
          and type(descriptor["size_bytes"]) is int and descriptor["size_bytes"] > 0, "actual C1 inventory descriptor required")
-    return pushes[-1][0], product[0]
+    return digest, product[0]
 
 
 def parse_build_log(path, image):
@@ -499,6 +519,31 @@ def self_test():
             except ValueError:
                 continue
             raise AssertionError("invalid build proof accepted")
+        marker = f'#12 0.1 {MARKER}{json.dumps(product)}\n'
+        traditional = f'one: digest: sha256:{"b" * 64} size: 13490\n--> Pushing image done\nimage: {image}\nimage size: 5.5 GB\n'
+        need(parse_build_lines((marker + traditional).encode().splitlines(True), image)[0] == "sha256:" + "b" * 64,
+             "traditional push parse failed")
+        need(parse_build_lines((log + f'image: {image}\n').encode().splitlines(True), image)[0] == "sha256:" + "b" * 64,
+             "Depot image summary rejected")
+        for bad in (
+                traditional.replace("one: digest:", "other: digest:"),
+                traditional.replace(image, image + "-foreign"),
+                traditional.replace("b" * 64, "b" * 63),
+                traditional.replace("size: 13490", "size: 0"),
+                traditional.replace("--> Pushing image done\n", ""),
+                traditional.replace(f'image: {image}\n', ""),
+                traditional.replace("one: digest:", "one: digest:" + " " * 2),
+                traditional.replace("--> Pushing image done", "--> Pushing image done unknown"),
+                traditional + traditional,
+                traditional + f'image: {image}\n',
+                f'image: {image}\n' + traditional.replace(f'image: {image}\n', ""),
+                "--> Pushing image done\n" + traditional.replace("--> Pushing image done\n", ""),
+                traditional + f'#13 pushing manifest for {image}@sha256:{"b" * 64} done\n'):
+            try:
+                parse_build_lines((marker + bad).encode().splitlines(True), image)
+            except ValueError:
+                continue
+            raise AssertionError("invalid traditional build proof accepted")
         malformed = dict(product, managedFiles={})
         p.write_text(log.replace(json.dumps(product), json.dumps(malformed)))
         try:

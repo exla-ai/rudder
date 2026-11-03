@@ -302,7 +302,7 @@ class ReceiptTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, 'exact-read-only-machine-diagnostic'):
                 owner.call(['machine', 'destroy', '84e691f2147978'], 'invalid', 220, 15, diagnostic=True)
 
-    def exercise_failed_create(self, *, missing_id=False, changed_nonce=False, expire_original=False):
+    def exercise_failed_create(self, *, missing_id=False, changed_nonce=False, expire_original=False, volume_rejected=False, unknown_rejection=False, late_volume=False, region='sjc'):
         nonce = 'b' * 32; expected = v.protected_expectation(); calls = []; persisted = {}; timer=[100.0]
         original_unknown, original_finish = v.ComponentOwner.unknown_create, v.ComponentOwner.finish
         class FakeOwner:
@@ -319,7 +319,7 @@ class ReceiptTests(unittest.TestCase):
             def finish(self, *args, **kwargs): return original_finish(self, *args, **kwargs)
             def call(self, args, label, end, timeout, **kwargs):
                 calls.append((args,label,end,timeout,kwargs)); code=0; err=b''
-                volume=dict(id='vol_test',name='rudder_qv_'+nonce[:12],region=v.REGION,
+                volume=dict(id='vol_test',name='rudder_qv_'+nonce[:12],region=region,
                             size_gb=1,encrypted=True,attached_machine_id=None)
                 home=dict(id=v.PROTECTED_ID,instance_id=expected['instanceId'],state='started',
                           image_ref={'digest':'sha256:'+expected['digest']},config={'mounts':[{'volume':'vol_protected'}]})
@@ -327,12 +327,18 @@ class ReceiptTests(unittest.TestCase):
                 if self.machine_live:
                     config=json.loads(json.dumps(persisted['machine.json']))
                     if changed_nonce: config['metadata']['qualification']='foreign'
-                    machine=dict(id='84e691f2147978',name='rudder-volume-'+nonce[:12],region=v.REGION,
+                    machine=dict(id='84e691f2147978',name='rudder-volume-'+nonce[:12],region=region,
                                  config=config,instance_id='A'*26,state=('starting'if expire_original else('started'if timer[0]>=177 else'starting')),image_ref={'digest':'sha256:'+'b'*64})
                 if args[:2]==['machine','list']: data=[home]if args[3]==v.PROTECTED_APP else([machine]if machine else[])
                 elif args[:2]==['volumes','list']: data=[volume]if self.volume_live else[]
                 elif args[:2]==['secrets','list']: data=[]
-                elif args[:2]==['volumes','create']: self.volume_live=True; data=volume
+                elif args[:2]==['volumes','create']:
+                    self.volume_live=not volume_rejected or late_volume
+                    if volume_rejected:
+                        code=1; data=b''
+                        err=b'Error: failed to create volume: failed_precondition: machine capacity hold failed: insufficient CPUs available to fulfill request (Request ID: known_request-iad)\n'
+                        if unknown_rejection: err=b'Error: failed to create volume: upstream unavailable\n'
+                    else: data=volume
                 elif args[:2]==['volumes','show']:
                     if expire_original and not self.machine_live: timer[0]=210
                     if self.machine_live: volume['attached_machine_id']='84e691f2147978'
@@ -363,12 +369,12 @@ class ReceiptTests(unittest.TestCase):
              patch.object(v,'BINDING',{'workerImage':'registry.fly.io/rudder-workers-exla@sha256:'+'b'*64}), \
              patch.object(v.uuid,'uuid4',return_value=SimpleNamespace(hex=nonce)), patch.object(v.time,'sleep',side_effect=lambda seconds:timer.__setitem__(0,timer[0]+seconds)), \
              patch.object(sys,'argv',['qualifier','--build-receipt','/workspace/test/build-receipt.json',
-                                      '--flyctl-sha256','a'*64,'--output','/workspace/rudder-fresh-volume-run-pure-failed-create']), \
+                                      '--flyctl-sha256','a'*64,'--region',region,'--output','/workspace/rudder-fresh-volume-run-pure-failed-create']), \
              patch('subprocess.Popen',side_effect=AssertionError('child forbidden')), \
              contextlib.redirect_stdout(io.StringIO()):
-            if missing_id or changed_nonce:
+            if missing_id or changed_nonce or unknown_rejection or late_volume:
                 with self.assertRaisesRegex(AssertionError,'original hold retained'): v.main()
-            else: self.assertEqual(v.main(),1 if expire_original else 0)
+            else: self.assertEqual(v.main(),1 if expire_original or volume_rejected else 0)
         return owner,calls,persisted
 
     def test_cold_start_failed_cli_reconciles_same_original_then_requires_probe_and_cleanup(self):
@@ -408,6 +414,50 @@ class ReceiptTests(unittest.TestCase):
             self.assertFalse(any(args[:2]in(['machine','destroy'],['volumes','destroy'])for args,*_ in calls))
             self.assertFalse(any(args[0]=='logs'for args,*_ in calls))
 
+    def test_capacity_rejection_requires_exact_provider_message_and_settled_child(self):
+        child=dict(exitCode=1,constructorCompleted=True,actualChildWait=True,stdoutEOF=True,
+                   stderrEOF=True,pidfdHeld=True,observerError=None,timedOut=False,truncated=False)
+        message=b'Error: failed to create volume: failed_precondition: machine capacity hold failed: insufficient CPUs available to fulfill request (Request ID: known_request-iad)\n'
+        result=dict(exitCode=1,timedOut=False,stdout=b'',stderr=message,child=child)
+        self.assertTrue(v.volume_capacity_rejection(result))
+        for key,value in [('stdout',b'vol_possible'),('exitCode',True),('exitCode',2),('timedOut',True),
+                          ('stderr',message+b'additional unknown error'),('stderr',b'capacity unavailable'),
+                          ('stderr',message.replace(b'failed_precondition',b'unknown'))]:
+            self.assertFalse(v.volume_capacity_rejection(dict(result,**{key:value})))
+        for key,value in [('actualChildWait',False),('stderrEOF',False),('observerError','lost'),
+                          ('timedOut',True),('truncated',True)]:
+            self.assertFalse(v.volume_capacity_rejection(dict(result,child=dict(child,**{key:value}))))
+
+    def test_capacity_rejection_fails_finitely_only_after_twice_absent_and_protected_checks(self):
+        owner,calls,files=self.exercise_failed_create(volume_rejected=True,region='iad')
+        report=files['report.json']
+        self.assertFalse(report['componentPassed']); self.assertTrue(report['cleanupVerified'])
+        self.assertFalse(report['originalVolumeCreateAcknowledged'])
+        self.assertTrue(report['originalVolumeCreateCapacityRejected'])
+        self.assertTrue(report['volumeCapacityRejectionAbsenceVerified'])
+        self.assertFalse(report['volumeCreateUncertain'])
+        self.assertIsNone(report['volumeId']); self.assertIsNone(report['machineId'])
+        self.assertEqual(len(report['cleanupObservations']),2)
+        self.assertTrue(report['protectedHomeUnchanged'])
+        self.assertEqual(files['intent.json']['region'],'iad')
+        creates=[args for args,*_ in calls if args[:2]==['volumes','create']]
+        self.assertEqual(len(creates),1); self.assertEqual(creates[0][creates[0].index('--region')+1],'iad')
+        self.assertFalse(any(args[:2]in(['machine','run'],['machine','destroy'],['volumes','destroy'])for args,*_ in calls))
+
+    def test_unknown_rejection_or_later_matching_volume_retains_hold_without_deletion(self):
+        for options in (dict(unknown_rejection=True),dict(late_volume=True)):
+            owner,calls,files=self.exercise_failed_create(volume_rejected=True,**options)
+            self.assertFalse(any(args[:2]in(['machine','run'],['machine','destroy'],['volumes','destroy'])for args,*_ in calls))
+            if options.get('late_volume'):
+                self.assertTrue(owner.volume_live)
+                self.assertTrue(files['report.json']['volumeCreateUncertain'])
+                self.assertFalse(files['report.json']['cleanupVerified'])
+
+    def test_operator_region_is_explicit_and_strict(self):
+        for region in ('sjc','iad','ams'): self.assertEqual(v.selected_region(region),region)
+        for region in ('IAD','iad; true','../iad','auto','',True,None):
+            with self.assertRaises(RuntimeError): v.selected_region(region)
+
     def test_existing_deadlines_and_carrier_unchanged(self):
         self.assertEqual((v.WORK_SECONDS, v.CLEANUP_SECONDS, v.MAX_CALLS, v.CLEANUP_RESERVE), (180,120,64,16))
         expected = {'owned_child.py': '22ee38a91c9f4764f831d3cf19949b4be1c2a562730951788ade8b29d45f7ae9', 'probe.mjs': 'b3ae62ba84ce86ce7dfe89afaa3f9baabb2d35f495c10f8ee38d7d785b695577'}
@@ -416,14 +466,14 @@ class ReceiptTests(unittest.TestCase):
 
     def test_provider_ownership_and_cleanup_source_preserved(self):
         # Original reviewed V3 bodies, independent of the historical filesystem.
-        expected = {'__init__': '5d394e77b56858de31e3f9c896b2824282c0f46d4a40a85654258dbadb2cb284', 'hold': '7367754119f6a48c3d991e48b94054782b216640bcfbc9f08d72ba35bdba914e', 'read': '38ca1a59a37a75854121f4e34ee4eba78ffd415d3b37d5ee1c6331c8be636dfb', 'current_inputs': '22a900690c4776ecdbd82e75f13c370b7e38ed72526d63d76c193338afd7df68', 'start_output': '22193aa74503986842ca6082f91f2bc520f2f4c91d46fd4483a99c6c11061e47', 'current_output': '534b3961b049a10749f43e5f90914d16e15c5c8cc5b14d8e3f4cf4280d0f3da8', 'persist': '7ba51903b586434f2ec433a36c790239826dbc7f0c391ef70b9fd859d983743e', 'call': '7079c3cfb713d69b9ac30e2bc1b160f2e466e934f042cc7e97de0f3f1a5cba00', 'unknown_create': 'ab6a3895d8d3545faba6e0f0f2df92e22d80e941bac56d95e8ebcf539a94f94d', 'finish': 'ea4832e7c3f266fec9f0fb6586017fc496ee06c749c4aa30b9b4a4448270930c'}
+        expected = {'__init__': '5d394e77b56858de31e3f9c896b2824282c0f46d4a40a85654258dbadb2cb284', 'hold': '7367754119f6a48c3d991e48b94054782b216640bcfbc9f08d72ba35bdba914e', 'read': '38ca1a59a37a75854121f4e34ee4eba78ffd415d3b37d5ee1c6331c8be636dfb', 'current_inputs': '22a900690c4776ecdbd82e75f13c370b7e38ed72526d63d76c193338afd7df68', 'start_output': '22193aa74503986842ca6082f91f2bc520f2f4c91d46fd4483a99c6c11061e47', 'current_output': '534b3961b049a10749f43e5f90914d16e15c5c8cc5b14d8e3f4cf4280d0f3da8', 'persist': '7ba51903b586434f2ec433a36c790239826dbc7f0c391ef70b9fd859d983743e', 'call': '7079c3cfb713d69b9ac30e2bc1b160f2e466e934f042cc7e97de0f3f1a5cba00', 'unknown_create': 'b6dedae86c524726644ef3bd973fdb0d1cdcd009e489da8ca481f114a1ec66aa', 'finish': 'ea4832e7c3f266fec9f0fb6586017fc496ee06c749c4aa30b9b4a4448270930c'}
         source = (HERE / 'qualify-volume.py').read_text()
         owner = next(n for n in ast.parse(source).body if isinstance(n, ast.ClassDef))
         actual = {n.name: v.digest(ast.dump(n, include_attributes=False).encode())
                   for n in owner.body if isinstance(n, ast.FunctionDef) and n.name != 'preflight'}
         self.assertEqual(actual, expected)
         body = source[source.index('    output = Path(args.output)'):]
-        self.assertEqual(v.digest(body.encode()), '3f97de117243f23db758fe0137bb8838b176799c69d5cca66189639837a4b955')
+        self.assertEqual(v.digest(body.encode()), '1128a5c9d73cc206ff8b0d6969d63c49d97d4df57fee7c9bcd251039701e118c')
 
     def test_real_retained_input_refuses_replacement(self):
         with tempfile.TemporaryDirectory(dir='/workspace') as directory:

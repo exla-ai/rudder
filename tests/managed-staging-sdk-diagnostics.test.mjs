@@ -1,9 +1,12 @@
 import assert from 'node:assert/strict';
-import test from 'node:test';
+import test,{after} from 'node:test';
 import {EventEmitter} from 'node:events';
 import {PassThrough} from 'node:stream';
 import {setImmediate as turn} from 'node:timers/promises';
 import {inspect} from 'node:util';
+import {mkdtempSync,mkdirSync,writeFileSync,chmodSync,rmSync,symlinkSync} from 'node:fs';
+import {tmpdir} from 'node:os';
+import {join} from 'node:path';
 import {OriginalSdkDiagnosticRead,projectSdkFailureLogs,sdkDiagnosticTarget} from '../cloud/dist/managed-home-provisioning/staging-sdk-diagnostics.js';
 
 const target={app:'rudder-mh-0123456789ab4cde81230123456789ab',machine:'1855366c049e08'};
@@ -11,6 +14,11 @@ const frame={kind:'rudder-root-retained-failure-v1',component:'root_storage',sta
 const line=(f=frame,machine=target.machine)=>JSON.stringify({instance:machine,message:JSON.stringify(f)})+'\n';
 const plain=(f=frame,machine=target.machine)=>`\x1b[2m2026-11-02T06:30:00Z\x1b[0m app[${machine}] iad [info]${JSON.stringify(f)}\n`;
 const time={end:Infinity,remaining:()=>5000};
+const privateHome=mkdtempSync(join(tmpdir(),'rudder-sdk-diagnostics-'));
+chmodSync(privateHome,0o700);
+const previousInput=process.env.RUDDER_RUNTIME_QUALIFICATION_INPUT;
+process.env.RUDDER_RUNTIME_QUALIFICATION_INPUT=join(privateHome,'driver-input.json');
+after(()=>{if(previousInput===undefined)delete process.env.RUDDER_RUNTIME_QUALIFICATION_INPUT;else process.env.RUDDER_RUNTIME_QUALIFICATION_INPUT=previousInput;rmSync(privateHome,{recursive:true,force:true});});
 class FakeChild extends EventEmitter {
  stdout=new PassThrough();stderr=new PassThrough();kills=[];options;
  spawn(options){this.options=options;}
@@ -54,6 +62,15 @@ test('optional error text must exactly match a typed operation and the same errn
   assert.deepEqual(projectSdkFailureLogs(Buffer.from(line({...frame,error_text:text})),target),[]);
 });
 
+test('original execution diagnostics accept only the four exact fixed operations',()=>{
+ const row={...frame,class:'validation_or_other',check:'SdkProcessOriginal',io_kind:null,errno:null};
+ for(const error_text of ['SDK original execution clock unavailable','SDK original execution cancellation check failed','SDK original execution admission check failed','SDK original execution floor changed']){
+  const projected=projectSdkFailureLogs(Buffer.from(line({...row,error_text})),target);
+  assert.equal(projected.length,1);assert(projected[0].error_text.startsWith(error_text+'; '));
+  for(const bad of [error_text+' secret',error_text+'\n',error_text+': io_kind=other'])assert.deepEqual(projectSdkFailureLogs(Buffer.from(line({...row,error_text:bad})),target),[]);
+ }
+});
+
 test('target comes only from the same captured original machine/configure/start identity',()=>{
  const machine={id:target.machine,instanceId:'original-instance',configSha256:'original-config'};
  const data={scope:'retained-disposable-provider-response-data-only',original_creation_captured:true,pending_effect:null,
@@ -73,6 +90,7 @@ test('retains the original child before spawn, uses explicit executable and env-
   child.spawn=options=>{assert(allocated);child.options=options;};
   const run=read.startRetaining();const o=child.options;
   assert.equal(o.file,'/explicit/flyctl');assert.deepEqual(o.args,['/explicit/flyctl','logs','--app',target.app,'--machine',target.machine,'--no-tail']);
+  assert.equal(o.cwd,privateHome);assert(o.envPairs.includes('HOME='+privateHome));
   assert(o.envPairs.includes('FLY_API_TOKEN=synthetic-private-token'));assert(!o.envPairs.some(s=>s.startsWith('FLY_ACCESS_TOKEN=')));
   assert(!JSON.stringify(o.args).includes('synthetic-private-token'));assert(!inspect(read).includes('synthetic-private-token'));assert.throws(()=>JSON.stringify(read));
   child.settle();await run;
@@ -119,5 +137,34 @@ test('uncertain constructor and stream errors never retry or discard the origina
  await turn();assert.equal(done,false);assert.equal(f.allocations(),1);assert.equal(f.read.statusData().constructor_completed,false);
  await new Promise(resolve=>setTimeout(resolve,15));assert.equal(done,false);assert(f.read.statusData().errors.includes('original_start_unknown'));assert.deepEqual(f.child.kills,['SIGKILL']);
  const g=fixture(),other=g.read.startRetaining();g.child.stderr.emit('error',Error('private stream error'));g.child.settle(1);await other;
- assert.deepEqual(g.child.kills,['SIGKILL']);assert.deepEqual(g.read.statusData().errors,['original_stream_error']);
+ assert.deepEqual(g.child.kills,['SIGKILL']);assert.deepEqual(g.read.statusData().errors,['original_stream_error','original_logs_exit_nonzero']);
+});
+
+test('nonzero original logs exit records fixed useful status without relaying stderr or provider text',async()=>{
+ const f=fixture(),run=f.read.startRetaining();f.child.stdout.write('arbitrary provider output');f.child.stderr.write('private token/config detail');f.child.settle(1);await run;
+ const data=f.read.statusData();assert.equal(data.exit_code,1);assert(data.errors.includes('original_logs_exit_nonzero'));
+ assert.equal(data.stderr_bytes,Buffer.byteLength('private token/config detail'));assert.equal(data.stdout_eof,true);assert.equal(data.stderr_eof,true);assert.equal(f.read.failures().length,0);
+ assert(!JSON.stringify(data).includes('private token'));assert(!JSON.stringify(data).includes('arbitrary provider'));
+});
+
+test('missing, relative, mutable and symlink private home refuse before child allocation',async()=>{
+ const previous=process.env.RUDDER_RUNTIME_QUALIFICATION_INPUT;
+ const mutable=join(privateHome,'mutable'),link=join(privateHome,'link');mkdirSync(mutable,{mode:0o755});symlinkSync(privateHome,link);
+ try{
+  for(const input of [undefined,'relative/driver-input.json',join(privateHome,'absent','driver-input.json'),join(mutable,'driver-input.json'),join(link,'driver-input.json')]){
+   if(input===undefined)delete process.env.RUDDER_RUNTIME_QUALIFICATION_INPUT;else process.env.RUDDER_RUNTIME_QUALIFICATION_INPUT=input;
+   const f=fixture();await f.read.startRetaining();assert.equal(f.allocations(),0);assert(f.read.statusData().errors.includes('diagnostic_home_unconfigured'));
+  }
+ }finally{process.env.RUDDER_RUNTIME_QUALIFICATION_INPUT=previous;}
+});
+
+test('actual original child works with otherwise empty controller environment and private HOME/cwd',async()=>{
+ const standin=join(privateHome,'logs-standin');
+ writeFileSync(standin,`#!${process.execPath}\nconst fs=require('node:fs');if(process.env.HOME!==${JSON.stringify(privateHome)}||process.cwd()!==${JSON.stringify(privateHome)}||Object.hasOwn(process.env,'FLY_ACCESS_TOKEN'))process.exit(2);process.stdout.write(${JSON.stringify(line())});`,{mode:0o700});
+ const previous=process.env;let read,run;
+ try{
+  process.env={RUDDER_RUNTIME_QUALIFICATION_INPUT:join(privateHome,'driver-input.json')};
+  read=new OriginalSdkDiagnosticRead(target,time,standin,'synthetic-private-token');run=read.startRetaining();
+ }finally{process.env=previous;}
+ await run;const data=read.statusData();assert.equal(data.exit_code,0);assert.equal(data.actual_exit_observed,true);assert.equal(data.close_observed,true);assert.equal(data.stdout_eof,true);assert.equal(data.stderr_eof,true);assert.deepEqual(data.errors,[]);assert.equal(read.failures()[0].check,'SdkProcessResult');
 });

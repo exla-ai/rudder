@@ -1,12 +1,14 @@
 import {ChildProcess} from "node:child_process";
 import {createHash} from "node:crypto";
+import {closeSync,constants,fstatSync,lstatSync,openSync,realpathSync,type BigIntStats} from "node:fs";
+import {dirname,isAbsolute} from "node:path";
 import {inspect} from "node:util";
 import type {OriginalTime} from "./fly.js";
 import {check,fail,snapshot} from "./types.js";
 
 const LIMIT=64*1024;
 const HELD=new Set<OriginalSdkDiagnosticRead>();
-const OPERATIONS=new Set(["SDK private namespace mount failed","SDK retained mount reopen failed","SDK retained floor chdir failed","SDK actual isolated namespaces unavailable","SDK retained workspace chdir failed","SDK user namespace join failed","SDK actual isolated workload spawn failed","SDK actual isolated workload wait failed","SDK actual isolated workload exit failed","SDK actual workload result parse failed"]);
+const OPERATIONS=new Set(["SDK private namespace mount failed","SDK retained mount reopen failed","SDK retained floor chdir failed","SDK actual isolated namespaces unavailable","SDK retained workspace chdir failed","SDK user namespace join failed","SDK actual isolated workload spawn failed","SDK actual isolated workload wait failed","SDK actual isolated workload exit failed","SDK actual workload result parse failed","SDK original execution clock unavailable","SDK original execution cancellation check failed","SDK original execution admission check failed","SDK original execution floor changed"]);
 const FIELDS=["kind","component","stage","check","class","io_kind","errno"];
 const CHECKS=new Set(("RuntimeMountSdk SdkPrepareOriginal SdkCatalog SdkPlaceholder SdkBackingDescriptors SdkSourceBinding SdkBakedInventory SdkVerifiedManifest SdkSemanticInputs SdkToolchains SdkArtifactBinding SdkStorage SdkReadFloor SdkFuse SdkMountData SdkQualification SdkReady SdkHelperEntry SdkHelperConnect SdkHelperParent SdkHelperParentImage SdkHelperCapsule SdkHelperServiceImage SdkHelperLauncher SdkHelperLauncherImage SdkHelperFloor SdkHelperWorkspace SdkHelperNamespaceWorkload SdkHelperResultSend SdkHelperExitUnknown SdkHelperExitedWithoutResult SdkProcessOriginal SdkProcessSpawn SdkProcessCapture SdkProcessPipes SdkProcessChildExit SdkProcessPeer SdkProcessHelperFloor SdkProcessHelperImage SdkProcessHelperParent SdkProcessCapsule SdkProcessResult SdkProcessWorkload SdkProcessInterpreter SdkProcessNamespaces SdkProcessCapabilities SdkProcessClock SdkProcessExitEof").split(" "));
 const STAGES:Record<string,readonly string[]>={root_storage:["entry","capture_core","capture_runtime","serve_current","serve_runtime","send_reply","receive","authenticate","decode","dispatch","encode"],machine_root:["prepare_host","spawn_engine","wait_engine","spawn_service","send_service","wait_client","wait_host_serving","established","quarantined"],compiler_sdk_helper:["handshake"]};
@@ -20,6 +22,24 @@ function uniqueJson(text:string):any {
  return parsed;
 }
 const IO=new Set(["permission_denied","not_found","timed_out","would_block","interrupted","invalid_data","other"]);
+type DiagnosticHome={path:string;fd:number;identity:string};
+function homeIdentity(s:BigIntStats){return [s.dev,s.ino,s.uid,s.gid,s.mode].join(":");}
+function assertDiagnosticHome(home:DiagnosticHome){
+ const named=lstatSync(home.path,{bigint:true}),held=fstatSync(home.fd,{bigint:true});
+ check(named.isDirectory()&&held.isDirectory()&&realpathSync(home.path)===home.path&&homeIdentity(named)===home.identity&&homeIdentity(held)===home.identity,"identity_changed");
+}
+/** The original supervisor creates this run directory before launching the
+ * driver with an otherwise empty environment. Reuse it, without reading the
+ * input or creating/configuring another home. Fly requires HOME even for version. */
+function diagnosticHome():DiagnosticHome{
+ const input=process.env.RUDDER_RUNTIME_QUALIFICATION_INPUT;
+ check(typeof input==="string"&&isAbsolute(input)&&!/[\0\r\n]/.test(input),"unconfigured");
+ const path=dirname(input),before=lstatSync(path,{bigint:true});
+ check(before.isDirectory()&&before.uid===BigInt(process.geteuid!())&&before.gid===BigInt(process.getegid!())&&(before.mode&0o7777n)===0o700n&&realpathSync(path)===path,"identity_changed");
+ const fd=openSync(path,constants.O_RDONLY|constants.O_DIRECTORY|constants.O_NOFOLLOW);
+ try{const home={path,fd,identity:homeIdentity(before)};assertDiagnosticHome(home);return home;}
+ catch{closeSync(fd);return fail("identity_changed");}
+}
 export interface SdkDiagnosticTarget {readonly app:string;readonly machine:string;}
 export interface SdkFailureDiagnostic {kind:"rudder-root-retained-failure-v1";component:string;stage:string;check:string|null;class:string;io_kind:string|null;errno:number|null;error_text:string;}
 /** Only fixed structured Root diagnostics are exported. Adjacent compiler,
@@ -72,6 +92,7 @@ export function sdkDiagnosticTarget(custody:any):SdkDiagnosticTarget {
  * Timeout/overflow kills only this local logs CLI, never the SDK machine. */
 export class OriginalSdkDiagnosticRead {
  #child?:ChildProcess;#run?:Promise<void>;#resolve?:()=>void;#timer?:NodeJS.Timeout;
+ #home?:DiagnosticHome;
  #raw:Buffer[]=[];#bytes=0;#stderrBytes=0;#hash=createHash("sha256");#sha?:string;
  #eof={stdout:false,stderr:false};#exited=false;#closed=false;#exit:number|null=null;#signal:string|null=null;
  #errors:string[]=[];#terminated=false;#finished=false;#constructorCompleted=false;#diagnostics:SdkFailureDiagnostic[]=[];
@@ -82,6 +103,7 @@ export class OriginalSdkDiagnosticRead {
  [inspect.custom](){return "OriginalSdkDiagnosticRead [original child retained; filtered DATA only]";}
  toJSON():never{fail("invalid_request");}
  #error(code:string){if(!this.#errors.includes(code))this.#errors.push(code);}
+ #closeHome(){if(this.#home){try{closeSync(this.#home.fd);}catch{this.#error("diagnostic_home_close_error");}this.#home=undefined;}}
  #stop(code:string){this.#error(code);if(this.#terminated)return;this.#terminated=true;try{this.#child?.kill("SIGKILL");}catch{this.#error("termination_unknown");}}
  #observe(raw:Buffer){
   if(this.#diagnostics.length)return;
@@ -92,22 +114,25 @@ export class OriginalSdkDiagnosticRead {
   if(this.#finished||!this.#closed||!this.#exited||!this.#eof.stdout||!this.#eof.stderr)return;
   this.#finished=true;if(this.#timer)clearTimeout(this.#timer);
   this.#sha=this.#hash.digest("hex");
+  try{if(this.#home)assertDiagnosticHome(this.#home);}catch{this.#error("diagnostic_home_changed");}
   if(this.#exit===0&&!this.#signal&&!this.#errors.length){try{this.time.remaining();this.#observe(Buffer.concat(this.#raw));}catch{this.#error("projection_refused");}}
-  this.#raw=[];this.#resolve?.();this.#resolve=undefined;
+  this.#raw=[];this.#closeHome();this.#resolve?.();this.#resolve=undefined;
  }
  startRetaining():Promise<void>{
   check(!this.#run,"effect_unknown");this.#run=new Promise(resolve=>{this.#resolve=resolve;});HELD.add(this);
   try{
    const remaining=Math.min(5000,this.time.remaining());
+   try{this.#home=diagnosticHome();}catch{this.#error("diagnostic_home_unconfigured");throw 0;}
    const child=this.allocate();this.#child=child;
    child.on("error",()=>{this.#error("original_child_error");});
-   child.once("exit",(code,signal)=>{this.#exit=code;this.#signal=signal;this.#exited=Number.isInteger(code)||signal!==null;this.#finish();});
+   child.once("exit",(code,signal)=>{this.#exit=code;this.#signal=signal;this.#exited=Number.isInteger(code)||signal!==null;
+    if(Number.isInteger(code)&&code!==0)this.#error("original_logs_exit_nonzero");if(signal!==null)this.#error("original_logs_exit_signal");this.#finish();});
    child.once("close",()=>{this.#closed=true;this.#finish();});
-   const env={...process.env,FLY_API_TOKEN:this.token};delete (env as NodeJS.ProcessEnv).FLY_ACCESS_TOKEN;
+   const env={...process.env,HOME:this.#home.path,FLY_API_TOKEN:this.token};delete (env as NodeJS.ProcessEnv).FLY_ACCESS_TOKEN;
    const args=[this.executable,"logs","--app",this.target.app,"--machine",this.target.machine,"--no-tail"];
    const spawn=(child as unknown as {spawn(options:unknown):unknown}).spawn;check(typeof spawn==="function","unconfigured");
    this.#timer=setTimeout(()=>this.#stop("original_logs_deadline"),remaining);
-   this.time.remaining();spawn.call(child,{file:this.executable,args,stdio:["ignore","pipe","pipe"],envPairs:Object.entries(env).filter((v):v is [string,string]=>typeof v[1]==="string").map(([k,v])=>`${k}=${v}`)});this.#constructorCompleted=true;
+   this.time.remaining();assertDiagnosticHome(this.#home);spawn.call(child,{file:this.executable,args,cwd:this.#home.path,stdio:["ignore","pipe","pipe"],envPairs:Object.entries(env).filter((v):v is [string,string]=>typeof v[1]==="string").map(([k,v])=>`${k}=${v}`)});this.#constructorCompleted=true;
    for(const name of ["stdout","stderr"] as const){const stream=child[name];check(stream,"effect_unknown");
     stream.on("data",(part:Buffer)=>{try{if(!Buffer.isBuffer(part)){this.#stop("stream_type");return;}
      if(name==="stdout"){this.#bytes+=part.length;this.#hash.update(part);if(this.#bytes<=LIMIT){this.#raw.push(part);
@@ -119,7 +144,7 @@ export class OriginalSdkDiagnosticRead {
     }catch{this.#stop("original_capture_error");}});
     stream.once("end",()=>{this.#eof[name]=true;this.#finish();});stream.on("error",()=>{this.#stop("original_stream_error");});
    }
-  }catch{this.#error("original_start_unknown");if(!this.#child){if(this.#timer)clearTimeout(this.#timer);this.#resolve?.();}}
+  }catch{this.#error("original_start_unknown");if(!this.#child){if(this.#timer)clearTimeout(this.#timer);this.#closeHome();this.#resolve?.();}}
   return this.#run;
  }
  failures():readonly SdkFailureDiagnostic[]{return snapshot(this.#diagnostics);}

@@ -57,7 +57,7 @@ function diagnosticHome():DiagnosticHome{
  catch{closeSync(fd);return fail("identity_changed");}
 }
 export interface SdkDiagnosticTarget {readonly app:string;readonly machine:string;}
-export interface SdkFailureDiagnostic {kind:"rudder-root-retained-failure-v1";component:string;stage:string;check:string|null;class:string;io_kind:string|null;errno:number|null;error_text:string;}
+export interface SdkFailureDiagnostic {kind:"rudder-root-retained-failure-v1";component:string;stage:string;check:string|null;class:string;io_kind:string|null;errno:number|null;machine_error_text:string|null;error_text:string;}
 /** Only fixed structured Root diagnostics are exported. Adjacent compiler,
  * provider, config, environment and arbitrary Error text are never relayed. */
 export function projectSdkFailureLogs(raw:Buffer,target:SdkDiagnosticTarget):SdkFailureDiagnostic[]{
@@ -87,7 +87,9 @@ export function projectSdkFailureLogs(raw:Buffer,target:SdkDiagnosticTarget):Sdk
    if(typeof row.error_text!=="string"||Buffer.byteLength(row.error_text)>384||![...OPERATIONS].some(op=>row.error_text===op+suffix))continue;
   }
   const detail=`${row.error_text?`${row.error_text}; `:""}${row.component}/${row.stage}: ${row.check??row.class}${row.io_kind===null?"":`; ${row.io_kind}${row.errno===null?"":` (errno ${row.errno})`}`}`;
-  found.push({...row,error_text:detail});if(found.length===8)break;
+  // Preserve the exact closed machine spelling separately from the rendered
+  // context. Neither field can carry arbitrary provider or workload output.
+  found.push({...row,machine_error_text:row.error_text??null,error_text:detail});if(found.length===8)break;
  }
  return found;
 }

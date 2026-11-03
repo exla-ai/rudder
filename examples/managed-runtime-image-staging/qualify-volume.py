@@ -136,6 +136,9 @@ def validate_build(receipt,raw,receipt_path,read,builder,builder_raw,fly_sha256)
     intent=read(parent.with_name(parent.name+'.intent.json'),4194304)
     need(digest(intent)==build_id,'original-durable-build-intent')
     intent_data=strict(intent)
+    service=receipt.get('buildService','depot')
+    need(service in ('depot','fly')and intent_data.get('buildService','depot')==service,
+         'same-original-build-service')
     need(intent_data.get('sourceRevision')==revision and intent_data.get('output')==str(parent)
          and intent_data.get('image')==image and intent_data.get('buildOnly')is True
          and intent_data.get('compilerC1Image')==builder['C1_IMAGE'],'same-original-build-intent')
@@ -146,6 +149,7 @@ def validate_build(receipt,raw,receipt_path,read,builder,builder_raw,fly_sha256)
               '--build-arg','RUDDER_CANDIDATE_BUILD_ID='+build_id,
               '--build-arg','RUDDER_IMAGE_PRESEED_PROFILE=baked-cas-v1',
               '--build-arg','RUDDER_IMAGE_QUALIFICATION_NONCE='+revision,
+              *(['--depot=false']if service=='fly'else []),
               '--build-only','--push','--remote-only','--image-label',label]
     need(remote.get('argv')==expected,'exact-original-build-only-command')
     logrow=remote.get('fileBackedLog')

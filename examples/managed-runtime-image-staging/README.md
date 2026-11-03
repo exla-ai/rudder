@@ -31,6 +31,13 @@ claim. Disk capacity is checked before each stage, not continuously. Use
 `--self-test` for pure renderer/parser checks. `--prepare-only` also consumes its
 output path; it does not provide an implicit build-resume operation.
 
+The default `--builder depot` uses Fly's Depot integration. An explicit
+`--builder fly` selects Fly's traditional remote builder with `--depot=false`.
+The intent, receipt and exact command bind that choice; changing services needs
+a new invocation and unused output paths. The builders have separate caches.
+An exporter push acknowledgment does not establish registry availability. Read
+back the immutable manifest/config before starting the filesystem qualification.
+
 Qualify a fresh isolated filesystem volume against that exact pushed worker:
 
 ```sh

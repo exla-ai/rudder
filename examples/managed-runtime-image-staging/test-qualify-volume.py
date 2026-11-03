@@ -104,6 +104,31 @@ class ReceiptTests(unittest.TestCase):
         self.receipt['sourceRevision'] = 'f' * 40
         self.assertEqual(result['sourceRevision'], self.revision)
 
+    def test_explicit_fly_builder_is_bound_to_original_intent_and_command(self):
+        intent_path = str(self.parent.with_name(self.parent.name + '.intent.json'))
+        intent = json.loads(self.files[intent_path])
+        intent['buildService'] = 'fly'
+        self.files[intent_path] = v.canonical(intent)
+        previous_build_id = self.build_id
+        self.build_id = v.digest(self.files[intent_path])
+        self.receipt.update(buildService='fly', buildId=self.build_id)
+        argv = self.receipt['commands'][-1]['argv']
+        argv[argv.index('RUDDER_CANDIDATE_BUILD_ID=' + previous_build_id)] = 'RUDDER_CANDIDATE_BUILD_ID=' + self.build_id
+        argv.insert(argv.index('--build-only'), '--depot=false')
+        self.sync_rows()
+        self.assertEqual(self.validate()['workerImage'], self.image.split(':')[0] + '@' + self.digest)
+        argv.remove('--depot=false')
+        self.sync_rows()
+        with self.assertRaisesRegex(RuntimeError, 'exact-original-build-only-command'):
+            self.validate()
+
+    def test_refuses_changed_or_unknown_build_service(self):
+        for service in ('fly', 'unknown', True):
+            with self.subTest(service=service):
+                self.receipt['buildService'] = service
+                with self.assertRaisesRegex(RuntimeError, 'same-original-build-service'):
+                    self.validate()
+
     def test_refuses_prepared_or_foreign_receipt(self):
         for key, value in [('image', None), ('digest', None), ('sourceRevision', 'HEAD'),
                            ('formatVersion', True), ('sourceArchiveSha256', '0' * 64),

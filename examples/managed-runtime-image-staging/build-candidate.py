@@ -518,6 +518,8 @@ def main():
     parser.add_argument("--app", default="rudder-workers-exla")
     parser.add_argument("--image-label")
     parser.add_argument("--fly-executable", default="flyctl")
+    parser.add_argument("--builder", choices=("depot", "fly"), default="depot",
+                        help="remote build service; fly uses the traditional Fly builder")
     parser.add_argument("--prepare-only", action="store_true", help="capture and compile JS only; no provider call")
     parser.add_argument("--self-test", action="store_true")
     args = parser.parse_args()
@@ -538,7 +540,8 @@ def main():
     disk_check(output.parent)
     intent = output.with_name(output.name + ".intent.json")
     write_new(intent, json_bytes({"sourceRevision": revision, "output": str(output), "buildOnly": True,
-                                  "compilerC1Image": C1_IMAGE, "image": f"registry.fly.io/{args.app}:{label}"}))
+                                  "compilerC1Image": C1_IMAGE, "image": f"registry.fly.io/{args.app}:{label}",
+                                  "buildService": args.builder}))
     build_id = sha_file(intent)
     output.mkdir(mode=0o700)
     sync_dir(output.parent)
@@ -578,6 +581,7 @@ def main():
                "generatedAssets": assets, "dockerfileSha256": sha_file(dockerfile),
                "compilerC1Image": C1_IMAGE, "compilerC1Pins": C1_PINS, "commands": commands,
                "buildId": build_id, "builderSourceSha256": sha_file(Path(__file__)),
+               "buildService": args.builder,
                "workerNodeImage": node_image,
                "image": None, "digest": None, "productData": None,
                "deployed": False, "sdkQualified": False, "runtimeQualified": False,
@@ -595,6 +599,7 @@ def main():
                              "--build-arg", "RUDDER_CANDIDATE_BUILD_ID=" + build_id,
                              "--build-arg", "RUDDER_IMAGE_PRESEED_PROFILE=baked-cas-v1",
                              "--build-arg", "RUDDER_IMAGE_QUALIFICATION_NONCE=" + revision,
+                             *(["--depot=false"] if args.builder == "fly" else []),
                              "--build-only", "--push", "--remote-only", "--image-label", label])
         digest, product = parse_build_log(output / "remote-build.log", image)
         receipt.update(image=image, digest=digest, productData=product)

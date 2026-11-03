@@ -148,8 +148,8 @@ The old captured source-policy mismatch reproduces locally, and real Codex/ws
 archive downloads passed full integrity and extraction checks. Asset failures
 now retain fixed command, artifact, phase, validation check and HTTP/OS codes.
 Seventeen Python checks pass, two Root-only checks are skipped, and the builder's
-local self-check passes. The corrected remote worker/controller builds are
-pending. The previous controller did publish; a later immutable read verified
+local self-check passes. The corrected remote worker/controller builds exited
+zero. The previous controller did publish; a later immutable read verified
 its original digest without rebuilding it. No hardware admission follows from
 that build proof.
 
@@ -162,6 +162,26 @@ checked. This prevents a completed early stage expiring during ordinary task
 verification. Cloud compilation and 44 focused Node checks pass, including
 actual driver timer callbacks across both stages. Hardware qualification is
 still pending.
+
+The final common capture is `9aea4c947c87d8e4d15d85cff0e95b4920a150e4`,
+which includes the published alpha.34 ancestry. Its worker build exited zero
+and the exporter reported digest
+`sha256:8bbdb64ed9734cd3bd40fe916c49b52568437f43821ab892c84091bf6ee391e8`.
+Native build steps reused the existing result. The controller's actual registry
+bytes verify digest
+`sha256:66216a50a0f8bf16a448a69b267606137e5381a4023e4db07861bb27f741a030`
+and the same revision. At 22:45Z, the worker manifest still returned HTTP404.
+Direct checks found its config and 54 unique layer blobs, with two layer blobs
+also returning HTTP404. The earlier `2117ed70` worker has the same publication
+failure. An exporter success is therefore insufficient registry delivery proof.
+Both original builds and their logs are retained; no new qualification machine,
+temporary token or managed lifecycle has been started. Publication recovery is
+under investigation before the next hardware run.
+The builder now accepts an explicit service choice, recorded in its original
+intent and receipt and checked against the exact command. The traditional Fly
+service avoids Depot's publication path; its cache is separate. Thirteen pure
+volume receipt checks and the builder self-check pass. This enables a separate
+fallback build, with the earlier publication failures retained.
 
 The requested project file/document viewer is queued in PLAN.md section 18.5.
 It covers project files and task outputs, rendered documents and website files,

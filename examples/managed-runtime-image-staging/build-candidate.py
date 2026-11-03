@@ -252,7 +252,12 @@ def extract_archive(archive, destination):
             names.add(member.name)
         # git archive has no dependency directories or generated output.
         need(not any(n == "node_modules" or n.startswith(("node_modules/", "cloud/node_modules/", "dist/", "cloud/dist/")) for n in names), "archive contains generated/dependency output")
-        tar.extractall(destination, filter="data")
+        # Older Python 3.11 lacks extraction filters. Every member above is
+        # already restricted to regular files/directories in a fresh empty root.
+        if hasattr(tarfile, "data_filter"):
+            tar.extractall(destination, filter="data")
+        else:
+            tar.extractall(destination)
 
 
 def generated_files(source):
@@ -351,6 +356,7 @@ def synthetic_product():
 
 def self_test():
     import tempfile
+    import io
     docker = render_dockerfile("# syntax=docker/dockerfile:1\nFROM x AS managed\n", "a" * 40)
     need("FROM managed AS managed_c1" in docker and "from=managed,source=/" in docker, "same-build stage missing")
     compile(VERIFY_C1.replace("__C1_PINS__", repr(C1_PINS)).replace("__MARKER__", MARKER), "verify", "exec")
@@ -358,6 +364,23 @@ def self_test():
     product = synthetic_product()
     log = f'#12 0.1 {MARKER}{json.dumps(product)}\n#13 pushing manifest for {image}@sha256:{"b" * 64} done\n'
     with tempfile.TemporaryDirectory() as directory:
+        archive = Path(directory) / "source.tar"
+        destination = Path(directory) / "source"
+        destination.mkdir()
+        with tarfile.open(archive, "w") as tar:
+            item = tarfile.TarInfo("nested/source.txt"); item.size = 5
+            tar.addfile(item, io.BytesIO(b"hello"))
+        extract_archive(archive, destination)
+        need((destination / "nested/source.txt").read_bytes() == b"hello", "archive extraction failed")
+        with tarfile.open(archive, "w") as tar:
+            item = tarfile.TarInfo("escape"); item.type = tarfile.SYMTYPE; item.linkname = "/tmp"
+            tar.addfile(item)
+        try:
+            extract_archive(archive, destination)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("archive symlink accepted")
         p = Path(directory) / "log"
         p.write_text(log)
         need(parse_build_log(p, image)[0] == "sha256:" + "b" * 64, "push parse failed")

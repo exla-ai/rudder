@@ -27,6 +27,8 @@ fn command_surface_help_completion_and_backend_namespace() {
     assert!(matches!(classify_composer("/nudge", false, "2026-11-03"), ComposerInput::Refused(_)));
     assert!(matches!(classify_composer("/unknown", false, "2026-11-03"), ComposerInput::Refused(_)));
     assert_eq!(classify_composer("fix the tests", false, "2026-11-03"), ComposerInput::Text);
+    assert_eq!(classify_composer("/workspace/project/file.ts fix this", false, "2026-11-03"), ComposerInput::Text);
+    assert_eq!(classify_composer("/Users/me/project/file.md", false, "2026-11-03"), ComposerInput::Text);
 }
 
 #[test]

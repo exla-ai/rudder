@@ -16,7 +16,7 @@ async function source(file) {
   return import(`data:text/javascript;base64,${Buffer.from(result.outputText).toString("base64")}`);
 }
 const { TerminalScreenSession } = await source("../cloud/src/private-access/terminal-session.ts");
-const { TerminalRecovery, terminalLatencyBounds } = await source("../src/board/ui/terminal-transport/recovery.ts");
+const { TerminalRecovery, terminalLatencyBounds } = await source("../cloud/src/private-access/terminal-recovery.ts");
 
 class Clock {
   time = 0; id = 0; jobs = new Map();

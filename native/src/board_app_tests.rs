@@ -2,7 +2,7 @@ use super::*;
 
 #[test]
 fn browser_result_waits_for_confirmation_without_changing_the_draft() {
-    for target in [board_access::Target::Project, board_access::Target::Usage] {
+    for target in [board_access::Target::Project, board_access::Target::Usage, board_access::Target::Files] {
         let mut app = App::new();
         app.task_input = "continue this task".into();
         app.task_cursor = 8;

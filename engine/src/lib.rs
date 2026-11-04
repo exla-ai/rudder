@@ -17,6 +17,8 @@ pub mod directory;
 pub mod snapshot;
 pub mod tree;
 pub mod journal;
+// Shared observation contracts used by the native App's bounded wait bridge.
+pub mod agent_efficiency;
 pub mod service;
 pub mod agent_api;
 pub mod workspace;

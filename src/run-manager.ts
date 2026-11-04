@@ -7,6 +7,7 @@ import path from "node:path";
 import { createSpec, renderContract, verifyRun } from "./brain.js";
 import { ensureRudderCodexBinary } from "./codex-binary.js";
 import { getBackend } from "./backends.js";
+import { efficiencyContext, learnIntegratedRun } from "./agent-efficiency/production.js";
 import { nativeAgentCommand } from "./native-agents.js";
 import { mergeGeneratedRudderMd, withRudderMdLock } from "./rudder-md.js";
 import {
@@ -652,7 +653,7 @@ async function runBackendPass(run: RunRecord): Promise<{ run: RunRecord; exitCod
     {
       run,
       prompt: run.currentPrompt ?? run.task,
-      contract: renderContract(spec),
+      contract: renderContract(spec) + await efficiencyContext(run).catch(()=>""),
     },
     async (event) => {
       await emit(run, event);
@@ -1162,6 +1163,7 @@ export async function mergeRun(runId: string, allowDirty = false, options?: { si
     // work sitting in review. That is how a whole plan's back half went dark
     // behind five already-merged nodes.
     await markGraphNodeMerged(repoRoot, merged);
+    await learnIntegratedRun(merged).catch(()=>undefined);
     await writeAgentContext(repoRoot);
     if (!options?.silent) {
       console.log(`Merged ${runId}`);

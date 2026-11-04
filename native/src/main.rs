@@ -61,6 +61,13 @@ mod task_routing;
 use crate::task_routing::*;
 mod engine_host;
 mod app_engine_lifecycle;
+mod v4_migration;
+mod v4_migration_driver;
+mod v4_migration_adoption;
+mod agent_efficiency;
+mod engine_observations;
+mod preview_registration;
+use rudder_native::command_surface;
 use crate::engine_host::*;
 mod fabric_cli;
 mod cloud_build_profile_cli;
@@ -4254,7 +4261,7 @@ impl App {
                 "Ctrl+W: gam: a swap half  t dialogue  i brief reviewer  x stop pair  ·  1/2/3 panes  m merge  g god's view  Esc cancels"
                     .to_string()
             } else {
-                "Ctrl+W: Tab cycle  1/2/3 panes  v review  m merge  b branch chat  g god's view  R review-all  M merge-all  H move to home  Esc cancels"
+                "Ctrl+W: Tab cycle  1/2/3 panes  v review  f files  m merge  b branch chat  g god's view  R review-all  M merge-all  H move to home  Esc cancels"
                     .to_string()
             });
             return false;
@@ -4696,6 +4703,7 @@ impl App {
             // TUI, so `b` was simply typed into it. Reachable here and under ^W.
             KeyCode::Char('b') => self.branch_selected_agent(),
             KeyCode::Char('u') => self.undo_selected_merge(),
+            KeyCode::Char('f') => self.open_selected_project_files(),
             KeyCode::Up | KeyCode::Char('k') => self.select_previous_agent(),
             KeyCode::Down | KeyCode::Char('j') => self.select_next_agent(),
             KeyCode::Char('m') => self.request_merge_selected_agent(),
@@ -4801,6 +4809,7 @@ impl App {
             // to "unknown key".
             KeyCode::Char('H') => self.request_move_all_home(),
             KeyCode::Char('r') => self.start_rename_selected_agent(),
+            KeyCode::Char('f') => self.open_selected_project_files(),
             KeyCode::Char('b') => self.branch_selected_agent(),
             KeyCode::Char('u') => self.undo_selected_merge(),
             KeyCode::Up | KeyCode::Char('k') => self.select_previous_agent(),
@@ -10185,9 +10194,8 @@ Address the objection directly. If you disagree, say why inside \
         self.dirty = true;
     }
 
-    /// The pair a `/tell` or `^W` chord acts on: the selected row's, else the
-    /// newest pair still running (so `/tell` from the task bar works without
-    /// first clicking into the split). Returned as (generator, adversarial).
+    /// The legacy pair a `^W` chord acts on: the selected row's, else the
+    /// newest pair still running. Returned as (generator, adversarial).
     fn gam_pair_for_command(&self) -> Option<(usize, usize)> {
         if let Some(pair) = self.gam_pair_indices_for_selected() {
             return Some(pair);
@@ -10242,51 +10250,33 @@ Address the objection directly. If you disagree, say why inside \
         ));
         self.settle_gam_pair(generator_index, GamOutcome::StoppedByUser);
         self.notice = Some(
-            "gam stopped · any turn in flight was interrupted · both panes stay live for you to drive"
+            "Automatic loop stopped; interrupts requested for active turns. Both panes remain open"
                 .to_string(),
         );
     }
 
-    /// `/tell <note>` (and `^W i`): a note from you to the reviewer.
-    ///
-    /// While the loop runs it is queued for the NEXT packet (review or mid-turn
-    /// check) instead of being typed in at once: a message landing while the
-    /// reviewer works on a verdict would end that turn without one, and the pair
-    /// would escalate on your own note. Once the pair has settled there is no
-    /// packet coming, so it goes straight into the reviewer's session.
+    /// Keep notes for an existing retained pair available without reopening
+    /// the retired standalone pair workflow.
     fn tell_gam_reviewer(&mut self, note: &str) {
-        let note = note.trim();
-        if note.is_empty() {
-            self.notice = Some(
-                "usage: /tell <note>: brief the /gam reviewer (rides along with its next review)"
-                    .to_string(),
-            );
-            return;
-        }
-        let Some((generator_index, adversarial_index)) = self.gam_pair_for_command() else {
-            self.notice =
-                Some("gam: no pair to tell · /tell briefs a /gam reviewer".to_string());
+        let Some((generator_index, adversarial_index)) = self.gam_pair_indices_for_selected() else {
             return;
         };
+        let note = note.trim();
+        if note.is_empty() {
+            self.notice = Some("Type a note for the selected reviewer after /tell".to_string());
+            return;
+        }
         let settled = self.agents[generator_index]
             .gam
             .as_ref()
             .is_some_and(|gam| matches!(gam.phase, GamPhase::Settled(_)));
-        if settled {
-            let message = format!("[from the user] {note}");
-            if !self.live_inject_at(adversarial_index, &message) {
-                self.notice = Some(
-                    "gam: the reviewer has no live pane to tell · Enter on its row resumes it"
-                        .to_string(),
-                );
-                return;
-            }
+        if settled && !self.live_inject_at(adversarial_index, &format!("[from the user] {note}")) {
+            self.notice = Some("The selected reviewer has no live pane; Enter on its row resumes it".to_string());
+            return;
         }
         for side in [generator_index, adversarial_index] {
             if let Some(gam) = self.agents[side].gam.as_mut() {
-                if !settled {
-                    gam.user_notes.push(note.to_string());
-                }
+                if !settled { gam.user_notes.push(note.to_string()); }
                 gam.say(GamRole::Adversarial, GamMessageKind::Note, note);
             }
             if let Some(run) = self.agents.get(side) {
@@ -10295,25 +10285,25 @@ Address the objection directly. If you disagree, say why inside \
         }
         self.record_activity(format!("gam: you told the reviewer: {}", truncate_chars(note, 120)));
         self.notice = Some(if settled {
-            "gam: sent to the reviewer's session".to_string()
+            "Sent to the selected reviewer's session".to_string()
         } else {
-            "gam: noted · the reviewer gets it with its next review".to_string()
+            "Noted; the selected reviewer gets it with its next review".to_string()
         });
         self.dirty = true;
     }
 
-    /// `^W i`: put `/tell ` on the task line and focus it.
+    /// `^W i`: prepare a note for the selected retained pair only.
     fn begin_gam_note(&mut self) {
-        if self.gam_pair_for_command().is_none() {
+        let Some(_) = self.gam_pair_indices_for_selected() else {
             self.notice = Some("gam: no pair selected".to_string());
             return;
-        }
+        };
         self.replace_task_input("/tell ".to_string());
         self.focus = FocusPane::Task;
         self.notice = Some(
-            "brief the reviewer: type a note and press Enter (Esc clears) · it rides along with the next review"
-                .to_string(),
+            "Type a note and press Enter; it rides along with the selected reviewer's next review".to_string(),
         );
+        self.dirty = true;
     }
 
     fn start_rudder_plan_task(&mut self, input: &str) {
@@ -11991,6 +11981,21 @@ Address the objection directly. If you disagree, say why inside \
     }
 
     fn handle_command(&mut self, input: &str) -> bool {
+        // Recovery controls bind to the selected historical pair. Without that
+        // selection /tell remains a retired standalone command below.
+        if input.split_whitespace().next() == Some("/tell")
+            && self.gam_pair_indices_for_selected().is_some()
+        {
+            self.emit_command_used(input);
+            self.tell_gam_reviewer(command_rest(input, "/tell"));
+            return true;
+        }
+        if let command_surface::ComposerInput::Refused(message) =
+            command_surface::classify_composer(input, false, &command_surface::utc_date()) {
+            self.notice = Some(message);
+            self.dirty = true;
+            return true;
+        }
         self.emit_command_used(input);
         let mut parts = input.split_whitespace();
         match parts.next() {
@@ -12051,11 +12056,6 @@ Address the objection directly. If you disagree, say why inside \
                 }
                 true
             }
-            Some("/tell") => {
-                let rest = command_rest(input, "/tell").trim();
-                self.tell_gam_reviewer(rest);
-                true
-            }
             Some("/plan") => {
                 // Explicit multi-agent route: hand the task to the DAG orchestrator.
                 let rest = command_rest(input, "/plan").trim();
@@ -12079,10 +12079,6 @@ Address the objection directly. If you disagree, say why inside \
                     Ok((count, task)) => self.start_swarm_task(count, &task),
                     Err(usage) => self.notice = Some(usage),
                 }
-                true
-            }
-            Some("/gam") => {
-                self.notice = Some("/gam has been retired; describe the task and Rudder will choose its workflow".to_string());
                 true
             }
             Some("/restore") => {
@@ -12322,17 +12318,8 @@ Address the objection directly. If you disagree, say why inside \
                 }
                 true
             }
-            Some("/goal") => {
-                let raw = command_rest(input, "/goal");
-                self.forward_slash_command_to_focused_agent("/goal", raw);
-                true
-            }
             Some("/merge-all") => {
                 self.request_merge_all_ready();
-                true
-            }
-            Some("/nudge") => {
-                self.notice = Some("/nudge has been retired; send a follow-up to the agent or orchestrator that owns the work".to_string());
                 true
             }
             Some("/verify") => {
@@ -14195,7 +14182,7 @@ Address the objection directly. If you disagree, say why inside \
             return;
         }
         if let Some(rest) = marker.strip_prefix("RUDDER_GOAL") {
-            self.handle_command(&format!("/goal {}", rest.trim()));
+            self.forward_slash_command_to_focused_agent("/goal", rest.trim());
             return;
         }
         if let Some(rest) = marker.strip_prefix("RUDDER_CLOUD") {
@@ -15649,6 +15636,15 @@ Address the objection directly. If you disagree, say why inside \
         self.request_board_open(board_access::Target::Project);
     }
 
+    fn open_selected_project_files(&mut self) {
+        if self.board_open_rx.is_some() { return; }
+        let Some(run) = self.agents.get(self.selected_agent) else {
+            self.notice = Some("no agent selected".into()); return;
+        };
+        self.board_open_rx = Some((board_access::Target::Files,
+            board_access::begin_file_open(self.cwd.clone(), run.id.clone())));
+    }
+
     fn request_board_open(&mut self, target: board_access::Target) {
         if self.board_open_rx.is_none() {
             self.board_open_rx = Some((target, board_access::begin_open(self.cwd.clone(), target)));
@@ -15668,6 +15664,7 @@ Address the objection directly. If you disagree, say why inside \
             Ok(board_access::OpenResult::Opened) => match target {
                 board_access::Target::Usage => "opening the usage dashboard in your browser",
                 board_access::Target::Project => "opening this project's web view in your browser",
+                board_access::Target::Files => "opening this agent's workspace files in your browser",
             },
             Ok(board_access::OpenResult::Unavailable) | Err(mpsc::TryRecvError::Disconnected) =>
                 "web UI is unavailable for this session",
@@ -21834,6 +21831,7 @@ fn run_app_loop(mut terminal: Option<&mut Tui>, mut ownership: EngineOwnership) 
     let mut lifecycle = app_engine_lifecycle::AppEngineLifecycle::prepare(&mut ownership)?;
     let mut app = App::new();
     app.cwd = ownership.app_identity().0.to_path_buf();
+    if let Some(records)=ownership.take_migration_records() {v4_migration_adoption::apply(&mut app,records)?;}
     app.engine_headless = terminal.is_none();
     install_termination_handlers();
     if ownership.is_fabric() {

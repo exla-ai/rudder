@@ -547,8 +547,8 @@ pub(crate) fn bounded_edit_distance(left: &str, right: &str, max_distance: usize
 
 pub(crate) fn command_suggestions() -> Vec<Suggestion> {
     let commands = searchable_command_suggestions();
-    ["/model", "/main", "/resume", "/cloud", "/help"].into_iter()
-        .filter_map(|label| commands.iter().find(|command| command.label == label).cloned())
+    crate::command_surface::registry().slash.iter()
+        .filter_map(|label| commands.iter().find(|command| command.label == *label).cloned())
         .collect()
 }
 

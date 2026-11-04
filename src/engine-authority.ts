@@ -21,6 +21,21 @@ export function projectEngineAuthority(repo: string): "fabric" | "legacy-native"
 }
 
 export function assertLegacyWriterAllowed(repo: string): void {
+  // lstat also refuses malformed receipts and dangling links. This shared
+  // synchronous boundary covers detached spawn and all legacy schedulers.
+  try {
+    fs.lstatSync(path.join(repo, ".rudder", "engine", "v4-migration.json"));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      assertLegacyAuthorityAllowed(repo);
+      return;
+    }
+    throw error;
+  }
+  throw new Error("Project migration requires explicit recovery with its recorded owner and run epochs before a scheduler can start");
+}
+
+function assertLegacyAuthorityAllowed(repo: string): void {
   if (projectEngineAuthority(repo) === "fabric") {
     throw new Error("This project uses the persistent engine. Use its dashboard or machine API so commands retain the current owner epoch.");
   }

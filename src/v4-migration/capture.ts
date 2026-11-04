@@ -1,6 +1,6 @@
 import fsp from "node:fs/promises";
 import path from "node:path";
-import { createRecoveryBundle, exportRecoveryBundle, legacyRecoveryRecord, type RecoveryRoot, type RecoveryManifest } from "./recovery.js";
+import { createRecoveryBundle, exportRecoveryBundle, legacyRecoveryRecord, verifyRecoveryBundle, type RecoveryRoot, type RecoveryManifest } from "./recovery.js";
 import { writeJson } from "../util.js";
 import type { JsonValue } from "../types.js";
 
@@ -105,4 +105,45 @@ export async function exportLegacyProjectRecovery(bundle: string, destination: s
     await exportLegacyRunProjections(path.join(destination, "legacy-runs"), compatibleRuns);
   }
   return { integrationPath, roots: manifest.roots.map(root => ({ ...root, path: path.join(destination, root.name === "git-history" ? "integration-source/.git" : root.name === "jj-history" ? "integration-source/.jj" : root.name) })), compatibleRuns };
+}
+
+/** Explicit compatible recovery handoff into a NEW checkout. Raw originals stay
+ * beside the checkout, while only paused projections become its runnable store.
+ * This opens no engine and starts no session. Workspace and transcript locations
+ * are remapped through the verified exported root inventory, never guessed.
+ */
+export async function prepareLegacyProjectRecovery(options: {
+  bundle: string; destination: string; projectId: string; migrationId: string;
+  rollbackCheckpoint?: string;
+}): Promise<{ integrationPath: string; roots: RecoveryRoot[]; compatibleRuns?: string }> {
+  const manifest = await verifyRecoveryBundle(options.bundle);
+  if (manifest.project_id !== options.projectId || manifest.migration_id !== options.migrationId
+    || manifest.rollback_checkpoint !== options.rollbackCheckpoint) throw new Error("Recovery selection differs from its checkpoint");
+  const exported = await exportLegacyProjectRecovery(options.bundle, options.destination);
+  const mappings = manifest.roots.map((root, index) => ({ before: path.resolve(root.path), after: exported.roots[index].path }))
+    .sort((a,b) => b.before.length - a.before.length);
+  const remap = (value: string): string => {
+    const input = path.resolve(value);
+    const mapping = mappings.find(root => input === root.before || input.startsWith(root.before + path.sep));
+    if (!mapping) throw new Error("Recovery workspace has no captured source root");
+    return path.join(mapping.after, path.relative(mapping.before, input));
+  };
+  if (exported.compatibleRuns) {
+    const files = await fsp.readdir(exported.compatibleRuns);
+    if (files.length > 1024) throw new Error("Recovery run inventory exceeds bound");
+    for (const file of files) {
+      if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,255}\.json$/.test(file)) throw new Error("Invalid compatible recovery run identity");
+      const record = legacyRecoveryRecord(JSON.parse(await fsp.readFile(path.join(exported.compatibleRuns,file), "utf8")));
+      const id = file.slice(0,-5);
+      if (record.id !== id) throw new Error("Recovery run identity differs");
+      const workspace = record.workspace as {enabled?: boolean; path?: string} | undefined;
+      if (workspace?.enabled && workspace.path) record.workspace = {...workspace, path: remap(workspace.path)};
+      record.repoRoot = exported.integrationPath;
+      record.migrationRecovery = { ...(record.migrationRecovery as object),
+        source_project_id: options.projectId, source_migration_id: options.migrationId,
+        session_files: exported.roots.filter(root => root.role === "sessions" && root.run_id === id).map(root=>root.path) };
+      await writeJson(path.join(exported.integrationPath,".rudder","runs",id,"run.json"), record as JsonValue, {mode:0o600});
+    }
+  }
+  return exported;
 }

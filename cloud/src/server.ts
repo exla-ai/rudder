@@ -38,6 +38,9 @@ import { FabricVerificationCache, S3FabricObjectStorage } from "./fabric-cas.js"
 import { createFabricHttpHandler } from "./fabric-http.js";
 import { cleanupFabricUploadSpools } from "./fabric-stream.js";
 import { HomeControlSessions } from "./home-control-sessions.js";
+import { CanonicalTerminalRelay } from "./private-access/terminal-relay.js";
+import { PrivatePreviewRoutes } from "./private-access/preview-routes.js";
+import { ProjectFileRoutes } from "./project-files/routes.js";
 import { createManagedHomeRegistry, type ManagedHomeWorker } from "./managed-home-provisioning/index.js";
 import { readManagedHomeStartupConfig } from "./managed-home-provisioning/startup-config.js";
 import { originalTime as originalManagedPolicyReadbackTime } from "./managed-home-provisioning/fly.js";
@@ -870,6 +873,23 @@ server.on("upgrade", (req: IncomingMessage, socket: Duplex, head: Buffer) => {
   }
   try {
     const url = new URL(req.url || "/", baseURL);
+    if (url.pathname === "/api/app/terminal-screen") {
+      void (async () => {
+        try {
+          if (req.headers.origin !== new URL(baseURL).origin) { destroyUpgrade(socket,403);return; }
+          const allowed = ["workspace","run","capability","client"];
+          if ([...url.searchParams.keys()].some(key=>!allowed.includes(key)) || allowed.some(key=>url.searchParams.getAll(key).length!==1)
+            || url.searchParams.get("capability")!=="canonical-screen-text-v1") { destroyUpgrade(socket,400);return; }
+          const account=await requireAccount(req);
+          const selection={actor:account.accountId,workspaceId:url.searchParams.get("workspace")!,runId:url.searchParams.get("run")!};
+          const clientId=url.searchParams.get("client")!;
+          if (![selection.workspaceId,selection.runId,clientId].every(value=>value.length>0 && value.length<=256 && !/[\x00-\x1f\x7f]/.test(value))) {destroyUpgrade(socket,400);return;}
+          requireHomeRepo(account.accountId,selection.workspaceId);
+          wss.handleUpgrade(req,socket,head,ws=>{void canonicalTerminalRelay.attach(selection,clientId,ws).catch(()=>ws.close(4001,"Current terminal custody is unavailable"));});
+        } catch { destroyUpgrade(socket,403); }
+      })();
+      return;
+    }
     const sailMatch = SAIL_ATTACH_PATH_RE.exec(url.pathname);
     if (sailMatch) {
       handleSailUpgrade(req, socket, head, sailMatch[1], sailMatch[2] as "worker" | "attach");
@@ -5979,12 +5999,12 @@ function attachHomeControl(homeId: string, ws: WebSocket, managedWorker?: Manage
   ws.on("error", () => undefined);
 }
 
-async function homeRpc(homeId: string, method: string, params: JsonRecord, timeoutMs = HOME_RPC_TIMEOUT_MS): Promise<Json> {
+async function homeRpc(homeId: string, method: string, params: JsonRecord, timeoutMs = HOME_RPC_TIMEOUT_MS, signal?: AbortSignal): Promise<Json> {
   const control = homeControls.get(homeId);
   if (!isOpen(control)) {
     throw Object.assign(new Error("the cloud machine is not connected yet; it may still be starting"), { status: 503 });
   }
-  return await homeRpcSessions.request(homeId, control, method, params, timeoutMs);
+  return await homeRpcSessions.request(homeId, control, method, params, timeoutMs, signal);
 }
 
 // ---------------------------------------------------------------------------
@@ -6644,6 +6664,11 @@ async function requireAccount(req: IncomingMessage): Promise<{ accountId: string
 }
 
 async function serveAppFile(res: ServerResponse, pathname: string): Promise<void> {
+  if (pathname === "/app/terminal-recovery.js" || pathname === "/app/project-file-render.js") {
+    const source=pathname === "/app/terminal-recovery.js" ? "./private-access/terminal-recovery.js" : "./project-files/browser-render.js";
+    const body=await fs.readFile(new URL(source,import.meta.url));
+    res.writeHead(200,{"content-type":"text/javascript; charset=utf-8","cache-control":"no-cache"});res.end(body);return;
+  }
   const relative = pathname.replace(/^\/app\/?/, "") || "index.html";
   const resolved = path.resolve(appDir, relative);
   const insideApp = resolved === appDir || resolved.startsWith(`${appDir}${path.sep}`);
@@ -6764,8 +6789,27 @@ const teamApiDeps = {
   },
 };
 
+const projectFileRoutes = new ProjectFileRoutes({
+  workspace: (accountId, workspaceId) => ({ homeId: requireHomeRepo(accountId, workspaceId).home.id }),
+  rpc: (homeId, method, params, signal) => homeRpc(homeId, method, params as JsonRecord, 10_000, signal),
+});
+
+const privatePreviewRoutes = new PrivatePreviewRoutes({
+  workspace: (actor, workspaceId) => ({homeId:requireHomeRepo(actor,workspaceId).home.id}),
+  rpc: (homeId,method,params,signal) => homeRpc(homeId,method,params as JsonRecord,10_000,signal),
+});
+const canonicalTerminalRelay = new CanonicalTerminalRelay({
+  authorize: async ({actor,workspaceId}) => {try {requireHomeRepo(actor,workspaceId);return true;} catch {return false;}},
+  read: async ({actor,workspaceId,runId},signal) => {
+    const {home,repo}=requireHomeRepo(actor,workspaceId);
+    return homeRpc(home.id,"screen",{workspaceId:repo.id,runId},3000,signal);
+  },
+});
+
 async function handleAppApi(req: IncomingMessage, res: ServerResponse, url: URL): Promise<void> {
   const account = await requireAccount(req);
+  if (await projectFileRoutes.handle(req, res, url, account.accountId)) return;
+  if (await privatePreviewRoutes.handle(req,res,url,account.accountId)) return;
   if (await handleOrgApi(req, res, url, account, { store: orgStore, sendJson, readJsonBody, baseURL, capture: captureProductEvent })) {
     return;
   }

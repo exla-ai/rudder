@@ -33,7 +33,9 @@ pub use automatic_mail_delivery::{ClaimedMailboxDelivery, MailboxDeliveryNotice}
 mod decisions;
 mod mailbox;
 mod schema;
+mod surface_receipts;
 mod runtime;
+pub use runtime::restart_recovery;
 mod vcs;
 mod managed;
 mod host_source;

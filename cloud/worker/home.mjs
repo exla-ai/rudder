@@ -29,8 +29,17 @@ import { sanitizeHomeHookConfigs } from "./hook-paths.mjs";
 import { createLoginRunner } from "./logins.mjs";
 import { collectDigestRuns } from "./digest.mjs";
 import { readProjectPlan } from "./plan.mjs";
-import { createTailnetPreviews, projectForPreviewPath, runTailnetCommand } from "./tailscale-previews.mjs";
+import { runTailnetCommand, tailnetStatus } from "./tailscale-previews.mjs";
 import { createTerminalTransport } from "./terminal-transport.mjs";
+
+let projectFiles;
+async function fileService() {
+  if (!projectFiles) {
+    const { HomeProjectFiles } = await import("/opt/rudder/dist/project-files/home.js");
+    projectFiles ??= new HomeProjectFiles();
+  }
+  return projectFiles;
+}
 
 const cloudUrl = (process.env.RUDDER_CLOUD_URL || "").trim().replace(/\/$/, "");
 const homeId = (process.env.RUDDER_WORKSPACE_ID || "").trim();
@@ -69,8 +78,24 @@ let credentialsRunning = false;
 let credentialsAgain = false;
 let vaultRefreshedAt = 0;
 const lastMessageCache = new Map(); // runId -> { mtime, text }
-let scanningPorts = false;
-let previewsReady = false;
+let privatePreviews;
+async function privatePreviewService() {
+  if (!privatePreviews) {
+    const [{ HomePrivatePreviews }, { PrivatePreviewDirectory }] = await Promise.all([
+      import("/opt/rudder/dist/private-access/home.js"), import("/opt/rudder/dist/private-access/previews.js"),
+    ]);
+    privatePreviews ??= new HomePrivatePreviews(homeId, new PrivatePreviewDirectory({
+      execute: async (args, signal) => {
+        signal.throwIfAborted();
+        return runTailnetCommand(args, { socket: TS_SOCKET, timeoutMs: 1500 });
+      },
+      processMatches: (item) => privatePreviews?.processMatches(item) ?? Promise.resolve(false),
+      ownedPorts: readPreviewPorts(),
+      onOwnedPorts: writePreviewPorts,
+    }));
+  }
+  return privatePreviews;
+}
 
 if (!homeId || !cloudUrl || !workerToken) {
   console.error("home supervisor: RUDDER_WORKSPACE_ID, RUDDER_CLOUD_URL and RUDDER_WORKER_TOKEN are required");
@@ -90,24 +115,12 @@ if (vault) {
 }
 acceptClaudeDialogs([]);
 
-const previews = createTailnetPreviews({
-  hostname: TS_HOSTNAME,
-  execute: (args) => runTailnetCommand(args, { socket: TS_SOCKET }),
-  ownedPorts: readPreviewPorts(),
-  onOwnedPorts: (ports) => {
-    const file = path.join(PERSIST_HOME, ".tailscale", "rudder-previews.json");
-    fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
-    const tmp = `${file}.${process.pid}.${randomUUID()}.tmp`;
-    fs.writeFileSync(tmp, JSON.stringify(ports), { mode: 0o600 });
-    fs.renameSync(tmp, file);
-  },
-  onChange: () => {
-    if (!previewsReady) return;
-    lastStateJson = "";
-    scheduleStateSoon();
-  },
-});
-const tailnet = previews.state;
+const tailnet = { hostname: TS_HOSTNAME, dnsName: null, online: false, https: null, error: null };
+function tailnetOffline(message) {
+  Object.assign(tailnet, { online: false, error: message });
+  lastStateJson = "";
+  scheduleStateSoon();
+}
 
 const baseChildEnv = buildChildEnv(vault?.env ?? {});
 
@@ -132,11 +145,10 @@ const projects = new Map();
 let controlSocket = null;
 let lastStateJson = "";
 let ports = []; // [{ port, pid, label, workspaceId|null }]
-previewsReady = true;
 
 connectControl();
 void startTailscale(vault?.env ?? {}).then(() => scanPorts()).catch((error) => {
-  previews.offline(`Tailscale could not start: ${error.code || "unavailable"}`);
+  tailnetOffline(`Tailscale could not start: ${error.code || "unavailable"}`);
 });
 void checkCredentials();
 void ensureRustToolchain().then(() => ensureGoToolchain());
@@ -393,6 +405,7 @@ function reconcileProjects(descriptors) {
     if (!wanted.has(id)) {
       log(`${project.name}: removed`);
       project.stop();
+      projectFiles?.close(project.dir);
       projects.delete(id);
     }
   }
@@ -477,6 +490,7 @@ async function handleRpc(method, params) {
     const project = projects.get(params.workspaceId);
     if (project) {
       project.stop();
+      projectFiles?.close(project.dir);
       projects.delete(params.workspaceId);
       if (params.removeClone) {
         fs.rmSync(project.dir, { recursive: true, force: true });
@@ -554,6 +568,12 @@ async function handleRpc(method, params) {
   if (!project) {
     throw new Error("that project is not open on the home machine");
   }
+  if (method === "projectFileScopes") {
+    return (await fileService()).scopes(project.dir);
+  }
+  if (method === "projectFiles") {
+    return (await fileService()).dispatch(project.dir, params.request);
+  }
   if (method === "transcript") {
     return readTranscript(project.dir, String(params.runId || ""), { limit: Number(params.limit) || 300, home: HOME });
   }
@@ -566,7 +586,26 @@ async function handleRpc(method, params) {
   if (method === "keys") {
     return await steer(project, { kind: "keys", taskId: String(params.runId || ""), instruction: String(params.keys || "") });
   }
+  if (method === "previewRegister") {
+    const service = await privatePreviewService();
+    const result = await service.register(project, params.request);
+    await scanPorts();
+    return result;
+  }
+  if (method === "previews") {
+    await scanPorts();
+    return (await privatePreviewService()).snapshot(project.workspaceId);
+  }
   if (method === "screen") {
+    const { projectEngineAuthority } = await import("/opt/rudder/dist/engine-authority.js");
+    if (projectEngineAuthority(project.dir) === "fabric") {
+      const { readOwnedScreen } = await import("/opt/rudder/dist/terminal-screen.js");
+      const runId = String(params.runId || "");
+      const frame = await readOwnedScreen(project.dir, runId);
+      return frame.type === "terminal-history"
+        ? { ...readScreen(project, runId, false), type: "terminal-history", owner: frame.owner }
+        : frame;
+    }
     return readScreen(project, String(params.runId || ""));
   }
   if (method === "upload") {
@@ -886,7 +925,7 @@ async function createGithubRepo(params) {
 // The phone's terminal view: mark the agent as watched (the dashboard mirrors
 // its visible screen to screen.txt for ~20s after each touch) and return the
 // latest mirror.
-function readScreen(project, runId) {
+function readScreen(project, runId, watchLive = true) {
   if (!/^[A-Za-z0-9._-]+$/.test(runId)) {
     throw new Error("agent not found");
   }
@@ -895,9 +934,11 @@ function readScreen(project, runId) {
     throw new Error("agent not found");
   }
   const watch = path.join(dir, "screen.watch");
-  fs.writeFileSync(watch, "");
-  const now = new Date();
-  fs.utimesSync(watch, now, now);
+  if (watchLive) {
+    fs.writeFileSync(watch, "");
+    const now = new Date();
+    fs.utimesSync(watch, now, now);
+  }
   try {
     const file = path.join(dir, "screen.txt");
     return { text: fs.readFileSync(file, "utf8"), updatedAt: fs.statSync(file).mtimeMs };
@@ -975,9 +1016,11 @@ async function publishState() {
       error: project.error,
       agents: project.status === "cloning" ? [] : project.agents(),
       plan: project.status === "cloning" ? null : readProjectPlan(project.dir),
-      ports: previews.snapshot()
-        .filter((entry) => entry.workspaceId === project.workspaceId)
-        .map(({ port, label, url, https }) => ({ port, label, url, https, access: "tailnet" })),
+      // The engine-proven role, PID token and attempt travel with every URL.
+      // Control-plane authorization binds these to this authenticated Home.
+      previews: privatePreviews?.snapshot(project.workspaceId) ?? [],
+      ports: (privatePreviews?.snapshot(project.workspaceId) ?? [])
+        .map(({ port, url, id }) => ({ port, label: "Project preview", url, https: true, access: "tailnet", previewId: id })),
     });
   }
   const state = { type: "state", projects: list, tailnet: { ...tailnet }, credentials, logins: logins.snapshot() };
@@ -1120,146 +1163,19 @@ async function answerAsk(project, params) {
 }
 
 // ---------------------------------------------------------------------------
-// Ports: dev servers agents start become tailnet previews.
+// Explicit current-owner preview registrations become private tailnet previews.
 // ---------------------------------------------------------------------------
 
 async function scanPorts() {
-  if (scanningPorts) return;
-  scanningPorts = true;
-  try {
-  const listening = listeningSockets();
-  const inodeToPid = socketOwners(new Set(listening.map((entry) => entry.inode)));
-  const found = new Map();
-  for (const entry of listening) {
-    const pid = inodeToPid.get(entry.inode);
-    if (!pid || found.has(entry.port)) {
-      continue;
-    }
-    const info = processInfo(pid);
-    if (!info || ignoredProcess(info)) {
-      continue;
-    }
-    found.set(entry.port, {
-      port: entry.port,
-      pid,
-      label: info.label,
-      workspaceId: projectForPath(info.cwd),
-      address: entry.address,
-      family: entry.family,
-    });
-  }
-  ports = Array.from(found.values()).sort((a, b) => a.port - b.port);
-  await previews.reconcile(ports);
-  } finally {
-    scanningPorts = false;
-  }
-}
-
-function listeningSockets() {
-  const out = [];
-  for (const file of ["/proc/net/tcp", "/proc/net/tcp6"]) {
-    let text = "";
-    try {
-      text = fs.readFileSync(file, "utf8");
-    } catch {
-      continue;
-    }
-    for (const line of text.split("\n").slice(1)) {
-      const cols = line.trim().split(/\s+/);
-      if (cols.length < 10 || cols[3] !== "0A") {
-        continue;
-      }
-      const [address, portHex] = cols[1].split(":");
-      const port = parseInt(portHex, 16);
-      // Loopback-only and wildcard listeners both count: tailscale serve
-      // proxies to 127.0.0.1, so a localhost-bound dev server works too.
-      if (!Number.isFinite(port) || port < 1024 || port === 41641) {
-        continue;
-      }
-      out.push({ port, inode: cols[9], address, family: file.endsWith("tcp6") ? 6 : 4 });
-    }
-  }
-  return out;
-}
-
-function socketOwners(inodes) {
-  const owners = new Map();
-  let pids = [];
-  try {
-    pids = fs.readdirSync("/proc").filter((name) => /^\d+$/.test(name));
-  } catch {
-    return owners;
-  }
-  for (const pid of pids) {
-    let fds = [];
-    try {
-      fds = fs.readdirSync(`/proc/${pid}/fd`);
-    } catch {
-      continue;
-    }
-    for (const fd of fds) {
-      let target = "";
-      try {
-        target = fs.readlinkSync(`/proc/${pid}/fd/${fd}`);
-      } catch {
-        continue;
-      }
-      const match = /^socket:\[(\d+)\]$/.exec(target);
-      if (match && inodes.has(match[1]) && !owners.has(match[1])) {
-        owners.set(match[1], Number(pid));
-      }
-    }
-  }
-  return owners;
-}
-
-function processInfo(pid) {
-  try {
-    const comm = fs.readFileSync(`/proc/${pid}/comm`, "utf8").trim();
-    const cmdline = fs.readFileSync(`/proc/${pid}/cmdline`, "utf8").split("\0").filter(Boolean);
-    let cwd = "";
-    try {
-      cwd = fs.readlinkSync(`/proc/${pid}/cwd`);
-    } catch {
-      // ignore
-    }
-    return { pid, comm, cmdline, cwd, label: portLabel(comm, cmdline) };
-  } catch {
-    return null;
-  }
-}
-
-function ignoredProcess(info) {
-  if (info.pid === process.pid) {
-    return true;
-  }
-  if (["tailscaled", "tailscale", "rudder-native", "claude", "codex"].includes(info.comm)) {
-    return true;
-  }
-  const joined = info.cmdline.join(" ");
-  // Rudder's own processes: this supervisor, and the `rudder` CLI that hosts
-  // each dashboard and its board server (`node /usr/local/bin/rudder`, or the
-  // package path behind the npm link).
-  const script = path.basename(info.cmdline[1] || "");
-  return (
-    /\/opt\/rudder(-worker)?\//.test(joined) ||
-    /@(exla|viraatdas)\/rudder|\/rudder\/dist\//.test(joined) ||
-    (info.comm === "node" && (script === "rudder" || script === "rudder.js"))
-  );
-}
-
-function portLabel(comm, cmdline) {
-  const args = cmdline.slice(1).map((arg) => path.basename(arg));
-  const interesting = args.find((arg) => /^(next|vite|astro|remix|nuxt|webpack|serve|http-server|uvicorn|gunicorn|flask|rails|django|manage\.py)/.test(arg));
-  if (interesting) {
-    const index = args.indexOf(interesting);
-    return [interesting, args[index + 1]].filter(Boolean).join(" ").slice(0, 40);
-  }
-  return comm.slice(0, 40);
-}
-
-function projectForPath(cwd) {
-  return projectForPreviewPath(cwd, projects.values());
+  const service = await privatePreviewService();
+  // Concurrent discovery callers await the same fresh reconciliation, including
+  // exact-current native custody checks around each asynchronous readiness probe.
+  await service.reconcile([...projects.values()].filter(project => project.status !== "cloning"));
+  ports = [...projects.values()].flatMap(project => service.snapshot(project.workspaceId));
+  // Read-only status does not share the superseded Serve writer or infer roles.
+  const status = await runTailnetCommand(["status", "--json"], { socket: TS_SOCKET, timeoutMs: 1500 });
+  let value = null; try { value = JSON.parse(status.stdout); } catch { /* offline */ }
+  Object.assign(tailnet, tailnetStatus(value, TS_HOSTNAME), { https: ports.length ? true : null });
 }
 
 // ---------------------------------------------------------------------------
@@ -1518,6 +1434,14 @@ for i in z.infolist():
 // Tailscale.
 // ---------------------------------------------------------------------------
 
+function writePreviewPorts(owned) {
+  const file = path.join(PERSIST_HOME, ".tailscale", "rudder-previews.json");
+  fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+  const temporary = `${file}.${process.pid}.${randomUUID()}.tmp`;
+  fs.writeFileSync(temporary, JSON.stringify(owned), { mode: 0o600 });
+  fs.renameSync(temporary, file);
+}
+
 function readPreviewPorts() {
   try { return JSON.parse(fs.readFileSync(path.join(PERSIST_HOME, ".tailscale", "rudder-previews.json"), "utf8")); }
   catch { return []; }
@@ -1528,7 +1452,7 @@ async function startTailscale(env) {
   const stateDir = path.join(PERSIST_HOME, ".tailscale");
   const hasState = fs.existsSync(stateDir) && fs.readdirSync(stateDir).length > 0;
   if (!authKey && !hasState) {
-    previews.offline("Add TS_AUTHKEY to the vault to enable private previews");
+    tailnetOffline("Add TS_AUTHKEY to the vault to enable private previews");
     return;
   }
   if (!commandExists("tailscaled")) {
@@ -1544,9 +1468,9 @@ async function startTailscale(env) {
     "--port=41641",
   ], { stdio: ["ignore", "ignore", "pipe"], detached: false });
   daemon.stderr.on("data", () => undefined);
-  daemon.on("error", () => previews.offline("tailscaled could not start"));
+  daemon.on("error", () => tailnetOffline("tailscaled could not start"));
   daemon.on("exit", (code) => {
-    previews.offline(`tailscaled exited (${code})`);
+    tailnetOffline(`tailscaled exited (${code})`);
     log(`tailscaled exited (${code})`);
   });
   for (let attempt = 0; attempt < 50 && !fs.existsSync(TS_SOCKET); attempt += 1) {
@@ -1558,7 +1482,7 @@ async function startTailscale(env) {
   let authenticated = false;
   try { authenticated = JSON.parse(existing.stdout)?.BackendState === "Running"; } catch { /* no login yet */ }
   if (!authenticated && !authKey) {
-    previews.offline("Tailscale needs login; refresh TS_AUTHKEY in the vault");
+    tailnetOffline("Tailscale needs login; refresh TS_AUTHKEY in the vault");
     return;
   }
   const up = await runTailnetCommand([
@@ -1573,7 +1497,8 @@ async function startTailscale(env) {
     log(`tailscale up failed: ${tailnet.error}`);
     return;
   }
-  await previews.reconcile(ports);
+  // Serve publication is performed only by the registered-process directory.
+  await scanPorts();
   log(`tailscale up as ${tailnet.dnsName || tailnet.hostname}`);
 }
 

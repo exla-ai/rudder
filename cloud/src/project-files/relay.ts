@@ -10,7 +10,7 @@ export type CloudFileDependencies<Actor> = {
   /** Existing authenticated private home RPC. Propagate abort to its pending
    * receipt, bound its response, and dispatch to ProjectFileService on the home.
    */
-  rpc: (homeId: string, operation: "projectFiles", request: CloudFileRequest, signal: AbortSignal) => Promise<unknown>;
+  rpc: (homeId: string, operation: "projectFiles", request: CloudFileRequest, signal: AbortSignal, actor: Actor) => Promise<unknown>;
 };
 export class CloudProjectFileError extends Error {
   constructor(readonly status: number, message: string) { super(message); }
@@ -57,7 +57,7 @@ export class CloudProjectFiles<Actor> {
       bounded.throwIfAborted();
       const grant = await abortable(this.dependencies.authorize(actor, request.scope, bounded), bounded);
       if (!sameScope(grant.scope, request.scope) || !grant.homeId) throw new CloudProjectFileError(403, "Project file access is no longer current");
-      const result = await abortable(this.dependencies.rpc(grant.homeId, "projectFiles", request, bounded), bounded);
+      const result = await abortable(this.dependencies.rpc(grant.homeId, "projectFiles", request, bounded, actor), bounded);
       bounded.throwIfAborted();
       const fresh = await abortable(this.dependencies.authorize(actor, request.scope, bounded), bounded);
       bounded.throwIfAborted();

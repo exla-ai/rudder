@@ -194,7 +194,7 @@ fn start_task(shared:&Arc<Shared>,job:&Arc<Job>,original:&FinalizationBudget,can
         ensure!(held.node.as_ref().is_some_and(|actual|Arc::ptr_eq(actual,&node))&&job.is_original_task_command(),"original StartTask project association changed");
         let selection=OriginalTaskCommandSelection{actual:job.clone(),_node:node.clone(),source:held.task.selected_source.as_ref().context("original StartTask selected source absent")?.clone(),root:job.covered_root().context("original StartTask root absent")?.clone()};
         shared.control.admit_task_from_original_command_retaining(&mut held.task.scope,&selection,original,cancelled.clone())?;
-        let scope=held.task.scope.as_ref().unwrap().clone();let actual_scope=scope.clone();let factory=held.task.factory.as_ref().unwrap().clone();let control=shared.control.clone();let owner=project.clone();let image=runtime.clone();
+        let scope=held.task.scope.as_ref().unwrap().clone();let actual_scope=scope.clone();let factory=held.task.factory.as_ref().unwrap().clone();let control=shared.control.clone();let owner=project.clone();let image=runtime.clone();let model=node.selection.as_ref().context("selected model absent")?.1.clone();
         held.task.factory_handle=Some(thread::Builder::new().name("rudder-ingress-task-factory".into()).spawn(move||{
             // Actual carrier is OUTSIDE catch. It preserves every error/panic,
             // input/secret/charge even if result delivery or binding fails.
@@ -203,7 +203,7 @@ fn start_task(shared:&Arc<Shared>,job:&Arc<Job>,original:&FinalizationBudget,can
                 actual_scope.wait_original_factory_registration()?;
                 let (original,cancelled)=held.admission.as_ref().context("original admission absent")?.source_lifetime();image.assert_current(&original,&cancelled)?;
                 let admission=held.admission.take().context("original admitted call absent")?;
-                let prepared=admission.prepare(&owner,|selected,cancel,budget|Ok(load_selected_managed_task_profile(&image.profile_loader(),selected,cancel,budget)?),
+                let prepared=admission.prepare(&owner,|selected,cancel,budget|image.selected_model_profile(selected,&model,budget,cancel),
                     |_,cancel,budget|{image.assert_current(budget,cancel)?;let source=control.source_for_factory(&actual_scope,Some(&cache))?;image.resources_retaining(source,backend,budget,&cancelled)});
                 match prepared {Ok(value)=>{
                     held.prepared=Some(value);actual_scope.bind_prepared_retaining(held.prepared.as_mut().unwrap())?;

@@ -41,7 +41,7 @@ pub mod remote_qualification;
 mod root;
 #[cfg(target_os = "linux")]
 mod state;
-pub use profile::{ExecutionProfileV4, ExecutionWorkspaceSelectionV4};
+pub use profile::{ExecutionProfileV4, ExecutionWorkspaceSelectionV4, ModelProfileSelectionV1, ModelSessionReceiptV1};
 mod record;
 pub use record::{
     CheckpointArtifactV2, CheckpointRef, CommittedExecutionRecord, ExecutionIdentityV2,

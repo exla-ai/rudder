@@ -356,7 +356,12 @@ pub(crate) fn classify_task_with_cli(cwd: &Path, task: &str) -> TaskRoutingDecis
     else {
         return fallback;
     };
-    let payload = serde_json::to_vec(&serde_json::json!({"task": task})).unwrap_or_default();
+    let ingress = serde_json::json!({
+        "requestId": uuid::Uuid::new_v4().to_string(), "task": task,
+        "execution": {"checkoutPath": cwd, "location": "local", "workspaceMode": "isolated"},
+        "attachments": [], "conversationReferences": []
+    });
+    let payload = serde_json::to_vec(&serde_json::json!({"ingress": ingress})).unwrap_or_default();
     let stdin = child.stdin.take();
     // Writing stdin must not defeat the timeout if a broken helper never reads.
     thread::spawn(move || {
@@ -368,7 +373,7 @@ pub(crate) fn classify_task_with_cli(cwd: &Path, task: &str) -> TaskRoutingDecis
     let reader = thread::spawn(move || {
         let mut output = Vec::new();
         if let Some(stdout) = stdout {
-            let _ = stdout.take(16 * 1024 + 1).read_to_end(&mut output);
+            let _ = stdout.take(512 * 1024 + 1).read_to_end(&mut output);
         }
         output
     });
@@ -390,7 +395,7 @@ pub(crate) fn classify_task_with_cli(cwd: &Path, task: &str) -> TaskRoutingDecis
         let _ = child.wait();
         return fallback;
     }
-    // Our helper emits one tiny JSON result and exits. Do not wait on a pipe
+    // Our helper echoes the bounded ingress and exits. Do not wait on a pipe
     // inherited by a faulty descendant after the process has exited.
     let output = if reader.is_finished() {
         reader.join().unwrap_or_default()
@@ -405,12 +410,12 @@ pub(crate) fn classify_task_with_cli(cwd: &Path, task: &str) -> TaskRoutingDecis
             return fallback;
         }
     };
-    if output.len() > 16 * 1024 {
+    if output.len() > 512 * 1024 {
         return fallback;
     }
-    let Ok(decision) = serde_json::from_slice::<TaskRoutingDecision>(&output) else {
-        return fallback;
-    };
+    let Ok(response) = serde_json::from_slice::<serde_json::Value>(&output) else { return fallback; };
+    if response["ingress"] != ingress || response["action"] != "new-task" { return fallback; }
+    let Ok(decision) = serde_json::from_value::<TaskRoutingDecision>(response["routing"].clone()) else { return fallback; };
     if !matches!(decision.source.as_str(), "deterministic" | "decisions")
         || decision.reason.trim().is_empty()
         || decision.reason.len() > 256

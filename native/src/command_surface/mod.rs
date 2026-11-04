@@ -44,15 +44,23 @@ pub fn completions(words: &[&str]) -> Vec<String> {
 }
 #[derive(Debug, PartialEq, Eq)]
 pub enum ComposerInput { Text, Backend, Rudder(String), Refused(String) }
+pub fn utc_date() -> String {
+    let seconds = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default().as_secs() as libc::time_t;
+    let mut utc: libc::tm = unsafe { std::mem::zeroed() };
+    if unsafe { libc::gmtime_r(&seconds, &mut utc) }.is_null() { return String::new(); }
+    format!("{:04}-{:02}-{:02}", utc.tm_year + 1900, utc.tm_mon + 1, utc.tm_mday)
+}
 /// Call only in the correct composer. Backend slash text is forwarded intact
 /// before interpreting Rudder's namespace, including retired Rudder spellings.
 /// `utc_date` is the owner's trusted YYYY-MM-DD date, never agent input.
 pub fn classify_composer(text: &str, backend_composer: bool, utc_date: &str) -> ComposerInput {
     let Some(command) = text.trim().split_whitespace().next().filter(|word| word.starts_with('/')) else { return ComposerInput::Text; };
     if backend_composer { return ComposerInput::Backend; }
+    if command[1..].contains('/') { return ComposerInput::Text; }
     let r = registry();
     if r.retired_slash.iter().any(|value| value == command) {
-        return ComposerInput::Refused(format!("{command} is retired; use ordinary task input or a selected agent action"));
+        return ComposerInput::Refused(format!("{command} has been retired; use ordinary task input or a selected agent action"));
     }
     if r.slash.iter().any(|value| value == command) { return ComposerInput::Rudder(command.into()); }
     if let Some(alias) = r.slash_aliases.iter().find(|value| value.name == command) {
@@ -61,7 +69,7 @@ pub fn classify_composer(text: &str, backend_composer: bool, utc_date: &str) -> 
         }
         return ComposerInput::Rudder(command.into());
     }
-    ComposerInput::Refused(format!("Unknown Rudder command {command}; use the backend composer for backend slash commands"))
+    ComposerInput::Refused(format!("unknown command {command}; use the backend composer for backend slash commands"))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -149,6 +157,12 @@ impl SurfaceRequest {
                 ensure!(a["authorization"].as_str() == self.operation.split('.').nth(1) && s.selection == Selection::Change, "Change authorization differs"); }
             "project.settings.v1" => { fields(a, &["setting", "value"])?; text(&a["value"], 256)?;
                 ensure!(["model", "effort", "speed", "notifications", "sound", "color", "telemetry"].contains(&a["setting"].as_str().unwrap_or("")) && s.selection == Selection::Project, "Unknown project setting"); }
+            "project.files.v1" => {
+                fields(a, &["workspace_id", "path"])?;
+                if let Some(workspace) = a.get("workspace_id") { text(workspace, 256)?; }
+                if let Some(path) = a.get("path") { text(path, 4096)?; }
+                ensure!(s.selection == Selection::Project, "Project files require project scope");
+            }
             name => {
                 match name {
                     "surface.open.v1" | "agent.list.v1" | "agent.status.v1" | "agent.logs.v1" | "agent.watch.v1" | "agent.attach.v1" | "agent.report.v1" | "agent.find.v1" | "change.sync.v1" | "project.restart.v1" | "auth.login.v1" | "diagnostic.check.v1" | "diagnostic.setup.v1" => fields(a, &[])?,

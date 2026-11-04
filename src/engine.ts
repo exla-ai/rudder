@@ -146,8 +146,16 @@ export function persistentProjectEngineRequested(repo: string, env: NodeJS.Proce
   return env.RUDDER_ENGINE === undefined ? projectEngineAuthority(repo) === "fabric" : persistentEngineRequested(env);
 }
 
-export async function runEngineCommand(action: string | undefined, repo: string, json = false): Promise<void> {
+export async function runEngineCommand(action: string | undefined, repo: string, json = false, args: string[] = []): Promise<void> {
   const op = action ?? "status";
+  if (["migration", "adopt-migration", "results", "await", "files", "screen", "previews", "preview-register"].includes(op)) {
+    const code = await new Promise<number | null>((resolve, reject) => {
+      const child = spawn(binaryPath({}), ["engine", op, "--repo", repo, ...args, ...(json ? ["--json"] : [])], { stdio: "inherit", env: process.env });
+      child.once("error", reject); child.once("exit", resolve);
+    });
+    process.exitCode = code ?? 1;
+    return;
+  }
   if (op === "api") {
     const code = await new Promise<number | null>((resolve, reject) => {
       const child = spawn(binaryPath({}), ["fabric"], { stdio: "inherit", env: process.env });
@@ -161,7 +169,7 @@ export async function runEngineCommand(action: string | undefined, repo: string,
   if (op === "start") status = await ensureEngineRunning(repo);
   else if (op === "status") status = await readEngineStatus(repo);
   else if (op === "shutdown" || op === "stop") status = await shutdownEngine(repo);
-  else throw new Error("Usage: rudder engine [start|status|shutdown] [--repo PATH] [--json]");
+  else throw new Error("Usage: rudder engine [start|status|shutdown|migration|adopt-migration|results|await|files|screen|previews|preview-register] [--repo PATH] [--json]");
   process.stdout.write(json ? `${JSON.stringify(status)}\n` : status.running
     ? `Engine ready in ${status.repo} (owner epoch ${status.owner?.epoch ?? "legacy"})\n`
     : `Engine stopped in ${status.repo}\n`);

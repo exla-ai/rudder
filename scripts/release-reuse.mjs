@@ -10,7 +10,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { isDeepStrictEqual } from 'node:util';
 
-export const PLATFORMS = ['darwin-arm64', 'darwin-x64', 'linux-x64'];
+export const PLATFORMS = ['darwin-arm64', 'linux-x64'];
 const WORKFLOW = '.github/workflows/release.yml';
 export const QUALIFY_STEPS = {
   native_archives:'Authenticate original native archives before extraction',
@@ -101,7 +101,7 @@ function artifact(value, run, ctx, now) {
 }
 function exactlyOne(values, name) { const matches=values.filter(v=>v.name === name); must(matches.length === 1); return matches[0]; }
 function validateManifests(manifests, revision) {
-  must(Array.isArray(manifests) && manifests.length === 3
+  must(Array.isArray(manifests) && manifests.length === PLATFORMS.length
     && isDeepStrictEqual(manifests.map(m=>m.platform).sort(), [...PLATFORMS].sort()));
   for (const manifest of manifests) {
     must(manifest.formatVersion === 1 && manifest.sourceRevision === revision && manifest.buildProfile === 'release');
@@ -115,7 +115,7 @@ function checkQualification(record, ctx) {
   must(record?.format_version === 1 && record.mode === 'full' && sameContext(record.context,ctx)
     && /^[0-9a-f]{64}$/.test(record.archive_proof_sha256));
   validateManifests(record.manifests,ctx.sha);
-  must(Array.isArray(record.artifacts) && record.artifacts.length === 3);
+  must(Array.isArray(record.artifacts) && record.artifacts.length === PLATFORMS.length);
   for (const p of PLATFORMS) { const entry=exactlyOne(record.artifacts,nativeName(p)); must(id(entry.id)); digest(entry.digest); }
   must(Object.keys(record.steps).sort().join() === Object.keys(QUALIFY_STEPS).sort().join()
     && Object.values(record.steps).every(value=>value === 'success'));
@@ -160,7 +160,7 @@ export async function selectReuse(ctx, api, now=Date.now) {
     workflow_ref:`${ctx.repository}/${WORKFLOW}@refs/heads/${branch}`};
   checkQualification(record,candidateContext);
   const native=PLATFORMS.map(p=>artifact(exactlyOne(uploads,nativeName(p)),run,ctx,clock()));
-  must(uploads.filter(a=>a.name.startsWith('rudder-native-')).length === 3);
+  must(uploads.filter(a=>a.name.startsWith('rudder-native-')).length === PLATFORMS.length);
   for (const entry of native) {
     const recorded=exactlyOne(record.artifacts,entry.name);
     must(recorded.id === entry.id && digest(recorded.digest) === entry.digest);
@@ -250,8 +250,8 @@ export async function authenticateNativeArchives(ctx, identities, api, root, now
   must(workflow.path === WORKFLOW && workflow.name === 'Release' && workflow.state === 'active');
   const values=await pages(api,`${base}/runs/${run.id}/artifacts`,'artifacts');
   const native=PLATFORMS.map(p=>artifact(exactlyOne(values,nativeName(p)),run,ctx,clock()));
-  must(values.filter(value=>value.name.startsWith('rudder-native-')).length === 3);
-  must(values.filter(value=>value.name.startsWith('native-upload-')).length === 3);
+  must(values.filter(value=>value.name.startsWith('rudder-native-')).length === PLATFORMS.length);
+  must(values.filter(value=>value.name.startsWith('native-upload-')).length === PLATFORMS.length);
   const produced=[], sidecars=[];
   for (const p of PLATFORMS) {
     const entry=artifact(exactlyOne(values,`native-upload-${p}`),run,ctx,clock()); sidecars.push(entry); must(entry.size <= 256*1024);
@@ -308,10 +308,10 @@ export function checkNativeSeal(manifests, record) {
   must(isDeepStrictEqual(manifests,record.manifests));
 }
 function uploads(values,names) {
-  must(Array.isArray(values) && values.length === 3);
+  must(Array.isArray(values) && values.length === PLATFORMS.length);
   const result=names.map(name=> { const value=exactlyOne(values,name); must(id(value.id));
     return {name,id:Number(value.id),digest:digest(value.digest)}; });
-  must(new Set(result.map(value=>value.id)).size === 3); return result;
+  must(new Set(result.map(value=>value.id)).size === PLATFORMS.length); return result;
 }
 export function validateReuseProof(record, ctx) {
   must(record?.format_version === 1 && ctx.run_attempt === 1 && sameContext(record.current,ctx)

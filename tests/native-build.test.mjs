@@ -54,7 +54,7 @@ test("bad prebuilt input never falls back to Cargo", async t => {
   const cases = {
     empty: async f => ({ RUDDER_NATIVE_PREBUILTS: "" }),
     absent: async f => ({ RUDDER_NATIVE_PREBUILTS: path.join(f.root, "absent") }),
-    missingPlatform: async f => { await fs.rm(f.directory("darwin-x64"), { recursive: true }); },
+    missingPlatform: async f => { await fs.rm(f.directory("darwin-arm64"), { recursive: true }); },
     missingBuddy: async f => { await fs.rm(path.join(f.directory("linux-x64"), "rudder-jj")); },
     missingManifest: async f => { await fs.rm(path.join(f.directory("linux-x64"), MANIFEST_NAME)); },
     wrongSource: async f => f.mutateManifest("linux-x64", m => m.sourceRevision = "0".repeat(40)),
@@ -102,7 +102,7 @@ test("artifact CLI produces the host manifest and verifies the full release set"
   const helper = fileURLToPath(new URL("../scripts/native-artifacts.mjs", import.meta.url));
   const host = `${process.platform}-${process.arch}`;
   assert.match((await execute(process.execPath, [helper, "create", "--directory", f.directory(host), "--platform", host, "--revision", f.revision], { cwd: f.root, env: f.env, timeout: 15_000 })).stdout, /Created/);
-  assert.match((await execute(process.execPath, [helper, "verify", "--root", f.artifacts, "--revision", f.revision], { cwd: f.root, env: f.env, timeout: 15_000 })).stdout, /Verified 3 native pairs/);
+  assert.match((await execute(process.execPath, [helper, "verify", "--root", f.artifacts, "--revision", f.revision], { cwd: f.root, env: f.env, timeout: 15_000 })).stdout, /Verified 2 native pairs/);
   const wrong = host === "linux-x64" ? "darwin-arm64" : "linux-x64";
   await assert.rejects(execute(process.execPath, [helper, "create", "--directory", f.directory(wrong), "--platform", wrong, "--revision", f.revision], { cwd: f.root, env: f.env, timeout: 15_000 }));
 });

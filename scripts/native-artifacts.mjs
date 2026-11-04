@@ -7,7 +7,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { isDeepStrictEqual, parseArgs } from "node:util";
 
-export const NATIVE_PLATFORMS = Object.freeze(["darwin-arm64", "darwin-x64", "linux-x64"]);
+export const NATIVE_PLATFORMS = Object.freeze(["darwin-arm64", "linux-x64"]);
 export const NATIVE_BINARIES = Object.freeze(["rudder-native", "rudder-jj"]);
 export const MANIFEST_NAME = "native-manifest.json";
 export const NATIVE_FEATURES = Object.freeze(["rudder-vcs-bridge/cli"]);

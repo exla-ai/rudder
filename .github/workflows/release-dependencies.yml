@@ -26,9 +26,6 @@ jobs:
           - key: darwin-arm64
             runner: macos-15
             cache_profile: release-fixtures
-          - key: darwin-x64
-            runner: macos-15-intel
-            cache_profile: release
           - key: linux-x64
             runner: ubuntu-22.04
             cache_profile: release

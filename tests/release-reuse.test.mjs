@@ -71,7 +71,7 @@ function fixture() {
   const artifacts=native.map(wrap); const receipt=wrap({id:400,name:'release-qualification'}); artifacts.push(receipt);
   const names=[...PLATFORMS.map(p=>`Native ${p}`),'Release qualification'];
   const jobs=names.map((name,i)=>({id:500+i,name,run_id:100,head_sha:sha,status:'completed',conclusion:'success',
-    completed_at:'2026-10-31T12:29:00Z',steps:(i===3?Object.values(QUALIFY_STEPS):NATIVE_STEPS)
+    completed_at:'2026-10-31T12:29:00Z',steps:(i===PLATFORMS.length?Object.values(QUALIFY_STEPS):NATIVE_STEPS)
       .map(name=>({name,status:'completed',conclusion:'success'}))}));
   let archive; const runs=[run,current]; let calls=0;
   const result={ctx,run,current,record,artifacts,jobs,runs,
@@ -93,8 +93,8 @@ const select=f=>selectReuse(f.ctx,f.api,f.now);
 test('only one fully qualified exact-SHA push supplies origin IDs and digests',async()=> {
   const f=fixture(); const selected=await select(f);
   assert.equal(selected.origin.run_id,100); assert.equal(selected.origin.run_attempt,1);
-  assert.equal(selected.origin.jobs.length,4);
-  assert.deepEqual(selected.origin.artifacts.map(a=>a.id),[300,301,302]);
+  assert.equal(selected.origin.jobs.length,3);
+  assert.deepEqual(selected.origin.artifacts.map(a=>a.id),[300,301]);
   assert.ok(selected.origin.artifacts.every(a=>/^sha256:[a-f0-9]{64}$/.test(a.digest)));
 });
 test('release-check and repeated current tag attempts never even query reuse evidence',async()=> {
@@ -122,9 +122,9 @@ test('ambiguous success/success and success/failure sets fall back, not latest-s
 });
 test('required jobs and steps must run successfully; continuation/skip is no waiver',async()=> {
   for (const change of [f=>{f.jobs.pop();},f=>{f.jobs[0].conclusion='skipped';},
-    f=>{f.jobs[3].steps.find(s=>s.name===QUALIFY_STEPS.js).conclusion='skipped';},
-    f=>{f.jobs[3].steps.find(s=>s.name===QUALIFY_STEPS.native_archives).conclusion='skipped';},
-    f=>{f.jobs[3].steps.find(s=>s.name===QUALIFY_STEPS.rust).conclusion='failure';},
+    f=>{f.jobs[2].steps.find(s=>s.name===QUALIFY_STEPS.js).conclusion='skipped';},
+    f=>{f.jobs[2].steps.find(s=>s.name===QUALIFY_STEPS.native_archives).conclusion='skipped';},
+    f=>{f.jobs[2].steps.find(s=>s.name===QUALIFY_STEPS.rust).conclusion='failure';},
     f=>{f.jobs.push({...f.jobs[0],id:999,name:'Unexpected skipped gate',conclusion:'skipped'});},
     f=>{f.record.steps.js='failure';f.refresh();}]) {
     const f=fixture(); change(f); await assert.rejects(select(f));
@@ -146,7 +146,7 @@ test('a slow receipt read cannot adopt evidence after its original expiry',async
 test('receipt context, original upload digests and each native source revision are bound',async()=> {
   for (const change of [r=>{r.context.sha='b'.repeat(40);},r=>{r.context.repository_id=8;},
     r=>{r.context.ref='refs/heads/main';},r=>{r.artifacts[0].digest=`sha256:${'f'.repeat(64)}`;},
-    r=>{r.manifests[2].sourceRevision='b'.repeat(40);},r=>{delete r.archive_proof_sha256;}]) {
+    r=>{r.manifests[1].sourceRevision='b'.repeat(40);},r=>{delete r.archive_proof_sha256;}]) {
     const f=fixture(); change(f.record); f.refresh(); await assert.rejects(select(f));
   }
 });
@@ -171,7 +171,7 @@ test('publication proof retains origin scope, version, upload identities and cur
 });
 test('every platform manifest/hash/size must match the bytes qualified at the source revision',()=> {
   const f=fixture(); checkNativeSeal(structuredClone(f.record.manifests),f.record);
-  for (let p=0;p<3;p++) for (const key of ['sha256','size']) {
+  for (let p=0;p<PLATFORMS.length;p++) for (const key of ['sha256','size']) {
     const actual=structuredClone(f.record.manifests);
     actual[p].files['rudder-native'][key]=key==='size'?101:'f'.repeat(64);
     assert.throws(()=>checkNativeSeal(actual,f.record));
@@ -193,15 +193,16 @@ function nativeArchiveFixture() {
   const manifests=PLATFORMS.map(p=>({formatVersion:1,sourceRevision:ctx.sha,platform:p,buildProfile:'release',
     features:['rudder-vcs-bridge/cli'],files:{'rudder-native':{sha256:hash('producer-native'),size:15},
       'rudder-jj':{sha256:hash('producer-jj'),size:11}}}));
-  const metadata=f.artifacts.slice(0,3).map((entry,i)=> {
+  const metadata=f.artifacts.slice(0,PLATFORMS.length).map((entry,i)=> {
     const bytes=zip([['native-manifest.json',JSON.stringify(manifests[i])],['rudder-native','producer-native'],['rudder-jj','producer-jj']]);
     blobs.set(entry.id,bytes); return {...entry,digest:`sha256:${hash(bytes)}`,size_in_bytes:bytes.length};
   });
   const identities=metadata.map(entry=>({context:ctx,name:entry.name,id:entry.id,digest:entry.digest}));
   const refreshProducer=()=> {
-    for (let i=0;i<3;i++) {
+    const n=PLATFORMS.length;
+    for (let i=0;i<n;i++) {
       const bytes=zip([['upload.json',JSON.stringify(identities[i])]]); blobs.set(600+i,bytes);
-      metadata[3+i]={...metadata[i],id:600+i,name:`native-upload-${PLATFORMS[i]}`,digest:`sha256:${hash(bytes)}`,size_in_bytes:bytes.length};
+      metadata[n+i]={...metadata[i],id:600+i,name:`native-upload-${PLATFORMS[i]}`,digest:`sha256:${hash(bytes)}`,size_in_bytes:bytes.length};
     }
   };
   refreshProducer();
@@ -231,17 +232,17 @@ test('native ZIPs match producer IDs/digests and trusted metadata before exact r
       assert.equal((await fs.lstat(file)).isSymbolicLink(),false);
     }
     const blobs=f.requests.filter(request=>request.url.hostname === 'fixture.blob.core.windows.net');
-    assert.equal(blobs.length,6); assert.ok(blobs.every(request=>request.options.headers === undefined));
+    assert.equal(blobs.length,2*PLATFORMS.length); assert.ok(blobs.every(request=>request.options.headers === undefined));
   } finally { await fs.rm(temporary,{recursive:true,force:true}); }
 });
 
 test('substituting Linux binary AND matching manifest cannot create an archive seal or qualification receipt',{timeout:10_000},async()=> {
   const f=nativeArchiveFixture(), temporary=await fs.mkdtemp(path.join(os.tmpdir(),'release-native-test-'));
-  const original=f.blobs.get(302), changed=structuredClone(f.manifests[2]);
+  const original=f.blobs.get(301), changed=structuredClone(f.manifests[1]);
   for (const entry of f.metadata) entry.expires_at=new Date(Date.now()+60_000).toISOString();
   changed.files['rudder-native'].sha256=hash('attacker-native');
   const substituted=zip([['native-manifest.json',JSON.stringify(changed)],['rudder-native','attacker-native'],['rudder-jj','producer-jj']]);
-  assert.equal(substituted.length,original.length); assert.notEqual(hash(substituted),hash(original)); f.blobs.set(302,substituted);
+  assert.equal(substituted.length,original.length); assert.notEqual(hash(substituted),hash(original)); f.blobs.set(301,substituted);
   const event=path.join(temporary,'event.json'), output=path.join(temporary,'output');
   const env={GITHUB_REPOSITORY:f.ctx.repository,GITHUB_REPOSITORY_ID:String(f.ctx.repository_id),
     GITHUB_RUN_ID:String(f.ctx.run_id),GITHUB_RUN_ATTEMPT:'1',GITHUB_SHA:f.ctx.sha,GITHUB_REF:f.ctx.ref,
@@ -258,7 +259,7 @@ test('substituting Linux binary AND matching manifest cannot create an archive s
     // cannot make this regression pass after archive authentication breaks.
     await assert.rejects(main('fetch-native'),{message:'RELEASE_EVIDENCE_REJECTED'});
     assert.deepEqual(f.requests.filter(request=>request.url.hostname === 'fixture.blob.core.windows.net' && Number(request.url.pathname.slice(1)) < 600)
-      .map(request=>Number(request.url.pathname.slice(1))),[300,301,302]);
+      .map(request=>Number(request.url.pathname.slice(1))),[300,301]);
     await absent('prebuilt-native'); await absent('release-evidence/native-archives.json'); await absent(output);
     await assert.rejects(main('certify')); await absent('release-evidence/qualification.json');
   } finally {
@@ -287,21 +288,20 @@ test('authenticated ZIPs still reject unexpected paths and bounded-entry expansi
   for (const files of [[['../rudder-native','producer-native'],['rudder-jj','producer-jj'],['native-manifest.json','{}']],
     [['rudder-native','producer-native'],['rudder-jj','producer-jj'],['native-manifest.json','x'.repeat(16*1024+1)]]]) {
     const f=nativeArchiveFixture(), temporary=await fs.mkdtemp(path.join(os.tmpdir(),'release-native-test-'));
-    const bytes=zip(files); f.blobs.set(302,bytes); f.metadata[2].size_in_bytes=bytes.length;
-    f.metadata[2].digest=f.identities[2].digest=`sha256:${hash(bytes)}`;
+    const bytes=zip(files); f.blobs.set(301,bytes); f.metadata[1].size_in_bytes=bytes.length;
+    f.metadata[1].digest=f.identities[1].digest=`sha256:${hash(bytes)}`;
     f.refreshProducer();
     try {
       const root=path.join(temporary,'native'); await assert.rejects(authenticateNativeArchives(f.ctx,f.identities,f.api,root,f.now)); await absent(root);
       assert.deepEqual(f.requests.filter(request=>request.url.hostname === 'fixture.blob.core.windows.net' && Number(request.url.pathname.slice(1)) < 600)
-        .map(request=>Number(request.url.pathname.slice(1))),[300,301,302]);
+        .map(request=>Number(request.url.pathname.slice(1))),[300,301]);
     } finally { await fs.rm(temporary,{recursive:true,force:true}); }
   }
 });
 
 test('workflow preserves platform/test gates and publishes only from two explicit complete paths',async()=> {
   const yaml=await fs.readFile(new URL('../.github/workflows/release.yml',import.meta.url),'utf8');
-  for (const pair of ['key: darwin-arm64\n            runner: macos-15','key: darwin-x64\n            runner: macos-15-intel',
-    'key: linux-x64\n            runner: ubuntu-22.04']) assert.ok(yaml.includes(pair));
+  for (const pair of ['key: darwin-arm64\n            runner: macos-15','key: linux-x64\n            runner: ubuntu-22.04']) assert.ok(yaml.includes(pair));
   assert.match(yaml,/github\.ref_type != 'tag' \|\| needs\.reuse\.result != 'success'/);
   assert.match(yaml,/needs\.native-artifacts\.result == 'skipped' && needs\.qualification\.result == 'skipped'/);
   assert.match(yaml,/needs\.native-artifacts\.result == 'success' && needs\.qualification\.result == 'success'/);

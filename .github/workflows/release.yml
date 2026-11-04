@@ -73,15 +73,6 @@ jobs:
           name: reuse-rudder-native-darwin-arm64
           path: prebuilt-native/rudder-native-darwin-arm64/
           if-no-files-found: error
-      - name: Stage reused darwin-x64
-        id: intel
-        if: steps.verify.outcome == 'success'
-        continue-on-error: true
-        uses: actions/upload-artifact@v4
-        with:
-          name: reuse-rudder-native-darwin-x64
-          path: prebuilt-native/rudder-native-darwin-x64/
-          if-no-files-found: error
       - name: Stage reused linux-x64
         id: linux
         if: steps.verify.outcome == 'success'
@@ -93,13 +84,12 @@ jobs:
           if-no-files-found: error
       - name: Record originating and current copy identities
         id: record
-        if: steps.arm.outcome == 'success' && steps.intel.outcome == 'success' && steps.linux.outcome == 'success'
+        if: steps.arm.outcome == 'success' && steps.linux.outcome == 'success'
         continue-on-error: true
         run: node scripts/release-reuse.mjs record-reuse
         env:
           REUSE_UPLOADS: >-
             [{"name":"reuse-rudder-native-darwin-arm64","id":"${{ steps.arm.outputs.artifact-id }}","digest":"${{ steps.arm.outputs.artifact-digest }}"},
-            {"name":"reuse-rudder-native-darwin-x64","id":"${{ steps.intel.outputs.artifact-id }}","digest":"${{ steps.intel.outputs.artifact-digest }}"},
             {"name":"reuse-rudder-native-linux-x64","id":"${{ steps.linux.outputs.artifact-id }}","digest":"${{ steps.linux.outputs.artifact-digest }}"}]
       - name: Upload exact reuse proof
         id: proof
@@ -128,9 +118,6 @@ jobs:
           - key: darwin-arm64
             runner: macos-15
             cache_profile: release-fixtures
-          - key: darwin-x64
-            runner: macos-15-intel
-            cache_profile: release
           - key: linux-x64
             runner: ubuntu-22.04
             cache_profile: release

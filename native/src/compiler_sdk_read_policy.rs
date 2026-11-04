@@ -6,6 +6,8 @@ use super::*;
 #[serde(deny_unknown_fields)]
 struct ChildReadObservation {
     format_version:u32,kind:String,policy_sha256:String,architecture:String,
+    isolation_sha256:String,mount_count:u32,source_declarations:String,
+    memfd_errno:i32,execveat_errno:i32,io_uring_errno:i32,sysv_ipc_errno:i32,keyring_errno:i32,
     seccomp_mode:u32,unshare_errno:i32,clone3_errno:i32,proc_uuid_errno:i32,job_file_errno:i32,
     observer_proc_fd_closed:bool,proc_empty_readonly:bool,workspace_parent_readonly:bool,
     stdin_eof:bool,descriptors:String,cache_reuse:bool,
@@ -25,11 +27,17 @@ pub(super) fn validate_selected_confinement_data(workload:&serde_json::Value)->R
         &&policy["cache_reuse"]==false&&policy["deterministic_execution"]==false,
         "SDK keyed compiler read policy differs");
     let expected=digest(&canonical_json(policy)?);
+    let isolation:serde_json::Value=serde_json::from_str(include_str!("sdk_compiler_isolation/policy.json"))?;
+    let isolation_sha256=digest(&canonical_json(&isolation)?);
     let checks=workload["checks"].as_array().context("SDK actual confined invocations absent")?;
     ensure!(!checks.is_empty(),"SDK actual confined invocation list is empty");
     for check in checks {
         let actual:ChildReadObservation=serde_json::from_value(check["input_confinement"].clone())?;
-        ensure!(actual.format_version==2&&actual.kind=="actual-a2-procless-seccomp-child-v2"
+        ensure!(actual.format_version==3&&actual.kind=="actual-a2-procless-seccomp-child-v3"
+            &&actual.isolation_sha256==isolation_sha256&&actual.mount_count==6
+            &&actual.source_declarations=="job-union-exact"
+            &&actual.memfd_errno==libc::EPERM&&actual.execveat_errno==libc::EPERM
+            &&actual.io_uring_errno==libc::EPERM&&actual.sysv_ipc_errno==libc::EPERM&&actual.keyring_errno==libc::EPERM
             &&actual.policy_sha256==expected&&actual.architecture==std::env::consts::ARCH
             &&matches!(actual.architecture.as_str(),"x86_64"|"aarch64")
             &&actual.seccomp_mode==2&&actual.unshare_errno==libc::EPERM&&actual.clone3_errno==libc::ENOSYS
@@ -47,7 +55,12 @@ pub(super) fn validate_selected_confinement_data(workload:&serde_json::Value)->R
 #[cfg(test)]
 pub(super) fn child_read_observation_fixture_data()->serde_json::Value {
     let rules:serde_json::Value=serde_json::from_str(include_str!("compiler_sdk_rules.json")).unwrap();
-    serde_json::json!({"format_version":2,"kind":"actual-a2-procless-seccomp-child-v2",
+    let isolation:serde_json::Value=serde_json::from_str(include_str!("sdk_compiler_isolation/policy.json")).unwrap();
+    serde_json::json!({"format_version":3,"kind":"actual-a2-procless-seccomp-child-v3",
+        "isolation_sha256":digest(&canonical_json(&isolation).unwrap()),"mount_count":6,
+        "source_declarations":"job-union-exact",
+        "memfd_errno":libc::EPERM,"execveat_errno":libc::EPERM,"io_uring_errno":libc::EPERM,
+        "sysv_ipc_errno":libc::EPERM,"keyring_errno":libc::EPERM,
         "policy_sha256":digest(&canonical_json(&rules["compiler_input_policy"]).unwrap()),
         "architecture":std::env::consts::ARCH,"seccomp_mode":2,"unshare_errno":libc::EPERM,
         "clone3_errno":libc::ENOSYS,"proc_uuid_errno":libc::ENOENT,"job_file_errno":libc::ENOENT,
@@ -66,6 +79,11 @@ mod tests {
         for (field,value) in [
             ("format_version",serde_json::json!(1)),("kind",serde_json::json!("pretend")),
             ("policy_sha256",serde_json::json!("0".repeat(64))),("architecture",serde_json::json!("wrong")),
+            ("isolation_sha256",serde_json::json!("0".repeat(64))),("mount_count",serde_json::json!(7)),
+            ("source_declarations",serde_json::json!("user-assertion")),
+            ("memfd_errno",serde_json::json!(0)),("execveat_errno",serde_json::json!(0)),
+            ("io_uring_errno",serde_json::json!(0)),("sysv_ipc_errno",serde_json::json!(0)),
+            ("keyring_errno",serde_json::json!(0)),
             ("seccomp_mode",serde_json::json!(0)),("unshare_errno",serde_json::json!(0)),
             ("clone3_errno",serde_json::json!(libc::EPERM)),("proc_uuid_errno",serde_json::json!(0)),
             ("job_file_errno",serde_json::json!(0)),("observer_proc_fd_closed",serde_json::json!(false)),

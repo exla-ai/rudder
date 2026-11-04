@@ -26,21 +26,10 @@ test("a merged row collapses into the done drawer and opens to its result", { ti
   const session = await launchRudder(t, { repo, claudeBin: completer });
   const story = journey(session, "finished work collapses into a drawer");
 
-  await story.step("a worker finishes into review", async () => {
+  await story.step("a finished worker integrates automatically into the done drawer", async () => {
     await session.waitForText("Type a task", { timeout: 20_000 });
     await session.type("write the done marker");
     await session.press("Enter");
-    await session.waitForText("press m to read", { timeout: 30_000 });
-    // Still a live row while it awaits a merge decision: review never collapses.
-    await session.waitForText("review 1", { timeout: 20_000 });
-  });
-
-  await story.step("merging moves it out of the sidebar into the done drawer", async () => {
-    await session.press("Ctrl+W");
-    await session.press("M");
-    await session.waitForText("[y] merge", { timeout: 20_000 });
-    await session.press("y");
-    await session.waitForText("merged 1 workspace", { timeout: 30_000 });
     // One collapsed row with a count and a closed chevron — not a per-run row.
     await session.waitForText("done 1", { timeout: 20_000 });
     const screen = await session.screen();

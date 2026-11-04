@@ -197,12 +197,11 @@ test("legacy dashboard and fabric engine cannot own one checkout concurrently", 
   await legacy.press("Ctrl+C");
   await legacy.waitForExit({ timeout: 10_000 });
 
-  const { ready } = await state.boot();
-  assert.ok(ready.owner.epoch > status.owner.epoch, "explicit close and journal CAS enable migration");
-  const duplicate = spawnSync(nativeBin, ["engine", "--repo", state.repo], { env: state.env, encoding: "utf8", timeout: 5000 });
-  assert.notEqual(duplicate.status, 0);
-  assert.match(duplicate.stderr, /another Rudder owner/);
-  assert.equal((await state.native("status")).instance_id, ready.instance_id);
+  // Closing the legacy owner is not permission to migrate it: Fabric startup
+  // still refuses until an explicit migration hands the checkout over.
+  const after = spawnSync(nativeBin, ["engine", "--repo", state.repo], { env: state.env, encoding: "utf8", timeout: 5000 });
+  assert.notEqual(after.status, 0);
+  assert.match(after.stderr, /requires explicit migration/);
 });
 
 test("headless view confirms deletion after rendering and SIGTERM persists a resumable pause", { timeout: 120_000 }, async (t) => {
@@ -250,7 +249,8 @@ test("fabric migration refuses a live detached writer and scheduler without stop
   assert.equal(await fsp.readFile(run, "utf8"), original, "migration never relabels the existing run");
   assert.ok(pidAlive(legacy.pid), "migration never signals the existing writer");
 
-  await fsp.rm(run);
+  // Only the run directory is removed so the next refusal is the scheduler's.
+  await fsp.rm(path.dirname(path.dirname(run)), { recursive: true });
   const daemon = path.join(state.repo, ".rudder/daemon.pid");
   await fsp.writeFile(daemon, JSON.stringify({ pid: legacy.pid, controlMode: "scheduler" }));
   const scheduler = invoke();

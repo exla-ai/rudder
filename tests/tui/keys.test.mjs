@@ -129,11 +129,8 @@ test("r opens rename on the selected row; Esc cancels", { timeout: 60_000 }, asy
   await session.press("Escape");
 });
 
-test("guard-notice keys each fire: R (review-all), o (web), b (branch)", { timeout: 60_000 }, async (t) => {
+test("guard-notice keys each fire: o (web), U (usage), b (branch)", { timeout: 60_000 }, async (t) => {
   const { session, browserLog } = await twoWorkerDashboard(t, "rudder-tui-guards-", { fakeBrowser: true });
-  // R: nothing is done yet, so review-all says exactly that.
-  await session.press("R");
-  await session.waitForText("no completed workspaces ready to review", { timeout: 15_000 });
   // o: asks the private host callback to open a ticket for this project.
   await session.press("o");
   await session.waitForText("web view", { timeout: 15_000 });
@@ -191,11 +188,7 @@ test("cc clears merged rows from the list (two-press)", { timeout: 120_000 }, as
 
   await session.type("mergeable task");
   await session.press("Enter");
-  await session.waitForText("press m to read", { timeout: 30_000 });
-  await session.press("Ctrl+W");
-  await session.press("M");
-  await session.waitForText("[y] merge", { timeout: 20_000 });
-  await session.press("y");
+  // Finished workers integrate automatically.
   // Merged rows live in the collapsed `done` drawer; its count is the proof.
   await session.waitForText("done 1", { timeout: 30_000 });
 

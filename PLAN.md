@@ -105,6 +105,14 @@ in order.
 
 ### After 4.0.0
 
+Cloud capacity work waits on branch `cloud-capacity-build-pool` (unbuilt,
+128 commits behind main as of 2026-11-04): hourly home cleanup with a
+`park` steer for idle agents, boot-time swap on home volumes, OpenTelemetry
+metrics plus the observability stack and dry-run scaler, burst builder
+machines per home (off unless `RUDDER_BUILDERS=1`), and keeping Codex trust
+for home repos. Rebase it onto main after 4.0.0; the burst builders should
+reuse the trusted-builder and tool-cache design from steps 7-8.
+
 REAPI cache for Buck2/Bazel repos (BuildFetch or self-hosted), cross-machine
 cache so new machines and teammates start warm, Mac (APFS, offline drafts,
 signing), deeper jj storage if measurements call for it.

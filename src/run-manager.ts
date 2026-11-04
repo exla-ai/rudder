@@ -1,3 +1,4 @@
+import { appendTimelineEvent, formatTimeline, readRunTimeline } from "./run-timeline.js";
 import { spawn } from "node:child_process";
 import { assertLegacyWriterAllowed } from "./engine-authority.js";
 import { randomUUID } from "node:crypto";
@@ -151,9 +152,13 @@ export async function startRun(params: {
   const baseCommit = await baseRevision(repoRoot);
   const targetBranch = await targetRevision(repoRoot);
   const id = newRunId(params.task);
+  const workspaceStarted = Date.now();
   const workspaceInfo = useWorkspace
     ? await createRunWorkspace({ repoRoot, runId: id, task: params.task })
     : { path: repoRoot, workspaceName: undefined, jjChangeId: undefined };
+  if (useWorkspace) {
+    await appendTimelineEvent(repoRoot, id, { kind: "workspace", ms: Date.now() - workspaceStarted });
+  }
   const run = await createRunRecord({
     id,
     repoRoot,
@@ -1008,7 +1013,7 @@ export async function statusRuns(options?: { json?: boolean }): Promise<void> {
 
 export async function listProjectRuns(options?: { json?: boolean }): Promise<void> {
   const repoRoot = findRepoRoot();
-  const runs = await listRuns(repoRoot);
+  const runs = (await listRuns(repoRoot)).map((run) => ({ ...run, timeline: readRunTimeline(repoRoot, run) }));
   if (options?.json) {
     console.log(JSON.stringify(runs, null, 2));
     return;
@@ -1016,6 +1021,7 @@ export async function listProjectRuns(options?: { json?: boolean }): Promise<voi
   for (const run of runs) {
     const wt = run.workspace.enabled ? ` ${workspaceKind(run)}=${shortenHome(run.workspace.path)}` : "";
     console.log(`${run.id}  ${run.status}  ${run.backend}${wt}  ${run.task}`);
+    if (run.timeline) console.log(`  ${formatTimeline(run.timeline)}`);
   }
 }
 

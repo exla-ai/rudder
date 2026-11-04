@@ -2000,6 +2000,7 @@ pub(crate) fn prepare_jj_workspace_at(
     }
 
     let id = new_run_id(task);
+    let started = Instant::now();
     let rudder = locate_rudder_cli()
         .context("rudder CLI not found on PATH; cannot create a jj workspace for the run")?;
     let mut launch = Command::new(&rudder);
@@ -2055,6 +2056,11 @@ pub(crate) fn prepare_jj_workspace_at(
         .filter(|value| !value.is_empty())
         .map(ToString::to_string);
 
+    crate::timeline::append_timeline_event(
+        &repo,
+        &id,
+        serde_json::json!({ "kind": "workspace", "ms": started.elapsed().as_millis() as u64 }),
+    );
     Ok(WorkspaceInfo {
         id,
         path: PathBuf::from(path),

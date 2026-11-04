@@ -47,6 +47,7 @@ type Tui = Terminal<CrosstermBackend<Stdout>>;
 
 mod usage;
 use crate::usage::*;
+mod timeline;
 mod config;
 use crate::config::*;
 mod gitio;
@@ -5787,6 +5788,8 @@ impl App {
                 self.diff_panel.revision += 1;
                 self.dirty = true;
             }
+            let request = timeline::TimelineRequest::for_run(&self.cwd, run);
+            timeline::spawn_timeline_job(self.diff_panel.timeline_tx.clone(), request);
         }
         if cfg!(test) {
             return;

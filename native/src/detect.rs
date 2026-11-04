@@ -34,6 +34,15 @@ pub(crate) fn mark_run_done(run: &mut AgentRun) {
         // stream). Persisted to run.json as `tokens` by save_native_run_record
         // so telemetry has a cost signal; without this native runs report zero.
         refresh_run_token_usage(run);
+        // Record where this run's time and tokens went (off the App loop; the
+        // thread only writes the run's timeline.jsonl).
+        if !cfg!(test) {
+            let mut request = crate::timeline::TimelineRequest::for_run(&run.cwd, run);
+            std::thread::spawn(move || {
+                request.repo_root = dashboard_root(&request.cwd);
+                let _ = crate::timeline::compute_timeline(&request);
+            });
+        }
         run.needs_permission = false;
         run.needs_user_input = false;
         // The ONLY ping: a task entering review. Done == the review bucket, and this

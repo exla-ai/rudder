@@ -359,6 +359,10 @@ pub(crate) struct DiffPanel {
     inflight: bool,
     tx: Sender<DiffJob>,
     rx: Receiver<DiffJob>,
+    /// Where the selected run's time and tokens went, computed off the loop.
+    pub(crate) timeline: Option<(String, crate::timeline::TimelineSummary)>,
+    pub(crate) timeline_tx: Sender<crate::timeline::TimelineJob>,
+    timeline_rx: Receiver<crate::timeline::TimelineJob>,
     /// (revision, width, focused) → rendered lines and the line index of each file.
     cache: Option<(u64, u16, bool, Vec<Line<'static>>, Vec<usize>)>,
 }
@@ -366,7 +370,11 @@ pub(crate) struct DiffPanel {
 impl DiffPanel {
     pub(crate) fn new() -> Self {
         let (tx, rx) = channel();
+        let (timeline_tx, timeline_rx) = channel();
         Self {
+            timeline: None,
+            timeline_tx,
+            timeline_rx,
             open: false,
             run_id: None,
             files: Vec::new(),
@@ -399,6 +407,7 @@ impl DiffPanel {
         self.loaded = false;
         self.scroll = 0;
         self.refreshed_at = None;
+        self.tokens_refreshed_at = None;
         self.output_seen_at = None;
         self.revision += 1;
         self.cache = None;
@@ -474,6 +483,14 @@ impl DiffPanel {
     /// Pull finished jobs in. True when something on screen changed.
     pub(crate) fn drain(&mut self) -> bool {
         let mut changed = false;
+        while let Ok(job) = self.timeline_rx.try_recv() {
+            let fresh = Some((job.run_id.clone(), job.summary.clone()));
+            if self.run_id.as_deref() == Some(job.run_id.as_str()) && self.timeline != fresh {
+                self.timeline = fresh;
+                self.revision += 1;
+                changed = true;
+            }
+        }
         while let Ok(job) = self.rx.try_recv() {
             self.inflight = false;
             let before = self.revision;
@@ -668,6 +685,14 @@ pub(crate) fn diff_panel_lines(
         ));
     }
     lines.push(Line::from(stats));
+    if let Some((run_id, summary)) = &panel.timeline {
+        if *run_id == run.id {
+            lines.push(Line::from(Span::styled(
+                truncate_cells(&crate::timeline::format_timeline(summary), width),
+                muted,
+            )));
+        }
+    }
     if panel.truncated {
         lines.push(Line::from(Span::styled(
             "diff truncated: too large to show in full".to_string(),

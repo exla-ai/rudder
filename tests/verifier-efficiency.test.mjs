@@ -39,8 +39,13 @@ test("verifier uses one status decision without requesting a patch", async (t) =
     fs.writeFileSync(path.join(bin, name), fakeVcs, { mode: 0o755 });
   }
   const previousPath = process.env.PATH;
+  const previousJj = process.env.RUDDER_JJ_BIN;
   process.env.PATH = `${bin}${path.delimiter}${previousPath ?? ""}`;
+  // Route `jj` to the fake on PATH, not a packaged rudder-jj next to the native binary.
+  process.env.RUDDER_JJ_BIN = "";
   t.after(() => {
+    if (previousJj === undefined) delete process.env.RUDDER_JJ_BIN;
+    else process.env.RUDDER_JJ_BIN = previousJj;
     if (previousPath === undefined) delete process.env.PATH;
     else process.env.PATH = previousPath;
     fs.rmSync(root, { recursive: true, force: true });

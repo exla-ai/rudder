@@ -51,8 +51,8 @@ test('production composer preserves absolute paths and backend slash ownership',
   assert.equal(classifyComposerInput('/compact','backend').kind,'backend');
   assert.equal(classifyComposerInput('/gam','project').kind,'refused');
 });
-test('project files command resolves current workspace identity before opening its private board', async()=>{
-  const parsed=applyCommandSurface({command:'project',args:['files','execution-workspace','docs/'],flags:{}});
+test('project-files developer command resolves current workspace identity before opening its private board', async()=>{
+  const parsed=applyCommandSurface({command:'project-files',args:['execution-workspace','docs/'],flags:{}});
   assert.equal(parsed.command,'project-files');assert.deepEqual(parsed.args,['execution-workspace','docs/']);
   const opened=[];const dependencies={grants:async(repo,signal)=>{assert.equal(repo,'/repo');signal.throwIfAborted();return [{scope,root:'/repo/task'}];},open:async(...args)=>{opened.push(args);}};
   await runProjectFilesCommand('/repo',parsed.args,dependencies);

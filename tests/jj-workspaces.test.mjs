@@ -410,12 +410,15 @@ async function setupFakeJj(t) {
     JJ_OP_FAIL: process.env.JJ_OP_FAIL,
     JJ_NEW_FAIL: process.env.JJ_NEW_FAIL,
     JJ_EXPORT_FAIL: process.env.JJ_EXPORT_FAIL,
+    RUDDER_JJ_BIN: process.env.RUDDER_JJ_BIN,
   };
 
   process.env.PATH = `${bin}:${process.env.PATH ?? ""}`;
   process.env.RUDDER_HOME = path.join(temp, "home");
   process.env.JJ_ROOT = repo;
   process.env.JJ_LOG = log;
+  // Route `jj` to the fake on PATH, not a packaged rudder-jj next to the native binary.
+  process.env.RUDDER_JJ_BIN = "";
   delete process.env.JJ_ROOT_FAIL;
   delete process.env.JJ_SOURCE_WORKSPACE;
   delete process.env.JJ_SOURCE_CHANGE;

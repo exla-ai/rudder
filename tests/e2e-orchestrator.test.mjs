@@ -27,7 +27,7 @@ import fsp from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, "..");
@@ -126,10 +126,19 @@ async function makeWorkspace(t) {
 async function planAndDrain(t, ws, tasks) {
   const planFile = path.join(ws.work, `plan-${Math.abs(hash(JSON.stringify(tasks)))}.txt`);
   await fsp.writeFile(planFile, wrapPlan(tasks));
-  const planned = cliSync(["plan", "do the work"], {
-    cwd: ws.repo,
-    env: { ...ws.baseEnv, RUDDER_FAKE_MODEL_OUTPUT: `@${planFile}` },
-  });
+  // The public `rudder plan` command was cut; drive the planner module the
+  // dashboard uses (planTask -> scaffoldPlan) with the fake model.
+  const planner = pathToFileURL(path.join(repoRoot, "dist", "planner.js")).href;
+  const jjModule = pathToFileURL(path.join(repoRoot, "dist", "jj.js")).href;
+  const planned = spawnSync(
+    process.execPath,
+    [
+      "--input-type=module",
+      "-e",
+      `const p = await import(${JSON.stringify(planner)}); await (await import(${JSON.stringify(jjModule)})).ensureColocated(process.cwd()); await p.scaffoldPlan(process.cwd(), await p.planTask("do the work", { root: process.cwd(), branch: "" }));`,
+    ],
+    { cwd: ws.repo, env: { ...process.env, ...ws.baseEnv, RUDDER_FAKE_MODEL_OUTPUT: `@${planFile}` }, encoding: "utf8", timeout: 60_000 },
+  );
   assert.equal(planned.status, 0, `rudder plan failed:\n${planned.stdout}\n${planned.stderr}`);
   assert.ok(fs.existsSync(ws.graphFile), "rudder plan wrote .rudder/graph.json");
 

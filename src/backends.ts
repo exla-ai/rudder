@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
+import { inFork } from "./warm-snapshot.js";
 import { BackendTelemetryObserver } from "./agent-efficiency/backend-observer.js";
 import type { BackendAdapter, BackendId, RunRequest, RudderEvent, AuthProfileStore, EffortLevel } from "./types.js";
 import { CODEX_RUDDER_WORKER_CONFIG_ARGS, codexLaunchEnv, ensureRudderCodexBinary } from "./codex-binary.js";
@@ -383,7 +384,8 @@ async function spawnAndStream(params: {
     message: `${params.command} started`,
     data: { command: params.command, args: params.args },
   });
-  const child = spawn(params.command, params.args, {
+  const launch = inFork(params.cwd, params.command, params.args);
+  const child = spawn(launch.command, launch.args, {
     cwd: params.cwd,
     env: params.env,
     stdio: ["ignore", "pipe", "pipe"],

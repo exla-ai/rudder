@@ -627,6 +627,14 @@ impl LockedOverlayWorkingCopy {
 
     async fn check_out_inner(&mut self, new_tree: MergedTree) -> anyhow::Result<CheckoutStats> {
         let mut stats = CheckoutStats::default();
+        // Same content (a rebase onto a commit whose files the fork already
+        // holds): keep the warm lower and the upper as they are. Swapping the
+        // lower would drop the snapshot's dependencies and build output.
+        if tree_to_ids(&new_tree) == tree_to_ids(&self.wc.tree) {
+            self.set_tree(new_tree);
+            write_state(&self.wc.state_path, &self.wc.state)?;
+            return Ok(stats);
+        }
         let mut diff = self.wc.tree.diff_stream(&new_tree, &EverythingMatcher);
         while let Some(entry) = diff.next().await {
             let values = entry.values?;

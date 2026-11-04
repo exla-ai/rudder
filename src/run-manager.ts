@@ -1,5 +1,6 @@
 import { appendTimelineEvent, formatTimeline, readRunTimeline } from "./run-timeline.js";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
+import { inFork } from "./warm-snapshot.js";
 import { assertLegacyWriterAllowed } from "./engine-authority.js";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
@@ -597,6 +598,7 @@ export async function workerRun(repoRoot: string, runId: string, attemptId?: str
             : `Run failed verification: ${verification.missing.join("; ")}`,
       });
       await writeAgentContext(repoRoot);
+      if (current.status === "completed") await autoIntegrateFinishedWorker(repoRoot, current);
       return;
     }
   } catch (error) {
@@ -1136,9 +1138,9 @@ export async function stopRun(runId: string, options?: { silent?: boolean }): Pr
 export async function mergeRun(
   runId: string,
   allowDirty = false,
-  options?: { silent?: boolean; abortOnConflict?: boolean },
+  options?: { silent?: boolean; abortOnConflict?: boolean; repoRoot?: string },
 ): Promise<RunRecord> {
-  const repoRoot = findRepoRoot();
+  const repoRoot = options?.repoRoot ?? findRepoRoot();
   assertLegacyWriterAllowed(repoRoot);
   const run = await loadRunRecord(repoRoot, runId);
   if (!run) {
@@ -1670,4 +1672,48 @@ function runHasMergeSource(run: RunRecord): boolean {
 
 function terminalExitCode(status: RunRecord["status"]): number {
   return status === "completed" || status === "merged" ? 0 : 1;
+}
+
+
+/**
+ * A finished isolated worker lands on its own, like the dashboard does: run the
+ * project's quick check (rudder.toml [verification] command) inside the
+ * worker's workspace, then merge with abort-on-conflict. A failed check or a
+ * conflict leaves nothing merged and records why on the run.
+ */
+async function autoIntegrateFinishedWorker(repoRoot: string, run: RunRecord): Promise<void> {
+  if (run.mode !== "execute" || !run.workspace?.enabled || !run.workspace.path) return;
+  if (process.env.RUDDER_NO_AUTO_INTEGRATE === "1") return;
+  try {
+    const command = projectCheckCommand(repoRoot);
+    if (command) {
+      const check = inFork(run.workspace.path, "sh", ["-c", `${command} 2>&1`]);
+      const result = spawnSync(check.command, check.args, {
+        cwd: run.workspace.path, encoding: "utf8", timeout: 15 * 60_000, maxBuffer: 16 * 1024 * 1024,
+      });
+      if (result.status !== 0) {
+        const tail = String(result.stdout ?? "").trim().split("\n").slice(-40).join("\n");
+        await emit(run, { ts: nowIso(), runId: run.id, type: "merge.result", message: `needs you: checks failed\n${tail}` });
+        return;
+      }
+    }
+    await mergeRun(run.id, true, { silent: true, abortOnConflict: true, repoRoot });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    await emit(run, { ts: nowIso(), runId: run.id, type: "merge.result", message: `needs you: ${message}` }).catch(() => undefined);
+  }
+}
+
+function projectCheckCommand(repoRoot: string): string | undefined {
+  let raw: string;
+  try { raw = fs.readFileSync(path.join(repoRoot, "rudder.toml"), "utf8"); } catch { return undefined; }
+  let inSection = false;
+  for (const line0 of raw.split("\n")) {
+    const line = line0.trim();
+    if (line.startsWith("[")) { inSection = line === "[verification]"; continue; }
+    if (!inSection) continue;
+    const match = /^command\s*=\s*(?:"((?:[^"\\]|\\.)*)"|'([^']*)')\s*$/.exec(line);
+    if (match) { const value = (match[1] ?? match[2] ?? "").replace(/\\"/g, '"'); return value.trim() ? value : undefined; }
+  }
+  return undefined;
 }

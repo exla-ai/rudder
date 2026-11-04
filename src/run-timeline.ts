@@ -20,6 +20,8 @@ export type RunTimeline = {
   modelMs: number;
   input: number;
   cached: number;
+  /** Headless runs know only the input total, not how much was cached. */
+  cacheUnknown?: boolean;
   output: number;
 };
 
@@ -69,6 +71,7 @@ export function parseTimeline(content: string, run?: Pick<RunRecord, "tokens">):
   // Headless runs record only run.tokens (input includes cache reads).
   if (!summary && run?.tokens) {
     timeline.input = run.tokens.input;
+    timeline.cacheUnknown = true;
     timeline.output = run.tokens.output;
   }
   return timeline;
@@ -118,7 +121,7 @@ export function formatTimeline(t: RunTimeline): string {
   const total = totalIn + t.output;
   if (total > 0) {
     const pct = totalIn > 0 ? Math.floor((t.cached * 100) / totalIn) : 0;
-    parts.push(`${formatTokens(total)} tok, ${pct}% cached`);
+    parts.push(t.cacheUnknown ? `${formatTokens(total)} tok` : `${formatTokens(total)} tok, ${pct}% cached`);
   }
   return parts.join(" · ");
 }

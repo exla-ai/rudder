@@ -47,6 +47,16 @@ export function forkStateDir(workspace: string): string {
   return `${workspace}.fork`;
 }
 
+/**
+ * A fork's files exist only inside its mount namespace: run `command` there
+ * when `cwd` is an overlay fork, otherwise unchanged.
+ */
+export function inFork(cwd: string, command: string, args: string[]): { command: string; args: string[] } {
+  const enter = path.join(forkStateDir(cwd), "enter");
+  if (process.platform !== "linux" || !fs.existsSync(enter)) return { command, args };
+  return { command: enter, args: [command, ...args] };
+}
+
 /** The single parent of the main checkout's @: what `jj workspace add` bases on. */
 export async function currentBaseCommit(repoRoot: string): Promise<string | null> {
   const result = await runCommand("jj", ["log", "--no-graph", "--ignore-working-copy", "-r", "@-", "-T", 'commit_id ++ "\\n"'], {
@@ -54,7 +64,16 @@ export async function currentBaseCommit(repoRoot: string): Promise<string | null
     allowFailure: true,
   });
   const ids = result.stdout.split("\n").map((line) => line.trim()).filter(Boolean);
-  return result.code === 0 && ids.length === 1 ? ids[0]! : null;
+  if (result.code === 0 && ids.length === 1) return ids[0]!;
+  // After automatic merges @ is itself the merge commit (several parents):
+  // its content is current main, so new work starts from it.
+  if (result.code !== 0 || ids.length < 2) return null;
+  const merge = await runCommand("jj", ["log", "--no-graph", "--ignore-working-copy", "-r", "@", "-T", 'commit_id ++ "\\n"'], {
+    cwd: repoRoot,
+    allowFailure: true,
+  });
+  const id = merge.stdout.trim();
+  return merge.code === 0 && id ? id : null;
 }
 
 export function readySnapshots(repoRoot: string): WarmSnapshot[] {
@@ -238,9 +257,27 @@ mount --bind "$M/.jj" "$F/jjmnt"
 W="$F/jjmnt/working_copy"
 mount -t overlay overlay -o "lowerdir=$(readlink -f "$(cat "$W/lower")"),upperdir=$W/upper,workdir=$W/work,userxattr" "$M"
 mount --bind "$F/jjmnt" "$M/.jj"
+# Login shells rebuild PATH; make every jj on it this fork-aware rudder-jj.
+J="$(readlink -f "$F/bin/jj")"
+for d in $(printf %s "$PATH" | tr : " ") /usr/local/bin /usr/bin "$HOME/.local/bin"; do
+  [ -f "$d/jj" ] && [ "$(readlink -f "$d/jj")" != "$J" ] && mount --bind "$J" "$d/jj" 2>/dev/null || true
+done
 cd "$M"
 PATH="$F/bin:$PATH"; export PATH
 exec unshare -U --map-user="$U" --map-group="$G" -- "$@"' sh "$F" "$M" "$U" "$G" "$@"
+`;
+
+// $1 = snapshot commit, $2 = base. Paths come NUL-free from jj, one per line.
+const MOVE_TO_BASE = `
+jj diff --ignore-working-copy --from "$1" --to "$2" --name-only | while IFS= read -r f; do
+  if jj file show --ignore-working-copy -r "$2" -- "root-file:\\"$f\\"" > /dev/null 2>&1; then
+    mkdir -p "$(dirname "$f")"; rm -rf "$f"
+    jj file show --ignore-working-copy -r "$2" -- "root-file:\\"$f\\"" > "$f"
+  else
+    rm -rf "$f"
+  fi
+done
+jj rebase -r @ -d "$2"
 `;
 
 /**
@@ -258,11 +295,12 @@ export async function createForkWorkspace(params: {
   const base = await currentBaseCommit(params.repoRoot);
   const snaps = readySnapshots(params.repoRoot);
   // Projects with nothing to install or build keep the plain checkout.
-  if (base && !snaps.some((snap) => snap.commit === base) && warmCommands(params.repoRoot).length > 0) {
+  const warmable = warmCommands(params.repoRoot).length > 0;
+  if (base && !snaps.some((snap) => snap.commit === base) && warmable) {
     startWarmBuild(params.repoRoot, base);
   }
   const snapshot = snaps.find((snap) => snap.commit === base) ?? snaps[0];
-  if (!snapshot) return { reason: "no warm snapshot yet (building)" };
+  if (!snapshot) return { reason: warmable ? "no warm snapshot yet (building)" : "nothing to install or build" };
   const rudderJj = rudderJjPath();
   if (!rudderJj) return { reason: "rudder-jj is not available" };
   const added = await runCommand(
@@ -286,6 +324,18 @@ export async function createForkWorkspace(params: {
     await fsp.writeFile(path.join(state, "enter"), ENTER_SCRIPT, { mode: 0o755 });
     const probe = spawnSync(path.join(state, "enter"), ["true"], { cwd: params.targetPath, stdio: ["ignore", "ignore", "pipe"] });
     if (probe.status !== 0) throw new Error(`overlay mount unavailable: ${probe.stderr?.toString().trim()}`);
+    // The snapshot supplies dependencies and build output; the code must be
+    // current. Move the fork's change onto the main checkout's base so only the
+    // files that differ are written into the upper layer.
+    if (base && base !== snapshot.commit) {
+      // Write the differing files through the mounted overlay (it records
+      // deletions itself), then move @ onto the base. The tree is then
+      // identical, so the working copy keeps the warm lower.
+      const moved = spawnSync(path.join(state, "enter"), ["sh", "-ec", MOVE_TO_BASE, "sh", snapshot.commit, base], {
+        cwd: params.targetPath, stdio: ["ignore", "ignore", "pipe"],
+      });
+      if (moved.status !== 0) throw new Error(`could not move fork to ${base.slice(0, 12)}: ${moved.stderr?.toString().trim()}`);
+    }
     return { snapshot };
   } catch (error) {
     await runCommand("jj", ["workspace", "forget", params.workspaceName], { cwd: params.repoRoot, allowFailure: true });

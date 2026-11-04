@@ -1,105 +1,113 @@
 # Rudder v4: shared workspaces, reusable builds, coordinated agents
 
-Status: v4 direction accepted for implementation, 2026-10-30. Implementation
-and delivery proceed in independently verifiable milestones; this document is
-not evidence that the full rewrite has shipped. Implementation choices marked
-provisional must pass the experiments before becoming commitments. This revises the earlier
-[plan at 91579cf](https://github.com/exla-ai/rudder/blob/91579cf631b1d9d78afbbd786a6dc1f8120cc1ca/PLAN.md).
-Existing coordination files remain in use until their consumers have migrated.
+Status: section 0 is the plan. Everything after it is background design from
+earlier phases; where it asks for experiments, gates or evidence, section 0
+wins.
 
-Discussion updates: plan for approximately 50 software engineers; prefer a
-Rudder-owned workspace/VFS model with focused jj integration and Buck2 as the
-leading Cloud build-engine candidate. The direct messaging design in section 10
-is accepted direction; backend injection mechanisms and guarantees are explicit.
-Before launch, simplify the public CLI/slash-command surface (section 16) and
-deliver real agent-to-agent steering and interruption of active runs (10.6).
-Ordinary task input selects planning automatically (section 17); standalone
-`/gam` is sunset. Tailscale access and responsive Cloud terminals are part of
-the product architecture (section 18), with staged delivery recorded in section 19.
+## 0. The v4 plan (locked 2026-11-04)
 
-Companion documents:
+This section is the plan. It overrides everything below it, which is
+background only. Status lives in [the v4 handoff](docs/v4-handoff.md).
 
-- [Research and implementation evidence](docs/architecture/research.md).
-- [Experiments, acceptance gates, and failure cases](docs/architecture/experiments.md).
-- [Implementation state and context handoff](docs/architecture/implementation.md).
-- [Measured Linux workspace substrate](docs/architecture/phase0-linux-evidence.md).
+### The user's goal (read this first, keep it in front of every task)
 
-## 0. Locked direction (2026-11-04)
+**Rudder agents feel fast.** Ten parallel agents start in seconds, share one
+warm copy of the project with dependencies installed and builds done, and
+spend their tokens and time on the user's task, not on setup, waiting or
+process. Every task in this plan exists to serve that sentence. If a piece of
+work does not make agents faster, cheaper or more reliable for the user, do
+not do it.
 
-This section overrides anything below that conflicts with it. Current status
-and open work live in [the v4 handoff](docs/v4-handoff.md).
+### How to work
 
-- **v4.0 goal: jj on the Rudder VFS.** The efficiency is the point of v4, so
-  4.0.0 ships only when it works. No alpha releases or Cloud deploys before
-  then.
-  1. **jj storage backend on the engine content store.** jj commits and trees
-     live in Rudder's CAS; a snapshot is a commit. Git stays at the edges
-     (push/pull to GitHub).
-  2. **jj working-copy plugin on the VFS.** An agent's workspace is a
-     copy-on-write fork; jj asks the VFS what changed instead of scanning.
-  3. **Warm snapshots.** A trusted builder snapshots the default branch with
-     dependencies installed and builds done; forks start from it.
-  4. **Agent launch uses forks, not checkouts.**
-  5. **Measured on real repos, v3 vs v4:** fork time, disk per agent, time to
-     first build, plus the scorecard below.
-  Both pieces are plugins written against `jj-lib` (already linked into the
-  native binary), not a hard fork of jj. The jj pin stays 0.40.0 unless a
-  plugin needs a newer API.
-- **Cloud on Fly, Linux first.** Mac work (APFS, offline drafts, signing)
-  follows after 4.0.0.
-- **Build speed for parallel agents comes from three layers, in this order:**
-  1. **Warm forks** (the v4.0 goal above). Agents never write into the shared
-     snapshot.
-  2. **Tool-native caches behind one Rudder cache per Cloud machine.** Rudder
-     points sccache, the pnpm store, uv, Turborepo/Nx and similar tools at a
-     cache it runs on the machine. Shared across machines later.
-  3. **REAPI for repos that already use Buck2 or Bazel.** The same cache serves
-     REAPI (self-hosted bazel-remote/Buildbarn on Fly, or BuildFetch to try).
-     Buck2 is supported, not required: Rudder does not generate Buck2 graphs
-     for other repos.
-- **Only the trusted builder writes shared results.** Agents read only. An
-  agent miss builds privately and never publishes a result other agents trust.
-- **The custom managed compiler cache path is frozen.** Its reuse stays
-  disabled; do not start new hardening work on it.
-- **Cross-machine content cache (E2) comes after 4.0.0.** One real two-worker Fly run is
-  needed to prove it, with user approval.
-- **No new hardening waves.** Work items must map to a goal in this section.
-- **Make it work, then evaluate.** Every milestone is checked with the
-  scorecard on real repos with real Codex and Claude sessions,
-  local and Cloud, comparing v4 with v3 on the same tasks: agent start time,
-  work lost on restart, tokens per accepted change, merge correctness, and the
-  web/phone flow. Record the numbers, bad ones included. This replaces E0-E14
-  as the working bar.
-- **Remove agent ceremony.** Agents never call Rudder commands. Rudder detects
-  completion itself (session ended with a commit) and takes the summary from
-  the agent's last message. Remove `rudder done`, `remember`, `share` and
-  `context` callbacks, auto-written `DECISIONS.md`, receipt/evidence prompts,
-  and automatic hardening/follow-up chains (follow-ups go in the summary for a
-  human to pick). Keep an owner map that Rudder enforces, not one agents read.
-- **Cut the CLI to about ten commands.** The dashboard is the product.
+- **No evidence, receipts or qualification.** Do not write proof files,
+  signed observations, evidence JSON, qualification drivers or "fail closed
+  until proven" layers. Normal tests for the code you change are enough.
+- **No gates until the end.** Build every step, then test the whole thing
+  once (step 9). Steps do not wait on proofs; they wait only on the code they
+  depend on.
+- **Add tasks only when truly needed.** No automatic follow-ups, no hardening
+  waves, no "while I am here" work. A new task is added only when the plan
+  cannot finish without it. Leftover ideas go in the final message for the
+  user to pick.
+- **Simple over general.** Size for one Cloud machine running many agents,
+  not a fleet of 50 engineers. Delete code that serves no step here.
+- **Fast loop.** Work on `main`, run only the checks for what you changed,
+  push when a step works. No prereleases, no CI, no Cloud deploys before
+  step 9.
 
-  ```
-  rudder                       open the dashboard (local or Cloud home)
-  rudder "task" [--cloud]      start an agent (--backend, --continue)
-  rudder ls                    list agents
-  rudder attach <agent>        watch or type into one agent
-  rudder logs <agent>          saved output
-  rudder stop <agent> [--delete]
-  rudder login | logout
-  rudder cloud [move]          Cloud home status; move this project there
-  rudder doctor                setup and diagnostics
-  rudder update | --version
-  ```
+### What gets built, in order
 
-  Merge, sync, cleanup and gc become automatic; undo is a dashboard action on
-  one change. `run`, `claude`, `codex`, `sail`, `plan`, `fanout`, `handoff`,
-  `watch`, `status`, `runs`, `report` fold into the commands above. Developer
-  tools (`board`, `serve`, `engine`, `telemetry`, `mouse-test`) are hidden or
-  move under `doctor`. Old spellings print "use X instead" for one release,
-  then go. No aliases until 2027.
-- **Delete BYOC** (`cloud byoc`, `runtime`, `vm`, `bootstrap`). Cloud is Fly.
-- **Delete `rudder improve`** (the automatic telemetry-to-release loop).
+Steps 2 and 3 can run in parallel with separate owners. Everything else is
+in order.
 
+0. **Main green.** Fix the currently failing tests (handoff section 2).
+1. **Delete dead weight.** Remove the managed compiler/runtime path, the Fly
+   qualification and staging machinery, receipt and qualification layers and
+   cross-machine fleet authority that no step below uses. Keep crash recovery,
+   restart fences and the sandboxing the workspace still needs. Done when the
+   remaining tests pass and the code is much smaller.
+2. **Fast Rudder build.** Split the large native crate into a few crates and
+   add sccache. Done when a changed-file Rust test runs in under a minute.
+3. **Teach Rudder this way of working** (makes Rudder's own agents faster and
+   cheaper):
+   - Worker and planner prompts (`native/src/tasks.rs`, `src/brain.ts`)
+     start with the user's goal in one sentence, stay short, and drop
+     evidence/receipt language and follow-up requests.
+   - Remove agent ceremony: `rudder done`, `remember`, `share`, `context`,
+     auto-written `DECISIONS.md`. Rudder detects completion itself (the
+     session ended with a commit) and takes the summary from the last message.
+   - Automatic hardening and follow-up chains off (`native/src/main.rs`
+     hardening queue). Planner adds tasks only when needed.
+   - Default development style for agents: targeted checks, no CI babysitting,
+     no git archaeology, capped shell output.
+4. **Cut the CLI to about ten commands** (`src/main.ts`, command registry):
+
+   ```
+   rudder                       open the dashboard (local or Cloud home)
+   rudder "task" [--cloud]      start an agent (--backend, --continue)
+   rudder ls                    list agents
+   rudder attach <agent>        watch or type into one agent
+   rudder logs <agent>          saved output
+   rudder stop <agent> [--delete]
+   rudder login | logout
+   rudder cloud [move]          Cloud home status; move this project there
+   rudder doctor                setup and diagnostics
+   rudder update | --version
+   ```
+
+   Merge, sync, cleanup and gc are automatic; undo is a dashboard action.
+   Old spellings print "use X instead" for one release. Delete BYOC and
+   `rudder improve`.
+5. **jj storage on the engine content store.** jj commits and trees live in
+   Rudder's store; a snapshot is a commit. Git only at the edges. Written as a
+   `jj-lib` backend plugin, not a fork; jj stays on 0.40.0 unless an API needs
+   newer.
+6. **jj working copy on the VFS.** An agent's workspace is a copy-on-write
+   fork; jj asks the VFS what changed instead of scanning (`vfs.rs`,
+   `workspace/linux.rs`).
+7. **Warm snapshots and agent launch.** A trusted builder snapshots the
+   default branch with dependencies installed and builds done. Every agent
+   starts from a fork of it. Only the trusted builder writes shared state.
+8. **Shared tool caches, timeline, integration.**
+   - One Rudder cache per machine; sccache, pnpm, uv and Turborepo/Nx point
+     at it. Agents read; the trusted builder writes.
+   - Per-agent timeline in the dashboard: startup, install, build, waiting,
+     model time and tokens.
+   - Finished work is rebased, tested and merged automatically; conflicts
+     show as "needs you".
+9. **Try it for real (the only test gate).** Use v4 to build Rudder itself
+   and a few real repos, local and on a Cloud machine, with real Codex and
+   Claude. Compare with v3 on the same tasks: agent start time, disk per
+   agent, time to first build, tokens per accepted change, work lost on
+   restart, merge correctness. Fix what is slow or broken. Then, with the
+   user's approval, release 4.0.0 and deploy Cloud (one Fly run).
+
+### After 4.0.0
+
+REAPI cache for Buck2/Bazel repos (BuildFetch or self-hosted), cross-machine
+cache so new machines and teammates start warm, Mac (APFS, offline drafts,
+signing), deeper jj storage if measurements call for it.
 
 ## 1. Product objective and constraints
 

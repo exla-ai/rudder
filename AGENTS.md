@@ -99,11 +99,14 @@ create, read-only ones included.
   bump needed.
 - **No git archaeology.** Do not spend turns on history, rebases, bisects or
   branch bookkeeping unless the task is about history.
-- **No new status docs, receipts or evidence files.** Update
+- **No evidence.** No status docs, receipts, qualification or proof files.
+  Normal tests are enough. Update
   `docs/v4-handoff.md`; put proof in your final message. Do not commit
   logs, captures or JSON receipts.
-- **No hardening waves or follow-up chains.** A follow-up must map to a goal in
-  `PLAN.md` section 0, or it is dropped.
+- **Add work only when truly needed.** No hardening waves or follow-up
+  chains; leftover ideas go in your final message.
+- **Keep the user's goal in front:** Rudder agents feel fast. If work does not
+  make agents faster, cheaper or more reliable, skip it.
 
 ## Shipping
 
@@ -126,6 +129,6 @@ has separate build, install/launch and signing gates; see reference §§9, 11.
 End with a short final message: what changed, what was checked, what is left.
 `rudder done` still exists until the ceremony removal lands; when a run's prompt asks for
 it, keep it to that same short summary. Report unfinished work honestly. The
-locked direction is [PLAN.md section 0](PLAN.md); current status and open work
+plan is [PLAN.md section 0](PLAN.md); current status and open work
 are in [the v4 handoff](docs/v4-handoff.md). `docs/architecture/` is background
 reference only.

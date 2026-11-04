@@ -106,28 +106,19 @@ cloud-sync paused; `main-branch-jrqtg` (Sol) completed; `ps` cancelled
 
 ## 6. Decisions the user needs to make
 
-- DECIDED 2026-11-04: 4.0.0 ships only when jj on the Rudder VFS works and
-  is measured. No alpha releases or Cloud deploys before then.
+- DECIDED 2026-11-04: the plan is PLAN.md section 0. 4.0.0 ships after
+  step 9. The user approves the release and Cloud deploy.
 - Whether to approve the one optional Fly campaign (single retained owner,
   SDK + runtime + ordinary on one image) described in the readiness doc.
 - Cloud deploy (worker image + Fly control plane) needs explicit approval.
 - `origin/rudder/mac-pty-diagnostic`: 7 unmerged PTY/broker commits from
   10-30, about 210 behind main. Needs a Mac to verify; merge or drop.
 
-## 7. What gets built (order)
+## 7. What gets built
 
-No alpha releases, no Cloud deploys, until 4.0.0 (PLAN.md section 0).
-
-0. Main green: fix the 6 failing tests (see section 2).
-1. Remove agent ceremony and cut the CLI (small, reduces noise for the rest).
-2. jj storage backend on the engine content store.
-3. jj working-copy plugin on the VFS (copy-on-write forks, VFS change tracking).
-4. Warm snapshots from a trusted builder; agent launch uses forks.
-5. Tool-native caches behind one Rudder cache per machine.
-6. Scorecard on real repos, local and Cloud, v3 vs v4.
-7. Release 4.0.0 and deploy Cloud (user approval), one Fly run.
-
-After 4.0.0: REAPI for Buck2/Bazel repos, cross-machine cache, Mac.
+The plan is `PLAN.md` section 0 (steps 0-9). One test gate only, at step 9.
+No evidence files, no automatic follow-ups, no prereleases or Cloud deploys
+before step 9.
 
 ## 8. Disk and leftovers (ask before deleting)
 

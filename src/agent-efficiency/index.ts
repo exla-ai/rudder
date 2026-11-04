@@ -1,0 +1,11 @@
+export { TelemetryRecorder, normalizeStep, supportedUsage } from "./telemetry.js";
+export type { StepObservation, StepTelemetry, Tokens } from "./telemetry.js";
+export { BoundedWaitRegistry } from "./waits.js";
+export type { WaitScope, WaitResult, SettledOutcome } from "./waits.js";
+export { compactionHandoff } from "./handoff.js";
+export type { HandoffInput } from "./handoff.js";
+export { deriveLesson, ScopedLessonStore } from "./lessons.js";
+export type { Lesson, LessonKind, LessonScope, TraceFinding } from "./lessons.js";
+export { deriveTraceLessons, traceFindings } from "./trace-lessons.js";
+export type { AcceptedTrace, TraceAction } from "./trace-lessons.js";
+export { evidenceId } from "./privacy.js";

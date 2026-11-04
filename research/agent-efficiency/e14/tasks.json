@@ -1,0 +1,35 @@
+{
+  "schemaVersion": 1,
+  "sourceRevision": "017d76ed18c33d23b1c85dc9a9e9db0443d132a2",
+  "minimumRepeatsPerTask": 3,
+  "tasks": [
+    {
+      "id": "effort-capabilities",
+      "prompt": "Extend effort normalization to respect an explicit per-model supported effort list. Preserve the user's supported choice, map Codex max to xhigh, preserve Claude's unset default, and reject an empty capability list without changing global defaults. Add targeted tests.",
+      "paths": ["src/effort.ts", "tests/workflow-contracts.test.mjs"],
+      "acceptance": ["Supported explicit choices survive", "Codex aliases normalize before capability checks", "Unknown capabilities preserve existing behavior", "Claude unset stays unset", "Typecheck and targeted tests pass"],
+      "checks": ["npm run check", "node --test tests/workflow-contracts.test.mjs"]
+    },
+    {
+      "id": "verifier-status-failure",
+      "prompt": "Make a failed VCS status query an explicit verification failure, retaining one status decision and the existing stale jj recovery. Add tests for both backends proving an unavailable status cannot satisfy an editing task and no full patch is requested.",
+      "paths": ["src/brain.ts", "tests/verifier-efficiency.test.mjs"],
+      "acceptance": ["Failed status is distinguished from clean", "No patch is requested by normal verification", "Stale jj recovery still works", "Non-edit prompts retain intended behavior", "Typecheck and targeted tests pass"],
+      "checks": ["npm run check", "node --test tests/verifier-efficiency.test.mjs"]
+    },
+    {
+      "id": "trace-redaction",
+      "prompt": "Extend the trace analyzer's credential redaction to URL userinfo and bearer authorization headers, including quoted shell values. Preserve command classification. Add tests proving known secret markers never reach the generated report and ordinary repository paths stay useful.",
+      "paths": ["research/agent-efficiency/trace/classify.ts", "research/agent-efficiency/trace/analyze.test.ts"],
+      "acceptance": ["URL credentials and bearer tokens are redacted", "Command categories remain correct", "No raw trace is published", "Targeted analyzer tests pass"],
+      "checks": ["node --test research/agent-efficiency/trace/analyze.test.ts"]
+    },
+    {
+      "id": "compaction-handoff",
+      "prompt": "Implement a bounded post-compaction handoff module containing task, constraints, open obligations and recent changes, with source references and truncation markers. Add deterministic tests that sections survive a bounded total budget and untrusted lesson text does not become authorization. Do not add a second scheduler or change launch defaults.",
+      "paths": ["src/agent-efficiency/handoff.ts", "tests/agent-efficiency-v4.test.mjs"],
+      "acceptance": ["All four sections are represented", "Output has a strict total bound", "Omitted items are signaled", "Lessons are advisory", "Typecheck and targeted tests pass"],
+      "checks": ["npm run check", "node --test tests/agent-efficiency-v4.test.mjs"]
+    }
+  ]
+}

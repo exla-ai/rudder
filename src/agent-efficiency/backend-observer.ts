@@ -9,13 +9,15 @@ import { BackendReadTrace } from "./production.js";
  * evidence cannot admit work or change completion/integration state.
  */
 export class BackendTelemetryObserver {
+  private readonly run: RunRecord;
   #recorder: TelemetryRecorder;
   #attempt = randomUUID();
   #sequence = 0;
   #pending = 0;
   #reads: BackendReadTrace;
   #inflight = new Set<Promise<void>>();
-  constructor(private readonly run: RunRecord) {
+  constructor(run: RunRecord) {
+    this.run = run;
     this.#recorder = new TelemetryRecorder(path.join(runDir(run.repoRoot, run.id), "efficiency.json"));
     this.#reads = new BackendReadTrace(run);
   }

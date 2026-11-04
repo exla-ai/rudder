@@ -287,10 +287,14 @@ fn multiple_surfaces_close_reopen_and_reconnect_without_replacing_live_work() {
 fn explicit_engine_shutdown_observes_exit_persists_paused_and_removes_process() {
     let mut h = Harness::new();
     h.start();
+    let attach_link = h.app.attach_socket_path();
+    let attach_endpoint = fs::read_link(&attach_link).unwrap();
     let pid = h.fake_backend();
     assert_eq!(h.record()["process"]["pid"], pid);
     let fence = h.owner.app_identity().1.clone();
     h.finish(Ok(())).unwrap();
+    assert!(fs::symlink_metadata(attach_link).is_err());
+    assert!(fs::symlink_metadata(attach_endpoint).is_err());
     assert_eq!(h.app.agents[0].status, AgentStatus::Paused);
     assert!(h.app.agents[0].terminal.is_none());
     let record = h.record();
@@ -449,6 +453,44 @@ fn app_cannot_bind_a_different_checkout_or_resume_before_ingress() {
 }
 
 #[test]
+fn attach_shutdown_retires_link_and_endpoint_independently() {
+    for replace_link in [true, false] {
+        let mut h = Harness::new();
+        h.start();
+        let link = h.app.attach_socket_path();
+        let endpoint = fs::read_link(&link).unwrap();
+        let successor_endpoint = if replace_link {
+            // Keep the replacement as short as the actual endpoint on macOS.
+            endpoint.with_extension("next")
+        } else {
+            fs::remove_file(&endpoint).unwrap();
+            endpoint.clone()
+        };
+        let successor = UnixListener::bind(&successor_endpoint).unwrap();
+        successor.set_nonblocking(true).unwrap();
+        if replace_link {
+            fs::rename(&link, h.root.join("original-attach-link")).unwrap();
+            std::os::unix::fs::symlink(&successor_endpoint, &link).unwrap();
+        }
+
+        h.finish(Ok(())).unwrap();
+
+        let connect_path = if replace_link {
+            assert_eq!(fs::read_link(&link).unwrap(), successor_endpoint);
+            assert!(fs::symlink_metadata(&endpoint).is_err());
+            resolve_attach_socket(&link)
+        } else {
+            assert!(fs::symlink_metadata(&link).is_err());
+            endpoint
+        };
+        let _client = UnixStream::connect(connect_path).unwrap();
+        let _accepted = successor.accept().unwrap();
+        drop(successor);
+        fs::remove_file(successor_endpoint).unwrap();
+    }
+}
+
+#[test]
 fn owner_epoch_change_fences_writer_readiness_poll_and_shutdown_projection() {
     let mut h = Harness::new();
     h.start();
@@ -465,6 +507,15 @@ fn owner_epoch_change_fences_writer_readiness_poll_and_shutdown_projection() {
         .to_path_buf();
     fs::remove_file(&control_path).unwrap();
     let successor_control = UnixListener::bind(&control_path).unwrap();
+    let attach_link = h.app.attach_socket_path();
+    let attach_endpoint = fs::read_link(&attach_link).unwrap();
+    fs::remove_file(&attach_endpoint).unwrap();
+    let successor_attach = UnixListener::bind(&attach_endpoint).unwrap();
+    successor_attach.set_nonblocking(true).unwrap();
+    // Keep the original link allocated so this is a distinct object even on
+    // filesystems that immediately reuse the inode of an unlinked symlink.
+    fs::rename(&attach_link, h.root.join("original-attach-link")).unwrap();
+    std::os::unix::fs::symlink(&attach_endpoint, &attach_link).unwrap();
     let lease = h
         .lifecycle
         .as_ref()
@@ -491,6 +542,20 @@ fn owner_epoch_change_fences_writer_readiness_poll_and_shutdown_projection() {
         .poll(&mut h.app, &mut h.owner)
         .is_err());
     assert!(h.finish(Err(anyhow!("owner epoch changed"))).is_err());
+    assert_eq!(fs::read_link(&attach_link).unwrap(), attach_endpoint);
+    let mut client = UnixStream::connect(resolve_attach_socket(&attach_link)).unwrap();
+    client.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+    let (mut accepted, _) = successor_attach.accept().unwrap();
+    accepted.write_all(b"successor").unwrap();
+    let mut received = [0; 9];
+    client.read_exact(&mut received).unwrap();
+    assert_eq!(
+        &received, b"successor",
+        "stale teardown must preserve successor attach reachability"
+    );
+    drop(successor_attach);
+    fs::remove_file(attach_link).unwrap();
+    fs::remove_file(attach_endpoint).unwrap();
     assert!(
         control_path.exists(),
         "stale teardown must preserve the successor's control endpoint"

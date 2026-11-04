@@ -3,13 +3,14 @@ import fsp from "node:fs/promises";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import test from "node:test";
+import { v4ScratchPrefix } from './helpers/v4-scratch.mjs';
 import {
   captureLegacyProject, exportLegacyProjectRecovery, assertNoPendingV4Migration,
   createRecoveryBundle, verifyRecoveryBundle, exportRecoveryBundle, legacyRecoveryRecord,
 } from "../dist/migration.js";
 
 async function fixture(t) {
-  const root = await fsp.mkdtemp("/workspace/v4-migration-");
+  const root = await fsp.mkdtemp(v4ScratchPrefix('migration'));
   t.after(() => fsp.rm(root, { recursive: true, force: true }));
   const repo = path.join(root, "repo");
   await fsp.mkdir(repo);

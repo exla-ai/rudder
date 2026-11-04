@@ -33,6 +33,44 @@ impl ManagedProfileMetadata {
         self.backend==Backend::Codex && self.kind==ManagedProfileCredentialKind::OAuthV1 && self.provider=="openai-codex"
     }
 }
+
+/// Loaded credential owner plus its validated non-secret model selection.
+/// The task-launch caller keeps the selection through session initialization
+/// and records bind_session's receipt with the original execution identity.
+pub(crate) struct SelectedManagedModelProfile {
+    profile: SelectedTaskProfile,
+    selection: serde_json::Value,
+}
+impl SelectedManagedModelProfile {
+    pub(crate) fn into_parts(self) -> (SelectedTaskProfile, serde_json::Value) {
+        (self.profile, self.selection)
+    }
+}
+
+/// OFF App. Use with capabilities from the selected backend's actual protocol.
+/// Retains explicit model/effort while the existing private one-shot loader
+/// remains the only credential handoff. No session receipt is minted by IO.
+pub(crate) fn load_selected_managed_model_profile(runtime: &ManagedProfileLoaderRuntime,
+    selected: &ManagedTaskOptIn, selection: &serde_json::Value,
+    cancelled: &AtomicBool, budget: &FinalizationBudget) -> Result<SelectedManagedModelProfile> {
+    check(budget, cancelled)?;
+    rudder_engine::execution::ExecutionProfileV4::validate_selected_model(selection)
+        .map_err(|_| ManagedProfileLoadError::Selection)?;
+    if selection["profile_id"] != selected.profile_id() || selection["backend"] != backend_name(selected.backend())? {
+        return Err(ManagedProfileLoadError::Selection);
+    }
+    let metadata = inspect_selected_managed_task_profile(runtime, selected.profile_id(), selected.backend(), cancelled, budget)?;
+    let kind = match metadata.kind { ManagedProfileCredentialKind::ApiKeyV1 => "api_key",
+        ManagedProfileCredentialKind::OAuthV1 => "oauth", ManagedProfileCredentialKind::TokenV1 => "token" };
+    if selection["provider"] != metadata.provider || selection["credential_kind"] != kind {
+        return Err(ManagedProfileLoadError::Selection);
+    }
+    // The inner load re-inspects before handoff; verify metadata again against
+    // this original snapshot to reject profile type/provider races as well.
+    let profile = load_profile_matching(runtime, selected, cancelled, budget, Some(&metadata))?;
+    check(budget, cancelled)?;
+    Ok(SelectedManagedModelProfile { profile, selection: selection.clone() })
+}
 fn check(budget: &FinalizationBudget, cancelled: &AtomicBool) -> Result<()> {
     if cancelled.load(Ordering::Acquire) { return Err(ManagedProfileLoadError::Cancelled); }
     budget.remaining().map(|_| ()).map_err(|_| ManagedProfileLoadError::Deadline)
@@ -243,7 +281,12 @@ fn key(bytes: &[u8]) -> Result<&str> {
 /// automatic effect retry, new secret wrapper or API-billing/profile fallback.
 pub(crate) fn load_selected_managed_task_profile(runtime: &ManagedProfileLoaderRuntime, selected: &ManagedTaskOptIn,
     cancelled: &AtomicBool, budget: &FinalizationBudget) -> Result<SelectedTaskProfile> {
+    load_profile_matching(runtime, selected, cancelled, budget, None)
+}
+fn load_profile_matching(runtime: &ManagedProfileLoaderRuntime, selected: &ManagedTaskOptIn,
+    cancelled: &AtomicBool, budget: &FinalizationBudget, original: Option<&ManagedProfileMetadata>) -> Result<SelectedTaskProfile> {
     let expected = inspect_selected_managed_task_profile(runtime, selected.profile_id(), selected.backend(), cancelled, budget)?;
+    if original.is_some_and(|original| original != &expected) { return Err(ManagedProfileLoadError::Selection); }
     let snapshot=match expected.kind {
         ManagedProfileCredentialKind::OAuthV1 if selected.accepts_codex_snapshot() && expected.supports_codex_access_snapshot()=>true,
         ManagedProfileCredentialKind::OAuthV1=>return Err(ManagedProfileLoadError::UnsupportedOAuth),

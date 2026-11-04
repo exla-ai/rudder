@@ -6,7 +6,7 @@ use rudder_vcs_bridge::{initial_source::PreparedInitialSource,publication::Prepa
 use std::sync::atomic::{AtomicBool,Ordering};
 
 pub(crate) struct AcceptedSourceInput {
-    identity:Arc<()>,owner:OwnerFence,receipt:VcsIntentReceipt,repo:Arc<jj_lib::repo::ReadonlyRepo>,
+    identity:Arc<()>,owner:OwnerFence,receipt:VcsIntentReceipt,repo:Arc<jj_lib::repo::ReadonlyRepo>,store:LocalStore,
     verified:Arc<VerifiedSourceProjection>,backed:Option<Arc<rudder_engine::store::environment_dependencies::SourceOverlayPinOwner>>,directories:Vec<IntegrationDirectory>,
 }
 impl AcceptedSourceInput {
@@ -24,7 +24,16 @@ impl AcceptedSourceInput {
         ensure!(lease.owner()==&self.owner&&state.owner_active&&state.owner==self.owner
             &&state.integration_head==self.integration().new_head
             &&journal.vcs_intent(&self.owner,&self.receipt.intent_id)?==self.receipt,
-            "accepted source input no longer matches actual owner/Published head");time(budget,cancel)
+            "accepted source input no longer matches actual owner/Published head");
+        // An immutable ReadonlyRepo and unchanged directory inodes do not prove
+        // that the physical operation heads still name this accepted history.
+        // Inspect the exact prepared operation without load_at_head(), which
+        // could merge divergent operations as a side effect.
+        let prepared=self.receipt.prepared.as_ref().context("accepted source operation absent")?;
+        let mut publisher=JournalJjPublisher{loader:self.repo.loader(),store:&self.store};
+        ensure!(publisher.inspect(prepared)?==VcsPublicationObservation::Published,
+            "accepted source physical jj publication changed; retain original input for recovery");
+        self.check_physical()?;time(budget,cancel)
     }
 }
 /// Original canonical-lock cleanup ACK only. It grants no task/source use;
@@ -70,6 +79,12 @@ impl ManagedCheckpointAcceptance {
         let bytes=self.store.read_object(&prepared.record)?;
         let record:PreparedJjOperation=serde_json::from_slice(&bytes)?;
         ensure!(canonical_json(&record)?==bytes,"published jj record is not canonical");
+        record.validate()?;
+        ensure!(record.commit.parents==vec![previous.baseline.commit.clone()]
+            &&record.integration_base==previous.baseline.commit
+            &&record.proof.binding.baseline==previous.baseline
+            &&record.proof.binding.baseline_operation==previous.operation,
+            "accepted source history differs from the original base/parent mapping");
         let verified=self.verified.as_ref().context("original actual mapping verifier absent")?;
         verified.check_proof(&record.proof)?;
         ensure!(integration.proposed_source_root==record.proof.source
@@ -91,7 +106,7 @@ impl ManagedCheckpointAcceptance {
         let mut directories=Vec::with_capacity(repository.directories.len()+1);
         directories.push(IntegrationDirectory{path:repository.path.clone(),held:repository.directory.try_clone()?});
         for d in &repository.directories{directories.push(IntegrationDirectory{path:d.path.clone(),held:d.held.try_clone()?});}
-        let input=Arc::new(AcceptedSourceInput{identity,owner:self.lease.owner().clone(),receipt:receipt.clone(),repo,verified:verified.clone(),backed,directories});
+        let input=Arc::new(AcceptedSourceInput{identity,owner:self.lease.owner().clone(),receipt:receipt.clone(),repo,store:self.store.clone(),verified:verified.clone(),backed,directories});
         input.check_current(&self.lease,journal,budget,cancel)?;repository.check_current()?;Ok(input)
     }
     /// Explicit OFF-App lock release only after the original successor source

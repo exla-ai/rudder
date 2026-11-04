@@ -10,15 +10,19 @@ async function withTempRudderHome(t) {
   const root = await fsp.mkdtemp(path.join(os.tmpdir(), "rudder-models-"));
   const previousHome = process.env.RUDDER_HOME;
   const previousUserHome = process.env.HOME;
+  const previousCodexHome = process.env.CODEX_HOME;
   process.env.RUDDER_HOME = root;
   // Model discovery also reads ~/.codex and ~/.claude/projects. Keep those
   // lookups in the same disposable home instead of scanning the real account.
   process.env.HOME = root;
+  delete process.env.CODEX_HOME;
   t.after(async () => {
     if (previousHome === undefined) delete process.env.RUDDER_HOME;
     else process.env.RUDDER_HOME = previousHome;
     if (previousUserHome === undefined) delete process.env.HOME;
     else process.env.HOME = previousUserHome;
+    if (previousCodexHome === undefined) delete process.env.CODEX_HOME;
+    else process.env.CODEX_HOME = previousCodexHome;
     await fsp.rm(root, { recursive: true, force: true }).catch(() => {});
   });
   return root;
@@ -87,6 +91,33 @@ test("model discovery merges account-specific OpenAI and Anthropic model APIs ah
   const cache = JSON.parse(await fsp.readFile(path.join(rudderHome, "models-dev.json"), "utf8"));
   assert.ok(cache.openai.models["gpt-6-codex-preview"], "OpenAI API model is written for native task pane");
   assert.ok(cache.anthropic.models["claude-oracle-6-20260703"], "Anthropic API model is written for native task pane");
+});
+
+test("Codex subscription OAuth stays off public API discovery and uses the selected local home", async t => {
+  const root = await withTempRudderHome(t);
+  const local = path.join(root, "selected-codex-home");
+  process.env.CODEX_HOME = local;
+  await fsp.mkdir(local);
+  await fsp.writeFile(path.join(local, "models_cache.json"), JSON.stringify({ models: [
+    { slug: "gpt-account-specific", display_name: "Account model" },
+    { slug: "gpt-hidden", visibility: "hide" },
+  ] }));
+  await fsp.writeFile(path.join(root, "auth-profiles.json"), JSON.stringify({ version: 1, profiles: {
+    "openai-codex:default": { type: "oauth", provider: "openai-codex", access: "subscription-fixture-bearer", refresh: "fixture-refresh", expires: Date.now() + 60000 },
+  } }));
+  const oldFetch = globalThis.fetch, oldKey = process.env.OPENAI_API_KEY;
+  delete process.env.OPENAI_API_KEY;
+  t.after(() => { globalThis.fetch = oldFetch; if (oldKey === undefined) delete process.env.OPENAI_API_KEY; else process.env.OPENAI_API_KEY = oldKey; });
+  const calls = [];
+  globalThis.fetch = async (url, init) => {
+    calls.push(String(url));
+    assert.ok(!JSON.stringify(init).includes("subscription-fixture-bearer"));
+    return jsonResponse({});
+  };
+  const options = await discoverModelOptions("codex");
+  assert.ok(options.some(row => row.value === "gpt-account-specific"));
+  assert.ok(!options.some(row => row.value === "gpt-hidden"));
+  assert.ok(!calls.includes("https://api.openai.com/v1/models"));
 });
 
 test("Claude fallback choices mirror Claude Code without synthetic 1m aliases", () => {

@@ -222,6 +222,9 @@ impl Journal {
     fn begin_vcs_intent_with_inputs(&mut self,owner:&OwnerFence,store:&LocalStore,request:&VcsIntentRequest,now_ms:i64,
         #[allow(unused_mut)] mut inputs:Option<&mut VcsRetainedInputs>)->Result<VcsIntentReceipt>{
         request.validate()?;
+        // Idempotency returns a historical receipt, never authority to act as a
+        // retired writer. Fence before every cached mutation result as well.
+        assert_owner(&self.conn, owner)?;
         if let Some(actual)=inputs.as_deref_mut(){actual.check(store)?;}
         let body = json(request)?;
         if let Some(receipt) = duplicate(
@@ -248,6 +251,7 @@ impl Journal {
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        assert_owner(&tx, owner)?;
         if let Some(receipt) = duplicate(&tx, &owner.project_id, &request.idempotency_key, &body)? {
             return Ok(receipt);
         }
@@ -294,6 +298,7 @@ impl Journal {
         now_ms: i64,
     ) -> Result<VcsIntentReceipt> {
         prepared.validate()?;
+        assert_owner(&self.conn, owner)?;
         let existing = intent(&self.conn, &owner.project_id, intent_id)?;
         if let Some(old) = &existing.prepared {
             ensure!(
@@ -316,6 +321,7 @@ impl Journal {
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        assert_owner(&tx, owner)?;
         let mut receipt = intent(&tx, &owner.project_id, intent_id)?;
         if let Some(old) = &receipt.prepared {
             ensure!(
@@ -369,6 +375,7 @@ impl Journal {
             let tx = self
                 .conn
                 .transaction_with_behavior(TransactionBehavior::Immediate)?;
+            assert_owner(&tx, owner)?;
             let mut receipt = intent(&tx, &owner.project_id, intent_id)?;
             if matches!(
                 receipt.state,
@@ -411,6 +418,7 @@ impl Journal {
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        assert_owner(&tx, owner)?;
         let mut receipt = intent(&tx, &owner.project_id, intent_id)?;
         ensure!(
             receipt.state == VcsIntentState::Started && receipt.original_owner == *owner,
@@ -473,6 +481,7 @@ impl Journal {
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        assert_owner(&tx, owner)?;
         let mut receipt = intent(&tx, &owner.project_id, intent_id)?;
         if matches!(
             receipt.state,
@@ -480,7 +489,6 @@ impl Journal {
         ) {
             return Ok(receipt);
         }
-        assert_owner(&tx, owner)?;
         ensure!(
             matches!(
                 receipt.state,
@@ -873,3 +881,153 @@ fn raw_hex(value: &str, length: usize) -> Result<()> {
 #[cfg(target_os="linux")]pub use retained_inputs::VcsRetainedInputs;
 #[cfg(not(target_os="linux"))]struct VcsRetainedInputs;
 #[cfg(not(target_os="linux"))]impl VcsRetainedInputs{fn check(&mut self,_:&LocalStore)->Result<()>{anyhow::bail!("retained input profile unavailable")}fn retain(&mut self,_:&LocalStore,_:&str,_:Vec<ObjectRef>)->Result<BTreeMap<String,ObjectRef>>{anyhow::bail!("retained input profile unavailable")}}
+
+#[cfg(test)]
+mod accepted_history_tests {
+    use super::*;
+    use crate::protocol::{CheckpointConsistency, Durability};
+    use crate::store::{CheckpointManifest, DirectoryManifest, EnvironmentManifest, SourceManifest};
+    use serde_json::json;
+
+    const BASE: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const NEXT: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+    struct Fixture {
+        directory: tempfile::TempDir,
+        journal: Journal,
+        store: LocalStore,
+        owner: OwnerFence,
+        request: VcsIntentRequest,
+    }
+    impl Fixture {
+        fn new() -> Self {
+            let directory = tempfile::tempdir().unwrap();
+            let mut journal = Journal::open(directory.path().join("journal.sqlite")).unwrap();
+            let owner = journal.create_project("project", "owner", BASE, 1).unwrap();
+            journal.observe_run_attempt(&owner, "run", "attempt", 1).unwrap();
+            let store = LocalStore::open(directory.path().join("cas")).unwrap();
+            let seed = store.put_directory(DirectoryManifest { format_version: 1, mode: 0o755, entries: vec![] }).unwrap();
+            let source = store.put_source(&SourceManifest { format_version: 1, directory: seed.clone(), parents: vec![], consistency: CheckpointConsistency::Quiesced }).unwrap();
+            let environment = store.put_environment(&EnvironmentManifest { format_version: 1, directory: seed.clone(), platform: BTreeMap::from([("abi".into(), "protocol-test".into())]), installer_inputs: vec![], provenance: BTreeMap::new() }).unwrap();
+            let recovery = store.put_checkpoint(&CheckpointManifest { format_version: 1, source: source.clone(), environment: Some(environment.clone()), parents: vec![], consistency: CheckpointConsistency::Quiesced, durability: Durability::Local, knowledge_cursor: 0 }).unwrap();
+            let policy = store.put_blob(b"test-only-profile-policy").unwrap();
+            let request = VcsIntentRequest {
+                idempotency_key: "import".into(), source_run: VcsRunFence { run_id: "run".into(), run_epoch: 1, attempt_id: "attempt".into(), view_id: "view".into() },
+                expected_head: BASE.into(), proposed_source_root: source.clone(), proposed_environment_root: environment.clone(), recovery_root: recovery,
+                seed_root: seed, projection_policy: policy.clone(), profile: policy, expected_view_root: None, hardlinks: None, versions: BTreeMap::new(),
+                evidence: IntegrationEvidence { tested_head: BASE.into(), tested_source_root: source, tested_environment_root: environment, action_results: vec![], checks: json!({"fixture":true}) },
+            };
+            Self { directory, journal, store, owner, request }
+        }
+        fn accepted(&mut self) -> VcsIntentReceipt {
+            self.journal.begin_vcs_intent(&self.owner, &self.store, &self.request, 2).unwrap()
+        }
+        fn operation(&self, receipt: &VcsIntentReceipt) -> PreparedVcsOperation {
+            // Protocol regression fixture, not a real jj publication witness.
+            let tree = json!({"terms":["d".repeat(40)],"labels":[]});
+            let proof = json!({"format_version":1,"binding":{"format_version":1,"project_id":"project","owner":{"owner":"owner","epoch":1},"run_id":"run","run_epoch":1,"attempt_id":"attempt","view_id":"view","seed":self.request.seed_root,"baseline":{"commit":BASE,"change":"e".repeat(32),"parents":[],"tree":tree},"baseline_operation":"1".repeat(128),"projection_policy":self.request.projection_policy,"profile":self.request.profile},"recovery_root":self.request.recovery_root,"source":self.request.proposed_source_root,"environment":self.request.proposed_environment_root,"tree":tree});
+            let proof_identity = self.store.put_blob(&canonical_json(&proof).unwrap()).unwrap();
+            let record = json!({"format_version":1,"intent_id":receipt.intent_id,"expected_heads":["1".repeat(128)],"operation":"2".repeat(128),"integration_base":BASE,"commit":{"commit":NEXT,"change":"c".repeat(32),"parents":[BASE],"tree":tree},"proof":proof});
+            PreparedVcsOperation { format_version: 1, record: self.store.put_blob(&canonical_json(&record).unwrap()).unwrap(), operation_id: "2".repeat(128), expected_operation_heads: vec!["1".repeat(128)], commit_id: NEXT.into(), proof_identity }
+        }
+        fn prepared(&mut self) -> VcsIntentReceipt {
+            let accepted = self.accepted();
+            let operation = self.operation(&accepted);
+            self.journal.attach_vcs_operation(&self.owner, &self.store, &accepted.intent_id, &operation, 3).unwrap()
+        }
+    }
+    struct Publisher { calls: usize, fail: bool }
+    impl VcsPublisher for Publisher {
+        fn inspect(&mut self, _: &PreparedVcsOperation) -> Result<VcsPublicationObservation> {
+            Ok(VcsPublicationObservation::NotPublished)
+        }
+        fn publish(&mut self, _: &PreparedVcsOperation) -> Result<VcsPublicationObservation> {
+            self.calls += 1;
+            ensure!(!self.fail, "fixture import failed before visible publication");
+            Ok(VcsPublicationObservation::Published)
+        }
+    }
+
+    #[test]
+    fn accepted_history_cached_acceptance_and_preparation_fence_retired_owner() {
+        let mut f = Fixture::new();
+        let accepted = f.accepted();
+        assert_eq!(f.accepted(), accepted);
+        let operation = f.operation(&accepted);
+        let prepared = f.journal.attach_vcs_operation(&f.owner, &f.store, &accepted.intent_id, &operation, 3).unwrap();
+        f.journal.transfer_owner(&f.owner, "replacement", 4).unwrap();
+        assert!(f.journal.begin_vcs_intent(&f.owner, &f.store, &f.request, 5).is_err());
+        assert!(f.journal.attach_vcs_operation(&f.owner, &f.store, &accepted.intent_id, &operation, 5).is_err());
+        // Historical reads remain available and do not mint current authority.
+        assert_eq!(f.journal.vcs_intent(&f.owner, &accepted.intent_id).unwrap(), prepared);
+    }
+
+    #[test]
+    fn accepted_history_terminal_publication_and_reconciliation_fence_retired_owner() {
+        let mut f = Fixture::new();
+        let prepared = f.prepared();
+        let mut publisher = Publisher { calls: 0, fail: false };
+        let published = f.journal.publish_vcs_intent(&f.owner, &prepared.intent_id, &mut publisher, 4).unwrap();
+        assert_eq!(published.state, VcsIntentState::Published);
+        let next = f.journal.transfer_owner(&f.owner, "replacement", 5).unwrap();
+        assert!(f.journal.publish_vcs_intent(&f.owner, &prepared.intent_id, &mut publisher, 6).is_err());
+        assert!(f.journal.reconcile_vcs_intent(&f.owner, &prepared.intent_id, &mut publisher, 6).is_err());
+        assert_eq!(f.journal.reconcile_vcs_intent(&next, &prepared.intent_id, &mut publisher, 6).unwrap(), published);
+        assert_eq!(publisher.calls, 1);
+    }
+
+    #[test]
+    fn accepted_history_changed_head_or_run_cannot_start_external_import() {
+        for changed_head in [false, true] {
+            let mut f = Fixture::new();
+            let prepared = f.prepared();
+            if changed_head {
+                let mut competing = f.request.integration(&"c".repeat(40));
+                competing.idempotency_key = "other-integration".into();
+                f.journal.integrate(&f.owner, &competing, 4).unwrap();
+            } else {
+                f.journal.advance_run_epoch(&f.owner, "run", 1, 4).unwrap();
+            }
+            let mut publisher = Publisher { calls: 0, fail: false };
+            assert!(f.journal.publish_vcs_intent(&f.owner, &prepared.intent_id, &mut publisher, 5).is_err());
+            assert_eq!(publisher.calls, 0);
+            assert_eq!(f.journal.vcs_intent(&f.owner, &prepared.intent_id).unwrap().state, VcsIntentState::Prepared);
+        }
+    }
+
+    #[test]
+    fn accepted_history_invalid_import_record_preserves_accepted_recovery() {
+        let mut f = Fixture::new();
+        let accepted = f.accepted();
+        let mut operation = f.operation(&accepted);
+        let mut record: Value = serde_json::from_slice(&f.store.read_object(&operation.record).unwrap()).unwrap();
+        record["proof"]["source"] = serde_json::to_value(&f.request.seed_root).unwrap();
+        operation.record = f.store.put_blob(&canonical_json(&record).unwrap()).unwrap();
+        assert!(f.journal.attach_vcs_operation(&f.owner, &f.store, &accepted.intent_id, &operation, 3).is_err());
+        assert_eq!(f.journal.vcs_intent(&f.owner, &accepted.intent_id).unwrap(), accepted);
+        assert!(f.store.read_object(&accepted.request.recovery_root).is_ok());
+        assert_eq!(f.journal.project_state("project").unwrap().integration_head, BASE);
+    }
+
+    #[test]
+    fn accepted_history_failed_import_retains_export_roots_and_reconciles_after_restart_without_replay() {
+        let mut f = Fixture::new();
+        let prepared = f.prepared();
+        let mut publisher = Publisher { calls: 0, fail: true };
+        let failed = f.journal.publish_vcs_intent(&f.owner, &prepared.intent_id, &mut publisher, 4).unwrap();
+        assert_eq!(failed.state, VcsIntentState::Uncertain);
+        assert!(failed.integration.is_none());
+        let mut restarted = Journal::open(f.directory.path().join("journal.sqlite")).unwrap();
+        let rejected = restarted.reconcile_vcs_intent(&f.owner, &prepared.intent_id, &mut publisher, 5).unwrap();
+        assert_eq!(rejected.state, VcsIntentState::Rejected);
+        assert!(rejected.integration.is_none());
+        assert_eq!(restarted.project_state("project").unwrap().integration_head, BASE);
+        assert_eq!(publisher.calls, 1);
+        let retained = f.store.retention().unwrap();
+        for (pin, reference) in &rejected.retention_pins {
+            assert_eq!(retained.pins.get(pin), Some(reference));
+            f.store.read_object(reference).unwrap();
+        }
+        assert_eq!(restarted.vcs_intent(&f.owner, &prepared.intent_id).unwrap(), rejected);
+    }
+}

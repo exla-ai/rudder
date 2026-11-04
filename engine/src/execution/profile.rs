@@ -10,6 +10,136 @@ use serde::{Deserialize, Serialize};
 use sha2::Digest;
 use uuid::Uuid;
 
+/// Non-secret selection recorded alongside the existing execution identity.
+/// This describes selection, not a credential grant or model qualification.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelProfileSelectionV1 {
+    pub format_version: u32,
+    pub backend: String,
+    pub profile_id: String,
+    pub provider: String,
+    pub credential_kind: String,
+    pub requested_model: String,
+    pub model: String,
+    pub requested_effort: Option<String>,
+    pub effort: Option<String>,
+    pub backend_version: String,
+}
+
+#[cfg(test)]
+mod model_identity_tests {
+    use super::*;
+    fn selection() -> ModelProfileSelectionV1 {
+        ModelProfileSelectionV1 { format_version: 1, backend: "codex".into(), profile_id: "private-selected".into(),
+            provider: "openai-codex".into(), credential_kind: "oauth".into(), requested_model: "account-model".into(),
+            model: "account-model".into(), requested_effort: Some("max".into()), effort: Some("xhigh".into()),
+            backend_version: "installed-version".into() }
+    }
+    fn execution() -> super::super::ExecutionIdentityV2 {
+        super::super::ExecutionIdentityV2 { project_id: "project".into(), request_id: Uuid::new_v4().to_string(),
+            run_id: "run".into(), run_epoch: 1, execution_id: Uuid::new_v4().to_string(), operation_id: Uuid::new_v4().to_string(),
+            view_id: Uuid::new_v4().to_string(), owner: crate::protocol::OwnerEpoch { owner: "owner".into(), epoch: 1 },
+            request_digest: "a".repeat(64), supervisor_pid: 100 }
+    }
+    #[test]
+    fn accepted_history_model_receipt_survives_restart_and_rejects_resume_drift() {
+        let selected = selection(); let execution = execution();
+        let receipt = ExecutionProfileV4::bind_model_session(&serde_json::to_value(&selected).unwrap(), &execution,
+            "actual-session", "account-model", Some("xhigh")).unwrap();
+        let restored: ModelSessionReceiptV1 = serde_json::from_slice(&canonical_json(&receipt).unwrap()).unwrap();
+        restored.validate_resume(&selected, &execution, "actual-session").unwrap();
+        let mut changed = selected.clone(); changed.profile_id = "other-profile".into();
+        assert!(restored.validate_resume(&changed, &execution, "actual-session").is_err());
+        changed = selected.clone(); changed.requested_effort = Some("xhigh".into());
+        assert!(restored.validate_resume(&changed, &execution, "actual-session").is_err());
+        let mut moved = execution.clone(); moved.owner.epoch += 1;
+        assert!(restored.validate_resume(&selected, &moved, "actual-session").is_err());
+        assert!(restored.validate_resume(&selected, &execution, "other-session").is_err());
+    }
+    #[test]
+    fn accepted_history_model_receipt_rejects_backend_model_and_version_changes() {
+        let selected = serde_json::to_value(selection()).unwrap(); let execution = execution();
+        assert!(ExecutionProfileV4::bind_model_session(&selected, &execution, "session", "fallback-model", None).is_err());
+        assert!(ExecutionProfileV4::bind_model_session(&selected, &execution, "session", "account-model", Some("high")).is_err());
+        let mut changed = selected.clone(); changed["format_version"] = serde_json::json!(2);
+        assert!(ExecutionProfileV4::validate_selected_model(&changed).is_err());
+        changed = selected.clone(); changed["secret"] = serde_json::json!("must-not-be-in-a-receipt");
+        assert!(ExecutionProfileV4::validate_selected_model(&changed).is_err());
+        let receipt = ExecutionProfileV4::bind_model_session(&selected, &execution, "session", "account-model", None).unwrap();
+        changed = selected.clone(); changed["backend_version"] = serde_json::json!("different-installed-version");
+        assert!(ExecutionProfileV4::validate_model_resume(&receipt, &changed, &execution, "session").is_err());
+        assert!(receipt["observed_effort"].is_null());
+    }
+}
+impl ModelProfileSelectionV1 {
+    pub fn validate(&self) -> Result<()> {
+        ensure!(self.format_version == 1, "unsupported model profile version");
+        for value in [&self.profile_id, &self.requested_model, &self.model, &self.backend_version] {
+            model_identity_text(value)?;
+        }
+        ensure!(matches!(self.credential_kind.as_str(), "api_key" | "oauth" | "token"), "invalid model credential kind");
+        ensure!(match self.backend.as_str() {
+            "claude" => self.provider == "anthropic",
+            "codex" => self.provider == "openai" || self.provider == "openai-codex" && self.credential_kind == "oauth",
+            _ => false,
+        }, "selected model profile provider/backend differs");
+        for value in [self.requested_effort.as_deref(), self.effort.as_deref()].into_iter().flatten() {
+            ensure!(matches!(value, "low" | "medium" | "high" | "xhigh" | "max"), "invalid selected model effort");
+        }
+        let effective = match (self.backend.as_str(), self.requested_effort.as_deref()) {
+            ("codex", Some("max")) => Some("xhigh"),
+            ("codex", None) => Some("high"),
+            (_, value) => value,
+        };
+        ensure!(self.effort.as_deref() == effective, "selected model effort differs from launch policy");
+        Ok(())
+    }
+}
+
+/// Written by the trusted owner only after actual backend initialization. JSON
+/// can describe this fact but cannot restore a process, authorize a resume or
+/// establish completion, verification, acceptance, push or deployment.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelSessionReceiptV1 {
+    pub format_version: u32,
+    pub selection: ModelProfileSelectionV1,
+    pub execution: super::ExecutionIdentityV2,
+    pub session_id: String,
+    pub observed_model: String,
+    /// None means the backend did not report effort, never that it verified it.
+    pub observed_effort: Option<String>,
+}
+impl ModelSessionReceiptV1 {
+    pub fn validate(&self) -> Result<()> {
+        ensure!(self.format_version == 1, "unsupported model session receipt version");
+        self.selection.validate()?;
+        self.execution.validate()?;
+        model_identity_text(&self.session_id)?;
+        model_identity_text(&self.observed_model)?;
+        ensure!(self.observed_model == self.selection.model, "backend model differs from selected model");
+        if let Some(effort) = &self.observed_effort {
+            ensure!(Some(effort) == self.selection.effort.as_ref(), "backend effort differs from selected effort");
+        }
+        Ok(())
+    }
+    pub fn validate_resume(&self, selection: &ModelProfileSelectionV1,
+        execution: &super::ExecutionIdentityV2, session_id: &str) -> Result<()> {
+        self.validate()?;
+        selection.validate()?;
+        execution.validate()?;
+        ensure!(&self.selection == selection && &self.execution == execution && self.session_id == session_id,
+            "resume profile/model/effort/session or execution owner changed");
+        Ok(())
+    }
+}
+fn model_identity_text(value: &str) -> Result<()> {
+    ensure!(!value.is_empty() && value.len() <= 256 && value.trim() == value
+        && !value.chars().any(char::is_control), "invalid model session identity");
+    Ok(())
+}
+
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExecutionProfileV4 {
@@ -35,6 +165,26 @@ pub enum ExecutionWorkspaceSelectionV4 {
 }
 
 impl ExecutionProfileV4 {
+    /// Strict codecs usable by native callers without extending legacy Spec4/5
+    /// encodings. Persist this sidecar under the original execution's custody.
+    pub fn validate_selected_model(value: &serde_json::Value) -> Result<()> {
+        let selected: ModelProfileSelectionV1 = serde_json::from_value(value.clone())?;
+        selected.validate()
+    }
+    pub fn bind_model_session(selection: &serde_json::Value, execution: &super::ExecutionIdentityV2,
+        session_id: &str, model: &str, effort: Option<&str>) -> Result<serde_json::Value> {
+        let receipt = ModelSessionReceiptV1 { format_version: 1,
+            selection: serde_json::from_value(selection.clone())?, execution: execution.clone(),
+            session_id: session_id.into(), observed_model: model.into(), observed_effort: effort.map(str::to_owned) };
+        receipt.validate()?;
+        Ok(serde_json::to_value(receipt)?)
+    }
+    pub fn validate_model_resume(receipt: &serde_json::Value, selection: &serde_json::Value,
+        execution: &super::ExecutionIdentityV2, session_id: &str) -> Result<()> {
+        let receipt: ModelSessionReceiptV1 = serde_json::from_value(receipt.clone())?;
+        let selection: ModelProfileSelectionV1 = serde_json::from_value(selection.clone())?;
+        receipt.validate_resume(&selection, execution, session_id)
+    }
     /// Derives protocol data only. Endpoint ownership and authorization still
     /// come from the actual remote view and trusted helper services.
     pub fn partial_binding(&self) -> Result<Option<crate::vfs::partial_rpc::PartialBinding>> {

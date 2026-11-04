@@ -5,3 +5,12 @@ resolver = "2"
 [profile.release]
 lto = "thin"
 codegen-units = 1
+
+# Fast edit/test loop: incremental stays on (cargo default for dev/test),
+# dependencies carry no debuginfo, workspace crates keep line tables for
+# backtraces. Optional: RUSTC_WRAPPER=sccache caches dependency builds.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false

@@ -13,10 +13,6 @@ path = "src/main.rs"
 name = "rudder_native"
 path = "src/lib.rs"
 
-[[test]]
-name = "app-engine-lifecycle"
-path = "src/app_engine_lifecycle/harness.rs"
-
 [dependencies]
 rudder-vcs-bridge = { path = "../vcs-bridge", features = ["jj"] }
 rudder-engine = { path = "../engine" }

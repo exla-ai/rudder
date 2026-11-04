@@ -3,10 +3,13 @@
 //! payload at its fixed interpreter path. It does not qualify Root custody,
 //! Python, Buck2, Rust, TypeScript, or the SDK producer handshake.
 //! Explicit Linux UID1500 run (requires `cc` and static libc):
-//! `CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 cargo test --workspace --locked
-//! --features rudder-vcs-bridge/cli --lib helper::local_tests -j2 --
-//! --ignored --nocapture --test-threads=1`
+//! `scripts/test-sdk-helper-local.sh --stand-in`
+//! The separate real Python/TypeScript selected execution harness is registered
+//! below. Neither fixture constructs a production SDK admission owner.
 use super::*;
+
+#[path = "sdk_local_e2e/mod.rs"]
+mod real_sdk;
 
 const PAYLOAD: &str = r#"
 #define _GNU_SOURCE

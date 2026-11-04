@@ -4,7 +4,7 @@ use super::*;
 use crate::workspace::{self, ProjectionBudget};
 use std::time::Duration;
 
-pub(super) struct SealedBuildInputs { store: LocalStore, pin: String, settled: bool }
+pub(super) struct SealedBuildInputs { store: LocalStore, pin: String, checkpoint: ObjectRef, settled: bool }
 impl SealedBuildInputs {
     pub(super) fn acquire(index: &BuildIndex, input: &BuildInputView, prepared: &PreparedEnvironment) -> Result<Self> {
         let store = index.store();
@@ -16,42 +16,47 @@ impl SealedBuildInputs {
         let published = store.publish_extending(&lease.id, &pin, input.checkpoint(), std::slice::from_ref(&prepared.receipt));
         if published.is_err() { let _ = store.abandon_staging(&lease.id); }
         published?;
-        let owner = Self { store: store.clone(), pin, settled: true };
+        let owner = Self { store: store.clone(), pin, checkpoint: input.checkpoint().clone(), settled: true };
         owner.validate(input)?;
         Ok(owner)
     }
     pub(super) fn pin_data(&self) -> &str { &self.pin }
     pub(super) fn mark_inflight(&mut self) { self.settled = false; }
+    #[cfg(test)]
     pub(super) fn mark_settled(&mut self) { self.settled = true; }
     pub(super) fn validate(&self, expected: &BuildInputView) -> Result<()> {
-        let actual = match expected.checkpoint().kind {
-            ObjectKind::Checkpoint => workspace::build_input_view(&self.store, expected.checkpoint())?,
-            ObjectKind::RunnableRoot => {
-                let root = crate::snapshot::decode_runnable(&self.store.read_object(expected.checkpoint())?)?;
-                let source = crate::snapshot::decode_source(&self.store.read_object(&root.source)?)?;
-                let qualified = workspace::runnable_build_input_view(&self.store, expected.checkpoint(), &source.projection_policy, &ProjectionBudget::default())?;
-                qualified.input().clone()
-            }
-            _ => anyhow::bail!("managed build input requires a sealed checkpoint or runnable root"),
-        };
+        let actual = qualified_input(&self.store, expected.checkpoint())?;
         ensure!(&actual == expected, "sealed build input differs from current verified checkpoint");
         Ok(())
     }
 }
+pub(super) fn qualified_input(store: &LocalStore, checkpoint: &ObjectRef) -> Result<BuildInputView> {
+        let actual = match checkpoint.kind {
+            ObjectKind::Checkpoint => workspace::build_input_view(store, checkpoint)?,
+            ObjectKind::RunnableRoot => {
+                let root = crate::snapshot::decode_runnable(&store.read_object(checkpoint)?)?;
+                let source = crate::snapshot::decode_source(&store.read_object(&root.source)?)?;
+                let qualified = workspace::runnable_build_input_view(store, checkpoint, &source.projection_policy, &ProjectionBudget::default())?;
+                qualified.input().clone()
+            }
+            _ => anyhow::bail!("managed build input requires a sealed checkpoint or runnable root"),
+        };
+        Ok(actual)
+}
 impl Drop for SealedBuildInputs {
     // Unknown shutdown retains the original pin recorded in the inflight
     // marker. Recovery must reconcile that original attempt before release.
-    fn drop(&mut self) { if self.settled { let _ = self.store.unpin(&self.pin); } }
+    fn drop(&mut self) { if self.settled { let _ = self.store.release_build_input_pin(&self.pin, &self.checkpoint); } }
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use crate::{protocol::{CheckpointConsistency, Durability}, store::{CheckpointV2Manifest,
         DirectoryEntry, DirectoryManifest, EntryNode, SourceManifest}, workspace::WorkspaceProfile};
     use std::fs;
 
-    fn fixture() -> (tempfile::TempDir, BuildIndex, PreparedEnvironment, BuildInputView) {
+    pub(in crate::build) fn fixture() -> (tempfile::TempDir, BuildIndex, PreparedEnvironment, BuildInputView) {
         let temp=tempfile::tempdir().unwrap();
         let store=LocalStore::open(temp.path().join("cas")).unwrap();
         let compiler=store.put_blob(b"pinned compiler identity").unwrap();

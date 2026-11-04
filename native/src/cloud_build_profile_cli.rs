@@ -4,7 +4,7 @@
 
 use anyhow::{bail, ensure, Context, Result};
 use rudder_engine::{
-    build::{Buck2Adapter, BuildProfile},
+    build::{Buck2Adapter, BuildExecutionControl, BuildProfile},
     content,
     directory::EntryNode,
     protocol::{ObjectKind, ObjectRef},
@@ -18,7 +18,12 @@ use std::{
     fs,
     io::{self, Read},
     path::{Path, PathBuf},
+    sync::Arc,
+    time::Duration,
 };
+
+#[path = "cloud_build_cancel.rs"]
+mod cancellation;
 
 const MAX_REQUEST: usize = 64 * 1024;
 
@@ -95,10 +100,16 @@ pub(crate) fn run(args: &[String]) -> Result<()> {
         args.is_empty(),
         "fabric build-profile accepts only JSON on stdin"
     );
+    // This is the one original control for the whole invocation, including
+    // request qualification. Keep its signal owner through synchronous build
+    // completion and original daemon shutdown on every result path.
+    let control = Arc::new(BuildExecutionControl::new(Duration::from_secs(180))?);
+    let cancellation = cancellation::BuildCancellation::install(control.clone())?;
     let mut raw = Vec::new();
     io::stdin()
         .take(MAX_REQUEST as u64 + 1)
         .read_to_end(&mut raw)?;
+    cancellation.check()?;
     let request = parse(&raw)?;
     ensure!(
         cfg!(target_os = "linux"),
@@ -140,7 +151,8 @@ pub(crate) fn run(args: &[String]) -> Result<()> {
     // Each invocation owns unique mutable scratch, even for identical inputs.
     let workspace = scratch.join(format!("build-{}", uuid::Uuid::new_v4()));
     fs::create_dir(&workspace)?;
-    let built = adapter.build(&index, &profile, input.input(), &prepared, &workspace);
+    cancellation.check()?;
+    let built = adapter.build_controlled(&index, &profile, input.input(), &prepared, &workspace, &control);
     // Stop the private daemon on both success and failure. Failed/uncertain
     // scratch remains recoverable; this adapter never deletes a live workspace.
     let stopped = if workspace.join(".rudder-managed-build.json").is_file() {
@@ -148,8 +160,20 @@ pub(crate) fn run(args: &[String]) -> Result<()> {
     } else {
         Ok(())
     };
-    let build = built?;
-    stopped?;
+    let cancelled = cancellation.finish().context("original build cancellation settlement failed; publication requires reconciliation")?;
+    let publication_started = control.publication_started()?;
+    let original_result = match &built {
+        Ok(build) => format!("published run receipt {} and action receipt {}", build.run_receipt.digest, build.stored.receipt.digest),
+        Err(error) => format!("{error:#}"),
+    };
+    if let Err(error) = stopped {
+        bail!("original build daemon shutdown unresolved; retain workspace {} for reconciliation; publication_started={publication_started}; build result: {original_result}; shutdown: {error:#}", workspace.display());
+    }
+    if cancelled.requested {
+        bail!("managed build cancelled; original synchronous build and daemon shutdown returned; publication_prevented={}; publication_started={publication_started}; original result: {original_result}; workspace {}",
+            cancelled.publication_prevented, workspace.display());
+    }
+    let build = built.with_context(|| format!("original build failed; workspace {} retained; publication_started={publication_started}", workspace.display()))?;
     // Buck2 always validates its graph/REAPI identity. record_build and its run
     // publication retain the verified output closure transactionally. Scrub it
     // again before returning this existing receipt as successful build DATA.

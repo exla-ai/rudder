@@ -373,6 +373,13 @@ impl BuildIndex {
         Ok(result)
     }
 
+    /// Inspect an already retained publication only for original-attempt
+    /// reconciliation. This is not cache admission or frontend validation.
+    pub(super) fn retained_action_for_reconciliation(&self, contract: &ActionContract) -> Result<Option<ObjectRef>> {
+        contract.validate()?;
+        self.lookup("action", &contract.key(&self.store)?)
+    }
+
     pub fn record_build(&self, build: &QualifiedBuild) -> Result<StoredBuild> {
         build.contract.validate()?;
         super::managed_action_gate::require_input_custody()?;

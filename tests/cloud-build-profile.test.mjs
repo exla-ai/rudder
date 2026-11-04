@@ -20,7 +20,7 @@ async function fixture(t, source) {
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   const binary = path.join(root, "native fixture.cjs");
   await fs.writeFile(binary, `#!${process.execPath}\n${source}\n`, { mode: 0o755 });
-  return { root, options: { nativeBinary: binary, timeoutMs: 3_000 } };
+  return { root, options: { nativeBinary: binary, timeoutMs: 3_000, cancelGraceMs: 200 } };
 }
 
 test("build client submits exactly the data helper command without provider credentials", async (t) => {
@@ -61,7 +61,7 @@ test("helper failure and output overflow cannot return success", async (t) => {
   await assert.rejects(runCloudBuildProfile(request(root), options), /output exceeds/);
 });
 
-test("deadlines and cancellation fail honestly and terminate helper process groups", async (t) => {
+test("deadlines and cancellation fail honestly for noncooperative helpers", async (t) => {
   const { root, options } = await fixture(t, "process.stdin.resume(); setInterval(()=>{},1000);");
   await assert.rejects(runCloudBuildProfile(request(root), { ...options, timeoutMs: 40 }), /deadline exceeded.*reconciliation/);
   const controller = new AbortController();
@@ -70,9 +70,58 @@ test("deadlines and cancellation fail honestly and terminate helper process grou
   await assert.rejects(pending, /cancelled.*reconciliation/);
 });
 
+test("cancellation retains the original cooperative helper through settlement and preserves its reconciliation", async (t) => {
+  const { root, options } = await fixture(t, `
+const fs=require('node:fs'); let raw='';
+process.stdin.on('data',c=>raw+=c); process.stdin.on('end',()=>{
+ const req=JSON.parse(raw); const live=setInterval(()=>{},1000);
+ process.on('SIGTERM',()=>{clearInterval(live);setTimeout(()=>{
+  fs.writeFileSync(req.scratch+'/settled','original execution joined');
+  console.error('original publication reconciled: action receipt retained'); process.exit(1);
+ },80);});
+ fs.writeFileSync(req.scratch+'/ready','ready');
+});`);
+  const controller = new AbortController();
+  const pending = runCloudBuildProfile(request(root), { ...options, cancelGraceMs: 1_000, signal: controller.signal });
+  let completed = false;
+  void pending.then(() => { completed = true; }, () => { completed = true; });
+  for (let i=0; i<100; i++) {
+    if (await fs.readFile(path.join(root, "ready"), "utf8").catch(() => "")) break;
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
+  assert.equal(await fs.readFile(path.join(root, "ready"), "utf8"), "ready");
+  controller.abort();
+  await new Promise(resolve => setTimeout(resolve, 30));
+  assert.equal(completed, false, "must retain the actual helper until it closes");
+  await assert.rejects(pending, /cancelled.*original helper returned.*original publication reconciled: action receipt retained/);
+  assert.equal(await fs.readFile(path.join(root, "settled"), "utf8"), "original execution joined");
+});
+
+test("a helper success after a stop request cannot become a successful build", async (t) => {
+  const req = request("/placeholder");
+  const { root, options } = await fixture(t, `
+const fs=require('node:fs'); let raw='';
+process.stdin.on('data',c=>raw+=c); process.stdin.on('end',()=>{
+ const req=JSON.parse(raw); const live=setInterval(()=>{},1000);
+ process.on('SIGTERM',()=>{clearInterval(live);const result=${JSON.stringify(response(req))};
+ result.runnable=req.runnable;result.workspace=req.scratch+'/build-a123';console.log(JSON.stringify(result));});
+ fs.writeFileSync(req.scratch+'/ready','ready');
+});`);
+  const controller = new AbortController();
+  const pending = runCloudBuildProfile(request(root), { ...options, signal: controller.signal });
+  for (let i=0; i<100; i++) {
+    if (await fs.readFile(path.join(root, "ready"), "utf8").catch(() => "")) break;
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
+  assert.equal(await fs.readFile(path.join(root, "ready"), "utf8"), "ready");
+  controller.abort();
+  await assert.rejects(pending, /cancelled.*reconciliation.*original helper returned/);
+});
+
 test("cancelled helpers cannot leave an ordinary descendant running", { skip: process.platform === "win32" }, async (t) => {
   const { root, options } = await fixture(t, `
 const fs=require('node:fs'), cp=require('node:child_process'); let raw='';
+process.on('SIGTERM',()=>{});
 process.stdin.on('data',c=>raw+=c); process.stdin.on('end',()=>{
  const req=JSON.parse(raw); const child=cp.spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:'ignore'});
  fs.writeFileSync(req.scratch+'/descendant',String(child.pid)); setInterval(()=>{},1000);
@@ -88,7 +137,7 @@ process.stdin.on('data',c=>raw+=c); process.stdin.on('end',()=>{
   }
   assert.ok(pid, "helper should have spawned a descendant before cancellation");
   controller.abort();
-  await assert.rejects(pending, /cancelled/);
+  await assert.rejects(pending, /cancelled.*original helper settlement unresolved/);
   // Linux can retain a killed orphan as a zombie until its init process reaps
   // it. Either absence or zombie state proves it cannot keep building.
   for (let i=0; i<100; i++) {
@@ -109,4 +158,5 @@ test("invalid request paths and deadlines fail before launching a helper", async
   await assert.rejects(runCloudBuildProfile(missingAlgorithm), /typed SHA-256/);
   await assert.rejects(runCloudBuildProfile({ ...request("/scratch"), scratch: "relative" }), /absolute/);
   await assert.rejects(runCloudBuildProfile(request("/scratch"), { timeoutMs: Infinity }), /deadline must/);
+  await assert.rejects(runCloudBuildProfile(request("/scratch"), { cancelGraceMs: Infinity }), /cancellation grace must/);
 });

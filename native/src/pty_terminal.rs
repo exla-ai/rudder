@@ -1190,6 +1190,7 @@ impl TerminalPane {
         if let (Some(command), Some(cwd)) = (&command, &options.cwd) {
             crate::agent_trust::prepare_for_launch(&command.program, cwd);
         }
+        let command = enter_fork(command, options.cwd.as_deref());
         let mut builder = command_builder(command, &options.term)?;
         if let Some(cwd) = &options.cwd {
             builder.cwd(cwd);
@@ -2262,6 +2263,27 @@ impl TerminalPane {
         self.terminated = true;
         self.child.request_termination();
     }
+}
+
+/// An agent workspace that is an overlay fork of the warm snapshot (see
+/// src/warm-snapshot.ts) has `<workspace>.fork/enter`; its files exist only
+/// inside the fork's mount namespace, so the command runs through it.
+fn enter_fork(command: Option<TerminalCommand>, cwd: Option<&std::path::Path>) -> Option<TerminalCommand> {
+    let command = command?;
+    let Some(cwd) = cwd else { return Some(command) };
+    let mut state = cwd.as_os_str().to_owned();
+    state.push(".fork");
+    let enter = std::path::PathBuf::from(state).join("enter");
+    if !cfg!(target_os = "linux") || !enter.is_file() {
+        return Some(command);
+    }
+    let mut args = vec![command.program];
+    args.extend(command.args);
+    Some(TerminalCommand {
+        program: enter.to_string_lossy().into_owned(),
+        args,
+        env: command.env,
+    })
 }
 
 fn command_builder(command: Option<TerminalCommand>, term: &str) -> Result<CommandBuilder> {

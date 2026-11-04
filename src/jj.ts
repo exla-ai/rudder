@@ -16,6 +16,7 @@ import { ensureProjectRuntimeIgnored, saveRunRecord, workspacePath } from "./sta
 import { DECISIONS_HEADER } from "./surfaces.js";
 import { withIntegrationLock } from "./rudder-md.js";
 import { managedJjInstallError } from "./jj-binary.js";
+import { createForkWorkspace, removeForkState } from "./warm-snapshot.js";
 
 // Minimum jj version we are confident in. Older releases may lack flags we use
 // (e.g. `jj workspace add -r`); we warn rather than throw so an older jj still
@@ -366,6 +367,21 @@ export async function createNodeWorkspace(params: {
   const targetPath = workspacePath(params.repoRoot, params.runId ?? id, params.task);
   await fsp.mkdir(path.dirname(targetPath), { recursive: true });
 
+  // Fast path: an overlay fork of the warm snapshot (no file copies, deps and
+  // build outputs already there). Falls back to a full jj checkout.
+  if (!params.atChangeId) {
+    const fork = await createForkWorkspace({
+      repoRoot: params.repoRoot,
+      targetPath,
+      workspaceName,
+      description: workspaceDescription(params, "running"),
+    });
+    if ("snapshot" in fork) {
+      process.stderr.write(`[rudder] workspace ${workspaceName}: overlay fork of warm snapshot ${fork.snapshot.key}\n`);
+      return { workspaceName, path: targetPath };
+    }
+    process.stderr.write(`[rudder] workspace ${workspaceName}: full jj checkout (${fork.reason})\n`);
+  }
   const baseArgs = ["workspace", "add", targetPath, "--name", workspaceName];
   let added = await jjWriteWithStaleRecovery(
     params.repoRoot,
@@ -735,6 +751,7 @@ export async function forgetWorkspace(params: {
       allowFailure: true,
     }).catch(() => undefined);
   }
+  await removeForkState(params.workspacePath);
   await fsp.rm(params.workspacePath, { recursive: true, force: true });
 }
 

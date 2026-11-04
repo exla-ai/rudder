@@ -1,3 +1,4 @@
+import fs from "node:fs";
 import fsp from "node:fs/promises";
 import path from "node:path";
 import { createHash } from "node:crypto";
@@ -133,13 +134,20 @@ export async function prepareLegacyProjectRecovery(options: {
     recovery_manifest_sha256: createHash("sha256").update(await fsp.readFile(path.join(options.bundle,"manifest.json"))).digest("hex"),
     rollback_checkpoint: options.rollbackCheckpoint ?? null, run_ids: [] as string[], ready: false };
   await writeJson(recoveryFile, recovery, {mode:0o600});
-  const mappings = manifest.roots.map((root, index) => ({ before: path.resolve(root.path), after: exported.roots[index].path }))
+  // Symlinked parents (macOS /var -> /private/var) give one directory two
+  // spellings; accept either for both the captured root and the run path.
+  const spellings = (value: string): string[] => {
+    const resolved = path.resolve(value);
+    try { const real = fs.realpathSync(resolved); return real === resolved ? [resolved] : [resolved, real]; } catch { return [resolved]; }
+  };
+  const mappings = manifest.roots.flatMap((root, index) => spellings(root.path).map(before => ({ before, after: exported.roots[index].path })))
     .sort((a,b) => b.before.length - a.before.length);
   const remap = (value: string): string => {
-    const input = path.resolve(value);
-    const mapping = mappings.find(root => input === root.before || input.startsWith(root.before + path.sep));
-    if (!mapping) throw new Error("Recovery workspace has no captured source root");
-    return path.join(mapping.after, path.relative(mapping.before, input));
+    for (const input of spellings(value)) {
+      const mapping = mappings.find(root => input === root.before || input.startsWith(root.before + path.sep));
+      if (mapping) return path.join(mapping.after, path.relative(mapping.before, input));
+    }
+    throw new Error("Recovery workspace has no captured source root");
   };
   if (exported.compatibleRuns) {
     const files = await fsp.readdir(exported.compatibleRuns);

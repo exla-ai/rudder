@@ -132,6 +132,7 @@ impl Journal {
             request.target_epoch,
             &request.scope,
         )?;
+        super::runtime::restart_recovery::require_runtime_admission(&tx, &auth.project, &request.target_run, request.target_epoch)?;
         super::runtime::validate_live_control(&tx, &auth.project, request, now_ms)?;
         let(count,bytes):(i64,i64)=tx.query_row("SELECT count(*),COALESCE(sum(length(CAST(request_json AS BLOB))),0) FROM commands WHERE project_id=?1 AND target_run=?2 AND target_epoch=?3 AND state!='completed'",params![auth.project,request.target_run,sql_u64(request.target_epoch)?],|r|Ok((r.get(0)?,r.get(1)?)))?;
         ensure!(
@@ -216,13 +217,14 @@ impl Journal {
         if state != "pending" {
             return Ok(None);
         }
+        super::runtime::restart_recovery::require_runtime_admission(&tx, &project, &target, epoch)?;
         let blockers:i64=tx.query_row("SELECT count(*) FROM commands c JOIN effects e ON e.command_id=c.command_id WHERE c.project_id=?1 AND c.target_run=?2 AND c.target_epoch=?3 AND c.accepted_sequence<?4 AND e.state!='completed'",params![project,target,sql_u64(epoch)?,sql_u64(sequence)?],|r|r.get(0))?;
         if blockers != 0 {
             return Ok(None);
         }
         if let Err(error) = super::automatic_mail_delivery::validate_reconciled_claim(&tx, command_id, now_ms) {
             let result = serde_json::json!({"status":"rejected","reason":"original mailbox notification no longer permits a write","detail":error.to_string()});
-            complete(&tx, command_id, &result)?;
+            complete(&tx, command_id, &result, now_ms)?;
             append_event(&tx, &project, "effect-rejected", &owner.owner_id, &serde_json::json!({"command_id":command_id,"result":result}), now_ms)?;
             tx.commit()?;
             return Ok(None);
@@ -241,7 +243,7 @@ impl Journal {
             })();
             if let Err(error) = authorized {
                 let result = serde_json::json!({"status":"rejected","reason":"control authority or pinned backend turn is no longer current","detail":error.to_string()});
-                complete(&tx, command_id, &result)?;
+                complete(&tx, command_id, &result, now_ms)?;
                 append_event(&tx, &project, "effect-rejected", &owner.owner_id, &serde_json::json!({"command_id":command_id,"result":result}), now_ms)?;
                 tx.commit()?;
                 return Ok(None);
@@ -313,7 +315,7 @@ impl Journal {
             state == "started",
             "effect must be reconciled before completion"
         );
-        complete(&tx, &claim.command_id, result)?;
+        complete(&tx, &claim.command_id, result, now_ms)?;
         append_event(
             &tx,
             &project,
@@ -350,6 +352,7 @@ impl Journal {
             )?;
         }
         tx.commit()?;
+        self.backfill_completion_outbox(owner, 256, now_ms)?;
         Ok(Recovery {
             pending: self.commands_in_state(owner, CommandState::Accepted, 1000)?,
             uncertain: self.commands_in_state(owner, CommandState::Uncertain, 1000)?,
@@ -415,14 +418,14 @@ impl Journal {
         match resolution {
             Reconciliation::Completed { result, evidence } => {
                 ensure!(!evidence.is_null(), "reconciliation requires evidence");
-                complete(&tx, command_id, result)?;
+                complete(&tx, command_id, result, now_ms)?;
             }
             Reconciliation::RetrySafe { evidence } => {
                 ensure!(!evidence.is_null(), "safe retry requires evidence");
                 assert_run(&tx, &project, &target, epoch)?;
                 tx.execute("UPDATE effects SET state='pending',claim_id=NULL,owner_epoch=NULL,started_at=NULL WHERE command_id=?1",[command_id])?;
                 tx.execute(
-                    "UPDATE commands SET state='accepted' WHERE command_id=?1",
+                    "UPDATE commands SET state='accepted',result_json=NULL WHERE command_id=?1",
                     [command_id],
                 )?;
             }
@@ -456,10 +459,12 @@ pub(super) fn receipt(conn: &Connection, id: &str) -> Result<CommandReceipt> {
 /// receipts in the same transaction as its epoch change. Started/uncertain
 /// effects remain for reconciliation; they are never relabeled as unexecuted.
 pub(super) fn retire_pending_targets(tx: &Transaction<'_>, project: &str, run: Option<&str>, principal: &str, now_ms: i64) -> Result<()> {
-    let changed = tx.execute(
-        "UPDATE effects SET state='completed' WHERE state='pending' AND claim_id IS NULL AND command_id IN (SELECT c.command_id FROM commands c JOIN runs r ON r.project_id=c.project_id AND r.run_id=c.target_run WHERE c.project_id=?1 AND (?2 IS NULL OR c.target_run=?2) AND c.state='accepted' AND c.target_epoch!=r.epoch)",
-        params![project,run],
-    )?;
+    let ids = {
+        let mut statement = tx.prepare("UPDATE effects SET state='completed' WHERE state='pending' AND claim_id IS NULL AND command_id IN (SELECT c.command_id FROM commands c JOIN runs r ON r.project_id=c.project_id AND r.run_id=c.target_run WHERE c.project_id=?1 AND (?2 IS NULL OR c.target_run=?2) AND c.state='accepted' AND c.target_epoch!=r.epoch) RETURNING command_id")?;
+        let ids = statement.query_map(params![project,run], |row| row.get::<_,String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        ids
+    };
+    let changed = ids.len();
     if changed == 0 { return Ok(()); }
     let result = serde_json::json!({"status":"rejected","reason":"target attempt retired before dispatch"});
     let completed = tx.execute(
@@ -467,11 +472,14 @@ pub(super) fn retire_pending_targets(tx: &Transaction<'_>, project: &str, run: O
         params![project,run,json(&result)?],
     )?;
     ensure!(changed == completed, "retired command/effect count differs");
+    // Publish each rejected receipt as well as the aggregate retirement event.
+    // The event is the durable outbox entry, committed with its terminal state.
+    for id in ids { publish_completion(tx, &id, now_ms)?; }
     append_event(tx,project,"pending-target-effects-retired",principal,&serde_json::json!({"run_id":run,"count":completed,"result":result}),now_ms)?;
     Ok(())
 }
 
-fn complete(tx: &Transaction<'_>, id: &str, result: &Value) -> Result<()> {
+pub(super) fn complete(tx: &Transaction<'_>, id: &str, result: &Value, now_ms: i64) -> Result<()> {
     tx.execute(
         "UPDATE effects SET state='completed' WHERE command_id=?1",
         [id],
@@ -480,5 +488,11 @@ fn complete(tx: &Transaction<'_>, id: &str, result: &Value) -> Result<()> {
         "UPDATE commands SET state='completed',result_json=?1 WHERE command_id=?2",
         params![json(result)?, id],
     )?;
+    publish_completion(tx, id, now_ms)
+}
+
+pub(super) fn publish_completion(tx: &Transaction<'_>, id: &str, now_ms: i64) -> Result<()> {
+    let done = receipt(tx, id)?;
+    append_event(tx, &done.project_id, "command-result-ready", "engine", &serde_json::json!({"command_id":id,"receipt":done}), now_ms)?;
     Ok(())
 }

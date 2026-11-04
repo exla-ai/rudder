@@ -1,3 +1,4 @@
+import fs from "node:fs";
 import fsp from "node:fs/promises";
 import path from "node:path";
 import type { MergeStrategy, RunRecord } from "./types.js";
@@ -25,8 +26,22 @@ export type RebaseResult = {
 export function findRepoRoot(cwd = process.cwd()): string {
   // A jj workspace can share the main checkout's Git directory. Git then
   // reports that checkout, which would send local writes outside this worker.
-  const workspace = runCommandSync("jj", ["root"], { cwd, allowFailure: true });
-  if (workspace.code === 0 && workspace.stdout.trim()) return workspace.stdout.trim();
+  // Read the workspace marker instead of invoking jj: even discovery commands
+  // can snapshot a working copy, and completion/read-only paths must not do so.
+  let directory = path.resolve(cwd);
+  while (true) {
+    try {
+      if (fs.statSync(path.join(directory, ".jj")).isDirectory()) return directory;
+    } catch {
+      // No readable local jj marker; continue ordinary repository discovery.
+    }
+    // A nested Git checkout belongs to its own project, not an enclosing jj
+    // workspace. Let Git resolve its marker or worktree file below.
+    if (fs.existsSync(path.join(directory, ".git"))) break;
+    const parent = path.dirname(directory);
+    if (parent === directory) break;
+    directory = parent;
+  }
   const result = runCommandSync("git", ["rev-parse", "--show-toplevel"], {
     cwd,
     allowFailure: true,

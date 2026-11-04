@@ -556,7 +556,7 @@ pub(crate) fn dashboard_help() -> &'static str {
     concat!(
         "plain input -> one isolated mergeable worker in its own jj workspace; multi-part implementation plans wait for approval. ",
         "/main [task] -> agent in this shared checkout. Send follow-ups in the owning agent's pane. ",
-        "/model chooses model/effort · /login signs in · /usage shows usage · /feedback reports a problem · /help shortcuts. ",
+        "/model chooses model/effort · /resume continues a conversation · /cloud changes new-task location · /help shortcuts. ",
         "Option-1/2/3/4 or ^W panes · Enter start/focus · R review all · M merge all · m merge · x stop · $ command opens a shell in this checkout."
     )
 }

@@ -455,11 +455,30 @@ export function workspaceNameFor(id: string): string {
  * operation id before the merge and records it on merge.operationId. On
  * conflict sets merge.status="conflict" + conflictedFiles + mergeChangeId.
  */
-export async function mergeJjRunIntoCurrentWorkspace(run: RunRecord, allowDirty = false): Promise<RunRecord> {
+export async function mergeJjRunIntoCurrentWorkspace(
+  run: RunRecord,
+  allowDirty = false,
+  options: { abortOnConflict?: boolean } = {},
+): Promise<RunRecord> {
   // Integration is one-at-a-time ACROSS PROCESSES: a `rudder merge` CLI call
   // and a daemon tick are separate processes sharing the same @, and a second
   // merge starting mid-flight would stack a merge change on a moving target.
-  return withIntegrationLock(run.repoRoot, () => mergeJjRunIntoCurrentWorkspaceLocked(run, allowDirty));
+  return withIntegrationLock(run.repoRoot, async () => {
+    const opBefore = options.abortOnConflict ? await currentOpId(run.repoRoot) : "";
+    const merged = await mergeJjRunIntoCurrentWorkspaceLocked(run, allowDirty);
+    if (options.abortOnConflict && merged.merge?.status === "conflict" && opBefore) {
+      // Automatic integration never leaves a conflicted merge in the main
+      // checkout: restore the pre-merge operation and leave the run for the user.
+      await undoToOp(run.repoRoot, opBefore);
+      merged.merge = {
+        ...merged.merge,
+        mergeChangeId: undefined,
+        error: "merge into the main change conflicts; nothing was merged",
+      };
+      await saveRunRecord(merged);
+    }
+    return merged;
+  });
 }
 
 async function mergeJjRunIntoCurrentWorkspaceLocked(run: RunRecord, allowDirty: boolean): Promise<RunRecord> {

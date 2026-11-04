@@ -6180,7 +6180,7 @@ fn merge_conflict_run_record_round_trips_actionable_state() {
         loaded[0].merge_conflict_files,
         vec!["src/auth.ts".to_string(), "src/session.ts".to_string()]
     );
-    assert_eq!(agent_status_label(&loaded[0]), "merge conflict · press m");
+    assert_eq!(agent_status_label(&loaded[0]), "needs you · conflict");
 
     save_native_run_record(&repo_root, &loaded[0]).expect("save conflict record");
     let raw = fs::read_to_string(native_run_dir(&repo_root, "conflict-run-1").join("run.json"))
@@ -9192,26 +9192,6 @@ fn auto_integration_non_conflict_error_does_not_spawn_resolver() {
 }
 
 #[test]
-fn merge_all_can_be_triggered_from_nav_mode() {
-    let mut app = App::new();
-    let mut run = test_agent_run("run-1", "test task");
-    run.status = AgentStatus::Done;
-    run.workspace_branch = Some("rudder/test".to_string());
-    run.workspace_path = Some(app.cwd.join("workspace"));
-    app.agents.push(run);
-    app.selected_agent = 0;
-    app.focus = FocusPane::Worker;
-    app.nav_mode = true;
-
-    app.handle_key(KeyEvent::new(KeyCode::Char('M'), KeyModifiers::SHIFT));
-
-    assert!(matches!(
-        app.merge_confirm.as_ref().map(|confirm| &confirm.intent),
-        Some(MergeIntent::All { ids }) if ids == &vec!["run-1".to_string()]
-    ));
-}
-
-#[test]
 fn ctrl_w_leader_then_digit_focuses_pane() {
     let mut app = App::new();
     app.focus = FocusPane::Task;
@@ -9266,119 +9246,6 @@ fn alt_digit_still_focuses_pane() {
 }
 
 #[test]
-fn merge_all_command_opens_confirmation() {
-    let mut app = App::new();
-    let mut run = test_agent_run("run-1", "test task");
-    run.status = AgentStatus::Done;
-    run.workspace_branch = Some("rudder/test".to_string());
-    run.workspace_path = Some(app.cwd.join("workspace"));
-    app.agents.push(run);
-
-    assert!(app.handle_command("/merge-all"));
-
-    assert!(matches!(
-        app.merge_confirm.as_ref().map(|confirm| &confirm.intent),
-        Some(MergeIntent::All { ids }) if ids == &vec!["run-1".to_string()]
-    ));
-}
-
-#[test]
-fn merge_all_command_includes_jj_workspace_runs_without_legacy_path() {
-    let mut app = App::new();
-    let mut run = test_agent_run("run-1", "test task");
-    run.status = AgentStatus::Done;
-    run.node_id = Some("n1".to_string());
-    run.workspace_name = Some("rudder-17824484932183-fe7bf2".to_string());
-    run.jj_change_id = Some("wuytqszwzqswmkrzrznwvrqmonnzkvoo".to_string());
-    app.agents.push(run);
-
-    assert!(app.handle_command("/merge-all"));
-
-    assert!(matches!(
-        app.merge_confirm.as_ref().map(|confirm| &confirm.intent),
-        Some(MergeIntent::All { ids }) if ids == &vec!["run-1".to_string()]
-    ));
-    assert!(app
-        .merge_confirm
-        .as_ref()
-        .and_then(|confirm| confirm.detail.as_deref())
-        .is_some_and(|detail| detail.contains("Ready: n1")));
-}
-
-#[test]
-fn merge_all_skips_recorded_merge_conflict_rows() {
-    let mut app = App::new();
-    let mut conflicted = test_agent_run("run-1", "conflicted task");
-    conflicted.status = AgentStatus::Done;
-    conflicted.node_id = Some("n1".to_string());
-    conflicted.workspace_name = Some("rudder-conflicted".to_string());
-    conflicted.jj_change_id = Some("abc123".to_string());
-    conflicted.merge_conflict = true;
-    conflicted.merge_conflict_files = vec!["src/auth.ts".to_string()];
-    app.agents.push(conflicted);
-
-    app.request_merge_all_ready();
-
-    assert!(app.merge_confirm.is_none());
-    assert!(app
-        .notice
-        .as_deref()
-        .is_some_and(|notice| notice.contains("need selected m")));
-}
-
-#[test]
-fn merge_all_confirmation_names_ready_nodes_and_logs_action() {
-    let mut app = App::new();
-    let mut first = test_agent_run("run-1", "first task");
-    first.status = AgentStatus::Done;
-    first.node_id = Some("n1".to_string());
-    first.workspace_path = Some(app.cwd.join("workspace-1"));
-    let mut second = test_agent_run("run-2", "second task");
-    second.status = AgentStatus::Done;
-    second.node_id = Some("n2".to_string());
-    second.workspace_path = Some(app.cwd.join("workspace-2"));
-    app.agents.push(first);
-    app.agents.push(second);
-
-    app.request_merge_all_ready();
-
-    let detail = app
-        .merge_confirm
-        .as_ref()
-        .and_then(|confirm| confirm.detail.as_deref())
-        .unwrap_or_default();
-    assert!(detail.contains("Ready: n1, n2"));
-    assert!(app
-        .activity_log
-        .iter()
-        .any(|line| line.contains("merge-all ready: 2 workspaces (n1, n2)")));
-    assert!(app.notice.is_none());
-}
-
-#[test]
-fn merge_all_ignores_oneoff_agents_even_if_they_have_workspace_fields() {
-    let mut app = App::new();
-    let mut oneoff = test_agent_run("oneoff-1", "quick question");
-    oneoff.mode = AgentMode::OneOff;
-    oneoff.status = AgentStatus::Done;
-    oneoff.workspace_branch = Some("rudder/oneoff".to_string());
-    oneoff.workspace_path = Some(app.cwd.join("oneoff-workspace"));
-    let mut run = test_agent_run("run-1", "test task");
-    run.status = AgentStatus::Done;
-    run.workspace_branch = Some("rudder/test".to_string());
-    run.workspace_path = Some(app.cwd.join("workspace"));
-    app.agents.push(oneoff);
-    app.agents.push(run);
-
-    app.request_merge_all_ready();
-
-    assert!(matches!(
-        app.merge_confirm.as_ref().map(|confirm| &confirm.intent),
-        Some(MergeIntent::All { ids }) if ids == &vec!["run-1".to_string()]
-    ));
-}
-
-#[test]
 fn selected_oneoff_agent_cannot_be_merged() {
     let mut app = App::new();
     let mut oneoff = test_agent_run("oneoff-1", "quick question");
@@ -9396,221 +9263,6 @@ fn selected_oneoff_agent_cannot_be_merged() {
         .notice
         .as_deref()
         .is_some_and(|notice| notice.contains("one-off agent: merge disabled")));
-}
-
-#[test]
-fn review_all_starts_codex_aggregate_agent() {
-    let mut app = App::new();
-    app.backend = Backend::Codex; // review_agent_profile keys off the plan backend
-    let mut first = test_agent_run("run-1", "first task");
-    first.status = AgentStatus::Done;
-    first.jj_change_id = Some("rudder/first".to_string());
-    first.workspace_path = Some(app.cwd.join("workspace-1"));
-    let mut second = test_agent_run("run-2", "second task");
-    second.status = AgentStatus::Done;
-    second.jj_change_id = Some("rudder/second".to_string());
-    second.workspace_path = Some(app.cwd.join("workspace-2"));
-    app.agents.push(first);
-    app.agents.push(second);
-    app.focus = FocusPane::Agents;
-
-    app.review_all_ready();
-
-    assert_eq!(app.agents.len(), 3);
-    assert_eq!(app.selected_agent, 2);
-    let review = &app.agents[2];
-    assert_eq!(review.mode, AgentMode::ReviewAll);
-    assert_eq!(review.backend, Backend::Codex);
-    assert_eq!(review.model, REVIEW_ALL_MODEL);
-    assert_eq!(review.effort, Some(REVIEW_ALL_EFFORT));
-    assert_eq!(
-        review.review_source_ids,
-        vec!["run-1".to_string(), "run-2".to_string()]
-    );
-    assert!(review.task.contains("/thermonuclear"));
-    assert!(review.task.contains("rudder/first"));
-    assert!(review.task.contains("rudder/second"));
-    assert_eq!(app.focus, FocusPane::Worker);
-    assert_eq!(app.worker_view, WorkerView::Terminal);
-    assert!(app
-        .notice
-        .as_deref()
-        .is_some_and(|notice| notice.contains("review-all")));
-}
-
-#[cfg(not(windows))]
-#[test]
-fn review_all_premerge_combines_real_jj_changes() {
-    let repo = unique_test_repo("review-all-real-jj");
-    let run = |program: &str, args: &[&str], cwd: &Path| {
-        let output = Command::new(program)
-            .args(args)
-            .current_dir(cwd)
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "{program} {} failed: {}",
-            args.join(" "),
-            String::from_utf8_lossy(&output.stderr)
-        );
-    };
-    run("git", &["init", "-b", "main"], &repo);
-    run("git", &["config", "user.email", "test@example.com"], &repo);
-    run("git", &["config", "user.name", "Rudder Test"], &repo);
-    fs::write(repo.join("base.txt"), "base\n").unwrap();
-    run("git", &["add", "base.txt"], &repo);
-    run("git", &["commit", "-m", "base"], &repo);
-    run("jj", &["git", "init", "--colocate", "."], &repo);
-
-    let first_path = repo.with_extension("review-one");
-    let second_path = repo.with_extension("review-two");
-    let aggregate_path = repo.with_extension("review-aggregate");
-    let add_workspace = |path: &Path, name: &str| {
-        let path_arg = path.to_string_lossy().to_string();
-        run(
-            "jj",
-            &["workspace", "add", &path_arg, "--name", name, "-r", "@"],
-            &repo,
-        );
-    };
-    add_workspace(&first_path, "review-one");
-    fs::write(first_path.join("one.txt"), "one\n").unwrap();
-    let first_revision = jj_workspace_change_id(&first_path).unwrap();
-    add_workspace(&second_path, "review-two");
-    fs::write(second_path.join("two.txt"), "two\n").unwrap();
-    let second_revision = jj_workspace_change_id(&second_path).unwrap();
-    add_workspace(&aggregate_path, "review-aggregate");
-    let sources = vec![
-        ReviewAllSource {
-            id: "one".to_string(),
-            revision: first_revision,
-            task: "one".to_string(),
-            summary: "one".to_string(),
-            workspace_path: Some(first_path.clone()),
-        },
-        ReviewAllSource {
-            id: "two".to_string(),
-            revision: second_revision,
-            task: "two".to_string(),
-            summary: "two".to_string(),
-            workspace_path: Some(second_path.clone()),
-        },
-    ];
-
-    let result = premerge_review_all_sources(&aggregate_path, &sources);
-
-    assert_eq!(result.merged_revisions.len(), 2);
-    assert!(result.stopped_revision.is_none());
-    assert_eq!(
-        fs::read_to_string(aggregate_path.join("one.txt")).unwrap(),
-        "one\n"
-    );
-    assert_eq!(
-        fs::read_to_string(aggregate_path.join("two.txt")).unwrap(),
-        "two\n"
-    );
-    assert!(jj_workspace_change_id(&aggregate_path).is_some());
-    let _ = fs::remove_dir_all(first_path);
-    let _ = fs::remove_dir_all(second_path);
-    let _ = fs::remove_dir_all(aggregate_path);
-    let _ = fs::remove_dir_all(repo);
-}
-
-#[test]
-fn review_all_ignores_oneoff_agents_even_if_they_have_workspace_fields() {
-    let mut app = App::new();
-    let mut oneoff = test_agent_run("oneoff-1", "quick question");
-    oneoff.mode = AgentMode::OneOff;
-    oneoff.status = AgentStatus::Done;
-    oneoff.jj_change_id = Some("rudder/oneoff".to_string());
-    oneoff.workspace_path = Some(app.cwd.join("oneoff-workspace"));
-    let mut run = test_agent_run("run-1", "test task");
-    run.status = AgentStatus::Done;
-    run.jj_change_id = Some("rudder/test".to_string());
-    run.workspace_path = Some(app.cwd.join("workspace"));
-    app.agents.push(oneoff);
-    app.agents.push(run);
-
-    app.review_all_ready();
-
-    assert_eq!(app.selected_agent, 2);
-    assert_eq!(app.agents[2].mode, AgentMode::ReviewAll);
-    assert_eq!(app.agents[2].review_source_ids, vec!["run-1".to_string()]);
-}
-
-#[test]
-fn review_all_can_be_triggered_from_nav_mode() {
-    let mut app = App::new();
-    let mut run = test_agent_run("run-1", "test task");
-    run.status = AgentStatus::Done;
-    run.jj_change_id = Some("rudder/test".to_string());
-    run.workspace_path = Some(app.cwd.join("workspace"));
-    app.agents.push(run);
-    app.selected_agent = 0;
-    app.focus = FocusPane::Worker;
-    app.nav_mode = true;
-
-    app.handle_key(KeyEvent::new(KeyCode::Char('R'), KeyModifiers::SHIFT));
-
-    assert_eq!(app.selected_agent, 1);
-    assert_eq!(app.agents[1].mode, AgentMode::ReviewAll);
-    assert_eq!(app.agents[1].review_source_ids, vec!["run-1".to_string()]);
-}
-
-#[test]
-fn review_all_command_starts_codex_review_agent() {
-    let mut app = App::new();
-    app.backend = Backend::Codex; // review_agent_profile keys off the plan backend
-    let mut run = test_agent_run("run-1", "test task");
-    run.status = AgentStatus::Done;
-    run.jj_change_id = Some("rudder/test".to_string());
-    run.workspace_path = Some(app.cwd.join("workspace"));
-    app.agents.push(run);
-
-    assert!(app.handle_command("/review-all"));
-
-    assert_eq!(app.selected_agent, 1);
-    assert_eq!(app.agents[1].mode, AgentMode::ReviewAll);
-    assert_eq!(app.agents[1].model, REVIEW_ALL_MODEL);
-}
-
-#[test]
-fn review_all_without_ready_workspaces_shows_notice() {
-    let mut app = App::new();
-
-    app.review_all_ready();
-
-    assert!(app.agents.is_empty());
-    assert!(app
-        .notice
-        .as_deref()
-        .is_some_and(|notice| notice.contains("no completed workspaces")));
-}
-
-#[test]
-fn review_all_claimed_sources_are_not_merge_all_ready() {
-    let mut app = App::new();
-    let mut source = test_agent_run("run-1", "source task");
-    source.status = AgentStatus::Done;
-    source.jj_change_id = Some("rudder/source".to_string());
-    source.workspace_path = Some(app.cwd.join("source"));
-    let mut review = test_agent_run("review-1", "review all");
-    review.mode = AgentMode::ReviewAll;
-    review.status = AgentStatus::Running;
-    review.workspace_branch = Some("rudder/review-all".to_string());
-    review.workspace_path = Some(app.cwd.join("review"));
-    review.review_source_ids = vec!["run-1".to_string()];
-    app.agents.push(source);
-    app.agents.push(review);
-
-    app.request_merge_all_ready();
-
-    assert!(app.merge_confirm.is_none());
-    assert!(app
-        .notice
-        .as_deref()
-        .is_some_and(|notice| notice.contains("no completed workspaces")));
 }
 
 #[test]
@@ -29017,4 +28669,131 @@ fn background_output_bursts_keep_input_live_and_service_the_oldest_panes() {
     assert!(app.agents.iter().all(|run| run.last_drain_at.unwrap() >= now),
         "later rows must progress while the first panes continue writing");
     // Drop requests bounded child teardown; no actor waits for flood writers.
+}
+
+#[test]
+fn project_check_command_reads_rudder_toml_verification() {
+    let raw = "name = \"x\"\n[other]\ncommand = \"nope\"\n[verification]\n# quick checks\ncommand = \"npm run check\"\n";
+    assert_eq!(parse_project_check_command(raw).as_deref(), Some("npm run check"));
+    assert_eq!(parse_project_check_command("[verification]\ncommand = ''\n"), None);
+    assert_eq!(parse_project_check_command("[other]\ncommand = \"x\"\n"), None);
+}
+
+#[test]
+fn integration_prep_runs_project_checks_in_the_workspace() {
+    let repo = unique_test_repo("integration-checks");
+    let workspace = repo.join("ws");
+    fs::create_dir_all(&workspace).unwrap();
+    // No rudder.toml: nothing to check.
+    assert_eq!(prepare_worker_integration(&repo, &workspace), IntegrationPrep::Ready);
+    fs::write(
+        repo.join("rudder.toml"),
+        "[verification]\ncommand = 'echo checking in $(basename \"$PWD\"); test -f ok'\n",
+    )
+    .unwrap();
+    let failed = prepare_worker_integration(&repo, &workspace);
+    fs::write(workspace.join("ok"), "").unwrap();
+    let passed = prepare_worker_integration(&repo, &workspace);
+    let _ = fs::remove_dir_all(&repo);
+    match failed {
+        IntegrationPrep::ChecksFailed { output } => {
+            assert!(output.contains("checking in ws"), "{output}");
+        }
+        other => panic!("expected failed checks, got {other:?}"),
+    }
+    assert_eq!(passed, IntegrationPrep::Ready);
+}
+
+#[test]
+fn finished_isolated_workers_are_integrated_automatically() {
+    let finished = |id: &str| {
+        let mut run = test_agent_run(id, "manual worker");
+        run.status = AgentStatus::Done;
+        run.workspace_path = Some(std::env::temp_dir().join("rudder-no-such-ws"));
+        run
+    };
+    let mut app = App::new();
+    let worker = finished("worker");
+    let mut oneoff = finished("oneoff");
+    oneoff.mode = AgentMode::OneOff;
+    let mut experiment = finished("experiment");
+    experiment.swarm_experiment = true;
+    assert!(app.is_auto_integration_candidate(&worker));
+    assert!(!app.is_auto_integration_candidate(&oneoff));
+    assert!(!app.is_auto_integration_candidate(&experiment));
+    app.agents = vec![worker];
+    app.apply_integration_prep("worker", IntegrationPrep::Ready);
+    assert!(app.integration_prepared.contains("worker"));
+}
+
+#[test]
+fn integration_conflict_or_failed_checks_need_the_user_and_merge_nothing() {
+    let finished = |id: &str| {
+        let mut run = test_agent_run(id, "parser work");
+        run.status = AgentStatus::Done;
+        run.node_id = Some("n1".to_string());
+        run.workspace_path = Some(std::env::temp_dir().join("rudder-no-such-ws"));
+        run
+    };
+    let mut app = App::new();
+    app.agents = vec![finished("worker")];
+    app.integration_prep_inflight.insert("worker".to_string());
+
+    app.apply_integration_prep(
+        "worker",
+        IntegrationPrep::Conflict {
+            files: vec!["src/a.ts".to_string()],
+            output: "rebase output".to_string(),
+        },
+    );
+    let row = &app.agents[0];
+    assert_eq!(row.status, AgentStatus::Done, "nothing was merged");
+    assert!(row.has_merge_conflict());
+    assert_eq!(row.merge_conflict_files, vec!["src/a.ts".to_string()]);
+    assert!(row
+        .last_error
+        .as_deref()
+        .is_some_and(|e| e.contains("src/a.ts") && e.contains("rebase output")));
+    assert!(!app.is_auto_integration_candidate(row), "a row that needs you is not retried");
+    assert!(app.agents.iter().all(|r| !r.merge_resolver), "no AI resolver is started");
+    assert!(app.notice.as_deref().is_some_and(|n| n.contains("needs you")));
+    assert_eq!(crate::render::agent_status_label(&app.agents[0]), "needs you · conflict");
+
+    app.agents.push(finished("worker2"));
+    app.apply_integration_prep(
+        "worker2",
+        IntegrationPrep::ChecksFailed { output: "`npm test` failed:\n1 failing".to_string() },
+    );
+    let row = &app.agents[1];
+    assert_eq!(row.status, AgentStatus::Done);
+    assert!(row.has_merge_conflict());
+    assert!(row.last_error.as_deref().is_some_and(|e| e.contains("1 failing")));
+    assert_eq!(crate::render::agent_status_label(row), "needs you · checks failed");
+}
+
+#[test]
+fn main_and_oneoff_agents_take_their_summary_from_the_last_message() {
+    let _env = env_guard();
+    let home = unique_test_repo("last-message-home");
+    let cwd = unique_test_repo("last-message-cwd");
+    std::env::set_var("HOME", &home);
+    let project = home.join(".claude").join("projects").join(encode_claude_project_dir(&cwd));
+    fs::create_dir_all(&project).unwrap();
+    fs::write(
+        project.join("sid-1.jsonl"),
+        "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"Shipped the parser fix.\"}]}}\n",
+    )
+    .unwrap();
+    let mut app = App::new();
+    let mut run = test_agent_run("oneoff-1", "fix parser");
+    run.mode = AgentMode::OneOff;
+    run.status = AgentStatus::Done;
+    run.cwd = cwd.clone();
+    run.session_id = Some("sid-1".to_string());
+    app.agents = vec![run];
+    app.ingest_direct_completion_notes();
+    let summary = app.agents[0].done_summary.clone();
+    let _ = fs::remove_dir_all(&home);
+    let _ = fs::remove_dir_all(&cwd);
+    assert_eq!(summary.as_deref(), Some("Shipped the parser fix."));
 }

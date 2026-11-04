@@ -1693,10 +1693,12 @@ pub(crate) fn run_rudder_jj_command(
     // preserves the main workspace's working copy as a merge parent (no data loss,
     // undoable via `rudder undo`), so the git-style dirty gate would only get in the
     // way. (Rudder's own files no longer count as dirty either; see jj.ts.)
-    let extra: &[&str] = if command == "merge" {
-        &["--allow-dirty"]
-    } else {
-        &[]
+    // `merge-auto` is automatic integration: same merge, but a conflict restores
+    // the pre-merge operation so nothing half-merged is left in the checkout.
+    let (command, extra): (&str, &[&str]) = match command {
+        "merge" => ("merge", &["--allow-dirty"]),
+        "merge-auto" => ("merge", &["--allow-dirty", "--abort-on-conflict"]),
+        other => (other, &[]),
     };
     // This runs on the UI thread: never `Command::output()` (unbounded wait). A hung
     // jj/node child would freeze the whole TUI, so spawn + poll with a deadline and
@@ -2143,64 +2145,6 @@ pub(crate) fn git_output_args(cwd: &Path, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
-pub(crate) fn premerge_review_all_sources(
-    cwd: &Path,
-    sources: &[ReviewAllSource],
-) -> ReviewAllPremerge {
-    let mut premerge = ReviewAllPremerge::default();
-    for (index, source) in sources.iter().enumerate() {
-        let output = Command::new("jj")
-            .args([
-                "new",
-                "@",
-                source.revision.as_str(),
-                "-m",
-                "rudder: review-all aggregate",
-            ])
-            .current_dir(cwd)
-            .stdin(Stdio::null())
-            .output();
-        match output {
-            Ok(output) if output.status.success() => {
-                premerge.merged_revisions.push(source.revision.clone());
-                let conflicts = jj_unresolved_conflicts(cwd);
-                if !conflicts.is_empty() {
-                    premerge.stopped_revision = Some(source.revision.clone());
-                    premerge.stopped_error = Some(format!(
-                        "aggregate change has conflicts in {}",
-                        conflicts.join(", ")
-                    ));
-                    premerge.remaining_revisions = sources[index + 1..]
-                        .iter()
-                        .map(|item| item.revision.clone())
-                        .collect();
-                    break;
-                }
-            }
-            Ok(output) => {
-                premerge.stopped_revision = Some(source.revision.clone());
-                premerge.stopped_error =
-                    Some(String::from_utf8_lossy(&output.stderr).trim().to_string());
-                premerge.remaining_revisions = sources[index..]
-                    .iter()
-                    .map(|item| item.revision.clone())
-                    .collect();
-                break;
-            }
-            Err(error) => {
-                premerge.stopped_revision = Some(source.revision.clone());
-                premerge.stopped_error = Some(error.to_string());
-                premerge.remaining_revisions = sources[index..]
-                    .iter()
-                    .map(|item| item.revision.clone())
-                    .collect();
-                break;
-            }
-        }
-    }
-    premerge
-}
-
 pub(crate) fn jj_workspace_change_id(cwd: &Path) -> Option<String> {
     let output = Command::new("jj")
         .args(["log", "--no-graph", "-r", "@", "-T", "change_id"])
@@ -2401,6 +2345,167 @@ pub(crate) fn forget_jj_workspace(
         fs::remove_dir_all(path)?;
     }
     Ok(())
+}
+
+/// What preparing a finished worker for automatic integration found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum IntegrationPrep {
+    /// Rebased cleanly and the project's checks passed (or none are configured).
+    Ready,
+    /// Rebasing onto the main change conflicted in these files.
+    Conflict { files: Vec<String>, output: String },
+    /// The project's check command failed; `output` is its tail.
+    ChecksFailed { output: String },
+}
+
+const INTEGRATION_CHECK_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+const INTEGRATION_OUTPUT_LINES: usize = 40;
+
+/// The project's quick check command, from `rudder.toml`:
+///
+/// ```toml
+/// [verification]
+/// command = "npm test"
+/// ```
+pub(crate) fn project_check_command(repo_root: &Path) -> Option<String> {
+    let raw = fs::read_to_string(repo_root.join("rudder.toml")).ok()?;
+    parse_project_check_command(&raw)
+}
+
+pub(crate) fn parse_project_check_command(raw: &str) -> Option<String> {
+    let mut in_section = false;
+    for line in raw.lines() {
+        let line = line.trim();
+        if line.starts_with('[') {
+            in_section = line == "[verification]";
+            continue;
+        }
+        if !in_section {
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        if key.trim() != "command" {
+            continue;
+        }
+        let value = value.trim();
+        let unquoted = value
+            .strip_prefix('"')
+            .and_then(|v| v.strip_suffix('"'))
+            .map(|v| v.replace("\\\"", "\""))
+            .or_else(|| {
+                value
+                    .strip_prefix('\'')
+                    .and_then(|v| v.strip_suffix('\''))
+                    .map(ToOwned::to_owned)
+            })?;
+        return (!unquoted.trim().is_empty()).then_some(unquoted);
+    }
+    None
+}
+
+fn output_tail(text: &str) -> String {
+    let lines: Vec<&str> = text.trim_end().lines().collect();
+    let start = lines.len().saturating_sub(INTEGRATION_OUTPUT_LINES);
+    lines[start..].join("\n")
+}
+
+/// Rebase a finished worker's change onto the current main change and run the
+/// project's checks, all inside the worker's own workspace (never the user's
+/// checkout). Mechanical conflicts (package.json, lock files) are settled the
+/// same way merges settle them. Blocking: call it off the UI thread.
+pub(crate) fn prepare_worker_integration(repo_root: &Path, workspace: &Path) -> IntegrationPrep {
+    // "Current main change" is the newest bookmark under the main checkout's @.
+    // If the revset does not resolve (no bookmark yet), skip the rebase; the
+    // merge itself still reports conflicts.
+    let rebase_output = Command::new("jj")
+        .args(["rebase", "-b", "@", "-d", "latest(heads(::default@ & bookmarks()))"])
+        .current_dir(workspace)
+        .stdin(Stdio::null())
+        .output()
+        .map(|out| {
+            format!(
+                "{}{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            )
+        })
+        .unwrap_or_default();
+    let conflicts = jj_unresolved_conflicts(workspace);
+    if !conflicts.is_empty() {
+        let files = auto_resolve_mechanical_conflicts(workspace, &conflicts);
+        if !files.is_empty() {
+            return IntegrationPrep::Conflict {
+                output: output_tail(&rebase_output),
+                files,
+            };
+        }
+    }
+    match project_check_command(repo_root) {
+        Some(command) => run_integration_check(workspace, &command),
+        None => IntegrationPrep::Ready,
+    }
+}
+
+fn run_integration_check(workspace: &Path, command: &str) -> IntegrationPrep {
+    let mut child = match Command::new("sh")
+        .arg("-c")
+        .arg(format!("{command} 2>&1"))
+        .current_dir(workspace)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(error) => {
+            return IntegrationPrep::ChecksFailed {
+                output: format!("could not run `{command}`: {error}"),
+            }
+        }
+    };
+    let reader = child.stdout.take().map(|mut pipe| {
+        thread::spawn(move || {
+            let mut buf = Vec::new();
+            let _ = pipe.read_to_end(&mut buf);
+            buf
+        })
+    });
+    let deadline = Instant::now() + INTEGRATION_CHECK_TIMEOUT;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Some(status),
+            Ok(None) if Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break None;
+            }
+            Ok(None) => thread::sleep(Duration::from_millis(100)),
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break None;
+            }
+        }
+    };
+    let output = reader
+        .and_then(|handle| handle.join().ok())
+        .map(|buf| String::from_utf8_lossy(&buf).into_owned())
+        .unwrap_or_default();
+    match status {
+        Some(status) if status.success() => IntegrationPrep::Ready,
+        Some(_) => IntegrationPrep::ChecksFailed {
+            output: format!("`{command}` failed:\n{}", output_tail(&output)),
+        },
+        None => IntegrationPrep::ChecksFailed {
+            output: format!(
+                "`{command}` did not finish within {} minutes:\n{}",
+                INTEGRATION_CHECK_TIMEOUT.as_secs() / 60,
+                output_tail(&output)
+            ),
+        },
+    }
 }
 
 pub(crate) fn jj_unresolved_conflicts(cwd: &Path) -> Vec<String> {

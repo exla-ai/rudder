@@ -218,6 +218,37 @@ test("jj merge records conflicted files and mergeChangeId on conflict", async (t
   assert.equal(merged.merge?.operationId, "opconflict");
 });
 
+test("automatic jj merge restores the pre-merge operation on conflict", async (t) => {
+  const env = await setupFakeJj(t);
+  const workspace = path.join(env.temp, "auto-conflict-workspace");
+  await fsp.mkdir(path.join(workspace, ".jj"), { recursive: true });
+  process.env.JJ_SOURCE_WORKSPACE = workspace;
+  process.env.JJ_OP_ID = "opbefore";
+  process.env.JJ_STATUS_OUTPUT = "The working copy has no changes.\n";
+  process.env.JJ_RESOLVE_LIST = "Conflict in src/a.ts\n";
+
+  const run = await createRunRecord({
+    id: "run-auto-conflict",
+    repoRoot: env.repo,
+    task: "auto conflict work",
+    backend: "claude",
+    targetBranch: "targetchange",
+    baseCommit: "basechange",
+    vcs: "jj",
+    useWorkspace: true,
+    workspacePath: workspace,
+    workspaceName: "rudder-run-auto-conflict",
+  });
+
+  const merged = await mergeJjRunIntoCurrentWorkspace(run, true, { abortOnConflict: true });
+
+  assert.equal(merged.merge?.status, "conflict");
+  assert.deepEqual(merged.merge?.conflictedFiles, ["src/a.ts"]);
+  assert.equal(merged.merge?.mergeChangeId, undefined);
+  assert.match(merged.merge?.error ?? "", /nothing was merged/);
+  assert.match(await readLog(env.log), /\|op restore opbefore/);
+});
+
 test("resolved jj conflict finalizes the existing merge change without stacking another merge", async (t) => {
   const env = await setupFakeJj(t);
   const workspace = path.join(env.temp, "resolved-conflict-workspace");
@@ -495,6 +526,10 @@ case "\${1:-}" in
     exit 0
     ;;
   op)
+    if [ "\${2:-}" = "restore" ]; then
+      : > "\${MARK}.restored"
+      exit 0
+    fi
     if [ "\${2:-}" = "log" ]; then
       if [ "\${JJ_OP_FAIL:-0}" = "1" ]; then
         echo "op log exploded" >&2

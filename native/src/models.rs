@@ -602,16 +602,6 @@ fn searchable_command_suggestions() -> Vec<Suggestion> {
             action: SuggestionAction::Insert("/goal ".to_string()),
         },
         Suggestion {
-            label: "/review-all".to_string(),
-            detail: "review all completed workspaces before merge".to_string(),
-            action: SuggestionAction::RunCommand("/review-all".to_string()),
-        },
-        Suggestion {
-            label: "/merge-all".to_string(),
-            detail: "merge all completed workspaces".to_string(),
-            action: SuggestionAction::RunCommand("/merge-all".to_string()),
-        },
-        Suggestion {
             label: "/verify".to_string(),
             detail: "rerun the final all-integrated repository checks".to_string(),
             action: SuggestionAction::RunCommand("/verify".to_string()),

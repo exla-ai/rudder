@@ -931,10 +931,11 @@ async function mergeRunIntoCurrentBranch(
   run: RunRecord,
   allowDirty: boolean,
   strategy: MergeStrategy,
+  abortOnConflict = false,
 ): Promise<RunRecord> {
   assertLegacyRunAllowed(run);
   if ((run.vcs ?? "git") === "jj") {
-    return await mergeJjRunIntoCurrentWorkspace(run, allowDirty);
+    return await mergeJjRunIntoCurrentWorkspace(run, allowDirty, { abortOnConflict });
   }
   return await mergeGitRunIntoCurrentBranch(run, allowDirty, strategy);
 }
@@ -1132,7 +1133,11 @@ export async function stopRun(runId: string, options?: { silent?: boolean }): Pr
   }
 }
 
-export async function mergeRun(runId: string, allowDirty = false, options?: { silent?: boolean }): Promise<RunRecord> {
+export async function mergeRun(
+  runId: string,
+  allowDirty = false,
+  options?: { silent?: boolean; abortOnConflict?: boolean },
+): Promise<RunRecord> {
   const repoRoot = findRepoRoot();
   assertLegacyWriterAllowed(repoRoot);
   const run = await loadRunRecord(repoRoot, runId);
@@ -1153,7 +1158,12 @@ export async function mergeRun(runId: string, allowDirty = false, options?: { si
     throw new Error(`Run ${runId} is still active; stop it or wait for it to finish before merging.`);
   }
   const config = await loadConfig();
-  const merged = await mergeRunIntoCurrentBranch(run, allowDirty, config.mergeStrategy);
+  const merged = await mergeRunIntoCurrentBranch(
+    run,
+    allowDirty,
+    config.mergeStrategy,
+    Boolean(options?.abortOnConflict),
+  );
   await emit(merged, {
     ts: nowIso(),
     runId,

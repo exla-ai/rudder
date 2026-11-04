@@ -76,9 +76,19 @@ test("completion writes its evidence without skills, telemetry setup or jj disco
   assert.equal(result.stdout, "");
   assert.equal(result.stderr, "");
   assert.deepEqual(JSON.parse(await fs.readFile(done, "utf8")), { ...note, node: "n0" });
-  assert.match(await fs.readFile(path.join(directory, "DECISIONS.md"), "utf8"), /Checked the parser\./);
+  await assert.rejects(fs.stat(path.join(directory, "DECISIONS.md")), { code: "ENOENT" });
   await assert.rejects(fs.stat(home), { code: "ENOENT" });
   await assert.rejects(fs.stat(probe), { code: "ENOENT" });
+
+  // Retired ceremony words are accepted no-ops: nothing is written and no
+  // agent is started.
+  for (const word of ["remember", "share"]) {
+    const retired = await run(word, "some text");
+    assert.equal(retired.stderr, "");
+    assert.match(retired.stdout, /no longer needed/);
+  }
+  await assert.rejects(fs.stat(path.join(directory, "DECISIONS.md")), { code: "ENOENT" });
+  await assert.rejects(fs.stat(path.join(directory, "RUDDER_SHARED.md")), { code: "ENOENT" });
 });
 
 test("first-use disclosure preserves JSON stdout and is shown once on stderr", {

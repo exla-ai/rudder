@@ -103,13 +103,13 @@ const ORCHESTRATOR_SKILLS: &[OrchestratorSkill] = &[
         slug: "rudder-monitor-work",
         name: "rudder-monitor-work",
         description: "Use when the user asks to monitor current Claude, Codex, or Rudder jobs and then take follow-up actions when they finish.",
-        body: "Read RUDDER.md's generated Global job snapshot plus Active, Ready, and Completed local Rudder agent sections first. Active means live or waiting, Ready means completed work awaiting review or merge, and Completed is terminal history. If relevant jobs are still running or waiting, report a concise status grounded in those rows and keep monitoring by re-reading RUDDER.md; do not invent completion. Planned DAG nodes integrate automatically after completion; use RUDDER_REVIEW_ALL for a whole-repo review, RUDDER_MERGE_ALL for manually started ready work, and RUDDER_ADD_TASK or RUDDER_RUN for fixes found by review. For repo-specific final steps such as push, publish, release, or deploy, start a main-checkout worker with RUDDER_MAIN <prompt> that names the exact final action. Do not run final release commands directly from the orchestrator.",
+        body: "Read RUDDER.md's generated Global job snapshot plus Active, Ready, and Completed local Rudder agent sections first. Active means live or waiting, Ready means completed work awaiting review or merge, and Completed is terminal history. If relevant jobs are still running or waiting, report a concise status grounded in those rows and keep monitoring by re-reading RUDDER.md; do not invent completion. Finished workers integrate automatically (rebase, project checks, merge); a row that needs you shows its conflict or check output. Use RUDDER_ADD_TASK or RUDDER_RUN for fixes. For repo-specific final steps such as push, publish, release, or deploy, start a main-checkout worker with RUDDER_MAIN <prompt> that names the exact final action. Do not run final release commands directly from the orchestrator.",
     },
     OrchestratorSkill {
         slug: "rudder-review-merge",
         name: "rudder-review-merge",
-        description: "Use when the user asks to review all work or merge ready manually started work.",
-        body: "Write exactly one control line to RUDDER.md: RUDDER_REVIEW_ALL to start a review-all agent, RUDDER_MERGE_ALL to ask the dashboard to merge all ready work, or RUDDER_MERGE <node-or-run-id> to merge one worker. Planned DAG nodes integrate automatically.",
+        description: "Use when the user asks to merge one finished worker by hand.",
+        body: "Finished workers integrate automatically. To merge one worker by hand, write RUDDER_MERGE <node-or-run-id> on its own line in RUDDER.md.",
     },
     OrchestratorSkill {
         slug: "rudder-plan-ask",
@@ -931,85 +931,6 @@ pub(crate) fn claude_program() -> String {
         .unwrap_or_else(|| "claude".to_string())
 }
 
-pub(crate) fn review_all_run(
-    workspace: WorkspaceInfo,
-    prompt: String,
-    sources: Vec<ReviewAllSource>,
-    session_id: Option<String>,
-) -> AgentRun {
-    let created_at = now_stamp();
-    let source_ids = sources
-        .iter()
-        .map(|source| source.id.clone())
-        .collect::<Vec<_>>();
-    AgentRun {
-        id: workspace.id,
-        created_at: created_at.clone(),
-        mode: AgentMode::ReviewAll,
-        task: prompt.clone(),
-        task_summary: format!("review all {} workspaces", source_ids.len()),
-        current_prompt: prompt.clone(),
-        turns: vec![AgentTurn {
-            ts: created_at.clone(),
-            prompt,
-            source: "user".to_string(),
-        }],
-        last_user_input_at: created_at,
-        backend: Backend::Codex,
-        model: REVIEW_ALL_MODEL.to_string(),
-        effort: Some(REVIEW_ALL_EFFORT),
-        status: AgentStatus::Running,
-        cwd: workspace.path.clone(),
-        workspace_branch: workspace.branch.clone(),
-        workspace_path: workspace.path_is_workspace.then_some(workspace.path),
-        workspace_name: workspace.workspace_name.clone(),
-        jj_change_id: workspace.jj_change_id.clone(),
-        integration: IntegrationEvidence::default(),
-        publish: PublishEvidence::default(),
-        delivery: DeliveryEvidence::default(),
-        session_id,
-        execution_profile: None,
-        managed_local: None,
-        managed_store: None,
-        terminal: None,
-        terminal_size: None,
-        last_output_at: Instant::now(),
-        completed_at: None,
-        autosteered: false,
-        plain_process: false,
-        interactive_orchestrator: false,
-        needs_permission: false,
-        needs_user_input: false,
-        wait_signal: None,
-        worker_exit_note: None,
-        last_error: None,
-        worker_input_draft: String::new(),
-        worker_input_cursor: 0,
-        worker_input_is_prompt: false,
-        last_drain_at: None,
-        review_source_ids: source_ids,
-        deps: Vec::new(),
-        soft_deps: Vec::new(),
-        node_id: None,
-        plan_id: None,
-        reviewed_at: None,
-        reconcile_planner: false,
-        swarm_experiment: false,
-        plan_stream: None,
-        plan_output_cache: None,
-        last_worker_input_at: None,
-        merge_resolver: false,
-        merge_conflict: false,
-        merge_conflict_operation: ConflictOperation::Merge,
-        merge_conflict_files: Vec::new(),
-        had_merge_conflict: false,
-        done_summary: None,
-        tokens_in: 0,
-        tokens_out: 0,
-        gam: None,
-    }
-}
-
 /// Prompt for the per-node review agent that runs in a finished node's OWN jj
 /// workspace before Rudder auto-merges it. It reviews the node's working-copy
 /// diff with the installed `thermonuclear` skill, fixes findings in place, then
@@ -1031,102 +952,3 @@ Instructions\n\
     )
 }
 
-pub(crate) fn review_all_prompt(
-    target_ref: &str,
-    workspace: &WorkspaceInfo,
-    sources: &[ReviewAllSource],
-    premerge: &ReviewAllPremerge,
-) -> String {
-    let aggregate_change = workspace
-        .jj_change_id
-        .as_deref()
-        .unwrap_or("current jj change");
-    let source_lines = sources
-        .iter()
-        .enumerate()
-        .map(|(index, source)| {
-            let path = source
-                .workspace_path
-                .as_ref()
-                .map(|path| path.display().to_string())
-                .unwrap_or_else(|| "(unknown workspace path)".to_string());
-            format!(
-                "{}. {} ({})\n   jj revision: {}\n   workspace: {}\n   task: {}",
-                index + 1,
-                source.summary,
-                source.id,
-                source.revision,
-                path,
-                truncate_chars(&source.task, 220)
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    let merged = if premerge.merged_revisions.is_empty() {
-        "- none yet".to_string()
-    } else {
-        premerge
-            .merged_revisions
-            .iter()
-            .map(|revision| format!("- {revision}"))
-            .collect::<Vec<_>>()
-            .join("\n")
-    };
-    let remaining = if premerge.remaining_revisions.is_empty() {
-        "- none".to_string()
-    } else {
-        premerge
-            .remaining_revisions
-            .iter()
-            .map(|revision| format!("- {revision}"))
-            .collect::<Vec<_>>()
-            .join("\n")
-    };
-    let stopped = match (
-        premerge.stopped_revision.as_deref(),
-        premerge.stopped_error.as_deref(),
-    ) {
-        (Some(revision), Some(error)) => {
-            format!("Rudder stopped while combining `{revision}`:\n{error}")
-        }
-        _ => "No conflict was detected while building the aggregate jj change.".to_string(),
-    };
-
-    format!(
-        "Review the combined Rudder agent workspace changes against `{target_ref}`.\n\
-\n\
-You are the Rudder review-all integration agent. You are running in an aggregate jj workspace that will become one reviewed integration.\n\
-\n\
-Aggregate workspace\n\
-- path: {path}\n\
-- jj change: {aggregate_change}\n\
-- target/base ref: {target_ref}\n\
-\n\
-Source workspaces included in this review\n\
-{source_lines}\n\
-\n\
-Pre-merge state\n\
-Already combined into this aggregate change:\n\
-{merged}\n\
-\n\
-Still not fully merged:\n\
-{remaining}\n\
-\n\
-{stopped}\n\
-\n\
-Instructions\n\
-1. Run `jj status` and `jj resolve --list` first. Resolve conflicts by editing files; do not use `git add` or create commits.\n\
-2. If a revision remains under \"Still not fully merged\", report it; Rudder stopped before stacking another change on a conflict.\n\
-3. If the `thermonuclear` code-review skill/plugin is available, invoke it over `jj diff --from {target_ref}` (use the Skill tool, or type `/thermonuclear` if your CLI exposes it as a command). If it is NOT installed, do an equivalent thorough review yourself — a missing skill is NOT an error, just review manually.\n\
-4. Fix real review findings directly in this aggregate workspace. Do not edit the original source workspaces.\n\
-5. Run the relevant tests/checks for the files touched. If a check cannot run, say exactly why.\n\
-6. Do not run jj commit/new/squash or Git branch/merge commands. When the aggregate change is ready, stop and say: `Rudder review-all change is ready; press m on this row to integrate it.`\n",
-        target_ref = target_ref,
-        path = workspace.path.display(),
-        aggregate_change = aggregate_change,
-        source_lines = source_lines,
-        merged = merged,
-        remaining = remaining,
-        stopped = stopped,
-    )
-}

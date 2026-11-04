@@ -5236,11 +5236,6 @@ pub(crate) fn render_merge_prompt(frame: &mut Frame<'_>, area: Rect, app: &App) 
         let headline = match &confirm.intent {
             MergeIntent::Selected { task, .. } => format!("Merge:  {}", short_task(task)),
             MergeIntent::Publish { task, .. } => format!("Publish:  {}", short_task(task)),
-            MergeIntent::All { ids } => format!(
-                "Merge {} completed workspace{}",
-                ids.len(),
-                if ids.len() == 1 { "" } else { "s" }
-            ),
         };
         // The ACTION comes first. This modal used to explain itself for three
         // wrapped rows and mention the keys only on the last one, which is also the
@@ -5979,8 +5974,13 @@ pub(crate) fn agent_status_label(agent: &AgentRun) -> &'static str {
         "integrating"
     } else if agent.has_merge_conflict() && agent.status == AgentStatus::Running {
         "resolving conflict"
+    } else if agent.has_merge_conflict()
+        && agent.status == AgentStatus::Done
+        && agent.merge_conflict_files.is_empty()
+    {
+        "needs you · checks failed"
     } else if agent.has_merge_conflict() && agent.status == AgentStatus::Done {
-        "merge conflict · press m"
+        "needs you · conflict"
     } else if agent.status == AgentStatus::Done && agent.delivery.required {
         // A deploy/publish task's delivery state (deployed / delivery blocked /
         // delivery proof needed) outranks the generic merge hint — these labels

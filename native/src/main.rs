@@ -2202,6 +2202,14 @@ struct App {
     completion_summary_tx: mpsc::Sender<CompletionSummaryResult>,
     completion_summary_rx: mpsc::Receiver<CompletionSummaryResult>,
     completion_summary_pending: HashSet<String>,
+    /// Automatic integration: a finished worker is rebased onto the main change
+    /// and checked off the UI thread; results arrive here keyed by run id.
+    integration_prep_tx: mpsc::Sender<(String, IntegrationPrep)>,
+    integration_prep_rx: mpsc::Receiver<(String, IntegrationPrep)>,
+    integration_prep_inflight: HashSet<String>,
+    integration_prepared: HashSet<String>,
+    /// (run id, turn count) whose main/one-off summary was already read.
+    direct_summary_read: HashSet<(String, usize)>,
     last_user_activity: Instant,
     mouse_debug: bool,
     mouse_debug_last: Option<String>,
@@ -2411,9 +2419,6 @@ enum MergeIntent {
         id: String,
         task: String,
     },
-    All {
-        ids: Vec<String>,
-    },
     /// The FIRST publish in a repo. Publishing is otherwise unprompted, so this
     /// intent exists only to carry that one-time consent: accepting it records the
     /// acceptance for the remote and then publishes.
@@ -2421,23 +2426,6 @@ enum MergeIntent {
         id: String,
         task: String,
     },
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct ReviewAllSource {
-    id: String,
-    revision: String,
-    task: String,
-    summary: String,
-    workspace_path: Option<PathBuf>,
-}
-
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-struct ReviewAllPremerge {
-    merged_revisions: Vec<String>,
-    stopped_revision: Option<String>,
-    stopped_error: Option<String>,
-    remaining_revisions: Vec<String>,
 }
 
 struct MergeConflictPrompt {
@@ -2746,41 +2734,6 @@ impl AgentRun {
     /// RudderPlan orchestrator is the only such row.
     pub(crate) fn is_pinned_planner(&self) -> bool {
         self.is_orchestrator()
-    }
-}
-
-fn merge_label_for_run(run: &AgentRun) -> String {
-    if let Some(node_id) = run.node_id.as_ref().filter(|id| !id.trim().is_empty()) {
-        return node_id.clone();
-    }
-    if !run.task_summary.trim().is_empty() {
-        return truncate_chars(run.task_summary.trim(), 24);
-    }
-    let task = short_task(&run.task);
-    if !task.trim().is_empty() {
-        return truncate_chars(&task, 24);
-    }
-    truncate_chars(&run.id, 18)
-}
-
-fn merge_all_labels(runs: &[&AgentRun]) -> Vec<String> {
-    runs.iter().map(|run| merge_label_for_run(run)).collect()
-}
-
-fn summarize_labels(labels: &[String], limit: usize) -> String {
-    let shown = labels
-        .iter()
-        .take(limit)
-        .cloned()
-        .collect::<Vec<_>>()
-        .join(", ");
-    let remaining = labels.len().saturating_sub(limit);
-    if remaining == 0 {
-        shown
-    } else if shown.is_empty() {
-        format!("+{remaining} more")
-    } else {
-        format!("{shown}, +{remaining} more")
     }
 }
 
@@ -3237,6 +3190,7 @@ impl App {
         let session_started_iso = managed_session.unwrap_or_else(|| load_or_init_session_started(&cwd));
         let (task_summary_tx, task_summary_rx) = mpsc::channel();
         let (completion_summary_tx, completion_summary_rx) = mpsc::channel();
+        let (integration_prep_tx, integration_prep_rx) = mpsc::channel();
         let (final_gate_tx, final_gate_rx) = mpsc::channel();
         let branch = if managed { managed_branch } else { current_branch_at(&cwd) };
         if !managed { let _ = signals::cleanup_old_signals(Duration::from_secs(7 * 24 * 60 * 60)); }
@@ -3424,6 +3378,11 @@ impl App {
             completion_summary_tx,
             completion_summary_rx,
             completion_summary_pending: HashSet::new(),
+            integration_prep_tx,
+            integration_prep_rx,
+            integration_prep_inflight: HashSet::new(),
+            integration_prepared: HashSet::new(),
+            direct_summary_read: HashSet::new(),
             last_user_activity: Instant::now(),
             mouse_debug: !managed && env::var(MOUSE_DEBUG_ENV).is_ok_and(|value| value != "0"),
             mouse_debug_last: None,
@@ -4225,7 +4184,7 @@ impl App {
                     "nav mode: gam: a swap half  t dialogue  i brief reviewer  x stop pair  ·  1/2/3 panes  m merge  Esc exits"
                         .to_string()
                 } else {
-                    "nav mode: 1 agents  2 worker  3 task  v review  b branch chat  g god's view  R review-all  M merge-all  Esc exits"
+                    "nav mode: 1 agents  2 worker  3 task  v review  b branch chat  g god's view  Esc exits"
                         .to_string()
                 }
             } else {
@@ -4246,7 +4205,7 @@ impl App {
                 "Ctrl+W: gam: a swap half  t dialogue  i brief reviewer  x stop pair  ·  1/2/3 panes  m merge  g god's view  Esc cancels"
                     .to_string()
             } else {
-                "Ctrl+W: Tab cycle  1/2/3 panes  v review  f files  m merge  b branch chat  g god's view  R review-all  M merge-all  H move to home  Esc cancels"
+                "Ctrl+W: Tab cycle  1/2/3 panes  v review  f files  m merge  b branch chat  g god's view  H move to home  Esc cancels"
                     .to_string()
             });
             return false;
@@ -4692,8 +4651,6 @@ impl App {
             KeyCode::Up | KeyCode::Char('k') => self.select_previous_agent(),
             KeyCode::Down | KeyCode::Char('j') => self.select_next_agent(),
             KeyCode::Char('m') => self.request_merge_selected_agent(),
-            KeyCode::Char('R') => self.review_all_ready(),
-            KeyCode::Char('M') => self.request_merge_all_ready(),
             KeyCode::Char('H') => self.request_move_all_home(),
             KeyCode::Char('g') | KeyCode::Char('\u{00a9}') => self.toggle_gods_view(),
             KeyCode::Char('d') => self.delete_selected_agent(),
@@ -4800,8 +4757,6 @@ impl App {
             KeyCode::Up | KeyCode::Char('k') => self.select_previous_agent(),
             KeyCode::Down | KeyCode::Char('j') => self.select_next_agent(),
             KeyCode::Char('m') => self.request_merge_selected_agent(),
-            KeyCode::Char('R') => self.review_all_ready(),
-            KeyCode::Char('M') => self.request_merge_all_ready(),
             KeyCode::Char('d') => self.delete_selected_agent(),
             KeyCode::Char('q') => return self.confirm_or_quit(),
             KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -4873,8 +4828,6 @@ impl App {
             KeyCode::Char('v') => self.toggle_worker_view(),
             KeyCode::Char('g') => self.toggle_nest_view(),
             KeyCode::Char('r') => self.start_rename_selected_agent(),
-            KeyCode::Char('R') => self.review_all_ready(),
-            KeyCode::Char('M') => self.request_merge_all_ready(),
             KeyCode::Char('H') => self.request_move_all_home(),
             KeyCode::Char('m') => self.request_merge_selected_agent(),
             KeyCode::Char('d') => {
@@ -5868,96 +5821,12 @@ impl App {
         self.dirty = true;
     }
 
-    fn review_all_ready(&mut self) {
-        let sources = self.review_all_sources();
-
-        if sources.is_empty() {
-            self.notice = Some("no completed workspaces ready to review".to_string());
-            return;
-        }
-
-        #[cfg(test)]
-        {
-            self.start_review_all_test_agent(sources);
-            return;
-        }
-
-        #[cfg(not(test))]
-        if let Err(error) = self.start_review_all_agent(sources) {
-            self.notice = Some(format!("review all failed: {error}"));
-        }
-    }
-
-    fn review_all_sources(&self) -> Vec<ReviewAllSource> {
-        let claimed = self.review_all_claimed_source_ids();
-        self.agents
-            .iter()
-            .filter(|run| run.status == AgentStatus::Done)
-            .filter(|run| run.managed_local.is_none())
-            .filter(|run| !run.is_oneoff())
-            // Competing experiments combined into one diff would be noise.
-            .filter(|run| !run.swarm_experiment)
-            .filter(|run| !claimed.contains(&run.id))
-            .filter_map(|run| {
-                let revision = run.jj_change_id.clone()?;
-                Some(ReviewAllSource {
-                    id: run.id.clone(),
-                    revision,
-                    task: run.task.clone(),
-                    summary: if run.task_summary.trim().is_empty() {
-                        short_task(&run.task)
-                    } else {
-                        run.task_summary.trim().to_string()
-                    },
-                    workspace_path: run.workspace_path.clone(),
-                })
-            })
-            .collect()
-    }
-
     fn review_all_claimed_source_ids(&self) -> HashSet<String> {
         self.agents
             .iter()
             .filter(|run| run.mode == AgentMode::ReviewAll && run.status != AgentStatus::Merged)
             .flat_map(|run| run.review_source_ids.iter().cloned())
             .collect()
-    }
-
-    #[cfg(test)]
-    fn start_review_all_test_agent(&mut self, sources: Vec<ReviewAllSource>) {
-        let workspace = WorkspaceInfo {
-            id: new_run_id("review all"),
-            path: self.cwd.join(".rudder-review-all-test"),
-            branch: None,
-            path_is_workspace: true,
-            workspace_name: Some("rudder-test-review-all".to_string()),
-            jj_change_id: Some("review-change".to_string()),
-        };
-        let premerge = ReviewAllPremerge {
-            merged_revisions: sources
-                .iter()
-                .map(|source| source.revision.clone())
-                .collect(),
-            ..ReviewAllPremerge::default()
-        };
-        let prompt = review_all_prompt(
-            current_branch_at(&self.cwd).as_deref().unwrap_or("HEAD"),
-            &workspace,
-            &sources,
-            &premerge,
-        );
-        let (review_backend, review_model, review_effort) = self.review_agent_profile();
-        let mut run = review_all_run(workspace, prompt, sources, None);
-        run.backend = review_backend;
-        run.model = review_model.to_string();
-        run.effort = Some(review_effort);
-        self.agents.push(run);
-        self.selected_agent = self.agents.len().saturating_sub(1);
-        self.delete_pending = None;
-        self.worker_selection = None;
-        self.worker_view = WorkerView::Terminal;
-        self.focus = FocusPane::Worker;
-        self.notice = Some("started review-all merge agent".to_string());
     }
 
     /// Deterministic model for the code-review agent, chosen by the plan's
@@ -5992,86 +5861,6 @@ impl App {
                 EffortLevel::Medium,
             ),
         }
-    }
-
-    #[cfg(not(test))]
-    fn start_review_all_agent(&mut self, sources: Vec<ReviewAllSource>) -> Result<()> {
-        let target_ref = current_branch_at(&self.cwd)
-            .or_else(|| {
-                git_output(&self.cwd, ["rev-parse", "HEAD"])
-                    .ok()
-                    .map(|value| value.trim().to_string())
-            })
-            .unwrap_or_else(|| "HEAD".to_string());
-        let mut workspace =
-            prepare_jj_workspace_at(&self.cwd, "review all completed workspaces", None)?;
-        let premerge = premerge_review_all_sources(&workspace.path, &sources);
-        workspace.jj_change_id = jj_workspace_change_id(&workspace.path);
-        let prompt = review_all_prompt(&target_ref, &workspace, &sources, &premerge);
-        let (review_backend, review_model, review_effort) = self.review_agent_profile();
-        let session_id = mint_session_id_for(review_backend);
-        let mut command = agent_command(
-            review_backend,
-            &review_model,
-            Some(review_effort),
-            &prompt,
-            AgentMode::ReviewAll,
-            session_id.as_deref(),
-        );
-        signals::augment_worker_command(
-            &mut command,
-            review_backend,
-            AgentMode::ReviewAll,
-            &workspace.id,
-        );
-        let options = TerminalPaneOptions {
-            size: TerminalSize::default(),
-            cwd: Some(workspace.path.clone()),
-            ..TerminalPaneOptions::default()
-        };
-        let mut run = review_all_run(workspace, prompt, sources, session_id);
-        // Keep the row's shown model honest with what actually spawned.
-        run.backend = review_backend;
-        run.model = review_model;
-        run.effort = Some(review_effort);
-        match TerminalPane::spawn_shell_or_command(Some(command), options) {
-            Ok(mut terminal) => {
-                let _ = terminal.drain_output();
-                Self::attach_output_waker(&self.pty_output_waker, &terminal);
-                run.execution_profile = terminal.execution_profile().map(str::to_string);
-                run.terminal = Some(terminal);
-            }
-            Err(error) => {
-                run.status = AgentStatus::Failed;
-                run.last_error = Some(error.to_string());
-                self.notice = Some(format!("failed to start Codex review-all: {error}"));
-            }
-        }
-        let started = run.status == AgentStatus::Running;
-
-        self.agents.push(run);
-        self.selected_agent = self.agents.len().saturating_sub(1);
-        self.delete_pending = None;
-        self.worker_selection = None;
-        self.worker_view = WorkerView::Terminal;
-        self.focus = FocusPane::Worker;
-        if let Some(run) = self.agents.get(self.selected_agent) {
-            let _ = save_native_run_record(&self.cwd, run);
-        }
-        let _ = self.write_rudder_context_timed(None);
-        if started {
-            let count = self
-                .agents
-                .get(self.selected_agent)
-                .map(|run| run.review_source_ids.len())
-                .unwrap_or(0);
-            let (_, review_model, _) = self.review_agent_profile();
-            self.notice = Some(format!(
-                "started {review_model} thermonuclear review-all for {count} workspace{}; press m on that row when done",
-                if count == 1 { "" } else { "s" }
-            ));
-        }
-        Ok(())
     }
 
     /// The width the renderer wrapped the draft at, so cursor motion agrees with
@@ -8808,18 +8597,6 @@ impl App {
             AgentMode::Execute,
             session_id.as_deref(),
         );
-        // ROBUST completion channel: tell this worker's `rudder done` EXACTLY where to
-        // drop its machine-readable note. The orchestrator reads this same file when the
-        // worker finishes, so the report survives no matter how Claude or Codex render
-        // tool output in their interactive TUI (which would otherwise box/truncate/wrap
-        // the echoed block in the PTY). The path lives inside the worker's own gitignored
-        // .rudder dir: writable under either backend's (here unsandboxed) Bash tool, and
-        // never snapshotted into the merge. The env propagates to the `rudder done`
-        // subprocess the agent spawns. A missing report is reconstructed from the diff.
-        if let Some(id) = node_id.as_deref() {
-            let done_file = worker_done_file(&workspace.path, id);
-            command = command.with_env("RUDDER_DONE_FILE", done_file.to_string_lossy().to_string());
-        }
         // Official completion signal: wire the backend's own Stop hook (Claude) /
         // notify (Codex) so it deterministically reports turn-end. Keyed by the run id the poll loop
         // reads. See signals.rs.
@@ -11131,8 +10908,8 @@ Address the objection directly. If you disagree, say why inside \
         // --settings / notify could never write it and would sit "running" forever.
         // (Same trap the conflict-resolver respawn fixed in e027f32.)
         signals::augment_existing_worker_command(&mut command, run.backend, run.mode, &run.id, run.execution_profile.as_deref());
-        // Same report channel as a fresh launch / re-goal, so `rudder done` from a
-        // resumed session still lands where the conductor reads it.
+        // A resumed OLD session may still call `rudder done`; point it at the
+        // sidecar the conductor reads. New launches no longer set this.
         let report_id = run.node_id.as_deref().unwrap_or(&run.id);
         command = command.with_env(
             "RUDDER_DONE_FILE",
@@ -11429,7 +11206,6 @@ Address the objection directly. If you disagree, say why inside \
         if !bootstrap.is_empty() {
             let _ = std::fs::remove_file(&done_file);
         }
-        command = command.with_env("RUDDER_DONE_FILE", done_file.to_string_lossy().to_string());
         let cwd = self.cwd.clone();
         let options = TerminalPaneOptions {
             size: terminal_size,
@@ -12310,10 +12086,6 @@ Address the objection directly. If you disagree, say why inside \
                 }
                 true
             }
-            Some("/merge-all") => {
-                self.request_merge_all_ready();
-                true
-            }
             Some("/verify") => {
                 self.plan_mut().final_gate_status = FinalGateStatus::Idle;
                 self.plan_mut().final_gate_summary = None;
@@ -12349,10 +12121,6 @@ Address the objection directly. If you disagree, say why inside \
                     _ => {}
                 }
                 self.start_rudder_cli_command("cloud sync", args);
-                true
-            }
-            Some("/review-all") => {
-                self.review_all_ready();
                 true
             }
             Some("/fast") => {
@@ -13687,7 +13455,7 @@ Address the objection directly. If you disagree, say why inside \
 
     /// Spawn exactly one normal execute worker without invoking the planner. In a git
     /// repo this uses the same jj workspace isolation as DAG workers, so the result
-    /// appears in Review and is integrated with `m` or `/merge-all`.
+    /// appears in Review and is integrated automatically (or with `m`).
     fn start_single_run_task(&mut self, input: &str) {
         let input = input.trim();
         if input.is_empty() {
@@ -13703,7 +13471,7 @@ Address the objection directly. If you disagree, say why inside \
             };
             if run.status == AgentStatus::Running && run.has_merge_source() {
                 self.notice = Some(
-                    "isolated worker running; merge with m or /merge-all when done".to_string(),
+                    "isolated worker running; it merges automatically when done".to_string(),
                 );
             } else if run.status == AgentStatus::Running
                 && !launch_notice
@@ -14284,18 +14052,12 @@ Address the objection directly. If you disagree, say why inside \
             "RUDDER_USAGE" => self.show_usage_summary(),
             "RUDDER_HELP" => {
                 self.notice = Some(
-                    "skills: model, main, goal, monitor, add/replan, merge/stop/regoal/inject, nudge-all, usage, cloud, review-all"
+                    "skills: model, main, goal, monitor, add/replan, merge/stop/regoal/inject, nudge-all, usage, cloud"
                         .to_string(),
                 );
             }
             "RUDDER_LOGIN" => {
                 self.handle_command("/login");
-            }
-            "RUDDER_REVIEW_ALL" => {
-                self.review_all_ready();
-            }
-            "RUDDER_MERGE_ALL" => {
-                self.request_merge_all_ready();
             }
             _ => {}
         }
@@ -15697,10 +15459,9 @@ Address the objection directly. If you disagree, say why inside \
         }
     }
 
-    /// Main/one-off agents do not participate in the DAG follow-up ledger, but
-    /// their `rudder done` report is still authoritative session and delivery
-    /// evidence. Read it directly so a finished end-to-end owner has a durable
-    /// outcome instead of an empty generic "review" row.
+    /// Main/one-off agents do not participate in the DAG follow-up ledger, but a
+    /// finished turn still gets a summary: the old `rudder done` sidecar when one
+    /// exists, else the agent's last message (the same fallback as workers).
     fn ingest_direct_completion_notes(&mut self) {
         let notes = self
             .agents
@@ -15709,14 +15470,27 @@ Address the objection directly. If you disagree, say why inside \
             .filter(|(_, run)| {
                 run.status == AgentStatus::Done && (run.is_main() || run.is_oneoff())
             })
+            .filter(|(_, run)| {
+                // Read once per finished turn: the summary is set when the run
+                // flips to Done and is not re-read every tick.
+                !self.direct_summary_read.contains(&(run.id.clone(), run.turns.len()))
+            })
             .filter_map(|(index, run)| {
+                // Old runs may still have a `rudder done` sidecar; otherwise the
+                // agent's last message is its summary, the same as workers.
                 std::fs::read_to_string(worker_done_file(&run.cwd, &run.id))
                     .ok()
                     .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
-                    .map(|note| (index, note))
+                    .or_else(|| {
+                        run_last_message(run).map(|summary| {
+                            serde_json::json!({ "summary": preview_text(summary.trim(), 600) })
+                        })
+                    })
+                    .map(|note| (index, (run.id.clone(), run.turns.len()), note))
             })
             .collect::<Vec<_>>();
-        for (index, note) in notes {
+        for (index, key, note) in notes {
+            self.direct_summary_read.insert(key);
             self.set_run_done_summary(index, &note);
         }
     }
@@ -17182,6 +16956,122 @@ Address the objection directly. If you disagree, say why inside \
         }
     }
 
+    /// A finished worker that Rudder integrates on its own: planned nodes and
+    /// isolated workers started from the dashboard. Main, one-off, orchestrator,
+    /// swarm experiments and rows that already need the user are left alone.
+    fn is_auto_integration_candidate(&self, run: &AgentRun) -> bool {
+        run.status == AgentStatus::Done
+            && (run.node_id.is_some()
+                || (run.mode == AgentMode::Execute && run.has_merge_source()))
+            && !run.swarm_experiment
+            && !run.is_main()
+            && !run.is_oneoff()
+            && !run.is_orchestrator()
+            && !run.merge_resolver
+            && !run.has_merge_conflict()
+            && run.managed_local.is_none()
+            && !(0..self.plans.len())
+                .any(|index| self.plans[index].rebasing && self.run_belongs_to_plan(run, index))
+            && (!self.node_review_enabled
+                || run.node_id.as_deref().map_or(true, |node_id| {
+                    self.plans[self.plan_index_for_node(node_id)]
+                        .reviewed_nodes
+                        .contains(node_id)
+                }))
+    }
+
+    /// Start the off-thread rebase + checks for each finished worker that has a
+    /// workspace and has not been prepared yet.
+    fn start_integration_prep(&mut self) {
+        let jobs: Vec<(String, PathBuf)> = self
+            .agents
+            .iter()
+            .filter(|run| self.is_auto_integration_candidate(run))
+            .filter(|run| {
+                !self.integration_prepared.contains(&run.id)
+                    && !self.integration_prep_inflight.contains(&run.id)
+            })
+            .filter_map(|run| run.workspace_path.clone().map(|path| (run.id.clone(), path)))
+            .collect();
+        for (id, workspace) in jobs {
+            self.integration_prep_inflight.insert(id.clone());
+            let tx = self.integration_prep_tx.clone();
+            let repo_root = self.cwd.clone();
+            thread::spawn(move || {
+                let prep = prepare_worker_integration(&repo_root, &workspace);
+                let _ = tx.send((id, prep));
+            });
+        }
+    }
+
+    fn drain_integration_prep(&mut self) {
+        while let Ok((id, prep)) = self.integration_prep_rx.try_recv() {
+            self.apply_integration_prep(&id, prep);
+        }
+    }
+
+    fn apply_integration_prep(&mut self, id: &str, prep: IntegrationPrep) {
+        self.integration_prep_inflight.remove(id);
+        let Some(index) = self.agents.iter().position(|run| run.id == id) else {
+            return;
+        };
+        // The worker went back to work (or was merged by hand) meanwhile; the
+        // next completion prepares it again.
+        if self.agents[index].status != AgentStatus::Done {
+            return;
+        }
+        match prep {
+            IntegrationPrep::Ready => {
+                self.integration_prepared.insert(id.to_string());
+            }
+            IntegrationPrep::Conflict { files, output } => {
+                let mut detail = format!(
+                    "rebase onto the main change conflicts in {}; resolve it in the workspace, then press m",
+                    files.join(", ")
+                );
+                if !output.trim().is_empty() {
+                    detail.push_str("\n");
+                    detail.push_str(&output);
+                }
+                self.mark_integration_needs_you(index, files, detail);
+            }
+            IntegrationPrep::ChecksFailed { output } => {
+                self.mark_integration_needs_you(index, Vec::new(), output);
+            }
+        }
+    }
+
+    /// Automatic integration stopped on a conflict or failed checks. Nothing was
+    /// merged; the row shows "needs you" with the output until the user acts.
+    fn mark_integration_needs_you(&mut self, index: usize, files: Vec<String>, detail: String) {
+        let cwd = self.cwd.clone();
+        let Some(run) = self.agents.get_mut(index) else {
+            return;
+        };
+        let checks_failed = files.is_empty();
+        run.status = AgentStatus::Done;
+        run.last_error = Some(detail.clone());
+        run.merge_resolver = false;
+        run.merge_conflict = true;
+        run.had_merge_conflict = true;
+        run.merge_conflict_operation = ConflictOperation::Merge;
+        run.merge_conflict_files = files;
+        run.integration.phase = IntegrationPhase::Pending;
+        let _ = save_native_run_record(&cwd, run);
+        let id = run.id.clone();
+        let label = short_task(&run.task_summary);
+        self.integration_prepared.remove(&id);
+        let first_line = detail.lines().next().unwrap_or_default().to_string();
+        let message = if checks_failed {
+            format!("{label} needs you: checks failed · {first_line}")
+        } else {
+            format!("{label} needs you: {first_line}")
+        };
+        self.notice = Some(message.clone());
+        self.record_activity(message);
+        self.dirty = true;
+    }
+
     fn integrate_ready_plan_nodes(&mut self) {
         // Hold integration steady for a plan whose structural rebase is in flight: merging
         // would shift a RUNNING node into the MERGED zone mid-diff and the build-forward
@@ -17205,73 +17095,35 @@ Address the objection directly. If you disagree, say why inside \
         // Per-node review gate: start a reviewer for a finished, unreviewed node.
         // Nodes only pass the merge predicate below once they're marked reviewed.
         self.maybe_start_node_review();
+        self.drain_integration_prep();
+        self.start_integration_prep();
         let mut merged_labels: Vec<String> = Vec::new();
         let mut conflicted = false;
         loop {
             let next = self.agents.iter().position(|run| {
-                run.node_id.is_some()
-                    && run.status == AgentStatus::Done
-                    && !run.swarm_experiment
-                    && !run.is_main()
-                    && !run.merge_resolver
-                    && !run.has_merge_conflict()
-                    && !(0..self.plans.len()).any(|index| {
-                        self.plans[index].rebasing && self.run_belongs_to_plan(run, index)
-                    })
-                    && (!self.node_review_enabled
-                        || run.node_id.as_deref().is_some_and(|node_id| {
-                            self.plans[self.plan_index_for_node(node_id)]
-                                .reviewed_nodes
-                                .contains(node_id)
-                        }))
+                self.is_auto_integration_candidate(run)
+                    && (run.workspace_path.is_none() || self.integration_prepared.contains(&run.id))
             });
             let Some(index) = next else { break };
             let id = self.agents[index].id.clone();
             let label = self.agents[index].task_summary.clone();
             let task = self.agents[index].task.clone();
-            match self.merge_agent_at(index) {
+            self.integration_prepared.remove(&id);
+            match self.merge_agent_at_inner(index, true) {
                 Ok(()) => merged_labels.push(short_task(&label)),
                 Err(error) => {
-                    // Only a REAL conflict (jj reported conflicted files) gets the AI
-                    // resolver. Every other failure — rudder CLI missing, 120s timeout,
-                    // dirty integration target — used to be dressed up as a conflict
-                    // with zero files, which spawned a resolver with nothing to resolve
-                    // and stamped merge_conflict, excluding the node from this loop
-                    // forever. Route those through the same terminal handling as a
-                    // manual merge failure instead.
-                    let files = self.pending_jj_conflict.clone().unwrap_or_default();
+                    let files = self.pending_jj_conflict.take().unwrap_or_default();
                     if files.is_empty() {
+                        // Not a conflict (rudder CLI missing, timeout, legacy run):
+                        // the same terminal handling as a manual merge failure.
                         self.handle_merge_error(task, error, None, None, None, Some(id.clone()));
-                        conflicted = true;
-                        break; // stop integrating this tick; the notice explains why
+                    } else {
+                        // Nothing was merged (the CLI restored the pre-merge
+                        // operation). The row waits for the user.
+                        self.mark_integration_needs_you(index, files, error.to_string());
                     }
-                    // Conflict: auto-spawn the AI resolver to integrate both sides in
-                    // the integration workspace. finalize_merge_resolvers flips the
-                    // node to Merged (unblocking children) once it finishes clean.
-                    // Clone (don't consume) the recorded conflict so it survives a
-                    // resolver spawn failure for any later manual recovery.
-                    self.conflict_prompt = Some(MergeConflictPrompt {
-                        operation: ConflictOperation::Merge,
-                        task,
-                        conflicted_files: files,
-                        error: error.to_string(),
-                        repo_root: self.cwd.clone(),
-                        target_branch: None,
-                        source_branch: None,
-                        workspace_path: None,
-                        agent_id: Some(id.clone()),
-                    });
-                    self.start_conflict_resolution_agent();
                     conflicted = true;
-                    let resolver_running =
-                        self.agents.iter().any(|r| r.id == id && r.merge_resolver);
-                    if resolver_running {
-                        self.notice = Some(format!(
-                            "conflict in {} — AI resolver integrating it",
-                            short_task(&label)
-                        ));
-                    }
-                    break; // one conflict at a time
+                    break; // one failure at a time; the notice explains it
                 }
             }
         }
@@ -18605,69 +18457,6 @@ Address the objection directly. If you disagree, say why inside \
         self.notice = None;
     }
 
-    fn request_merge_all_ready(&mut self) {
-        let claimed = self.review_all_claimed_source_ids();
-        let ready_runs: Vec<&AgentRun> = self
-            .agents
-            .iter()
-            .filter(|run| {
-                run.status == AgentStatus::Done
-                    && run.has_merge_source()
-                    && !run.swarm_experiment
-                    && !run.is_main()
-                    && !run.is_oneoff()
-                    && !run.is_orchestrator()
-                    && !run.has_merge_conflict()
-                    && !claimed.contains(&run.id)
-            })
-            .collect();
-
-        if ready_runs.is_empty() {
-            let conflict_count = self
-                .agents
-                .iter()
-                .filter(|run| {
-                    run.status == AgentStatus::Done
-                        && run.has_merge_conflict()
-                        && !run.is_main()
-                        && !run.is_oneoff()
-                        && !run.is_orchestrator()
-                        && !claimed.contains(&run.id)
-                })
-                .count();
-            self.notice = Some(if conflict_count > 0 {
-                format!(
-                    "{conflict_count} merge-conflict row{} need selected m before merge-all can continue",
-                    if conflict_count == 1 { "" } else { "s" }
-                )
-            } else {
-                "no completed workspaces ready to merge".to_string()
-            });
-            return;
-        }
-
-        let ids: Vec<String> = ready_runs.iter().map(|r| r.id.clone()).collect();
-        let count = ids.len();
-        let labels = merge_all_labels(&ready_runs);
-        let detail = format!("Ready: {}", summarize_labels(&labels, 6));
-
-        let _ = count;
-        self.delete_pending = None;
-        self.merge_confirm = Some(MergeConfirmation {
-            intent: MergeIntent::All { ids },
-            detail: Some(detail),
-        });
-        self.conflict_prompt = None;
-        self.record_activity(format!(
-            "merge-all ready: {count} workspace{} ({})",
-            if count == 1 { "" } else { "s" },
-            summarize_labels(&labels, 8)
-        ));
-        // The modal carries the question and the keys; a parallel notice would
-        // just duplicate (and outlive) it.
-        self.notice = None;
-    }
-
     fn handle_merge_prompt_key(&mut self, key: KeyEvent) -> bool {
         if self.merge_confirm.is_some() {
             match key.code {
@@ -18772,73 +18561,6 @@ Address the objection directly. If you disagree, say why inside \
                 // `publish_agent_at` records the acceptance, so this repo goes
                 // straight to publishing from here on.
                 self.publish_agent_at(index);
-            }
-            MergeIntent::All { ids } => {
-                let total = ids.len();
-                let mut merged = 0;
-                let labels = ids
-                    .iter()
-                    .filter_map(|id| {
-                        self.agents
-                            .iter()
-                            .find(|run| run.id == *id)
-                            .map(merge_label_for_run)
-                    })
-                    .collect::<Vec<_>>();
-                self.push_activity(format!(
-                    "merge-all started: {total} workspace{} ({})",
-                    if total == 1 { "" } else { "s" },
-                    summarize_labels(&labels, 8)
-                ));
-                for (position, id) in ids.iter().enumerate() {
-                    let Some(index) = self.agents.iter().position(|run| run.id == *id) else {
-                        continue;
-                    };
-                    // The ids were snapshotted at request time; auto-integration
-                    // may have landed some meanwhile. Counting those as "merged
-                    // by merge-all" over-reported the batch.
-                    if self.agents[index].status == AgentStatus::Merged {
-                        continue;
-                    }
-                    let task = self.agents[index].task.clone();
-                    let source_branch = self.agents[index].workspace_branch.clone();
-                    let workspace_path = self.agents[index].workspace_path.clone();
-                    let agent_id = Some(self.agents[index].id.clone());
-                    if let Err(error) = self.merge_agent_at(index) {
-                        // Integration is serialized through the shared workspace, so a
-                        // conflict stops the batch (continuing would stack merges on a
-                        // conflicted @). Tell the user the FULL outcome — what landed,
-                        // what is paused, and what is still waiting — not just the error.
-                        let remaining = total.saturating_sub(position + 1);
-                        self.handle_merge_error(
-                            task,
-                            error,
-                            Some(merged),
-                            source_branch,
-                            workspace_path,
-                            agent_id,
-                        );
-                        if let Some(notice) = self.notice.take() {
-                            let message = format!(
-                                "merged {merged}/{total} · {notice}{}",
-                                if remaining > 0 {
-                                    format!(" · {remaining} more wait in review")
-                                } else {
-                                    String::new()
-                                }
-                            );
-                            self.push_activity(format!("merge-all stopped: {message}"));
-                            self.notice = Some(message);
-                        }
-                        return;
-                    }
-                    merged += 1;
-                }
-                self.delete_pending = None;
-                self.push_activity(format!(
-                    "merged {merged} workspace{}",
-                    if merged == 1 { "" } else { "s" }
-                ));
             }
         }
         // A merge can satisfy a child's hard dep on the just-merged parent. Drain the
@@ -19129,7 +18851,6 @@ Address the objection directly. If you disagree, say why inside \
             let backend = run.backend;
             let size = run.terminal_size.unwrap_or_default();
             let cwd = run.cwd.clone();
-            let run_id = run.id.clone();
             let run_mode = run.mode;
             let label = run.node_id.clone().unwrap_or_else(|| run.id.clone());
             let session = run.session_id.clone().filter(|s| !s.trim().is_empty());
@@ -19163,13 +18884,6 @@ Address the objection directly. If you disagree, say why inside \
             // already exists, so the poll loop waits for the official signal — a
             // relaunch without the hooks wired would never flip back to review.
             signals::augment_existing_worker_command(&mut command, backend, run.mode, &run.id, run.execution_profile.as_deref());
-            let report_id = run.node_id.as_deref().unwrap_or(&run.id);
-            command = command.with_env(
-                "RUDDER_DONE_FILE",
-                worker_done_file(&run.cwd, report_id)
-                    .to_string_lossy()
-                    .to_string(),
-            );
             (command, deliver_after, new_session, size, cwd, label)
         };
 
@@ -19748,6 +19462,12 @@ What to do\n\
     }
 
     fn merge_agent_at(&mut self, index: usize) -> Result<()> {
+        self.merge_agent_at_inner(index, false)
+    }
+
+    /// `auto` is automatic integration: the CLI restores the pre-merge operation
+    /// on conflict, so there is no conflicted merge to settle mechanically here.
+    fn merge_agent_at_inner(&mut self, index: usize, auto: bool) -> Result<()> {
         self.pending_jj_conflict = None;
         let Some(run) = self.agents.get(index) else {
             anyhow::bail!("no selected agent");
@@ -19788,9 +19508,15 @@ What to do\n\
             // routes to mergeJjRunIntoCurrentWorkspace and captures op-log for
             // `rudder undo`. The command records its outcome in run.json and
             // exits 0 even on conflict, so classify by the recorded state.
-            match run_rudder_jj_command(&self.cwd, "merge", &run_id, "merge") {
+            let command = if auto { "merge-auto" } else { "merge" };
+            match run_rudder_jj_command(&self.cwd, command, &run_id, "merge") {
                 JjCliOutcome::Ok { integration } => {
                     self.agents[index].integration = integration;
+                }
+                JjCliOutcome::Conflict { files } if auto => {
+                    self.agents[index].integration.phase = IntegrationPhase::Pending;
+                    self.pending_jj_conflict = Some(files);
+                    anyhow::bail!("merge into the main change conflicts; nothing was merged");
                 }
                 JjCliOutcome::Conflict { files } => {
                     self.agents[index].integration.phase = IntegrationPhase::Pending;

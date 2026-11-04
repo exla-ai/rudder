@@ -47,7 +47,7 @@ import {
   watchRun,
   workerRun,
 } from "./run-manager.js";
-import { appendCompletionNote, appendDecision, appendSharedContext, parseCompletionNoteArg, SHARED_CONTEXT_FILE, syncSharedContextToWorkspaces, writeCompletionNoteFile } from "./surfaces.js";
+import { parseCompletionNoteArg, writeCompletionNoteFile } from "./surfaces.js";
 import type { CompletionNote } from "./surfaces.js";
 import type { BackendId } from "./types.js";
 import { commandExists, isTty, MissingToolError, newRunId, runCommand } from "./util.js";
@@ -68,6 +68,7 @@ type Parsed = {
     workspace?: boolean;
     queue?: boolean;
     allowDirty?: boolean;
+    abortOnConflict?: boolean;
     dryRun?: boolean;
     force?: boolean;
     nonInteractive?: boolean;
@@ -165,7 +166,7 @@ export async function main(): Promise<void> {
   // launcher already prepares the worker environment; repeating installation
   // here turns every callback into a walk of the user's skills directory.
   const internal = isInternalCommand(parsed.command);
-  const setup = !internal && !parsed.flags.help && parsed.command !== "help" && parsed.command !== "done"
+  const setup = !internal && !parsed.flags.help && parsed.command !== "help" && !RETIRED_CALLBACKS.has(parsed.command ?? "")
     && Boolean(parsed.command || parsed.args.length > 0 || isTty());
   if (setup) {
     await ensureAgentSkills();
@@ -424,7 +425,9 @@ export async function main(): Promise<void> {
       if (!run) {
         throw new Error("Missing run id.");
       }
-      await mergeRun(run, Boolean(parsed.flags.allowDirty));
+      await mergeRun(run, Boolean(parsed.flags.allowDirty), {
+        abortOnConflict: Boolean(parsed.flags.abortOnConflict),
+      });
       return;
     }
     case "sync":
@@ -445,24 +448,16 @@ export async function main(): Promise<void> {
       await runUndo(parsed.args[0]);
       return;
     }
-    case "remember": {
-      const insight = parsed.args.join(" ").trim();
-      if (!insight) {
-        throw new Error('Missing insight. Usage: rudder remember "the parser owns token budget"');
-      }
-      await runRemember(insight);
-      return;
-    }
+    case "remember":
     case "share": {
-      const text = parsed.args.join(" ").trim();
-      if (!text) {
-        throw new Error('Missing shared context. Usage: rudder share "APIFY_TOKEN=..."');
-      }
-      await runShare(text);
+      // Retired agent ceremony. Old sessions may still call these; accept them
+      // as no-ops so the words never fall through to starting a new agent.
+      console.log(`rudder ${parsed.command} is no longer needed; nothing was written.`);
       return;
     }
     case "done": {
-      // Worker end-of-task report (summary + interfaces + recommended follow-ups).
+      // Old-run compatibility: Rudder now detects completion itself and reads the
+      // summary from the agent's last message. Only the sidecar is written.
       await runDone(parsed);
       return;
     }
@@ -521,7 +516,8 @@ export function isInternalCommand(command: string | undefined): boolean {
 }
 
 // These commands need no jj installation. Completion only writes its evidence.
-const JJ_FREE_COMMANDS = new Set(["__event", "__route-task", "engine", "telemetry", "feedback", "login", "logout", "update", "help", "done"]);
+const JJ_FREE_COMMANDS = new Set(["__event", "__route-task", "engine", "telemetry", "feedback", "login", "logout", "update", "help", "done", "remember", "share"]);
+const RETIRED_CALLBACKS = new Set(["done", "remember", "share"]);
 
 function shouldAutoUpdateForCommand(command: string | undefined): boolean {
   if (command?.startsWith("__")) {
@@ -530,7 +526,7 @@ function shouldAutoUpdateForCommand(command: string | undefined): boolean {
   // `rudder done` is invoked by worker agents inside a live Rudder session; updating
   // the global package in that callback can desync the running dashboard from its
   // worker surface.
-  return command !== "done";
+  return !RETIRED_CALLBACKS.has(command ?? "");
 }
 
 function parseArgs(argv: string[]): Parsed {
@@ -593,6 +589,10 @@ function parseArgs(argv: string[]): Parsed {
     }
     if (arg === "--allow-dirty") {
       parsed.flags.allowDirty = true;
+      continue;
+    }
+    if (arg === "--abort-on-conflict") {
+      parsed.flags.abortOnConflict = true;
       continue;
     }
     if (arg === "--force") {
@@ -1169,14 +1169,6 @@ async function runUndo(opId?: string): Promise<void> {
   console.log("Note: jj undo is global - it rewinds all workspaces and refs.");
 }
 
-async function runRemember(insight: string): Promise<void> {
-  // The bd-remember equivalent: append a durable insight to DECISIONS.md, the
-  // tracked agent-authored knowledge surface the board's Memory view renders.
-  const repoRoot = findRepoRoot();
-  await appendDecision(repoRoot, insight, "cli");
-  console.log("Remembered. Appended to DECISIONS.md (shared, jj-tracked).");
-}
-
 async function runTelemetryCommand(action: string | undefined): Promise<void> {
   const verb = (action ?? "status").trim().toLowerCase();
   if (verb === "on" || verb === "enable") {
@@ -1250,17 +1242,6 @@ async function runEventCommand(parsed: Parsed): Promise<void> {
   await capture(event, properties);
 }
 
-async function runShare(text: string): Promise<void> {
-  const repoRoot = findRepoRoot();
-  await appendSharedContext(repoRoot, text, "cli share");
-  const runs = await listRuns(repoRoot).catch(() => []);
-  await syncSharedContextToWorkspaces(
-    repoRoot,
-    runs.map((run) => run.workspace.path),
-  ).catch(() => undefined);
-  console.log(`Shared. Appended to ${SHARED_CONTEXT_FILE} (gitignored, mirrored to agents).`);
-}
-
 /** Read all of stdin when it is piped (never when interactive), with a short
  *  timeout so a worker that calls `rudder done` without piping never hangs. */
 async function readPipedStdin(timeoutMs = 3000): Promise<string> {
@@ -1296,18 +1277,11 @@ async function readPipedStdin(timeoutMs = 3000): Promise<string> {
   });
 }
 
-/** `rudder done [--node <id>] ['<json>']`: a worker's end-of-task report. Accepts
- *  a CompletionNote JSON via stdin (piped) or as the joined args; a non-JSON arg
- *  is treated as a freeform summary. The note travels back to the orchestrator over
- *  two durable channels so a real Claude/Codex worker's report is
- *  not lost to terminal rendering:
- *    1. RUDDER_DONE_FILE (set by the launcher to <workspace>/.rudder/done/<node>.json):
- *       a machine-readable JSON drop the orchestrator reads straight off disk. This is
- *       the authoritative channel - it never passes through the agent's TUI.
- *    2. DECISIONS.md: a human-legible bullet siblings re-read.
- *  Never manages jj - just records, like `rudder remember`. */
+/** `rudder done [--node <id>] ['<json>']`: compatibility callback for old runs.
+ *  Accepts a CompletionNote JSON via stdin (piped) or as the joined args; a non-JSON
+ *  arg is treated as a freeform summary. It only writes the sidecar file an old
+ *  scheduler reads (RUDDER_DONE_FILE when set, else .rudder/done/<node>.json). */
 async function runDone(parsed: Parsed): Promise<void> {
-  const repoRoot = findRepoRoot();
   const node = parsed.flags.node;
   let raw = (await readPipedStdin()).trim();
   if (!raw && parsed.args.length) {
@@ -1326,8 +1300,6 @@ async function runDone(parsed: Parsed): Promise<void> {
   if (doneFile) {
     await writeCompletionNoteFile(doneFile, note);
   }
-  // (2) Human-legible record for sibling agents and review history.
-  await appendCompletionNote(repoRoot, note, node || "worker");
 }
 
 

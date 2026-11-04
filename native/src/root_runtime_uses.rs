@@ -48,6 +48,9 @@ impl RuntimeUseLedger {
     fn state(&self)->Result<std::sync::MutexGuard<'_,State>> {self.state.lock().map_err(|_|anyhow::anyhow!("original runtime-use custody poisoned"))}
     fn admit(state:&State)->Result<()> {ensure!(!state.closed&&state.entries.len()<MAX_USES,"original runtime-use admission closed/full");Ok(())}
     pub(super) fn close(&self)->Result<()> {self.state()?.closed=true;Ok(())}
+    pub(super) fn closed_and_empty(&self)->Result<bool> {
+        let state=self.state()?;Ok(state.closed&&state.entries.is_empty())
+    }
     pub(super) fn observation(&self)->RuntimeUseObservation {RuntimeUseObservation {ledger:self.clone()}}
     pub(super) fn try_contains_helper(&self,actual:&Arc<Mutex<ClientRequest>>)->Result<()> {
         let state=self.state.try_lock().map_err(|_|anyhow::anyhow!("original runtime-use ledger busy/poisoned; owners retained"))?;
@@ -164,3 +167,21 @@ impl RuntimePreparationUse {
 #[cfg(test)]
 #[path="root_runtime_use_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod unshared_retirement_tests {
+    use super::*;
+    #[test]
+    fn retirement_requires_absorbing_close_and_no_original_enrollment() {
+        let unused=RuntimeUseLedger::new();assert!(!unused.closed_and_empty().unwrap());
+        unused.close().unwrap();assert!(unused.closed_and_empty().unwrap());
+        let mut forbidden=None;assert!(unused.preparation_retaining(&mut forbidden).is_err());
+        let used=RuntimeUseLedger::new();let mut actual=None;used.preparation_retaining(&mut actual).unwrap();
+        used.close().unwrap();assert!(!used.closed_and_empty().unwrap());
+        let worker=OwnedWorkerJoin::new(std::thread::spawn(||{}));actual.as_ref().unwrap().retain_original_worker(&worker).unwrap();
+        let joined=worker.await_joined(std::time::Duration::from_secs(2)).unwrap();actual.as_ref().unwrap().retain_original_joined(&joined).unwrap();
+        // Joining preparation does not retire exported backing/actors. The
+        // actual reservation remains charged to the original machine census.
+        drop(actual);assert!(!used.closed_and_empty().unwrap());
+    }
+}

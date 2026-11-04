@@ -10,7 +10,8 @@ pub(crate) struct RetainedManagedAcquisition {
     owner:Option<EngineOwnership>,journal:Option<Journal>,held_journal:Option<HeldJournalFile>,lock:Option<CheckoutLock>,
     repo_anchor:Option<File>,home_anchor:Option<File>,repo_id:Option<(u64,u64)>,home_id:Option<(u64,u64)>,
     config:Arc<HostIngressConfigOwner>,selection:AllowedPreparedProject,original:FinalizationBudget,cancelled:Arc<AtomicBool>,
-    attempted:bool,transfer_attempted:bool,transfer_ack:Option<OwnerFence>,acknowledged:bool,panic:Option<Box<dyn Any+Send>>,
+    attempted:bool,replacement:owner_restart::reconciliation::GuardedReplacement,acknowledged:bool,panic:Option<Box<dyn Any+Send>>,
+    previous:Option<OwnerFence>,instance:Option<String>,
     restart_recovery:Option<restart::NativeRestartRecovery>,
 }
 impl RetainedManagedAcquisition {
@@ -28,7 +29,7 @@ impl RetainedManagedAcquisition {
             anyhow::ensure!(!private.starts_with(&selection.checkout)&&!selection.checkout.starts_with(private),"host private namespace overlaps configured source checkout");
         }
         *out=Some(Self {owner:None,journal:None,held_journal:None,lock:None,repo_anchor:None,home_anchor:None,repo_id:None,home_id:None,
-            config,selection,original:original.clone(),cancelled,attempted:false,transfer_attempted:false,transfer_ack:None,acknowledged:false,panic:None,restart_recovery:None});Ok(())
+            config,selection,original:original.clone(),cancelled,attempted:false,replacement:Default::default(),acknowledged:false,panic:None,restart_recovery:None,previous:None,instance:None});Ok(())
     }
     fn time(&self)->Result<()> {if self.cancelled.load(Ordering::Acquire){self.original.cancel();bail!("original ingress acquisition cancelled");}self.original.remaining()?;self.config.assert_current()}
     fn custody(&self)->Result<()> {
@@ -64,21 +65,40 @@ impl RetainedManagedAcquisition {
         self.held_journal=Some(self.journal.as_ref().unwrap().hold_database_file()?);self.custody()?;
         let journal=self.journal.as_ref().unwrap();
         let project=existing_prepared_project(journal,&self.selection)?;
-        let previous=journal.project_state(&project)?.owner;
-        let instance=uuid::Uuid::new_v4().to_string();let owner_id=format!("fabric:{instance}");
-        self.time()?;self.transfer_attempted=true;
-        let fence=owner_restart::replace_locked_owner(self.journal.as_mut().unwrap(),&previous,&owner_id,
-            epoch_ms(),&mut self.restart_recovery)?;
-        self.transfer_ack=Some(fence.clone()); // original transaction returned; BEFORE postchecks
+        self.previous=Some(journal.project_state(&project)?.owner);
+        self.instance=Some(uuid::Uuid::new_v4().to_string());
+        self.resume_prepared_inner(None)
+    }
+    /// Explicit OFF-App continuation of a refused acquisition. The caller
+    /// supplies its actual original external protocol owner, not reconstructed
+    /// paths, a copied receipt or an observer flag. No acquisition replay or new
+    /// budget is created. Err leaves every carrier in this SAME value.
+    pub(crate) fn reconcile_prepared_retaining(&mut self, external:&mut dyn owner_restart::reconciliation::OriginalExternalWork)->Result<()> {
+        anyhow::ensure!(self.attempted&&self.previous.is_some()&&self.panic.is_none(),"original acquisition is not resumable");
+        let result=std::panic::catch_unwind(std::panic::AssertUnwindSafe(||self.resume_prepared_inner(Some(external))));
+        match result {Ok(result)=>result,Err(panic)=>{self.panic=Some(panic);Err(anyhow::anyhow!("project reconciliation panicked; original carriers retained"))}}
+    }
+    fn resume_prepared_inner(&mut self, external:Option<&mut dyn owner_restart::reconciliation::OriginalExternalWork>)->Result<()> {
+        self.custody()?;
+        let instance=self.instance.as_ref().context("original acquisition instance absent")?.clone();
+        if self.owner.is_none() {
+        anyhow::ensure!(self.lock.is_some(),"original checkout lock absent");
+        let previous=self.previous.as_ref().context("original recorded owner absent")?;
+        // Revalidate immutable configuration/prepare binding before callbacks
+        // or transfer. This does not reconstruct external retirement authority.
+        existing_prepared_project(self.journal.as_ref().context("original acquisition Journal absent")?,&self.selection)?;
+        let fence=owner_restart::reconciliation::reconcile_locked_owner(self.journal.as_mut().unwrap(),previous,&format!("fabric:{instance}"),
+            external,&self.original,&mut self.replacement,&mut self.restart_recovery)?;
         let lock=self.lock.take().unwrap();let journal=self.journal.take().unwrap();
         let record=OwnerRecord {format_version:ENGINE_FORMAT,repo:self.selection.checkout.clone(),authority:"fabric".into(),
             implementation:"managed-machine-ingress".into(),pid:std::process::id(),owner:RecordedFence::from(&fence),instance_id:instance,
-            attach_socket:attach,control_socket:None,state:"starting".into(),started_at:now_stamp(),control_nonce:None};
+            attach_socket:self.selection.checkout.join(".rudder").join(ATTACH_SOCKET_NAME),control_socket:None,state:"starting".into(),started_at:now_stamp(),control_nonce:None};
         let lifetime=Arc::new(EngineOwnerLifetime {lock:Arc::new(lock),assigned:None,repo:record.repo.clone(),owner:fence.clone(),authority:NativeAuthority::Fabric,
             process_id:std::process::id(),revoked:AtomicBool::new(false)});
         self.owner=Some(EngineOwnership {lifetime,journal,fence,record_path:record.repo.join(".rudder/engine/owner.json"),record,
             released:false,identity_home:self.selection.home.clone(),managed_store:None,migration_records:None,
             restart_recovery:self.restart_recovery.clone()});
+        }
         self.custody()?;
         let actual=self.owner.as_mut().unwrap();
         write_owner_record(&actual.record_path,&actual.record)?;
@@ -87,7 +107,7 @@ impl RetainedManagedAcquisition {
     }
     /// Pure ownership transfer after all original ACKs; Err keeps SAME owner.
     pub(crate) fn take_acknowledged(&mut self)->Result<EngineOwnership> {
-        self.custody()?;anyhow::ensure!(self.acknowledged&&self.transfer_ack.is_some()&&self.panic.is_none(),"original acquisition ACK unavailable");
+        self.custody()?;anyhow::ensure!(self.acknowledged&&self.replacement.acknowledgment().is_some()&&self.panic.is_none(),"original acquisition ACK unavailable");
         self.owner.take().context("original acquired owner already transferred")
     }
 }

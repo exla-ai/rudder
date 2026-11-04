@@ -7,17 +7,27 @@ use rudder_engine::{build::{PlatformIdentity,PreparationSpec,ToolchainIdentity},
 #[path="compiler_sdk_build.rs"]
 mod selected;
 pub use selected::{CompilerSdkBuildOutcome,RetainedCompilerSdkBuild,CompilerSdkBuildFailure,CompilerSdkJobDisposal,CompilerSdkJobSettled};
-pub struct CompilerSdkClient {dispatch_serial:std::sync::atomic::AtomicU64,builds:Mutex<Vec<Arc<Mutex<selected::BuildState>>>>,client:Arc<RuntimeImageClient>,mount:Option<CompilerSdkMountData>,spec:Option<PreparationSpec>,ready:bool}
+pub struct CompilerSdkClient {build_admission_closed:AtomicBool,dispatch_serial:std::sync::atomic::AtomicU64,builds:Mutex<Vec<Arc<Mutex<selected::BuildState>>>>,client:Arc<RuntimeImageClient>,mount:Option<CompilerSdkMountData>,spec:Option<PreparationSpec>,ready:bool}
 impl CompilerSdkClient {
     pub(super) fn capture_retaining(out:&mut Option<Arc<Self>>,client:Arc<RuntimeImageClient>)->Result<()> {
         ensure!(out.is_none(),"original Native SDK client already captured");
-        *out=Some(Arc::new(Self{dispatch_serial:std::sync::atomic::AtomicU64::new(0),builds:Mutex::new(Vec::new()),client,mount:None,spec:None,ready:false}));
+        *out=Some(Arc::new(Self{build_admission_closed:AtomicBool::new(false),dispatch_serial:std::sync::atomic::AtomicU64::new(0),builds:Mutex::new(Vec::new()),client,mount:None,spec:None,ready:false}));
         let held=Arc::get_mut(out.as_mut().unwrap()).context("original SDK alias escaped before completion")?;
         held.client.current()?;let data=held.client.ready.compiler_sdk_data()?.context("original Root SDK ACK absent")?;data.mount.validate_data()?;
         ensure!(held.client.config.data().compiler_sdk.as_ref()==Some(&data.mount.catalog),"SDK original config/Root ACK differ");
         held.mount=Some(data.mount.clone());let semantic=&held.mount.as_ref().unwrap().semantic;
         held.spec=Some(semantic_preparation_spec_data(semantic,&held.mount.as_ref().unwrap().toolchains)?);
         held.spec.as_ref().unwrap().validate()?;held.client.current()?;held.ready=true;Ok(())
+    }
+    /// Close under the SAME registry mutex as registration. In-flight builds
+    /// remain charged until their original build and cleanup workers join.
+    pub(super) fn close_build_admission(&self)->Result<()> {
+        let _registry=self.builds.try_lock().map_err(|_|anyhow::anyhow!("SDK build admission busy/poisoned; retain retirement"))?;
+        self.build_admission_closed.store(true,Ordering::Release);Ok(())
+    }
+    pub(super) fn builds_retired(&self)->Result<bool> {
+        let registry=self.builds.try_lock().map_err(|_|anyhow::anyhow!("SDK original build census busy/poisoned"))?;
+        Ok(self.build_admission_closed.load(Ordering::Acquire)&&registry.is_empty())
     }
     pub fn current(&self,original:&FinalizationBudget)->Result<()>{original.remaining()?;self.assert_current()?;original.remaining()?;Ok(())}
     pub(super) fn poll_cancellations(&self)->Result<()>{let builds=match self.builds.try_lock(){Ok(v)=>v,Err(TryLockError::WouldBlock)=>return Ok(()),Err(TryLockError::Poisoned(_))=>anyhow::bail!("SDK retained builds custody poisoned")};for build in &*builds{if let Ok(held)=build.try_lock(){held.signal_original_cancellation()?;}}Ok(())}

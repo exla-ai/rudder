@@ -22,6 +22,7 @@ pub struct CompilerSdkJobDisposal {original:FinalizationBudget,cancelled:Arc<Ato
 pub struct CompilerSdkJobSettled {build:Arc<Mutex<BuildState>>,state:Arc<Mutex<DisposalState>>}
 pub(super) fn register_active_retaining(sdk:&Arc<CompilerSdkClient>,state:&Arc<Mutex<BuildState>>,original:&FinalizationBudget,cancel:&AtomicBool)->Result<()> {
     let mut actual=lock(state,original,cancel)?;let mut retained=lock(&sdk.builds,original,cancel)?;
+    ensure!(!sdk.build_admission_closed.load(Ordering::Acquire),"SDK original build admission closed");
     ensure!(retained.len()<MAX_HELPERS&&!actual.registered,"SDK retained builds full/original already registered; actual job settlement required");
     job_protocol::time(original,cancel)?;retained.push(state.clone());actual.registered=true;Ok(())
 }

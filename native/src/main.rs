@@ -64,6 +64,7 @@ mod app_engine_lifecycle;
 mod v4_migration;
 mod v4_migration_driver;
 mod v4_migration_adoption;
+mod v4_recovery_adoption;
 mod agent_efficiency;
 mod engine_observations;
 mod preview_registration;

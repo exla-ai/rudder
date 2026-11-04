@@ -93,6 +93,17 @@ impl RootCompilerSdkOwner {
         ensure!((held.dev(),held.ino(),held.mode(),held.uid(),held.gid())==(named.dev(),named.ino(),named.mode(),named.uid(),named.gid())&&held.is_dir()&&held.uid()==0&&held.gid()==0&&held.mode()&0o7777==0o555&&fs::read_dir(SDK_SOURCE)?.next().is_none(),"SDK original empty DATA placeholder changed");Ok(())}
     pub(super) fn enable_data(&self)->Result<CompilerSdkEnableData>{self.current()?;Ok(CompilerSdkEnableData{mount:self.data.as_ref().unwrap().clone(),probe:self.helper.as_ref().map(|h|h.result_data().cloned()).transpose()?})}
     pub(super) fn duplicate_floor(&self)->Result<OwnedFd>{self.current()?;Ok(self.root.as_ref().unwrap().try_clone()?)}
+    pub(super) fn retire_unshared_retaining(&mut self,original:&FinalizationBudget,cancel:&AtomicBool)->Result<bool> {
+        original.remaining()?;ensure!(!cancel.load(Ordering::Acquire),"SDK retirement cancelled; original owners retained");
+        if let Some(helper)=&mut self.helper{helper.retire_startup_retaining(original,cancel)?;}
+        self.close_admission();self.root.take();
+        let Some(mount)=&mut self.mount else{return Ok(false)};
+        if !mount.unmount_and_checkpoint_retaining(original,cancel)?{return Ok(false)}
+        ensure!(mount.is_unmounted_and_joined(),"SDK original FUSE/TLS join absent");
+        // Failed immutable reads remain retained for explicit reconciliation.
+        if self.read.is_some()||self.floor.as_ref().context("SDK original floor absent")?.retained_requests_data()?!=0{return Ok(false)}
+        original.remaining()?;ensure!(!cancel.load(Ordering::Acquire),"SDK retirement cancelled; joined owners retained");Ok(true)
+    }
     pub(super) fn close_admission(&self){if let Some(m)=&self.mount{m.close_admission()}if let Some(f)=&self.floor{f.close_admission()}}
 
 }

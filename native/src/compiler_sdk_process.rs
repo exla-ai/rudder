@@ -48,12 +48,12 @@ impl StartupResultReadClosure {
 }
 pub(super) struct SdkProcess {proof:Arc<RuntimeBootstrapProof>,admission:Arc<RuntimeReadAdmission>,original:FinalizationBudget,
     diagnostic_check:BootstrapCheck,startup_read_closure:StartupResultReadClosure,root:Option<OwnedFd>,data:Option<CompilerSdkMountData>,helper:Helper,job:Option<serde_json::Value>,job_fds:Option<(OwnedFd,OwnedFd)>,
-    job_child_disposal:Option<child_settlement::ChildSettlement>,terminal_failure:Option<terminal::OriginalHelperTerminalFailure>,pipe_error:bool,stdout:Option<std::process::ChildStdout>,stderr:Option<std::process::ChildStderr>,stdout_raw:Vec<u8>,stderr_raw:Vec<u8>,stdout_eof:bool,stderr_eof:bool,cancel:Option<OwnedFd>}
+    startup_retirement:Option<retirement::StartupRetirement>,job_child_disposal:Option<child_settlement::ChildSettlement>,terminal_failure:Option<terminal::OriginalHelperTerminalFailure>,pipe_error:bool,stdout:Option<std::process::ChildStdout>,stderr:Option<std::process::ChildStderr>,stdout_raw:Vec<u8>,stderr_raw:Vec<u8>,stdout_eof:bool,stderr_eof:bool,cancel:Option<OwnedFd>}
 impl SdkProcess {
     pub(super) fn capture_retaining(out:&mut Option<Self>,proof:Arc<RuntimeBootstrapProof>,admission:Arc<RuntimeReadAdmission>,original:FinalizationBudget,
         root:OwnedFd,data:CompilerSdkMountData,job:Option<serde_json::Value>,job_fds:Option<(OwnedFd,OwnedFd)>,cancel:Option<OwnedFd>)->Result<()> {
         ensure!(out.is_none(),"original SDK process carrier occupied");validate_sdk_process_clock(&original.constraint(),job.is_none())?;*out=Some(Self{proof,admission,original,diagnostic_check:BootstrapCheck::SdkProcessOriginal,startup_read_closure:StartupResultReadClosure::default(),root:Some(root),data:Some(data),helper:Helper::staged(),job,job_fds,
-            job_child_disposal:None,terminal_failure:None,pipe_error:false,stdout:None,stderr:None,stdout_raw:Vec::new(),stderr_raw:Vec::new(),stdout_eof:false,stderr_eof:false,cancel});Ok(())
+            startup_retirement:None,job_child_disposal:None,terminal_failure:None,pipe_error:false,stdout:None,stderr:None,stdout_raw:Vec::new(),stderr_raw:Vec::new(),stdout_eof:false,stderr_eof:false,cancel});Ok(())
     }
     fn current_build(&self)->Result<()>{
         self.original.remaining().context(SdkHelperOperation::OriginalClock)?;
@@ -217,3 +217,6 @@ mod startup_read_closure_tests;
 #[cfg(test)]
 #[path="compiler_sdk_helper_pipe_tests.rs"]
 mod helper_pipe_tests;
+
+#[path="compiler_sdk_startup_retirement.rs"]
+mod retirement;

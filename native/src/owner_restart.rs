@@ -4,9 +4,13 @@
 use super::*;
 use restart::{ExpectedRuntimeAttempt, NativeRestartRecovery};
 
+#[path = "owner_reconciliation.rs"]
+pub(crate) mod reconciliation;
+
 pub(crate) struct RestartBlocked {
     pub recovery: NativeRestartRecovery,
     cause: String,
+    transfer_attempted: bool,
 }
 impl std::fmt::Debug for RestartBlocked {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {std::fmt::Display::fmt(self, f)}
@@ -37,19 +41,34 @@ impl std::error::Error for RestartBlocked {}
 /// epoch; a new lock, PID or journal flag cannot replace this custody.
 pub(crate) struct RetainedRestartFailure {
     cause: anyhow::Error,
-    original: std::sync::Mutex<(CheckoutLock, Journal, OwnerFence)>,
+    original: std::sync::Mutex<(CheckoutLock, Journal, OwnerFence, reconciliation::GuardedReplacement)>,
 }
 impl RetainedRestartFailure {
     pub(super) fn new(cause: anyhow::Error, lock: CheckoutLock, journal: Journal, owner: OwnerFence) -> Self {
-        Self {cause, original: std::sync::Mutex::new((lock, journal, owner))}
+        let attempted=cause.downcast_ref::<RestartBlocked>().is_none_or(|error|error.transfer_attempted);
+        Self {cause, original: std::sync::Mutex::new((lock, journal, owner, reconciliation::GuardedReplacement::after_failure(attempted)))}
     }
     pub(crate) fn recovery(&self) -> Option<&NativeRestartRecovery> {
         self.cause.downcast_ref::<RestartBlocked>().map(|blocked|&blocked.recovery)
     }
     pub(crate) fn reconcile<T>(&self, reconcile: impl FnOnce(&mut Journal, &OwnerFence) -> Result<T>) -> Result<T> {
         let mut original = self.original.lock().map_err(|_|anyhow::anyhow!("original restart custody is poisoned"))?;
-        let (_, journal, owner) = &mut *original;
+        let (_, journal, owner, transferred) = &mut *original;
+        anyhow::ensure!(!transferred.started(), "original owner transfer already attempted; retain its original acknowledgment");
         reconcile(journal, owner)
+    }
+
+    /// OFF App. Resume the SAME refused acquisition with its actual external
+    /// owner. A successful transfer ACK stays beside the original lock even if
+    /// the caller loses its response; repeated calls never advance another epoch.
+    pub(crate) fn reconcile_and_replace_retaining(
+        &self, next_owner: &str, external: &mut dyn reconciliation::OriginalExternalWork,
+        budget: &rudder_engine::execution::finalization_budget::FinalizationBudget,
+    ) -> Result<OwnerFence> {
+        budget.remaining()?;
+        let mut original = self.original.try_lock().map_err(|_|anyhow::anyhow!("original restart custody busy or poisoned"))?;
+        let (_, journal, previous, transferred) = &mut *original;
+        reconciliation::reconcile_locked_owner(journal, previous, next_owner, Some(external), budget, transferred, &mut None)
     }
 }
 impl std::fmt::Debug for RetainedRestartFailure {
@@ -72,6 +91,22 @@ pub(super) fn replace_locked_owner(
     now_ms: i64,
     report: &mut Option<NativeRestartRecovery>,
 ) -> Result<OwnerFence> {
+    inspect_locked_owner(journal, previous, now_ms, report)?;
+    match journal.transfer_recovered_owner(previous, next_owner, now_ms) {
+        Ok(fence) => Ok(fence),
+        Err(error) => match report.as_ref() {
+            Some(recovery) => Err(RestartBlocked {recovery: recovery.clone(), cause: format!("{error:#}"),transfer_attempted:true}.into()),
+            None => Err(error),
+        },
+    }
+}
+
+/// Inspect/quarantine without transferring. Keeping this separate allows the
+/// actual retained owner to reconcile external effects before the guarded CAS.
+pub(super) fn inspect_locked_owner(
+    journal: &mut Journal, previous: &OwnerFence, now_ms: i64,
+    report: &mut Option<NativeRestartRecovery>,
+) -> Result<()> {
     let state = journal.project_state(&previous.project_id)?;
     anyhow::ensure!(state.owner == *previous, "recorded owner changed before restart");
     if state.owner_active {
@@ -93,14 +128,14 @@ pub(super) fn replace_locked_owner(
     if let Some(recovery) = report.as_ref() {
         if recovery.runtimes.iter().any(|runtime|matches!(runtime, restart::RecoveredRuntimeDisposition::Quarantined {..})) {
             return Err(RestartBlocked {recovery: recovery.clone(),
-                cause: "native runtime inventory requires physical custody reconciliation".into()}.into());
+                cause: "native runtime inventory requires physical custody reconciliation".into(),transfer_attempted:false}.into());
         }
     }
-    match journal.transfer_recovered_owner(previous, next_owner, now_ms) {
-        Ok(fence) => Ok(fence),
-        Err(error) => match report.as_ref() {
-            Some(recovery) => Err(RestartBlocked {recovery: recovery.clone(), cause: format!("{error:#}")}.into()),
-            None => Err(error),
-        },
+    if let Some(recovery) = report.as_ref() {
+        if !recovery.effects.uncertain.is_empty() {
+            return Err(RestartBlocked {recovery: recovery.clone(),
+                cause: "original external effects require authoritative reconciliation".into(),transfer_attempted:false}.into());
+        }
     }
+    Ok(())
 }

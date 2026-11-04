@@ -2,6 +2,10 @@
 //! Inspection and owner transfer happen off App before this typed data arrives.
 use super::*;
 
+#[cfg(test)]
+#[path = "v4_migration_integration_tests.rs"]
+mod integration_tests;
+
 pub(crate) fn apply(app: &mut App, records: Vec<serde_json::Value>) -> Result<()> {
     anyhow::ensure!(records.len() <= 1024 && app.agents.iter().all(|run|run.terminal.is_none()),
         "migration adoption requires a new App without live PTYs");

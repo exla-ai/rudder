@@ -1178,14 +1178,13 @@ fn every_agent_prompt_asks_for_parallel_work() {
 #[test]
 fn execution_prompt_tells_the_worker_it_is_a_jj_runtime() {
     let prompt = execution_prompt("add a feature");
-    assert!(prompt.contains("jj (Jujutsu)"), "names the VCS: {prompt}");
-    assert!(prompt.contains("jj status") && prompt.contains("jj diff"));
-    assert!(
-        prompt.contains("RUDDER_SHARED.md"),
-        "workers must be told to read shared local context: {prompt}"
-    );
-    // The old Hunk review integration paragraph is gone.
-    assert!(!prompt.to_lowercase().contains("hunk"), "no hunk: {prompt}");
+    assert!(prompt.starts_with("add a feature"), "goal comes first: {prompt}");
+    assert!(prompt.contains("jj workspace"), "names the VCS: {prompt}");
+    assert!(prompt.contains("Do not commit, push or deploy"));
+    assert!(prompt.contains("Never write secrets"));
+    for removed in ["rudder done", "followup", "evidence", "DECISIONS.md", "hunk"] {
+        assert!(!prompt.to_lowercase().contains(&removed.to_lowercase()), "no {removed}: {prompt}");
+    }
 }
 
 #[test]
@@ -8511,14 +8510,16 @@ fn enter_on_paused_rows_resumes_worker_and_main_sessions() {
 #[test]
 fn main_prompt_is_an_end_to_end_delivery_contract() {
     let prompt = main_task_prompt("deploy the app");
-    assert!(prompt.contains("single end-to-end owner"));
-    assert!(prompt.contains("Pushing alone is not deployment"));
-    assert!(prompt.contains("prior authorization"));
-    assert!(prompt.contains("verifiedAt"));
-    assert!(prompt.ends_with("deploy the app"));
-    assert!(prompt.len() < 1_600, "startup instructions should stay compact");
-    assert!(execution_prompt("fix one bug").len() < 1_400);
-    assert!(!prompt.contains("Before each significant step"));
+    assert!(prompt.starts_with("deploy the app"), "goal comes first");
+    assert!(prompt.contains("Preserve unrelated edits"));
+    assert!(prompt.contains("Ship only when asked"));
+    assert!(prompt.contains("Never force-push"));
+    assert!(prompt.contains("write secrets"));
+    for removed in ["rudder done", "followup", "evidence", "DECISIONS.md", "verifiedAt"] {
+        assert!(!prompt.to_lowercase().contains(&removed.to_lowercase()), "no {removed}");
+    }
+    assert!(prompt.len() < 1_000, "startup instructions should stay compact");
+    assert!(execution_prompt("fix one bug").len() < 1_000);
 }
 
 #[test]
@@ -11868,24 +11869,19 @@ fn rudder_context_carries_session_memory_for_new_agents() {
 #[test]
 fn orchestrator_prompts_include_global_monitoring_contract() {
     let claude_prompt = orchestrator_system_prompt();
-    assert!(claude_prompt.contains("Global job snapshot"));
-    assert!(claude_prompt.contains("wait for current Claude/Codex jobs"));
-    assert!(claude_prompt.contains("RUDDER_REVIEW_ALL"));
-    assert!(claude_prompt.contains("RUDDER_RUN <task>"));
-    assert!(claude_prompt.contains("RUDDER_RESUME <node-or-run-id>"));
-    assert!(claude_prompt.contains("RUDDER_CLOUD_MIGRATE"));
-    assert!(claude_prompt.contains("RUDDER_MAIN <prompt>"));
-
     let codex_prompt = codex_orchestrator_prompt("monitor the current threads");
-    assert!(codex_prompt.contains("Global job snapshot"));
-    assert!(codex_prompt.contains("Active local Rudder agents"));
-    assert!(codex_prompt.contains("Ready local Rudder agents"));
-    assert!(codex_prompt.contains("Completed local Rudder agents"));
-    assert!(codex_prompt.contains("Active local Rudder agents are live or waiting"));
-    assert!(codex_prompt.contains("RUDDER_RUN <task>"));
-    assert!(codex_prompt.contains("RUDDER_RESUME <node-or-run-id>"));
-    assert!(codex_prompt.contains("RUDDER_CLOUD_MIGRATE"));
-    assert!(codex_prompt.contains("monitor the current threads"));
+    for prompt in [&claude_prompt, &codex_prompt] {
+        assert!(prompt.contains("Global job snapshot"));
+        assert!(prompt.contains("Active local Rudder agents are live or waiting"));
+        assert!(prompt.contains("Ready local Rudder agents"));
+        assert!(prompt.contains("Completed local Rudder agents"));
+        assert!(prompt.contains("RUDDER_RUN <task>"));
+        assert!(prompt.contains("RUDDER_MAIN <prompt>"));
+        assert!(prompt.contains("RUDDER_RESUME <node-or-run-id>"));
+        assert!(prompt.contains("RUDDER_CLOUD_MIGRATE"));
+        assert!(!prompt.contains("RUDDER_REVIEW_ALL"), "integration is automatic");
+    }
+    assert!(codex_prompt.ends_with("monitor the current threads"));
 }
 
 #[test]

@@ -503,8 +503,8 @@ mod tests {
         ] {
             assert!(prompt.contains(PLANNING_OWNERSHIP_RULE));
             assert!(prompt.contains("Do NOT implement") || prompt.contains("do NOT implement"));
-            assert!(prompt.contains("approval scope/version and granted budget"));
-            assert!(prompt.contains("Routine messages do not resume stopped work"));
+            assert!(prompt.contains("a changed plan is not new authority"));
+            assert!(!prompt.contains("rudder done") && !prompt.contains("DECISIONS.md"));
         }
     }
 

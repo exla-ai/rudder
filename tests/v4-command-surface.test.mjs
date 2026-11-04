@@ -4,6 +4,7 @@ import { spawnSync } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
+import { v4ScratchPrefix } from './helpers/v4-scratch.mjs';
 import { COMMAND_REGISTRY as registry, commandHelp, commandCompletions, classifyComposerInput } from "../dist/operations/registry.js";
 import { applyCommandSurface, printCommandDiscovery } from "../dist/operations/cli.js";
 import { agentToolCalls, validateOperationRequest, operationDigest, validateOperationReceipt, dispatchOperation } from "../dist/operations/requests.js";
@@ -209,7 +210,7 @@ test("discovery handles structured machine output before any setup or launch", (
 });
 
 test("real CLI help/completion and inert callbacks keep JSON framing and exit contracts", () => {
-  const root = mkdtempSync("/workspace/v4-command-surface-");
+  const root = mkdtempSync(v4ScratchPrefix('command-surface'));
   const entry = fileURLToPath(new URL("../dist/index.js", import.meta.url));
   const env = { ...process.env, HOME: root, CODEX_HOME: path.join(root, ".codex"), CLAUDE_CONFIG_DIR: path.join(root, ".claude"), CI: "1", RUDDER_DISABLE_UPDATE_CHECK: "1", RUDDER_DISABLE_AUTO_UPDATE: "1", RUDDER_DISABLE_TELEMETRY: "1", RUDDER_DISABLE_AGENT_SKILLS: "1" };
   for (const key of Object.keys(env)) if (key.startsWith("RUDDER_") && !key.startsWith("RUDDER_DISABLE_")) delete env[key];

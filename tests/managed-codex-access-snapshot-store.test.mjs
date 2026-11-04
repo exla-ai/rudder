@@ -48,7 +48,7 @@ test("closed canonical access-only validator reuses account/expiry claims and re
     raw({ ...value, formatVersion: true }), raw({ ...value, kind: "other" }), raw({ ...value, backend: "claude" }),
     raw({ ...value, provider: "anthropic" }), raw({ ...value, chatgptAccountId: "foreign" }),
     raw({ ...value, expiresAtMs: value.expiresAtMs + 1 }), raw({ ...value, chatgptPlanType: "other" }),
-    raw(snapshot(1)), raw(snapshot(Math.floor(Date.now() / 1000) + 86402)),
+    raw(snapshot(1)), raw(snapshot(Math.floor(Date.now() / 1000) + 14 * 86400 + 2)),
     Buffer.from(JSON.stringify(value) + "\n"), Buffer.from(" " + JSON.stringify(value)),
     Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), raw(value)]),
     raw(Object.fromEntries(Object.entries(value).reverse())),

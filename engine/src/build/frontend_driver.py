@@ -3,6 +3,8 @@
 
 The engine supplies CAS-materialized inputs/tools and writes this bundled
 driver plus linux_runner.py. No user BUILD/Starlark/shell program is loaded.
+Execution is disabled until the host can exclude all materialized-input writers
+for the entire action lifetime. Read-only child mounts alone do not establish it.
 """
 import gzip
 import hashlib
@@ -23,6 +25,8 @@ def write_if_changed(path, text):
 
 
 def rules(remote, platform):
+    if remote:
+        raise ValueError("managed compiler remote cache reads/uploads disabled: host input writer exclusion is not enforced")
     properties = {"OSFamily": platform["os"], "Arch": platform["architecture"], "rudder-abi": platform["abi"], **platform.get("properties", {})}
     return '''def _compile(ctx):
     output = ctx.actions.declare_output("js" if ctx.attrs.language == "typescript" else ctx.label.name + ".rlib", dir = ctx.attrs.language == "typescript")
@@ -32,15 +36,15 @@ def rules(remote, platform):
     for source in ctx.attrs.sources:
         argv.add("--input", source)
     argv.add(cmd_args(hidden = [ctx.attrs.contract]))
-    ctx.actions.run(argv, category = "rudder_compile", identifier = ctx.attrs.language, local_only = True, allow_cache_upload = True, env = {"PYTHONHOME": "prepared/tools/python", "PYTHONDONTWRITEBYTECODE": "1", "PYTHONHASHSEED": "0"})
+    ctx.actions.run(argv, category = "rudder_compile", identifier = ctx.attrs.language, local_only = True, allow_cache_upload = False, env = {"PYTHONHOME": "prepared/tools/python", "PYTHONDONTWRITEBYTECODE": "1", "PYTHONHASHSEED": "0"})
     return [DefaultInfo(default_output = output)]
 compile_target = rule(impl = _compile, attrs = {"language": attrs.string(), "entrypoint": attrs.source(), "sources": attrs.list(attrs.source()), "runner": attrs.source(), "contract": attrs.source(), "environment": attrs.string()})
 def _platforms(ctx):
-    executor = CommandExecutorConfig(local_enabled = True, remote_enabled = False, remote_cache_enabled = REMOTE, allow_cache_uploads = REMOTE, remote_execution_properties = PROPERTIES, remote_execution_use_case = "buck2-default")
+    executor = CommandExecutorConfig(local_enabled = True, remote_enabled = False, remote_cache_enabled = False, allow_cache_uploads = False, remote_execution_properties = PROPERTIES, remote_execution_use_case = "buck2-default")
     platform = ExecutionPlatformInfo(label = ctx.label.raw_target(), configuration = ConfigurationInfo(constraints = {}, values = {}), executor_config = executor)
     return [DefaultInfo(), ExecutionPlatformRegistrationInfo(platforms = [platform])]
 platforms = rule(impl = _platforms, attrs = {})
-'''.replace("REMOTE", "True" if remote else "False").replace("PROPERTIES", json.dumps(properties, sort_keys=True))
+'''.replace("PROPERTIES", json.dumps(properties, sort_keys=True))
 
 
 def parse_events(path):
@@ -72,10 +76,17 @@ def parse_events(path):
     return executed, hits, [{"hash": digest, "size_bytes": size} for digest, size in sorted(digests)]
 
 
+def require_input_custody():
+    # No JSON/profile field or environment variable is a custody capability.
+    # Refuse before paths, daemon startup, cache requests or output writes.
+    raise ValueError("managed compiler action reuse and publication disabled: full-lifetime host SDK/source writer exclusion is not enforced")
+
+
 def main():
     request = json.load(sys.stdin)
     if request.get("format_version") != 1:
         raise ValueError("unsupported managed frontend request")
+    require_input_custody()
     workspace = Path(request["workspace"]).resolve()
     prepared = Path(request["prepared_directory"]).resolve(strict=True)
     buck2 = Path(request["buck2"]).resolve(strict=True)

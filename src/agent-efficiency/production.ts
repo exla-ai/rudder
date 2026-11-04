@@ -26,10 +26,11 @@ function relativeRead(run:RunRecord,file:unknown):string|undefined {
  * commands or assistant prose as a successful read or check. Raw tool data is
  * hashed in memory and is not persisted in this private bounded trace. */
 export class BackendReadTrace {
+  private readonly run: RunRecord;
   #pending=new Map<string,{path:string;input:unknown}>();
   #attempt=randomUUID();
   #writes=0;
-  constructor(private readonly run:RunRecord){}
+  constructor(run: RunRecord) { this.run = run; }
   async observe(event:unknown):Promise<void>{
     if(this.run.backend!=="claude" || !event || typeof event!=="object")return;
     const row=event as {type?:string;message?:{content?:unknown}};

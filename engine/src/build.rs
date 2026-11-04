@@ -3,8 +3,9 @@
 //!
 //! The first managed profile generates trusted Buck2 compile rules. It does
 //! not accept arbitrary shell commands or a peer's assertion of hermeticity.
-//! Native Buck2 owns action validity and REAPI cache lookups; this module keeps
-//! immutable roots, admission provenance and the explicit project contract.
+//! Preparation reuse is independent from compiler action reuse. Managed compiler
+//! execution, REAPI reuse/uploads and reusable result publication remain disabled
+//! until the host enforces input custody for the full action lifetime.
 
 use crate::protocol::{canonical_json, ObjectKind, ObjectRef, FORMAT_VERSION};
 use crate::store::{LocalStore, ReferencedMetadata};
@@ -18,6 +19,7 @@ mod frontend;
 mod index;
 mod sealed_inputs;
 mod execution_control;
+mod managed_action_gate;
 pub use execution_control::BuildExecutionControl;
 pub use frontend::{Buck2Adapter, BuildRun};
 pub use index::{BuildIndex, PreparedEnvironment, StoredBuild};
@@ -340,6 +342,7 @@ impl BuildPolicy {
         }
         Ok(())
     }
+    /// Effects-only eligibility, not proof of input custody or cache admission.
     pub fn cacheable(&self) -> bool {
         self.effects.is_empty()
     }

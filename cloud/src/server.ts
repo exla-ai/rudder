@@ -437,6 +437,7 @@ const insertToken = database.prepare(`
   values (@tokenHash, @accountId, @email, @createdAt, @lastUsedAt)
 `);
 const findToken = database.prepare("select * from rudder_tokens where token_hash = ?");
+const deleteToken = database.prepare("delete from rudder_tokens where token_hash = ?");
 const touchToken = database.prepare("update rudder_tokens set last_used_at = ? where token_hash = ?");
 const insertSail = database.prepare(`
   insert into rudder_sails (
@@ -792,6 +793,10 @@ const server = http.createServer({ noDelay: true }, async (req, res) => {
     }
     if (url.pathname === "/api/app/pair/start" || url.pathname === "/api/app/pair/finish") {
       await handleAppPairing(req, res, url);
+      return;
+    }
+    if (url.pathname === "/api/app/sign-out") {
+      handleAppSignOut(req, res);
       return;
     }
     if (await handleManagedHomeProvisioningHttp(req, res, url, { registry: managedHomeRegistry,
@@ -4835,16 +4840,22 @@ function socialProviders(): JsonRecord {
   const googleClientSecret = oauthValue("GOOGLE_CLIENT_SECRET", "google_client_secret");
   const githubClientId = oauthValue("GITHUB_CLIENT_ID", "github_client_id");
   const githubClientSecret = oauthValue("GITHUB_CLIENT_SECRET", "github_client_secret");
+  // Always show the account picker. The iOS and Mac shells sign in through
+  // the system browser's shared cookies, so without it Google (and GitHub)
+  // silently reuse whichever account is already signed in there, and after
+  // signing out there is no way to pick a different one.
   if (googleClientId && googleClientSecret) {
     providers.google = {
       clientId: googleClientId,
       clientSecret: googleClientSecret,
+      prompt: "select_account",
     };
   }
   if (githubClientId && githubClientSecret) {
     providers.github = {
       clientId: githubClientId,
       clientSecret: githubClientSecret,
+      prompt: "select_account",
     };
   }
   return providers;
@@ -7129,6 +7140,22 @@ async function handleAppNativeDone(req: IncomingMessage, res: ServerResponse): P
   res.statusCode = 302;
   res.setHeader("Location", `rudder://auth?token=${encodeURIComponent(issued.token)}`);
   res.end();
+}
+
+// Signing out of the phone or Mac app revokes its bearer token, so the next
+// account signed in on that device starts clean and the old token cannot be
+// reused. Idempotent: an unknown or missing token is already signed out.
+function handleAppSignOut(req: IncomingMessage, res: ServerResponse): void {
+  if (req.method !== "POST") {
+    sendJson(res, 405, { error: "method not allowed" });
+    return;
+  }
+  const authHeader = req.headers.authorization || "";
+  const token = authHeader.startsWith("Bearer ") ? authHeader.slice("Bearer ".length).trim() : "";
+  if (token.startsWith("rdr_")) {
+    deleteToken.run(tokenHash(token));
+  }
+  sendJson(res, 200, { ok: true });
 }
 
 // ---------------------------------------------------------------------------

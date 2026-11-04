@@ -1183,6 +1183,12 @@ impl TerminalPane {
         let reader_readiness = PtyReadiness::new(pair.master.as_raw_fd())
             .context("failed to initialize PTY reader readiness")?;
 
+        // Answer Claude's and Codex's folder-trust prompt before it appears:
+        // each agent starts in a fresh workspace nobody is watching.
+        #[cfg(unix)]
+        if let (Some(command), Some(cwd)) = (&command, &options.cwd) {
+            crate::agent_trust::prepare_for_launch(&command.program, cwd);
+        }
         let mut builder = command_builder(command, &options.term)?;
         if let Some(cwd) = &options.cwd {
             builder.cwd(cwd);

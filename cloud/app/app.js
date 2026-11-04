@@ -490,13 +490,26 @@ function openAddProject() {
 // round trips can land back on it.
 function openSettings() { navigate("/app/settings"); }
 
-async function signOut() {
-  if (NATIVE) { postNative({ type: "signOut" }); return; }
-  ls.set("rudder.token", null);
+// Everything this app keeps in localStorage belongs to the signed-in account
+// (its org scope, last screen, drafts, onboarding), so a different account
+// signed in next on this device starts clean instead of on the old one's.
+function forgetAccount() {
   try {
-    await fetch("/api/auth/sign-out", { method: "POST", credentials: "same-origin", headers: { "Content-Type": "application/json" }, body: "{}" });
-  } catch { /* reload anyway */ }
-  ls.set("rudder.lastRoute", null);
+    for (const key of Object.keys(localStorage)) {
+      if (key.startsWith("rudder.")) localStorage.removeItem(key);
+    }
+  } catch { /* private mode */ }
+}
+
+async function signOut() {
+  const token = ls.get("rudder.token");
+  forgetAccount();
+  // The shell revokes its own token and clears the web view's data.
+  if (NATIVE) { postNative({ type: "signOut" }); return; }
+  const done = [fetch("/api/auth/sign-out", { method: "POST", credentials: "same-origin", headers: { "Content-Type": "application/json" }, body: "{}" })];
+  // A paired browser holds a bearer token too: revoke it.
+  if (token) done.push(fetch("/api/app/sign-out", { method: "POST", headers: { Authorization: `Bearer ${token}` } }));
+  await Promise.allSettled(done);
   location.reload();
 }
 

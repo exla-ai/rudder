@@ -4,7 +4,7 @@ use rudder_engine::{
     store::{CheckpointV2Manifest, EnvironmentManifest, LocalStore, SourceManifest},
     workspace::{
         CreateRequest, PrepareRequest, PreparedWorkspace, WorkspaceBackend, WorkspaceManager,
-        WorkspaceProfile, WorkspaceStatus,
+        remove_managed_tree, WorkspaceProfile, WorkspaceStatus,
     },
 };
 use std::os::unix::fs::{symlink, PermissionsExt};
@@ -43,6 +43,14 @@ fn profile() -> WorkspaceProfile {
 fn write(path: impl AsRef<Path>, bytes: &[u8]) {
     fs::create_dir_all(path.as_ref().parent().unwrap()).unwrap();
     fs::write(path, bytes).unwrap();
+}
+
+// Overlay helpers leave `work/work` unreadable, which TempDir's own cleanup
+// cannot remove (it fails silently and leaked 159 dirs on /workspace).
+impl Drop for Fixture {
+    fn drop(&mut self) {
+        let _ = remove_managed_tree(self._temp.path());
+    }
 }
 
 struct Fixture {
@@ -440,6 +448,44 @@ fn seal_and_destroy_are_idempotent_and_retain_checkpoint_closure() {
             .status,
         WorkspaceStatus::Destroyed
     );
+}
+
+#[test]
+fn destroy_removes_private_state_the_overlay_left_unreadable() {
+    let fixture = Fixture::new();
+    let prepared = fixture.prepare(WorkspaceBackend::EagerCopy);
+    let view = fixture.create(&prepared);
+    let private = fixture
+        .manager
+        .view_path(&view.view_id)
+        .unwrap()
+        .join("private");
+    // What overlayfs leaves behind: work/work with no read or search bit,
+    // here with a file inside so only a real permission fix can remove it.
+    let stuck = private.join("work/work");
+    write(stuck.join("index"), b"overlay internal");
+    fs::set_permissions(&stuck, fs::Permissions::from_mode(0o200)).unwrap();
+    fixture
+        .manager
+        .destroy(&view.view_id, &owner(), &id())
+        .unwrap();
+    assert!(!private.exists());
+    // A symlink inside the tree is removed, never followed and chmodded.
+    let outside = fixture._temp.path().join("outside");
+    fs::create_dir(&outside).unwrap();
+    fs::set_permissions(&outside, fs::Permissions::from_mode(0o500)).unwrap();
+    let tree = fixture._temp.path().join("tree");
+    let locked = tree.join("locked");
+    fs::create_dir_all(&locked).unwrap();
+    symlink(&outside, locked.join("link")).unwrap();
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+    remove_managed_tree(&tree).unwrap();
+    assert!(!tree.exists());
+    assert_eq!(
+        fs::metadata(&outside).unwrap().permissions().mode() & 0o777,
+        0o500
+    );
+    fs::set_permissions(&outside, fs::Permissions::from_mode(0o700)).unwrap();
 }
 
 #[test]

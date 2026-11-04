@@ -3,6 +3,7 @@ import AuthenticationServices
 import Foundation
 import Observation
 import Security
+import WebKit
 
 /// Who is signed in, and how to sign in. The macOS twin of ios/App/Session.swift.
 ///
@@ -107,10 +108,23 @@ final class Session {
         Task { await pair(code: code) }
     }
 
+    /// Signs this Mac out so a different account can sign in next: the token
+    /// is revoked on the server and the web view's storage (the old account's
+    /// org scope, last screen and drafts) is cleared. The account picker is
+    /// the server's `prompt=select_account`.
     func signOut() {
+        let revoked = token
         Keychain.delete()
         token = nil
         NSApp.dockTile.badgeLabel = nil
+        WKWebsiteDataStore.default().removeData(ofTypes: WKWebsiteDataStore.allWebsiteDataTypes(), modifiedSince: .distantPast) {}
+        if let revoked {
+            var request = URLRequest(url: server.appendingPathComponent("api/app/sign-out"))
+            request.httpMethod = "POST"
+            request.setValue("Bearer \(revoked)", forHTTPHeaderField: "Authorization")
+            // Best effort: signed out on this Mac whether or not it lands.
+            URLSession.shared.dataTask(with: request).resume()
+        }
     }
 }
 

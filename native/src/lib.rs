@@ -30,3 +30,6 @@ pub mod compiler_image_data;
 
 #[cfg(target_os="linux")]
 pub mod managed_owner_lease;
+
+#[cfg(unix)]
+mod agent_trust;

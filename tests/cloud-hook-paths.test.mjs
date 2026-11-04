@@ -6,7 +6,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { absoluteProgram, rewriteHomePrefix, sanitizeHookConfig, sanitizeHomeHookConfigs } from "../cloud/worker/hook-paths.mjs";
+import { absoluteProgram, carryCodexHookTrust, codexHookHash, rewriteHomePrefix, sanitizeHookConfig, sanitizeHomeHookConfigs } from "../cloud/worker/hook-paths.mjs";
 
 const HOME = "/home/rudder";
 
@@ -108,4 +108,79 @@ test("a hook whose command reads a missing home path is dropped, a guarded one i
   assert.equal(missingHomePath('SUPERSET_AGENT_ID=codex "/home/rudder/.superset/notify.sh"', "/home/rudder", exists), "/home/rudder/.superset/notify.sh");
   assert.equal(missingHomePath("if [ -f '/home/rudder/x/i.js' ]; then node '/home/rudder/x/i.js'; fi", "/home/rudder", exists), null);
   assert.equal(missingHomePath("node /home/rudder/ok.mjs", "/home/rudder", exists), null);
+});
+
+// Hashes Codex itself recorded for these laptop hooks (its ~/.codex/config.toml).
+const LIBRA = 'node "/Users/viraat/.codex/libra-hooks/libra-hook.mjs" codex';
+const LEDGER = (event) => `if [ -f '/Users/viraat/code/ledger-agent-plugin/dist/hook/index.js' ]; then node '/Users/viraat/code/ledger-agent-plugin/dist/hook/index.js' ${event}; fi`;
+
+test("the Codex declaration hash matches what Codex records", () => {
+  assert.equal(codexHookHash("UserPromptSubmit", undefined, { type: "command", command: LIBRA, timeout: 10 }),
+    "sha256:0ba4d062fee2b8eb6ebf55dacd4165d5e5151aee137227bd761460e5d51c619a");
+  // No timeout: 600s by default, 1s for SessionEnd.
+  assert.equal(codexHookHash("SessionStart", undefined, { type: "command", command: LEDGER("SessionStart") }),
+    "sha256:a15becd5234a2dcedd507d6afa507a26392d49afd5403f3aac0678c77984ecdb");
+  assert.equal(codexHookHash("SessionEnd", undefined, { type: "command", command: LEDGER("SessionEnd") }),
+    "sha256:c440185ba13a21befff5e33788d1c7c86d959321f89315d8133ebbc4700a0314");
+  // UserPromptSubmit has no matcher, so one in the file changes nothing.
+  assert.equal(codexHookHash("UserPromptSubmit", "x", { type: "command", command: LIBRA, timeout: 10 }),
+    codexHookHash("UserPromptSubmit", undefined, { type: "command", command: LIBRA, timeout: 10 }));
+  assert.equal(codexHookHash("Stop", undefined, { type: "mcp_tool", server: "s", tool: "t" }), null);
+});
+
+test("only hooks approved on the laptop keep their approval under the new key", () => {
+  const laptopConfig = [
+    'model = "gpt"',
+    "",
+    "[hooks.state]",
+    "",
+    '[hooks.state."/Users/viraat/.codex/hooks.json:user_prompt_submit:3:0"]',
+    'trusted_hash = "sha256:0ba4d062fee2b8eb6ebf55dacd4165d5e5151aee137227bd761460e5d51c619a"',
+    "",
+    // A plugin's approval is never reused for the user's hooks.json.
+    '[hooks.state."vercel@claude-plugins-official:hooks/hooks.json:session_start:0:0"]',
+    `trusted_hash = "${codexHookHash("SessionStart", undefined, { type: "command", command: LEDGER("SessionStart") })}"`,
+    "",
+  ].join("\n");
+  const hooks = {
+    hooks: {
+      UserPromptSubmit: [{ hooks: [{ type: "command", command: LIBRA, timeout: 10 }] }],
+      SessionStart: [{ hooks: [{ type: "command", command: LEDGER("SessionStart") }] }],
+      Stop: [{ hooks: [{ type: "command", command: "/Users/viraat/new-hook.sh" }] }],
+    },
+  };
+  const { kept } = sanitizeHookConfig(hooks, { home: HOME, exists: () => true });
+  assert.deepEqual(kept.map((hook) => [hook.event, hook.group, hook.handler]), [["UserPromptSubmit", 0, 0], ["SessionStart", 0, 0], ["Stop", 0, 0]]);
+  const next = carryCodexHookTrust(laptopConfig, { hooksPaths: ["/home/rudder/.codex/hooks.json"], kept });
+  const rewritten = codexHookHash("UserPromptSubmit", undefined, { type: "command", command: 'node "/home/rudder/.codex/libra-hooks/libra-hook.mjs" codex', timeout: 10 });
+  assert.equal(next, `${laptopConfig}\n[hooks.state."/home/rudder/.codex/hooks.json:user_prompt_submit:0:0"]\ntrusted_hash = "${rewritten}"\n`);
+  assert.equal(carryCodexHookTrust(next, { hooksPaths: ["/home/rudder/.codex/hooks.json"], kept }), null, "idempotent");
+  assert.equal(carryCodexHookTrust('model = "gpt"\n', { hooksPaths: ["/home/rudder/.codex/hooks.json"], kept }), null, "nothing approved");
+});
+
+test("a home's boot carries Codex approvals into its own config.toml", () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "rudder-codex-trust-"));
+  try {
+    fs.mkdirSync(path.join(home, ".codex", "libra-hooks"), { recursive: true });
+    fs.writeFileSync(path.join(home, ".codex", "libra-hooks", "libra-hook.mjs"), "");
+    fs.writeFileSync(path.join(home, ".codex", "hooks.json"), JSON.stringify({
+      hooks: { UserPromptSubmit: [{ hooks: [{ type: "command", command: LIBRA, timeout: 10 }] }] },
+    }));
+    const config = [
+      '[hooks.state."/Users/viraat/.codex/hooks.json:user_prompt_submit:0:0"]',
+      'trusted_hash = "sha256:0ba4d062fee2b8eb6ebf55dacd4165d5e5151aee137227bd761460e5d51c619a"',
+      "",
+    ].join("\n");
+    fs.writeFileSync(path.join(home, ".codex", "config.toml"), config, { mode: 0o600 });
+    const logs = [];
+    sanitizeHomeHookConfigs(home, (line) => logs.push(line));
+    const text = fs.readFileSync(path.join(home, ".codex", "config.toml"), "utf8");
+    const rewritten = codexHookHash("UserPromptSubmit", undefined, { type: "command", command: `node "${home}/.codex/libra-hooks/libra-hook.mjs" codex`, timeout: 10 });
+    assert.ok(text.startsWith(config));
+    assert.ok(text.includes(`[hooks.state."${home}/.codex/hooks.json:user_prompt_submit:0:0"]\ntrusted_hash = "${rewritten}"`), text);
+    assert.equal(fs.statSync(path.join(home, ".codex", "config.toml")).mode & 0o777, 0o600);
+    assert.ok(logs.some((line) => /kept the laptop's approval for 1 hook entry/.test(line)), logs.join("\n"));
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+  }
 });

@@ -4,6 +4,7 @@ import Observation
 import Security
 import UIKit
 import UserNotifications
+import WebKit
 
 /// Who is signed in, and how to sign in.
 ///
@@ -136,10 +137,30 @@ final class Session {
         Task { await pair(code: code) }
     }
 
+    /// Signs this device out so a different account can sign in next: the
+    /// token is revoked on the server, and the web view's storage (the old
+    /// account's org scope, last screen, drafts and service worker cache) and
+    /// the 9:01 digest notification go with it. Choosing the account again is
+    /// the server's `prompt=select_account`, since the sign-in sheet shares
+    /// Safari's Google and GitHub sessions.
     func signOut() {
+        let revoked = token
         Keychain.delete()
         token = nil
+        signingIn = false
+        authSession?.cancel()
+        authSession = nil
         setBadge(0)
+        UNUserNotificationCenter.current().removePendingNotificationRequests(withIdentifiers: [DigestReminder.identifier])
+        let store = WKWebsiteDataStore.default()
+        store.removeData(ofTypes: WKWebsiteDataStore.allWebsiteDataTypes(), modifiedSince: .distantPast) {}
+        if let revoked {
+            var request = URLRequest(url: server.appendingPathComponent("api/app/sign-out"))
+            request.httpMethod = "POST"
+            request.setValue("Bearer \(revoked)", forHTTPHeaderField: "Authorization")
+            // Best effort: signed out on this device whether or not it lands.
+            URLSession.shared.dataTask(with: request).resume()
+        }
     }
 
     func didBecomeActive() {

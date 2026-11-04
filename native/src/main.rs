@@ -2886,9 +2886,19 @@ struct CliSelection {
 fn test_default_cwd() -> PathBuf {
     use std::sync::atomic::{AtomicU64, Ordering};
     static COUNTER: AtomicU64 = AtomicU64::new(0);
+    #[cfg(unix)]
+    static SWEEP: std::sync::Once = std::sync::Once::new();
+    // Tests have no process-wide teardown, so these dirs were never removed
+    // (18k of them filled the shared TMPDIR). Once per test process, remove
+    // the ones left by test processes that have exited.
+    #[cfg(unix)]
+    SWEEP.call_once(test_cwd_sweep::sweep_dead_test_cwds);
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
     std::env::temp_dir().join(format!("rudder-test-cwd-{}-{n}", std::process::id()))
 }
+
+#[cfg(all(test, unix))]
+mod test_cwd_sweep;
 
 impl App {
     /// Index of the plan the UI is currently acting on. DERIVED from the selection

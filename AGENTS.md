@@ -81,6 +81,9 @@ The build cleans `dist/`, compiles TS/board/native and copies the binary. Do not
 run it concurrently with `npm test`, which also writes `dist/`. The TUI suite
 uses a real binary and disposable backends. Large storage/build fixtures belong
 on `/workspace`; never mount over user checkouts or fill Cloud's small `/tmp`.
+Keep one task's scratch and evidence in one `/workspace/rudder-scratch/<task>/`
+reused across attempts, and delete it when the task ends unless a tracked doc
+cites it. Tests remove every temp dir they create, read-only ones included.
 
 ## Shipping
 

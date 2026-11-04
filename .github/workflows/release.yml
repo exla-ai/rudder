@@ -282,9 +282,16 @@ jobs:
 
       # The native and JS tests drive real jj repos. Rudder's own installer no
       # longer puts jj on the system PATH (it keeps a private copy), so install it.
+      # Pinned to the shipped jj (0.40.0); Homebrew's latest breaks the
+      # migration tests that read real jj 0.40 repos.
       - name: Install jj
         id: install_jj
-        run: brew install jj
+        run: |
+          mkdir -p "$RUNNER_TEMP/jj"
+          curl -fsSL https://github.com/jj-vcs/jj/releases/download/v0.40.0/jj-v0.40.0-aarch64-apple-darwin.tar.gz | tar -xz -C "$RUNNER_TEMP/jj"
+          JJ="$(find "$RUNNER_TEMP/jj" -type f -name jj | head -1)"
+          chmod +x "$JJ"; echo "$(dirname "$JJ")" >> "$GITHUB_PATH"
+          "$JJ" --version
 
       - name: Install npm dependencies
         id: install

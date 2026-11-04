@@ -159,7 +159,9 @@ test("only hooks approved on the laptop keep their approval under the new key", 
 });
 
 test("a home's boot carries Codex approvals into its own config.toml", () => {
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), "rudder-codex-trust-"));
+  // Real path: macOS temp dirs sit behind /var -> /private/var, which would
+  // (correctly) carry the approval under both spellings.
+  const home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "rudder-codex-trust-")));
   try {
     fs.mkdirSync(path.join(home, ".codex", "libra-hooks"), { recursive: true });
     fs.writeFileSync(path.join(home, ".codex", "libra-hooks", "libra-hook.mjs"), "");

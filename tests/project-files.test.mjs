@@ -1,6 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, writeFile, symlink, rm, truncate, rename } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile, symlink, rm, truncate, rename, realpath } from "node:fs/promises";
+import fs from "node:fs";
+import os from "node:os";
 import { build } from "esbuild";
 import path from "node:path";
 import http from "node:http";
@@ -21,7 +23,7 @@ function query(operation = "read", relative = "README.md", identity = scope) {
   return new URL(`http://127.0.0.1/api/project-files?${new URLSearchParams({ version: "1", operation, ...identity, path: relative })}`);
 }
 async function fixture(t, authorize) {
-  const base = await mkdtemp("/workspace/project-files-test-");
+  const base = await mkdtemp(path.join(fs.existsSync("/workspace") ? "/workspace" : await realpath(os.tmpdir()), "project-files-test-"));
   const root = path.join(base, "project");
   await mkdir(root);
   await mkdir(path.join(root, "docs"));

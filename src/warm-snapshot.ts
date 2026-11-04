@@ -198,8 +198,16 @@ export async function seedFromPrevious(previousDir: string, dir: string): Promis
   }
   for (const name of names) {
     if (name === ".jj" || name === ".git" || fs.existsSync(path.join(dir, name))) continue;
-    const ran = spawnSync("cp", ["-a", "--reflink=auto", path.join(previousDir, name), path.join(dir, name)], { stdio: "ignore" });
-    if (ran.status !== 0) await fsp.rm(path.join(dir, name), { recursive: true, force: true });
+    const from = path.join(previousDir, name);
+    const to = path.join(dir, name);
+    // GNU cp reflinks where it can; macOS cp -c clones on APFS, else copies.
+    const attempts = process.platform === "linux" ? [["-a", "--reflink=auto"]] : [["-cRp"], ["-Rp"]];
+    let copied = false;
+    for (const flags of attempts) {
+      if (spawnSync("cp", [...flags, from, to], { stdio: "ignore" }).status === 0) { copied = true; break; }
+      await fsp.rm(to, { recursive: true, force: true });
+    }
+    if (!copied) await fsp.rm(to, { recursive: true, force: true });
   }
 }
 

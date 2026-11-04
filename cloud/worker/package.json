@@ -7,6 +7,10 @@
     "postinstall": "node -e \"const fs=require('fs'),p=require('path');const d=p.join('node_modules','node-pty','prebuilds');for(const a of fs.existsSync(d)?fs.readdirSync(d):[]){const f=p.join(d,a,'spawn-helper');if(fs.existsSync(f))fs.chmodSync(f,0o755)}\""
   },
   "dependencies": {
+    "@opentelemetry/api": "~1.9.1",
+    "@opentelemetry/exporter-metrics-otlp-http": "^0.223.0",
+    "@opentelemetry/resources": "^2.12.0",
+    "@opentelemetry/sdk-metrics": "^2.12.0",
     "node-pty": "^1.0.0",
     "ws": "^8.18.0"
   }

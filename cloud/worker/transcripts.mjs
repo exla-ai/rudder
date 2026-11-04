@@ -127,7 +127,7 @@ function readRunRecord(repoDir, runId) {
   }
 }
 
-function transcriptFile(record, home) {
+export function transcriptFile(record, home) {
   const sessionId = record?.session?.nativeSessionId;
   if (!sessionId || !/^[A-Za-z0-9-]+$/.test(sessionId)) {
     return null;

@@ -1,0 +1,119 @@
+# Recording rules: the ratios every dashboard and alert would otherwise repeat.
+# Alerts: what should page someone before users see "reconnecting".
+# Names and labels follow observability/metrics.md.
+groups:
+  - name: rudder-home-ratios
+    interval: 30s
+    rules:
+      - record: rudder:home_memory_available:ratio
+        expr: rudder_home_memory_available_bytes / rudder_home_memory_total_bytes
+      - record: rudder:home_swap_used:ratio
+        expr: 1 - rudder_home_swap_free_bytes / (rudder_home_swap_total_bytes > 0)
+      - record: rudder:home_workspace_free:ratio
+        expr: rudder_home_disk_free_bytes{mount="/workspace"} / rudder_home_disk_total_bytes{mount="/workspace"}
+      - record: rudder:home_memory_stall:avg60
+        expr: rudder_home_pressure_ratio{resource="memory", kind="full", window="avg60"}
+
+  - name: rudder-home-alerts
+    rules:
+      - alert: HomeMemoryStalling
+        expr: rudder:home_memory_stall:avg60 > 0.10
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: "Home {{ $labels.rudder_home_id }} spends {{ $value | humanizePercentage }} of its time stalled on memory"
+          action: "The cleanup job should be putting idle agents to sleep. If it keeps up, the scaler will want more memory for this home."
+      - alert: HomeMemoryExhausted
+        expr: rudder:home_memory_stall:avg60 > 0.30
+        for: 3m
+        labels: { severity: critical }
+        annotations:
+          summary: "Home {{ $labels.rudder_home_id }} is thrashing ({{ $value | humanizePercentage }} stalled); attached terminals will show reconnecting"
+          action: "Check swap, run the cleanup now, or resize the machine when its agents are idle."
+      - alert: HomeMemoryAvailableLow
+        expr: rudder:home_memory_available:ratio < 0.10
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: "Home {{ $labels.rudder_home_id }} has {{ $value | humanizePercentage }} of memory available"
+      - alert: HomeSwapNearlyFull
+        expr: rudder:home_swap_used:ratio > 0.85
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: "Home {{ $labels.rudder_home_id }} has used {{ $value | humanizePercentage }} of its swap"
+      - alert: HomeWithoutSwap
+        expr: rudder_home_swap_total_bytes == 0
+        for: 30m
+        labels: { severity: info }
+        annotations:
+          summary: "Home {{ $labels.rudder_home_id }} runs without swap; idle agents cannot move out of memory"
+      - alert: HomeDiskLow
+        expr: rudder:home_workspace_free:ratio < 0.10
+        for: 15m
+        labels: { severity: warning }
+        annotations:
+          summary: "Home {{ $labels.rudder_home_id }} has {{ $value | humanizePercentage }} of /workspace free"
+          action: "The scaler recommends extending the volume; build caches (target/, node_modules) are the usual cause."
+      - alert: HomeDiskCritical
+        expr: rudder:home_workspace_free:ratio < 0.04
+        for: 5m
+        labels: { severity: critical }
+        annotations:
+          summary: "Home {{ $labels.rudder_home_id }} is about to run out of disk ({{ $value | humanizePercentage }} free)"
+      - alert: HomeSupervisorStalling
+        expr: rudder_home_supervisor_event_loop_delay_seconds{stat="p99"} > 0.5
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "The supervisor on {{ $labels.rudder_home_id }} is stalling (event loop p99 {{ $value | humanizeDuration }})"
+      - alert: HomeControlFlapping
+        expr: increase(rudder_control_home_disconnects_total[15m]) > 3
+        labels: { severity: warning }
+        annotations:
+          summary: "Home {{ $labels.rudder_home_id }} lost its control socket {{ $value | printf \"%.0f\" }} times in 15 minutes"
+      - alert: HomeHeartbeatStale
+        expr: rudder_control_home_heartbeat_age_seconds > 600 and on (rudder_home_id) rudder_control_home_control_connected_ratio == 0
+        for: 5m
+        labels: { severity: info }
+        annotations:
+          summary: "Home {{ $labels.rudder_home_id }} has not sent a heartbeat for {{ $value | humanizeDuration }}"
+          action: "Expected while a home is stopped; investigate if its owner is using it."
+
+  - name: rudder-control-alerts
+    rules:
+      - alert: ControlPlaneErrors
+        expr: |
+          sum(rate(http_server_request_duration_seconds_count{http_response_status_code=~"5.."}[5m]))
+            / sum(rate(http_server_request_duration_seconds_count[5m])) > 0.05
+        for: 10m
+        labels: { severity: critical }
+        annotations:
+          summary: "{{ $value | humanizePercentage }} of control plane requests fail"
+      - alert: ControlPlaneEventLoopSlow
+        expr: rudder_control_event_loop_delay_seconds{stat="p99"} > 0.2
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: "Control plane event loop p99 is {{ $value | humanizeDuration }}; every relayed keystroke waits on it"
+      - alert: ControlPlaneMemoryHigh
+        expr: rudder_control_process_memory_bytes{kind="rss"} > 800 * 1024 * 1024
+        for: 15m
+        labels: { severity: warning }
+        annotations:
+          summary: "Control plane RSS is {{ $value | humanize1024 }}B on a 1 GB machine"
+
+  - name: rudder-scaler-alerts
+    rules:
+      - alert: ScalerStale
+        expr: time() - rudder_scaler_last_evaluation_timestamp_seconds > 300
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "The scaler has not evaluated for {{ $value | humanizeDuration }}"
+      - alert: ScalerWantsChange
+        expr: rudder_scaler_decision{action=~"scale-up-memory|extend-volume", state=~"recommended|waiting-for-idle"} == 1
+        for: 30m
+        labels: { severity: info }
+        annotations:
+          summary: "The scaler wants {{ $labels.action }} for {{ $labels.rudder_home_id }} ({{ $labels.state }})"

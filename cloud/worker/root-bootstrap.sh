@@ -81,6 +81,44 @@ workspace_mount_owner() {
     && [ "$(/usr/bin/stat -c '%u:%g:%a' -- /workspace)" = "1500:1500:$workspace_mode" ]
 }
 
+# A home machine runs dozens of mostly idle agents in 16 GB. With no swap the
+# kernel can only evict program text, so memory pressure stalls everything,
+# the supervisor included, and every attached terminal shows "reconnecting"
+# (2026-11-02: 75% "full" memory stall, 0.7 GB available). A swap file on the
+# volume lets idle agents' cold memory move out instead. This runs as root
+# before any account process exists, never follows a link, and only reuses a
+# root-owned regular file. RUDDER_HOME_SWAP_MB=0 turns it off.
+provision_home_swap() {
+  [ "${RUDDER_HOME:-0}" = "1" ] || return 0
+  swap_mb=${RUDDER_HOME_SWAP_MB:-4096}
+  case "$swap_mb" in ''|*[!0-9]*) return 0 ;; esac
+  [ "$swap_mb" -gt 0 ] || return 0
+  /usr/bin/awk '$5=="/workspace" {found=1} END {exit !found}' /proc/self/mountinfo || return 0
+  swap=/workspace/.rudder-swap
+  if /usr/bin/awk -v f="$swap" '$1==f {found=1} END {exit !found}' /proc/swaps; then return 0; fi
+  if [ -e "$swap" ] || [ -L "$swap" ]; then
+    if [ -L "$swap" ] || [ ! -f "$swap" ] || [ "$(/usr/bin/stat -c '%u:%h' -- "$swap")" != "0:1" ]; then
+      echo "rudder-worker: not using $swap as swap (not a root-owned file)" >&2
+      return 0
+    fi
+  else
+    free_mb=$(/usr/bin/df -Pm /workspace | /usr/bin/awk 'NR==2 {print $4}')
+    if [ -z "$free_mb" ] || [ "$free_mb" -lt $((swap_mb + 4096)) ]; then
+      echo "rudder-worker: no room on /workspace for a ${swap_mb} MB swap file" >&2
+      return 0
+    fi
+    if ! (umask 077 && /usr/bin/fallocate -l "${swap_mb}M" -- "$swap" && /usr/sbin/mkswap -- "$swap" >/dev/null); then
+      /usr/bin/rm -f -- "$swap"
+      echo "rudder-worker: could not create a swap file on /workspace" >&2
+      return 0
+    fi
+  fi
+  /usr/sbin/swapon -- "$swap" 2>/dev/null \
+    || { /usr/sbin/mkswap -- "$swap" >/dev/null && /usr/sbin/swapon -- "$swap"; } \
+    || echo "rudder-worker: could not enable swap on $swap" >&2
+  return 0
+}
+
 if [ "$verify_only" = "1" ]; then
   if [ "$managed" != "1" ] || ! managed_identity || ! privilege_floor || ! fuse_grant || ! workspace_access; then
     echo "rudder-worker: managed entrypoint requires its bootstrap, pre-granted FUSE and owned writable /workspace" >&2
@@ -97,6 +135,7 @@ if [ "$uid" = "0" ]; then
     echo "rudder-worker: managed execution requires its assigned /workspace directory or mounted volume" >&2
     exit 78
   fi
+  provision_home_swap
   if provision_fuse; then RUDDER_WORKER_FUSE_READY=1; fi
   if [ "$managed" = "1" ] && [ "$RUDDER_WORKER_FUSE_READY" != "1" ]; then
     echo "rudder-worker: managed execution requires a safe /dev/fuse character device 10:229" >&2

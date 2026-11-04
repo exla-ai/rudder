@@ -18,6 +18,12 @@ fi
 
 . /opt/rudder-worker/cache-env.sh
 
+# A builder in a home's burst build pool runs builds and nothing else: no
+# agent CLIs to update, no supervisor.
+if [ "${RUDDER_BUILDER:-0}" = "1" ]; then
+  exec node /opt/rudder-worker/builder.mjs "$@"
+fi
+
 # The image bakes whatever Claude Code was current on its build day, and a
 # machine boots from the image, so without this a worker ran a stale binary
 # for the life of the image tag (the auto-updater's "Updated to latest" only

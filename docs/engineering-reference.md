@@ -1003,6 +1003,78 @@ brain lives in the cloud, and the phone is a first-class client.
   IN PLACE (`POST machines/<id>` with the current config and the new image: same
   volume, env, mounts). The boot reopen brings the agents back. At most one attempt
   per 15 min. So after a release, you never restart the home by hand.
+- **Hourly cleanup (`cloud/worker/cleanup.mjs`).** On 2026-11-02 the 16 GB home
+  ran ~100 Claude processes (sessions resumed days earlier, agent teams), 23
+  dashboards, dev servers and parallel `rustc`; memory pressure sat at 54% "full",
+  the supervisor starved, and every `rudder cloud` attach showed "reconnecting".
+  Now the supervisor runs `claude -p` with Sonnet 5.5 (`RUDDER_HOME_CLEANUP_MODEL`)
+  10 min after boot, then hourly (`RUDDER_HOME_CLEANUP_MS`), and early when memory
+  is short (`memoryIsShort`: under 12% available or memory PSI full avg60 >= 20,
+  at most every 15 min); `RUDDER_HOME_CLEANUP=0` turns it off. The model's only
+  tool is `Bash(node cleanup.mjs *)`: `inventory` (memory, PSI, live agents with
+  idle minutes from transcript mtime and the RSS of their process tree, the biggest
+  other processes with their owning agent), `park <project> <runId> "<reason>"`
+  and `stop <pid> "<reason>"`. The prompt sets policy (sleep agents idle 3h, or
+  30 min while memory is short; stop leftovers idle/ownerless for 2h); the guards
+  are code. `park` is steer kind `park`, and the DASHBOARD refuses orchestrators,
+  /gam pairs, merge resolvers, shell panes, pending permission prompts, attached
+  rows, the row someone has open, and any pane that printed in the last 20 min
+  (`PARK_MIN_SILENCE`). A parked row drops its PTY like a machine stop, keeps its
+  status (Done stays Done), and records run.json `parked {at, reason}`; the boot
+  reopen skips it, a message/Enter/focus wakes it, and any live pane clears the
+  marker (`wake_parked_rows_with_panes`). `stop` refuses the cleanup's own
+  ancestors, the supervisor/dashboards/tailscale, other uids, agent CLIs (park
+  them), anything younger than an hour, and anything an agent active in the last
+  20 min owns (process tree, or a team member's `--parent-session-id`). Actions go
+  to `<rudder home>/cleanup/actions.jsonl`, the last report to `last.json`, and
+  each line of it to the supervisor log as `cleanup: ...`. Steer kinds a dashboard
+  does not know now FAIL; they used to fall through to typed input, which would
+  have sent a park reason to an older dashboard's agent as a prompt.
+- **Swap at boot (`provision_home_swap`, root-bootstrap.sh).** A home has no
+  swap unless it makes one, and without swap the kernel can only evict program
+  text, so the same incident thrashed instead of paging idle agents out. Before
+  dropping root, a home enables `/workspace/.rudder-swap` (created with
+  `RUDDER_HOME_SWAP_MB`, default 4096, only when 4 GB more stays free; 0 turns
+  it off). It never follows a link and only reuses a root-owned regular file;
+  no account process exists yet at that point.
+- **Metrics (`observability/`).** `cloud/worker/telemetry.mjs` (home: memory,
+  swap, PSI, disk, RSS by process group, agents by state, supervisor event loop,
+  control socket, cleanup runs) and `cloud/src/telemetry.ts` (control plane:
+  request latency by normalized route, homes/sails by state, heartbeat age,
+  control disconnects per home) push OTLP when `RUDDER_OTEL_ENDPOINT` is set and
+  do nothing otherwise. They use `RUDDER_OTEL_*`, never `OTEL_*`, which agents
+  would inherit; the supervisor strips both from agents' env. The control plane
+  passes them to homes (`homeTelemetryEnv`). Collector, Prometheus, Grafana and a
+  dry-run scaler live in `observability/` with a local compose stack; names are a
+  contract in `observability/metrics.md`. Not deployed yet.
+- **Codex trust on the home (`cloud/worker/codex-trust.mjs`).** The home's
+  `~/.codex/config.toml` is the laptop's copy from the vault and is rewritten at
+  every boot and vault refresh, so trust given on the home was lost and every
+  restart left each Codex agent at "Trust this folder?" (steer refuses to type
+  into a menu). After each vault write and before each dashboard spawn the
+  supervisor adds a trusted table for each repo under the code dir (real path),
+  never touching a table the user wrote.
+- **Burst build pool (`cloud/src/builders.ts`, `cloud/worker/builder.mjs`,
+  `burst.mjs`).** Per-home builder machines that scale from zero, off unless the
+  control plane has `RUDDER_BUILDERS=1`. `rudder-burst <command>` on a home asks
+  the supervisor's broker (`RUDDER_BURST_SOCKET`, `burst-broker.mjs`; agents
+  never see the worker token) for a lease. The control plane reuses a free
+  builder (started first, then most recently used), creates one while the home
+  is under `RUDDER_BUILDERS_MAX_PER_HOME` (default 2), or answers 429 busy. A
+  builder serves one lease at a time, so its warm `target/` is a serialized
+  build service, never shared by concurrent agents. Defaults: 16 performance CPU,
+  32 GB, 100 GB volume, private network only (no Fly services). The client
+  uploads with rsync over an authenticated HTTP upgrade (`--filter=:- .gitignore`
+  plus `--delete`: ignored paths are neither sent nor deleted, which needs GNU
+  rsync on the receiver, as in the image), runs the command over a framed
+  stream, pulls `--pull` paths back and releases. The builder exits after
+  `RUDDER_BUILDER_IDLE_SECONDS` idle (restart policy "no" stops the machine);
+  the minute sweep expires leases, stops a builder still running 10 minutes past
+  that, and destroys builders unused for `RUDDER_BUILDER_RETAIN_DAYS` or whose
+  home is gone. Builder tokens are HMACs of a per-builder salt
+  (`RUDDER_BUILDER_KEY`, else `BETTER_AUTH_SECRET`); the machine gets only the
+  SHA-256, and a changed key recreates the machine on the same volume. The
+  `rudder-burst` skill tells agents when to use it.
 - **`/sync` also shows the agents.** After syncing it lists the cloud's agents for
   the repo (needs you / working / done, from the home's last state) and the laptop's
   still-running movable agents; `/sync move` hands those over through the same

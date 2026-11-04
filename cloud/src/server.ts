@@ -39,6 +39,8 @@ import { HomeControlSessions } from "./home-control-sessions.js";
 import { CanonicalTerminalRelay } from "./private-access/terminal-relay.js";
 import { PrivatePreviewRoutes } from "./private-access/preview-routes.js";
 import { ProjectFileRoutes } from "./project-files/routes.js";
+import { startControlTelemetry, type ControlSnapshot, type ControlTelemetry } from "./telemetry.js";
+import { BuilderPoolError, builderPolicy, createBuilderPool, type BuilderFly, type BuilderPool } from "./builders.js";
 
 type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
 
@@ -624,6 +626,11 @@ const upsertSetting = database.prepare(`
   on conflict(key) do update set value = excluded.value, updated_at = excluded.updated_at
 `);
 
+// Replaced once startControlTelemetry resolves; a no-op until then (or for good).
+let telemetry: ControlTelemetry = { enabled: false, recordRequest() {}, recordHomeDisconnect() {}, recordBuilderLease() {}, async flush() {}, async shutdown() {} };
+// The burst build pool (cloud/src/builders.ts). Null unless RUDDER_BUILDERS=1.
+let builderPool: BuilderPool | null = null;
+
 let authProviderFingerprint = providerFingerprint();
 let auth: ReturnType<typeof createBetterAuth> = createBetterAuth();
 let authHandler = toNodeHandler(auth.handler);
@@ -633,8 +640,10 @@ let authHandler = toNodeHandler(auth.handler);
 // piggyback ACKs. Node >=18 defaults accepted sockets to noDelay, but make it
 // explicit so the relay's latency floor doesn't hinge on a runtime default.
 const server = http.createServer({ noDelay: true }, async (req, res) => {
+  const requestStartedAt = performance.now();
   res.once("finish", () => {
     schedulePersistDatabase();
+    telemetry.recordRequest(req.method, req.url || "/", res.statusCode, (performance.now() - requestStartedAt) / 1000);
   });
   try {
     const url = new URL(req.url || "/", baseURL);
@@ -1448,6 +1457,7 @@ async function requestDeletion(
         closeChannel("workspace", repo.id);
       }
       homeStates.delete(id);
+      void builderPool?.destroyForHome(id).catch(() => undefined);
     } else if (homeId) {
       void homeRpc(homeId, "close", { workspaceId: id, removeClone: true }).catch(() => null);
       pushHomeRepos(homeId);
@@ -2701,6 +2711,65 @@ async function handleWorkerSecrets(
   sendJson(res, 200, secretsVault().exportForWorker(String(row.account_id)) as unknown as Json);
 }
 
+// Burst build pool, called by a home supervisor with its rdrw_ bearer (the
+// agents on the home reach it through the supervisor's local broker, never
+// with the worker token itself).
+//   GET  .../builders                 list this home's builders
+//   POST .../builders/lease           { seconds?, holder? } -> grant or 429 busy
+//   POST .../builders/<lease>/renew   { seconds? }
+//   POST .../builders/<lease>/release
+async function handleHomeBuilders(req: IncomingMessage, res: ServerResponse, homeId: string, action: string | undefined): Promise<void> {
+  const row = findWorkspaceById.get(homeId) as Record<string, unknown> | undefined;
+  if (!row || optionalString(row.source_kind) !== "home" || optionalString(row.status) === "deleting") {
+    sendJson(res, 404, { error: "not found" });
+    return;
+  }
+  requireWorkerBearer(req, row);
+  const pool = builderPool;
+  if (!pool) {
+    sendJson(res, 404, { error: "the build pool is not enabled" });
+    return;
+  }
+  if (req.method === "GET" && action === undefined) {
+    sendJson(res, 200, { policy: { maxPerHome: pool.policy.maxPerHome, cpus: pool.policy.cpus, memoryMb: pool.policy.memoryMb, idleSeconds: pool.policy.idleSeconds }, builders: pool.list(homeId) as unknown as Json });
+    return;
+  }
+  if (req.method !== "POST" || action === undefined) {
+    sendJson(res, 405, { error: "method not allowed" });
+    return;
+  }
+  const body = await readJsonBody(req, 16 * 1024);
+  const input = body && typeof body === "object" && !Array.isArray(body) ? body as JsonRecord : {};
+  const seconds = typeof input.seconds === "number" && Number.isFinite(input.seconds) ? input.seconds : undefined;
+  if (action === "lease") {
+    try {
+      const result = await pool.lease(
+        { id: homeId, accountId: String(row.account_id), region: optionalString(row.region) || flyRegion },
+        { seconds, holder: typeof input.holder === "string" ? input.holder : undefined },
+      );
+      if (result.kind === "busy") {
+        telemetry.recordBuilderLease("busy");
+        res.setHeader("retry-after", String(result.retryAfterSeconds));
+        sendJson(res, 429, { error: `all ${result.builders} builders are busy`, retryAfterSeconds: result.retryAfterSeconds });
+        return;
+      }
+      telemetry.recordBuilderLease("granted", result.warm);
+      sendJson(res, 200, result as unknown as Json);
+    } catch (error) {
+      telemetry.recordBuilderLease("failed");
+      sendJson(res, error instanceof BuilderPoolError ? error.status : 500, { error: error instanceof Error ? error.message : String(error) });
+    }
+    return;
+  }
+  const [leaseId, verb] = action.split("/");
+  if (verb === "renew") {
+    const renewed = pool.renew(homeId, leaseId, seconds);
+    sendJson(res, renewed ? 200 : 404, renewed ?? { error: "lease not found or expired" });
+    return;
+  }
+  sendJson(res, pool.release(homeId, leaseId) ? 200 : 404, { ok: true });
+}
+
 async function handleWorkspaceApi(req: IncomingMessage, res: ServerResponse, url: URL): Promise<void> {
   const workerSecretsMatch = url.pathname.match(/^\/api\/rudder\/workspace\/([^/]+)\/secrets$/);
   if (req.method === "GET" && workerSecretsMatch) {
@@ -2711,6 +2780,12 @@ async function handleWorkspaceApi(req: IncomingMessage, res: ServerResponse, url
   const heartbeatMatch = url.pathname.match(/^\/api\/rudder\/workspace\/([^/]+)\/heartbeat$/);
   if (req.method === "POST" && heartbeatMatch) {
     await handleWorkspaceHeartbeat(req, res, heartbeatMatch[1]);
+    return;
+  }
+
+  const buildersMatch = url.pathname.match(/^\/api\/rudder\/workspace\/([^/]+)\/builders(?:\/(lease|[^/]+\/(?:renew|release)))?$/);
+  if (buildersMatch) {
+    await handleHomeBuilders(req, res, buildersMatch[1], buildersMatch[2]);
     return;
   }
 
@@ -5276,6 +5351,17 @@ async function startHome(accountId: string, region?: string | null): Promise<Wor
   return await recreateHomeMachine(existing);
 }
 
+// Where a home pushes its metrics (observability/). Passed through only when
+// the control plane itself is configured, so homes stay silent otherwise.
+function homeTelemetryEnv(): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const key of ["RUDDER_OTEL_ENDPOINT", "RUDDER_OTEL_TOKEN"]) {
+    const value = process.env[key]?.trim();
+    if (value) env[key] = value;
+  }
+  return env;
+}
+
 function homeMachineParams(home: { id: string; accountId: string }, workerToken: string, region: string, volumeId?: string): CreateWorkspaceMachineParams {
   return {
     workspaceId: home.id,
@@ -5285,7 +5371,7 @@ function homeMachineParams(home: { id: string; accountId: string }, workerToken:
     region,
     volumeId,
     guest: { cpu_kind: homeCpuKind, cpus: homeCpus, memory_mb: homeMemoryMb },
-    env: { RUDDER_HOME: "1" },
+    env: { RUDDER_HOME: "1", ...homeTelemetryEnv() },
     namePrefix: "rudder-home",
   };
 }
@@ -5430,6 +5516,41 @@ const homeImageChecked = new Map<string, { at: number; image: string | null }>()
 const homeUpdating = new Map<string, number>();
 const homeUpdateFlights = new Set<string>();
 const listHomeRows = database.prepare("select * from rudder_workspaces where source_kind = 'home' and status <> 'deleting'");
+const countSailsByStatus = database.prepare("select status, count(*) as n from rudder_sails group by status");
+
+// Metrics for the observability stack (cloud/src/telemetry.ts); off unless
+// RUDDER_OTEL_ENDPOINT is set. Read once per export, every 30s by default.
+function controlSnapshot(): ControlSnapshot {
+  const now = Date.now();
+  const homes: Record<string, number> = {};
+  const perHome: ControlSnapshot["perHome"] = [];
+  for (const row of listHomeRows.all() as Record<string, unknown>[]) {
+    const home = rowToWorkspace(row);
+    homes[home.status] = (homes[home.status] ?? 0) + 1;
+    const heartbeatAt = Date.parse(home.lastHeartbeatAt ?? "");
+    let clients = 0;
+    for (const repo of listHomeRepoRows.all(home.id) as Record<string, unknown>[]) {
+      clients += workspaceChannels.get(String(repo.id))?.clients.size ?? 0;
+    }
+    perHome.push({
+      homeId: home.id,
+      state: home.status,
+      // Only a running home is expected to beat; a stopped one is not stale.
+      heartbeatAgeSeconds: home.status === "running" && Number.isFinite(heartbeatAt) ? Math.max(0, (now - heartbeatAt) / 1000) : null,
+      controlConnected: homeControls.has(home.id),
+      clients,
+    });
+  }
+  const sails: Record<string, number> = {};
+  for (const row of countSailsByStatus.all() as Array<{ status: string; n: number }>) sails[row.status] = row.n;
+  let worker = 0;
+  let client = 0;
+  for (const channel of [...sailChannels.values(), ...workspaceChannels.values()]) {
+    if (channel.worker) worker++;
+    client += channel.clients.size;
+  }
+  return { homes, sails, perHome, ws: { worker, client, homeControl: homeControls.size }, ...(builderPool ? { builders: builderPool.snapshot() } : {}) };
+}
 
 function homeAgentsBusy(projects: HomeProject[]): boolean {
   return projects.some((project) => (project.agents ?? []).some((agent) => {
@@ -5511,7 +5632,7 @@ async function sweepIdleHomeUpdates(): Promise<void> {
       const env = config.env && typeof config.env === "object" ? config.env as JsonRecord : {};
       await flyRequest<FlyMachine>(
         `/v1/apps/${encodeURIComponent(flyAppName)}/machines/${encodeURIComponent(home.machineId)}`,
-        { method: "POST", body: { config: { ...config, image: flyWorkerImage, env: { ...env, RUDDER_WORKER_TOKEN: workerToken } } } },
+        { method: "POST", body: { config: { ...config, image: flyWorkerImage, env: { ...env, RUDDER_WORKER_TOKEN: workerToken, ...homeTelemetryEnv() } } } },
       );
       homeImageChecked.set(home.id, { at: now, image: flyWorkerImage });
     } catch (error) {
@@ -5523,6 +5644,73 @@ async function sweepIdleHomeUpdates(): Promise<void> {
     }
   }
 }
+
+// Fly calls for the build pool. Builders live in the worker app beside the
+// homes, so a home reaches its builder over the app's private network.
+const builderFly: BuilderFly = {
+  appName: flyAppName,
+  image: flyWorkerImage,
+  async createVolume({ name, region, sizeGb }) {
+    const volume = await createWorkspaceVolumeNamed(name, region, sizeGb);
+    if (!volume.id) throw new Error("Fly returned a volume without an id");
+    return { id: volume.id };
+  },
+  async createMachine({ name, region, config }) {
+    const machine = await flyRequest<FlyMachine & { private_ip?: string }>(`/v1/apps/${encodeURIComponent(flyAppName)}/machines`, {
+      method: "POST",
+      body: { name, region, config: config as JsonRecord },
+    });
+    if (!machine.id) throw new Error("Fly returned a machine without an id");
+    return { id: machine.id, state: machine.state, private_ip: machine.private_ip };
+  },
+  async getMachine(id) {
+    try {
+      const machine = await flyRequest<FlyMachine & { private_ip?: string }>(`/v1/apps/${encodeURIComponent(flyAppName)}/machines/${encodeURIComponent(id)}`, { method: "GET" });
+      return machine.id ? { id: machine.id, state: machine.state, private_ip: machine.private_ip } : null;
+    } catch (error) {
+      if (/not found|404/i.test(error instanceof Error ? error.message : String(error))) return null;
+      throw error;
+    }
+  },
+  async startMachine(id) {
+    await flyRequest(`/v1/apps/${encodeURIComponent(flyAppName)}/machines/${encodeURIComponent(id)}/start`, { method: "POST" });
+  },
+  async stopMachine(id) {
+    await flyRequest(`/v1/apps/${encodeURIComponent(flyAppName)}/machines/${encodeURIComponent(id)}/stop`, { method: "POST" });
+  },
+  destroyMachine: destroyFlyMachine,
+  destroyVolume: destroyWorkspaceVolume,
+};
+
+{
+  const policy = builderPolicy();
+  if (policy.enabled && flyApiToken && flyAppName) {
+    builderPool = createBuilderPool({
+      db: database,
+      fly: builderFly,
+      policy,
+      key: process.env.RUDDER_BUILDER_KEY || requiredEnv("BETTER_AUTH_SECRET"),
+      homeExists: (homeId) => {
+        const row = findWorkspaceById.get(homeId) as Record<string, unknown> | undefined;
+        return Boolean(row && optionalString(row.status) !== "deleting");
+      },
+      persist: schedulePersistDatabase,
+      log: (line) => console.log(line),
+    });
+    setInterval(() => void builderPool?.sweep().catch(() => undefined), 60_000).unref?.();
+    console.log(`[builders] build pool on: up to ${policy.maxPerHome} x ${policy.cpus} CPU / ${policy.memoryMb} MB per home`);
+  } else if (policy.enabled) {
+    console.log("[builders] RUDDER_BUILDERS=1 but Fly is not configured; the build pool stays off");
+  }
+}
+
+void startControlTelemetry({
+  version: (process.env.FLY_IMAGE_REF || "").split("@")[0].split(":").pop() || "dev",
+  snapshot: controlSnapshot,
+  log: (line) => console.log(line),
+}).then((started) => {
+  telemetry = started;
+});
 
 const homeUpdateSweepMs = Number(process.env.RUDDER_HOME_UPDATE_SWEEP_MS || 60 * 1000);
 if (homeUpdateSweepMs >= 1000) {
@@ -5933,6 +6121,7 @@ function attachHomeControl(homeId: string, ws: WebSocket): void {
     if (session) homeRpcSessions.close(session);
     if (homeControls.get(homeId) === ws) {
       homeControls.delete(homeId);
+      telemetry.recordHomeDisconnect(homeId);
     }
   });
   ws.on("error", () => undefined);

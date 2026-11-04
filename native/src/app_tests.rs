@@ -7988,6 +7988,7 @@ fn test_agent_run(id: &str, task: &str) -> AgentRun {
         needs_user_input: false,
         wait_signal: None,
         worker_exit_note: None,
+        parked: None,
         last_error: None,
         worker_input_draft: String::new(),
         worker_input_cursor: 0,
@@ -9602,6 +9603,7 @@ fn delete_agent_requires_second_d() {
         needs_user_input: false,
         wait_signal: None,
         worker_exit_note: None,
+        parked: None,
         last_error: None,
         worker_input_draft: String::new(),
         worker_input_cursor: 0,
@@ -28796,4 +28798,114 @@ fn main_and_oneoff_agents_take_their_summary_from_the_last_message() {
     let _ = fs::remove_dir_all(&home);
     let _ = fs::remove_dir_all(&cwd);
     assert_eq!(summary.as_deref(), Some("Shipped the parser fix."));
+}
+
+#[test]
+fn the_home_cleanup_parks_only_idle_agents_and_a_woken_row_forgets_it() {
+    // The home machine's hourly cleanup (cloud/worker/cleanup.mjs) asks the
+    // dashboard to put idle agents to sleep: 16 GB filled with resumed sessions
+    // nobody had touched in days, and the thrashing dropped every cloud attach.
+    // The cleanup picks rows; the dashboard refuses anything that may be working.
+    let dir = unique_test_repo("park");
+    let steer = dir.join(".rudder").join("steer");
+    std::fs::create_dir_all(&steer).unwrap();
+    let mut app = App::new();
+    app.cwd = dir.clone();
+    let fake = dir.join("sleeper.sh");
+    write_fake_bin(&fake, "#!/bin/sh\nsleep 30\n");
+    let pane = || {
+        TerminalPane::spawn_shell_or_command(
+            Some(TerminalCommand::with_args(fake.to_string_lossy().to_string(), Vec::<String>::new())),
+            TerminalPaneOptions::default(),
+        )
+        .expect("spawn sleeper")
+    };
+    let long_ago = Instant::now().checked_sub(Duration::from_secs(45 * 60)).unwrap();
+
+    let mut idle = test_agent_run("run-idle", "finished main work");
+    idle.mode = AgentMode::Main;
+    idle.status = AgentStatus::Done;
+    idle.terminal = Some(pane());
+    idle.last_output_at = long_ago;
+    let mut busy = test_agent_run("run-busy", "a turn in progress");
+    busy.terminal = Some(pane());
+    let mut asking = test_agent_run("run-asking", "waiting on a prompt");
+    asking.status = AgentStatus::Done;
+    asking.terminal = Some(pane());
+    asking.last_output_at = long_ago;
+    asking.needs_permission = true;
+    app.agents = vec![idle, busy, asking];
+    app.selected_agent = 1;
+    app.last_user_activity = long_ago;
+
+    for (n, id) in ["run-idle", "run-busy", "run-asking"].iter().enumerate() {
+        std::fs::write(
+            steer.join(format!("170000000000{n}-{id}.json")),
+            format!(r#"{{"requestId":"request-park-{n}","kind":"park","taskId":"{id}","instruction":"idle 5h, memory was low"}}"#),
+        )
+        .unwrap();
+    }
+    app.poll_steer_inbox();
+    let receipt = |n: usize| -> serde_json::Value {
+        let path = dir.join(".rudder").join("steer-receipts").join(format!("request-park-{n}.json"));
+        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+    };
+
+    assert_eq!(receipt(0)["status"], "delivered");
+    let idle = &app.agents[0];
+    assert!(idle.terminal.is_none(), "the idle agent's process is gone");
+    assert_eq!(idle.status, AgentStatus::Done, "finished work still reads finished");
+    assert_eq!(idle.parked.as_ref().map(|p| p.reason.as_str()), Some("idle 5h, memory was low"));
+    assert!(idle.worker_exit_note.as_deref().unwrap_or_default().contains("Send a message or press Enter"));
+    let record: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(native_run_dir(&dir, "run-idle").join("run.json")).unwrap(),
+    )
+    .unwrap();
+    assert!(record.get("process").is_none(), "no process is claimed once it is asleep");
+    assert_eq!(record["parked"]["reason"], "idle 5h, memory was low");
+
+    assert_eq!(receipt(1)["status"], "failed");
+    assert!(receipt(1)["error"].as_str().unwrap().contains("printed something"), "{}", receipt(1));
+    assert!(app.agents[1].terminal.is_some(), "a row with fresh output keeps running");
+    assert_eq!(receipt(2)["status"], "failed");
+    assert!(receipt(2)["error"].as_str().unwrap().contains("permission"), "{}", receipt(2));
+    assert!(app.agents[2].terminal.is_some(), "a pending prompt is not idle");
+
+    // A kind this dashboard does not know is refused, never typed into the agent.
+    let before = app.agents[1].turns.len();
+    std::fs::write(
+        steer.join("1700000000009-run-busy.json"),
+        r#"{"requestId":"request-park-9","kind":"hibernate","taskId":"run-busy","instruction":"idle 5h"}"#,
+    )
+    .unwrap();
+    app.poll_steer_inbox();
+    assert_eq!(receipt(9)["status"], "failed");
+    assert!(receipt(9)["error"].as_str().unwrap().contains("unknown request kind"));
+    assert_eq!(app.agents[1].turns.len(), before, "nothing reached the agent as a message");
+
+    // A restart reads it back asleep (the boot reopen skips parked rows).
+    let reloaded = load_persisted_agents(&dir)
+        .into_iter()
+        .find(|run| run.id == "run-idle")
+        .expect("record loads");
+    assert!(reloaded.parked.is_some());
+    assert!(reloaded.worker_exit_note.is_some());
+
+    // Waking it (any path that gives it a pane again) forgets the sleep.
+    app.agents[0].terminal = Some(pane());
+    app.wake_parked_rows_with_panes();
+    assert!(app.agents[0].parked.is_none());
+    assert!(app.agents[0].worker_exit_note.is_none());
+    let record: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(native_run_dir(&dir, "run-idle").join("run.json")).unwrap(),
+    )
+    .unwrap();
+    assert!(record["parked"].is_null(), "an awake row is not left marked asleep: {record}");
+
+    for run in &mut app.agents {
+        if let Some(terminal) = run.terminal.as_mut() {
+            terminal.request_termination();
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
 }

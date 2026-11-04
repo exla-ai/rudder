@@ -1,0 +1,56 @@
+# OpenTelemetry Collector: the one place homes and the control plane push to.
+# It authenticates, bounds memory, batches, and forwards to Prometheus' native
+# OTLP receiver. In production it listens on the Fly private network
+# (rudder-observability.internal:4318); locally on localhost:4318.
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+  # Every pusher sends `authorization: Bearer $RUDDER_OTEL_TOKEN`. Agents on a
+  # home run as the same user as the supervisor, so this keeps strangers out,
+  # not a home's own processes; the scaler re-checks identity with Fly before
+  # it acts (observability/README.md, "Trust").
+  bearertokenauth:
+    token: ${env:RUDDER_OTEL_TOKEN}
+
+receivers:
+  otlp:
+    protocols:
+      http:
+        endpoint: 0.0.0.0:4318
+        auth:
+          authenticator: bearertokenauth
+
+processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_percentage: 80
+    spike_limit_percentage: 20
+  batch:
+    send_batch_size: 8192
+    timeout: 5s
+  # Never let a pusher claim another environment's label set.
+  resource/environment:
+    attributes:
+      - key: deployment.environment.name
+        value: ${env:RUDDER_OTEL_ENVIRONMENT}
+        action: upsert
+
+exporters:
+  otlphttp/prometheus:
+    endpoint: ${env:PROMETHEUS_OTLP_ENDPOINT}
+    tls:
+      insecure: true
+    retry_on_failure:
+      enabled: true
+      max_elapsed_time: 120s
+
+service:
+  extensions: [health_check, bearertokenauth]
+  telemetry:
+    logs:
+      level: info
+  pipelines:
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, resource/environment, batch]
+      exporters: [otlphttp/prometheus]

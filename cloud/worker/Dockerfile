@@ -55,7 +55,7 @@ RUN apt-get update \
   && apt-get install -y --no-install-recommends \
     ca-certificates curl wget git git-lfs openssh-client tar gzip zip unzip xz-utils bzip2 zsh \
     python3 python3-pip python3-venv python3-dev build-essential cmake pkg-config libssl-dev \
-    jq ripgrep fd-find tree file less lsof procps htop tmux nano vim-tiny \
+    jq ripgrep fd-find tree file less lsof procps htop tmux nano vim-tiny rsync \
     sqlite3 postgresql-client redis-tools util-linux gettext-base libcurl4 libexpat1 zlib1g \
   && ln -s /usr/bin/fdfind /usr/local/bin/fd \
   && rm -rf /var/lib/apt/lists/*
@@ -164,6 +164,16 @@ COPY cloud/worker/terminal-transport.mjs ./terminal-transport.mjs
 COPY cloud/worker/tailscale-previews.mjs ./tailscale-previews.mjs
 COPY cloud/worker/cache-env.sh ./cache-env.sh
 COPY cloud/worker/task-launch.mjs ./task-launch.mjs
+COPY cloud/worker/steer-inbox.mjs ./steer-inbox.mjs
+COPY cloud/worker/cleanup.mjs ./cleanup.mjs
+COPY cloud/worker/telemetry.mjs ./telemetry.mjs
+COPY cloud/worker/codex-trust.mjs ./codex-trust.mjs
+COPY cloud/worker/burst-protocol.mjs ./burst-protocol.mjs
+COPY cloud/worker/burst-broker.mjs ./burst-broker.mjs
+COPY cloud/worker/burst.mjs ./burst.mjs
+COPY cloud/worker/builder.mjs ./builder.mjs
+RUN printf '#!/bin/sh\nexec node /opt/rudder-worker/burst.mjs "$@"\n' > /usr/local/bin/rudder-burst \
+  && chmod 0755 /usr/local/bin/rudder-burst
 
 COPY cloud/worker/entrypoint.sh /usr/local/bin/rudder-worker
 COPY cloud/worker/root-bootstrap.sh /usr/local/bin/rudder-worker-root-bootstrap

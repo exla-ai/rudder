@@ -334,6 +334,7 @@ pub(crate) fn create_main_agent(
         needs_user_input: false,
         wait_signal: None,
         worker_exit_note: None,
+        parked: None,
         last_error: None,
         worker_input_draft: String::new(),
         worker_input_cursor: 0,
@@ -866,6 +867,7 @@ fn parse_agent_run_record(repo_root: &Path, record: serde_json::Value) -> Option
     // Records from the removed managed runtime stay on disk untouched and are
     // never restored as ordinary checkout runs.
     if record.get("managedLocal").is_some() { return None; }
+    let parked = ParkedNote::from_record(&record);
     let mut run = AgentRun {
         plain_process: false,
         id,
@@ -901,7 +903,8 @@ fn parse_agent_run_record(repo_root: &Path, record: serde_json::Value) -> Option
         needs_permission: false,
         needs_user_input: false,
         wait_signal: None,
-        worker_exit_note: None,
+        worker_exit_note: parked.as_ref().map(ParkedNote::card_note),
+        parked,
         last_error: None,
         worker_input_draft: String::new(),
         worker_input_cursor: 0,
@@ -1382,6 +1385,9 @@ pub(crate) fn save_native_run_record(repo_root: &Path, run: &AgentRun) -> Result
         "planDeps": run.deps,
         "delivery": run.delivery.to_json(),
         "session": run.session_id.as_ref().map(|sid| serde_json::json!({ "nativeSessionId": sid })),
+        // Written every time (null once awake): the carry-over below keeps any
+        // key this projection leaves out, which would keep a woken row asleep.
+        "parked": run.parked.as_ref().map(ParkedNote::to_json),
     });
     if let Some(gam) = run.gam.as_ref() {
         record["gam"] = gam_state_to_json(gam);
@@ -1619,7 +1625,7 @@ pub(crate) fn run_rudder_jj_command(
     // the pre-merge operation so nothing half-merged is left in the checkout.
     let (command, extra): (&str, &[&str]) = match command {
         "merge" => ("merge", &["--allow-dirty"]),
-        "merge-auto" => ("merge", &["--allow-dirty", "--abort-on-conflict"]),
+        "merge-auto" => ("merge", &["--allow-dirty", "--abort-on-conflict", "--skip-checks"]),
         other => (other, &[]),
     };
     // This runs on the UI thread: never `Command::output()` (unbounded wait). A hung

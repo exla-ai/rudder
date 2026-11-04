@@ -31,6 +31,10 @@ import { collectDigestRuns } from "./digest.mjs";
 import { readProjectPlan } from "./plan.mjs";
 import { runTailnetCommand, tailnetStatus } from "./tailscale-previews.mjs";
 import { createTerminalTransport } from "./terminal-transport.mjs";
+import { queueSteer, readSteerReceipt } from "./steer-inbox.mjs";
+import { cleanupPaths, createCleanupJob } from "./cleanup.mjs";
+import { startHomeTelemetry } from "./telemetry.mjs";
+import { startBurstBroker } from "./burst-broker.mjs";
 import { ensureCodexTrust } from "./codex-trust.mjs";
 
 let projectFiles;
@@ -60,6 +64,8 @@ const trustedPaths = new Set();
 // CLIs the image does not carry (AWS, SSM plugin) install here, on the volume.
 const TOOLS_DIR = path.join(VOLUME, "tools");
 const TOOLS_BIN = path.join(TOOLS_DIR, "bin");
+// Where `rudder-burst` reaches this supervisor for build pool leases.
+const BURST_SOCKET = process.env.RUDDER_BURST_SOCKET || path.join(os.tmpdir(), "rudder-burst.sock");
 const PERSIST_HOME = path.join(VOLUME, "home");
 const HOME = os.homedir() || process.env.HOME || "/home/rudder";
 const TS_SOCKET = process.env.RUDDER_TAILSCALE_SOCKET || "/tmp/tailscaled.sock";
@@ -144,6 +150,9 @@ const logins = createLoginRunner({
 /** @type {Map<string, Project>} */
 const projects = new Map();
 let controlSocket = null;
+let controlEverConnected = false;
+// Replaced by startHomeTelemetry's hooks once the SDK loads (or kept: off).
+let telemetry = { recordReconnect() {}, recordCleanupRun() {}, async shutdown() {} };
 let lastStateJson = "";
 let ports = []; // [{ port, pid, label, workspaceId|null }]
 
@@ -159,6 +168,23 @@ setInterval(() => void publishState().catch((error) => log(`state: ${error.messa
 setInterval(() => void scanPorts().catch((error) => log(`ports: ${error.message}`)), PORT_SCAN_INTERVAL_MS);
 setInterval(reportHeartbeat, 30_000);
 reportHeartbeat();
+// Metrics for the observability stack (observability/metrics.md); off unless
+// RUDDER_OTEL_ENDPOINT is set. Paths come from the child env because
+// RUDDER_HOME here is the home-machine flag, not a state directory.
+const cleanupEnv = { ...baseChildEnv, RUDDER_HOME_VOLUME: VOLUME };
+void startHomeTelemetry({
+  homeId,
+  paths: cleanupPaths(cleanupEnv),
+  controlConnected: () => controlSocket !== null,
+  projectCount: () => projects.size,
+  log,
+}).then((started) => { telemetry = started; }).catch((error) => log(`telemetry: ${error.message}`));
+// Hourly (and when memory runs short), a small model puts agents idle for
+// hours to sleep and stops processes they left behind (cloud/worker/cleanup.mjs).
+createCleanupJob({ env: cleanupEnv, log, onRun: (run) => telemetry.recordCleanupRun(run) }).start();
+// Build pool leases for `rudder-burst`; the control plane answers 404 until
+// the pool is enabled there.
+startBurstBroker({ socketPath: BURST_SOCKET, cloudUrl, homeId, workerToken, log });
 
 for (const signal of ["SIGTERM", "SIGINT"]) {
   process.on(signal, () => {
@@ -439,6 +465,8 @@ function connectControl() {
   const url = `${cloudUrl.replace(/^http/, "ws")}/api/rudder/home/${encodeURIComponent(homeId)}/control`;
   const socket = new WebSocket(url, { headers: { authorization: `Bearer ${workerToken}` } });
   socket.on("open", () => {
+    if (controlEverConnected) telemetry.recordReconnect();
+    controlEverConnected = true;
     controlSocket = socket;
     lastStateJson = "";
     log("control connected");
@@ -522,7 +550,7 @@ async function handleRpc(method, params) {
     const target = await waitForClone(String(params.workspaceId || ""), 8 * 60_000);
     const runIds = (Array.isArray(params.runIds) ? params.runIds : []).filter((id) => /^[A-Za-z0-9._-]+$/.test(String(id)));
     for (const runId of runIds) {
-      queueSteer(target, { kind: "delete", taskId: runId, instruction: "delete" });
+      queueSteer(target.dir, { kind: "delete", taskId: runId, instruction: "delete" });
     }
     return { queued: runIds.length };
   }
@@ -809,7 +837,7 @@ async function adoptMovedAgents(params) {
     // Every adopted run, retried ones included: the dashboard resumes a run at
     // most once, and a retry is exactly when the first resume may not have run.
     for (const agent of agents) {
-      queueSteer(project, { kind: "adopt", taskId: agent.runId, instruction: "adopt" });
+      queueSteer(project.dir, { kind: "adopt", taskId: agent.runId, instruction: "adopt" });
     }
     lastStateJson = "";
     log(`${project.name}: adopted ${agents.length} moved agent(s)${adopted.failed?.length ? `, ${adopted.failed.length} failed` : ""}`);
@@ -950,21 +978,6 @@ function readScreen(project, runId, watchLive = true) {
   }
 }
 
-// Drop one request into the dashboard's steer inbox. The dashboard consumes it
-// on its next poll, so a request queued while it is still starting is not lost.
-function queueSteer(project, { kind, taskId, instruction }) {
-  const requestId = randomUUID();
-  const inbox = path.join(project.dir, ".rudder", "steer");
-  fs.mkdirSync(inbox, { recursive: true });
-  const safeId = (taskId || "conductor").replace(/[^A-Za-z0-9_.-]/g, "-").slice(0, 64) || "conductor";
-  const name = `${String(Date.now()).padStart(13, "0")}-${String(process.hrtime.bigint()).padStart(20, "0")}-${safeId}-${requestId}.json`;
-  const file = path.join(inbox, name);
-  const tmp = `${file}.${process.pid}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify({ requestId, kind, taskId, instruction, ts: new Date().toISOString() }));
-  fs.renameSync(tmp, file);
-  return requestId;
-}
-
 // Requests go through the dashboard's own steer inbox (.rudder/steer), the same
 // channel the web board uses: the dashboard is the single writer of its agents,
 // so the phone never touches a PTY or run.json directly. The receipt says
@@ -976,25 +989,17 @@ async function steer(project, { kind, taskId, instruction }) {
   if (!project.term) {
     throw new Error(`the ${project.name} dashboard is ${project.status}${project.error ? `: ${project.error}` : ""}`);
   }
-  const requestId = queueSteer(project, { kind, taskId, instruction });
-  const receipts = path.join(project.dir, ".rudder", "steer-receipts");
-  const receiptPath = path.join(receipts, `${requestId}.json`);
+  const requestId = queueSteer(project.dir, { kind, taskId, instruction });
   const deadline = Date.now() + 12_000;
   while (Date.now() < deadline) {
     await sleep(300);
-    try {
-      const receipt = JSON.parse(fs.readFileSync(receiptPath, "utf8"));
-      if (receipt.status === "delivered") {
-        lastStateJson = "";
-        return { ok: true, status: "delivered" };
-      }
-      if (receipt.status === "failed") {
-        throw new Error(receipt.error || "the dashboard could not deliver it");
-      }
-    } catch (error) {
-      if (error && error.code !== "ENOENT" && !(error instanceof SyntaxError)) {
-        throw error;
-      }
+    const receipt = readSteerReceipt(project.dir, requestId);
+    if (receipt?.status === "delivered") {
+      lastStateJson = "";
+      return { ok: true, status: "delivered" };
+    }
+    if (receipt?.status === "failed") {
+      throw new Error(receipt.error || "the dashboard could not deliver it");
     }
   }
   return { ok: true, status: "queued" };
@@ -1753,9 +1758,10 @@ function buildChildEnv(vaultEnv) {
     RUDDER_DISABLE_UPDATE_CHECK: "1",
     RUDDER_DISABLE_ONBOARD_INSTALL: "1",
     RUDDER_CODEX_BIN: process.env.RUDDER_CODEX_BIN || "codex",
+    RUDDER_BURST_SOCKET: BURST_SOCKET,
   };
   // Nothing an agent runs should be able to read the machine's own credentials.
-  for (const secret of ["RUDDER_WORKER_TOKEN", "RUDDER_SNAPSHOT_URL", "RUDDER_CLOUD_TOKEN", "TS_AUTHKEY", "TS_API_KEY", "RUDDER_HOME"]) {
+  for (const secret of ["RUDDER_WORKER_TOKEN", "RUDDER_SNAPSHOT_URL", "RUDDER_CLOUD_TOKEN", "TS_AUTHKEY", "TS_API_KEY", "RUDDER_HOME", "RUDDER_OTEL_TOKEN", "RUDDER_OTEL_ENDPOINT"]) {
     delete env[secret];
   }
   return env;

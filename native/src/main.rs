@@ -74,48 +74,6 @@ use crate::engine_host::*;
 mod fabric_cli;
 mod cloud_build_profile_cli;
 mod fabric_runtime;
-mod execution_cli;
-mod workspace_vcs;
-#[cfg(target_os = "linux")]
-mod remote_workspace;
-mod source_authorizer;
-mod source_issuer;
-#[cfg(target_os = "linux")]
-mod source_connect_authority;
-#[cfg(target_os = "linux")]
-mod source_shutdown_join;
-#[cfg(target_os = "linux")]
-mod source_controller;
-#[cfg(target_os = "linux")]
-mod managed_task_launch;
-#[cfg(target_os = "linux")]
-mod managed_initial_source;
-#[cfg(target_os = "linux")]
-mod managed_profile_loader;
-#[cfg(target_os = "linux")]
-mod managed_preparation_cache;
-#[cfg(target_os = "linux")]
-mod managed_checkpoint_accept;
-mod managed_launch;
-mod managed_app;
-#[cfg(target_os = "linux")]
-mod managed_machine_entry;
-#[cfg(target_os="linux")]
-mod managed_machine_ingress;
-#[cfg(target_os="linux")]
-mod managed_machine_receipts;
-#[cfg(target_os="linux")]
-mod managed_machine_runtime_profile;
-#[cfg(target_os="linux")]
-mod provider_kernel_qualification;
-#[cfg(target_os = "linux")]
-mod managed_seed_enrollment;
-#[cfg(target_os = "linux")]
-mod managed_root_seed_retirement;
-#[cfg(target_os = "linux")]
-mod managed_seed_fork;
-mod managed_source_app;
-mod managed_store;
 mod board_access;
 mod agent_link;
 mod workspace_cli;
@@ -1927,8 +1885,6 @@ struct App {
     task_history_draft: String,
     agents: Vec<AgentRun>,
     fabric_runtime: fabric_runtime::RuntimeState,
-    managed_local: managed_app::ManagedAppState,
-    managed_source: managed_source_app::ManagedSourceAppState,
     /// Every live plan, in the order its `/plan` was started. Several orchestrators
     /// may run at once and each owns exactly one entry, so plan state is per-plan
     /// rather than global. NEVER empty: `App::new` seeds one plan (holding whatever
@@ -1976,7 +1932,6 @@ struct App {
     /// Machine notices are projected into independent attached views only when
     /// this App has no local terminal surface.
     engine_headless: bool,
-    managed_project_mode: bool,
     machine_notice: Option<(u64, String)>,
     machine_notice_cursor: u64,
     cloud_prompt: Option<CloudLaunchPrompt>,
@@ -2497,11 +2452,6 @@ struct AgentRun {
     session_id: Option<String>,
     /// Persisted renderer/control contract; historical runs remain native.
     execution_profile: Option<String>,
-    /// Retained logical source. Every legacy cwd/history consumer must refuse
-    /// this marker, including malformed records and unadopted reservations.
-    managed_local: Option<managed_launch::ManagedRunSource>,
-    /// Host-only trusted private store binding; never parsed from legacy JSON.
-    managed_store: Option<managed_store::ManagedRunLocation>,
     terminal: Option<TerminalPane>,
     terminal_size: Option<TerminalSize>,
     last_output_at: Instant,
@@ -2791,15 +2741,6 @@ struct InitialSelection {
     backend: Backend,
     model: String,
     effort: Option<EffortLevel>,
-}
-
-/// Initial display DATA supplied by the managed bootstrap. It grants no task,
-/// owner or storage authority and reads no legacy state or implicit selection.
-struct ManagedAppInitialState {
-    repository: PathBuf,
-    selection: InitialSelection,
-    branch: String,
-    session_started_iso: String,
 }
 
 
@@ -3110,16 +3051,7 @@ impl App {
             .unwrap_or_else(|| self.active_plan_index())
     }
 
-    fn new() -> Self { Self::new_with_startup(None) }
-
-    /// Called only after managed bootstrap; DATA construction creates no
-    /// execution authority. The actual project/launch owners stay off App.
-    fn new_managed(initial: ManagedAppInitialState) -> Self {
-        Self::new_with_startup(Some(initial))
-    }
-
-    fn new_with_startup(initial: Option<ManagedAppInitialState>) -> Self {
-        let managed = initial.is_some();
+    fn new() -> Self {
         // In tests, default to a UNIQUE temp dir, never the real repo: App methods write
         // real files (DECISIONS.md, .rudder/, RUDDER.md, graph.json) keyed on cwd, so a test
         // that forgets to override app.cwd would otherwise pollute the working repo (this is
@@ -3131,24 +3063,21 @@ impl App {
             #[cfg(not(test))]
             { std::env::current_dir().map(|path| dashboard_root(&path)).unwrap_or_else(|_| PathBuf::from(".")) }
         };
-        let (cwd, selection, managed_branch, managed_session) = match initial {
-            Some(initial) => (initial.repository, initial.selection, Some(initial.branch), Some(initial.session_started_iso)),
-            None => (legacy_cwd(), initial_selection(), None, None),
-        };
+        let (cwd, selection) = (legacy_cwd(), initial_selection());
         // Read the per-repo cloud-mode flag BEFORE the struct literal takes
         // ownership of `cwd`. Tests pin it off (they share repo dirs).
-        let cloud_mode = if managed || cfg!(test) {
+        let cloud_mode = if cfg!(test) {
             false
         } else {
             read_cloud_mode(&cwd)
         };
         let bg_notices = mpsc::channel::<String>();
-        let dashboard_color_mode = if managed || cfg!(test) {
+        let dashboard_color_mode = if cfg!(test) {
             ColorMode::Terminal
         } else {
             config::initial_color_mode()
         };
-        if !managed { set_color_mode(dashboard_color_mode); }
+        set_color_mode(dashboard_color_mode);
         // The fleet and the live plans come back TOGETHER (see `restore_persisted_state`):
         // which planner rows survive depends on which plans returned, and which nodes a
         // plan still owes depends on which runs returned. It lives outside this
@@ -3157,7 +3086,7 @@ impl App {
         // so this arm must stay short-circuited, and that is precisely the blind spot
         // that let two concurrent plans collapse into one across a restart with a green
         // suite behind it.
-        let (agents, restored_plans) = if managed || cfg!(test) {
+        let (agents, restored_plans) = if cfg!(test) {
             (Vec::new(), PlanQueueFile::default().into_plans())
         } else {
             restore_persisted_state(&cwd)
@@ -3165,14 +3094,14 @@ impl App {
         // Restore the ingested-run ledger so a worker handled before the last exit is not
         // re-ingested (or re-summarized) when its Done record reloads. Empty in tests.
         // Loaded before `cwd` moves into the struct below.
-        let followups_ingested = if managed || cfg!(test) {
+        let followups_ingested = if cfg!(test) {
             HashSet::new()
         } else {
             load_ingested_runs(&cwd)
         };
         // Same short-circuit as the restores above: every App::new() in the
         // suite would otherwise read the developer's own .rudder/.
-        let restored_task_history = if managed || cfg!(test) {
+        let restored_task_history = if cfg!(test) {
             Vec::new()
         } else {
             load_task_history(&cwd)
@@ -3181,33 +3110,31 @@ impl App {
         // /main from the task pane. Main records render in their own section
         // instead of being mixed into ordinary workspace agents.
         let (task_input, task_cursor) = (String::new(), 0);
-        let pending_migration_resumes = if managed || cfg!(test) {
+        let pending_migration_resumes = if cfg!(test) {
             Vec::new()
         } else {
             read_migration_manifest(&cwd)
         };
-        let cloud = if managed { CloudSummary { connected: false, runtime: None } } else { read_cloud_summary() };
-        let session_started_iso = managed_session.unwrap_or_else(|| load_or_init_session_started(&cwd));
+        let cloud = read_cloud_summary();
+        let session_started_iso = load_or_init_session_started(&cwd);
         let (task_summary_tx, task_summary_rx) = mpsc::channel();
         let (completion_summary_tx, completion_summary_rx) = mpsc::channel();
         let (integration_prep_tx, integration_prep_rx) = mpsc::channel();
         let (final_gate_tx, final_gate_rx) = mpsc::channel();
-        let branch = if managed { managed_branch } else { current_branch_at(&cwd) };
-        if !managed { let _ = signals::cleanup_old_signals(Duration::from_secs(7 * 24 * 60 * 60)); }
-        let perf = if managed { PerfLogger::disabled() } else { PerfLogger::new() };
+        let branch = current_branch_at(&cwd);
+        let _ = signals::cleanup_old_signals(Duration::from_secs(7 * 24 * 60 * 60));
+        let perf = PerfLogger::new();
         let perf_stats = PerfStats::new(perf.enabled());
         let (gam_link_tx, gam_link_rx) = std::sync::mpsc::channel();
         let cloud_deletes = mpsc::channel();
         let task_routing = mpsc::channel();
         Self {
             fabric_runtime: fabric_runtime::RuntimeState::default(),
-            managed_local: managed_app::ManagedAppState::default(),
-            managed_source: managed_source_app::ManagedSourceAppState::default(),
             gam_links: HashMap::new(),
             gam_signals: HashMap::new(),
             gam_link_tx,
             gam_link_rx,
-            gam_links_enabled: !managed && !cfg!(test)
+            gam_links_enabled: !cfg!(test)
                 && std::env::var("RUDDER_GAM_LINK").map_or(true, |value| value != "0"),
             focus: FocusPane::Task,
             nav_mode: false,
@@ -3216,7 +3143,7 @@ impl App {
             gam_transcript_visible: true,
             // Tests never read the user's own pair (it would change what the
             // picker offers from one machine to the next).
-            gam_last: if managed || (cfg!(test) && std::env::var_os("RUDDER_HOME").is_none()) {
+            gam_last: if (cfg!(test) && std::env::var_os("RUDDER_HOME").is_none()) {
                 None
             } else {
                 load_rudder_config()
@@ -3245,7 +3172,7 @@ impl App {
             plans: restored_plans,
             // OFF by default: the automatic per-node review is disabled pending a
             // better design. Opt in explicitly with RUDDER_NODE_REVIEW=1.
-            node_review_enabled: !managed && std::env::var("RUDDER_NODE_REVIEW")
+            node_review_enabled: std::env::var("RUDDER_NODE_REVIEW")
                 .map(|value| {
                     let value = value.trim();
                     value == "1" || value.eq_ignore_ascii_case("true")
@@ -3253,12 +3180,12 @@ impl App {
                 .unwrap_or(false),
             final_gate_tx,
             final_gate_rx,
-            fast_mode: if managed || cfg!(test) {
+            fast_mode: if cfg!(test) {
                 false
             } else {
                 config::fast_mode_enabled()
             },
-            board_url: if managed || cfg!(test) {
+            board_url: if cfg!(test) {
                 None
             } else {
                 // Always show a web-UI address in the TUI. Prefer the URL the Node
@@ -3274,7 +3201,7 @@ impl App {
                 )
             },
             board_open_rx: None,
-            interactive_orchestrator: !managed && interactive_orchestrator(),
+            interactive_orchestrator: interactive_orchestrator(),
             scheduler_tick: 0,
             spinner_frame: 0,
             last_spinner_advance: Instant::now(),
@@ -3284,8 +3211,7 @@ impl App {
             model: selection.model,
             effort: selection.effort,
             notice: None,
-            engine_headless: managed,
-            managed_project_mode: managed,
+            engine_headless: false,
             machine_notice: None,
             machine_notice_cursor: 0,
             cloud_prompt: None,
@@ -3384,14 +3310,14 @@ impl App {
             integration_prepared: HashSet::new(),
             direct_summary_read: HashSet::new(),
             last_user_activity: Instant::now(),
-            mouse_debug: !managed && env::var(MOUSE_DEBUG_ENV).is_ok_and(|value| value != "0"),
+            mouse_debug: env::var(MOUSE_DEBUG_ENV).is_ok_and(|value| value != "0"),
             mouse_debug_last: None,
             pending_migration_resumes,
             migration_resumes_attempted: false,
             focus_resume_attempted: HashSet::new(),
             restart_home_boot_suppressed: HashSet::new(),
             restart_quarantined_ids: HashSet::new(),
-            home_runtime: !managed && home_runtime_from_env(),
+            home_runtime: home_runtime_from_env(),
             home_boot_reopen_done: false,
             boot_orphaned_ids: HashSet::new(),
             rename_input: None,
@@ -5075,7 +5001,6 @@ impl App {
             return false;
         };
 
-        if !managed_app::accepts_input(self, self.selected_agent) { return false; }
         let capture_as_prompt = self.selected_worker_accepts_prompt_input();
         let result = match self.selected_terminal_mut() {
             Some(terminal) => {
@@ -5658,12 +5583,6 @@ impl App {
     /// reviewed the row (same weak gate as `v`); closing returns focus to the
     /// worker so the next keystroke lands where the conversation is.
     fn toggle_diff_panel(&mut self) {
-        if self.agents.get(self.selected_agent).is_some_and(|run|run.managed_local.is_some()) {
-            self.diff_panel.open = false;
-            self.notice = Some("managed source observation is pending; checkout diff is unavailable".into());
-            self.dirty = true;
-            return;
-        }
         if self.diff_panel.open {
             self.diff_panel.open = false;
             self.diff_area = None;
@@ -5708,12 +5627,6 @@ impl App {
         if !self.diff_panel.open {
             return;
         }
-        if self.agents.get(self.selected_agent).is_some_and(|run|run.managed_local.is_some()) {
-            self.diff_panel.open = false;
-            self.diff_area = None;
-            self.dirty = true;
-            return;
-        }
         if self.diff_panel.drain() {
             self.dirty = true;
         }
@@ -5722,11 +5635,6 @@ impl App {
         };
         let run_id = run.id.clone();
         self.diff_panel.track(&run_id);
-        if run.managed_local.is_some() {
-            // The retained view has no checkout representation. Its pending
-            // observation consumer must never display this App's host diff.
-            return;
-        }
         // Token totals come from the backend's session log; refresh them
         // while the panel is open so the header's cost keeps up with the turn.
         let tokens_due = self
@@ -6407,7 +6315,6 @@ impl App {
     }
 
     fn handle_paste(&mut self, text: String) {
-        if self.focus == FocusPane::Worker && !managed_app::accepts_input(self, self.selected_agent) { return; }
         if self.focus == FocusPane::Worker
             && self.agents.get(self.selected_agent)
                 .and_then(|run| run.terminal.as_ref())
@@ -7329,7 +7236,6 @@ impl App {
     }
 
     fn write_mouse_to_selected_worker(&mut self, mouse: MouseEvent, area: Rect) -> bool {
-        if !managed_app::accepts_input(self, self.selected_agent) { return false; }
         let Some(bytes) = mouse_event_to_sgr(mouse, area) else {
             return false;
         };
@@ -7350,7 +7256,7 @@ impl App {
     }
 
     fn scroll_selected_worker_or_forward(&mut self, mouse: MouseEvent, area: Rect) -> bool {
-        let may_forward = managed_app::accepts_input(self, self.selected_agent);
+        let may_forward = true;
         let rows = self.wheel_delta(mouse, area.height);
         let mouse_bytes = mouse_event_to_sgr(mouse, area);
         let Some(terminal) = self.selected_terminal_mut() else {
@@ -7430,7 +7336,7 @@ impl App {
     }
 
     fn scroll_gam_half(&mut self, mouse: MouseEvent, area: Rect, index: usize) -> bool {
-        let may_forward = managed_app::accepts_input(self, index);
+        let may_forward = true;
         let rows = self.wheel_delta(mouse, area.height);
         let mouse_bytes = mouse_event_to_sgr(mouse, area);
         let Some(terminal) = self
@@ -7519,7 +7425,7 @@ impl App {
     }
 
     fn handle_worker_page_key(&mut self, key: KeyEvent, rows: isize) {
-        let may_forward = managed_app::accepts_input(self, self.selected_agent);
+        let may_forward = true;
         let Some(bytes) = terminal_bytes_for_key(key) else {
             return;
         };
@@ -7734,7 +7640,6 @@ impl App {
                 continue;
             }
             if let Some(index) = self.agents.iter().position(|run| run.id == pending.run_id) {
-                if !managed_app::accepts_input(self, index) { continue; }
                 let run = &mut self.agents[index];
                 if let Some(terminal) = run.terminal.as_mut() {
                     if pending.instance_id.as_deref() != Some(terminal.instance_id())
@@ -8455,8 +8360,6 @@ impl App {
             delivery: DeliveryEvidence::default(),
             session_id,
             execution_profile: None,
-            managed_local: None,
-            managed_store: None,
             terminal: None,
             terminal_size: None,
             last_output_at: Instant::now(),
@@ -8637,8 +8540,6 @@ impl App {
             delivery: DeliveryEvidence::for_task(&goal_prompt),
             session_id,
             execution_profile: None,
-            managed_local: None,
-            managed_store: None,
             terminal: None,
             terminal_size: None,
             last_output_at: Instant::now(),
@@ -8892,8 +8793,6 @@ Until the first packet arrives, reply only: \"standing by\"."
             delivery: DeliveryEvidence::for_task(&goal_prompt),
             session_id,
             execution_profile: None,
-            managed_local: None,
-            managed_store: None,
             terminal: None,
             terminal_size: None,
             last_output_at: Instant::now(),
@@ -8988,8 +8887,6 @@ Until the first packet arrives, reply only: \"standing by\"."
             delivery: DeliveryEvidence::default(),
             session_id: adversarial_session,
             execution_profile: None,
-            managed_local: None,
-            managed_store: None,
             terminal: None,
             terminal_size: None,
             last_output_at: Instant::now(),
@@ -10205,8 +10102,6 @@ Address the objection directly. If you disagree, say why inside \
             delivery: DeliveryEvidence::default(),
             session_id,
             execution_profile: None,
-            managed_local: None,
-            managed_store: None,
             terminal: None,
             terminal_size: None,
             last_output_at: Instant::now(),
@@ -10682,10 +10577,6 @@ Address the objection directly. If you disagree, say why inside \
             self.notice = Some("runtime custody requires explicit reconciliation before resume".into());
             return false;
         }
-        if run.managed_local.is_some() {
-            self.notice = Some("managed source requires explicit owned recovery; checkout conversation resume is unavailable".into());
-            return false;
-        }
         if run.terminal.is_some()
             || run.plain_process
             || run.is_orchestrator()
@@ -10865,7 +10756,6 @@ Address the objection directly. If you disagree, say why inside \
         let Some(run) = self.agents.get_mut(index) else {
             return false;
         };
-        if run.managed_local.is_some() { return false; }
         if run.terminal.is_some() && run.status == AgentStatus::Running {
             return false;
         }
@@ -13059,9 +12949,6 @@ Address the objection directly. If you disagree, say why inside \
         }
         let existing = self.agents.iter().position(|run| run.id == run_id);
         if let Some(index) = existing {
-            if self.agents[index].managed_local.is_some() || self.agents[index].managed_store.is_some() {
-                return SteerDelivery::Failed("managed runs require explicit recovery; legacy adoption is unavailable".to_string());
-            }
             if self.agents[index]
                 .terminal
                 .as_mut()
@@ -13390,8 +13277,6 @@ Address the objection directly. If you disagree, say why inside \
             delivery: DeliveryEvidence::default(),
             session_id: None,
             execution_profile: None,
-            managed_local: None,
-            managed_store: None,
             terminal: None,
             terminal_size: None,
             last_output_at: Instant::now(),
@@ -15217,7 +15102,6 @@ Address the objection directly. If you disagree, say why inside \
         let Some(index) = self.agent_index_for_token(task_id) else {
             return SteerDelivery::Failed(format!("target not found: {task_id}"));
         };
-        if !managed_app::accepts_input(self, index) { return SteerDelivery::Failed("managed helper is not accepting input".into()); }
         let mut bytes = Vec::new();
         for key in keys.split(',').map(str::trim).filter(|key| !key.is_empty()) {
             match remote_key_bytes(key) {
@@ -15248,9 +15132,6 @@ Address the objection directly. If you disagree, say why inside \
     fn write_watched_screens(&mut self) {
         let repo = self.cwd.clone();
         for run in &mut self.agents {
-            if run.managed_local.is_some() || run.managed_store.is_some() {
-                continue;
-            }
             let dir = native_run_dir(&repo, &run.id);
             let watched = std::fs::metadata(dir.join("screen.watch"))
                 .and_then(|meta| meta.modified())
@@ -15505,7 +15386,6 @@ Address the objection directly. If you disagree, say why inside \
             let Some(run) = self.agents.get_mut(index) else {
                 return false;
             };
-            if run.managed_local.is_some() { return false; }
             // Only a cleanly-Done worker is eligible for the diff-backstop; a Failed/Stopped
             // one may still have a filed note we should read, but its diff is half-finished.
             let is_complete = run.status == AgentStatus::Done;
@@ -16473,7 +16353,7 @@ Address the objection directly. If you disagree, say why inside \
 
         // Plan-launched agents: those carrying a node_id, projected to a node
         // keyed by that node_id. AgentStatus maps onto the board's NodeStatus.
-        for run in self.agents.iter().filter(|run|run.managed_local.is_none() && run.managed_store.is_none()) {
+        for run in self.agents.iter() {
             let Some(node_id) = run.node_id.as_ref() else {
                 continue;
             };
@@ -16969,7 +16849,6 @@ Address the objection directly. If you disagree, say why inside \
             && !run.is_orchestrator()
             && !run.merge_resolver
             && !run.has_merge_conflict()
-            && run.managed_local.is_none()
             && !(0..self.plans.len())
                 .any(|index| self.plans[index].rebasing && self.run_belongs_to_plan(run, index))
             && (!self.node_review_enabled
@@ -17732,9 +17611,6 @@ Address the objection directly. If you disagree, say why inside \
     /// of `dd`, and what a delete from the phone runs. Keeps the selection on a
     /// sensible neighbor and returns the notice to show.
     fn delete_agent_now(&mut self, index: usize) -> String {
-        if self.agents.get(index).is_some_and(|run| run.managed_local.is_some() || run.managed_store.is_some()) {
-            return "managed run retained for explicit recovery".to_string();
-        }
         let run = self.agents.remove(index);
         // Indices shifted under the rendered rows; drop the click map so a same-tick
         // click resolves to nothing instead of a neighbor (next render rebuilds it).
@@ -18135,8 +18011,6 @@ Address the objection directly. If you disagree, say why inside \
             // it; Codex records it under the fork's cwd, discovered at completion).
             session_id: None,
             execution_profile: None,
-            managed_local: None,
-            managed_store: None,
             terminal: None,
             terminal_size: None,
             last_output_at: Instant::now(),
@@ -18786,10 +18660,6 @@ Address the objection directly. If you disagree, say why inside \
         new_goal: &str,
         target: Option<(Backend, String, Option<EffortLevel>)>,
     ) -> bool {
-        if self.agents.get(index).is_some_and(|run|run.managed_local.is_some()) {
-            self.notice = Some("managed local source requires explicit owned recovery; checkout restart is unavailable".into());
-            return false;
-        }
         let cwd_default = self.cwd.clone();
         let retargeted = target.is_some();
         if let Some((backend, model, effort)) = target {
@@ -18962,7 +18832,6 @@ Address the objection directly. If you disagree, say why inside \
     /// picks it up on its next turn). Returns false if there is no live terminal
     /// (the caller can fall back to re-goal-via-resume).
     fn live_inject_at(&mut self, index: usize, text: &str) -> bool {
-        if !managed_app::accepts_input(self, index) { return false; }
         let run_id = match self.agents.get(index) {
             Some(run) => run.id.clone(),
             None => return false,
@@ -18996,7 +18865,6 @@ Address the objection directly. If you disagree, say why inside \
     /// its jj workspace on disk (undoable / re-goalable). Its node id never enters the
     /// merged set, so hard dependents stay correctly blocked.
     fn stop_agent_at(&mut self, index: usize) -> bool {
-        if let Some(stopped) = managed_app::stop(self, index) { return stopped; }
         let cwd = self.cwd.clone();
         let (label, run_id) = {
             let Some(run) = self.agents.get_mut(index) else {
@@ -19472,7 +19340,6 @@ What to do\n\
         let Some(run) = self.agents.get(index) else {
             anyhow::bail!("no selected agent");
         };
-        anyhow::ensure!(run.managed_local.is_none(), "managed source acceptance is pending; checkout integration is unavailable");
         // Already merged: a confirm prompt acted on a stale snapshot and an intervening
         // plan integration already merged this run. Re-running `rudder merge` would create a
         // spurious second merge. No-op instead.
@@ -19950,31 +19817,7 @@ What to do\n\
         );
     }
 
-    /// Managed protocols own status/checkpoint/helper lifetime. This bounded
-    /// pane drain does not run legacy discovery, hooks, scheduling or Git work.
-    fn poll_managed_panes(&mut self) {
-        let now = Instant::now();
-        let selected = self.selected_agent;
-        let mut background: Vec<_> = self.agents.iter().enumerate().filter_map(|(index, run)| {
-            let pane = run.terminal.as_ref()?;
-            (index != selected && pane.has_pending_output()
-                && run.last_drain_at.is_none_or(|at| now.duration_since(at) >= Duration::from_millis(500)))
-                .then_some((index, run.last_drain_at))
-        }).collect();
-        background.sort_by_key(|(_, at)| *at);
-        let indices = std::iter::once(selected).chain(background.into_iter().take(2).map(|(index,_)|index));
-        for index in indices {
-            let Some(run) = self.agents.get_mut(index) else { continue; };
-            let Some(pane) = run.terminal.as_mut() else { continue; };
-            run.last_drain_at = Some(now);
-            if !pane.drain_output().is_empty() { run.last_output_at = now; self.dirty = true; }
-            let _ = pane.take_notifications();
-        }
-        self.advance_spinner_if_due(now);
-    }
-
     fn poll_agents(&mut self) {
-        if self.managed_project_mode { self.poll_managed_panes(); return; }
         let poll_started = Instant::now();
         self.poll_board_open();
         // Background work (workspace removal) reports its outcome here.
@@ -20084,7 +19927,6 @@ What to do\n\
         for (index, run) in self.agents.iter_mut().enumerate() {
             // This lifecycle is consumed only by managed_app's authenticated
             // helper channel. Legacy exit/hooks cannot certify its checkpoint.
-            if run.managed_local.is_some() { continue; }
             let mut changed = false;
             let mut worker_gone_exit: Option<u32> = None;
             let is_orchestrator = run.is_orchestrator();
@@ -20771,13 +20613,6 @@ mod app_tests;
 mod board_app_tests;
 
 fn main() -> Result<()> {
-    #[cfg(target_os="linux")]
-    if rudder_native::root_storage_bootstrap::runtime_image::compiler_sdk::helper_selected_early(){return rudder_native::root_storage_bootstrap::runtime_image::compiler_sdk::run_helper();}
-    // FIRST: an inherited managed bridge/FD family never reaches legacy or smoke.
-    #[cfg(target_os = "linux")]
-    if managed_machine_entry::selected_early() {
-        managed_machine_entry::run_selected();
-    }
     if std::env::args().any(|arg| arg == "--smoke") {
         println!("rudder-native smoke ok");
         return Ok(());
@@ -22227,7 +22062,6 @@ impl App {
                 let Some(index) = self.attached_run_index(pos) else {
                     return;
                 };
-                if !managed_app::accepts_input(self, index) { return; }
                 let run = &mut self.agents[index];
                 run.last_worker_input_at = Some(Instant::now());
                 let result = run
@@ -22399,22 +22233,5 @@ pub(crate) fn remote_key_bytes(key: &str) -> Option<&'static [u8]> {
     })
 }
 
-#[cfg(all(test, target_os = "linux"))]
-#[path = "managed_app_startup_tests.rs"]
-mod managed_app_startup_tests;
 
-#[cfg(target_os="linux")]
-mod managed_machine_cas;
-#[cfg(target_os="linux")]
-mod managed_runtime_image_preseed;
 
-#[cfg(target_os="linux")]
-mod managed_fresh_environment;
-#[cfg(target_os="linux")]
-mod managed_fresh_genesis;
-#[cfg(target_os="linux")]
-mod managed_fresh_assigned;
-#[cfg(target_os="linux")]
-mod managed_fresh_machine;
-#[cfg(target_os="linux")]
-mod managed_root_upload;

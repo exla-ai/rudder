@@ -19,9 +19,6 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 const EXIT_OUTPUT_GRACE: Duration = Duration::from_secs(2);
-#[cfg(all(test, target_os = "linux"))]
-#[path = "source_shutdown_exit_tests.rs"]
-mod source_shutdown_exit_tests;
 const MAX_OWNED_PTY_CHILDREN: usize = 512;
 const REAP_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const PTY_READ_CHUNK_BYTES: usize = 8192;
@@ -146,11 +143,6 @@ impl PtyReaderWork {
         if let Some(waker) = waker { waker(); }
     }
 }
-#[cfg(target_os = "linux")]
-#[path = "retained_managed_pty.rs"]
-mod retained_managed_pty;
-#[cfg(target_os = "linux")]
-pub use retained_managed_pty::{ManagedPtyActivationOwner, ManagedPtyDrainOwner};
 
 #[derive(Default)]
 struct ReapObservation {
@@ -669,48 +661,6 @@ pub struct TerminalPane {
     output_waker: Arc<Mutex<Option<PtyOutputWaker>>>,
 }
 
-/// Created only from this pane's actual owned child wait. This carries neither
-/// a caller status nor a saved/reopened PID. No Serde/Clone/public constructor.
-#[cfg(target_os = "linux")]
-pub struct SuccessfulManagedHelperExit {
-    instance_id: String,
-    pid: u32,
-    child: Arc<()>,
-}
-/// Capture once from the actual live pane during initial owned activation and
-/// retain in Live. A replacement pane cannot reproduce this child identity.
-#[cfg(target_os = "linux")]
-pub struct ManagedHelperCustody {
-    instance_id: String,
-    pid: u32,
-    child: Arc<()>,
-}
-#[cfg(target_os = "linux")]
-impl SuccessfulManagedHelperExit {
-    /// Match genuine engine-validated checkpoint ACK to the original child
-    /// whose actual successful wait minted this exit. DATA alone creates none
-    /// of these three opaque runtime/ACK/custody owners.
-    pub fn matches_checkpoint(&self, custody: &ManagedHelperCustody,
-        shutdown: &rudder_engine::execution::handoff::ValidatedManagedShutdown) -> Result<()> {
-        self.matches_checkpoint_record(custody, shutdown.record())
-    }
-    fn matches_checkpoint_record(&self, custody: &ManagedHelperCustody,
-        record: &rudder_engine::execution::ExecutionRecord) -> Result<()> {
-        anyhow::ensure!(Arc::ptr_eq(&self.child,&custody.child)
-            && self.instance_id==custody.instance_id && self.pid==custody.pid
-            && record.execution_id()==self.instance_id && record.supervisor_pid()==self.pid,
-            "owned helper exit differs from checkpoint receipt");
-        record.checkpointed_data()?;Ok(())
-    }
-    pub fn matches(&self, custody: &ManagedHelperCustody, provisional: &rudder_engine::execution::handoff::source_shutdown::ProvisionalSourceShutdown) -> Result<()> {
-        anyhow::ensure!(Arc::ptr_eq(&self.child, &custody.child)
-            && self.instance_id == custody.instance_id && self.pid == custody.pid
-            && provisional.matches_helper(&self.instance_id, self.pid),
-            "owned helper exit differs from provisional source receipt");
-        Ok(())
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum AnsiTrackState {
     Ground,
@@ -1097,52 +1047,6 @@ pub struct TerminalCursor {
 }
 
 impl TerminalPane {
-    /// Spawn the exact helper prepared off-App. The sealed execution spec and
-    /// private control descriptors travel through the owned handoff after the
-    /// PTY child exists; they never enter terminal output, argv or environment.
-    /// The caller retains both receipts separately from rendered terminal data.
-    #[cfg(target_os = "linux")]
-    pub fn spawn_managed(
-        native_program: impl Into<String>,
-        handoff: rudder_engine::execution::handoff::ManagedExecutionHandoff,
-        attempt_id: &str,
-        execution_profile: &str,
-        agent_link_launch_json: Option<&str>,
-        options: TerminalPaneOptions,
-    ) -> Result<(
-        Self,
-        rudder_engine::execution::handoff::HandoffReceipt,
-        rudder_engine::execution::handoff::ManagedExecutionHandle,
-    )> {
-        anyhow::ensure!(
-            uuid::Uuid::parse_str(attempt_id).is_ok_and(|id| id.to_string() == attempt_id),
-            "managed PTY requires its reserved canonical attempt UUID"
-        );
-        anyhow::ensure!(
-            matches!(execution_profile, "claude-sdk" | "codex-app-server"),
-            "managed PTY requires a qualified backend profile"
-        );
-        anyhow::ensure!(
-            handoff.binding().execution_id == attempt_id
-                && handoff.binding().execution_profile == execution_profile,
-            "managed PTY identity differs from its sealed handoff"
-        );
-        let mut command = TerminalCommand::with_args(native_program, handoff.helper_args())
-            .with_env("RUDDER_FABRIC_ATTEMPT_ID", attempt_id)
-            .with_env("RUDDER_EXECUTION_PROFILE", execution_profile);
-        if let Some(launch) = agent_link_launch_json {
-            command = command.with_env("RUDDER_AGENT_LINK_LAUNCH", launch);
-        }
-        let pane = Self::spawn_shell_or_command(Some(command), options)?;
-        let pid = pane
-            .child_process_id()
-            .context("managed PTY has no owned helper PID")?;
-        // activate starts the bounded descriptor/control worker. It does not
-        // wait for helper readiness or perform workspace/model/network work.
-        let (receipt, control) = handoff.activate(pid)?;
-        Ok((pane, receipt, control))
-    }
-
     /// Spawn the user's shell when `command` is `None`, or spawn the supplied
     /// program and arguments when it is `Some`.
     ///
@@ -1850,30 +1754,6 @@ impl TerminalPane {
         self.exit_observed.is_some()
     }
 
-    #[cfg(target_os = "linux")]
-    pub fn retain_managed_helper_custody(&self) -> Result<ManagedHelperCustody> {
-        let pid = self.child_process_id().context("managed helper is no longer live")?;
-        anyhow::ensure!(pid > 1, "invalid owned managed helper identity");
-        Ok(ManagedHelperCustody { instance_id: self.instance_id.clone(), pid, child: self.child.identity.clone() })
-    }
-
-    /// Pure App-side identity check. Matching text or a reused PID is insufficient.
-    #[cfg(target_os = "linux")]
-    pub fn matches_managed_helper_custody(&self, custody: &ManagedHelperCustody) -> bool {
-        self.instance_id == custody.instance_id && self.child.pid == Some(custody.pid)
-            && Arc::ptr_eq(&self.child.identity, &custody.child)
-    }
-
-    /// App-only nonblocking observation. Agent exit is independent data in the
-    /// receipt; this separately requires successful physical helper process exit.
-    #[cfg(target_os = "linux")]
-    pub fn successful_managed_helper_exit(&mut self) -> Result<Option<SuccessfulManagedHelperExit>> {
-        let Some(status) = self.try_wait_after_output()? else { return Ok(None); };
-        anyhow::ensure!(status.success(), "owned managed helper exited unsuccessfully");
-        let pid = self.child.pid.context("owned managed helper has no process identity")?;
-        anyhow::ensure!(pid > 1, "invalid owned managed helper process identity");
-        Ok(Some(SuccessfulManagedHelperExit { instance_id: self.instance_id.clone(), pid, child: self.child.identity.clone() }))
-    }
     pub fn is_output_only(&self) -> bool {
         self.output_only
     }
@@ -2345,39 +2225,6 @@ fn default_shell() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn managed_helper_custody_rejects_replacement_even_when_ids_are_copied() {
-        let spawn = || TerminalPane::spawn_shell_or_command(
-            Some(TerminalCommand::with_args("/bin/sh", ["-c", "read -r value"])),
-            TerminalPaneOptions::default(),
-        ).unwrap();
-        let mut original = spawn();
-        let mut replacement = spawn();
-        let custody = original.retain_managed_helper_custody().unwrap();
-        assert!(original.matches_managed_helper_custody(&custody));
-        assert!(!replacement.matches_managed_helper_custody(&custody));
-        let copied_ids = ManagedHelperCustody {
-            instance_id: replacement.instance_id.clone(),
-            pid: replacement.child_process_id().unwrap(),
-            child: custody.child.clone(),
-        };
-        assert!(!replacement.matches_managed_helper_custody(&copied_ids));
-        original.write_input(b"done\n").unwrap();
-        replacement.write_input(b"done\n").unwrap();
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while original.try_wait_after_output().unwrap().is_none()
-            || replacement.try_wait_after_output().unwrap().is_none() {
-            assert!(Instant::now() < deadline);
-            original.drain_output();
-            replacement.drain_output();
-            thread::sleep(Duration::from_millis(5));
-        }
-        // Custody identifies the same owned child after reap; it is not a
-        // substitute for a current-process or successful-exit witness.
-        assert!(original.matches_managed_helper_custody(&custody));
-    }
 
     #[test]
     fn full_output_queue_stops_the_producer_and_teardown_releases_it() {

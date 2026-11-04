@@ -323,8 +323,6 @@ pub(crate) fn create_main_agent(
         delivery: DeliveryEvidence::for_task(prompt),
         session_id: None,
         execution_profile: None,
-        managed_local: None,
-        managed_store: None,
         terminal: None,
         terminal_size: None,
         last_output_at: Instant::now(),
@@ -396,30 +394,24 @@ pub(crate) fn load_persisted_agents(repo_root: &Path) -> Vec<AgentRun> {
             continue;
         }
         let path = entry.path().join("run.json");
-        let experimental_sidecar = fs::symlink_metadata(entry.path().join("managed-local.json")).is_ok();
-        let recovery_row = || agent_from_run_record(repo_root, serde_json::json!({
-            "id":entry.file_name().to_string_lossy(),"task":"Experimental managed source recovery",
-            "status":"orphaned","managedLocal":null }));
         // A missing/corrupt/partial run.json used to make the agent silently vanish on
         // reload (filter_map swallowed it). Log the path + reason so a lost agent is
         // diagnosable; still skip it (we cannot reconstruct a malformed record).
         let raw = match fs::read_to_string(&path) {
             Ok(raw) => raw,
-            Err(_) => { if experimental_sidecar { if let Some(run)=recovery_row() { agents.push(run); } } continue; }
+            Err(_) => continue,
         };
         let mut record = match serde_json::from_str::<serde_json::Value>(&raw) {
             Ok(record) => record,
             Err(error) => {
                 eprintln!("rudder: skipping unreadable {}: {error}", path.display());
-                if experimental_sidecar { if let Some(run)=recovery_row() { agents.push(run); } }
                 continue;
             }
         };
         heal_moved_repo_paths(&mut record, repo_root);
         match agent_from_run_record(repo_root, record) {
             Some(agent) => agents.push(agent),
-            None => { if experimental_sidecar { if let Some(run)=recovery_row() { agents.push(run); } }
-                eprintln!("rudder: skipping {} (run record missing required fields)",path.display()); },
+            None => eprintln!("rudder: skipping {} (run record missing required fields)", path.display()),
         }
     }
     // Drop any TRANSIENT reconcile planner left on disk (e.g. by a crash mid-reconcile,
@@ -620,10 +612,10 @@ pub(crate) fn agent_from_run_record(
     repo_root: &Path,
     record: serde_json::Value,
 ) -> Option<AgentRun> {
-    parse_agent_run_record(repo_root, record, true)
+    parse_agent_run_record(repo_root, record)
 }
 
-fn parse_agent_run_record(repo_root: &Path, record: serde_json::Value, experimental_sidecars: bool) -> Option<AgentRun> {
+fn parse_agent_run_record(repo_root: &Path, record: serde_json::Value) -> Option<AgentRun> {
     let id = record.get("id")?.as_str()?.to_string();
     let task = record.get("task")?.as_str()?.to_string();
     let raw_task_summary = record
@@ -871,27 +863,9 @@ fn parse_agent_run_record(repo_root: &Path, record: serde_json::Value, experimen
                 && matches!(status, AgentStatus::Running | AgentStatus::Stopped)
         });
 
-    let managed_local = record.get("managedLocal").map(|value| {
-        serde_json::from_value::<crate::managed_launch::ManagedRunSource>(value.clone()).ok()
-            .filter(|source| source.validate(&id).is_ok())
-            .unwrap_or(crate::managed_launch::ManagedRunSource::Quarantined)
-    });
-    // The fsynced sidecar precedes all managed preparation. A crash that lost
-    // or reverted the UI projection must never turn this source into legacy.
-    let managed_local = if !experimental_sidecars { managed_local } else { match crate::managed_launch::read_reservation(&native_run_dir(repo_root, &id).join("managed-local.json")) {
-        Ok(None) => managed_local,
-        Ok(Some(reservation)) if reservation.validate(&id).is_ok() => match managed_local {
-            Some(source) if source.matches_reservation(&reservation) => Some(source),
-            None => Some(reservation),
-            _ => Some(crate::managed_launch::ManagedRunSource::Quarantined),
-        },
-        _ => Some(crate::managed_launch::ManagedRunSource::Quarantined),
-    } };
-    let managed_local = if experimental_sidecars && managed_local.is_some() {
-        // Experimental records remain untouched on disk. Their old projection
-        // cannot become new namespace authority through ordinary restoration.
-        Some(crate::managed_launch::ManagedRunSource::Quarantined)
-    } else { managed_local };
+    // Records from the removed managed runtime stay on disk untouched and are
+    // never restored as ordinary checkout runs.
+    if record.get("managedLocal").is_some() { return None; }
     let mut run = AgentRun {
         plain_process: false,
         id,
@@ -918,8 +892,6 @@ fn parse_agent_run_record(repo_root: &Path, record: serde_json::Value, experimen
         delivery,
         session_id,
         execution_profile: Some(record.get("executionProfile").and_then(serde_json::Value::as_str).unwrap_or("native").to_string()),
-        managed_local,
-        managed_store: None,
         terminal: None,
         terminal_size: None,
         last_output_at: Instant::now(),
@@ -972,36 +944,7 @@ fn parse_agent_run_record(repo_root: &Path, record: serde_json::Value, experimen
     if run.status == AgentStatus::Merged {
         run.restore_pre_conflict_identity();
     }
-    if run.managed_local.is_some() {
-        // Persisted assignments are recovery evidence only. No saved PID,
-        // socket path or old owner epoch recreates an owned helper lifecycle.
-        run.status = AgentStatus::Orphaned;
-        run.completed_at = None;
-        run.merge_resolver = false;
-        run.last_error = Some("managed local source requires explicit owned recovery; checkout resume is unavailable".into());
-    }
     Some(run)
-}
-
-/// Off-App, explicit private namespace recovery. This never discovers legacy
-/// run/graph directories, resumes a session, imports a plan, or writes state.
-pub(crate) fn load_managed_agents(store: &crate::managed_store::ManagedStore) -> Result<Vec<AgentRun>> {
-    store.recover_runs()?.into_iter().map(|recovered| {
-        let mut record = serde_json::json!({"id":recovered.run_id,"task":"Managed source recovery",
-            "mode":"execute","status":"orphaned","managedLocal":recovered.source});
-        if let Some(data) = recovered.projection.and_then(|data|data.as_object().cloned()) {
-            for name in ["task", "taskSummary", "backend", "model", "executionProfile", "createdAt", "doneSummary"] {
-                if let Some(value) = data.get(name) { record[name] = value.clone(); }
-            }
-        }
-        let mut run = parse_agent_run_record(&store.binding().repository, record, false)
-            .context("managed recovery row could not be represented")?;
-        run.managed_local = Some(recovered.source); run.managed_store = recovered.location;
-        run.status = AgentStatus::Orphaned; run.session_id = None; run.autosteered = false;
-        run.cwd = store.binding().repository.clone();
-        if let Some(reason) = recovered.diagnostic { run.last_error = Some(reason); }
-        Ok(run)
-    }).collect()
 }
 
 pub(crate) fn turns_from_run_record(
@@ -1304,21 +1247,6 @@ pub(crate) fn run_record_status(status: AgentStatus) -> &'static str {
 }
 
 pub(crate) fn save_native_run_record(repo_root: &Path, run: &AgentRun) -> Result<()> {
-    if let Some(source) = &run.managed_local {
-        let location = run.managed_store.as_ref().context("experimental managed record requires explicit private-store recovery; legacy writes refused")?;
-        anyhow::ensure!(location.run_id() == run.id && location.store().binding().repository == repo_root,
-            "managed projection differs from explicit project identity");
-        // Admission only. The immutable reservation/assignment is persisted by
-        // the IO worker before preparation/grant; UI data is never authority.
-        return location.queue_projection(source, serde_json::json!({
-            "id":run.id, "task":run.task, "taskSummary":run.task_summary,
-            "mode":"execute", "status":format!("{:?}",run.status).to_lowercase(),
-            "backend":run.backend.as_str(), "model":run.model,
-            "executionProfile":run.execution_profile, "createdAt":run.created_at,
-            "doneSummary":run.done_summary, "lastError":run.last_error,
-        }));
-    }
-    anyhow::ensure!(run.managed_store.is_none(), "managed storage locator cannot be written as a legacy record");
     let run_dir = native_run_dir(repo_root, &run.id);
     fs::create_dir_all(&run_dir)?;
     let record_path = run_dir.join("run.json");
@@ -1331,14 +1259,12 @@ pub(crate) fn save_native_run_record(repo_root: &Path, run: &AgentRun) -> Result
         .get("targetBranch")
         .and_then(serde_json::Value::as_str)
         .map(ToOwned::to_owned)
-        .unwrap_or_else(|| if run.managed_local.is_some() { String::new() }
-            else { current_branch_at(repo_root).unwrap_or_else(|| "HEAD".to_string()) });
+        .unwrap_or_else(|| current_branch_at(repo_root).unwrap_or_else(|| "HEAD".to_string()));
     let base_commit = existing_record
         .get("baseCommit")
         .and_then(serde_json::Value::as_str)
         .map(ToOwned::to_owned)
         .unwrap_or_else(|| {
-            if run.managed_local.is_some() { return String::new(); }
             git_output(repo_root, ["rev-parse", "HEAD"])
                 .map(|value| value.trim().to_string())
                 .unwrap_or_default()
@@ -1459,10 +1385,6 @@ pub(crate) fn save_native_run_record(repo_root: &Path, run: &AgentRun) -> Result
     });
     if let Some(gam) = run.gam.as_ref() {
         record["gam"] = gam_state_to_json(gam);
-    }
-    if let Some(source) = &run.managed_local {
-        record["managedLocal"] = serde_json::to_value(source)?;
-        record["vcs"] = serde_json::Value::String("fabric".into());
     }
     // Native and TS commands share run.json. Preserve fields owned by the TS
     // merge/undo/verifier layers instead of replacing the document with the

@@ -3,11 +3,6 @@
 use super::*;
 use rudder_engine::journal::{Journal, OwnerFence};
 
-#[cfg(target_os = "linux")]
-mod managed;
-#[cfg(target_os = "linux")]
-pub(crate) use managed::ManagedAppDrain;
-
 pub(crate) struct AppEngineLifecycle {
     repository: PathBuf,
     fence: OwnerFence,
@@ -23,7 +18,6 @@ impl AppEngineLifecycle {
     /// uncertain owner receipt; Drop never attempts SQLite reconciliation.
     pub(crate) fn prepare(owner: &mut EngineOwnership) -> Result<Self> {
         let prepared: Result<Self> = (|| {
-            owner.require_legacy_startup()?;
             owner.assert_current()?;
             let (repository, fence) = owner.app_identity();
             let (lease, writer) = if owner.is_fabric() {
@@ -109,8 +103,6 @@ impl AppEngineLifecycle {
             return Ok(true);
         }
         if let Some(writer) = &mut self.writer {
-            managed_source_app::poll(app, &self.fence);
-            managed_app::poll(app, writer, &self.fence)?;
             fabric_runtime::poll(app, writer, &self.fence)?;
         }
         Ok(false)
@@ -227,13 +219,6 @@ fn shutdown_app_until(
     deadline: Instant,
     can_publish: bool,
 ) -> Result<()> {
-    app.ensure_managed_source_shutdown_ready()?;
-    #[cfg(target_os = "linux")]
-    app.ensure_managed_task_shutdown_ready()?;
-    anyhow::ensure!(
-        !app.agents.iter().any(|run| run.managed_local.is_some() && run.terminal.is_some()),
-        "managed pane requires its retained runtime drain before App retirement"
-    );
     app.close_attach_clients(reason);
     let mut failures = Vec::new();
     let mut pending = Vec::new();
@@ -241,9 +226,7 @@ fn shutdown_app_until(
         let Some(terminal) = run.terminal.as_mut() else {
             continue;
         };
-        if run.managed_local.is_none() {
-            terminal.request_termination();
-        }
+        terminal.request_termination();
         pending.push(index);
     }
     while !pending.is_empty() {
@@ -253,15 +236,11 @@ fn shutdown_app_until(
             terminal.drain_output();
             match terminal.try_wait() {
                 Ok(Some(_)) => {
-                    if run.managed_local.is_none() && run.backend == Backend::Codex && run.session_id.is_none() {
+                    if run.backend == Backend::Codex && run.session_id.is_none() {
                         run.session_id = latest_codex_session_id_for_cwd(&run.cwd);
                     }
                     run.terminal = None;
-                    if run.managed_local.is_some() {
-                        run.status = AgentStatus::Orphaned;
-                        run.completed_at = None;
-                        run.last_error = Some(format!("managed helper ownership ended because {reason}; no checkpoint acknowledged"));
-                    } else if run.status == AgentStatus::Running {
+                    if run.status == AgentStatus::Running {
                         run.status = AgentStatus::Paused;
                         run.needs_permission = false;
                         run.needs_user_input = false;
@@ -274,10 +253,10 @@ fn shutdown_app_until(
                     }
                     false
                 }
-                Ok(None) if Instant::now() < deadline && run.managed_local.is_none() => true,
+                Ok(None) if Instant::now() < deadline => true,
                 outcome => {
                     let detail = match outcome { Err(error) => format!("{error:#}"),
-                        _ => "process exit remains unconfirmed; managed tasks require their retained runtime drain".into() };
+                        _ => "process exit remains unconfirmed".into() };
                     run.last_error = Some(format!("shutdown uncertain because {reason}: {detail}"));
                     failures.push(format!("{}: {detail}", run.id));
                     // Keep the actual pane and live process record. Recovery
@@ -293,7 +272,7 @@ fn shutdown_app_until(
             thread::sleep(Duration::from_millis(5));
         }
     }
-    if let Err(error) = if can_publish && !app.managed_project_mode {
+    if let Err(error) = if can_publish {
         app.write_rudder_context_timed(None)
     } else {
         Ok(())

@@ -1,4 +1,0 @@
-[cells]
-root = .
-[build]
-execution_platforms = root//:platforms

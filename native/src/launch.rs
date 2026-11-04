@@ -132,7 +132,6 @@ const ORCHESTRATOR_SKILLS: &[OrchestratorSkill] = &[
 ];
 
 pub(crate) fn can_resume_agent(run: &AgentRun) -> bool {
-    if run.managed_local.is_some() { return false; }
     match run.backend {
         Backend::Claude | Backend::Codex | Backend::Opencode => run.session_id.is_some(),
     }

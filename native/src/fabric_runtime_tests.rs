@@ -21,10 +21,6 @@ fn slot() -> RuntimeLink {
         uncertain: false,
         closed: false,
         draining: false,
-        workspace: None,
-        managed_home: None,
-        #[cfg(target_os = "linux")]
-        owned_backend: None,
     }
 }
 
@@ -70,51 +66,6 @@ fn graceful_drain_stops_new_controls_without_claiming_backend_completion() {
         "SDK bootstrap cannot bypass shutdown admission");
 }
 
-#[test]
-fn managed_identity_rotation_preserves_only_the_exact_current_workspace_scope() {
-    use crate::managed_launch::{ManagedLaunchFence, WorkspaceAssignment};
-    use rudder_engine::{execution::ProtectedHostContextRef, protocol::{ObjectKind, ObjectRef}, vfs::rpc::{AttemptContext, ObservationBinding}};
-    let mut fixture=crate::managed_store::tests::Fixture::new(); let store=fixture.prepare(); let home=fixture.home.clone();
-    let mut journal = Journal::open(&FabricPaths::new(&home).journal).unwrap();
-    let owner = fixture.owner.clone();
-    let attempt = uuid::Uuid::new_v4().to_string();
-    let epoch = journal.observe_run_attempt(&owner, "run", &attempt, 1).unwrap();
-    let fence = ManagedLaunchFence { owner: owner.clone(), run_id: "run".into(), run_epoch: epoch,
-        attempt_id: attempt.clone(), request_id: uuid::Uuid::new_v4().to_string() };
-    let reference = |kind, bytes: &[u8]| ObjectRef::from_bytes(kind, bytes);
-    let workspace = WorkspaceAssignment { format_version: 1, fence: fence.clone(),
-        runnable_root: reference(ObjectKind::RunnableRoot, b"runnable"), source: reference(ObjectKind::SourceRoot, b"source"),
-        seed: reference(ObjectKind::Directory, b"seed"),
-        observation: ObservationBinding { format_version: 1, attempt: AttemptContext { execution_id: attempt.clone(), operation_id: uuid::Uuid::new_v4().to_string() },
-            view_id: uuid::Uuid::new_v4().to_string(), owner: fence.owner_epoch(), namespace: uuid::Uuid::new_v4().to_string(),
-            profile: reference(ObjectKind::Blob, b"profile"), exclusion_policy_digest: "a".repeat(64) },
-        host_context: ProtectedHostContextRef { format_version: 1, path: home.join("context.json"), sha256: "b".repeat(64), size_bytes: 1 } };
-    store.run("run").unwrap().persist_reservation(&crate::managed_launch::ManagedRunSource::Reserved {
-        fence:fence.clone(), runnable_root:workspace.runnable_root.clone() }).unwrap();
-    crate::managed_launch::persist_assignment(&home, &workspace).unwrap();
-    let mut recipients = BTreeMap::from([("run".into(), epoch)]);
-    let path = issue_identity(&home, &mut journal, &owner, "run", epoch, &recipients, 2, Some(&workspace)).unwrap();
-    let first: AgentIdentityFile = read_private(&path, 16 * 1024).unwrap();
-    journal.authorize_workspace(&first.token, &workspace.observation, 2).unwrap();
-    journal.register_run(&owner, "peer", 3).unwrap();
-    recipients.insert("peer".into(), 1);
-    let path = issue_identity(&home, &mut journal, &owner, "run", epoch, &recipients, 3, Some(&workspace)).unwrap();
-    let rotated: AgentIdentityFile = read_private(&path, 16 * 1024).unwrap();
-    assert_ne!(rotated.token, first.token);
-    assert!(journal.authenticate_agent(&first.token, 3).is_err());
-    journal.authorize_workspace(&rotated.token, &workspace.observation, 3).unwrap();
-    let mut sibling = workspace.observation.clone(); sibling.namespace = uuid::Uuid::new_v4().to_string();
-    assert!(journal.authorize_workspace(&rotated.token, &sibling, 3).is_err());
-    let replacement = uuid::Uuid::new_v4().to_string();
-    let epoch = journal.observe_run_attempt(&owner, "run", &replacement, 4).unwrap();
-    recipients.insert("run".into(), epoch);
-    assert!(issue_identity(&home, &mut journal, &owner, "run", epoch, &recipients, 4, Some(&workspace)).is_err());
-    let path = issue_identity(&home, &mut journal, &owner, "run", epoch, &recipients, 5, None).unwrap();
-    let legacy: AgentIdentityFile = read_private(&path, 16 * 1024).unwrap();
-    assert!(journal.authorize_workspace(&legacy.token, &workspace.observation, 5).is_err());
-    assert!(crate::managed_launch::assignment_for_attempt(&home, &owner, "run", epoch, &replacement).unwrap().is_none());
-    fs::remove_dir_all(home).unwrap();
-}
 
 #[test]
 fn requested_sdk_binding_allows_only_first_idle_input_before_qualification() {
@@ -167,8 +118,6 @@ fn test_agent_run(id: &str, task: &str) -> AgentRun {
         delivery: DeliveryEvidence::default(),
         session_id: None,
         execution_profile: None,
-        managed_local: None,
-        managed_store: None,
         terminal: None,
         terminal_size: None,
         last_output_at: Instant::now(),

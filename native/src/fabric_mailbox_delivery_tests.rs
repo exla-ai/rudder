@@ -21,10 +21,6 @@ fn slot() -> RuntimeLink {
         uncertain: false,
         closed: false,
         draining: false,
-        workspace: None,
-        managed_home: None,
-        #[cfg(target_os = "linux")]
-        owned_backend: None,
     }
 }
 

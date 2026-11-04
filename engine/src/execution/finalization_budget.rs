@@ -3,7 +3,7 @@
 //! A constraint limits time only. It does not authenticate a shutdown request,
 //! retain a source grant, stop a process, settle a worker or prove a checkpoint.
 //! Callers must keep the actual owners until those independent effects settle.
-use crate::fleet_lease::{HostClock, SuspendAwareClock};
+use crate::clock::{HostClock, SuspendAwareClock};
 use anyhow::{anyhow, ensure, Result};
 use serde::{Deserialize, Serialize};
 use std::{

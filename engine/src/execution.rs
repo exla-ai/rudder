@@ -36,8 +36,6 @@ pub mod network;
 mod network_phase;
 mod profile;
 #[cfg(target_os = "linux")]
-pub mod remote_qualification;
-#[cfg(target_os = "linux")]
 mod root;
 #[cfg(target_os = "linux")]
 mod state;

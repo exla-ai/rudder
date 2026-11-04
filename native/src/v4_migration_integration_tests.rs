@@ -199,10 +199,11 @@ fn migration_actual_engine_refuses_unreconciled_runtime_before_owner_publication
         active_turn_id:Some("turn".into()),last_interrupted_turn_id:None,
         phase:rudder_engine::journal::RuntimePhase::Working,capabilities:["inspect".into()].into(),pty_owned:true},11).unwrap();
     let error=EngineOwnership::acquire_migrated_in_home(&f.repo,&f.home,&selection(&committed)).err().unwrap();
-    assert!(error.to_string().contains("runtime custody"),"{error:#}");
+    assert!(error.to_string().contains("custody reconciliation"),"{error:#}");
     assert_eq!(journal.project_state(&committed.owner.project_id).unwrap().owner,committed.owner);
     assert!(!f.repo.join(".rudder/engine/owner.json").exists());
-    assert!(MigrationSession::open(&f.repo,&quiet()).is_ok());
+    drop(error);
+    if let Err(e)=MigrationSession::open(&f.repo,&quiet()) { panic!("{e:#}"); }
 }
 
 #[test]

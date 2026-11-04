@@ -20,7 +20,7 @@ pub(crate) mod restart;
 #[path = "owner_restart.rs"]
 mod owner_restart;
 pub(crate) use owner_restart::RetainedRestartFailure;
-pub(crate) use owner_restart::reconciliation::OriginalExternalWork;
+
 
 const ENGINE_FORMAT: u32 = 1;
 const CONTROL_LIMIT: usize = 8192;
@@ -97,8 +97,7 @@ pub(crate) struct EngineOwnership {
     record: OwnerRecord,
     record_path: PathBuf,
     released: bool,
-    identity_home: PathBuf,
-    managed_store: Option<crate::managed_store::ManagedStore>,
+
     migration_records: Option<Vec<serde_json::Value>>,
     restart_recovery: Option<restart::NativeRestartRecovery>,
 }
@@ -107,8 +106,6 @@ pub(crate) struct EngineOwnership {
 /// acquisition constructs this value; saved projections cannot recreate it.
 struct EngineOwnerLifetime {
     lock: Arc<CheckoutLock>,
-    #[cfg(target_os="linux")]
-    assigned:Option<Arc<crate::managed_fresh_assigned::AssignedFreshAuthority>>,
     repo: PathBuf,
     owner: OwnerFence,
     authority: NativeAuthority,
@@ -137,17 +134,11 @@ impl EngineOwnerLifetime {
         Ok(())
     }
 
-    fn check_shared_admission(&self)->Result<()> {self.check_active()?;
-        #[cfg(target_os="linux")] if let Some(assigned)=&self.assigned{
-            use rudder_native::managed_owner_lease::ManagedOwnerAdmission;
-            if assigned.admission_state()==ManagedOwnerAdmission::Busy{return Err(EngineSharedAdmissionBusy.into());}
-            if let Err(error)=assigned.check_active(){return if assigned.admission_state()==ManagedOwnerAdmission::Fenced{Err(error)}else{Err(EngineSharedAdmissionBusy.into())};}
-        }Ok(())}
+    fn check_shared_admission(&self)->Result<()> {self.check_active()}
     fn check_custody(&self) -> Result<()> {
         let result = (|| -> Result<()> {
             self.check_active()?;
             #[cfg(test)] tests::custody_contention::restriction()?;
-            #[cfg(target_os="linux")] if let Some(assigned)=&self.assigned{assigned.assert_retained_custody()?;}
             let held = self.lock.metadata()?;
             let named = fs::symlink_metadata(self.repo.join(".rudder/engine/owner.lock"))?;
             anyhow::ensure!(
@@ -219,32 +210,6 @@ impl EngineSourceLease {
         result
     }
 
-    /// Actual assigned lease alias for task-only host consumers. None is an
-    /// actual legacy lifetime; paths/identity JSON cannot populate this slot.
-    #[cfg(target_os="linux")]
-    pub(crate) fn managed_owner_lease(&self)->Option<&Arc<rudder_native::managed_owner_lease::ManagedOwnerLease>> {self.lifetime.assigned.as_ref().map(|owner|owner.lease())}
-
-    pub(crate) fn shared_admission_closed(&self)->bool {
-        #[cfg(target_os="linux")] if let Some(assigned)=&self.lifetime.assigned{return assigned.admission_state()==rudder_native::managed_owner_lease::ManagedOwnerAdmission::Fenced;}
-        false
-    }
-
-    /// New shared work/adoption, distinct from original-resource settlement.
-    /// Local held custody remains available after PG expiry for typed cleanup.
-    pub(crate) fn check_shared_current(&self)->Result<()> {self.check_current()?;self.lifetime.check_shared_admission()?;#[cfg(target_os="linux")] if let Some(assigned)=&self.lifetime.assigned{assigned.assert_custody()?;}self.lifetime.check_shared_admission()}
-
-    pub(crate) fn wait_shared_current(&self,budget:&rudder_engine::execution::finalization_budget::FinalizationBudget,cancelled:&AtomicBool)->Result<()> {
-        loop{budget.remaining()?;anyhow::ensure!(!cancelled.load(Ordering::Acquire),"original shared validation cancelled");match self.check_shared_current(){Ok(())=>{budget.remaining()?;return Ok(());},Err(error) if error.downcast_ref::<EngineSharedAdmissionBusy>().is_some()=>std::thread::sleep(budget.phase_limit(Duration::from_millis(2))?),Err(error)=>return Err(error)}}
-    }
-
-    /// Off-App, bounded existing read-only Journal derived from this actual
-    /// EngineOwnership connection. No caller-supplied database path is accepted.
-    pub(crate) fn open_journal(&self, busy_timeout: Duration) -> Result<ReadOnlyJournal<'_>> {
-        self.check_current()?;
-        let result = self.database.open_read_only(busy_timeout);
-        self.check_current()?;
-        result
-    }
 
     /// Off-App existing writer, anchored to the actual owner's held database.
     /// Opening it creates neither a project nor a scheduler or source grant.
@@ -266,57 +231,31 @@ impl EngineSourceLease {
 }
 
 impl EngineOwnership {
-    /// Off-App bootstrap. Captures actual held owner custody, never a path from
-    /// an agent request. The source worker opens its own bounded connection.
-    #[cfg(target_os = "linux")]
-    pub(crate) fn source_journal_factory(&self, expected: &OwnerFence)
-        -> Result<crate::managed_source_app::SourceJournalFactory> {
-        let lease = self.source_lease(expected)?;
-        Ok(Box::new(move || lease.open_source_writer()))
-    }
     pub(crate) fn acquire(repo: &Path, mode: NativeAuthority) -> Result<Self> {
-        Self::acquire_inner(repo, mode, None, None, None)
+        Self::acquire_inner(repo, mode, None, None)
     }
 
     /// Off-App, explicit local identity. Existing launchers retain their home
     /// selection; managed preparation/recovery never infer a different home.
     pub(crate) fn acquire_migrated(repo:&Path,request:&crate::v4_migration::AdoptionRequest)->Result<Self> {
-        Self::acquire_inner(repo,NativeAuthority::Fabric,None,None,Some(request))
+        Self::acquire_inner(repo,NativeAuthority::Fabric,None,Some(request))
     }
     #[cfg(test)]
     pub(crate) fn acquire_migrated_in_home(repo: &Path, home: &Path,
         request: &crate::v4_migration::AdoptionRequest) -> Result<Self> {
-        Self::acquire_inner(repo, NativeAuthority::Fabric, Some(home), None, Some(request))
+        Self::acquire_inner(repo, NativeAuthority::Fabric, Some(home), Some(request))
     }
     pub(crate) fn take_migration_records(&mut self)->Option<Vec<serde_json::Value>> {self.migration_records.take()}
     pub(crate) fn restart_recovery(&self)->Option<&restart::NativeRestartRecovery> {self.restart_recovery.as_ref()}
 
     pub(crate) fn acquire_in_home(repo: &Path, mode: NativeAuthority, home: &Path) -> Result<Self> {
-        Self::acquire_inner(repo, mode, Some(home), None, None)
-    }
-
-    /// Explicit prepare recovery, not launch/resume permission. The caller
-    /// supplies the exact historical request; incomplete evidence is retained.
-    pub(crate) fn recover_managed_prepare(repo: &Path, home: &Path,
-        request: &rudder_engine::journal::ManagedProjectPrepare) -> Result<Self> {
-        let mut owner = Self::acquire_inner(repo, NativeAuthority::Fabric, Some(home), Some(request), None)?;
-        owner.prepare_managed_project(request)?;
-        Ok(owner)
-    }
-    pub(crate) fn recover_managed_prepare_with_plan(repo: &Path, home: &Path,
-        request: &rudder_engine::journal::ManagedProjectPrepare, plan: &crate::managed_store::ExperimentalRecoveryPlan) -> Result<Self> {
-        let mut owner=Self::acquire_inner(repo,NativeAuthority::Fabric,Some(home),Some(request),None)?;
-        owner.prepare_managed_project_with_plan(request,plan)?; Ok(owner)
+        Self::acquire_inner(repo, mode, Some(home), None)
     }
 
     fn acquire_inner(repo: &Path, mode: NativeAuthority, explicit_home: Option<&Path>,
-        recovery: Option<&rudder_engine::journal::ManagedProjectPrepare>,
         adoption: Option<&crate::v4_migration::AdoptionRequest>) -> Result<Self> {
         let repo = repo.canonicalize().context("canonical engine checkout")?;
         if adoption.is_none() && mode==NativeAuthority::Legacy {crate::v4_migration::refuse_implicit_startup(&repo)?;}
-        // Presence is conservative refusal evidence only. The actual fresh
-        // constructor requires original registered/PG/namespace/lease custody.
-        match fs::symlink_metadata(repo.join(".rudder/engine/fresh-project.json")){Ok(_)=>bail!("fresh logical managed checkout requires its original assigned owner; legacy/default acquisition refused"),Err(error) if error.kind()==std::io::ErrorKind::NotFound=>{},Err(error)=>return Err(error.into())}
         let directory = repo.join(".rudder/engine");
         let lock = acquire_checkout_lock(&repo)?;
         // A migration can finish between the preflight and this acquisition.
@@ -374,21 +313,6 @@ impl EngineOwnership {
         let paths = FabricPaths::new(&canonical_home);
         let mut journal = Journal::open(&paths.journal)?;
         let project = local_project_id(&repo)?;
-        // This check precedes every owner transfer, recovery operation and
-        // owner.json rewrite. Intent alone blocks a legacy restart after a
-        // crash before the schema5 transaction; a floor alone blocks one after.
-        let managed = journal.managed_project(&project)?;
-        let namespace_present = crate::managed_store::has_namespace_evidence(&canonical_home, &project)?;
-        if let Some(request) = recovery {
-            let binding = crate::managed_store::namespace(&canonical_home, &repo, &project, &journal)?;
-            anyhow::ensure!(request.namespace == binding
-                && crate::managed_store::read_prepare_intent(&binding, &journal)? == *request
-                && managed.as_ref().is_none_or(|receipt|receipt.request == *request),
-                "managed recovery request differs from retained evidence");
-        } else {
-            anyhow::ensure!(managed.is_none() && !namespace_present,
-                "managed project is prepared or quarantined; legacy Native startup is refused before ownership changes; use explicit recovery");
-        }
         let migration_records=if let Some(request)=adoption {Some(crate::v4_migration::prepare_adoption(&repo,&journal,request)?)}
             else {crate::v4_migration::prepare_fabric_restart(&repo,&journal)?};
         let recovery_records=crate::v4_recovery_adoption::prepare(&repo,&journal)?;
@@ -447,7 +371,6 @@ impl EngineOwnership {
         write_owner_record(&record_path, &record)?;
         let lifetime = Arc::new(EngineOwnerLifetime {
             lock:Arc::new(lock),
-            #[cfg(target_os="linux")] assigned:None,
             repo: record.repo.clone(),
             owner: fence.clone(),
             authority: mode,
@@ -461,57 +384,10 @@ impl EngineOwnership {
             record,
             record_path,
             released: false,
-            identity_home: canonical_home,
-            managed_store: None,
+
             migration_records,
             restart_recovery,
         })
-    }
-
-    /// Off-App explicit opt-in, while this actual CheckoutLock is held and
-    /// before any App/scheduler is started. This does not enable managed launch.
-    pub(crate) fn prepare_managed_project(&mut self,
-        request: &rudder_engine::journal::ManagedProjectPrepare) -> Result<crate::managed_store::ManagedStore> {
-        self.prepare_managed_inner(request,None)
-    }
-    pub(crate) fn experimental_recovery_plan(&self) -> Result<crate::managed_store::ExperimentalRecoveryPlan> {
-        self.assert_current()?;
-        let binding=crate::managed_store::namespace(&self.identity_home,&self.record.repo,&self.fence.project_id,&self.journal)?;
-        crate::managed_store::inspect_experimental(&binding)
-    }
-    pub(crate) fn prepare_managed_project_with_plan(&mut self,
-        request: &rudder_engine::journal::ManagedProjectPrepare, plan: &crate::managed_store::ExperimentalRecoveryPlan) -> Result<crate::managed_store::ManagedStore> {
-        self.prepare_managed_inner(request,Some(plan))
-    }
-    fn prepare_managed_inner(&mut self, request: &rudder_engine::journal::ManagedProjectPrepare,
-        recovery: Option<&crate::managed_store::ExperimentalRecoveryPlan>) -> Result<crate::managed_store::ManagedStore> {
-        anyhow::ensure!(self.record.state == "starting" && self.record.authority == "fabric",
-            "managed preparation requires a starting owned Fabric engine");
-        self.assert_current()?;
-        reject_legacy_writers(&self.record.repo)?;
-        let binding = crate::managed_store::namespace(&self.identity_home, &self.record.repo,
-            &self.fence.project_id, &self.journal)?;
-        anyhow::ensure!(request.namespace == binding, "managed prepare differs from the actual owner identity");
-        let experimental=crate::managed_store::inspect_experimental(&binding)?;
-        anyhow::ensure!(recovery.map_or_else(||experimental.is_empty(),|plan|plan==&experimental),
-            "experimental managed records require an explicit exact bounded recovery plan; originals retained");
-        crate::managed_store::persist_prepare_intent(request, &self.journal)?;
-        if let Some(plan)=recovery { crate::managed_store::persist_recovery_plan(plan,&binding)?; }
-        let receipt = self.journal.prepare_managed_project(&self.fence, request, epoch_ms())?;
-        let store = crate::managed_store::persist_prepared_receipt(&receipt, &self.journal)?;
-        if let Some(plan)=recovery { crate::managed_store::preserve_experimental(&store,plan)?; }
-        self.managed_store = Some(store.clone());
-        Ok(store)
-    }
-
-    pub(crate) fn managed_recovery_store(&self) -> Option<&crate::managed_store::ManagedStore> { self.managed_store.as_ref() }
-
-    pub(crate) fn require_legacy_startup(&self) -> Result<()> {
-        anyhow::ensure!(self.managed_store.is_none()
-            && self.journal.managed_project(&self.fence.project_id)?.is_none()
-            && !crate::managed_store::has_namespace_evidence(&self.identity_home, &self.fence.project_id)?,
-            "managed project remains recovery-only; legacy App/scheduler startup is refused");
-        Ok(())
     }
 
     pub(crate) fn assert_current(&self) -> Result<()> {
@@ -532,31 +408,15 @@ impl EngineOwnership {
         result
     }
 
-    /// App-safe actual admission check: original process/clock/atomics only.
-    pub(crate) fn check_shared_for_app(&self)->Result<()> {self.lifetime.check_shared_admission()}
-    /// Pure permission state only. No saved flag/record can create the actual
-    /// lease; this distinguishes ordinary shared fencing from physical failure.
-    pub(crate) fn shared_admission_closed(&self)->bool {
-        #[cfg(target_os="linux")] if let Some(assigned)=&self.lifetime.assigned{return assigned.admission_state()==rudder_native::managed_owner_lease::ManagedOwnerAdmission::Fenced;}
-        false
-    }
-    pub(crate) fn shared_admission_busy(&self)->bool {
-        #[cfg(target_os="linux")] if let Some(assigned)=&self.lifetime.assigned{return assigned.admission_state()==rudder_native::managed_owner_lease::ManagedOwnerAdmission::Busy;}
-        false
-    }
-    pub(crate) fn assert_current_bounded(&self,budget:&rudder_engine::execution::finalization_budget::FinalizationBudget,cancelled:&AtomicBool)->Result<()> {
-        loop{budget.remaining()?;anyhow::ensure!(!cancelled.load(Ordering::Acquire),"original shared owner validation cancelled");match self.assert_current(){Ok(())=>{budget.remaining()?;return Ok(());},Err(error) if error.downcast_ref::<EngineSharedAdmissionBusy>().is_some()=>std::thread::sleep(budget.phase_limit(Duration::from_millis(2))?),Err(error)=>return Err(error)}}
-    }
-    /// Original local resource custody for cleanup polling after PG fencing.
-    /// This grants no new task/source/head/publication or general writer use.
-    pub(crate) fn assert_original_local_custody(&self)->Result<()> {
-        self.lifetime.check_custody()?;let held=self.journal.hold_database_file()?;held.check_current()?;let state=self.journal.project_state(&self.fence.project_id)?;
-        anyhow::ensure!(state.owner_active&&state.owner==self.fence,"original local owner changed");Ok(())
-    }
 
     /// Off-App. Requires this actual live Fabric owner and an exact expected
     /// fence; it does not issue a source capability. Existing leases survive
     /// graceful stopping until finish, but no new lease is admitted then.
+    #[cfg(test)]
+    pub(crate) fn journal_parts(&mut self) -> (&mut Journal, &OwnerFence) {
+        (&mut self.journal, &self.fence)
+    }
+
     pub(crate) fn source_lease(&self, expected: &OwnerFence) -> Result<EngineSourceLease> {
         anyhow::ensure!(
             self.lifetime.authority == NativeAuthority::Fabric,
@@ -653,9 +513,6 @@ impl EngineOwnership {
         self.record.authority == "fabric"
     }
 
-    pub(crate) fn journal_parts(&mut self) -> (&mut Journal, &OwnerFence) {
-        (&mut self.journal, &self.fence)
-    }
 }
 
 impl Drop for EngineOwnership {
@@ -1405,15 +1262,3 @@ pub(crate) fn current_process_is_fabric_owner() -> bool {
     let Ok(record) = serde_json::from_reader::<_,OwnerRecord>(file) else { return false; };
     record.format_version == ENGINE_FORMAT && record.authority == "fabric" && record.pid == std::process::id() && record.repo == repo
 }
-
-#[cfg(target_os="linux")]
-#[path="engine_host_ingress_acquisition.rs"]
-mod ingress_acquisition;
-#[cfg(target_os="linux")]
-pub(crate) use ingress_acquisition::RetainedManagedAcquisition;
-
-#[cfg(target_os="linux")]
-#[path="engine_host_fresh.rs"]
-mod fresh;
-#[cfg(target_os="linux")]
-pub(crate) use fresh::{FreshLocalNamespace,FreshNamespaceCustody};

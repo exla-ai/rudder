@@ -18,9 +18,6 @@ pub(crate) fn run(args: &[String]) -> Result<()> {
     if args.first().is_some_and(|s| s == "broker") {
         return crate::agent_broker::run(&args[1..]);
     }
-    if args.first().is_some_and(|s| s == "execution") {
-        return crate::execution_cli::run(&args[1..]);
-    }
     if args.first().is_some_and(|s| s == "rpc") {
         if args.len() != 1 {
             bail!("fabric rpc accepts no extra arguments");

@@ -108,8 +108,6 @@ pub(crate) fn run(repository: &Path) -> Result<()> {
     let home=crate::signals::rudder_home().context("no Rudder home for migration journal")?.canonicalize()?;
     let repository=repository.canonicalize()?;
     let project=local_project_id(&repository)?;
-    // Migration cannot construct a different or fresh managed namespace.
-    ensure!(!crate::managed_store::has_namespace_evidence(&home,&project)?,"managed namespace requires its existing recovery path");
     let mut journal=open_migration_journal(&home)?;
     ensure!(journal.managed_project(&project)?.is_none(),"managed project requires its existing recovery path");
     let now=||std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis().min(i64::MAX as u128) as i64;

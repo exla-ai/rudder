@@ -15,8 +15,7 @@ pub(crate) fn apply(app: &mut App, records: Vec<serde_json::Value>) -> Result<()
         anyhow::ensure!(ids.insert(id), "duplicate migration run projection");
         let mut run = crate::gitio::agent_from_run_record(&app.cwd, record)
             .context("migration record cannot be restored by this App")?;
-        anyhow::ensure!(run.terminal.is_none() && run.managed_local.is_none() && run.managed_store.is_none(),
-            "migration adoption cannot reconstruct managed runtime custody");
+        anyhow::ensure!(run.terminal.is_none(), "migration adoption cannot reconstruct a live terminal");
         if matches!(run.status, AgentStatus::Running | AgentStatus::Orphaned) {
             run.status = AgentStatus::Paused;
         }

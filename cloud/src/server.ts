@@ -1,5 +1,3 @@
-import {handleManagedStorageHttp} from "./managed-home-provisioning/storage-http.js";
-import { handleManagedMachineApi } from "./managed-machine-api.js";
 import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import fs from "node:fs/promises";
 import http, { type IncomingMessage, type ServerResponse } from "node:http";
@@ -41,11 +39,6 @@ import { HomeControlSessions } from "./home-control-sessions.js";
 import { CanonicalTerminalRelay } from "./private-access/terminal-relay.js";
 import { PrivatePreviewRoutes } from "./private-access/preview-routes.js";
 import { ProjectFileRoutes } from "./project-files/routes.js";
-import { createManagedHomeRegistry, type ManagedHomeWorker } from "./managed-home-provisioning/index.js";
-import { readManagedHomeStartupConfig } from "./managed-home-provisioning/startup-config.js";
-import { originalTime as originalManagedPolicyReadbackTime } from "./managed-home-provisioning/fly.js";
-import { handleManagedHomeProvisioningHttp } from "./managed-home-provisioning/http.js";
-import { ManagedHomeRegistrationWire } from "./managed-home-provisioning/wire.js";
 
 type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
 
@@ -645,7 +638,6 @@ const server = http.createServer({ noDelay: true }, async (req, res) => {
   });
   try {
     const url = new URL(req.url || "/", baseURL);
-    if (await handleManagedStorageHttp(req,res,url,managedHomeRegistry)) return;
     if (url.pathname === "/api/rudder/fabric" || url.pathname.startsWith("/api/rudder/fabric/")) {
       if (!fabricHttp) {
         sendJson(res, 503, { format_version: 1, error: { code: "unavailable", message: "Fabric durable storage is not enabled" } });
@@ -802,9 +794,6 @@ const server = http.createServer({ noDelay: true }, async (req, res) => {
       handleAppSignOut(req, res);
       return;
     }
-    if (await handleManagedHomeProvisioningHttp(req, res, url, { registry: managedHomeRegistry,
-      authenticate: async (request) => ({ accountId: (await requireAccount(request)).accountId }),
-    })) return;
     if (url.pathname.startsWith("/api/app/")) {
       await handleAppApi(req, res, url);
       return;
@@ -5186,31 +5175,6 @@ const homeRpcSessions = new HomeControlSessions<WebSocket, Json>({
   isOpen: (socket) => isOpen(socket),
   send: (socket, data) => sendSocket(socket, data),
 });
-// No private operator config means inactive. Configuring a registry does not
-// migrate or activate its independently qualified/frozen PG authority.
-const managedHomeStartupConfig = readManagedHomeStartupConfig(
-  process.env.RUDDER_MANAGED_HOME_CONFIG,
-  { flyToken: flyApiToken, storage: fabricS3 && fabricSpoolReady && process.env.RUDDER_FABRIC_DURABLE_STORE === "1"
-    ? new S3FabricObjectStorage({ client: fabricS3, bucket: fabricBucket, timeoutMs: 60_000, maxConcurrency: 4 }) : null },
-);
-// Optional explicit batch policy only. Keep the actual adapter in module custody
-// BEFORE any AWS/credential read; cached JSON/readback never enables this class.
-let managedImmutableBatchStorage: S3FabricObjectStorage | undefined;
-if (managedHomeStartupConfig.mode === "postgres"
-  && managedHomeStartupConfig.policy.imagePreseed?.batchTransport === "batch-v1") {
-  if (process.platform !== "linux" || !managedHomeStartupConfig.freshStorage || !fabricBucket || !fabricRole)
-    throw new Error("Managed immutable batch storage is unconfigured");
-  const originalQualification = originalManagedPolicyReadbackTime(30_000);
-  managedImmutableBatchStorage = S3FabricObjectStorage.fromWebIdentityForImmutableBatches({
-    bucket: fabricBucket, region: awsRegion, roleArn: fabricRole,
-    webIdentityTokenFile: process.env.AWS_WEB_IDENTITY_TOKEN_FILE || "/.fly/oidc_token",
-    timeoutMs: 30_000, maxConcurrency: 4,
-  });
-  managedHomeStartupConfig.freshStorage.storage = managedImmutableBatchStorage;
-  await managedImmutableBatchStorage.qualifyImmutableBatchRetentionRetaining(originalQualification);
-}
-const managedHomeRegistry = createManagedHomeRegistry(managedHomeStartupConfig);
-const managedHomeRegistrationWire = new ManagedHomeRegistrationWire(managedHomeRegistry);
 const homeStarts = new Map<string, Promise<Workspace>>();
 
 const listHomeRepoRows = database.prepare(
@@ -5874,16 +5838,6 @@ async function openRepoOnHome(accountId: string, body: Json): Promise<JsonRecord
 }
 
 function handleHomeControlUpgrade(req: IncomingMessage, socket: Duplex, head: Buffer, homeId: string): void {
-  if (homeId.startsWith("mh-")) {
-    // Managed PG homes never fall through to legacy SQLite bearer authentication.
-    void (async () => {
-      const authorization = req.headers.authorization;
-      if (typeof authorization !== "string" || !authorization.startsWith("Bearer ")) { destroyUpgrade(socket, 401); return; }
-      const worker = await managedHomeRegistry.authenticateManagedHomeWorker(homeId, authorization.slice(7));
-      wss.handleUpgrade(req, socket, head, (ws) => attachHomeControl(homeId, ws, worker));
-    })().catch(() => destroyUpgrade(socket, 503));
-    return;
-  }
   const row = findWorkspaceById.get(homeId) as Record<string, unknown> | undefined;
   if (!row || optionalString(row.source_kind) !== "home") {
     destroyUpgrade(socket, 404);
@@ -5902,11 +5856,8 @@ function handleHomeControlUpgrade(req: IncomingMessage, socket: Duplex, head: Bu
   wss.handleUpgrade(req, socket, head, (ws) => attachHomeControl(homeId, ws));
 }
 
-function attachHomeControl(homeId: string, ws: WebSocket, managedWorker?: ManagedHomeWorker): void {
-  if (managedWorker) managedHomeRegistry.bindAuthenticatedManagedHomeSocket(ws, managedWorker);
+function attachHomeControl(homeId: string, ws: WebSocket): void {
   let session: ReturnType<typeof homeRpcSessions.attach> | undefined;
-  // A managed bearer socket is provisional. Only the genuine original Root
-  // transport producer may replace a live managed RPC generation.
   const attach = () => {
     const previous = homeControls.get(homeId);
     session = homeRpcSessions.attach(homeId, ws);
@@ -5915,11 +5866,12 @@ function attachHomeControl(homeId: string, ws: WebSocket, managedWorker?: Manage
       try { previous.close(4000, "replaced"); } catch { /* actual close observed separately */ }
     }
   };
-  if (!managedWorker) attach();
+  attach();
   enableSocketLiveness(ws);
-  if (!managedWorker) { pushHomeRepos(homeId); flushPendingHomeDeletes(homeId); }
+  pushHomeRepos(homeId);
+  flushPendingHomeDeletes(homeId);
   ws.on("message", (data) => {
-    if (!managedWorker && (!session || !homeRpcSessions.isCurrent(session))) return;
+    if (!session || !homeRpcSessions.isCurrent(session)) return;
     let message: Json;
     try {
       message = JSON.parse(Buffer.isBuffer(data) ? data.toString("utf8") : String(data)) as Json;
@@ -5927,19 +5879,7 @@ function attachHomeControl(homeId: string, ws: WebSocket, managedWorker?: Manage
       return;
     }
     const type = stringField(message, "type");
-    if (managedWorker && (type === "runtime_image_qualification_ready_v1" || type === "engine_registration_begin_v1" || type === "engine_registration_proof_v1" || type === "engine_operation_v1" || type === "host_transport_begin_v1" || type === "host_transport_commit_v1" || type === "host_transport_confirm_v1" || type === "host_transport_reconcile_v1")) {
-      void managedHomeRegistrationWire.receive(managedWorker, message, (reply) => new Promise<void>((resolve, reject) => {
-        ws.send(JSON.stringify(reply), (error) => error ? reject(new Error("managed registration send unknown")) : resolve());
-      }), ws, async (owner) => {
-        await owner.assertCurrent();
-        if (owner.socket !== ws || ws.readyState !== WebSocket.OPEN) throw new Error("managed transport commit socket lost");
-        attach();
-      }).catch(() => undefined);
-      return;
-    }
     if (!session || !homeRpcSessions.isCurrent(session)) return;
-    // Managed workers cannot inject legacy state or request legacy operations.
-    if (managedWorker && type !== "rpc-result") return;
     if (type === "state") {
       const projects = (message as JsonRecord).projects;
       noteHomeBusy(homeId, Array.isArray(projects) ? (projects as unknown as HomeProject[]) : []);
@@ -5991,7 +5931,6 @@ function attachHomeControl(homeId: string, ws: WebSocket, managedWorker?: Manage
   });
   ws.on("close", () => {
     if (session) homeRpcSessions.close(session);
-    if (managedWorker) managedHomeRegistry.closeManagedHostSocket(ws);
     if (homeControls.get(homeId) === ws) {
       homeControls.delete(homeId);
     }
@@ -6435,20 +6374,6 @@ async function handleHomeApi(req: IncomingMessage, res: ServerResponse, url: URL
     return;
   }
   const authContext = requireBearer(req);
-  // managedHomeRegistry is the exact operator-configured PG registry owned by
-  // the separate provisioning registration patch. Inactive mode returns503;
-  // no SQLite/legacy socket or manual row can substitute for its binding.
-  if (await handleManagedMachineApi(req, res, url, authContext.accountId, {
-    registry: managedHomeRegistry,
-    readJsonBody: (request, limit) => readJsonBody(request, limit),
-    sendJson: (response, status, body) => sendJson(response, status, body as Json),
-    currentHomeSocket: (homeId) => { const socket = homeControls.get(homeId); return isOpen(socket) ? socket : undefined; },
-    rpcOnExactSocket: async (homeId, actual, method, params, remainingMs) => {
-      const socket = homeControls.get(homeId);
-      if (socket !== actual || !isOpen(socket)) throw Object.assign(new Error("managed home socket changed; effect unknown"), { status: 503 });
-      return await homeRpcSessions.request(homeId, socket, method, params as JsonRecord, remainingMs);
-    },
-  })) return;
   if (req.method === "POST" && url.pathname === "/api/rudder/home/move") {
     const body = await readJsonBody(req, MAX_SNAPSHOT_BODY_BYTES);
     const move = startHomeMove(authContext.accountId, body);

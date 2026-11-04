@@ -94,7 +94,9 @@ create, read-only ones included.
   filter, `npm run check`). The full suite above runs once per release, not per
   commit, task or agent. Re-run a failing test alone before treating it as real.
 - **No prereleases until 4.0.0.** Do not cut alpha versions or deploy Cloud.
-  CI is for the release; do not watch, rerun or debug it during development.
+  CI is disabled except the tag-triggered Release workflow. Push `main` to
+  GitHub when it makes sense (a working milestone, end of day); no version
+  bump needed.
 - **No git archaeology.** Do not spend turns on history, rebases, bisects or
   branch bookkeeping unless the task is about history.
 - **No new status docs, receipts or evidence files.** Update
@@ -109,9 +111,9 @@ An explicit push/ship/publish/install/deploy request authorizes the documented
 workflow; preserve that authorization across turns. Ordinary edits alone do not
 authorize unrelated deployment. Never force-push.
 
-Product pushes to `origin/main` require a versioned npm release: run relevant
-checks, commit, `npm version` appropriately, then push main and the created tag.
-Tag CI publishes; do not manually `npm publish`. v4 prereleases use `next`;
+Until 4.0.0, pushing `main` needs no release. A release is: run the full
+checks, commit, `npm version`, then push main and the created tag. Tag CI
+publishes; do not manually `npm publish`. v4 prereleases use `next`;
 stable uses `latest`. Verify CI and actual registry availability. Docs-only
 pushes do not require a product version bump.
 

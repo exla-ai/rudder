@@ -1,93 +1,81 @@
 import { assertAliasCurrent, COMMAND_REGISTRY, commandCompletions, commandHelp } from "./registry.js";
 import { deterministicTaskRoute } from "../task-routing.js";
 
-type ParsedSurface = { command?: string; args: string[]; flags: { help?: boolean; json?: boolean; backend?: string; model?: string; workspace?: boolean } };
+type SurfaceFlags = {
+  help?: boolean; json?: boolean; backend?: string; model?: string; workspace?: boolean;
+  cloud?: boolean; continue?: boolean; delete?: boolean; version?: boolean;
+};
+type ParsedSurface = { command?: string; args: string[]; flags: SurfaceFlags };
+type Alias = (typeof COMMAND_REGISTRY.aliases)[number] & { backend?: string; cloud?: boolean; bare_only?: boolean };
 
-/** Normalize canonical families before existing dispatch. Never wrap its stdout,
- * errors or process exit codes. Required callbacks pass through byte for byte. */
-export function applyCommandSurface<T extends ParsedSurface>(input: T, now = new Date(), rawArgv?: readonly string[]): T {
+const PASSTHROUGH = new Set<string>([...COMMAND_REGISTRY.callbacks, ...COMMAND_REGISTRY.developer, "help", "completion", "version"]);
+const PUBLIC: Record<string, string> = { ls: "runs", attach: "attach", logs: "logs", login: "login", logout: "logout", cloud: "cloud", update: "update" };
+/** Old families: an unknown action there is a typo, never a task. */
+const OLD_FAMILIES = new Set(["agent", "change", "project", "auth"]);
+
+const stderr = (text: string) => { process.stderr.write(text); };
+
+/** Map the public CLI and old spellings onto the dispatch adapters in main.ts.
+ * Old spellings print one "use X instead" line and still run. Callbacks and
+ * developer commands pass through byte for byte. */
+export function applyCommandSurface<T extends ParsedSurface>(input: T, now = new Date(), rawArgv?: readonly string[], warn = stderr): T {
   const parsed = { ...input, args: [...input.args], flags: { ...input.flags } };
   const name = parsed.command;
-  if (!name && parsed.args.length && !parsed.flags.help && !("version" in parsed.flags && parsed.flags.version)) {
-    return applyCommandSurface({ ...parsed, command: "run" }, now, rawArgv);
+  if (!name) {
+    if (parsed.flags.continue && !parsed.flags.help && !parsed.flags.version) parsed.command = "handoff";
+    return parsed;
   }
-  if (!name || name.startsWith("__") || COMMAND_REGISTRY.callbacks.includes(name)
-      || ["help", "completion", "version"].includes(name) || parsed.flags.help) return parsed;
+  if (name.startsWith("__") || PASSTHROUGH.has(name) || parsed.flags.help) return parsed;
   const delimiter = rawArgv?.indexOf("--") ?? -1;
   const flagArgv = delimiter >= 0 ? rawArgv!.slice(0, delimiter) : rawArgv ?? [];
   for (const alias of COMMAND_REGISTRY.flag_aliases) if (flagArgv.includes(alias.name)) assertAliasCurrent(alias, now);
-  if (COMMAND_REGISTRY.retired.includes(name)) throw new Error(`${name} is retired; use rudder open`);
-  const family = COMMAND_REGISTRY.families.find((entry) => entry.name === name);
-  let operation;
-  if (family) {
-    const bareAlias = COMMAND_REGISTRY.aliases.find((entry) => entry.name === name && "bare_only" in entry && entry.bare_only);
-    if (bareAlias && parsed.args.length === 0) {
-      assertAliasCurrent(bareAlias, now); parsed.command = bareAlias.adapter ?? undefined; return parsed;
-    }
-    const candidates = COMMAND_REGISTRY.operations.filter((entry) => entry.cli[0] === name);
-    operation = candidates.find((entry) => entry.cli.length === 2 && entry.cli[1] === parsed.args[0]);
-    if (operation) parsed.args.shift();
-    else operation = candidates.find((entry) => entry.cli.length === 1);
-    if (!operation) throw new Error(`Choose a ${name} action: ${commandCompletions([name]).join(", ")}`);
-    if (name === "doctor" && parsed.args.length && operation.cli.length === 1) {
-      throw new Error(`Unknown doctor action: ${parsed.args[0]}`);
-    }
-    if (!operation.adapter) throw new Error(`${operation.id} requires a selected surface or authenticated engine tool; no task was started`);
+  if (COMMAND_REGISTRY.retired.includes(name)) throw new Error(`rudder ${name} was removed; run rudder --help`);
+
+  if (name in PUBLIC) { parsed.command = PUBLIC[name]; return parsed; }
+  if (name === "stop") { parsed.command = parsed.flags.delete ? "delete" : "stop"; return parsed; }
+  if (name === "doctor") {
+    const action = parsed.args[0];
+    if (!action) return parsed;
+    const operation = COMMAND_REGISTRY.operations.find((entry) => entry.cli[0] === "doctor" && entry.cli[1] === action);
+    if (!operation?.adapter) throw new Error(`Unknown doctor action: ${action}. Choose ${commandCompletions(["doctor"]).join(", ")}`);
+    parsed.args.shift();
     parsed.command = operation.adapter;
-  } else {
-    const alias = COMMAND_REGISTRY.aliases.find((entry) => entry.name === name);
-    if (alias) {
-      assertAliasCurrent(alias, now);
-      parsed.command = alias.adapter ?? undefined;
-      if ("backend" in alias && alias.backend) {
-        if (parsed.args.some((arg) => /^--(?:location|checkout)(?:=|$)/.test(arg))) throw new Error(`Use ${alias.replacement} to select an execution scope`);
-        if (parsed.flags.backend && parsed.flags.backend !== alias.backend) throw new Error("Conflicting backend selection");
-        parsed.flags.backend = alias.backend;
-        if (alias.backend === "acpx" && parsed.args[0] === "codex") parsed.args.shift();
-      }
-      // Compatibility starts retain their old checkout policy. New canonical
-      // starts and ordinary text choose the documented isolated default below.
-      return parsed;
+    return parsed;
+  }
+
+  const aliases = COMMAND_REGISTRY.aliases as Alias[];
+  const twoWord = parsed.args[0] ? aliases.find((entry) => entry.name === `${name} ${parsed.args[0]}`) : undefined;
+  const alias = twoWord ?? aliases.find((entry) => entry.name === name && (!entry.bare_only || parsed.args.length === 0));
+  if (alias) {
+    assertAliasCurrent(alias, now);
+    warn(`use ${alias.replacement} instead\n`);
+    if (twoWord) parsed.args.shift();
+    parsed.command = alias.adapter;
+    if (alias.backend) {
+      if (parsed.flags.backend && parsed.flags.backend !== alias.backend) throw new Error("Conflicting backend selection");
+      parsed.flags.backend = alias.backend;
+      if (alias.backend === "acpx" && parsed.args[0] === "codex") parsed.args.shift();
     }
+    if (alias.cloud) parsed.flags.cloud = true;
+    if (parsed.command === "dashboard" && parsed.args.length) parsed.command = "attach";
+    if (parsed.command !== "run") return parsed;
+  } else {
+    if (OLD_FAMILIES.has(name)) throw new Error(`Unknown command: rudder ${[name, ...parsed.args.slice(0, 1)].join(" ")}. Run rudder --help`);
     if (name.startsWith("/") || name.startsWith("-")) throw new Error(`Unknown Rudder command: ${name}`);
-    parsed.command = "run";
     parsed.args.unshift(name);
   }
-  if (parsed.command === "dashboard" && parsed.args.length) parsed.command = "attach";
-  if (parsed.command === "run") {
-    let location = "local";
-    let checkout = "isolated";
-    // These are surface flags, intentionally consumed before legacy dispatch.
-    const task: string[] = [];
-    const literalCount = delimiter >= 0 ? rawArgv!.length - delimiter - 1 : 0;
-    const flagEnd = parsed.args.length - literalCount;
-    for (let i = 0; i < parsed.args.length; i++) {
-      const arg = parsed.args[i]!;
-      if (i >= flagEnd) { task.push(arg); continue; }
-      if (arg === "--location" || arg === "--checkout") {
-        if (i + 1 >= flagEnd) throw new Error(`${arg} requires a value`);
-        const value = parsed.args[++i];
-        if (!value) throw new Error(`${arg} requires a value`);
-        if (arg === "--location") location = value;
-        else checkout = value;
-      } else if (arg.startsWith("--location=")) location = arg.slice(11);
-      else if (arg.startsWith("--checkout=")) checkout = arg.slice(11);
-      else task.push(arg);
-    }
-    if (!["local", "cloud"].includes(location) || !["isolated", "main"].includes(checkout)) throw new Error("Choose --location local|cloud and --checkout isolated|main");
-    if (checkout === "main") throw new Error("Main checkout execution requires the native task owner; choose that checkout in rudder open");
-    if (!task.join(" ").trim()) throw new Error('Missing task. Usage: rudder run "fix the tests"');
-    const route = deterministicTaskRoute(task.join(" "));
-    if (route.route !== "execute") throw new Error(`${route.reason}; use rudder open to preserve the native planning and approval owner`);
-    if (location === "cloud" && (parsed.flags.backend || parsed.flags.model)) {
-      throw new Error("Cloud task launch cannot preserve an explicit backend/model through this adapter; select them in rudder open");
-    }
-    parsed.flags.workspace = true;
-    // The sail dispatch is task-only. Bare cloud text also guesses project
-    // names, which would turn a one-word task into an attach operation.
-    parsed.command = location === "cloud" ? "sail" : "run";
-    parsed.args = task;
+
+  // rudder "task" [--cloud] [--backend X] [--continue]
+  if (parsed.flags.continue) { parsed.command = "handoff"; return parsed; }
+  const task = parsed.args.join(" ").trim();
+  if (!task) throw new Error('Missing task. Usage: rudder "fix the tests"');
+  const route = deterministicTaskRoute(task);
+  if (route.route !== "execute") throw new Error(`${route.reason}; run rudder and plan it in the dashboard`);
+  if (parsed.flags.cloud && (parsed.flags.backend || parsed.flags.model)) {
+    throw new Error("--cloud cannot keep --backend or --model yet; pick them in the dashboard");
   }
+  parsed.flags.workspace = true;
+  parsed.command = parsed.flags.cloud ? "sail" : "run";
   return parsed;
 }
 

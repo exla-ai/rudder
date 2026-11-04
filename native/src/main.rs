@@ -12864,16 +12864,6 @@ Address the objection directly. If you disagree, say why inside \
             "status",
             "stop",
             "logs",
-            "vm",
-            "byoc",
-            "byo-vm",
-            "bootstrap",
-            "runtime",
-            "setup",
-            "byoc",
-            "setup-byoc",
-            "setup-vm",
-            "setup-fly",
         ];
         let mut command = vec!["cloud".to_string()];
         if known.contains(&args[0]) {

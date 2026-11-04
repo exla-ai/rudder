@@ -18,21 +18,28 @@ export function assertAliasCurrent(alias: { name: string; expires: string; repla
 }
 
 export function commandHelp(family?: string): string {
-  if (family && !manifest.families.some((entry) => entry.name === family)) throw new Error(`Unknown command family: ${family}`);
-  const entries = family
-    ? manifest.operations.filter((entry) => entry.cli[0] === family)
-        .map((entry) => `  rudder ${entry.cli.join(" ")}${entry.adapter === null ? "  (selected surface or authenticated engine tool)" : ""}`)
-    : manifest.families.map((entry) => `  rudder ${entry.name.padEnd(9)} ${entry.summary}`);
-  return ["rudder", "", "Usage:", ...entries, "", "Run scope: --location local|cloud --checkout isolated|main --cwd <project>",
-    "New CLI tasks use isolated local checkouts. Main checkout execution requires its native owner.",
-    "Use run --backend claude|codex|opencode; describe discussion or plan-only intent in the task.",
-    "Use help <family>, help --json, or completion [family] to discover operations.",
-    "Machine callbacks and engine APIs keep their existing JSON and exit contracts.", ""].join("\n");
+  if (family && !manifest.families.some((entry) => entry.name === family)) throw new Error(`Unknown command: ${family}`);
+  const line = (usage: string, summary: string) => `  rudder ${usage.padEnd(24)} ${summary}`;
+  const families = family ? manifest.families.filter((entry) => entry.name === family) : manifest.families;
+  const subcommands = family
+    ? manifest.operations.filter((entry) => entry.cli[0] === family && entry.cli.length > 1).map((entry) => `  rudder ${entry.cli.join(" ")}`)
+    : [];
+  return [
+    "Usage:",
+    ...(family ? [] : [line("", "open the dashboard"), line('"task"', "start an agent")]),
+    ...families.map((entry) => line(entry.usage, entry.summary)),
+    ...subcommands,
+    ...(family ? [] : [line("--version", "print the version"), "",
+      "Task flags: --cloud runs it on your Cloud home, --backend claude|codex|opencode,",
+      "--continue hands this chat to the dashboard, --cwd <project> picks the project."]),
+    "",
+  ].join("\n");
 }
 
-/** Completion never advertises callbacks, retired names or compatibility aliases. */
+/** Completion never advertises callbacks, developer commands or old spellings. */
 export function commandCompletions(words: readonly string[] = []): string[] {
   if (words.length === 0) return manifest.families.map((entry) => entry.name);
+  if (!manifest.families.some((entry) => entry.name === words[0])) return [];
   return [...new Set(manifest.operations.filter((entry) => words.every((word, index) => entry.cli[index] === word))
     .map((entry) => entry.cli[words.length]).filter((word): word is string => Boolean(word)))];
 }

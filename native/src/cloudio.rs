@@ -69,7 +69,7 @@ pub(crate) fn read_cloud_summary() -> CloudSummary {
             data.as_ref()
                 .and_then(|data| data.get("defaultRuntime"))
                 .and_then(serde_json::Value::as_str)
-                .map(|value| if value == "byo-vm" { "byoc" } else { value }.to_string())
+                .map(str::to_string)
         });
     CloudSummary { connected, runtime }
 }
@@ -353,9 +353,8 @@ pub(crate) fn cloud_args_start_worker(args: &[&str]) -> bool {
     match args.first().copied() {
         None => true,
         Some(
-            "help" | "login" | "list" | "ls" | "status" | "runtime" | "setup" | "setup-byoc"
-            | "setup-vm" | "setup-fly" | "bootstrap" | "pause" | "resume" | "stop" | "logs"
-            | "onload" | "workspace" | "byoc" | "vm" | "byo-vm",
+            "help" | "login" | "logout" | "list" | "ls" | "status" | "pause" | "resume"
+            | "stop" | "logs" | "onload" | "workspace",
         ) => false,
         Some(_) => true,
     }

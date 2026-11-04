@@ -6553,44 +6553,6 @@ fn cloud_command_defaults_to_generated_cloud_worker() {
         app.cloud_command_args(vec!["visualization"]),
         vec!["cloud".to_string(), "visualization".to_string()]
     );
-    assert_eq!(
-        app.cloud_command_args(vec!["setup", "vm"]),
-        vec!["cloud".to_string(), "setup".to_string(), "vm".to_string()]
-    );
-    assert_eq!(
-        app.cloud_command_args(vec!["setup-byoc"]),
-        vec!["cloud".to_string(), "setup-byoc".to_string()]
-    );
-    assert_eq!(
-        app.cloud_command_args(vec!["setup-vm"]),
-        vec!["cloud".to_string(), "setup-vm".to_string()]
-    );
-    assert_eq!(
-        app.cloud_command_args(vec!["vm", "fix", "tests"]),
-        vec![
-            "cloud".to_string(),
-            "vm".to_string(),
-            "fix".to_string(),
-            "tests".to_string()
-        ]
-    );
-    assert_eq!(
-        app.cloud_command_args(vec!["byoc", "fix", "tests"]),
-        vec![
-            "cloud".to_string(),
-            "byoc".to_string(),
-            "fix".to_string(),
-            "tests".to_string()
-        ]
-    );
-    assert_eq!(
-        app.cloud_command_args(vec!["bootstrap", "sail_123"]),
-        vec![
-            "cloud".to_string(),
-            "bootstrap".to_string(),
-            "sail_123".to_string()
-        ]
-    );
 }
 
 #[test]

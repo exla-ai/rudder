@@ -262,6 +262,28 @@ export function isUnpublishedYet(npmOutput: string): boolean {
   return /\bETARGET\b/.test(npmOutput) || /\bnotarget\b/.test(npmOutput);
 }
 
+/** `rudder update`: install the latest published version now. */
+export async function runUpdate(): Promise<void> {
+  const info = await readPackageInfo();
+  if (!info) throw new Error("Could not read the installed Rudder version.");
+  const latest = await fetchLatest(AUTO_UPDATE_TIMEOUT_MS);
+  if (!latest) throw new Error("Could not reach the npm registry.");
+  if (compareSemver(info.version, latest) >= 0) {
+    await writeCache(latest);
+    console.log(`Rudder ${info.version} is up to date.`);
+    return;
+  }
+  console.log(`Updating ${info.version} -> ${latest}...`);
+  const installed = await installLatest(latest);
+  if (!installed.ok) {
+    throw new Error(isUnpublishedYet(installed.output)
+      ? `${latest} is not resolvable from the registry yet; try again in a minute.`
+      : `Update failed:\n${installed.output.trim()}`);
+  }
+  await writeCache(latest);
+  console.log(`Updated to ${latest}.`);
+}
+
 async function rerunCurrentCommand(argv: string[]): Promise<number> {
   const entry = process.argv[1];
   if (entry) {

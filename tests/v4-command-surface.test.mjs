@@ -35,109 +35,114 @@ test("one versioned registry covers every operation with shared contract vectors
   }
 });
 
-test("seven command families and five slash entries advertise canonical actions only", () => {
-  assert.equal(registry.families.length, 7);
+test("about ten public commands; help fits one screen and completion derives from the registry", () => {
+  assert.deepEqual(commandCompletions(), ["ls", "attach", "logs", "stop", "login", "logout", "cloud", "doctor", "update"]);
   assert.equal(registry.slash.length, 5);
-  assert.deepEqual(commandCompletions(), ["open", "run", "agent", "change", "project", "auth", "doctor"]);
-  for (const alias of registry.aliases) {
-    assert.equal(alias.expires, "2027-02-01");
-    assert.ok(alias.owner && alias.replacement);
-    if (!alias.bare_only) {
-      assert.ok(!commandCompletions().includes(alias.name), alias.name);
-      assert.ok(!commandHelp().split("\n").some((line) => line.startsWith(`  rudder ${alias.name} `)), alias.name);
-    }
+  const help = commandHelp();
+  const lines = help.trimEnd().split("\n");
+  assert.ok(lines.length <= 20, help);
+  assert.ok(lines.every((line) => line.length <= 80), help);
+  assert.ok(!/—/.test(help), "no em dashes");
+  assert.match(help, /rudder "task"/);
+  assert.match(help, /--cloud/);
+  assert.match(help, /--continue/);
+  assert.match(help, /rudder --version/);
+  for (const hidden of [...registry.developer, ...registry.callbacks, "merge", "improve", "byoc", "run", "watch", "agent"]) {
+    assert.ok(!commandCompletions().includes(hidden), hidden);
+    assert.ok(!lines.some((line) => line.startsWith(`  rudder ${hidden} `)), hidden);
   }
-  assert.ok(commandCompletions(["agent"]).includes("resume"));
-  assert.ok(commandCompletions(["change"]).includes("review"));
-  assert.ok(!commandCompletions().includes("engine"));
-  assert.match(commandHelp("agent"), /agent send/);
+  assert.deepEqual(commandCompletions(["doctor"]), ["setup", "mouse", "feedback", "context"]);
+  assert.deepEqual(commandCompletions(["stop"]), ["--delete"]);
+  assert.deepEqual(commandCompletions(["agent"]), []);
 });
 
-test("canonical inspect/control/view/settings/auth adapters retain existing args and flags", () => {
-  for (const [family, action, adapter] of [
-    ["agent", "list", "runs"], ["agent", "status", "status"], ["agent", "logs", "logs"],
-    ["agent", "watch", "watch"], ["agent", "stop", "stop"], ["agent", "attach", "attach"],
-    ["agent", "continue", "handoff"], ["agent", "delete", "delete"], ["agent", "report", "report"],
-    ["change", "integrate", "merge"], ["change", "sync", "sync"], ["change", "undo", "undo"],
-    ["project", "cloud", "cloud"], ["project", "settings", "telemetry"], ["project", "board", "board"],
-    ["auth", "login", "login"], ["doctor", "setup", "onboard"], ["doctor", "context", "context"],
-  ]) {
-    const flags = { json: true, follow: true, force: true, allowDirty: true, format: "json", nonInteractive: true, cwd: "/selected/project" };
-    const value = resolve(family, [action, "target", "--existing-option"], flags);
-    assert.equal(value.command, adapter);
+test("public commands map to existing adapters and keep args and flags", () => {
+  for (const [command, adapter] of [["ls", "runs"], ["attach", "attach"], ["logs", "logs"], ["stop", "stop"],
+    ["login", "login"], ["logout", "logout"], ["cloud", "cloud"], ["update", "update"]]) {
+    const flags = { json: true, cwd: "/selected/project" };
+    const value = resolve(command, ["target", "--existing-option"], flags);
+    assert.equal(value.command, adapter, command);
     assert.deepEqual(value.args, ["target", "--existing-option"]);
     assert.deepEqual(value.flags, flags);
   }
-  assert.equal(resolve("open").command, "dashboard");
-  assert.deepEqual(resolve("open", ["agent-1"]), parsed("attach", ["agent-1"]));
+  assert.equal(resolve("stop", ["a1"], { delete: true }).command, "delete");
+  assert.equal(resolve("cloud", ["move"]).command, "cloud");
+  assert.deepEqual(resolve("cloud", ["move"]).args, ["move"]);
   assert.equal(resolve("doctor").command, "doctor");
-  assert.equal(resolve("auth").command, "login");
+  for (const [action, adapter] of [["setup", "onboard"], ["mouse", "mouse-test"], ["feedback", "feedback"], ["context", "context"]]) {
+    assert.deepEqual(resolve("doctor", [action, "x"]), parsed(adapter, ["x"]));
+  }
+  assert.throws(() => resolve("doctor", ["nope"]), /Unknown doctor action/);
+  assert.deepEqual(applyCommandSurface(parsed(undefined, [], { continue: true }), now), parsed("handoff", [], { continue: true }));
+  assert.deepEqual(applyCommandSurface(parsed(undefined, []), now), parsed(undefined, []));
 });
 
-test("canonical task input chooses an explicit isolated local checkout and retains project flags", () => {
-  const flags = { json: true, cwd: "/project", backend: "codex", model: "chosen", detach: true };
-  assert.deepEqual(resolve("run", ["fix the typo"], flags), parsed("run", ["fix the typo"], { ...flags, workspace: true }));
+test("task input starts an isolated agent, locally or with --cloud", () => {
+  const flags = { json: true, backend: "codex", model: "chosen", detach: true };
+  assert.deepEqual(resolve("fix the typo", [], flags), parsed("run", ["fix the typo"], { ...flags, workspace: true }));
   assert.deepEqual(resolve("fix", ["the", "typo"]), parsed("run", ["fix", "the", "typo"], { workspace: true }));
-  assert.deepEqual(resolve("run", ["--location", "local", "--checkout=isolated", "fix it"]), parsed("run", ["fix it"], { workspace: true }));
-  assert.throws(() => resolve("run", ["--checkout", "main", "fix it"]), /native task owner/);
-  assert.throws(() => resolve("run", ["--location", "any", "fix it"]), /Choose --location/);
-  assert.throws(() => resolve("run", ["--location"]), /requires a value/);
-});
-
-test("Cloud task launch cannot guess a project attachment or discard selected backend", () => {
-  const value = resolve("run", ["--location", "cloud", "fix"]);
-  assert.equal(value.command, "sail", "task-only dispatch avoids the cloud project-name heuristic");
-  assert.deepEqual(value.args, ["fix"]);
-  assert.equal(value.flags.workspace, true);
-  assert.throws(() => resolve("run", ["--location=cloud", "fix"], { backend: "codex" }), /cannot preserve/);
-  assert.throws(() => resolve("run", ["--location=cloud", "fix"], { model: "selected" }), /cannot preserve/);
-});
-
-test("a literal task after -- cannot become location or checkout options", () => {
-  const value = applyCommandSurface(parsed("run", ["--location", "cloud", "fix"]), now, ["run", "--", "--location", "cloud", "fix"]);
-  assert.equal(value.command, "run");
-  assert.deepEqual(value.args, ["--location", "cloud", "fix"]);
-  assert.deepEqual(applyCommandSurface(parsed(undefined, ["fix the typo"]), now, ["--", "fix the typo"]), parsed("run", ["fix the typo"], { workspace: true }));
-});
-
-test("read-only and decomposed tasks cannot enter a direct implementation adapter", () => {
+  assert.deepEqual(resolve("fix it", [], { cloud: true }), parsed("sail", ["fix it"], { cloud: true, workspace: true }));
+  assert.throws(() => resolve("fix", [], { cloud: true, backend: "codex" }), /cannot keep/);
+  assert.deepEqual(resolve("keep going", [], { continue: true }), parsed("handoff", ["keep going"], { continue: true }));
   for (const task of ["plan only: implement the cache", "just discuss the change", "implement this in parallel"]) {
-    assert.throws(() => resolve("run", [task]), /native planning and approval owner/);
-    assert.throws(() => resolve("run", ["--location=cloud", task]), /native planning and approval owner/);
+    assert.throws(() => resolve(task), /plan it in the dashboard/);
   }
 });
 
-test("backend start aliases migrate physically to run while retaining compatibility checkout policy", () => {
-  for (const backend of ["claude", "codex", "acpx"]) {
-    assert.deepEqual(resolve(backend, ["fix it"], { json: true }), parsed("run", ["fix it"], { json: true, backend }));
+test("old spellings print one line and run the new behavior", () => {
+  const cases = [
+    ["run", ["fix it"], "run", ["fix it"], 'rudder "task"'],
+    ["claude", ["fix it"], "run", ["fix it"], "--backend claude"],
+    ["codex", ["fix it"], "run", ["fix it"], "--backend codex"],
+    ["sail", ["fix it"], "sail", ["fix it"], "--cloud"],
+    ["watch", ["a1"], "attach", ["a1"], "rudder attach"],
+    ["status", [], "runs", [], "rudder ls"],
+    ["runs", [], "runs", [], "rudder ls"],
+    ["report", [], "runs", [], "rudder ls"],
+    ["handoff", ["next"], "handoff", ["next"], "--continue"],
+    ["onboard", [], "onboard", [], "doctor setup"],
+    ["mouse-test", [], "mouse-test", [], "doctor mouse"],
+    ["dashboard", [], "dashboard", [], "use rudder instead"],
+    ["open", ["a1"], "attach", ["a1"], "use rudder instead"],
+    ["agent", ["list"], "runs", [], "rudder ls"],
+    ["agent", ["stop", "a1"], "stop", ["a1"], "rudder stop"],
+    ["auth", [], "login", [], "rudder login"],
+  ];
+  for (const [command, args, adapter, rest, message] of cases) {
+    let out = "";
+    const value = applyCommandSurface(parsed(command, args), now, undefined, (text) => { out += text; });
+    assert.equal(value.command, adapter, command);
+    assert.deepEqual(value.args, rest, command);
+    assert.equal(out.split("\n").length, 2, command);
+    assert.ok(out.startsWith("use ") && out.includes(message) && out.endsWith(" instead\n"), `${command}: ${out}`);
   }
-  assert.deepEqual(resolve("acpx", ["codex", "fix it"]).args, ["fix it"]);
+  assert.equal(resolve("codex", ["fix"]).flags.backend, "codex");
   assert.throws(() => resolve("codex", ["fix"], { backend: "claude" }), /Conflicting backend/);
+  assert.throws(() => resolve("agent", ["send"]), /Unknown command/);
+  assert.throws(() => resolve("change", ["review"]), /Unknown command/);
 });
 
-test("every compatibility alias has an enforced exclusive UTC deadline", () => {
+test("every old spelling has an enforced exclusive UTC deadline", () => {
   for (const alias of registry.aliases) {
-    const args = alias.bare_only ? [] : ["fix it"];
-    assert.throws(() => applyCommandSurface(parsed(alias.name, args), expired), /expired on 2027-02-01/, alias.name);
-    assert.doesNotThrow(() => applyCommandSurface(parsed(alias.name, args), new Date("2027-01-31T23:59:59.999Z")), alias.name);
+    const [command, ...first] = alias.name.split(" ");
+    const args = alias.bare_only ? [] : [...first, "fix it"];
+    const quiet = () => {};
+    assert.throws(() => applyCommandSurface(parsed(command, args), expired, undefined, quiet), /expired on 2027-02-01/, alias.name);
+    assert.doesNotThrow(() => applyCommandSurface(parsed(command, args), new Date("2027-01-31T23:59:59.999Z"), undefined, quiet), alias.name);
   }
-  assert.throws(() => applyCommandSurface(parsed("run", ["fix"], {workspace:true}), expired, ["run", "--worktree", "fix"]), /--worktree expired/);
-  assert.doesNotThrow(() => applyCommandSurface(parsed("run", ["--worktree"]), expired, ["run", "--", "--worktree"]));
+  assert.throws(() => applyCommandSurface(parsed("fix", [], { workspace: true }), expired, ["fix", "--worktree"]), /--worktree expired/);
 });
 
-test("callbacks including version-skewed internal names preserve their exact arguments", () => {
-  for (const command of [...registry.callbacks, "__future_callback"]) {
+test("callbacks and developer commands pass through with their exact arguments", () => {
+  for (const command of [...registry.callbacks, ...registry.developer, "__future_callback"]) {
     const original = parsed(command, ["--unknown", "value", "{\"json\":true}"], { json: true, node: "n8", repo: "/chosen" });
     assert.deepEqual(applyCommandSurface(original, expired), original, command);
   }
 });
 
-test("retired names, unsupported scoped actions and unknown slash syntax never launch a task", () => {
-  for (const command of [...registry.retired, "/nudge", "/ask", "/run", "/unknown"]) assert.throws(() => resolve(command));
-  for (const [family, action] of [["agent", "send"], ["agent", "resume"], ["agent", "move"], ["change", "review"], ["change", "check"]]) {
-    assert.throws(() => resolve(family, [action]), /selected surface or authenticated engine tool/);
-  }
-  assert.throws(() => resolve("agent", ["not-an-action"]), /Choose a agent action/);
+test("removed names and unknown slash syntax never launch a task", () => {
+  for (const command of [...registry.retired, "/nudge", "/ask", "/run", "/unknown"]) assert.throws(() => resolve(command), undefined, command);
+  assert.throws(() => resolve("improve"), /was removed/);
 });
 
 test("backend composers own slash commands and project commands refuse unknown or expired aliases", () => {
@@ -219,34 +224,31 @@ test("real CLI help/completion and inert callbacks keep JSON framing and exit co
     for (const args of [["help", "--json"], ["--help", "--json"]]) {
       const result = cli(args); assert.equal(result.status, 0, result.stderr); assert.deepEqual(JSON.parse(result.stdout), registry);
     }
-    const completion = cli(["completion", "agent", "--json"]);
+    const help = cli(["--help"]);
+    assert.equal(help.status, 0, help.stderr); assert.equal(help.stdout, commandHelp());
+    const completion = cli(["completion", "doctor", "--json"]);
     assert.equal(completion.status, 0, completion.stderr);
-    assert.deepEqual(JSON.parse(completion.stdout), commandCompletions(["agent"]));
+    assert.deepEqual(JSON.parse(completion.stdout), commandCompletions(["doctor"]));
     const version = cli(["--version", "--help"]);
     assert.equal(version.status, 0, version.stderr); assert.match(version.stdout, /^4\./);
     const inert = cli(["__future_callback", "--unknown"]);
     assert.equal(inert.status, 0, inert.stderr); assert.equal(inert.stdout, "");
     const routed = cli(["__route-task"], JSON.stringify({ task: "plan only: build the cache" }));
     assert.equal(routed.status, 0, routed.stderr); assert.equal(JSON.parse(routed.stdout).route, "discuss");
-    const refused = cli(["agent", "resume", "stopped-agent", "--json"]);
-    assert.equal(refused.status, 1); assert.equal(refused.stdout, ""); assert.match(refused.stderr, /authenticated engine tool/);
-    for (const [legacy, canonical] of [["status", ["agent", "status"]], ["runs", ["agent", "list"]]]) {
+    const refused = cli(["agent", "send", "a1", "--json"]);
+    assert.equal(refused.status, 1); assert.equal(refused.stdout, ""); assert.match(refused.stderr, /Unknown command/);
+    const current = cli(["ls", "--json"]);
+    assert.equal(current.status, 0, current.stderr);
+    JSON.parse(current.stdout);
+    for (const legacy of ["status", "runs"]) {
       const old = cli([legacy, "--json"]);
-      const current = cli([...canonical, "--json"]);
-      assert.equal(current.status, 0, current.stderr);
-      JSON.parse(current.stdout);
       if (Date.now() < expired.getTime()) {
-        assert.equal(old.status, current.status, old.stderr);
-        assert.equal(old.stdout, current.stdout, "canonical adapter preserves the original JSON bytes");
+        assert.equal(old.status, 0, old.stderr);
+        assert.equal(old.stdout, current.stdout, "old spelling runs the new behavior");
+        assert.match(old.stderr, /use rudder ls instead/);
       } else { assert.equal(old.status, 1); assert.match(old.stderr, /expired on/); }
     }
-    const missingTarget = cli(["agent", "stop", "--json"]);
+    const missingTarget = cli(["stop", "--json"]);
     assert.equal(missingTarget.status, 1); assert.equal(missingTarget.stdout, ""); assert.match(missingTarget.stderr, /Missing run id/);
-    if (Date.now() < expired.getTime()) {
-      const oldMissingTarget = cli(["stop", "--json"]);
-      assert.equal(oldMissingTarget.status, missingTarget.status);
-      assert.equal(oldMissingTarget.stdout, missingTarget.stdout);
-      assert.equal(oldMissingTarget.stderr, missingTarget.stderr);
-    }
   } finally { rmSync(root, { recursive: true, force: true }); }
 });

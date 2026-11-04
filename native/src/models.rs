@@ -670,11 +670,6 @@ fn searchable_command_suggestions() -> Vec<Suggestion> {
             action: SuggestionAction::RunCommand("/cloud list".to_string()),
         },
         Suggestion {
-            label: "/cloud byoc".to_string(),
-            detail: "bring your own computer for cloud workers".to_string(),
-            action: SuggestionAction::RunCommand("/cloud byoc".to_string()),
-        },
-        Suggestion {
             label: "/feedback <what broke>".to_string(),
             detail: "send a report with version, model and recent notices — never your prompts or code"
                 .to_string(),

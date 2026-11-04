@@ -124,7 +124,6 @@ type CloudClient = {
   download(pathname: string): Promise<Buffer>;
 };
 
-type CloudRuntime = "fly" | "byo-vm";
 
 const DEFAULT_LOGIN_INTERVAL_MS = 2000;
 const DEFAULT_LOGIN_TIMEOUT_MS = 5 * 60 * 1000;
@@ -248,6 +247,9 @@ export async function runCloudCommand(command: string, args: string[], options: 
     case "login":
       await login(options, rest);
       return;
+    case "logout":
+      await logout(options);
+      return;
     case "home":
       await homeCommand(rest, options);
       return;
@@ -269,13 +271,6 @@ export async function runCloudCommand(command: string, args: string[], options: 
       return;
     case "sail":
       await launch(rest, options);
-      return;
-    case "byoc":
-      await setupByoc(rest, options);
-      return;
-    case "vm":
-    case "byo-vm":
-      await launch(rest, options, "task", "byo-vm");
       return;
     case "list":
     case "ls":
@@ -317,9 +312,6 @@ export async function runCloudCommand(command: string, args: string[], options: 
     case "pull":
       await pullCommand(rest, options);
       return;
-    case "bootstrap":
-      await bootstrap(rest, options);
-      return;
     case "pause":
       await mutateSail("pause", rest, options);
       return;
@@ -338,28 +330,6 @@ export async function runCloudCommand(command: string, args: string[], options: 
       return;
     case "setup-google":
       await setupOAuthProvider("google", rest, options);
-      return;
-    case "setup-byoc":
-      await setupByoc(rest, options);
-      return;
-    case "setup-vm":
-      await setupByoc(rest, options);
-      return;
-    case "setup-fly":
-      await configureDefaultRuntime("fly", options);
-      return;
-    case "setup":
-      if (rest[0] === "byoc" || rest[0] === "vm" || rest[0] === "byo-vm") {
-        await setupByoc(rest.slice(1), options);
-        return;
-      }
-      if (rest[0] === "fly") {
-        await configureDefaultRuntime("fly", options);
-        return;
-      }
-      throw new Error("Usage: rudder cloud setup byoc | rudder cloud setup fly");
-    case "runtime":
-      await runtime(rest, options);
       return;
     case "region":
       await configureRegion(rest, options);
@@ -617,14 +587,10 @@ async function saveCloudLogin(
   source: string,
 ): Promise<void> {
   const previous = await loadCloudAuth();
-  const previousRuntime = previous?.cloudUrl === client.baseUrl ? parseCloudRuntime(previous.defaultRuntime) : undefined;
-  const previousByocHost = previous?.cloudUrl === client.baseUrl ? previous.byocSshHost : undefined;
   await saveCloudAuth({
     version: 1,
     token,
     cloudUrl: client.baseUrl,
-    defaultRuntime: previousRuntime,
-    byocSshHost: previousByocHost,
     accountId: login.accountId,
     email: login.email,
     expiresAt: login.expiresAt ?? (login.expiresIn ? new Date(Date.now() + login.expiresIn * 1000).toISOString() : undefined),
@@ -663,15 +629,13 @@ async function launch(
   args: string[],
   options: CloudCommandOptions,
   mode: "name" | "task" = "name",
-  explicitRuntime?: CloudRuntime,
 ): Promise<void> {
   const raw = args.join(" ").trim();
   const repoRoot = findRepoRoot();
   const snapshot = await createSnapshot(repoRoot, options.homePaths ?? []);
   try {
     const client = await cloudClient({ requireToken: true });
-    const runtime = await selectedCloudRuntime(explicitRuntime);
-    const task = mode === "task" || runtime === "byo-vm" ? raw : "";
+    const task = mode === "task" ? raw : "";
     const launchName = process.env.RUDDER_CLOUD_LAUNCH_NAME?.trim();
     const name = launchName || (task ? cloudNameFromTask(task) : raw || randomCloudName());
     const body: Record<string, JsonValue> = {
@@ -684,9 +648,6 @@ async function launch(
         manifest: snapshot.manifest as unknown as JsonValue,
       },
     };
-    if (runtime !== "fly") {
-      body.runtime = runtime;
-    }
     if (task) {
       body.task = task;
     }
@@ -711,7 +672,6 @@ async function onload(args: string[], options: CloudCommandOptions): Promise<voi
   const snapshot = await createSnapshot(repoRoot, options.homePaths ?? [], { includeRudderState: true });
   try {
     const client = await cloudClient({ requireToken: true });
-    const runtime = await selectedCloudRuntime();
     const body: Record<string, JsonValue> = {
       repoName: path.basename(repoRoot),
       workspace: true,
@@ -723,9 +683,6 @@ async function onload(args: string[], options: CloudCommandOptions): Promise<voi
         manifest: snapshot.manifest as unknown as JsonValue,
       },
     };
-    if (runtime !== "fly") {
-      body.runtime = runtime;
-    }
     const result = await client.request<JsonValue>("/api/rudder/sail/onload", {
       method: "POST",
       body,
@@ -787,7 +744,6 @@ async function handoffRunToCloud(repoRoot: string, runId: string, options: Cloud
     rudderStateRunIds: [runId],
   });
   try {
-    const runtime = await selectedCloudRuntime();
     const body: Record<string, JsonValue> = {
       repoName,
       runId,
@@ -798,9 +754,6 @@ async function handoffRunToCloud(repoRoot: string, runId: string, options: Cloud
         manifest: snapshot.manifest as unknown as JsonValue,
       },
     };
-    if (runtime !== "fly") {
-      body.runtime = runtime;
-    }
     const result = await client.request<JsonValue>("/api/rudder/sail/onload", {
       method: "POST",
       body,
@@ -872,7 +825,6 @@ async function listSails(options: CloudCommandOptions): Promise<void> {
 async function status(options: CloudCommandOptions): Promise<void> {
   const client = await cloudClient({ requireToken: true });
   const state = await loadCloudAuth();
-  const runtime = await selectedCloudRuntime();
   const sails = await client.request<JsonValue>("/api/rudder/sail", { method: "GET" });
   const sailRows = Array.isArray(sails)
     ? sails
@@ -883,7 +835,6 @@ async function status(options: CloudCommandOptions): Promise<void> {
   const result: Record<string, JsonValue> = {
     ok: true,
     cloudUrl: client.baseUrl,
-    runtime,
     sails: sailCount,
   };
   if (state?.cloudUrl === client.baseUrl) {
@@ -893,34 +844,15 @@ async function status(options: CloudCommandOptions): Promise<void> {
     if (state.accountId) {
       result.accountId = state.accountId;
     }
-    if (state.byocSshHost) {
-      result.byocSshHost = state.byocSshHost;
-    }
   }
   if (options.json) {
     printJson(result);
     return;
   }
   console.log(`Logged in to ${client.baseUrl}${state?.email ? ` as ${state.email}` : ""}.`);
-  console.log(`Runtime: ${runtime}`);
-  if (state?.byocSshHost) {
-    console.log(`BYOC SSH host: ${state.byocSshHost}`);
-  }
   console.log(`Cloud workers: ${sailCount}`);
 }
 
-async function bootstrap(args: string[], options: CloudCommandOptions): Promise<void> {
-  const sailId = args[0];
-  if (!sailId) {
-    throw new Error("Missing sail id. Usage: rudder cloud bootstrap <id>");
-  }
-  const client = await cloudClient({ requireToken: true });
-  const result = await client.request<JsonValue>(`/api/rudder/sail/${encodeURIComponent(sailId)}/bootstrap`, {
-    method: "POST",
-    body: {},
-  });
-  await printResult(result, options);
-}
 
 async function mutateSail(action: "onload" | "pause" | "resume" | "stop", args: string[], options: CloudCommandOptions): Promise<void> {
   const sailId = args[0];
@@ -1122,269 +1054,14 @@ async function setupOAuthProvider(
   await printResult(result, options);
 }
 
-async function setupByoc(args: string[], options: CloudCommandOptions): Promise<void> {
-  const sshConfigPath = path.join(os.homedir(), ".ssh", "config");
-  const configuredHosts = await listSshConfigHosts(sshConfigPath);
-  const host = (options.sshHost ?? args.join(" ").trim()) || await chooseByocHost(configuredHosts);
-  if (!host) {
-    throw new Error([
-      "Missing BYOC SSH host.",
-      "Add your workstation/server to ~/.ssh/config, then run:",
-      "",
-      "  rudder cloud byoc <ssh-host>",
-      "",
-      "Example ~/.ssh/config:",
-      "  Host rudder-workstation",
-      "    HostName 203.0.113.10",
-      "    User ubuntu",
-      "    IdentityFile ~/.ssh/id_ed25519",
-      "",
-      configuredHosts.length
-        ? `Detected SSH hosts: ${configuredHosts.slice(0, 12).join(", ")}`
-        : `No usable hosts found in ${shortenHome(sshConfigPath)}.`,
-    ].join("\n"));
-  }
 
-  const configMentionsHost = configuredHosts.includes(host) || await sshConfigMentions(sshConfigPath, host);
-  const diagnostics = await checkByocHost(host);
-  const client = await cloudClient({ requireToken: true });
-  const state = await loadCloudAuth();
-  if (!state || state.cloudUrl !== client.baseUrl) {
-    throw new Error("Not logged in to this Rudder Cloud control plane. Run `rudder login` first.");
-  }
-  await saveCloudAuth({
-    ...state,
-    defaultRuntime: state.defaultRuntime === "byo-vm" ? "fly" : state.defaultRuntime,
-    byocSshHost: host,
-    updatedAt: nowIso(),
-  });
 
-  if (options.json) {
-    const result: Record<string, JsonValue> = {
-      ok: true,
-      cloudUrl: client.baseUrl,
-      byocSshHost: host,
-    };
-    const defaultRuntime = state.defaultRuntime === "byo-vm" ? "fly" : state.defaultRuntime;
-    if (defaultRuntime) {
-      result.defaultRuntime = defaultRuntime;
-    }
-    printJson(result);
-    return;
-  }
 
-  console.log(`Rudder BYOC host set to ${host}.`);
-  console.log("Plain `rudder cloud` and dashboard `/cloud` continue to use Fly by default.");
-  console.log("Use `rudder cloud vm <task>` when you want to run a task on this BYOC host.");
 
-  if (!configMentionsHost) {
-    console.log(`\nNote: ${shortenHome(sshConfigPath)} does not appear to define Host ${host}.`);
-    console.log("Rudder can still use it if SSH resolves it, but a ~/.ssh/config entry is recommended:");
-    console.log(`  Host ${host}`);
-    console.log("    HostName <server-ip-or-dns>");
-    console.log("    User <user>");
-    console.log("    IdentityFile ~/.ssh/<private-key>");
-  }
-  if (diagnostics.ok) {
-    console.log(`SSH check passed for ${host}. Docker is available on the BYOC host.`);
-  } else {
-    console.log(`\nSSH check did not fully pass for ${host}: ${diagnostics.message}`);
-    console.log("Fix SSH/Docker before launching, or run the printed Docker command manually on that host.");
-  }
-}
 
-async function chooseByocHost(hosts: string[]): Promise<string> {
-  if (hosts.length === 0) {
-    return await promptText("SSH host from ~/.ssh/config");
-  }
-  return await promptSelect(
-    "Choose a BYOC SSH host from ~/.ssh/config",
-    hosts.slice(0, 24).map((host) => ({ value: host, label: host })),
-    hosts[0],
-  );
-}
 
-async function configureDefaultRuntime(runtime: CloudRuntime, options: CloudCommandOptions, byocSshHost?: string): Promise<void> {
-  const client = await cloudClient({ requireToken: true });
-  const state = await loadCloudAuth();
-  if (!state || state.cloudUrl !== client.baseUrl) {
-    throw new Error("Not logged in to this Rudder Cloud control plane. Run `rudder login` first.");
-  }
-  await saveCloudAuth({
-    ...state,
-    defaultRuntime: runtime,
-    byocSshHost: runtime === "byo-vm" ? byocSshHost ?? state.byocSshHost : undefined,
-    updatedAt: nowIso(),
-  });
-  const result: Record<string, JsonValue> = {
-    ok: true,
-    cloudUrl: client.baseUrl,
-    defaultRuntime: runtime,
-  };
-  const savedByocHost = byocSshHost ?? state.byocSshHost;
-  if (runtime === "byo-vm" && savedByocHost) {
-    result.byocSshHost = savedByocHost;
-  }
-  const envRuntime = envCloudRuntime();
-  if (envRuntime) {
-    result.envOverride = envRuntime;
-  }
-  if (options.json) {
-    printJson(result);
-    return;
-  }
-  console.log(`Rudder Cloud runtime set to ${runtime}.`);
-  if (runtime === "byo-vm") {
-    const host = byocSshHost ?? state.byocSshHost;
-    console.log("Future `rudder cloud <task>` and `/sail <task>` launches will prepare a BYOC worker instead of creating a Fly Machine.");
-    console.log(host
-      ? `Rudder will try to start the worker over SSH on ${host}.`
-      : "Run `rudder cloud byoc <ssh-host>` to let Rudder start workers over SSH.");
-  } else {
-    console.log("Future `rudder cloud <task>` and `/sail <task>` launches will create Fly Machines.");
-  }
-  if (envRuntime) {
-    console.log(`RUDDER_CLOUD_RUNTIME=${envRuntime} is set and will override this saved default.`);
-  }
-}
 
-async function runtime(args: string[], options: CloudCommandOptions): Promise<void> {
-  const next = args[0] ? parseCloudRuntime(args[0]) : undefined;
-  if (args[0] && !next) {
-    throw new Error("Runtime must be `fly`, `byoc`, or `byo-vm`.");
-  }
-  if (next) {
-    await configureDefaultRuntime(next, options);
-    return;
-  }
-  const client = await cloudClient({ requireToken: true });
-  const current = await selectedCloudRuntime();
-  const state = await loadCloudAuth();
-  const savedRuntime = parseCloudRuntime(state?.defaultRuntime);
-  const result: Record<string, JsonValue> = {
-    cloudUrl: client.baseUrl,
-    runtime: current,
-  };
-  const envRuntime = envCloudRuntime();
-  if (state?.cloudUrl === client.baseUrl && savedRuntime) {
-    result.savedDefaultRuntime = savedRuntime;
-  }
-  if (state?.cloudUrl === client.baseUrl && state.byocSshHost) {
-    result.byocSshHost = state.byocSshHost;
-  }
-  if (envRuntime) {
-    result.envOverride = envRuntime;
-  }
-  if (options.json) {
-    printJson(result);
-  } else {
-    console.log(`Rudder Cloud runtime: ${current}`);
-    if (envRuntime) {
-      console.log(`Set by RUDDER_CLOUD_RUNTIME=${envRuntime}.`);
-    } else if (state?.cloudUrl === client.baseUrl && savedRuntime) {
-      console.log("Set in local Rudder Cloud config.");
-    } else {
-      console.log("Using default Fly Machines runtime.");
-    }
-    if (state?.cloudUrl === client.baseUrl && state.byocSshHost) {
-      console.log(`BYOC SSH host: ${state.byocSshHost}`);
-    }
-  }
-}
 
-async function sshConfigMentions(configPath: string, host: string): Promise<boolean> {
-  const text = await fsp.readFile(configPath, "utf8").catch(() => "");
-  if (!text.trim()) {
-    return false;
-  }
-  const target = host.toLowerCase();
-  for (const line of text.split(/\r?\n/)) {
-    const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith("#")) {
-      continue;
-    }
-    const match = /^Host\s+(.+)$/i.exec(trimmed);
-    if (!match) {
-      continue;
-    }
-    const patterns = match[1].split(/\s+/).map((part) => part.toLowerCase());
-    if (patterns.includes(target)) {
-      return true;
-    }
-  }
-  return false;
-}
-
-async function listSshConfigHosts(configPath: string): Promise<string[]> {
-  const text = await fsp.readFile(configPath, "utf8").catch(() => "");
-  const hosts: string[] = [];
-  const seen = new Set<string>();
-  for (const line of text.split(/\r?\n/)) {
-    const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith("#")) {
-      continue;
-    }
-    const match = /^Host\s+(.+)$/i.exec(trimmed);
-    if (!match) {
-      continue;
-    }
-    for (const host of match[1].split(/\s+/)) {
-      if (!host || host.includes("*") || host.includes("?") || host.startsWith("!")) {
-        continue;
-      }
-      if (seen.has(host)) {
-        continue;
-      }
-      seen.add(host);
-      hosts.push(host);
-    }
-  }
-  return hosts;
-}
-
-async function checkByocHost(host: string): Promise<{ ok: boolean; message: string }> {
-  if (!commandExists("ssh")) {
-    return { ok: false, message: "ssh is not installed or not on PATH" };
-  }
-  const result = await runCommand("ssh", [
-    "-o",
-    "BatchMode=yes",
-    "-o",
-    "ConnectTimeout=8",
-    host,
-    "command -v docker >/dev/null && docker info >/dev/null 2>&1",
-  ], { allowFailure: true });
-  if (result.code === 0) {
-    return { ok: true, message: "ok" };
-  }
-  const detail = (result.stderr || result.stdout || `ssh exited ${result.code}`).trim();
-  return { ok: false, message: detail };
-}
-
-async function startByocWorkerOverSsh(host: string, bootstrapCommand: string): Promise<void> {
-  if (!commandExists("ssh")) {
-    throw new Error("ssh is not installed or not on PATH");
-  }
-  const remoteCommand = [
-    "mkdir -p ~/.rudder/byoc",
-    `nohup sh -lc ${shellQuote(nonInteractiveDockerCommand(bootstrapCommand))} > ~/.rudder/byoc/worker.log 2>&1 < /dev/null &`,
-  ].join(" && ");
-  await runCommand("ssh", [
-    "-o",
-    "BatchMode=yes",
-    "-o",
-    "ConnectTimeout=10",
-    host,
-    remoteCommand,
-  ]);
-}
-
-function nonInteractiveDockerCommand(command: string): string {
-  return command
-    .replace(/\bdocker run --rm -it\b/g, "docker run --rm")
-    .replace(/\bdocker run --rm -i -t\b/g, "docker run --rm")
-    .replace(/\bdocker run --rm -t -i\b/g, "docker run --rm");
-}
 
 async function cloudClient(options: { requireToken: boolean }): Promise<CloudClient> {
   const baseUrl = normalizeCloudUrl(process.env.RUDDER_CLOUD_URL);
@@ -1449,8 +1126,7 @@ function normalizeCloudUrl(raw: string | undefined): string {
   if (url.protocol !== "http:" && url.protocol !== "https:") {
     throw new Error("RUDDER_CLOUD_URL must be a valid http(s) URL.");
   }
-  // The control plane hands back a shell command (bootstrapCommand) that the client
-  // can auto-run over SSH, so a plain-HTTP control plane is a MITM-to-RCE risk.
+  // The token and snapshots travel to the control plane, so plain HTTP is a MITM risk.
   // Require https except for loopback dev or an explicit opt-in.
   const isLoopback = url.hostname === "127.0.0.1" || url.hostname === "localhost" || url.hostname === "::1";
   if (url.protocol === "http:" && !isLoopback && process.env.RUDDER_CLOUD_ALLOW_HTTP !== "1") {
@@ -1464,41 +1140,8 @@ function normalizeCloudUrl(raw: string | undefined): string {
   return url.toString().replace(/\/$/, "");
 }
 
-async function selectedCloudRuntime(explicit?: CloudRuntime): Promise<CloudRuntime> {
-  if (explicit) {
-    return explicit;
-  }
-  const envRuntime = envCloudRuntime();
-  if (envRuntime) {
-    return envRuntime;
-  }
-  const baseUrl = normalizeCloudUrl(process.env.RUDDER_CLOUD_URL);
-  const state = await loadCloudAuth();
-  const savedRuntime = parseCloudRuntime(state?.defaultRuntime);
-  return state?.cloudUrl === baseUrl && savedRuntime ? savedRuntime : "fly";
-}
 
-function parseCloudRuntime(raw: string | undefined): CloudRuntime | undefined {
-  const value = raw?.trim().toLowerCase();
-  if (!value) {
-    return undefined;
-  }
-  if (value === "fly" || value === "fly-machine" || value === "fly-machines") {
-    return "fly";
-  }
-  if (value === "byo" || value === "byoc" || value === "byo-vm" || value === "manual" || value === "self-hosted" || value === "vm") {
-    return "byo-vm";
-  }
-  return undefined;
-}
 
-function envCloudRuntime(): CloudRuntime | undefined {
-  const runtime = parseCloudRuntime(process.env.RUDDER_CLOUD_RUNTIME);
-  if (process.env.RUDDER_CLOUD_RUNTIME?.trim() && !runtime) {
-    throw new Error("RUDDER_CLOUD_RUNTIME must be `fly`, `byoc`, or `byo-vm`.");
-  }
-  return runtime;
-}
 
 async function pollLogin(
   client: CloudClient,
@@ -1517,6 +1160,16 @@ async function pollLogin(
 async function loadCloudAuth(): Promise<CloudAuthState | null> {
   const state = await readJson<CloudAuthState>(cloudAuthPath());
   return state?.version === 1 && typeof state.token === "string" ? state : null;
+}
+
+async function logout(options: CloudCommandOptions): Promise<void> {
+  const existed = (await loadCloudAuth()) !== null;
+  await fsp.rm(cloudAuthPath(), { force: true });
+  if (options.json) {
+    printJson({ ok: true, loggedOut: existed });
+    return;
+  }
+  console.log(existed ? "Logged out of Rudder Cloud." : "Not logged in to Rudder Cloud.");
 }
 
 async function saveCloudAuth(state: CloudAuthState): Promise<void> {
@@ -2071,41 +1724,6 @@ async function printResult(result: JsonValue, options: CloudCommandOptions): Pro
   }
   if (result && typeof result === "object" && !Array.isArray(result)) {
     const record = result as Record<string, JsonValue>;
-    if (typeof record.bootstrapCommand === "string") {
-      const id = typeof record.id === "string" ? record.id : "BYOC sail";
-      const status = typeof record.status === "string" ? record.status : undefined;
-      const state = await loadCloudAuth();
-      const host = options.sshHost ?? state?.byocSshHost;
-      console.log(`${id}${status ? ` (${status})` : ""} is ready for BYOC.`);
-      // bootstrapCommand is a shell command supplied by the control plane. Auto-running
-      // it over SSH is RCE-on-your-host if the control plane is compromised or MITM'd,
-      // so autostart is OPT-IN (RUDDER_BYOC_AUTOSTART=1) and the command is always
-      // printed first so the user can review exactly what would run.
-      console.log("BYOC bootstrap command (review before running):");
-      console.log(record.bootstrapCommand);
-      if (host && process.env.RUDDER_BYOC_AUTOSTART === "1") {
-        try {
-          console.log(`\nRUDDER_BYOC_AUTOSTART=1 set — running the above over SSH on ${host}...`);
-          await startByocWorkerOverSsh(host, record.bootstrapCommand);
-          console.log(`Started BYOC worker over SSH on ${host}.`);
-          console.log(`Remote log: ssh ${host} 'tail -f ~/.rudder/byoc/worker.log'`);
-        } catch (error) {
-          console.log(`Could not start BYOC worker over SSH on ${host}: ${error instanceof Error ? error.message : String(error)}`);
-          console.log("Run the command above manually on your workstation/server.");
-        }
-      } else {
-        console.log("\nRun the command above on your workstation/server.");
-        if (host) {
-          console.log("To auto-run it over SSH next time, set RUDDER_BYOC_AUTOSTART=1.");
-        } else {
-          console.log("Tip: run `rudder cloud byoc <ssh-host>` to target an SSH host.");
-        }
-      }
-      if (typeof record.updatedAt === "string") {
-        console.log(`\nIf the command expires, run: rudder cloud bootstrap ${id}`);
-      }
-      return;
-    }
     const sails = record.sails ?? record.items;
     if (Array.isArray(sails)) {
       printSailList(sails);
@@ -4038,9 +3656,6 @@ async function maybeAutoAttach(result: JsonValue, options: CloudCommandOptions):
     return;
   }
   const record = result as Record<string, JsonValue>;
-  if (typeof record.bootstrapCommand === "string") {
-    return;
-  }
   const sailId = extractSailId(record);
   if (!sailId) {
     return;
@@ -4088,8 +3703,6 @@ Usage:
   rudder cloud help
   rudder cloud [name or task]
   rudder cloud launch [--home-path <path>] ["task"]
-  rudder cloud byoc [ssh-host]
-  rudder cloud vm ["task"]
   rudder cloud list
   rudder cloud onload [runId]
       with a runId, hands that agent off to its own cloud machine and
@@ -4115,10 +3728,6 @@ Usage:
       manage the encrypted cloud secrets vault; \`sync\` imports your local credentials once
   rudder cloud region [<fly-region>|clear]
       override worker placement (default: next to the relay for lowest typing latency)
-  rudder cloud bootstrap <id>
-  rudder cloud runtime [fly|byoc]
-  rudder cloud setup-byoc <ssh-host>   compatibility alias
-  rudder cloud setup-fly
   rudder sail [name or task]
   rudder sail list
   rudder sail pause <id>
@@ -4128,7 +3737,6 @@ Usage:
 
 Environment:
   RUDDER_CLOUD_URL              Cloud control plane URL (defaults to ${DEFAULT_CLOUD_URL})
-  RUDDER_CLOUD_RUNTIME          fly, byoc, or byo-vm (overrides saved local default)
   RUDDER_CLOUD_HOME_PATHS       Extra comma-separated HOME paths to include in snapshots
   RUDDER_GITHUB_CLIENT_ID       GitHub App OAuth client ID for setup-github
   RUDDER_GITHUB_CLIENT_SECRET   GitHub App OAuth client secret for setup-github

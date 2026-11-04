@@ -30,7 +30,6 @@ import {
 import { graphPath, mirrorPlanIntoGraph, updateGraph } from "./graph.js";
 import { adoptMovedAgents } from "./move-home.js";
 import type { MirrorPayload } from "./graph.js";
-import { buildFanoutDag, gateDecision, planTask, scaffoldPlan } from "./planner.js";
 import { backfillLlmTaskSummaries, listRuns, loadConfig, popUndoEntry, projectStateDir, registerProject, runsDir } from "./state.js";
 import { discoverModelOptions } from "./models.js";
 import { resolveNativeBinaryPath } from "./native-binary.js";
@@ -88,6 +87,12 @@ type Parsed = {
     port?: number;
     open?: boolean;
     n?: number;
+    /** `rudder "task" --cloud`: start it on the Cloud home. */
+    cloud?: boolean;
+    /** `rudder --continue`: hand this chat to the dashboard. */
+    continue?: boolean;
+    /** `rudder stop <agent> --delete`. */
+    delete?: boolean;
     /** `rudder feedback --context <file>`: the dashboard's on-screen context. */
     contextFile?: string;
     /** `--no-issue` opts out of filing a GitHub issue for a feedback report. */
@@ -141,7 +146,7 @@ export async function main(): Promise<void> {
   }
   const parsed = applyCommandSurface(parseArgs(process.argv.slice(2)), new Date(), process.argv.slice(2));
   if (!parsed.flags.version && printCommandDiscovery(parsed)) return;
-  if (shouldAutoUpdateForCommand(parsed.command) && await autoUpdateAndRerunIfNeeded(process.argv.slice(2))) {
+  if (parsed.command !== "update" && shouldAutoUpdateForCommand(parsed.command) && await autoUpdateAndRerunIfNeeded(process.argv.slice(2))) {
     return;
   }
   if (parsed.flags.version || parsed.command === "version") {
@@ -324,8 +329,15 @@ export async function main(): Promise<void> {
     case "doctor":
       await runDoctor({ json: parsed.flags.json });
       return;
+    case "update": {
+      const { runUpdate } = await import("./version-check.js");
+      await runUpdate();
+      return;
+    }
+    case "logout":
+      await runCloudCommand("cloud", ["logout"], { json: parsed.flags.json });
+      return;
     case "login":
-    case "auth":
       await runCloudCommand("cloud", ["login", ...parsed.args], {
         json: parsed.flags.json,
         homePaths: parsed.flags.homePaths,
@@ -424,11 +436,6 @@ export async function main(): Promise<void> {
     case "gc":
       await runGc({ dryRun: Boolean(parsed.flags.dryRun) });
       return;
-    case "improve": {
-      const { runImprove } = await import("./improve/index.js");
-      await runImprove(parsed);
-      return;
-    }
     case "board":
     case "serve": {
       await runBoard(parsed);
@@ -457,24 +464,6 @@ export async function main(): Promise<void> {
     case "done": {
       // Worker end-of-task report (summary + interfaces + recommended follow-ups).
       await runDone(parsed);
-      return;
-    }
-    case "plan": {
-      await maybeOnboard();
-      const task = parsed.args.join(" ").trim();
-      if (!task) {
-        throw new Error('Missing task. Usage: rudder plan "split the parser work"');
-      }
-      await runPlan(task);
-      return;
-    }
-    case "fanout": {
-      await maybeOnboard();
-      const task = parsed.args.join(" ").trim();
-      if (!task) {
-        throw new Error('Missing task. Usage: rudder fanout "implement the cache" [--n 3]');
-      }
-      await runFanout(task, parsed.flags.n, parsed.flags.backend);
       return;
     }
     case "context": {
@@ -532,7 +521,7 @@ export function isInternalCommand(command: string | undefined): boolean {
 }
 
 // These commands need no jj installation. Completion only writes its evidence.
-const JJ_FREE_COMMANDS = new Set(["__event", "__route-task", "engine", "telemetry", "feedback", "login", "logout", "help", "done"]);
+const JJ_FREE_COMMANDS = new Set(["__event", "__route-task", "engine", "telemetry", "feedback", "login", "logout", "update", "help", "done"]);
 
 function shouldAutoUpdateForCommand(command: string | undefined): boolean {
   if (command?.startsWith("__")) {
@@ -584,6 +573,18 @@ function parseArgs(argv: string[]): Parsed {
     // and existing scripts keep working; help only documents `--workspace`.
     if (arg === "--workspace" || arg === "--worktree") {
       parsed.flags.workspace = true;
+      continue;
+    }
+    if (arg === "--cloud") {
+      parsed.flags.cloud = true;
+      continue;
+    }
+    if (arg === "--continue") {
+      parsed.flags.continue = true;
+      continue;
+    }
+    if (arg === "--delete") {
+      parsed.flags.delete = true;
       continue;
     }
     if (arg === "--queue") {
@@ -1329,52 +1330,7 @@ async function runDone(parsed: Parsed): Promise<void> {
   await appendCompletionNote(repoRoot, note, node || "worker");
 }
 
-async function runPlan(task: string): Promise<void> {
-  const repoRoot = findRepoRoot();
-  ensureJj();
-  await ensureColocated(repoRoot);
-  const branch = await currentBranch(repoRoot).catch(() => "");
 
-  const dag = await planTask(task, { root: repoRoot, branch });
-  const gate = gateDecision(dag);
-
-  if (gate.autoRun) {
-    console.log(`auto: ${gate.reason}`);
-  } else {
-    console.log(`gate: ${gate.reason}`);
-    console.log(`Plan: ${dag.nodes.length} node(s), ${dag.edges.length} edge(s)`);
-    for (const node of dag.nodes) {
-      const deps = node.deps.length
-        ? ` deps=[${node.deps.map((dep) => `${dep.on}:${dep.type}`).join(", ")}]`
-        : "";
-      console.log(`  - ${node.id} ${node.title}${deps}`);
-    }
-  }
-
-  await scaffoldPlan(repoRoot, dag);
-  console.log(`graph: ${graphPath(repoRoot)}`);
-}
-
-async function runFanout(task: string, n: number | undefined, backend?: BackendId): Promise<void> {
-  const repoRoot = findRepoRoot();
-  ensureJj();
-  await ensureColocated(repoRoot);
-
-  const requested = typeof n === "number" && Number.isFinite(n) ? n : 3;
-  const dag = buildFanoutDag(task, requested, backend ? { backend } : {});
-  const variants = dag.nodes.filter((node) => node.id !== "judge");
-
-  console.log(`fanout: ${variants.length} variant(s) + 1 judge`);
-  for (const node of dag.nodes) {
-    const judgeOf = node.deps.filter((dep) => dep.type === "judge").map((dep) => dep.on);
-    const suffix = judgeOf.length ? ` judges=[${judgeOf.join(", ")}]` : "";
-    console.log(`  - ${node.id} ${node.title}${suffix}`);
-  }
-
-  await scaffoldPlan(repoRoot, dag);
-  console.log(`graph: ${graphPath(repoRoot)}`);
-  console.log("The judge launches once every variant reaches review; variants are not merged.");
-}
 
 async function runContextCommand(parsed: Parsed): Promise<void> {
   const sub = parsed.args[0] ?? "audit";

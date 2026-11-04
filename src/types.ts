@@ -103,21 +103,6 @@ export type RudderConfig = {
       maxTokens?: number;
     };
   };
-  /** Continual improvement loop (`rudder improve`); see docs/continual-improvement.md. */
-  improve?: {
-    enabled?: boolean;
-    autonomy?: "observe" | "propose" | "ship";
-    budgetUsd?: number;
-    maxFindings?: number;
-    repoPath?: string;
-    allowedRemote?: string;
-    excludeProjects?: string[];
-    minerModel?: string;
-    judgeModel?: string;
-    advisorModel?: string;
-    workerModel?: string;
-    agentTimeoutMs?: number;
-  };
 };
 
 export const DEFAULT_BOARD_PORT = 4774;
@@ -494,9 +479,7 @@ export type CloudAuthState = {
   version: 1;
   token: string;
   cloudUrl: string;
-  defaultRuntime?: "fly" | "byo-vm";
   defaultRegion?: string;
-  byocSshHost?: string;
   accountId?: string;
   email?: string;
   expiresAt?: string;

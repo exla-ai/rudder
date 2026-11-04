@@ -63,7 +63,6 @@ export type OperationArguments = {
   "diagnostic.mouse.v1": { argv: string[] };
   "diagnostic.feedback.v1": { argv: string[] };
   "diagnostic.context.v1": { argv: string[] };
-  "diagnostic.improve.v1": { argv: string[] };
   "project.settings.v1": { setting: "model" | "effort" | "speed" | "notifications" | "sound" | "color" | "telemetry"; value: string };
   "project.files.v1": { workspace_id?: string; path?: string };
 };
@@ -155,7 +154,7 @@ export function validateOperationRequest(input: unknown): OperationRequest {
     if (args.path !== undefined) text(args.path, 4096);
     requireCondition(scope.selection === "project", "Project files require project scope");
   } else {
-    const passthrough = ["project.cloud.v1", "project.board.v1", "project.serve.v1", "diagnostic.mouse.v1", "diagnostic.feedback.v1", "diagnostic.context.v1", "diagnostic.improve.v1"];
+    const passthrough = ["project.cloud.v1", "project.board.v1", "project.serve.v1", "diagnostic.mouse.v1", "diagnostic.feedback.v1", "diagnostic.context.v1"];
     const empty = ["surface.open.v1", "agent.list.v1", "agent.status.v1", "agent.logs.v1", "agent.watch.v1", "agent.attach.v1", "agent.report.v1", "agent.find.v1", "change.sync.v1", "project.restart.v1", "auth.login.v1", "diagnostic.check.v1", "diagnostic.setup.v1"];
     if (passthrough.includes(name)) {
       keys(args, ["argv"]);

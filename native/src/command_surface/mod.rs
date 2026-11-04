@@ -166,7 +166,7 @@ impl SurfaceRequest {
             name => {
                 match name {
                     "surface.open.v1" | "agent.list.v1" | "agent.status.v1" | "agent.logs.v1" | "agent.watch.v1" | "agent.attach.v1" | "agent.report.v1" | "agent.find.v1" | "change.sync.v1" | "project.restart.v1" | "auth.login.v1" | "diagnostic.check.v1" | "diagnostic.setup.v1" => fields(a, &[])?,
-                    "project.cloud.v1" | "project.board.v1" | "project.serve.v1" | "diagnostic.mouse.v1" | "diagnostic.feedback.v1" | "diagnostic.context.v1" | "diagnostic.improve.v1" => {
+                    "project.cloud.v1" | "project.board.v1" | "project.serve.v1" | "diagnostic.mouse.v1" | "diagnostic.feedback.v1" | "diagnostic.context.v1" => {
                         fields(a, &["argv"])?; let argv = a["argv"].as_array().ok_or_else(|| anyhow::anyhow!("Bounded adapter arguments required"))?;
                         ensure!(argv.len() <= 128, "Bounded adapter arguments required"); for arg in argv {text(arg,65536)?;}
                     }

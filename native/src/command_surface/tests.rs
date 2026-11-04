@@ -14,9 +14,9 @@ fn command_surface_shared_contract_vectors() {
 fn command_surface_help_completion_and_backend_namespace() {
     let r = registry();
     assert_eq!(r.format_version, 1);
-    assert_eq!(r.families.len(), 7);
+    assert_eq!(r.families.len(), 9);
     assert_eq!(r.slash.len(), 5);
-    assert_eq!(completions(&[]), ["open", "run", "agent", "change", "project", "auth", "doctor"]);
+    assert_eq!(completions(&[]), ["ls", "attach", "logs", "stop", "login", "logout", "cloud", "doctor", "update"]);
     for alias in &r.aliases { if alias.name != "auth" {assert!(!completions(&[]).contains(&alias.name));} assert_eq!(alias.expires, "2027-02-01"); assert!(!alias.owner.is_empty()); }
     for alias in &r.flag_aliases {assert_eq!(alias.expires, "2027-02-01"); assert!(!alias.owner.is_empty());}
     assert_eq!(classify_composer("/compact keep my context", true, "2027-02-01"), ComposerInput::Backend);

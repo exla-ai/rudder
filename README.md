@@ -108,14 +108,35 @@ You can also start a task directly from the shell:
 
 ```bash
 rudder "fix the failing tests"
-rudder claude "fix the auth redirect bug"
-rudder codex --model gpt-6.1-sol "refactor the parser"
+rudder "fix the auth redirect bug" --backend claude
+rudder "refactor the parser" --backend codex --model gpt-6.1-sol
+rudder "run the migration" --cloud
 ```
+
+The whole CLI:
+
+```
+rudder                          open the dashboard
+rudder "task"                   start an agent (--cloud, --backend X, --continue)
+rudder ls                       list agents
+rudder attach <agent>           watch or type into one agent
+rudder logs <agent>             saved output
+rudder stop <agent> [--delete]  stop an agent; --delete also removes it
+rudder login | logout           Rudder Cloud account
+rudder cloud [move]             Cloud home status; move this project there
+rudder doctor                   setup and diagnostics
+rudder update | --version
+```
+
+Merge, sync, cleanup and gc are automatic; undo is a dashboard action. Older
+spellings (`run`, `claude`, `codex`, `sail`, `watch`, `status`, `runs`,
+`handoff`, `onboard`, `mouse-test`) print the new form and still work for one
+release.
 
 ## Onboarding and auth
 
 ```bash
-rudder onboard
+rudder doctor setup
 ```
 
 Onboarding uses the auth you already have, so you usually do not need API keys:
@@ -442,7 +463,7 @@ Two directions, same result:
   showing what each was about, which model it was running, how long ago, and its
   session id. Pick one, optionally type the next step after it, and press Enter. It
   opens as an isolated worker that merges with `m` like any other.
-- **From inside the chat:** run `rudder handoff "<next step>"`. That queues the
+- **From inside the chat:** run `rudder --continue "<next step>"`. That queues the
   conversation you are in; the dashboard picks it up within a second (start it with
   `rudder` if it is not open). `--here` continues in the main checkout instead of an
   isolated workspace, `--list` shows the conversations Rudder can see, and
@@ -493,13 +514,7 @@ Choose the merge behavior in `~/.rudder/config.json`:
 - `"merge"` (default): `git merge --no-ff`.
 - `"rebase"`: rebase the workspace onto the latest base, then `git merge --ff-only`.
 
-Command-line equivalents:
-
-```bash
-rudder merge <runId>
-rudder sync <runId>
-rudder cleanup
-```
+Merging, syncing and cleanup happen automatically or from the dashboard.
 
 `rudder stop` records a durable cancellation request and terminates the native PTY process
 group. Cancellation is terminal: a resulting signal exit cannot be relabeled as a failure.
@@ -544,7 +559,7 @@ rudder cloud list            # list cloud workers
 rudder cloud logs <id>       # worker status
 rudder cloud onload [runId]  # hand one agent off to the cloud (or upload the workspace)
 rudder cloud workspace attach # migrate all live isolated agents into one cloud workspace
-rudder sail <name>           # short alias for starting a cloud worker
+rudder "task" --cloud       # start an agent on your Cloud home
 ```
 
 **Your home machine.** `rudder cloud` in a repo with a GitHub origin opens it on
@@ -645,15 +660,6 @@ diff. The explicit fleet-migration snapshot includes all inherited environment v
 agent auth/config, shell and cloud CLI configuration, and project `.env*` files (including
 nested package dotenv files) in each restored worker workspace.
 
-Cloud workers use Fly Machines by default. To use your own server over SSH (Docker over
-SSH; bring-your-own-compute can be stopped but not paused/resumed):
-
-```bash
-rudder cloud byoc <ssh-host>   # an entry from ~/.ssh/config, key auth + Docker
-rudder cloud vm "task"         # run on that host
-rudder cloud runtime [fly|byoc]
-```
-
 The CLI points at the hosted control plane `https://rudder-cloud-control.fly.dev`.
 Set `RUDDER_CLOUD_URL` to use your own deployment. Rudder Cloud login is separate
 from Claude Code and Codex login; provider auth stays in the official CLIs.
@@ -661,15 +667,11 @@ from Claude Code and Codex login; provider auth stays in the official CLIs.
 ## Run management
 
 ```bash
-rudder status
-rudder runs
-rudder watch <runId>
-rudder logs <runId> --follow
-rudder stop <runId>
-rudder delete <runId>
-rudder merge <runId>
-rudder sync <runId>
-rudder cleanup
+rudder ls
+rudder attach <agent>
+rudder logs <agent> --follow
+rudder stop <agent>
+rudder stop <agent> --delete
 ```
 
 ## Troubleshooting
@@ -681,46 +683,8 @@ rudder cleanup
   avoid reparsing unchanged planner JSON, throttle background PTY drains, and redraw
   only dirty frames. Upgrade and restart any dashboard launched by 2.12.8 or older.
 - Trackpad scrolling: confirm your terminal sends scroll events with
-  `rudder mouse-test parsed`. Set `RUDDER_WHEEL_SCROLL_ROWS=<n>` to change the
+  `rudder doctor mouse parsed`. Set `RUDDER_WHEEL_SCROLL_ROWS=<n>` to change the
   scroll step, or `RUDDER_MOUSE_DEBUG=1` to inspect routing.
-
-## Continual improvement loop
-
-Rudder improves itself from its own telemetry. Every run already leaves a
-record on disk (`.rudder/runs/`, event logs, verifier results, steer history,
-token usage). The improvement loop, `rudder improve`, is a scheduled local
-batch job (launchd on macOS, not a resident daemon) that:
-
-1. **Collects** recent session telemetry across your registered projects,
-   redacting secrets at the source.
-2. **Mines** it into ranked friction findings (failed runs, user redirects,
-   merge conflicts, verifier misses) using the advisor pattern: a Sonnet
-   executor consults a Fable 5 advisor mid-generation, so most tokens bill at
-   the executor rate.
-3. **Proposes** fixes with headless agents in isolated git worktrees of the
-   rudder repo, each briefed with a rich context pack (finding, evidence,
-   surface map, prior failed attempts, repo conventions).
-4. **Judges** each candidate with the repo's full test gates plus a
-   three-lens adversarial LLM panel that fails closed.
-5. **Prepares** survivors as pushed review branches by default. If you
-   explicitly opt into `ship` autonomy, Rudder instead rebases onto
-   `origin/main`, runs `npm version patch`, and pushes main + tag for the normal
-   tag-driven npm release. Later cycles verify whether the targeted metric
-   improved and record regressions for review.
-
-```bash
-rudder improve run --dry-run     # see what it would do, propose nothing
-rudder improve schedule install  # nightly cycle at 03:30 via launchd
-rudder improve status            # shipped versions, metrics trend, ledger
-```
-
-Everything stays on your machine. Estimated model/agent spend is bounded per
-cycle (`improve.budgetUsd`, default $5), and autonomy is configurable:
-`observe` only reports, `propose` (the default) pushes a review branch, and
-`ship` is an explicit opt-in to unattended releases. `RUDDER_IMPROVE=0`
-disables the loop. The full harness spec is in
-[`docs/continual-improvement.md`](./docs/continual-improvement.md);
-implementation details live in [`AGENTS.md`](./AGENTS.md) section 15.
 
 ## What Rudder derives rather than remembers
 

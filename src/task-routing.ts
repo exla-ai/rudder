@@ -12,6 +12,9 @@ export const MAX_ROUTING_TASK_BYTES = 64 * 1024;
 const MAX_ROUTING_INPUT_BYTES = 512 * 1024;
 const MAX_DECISION_RESPONSE_BYTES = 32 * 1024;
 const DECISION_TIMEOUT_MS = 900;
+export const ROUTING_POLICY_VERSION = 2;
+export const CLASSIFIER_VERSION = "decisions:gpt-6-luna:v1";
+const MAX_CLASSIFIER_INTENT_CHARS = 4096;
 
 // Keep these conservative rules aligned with native/src/task_routing.rs. They
 // choose a workflow, never authorize edits, shipping, or a larger task scope.
@@ -33,27 +36,28 @@ export function deterministicTaskRoute(task: string): TaskRoutingResult {
     ["", " anything", " code changes", " this", " it"].map((suffix) => prefix + suffix));
   scopeRestrictions.push(...["don't change", "do not change", "don't edit", "do not edit", "don't modify", "do not modify", "don't write", "do not write"].flatMap((prefix) =>
     ["anything", "any files", "code", "files", "the files", "any code", "the code"].map((scope) => `${prefix} ${scope}`)));
-  scopeRestrictions.push("no implementation", "no implementation work", "no code changes", "no file changes", "without implementing", "without implementing anything", "without implementing this", "without implementing it");
+  scopeRestrictions.push("read-only", "read only", "no edits", "no changes", "no implementation", "no implementation work", "no code changes", "no file changes", "without implementing", "without implementing anything", "without implementing this", "without implementing it");
   const wholeRequestRestriction = scopeRestrictions.some((phrase) => {
     let offset = text.indexOf(phrase);
     while (offset !== -1) {
       const before = text.slice(0, offset);
       const after = text.slice(offset + phrase.length);
-      if ((!before || /[^\p{L}\p{N}_]$/u.test(before))
+      if (!/(?:not |isn't )$/u.test(before) && (!before || /[^\p{L}\p{N}_]$/u.test(before))
         && /^(?:[.!?;,:]|$|\s+(?:yet|now|for now|at this stage)\b)/u.test(after)) return true;
       offset = text.indexOf(phrase, offset + 1);
     }
     return false;
   });
   const asksForImplementationAfterInspection = /\b(?:and|then|also) (?:please )?(?:implement|fix|build|add|update|change|ship|deploy)\b/u.test(text);
-  const readOnly = explicitReadOnly || wholeRequestRestriction
+  const readOnlyRequest = /^(?:please )?(?:read[- ]only\b|(?:keep|make) (?:this|it|the request|the task) read[- ]only\b)/u.test(text);
+  const readOnly = explicitReadOnly || readOnlyRequest || wholeRequestRestriction
     || /^(?:please )?(?:discuss|explain|compare|brainstorm|what|why|how|should|is|are|can we|could we|help me understand)\b/u.test(text)
-    || (/^(?:please )?(?:review|research|analyze|analyse|investigate)\b/u.test(text) && !asksForImplementationAfterInspection)
-    || /^(?:can|could|would) you (?:please )?(?:explain|compare|discuss|review|research|analyze|analyse|investigate|help me understand)\b/u.test(text) && !asksForImplementationAfterInspection
+    || (/^(?:please )?(?:review|research|analyze|analyse|investigate|inspect|audit)\b/u.test(text) && !asksForImplementationAfterInspection)
+    || /^(?:can|could|would) you (?:please )?(?:explain|compare|discuss|review|research|analyze|analyse|investigate|inspect|audit|help me understand)\b/u.test(text) && !asksForImplementationAfterInspection
     || /^(?:please )?(?:make|write|draft|create|outline|give me) (?:a |an |the )?(?:implementation |architecture |architectural )?plan\b/u.test(text)
     || /^(?:please )?plan\b/u.test(text);
   if (readOnly) {
-    return { route: "discuss", source: "deterministic", reason: "discussion or planning intent; no implementation workers" };
+    return { route: "discuss", source: "deterministic", reason: "discussion or planning intent; no implementation workers (routing v2)" };
   }
 
   const implementation = ["implement", "build", "create", "rewrite", "migrate", "refactor", "add", "fix", "ship"].some(has);
@@ -61,9 +65,9 @@ export function deterministicTaskRoute(task: string): TaskRoutingResult {
   const largeChange = ["rewrite", "migration"].some(has)
     && includesAny(["architecture", "architectural", "entire", "whole", "across", "system"]);
   if (implementation && (explicitParallel || largeChange)) {
-    return { route: "plan", source: "deterministic", reason: "multi-part implementation; plan requires approval before workers launch" };
+    return { route: "plan", source: "deterministic", reason: "multi-part implementation; plan requires approval before workers launch (routing v2)" };
   }
-  return { route: "execute", source: "deterministic", reason: "one isolated worker; no automatic expansion into a fleet" };
+  return { route: "execute", source: "deterministic", reason: "one isolated worker; no automatic expansion into a fleet (routing v2)" };
 }
 
 interface RoutingOptions {
@@ -77,9 +81,9 @@ export async function classifyTaskRoute(task: string, options: RoutingOptions = 
   validateTask(task);
   const fallback = deterministicTaskRoute(task);
   const env = options.env ?? process.env;
-  if (fallback.route === "discuss" || env.RUDDER_TASK_ROUTING !== "decisions" || !env.OPENAI_API_KEY?.trim()) {
-    return fallback;
-  }
+  if (fallback.route === "discuss" || env.RUDDER_TASK_ROUTING !== "decisions") return fallback;
+  const failed = (code: string): TaskRoutingResult => ({ ...fallback, reason: `Classifier fallback (${code}); ${fallback.reason}` });
+  if (!env.OPENAI_API_KEY?.trim()) return failed("no-api-key");
   const controller = new AbortController();
   const timeoutMs = Math.max(1, Math.min(options.timeoutMs ?? DECISION_TIMEOUT_MS, DECISION_TIMEOUT_MS));
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -96,7 +100,7 @@ export async function classifyTaskRoute(task: string, options: RoutingOptions = 
             model: "gpt-6-luna",
             // Only classifier evidence is redacted. The request's original task
             // remains unchanged for local routing and the eventual agent launch.
-            input: redactTaskSummarySecrets(task),
+            input: redactTaskSummarySecrets(task).slice(0, MAX_CLASSIFIER_INTENT_CHARS),
             questions: [{
               type: "choice",
               name: "task_route",
@@ -109,7 +113,7 @@ export async function classifyTaskRoute(task: string, options: RoutingOptions = 
             }],
           }),
         });
-        if (!response.ok || !response.body) throw new Error("routing unavailable");
+        if (!response.ok || !response.body) throw new Error(response.status === 429 ? "rate-limit" : "unavailable");
         const reader = response.body.getReader();
         const chunks: Uint8Array[] = [];
         let bytes = 0;
@@ -118,7 +122,7 @@ export async function classifyTaskRoute(task: string, options: RoutingOptions = 
             const part = await reader.read();
             if (part.done) break;
             bytes += part.value.byteLength;
-            if (bytes > MAX_DECISION_RESPONSE_BYTES) throw new Error("routing response too large");
+            if (bytes > MAX_DECISION_RESPONSE_BYTES) throw new Error("malformed-response");
             chunks.push(part.value);
           }
         } finally {
@@ -127,25 +131,28 @@ export async function classifyTaskRoute(task: string, options: RoutingOptions = 
         return JSON.parse(Buffer.concat(chunks).toString("utf8")) as unknown;
       })(),
       new Promise<never>((_, reject) => {
-        timer = setTimeout(() => { controller.abort(); reject(new Error("routing timed out")); }, timeoutMs);
+        timer = setTimeout(() => { controller.abort(); reject(new Error("deadline")); }, timeoutMs);
       }),
     ]);
-    if (!decision || typeof decision !== "object" || !("answers" in decision) || !Array.isArray(decision.answers) || decision.answers.length !== 1) return fallback;
+    if (!decision || typeof decision !== "object" || !("answers" in decision) || !Array.isArray(decision.answers) || decision.answers.length !== 1) return failed("malformed-response");
     const answer: unknown = decision.answers[0];
     if (!answer || typeof answer !== "object" || !("type" in answer) || answer.type !== "choice"
       || !("name" in answer) || answer.name !== "task_route" || !("choice" in answer)
       || !("confidence" in answer) || typeof answer.confidence !== "number" || !Number.isFinite(answer.confidence)
       // Provisional threshold, not a calibrated task-routing quality guarantee.
-      || answer.confidence < 0.8 || answer.confidence > 1) return fallback;
+      || answer.confidence < 0 || answer.confidence > 1) return failed("malformed-response");
+    if (answer.confidence < 0.8) return failed("low-confidence");
     const route = answer.choice;
-    if (route !== "discuss" && route !== "execute" && route !== "plan") return fallback;
+    if (route !== "discuss" && route !== "execute" && route !== "plan") return failed("malformed-response");
     return { route, source: "decisions", reason: route === "discuss"
-      ? "classified as discussion or planning; no implementation workers"
-      : route === "plan" ? "classified as multi-part implementation; approval required before workers launch"
-        : "classified as one isolated implementation worker" };
-  } catch {
-    // Do not expose service errors or credentials; failure must not lose a task.
-    return fallback;
+      ? "classified as discussion or planning; no implementation workers (routing v2; decisions:gpt-6-luna:v1)"
+      : route === "plan" ? "classified as multi-part implementation; approval required before workers launch (routing v2; decisions:gpt-6-luna:v1)"
+        : "classified as one isolated implementation worker (routing v2; decisions:gpt-6-luna:v1)" };
+  } catch (error) {
+    // Only fixed public codes escape the adapter, never transport error text.
+    const code = error instanceof Error && ["deadline", "rate-limit", "unavailable", "malformed-response"].includes(error.message)
+      ? error.message : error instanceof SyntaxError ? "malformed-response" : "unavailable";
+    return failed(code);
   } finally {
     if (timer) clearTimeout(timer);
     controller.abort();
@@ -177,7 +184,13 @@ export async function runTaskRoutingCommand(input: Readable = process.stdin, out
   }
   const request: unknown = JSON.parse(Buffer.concat(chunks).toString("utf8"));
   if (!request || typeof request !== "object" || Array.isArray(request)
-    || Object.keys(request).length !== 1 || !("task" in request)) throw new Error("task routing expects {task}");
+    || Object.keys(request).length !== 1) throw new Error("task routing expects {task} or {ingress}");
+  if ("ingress" in request) {
+    const { routeTaskIngress } = await import("./planning-ownership/ingress.js");
+    output.write(`${JSON.stringify(await routeTaskIngress(request.ingress as import("./planning-ownership/ingress.js").TaskIngress))}\n`);
+    return;
+  }
+  if (!("task" in request)) throw new Error("task routing expects {task}");
   validateTask(request.task);
   output.write(`${JSON.stringify(await classifyTaskRoute(request.task))}\n`);
 }

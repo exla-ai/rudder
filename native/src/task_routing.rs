@@ -1,5 +1,9 @@
 use super::*;
 
+/// The wire shape stays compatible with older CLI helpers. The reason carries
+/// policy/provider provenance so activity remains useful on mixed installations.
+pub(crate) const TASK_ROUTING_POLICY_VERSION: &str = "routing v2";
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum TaskRoute {
@@ -47,6 +51,24 @@ pub(crate) fn deterministic_task_route(task: &str) -> TaskRoutingDecision {
                 .strip_prefix(word)
                 .is_some_and(|rest| rest.starts_with(|ch: char| !ch.is_alphanumeric() && ch != '_'))
     };
+    // Mirrors TS /^(?:please )?(?:read[- ]only\b|(?:keep|make)
+    // (?:this|it|the request|the task) read[- ]only\b)/u. These restrictions
+    // introduce the request scope even when more prose follows immediately.
+    let starts_read_only = |candidate: &str| {
+        ["read-only", "read only"].iter().any(|prefix| {
+            candidate.strip_prefix(prefix).is_some_and(|tail| {
+                !tail.starts_with(|ch: char| ch.is_ascii_alphanumeric() || ch == '_')
+            })
+        })
+    };
+    let read_only_request = starts_read_only(leading)
+        || ["keep ", "make "].iter().any(|verb| {
+            leading.strip_prefix(verb).is_some_and(|rest| {
+                ["this ", "it ", "the request ", "the task "]
+                    .iter()
+                    .any(|scope| rest.strip_prefix(scope).is_some_and(starts_read_only))
+            })
+        });
     let explicit_read_only = includes_any(&[
         "just discuss",
         "let's discuss",
@@ -98,6 +120,10 @@ pub(crate) fn deterministic_task_route(task: &str) -> TaskRoutingDecision {
     }
     scope_restrictions.extend(
         [
+            "read-only",
+            "read only",
+            "no edits",
+            "no changes",
             "no implementation",
             "no implementation work",
             "no code changes",
@@ -113,6 +139,9 @@ pub(crate) fn deterministic_task_route(task: &str) -> TaskRoutingDecision {
         text.match_indices(phrase.as_str()).any(|(offset, _)| {
             let before = &text[..offset];
             let after = &text[offset + phrase.len()..];
+            if before.ends_with("not ") || before.ends_with("isn't ") {
+                return false;
+            }
             let boundary_before = before
                 .chars()
                 .last()
@@ -153,7 +182,15 @@ pub(crate) fn deterministic_task_route(task: &str) -> TaskRoutingDecision {
                     .any(|triple| triple == [*joiner, "please", *verb])
         })
     });
-    let inspection_words = ["review", "research", "analyze", "analyse", "investigate"];
+    let inspection_words = [
+        "review",
+        "research",
+        "analyze",
+        "analyse",
+        "investigate",
+        "inspect",
+        "audit",
+    ];
     let requested_inspection = ["can you ", "could you ", "would you "]
         .iter()
         .any(|prefix| {
@@ -168,6 +205,8 @@ pub(crate) fn deterministic_task_route(task: &str) -> TaskRoutingDecision {
                     "analyze",
                     "analyse",
                     "investigate",
+                    "inspect",
+                    "audit",
                     "help me understand",
                 ]
                 .iter()
@@ -179,7 +218,8 @@ pub(crate) fn deterministic_task_route(task: &str) -> TaskRoutingDecision {
                 })
             })
         });
-    let read_only = explicit_read_only
+    let read_only = read_only_request
+        || explicit_read_only
         || whole_request_restriction
         || [
             "discuss",
@@ -226,7 +266,7 @@ pub(crate) fn deterministic_task_route(task: &str) -> TaskRoutingDecision {
         return TaskRoutingDecision {
             route: TaskRoute::Discuss,
             source: "deterministic".into(),
-            reason: "discussion or planning intent; no implementation workers".into(),
+            reason: format!("discussion or planning intent; no implementation workers ({TASK_ROUTING_POLICY_VERSION})"),
         };
     }
     let implementation = [
@@ -264,14 +304,13 @@ pub(crate) fn deterministic_task_route(task: &str) -> TaskRoutingDecision {
         TaskRoutingDecision {
             route: TaskRoute::Plan,
             source: "deterministic".into(),
-            reason: "multi-part implementation; plan requires approval before workers launch"
-                .into(),
+            reason: format!("multi-part implementation; plan requires approval before workers launch ({TASK_ROUTING_POLICY_VERSION})"),
         }
     } else {
         TaskRoutingDecision {
             route: TaskRoute::Execute,
             source: "deterministic".into(),
-            reason: "one isolated worker; no automatic expansion into a fleet".into(),
+            reason: format!("one isolated worker; no automatic expansion into a fleet ({TASK_ROUTING_POLICY_VERSION})"),
         }
     }
 }
@@ -282,8 +321,14 @@ pub(crate) fn optional_decisions_routing_enabled() -> bool {
     if cfg!(test) && env::var("RUDDER_TEST_TASK_ROUTING").as_deref() != Ok("1") {
         return false;
     }
+    // Opt-in without a key still traverses the background path so activity can
+    // visibly explain the deterministic fallback rather than silently skipping it.
     env::var("RUDDER_TASK_ROUTING").as_deref() == Ok("decisions")
-        && env::var("OPENAI_API_KEY").is_ok_and(|value| !value.trim().is_empty())
+}
+
+fn classifier_fallback(mut decision: TaskRoutingDecision, code: &str) -> TaskRoutingDecision {
+    decision.reason = format!("Classifier fallback ({code}); {}", decision.reason);
+    decision
 }
 
 /// Runs only on a background thread. No HTTP client in the dashboard, and no
@@ -293,6 +338,10 @@ pub(crate) fn classify_task_with_cli(cwd: &Path, task: &str) -> TaskRoutingDecis
     if fallback.route == TaskRoute::Discuss || task.len() > 64 * 1024 {
         return fallback;
     }
+    if !env::var("OPENAI_API_KEY").is_ok_and(|value| !value.trim().is_empty()) {
+        return classifier_fallback(fallback, "no-api-key");
+    }
+    let fallback = classifier_fallback(fallback, "unavailable");
     let Some(program) = crate::cloudio::locate_rudder_cli() else {
         return fallback;
     };
@@ -363,6 +412,7 @@ pub(crate) fn classify_task_with_cli(cwd: &Path, task: &str) -> TaskRoutingDecis
         return fallback;
     };
     if !matches!(decision.source.as_str(), "deterministic" | "decisions")
+        || decision.reason.trim().is_empty()
         || decision.reason.len() > 256
         || decision.reason.chars().any(char::is_control)
     {
@@ -389,6 +439,67 @@ mod tests {
             let task = fixture["task"].as_str().unwrap();
             let expected: TaskRoute = serde_json::from_value(fixture["route"].clone()).unwrap();
             assert_eq!(deterministic_task_route(task).route, expected, "{task}");
+        }
+    }
+
+    #[test]
+    fn read_only_and_inspection_restrictions_do_not_expand_authority() {
+        for task in [
+            "Read-only: inspect the architecture rewrite",
+            "Read-only audit of the whole system",
+            "Please keep this read only while you inspect",
+            "Build this eventually, no edits for now",
+            "Implement the cache later; no changes yet",
+            "Keep this read only. Tell me the risks",
+            "Inspect the worker startup",
+            "Can you audit the cache migration?",
+            "Audit the entire system with multiple agents",
+        ] {
+            let decision = deterministic_task_route(task);
+            assert_eq!(decision.route, TaskRoute::Discuss, "{task}");
+            assert!(decision.reason.contains(TASK_ROUTING_POLICY_VERSION));
+        }
+        for task in [
+            "Fix the cache with no changes to backend APIs",
+            "Implement this; it is not read-only",
+            "Fix the read-only widget regression",
+            "Fix the read-only API",
+            "Inspect startup then fix the bug",
+            "Please audit the patch and implement the fix",
+        ] {
+            assert_eq!(
+                deterministic_task_route(task).route,
+                TaskRoute::Execute,
+                "{task}"
+            );
+        }
+    }
+
+    #[test]
+    fn classifier_fallback_is_visible_and_keeps_the_local_route() {
+        for code in ["no-api-key", "unavailable"] {
+            let original = deterministic_task_route("implement the API and UI in parallel");
+            let decision = classifier_fallback(original.clone(), code);
+            assert_eq!(decision.route, original.route);
+            assert_eq!(decision.source, "deterministic");
+            assert!(decision
+                .reason
+                .starts_with(&format!("Classifier fallback ({code}); ")));
+            assert!(decision.reason.contains(TASK_ROUTING_POLICY_VERSION));
+            assert!(decision.reason.len() <= 256);
+        }
+    }
+
+    #[test]
+    fn planner_preserves_one_owner_and_bounds_without_becoming_an_implementer() {
+        for prompt in [
+            rudder_plan_prompt("build a feature"),
+            orchestrator_system_prompt(),
+        ] {
+            assert!(prompt.contains(PLANNING_OWNERSHIP_RULE));
+            assert!(prompt.contains("Do NOT implement") || prompt.contains("do NOT implement"));
+            assert!(prompt.contains("approval scope/version and granted budget"));
+            assert!(prompt.contains("Routine messages do not resume stopped work"));
         }
     }
 

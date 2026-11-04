@@ -1,4 +1,5 @@
 import path from "node:path";
+import { planningLaunchAllowed, type PlanningGraph } from "./planning-ownership/index.js";
 import type {
   BackendId,
   DepType,
@@ -44,6 +45,8 @@ export async function readGraph(repoRoot: string): Promise<RudderGraph> {
   if (graph && graph.version === 1 && graph.nodes && graph.edges) {
     return {
       version: 1,
+      ...((graph as PlanningGraph).planningOwnership ? { planningOwnership: (graph as PlanningGraph).planningOwnership } : {}),
+      ...((graph as PlanningGraph).launchReservations ? { launchReservations: (graph as PlanningGraph).launchReservations } : {}),
       repoRoot: graph.repoRoot || repoRoot,
       ...(graph.integrationChangeId ? { integrationChangeId: graph.integrationChangeId } : {}),
       nodes: adoptLegacyNodeWorkspaceKeys(graph.nodes),
@@ -198,6 +201,9 @@ function mirrorEdgeId(from: string, to: string, type: EdgeType): string {
  * everything else is overwritten from the payload.
  */
 export function mirrorPlanIntoGraph(graph: RudderGraph, payload: MirrorPayload): RudderGraph {
+  if (Object.keys((graph as PlanningGraph).planningOwnership ?? {}).length) {
+    throw new Error("A legacy mirror cannot replace versioned owned planning state");
+  }
   const inNodes = Array.isArray(payload.nodes) ? payload.nodes : [];
   const createdAt = nowIso();
   const keepNodeIds = new Set<string>();
@@ -283,6 +289,8 @@ function sortGraph(graph: RudderGraph): RudderGraph {
   return {
     version: 1,
     repoRoot: graph.repoRoot,
+    ...((graph as PlanningGraph).planningOwnership ? { planningOwnership: (graph as PlanningGraph).planningOwnership } : {}),
+    ...((graph as PlanningGraph).launchReservations ? { launchReservations: (graph as PlanningGraph).launchReservations } : {}),
     ...(graph.integrationChangeId ? { integrationChangeId: graph.integrationChangeId } : {}),
     nodes,
     edges,
@@ -351,7 +359,7 @@ export function dependents(graph: RudderGraph, id: string): string[] {
  * has every variant's diff to compare.
  */
 export function isReady(graph: RudderGraph, node: TaskNode): boolean {
-  if (node.status !== "planned") {
+  if (node.status !== "planned" || !planningLaunchAllowed(graph, node.id)) {
     return false;
   }
   // A hard dep id that is NOT part of the plan (pruned or never existed) is treated

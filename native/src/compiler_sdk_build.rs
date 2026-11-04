@@ -22,13 +22,12 @@ pub struct RetainedCompilerSdkBuild {state:Arc<Mutex<BuildState>>,outcome:Option
 /// genuine Root child result, original private pipe settlement and known CAS
 /// publication; an old process report or matching key cannot construct it.
 pub struct CompilerSdkBuildOutcome {owner:Arc<Mutex<BuildState>>,sdk:Arc<CompilerSdkClient>,input:BuildInputView,
-    sdk_environment:ObjectRef,toolchains:BTreeMap<String,ToolchainIdentity>,action_key:ObjectRef,actions:Vec<ObjectRef>,checks:serde_json::Value,warm:bool}
+    sdk_environment:ObjectRef,toolchains:BTreeMap<String,ToolchainIdentity>,action_key:ObjectRef,actions:Vec<ObjectRef>,checks:serde_json::Value}
 pub(super) struct BuildState {registered:bool,sdk:Arc<CompilerSdkClient>,original:FinalizationBudget,cancelled:Arc<AtomicBool>,store:LocalStore,
     input:BuildInputView,profile:BuildProfile,nonce:String,caller_thread:std::thread::ThreadId,dispatch_permit:Option<NeverDispatched>,dispatch:Option<JobBinding>,execution:Option<OriginalSdkExecution>,terminal_failure:Option<terminal::OriginalSdkTerminalFailure>,disposal:Option<Arc<Mutex<settlement::DisposalState>>>,work:PathBuf,parent:Option<File>,work_fd:Option<File>,phase:&'static str,stage_attempted:bool,publish_attempted:bool,source:Option<OwnedFd>,output:Option<OwnedFd>,cancel:Option<OwnedFd>,
     reply:Option<RuntimeEndpoint>,remote_reply:Option<OwnedFd>,request:Option<Vec<u8>>,pending:Option<RuntimePacket>,sent:bool,
     stage:Option<StagingLease>,source_pin:String,result_pin:String,sdk_environment:Option<ObjectRef>,key:Option<ObjectRef>,
-    artifacts:Option<ObjectRef>,result:Option<ObjectRef>,checks:Option<serde_json::Value>,published:bool,finished:bool,failed:bool,error:Option<String>,panicked:bool,
-    previous:Option<Arc<Mutex<BuildState>>>}
+    artifacts:Option<ObjectRef>,result:Option<ObjectRef>,checks:Option<serde_json::Value>,published:bool,finished:bool,failed:bool,error:Option<String>,panicked:bool}
 impl RetainedCompilerSdkBuild {pub fn outcome(&self)->Result<&CompilerSdkBuildOutcome>{self.outcome.as_ref().context("SDK build lacks its original successful publication")}
     pub fn failure_data(&self)->Result<Option<String>>{Ok(self.state.lock().map_err(|_|anyhow::anyhow!("SDK build custody poisoned"))?.error.clone())}}
 impl CompilerSdkBuildOutcome {
@@ -42,7 +41,9 @@ impl CompilerSdkBuildOutcome {
     pub fn action_results(&self)->&[ObjectRef]{&self.actions}
     pub fn artifacts(&self)->Result<ObjectRef>{let owner=self.owner.lock().map_err(|_|anyhow::anyhow!("SDK actual artifact owner poisoned"))?;owner.artifacts.clone().context("SDK actual artifact root absent")}
     pub fn checks(&self)->&serde_json::Value{&self.checks}
-    pub fn warm_reuse(&self)->bool{self.warm}
+    /// Preparation reuse and compiler confinement do not qualify deterministic
+    /// SDK execution. No ordinary outcome can claim an action-cache hit.
+    pub fn warm_reuse(&self)->bool{false}
     pub fn qualified_owner(&self)->&Arc<CompilerSdkClient>{&self.sdk}
     pub fn current(&self,original:&FinalizationBudget)->Result<()>{original.remaining()?;self.sdk.current(original)?;
         let owner=self.owner.lock().map_err(|_|anyhow::anyhow!("SDK original result custody poisoned"))?;owner.result_current()?;original.remaining()?;Ok(())}
@@ -51,6 +52,8 @@ impl CompilerSdkClient {
     /// OFF App, blocking caller. The supplied original30 budget is never reset.
     /// Carrier and machine alias are installed before staging/export/send. On
     /// Err/unwind, owners, original FDs and uncertain side effects stay retained.
+    /// A previous outcome is accepted for caller compatibility only. It never
+    /// authorizes reuse, even for identical inputs or a reused preparation floor.
     pub fn build_selected_source_retaining(self:&Arc<Self>,out:&mut Option<RetainedCompilerSdkBuild>,input:&BuildInputView,
         profile:&BuildProfile,store:&LocalStore,owned_work_parent:&Path,original:FinalizationBudget,cancelled:Arc<AtomicBool>,
         _previous:Option<&CompilerSdkBuildOutcome>)->Result<()> {
@@ -58,16 +61,16 @@ impl CompilerSdkClient {
         let nonce=uuid::Uuid::new_v4().to_string();let state=Arc::new(Mutex::new(BuildState{registered:false,sdk:self.clone(),original:original.clone(),cancelled:cancelled.clone(),store:store.clone(),
             input:input.clone(),profile:profile.clone(),nonce:nonce.clone(),caller_thread:std::thread::current().id(),dispatch_permit:Some(NeverDispatched),dispatch:None,execution:None,terminal_failure:None,disposal:None,work:owned_work_parent.join(format!("rudder-sdk-build-{nonce}")),parent:None,work_fd:None,phase:"staged",stage_attempted:false,publish_attempted:false,source:None,output:None,cancel:None,reply:None,remote_reply:None,
             request:None,pending:None,sent:false,stage:None,source_pin:format!("compiler-sdk-source/{nonce}"),result_pin:format!("compiler-sdk-result/{nonce}"),sdk_environment:None,key:None,artifacts:None,result:None,checks:None,
-            published:false,finished:false,failed:false,error:None,panicked:false,previous:None}));
+            published:false,finished:false,failed:false,error:None,panicked:false}));
         *out=Some(RetainedCompilerSdkBuild{state:state.clone(),outcome:None,failure:None});
         settlement::register_active_retaining(self,&state,&original,&cancelled)?;
         let attempt=catch_unwind(AssertUnwindSafe(||->Result<CompilerSdkBuildOutcome>{let mut held=state.lock().unwrap_or_else(|p|p.into_inner());held.prepare(owned_work_parent)?;
-            // A matching semantic key does not authorize reuse while the compiler
-            // can observe unkeyed job metadata and kernel /proc values. Always
-            // execute this original job until hermetic reads/effects are enforced.
+            // Mandatory proc-less confinement is not deterministic execution:
+            // clock, randomness and interpreted code remain unqualified. Neither
+            // preparation-cache evidence nor a matching key grants SDK reuse.
             held.export_and_capture()?;
             loop{if held.poll_root()?{break}std::thread::sleep(held.original.remaining()?.min(Duration::from_millis(1)));}
-            held.publish_artifacts()?;held.outcome(state.clone(),false)
+            held.publish_artifacts()?;held.outcome(state.clone())
         }));
         match attempt{Ok(Ok(result))=>{out.as_mut().unwrap().outcome=Some(result);Ok(())},Ok(Err(error))=>{
             let mut held=state.lock().unwrap_or_else(|p|p.into_inner());held.failed=true;out.as_mut().unwrap().failure=held.retain_failure_owner(state.clone());
@@ -77,12 +80,11 @@ impl CompilerSdkClient {
 }
 impl BuildState {
     fn live(&self)->Result<()>{self.original_paths_current()?;ensure!(!self.failed&&!self.cancelled.load(Ordering::Acquire),"SDK original build cancelled/failed");self.original.remaining()?;self.sdk.require_ordinary_execution()?;Ok(())}
-    fn prepare(&mut self,parent:&Path)->Result<()>{self.phase="validate-profile-and-parent";self.live()?;self.profile.validate()?;
+    fn prepare(&mut self,parent:&Path)->Result<()>{self.phase="validate-profile-and-parent";self.live()?;validate_ordinary_profile(&self.profile)?;
         let m=fs::symlink_metadata(parent)?;ensure!(m.is_dir()&&!m.file_type().is_symlink()&&m.uid()==1500&&m.gid()==1500&&m.mode()&0o077==0&&parent.canonicalize()?==parent,"SDK work parent is not actual private Native directory");
         self.parent=Some(File::from(open_dir(parent)?));self.original_paths_current()?;
         ensure!(self.input.hardlink_group_count()==0,"A2 compiler adapter refuses unimplemented source hardlink topology");
         let sdk=self.sdk.preparation_spec_data()?;ensure!(self.profile.platform==sdk.platform,"SDK build platform differs from actual compiler closure");
-        ensure!(self.profile.policy.cacheable()&&self.profile.buck2.remote_cache.is_none()&&self.profile.policy.environment.keys().all(|k|matches!(k.as_str(),"LANG"|"LC_ALL"|"TZ")),"direct SDK compiler refuses unsupported effects/environment/remote cache");
         ensure!(self.profile.buck2.executable_sha256==sdk.toolchains["buck2"].configuration["executable_raw_sha256"],"profile Buck2 input differs from qualified SDK");
         self.phase="begin-original-cas-staging";self.stage_attempted=true;self.stage=Some(self.store.begin_staging(self.original.remaining()?)?);
         self.phase="publish-semantic-data";let environment=self.store.put_blob(&canonical_json(sdk)?)?;self.sdk_environment=Some(environment);
@@ -140,9 +142,8 @@ impl BuildState {
         validate_output_tree(&self.work.join("output"),&self.original)?;self.live()?;
         let tree=rudder_engine::tree::import_quiesced(&self.store,&self.stage.as_ref().unwrap().id,&self.work.join("output"),&Default::default(),&rudder_engine::tree::ImportBudget{max_logical_bytes:MAX_OUTPUT_BYTES,..source_budget()})?;
         ensure!(serde_json::from_slice::<rudder_engine::tree::HardlinkTopology>(&self.store.read_object(&tree.hardlinks)?)?.groups.is_empty(),"SDK outputs contain unmodeled hardlinks");self.artifacts=Some(tree.directory);self.live()?;
-        self.result=Some(self.store.put_metadata(ObjectKind::ActionResult,&ReferencedMetadata{format_version:1,references:vec![self.key.as_ref().unwrap().clone(),self.artifacts.as_ref().unwrap().clone()],
-            payload:serde_json::json!({"schema":"compiler-sdk-selected-result-v1","action_key":self.key,"artifacts":self.artifacts,"checks":self.checks,"buck2_frontend_executed":false,
-                "execution_nonce":self.nonce,"cacheable":false,"cache_reuse":"disabled-until-hermetic-inputs-enforced"})})?);self.live()?;
+        self.result=Some(self.store.put_metadata(ObjectKind::ActionResult,&ordinary_artifact_receipt(
+            self.key.as_ref().unwrap(),self.artifacts.as_ref().unwrap(),self.checks.as_ref().context("SDK actual checks absent")?,&self.nonce))?);self.live()?;
         self.phase="publish-actual-artifact-result";self.publish_attempted=true;self.store.publish(&self.stage.as_ref().unwrap().id,&self.result_pin,self.result.as_ref().unwrap())?;self.published=true;self.live()?;self.finished=true;self.phase="completed";Ok(())}
     fn original_paths_current(&self)->Result<()>{
         fn same(path:&Path,fd:&File)->Result<()>{let a=fd.metadata()?;let n=fs::symlink_metadata(path)?;ensure!(n.is_dir()&&!n.file_type().is_symlink()&&a.is_dir()&&a.uid()==1500&&a.gid()==1500
@@ -151,13 +152,29 @@ impl BuildState {
         if let Some(source)=&self.source{same(&self.work.join("source"),&File::from(source.try_clone()?))?;}if let Some(output)=&self.output{same(&self.work.join("output"),&File::from(output.try_clone()?))?;}Ok(())
     }
     fn result_current(&self)->Result<()>{ensure!(self.finished&&!self.failed,"SDK original result not successful");self.sdk.assert_current()?;
-        if let Some(previous)=&self.previous{return previous.lock().map_err(|_|anyhow::anyhow!("SDK prior owner custody poisoned"))?.result_current()}
         ensure!(self.published&&self.store.retention()?.pins.get(&self.result_pin)==self.result.as_ref(),"SDK result original pin absent");
         self.store.retained_closure(self.result.as_ref().unwrap())?;Ok(())}
-    fn outcome(&self,owner:Arc<Mutex<BuildState>>,warm:bool)->Result<CompilerSdkBuildOutcome>{self.live()?;ensure!(self.finished,"SDK execution/publication incomplete");
+    fn outcome(&self,owner:Arc<Mutex<BuildState>>)->Result<CompilerSdkBuildOutcome>{self.live()?;ensure!(self.finished,"SDK execution/publication incomplete");
         Ok(CompilerSdkBuildOutcome{owner,sdk:self.sdk.clone(),input:self.input.clone(),sdk_environment:self.sdk_environment.as_ref().unwrap().clone(),toolchains:self.sdk.toolchains_data()?.clone(),
-            action_key:self.key.as_ref().unwrap().clone(),actions:vec![self.result.as_ref().unwrap().clone()],checks:self.checks.clone().context("SDK actual checks absent")?,warm})}
+            action_key:self.key.as_ref().unwrap().clone(),actions:vec![self.result.as_ref().unwrap().clone()],checks:self.checks.clone().context("SDK actual checks absent")?})}
     pub(super) fn signal_original_cancellation(&self)->Result<()>{if self.cancelled.load(Ordering::Acquire)||self.original.remaining().is_err(){if let Some(fd)=&self.cancel{signal_cancel(fd)?;}}Ok(())}
+}
+// This validates admission to the fixed compiler runner, not cacheability of
+// its result. An empty declared effects set cannot prove deterministic code.
+fn validate_ordinary_profile(profile:&BuildProfile)->Result<()> {
+    profile.validate()?;
+    ensure!(profile.policy.cacheable()&&profile.buck2.remote_cache.is_none()
+        &&profile.policy.environment.keys().all(|k|matches!(k.as_str(),"LANG"|"LC_ALL"|"TZ")),
+        "direct SDK compiler refuses unsupported effects/environment/remote cache");
+    Ok(())
+}
+// A retained artifact receipt is deliberately not action-cache provenance.
+// No preparation acknowledgment, confinement observation or previous result
+// can switch this policy. Enabling reuse needs real supported-profile proof.
+fn ordinary_artifact_receipt(key:&ObjectRef,artifacts:&ObjectRef,checks:&serde_json::Value,nonce:&str)->ReferencedMetadata {
+    ReferencedMetadata{format_version:1,references:vec![key.clone(),artifacts.clone()],
+        payload:serde_json::json!({"schema":"compiler-sdk-selected-result-v1","action_key":key,"artifacts":artifacts,"checks":checks,"buck2_frontend_executed":false,
+            "execution_nonce":nonce,"cacheable":false,"cache_reuse":"disabled-until-hermetic-inputs-enforced"})}
 }
 fn semantic_action_data(source:&ObjectRef,topology:Option<&ObjectRef>,sdk:&PreparationSpec,profile:&BuildProfile)->Result<serde_json::Value>{
     semantic_action_with_rules_data(source,topology,sdk,profile,&sdk_execution_rules_data()?)
@@ -223,6 +240,52 @@ impl Write for SourceComparison<'_>{fn write(&mut self,expected:&[u8])->io::Resu
         let mut changed=profile.clone();changed.platform.abi="changed-ABI".into();assert_ne!(actual,semantic_action_data(&source,None,&sdk,&changed).unwrap());
         let mut changed=sdk.clone();changed.toolchains.get_mut("rustc").unwrap().configuration.insert("compiler_entrypoint".into(),"new/path".into());assert_ne!(actual,semantic_action_data(&source,None,&changed,&profile).unwrap());
         let text=canonical_json(&actual).unwrap();let text=String::from_utf8(text).unwrap();for field in ["isolation_sha256","rules_sha256","artifact_manifest_sha256","source_binding_sha256","cas_image","qualification_workload"]{assert!(!text.contains(field));}
+    }
+    #[test]fn ordinary_sdk_admission_refuses_every_declared_effect_and_ambient_input(){
+        use rudder_engine::build::{BuildEffect,RemoteCacheConfig};
+        let(_,_,profile)=data();validate_ordinary_profile(&profile).unwrap();
+        for effect in [BuildEffect::Network,BuildEffect::Secrets,BuildEffect::Signing,BuildEffect::Deployment,
+            BuildEffect::ExternalState,BuildEffect::Clock,BuildEffect::Randomness] {
+            let mut changed=profile.clone();changed.policy.effects.insert(effect);
+            assert!(validate_ordinary_profile(&changed).is_err(),"{effect:?}");
+        }
+        for name in ["PATH","HOME","SOURCE_DATE_EPOCH","SDK_SECRET","RANDOM"] {
+            let mut changed=profile.clone();changed.policy.environment.insert(name.into(),"unmodeled".into());
+            assert!(validate_ordinary_profile(&changed).is_err(),"{name}");
+        }
+        let mut changed=profile.clone();changed.buck2.remote_cache=Some(RemoteCacheConfig{cas_address:"http://localhost:1234".into(),
+            action_cache_address:"http://localhost:1234".into(),instance_name:"sdk".into(),tls:false});
+        assert!(validate_ordinary_profile(&changed).is_err());
+    }
+    #[test]fn ordinary_sdk_profile_cannot_supply_shell_commands_or_override_fixed_compilers(){
+        let(_,_,profile)=data();let original=serde_json::to_value(profile).unwrap();
+        for field in ["command","shell","rust_argv","installer_commands"] {
+            let mut changed=original.clone();changed[field]=serde_json::json!(["/bin/sh","-c","date; cat /run/secrets/token"]);
+            assert!(serde_json::from_value::<BuildProfile>(changed).is_err(),"{field}");
+            let mut changed=original.clone();changed["targets"][0][field]=serde_json::json!(["/bin/sh","-c","date"]);
+            assert!(serde_json::from_value::<BuildProfile>(changed).is_err(),"target {field}");
+        }
+        let mut changed=original;changed["targets"][0]["language"]="shell".into();
+        assert!(serde_json::from_value::<BuildProfile>(changed).is_err());
+    }
+    #[test]fn ordinary_sdk_identical_semantics_and_preparation_evidence_never_publish_cache_provenance(){
+        let(source,sdk,profile)=data();let semantic=semantic_action_data(&source,None,&sdk,&profile).unwrap();
+        let key=ObjectRef::from_bytes(ObjectKind::ActionKey,&canonical_json(&semantic).unwrap());
+        let artifact=ObjectRef::from_bytes(ObjectKind::Directory,b"artifact-data-only");
+        // DATA-only adversarial reports cannot turn artifact publication into
+        // compiler qualification, even when they claim successful confinement.
+        let checks=serde_json::json!({"preparation_cache_hit":true,"sealed_inputs":true,
+            "confinement_enforced":true,"qualification":"passed","cacheable":true,"cache_reuse":true});
+        let first=ordinary_artifact_receipt(&key,&artifact,&checks,"original-1");
+        let second=ordinary_artifact_receipt(&key,&artifact,&checks,"original-2");
+        for receipt in [&first,&second] {
+            assert_eq!(receipt.references,vec![key.clone(),artifact.clone()]);
+            assert_eq!(receipt.payload["action_key"],serde_json::to_value(&key).unwrap());
+            assert_eq!(receipt.payload["cacheable"],false);
+            assert_eq!(receipt.payload["cache_reuse"],"disabled-until-hermetic-inputs-enforced");
+            assert_eq!(receipt.payload["buck2_frontend_executed"],false);
+        }
+        assert_ne!(canonical_json(&first).unwrap(),canonical_json(&second).unwrap());
     }
     #[test]fn actual_paged_chunked_source_export_verifies_then_detects_changed_tail(){
         let path=PathBuf::from(format!("/workspace/rudder-sdk-source-negative-{}",uuid::Uuid::new_v4()));fs::create_dir(&path).unwrap();

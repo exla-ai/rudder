@@ -98,7 +98,7 @@ create, read-only ones included.
 - **No git archaeology.** Do not spend turns on history, rebases, bisects or
   branch bookkeeping unless the task is about history.
 - **No new status docs, receipts or evidence files.** Update
-  `docs/v4-handoff.md`; put proof in the `rudder done` summary. Do not commit
+  `docs/v4-handoff.md`; put proof in your final message. Do not commit
   logs, captures or JSON receipts.
 - **No hardening waves or follow-up chains.** A follow-up must map to a goal in
   `PLAN.md` section 0, or it is dropped.
@@ -121,8 +121,9 @@ Let active homes update when idle; never restart live agents to force adoption.
 Filter provider output so worker tokens stay private. Mac installation/release
 has separate build, install/launch and signing gates; see reference §§9, 11.
 
-Before final handoff, file `rudder done` with summary, interfaces, follow-ups and
-actual delivery proof when requested. Report unfinished work honestly. The
+End with a short final message: what changed, what was checked, what is left.
+`rudder done` still exists until 4.0.x removes it; when a run's prompt asks for
+it, keep it to that same short summary. Report unfinished work honestly. The
 locked direction is [PLAN.md section 0](PLAN.md); current status and open work
 are in [the v4 handoff](docs/v4-handoff.md). `docs/architecture/` is background
 reference only.

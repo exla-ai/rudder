@@ -123,6 +123,17 @@ cloud-sync paused; `main-branch-jrqtg` (Sol) completed; `ps` cancelled
 3. Release 4.0.0 to `latest` (npm version, release-check CI, push main + tag).
 4. Cloud worker image + Fly deploy, with user approval.
 
+4.0.x, right after release (details in PLAN.md section 0):
+
+1. Make it work, then evaluate: run the scorecard on real repos, local and
+   Cloud, v4 against v3. Fix what fails, cut what does not earn its keep.
+2. Remove agent ceremony (`rudder done`, `remember`, `share`, `context`,
+   auto `DECISIONS.md`, automatic hardening and follow-up chains). Starting
+   points: `native/src/tasks.rs`, `src/brain.ts`, worker prompts, hardening
+   queue in `native/src/main.rs`.
+3. Cut the CLI to about ten commands (`src/main.ts` and the command registry).
+4. Delete BYOC and `rudder improve`.
+
 4.1 headline, in order: wire overlay workspaces into agent launch, warm forks
 from a trusted builder snapshot, one Rudder cache per machine for tool-native
 caches, REAPI for Buck2/Bazel repos, then cross-machine cache (E2, one Fly run)

@@ -50,6 +50,42 @@ and open work live in [the v4 handoff](docs/v4-handoff.md).
 - **Cross-machine content cache (E2) is 4.1.** One real two-worker Fly run is
   needed to prove it, with user approval.
 - **No new hardening waves.** Work items must map to a 4.0.x or 4.1 goal above.
+- **Next phase is "make it work, then evaluate".** No new features until the
+  scorecard below runs on real repos with real Codex and Claude sessions,
+  local and Cloud, comparing v4 with v3 on the same tasks: agent start time,
+  work lost on restart, tokens per accepted change, merge correctness, and the
+  web/phone flow. Record the numbers, bad ones included. This replaces E0-E14
+  as the working bar.
+- **Remove agent ceremony.** Agents never call Rudder commands. Rudder detects
+  completion itself (session ended with a commit) and takes the summary from
+  the agent's last message. Remove `rudder done`, `remember`, `share` and
+  `context` callbacks, auto-written `DECISIONS.md`, receipt/evidence prompts,
+  and automatic hardening/follow-up chains (follow-ups go in the summary for a
+  human to pick). Keep an owner map that Rudder enforces, not one agents read.
+- **Cut the CLI to about ten commands.** The dashboard is the product.
+
+  ```
+  rudder                       open the dashboard (local or Cloud home)
+  rudder "task" [--cloud]      start an agent (--backend, --continue)
+  rudder ls                    list agents
+  rudder attach <agent>        watch or type into one agent
+  rudder logs <agent>          saved output
+  rudder stop <agent> [--delete]
+  rudder login | logout
+  rudder cloud [move]          Cloud home status; move this project there
+  rudder doctor                setup and diagnostics
+  rudder update | --version
+  ```
+
+  Merge, sync, cleanup and gc become automatic; undo is a dashboard action on
+  one change. `run`, `claude`, `codex`, `sail`, `plan`, `fanout`, `handoff`,
+  `watch`, `status`, `runs`, `report` fold into the commands above. Developer
+  tools (`board`, `serve`, `engine`, `telemetry`, `mouse-test`) are hidden or
+  move under `doctor`. Old spellings print "use X instead" for one release,
+  then go. No aliases until 2027.
+- **Delete BYOC** (`cloud byoc`, `runtime`, `vm`, `bootstrap`). Cloud is Fly.
+- **Delete `rudder improve`** (the automatic telemetry-to-release loop).
+
 
 ## 1. Product objective and constraints
 
@@ -848,6 +884,8 @@ The ideal architecture is the shared identity/ownership/correctness model above;
 individual runtimes and storage libraries must earn their place through gates.
 
 ## 16. Simplify the product and command surface before launch
+
+Superseded by the CLI cut in section 0.
 
 ### 16.1 One ordinary task path and visible targeted actions
 

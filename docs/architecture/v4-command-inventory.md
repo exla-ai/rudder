@@ -1,5 +1,9 @@
 # v4 command inventory and migration map
 
+> **Superseded (2026-11-04).** The CLI cut in `PLAN.md` section 0 replaces this
+> inventory and its 2027 alias windows. Kept as reference.
+
+
 Source baseline: `017d76ed`, inspected 2026-11-03 for PLAN 16 / E11.
 Registry/adapter alignment: 2026-11-04, current n8 implementation. This is a
 source inventory, not telemetry or proof that a caller has no users. The n8

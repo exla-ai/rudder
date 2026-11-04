@@ -152,6 +152,7 @@ RUN npm install --omit=dev --no-audit --no-fund \
 COPY cloud/worker/supervisor.mjs ./supervisor.mjs
 COPY cloud/worker/active-runs.mjs ./active-runs.mjs
 COPY cloud/worker/home.mjs ./home.mjs
+COPY cloud/worker/codex-trust.mjs ./codex-trust.mjs
 COPY cloud/worker/transcripts.mjs ./transcripts.mjs
 COPY cloud/worker/hook-paths.mjs ./hook-paths.mjs
 COPY cloud/worker/asks.mjs ./asks.mjs

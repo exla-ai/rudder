@@ -31,6 +31,7 @@ import { collectDigestRuns } from "./digest.mjs";
 import { readProjectPlan } from "./plan.mjs";
 import { runTailnetCommand, tailnetStatus } from "./tailscale-previews.mjs";
 import { createTerminalTransport } from "./terminal-transport.mjs";
+import { ensureCodexTrust } from "./codex-trust.mjs";
 
 let projectFiles;
 async function fileService() {
@@ -256,6 +257,8 @@ class Project {
     if (this.stopped) {
       return;
     }
+    // A repo cloned since the last vault write has no Codex trust entry yet.
+    ensureCodexTrust({ configPath: path.join(HOME, ".codex", "config.toml"), codeDir: CODE_DIR, log });
     const env = {
       ...baseChildEnv,
       RUDDER_WORKSPACE_ID: this.workspaceId,
@@ -1607,6 +1610,9 @@ function writeVaultFiles(files, deferred) {
   // fixed every boot too: laptop paths become this home, and hooks whose
   // program is still missing are dropped. Last, so ~/.claude/hooks is on disk.
   sanitizeHomeHookConfigs(HOME, log);
+  // The vault's ~/.codex/config.toml is the laptop's and knows nothing of this
+  // home's repos; without these entries every Codex resume stops at a trust menu.
+  ensureCodexTrust({ configPath: path.join(HOME, ".codex", "config.toml"), codeDir: CODE_DIR, log });
 }
 
 // Claude and Codex refresh their OAuth tokens in place, and a refresh can

@@ -135,3 +135,29 @@ fn image_pause(original:&ManagedImageBudget)->Result<()>{thread::sleep(original.
 #[cfg(test)]
 #[path="managed_fresh_machine_join_tests.rs"]
 mod join_tests;
+
+impl ManagedFreshMachine {
+    /// Sample every original subtree, even if coordinator/flow qualification
+    /// failed before its importer returned. No readiness or publication poll.
+    pub(crate) fn observe_original_producers(&self)->Result<Option<crate::managed_machine_entry::census::RuntimeProducerCensusData>> {
+        use crate::managed_machine_entry::census::{self,RuntimeProducerCensusData};
+        let mut data=RuntimeProducerCensusData::default();
+        let Some(actual)=census::worker(&self.worker)?else{return Ok(None)};data.fresh_coordinators=actual;
+        let (environment,image)={let Some(held)=census::borrow(&self.owner)?else{return Ok(None)};
+            (held.runtime_environment.clone(),held.image_source.clone())};
+        if let Some(environment)=environment {
+            let Some(actual)=environment.observe_original_producer_worker()?else{return Ok(None)};data.environment_workers=actual;
+        }
+        if let Some(image)=image {
+            let Some(actual)=image.observe_original_producer_worker()?else{return Ok(None)};data.image_importers=actual;
+        }
+        for flow in self.flows.values() {
+            let Some(actual)=census::worker(&flow.worker)?else{return Ok(None)};data.fresh_flows.include(actual);
+            let source={let Some(held)=census::borrow(&flow.data)?else{return Ok(None)};held.source.clone()};
+            if let Some(source)=source {
+                let Some(actual)=source.observe_original_producer_worker()?else{return Ok(None)};data.genesis_importers.include(actual);
+            }
+        }
+        Ok(Some(data))
+    }
+}

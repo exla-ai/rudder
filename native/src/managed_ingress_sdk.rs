@@ -106,3 +106,13 @@ pub(super) fn observation(job:&Arc<Job>)->Option<serde_json::Value>{
         "job_disposal":if state.settled{"settled"}else if state.error.is_some()||state.panic.is_some(){"retained"}else{"pending"},
         "source_authority":false,"shared_floor_retirement":false}))
 }
+
+impl Slot {
+    pub(super) fn observe_original_producers(&self)->Result<Option<crate::managed_machine_entry::census::RuntimeProducerCensusData>> {
+        use crate::managed_machine_entry::census::{self,RuntimeProducerCensusData,WorkerCensus};
+        let (worker,settled)={let Some(held)=census::borrow(&self.state)?else{return Ok(None)};
+            (held.cleanup_worker.clone(),held.settled)};
+        Ok(Some(RuntimeProducerCensusData{sdk_campaigns:1,unsettled_sdk_campaigns:usize::from(!settled),
+            sdk_cleanups:WorkerCensus::observe(worker.as_ref())?,..RuntimeProducerCensusData::default()}))
+    }
+}

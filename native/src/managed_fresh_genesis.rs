@@ -162,3 +162,9 @@ mod tests;
 
 struct FreshReadClock{original:FinalizationBudget,cancelled:Arc<AtomicBool>}
 impl rudder_engine::store::ImageImportFence for FreshReadClock{fn remaining(&self)->Result<std::time::Duration>{time(&self.original,&self.cancelled)?;self.original.remaining()}}
+
+impl ManagedFreshGenesis {
+    pub(crate) fn observe_original_producer_worker(&self)->Result<Option<crate::managed_machine_entry::census::WorkerCensus>> {
+        crate::managed_machine_entry::census::worker(&self.factory)
+    }
+}

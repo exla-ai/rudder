@@ -112,3 +112,17 @@ impl ManagedIngressControl {
 
 #[cfg(test)]
 #[path="managed_canonical_worker_tests.rs"]mod tests;
+
+impl Campaign {
+    pub(super) fn observe_original_producers(&self)->Result<Option<crate::managed_machine_entry::census::RuntimeProducerCensusData>> {
+        use crate::managed_machine_entry::census::{self,RuntimeProducerCensusData,WorkerCensus};
+        let (worker,cleanup,settled)={let Some(held)=census::borrow(&self.state)?else{return Ok(None)};
+            (held.worker.clone(),held.sdk_cleanup.clone(),held.work.may_release_serial_slot())};
+        let mut data=RuntimeProducerCensusData{canonical_campaigns:1,unsettled_canonical_campaigns:usize::from(!settled),
+            canonical_workers:WorkerCensus::observe(worker.as_ref())?,..RuntimeProducerCensusData::default()};
+        if let Some(cleanup)=cleanup {
+            let Some(actual)=cleanup.observe_original_producer_worker()?else{return Ok(None)};data.canonical_sdk_cleanups=actual;
+        }
+        Ok(Some(data))
+    }
+}

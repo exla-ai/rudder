@@ -82,6 +82,16 @@ impl IngressJob {
         if !self.is_original_task_command(){
             ensure!(selected.is_none()&&scope.is_none(),"non-task original command has task descendants");return Ok(true);
         }
+        if held.task.scope.is_none() {
+            // A profile/App refusal before task-role admission has no factory
+            // descendant. Only this command's actual original join incl TLS
+            // makes absence stable; a result/error/step flag cannot do so.
+            ensure!(scope.is_none(),"original command lost retained task scope");
+            let worker=held.worker.clone();drop(held);
+            let Some(worker)=worker else{return Ok(false)};
+            worker.start_join_observer()?;
+            return Ok(worker.try_joined()?.is_some()&&!root.original_task_role_charged());
+        }
         let (Some(selected),Some(actual_selected))=(selected.as_ref(),held.task.selected_source.as_ref()) else{return Ok(false)};
         ensure!(root.same_selected_source(selected,actual_selected),"original command selected source changed; owners retained");
         let (Some(scope),Some(actual_scope))=(scope.as_ref(),held.task.scope.as_ref()) else{return Ok(false)};
@@ -103,6 +113,25 @@ struct FreshAttemptState {attempted:bool,original:Option<FinalizationBudget>,can
 pub(crate) struct FreshInitializationAttempt {config:Arc<HostIngressConfigOwner>,machine:MachineControl,root:OnceLock<Arc<crate::managed_machine_entry::FreshInitializationRoot>>,coordinator:OnceLock<std::sync::Weak<crate::managed_fresh_machine::ManagedFreshMachine>>,state:Mutex<FreshAttemptState>}
 impl FreshInitializationAttempt {
     pub(crate) fn original_coordinator(&self)->Option<Arc<crate::managed_fresh_machine::ManagedFreshMachine>>{self.coordinator.get().and_then(std::sync::Weak::upgrade)}
+    /// The initializer holds this mutex through its entire synchronous attempt.
+    /// Observing attempted with no coordinator therefore seals empty discovery;
+    /// it is not an ingress-worker join or a runtime retirement acknowledgment.
+    pub(crate) fn retain_original_coordinator(&self,out:&mut Option<Arc<crate::managed_fresh_machine::ManagedFreshMachine>>)->Result<bool> {
+        let Some(held)=crate::managed_machine_entry::census::borrow(&self.state)?else{return Ok(false)};
+        if let Some(actual)=&held.coordinator {
+            if let Some(original)=out {ensure!(Arc::ptr_eq(original,actual),"original fresh coordinator replaced; retained census owner unchanged");}
+            else {*out=Some(actual.clone());}
+            Ok(true)
+        }else {ensure!(out.is_none(),"original fresh coordinator disappeared; census owner retained");Ok(held.attempted)}
+    }
+    pub(crate) fn observe_original_producers(&self)->Result<Option<crate::managed_machine_entry::census::RuntimeProducerCensusData>> {
+        use crate::managed_machine_entry::census::{borrow,RuntimeProducerCensusData};
+        let (attempted,coordinator)={let Some(held)=borrow(&self.state)?else{return Ok(None)};(held.attempted,held.coordinator.clone())};
+        let mut data=RuntimeProducerCensusData{fresh_attempts:1,pending_fresh_attempts:usize::from(!attempted),
+            terminal_fresh_attempts_without_coordinator:usize::from(attempted&&coordinator.is_none()),..RuntimeProducerCensusData::default()};
+        if let Some(actual)=coordinator {let Some(sample)=actual.observe_original_producers()?else{return Ok(None)};data.include(sample);}
+        Ok(Some(data))
+    }
     fn capture(config:Arc<HostIngressConfigOwner>,machine:MachineControl)->Arc<Self>{Arc::new(Self{config,machine,root:OnceLock::new(),coordinator:OnceLock::new(),state:Mutex::new(FreshAttemptState{attempted:false,original:None,cancelled:Arc::new(AtomicBool::new(false)),kernel:None,registration:None,client:None,coordinator:None,error:None,panic:None})})}
     pub(crate) fn covered_root(&self)->Option<&Arc<crate::managed_machine_entry::FreshInitializationRoot>>{self.root.get()}
     pub(crate) fn retain_covered_root(&self,root:Arc<crate::managed_machine_entry::FreshInitializationRoot>)->Result<()>{self.root.set(root).map_err(|_|anyhow::anyhow!("original fresh root already attached"))}
@@ -407,3 +436,15 @@ fn original_lock<'a,T>(owner:&'a Mutex<T>,original:&FinalizationBudget)->Result<
 #[path="managed_canonical_driver.rs"]mod canonical_driver;
 
 #[path="managed_ingress_sdk.rs"]mod sdk_driver;
+
+impl IngressJob {
+    pub(crate) fn observe_original_producers(&self)->Result<Option<crate::managed_machine_entry::census::RuntimeProducerCensusData>> {
+        use crate::managed_machine_entry::census::{self,RuntimeProducerCensusData,WorkerCensus};
+        let (worker,sdk,canonical)={let Some(held)=census::borrow(&self.carrier)?else{return Ok(None)};
+            (held.worker.clone(),held.sdk.clone(),held.canonical.clone())};
+        let mut data=RuntimeProducerCensusData{command_workers:WorkerCensus::observe(worker.as_ref())?,..RuntimeProducerCensusData::default()};
+        if let Some(sdk)=sdk {let Some(actual)=sdk.observe_original_producers()?else{return Ok(None)};data.include(actual);}
+        if let Some(canonical)=canonical {let Some(actual)=canonical.observe_original_producers()?else{return Ok(None)};data.include(actual);}
+        Ok(Some(data))
+    }
+}

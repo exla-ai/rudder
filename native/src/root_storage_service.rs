@@ -274,6 +274,7 @@ pub(crate) enum Request {
     // Reader IDs are routing DATA; native actual join custody stays in issuer.
     RetireSeed { #[serde(with="uuid_wire")] slot:uuid::Uuid, #[serde(with="uuid_wire")] retirement:uuid::Uuid, readers:Vec<String> },
     ReleaseSeed { #[serde(with="uuid_wire")] slot:uuid::Uuid, #[serde(with="uuid_wire")] retirement:uuid::Uuid },
+    StopService { #[serde(with="uuid_wire")] retirement:uuid::Uuid },
 }
 // Native's pinned UUID dependency has v4, not serde. Keep wire IDs canonical
 // without changing package features or treating a parsed ID as authority.
@@ -306,6 +307,8 @@ pub(crate) enum Reply {
     SeedRetired { #[serde(with="uuid_wire")] slot:uuid::Uuid, #[serde(with="uuid_wire")] retirement:uuid::Uuid },
     SeedReleased { #[serde(with="uuid_wire")] slot:uuid::Uuid, #[serde(with="uuid_wire")] retirement:uuid::Uuid },
     RetirementPending { #[serde(with="uuid_wire")] slot:uuid::Uuid, #[serde(with="uuid_wire")] retirement:uuid::Uuid },
+    ServiceStopped { #[serde(with="uuid_wire")] retirement:uuid::Uuid },
+    ServiceStopPending { #[serde(with="uuid_wire")] retirement:uuid::Uuid },
     HelperEnrolled { #[serde(with = "uuid_wire")] reader: uuid::Uuid, pid: u32 },
     Ready { #[serde(with = "uuid_wire")] slot: uuid::Uuid, seed: ObjectRef, root: PathBuf, objects: PathBuf },
     PagedReady { #[serde(with="uuid_wire")] slot:uuid::Uuid,seed:ObjectRef,root:PathBuf,objects:PathBuf,cow_floor:ObjectRef },
@@ -387,6 +390,7 @@ struct Slot {
 struct RootRetirement { id:uuid::Uuid, original:FinalizationBudget, readers:BTreeSet<uuid::Uuid>,
     import_removed:bool, directory_remove_attempted:bool, directory_removed:bool, committed:bool }
 struct RetirementAnswer {serial:u64,digest:Vec<u8>,bytes:Vec<u8>,_retired:Option<Slot>}
+struct ServiceStopIntent {id:uuid::Uuid,original:FinalizationBudget,committed:bool,ack_sent:bool}
 impl RetirementAnswer {
     fn replay(&self,serial:u64,request:&[u8],has_fd:bool)->Result<Vec<u8>> {
         ensure!(self.serial==serial&&self.digest==Sha256::digest(request).to_vec()&&!has_fd,"storage retirement replay differs");
@@ -562,6 +566,7 @@ pub struct RootStorageService {
     root: Option<RootDirectory>, root_caps: u64, runtime:Option<crate::root_storage_bootstrap::runtime_image::RootRuntimeService>, paged:Option<paged::RootPagedStorage>,
     serial: u64, hello: bool, fenced: bool, slots: BTreeMap<uuid::Uuid, Slot>,
     retirement_answer:Option<RetirementAnswer>,outbox:Option<Vec<u8>>,pending_retired:Option<Slot>,
+    service_stop:Option<ServiceStopIntent>,
 }
 impl RootStorageService {
     /// Image bootstrap supplies only actual inherited endpoint and enrolled
@@ -579,7 +584,7 @@ impl RootStorageService {
             engine_image: Image::capture(Path::new(ENGINE_IMAGE))?, service_image,
             mnt: namespace(None, "mnt", libc::CLONE_NEWNS)?, user: namespace(None, "user", libc::CLONE_NEWUSER)?,
             boot: proc_bytes("/proc/sys/kernel/random/boot_id", 64)?, instance: uuid::Uuid::new_v4(), serial: 0,
-            root: None, root_caps: caps, runtime:None, paged:None, hello: false, fenced: false, slots: BTreeMap::new(),retirement_answer:None,outbox:None,pending_retired:None };
+            root: None, root_caps: caps, runtime:None, paged:None, hello: false, fenced: false, slots: BTreeMap::new(),retirement_answer:None,outbox:None,pending_retired:None,service_stop:None };
         ensure!(value.engine.pid != value.own.pid, "root storage cannot enroll itself as engine");
         ensure!(Path::new("/run").canonicalize()? == Path::new("/run"), "root storage /run redirects");
         let run = fs::symlink_metadata("/run")?;
@@ -616,6 +621,14 @@ impl RootStorageService {
     pub fn close_admission(&mut self) { if let Some(runtime)=&mut self.runtime{runtime.close_admission();} if let Some(paged)=&mut self.paged{paged.close_admission();} self.fenced = true; for slot in self.slots.values_mut() { slot.fence(); } }
     /// OFF App, one bounded packet. No error removes a slot or its actual owners.
     pub fn poll_once(&mut self) -> Result<bool> {
+        // Stop has checked every supported resource. Keep the original ACK
+        // and durable read caches under the parent's original machine lock
+        // until actual send. This is service stop, never namespace deletion.
+        if let Some(stop)=&mut self.service_stop {if stop.committed {
+            stop.original.remaining()?;
+            if let Some(bytes)=&self.outbox {if !self.endpoint.send(bytes,None)?{return Ok(false)}self.outbox=None;stop.ack_sent=true;}
+            return Ok(stop.ack_sent);
+        }}
         self.diagnostic_stage=ServiceStage::ServingCurrent;self.current()?;
         self.diagnostic_stage=ServiceStage::ServingRuntime;
         if let Some(runtime)=&mut self.runtime{if runtime.poll_retaining()?{return Ok(true)}}
@@ -641,12 +654,13 @@ impl RootStorageService {
         self.serial=envelope.serial;
         let retirement=match &envelope.request {
             Request::RetireSeed {slot,retirement,..}|Request::ReleaseSeed {slot,retirement}=>Some((*slot,*retirement)),_=>None};
+        let service_stop=match &envelope.request {Request::StopService{retirement}=>Some(*retirement),_=>None};
         self.diagnostic_stage=ServiceStage::Dispatch;
         let result=(||->Result<Reply>{
             let wire_budget=FinalizationBudget::from_constraint(&envelope.constraint)?;wire_budget.remaining()?;
             self.dispatch(envelope.request,payload,packet.fds.pop(),&envelope.constraint)
         })();
-        let reply=match result {Ok(reply)=>reply,Err(_)=>match retirement {
+        let reply=match result {Ok(reply)=>reply,Err(_)if service_stop.is_some()=>Reply::ServiceStopPending{retirement:service_stop.unwrap()},Err(_)=>match retirement {
             Some((slot,retirement))=>Reply::RetirementPending {slot,retirement},
             None=>{for slot in self.slots.values_mut(){slot.fence();}Reply::Rejected}
         }};
@@ -658,12 +672,18 @@ impl RootStorageService {
         self.outbox=Some(bytes);Ok(true)
     }
     fn dispatch(&mut self, request: Request, payload: &[u8], fd: Option<OwnedFd>, wire_constraint: &FinalizationConstraint) -> Result<Reply> {
+        ensure!(self.service_stop.is_none()||matches!(&request,Request::StopService{..}|Request::RetireSeed{..}|Request::ReleaseSeed{..}),
+            "Root service admission closed by original stop request");
         if let Request::Hello { constraint } = request {
             ensure!(!self.hello && payload.is_empty() && fd.is_none() && &constraint == wire_constraint, "storage duplicate/invalid hello");
             FinalizationBudget::from_constraint(&constraint)?.remaining()?;
             self.hello = true; return Ok(Reply::Hello { instance: self.instance, image_sha256: self.service_image.sha256.clone() });
         }
         ensure!(self.hello, "storage hello required");
+        if let Request::StopService {retirement}=request {
+            ensure!(payload.is_empty()&&fd.is_none(),"Root service stop descriptors/payload invalid");
+            return self.stop_service_retaining(retirement,wire_constraint);
+        }
         let paged_slot=match &request {Request::Object{slot,..}|Request::PagedInventory{slot,..}|Request::PagedChunk{slot,..}|Request::Chunk{slot,..}|Request::Commit{slot}|Request::Check{slot}|Request::Fence{slot}
             |Request::EnrollHelper{slot}|Request::EnrollHelperCow{slot,..}|Request::RetireSeed{slot,..}|Request::ReleaseSeed{slot,..}|Request::CreateMetadataCow{slot,..}
             |Request::ArchiveMetadataCow{slot,..}=>self.paged.as_ref().is_some_and(|p|p.contains(slot)),_=>false};
@@ -840,6 +860,30 @@ impl RootStorageService {
         Ok(RootStorageRetired {_instance:self.instance,_slot:proof.slot})
     }
 
+    fn stop_service_retaining(&mut self,id:uuid::Uuid,constraint:&FinalizationConstraint)->Result<Reply> {
+        if let Some(stop)=&self.service_stop {
+            ensure!(stop.id==id&&stop.original.constraint()==*constraint,"original Root service stop/budget changed");
+        }else{
+            let original=FinalizationBudget::from_constraint(constraint)?;original.remaining()?;
+            self.service_stop=Some(ServiceStopIntent{id,original,committed:false,ack_sent:false});
+        }
+        let original=self.service_stop.as_ref().unwrap().original.clone();original.remaining()?;
+        // Paged custody includes accepted archive/checkpoint pins even after
+        // its active slot map is empty. Do not erase it to manufacture drain.
+        if !self.slots.is_empty()||self.paged.is_some()||self.pending_retired.is_some(){return Ok(Reply::ServiceStopPending{retirement:id})}
+        if let Some(runtime)=&mut self.runtime {
+            if !runtime.retire_unshared_resources_retaining(&original,&AtomicBool::new(false))?{return Ok(Reply::ServiceStopPending{retirement:id})}
+        }
+        // Immutable cache data remains Root-owned and protected by the actual
+        // parent's lock. Stopping workers does not authorize cache deletion,
+        // source/checkpoint unpinning or reuse by a replacement machine.
+        let root=self.root.as_ref().context("original service root absent")?;root.check()?;root.file.sync_all()?;
+        original.remaining()?;self.service_stop.as_mut().unwrap().committed=true;
+        Ok(Reply::ServiceStopped{retirement:id})
+    }
+
+    fn original_stop_ack_sent(&self)->bool {self.service_stop.as_ref().is_some_and(|stop|stop.committed&&stop.ack_sent)}
+
 }
 
 /// Root-only fixed FD entry. The machine bootstrap interface that creates and
@@ -893,6 +937,7 @@ pub fn run_inherited_root_service() -> Result<()> {
                 loop { std::thread::sleep(Duration::from_secs(1)); }
             }
         }
+        if owner.original_stop_ack_sent(){return Ok(())}
     }
 }
 

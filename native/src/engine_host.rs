@@ -20,6 +20,7 @@ pub(crate) mod restart;
 #[path = "owner_restart.rs"]
 mod owner_restart;
 pub(crate) use owner_restart::RetainedRestartFailure;
+pub(crate) use owner_restart::reconciliation::OriginalExternalWork;
 
 const ENGINE_FORMAT: u32 = 1;
 const CONTROL_LIMIT: usize = 8192;

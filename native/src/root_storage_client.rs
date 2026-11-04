@@ -13,6 +13,9 @@ use std::sync::{Arc,Weak};
 use std::{collections::{BTreeMap, BTreeSet}, fs::{self, File, OpenOptions}, os::{fd::{AsRawFd, FromRawFd, OwnedFd}, unix::fs::{MetadataExt, OpenOptionsExt}},
     path::{Path, PathBuf}, sync::atomic::{AtomicBool, Ordering}, time::Duration};
 static INHERITED_BOOTSTRAP_TAKEN: AtomicBool = AtomicBool::new(false);
+#[path="root_service_stop_client.rs"]
+mod service_stop;
+pub use service_stop::RootServiceStopped;
 
 /// The source is already pinned by the caller. Check every newly discovered
 /// typed reference BEFORE reading it or growing the retained transfer queue.
@@ -162,6 +165,7 @@ pub struct RootStorageClient {
     endpoint: Endpoint, server: Process, own: Process, image: Image, engine_image: Image,
     _inherited_image: OwnedFd, mnt: File, user: File, boot: Vec<u8>, serial: u64,
     instance: Option<uuid::Uuid>, fenced: bool,retirement_inflight:Option<uuid::Uuid>,cow_inflight:Option<String>,seed_window_inflight:Option<uuid::Uuid>,private_v2_recovery:Option<RootPrivateEffect>,generic_inflight:Option<GenericOriginal>,last_generic:Option<GenericOriginal>,
+    service_stop:Option<service_stop::ServiceStop>,
 }
 impl RootStorageClient {
     /// Bootstrap must supply the actual connected pair, original root-service
@@ -184,7 +188,7 @@ impl RootStorageClient {
         let value = Self { endpoint: Endpoint::capture(endpoint)?, server: Process::capture(original_service_pidfd)?, own,
             image, engine_image, _inherited_image: original_service_image,
             mnt: service::namespace(None, "mnt", libc::CLONE_NEWNS)?, user: service::namespace(None, "user", libc::CLONE_NEWUSER)?,
-            boot: service::proc_bytes("/proc/sys/kernel/random/boot_id", 64)?, serial: 0, instance: None, fenced: false,retirement_inflight:None,cow_inflight:None,seed_window_inflight:None,private_v2_recovery:None,generic_inflight:None,last_generic:None };
+            boot: service::proc_bytes("/proc/sys/kernel/random/boot_id", 64)?, serial: 0, instance: None, fenced: false,retirement_inflight:None,cow_inflight:None,seed_window_inflight:None,private_v2_recovery:None,generic_inflight:None,last_generic:None,service_stop:None };
         ensure!(value.server.pid != value.own.pid, "storage client cannot authenticate itself as service"); value.current()?; Ok(value)
     }
     /// Fixed inherited FD adapter for the image-owned engine bootstrap only.
@@ -215,6 +219,7 @@ impl RootStorageClient {
     /// Refusal-state observation only, never a retirement/settlement ACK.
     pub fn retirement_pending(&self)->bool {self.retirement_inflight.is_some()}
     fn exchange(&mut self,request:Request,payload:&[u8],fd:Option<&OwnedFd>,budget:&FinalizationBudget)->Result<Reply>{
+        ensure!(self.service_stop.as_ref().is_none_or(|stop|stop.permits_seed_retirement()&&matches!(&request,Request::RetireSeed{..}|Request::ReleaseSeed{..})),"Root service stop requires original reconciliation; new work refused");
         ensure!(self.retirement_inflight.is_none()&&self.cow_inflight.is_none()&&self.seed_window_inflight.is_none()&&self.generic_inflight.is_none(),"original Root ACK reconciliation pending; no interleaved RPC");
         let result=(||{
             self.current()?;budget.remaining()?;let serial=self.serial.checked_add(1).context("storage serial exhausted")?;

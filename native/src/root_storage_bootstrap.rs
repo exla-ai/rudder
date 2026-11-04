@@ -11,6 +11,9 @@ use std::{any::Any, ffi::CString, fmt, fs::{self, File, OpenOptions}, io::{self,
 
 #[path="root_host_control_file_modes.rs"]
 mod host_file_modes;
+#[path="root_bootstrap_retirement.rs"]
+mod retirement;
+pub use retirement::StorageServiceRetired;
 
 #[path="host_ingress.rs"]
 pub mod host_ingress;
@@ -71,9 +74,11 @@ fn read_data(fd:&OwnedFd)->Result<BootstrapData> {
     let mut bytes=vec![0u8;m.len() as usize];let n=file.read_at(&mut bytes,0)?;
     ensure!(n==bytes.len(),"machine bootstrap data read uncertain");let data:BootstrapData=serde_json::from_slice(&bytes)?;data.validate()?;Ok(data)
 }
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all="snake_case")]
-enum Message { EngineWaiting, ServicePidfd, ServiceImage, ClientAuthenticated, ParentAccepted, HostControlAbsent, HostControlOffer, HostControlFd(u8), HostServing(u32), EngineRegistered, EngineOperationsEndpoint, EngineRegistrationAccepted, EngineRegistrationFenced, RuntimeImageReadyEvidence, RuntimeImageEndpoint, RuntimeImageQualificationExport, Quarantine }
+enum Message { EngineWaiting, ServicePidfd, ServiceImage, ClientAuthenticated, ParentAccepted, HostControlAbsent, HostControlOffer, HostControlFd(u8), HostServing(u32), EngineRegistered, EngineOperationsEndpoint, EngineRegistrationAccepted, EngineRegistrationFenced, RuntimeImageReadyEvidence, RuntimeImageEndpoint, RuntimeImageQualificationExport, Quarantine,
+    StorageStopRequested{request:String,constraint:FinalizationConstraint},StorageStopReady{request:String},
+    StorageStopAcknowledged{request:String,retirement:String},StorageChildJoined{request:String} }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Frame { version:u32, serial:u64, nonce:String, constraint:FinalizationConstraint, message:Message }
@@ -403,6 +408,7 @@ impl Stage {
 /// cleanup. Keep outside catch_unwind and retain after every uncertain result.
 #[must_use="retain actual children and descriptors through explicit existing-owner drain or VM teardown"]
 pub struct MachineRootBootstrap {
+    storage_stop:Option<retirement::RootStorageStop>,
     provisioned_files:Option<host_file_modes::ProvisionedFileModes>,
     runtime_qualification:Option<runtime_image::qualification::RootQualification>,
     original:FinalizationBudget,data:BootstrapData,own:Process,launcher_image:Image,engine_image:Image,service_image:Image,
@@ -428,7 +434,7 @@ impl MachineRootBootstrap {
         let data=BootstrapData {version:1,nonce:uuid::Uuid::new_v4().to_string(),constraint:original.constraint()};
         let data_fd=sealed_data(&data)?;let (service_endpoint,engine_endpoint)=storage::bootstrap_socket_pair()?;
         let (gate_parent,gate_child)=storage::bootstrap_socket_pair()?;
-        let mut owner=Self {provisioned_files:None,runtime_qualification:None,original,data,own,launcher_image,engine_image:Image::capture(Path::new(ENGINE_PATH))?,
+        let mut owner=Self {storage_stop:None,provisioned_files:None,runtime_qualification:None,original,data,own,launcher_image,engine_image:Image::capture(Path::new(ENGINE_PATH))?,
             service_image:Image::capture(Path::new(SERVICE_PATH))?,mnt:storage::namespace(None,"mnt",libc::CLONE_NEWNS)?,
             user:storage::namespace(None,"user",libc::CLONE_NEWUSER)?,pidns:storage::namespace(None,"pid",libc::CLONE_NEWPID)?,boot:storage::proc_bytes("/proc/sys/kernel/random/boot_id",64)?,
             root_caps,drop_policy:PrivilegeDropPolicy::capture()?,runtime:None,lock:None,lock_id:None,launcher_exe,data_fd,service_endpoint,engine_endpoint:Some(engine_endpoint),
@@ -586,10 +592,16 @@ impl MachineRootBootstrap {
     /// OFF App original-child/image/namespace observation, never helper/backend
     /// drain. A loss is absorbing and cannot create a replacement machine.
     pub fn poll_lifetime_retaining(&mut self)->Result<()> {
+        if self.storage_stop.is_some(){return self.poll_storage_stop_retaining()}
         let result=(|| ->Result<()> {ensure!(self.stage==Stage::Established,"machine startup not established");self.root_current()?;self.engine_current()?;
             let service=self.service.as_mut().unwrap();service.live()?;self.service_image.matches_process(service.original()?)?;
             if let Some((message,fd))=self.gate.as_mut().unwrap().poll()? {
                 match message {
+                    Message::StorageStopRequested{request,constraint}=>{
+                        ensure!(fd.is_none(),"storage stop request has unexpected descriptor");
+                        self.capture_storage_stop_retaining(request,constraint)?;
+                        return self.poll_storage_stop_retaining();
+                    },
                     Message::EngineRegistrationAccepted=>{
                         ensure!(fd.is_none()&&self.registration.is_some(),"machine unexpected registration frame");
                         if self.registration.as_mut().unwrap().native_accepted_retaining().is_err(){self.registration.as_mut().unwrap().mark_failed();}
@@ -720,6 +732,7 @@ impl MachineRootBootstrap {
 /// lease, scheduler, source admission, backend readiness or host drain proof.
 #[must_use="retain actual bootstrap and Root client owners for the machine lifetime"]
 pub struct ManagedMachineBootstrap {
+    storage_stop:Option<retirement::NativeStorageStop>,
     raw:[Option<OwnedFd>;5],own:Option<Process>,engine_image:Option<Image>,launcher_image:Option<Image>,
     service_image:Option<Image>,service_pidfd:Option<OwnedFd>,service_exe:Option<OwnedFd>,service:Option<Process>,
     mnt:Option<File>,user:Option<File>,boot:Vec<u8>,drop_policy:Option<PrivilegeDropPolicy>,data:Option<BootstrapData>,original:Option<FinalizationBudget>,
@@ -741,7 +754,7 @@ impl ManagedMachineBootstrapFailure {
         loop {std::hint::black_box(&self.owner);std::thread::sleep(Duration::from_secs(1));}}
 }
 impl ManagedMachineBootstrap {
-    fn empty()->Self {Self {raw:std::array::from_fn(|_|None),own:None,engine_image:None,launcher_image:None,service_image:None,
+    fn empty()->Self {Self {storage_stop:None,raw:std::array::from_fn(|_|None),own:None,engine_image:None,launcher_image:None,service_image:None,
         runtime_qualification:None,service_pidfd:None,service_exe:None,service:None,mnt:None,user:None,boot:Vec::new(),drop_policy:None,data:None,original:None,gate:None,client:None,host_transfer:Vec::new(),host_ingress:None,registration_fd:None,operation_fd:None,runtime_fd:None,runtime_ready_fd:None,runtime_client:None,runtime_ready_observation:None,registered_engine:None,registered_fence:Arc::new(AtomicBool::new(false)),registration_ready:false,registration_failed:false,
         parent_accepted:false,host_ack:HostServingAck::Pending,
         quarantined:false,panic:None}}
@@ -809,7 +822,7 @@ impl ManagedMachineBootstrap {
     /// drain. Root Main must poll it before admitting later managed work.
     pub fn check_current_retaining(&mut self)->Result<()> {
         let result=(|| ->Result<()> {
-            ensure!(!self.quarantined && self.client.is_some(),"machine actual client is quarantined/unavailable");
+            ensure!(!self.quarantined && self.client.is_some()&&self.storage_stop.is_none(),"machine actual client is quarantined/unavailable/retiring");
             let own=self.own.as_ref().context("machine original self pidfd absent")?;
             ensure!(own.pid==std::process::id(),"machine client moved to another process");storage::floor(own.pid,1500)?;own.live()?;
             ensure!(unsafe {libc::prctl(libc::PR_GET_DUMPABLE,0,0,0,0)}==0,"machine nondumpable guard changed");
@@ -946,7 +959,7 @@ pub fn run_machine_root()->Result<()> {
         // Uploader cleanup remains independent of registration/WS/quarantine;
         // keep actual child/pidfd/stdio owners and poll original wait/EOF only.
         if let Some(registration)=&mut owner.registration {let _=std::panic::catch_unwind(std::panic::AssertUnwindSafe(||registration.settle_uploaders_retaining()));}
-        if owner.stage==Stage::Established {
+        if owner.stage==Stage::Established||owner.storage_stop.is_some() {
             match std::panic::catch_unwind(std::panic::AssertUnwindSafe(||owner.poll_lifetime_retaining())) {
                 Ok(Ok(()))=>{},Ok(Err(_))=>eprintln!("MACHINE_ROOT_LIFETIME_QUARANTINED"),
                 Err(panic)=>{owner.panic=Some(panic);owner.quarantine();eprintln!("MACHINE_ROOT_LIFETIME_QUARANTINED");}

@@ -29,6 +29,8 @@ pub mod compiler_qualification;
 pub mod environment;
 #[path="root_runtime_uses.rs"]
 mod uses;
+#[path="root_runtime_retirement.rs"]
+mod retirement;
 pub use uses::{RuntimePreparationUse,RuntimeNativeUseData};
 /// Select the clock domain only from the authenticated, closed role config.
 /// A serialized constraint alone never selects the larger qualification domain.
@@ -748,12 +750,12 @@ impl CapturedRuntimeDescriptors {
 
 /// Private service extension. Missing inherited set leaves legacy service
 /// behavior unchanged. Partial/bad set is absorbing and retains every owner.
-pub(crate) struct RootRuntimeService {raw:Vec<OwnedFd>,proof:Option<Arc<RuntimeBootstrapProof>>,parent:Option<RuntimeEndpoint>,engine:Option<RuntimeEndpoint>,offer:Option<RuntimePacket>,owner:Option<RuntimeImageMountOwner>,ack:Option<Vec<u8>>,ack_sent:bool,sessions:BTreeMap<String,ServiceSession>,compiler_jobs:Vec<compiler_sdk::jobs::RootBuildTransfer>,sdk_job_high_watermark:u64,backing_transfer:Option<environment::RootBackingTransfer>,pending:Option<RuntimePacket>,failed:bool}
+pub(crate) struct RootRuntimeService {raw:Vec<OwnedFd>,proof:Option<Arc<RuntimeBootstrapProof>>,parent:Option<RuntimeEndpoint>,engine:Option<RuntimeEndpoint>,offer:Option<RuntimePacket>,owner:Option<RuntimeImageMountOwner>,ack:Option<Vec<u8>>,ack_sent:bool,sessions:BTreeMap<String,ServiceSession>,compiler_jobs:Vec<compiler_sdk::jobs::RootBuildTransfer>,sdk_job_high_watermark:u64,backing_transfer:Option<environment::RootBackingTransfer>,pending:Option<RuntimePacket>,retirement:Option<retirement::RootRetirement>,failed:bool}
 impl RootRuntimeService {
     pub(crate) fn capture_entry_snapshot_retaining(out:&mut Option<Self>,captured:&mut CapturedRuntimeDescriptors,engine:&Process)->Result<()> {
         ensure!(out.is_none(),"runtime inherited slot occupied");captured.validate_shape()?;
         if captured.is_absent_at_entry(){return Ok(())}
-        *out=Some(Self{raw:Vec::with_capacity(8),proof:None,parent:None,engine:None,offer:None,owner:None,ack:None,ack_sent:false,sessions:BTreeMap::new(),compiler_jobs:Vec::new(),sdk_job_high_watermark:0,backing_transfer:None,pending:None,failed:false});
+        *out=Some(Self{raw:Vec::with_capacity(8),proof:None,parent:None,engine:None,offer:None,owner:None,ack:None,ack_sent:false,sessions:BTreeMap::new(),compiler_jobs:Vec::new(),sdk_job_high_watermark:0,backing_transfer:None,pending:None,retirement:None,failed:false});
         let s=out.as_mut().unwrap();ensure!(captured.take_complete_into_retaining(&mut s.raw)?,"runtime complete entry snapshot absent");
         // Validate ONLY the owned entry snapshot against the actual constructed
         // service/engine. Never inspect numeric slots after allocation.
@@ -763,7 +765,7 @@ impl RootRuntimeService {
         s.proof=Some(Arc::new(RuntimeBootstrapProof::capture(raw,engine)?));Ok(())
     }
     pub(crate) fn close_admission(&mut self){self.failed=true;if let Some(owner)=&self.owner{owner.close_admission()}}
-    pub(crate) fn poll_retaining(&mut self)->Result<bool>{ensure!(!self.failed,"runtime original service admission quarantined");let result=self.poll_inner();if result.is_err(){self.close_admission()}result}
+    pub(crate) fn poll_retaining(&mut self)->Result<bool>{if self.retirement.is_some(){return self.poll_original_retirement()}ensure!(!self.failed,"runtime original service admission quarantined");let result=self.poll_inner();if result.is_err(){self.close_admission()}result}
     fn poll_inner(&mut self)->Result<bool>{let proof=self.proof.as_ref().context("runtime actual bootstrap chain incomplete")?;proof.current()?;
         if self.owner.is_none(){if self.offer.is_none(){self.offer=self.parent.as_ref().unwrap().receive_data()?;}let Some(packet)=self.offer.as_ref()else{return Ok(false)};
             ensure!(packet.credentials.pid==proof.root.pid as i32&&packet.credentials.uid==0&&packet.credentials.gid==0,"runtime enable is not actual original image launcher");
@@ -802,6 +804,10 @@ impl RootRuntimeService {
             wire::RuntimeDisposalRead::Pending=>return Ok(false),wire::RuntimeDisposalRead::Packet=>{},wire::RuntimeDisposalRead::ReadClosed{..}=>anyhow::bail!("original runtime engine endpoint closed; pending owners retained")}}
         let Some(packet)=self.pending.as_ref()else{return Ok(false)};
         ensure!(packet.credentials.pid==proof.engine.pid as i32&&packet.credentials.uid==1500&&packet.credentials.gid==1500,"runtime enrollment is not actual original engine");
+        if retirement::is_request(&packet.bytes)? {
+            self.retirement=Some(retirement::RootRetirement::capture(self.pending.take().unwrap()));
+            return self.poll_original_retirement();
+        }
         if compiler_sdk::jobs::is_request(&packet.bytes)?{if self.compiler_jobs.len()>=MAX_HELPERS{return Ok(false)}
             let staged=compiler_sdk::jobs::RootBuildTransfer::staged(self.pending.take().unwrap());self.compiler_jobs.push(staged);
             self.compiler_jobs.last_mut().unwrap().admit_original_serial_retaining(owner,&mut self.sdk_job_high_watermark);return Ok(true)}
@@ -820,7 +826,7 @@ impl RootRuntimeService {
     }
 }
 
-struct ClientState {endpoint:RuntimeEndpoint,active:Option<Arc<Mutex<ClientRequest>>>,retained:Vec<Arc<Mutex<ClientRequest>>>,
+struct ClientState {retirement:Option<retirement::NativeRetirement>,endpoint:RuntimeEndpoint,active:Option<Arc<Mutex<ClientRequest>>>,retained:Vec<Arc<Mutex<ClientRequest>>>,
     backing_active:Option<Arc<Mutex<environment::NativeBackingState>>>,backing_retained:Option<Arc<Mutex<environment::NativeBackingState>>>}
 struct ClientRequest {original:FinalizationBudget,cancelled:Arc<AtomicBool>,helper:Arc<rudder_engine::execution::handoff::helper_process::HelperProcessWitness>,binding:rudder_engine::execution::ManagedExecutionBinding,
     request:Option<HelperRequest>,bytes:Option<Vec<u8>>,pidfd:Option<OwnedFd>,delivery:Option<OwnedFd>,receive:Option<OwnedFd>,cancel:Option<OwnedFd>,pid:u32,start:String,sent:bool,unknown:bool,pending:Option<RuntimePacket>,ready:bool,attached:bool}
@@ -860,7 +866,7 @@ impl RuntimeImageClient {
         ensure!(config.data().image_preseed.as_ref().and_then(|p|p.runtime_mount.as_ref()).is_some(),"runtime image profile absent");
         let service=Process::capture(service.try_clone()?)?;let image=Image::capture(Path::new(SERVICE_PATH))?;image.matches_fd(service_exe)?;service.live()?;
         let ready=ready::ReadyOrigin::capture_from_original_bootstrap(ready_fd,&registration,&service,bootstrap_nonce)?;
-        *out=Some(Arc::new(Self{uses:uses::RuntimeUseLedger::new(),compiler_sdk:Mutex::new(None),ready,state:Mutex::new(ClientState{endpoint:RuntimeEndpoint::capture(endpoint)?,active:None,retained:Vec::new(),backing_active:None,backing_retained:None}),registration,config,service,service_image:image,service_exe:service_exe.try_clone()?}));
+        *out=Some(Arc::new(Self{uses:uses::RuntimeUseLedger::new(),compiler_sdk:Mutex::new(None),ready,state:Mutex::new(ClientState{retirement:None,endpoint:RuntimeEndpoint::capture(endpoint)?,active:None,retained:Vec::new(),backing_active:None,backing_retained:None}),registration,config,service,service_image:image,service_exe:service_exe.try_clone()?}));
         let client=out.as_ref().unwrap();client.current()?;client.ready.original_receipt_current()?;
         if client.config.data().compiler_sdk.is_some(){let mut slot=client.compiler_sdk.lock().unwrap_or_else(|p|p.into_inner());CompilerSdkClient::capture_retaining(&mut slot,client.clone())?;}
         *observation=Some(RuntimeReadyObservation::issue_on_original_client(client)?);Ok(())
@@ -868,7 +874,11 @@ impl RuntimeImageClient {
     /// Local absorbing admission only. Existing request polling, immutable
     /// DATA reads and SDK disposal keep their original custody. No Root packet,
     /// floor close, release, cancellation or capacity recycling is issued here.
-    pub fn close_original_use_admission(&self)->Result<()> {self.uses.close()}
+    pub fn close_original_use_admission(&self)->Result<()> {
+        self.uses.close()?;
+        let sdk=self.compiler_sdk.try_lock().map_err(|_|anyhow::anyhow!("original SDK owner busy/poisoned; retirement retained"))?;
+        if let Some(sdk)=&*sdk{sdk.close_build_admission()?;}Ok(())
+    }
     /// Pure retained alias capture only. Do not close admission: previously
     /// admitted tasks may still be preparing their first helper enrollment.
     /// No currentness/clock/Root IO and no authority reconstructed from DATA.

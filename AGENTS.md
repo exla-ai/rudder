@@ -105,5 +105,5 @@ has separate build, install/launch and signing gates; see reference §§9, 11.
 
 Before final handoff, file `rudder done` with summary, interfaces, follow-ups and
 actual delivery proof when requested. Report unfinished work honestly. The v4
-target is [PLAN.md](PLAN.md); current evidence/continuation state is in
+target is [PLAN.md](PLAN.md); current status and open work: [v4 handoff](docs/v4-handoff.md). Evidence/continuation state is in
 [the implementation record](docs/architecture/implementation.md).

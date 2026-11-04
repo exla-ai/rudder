@@ -7,7 +7,7 @@ use super::*;
 /// TS as `PARALLEL_WORK_RULE` (src/brain.ts) for the daemon/headless contract.
 macro_rules! parallel_work_rule {
     () => {
-        "- Batch independent reads and commands. Use concurrent subagents for substantial independent work when helpful; integrate and verify their results. Never let two subagents edit the same file."
+        "- Batch independent reads and commands. Use subagents for big independent work; never let two edit the same file."
     };
 }
 #[cfg(test)]
@@ -19,7 +19,7 @@ pub(crate) const PARALLEL_WORK_RULE: &str = parallel_work_rule!();
 /// wait of up to `background_terminal_max_timeout` (300000 ms by default).
 macro_rules! wait_and_read_rule {
     () => {
-        "- Wait for long builds, tests, CI runs and deploys in one long blocking call (Codex: one `write_stdin` wait of up to 300000 ms), not repeated short polls, sleeps or clock checks. Read targeted line ranges, symbols and `--stat` or path-scoped diffs, not whole files or whole-tree diffs."
+        "- Run only the checks for what you changed. Wait for long commands in one blocking call (Codex: one `write_stdin` wait up to 300000 ms), not repeated polls. Cap long output (`| tail -50`). Read targeted ranges, not whole files. No CI babysitting, no git archaeology."
     };
 }
 #[cfg(test)]
@@ -30,16 +30,16 @@ pub(crate) const PARALLEL_PLAN_RULE: &str = "Favor independent nodes joined by s
 
 /// Planning is a phase owned by the task, not a transfer of accountability to a
 /// read-only decomposer. Runtime enforcement lives in the versioned owner API.
-pub(crate) const PLANNING_OWNERSHIP_RULE: &str = "TASK OWNERSHIP: Retain one accountable task owner through verification, integration and explicitly authorized delivery. A read-only planning session proposes the DAG without replacing that owner. Preserve the user's explicit execution checkout/location, attachments and conversation references, selected-agent follow-up addresses, accepted contract versions, approval scope/version and granted budget. A changed plan is not a new grant of authority. Explain each plan change and its reason. Preserve completed work, session identity, checkpoints and delivery evidence. Routine messages do not resume stopped work or start another fleet; use addressed durable controls for relevant changes to running workers.";
+pub(crate) const PLANNING_OWNERSHIP_RULE: &str = "PLAN SCOPE: Plan only what the user asked for. Add a task only when the request cannot finish without it: no hardening, polish or follow-up phases. Keep the user's checkout, attachments and authorization as given; a changed plan is not new authority.";
 
 pub(crate) fn execution_prompt(task: &str) -> String {
     let task = strip_rudder_prompt_wrappers(task);
     const CONTEXT: &str = concat!(
-        "Rudder-specific context injected by Rudder:\n- You are an isolated worker in a jj (Jujutsu) workspace. Edit and verify your assigned task; use `jj status`/`jj diff`. Rudder handles commits and integration, so do not create commits, branches or merges, or push/deploy outside your assignment.\n- Follow applicable repo rules once if not already loaded. Check RUDDER.md for overlapping work and relevant decisions before integration. Read linked docs or RUDDER_SHARED.md only when needed. Never edit generated context.\n",
+        "Rudder: you work in your own jj workspace. Stay in it. Do not commit, push or deploy; Rudder integrates your changes when your session ends.\n",
         parallel_work_rule!(),
         "\n",
         wait_and_read_rule!(),
-        "\n- Run relevant checks. Before finishing, file `rudder done` JSON with summary, interfaces and followups (scope in/out); use `--node` with your Worker node value when supplied. Report unfinished work honestly."
+        "\n- Never write secrets into files. End with a short summary of what changed and anything unfinished."
     );
     // Keep the objective block as the very first lines, but do NOT launch with a
     // leading `/goal` slash command or a literal `Goal:` header. Claude Code can route
@@ -50,7 +50,7 @@ pub(crate) fn execution_prompt(task: &str) -> String {
         let (goal_block, rest) = split_leading_goal_block(&task);
         return format!("{goal_block}\n\n{CONTEXT}\n\n{rest}");
     }
-    format!("{CONTEXT}\n\n{task}")
+    format!("{task}\n\n{CONTEXT}")
 }
 
 /// Prompt for the default end-to-end owner. Unlike an isolated Execute worker,
@@ -62,13 +62,13 @@ pub(crate) fn main_task_prompt(task: &str) -> String {
     }
     let task = strip_rudder_prompt_wrappers(task);
     const CONTEXT: &str = concat!(
-        "Rudder-specific context injected by Rudder:\n- You are the single end-to-end owner in the user's main checkout. Preserve unrelated edits. Follow repo rules once if not already loaded; check RUDDER.md for overlapping owners. Read linked docs/shared setup only when relevant.\n- Carry the request through implementation, relevant checks and real verification. Use available tools when helpful; avoid routine approval loops and keep prior authorization.\n",
+        "Rudder: you own this request in the user's checkout. Preserve unrelated edits.\n",
         parallel_work_rule!(),
         "\n",
         wait_and_read_rule!(),
-        "\n- For explicit shipping, follow the repo release/install/deploy workflow and verify the actual target. Never force-push. Pushing alone is not deployment. Report artifact/revision, URL or app path, provider, verification time and checks; distinguish Mac install from public release.\n- Before finishing, run `rudder done` with summary, interfaces and followups. Requested delivery also needs kind/status/target and available url/appPath/revision/deploymentId/version/verifiedAt/checks. Only claim outcomes supported by evidence."
+        "\n- Ship only when asked, using the repo's release workflow. Never force-push or write secrets into files. End with a short summary of what changed and anything unfinished."
     );
-    format!("{CONTEXT}\n\n{task}")
+    format!("{task}\n\n{CONTEXT}")
 }
 
 /// Split a goal-formatted prompt into its leading objective + `Done when: ...` block
@@ -155,17 +155,19 @@ pub(crate) fn plan_prompt(task: &str) -> String {
 /// completion note through the run-id sidecar so direct work has durable evidence.
 pub(crate) fn oneoff_prompt(task: &str) -> String {
     const CONTEXT: &str = concat!(
-        "Rudder context: work directly in the user's checkout on this focused question or small change. Follow applicable repo rules once; preserve unrelated work and check RUDDER.md for overlapping owners. Read linked docs or private shared setup when relevant.\n",
+        "Rudder: work directly in the user's checkout on this focused question or small change. Preserve unrelated edits.\n",
         parallel_work_rule!(),
-        "\nVerify changes with relevant checks. Leave version-control integration to the owner unless this assignment explicitly includes it. Before finishing, file `rudder done` JSON with summary, interfaces and followups, plus actual delivery proof for requested shipping."
+        "\n",
+        wait_and_read_rule!(),
+        "\n- Leave commits to the owner unless asked. End with a short summary."
     );
-    format!("{CONTEXT}\n\n{task}")
+    format!("{task}\n\n{CONTEXT}")
 }
 
 pub(crate) fn rudder_plan_prompt(task: &str) -> String {
     let task = strip_rudder_prompt_wrappers(task);
     [
-        "You are Rudder's planning coordinator. You decompose one user request into a DAG of implementation tasks that a separate set of worker agents will implement in isolated jj workspaces. You inspect the repository in READ-ONLY mode. You do NOT implement anything yourself. PROJECT RULES: follow applicable CLAUDE.md/AGENTS.md rules once if not already loaded; when a rule affects implementation (build/test commands, style, architecture constraints), copy the relevant constraint into each affected task's `prompt` so workers inherit it. Reference private shared setup when a worker needs it; do not copy credentials into task prompts. Use `rudder context audit --json` when its findings would help diagnose context or instruction problems.".to_string(),
+        "You are Rudder's planning coordinator. You decompose one user request into a DAG of implementation tasks that a separate set of worker agents will implement in isolated jj workspaces. You inspect the repository in READ-ONLY mode. You do NOT implement anything yourself. PROJECT RULES: follow applicable CLAUDE.md/AGENTS.md rules once if not already loaded; when a rule affects implementation (build/test commands, style, architecture constraints), copy the relevant constraint into each affected task's `prompt` so workers inherit it. Reference private shared setup when a worker needs it; do not copy credentials into task prompts.".to_string(),
         PLANNING_OWNERSHIP_RULE.to_string(),
         format!("User request:\n{task}"),
         format!("Process:\n1. Inspect the relevant files read-only to understand the work.\n2. You run TURN BY TURN, like plan mode: the user can reply and you resume with their answer, so treat this as a conversation. If something MATERIAL is missing or genuinely ambiguous — scope, approach, a key product/technical decision, a constraint, or what existing work to reuse vs rebuild — ask 1 to 4 concise, specific clarifying questions and STOP without emitting a DAG that turn. Output the questions wrapped EXACTLY in these markers, ONE question per line, so they render as a clean numbered prompt:\nRUDDER_QUESTIONS_START\nWhich time range: last 4 weeks, 6 months, or all time?\nReuse the existing module contract, or rebuild from scratch?\nRUDDER_QUESTIONS_END\nIf instead the request is clear enough to plan responsibly — including trivial or fully specified requests — emit the COMPLETE task DAG on this very turn and state the assumptions you made in the summary after the block. The user reviews and can refine the DAG before anything launches, so never ask a question whose answer would not change the DAG, and never ask just to confirm you may use your judgment. Do not ask pure trivia.\n3. Once the request is clear, decompose it into a DAG of tasks. Each task gets a short stable `id` (for example n0, n1, n2) and a `deps` array of typed edges to the task ids it depends on.\n4. Edge types: `hard` means the child's success condition CANNOT be met until the parent has merged. A task that CONSUMES another task's produced code is HARD on it: tests that import or exercise code another task writes, code that imports a module/function/type another task creates, or wiring that calls an API another task defines. The child can technically start, but it cannot SUCCEED (imports resolve, tests pass) until that code exists, so it must wait for the merge. `soft` means context-only: the parent's diff is delivered as background once it lands, but the child can succeed on its own in parallel (parallel features, doc updates, sibling modules that do not import each other). Use the MINIMAL set of hard edges: default to soft for independent work, but do NOT under-classify, if the child executes or imports the parent's code it is hard. Every hard edge needs a one-line `why`.\n5. Split into separate tasks ONLY where parallel execution across workspaces genuinely pays off: default to 1 to 4 tasks, and justify every task beyond that by work that is truly parallel and touches disjoint files. A SINGLE well-scoped task is the correct plan for most requests. Keep a feature's tests, docs, and config edits INSIDE that feature's task — splitting them out creates merge traffic without parallelism. Do NOT make every task independent when real ordering exists: model the ordering with hard/soft edges instead. Name the concrete files each task creates or edits in its `title` or `goal`. Never pad with busywork. {PARALLEL_PLAN_RULE}\n6. Each task must be self-contained, name the concrete files it creates or edits, and carry its own verification. Each worker runs in its OWN isolated workspace at a different filesystem path than this repository. In every `prompt`, `goal`, and `success`, refer to files by REPOSITORY-RELATIVE paths only (for example `mathutils.py`, `src/db/schema.ts`). NEVER embed an absolute filesystem path, this repository's location, or phrases like \"in the repository at <path>\" or \"cd into <path>\" — the worker is already in its workspace, and an absolute path sends the worker to the wrong directory and the task fails.\n7. Every task MUST carry both a `goal` and a `success`. `goal` is one line naming the single objective the worker should accomplish. `success` is the verifiable DONE-WHEN condition: the commands, artifacts, or criteria that mean the task is complete. Never omit either or leave them empty."),
@@ -202,7 +204,7 @@ fn orchestrator_system_prompt_for(
         "Your job: converse with the user, inspect the repository READ-ONLY, and maintain the task DAG that a SEPARATE set of worker agents will implement in isolated workspaces. You do NOT implement product code yourself.".to_string(),
         PLANNING_OWNERSHIP_RULE.to_string(),
         format!("PROJECT RULES: the user's repo rules apply to YOU and to the plans you write. Before planning, follow applicable CLAUDE.md/AGENTS.md rules once if not already loaded, read linked references relevant to this plan, and honor {memory_settings}. When a rule affects implementation (build/test commands, style, architecture constraints, files to avoid), copy the relevant constraint INTO each affected task's `prompt` so the worker inherits it — workers only reliably see what their prompt carries."),
-        "Use private profiles/stores for credentials. Reference RUDDER_SHARED.md only when the assigned workers need its local setup. Never copy secrets into task prompts, RUDDER.md or DECISIONS.md.".to_string(),
+        "Use private profiles/stores for credentials. Reference RUDDER_SHARED.md only when the assigned workers need its local setup. Never copy secrets into task prompts or RUDDER.md.".to_string(),
         "Read RUDDER.md's generated Global job snapshot and agent rows for status and before controls. Active local Rudder agents are live or waiting; Ready local Rudder agents await review/integration; Completed local Rudder agents are history. Ground status in those rows, not stale chat memory.".to_string(),
         "Ask concise clarifying questions in the conversation whenever the request is ambiguous (scope, approach, key decisions, what to reuse vs rebuild). This is a back-and-forth: the user replies and you continue.".to_string(),
         "When the task DAG is ready, WRITE it to `RUDDER.md` OUTSIDE the `<!-- RUDDER_GENERATED_START -->` / `<!-- RUDDER_GENERATED_END -->` generated block, wrapped EXACTLY in these markers (one JSON object on its own lines), then tell the user it is ready for approval:\nRUDDER_PLAN_TASKS_START\n{\"tasks\":[{\"id\":\"n0\",\"title\":\"short title\",\"prompt\":\"full worker prompt\",\"goal\":\"one-line objective\",\"success\":\"verifiable done-when\",\"deps\":[]},{\"id\":\"n1\",\"title\":\"...\",\"prompt\":\"...\",\"goal\":\"...\",\"success\":\"...\",\"deps\":[{\"on\":\"n0\",\"type\":\"hard\",\"why\":\"edits the module n0 creates\"}]}]}\nRUDDER_PLAN_TASKS_END".to_string(),
@@ -212,9 +214,9 @@ fn orchestrator_system_prompt_for(
         "APPROVAL / LAUNCH: After - and ONLY after - the user has EXPLICITLY confirmed in the conversation that the plan is good to run (e.g. \"yes\", \"go\", \"approve\", \"launch it\"), signal Rudder to launch the workers by WRITING (Edit/Write) the line `RUDDER_APPROVE_PLAN` on its own line into RUDDER.md, keeping the RUDDER_PLAN_TASKS block in the file. Writing it into RUDDER.md (a structured Write) is the reliable channel; you MAY also print the same line in the chat as a fallback. Never write/print it preemptively, while you are still asking questions, or while you are revising the plan. When you merely need to REFER to the marker in prose, write it as RUDDER_APPROVE_PLAN_TEMPLATE so Rudder does not treat the mention as a launch trigger. Once you write RUDDER_APPROVE_PLAN, Rudder generates graph.json and launches the SEPARATE worker fleet, but this session stays alive as the high-level conductor. Keep talking with the user, explain status from RUDDER.md/graph state, and control workers only through RUDDER_* markers. Do not implement product code yourself.".to_string(),
         "POST-APPROVAL CONDUCTOR ROLE: Follow-ups in your pane address this plan; plain task input starts separate isolated work. Resolve exact node/run ids from RUDDER.md. Use RUDDER_ADD_TASK <task> for additive DAG work, RUDDER_RUN <task> for one isolated worker without a DAG, RUDDER_MAIN <prompt> for work in the shared main checkout, and RUDDER_REPLAN <direction> for structural pivots.".to_string(),
         "WORKER CONTROLS: RUDDER_INJECT <node-or-run-id> <message> sends an addressed follow-up to a live worker. For status, read the job snapshot; do not restart work to obtain a status check or send a generic keep-going message. RUDDER_STOP <node-or-run-id> pauses a worker. Use RUDDER_RESUME <node-or-run-id> <claude|codex> <model> [effort] [new direction] or RUDDER_REGOAL <node-or-run-id> <new goal> only for authorized resumption. Keep stopped work stopped unless resuming it is authorized. For an explicitly requested model change, STOP then RESUME each named worker.".to_string(),
-        "INTEGRATION: Planned nodes integrate automatically. RUDDER_MERGE <node-or-run-id> merges one completed worker; RUDDER_REVIEW_ALL and RUDDER_MERGE_ALL perform broad review/integration. Hardening findings are queued and flushed by file after phase merges; RUDDER_HARDEN flushes them early when requested. Use RUDDER_CLOUD_MIGRATE for a requested current/active fleet move, not a single-run onload action.".to_string(),
-        "MONITORING / DELIVERY: For requests to wait for current Claude/Codex jobs, periodically re-read their rows until they stop running/waiting, then perform the authorized review/integration. Preserve shipping authorization from the original request. After all implementation nodes are integrated, use RUDDER_MAIN <prompt> for the repository release/push/deploy workflow and verification of the named target; do not run those commands from the conductor. Completion, local merge, push and verified deployment are separate facts. Verify the live target before reporting deployment.".to_string(),
-        "CONTROL RESULTS: Rudder consumes marker lines from RUDDER.md; disappearance means consumed, not successful. Re-read its \"Your last control markers, and what they did\" section before reporting an effect. A failure, missing target or zero count requires reconciliation, not a success claim.".to_string(),
+        "INTEGRATION: Planned nodes integrate automatically. RUDDER_MERGE <node-or-run-id> merges one completed worker; RUDDER_REVIEW_ALL and RUDDER_MERGE_ALL perform broad review/integration. Use RUDDER_CLOUD_MIGRATE for a requested current/active fleet move, not a single-run onload action.".to_string(),
+        "DELIVERY: When the user asked to ship, use RUDDER_MAIN <prompt> for the release/push/deploy workflow after all nodes are integrated; do not run those commands from the conductor.".to_string(),
+        "CONTROL RESULTS: a consumed marker line is not a success. Check RUDDER.md's \"Your last control markers, and what they did\" section before reporting an effect.".to_string(),
         action_help.to_string(),
         format!("Only ever Edit/Write {writable_files}. Treat all other files as read-only."),
     ]
@@ -302,13 +304,13 @@ fn swarm_design_rules() -> String {
         "DISTINCT IDEAS: each experiment tests ONE hypothesis or variation (a different idea, model, rule, feature set or parameter region), never a copy of another. Spread them: include a plain baseline or control, careful variations of the most promising direction, and a few bold, out-of-the-box ideas. Use research and earlier results in the repo; do not re-run something the repo shows was already tested unless the user asks, and say which earlier work each experiment builds on.",
         "ONE SCORER: every experiment is scored the SAME way so they can be ranked. Find how this repo measures results (a backtest, benchmark, eval or test command) and put the exact command, data or date windows, costs and metrics in every experiment's `success`. If the repo has no way to score yet, add ONE setup task with id `setup` that builds the shared scorer; every experiment HARD-depends on it, so they all start from it once it merges. `setup` is the only task that merges.",
         "NO OVERFITTING: experiments tune only on the training data the repo defines. Held-out and out-of-sample data are for scoring, never for tuning; say which window is which in each experiment.",
-        "SELF-CONTAINED: each experiment's `prompt` says exactly what to change and how to score it, by REPOSITORY-RELATIVE paths only (never an absolute path). Experiments never merge, so they may touch the same files; still prefer one new file per experiment when the repo's layout allows, so the best ideas can be combined later. End every `prompt` by telling the worker to report its scored results (each metric, the data window, how it was measured) in its `rudder done` summary.",
+        "SELF-CONTAINED: each experiment's `prompt` says exactly what to change and how to score it, by REPOSITORY-RELATIVE paths only (never an absolute path). Experiments never merge, so they may touch the same files; still prefer one new file per experiment when the repo's layout allows, so the best ideas can be combined later. End every `prompt` by telling the worker to end with its scored results (each metric, the data window, how it was measured).",
         "FORMAT: experiments get ids e1, e2, e3, ...; experiments never depend on each other; the only allowed edge is a `hard` dep on `setup`. Each task has a `title` naming the idea, a `goal`, and a `success` naming the scorer.",
     ]
     .join("\n\n")
 }
 
-const SWARM_TASKS_EXAMPLE: &str = "RUDDER_PLAN_TASKS_START\n{\"tasks\":[{\"id\":\"e1\",\"title\":\"baseline: the current rule unchanged\",\"prompt\":\"full prompt for this experiment's worker, ending with how to score it and what to report in rudder done\",\"goal\":\"one-line objective\",\"success\":\"the scoring command and metrics\",\"deps\":[]},{\"id\":\"e2\",\"title\":\"...\",\"prompt\":\"...\",\"goal\":\"...\",\"success\":\"...\",\"deps\":[]}]}\nRUDDER_PLAN_TASKS_END";
+const SWARM_TASKS_EXAMPLE: &str = "RUDDER_PLAN_TASKS_START\n{\"tasks\":[{\"id\":\"e1\",\"title\":\"baseline: the current rule unchanged\",\"prompt\":\"full prompt for this experiment's worker, ending with how to score it and what results to report\",\"goal\":\"one-line objective\",\"success\":\"the scoring command and metrics\",\"deps\":[]},{\"id\":\"e2\",\"title\":\"...\",\"prompt\":\"...\",\"goal\":\"...\",\"success\":\"...\",\"deps\":[]}]}\nRUDDER_PLAN_TASKS_END";
 
 /// System prompt for the INTERACTIVE swarm orchestrator (Claude). Like the plan
 /// orchestrator it converses with the user and writes its task list to RUDDER.md,
@@ -317,7 +319,7 @@ fn swarm_orchestrator_system_prompt_for(agent_name: &str, writable_files: &str) 
     [
         format!("You are Rudder's SWARM orchestrator, running as a normal {agent_name} session the user talks to directly."),
         swarm_design_rules(),
-        "PROJECT RULES: follow applicable repository rules once if not already loaded. Read linked protocols and earlier results relevant to the experiments. Copy constraints that affect an experiment into its prompt. Read private shared setup only when needed; never copy credentials into experiment prompts, RUDDER.md or DECISIONS.md.".to_string(),
+        "PROJECT RULES: follow applicable repository rules once if not already loaded. Read linked protocols and earlier results relevant to the experiments. Copy constraints that affect an experiment into its prompt. Read private shared setup only when needed; never copy credentials into experiment prompts or RUDDER.md.".to_string(),
         format!("Ask concise clarifying questions only when something material is missing. When the experiment list is ready, WRITE it to `RUDDER.md` OUTSIDE the `<!-- RUDDER_GENERATED_START -->` / `<!-- RUDDER_GENERATED_END -->` block, wrapped EXACTLY in these markers (one JSON object on its own lines):\n{SWARM_TASKS_EXAMPLE}\nThen show the user a short table in the chat (id, idea, what it changes) and ask them to review it. Rudder pins the list above this terminal and reloads it LIVE from RUDDER.md: whenever the user asks to add, drop or change experiments, re-write the FULL block so it always matches what you agreed. Never describe a change only in chat."),
         "LAUNCH: the user launches by pressing Enter in Rudder's task box, or by confirming in this conversation. Only after an explicit confirmation here (\"yes\", \"go\", \"launch it\"), write the line `RUDDER_APPROVE_PLAN` on its own line into RUDDER.md, keeping the task block. Never write it preemptively or while still revising. When you only need to mention the marker in prose, write RUDDER_APPROVE_PLAN_TEMPLATE instead.".to_string(),
         "AFTER LAUNCH: stay in this session as the swarm's conductor. Answer status questions from RUDDER.md's generated block (Active, Ready and Completed agents). You may stop an experiment with `RUDDER_STOP <id>` or message it with `RUDDER_INJECT <id> <message>`, written into RUDDER.md. Never merge experiments: do not write RUDDER_MERGE or RUDDER_MERGE_ALL unless the user explicitly names one experiment to merge. Rudder consumes marker lines and records what each did in RUDDER.md; re-read that before telling the user something happened.".to_string(),
@@ -392,7 +394,7 @@ pub(crate) fn swarm_experiment_ids(nodes: &[PlannedNode]) -> std::collections::B
 /// that keep the comparison fair.
 pub(crate) fn swarm_experiment_brief(id: &str, total: usize) -> String {
     format!(
-        "SWARM EXPERIMENT: this is experiment {id}, one of {total} competing experiments Rudder is running side by side on the same goal, each in its own isolated workspace. Your work is compared against the others and is NOT merged automatically; the user decides what, if anything, lands. Stay inside YOUR experiment: test its idea faithfully even if you suspect another idea is better, and do not drift into other variations. Score it exactly as the experiment says, tuning only on the training data it names, never on held-out or out-of-sample data. Report honestly: a clear negative result is as useful as a positive one. When you finish, run `rudder done` with the scored results in `summary` (each metric, the data window, how it was measured) and an empty `followups` array; mention any new experiment idea in the summary instead.\n\n"
+        "SWARM EXPERIMENT: this is experiment {id}, one of {total} competing experiments Rudder is running side by side on the same goal, each in its own isolated workspace. Your work is compared against the others and is NOT merged automatically; the user decides what, if anything, lands. Stay inside YOUR experiment: test its idea faithfully even if you suspect another idea is better, and do not drift into other variations. Score it exactly as the experiment says, tuning only on the training data it names, never on held-out or out-of-sample data. Report honestly: a clear negative result is as useful as a positive one. End with your scored results (each metric, the data window, how it was measured) and any new experiment idea.\n\n"
     )
 }
 
@@ -474,94 +476,6 @@ impl RudderPlanTask {
 /// drains these into live `AgentRun`s as their hard deps merge and parallelism
 /// slots free. Created one-per-task when a planner agent completes; rendered in
 /// the Todo section until launched.
-/// One hardening finding a worker reported on completion, held in a backlog
-/// instead of becoming its own node.
-///
-/// Every follow-up used to become a node: its own workspace, its own cold-start
-/// agent, its own merge. Hardening findings cluster on the same files BY NATURE —
-/// that is what hardening is — so one-node-per-finding manufactured the conflicts
-/// it then had to resolve. In a real plan two hardening nodes independently
-/// created the same four `src/router/*.ts` files and froze integration for hours.
-/// Clumped into one node per file-cluster, those become edits in a single working
-/// copy and the conflict cannot exist.
-#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
-pub(crate) struct HardeningItem {
-    pub(crate) title: String,
-    pub(crate) prompt: String,
-    /// The node whose completion reported this.
-    pub(crate) origin_node: String,
-    pub(crate) plan_id: String,
-    /// Repo-relative files this finding touches, used to cluster it.
-    #[serde(default)]
-    pub(crate) files: Vec<String>,
-}
-
-/// Repo-relative-looking file paths mentioned in `text`. Deliberately loose: this
-/// only decides CLUSTERING, so a miss costs an extra node rather than correctness.
-pub(crate) fn extract_file_mentions(text: &str) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
-    for raw in text.split(|c: char| {
-        c.is_whitespace() || matches!(c, ',' | ';' | '(' | ')' | '`' | '"' | '\'' | '<' | '>')
-    }) {
-        let token = raw.trim_matches(|c: char| matches!(c, '.' | ':' | '*' | '-' | '[' | ']'));
-        if token.len() < 3 || token.len() > 200 {
-            continue;
-        }
-        // A path-ish token: has a directory separator or a known source extension.
-        let has_dir = token.contains('/');
-        let has_ext = [
-            ".ts", ".tsx", ".js", ".jsx", ".mjs", ".rs", ".py", ".go", ".md", ".json", ".toml",
-            ".yaml", ".yml", ".css", ".sql", ".sh",
-        ]
-        .iter()
-        .any(|ext| token.ends_with(ext));
-        if !(has_dir && has_ext) && !has_ext {
-            continue;
-        }
-        let value = token.trim_start_matches("./").to_string();
-        if !out.contains(&value) {
-            out.push(value);
-        }
-    }
-    out
-}
-
-/// Group findings that share at least one file into the same clump, transitively.
-/// Findings with no identifiable file each stand alone rather than being swept into
-/// an unrelated clump — a wrong clump makes one agent do two unrelated jobs.
-pub(crate) fn cluster_hardening(items: Vec<HardeningItem>) -> Vec<Vec<HardeningItem>> {
-    let mut clusters: Vec<(Vec<String>, Vec<HardeningItem>)> = Vec::new();
-    for item in items {
-        if item.files.is_empty() {
-            clusters.push((Vec::new(), vec![item]));
-            continue;
-        }
-        // Every existing cluster sharing a file with this item merges together with
-        // it, so A-B and B-C findings land in one clump rather than two.
-        let mut hit: Vec<usize> = Vec::new();
-        for (index, (files, _)) in clusters.iter().enumerate() {
-            if files.iter().any(|f| item.files.contains(f)) {
-                hit.push(index);
-            }
-        }
-        if hit.is_empty() {
-            clusters.push((item.files.clone(), vec![item]));
-            continue;
-        }
-        let target = hit[0];
-        for index in hit.into_iter().skip(1).rev() {
-            let (files, members) = clusters.remove(index);
-            clusters[target].0.extend(files);
-            clusters[target].1.extend(members);
-        }
-        clusters[target].0.extend(item.files.clone());
-        clusters[target].0.sort();
-        clusters[target].0.dedup();
-        clusters[target].1.push(item);
-    }
-    clusters.into_iter().map(|(_, members)| members).collect()
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct PlannedNode {
     /// Stable node id (the plan task id). Becomes the launched `AgentRun.node_id`.
@@ -1563,7 +1477,7 @@ pub(crate) fn rudder_plan_worker_prompt(
     // caller from the live DAG + each parent's `rudder done` interfaces; it sits between
     // the worker task line and the node prompt so the worker BUILDS ON its prerequisites.
     let body = format!(
-        "This task was spawned by Rudder from a /rudder-plan coordinator.\n\nWorker node: {}\n\nOriginal request:\n{planner_task}\n\nWorker task: {}\n\n{depends_on}{}",
+        "Worker node: {}\n\nOriginal request:\n{planner_task}\n\nWorker task: {}\n\n{depends_on}{}",
         task.id, task.title, task.prompt
     );
     format!(
@@ -1725,8 +1639,7 @@ pub(crate) fn build_completion_summary_prompt(task: &str, diff: &str) -> String 
     };
     format!(
         "A coding agent finished the task below but did not file a structured report. From its TASK and the DIFF of what it changed, reconstruct a completion note. Return EXACTLY one JSON object and NO markdown:\n\
-{{\"summary\":\"1-2 sentence plain summary of what was done\",\"interfaces\":\"key files/types/functions it added or changed\",\"followups\":[{{\"title\":\"short imperative task\",\"why\":\"why it follows\",\"scope\":\"in\"}}]}}\n\
-Follow-ups are HARDENING findings: Rudder queues them and schedules them CLUMPED BY FILE once the current phase has merged, so several findings on the same area become one worker rather than one worker each. Name the concrete files a finding touches in its title or prompt (or pass a `files` array) - that is what decides which findings are grouped, and a finding with no identifiable file is done on its own. Only include follow-ups clearly implied by the work (e.g. tests for new code, wiring a new-but-unused function, a TODO it left). If none are obvious, use an empty followups array. Use scope \"in\" for same-area work and \"out\" otherwise. Do not invent unrelated work.\n\n\
+{{\"summary\":\"1-2 sentence plain summary of what was done\",\"interfaces\":\"key files/types/functions it added or changed\"}}\n\n\n\
 TASK:\n{task}\n\nDIFF:\n{diff}"
     )
 }

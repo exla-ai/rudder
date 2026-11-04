@@ -95,38 +95,29 @@ export async function createSpec(run: RunRecord): Promise<SpecContract> {
 // Parallel-work guidance for every implementing agent. Mirrors the Rust
 // `parallel_work_rule!` in native/src/tasks.rs; keep the text in parity.
 export const PARALLEL_WORK_RULE =
-  "Batch independent reads and commands. Use concurrent subagents for substantial independent work when helpful; integrate and verify their results. Never let two subagents edit the same file.";
+  "Batch independent reads and commands. Use subagents for big independent work; never let two edit the same file.";
 
 // Waiting and reading guidance. Mirrors the Rust `wait_and_read_rule!` in
 // native/src/tasks.rs; keep the text in parity (PLAN.md section 20).
 export const WAIT_AND_READ_RULE =
-  "Wait for long builds, tests, CI runs and deploys in one long blocking call (Codex: one `write_stdin` wait of up to 300000 ms), not repeated short polls, sleeps or clock checks. Read targeted line ranges, symbols and `--stat` or path-scoped diffs, not whole files or whole-tree diffs.";
+  "Run only the checks for what you changed. Wait for long commands in one blocking call (Codex: one `write_stdin` wait up to 300000 ms), not repeated polls. Cap long output (`| tail -50`). Read targeted ranges, not whole files. No CI babysitting, no git archaeology.";
 
 export function renderContract(spec: SpecContract): string {
   const instructions = spec.instructionsFiles
     .map((file) => file.path)
     .join(", ");
   const body = [
-    "Rudder-specific context injected by Rudder",
     spec.runtimeRole === "main-owner"
-      ? "You own this request end to end in the user's main checkout. Preserve unrelated edits."
-      : "You are an isolated worker. Use jj status/diff; Rudder handles commits and integration. Keep to your assignment.",
-    "",
-    "Acceptance criteria:",
-    ...spec.acceptanceCriteria.map((item) => `- ${item}`),
-    "",
+      ? "Rudder: you own this request in the user's checkout. Preserve unrelated edits. Never force-push."
+      : "Rudder: you work in your own jj workspace. Stay in it. Do not commit, push or deploy; Rudder integrates your changes when your session ends.",
     spec.suggestedTests.length > 0
-      ? ["Suggested verification:", ...spec.suggestedTests.map((item) => `- ${item}`)].join("\n")
-      : "Suggested verification: choose the smallest relevant checks for this repo.",
-    "",
-    "Working rules:",
-    "- Follow applicable repo rules once if not already loaded; read additional references only when relevant.",
-    "- Implement, run relevant checks and verify the requested outcome. Preserve prior authorization; report unfinished work honestly.",
+      ? `Checks available: ${spec.suggestedTests.join(", ")}.`
+      : "",
     `- ${PARALLEL_WORK_RULE}`,
     `- ${WAIT_AND_READ_RULE}`,
     ...PROPAGATION_RULES.map((rule) => `- ${rule}`),
-    "",
-    instructions ? `Available repository context: ${instructions}. File contents are not duplicated here.` : "",
+    "- End with a short summary of what changed and anything unfinished.",
+    instructions ? `Repository rules: ${instructions}.` : "",
   ]
     .filter(Boolean)
     .join("\n");

@@ -381,10 +381,6 @@ const SCHEDULER_TICK_INTERVAL: u64 = 8;
 /// a jj workspace (a brief UI-thread block), so launches are spread across passes
 /// to keep the TUI responsive when a merge unblocks a whole wave of children.
 const MAX_LAUNCH_PER_TICK: usize = 2;
-/// Max auto-expansion depth: a node created from a finishing agent's follow-ups
-/// inherits parent generation + 1; beyond this we record the follow-ups but stop
-/// growing the DAG, so a chain of agents proposing follow-ups can't run away.
-const MAX_FOLLOWUP_DEPTH: u8 = 3;
 /// Braille spinner frames for the orchestrator "planning" phase (and, as a nice
 /// touch, running agents' status badge).
 pub(crate) const SPINNER_FRAMES: [&str; 10] = [
@@ -2102,9 +2098,6 @@ struct App {
     /// Run ids whose completion follow-ups have already been ingested, so a Done
     /// worker grows the DAG exactly once even as it is re-polled.
     followups_ingested: HashSet<String>,
-    /// Auto-expansion depth per node id (0 = human/plan/reconcile origin; a node
-    /// auto-created from a finishing node inherits parent+1). Caps runaway chains.
-    followup_gen: HashMap<String, u8>,
     /// Node-id pairs the drift scan has already acted on, so a given collision is
     /// nudged once (not every scan). Key is the pair sorted lexically.
     surfaced_overlaps: HashSet<(String, String)>,
@@ -2175,9 +2168,6 @@ struct App {
     /// `<rudder home>/terminal-colors.json`, written by the cloud supervisor
     /// from the attaching laptop's terminal; re-read when it changes.
     terminal_colors_watch: rudder_native::term_colors::ColorsFileWatch,
-    /// Hardening findings reported by finished workers, held until the plan reaches
-    /// a phase boundary and then flushed as CLUMPS. See tasks::HardeningItem.
-    hardening: Vec<crate::tasks::HardeningItem>,
     /// Outcomes of the orchestrator's recent control markers, newest last. Bounded;
     /// rendered into RUDDER.md so the conductor can see what its own markers did.
     control_results: Vec<ControlResult>,
@@ -3221,11 +3211,6 @@ impl App {
         // Restore the ingested-run ledger so a worker handled before the last exit is not
         // re-ingested (or re-summarized) when its Done record reloads. Empty in tests.
         // Loaded before `cwd` moves into the struct below.
-        let hardening_backlog = if managed || cfg!(test) {
-            Vec::new()
-        } else {
-            load_hardening_backlog(cwd.as_path())
-        };
         let followups_ingested = if managed || cfg!(test) {
             HashSet::new()
         } else {
@@ -3237,12 +3222,6 @@ impl App {
             Vec::new()
         } else {
             load_task_history(&cwd)
-        };
-        // Restore the auto-expansion depth map so MAX_FOLLOWUP_DEPTH survives a restart.
-        let followup_gen = if managed || cfg!(test) {
-            HashMap::new()
-        } else {
-            load_followup_gen(&cwd)
         };
         // Main is no longer auto-pinned. If the user wants one, they type
         // /main from the task pane. Main records render in their own section
@@ -3399,7 +3378,6 @@ impl App {
             drawer: None,
             activity_log: Vec::new(),
             followups_ingested,
-            followup_gen,
             surfaced_overlaps: HashSet::new(),
             last_drift_scan: None,
             orch_dag_scroll: 0,
@@ -3428,7 +3406,6 @@ impl App {
             last_workspace_gc: Instant::now(),
             last_steer_poll: Instant::now(),
             terminal_colors_watch: Default::default(),
-            hardening: hardening_backlog,
             control_results: Vec::new(),
             last_heartbeat_emit: Instant::now(),
             cloud_workspace: None,
@@ -14292,10 +14269,6 @@ Address the objection directly. If you disagree, say why inside \
             self.notice = Some("RUDDER_INJECT requires <node-or-run-id> <message>".to_string());
             return;
         }
-        if marker == "RUDDER_HARDEN" {
-            self.flush_hardening_now();
-            return;
-        }
         if let Some(rest) = marker.strip_prefix("RUDDER_NUDGE_ALL ") {
             self.nudge_all_workers(rest.trim());
             return;
@@ -15087,15 +15060,11 @@ Address the objection directly. If you disagree, say why inside \
         self.dirty = true;
     }
 
-    /// Record a cross-cutting conductor DECISION: surface it in the in-pane activity log
-    /// AND append it durably to DECISIONS.md, so the fleet (workers re-read that file) sees
-    /// the conductor's plan/steer reasoning, not just the ephemeral activity line.
+    /// Record a conductor decision in the activity log. Rudder no longer writes
+    /// DECISIONS.md for agents.
     fn record_decision(&mut self, title: &str, what: &str, why: Option<&str>) {
-        // Only surface it in the activity feed when DECISIONS.md actually took a new entry,
-        // so a deduped repeat (same decision re-hit every tick) does not spam either surface.
-        if append_conductor_decision(&self.cwd, title, what, why) {
-            self.push_activity(what.to_string());
-        }
+        let _ = (title, why);
+        self.push_activity(what.to_string());
     }
 
     /// Append a single event line to `.rudder/activity.jsonl` — the append-only
@@ -15689,32 +15658,6 @@ Address the objection directly. If you disagree, say why inside \
                 .count()
     }
 
-    /// True if a node with a title that normalizes to `title` already exists (queued
-    /// or launched), so an auto-expanded follow-up does not duplicate existing work.
-    fn followup_title_exists(&self, title: &str) -> bool {
-        let norm = |s: &str| {
-            s.to_ascii_lowercase()
-                .split_whitespace()
-                .collect::<Vec<_>>()
-                .join(" ")
-        };
-        let want = norm(title);
-        if want.is_empty() {
-            return true;
-        }
-        self.plan()
-            .planned_nodes
-            .iter()
-            .any(|n| norm(&n.title) == want)
-            // Findings now WAIT in the hardening backlog before becoming nodes, so
-            // dedupe has to see the backlog too — otherwise the same finding
-            // reported by two workers is queued twice and the clump does it twice.
-            || self.hardening.iter().any(|item| norm(&item.title) == want)
-            || self.active_plan_agents().any(|r| {
-                r.node_id.is_some() && (norm(&r.task_summary) == want || norm(&r.task) == want)
-            })
-    }
-
     /// Scan finished plan workers and GROW the DAG from each one's `rudder done`
     /// report exactly once. Autonomous (no confirm); surfaced via the activity log.
     fn maybe_ingest_worker_followups(&mut self) {
@@ -15820,52 +15763,28 @@ Address the objection directly. If you disagree, say why inside \
             return false;
         }
 
+        // Old runs may still have a `rudder done` sidecar; use it when present.
         if let Some(note) = sidecar_note {
-            // A note came through a direct channel. If the agent ADDRESSED follow-ups at
-            // all (a `followups` array, even empty), trust it: apply what is there and we
-            // are done (an empty list is a deliberate "nothing further"). If the note never
-            // addressed follow-ups (freeform prose, or a summary with no `followups` key),
-            // the agent's next-steps are unstructured, so fall through to the diff-backstop
-            // and feed it the agent's own words. This is the freeform-prose recovery.
-            let addressed_followups = note.get("followups").is_some();
-            // Keep the worker's own account of what it did on the run, so the
-            // finished-worker card can show "objective + what it did" (and refresh
-            // it on every later completion of the same, re-goaled session).
             self.set_run_done_summary(index, &note);
-            let grew = self.apply_worker_followups(&node_id, &note);
-            if grew || addressed_followups {
-                self.mark_run_ingested(run_id);
-                return grew;
-            }
-            let note_summary = note
-                .get("summary")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("")
-                .trim()
-                .to_string();
-            let task = if note_summary.is_empty() {
-                task
-            } else {
-                format!("{task}\n\nThe agent's own note: {note_summary}")
-            };
-            return self.spawn_completion_backstop(
-                run_id,
-                node_id,
-                cwd,
-                task,
-                is_complete,
-                "agent reported no structured next steps; mining its diff for follow-ups",
-            );
+            self.mark_run_ingested(run_id);
+            return false;
         }
-
-        // No report filed at all: reconstruct one from the diff (cleanly-Done only).
+        // Otherwise the session ending is the completion signal and the agent's
+        // last message is its summary.
+        if let Some(summary) = self.agents.get(index).and_then(run_last_message) {
+            let note = serde_json::json!({ "summary": preview_text(summary.trim(), 600) });
+            self.set_run_done_summary(index, &note);
+            self.mark_run_ingested(run_id);
+            return false;
+        }
+        // No transcript to read: summarize the diff once (cleanly-Done only).
         self.spawn_completion_backstop(
             run_id,
             node_id,
             cwd,
             task,
             is_complete,
-            "agent finished without a report; summarizing its diff to extract follow-ups",
+            "agent finished without a summary; summarizing its diff",
         )
     }
 
@@ -15948,7 +15867,6 @@ Address the objection directly. If you disagree, say why inside \
     /// and mark the run ingested so it is never re-processed. Mirrors
     /// `poll_task_summary_workers`; called from the poll loop.
     fn poll_completion_summary_workers(&mut self) {
-        let mut grew = false;
         while let Ok(result) = self.completion_summary_rx.try_recv() {
             // The backstop summarizer thread is fire-and-forget: it cannot be cancelled, so
             // a result can land AFTER the run was re-goaled (regoal clears it from pending +
@@ -15963,15 +15881,8 @@ Address the objection directly. If you disagree, say why inside \
                 if let Some(index) = self.agents.iter().position(|run| run.id == result.run_id) {
                     self.set_run_done_summary(index, &note);
                 }
-                if self.apply_worker_followups(&result.node_id, &note) {
-                    grew = true;
-                }
             }
             self.mark_run_ingested(result.run_id);
-        }
-        if grew && !self.plan().awaiting_approval {
-            self.run_scheduler();
-            self.mirror_graph();
         }
     }
 
@@ -15988,161 +15899,6 @@ Address the objection directly. If you disagree, say why inside \
             return;
         }
         let path = dir.join("ingestion-ledger.json");
-        let tmp = path.with_extension(format!("json.{}.tmp", std::process::id()));
-        if std::fs::write(&tmp, json).is_ok() {
-            let _ = std::fs::rename(&tmp, &path);
-        }
-    }
-
-    /// Persist the auto-expansion DEPTH map to `.rudder/followup-gen.json` (atomic) so the
-    /// MAX_FOLLOWUP_DEPTH cap survives a restart. Without this, reopening Rudder mid-plan
-    /// resets every node's depth to 0 and an auto-expansion chain could grow further than
-    /// the cap intends (still bounded by MAX_PLAN_TASKS, but the depth guard would be lost).
-    /// Turn the pending hardening backlog for `plan_id` into plan nodes, ONE per
-    /// file-cluster. Returns how many nodes were added.
-    ///
-    /// Called at the phase boundary (every launched node merged, queue empty), so
-    /// hardening runs as its own phase instead of interleaving with feature work
-    /// and competing for the same files while those features are still landing.
-    fn flush_hardening_into_plan(&mut self, plan_index: usize) -> usize {
-        let plan_id = self.plans[plan_index].id.clone();
-        let (mine, rest): (Vec<_>, Vec<_>) = self
-            .hardening
-            .drain(..)
-            .partition(|item| item.plan_id == plan_id);
-        self.hardening = rest;
-        if mine.is_empty() {
-            return 0;
-        }
-        let clusters = crate::tasks::cluster_hardening(mine);
-        let mut added = 0usize;
-        for cluster in clusters {
-            if self.plan_node_count() >= MAX_PLAN_TASKS {
-                self.record_decision(
-                    &format!("Plan at {MAX_PLAN_TASKS}-node cap"),
-                    "Remaining hardening clumps were not scheduled: the plan hit its node cap.",
-                    Some("the plan-size cap prevents runaway auto-growth"),
-                );
-                break;
-            }
-            let files: Vec<String> = {
-                let mut all: Vec<String> =
-                    cluster.iter().flat_map(|item| item.files.clone()).collect();
-                all.sort();
-                all.dedup();
-                all
-            };
-            let title = if cluster.len() == 1 {
-                cluster[0].title.clone()
-            } else if let Some(area) = common_area(&files) {
-                format!("Harden {area} ({} findings)", cluster.len())
-            } else {
-                format!("Hardening pass ({} findings)", cluster.len())
-            };
-            // ONE prompt carrying every finding in the clump, so the agent fixes
-            // them together with full sight of the file rather than N agents each
-            // half-fixing it.
-            let mut prompt = String::from(
-                "Hardening pass. Address ALL of the following findings together in one coherent change. They were reported by finished workers and touch overlapping files, so fix them as a set rather than one at a time.
-
-",
-            );
-            for (index, item) in cluster.iter().enumerate() {
-                prompt.push_str(&format!(
-                    "{}. {} (reported by {})
-   {}
-",
-                    index + 1,
-                    item.title,
-                    item.origin_node,
-                    item.prompt
-                ));
-            }
-            if !files.is_empty() {
-                prompt.push_str(&format!(
-                    "
-Files involved: {}
-",
-                    files.join(", ")
-                ));
-            }
-            let node = PlannedNode {
-                id: self.uniquify_node_id("harden"),
-                plan_id: plan_id.clone(),
-                title,
-                prompt,
-                goal: Some("address every finding in this hardening clump".to_string()),
-                success: Some(
-                    "every listed finding is handled and the repo's own checks pass".to_string(),
-                ),
-                deps: Vec::new(),
-                soft_deps: Vec::new(),
-                backend: None,
-                model: None,
-                effort: None,
-            };
-            self.push_plan_node(plan_index, node);
-            added += 1;
-        }
-        if added > 0 {
-            self.plans[plan_index].final_gate_status = FinalGateStatus::Idle;
-            self.plans[plan_index].final_gate_summary = None;
-            self.push_activity(format!("hardening: {added} clumped node(s) scheduled"));
-            self.persist_hardening();
-            self.dirty = true;
-        }
-        added
-    }
-
-    /// Flush the hardening backlog ahead of the phase boundary. Reached through the
-    /// orchestrator marker, which is where fleet control belongs; it is deliberately
-    /// NOT a slash command, since hardening flushes itself and an extra verb in the
-    /// picker earns its place only if you would otherwise be stuck.
-    fn flush_hardening_now(&mut self) {
-        if self.hardening.is_empty() {
-            self.notice = Some("no hardening findings pending".to_string());
-            return;
-        }
-        let pending = self.hardening.len();
-        let plan_index = self.active_plan_index();
-        let added = self.flush_hardening_into_plan(plan_index);
-        self.notice = Some(if added > 0 {
-            format!("{pending} hardening finding(s) scheduled as {added} node(s)")
-        } else {
-            "hardening findings belong to another plan".to_string()
-        });
-    }
-
-    fn hardening_path(&self) -> PathBuf {
-        self.cwd.join(".rudder").join("hardening.json")
-    }
-
-    /// The backlog must survive a restart: a finding recorded and then lost is
-    /// hardening the user was told would happen and never does.
-    fn persist_hardening(&self) {
-        let path = self.hardening_path();
-        if self.hardening.is_empty() {
-            let _ = std::fs::remove_file(&path);
-            return;
-        }
-        let Ok(json) = serde_json::to_string(&self.hardening) else {
-            return;
-        };
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        let _ = std::fs::write(path, json);
-    }
-
-    fn persist_followup_gen(&self) {
-        let Ok(json) = serde_json::to_string(&self.followup_gen) else {
-            return;
-        };
-        let dir = self.cwd.join(".rudder");
-        if std::fs::create_dir_all(&dir).is_err() {
-            return;
-        }
-        let path = dir.join("followup-gen.json");
         let tmp = path.with_extension(format!("json.{}.tmp", std::process::id()));
         if std::fs::write(&tmp, json).is_ok() {
             let _ = std::fs::rename(&tmp, &path);
@@ -16573,145 +16329,6 @@ Files involved: {}
         }
         self.dirty = true;
         false
-    }
-
-    /// Grow the DAG from a parsed completion note: dedupe, depth- and cap-guard,
-    /// infer deps, and push the in-scope follow-ups as planned nodes. Pure of any
-    /// PTY/terminal access (split out of ingest_worker_followups so it is testable).
-    /// Returns true if any node was added.
-    fn apply_worker_followups(&mut self, node_id: &str, note: &serde_json::Value) -> bool {
-        let followups = note
-            .get("followups")
-            .and_then(serde_json::Value::as_array)
-            .cloned()
-            .unwrap_or_default();
-        if followups.is_empty() {
-            return false;
-        }
-        // Depth guard: a node that is itself deep in an auto-expansion chain does not
-        // get to spawn more; record the intent instead of growing without bound.
-        let gen = self.followup_gen.get(node_id).copied().unwrap_or(0);
-        if gen >= MAX_FOLLOWUP_DEPTH {
-            let titles: Vec<String> = followups
-                .iter()
-                .filter_map(|f| {
-                    f.get("title")
-                        .or_else(|| f.get("prompt"))
-                        .and_then(serde_json::Value::as_str)
-                })
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .collect();
-            self.record_decision(
-                &format!("Deferred follow-ups from {node_id} (depth cap)"),
-                &format!(
-                    "Auto-expansion stopped at depth cap {MAX_FOLLOWUP_DEPTH}; these follow-ups were NOT launched and need manual scheduling if wanted: {}",
-                    if titles.is_empty() { "(unnamed)".to_string() } else { titles.join("; ") }
-                ),
-                Some("the depth cap prevents unbounded auto-growth of the DAG"),
-            );
-            return false;
-        }
-        // A follow-up joins the plan that owns the node that reported it, never whichever
-        // plan the user happens to be looking at.
-        let plan_index = self.plan_index_for_node(node_id);
-        let plan_id = self.plans[plan_index].id.clone();
-        // Every node id known to that plan (queued + launched). Used to (a) skip a batch
-        // whose finishing node is gone, and (b) validate explicit follow-up deps below.
-        let known = self.known_plan_node_ids_in(plan_index);
-        // If the finishing node's agent was deleted while a backstop was in flight, there
-        // is nothing to attach to; skip rather than soft-link to a ghost id.
-        if !node_id.is_empty() && !known.iter().any(|id| id == node_id) {
-            self.push_activity(format!(
-                "follow-ups from {node_id} skipped (its node is gone)"
-            ));
-            return false;
-        }
-        let mut added = 0usize;
-        for f in &followups {
-            // Out-of-lane work is recorded by the worker in DECISIONS.md, not auto-injected.
-            // Match case-insensitively so "Out"/"OUT" are honored (anything else, incl. a
-            // missing scope, is treated as in-lane and injected — never silently dropped).
-            if f.get("scope")
-                .and_then(serde_json::Value::as_str)
-                .is_some_and(|s| s.trim().eq_ignore_ascii_case("out"))
-            {
-                continue;
-            }
-            let title = f
-                .get("title")
-                .or_else(|| f.get("prompt"))
-                .and_then(serde_json::Value::as_str)
-                .map(str::trim)
-                .filter(|s| !s.is_empty());
-            let Some(title) = title else { continue };
-            if self.followup_title_exists(title) {
-                continue;
-            }
-            if self.plan_node_count() >= MAX_PLAN_TASKS {
-                self.record_decision(
-                    &format!("Plan at {MAX_PLAN_TASKS}-node cap"),
-                    &format!(
-                        "Remaining follow-ups from {node_id} (incl. '{title}') were NOT launched: the plan hit the {MAX_PLAN_TASKS}-node cap. Schedule manually if still needed."
-                    ),
-                    Some("the plan-size cap prevents runaway auto-growth"),
-                );
-                break;
-            }
-            let prompt = f
-                .get("prompt")
-                .and_then(serde_json::Value::as_str)
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .unwrap_or(title)
-                .to_string();
-            // BACKLOG, not a node. One node per finding gave each a cold-start
-            // agent, a workspace and a merge — and because hardening findings
-            // land on the same files, it manufactured the conflicts it then had
-            // to resolve. These are clumped by file and flushed at the phase
-            // boundary instead (flush_hardening_into_plan).
-            {
-                let mut files: Vec<String> = f
-                    .get("files")
-                    .and_then(serde_json::Value::as_array)
-                    .map(|a| {
-                        a.iter()
-                            .filter_map(|v| v.as_str().map(str::to_string))
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                if files.is_empty() {
-                    files = crate::tasks::extract_file_mentions(&format!("{title} {prompt}"));
-                }
-                // The reporting node's own interfaces are the strongest clue about
-                // WHERE this finding lives when the finding text names no file.
-                if files.is_empty() {
-                    if let Some(interfaces) =
-                        note.get("interfaces").and_then(serde_json::Value::as_str)
-                    {
-                        files = crate::tasks::extract_file_mentions(interfaces);
-                    }
-                }
-                self.hardening.push(crate::tasks::HardeningItem {
-                    title: title.to_string(),
-                    prompt: prompt.clone(),
-                    origin_node: node_id.to_string(),
-                    plan_id: plan_id.clone(),
-                    files,
-                });
-                added += 1;
-            }
-        }
-        if added > 0 {
-            self.followup_gen.insert(node_id.to_string(), gen + 1);
-            self.persist_followup_gen();
-            self.persist_hardening();
-            self.push_activity(format!(
-                "queued {added} hardening item(s) from {node_id} ({} pending)",
-                self.hardening.len()
-            ));
-        }
-        added > 0
     }
 
     /// Make `id` unique against every node id already known to the active plan:
@@ -22105,13 +21722,6 @@ fn load_ingested_runs(cwd: &Path) -> HashSet<String> {
         .unwrap_or_default()
 }
 
-fn load_followup_gen(cwd: &Path) -> HashMap<String, u8> {
-    std::fs::read_to_string(cwd.join(".rudder").join("followup-gen.json"))
-        .ok()
-        .and_then(|raw| serde_json::from_str::<HashMap<String, u8>>(&raw).ok())
-        .unwrap_or_default()
-}
-
 /// Whether a merged row's workspace may be deleted.
 ///
 /// "Merged" does NOT mean the agent is gone: claude and codex stay RESIDENT between
@@ -22216,6 +21826,18 @@ fn claude_transcript_final_text(cwd: &Path, session_id: &str) -> Option<String> 
     let path = claude_transcript_path(cwd, session_id)?;
     let raw = std::fs::read_to_string(path).ok()?;
     parse_transcript_final_text(&raw)
+}
+
+/// The agent's last message for a finished run, read from its backend's session
+/// record. Claude only; other backends fall back to the diff summarizer.
+fn run_last_message(run: &AgentRun) -> Option<String> {
+    match run.backend {
+        Backend::Claude => run
+            .session_id
+            .as_deref()
+            .and_then(|sid| claude_transcript_final_text(&run.cwd, sid)),
+        _ => None,
+    }
 }
 
 /// Pure parser for `claude_transcript_final_text` (testable without a file): the last
@@ -22577,13 +22199,6 @@ fn common_area(files: &[String]) -> Option<String> {
     dirs.iter().all(|d| *d == first).then(|| first.to_string())
 }
 
-fn load_hardening_backlog(cwd: &Path) -> Vec<crate::tasks::HardeningItem> {
-    std::fs::read_to_string(cwd.join(".rudder").join("hardening.json"))
-        .ok()
-        .and_then(|raw| serde_json::from_str(&raw).ok())
-        .unwrap_or_default()
-}
-
 fn is_orchestrator_skill_marker(line: &str) -> bool {
     [
         "RUDDER_MODEL",
@@ -22602,7 +22217,6 @@ fn is_orchestrator_skill_marker(line: &str) -> bool {
         "RUDDER_REGOAL",
         "RUDDER_INJECT",
         "RUDDER_NUDGE_ALL",
-        "RUDDER_HARDEN",
         "RUDDER_ADD_TASK",
         "RUDDER_REPLAN",
         "RUDDER_PLAN",

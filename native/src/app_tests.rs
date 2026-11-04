@@ -574,61 +574,6 @@ fn plan_stream_lands_final_plan_emitted_after_tool_narration() {
     );
 }
 
-#[test]
-fn conductor_decision_appends_parseable_entry_with_header() {
-    let dir = std::env::temp_dir().join(format!("rudder-dec-{}", std::process::id()));
-    let _ = std::fs::create_dir_all(&dir);
-    let file = dir.join("DECISIONS.md");
-    let _ = std::fs::remove_file(&file);
-
-    append_conductor_decision(
-        &dir,
-        "Plan approved",
-        "Approved a 3-task plan",
-        Some("user approved"),
-    );
-    let content = std::fs::read_to_string(&file).unwrap();
-    // Header created on first write, then the canonical ## block format.
-    assert!(
-        content.starts_with("# Decisions"),
-        "header present: {content}"
-    );
-    assert!(content.contains("## Plan approved"));
-    assert!(content.contains("- **What:** Approved a 3-task plan"));
-    assert!(content.contains("- **Why:** user approved"));
-    assert!(content.contains("- **By:** conductor · "));
-
-    // A second decision appends (does not clobber).
-    append_conductor_decision(&dir, "Plan at cap", "deferred follow-ups", None);
-    let content = std::fs::read_to_string(&file).unwrap();
-    assert!(content.contains("## Plan approved") && content.contains("## Plan at cap"));
-    // Empty `what` is a no-op (never writes a blank decision).
-    let before = content.len();
-    assert!(!append_conductor_decision(&dir, "x", "   ", None));
-    assert_eq!(std::fs::read_to_string(&file).unwrap().len(), before);
-
-    // Idempotent: re-recording the SAME title+what (the depth-cap spam case) is a no-op,
-    // even though a fresh entry would carry a new timestamp footer.
-    let len_before = std::fs::read_to_string(&file).unwrap().len();
-    assert!(
-        !append_conductor_decision(&dir, "Plan at cap", "deferred follow-ups", None),
-        "an identical decision is not appended again"
-    );
-    assert_eq!(
-        std::fs::read_to_string(&file).unwrap().len(),
-        len_before,
-        "duplicate decision did not grow the file"
-    );
-    assert_eq!(
-        std::fs::read_to_string(&file)
-            .unwrap()
-            .matches("## Plan at cap")
-            .count(),
-        1,
-        "the capped decision appears exactly once"
-    );
-    let _ = std::fs::remove_file(&file);
-}
 
 #[test]
 fn push_activity_appends_parseable_jsonl_for_the_web_board() {
@@ -1175,8 +1120,8 @@ fn detects_permission_prompts_without_matching_task_text() {
 #[test]
 fn execution_prompt_does_not_label_user_task_or_nest_rudder_blocks() {
     let prompt = execution_prompt("fix the tests");
-    assert!(prompt.contains("Rudder-specific context injected by Rudder"));
-    assert!(prompt.contains("fix the tests"));
+    assert!(prompt.starts_with("fix the tests"));
+    assert!(prompt.contains("your own jj workspace"));
     assert!(!prompt.contains("USER TASK"));
     assert!(!prompt.contains("[RUDDER PROMPT INJECTION]"));
 }
@@ -1188,7 +1133,7 @@ fn execution_prompt_strips_old_rudder_wrappers_from_followups() {
         );
     assert_eq!(
         prompt
-            .matches("Rudder-specific context injected by Rudder")
+            .matches("your own jj workspace")
             .count(),
         1
     );
@@ -1214,9 +1159,16 @@ fn every_agent_prompt_asks_for_parallel_work() {
         assert!(prompt.contains(PARALLEL_WORK_RULE), "{prompt}");
         assert!(prompt.contains(WAIT_AND_READ_RULE), "{prompt}");
     }
-    assert!(PARALLEL_WORK_RULE.contains("concurrent subagents"));
-    assert!(PARALLEL_WORK_RULE.contains("Never let two subagents edit the same file"));
-    assert!(oneoff_prompt("q").contains("concurrent subagents"));
+    assert!(PARALLEL_WORK_RULE.contains("never let two edit the same file"));
+    assert!(oneoff_prompt("q").contains(PARALLEL_WORK_RULE));
+    assert!(WAIT_AND_READ_RULE.contains("Cap long output"));
+    // No agent ceremony or evidence language in any implementing prompt.
+    for prompt in [execution_prompt("x"), main_task_prompt("x"), oneoff_prompt("x"), rudder_plan_prompt("x")] {
+        for banned in ["rudder done", "followups", "evidence", "context audit", "DECISIONS.md"] {
+            assert!(!prompt.contains(banned), "{banned} in {prompt}");
+        }
+    }
+    assert!(execution_prompt("x").len() < 800, "worker context stays short");
     // Planners and orchestrators shape the DAG for parallelism.
     assert!(rudder_plan_prompt("x").contains(PARALLEL_PLAN_RULE));
     assert!(orchestrator_system_prompt().contains(PARALLEL_PLAN_RULE));
@@ -1325,7 +1277,7 @@ fn execution_prompt_hoists_goal_block_above_context() {
     );
     // The objective lines must be first, but not as a slash command or Goal header.
     assert!(prompt.starts_with("Objective: ship the parser\nDone when: cargo test passes\n"));
-    assert!(prompt.contains("Rudder-specific context injected by Rudder"));
+    assert!(prompt.contains("your own jj workspace"));
     assert!(prompt.contains("Write the parser."));
 }
 
@@ -7418,63 +7370,6 @@ fn orchestrator_pane_mouse_drag_selects_visible_text() {
     assert!(app.orch_selection.is_none(), "empty click clears selection");
 }
 
-#[test]
-fn auto_expand_grows_dag_from_in_scope_followups() {
-    let mut app = App::new();
-    app.cwd = std::env::temp_dir();
-    // A launched plan node n0 (so the frontier is real); not awaiting approval.
-    let mut a = test_agent_run("n0agent", "scaffold");
-    a.node_id = Some("n0".to_string());
-    a.mode = AgentMode::Execute;
-    app.agents = vec![a];
-    let note = serde_json::json!({
-        "summary": "built auth",
-        "followups": [
-            { "title": "add token refresh", "scope": "in" },
-            { "title": "rate limit handling", "scope": "out" }
-        ]
-    });
-    let grew = app.apply_worker_followups("n0", &note);
-    assert!(grew, "an in-scope follow-up is captured");
-    // It QUEUES rather than becoming a node. One node per finding gave each its own
-    // cold-start agent, workspace and merge, and because hardening findings land on
-    // the same files it manufactured the conflicts it then had to resolve.
-    assert_eq!(
-        app.plan().planned_nodes.len(),
-        0,
-        "nothing is scheduled until the phase boundary"
-    );
-    assert_eq!(
-        app.hardening.len(),
-        1,
-        "only the in-scope follow-up is queued"
-    );
-    assert_eq!(app.hardening[0].title, "add token refresh");
-    assert_eq!(app.hardening[0].origin_node, "n0");
-    assert!(
-        app.activity_log
-            .iter()
-            .any(|l| l.contains("queued 1 hardening item")),
-        "queueing is surfaced in the activity log: {:?}",
-        app.activity_log
-    );
-    // A second identical note adds nothing (title dedupe against the BACKLOG).
-    assert!(
-        !app.apply_worker_followups("n0", &note),
-        "duplicate title is skipped"
-    );
-    assert_eq!(app.hardening.len(), 1);
-
-    // Flushing turns the backlog into plan nodes.
-    let added = app.flush_hardening_into_plan(0);
-    assert_eq!(added, 1);
-    assert_eq!(app.plan().planned_nodes.len(), 1);
-    assert_eq!(app.plan().planned_nodes[0].title, "add token refresh");
-    assert!(
-        app.hardening.is_empty(),
-        "the backlog is consumed by the flush"
-    );
-}
 
 #[test]
 fn auto_expand_skips_non_done_or_non_plan_workers() {
@@ -7692,27 +7587,6 @@ fn steering_guards_refuse_unsafe_targets() {
     );
 }
 
-#[test]
-fn auto_expand_respects_depth_cap() {
-    let mut app = App::new();
-    // Isolate the DECISIONS.md write: record_decision now dedupes, so it must run against a
-    // clean file (not the repo's, which already carries depth-cap entries) for the first
-    // record to genuinely write and surface in the activity feed.
-    let dir = std::env::temp_dir().join(format!("rudder-depthcap-{}", std::process::id()));
-    let _ = std::fs::create_dir_all(&dir);
-    let _ = std::fs::remove_file(dir.join("DECISIONS.md"));
-    app.cwd = dir.clone();
-    app.followup_gen
-        .insert("deep".to_string(), MAX_FOLLOWUP_DEPTH);
-    let note = serde_json::json!({ "followups": [{ "title": "more work", "scope": "in" }] });
-    assert!(
-        !app.apply_worker_followups("deep", &note),
-        "depth cap blocks runaway expansion"
-    );
-    assert!(app.plan().planned_nodes.is_empty());
-    assert!(app.activity_log.iter().any(|l| l.contains("depth cap")));
-    let _ = std::fs::remove_file(dir.join("DECISIONS.md"));
-}
 
 #[test]
 fn planning_redraw_gate_tracks_running_not_parse_state() {
@@ -15548,33 +15422,6 @@ fn nest_view_selection_order_matches_nest_render_across_buckets() {
     );
 }
 
-#[test]
-fn a_hardening_clump_carries_no_deps_so_a_bad_dep_cannot_gate_it() {
-    // A follow-up naming a hard dep NOT in the plan (a typo) used to be a live trap:
-    // is_ready treats an out-of-plan dep as satisfied, so the node launched
-    // immediately and silently lost its gate; a dep resolving to a FAILED node
-    // deadlocked instead. Hardening now flushes at the phase boundary, when every
-    // launched node has already merged, so a clump has nothing left to depend on --
-    // the whole class of bad-dep failures is gone rather than mitigated.
-    let mut app = App::new();
-    app.cwd = std::env::temp_dir();
-    let mut a = node_agent("n0", AgentStatus::Done);
-    a.mode = AgentMode::Execute;
-    app.agents = vec![a];
-    let note = serde_json::json!({
-        "followups": [{ "title": "wire it", "deps": ["ghost"], "scope": "in" }]
-    });
-    assert!(app.apply_worker_followups("n0", &note));
-    app.flush_hardening_into_plan(0);
-    let node = app
-        .plan()
-        .planned_nodes
-        .iter()
-        .find(|n| n.title == "wire it")
-        .expect("follow-up scheduled");
-    assert!(node.deps.is_empty(), "no hard dep to mis-resolve");
-    assert!(node.soft_deps.is_empty(), "and nothing left to wait on");
-}
 
 #[test]
 fn sectioned_render_emits_status_headers_with_counts() {
@@ -16400,48 +16247,6 @@ fn retire_reconcile_planner_clears_memory_and_disk() {
     let _ = fs::remove_dir_all(&repo);
 }
 
-#[test]
-fn auto_expand_recovers_followups_from_sidecar_file_without_a_pty() {
-    // The ROBUST channel in isolation: a finished worker with NO terminal at all. The
-    // only way to recover its follow-ups is the file `rudder done` dropped at
-    // <workspace>/.rudder/done/<node>.json. This is what makes auto-expand survive a
-    // real Claude/Codex agent whose interactive TUI would have boxed/truncated the
-    // echoed block in the PTY beyond recovery.
-    let repo = unique_test_repo("done-sidecar");
-    let mut app = App::new();
-    app.cwd = repo.clone();
-    app.plan_mut().awaiting_approval = true; // hold scheduling; we only assert the DAG grew
-
-    let mut worker = node_agent("n0", AgentStatus::Done); // mode Execute, node_id "n0"
-    worker.cwd = repo.clone();
-    worker.terminal = None; // no PTY: the file on disk is the ONLY source
-    app.agents = vec![worker];
-
-    // Exactly what `rudder done` (pointed at RUDDER_DONE_FILE) writes into the workspace.
-    let done = worker_done_file(&repo, "n0");
-    fs::create_dir_all(done.parent().unwrap()).unwrap();
-    fs::write(
-            &done,
-            "{\"summary\":\"did it\",\"followups\":[{\"title\":\"add docs\",\"scope\":\"in\"},{\"title\":\"out of lane\",\"scope\":\"out\"}]}",
-        )
-        .unwrap();
-
-    app.maybe_ingest_worker_followups();
-    // Findings queue; the flush is what schedules them.
-    app.flush_hardening_into_plan(0);
-
-    assert_eq!(
-        app.plan().planned_nodes.len(),
-        1,
-        "the in-scope follow-up is recovered from the file (no PTY involved)"
-    );
-    assert_eq!(app.plan().planned_nodes[0].title, "add docs");
-    assert!(
-        app.followups_ingested.contains("n0"),
-        "the worker is marked ingested once"
-    );
-    let _ = fs::remove_dir_all(&repo);
-}
 
 // ---- backstop summarizer (silent agents) ------------------------------------
 
@@ -16450,10 +16255,8 @@ fn completion_summary_prompt_carries_task_and_diff() {
     let prompt = build_completion_summary_prompt("wire up auth", "diff --git a/auth.rs b/auth.rs");
     assert!(prompt.contains("wire up auth"), "the task is included");
     assert!(prompt.contains("auth.rs"), "the diff is included");
-    assert!(
-        prompt.contains("\"followups\""),
-        "asks for the CompletionNote shape"
-    );
+    assert!(prompt.contains("\"summary\""), "asks for the CompletionNote shape");
+    assert!(!prompt.contains("followups"), "no follow-up mining");
     // An empty diff is labeled rather than left blank.
     assert!(build_completion_summary_prompt("x", "   ").contains("no file changes detected"));
 }
@@ -16467,47 +16270,6 @@ fn completion_note_parser_extracts_json_amid_prose() {
     assert!(completion_note_from_summary_output("}{ broken").is_none());
 }
 
-#[test]
-fn backstop_result_grows_dag_via_poll() {
-    // The summarizer ran off-thread and returned a reconstructed note; poll applies it
-    // exactly like a real `rudder done` report would.
-    let mut app = App::new();
-    app.cwd = std::env::temp_dir();
-    app.plan_mut().awaiting_approval = true; // hold scheduling; assert the DAG grew
-    let mut worker = node_agent("n0", AgentStatus::Done); // run.id == node_id == "n0"
-    worker.mode = AgentMode::Execute;
-    app.agents = vec![worker];
-    app.completion_summary_pending.insert("n0".to_string());
-
-    app.completion_summary_tx
-        .send(CompletionSummaryResult {
-            run_id: "n0".to_string(),
-            node_id: "n0".to_string(),
-            note: Some(serde_json::json!({
-                "summary": "implemented it",
-                "followups": [{ "title": "add tests", "scope": "in" }]
-            })),
-        })
-        .unwrap();
-
-    app.poll_completion_summary_workers();
-
-    assert!(
-        !app.completion_summary_pending.contains("n0"),
-        "pending cleared"
-    );
-    assert!(
-        app.followups_ingested.contains("n0"),
-        "marked ingested (never re-summarized)"
-    );
-    app.flush_hardening_into_plan(0);
-    assert_eq!(
-        app.plan().planned_nodes.len(),
-        1,
-        "the reconstructed note grew the DAG"
-    );
-    assert_eq!(app.plan().planned_nodes[0].title, "add tests");
-}
 
 #[test]
 fn ingest_without_note_or_node_id_does_not_spawn_backstop() {
@@ -16592,9 +16354,9 @@ fn ingest_failed_worker_reads_note_but_never_backstops() {
             AgentStatus::Failed,
         )];
     let grew = app.ingest_worker_followups(0);
-    assert!(grew, "a failed worker's filed follow-ups are still applied");
-    app.flush_hardening_into_plan(0);
-    assert_eq!(app.plan().planned_nodes[0].title, "finish the refactor");
+    assert!(!grew, "follow-ups never grow the plan");
+    assert!(app.plan().planned_nodes.is_empty());
+    assert_eq!(app.agents[0].done_summary.as_deref(), Some("partial"));
 
     // …but a FAILED worker with only freeform prose never triggers the diff-backstop
     // (its half-finished diff would invite noise).
@@ -16654,29 +16416,6 @@ fn spawn_completion_backstop_refuses_incomplete_or_unattached() {
     assert!(app.followups_ingested.contains("r2"));
 }
 
-#[test]
-fn followup_scope_out_is_case_insensitive() {
-    let mut app = App::new();
-    app.cwd = std::env::temp_dir();
-    let mut a = node_agent("n0", AgentStatus::Done);
-    a.mode = AgentMode::Execute;
-    app.agents = vec![a];
-    let note = serde_json::json!({
-        "followups": [
-            { "title": "out of lane work", "scope": "OUT" },
-            { "title": "in lane work", "scope": "in" }
-        ]
-    });
-    let grew = app.apply_worker_followups("n0", &note);
-    assert!(grew);
-    app.flush_hardening_into_plan(0);
-    assert_eq!(
-        app.plan().planned_nodes.len(),
-        1,
-        "the OUT (any case) follow-up is not injected"
-    );
-    assert_eq!(app.plan().planned_nodes[0].title, "in lane work");
-}
 
 #[test]
 fn ingested_ledger_persists_and_reloads() {
@@ -16715,153 +16454,6 @@ const FAKE_CONDUCTOR_WORKER: &str = "#!/bin/sh\n\
           printf '%s' '{\"summary\":\"did the work\",\"followups\":[{\"title\":\"write integration tests\",\"why\":\"cover it\",\"scope\":\"in\"}]}' > \"$RUDDER_DONE_FILE\"\n\
         fi\n";
 
-#[test]
-#[ignore = "live conductor simulation: spawns fake worker processes + sleeps; run with --ignored --nocapture"]
-fn conductor_live_run_drains_dag_with_fake_workers() {
-    // #[ignore]d by default, but `--ignored` runs it alongside the rest: it injects
-    // RUDDER_CODEX_BIN, so it has to take the same lock everything else does.
-    let _env = env_guard();
-    let repo = unique_test_repo("conductor-live");
-    let worker = repo.join("fake-worker.sh");
-    fs::write(&worker, FAKE_CONDUCTOR_WORKER).expect("write fake worker");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = fs::metadata(&worker).unwrap().permissions();
-        perms.set_mode(0o755);
-        fs::set_permissions(&worker, perms).unwrap();
-    }
-    std::env::set_var("RUDDER_CODEX_BIN", &worker);
-
-    let mut app = App::new();
-    app.cwd = repo.clone();
-    app.backend = Backend::Codex;
-    // Merge has its own tests; this harness simulates each integration event.
-    // Seed a 2-node plan: a root + a child that HARD-depends on it.
-    app.plan_mut().planned_nodes = vec![titled_planned_node("setup", "scaffold the project"), {
-        let mut n = titled_planned_node("feature", "build the feature");
-        n.deps = vec!["setup".to_string()];
-        n
-    }];
-    app.plan_mut().planned_origin = "build a small app".to_string();
-
-    println!("\n=== conductor live run ===");
-    println!("seed: [setup] (root)  ->hard->  [feature]");
-    app.run_scheduler();
-    println!("after approve: launched the ready root, feature held on its hard dep");
-
-    let node_status = |app: &App, id: &str| {
-        app.agents
-            .iter()
-            .find(|r| r.node_id.as_deref() == Some(id))
-            .map(|r| r.status)
-    };
-
-    // A node is "present" whether it is still queued in planned_nodes OR has already
-    // been launched into an agent: the conductor launches a grown follow-up the same
-    // tick it ingests it, so it leaves planned_nodes almost immediately.
-    let followup_present = |app: &App| {
-        app.plan()
-            .planned_nodes
-            .iter()
-            .any(|n| n.title == "write integration tests")
-            || app
-                .agents
-                .iter()
-                .any(|r| r.task_summary == "write integration tests")
-    };
-
-    let mut saw_followup = false;
-    let mut drained = false;
-    for tick in 0..300 {
-        app.poll_agents();
-        app.maybe_ingest_worker_followups();
-
-        // The conductor grows the DAG from a finished worker's RUDDER_DONE block;
-        // the grown node launches the same tick, so check queue AND agents.
-        if !saw_followup && followup_present(&app) {
-            saw_followup = true;
-            println!("[tick {tick}] auto-expand: a finished worker's `rudder done` grew the DAG with 'write integration tests'");
-        }
-
-        // Simulate the conductor's MERGE: any finished plan worker merges, which
-        // unblocks its hard children on the next scheduler pass (feature waits for
-        // setup's merge, not just its completion).
-        let just_done: Vec<(usize, String)> = app
-            .agents
-            .iter()
-            .enumerate()
-            .filter(|(_, r)| r.node_id.is_some() && r.status == AgentStatus::Done)
-            .map(|(i, r)| (i, r.node_id.clone().unwrap_or_default()))
-            .collect();
-        if !just_done.is_empty() {
-            for (i, id) in &just_done {
-                // A real merge (mark_agent_and_review_sources_merged) drops the PTY
-                // too, so poll_agents stops re-marking the exited process Done; mirror
-                // that here for a faithful simulation.
-                app.agents[*i].terminal = None;
-                app.agents[*i].status = AgentStatus::Merged;
-                println!("[tick {tick}] {id} finished -> merged");
-            }
-            app.run_scheduler();
-        }
-
-        let running = app
-            .agents
-            .iter()
-            .filter(|r| r.node_id.is_some() && r.status == AgentStatus::Running)
-            .count();
-        if saw_followup
-            && app.plan().planned_nodes.is_empty()
-            && running == 0
-            && node_status(&app, "setup") == Some(AgentStatus::Merged)
-            && node_status(&app, "feature") == Some(AgentStatus::Merged)
-        {
-            println!("[tick {tick}] DAG drained: the hard-dep child waited for its parent's merge, and the auto-grown node launched + finished");
-            drained = true;
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(20));
-    }
-
-    println!("\n--- activity log ---");
-    for line in &app.activity_log {
-        println!("  · {line}");
-    }
-    println!("--- final node states ---");
-    for run in &app.agents {
-        if let Some(id) = &run.node_id {
-            println!("  {id:<10} {:?}  ({})", run.status, run.task_summary);
-        }
-    }
-    println!();
-
-    std::env::remove_var("RUDDER_CODEX_BIN");
-
-    assert!(
-        saw_followup,
-        "a finished worker's `rudder done` grew the DAG"
-    );
-    assert!(
-        node_status(&app, "setup") == Some(AgentStatus::Merged),
-        "the root ran and merged"
-    );
-    assert!(
-        node_status(&app, "feature") == Some(AgentStatus::Merged),
-        "the hard-dependent child launched after its parent merged, then merged"
-    );
-    let followup_launched = app.agents.iter().any(|r| {
-        r.task_summary.contains("write integration tests")
-            || r.current_prompt.contains("write integration tests")
-    });
-    assert!(
-        followup_launched,
-        "the auto-grown follow-up node was scheduled into a worker"
-    );
-    assert!(drained, "the whole DAG drained within the tick budget");
-
-    let _ = fs::remove_dir_all(&repo);
-}
 
 #[test]
 fn cleanup_run_signals_removes_only_that_runs_files() {
@@ -20108,177 +19700,12 @@ fn trunk_verification_asks_jj_once_for_every_merged_row() {
     assert!(jj_changes_in_trunk(&repo, &["   ".to_string()]).is_empty());
 }
 
-fn hardening_item(title: &str, files: &[&str]) -> crate::tasks::HardeningItem {
-    crate::tasks::HardeningItem {
-        title: title.to_string(),
-        prompt: title.to_string(),
-        origin_node: "n0".to_string(),
-        plan_id: "p1".to_string(),
-        files: files.iter().map(|f| (*f).to_string()).collect(),
-    }
-}
 
-#[test]
-fn hardening_findings_on_the_same_files_become_one_clump() {
-    // The offstage failure, exactly: two hardening follow-ups each independently
-    // created the same four src/router files, conflicted 3-sided, and froze
-    // integration for hours. As one clump they are edits in a single working copy
-    // and the conflict cannot exist.
-    let clusters = crate::tasks::cluster_hardening(vec![
-        hardening_item(
-            "--video routes to container",
-            &["src/router/index.ts", "src/router/signals.ts"],
-        ),
-        hardening_item(
-            "webdriver tools route to container",
-            &["src/router/index.ts", "src/router/inspect.ts"],
-        ),
-        hardening_item(
-            "cap retained output at 4MB",
-            &["src/lanes/headless/parse.ts"],
-        ),
-    ]);
 
-    assert_eq!(
-        clusters.len(),
-        2,
-        "the two router findings clump, the lane one stands alone"
-    );
-    let router = clusters
-        .iter()
-        .find(|c| c.len() == 2)
-        .expect("router clump");
-    assert!(router.iter().any(|i| i.title.contains("--video")));
-    assert!(router.iter().any(|i| i.title.contains("webdriver")));
-}
 
-#[test]
-fn clumping_is_transitive_across_a_shared_file() {
-    // A touches x, B touches x+y, C touches y. All three belong together: an agent
-    // fixing y must see what A did to x, or it re-litigates the same file.
-    let clusters = crate::tasks::cluster_hardening(vec![
-        hardening_item("A", &["src/x.ts"]),
-        hardening_item("C", &["src/y.ts"]),
-        hardening_item("B", &["src/x.ts", "src/y.ts"]),
-    ]);
-    assert_eq!(clusters.len(), 1, "the bridging finding merges both clumps");
-    assert_eq!(clusters[0].len(), 3);
-}
 
-#[test]
-fn findings_with_no_identifiable_file_stay_separate() {
-    // Sweeping unattributable findings into an arbitrary clump would hand one agent
-    // two unrelated jobs, which is the failure mode clumping exists to avoid.
-    let clusters = crate::tasks::cluster_hardening(vec![
-        hardening_item("tighten the docs", &[]),
-        hardening_item("review error copy", &[]),
-        hardening_item("fix router", &["src/router/index.ts"]),
-    ]);
-    assert_eq!(clusters.len(), 3);
-}
 
-#[test]
-fn file_mentions_are_recovered_from_free_text() {
-    let files = crate::tasks::extract_file_mentions(
-        "constraintStatus() in scripts/migrate-comeback.ts must match pg_constraint; \
-         also update `tests/router.classify.test.ts` and the README.md note.",
-    );
-    assert!(
-        files.contains(&"scripts/migrate-comeback.ts".to_string()),
-        "{files:?}"
-    );
-    assert!(
-        files.contains(&"tests/router.classify.test.ts".to_string()),
-        "{files:?}"
-    );
-    assert!(files.contains(&"README.md".to_string()), "{files:?}");
-    // Prose is not a path.
-    assert!(
-        !files.iter().any(|f| f == "constraintStatus()"),
-        "{files:?}"
-    );
-}
 
-#[test]
-fn many_findings_on_one_area_become_one_node_not_many() {
-    // The whole point. Four findings across two areas used to be four nodes: four
-    // cold-start agents, four workspaces, four merges — and the two router findings
-    // would race to create the same files. They become two nodes.
-    let mut app = App::new();
-    app.cwd = std::env::temp_dir();
-    let mut a = test_agent_run("n0agent", "router");
-    a.node_id = Some("n0".to_string());
-    a.mode = AgentMode::Execute;
-    app.agents = vec![a];
-
-    let note = serde_json::json!({
-        "summary": "built the router",
-        "followups": [
-            { "title": "video routing needs src/router/index.ts guard", "scope": "in" },
-            { "title": "webdriver routing in src/router/index.ts is unhandled", "scope": "in" },
-            { "title": "cap output in src/lanes/headless/parse.ts", "scope": "in" },
-            { "title": "docs for src/lanes/headless/parse.ts limits", "scope": "in" }
-        ]
-    });
-    assert!(app.apply_worker_followups("n0", &note));
-    assert_eq!(app.hardening.len(), 4, "all four are captured");
-    assert_eq!(
-        app.plan().planned_nodes.len(),
-        0,
-        "and none of them is scheduled yet"
-    );
-
-    let added = app.flush_hardening_into_plan(0);
-    assert_eq!(added, 2, "four findings, two file-areas, two nodes");
-
-    let titles: Vec<&str> = app
-        .plan()
-        .planned_nodes
-        .iter()
-        .map(|n| n.title.as_str())
-        .collect();
-    assert!(
-        titles.iter().any(|t| t.contains("src/router")),
-        "a clump is named for its area: {titles:?}"
-    );
-
-    // Every finding in a clump reaches the agent in ONE prompt, so it fixes them
-    // together with full sight of the file instead of two agents half-fixing it.
-    let router = app
-        .plan()
-        .planned_nodes
-        .iter()
-        .find(|n| n.title.contains("src/router"))
-        .expect("router clump");
-    assert!(router.prompt.contains("video routing"));
-    assert!(router.prompt.contains("webdriver routing"));
-    assert!(router.prompt.contains("reported by n0"));
-}
-
-#[test]
-fn the_backlog_survives_a_restart() {
-    // A finding recorded and then lost is hardening the user was told would happen
-    // and never does.
-    let repo = unique_test_repo("hardening-persist");
-    let mut app = App::new();
-    app.cwd = repo.clone();
-    app.hardening = vec![crate::tasks::HardeningItem {
-        title: "cap the output".to_string(),
-        prompt: "cap it".to_string(),
-        origin_node: "n2".to_string(),
-        plan_id: "p1".to_string(),
-        files: vec!["src/lanes/headless/parse.ts".to_string()],
-    }];
-    app.persist_hardening();
-
-    let reloaded = load_hardening_backlog(&repo);
-    assert_eq!(reloaded, app.hardening);
-
-    // Draining it clears the file rather than leaving a stale backlog behind.
-    app.hardening.clear();
-    app.persist_hardening();
-    assert!(load_hardening_backlog(&repo).is_empty());
-}
 
 #[test]
 fn git_state_is_recomputed_only_when_git_writes() {
@@ -29412,7 +28839,8 @@ fn swarm_orchestrator_commands_carry_the_swarm_contract() {
 fn swarm_experiment_brief_keeps_workers_honest() {
     let brief = swarm_experiment_brief("e3", 12);
     assert!(brief.contains("experiment e3, one of 12"), "{brief}");
-    assert!(brief.contains("rudder done"));
+    assert!(brief.contains("scored results"));
+    assert!(!brief.contains("rudder done"));
     assert!(brief.ends_with("\n\n"));
 }
 

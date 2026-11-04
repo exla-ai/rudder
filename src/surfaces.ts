@@ -86,10 +86,8 @@ async function appendDecisionsEntry(repoRoot: string, entry: string): Promise<vo
 // preamble so an agent reading only RUDDER.md still gets them. Kept here so the
 // two surfaces never drift. No em dashes.
 export const PROPAGATION_RULES: string[] = [
-  "Check RUDDER.md for overlapping ownership and before integration; do not poll or reload all context files before every step.",
-  "Read relevant shared decisions once. Adapt when the user or a relevant topic changes; unrelated task history does not need reloading.",
-  "Record cross-cutting decisions concisely with their rationale and owner. Ordinary peer messages do not accept project decisions.",
-  "Keep credentials in private stores or RUDDER_SHARED.md when needed, never in DECISIONS.md or generated RUDDER.md. Do not edit generated context.",
+  "Check RUDDER.md only when your work overlaps another agent's. Do not edit generated context.",
+  "Never write secrets into tracked files or RUDDER.md.",
 ];
 
 function decisionsPath(repoRoot: string): string {
@@ -425,10 +423,6 @@ async function computeFreshness(repoRoot: string): Promise<number> {
  * throws on a missing run record; degrades to the graph status.
  */
 export async function renderLiveRudderMd(repoRoot: string): Promise<void> {
-  // Ensure the agent-authored knowledge surface exists so siblings have a place
-  // to append decisions, and so its mtime feeds the freshness stamp below.
-  await ensureDecisionsFile(repoRoot).catch(() => undefined);
-
   const graph = await readGraph(repoRoot);
   const nodes = Object.values(graph.nodes).sort((a, b) => a.createdAt.localeCompare(b.createdAt));
 
@@ -484,7 +478,7 @@ export async function renderLiveRudderMd(repoRoot: string): Promise<void> {
   lines.push(
     "",
     "## Shared decisions",
-    "Shared, cross-cutting decisions live in DECISIONS.md (agent-authored, jj-tracked). Gitignored user-shared tokens/env/private context lives in RUDDER_SHARED.md when present. Never edit RUDDER.md.",
+    "Gitignored user-shared tokens/env/private context lives in RUDDER_SHARED.md when present. Never edit RUDDER.md.",
     "",
   );
 

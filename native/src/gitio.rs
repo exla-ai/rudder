@@ -3766,59 +3766,6 @@ pub(crate) fn is_readable_run_id(run_id: &str) -> bool {
         && run_id.len() <= RUN_SLUG_CHARS + 1 + RUN_KEY_LEN
 }
 
-/// Append a cross-cutting conductor decision to the repo's DECISIONS.md (the shared,
-/// agent-authored log workers consult for relevant decisions). Mirrors the TS
-/// `renderDecisionEntry` format: a `## title` heading, **What** / optional **Why**, and a
-/// **By: conductor** footer. Best-effort; creates the file with a header when absent.
-/// Keeps the conductor's plan/steer decisions DURABLE and visible to the fleet, not only
-/// in the in-pane activity log.
-/// Returns true if a new entry was written, false if it was skipped (empty `what`, or a
-/// byte-identical title+what decision already present so this is a no-op duplicate).
-pub(crate) fn append_conductor_decision(
-    repo_root: &Path,
-    title: &str,
-    what: &str,
-    why: Option<&str>,
-) -> bool {
-    let collapse = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
-    let what = collapse(what);
-    if what.is_empty() {
-        return false;
-    }
-    let title = {
-        let t = collapse(title);
-        if t.is_empty() {
-            "decision".to_string()
-        } else {
-            t
-        }
-    };
-    // The decision's identity is its title + what (the only varying part of a repeat is the
-    // timestamp footer). Skip when that exact block already exists, so a conductor that
-    // re-hits the same state every tick — e.g. a depth-capped auto-expansion that keeps
-    // deferring the same follow-ups — does not spam DECISIONS.md with identical entries.
-    let signature = format!("## {title}\n- **What:** {what}\n");
-    let path = repo_root.join("DECISIONS.md");
-    const HEADER: &str = "# Decisions\n\nShared, agent-authored log of cross-cutting decisions the fleet must honor. The conductor records plan/steer decisions here; workers record interface contracts + adjustments. Read relevant entries once; revisit when a relevant topic changes or before integration.\n\n";
-    let existing = fs::read_to_string(&path).unwrap_or_default();
-    if existing.contains(&signature) {
-        return false;
-    }
-    let mut entry = signature;
-    if let Some(why) = why.map(|w| collapse(w)).filter(|w| !w.is_empty()) {
-        entry.push_str(&format!("- **Why:** {why}\n"));
-    }
-    entry.push_str(&format!("- **By:** conductor · {}\n\n", now_stamp()));
-
-    let base = if existing.is_empty() {
-        HEADER.to_string()
-    } else {
-        existing
-    };
-    let prefix = if base.ends_with('\n') { "" } else { "\n" };
-    fs::write(&path, format!("{base}{prefix}{entry}")).is_ok()
-}
-
 pub(crate) fn now_stamp() -> String {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)

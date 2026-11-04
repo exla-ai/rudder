@@ -134,8 +134,9 @@ test("renderContract leads with the Objective + Done-when header", () => {
   assert.equal(contract.split("\n")[1], "Done when: the toggle works and tests pass");
   // Adapters carry the actual user prompt separately from this contract.
   assert.ok(!contract.includes("Task: add a dark mode toggle"));
-  assert.ok(contract.includes("Acceptance criteria:"));
-  assert.ok(contract.includes("Working rules:"));
+  assert.ok(contract.includes("Checks available: npm test."));
+  assert.ok(!/rudder done|evidence|followups/i.test(contract));
+  assert.ok(contract.length < 1200, `contract stays short (${contract.length})`);
 });
 
 test("renderContract derives goal/success when the spec omits them", () => {
@@ -155,7 +156,7 @@ test("renderContract derives goal/success when the spec omits them", () => {
   assert.ok(contract.split("\n")[1].startsWith("Done when: "));
 });
 
-test("native command adapters submit the full task once while preserving role and criteria", {
+test("native command adapters submit the full task once while preserving role and goal", {
   skip: process.platform === "win32" ? "native command adapters use POSIX shell quoting" : false,
 }, async (t) => {
   const execute = promisify(execFile);
@@ -191,8 +192,7 @@ test("native command adapters submit the full task once while preserving role an
       assert.equal(submitted.split(task).length - 1, 1, `${backend}/${runtimeRole} task body`);
       assert.ok(submitted.includes("Objective: Preserve parser input"));
       assert.ok(submitted.includes("Done when: The quoted-input regression passes"));
-      assert.ok(submitted.includes("Retain every input byte."));
-      assert.ok(submitted.includes(runtimeRole === "main-owner" ? "user's main checkout" : "You are an isolated worker"));
+      assert.ok(submitted.includes(runtimeRole === "main-owner" ? "you own this request" : "your own jj workspace"));
     }
   }
 });
@@ -210,7 +210,8 @@ test("renderContract asks the worker to parallelize, in parity with the native p
     suggestedTests: [],
   });
   assert.ok(contract.includes(`- ${PARALLEL_WORK_RULE}`));
-  assert.ok(PARALLEL_WORK_RULE.includes("concurrent subagents"));
+  assert.ok(PARALLEL_WORK_RULE.includes("subagents"));
+  assert.ok(WAIT_AND_READ_RULE.includes("Cap long output"));
   // The Rust worker context block carries the same sentence.
   const tasksRs = fs.readFileSync(new URL("../native/src/tasks.rs", import.meta.url), "utf8");
   assert.ok(tasksRs.includes(`"- ${PARALLEL_WORK_RULE}"`), "native parallel_work_rule! drifted from TS");

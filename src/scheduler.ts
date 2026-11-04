@@ -30,7 +30,7 @@ import { reconcile } from "./planner.js";
 import { DEFAULT_SUCCESS, deriveGoal, formatGoalPrompt, normalizeGoalLine } from "./goal.js";
 import { createRunRecord, loadConfig, loadRunRecord, runDir, saveRunRecord } from "./state.js";
 import { newAttemptId, spawnWorker } from "./run-manager.js";
-import { ensureDecisionsFile, renderLiveRudderMd } from "./surfaces.js";
+import { renderLiveRudderMd } from "./surfaces.js";
 import { withIntegrationLock } from "./rudder-md.js";
 import type {
   GraphEdge,
@@ -268,9 +268,6 @@ async function launchReservedNode(repoRoot: string, graph: RudderGraph, node: Ta
     atChangeId: baseChange,
     task: node.title,
   }) : { path: repoRoot, workspaceName: undefined };
-  // Seed the shared-knowledge surface into the workspace if absent so the agent
-  // edits it in its jj workspace (jj merges concurrent edits on fan-in).
-  await ensureDecisionsFile(workspace.path).catch(() => undefined);
   const jjChangeId = (await currentJjChangeId(workspace.path)) || node.jjChangeId;
 
   const run = await createRunRecord({

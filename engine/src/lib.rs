@@ -25,4 +25,6 @@ pub mod workspace;
 pub mod build;
 pub mod execution;
 pub mod vfs;
+#[cfg(target_os = "linux")]
+pub mod jj_working_copy;
 pub mod jj_store;

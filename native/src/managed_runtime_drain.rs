@@ -3,6 +3,10 @@
 use super::*;
 use rudder_native::root_storage_bootstrap::runtime_image::{RuntimeNativeUseObservation,RuntimeNativeUseData};
 use crate::managed_app::runtime_task::OriginalTaskRuntimeUse;
+use rudder_engine::journal as recovery_journal;
+
+#[path = "runtime_recovery/mod.rs"]
+pub(crate) mod restart;
 
 /// Stored INSIDE WorkerCarrier. No Shared/cell/root back-reference: retaining
 /// this campaign cannot create Shared -> campaign -> Shared ownership cycles.

@@ -8,6 +8,8 @@ import {
   app, NATIVE, PLATFORM, postNative, openExternal, ls, coarse, toMs, rel, ApiError, api, toast, confirmDialog, track, showError,
 } from "/app/core.js";
 import { PlanView, planOf } from "/app/plan.js";
+import { ProjectFiles } from "/app/project-files.js";
+import { CanonicalTerminalView } from "/app/terminal-client.js";
 import { openModelPicker, modelChip } from "/app/model-picker.js";
 import { SettingsScreen, JoinScreen, SlackLinkScreen, openLinearIssues, linearAvailable, rememberPendingLink, takePendingLink } from "/app/org.js";
 import { OnboardingScreen, onboardingDue } from "/app/onboarding.js";
@@ -2385,6 +2387,8 @@ function ProjectScreen(ws) {
     </div></section>`);
   const bar = el.querySelector(".topbar");
   const scroller = el.querySelector(".scroller");
+  const files = ProjectFiles(ws);
+  scroller.appendChild(files.el);
   el.querySelector(".back").addEventListener("click", (e) => { e.preventDefault(); goBack("/app"); });
   // The model new agents start on, in the header too (the task box has its chip).
   const headModel = modelChip(ws, { compact: true });
@@ -2552,7 +2556,7 @@ function ProjectScreen(ws) {
       }
     } else emptySlot.replaceChildren();
   }
-  return { el, update };
+  return { el, update, destroy() { files.destroy(); } };
 }
 
 /* ------------------------------------------------------------------ */
@@ -2940,19 +2944,38 @@ function AgentScreen(ws, run, { member = null } = {}) {
   };
   composer.textarea.addEventListener("input", renderSlash);
 
-  // Live terminal: what the agent's screen shows right now (pickers, prompts),
-  // with real keys to drive it.
+  // Negotiate the exact current agent screen independently of the dashboard
+  // byte channel. Historical and legacy owners retain their HTTP screen view.
   const termPanel = el.querySelector(".term-panel");
   const termScreen = el.querySelector(".term-screen");
   const termToggle = el.querySelector(".term-toggle");
   let termOn = false;
   let termTimer = null;
+  let termCanonical = false;
+  let termFallbackEpoch = 0;
+  const terminalView = new CanonicalTerminalView(termScreen, { workspaceId: ws, runId: run,
+    onUnavailable: () => {
+      if (!termOn) return;
+      termCanonical = false; termFallbackEpoch++;
+      for (const button of el.querySelectorAll(".key-strip button")) button.disabled = false;
+      termScreen.setAttribute("aria-label", "Saved or legacy agent terminal screen");
+      pollScreen();
+    },
+    onCapability: () => {
+      termCanonical = true; termFallbackEpoch++;
+      clearTimeout(termTimer);
+      for (const button of el.querySelectorAll(".key-strip button")) button.disabled = true;
+      termScreen.setAttribute("aria-label", "Current agent terminal, read only text view");
+    },
+  });
   const pollScreen = async () => {
     termTimer = null;
-    if (!termOn) return;
+    if (!termOn || termCanonical) return;
+    const fallbackEpoch = termFallbackEpoch;
     if (!document.hidden) {
       try {
         const res = await api(`/api/app/screen?workspace=${encodeURIComponent(ws)}&run=${encodeURIComponent(run)}`);
+        if (!termOn || termCanonical || fallbackEpoch !== termFallbackEpoch) return;
         if (res?.text != null) {
           const lines = res.text.split("\n");
           while (lines.length && !lines[lines.length - 1].trim()) lines.pop();
@@ -2961,18 +2984,20 @@ function AgentScreen(ws, run, { member = null } = {}) {
           termScreen.textContent = "Waiting for the agent's screen…";
         }
       } catch (err) {
+        if (!termOn || termCanonical || fallbackEpoch !== termFallbackEpoch) return;
         termScreen.textContent = err.status === 401 ? "Signed out." : err.waking ? "Waking the cloud machine…" : err.message;
       }
     }
-    if (termOn) termTimer = setTimeout(pollScreen, 1000);
+    if (termOn && !termCanonical && fallbackEpoch === termFallbackEpoch) termTimer = setTimeout(pollScreen, 1000);
   };
   function setTerminal(on) {
-    termOn = on;
+    termOn = on; termCanonical = false; termFallbackEpoch++;
     termPanel.hidden = !on;
     termToggle.setAttribute("aria-pressed", String(on));
     termToggle.classList.toggle("on", on);
     clearTimeout(termTimer);
-    if (on) pollScreen();
+    terminalView.stop();
+    if (on && !document.hidden) terminalView.start();
   }
   termToggle.addEventListener("click", () => setTerminal(!termOn));
   el.querySelector(".key-strip").addEventListener("click", async (e) => {
@@ -3399,7 +3424,10 @@ function AgentScreen(ws, run, { member = null } = {}) {
     }
     if (timer !== -1) timer = setTimeout(tick, ro ? (waking ? 10000 : 3000) : waking ? 5000 : 2000);
   };
-  const onVis = () => { if (!document.hidden) { clearTimeout(timer); tick(); } };
+  const onVis = () => {
+    if (!document.hidden) { clearTimeout(timer); tick(); if (termOn) terminalView.start(); }
+    else terminalView.stop();
+  };
   document.addEventListener("visibilitychange", onVis);
   const unReady = () => { if (screen?.el === el) paint(); };
   onMarkdownReady(unReady);
@@ -3410,7 +3438,7 @@ function AgentScreen(ws, run, { member = null } = {}) {
     update: paint,
     destroy() {
       clearTimeout(timer); timer = -1;
-      termOn = false; clearTimeout(termTimer);
+      termOn = false; clearTimeout(termTimer); terminalView.stop();
       if (!ro) fastStatePoll = null;
       document.removeEventListener("visibilitychange", onVis);
       resizeObs.disconnect();

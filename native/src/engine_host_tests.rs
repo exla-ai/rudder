@@ -223,6 +223,7 @@ fn control_requires_the_current_instance_epoch_and_nonce() {
     let scratch = Scratch::new();
     let owner = record(&scratch.0);
     let mut request = ControlRequest {
+        run_id: None, command_id:None, timeout_ms:None, preview:None,
         format_version: 1,
         op: "shutdown".into(),
         instance_id: owner.instance_id.clone(),
@@ -801,6 +802,7 @@ fn accepted_nonblocking_control_stream_waits_for_fragments_and_retains_its_deadl
     assert!(flags >= 0);
     assert_eq!(flags & libc::O_NONBLOCK, 0);
     let payload = serde_json::to_vec(&ControlRequest {
+        run_id: None, command_id:None, timeout_ms:None, preview:None,
         format_version: 1,
         op: "status".into(),
         instance_id: "fragmented-instance".into(),

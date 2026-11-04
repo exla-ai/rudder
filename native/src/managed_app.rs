@@ -522,13 +522,13 @@ mod local {
         task_time(&budget,&cancelled)?;
         let handoff=prepared.prepare_handoff()?;
         let launch_json=serde_json::to_string(&prepared.link_launch())?;task_time(&budget,&cancelled)?;
-        Ok(PreparedResult { prepared,broker:Some(broker),projection_owner:Some(projection_owner),projection_hash:projection.projection_hash,handoff:Some(handoff),
+        Ok(PreparedResult { model_session:agent_link::model_session::ModelSessionPlan::capture(&prepared)?, prepared,broker:Some(broker),projection_owner:Some(projection_owner),projection_hash:projection.projection_hash,handoff:Some(handoff),
             native_program:carrier.native.take().context("managed task native program absent")?,launch_json })
     }
 
     struct Pending { fence: ManagedLaunchFence, cancelled: Arc<AtomicBool>, started: Instant,
         budget: Option<FinalizationBudget> }
-    struct PreparedResult { prepared: PreparedManagedLaunch, broker: Option<AgentBroker>, projection_hash: [u8; 32],
+    struct PreparedResult { model_session:Option<agent_link::model_session::ModelSessionPlan>, prepared: PreparedManagedLaunch, broker: Option<AgentBroker>, projection_hash: [u8; 32],
         projection_owner:Option<fabric_runtime::SharedAgentToolsProjectionOwner>,
         handoff: Option<ManagedExecutionHandoff>, native_program: PathBuf, launch_json: String }
     type BackendProcess = Arc<rudder_engine::execution::handoff::BackendProcessWitness>;
@@ -538,7 +538,7 @@ mod local {
         Authenticated { process:BackendProcess, result:std::result::Result<(),agent_link::ManagedCodexAuthError> } }
     struct WorkerResult { fence: ManagedLaunchFence, result: Result<WorkerStep> }
     struct PendingAuth { process:BackendProcess, cancelled:Arc<AtomicBool>, deadline:Instant, running:bool }
-    struct Live { prepared: PreparedManagedLaunch, handoff: HandoffReceipt, control: ManagedExecutionHandle,
+    struct Live { model_session:Option<agent_link::model_session::ModelSessionPlan>, prepared: PreparedManagedLaunch, handoff: HandoffReceipt, control: ManagedExecutionHandle,
         receipt: Option<ValidatedManagedShutdown>, stop: Option<(StopAndCheckpoint, Instant)>, uncertain: bool,
         orphan_reported: bool, backend_ready: bool, auth:Option<PendingAuth>, auth_session:Option<Arc<agent_link::ManagedCodexAuthSession>>, snapshot_stop_attempted:bool, report_pending: bool, last_report: Option<Instant>, report_digest: Option<[u8;32]>,
         task:Option<TaskLive> }
@@ -909,7 +909,7 @@ mod local {
                     anyhow::ensure!(!cancelled.load(Ordering::Acquire), "managed launch cancelled before result");
                     worker_fence.check_current(&Journal::open(&journal_path)?)?;
                     let launch_json = serde_json::to_string(&prepared.link_launch())?;
-                    Ok(PreparedResult { prepared, broker:Some(broker),projection_owner:None,projection_hash: projection.projection_hash, handoff:Some(handoff), native_program, launch_json })
+                    Ok(PreparedResult { model_session:agent_link::model_session::ModelSessionPlan::capture(&prepared)?, prepared, broker:Some(broker),projection_owner:None,projection_hash: projection.projection_hash, handoff:Some(handoff), native_program, launch_json })
                 })();
                 WorkerResult { fence: worker_fence, result: result.map(WorkerStep::Ready) }
             }, move ||WorkerResult { fence:panic_fence, result:Err(anyhow::anyhow!("managed preparation worker failed without a result")) });
@@ -977,7 +977,7 @@ mod local {
                                 let expected = app.agents[index].session_id.clone();
                                 let attached = app.agents[index].terminal.as_mut().context("managed authenticated terminal absent").and_then(|terminal|
                                     app.fabric_runtime.attach_managed_backend(owner, &live.prepared.assignment, terminal, live.prepared.link_launch(),
-                                        live.prepared.transport.guest_cwd.clone(), expected, process));
+                                        live.prepared.transport.guest_cwd.clone(), expected, process, live.model_session.clone()));
                                 if attached.is_ok() && live.control.backend_authenticated().is_ok() { live.backend_ready = true; live.auth = None; }
                                 else { live.uncertain = true; if let Some(session)=&live.auth_session {session.refuse();} }
                             } else { live.uncertain = true; if let Some(session)=&live.auth_session {session.refuse();} }
@@ -1114,7 +1114,7 @@ mod local {
                                 if adoption.is_ok() || task_live.is_some() {
                                     app.agents[index].terminal = Some(terminal);
                                     if adoption.is_ok() { app.agents[index].last_error = None; }
-                                    self.live.insert(assignment.fence.run_id.clone(), Live { prepared: ready.prepared,
+                                    self.live.insert(assignment.fence.run_id.clone(), Live { model_session:ready.model_session, prepared: ready.prepared,
                                         handoff, control, receipt: None, stop: None, uncertain: adoption.is_err() || task_uncertain, orphan_reported: adoption.is_err() || task_uncertain,
                                         backend_ready: false, auth:None, auth_session:None, snapshot_stop_attempted:false, report_pending: false, last_report: None, report_digest: None,task:task_live });
                                     let _ = save_native_run_record(&app.cwd, &app.agents[index]);
@@ -1214,7 +1214,7 @@ mod local {
                             let expected = app.agents[index].session_id.clone();
                             if let Some(terminal) = app.agents[index].terminal.as_mut() {
                                 if app.fabric_runtime.attach_managed_backend(owner, assignment, terminal, live.prepared.link_launch(),
-                                    live.prepared.transport.guest_cwd.clone(), expected, process).is_err() { live.uncertain = true; }
+                                    live.prepared.transport.guest_cwd.clone(), expected, process, live.model_session.clone()).is_err() { live.uncertain = true; }
                                 else { live.backend_ready = true; }
                             } else { live.uncertain = true; }
                         }

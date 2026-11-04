@@ -7,6 +7,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { BoardAuthority, type BoardSession, type BoardTarget } from "./authority.js";
 import { openBoardBrowser, serveBoardHostAccess } from "./host-access.js";
+import { BoardProjectFiles } from "./project-files.js";
 
 const MAX_BODY_BYTES = 1_000_000;
 
@@ -65,6 +66,7 @@ const logger = createLogger("board", { fileName: "daemon.log" });
 
 type SseClient = { res: ServerResponse; session: BoardSession };
 type BoardProjection = {
+  files: BoardProjectFiles;
   authority: BoardAuthority;
   sseClients: Map<string, Set<SseClient>>;
   watchers: Map<string, fs.FSWatcher>;
@@ -92,7 +94,7 @@ export async function startBoardDaemon(opts: {
     slug = projects.find((entry) => sameRepoPath(entry.repoRoot, opts.repoRoot))?.slug ?? "";
   } catch { /* A new project can still open its index. */ }
   const authority = new BoardAuthority(slug, controlMode);
-  const state: BoardProjection = { authority, sseClients: new Map(), watchers: new Map(),
+  const state: BoardProjection = { authority, files: new BoardProjectFiles(), sseClients: new Map(), watchers: new Map(),
     decisionsWatchers: new Map(), watchTimers: new Map(), lastNodes: new Map(), lastEdges: new Map(),
     lastMemory: new Map(), lastActivity: new Map(), broadcasts: new Map() };
   // Subscribe the SSE broadcaster to the shared bus: node.*/schedule.*/merge.*
@@ -342,6 +344,11 @@ async function handleProjectApi(
   if (rest === "/state" && method === "GET") {
     const snapshot = await buildSnapshot(project);
     sendJson(res, 200, snapshot);
+    return;
+  }
+
+  if (rest === "/files" || rest === "/file-scopes") {
+    await state.files.handle(req, res, url, project.repoRoot, state.authority, session);
     return;
   }
 

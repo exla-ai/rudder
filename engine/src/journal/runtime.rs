@@ -2,6 +2,32 @@
 //! both thread and turn inside the same transaction as durable acceptance.
 use super::*;
 
+#[path = "../restart_recovery/mod.rs"]
+pub mod restart_recovery;
+
+/// Called only by explicit crash recovery under the exclusive engine lock.
+/// A persisted PTY flag cannot establish custody after the engine died.
+pub(super) fn invalidate_recovered_runtimes(tx: &Transaction<'_>, owner: &OwnerFence, now_ms: i64) -> Result<()> {
+    let rows = {
+        let mut statement = tx.prepare("SELECT run_id,observation_json FROM runtime_observations WHERE project_id=?1")?;
+        let rows = statement.query_map([&owner.project_id], |row| Ok((row.get::<_,String>(0)?, row.get::<_,String>(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        rows
+    };
+    for (run_id, encoded) in rows {
+        let mut observation: RuntimeObservation = serde_json::from_str(&encoded)?;
+        if !observation.pty_owned { continue; }
+        observation.pty_owned = false;
+        observation.capabilities.retain(|kind| kind == "inspect");
+        // Backend completion is independent of physical process retirement.
+        // Every lost live owner requires custody reconciliation, even if its
+        // last backend turn already completed or failed.
+        observation.phase = RuntimePhase::Uncertain;
+        tx.execute("UPDATE runtime_observations SET observation_json=?1,observed_at=?2 WHERE project_id=?3 AND run_id=?4", params![json(&observation)?,now_ms,owner.project_id,run_id])?;
+        append_event(tx, &owner.project_id, "runtime-recovery-quarantined", &owner.owner_id, &serde_json::json!({"run_id":run_id,"observation":observation}), now_ms)?;
+    }
+    Ok(())
+}
+
 pub const RUNTIME_MAX_AGE_MS: i64 = 10_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

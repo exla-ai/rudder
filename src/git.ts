@@ -23,6 +23,10 @@ export type RebaseResult = {
 // ---------------------------------------------------------------------------
 
 export function findRepoRoot(cwd = process.cwd()): string {
+  // A jj workspace can share the main checkout's Git directory. Git then
+  // reports that checkout, which would send local writes outside this worker.
+  const workspace = runCommandSync("jj", ["root"], { cwd, allowFailure: true });
+  if (workspace.code === 0 && workspace.stdout.trim()) return workspace.stdout.trim();
   const result = runCommandSync("git", ["rev-parse", "--show-toplevel"], {
     cwd,
     allowFailure: true,

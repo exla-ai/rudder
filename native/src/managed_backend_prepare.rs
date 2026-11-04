@@ -16,6 +16,7 @@ pub(crate) enum ManagedCodexCredential { ApiKey(ManagedCodexApiKey), AccessSnaps
 pub(crate) struct SelectedCredentials {
     pub(super) profile_id: String,
     backend: crate::Backend,
+    pub(crate) model_selection: Option<serde_json::Value>,
     codex_snapshot: Option<CodexOAuthAccessSnapshotV1>,
     pub(super) environment: std::collections::BTreeMap<String, String>,
 }
@@ -67,6 +68,10 @@ impl SelectedCredentials {
         ensure!(self.backend != crate::Backend::Codex || (self.environment.is_empty() && self.codex_snapshot.is_none()),
             "selected Codex API key must move to host custody before guest preparation");
         let mut environment = self.environment.clone();
+        if let Some(selection) = &self.model_selection {
+            rudder_engine::execution::ExecutionProfileV4::validate_selected_model(selection)?;
+            environment.insert("RUDDER_MODEL_PROFILE_V1".into(), serde_json::to_string(selection)?);
+        }
         environment.extend([("RUDDER_FABRIC_ATTEMPT_ID".into(), fence.attempt_id.clone()),
             ("RUDDER_DONE_FILE".into(), reports.guest_done_file.display().to_string()),
             ("CODEX_HOME".into(), "/home/agent/.codex".into())]);
@@ -83,12 +88,12 @@ impl SelectedCredentials {
             crate::Backend::Claude => "ANTHROPIC_API_KEY",
             _ => anyhow::bail!("managed provider profile is unsupported"),
         };
-        Ok(Self { profile_id, backend, codex_snapshot:None, environment: [(key.into(), secret.into_validated())].into() })
+        Ok(Self { profile_id, backend, model_selection:None, codex_snapshot:None, environment: [(key.into(), secret.into_validated())].into() })
     }
     pub(crate) fn codex_access_snapshot(profile_id:String, snapshot:CodexOAuthAccessSnapshotV1)->Result<Self> {
         ensure!(!profile_id.is_empty() && profile_id.len()<=256 && !profile_id.chars().any(char::is_control), "invalid selected credential profile");
         ensure!(snapshot.profile()==profile_id, "selected Codex access snapshot belongs to another profile");
-        Ok(Self {profile_id,backend:crate::Backend::Codex,codex_snapshot:Some(snapshot),environment:BTreeMap::new()})
+        Ok(Self {profile_id,backend:crate::Backend::Codex,model_selection:None,codex_snapshot:Some(snapshot),environment:BTreeMap::new()})
     }
     pub(crate) fn take_host_codex_credential(&mut self)->Result<Option<ManagedCodexCredential>> {
         if let Some(snapshot)=self.codex_snapshot.take() {

@@ -49,6 +49,11 @@ impl ManagedTaskOptIn {
 /// itself. It does not duplicate keys or create OAuth/API-billing fallbacks.
 pub(crate) struct SelectedTaskProfile { selected: ManagedTaskOptIn, credentials: SelectedCredentials }
 impl SelectedTaskProfile {
+    pub(crate) fn retain_model_selection(&mut self, selection:serde_json::Value)->Result<()> {
+        rudder_engine::execution::ExecutionProfileV4::validate_selected_model(&selection)?;
+        ensure!(selection["profile_id"]==self.selected.profile_id && selection["backend"]==match self.selected.backend {Backend::Codex=>"codex",Backend::Claude=>"claude",_=>"unsupported"}, "model selection differs from selected credential owner");
+        self.credentials.model_selection=Some(selection); Ok(())
+    }
     /// OFF-APP trusted private-profile selector only; supply precisely the
     /// explicitly selected API profile's key, never inherited env/login material.
     pub(crate) fn api_key(selected: ManagedTaskOptIn, secret: String) -> Result<Self> {
@@ -264,7 +269,16 @@ impl ManagedTaskAdmission {
         let profile = self.load_profile(loader)?;
         let resources = resources(&self.target, &self.cancelled, &self.budget)?;
         project.check_worker(&resources.expected_integration_head, &self.budget, &self.cancelled)?;
-        let backend = resources.programs.bind(&self.target)?;
+        let mut backend = resources.programs.bind(&self.target)?;
+        if let Some(selection)=&profile.credentials.model_selection {
+            ensure!(selection["requested_model"]==self.target.model, "selected model differs from actual admitted task");
+            if let ManagedBackendProfile::CodexAppServer { arguments,.. }=&mut backend {
+                let model=selection["model"].as_str().context("selected model absent")?;
+                let effort=selection["effort"].as_str().context("selected Codex effort absent")?;
+                arguments[1]=model.to_owned();
+                arguments.splice(2..2,["-c".into(),format!("model_reasoning_effort={effort:?}")]);
+            }
+        }
         profile.credentials.check_backend(&backend)?;
         backend.validate_runtime(&resources.runtime, &[resources.native_guest.as_str(), resources.jj_guest.as_str()])?;
         ensure!(normalized(&resources.native_program) && normalized(&resources.endpoint_parent), "managed task paths must be explicit normalized absolute identities");

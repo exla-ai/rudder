@@ -13851,8 +13851,8 @@ fn optional_routing_helper_runs_in_background_and_preserves_submitted_model() {
     let helper = repo.join("fake-rudder.sh");
     let capture = repo.join("routing-request.json");
     write_fake_bin(&helper, &format!(
-        "#!/bin/sh\n[ \"$1\" = __route-task ] || exit 2\ncat > {}\nprintf '%s\\n' '{{\"route\":\"plan\",\"source\":\"decisions\",\"reason\":\"multi-part implementation; approval required\"}}'\n",
-        shell_single_quote(&capture.to_string_lossy())
+        "#!/usr/bin/env python3\nimport json,sys\nassert sys.argv[1] == '__route-task'\nrequest=json.load(sys.stdin)\nwith open({},'w') as file: json.dump(request,file)\nprint(json.dumps({{'ingress':request['ingress'],'action':'new-task','routing':{{'route':'plan','source':'decisions','reason':'multi-part implementation; approval required'}}}}))\n",
+        serde_json::to_string(&capture).unwrap()
     ));
     let worker = repo.join("fake-worker.sh");
     write_fake_bin(&worker, FAKE_CONDUCTOR_WORKER);
@@ -13882,7 +13882,10 @@ fn optional_routing_helper_runs_in_background_and_preserves_submitted_model() {
     assert_eq!(app.backend, Backend::Claude);
     assert_eq!(app.model, "opus");
     let request: serde_json::Value = serde_json::from_str(&fs::read_to_string(capture).unwrap()).unwrap();
-    assert_eq!(request, serde_json::json!({"task": task}));
+    assert_eq!(request["ingress"]["task"], task);
+    assert_eq!(request["ingress"]["execution"]["checkoutPath"], repo.to_string_lossy().as_ref());
+    assert_eq!(request["ingress"]["execution"]["location"], "local");
+    assert!(uuid::Uuid::parse_str(request["ingress"]["requestId"].as_str().unwrap()).is_ok());
     for (key, value) in previous {
         match value { Some(value) => std::env::set_var(key, value), None => std::env::remove_var(key) }
     }
@@ -13902,7 +13905,7 @@ fn retired_workflows_and_hidden_plan_alias_never_take_over_the_palette() {
 
 #[cfg(not(windows))]
 #[test]
-fn retired_slash_commands_are_not_silently_reinterpreted() {
+fn production_command_registry_refuses_retired_slash_commands() {
     // `/run` and `/ask` are gone: `/run`'s behavior is what plain input does now,
     // and `/ask` is gone entirely. Neither may fall through and spawn an agent
     // whose prompt is the literal "/run build the settings panel" - the unknown
@@ -13910,7 +13913,7 @@ fn retired_slash_commands_are_not_silently_reinterpreted() {
     let mut app = App::new();
     app.cwd = std::env::temp_dir();
 
-    for retired in ["/run build the settings panel", "/ask explain the build"] {
+    for retired in ["/run build the settings panel", "/ask explain the build", "/gam review this", "/tell use tests", "/nudge continue"] {
         app.notice = None;
         let before = app.agents.len();
         app.start_task_from_input(retired);
@@ -13921,9 +13924,13 @@ fn retired_slash_commands_are_not_silently_reinterpreted() {
         );
         let notice = app.notice.as_deref().unwrap_or_default();
         assert!(
-            notice.contains("unknown command"),
-            "{retired} is reported as unknown: {notice}"
+            notice.contains("retired"),
+            "{retired} is reported as retired: {notice}"
         );
+        app.notice = None;
+        assert!(app.handle_command(retired));
+        assert_eq!(app.agents.len(), before, "direct dispatch cannot bypass the registry");
+        assert!(app.notice.as_deref().unwrap_or_default().contains("retired"));
     }
 }
 

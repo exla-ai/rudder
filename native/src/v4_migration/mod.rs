@@ -68,6 +68,203 @@ pub struct Quiescence {
     pub launchers_disabled: bool,
     pub external_credentials_fenced: bool,
 }
+
+/// Explicit startup selection. This is request data, never a replacement for
+/// the engine's actual checkout lock or the journal's current owner fence.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AdoptionRequest {
+    pub format_version: u32,
+    pub migration_id: String,
+    pub expected_owner: OwnerFence,
+    pub run_epochs: BTreeMap<String, u64>,
+    pub quiescence: AdoptionQuiescence,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AdoptionQuiescence {
+    pub scheduler_shutdown_confirmed: bool,
+    pub effects_reconciled: bool,
+    pub launchers_disabled: bool,
+    pub external_credentials_fenced: bool,
+}
+impl AdoptionQuiescence {
+    pub fn confirmed(&self) -> Quiescence {
+        Quiescence {
+            scheduler_shutdown_confirmed: self.scheduler_shutdown_confirmed,
+            effects_reconciled: self.effects_reconciled,
+            launchers_disabled: self.launchers_disabled,
+            external_credentials_fenced: self.external_credentials_fenced,
+        }
+    }
+}
+
+/// Called by EngineOwnership only after acquiring its real checkout lock and
+/// before recovery/transfer. A receipt permits inspecting retained data; the
+/// exact live journal fence and complete run inventory still gate acquisition.
+/// Returned records are projections. Original records and archives stay intact.
+pub fn prepare_adoption(repository: &Path, journal: &Journal, request: &AdoptionRequest) -> Result<Vec<serde_json::Value>> {
+    request.quiescence.confirmed().check()?;
+    ensure!(request.format_version == 1 && !request.migration_id.is_empty()
+        && request.migration_id.len() <= 200 && request.run_epochs.len() <= 1024,
+        "invalid explicit migration adoption request");
+    let repository = repository.canonicalize()?;
+    ensure!(rudder_engine::paths::local_project_id(&repository)? == request.expected_owner.project_id,
+        "migration adoption belongs to another checkout");
+    reject_live_legacy(&repository)?;
+    // Read through the same bounded, strict receipt codec without trying to
+    // reacquire the lock already retained by the actual engine constructor.
+    let receipt = read_receipt(&repository)?.context("migration is not prepared")?;
+    ensure!(receipt.phase == Phase::Committed && receipt.request.migration_id == request.migration_id
+        && receipt.owner.project_id == request.expected_owner.project_id
+        && request.expected_owner.epoch >= receipt.owner.epoch,
+        "migration is not committed for this explicit owner selection");
+    ensure!(journal.project_state(&request.expected_owner.project_id)?.owner == request.expected_owner,
+        "stale migration adoption owner epoch");
+    let actual: BTreeMap<_, _> = journal.recorded_run_inventory(&request.expected_owner)?
+        .into_iter().map(|run|(run.run_id,run.run_epoch)).collect();
+    ensure!(actual == request.run_epochs, "stale migration adoption run inventory");
+    verify_bundle(&receipt.request.recovery_bundle, &receipt.request.recovery_manifest_sha256,
+        &receipt.owner.project_id, &request.migration_id)?;
+    let manifest: serde_json::Value = serde_json::from_slice(&fs::read(receipt.request.recovery_bundle.join("manifest.json"))?)?;
+    let mut archived = BTreeMap::new();
+    for entry in manifest["entries"].as_array().context("recovery entries absent")? {
+        if entry["root"] != "legacy-runs" || entry["type"] != "file" { continue; }
+        let Some(path) = entry["path"].as_str().and_then(|path| path.strip_suffix("/run.json")) else { continue; };
+        ensure!(safe_run_id(path), "unsafe archived run identity");
+        let hash = entry["object"]["digest"].as_str().context("legacy record object absent")?;
+        ensure!(entry["object"]["size_bytes"].as_u64().is_some_and(|size|size <= 2*1024*1024), "legacy record exceeds adoption bound");
+        let bytes = fs::read(receipt.request.recovery_bundle.join("objects").join(hash))?;
+        ensure!(entry["object"]["size_bytes"].as_u64() == Some(bytes.len() as u64)
+            && format!("{:x}", Sha256::digest(&bytes)) == hash, "legacy compatibility record checksum mismatch");
+        let record: serde_json::Value = serde_json::from_slice(&bytes)?;
+        archived.insert(path.to_string(), record);
+    }
+    request.run_epochs.keys().map(|id| {
+        ensure!(safe_run_id(id), "unsafe migration run identity");
+        let directory = repository.join(".rudder/runs").join(id);
+        let path = directory.join("run.json");
+        let record = match fs::symlink_metadata(&path) {
+            Ok(stat) => {
+                ensure!(stat.is_file() && !stat.is_symlink() && stat.len() <= 2*1024*1024
+                    && !fs::symlink_metadata(&directory)?.is_symlink(), "invalid current migration run record");
+                serde_json::from_slice(&fs::read(path)?)?
+            },
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound =>
+                archived.remove(id).context("migration run has no retained compatibility record")?,
+            Err(error) => return Err(error.into()),
+        };
+        compatible_record(id, record)
+    }).collect()
+}
+
+const ADOPTION_RECEIPT_KIND: &str = "v4-migration-adoption-v1";
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AdoptedFabricAuthority {
+    format_version: u32,
+    migration_id: String,
+    repository: PathBuf,
+    recovery_manifest_sha256: String,
+    owner: OwnerFence,
+    automatic_resume: bool,
+}
+fn adoption_key(migration_id: &str, epoch: u64) -> String {
+    format!("{:x}:{epoch}",Sha256::digest(migration_id.as_bytes()))
+}
+
+/// Called only by the real engine constructor AFTER explicit adoption or a
+/// previously proven Fabric restart, under its retained checkout lock and new
+/// active journal fence. Commit before publishing owner.json or starting App.
+/// A crash before this receipt requires explicit adoption again; marker files
+/// and runtime projections alone can never open normal startup admission.
+pub fn record_adoption(repository: &Path, journal: &mut Journal, owner: &OwnerFence) -> Result<()> {
+    let repository=repository.canonicalize()?;
+    let receipt=read_receipt(&repository)?.context("migration adoption receipt missing")?;
+    ensure!(receipt.phase == Phase::Committed && owner.project_id == receipt.owner.project_id
+        && owner.epoch > receipt.owner.epoch && owner.owner_id.starts_with("fabric:")
+        && rudder_engine::paths::local_project_id(&repository)? == owner.project_id,
+        "adoption requires this committed migration and its transferred Fabric authority");
+    let proof=serde_json::to_value(AdoptedFabricAuthority {format_version:1,
+        migration_id:receipt.request.migration_id.clone(),repository,
+        recovery_manifest_sha256:receipt.request.recovery_manifest_sha256,
+        owner:owner.clone(),automatic_resume:false})?;
+    let now=std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_millis().try_into()?;
+    journal.record_surface_receipt(owner,&adoption_key(&receipt.request.migration_id,owner.epoch),
+        ADOPTION_RECEIPT_KIND,&proof,&proof,now)?;
+    Ok(())
+}
+
+/// Fabric-only normal startup, AFTER acquiring the real checkout lock and
+/// opening its actual journal, BEFORE recovery/transfer. Legacy startup keeps
+/// refusing every marker. Normal release increments only the owner's epoch;
+/// its proof must bind that exact same owner id and immediately prior epoch.
+/// Active/crashed owners still pass through runtime custody reconciliation in
+/// EngineOwnership; this read permission never bypasses quarantine or resume.
+pub fn prepare_fabric_restart(repository: &Path, journal: &Journal) -> Result<Option<Vec<serde_json::Value>>> {
+    let repository=repository.canonicalize()?;
+    let Some(receipt)=read_receipt(&repository)? else { return Ok(None); };
+    ensure!(receipt.phase == Phase::Committed,"migration requires explicit recovery before Fabric restart");
+    let project=rudder_engine::paths::local_project_id(&repository)?;
+    ensure!(project == receipt.owner.project_id,"migration restart belongs to another checkout");
+    let state=journal.project_state(&project)?;
+    ensure!(state.owner.owner_id.starts_with("fabric:"),"migration has no adopted Fabric authority");
+    let mut adopted=state.owner.clone();
+    if !state.owner_active { adopted.epoch=adopted.epoch.checked_sub(1).context("invalid released adoption epoch")?; }
+    let proof=journal.recorded_surface_receipt(&state.owner,&adoption_key(&receipt.request.migration_id,adopted.epoch),
+        ADOPTION_RECEIPT_KIND)?.context("migration requires explicit adoption before normal Fabric restart")?;
+    let proof:AdoptedFabricAuthority=serde_json::from_value(proof)?;
+    ensure!(proof.format_version == 1 && !proof.automatic_resume && proof.owner == adopted
+        && proof.migration_id == receipt.request.migration_id && proof.repository == repository
+        && proof.recovery_manifest_sha256 == receipt.request.recovery_manifest_sha256
+        && adopted.epoch > receipt.owner.epoch,"migration adoption proof differs from current authority");
+    let run_epochs=journal.recorded_run_inventory(&state.owner)?.into_iter()
+        .map(|run|(run.run_id,run.run_epoch)).collect();
+    // The durable adoption proof retains the explicit old-writer handover.
+    // Known legacy PIDs and original archive integrity are checked again by
+    // prepare_adoption; current runtime/effect custody is reconciled by host.
+    prepare_adoption(&repository,journal,&AdoptionRequest {format_version:1,
+        migration_id:receipt.request.migration_id,expected_owner:state.owner,run_epochs,
+        quiescence:AdoptionQuiescence {scheduler_shutdown_confirmed:true,effects_reconciled:true,
+            launchers_disabled:true,external_credentials_fenced:true}}).map(Some)
+}
+
+fn safe_run_id(id: &str) -> bool {
+    !id.is_empty() && id.len() <= 256 && id != "." && id != ".."
+        && id.chars().all(|c|c.is_ascii_alphanumeric() || matches!(c, '-'|'_'|'.'))
+}
+fn compatible_record(id: &str, mut record: serde_json::Value) -> Result<serde_json::Value> {
+    ensure!(record["id"] == id && record["status"].is_string() && record["task"].is_string(),
+        "invalid migration run compatibility record");
+    let original = record["status"].as_str().unwrap().to_owned();
+    let object = record.as_object_mut().context("invalid migration run object")?;
+    object.remove("process"); object.remove("terminal");
+    if !object.contains_key("workspace") {
+        if let Some(workspace) = object.get("worktree").cloned() { object.insert("workspace".into(), workspace); }
+    }
+    if ["created", "running", "steering", "verifying", "orphaned"].contains(&original.as_str()) {
+        object.insert("status".into(), serde_json::json!("paused"));
+    }
+    object.insert("migrationRecovery".into(), serde_json::json!({"format_version":1,
+        "original_status":original,"automatic_resume":false}));
+    Ok(record)
+}
+
+fn read_receipt(repository: &Path) -> Result<Option<MigrationReceipt>> {
+    let path = repository.join(".rudder/engine/v4-migration.json");
+    match fs::symlink_metadata(&path) {
+        Ok(stat) => ensure!(stat.is_file() && !stat.is_symlink() && stat.len() <= 8*1024*1024,
+            "invalid migration receipt file"),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    }
+    let receipt: MigrationReceipt = serde_json::from_slice(&fs::read(path)?)?;
+    ensure!(receipt.format_version == 1 && receipt.request.format_version == 1
+        && receipt.request.repository == repository
+        && receipt.owner.project_id == receipt.request.previous_owner.project_id
+        && receipt.imported <= receipt.request.runs.len(), "invalid migration receipt");
+    Ok(Some(receipt))
+}
 impl Quiescence {
     fn check(&self) -> Result<()> {
         ensure!(self.scheduler_shutdown_confirmed && self.effects_reconciled && self.launchers_disabled && self.external_credentials_fenced,
@@ -197,29 +394,7 @@ impl MigrationSession {
         Ok(receipt)
     }
     pub fn read(&self) -> Result<Option<MigrationReceipt>> {
-        match fs::symlink_metadata(&self.receipt_path) {
-            Ok(stat) => ensure!(
-                stat.is_file() && stat.len() <= 8 * 1024 * 1024,
-                "invalid migration receipt file"
-            ),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(e) => return Err(e.into()),
-        }
-        let bytes = match fs::read(&self.receipt_path) {
-            Ok(bytes) => bytes,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(e) => return Err(e.into()),
-        };
-        let receipt: MigrationReceipt = serde_json::from_slice(&bytes)?;
-        ensure!(
-            receipt.format_version == 1
-                && receipt.request.format_version == 1
-                && receipt.request.repository == self.repository
-                && receipt.owner.project_id == receipt.request.previous_owner.project_id
-                && receipt.imported <= receipt.request.runs.len(),
-            "invalid migration receipt"
-        );
-        Ok(Some(receipt))
+        read_receipt(&self.repository)
     }
     /// One committed phase or one run import per call. Intents are persisted
     /// BEFORE journal writes. A crash after SQLite commit reconciles the exact
@@ -366,7 +541,7 @@ impl MigrationSession {
         let state = journal.project_state(&receipt.owner.project_id)?;
         if state.owner_active && state.owner == receipt.owner {
             validate_epochs(journal, &receipt.owner, &receipt.run_epochs)?;
-            journal.release_owner(&receipt.owner, now_ms)?;
+            journal.release_drained_owner(&receipt.owner, now_ms)?;
         } else {
             ensure!(
                 !state.owner_active
@@ -651,7 +826,7 @@ pub fn reject_live_legacy(repo: &Path) -> Result<()> {
 
 /// Read-only, daemonless checksum validation. No CAS publication or source
 /// authority is implied by a bundle. Keep its complete directory retained.
-fn verify_bundle(bundle: &Path, hash: &str, project: &str, migration: &str) -> Result<()> {
+pub(crate) fn verify_bundle(bundle: &Path, hash: &str, project: &str, migration: &str) -> Result<()> {
     ensure!(
         bundle.is_absolute()
             && hash.len() == 64
@@ -667,7 +842,7 @@ fn verify_bundle(bundle: &Path, hash: &str, project: &str, migration: &str) -> R
     );
     let bytes = fs::read(&manifest_path)?;
     ensure!(
-        hex::encode(Sha256::digest(&bytes)) == hash,
+        format!("{:x}", Sha256::digest(&bytes)) == hash,
         "recovery manifest checksum mismatch"
     );
     let manifest: serde_json::Value = serde_json::from_slice(&bytes)?;
@@ -749,7 +924,7 @@ fn verify_bundle(bundle: &Path, hash: &str, project: &str, migration: &str) -> R
         let bytes = fs::read(&object_path)?;
         ensure!(
             reference["size_bytes"].as_u64() == Some(bytes.len() as u64)
-                && hex::encode(Sha256::digest(bytes)) == object_hash,
+                && format!("{:x}", Sha256::digest(bytes)) == object_hash,
             "recovery blob checksum mismatch"
         );
         File::open(object_path)?.sync_all()?;
@@ -844,3 +1019,6 @@ fn verify_legacy_inventory(request: &MigrationRequest) -> Result<()> {
     );
     Ok(())
 }
+
+#[cfg(test)]
+mod adoption_tests;

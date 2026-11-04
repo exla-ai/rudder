@@ -16,6 +16,21 @@ try {
     imported = true;
     // The import ACK has no profile, bearer or credential metadata.
     reply = failed("UNUSED", "Unused import reply.");
+  } else if (args.length === 5 && operation === "discover-model" && backend === "codex" && profileId) {
+    const [,,, model, program] = args;
+    if (!model || model.length > 256 || /[\x00-\x1f\x7f]/u.test(model) || !program?.startsWith("/")) throw new Error();
+    const fs = await import("node:fs/promises");
+    const path = await import("node:path");
+    const { rudderHome } = await import("./util.js");
+    const scratch = await fs.mkdtemp(path.join(rudderHome(), "model-probe-"));
+    try {
+      await fs.chmod(scratch, 0o700);
+      const { discoverInstalledCodexModels } = await import("./model-profile/codex-discovery.js");
+      const installed = await discoverInstalledCodexModels(program, scratch);
+      const { prepareSelectedModelProfile } = await import("./model-profile/identity.js");
+      reply = { ok: true, selection: await prepareSelectedModelProfile({ profileId, backend, model,
+        backendVersion: installed.backendVersion }, installed.capabilities) };
+    } finally { await fs.rm(scratch, { recursive: true, force: true }); }
   } else if (args.length !== 3 || !profileId || (backend !== "codex" && backend !== "claude")
     || (operation !== "inspect" && operation !== "inspect-model" && operation !== "handoff-api-key"
       && operation !== "handoff-codex-oauth-access-snapshot")) {

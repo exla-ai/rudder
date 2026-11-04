@@ -639,6 +639,7 @@ pub struct TerminalPane {
     reader_thread: Option<JoinHandle<()>>,
     reader_stop: Arc<AtomicBool>,
     parser: vt100::Parser,
+    pub(crate) screen_exporter: crate::terminal_stream::ScreenExporter,
     size: TerminalSize,
     alternate_history: Vec<Vec<String>>,
     alternate_history_offset: usize,
@@ -1238,6 +1239,7 @@ impl TerminalPane {
             terminated: false,
             reader_thread: Some(reader_thread),
             reader_stop,
+            screen_exporter: crate::terminal_stream::ScreenExporter::new(1, 16 * 1024, 128, 40_000),
             parser: vt100::Parser::new(
                 options.size.rows,
                 options.size.cols,
@@ -1342,6 +1344,7 @@ impl TerminalPane {
             .resize(size.pty_size())
             .context("failed to resize PTY")?;
         self.parser.screen_mut().set_size(size.rows, size.cols);
+        self.screen_exporter.mark_changed();
         self.size = size;
         self.last_alternate_snapshot.clear();
         self.tracked_scroll_region = None;
@@ -1944,7 +1947,25 @@ impl TerminalPane {
                 self.on_hyperlink_edge(edge);
             }
         }
+        self.screen_exporter.observe(chunk);
         self.capture_alternate_snapshot();
+    }
+
+    /// A complete canonical snapshot. App-owned parsing, no byte-tail replay or IO.
+    pub fn canonical_screen(&mut self) -> Result<serde_json::Value> {
+        let snapshot = if self.output_eof {
+            self.screen_exporter.capture_final(self.parser.screen_mut())
+        } else {
+            self.screen_exporter.capture(self.parser.screen_mut(), true, true)
+        }.map_err(|error| anyhow::anyhow!("terminal screen is unavailable: {error:?}"))?;
+        let scrollback = self.parser.screen().scrollback();
+        self.parser.screen_mut().set_scrollback(0);
+        let text = self.parser.screen().contents();
+        self.parser.screen_mut().set_scrollback(scrollback);
+        Ok(serde_json::json!({"version":1,"type":"terminal-screen",
+            "generation": self.instance_id, "sequence":snapshot.cursor.sequence,
+            "reset":snapshot.reset,"gap":snapshot.gap,"screen":snapshot.wire_screen()?,
+            "text":text}))
     }
 
     /// An OSC 8 edge has just been parsed, so the cursor sits exactly where the
@@ -2849,6 +2870,29 @@ mod tests {
     fn terminal_size_rejects_zero_dimensions() {
         assert!(TerminalSize::new(0, 80).is_err());
         assert!(TerminalSize::new(24, 0).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn canonical_screen_uses_owned_parser_and_refuses_partial_escape() {
+        let mut pane = TerminalPane::spawn_shell_or_command(
+            Some(TerminalCommand::with_args("/bin/sh", ["-c", "exit 0"])),
+            TerminalPaneOptions { size: TerminalSize { rows: 3, cols: 20 }, scrollback_lines: 10, ..Default::default() }
+        ).unwrap();
+        pane.process_output_chunk(b"first\r\n\x1b[31mred\x1b[0m");
+        let frame = pane.canonical_screen().unwrap();
+        assert_eq!(frame["screen"]["format"], "vt100-ansi-v1");
+        assert_eq!(frame["generation"], pane.instance_id());
+        let mut restored = vt100::Parser::new(3, 20, 10);
+        restored.process(frame["screen"]["screen"].as_str().unwrap().as_bytes());
+        assert_eq!(restored.screen().contents(), pane.parser.screen().contents());
+        pane.process_output_chunk(b"\x1b[");
+        assert!(pane.canonical_screen().is_err());
+        pane.process_output_chunk(b"0m final");
+        assert!(pane.canonical_screen().unwrap()["sequence"].as_u64().unwrap() > frame["sequence"].as_u64().unwrap());
+        pane.process_output_chunk(b"\x1b[");
+        pane.output_eof = true;
+        assert!(pane.canonical_screen().unwrap()["text"].as_str().unwrap().contains("final"));
     }
 
     #[test]

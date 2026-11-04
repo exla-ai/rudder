@@ -271,3 +271,42 @@ test("Codex policy remains mirrored, explicit and capability bounded", async () 
   assert.ok(CODEX_RUDDER_PLANNER_CONFIG_ARGS.includes("features.plugins=false"));
   assert.ok(CODEX_RUDDER_PLANNER_CONFIG_ARGS.includes("features.computer_use=false"));
 });
+
+test('production read receipts teach only integrated runs and reach fresh Claude and Codex context', async t => {
+  const { BackendReadTrace, learnIntegratedRun, efficiencyContext } = await import('../src/agent-efficiency/production.ts');
+  const root=await temp(t);
+  const exec=promisify(execFile);
+  await fs.mkdir(path.join(root,'src'));
+  await fs.writeFile(path.join(root,'src','worker.ts'),'export const value = 1;\n');
+  await fs.writeFile(path.join(root,'.gitignore'),'.rudder/\n');
+  for(const args of [['init'],['config','user.email','fixture@example.invalid'],['config','user.name','Fixture'],['add','.'],['commit','-m','fixture']])await exec('git',args,{cwd:root});
+  const revision=(await exec('git',['rev-parse','HEAD'],{cwd:root})).stdout.trim();
+  const run={id:'read-run',backend:'claude',repoRoot:root,workspace:{path:root},task:'Update src/worker.ts',vcs:'git',verification:{missing:[],shouldContinue:false},merge:{status:'pending'}};
+  const { BackendTelemetryObserver } = await import('../src/agent-efficiency/backend-observer.ts');
+  const observer=new BackendTelemetryObserver(run);
+  for(let i=0;i<3;i++) {
+    void observer.observe({type:'assistant',message:{content:[{type:'tool_use',id:`read-${i}`,name:'Read',input:{file_path:path.join(root,'src/worker.ts'),offset:1,limit:2}}]}});
+    void observer.observe({type:'user',message:{content:[{type:'tool_result',tool_use_id:`read-${i}`,content:'private file content'}]}});
+  }
+  await observer.flush();
+  const receipts=JSON.parse(await fs.readFile(path.join(root,'.rudder/runs/read-run/efficiency-actions.json'),'utf8'));
+  assert.equal(receipts.actions.length,3);
+  await learnIntegratedRun(run);
+  const lessonFile=path.join(root,'.rudder','efficiency-lessons.json');
+  assert.equal(existsSync(lessonFile),false);
+  await learnIntegratedRun({...run,merge:{status:'merged',localCommit:revision,operationId:'integrated-operation'},verification:{missing:['required gate'],shouldContinue:true}});
+  assert.equal(existsSync(lessonFile),false);
+  await learnIntegratedRun({...run,merge:{status:'merged',localCommit:revision,operationId:'integrated-operation'}});
+  const stored=await fs.readFile(lessonFile,'utf8');
+  assert.doesNotMatch(stored,/private file content|read-run|read-0/);
+  for(const backend of ['claude','codex']) {
+    const context=await efficiencyContext({...run,id:`fresh-${backend}`,backend,merge:undefined});
+    assert.match(context,/Advisory .*Retrieve the relevant symbol/);
+    assert.match(context,/required checks and approvals still apply/);
+  }
+  await exec('jj',['git','init','--colocate'],{cwd:root});
+  const jjContext=await efficiencyContext({...run,id:'fresh-jj',backend:'codex',vcs:'jj',merge:undefined});
+  assert.match(jjContext,/Advisory .*Retrieve the relevant symbol/);
+  await fs.writeFile(path.join(root,'src/worker.ts'),'changed\n');
+  assert.doesNotMatch(await efficiencyContext({...run,id:'dirty-fresh'}),/Advisory /);
+});

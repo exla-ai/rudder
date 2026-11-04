@@ -8,7 +8,7 @@ use crate::{Backend,AgentMode,AgentStatus,
     managed_machine_entry::{ManagedMachineRuntime,MachineControl,ProjectTicket,ManagedProjectDisplay,SeedTicket,SeedTaskTicket,SeedCacheTicket,EnrollmentTicket,NeverStartedProgress},
     managed_task_launch::{ManagedTaskController,ManagedTaskAdmission,ManagedTaskFactoryRetention,PreparedManagedTask,ManagedTaskProject,
         ManagedTaskOptIn,SelectedTaskCredentialKind,ManagedTaskNetworkSelection},
-    managed_profile_loader::{inspect_selected_managed_task_profile,load_selected_managed_task_profile,ManagedProfileCredentialKind},
+    managed_profile_loader::{inspect_selected_managed_task_profile,ManagedProfileCredentialKind},
     managed_machine_receipts::{MachineReceipts,AcceptedHostCommand,DuplicateReceipt},managed_machine_runtime_profile::{ManagedHostRuntime,ManagedProfileInspection}};
 use anyhow::{ensure,Context,Result};
 use rudder_engine::execution::{finalization_budget::FinalizationBudget,handoff::{OwnedWorkerJoin,WorkerJoined}};

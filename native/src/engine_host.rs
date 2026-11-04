@@ -91,6 +91,7 @@ pub(crate) struct EngineOwnership {
     released: bool,
     identity_home: PathBuf,
     managed_store: Option<crate::managed_store::ManagedStore>,
+    migration_records: Option<Vec<serde_json::Value>>,
 }
 
 /// Private, actual process-local custody. Only successful EngineOwnership
@@ -265,32 +266,39 @@ impl EngineOwnership {
         Ok(Box::new(move || lease.open_source_writer()))
     }
     pub(crate) fn acquire(repo: &Path, mode: NativeAuthority) -> Result<Self> {
-        Self::acquire_inner(repo, mode, None, None)
+        Self::acquire_inner(repo, mode, None, None, None)
     }
 
     /// Off-App, explicit local identity. Existing launchers retain their home
     /// selection; managed preparation/recovery never infer a different home.
+    pub(crate) fn acquire_migrated(repo:&Path,request:&crate::v4_migration::AdoptionRequest)->Result<Self> {
+        Self::acquire_inner(repo,NativeAuthority::Fabric,None,None,Some(request))
+    }
+    pub(crate) fn take_migration_records(&mut self)->Option<Vec<serde_json::Value>> {self.migration_records.take()}
+
     pub(crate) fn acquire_in_home(repo: &Path, mode: NativeAuthority, home: &Path) -> Result<Self> {
-        Self::acquire_inner(repo, mode, Some(home), None)
+        Self::acquire_inner(repo, mode, Some(home), None, None)
     }
 
     /// Explicit prepare recovery, not launch/resume permission. The caller
     /// supplies the exact historical request; incomplete evidence is retained.
     pub(crate) fn recover_managed_prepare(repo: &Path, home: &Path,
         request: &rudder_engine::journal::ManagedProjectPrepare) -> Result<Self> {
-        let mut owner = Self::acquire_inner(repo, NativeAuthority::Fabric, Some(home), Some(request))?;
+        let mut owner = Self::acquire_inner(repo, NativeAuthority::Fabric, Some(home), Some(request), None)?;
         owner.prepare_managed_project(request)?;
         Ok(owner)
     }
     pub(crate) fn recover_managed_prepare_with_plan(repo: &Path, home: &Path,
         request: &rudder_engine::journal::ManagedProjectPrepare, plan: &crate::managed_store::ExperimentalRecoveryPlan) -> Result<Self> {
-        let mut owner=Self::acquire_inner(repo,NativeAuthority::Fabric,Some(home),Some(request))?;
+        let mut owner=Self::acquire_inner(repo,NativeAuthority::Fabric,Some(home),Some(request),None)?;
         owner.prepare_managed_project_with_plan(request,plan)?; Ok(owner)
     }
 
     fn acquire_inner(repo: &Path, mode: NativeAuthority, explicit_home: Option<&Path>,
-        recovery: Option<&rudder_engine::journal::ManagedProjectPrepare>) -> Result<Self> {
+        recovery: Option<&rudder_engine::journal::ManagedProjectPrepare>,
+        adoption: Option<&crate::v4_migration::AdoptionRequest>) -> Result<Self> {
         let repo = repo.canonicalize().context("canonical engine checkout")?;
+        if adoption.is_none() && mode==NativeAuthority::Legacy {crate::v4_migration::refuse_implicit_startup(&repo)?;}
         // Presence is conservative refusal evidence only. The actual fresh
         // constructor requires original registered/PG/namespace/lease custody.
         match fs::symlink_metadata(repo.join(".rudder/engine/fresh-project.json")){Ok(_)=>bail!("fresh logical managed checkout requires its original assigned owner; legacy/default acquisition refused"),Err(error) if error.kind()==std::io::ErrorKind::NotFound=>{},Err(error)=>return Err(error.into())}
@@ -361,12 +369,21 @@ impl EngineOwnership {
             anyhow::ensure!(managed.is_none() && !namespace_present,
                 "managed project is prepared or quarantined; legacy Native startup is refused before ownership changes; use explicit recovery");
         }
+        let migration_records=if let Some(request)=adoption {Some(crate::v4_migration::prepare_adoption(&repo,&journal,request)?)}
+            else {crate::v4_migration::prepare_fabric_restart(&repo,&journal)?};
         let instance_id = uuid::Uuid::new_v4().to_string();
         let owner_id = format!("{}:{instance_id}", mode.name());
         // The lock plus refusal above establishes local quiescence. A transfer
         // is a journal CAS, never a lease timeout or a PID-based takeover.
         let fence = match journal.project_state(&project) {
-            Ok(state) => journal.transfer_owner(&state.owner, &owner_id, epoch_ms())?,
+            Ok(state) => {
+                // The exclusive checkout lock is held. Reconcile the previous
+                // process before changing epochs or admitting replacement work.
+                if state.owner_active {
+                    journal.recover_runtime_restart(&state.owner, epoch_ms())?;
+                }
+                journal.transfer_recovered_owner(&state.owner, &owner_id, epoch_ms())?
+            },
             Err(error)
                 if matches!(
                     error.downcast_ref::<rusqlite::Error>(),
@@ -382,7 +399,8 @@ impl EngineOwnership {
             }
             Err(error) => return Err(error).context("read existing project authority"),
         };
-        journal.recover(&fence, epoch_ms())?;
+        journal.recover_runtime_restart(&fence, epoch_ms())?;
+        if migration_records.is_some() {crate::v4_migration::record_adoption(&repo,&mut journal,&fence)?;}
         let record = OwnerRecord {
             format_version: ENGINE_FORMAT,
             repo,
@@ -417,6 +435,7 @@ impl EngineOwnership {
             released: false,
             identity_home: canonical_home,
             managed_store: None,
+            migration_records,
         })
     }
 
@@ -574,7 +593,7 @@ impl EngineOwnership {
         self.record.state = if clean { "stopping" } else { "uncertain" }.into();
         write_owner_record(&self.record_path, &self.record)?;
         if clean {
-            if let Err(error) = self.journal.release_owner(&self.fence, epoch_ms()) {
+            if let Err(error) = self.journal.release_drained_owner(&self.fence, epoch_ms()) {
                 self.record.state = "uncertain".into();
                 let _ = write_owner_record(&self.record_path, &self.record);
                 return Err(error);
@@ -852,6 +871,14 @@ fn write_owner_record(path: &Path, value: &OwnerRecord) -> Result<()> {
 struct ControlRequest {
     format_version: u32,
     op: String,
+    #[serde(default, skip_serializing_if="Option::is_none")]
+    run_id: Option<String>,
+    #[serde(default, skip_serializing_if="Option::is_none")]
+    command_id: Option<String>,
+    #[serde(default, skip_serializing_if="Option::is_none")]
+    timeout_ms: Option<u64>,
+    #[serde(default, skip_serializing_if="Option::is_none")]
+    preview: Option<serde_json::Value>,
     instance_id: String,
     epoch: u64,
     nonce: String,
@@ -886,6 +913,7 @@ pub(crate) struct EngineControl {
     stopping: bool,
     stop: Arc<AtomicBool>,
     thread: Option<thread::JoinHandle<()>>,
+    observations: crate::engine_observations::EngineObservations,
 }
 
 impl EngineControl {
@@ -918,6 +946,7 @@ impl EngineControl {
         fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
         listener.set_nonblocking(true)?;
         let (tx, rx) = mpsc::sync_channel(32);
+        let observations=crate::engine_observations::EngineObservations::new(waker.clone())?;
         let stop = Arc::new(AtomicBool::new(false));
         let thread_stop = stop.clone();
         let thread = thread::Builder::new()
@@ -961,6 +990,7 @@ impl EngineControl {
             stopping: false,
             stop,
             thread: Some(thread),
+            observations,
         })
     }
 
@@ -969,7 +999,10 @@ impl EngineControl {
     }
 
     /// The App's mutation thread alone accepts shutdown and answers state.
-    pub(crate) fn poll(&mut self, owner: &mut EngineOwnership, app: &App) -> bool {
+    pub(crate) fn poll(&mut self, owner: &mut EngineOwnership, app: &mut App) -> bool {
+        if let Err(error)=self.observations.poll(&mut owner.journal,&owner.fence) {
+            app.notice=Some(format!("Command history requires recovery: {error:#}"));
+        }
         for _ in 0..MAX_EVENTS_PER_FRAME {
             let Ok(event) = self.rx.try_recv() else {
                 break;
@@ -978,7 +1011,7 @@ impl EngineControl {
             let valid = request.authenticates(&owner.record);
             let response = if !valid {
                 serde_json::json!({"ok":false,"error":"engine control identity or epoch mismatch"})
-            } else if !matches!(request.op.as_str(), "status" | "shutdown") {
+            } else if !matches!(request.op.as_str(), "status" | "shutdown" | "files" | "screen" | "results" | "await" | "previews" | "preview-register") {
                 serde_json::json!({"ok":false,"error":"unknown engine control operation"})
             } else {
                 if request.op == "shutdown" {
@@ -986,6 +1019,52 @@ impl EngineControl {
                     owner.record.state = "stopping".into();
                 }
                 let mut status = owner.record.public(true);
+                if matches!(request.op.as_str(),"previews"|"preview-register") {
+                    let result=if request.op=="previews" {crate::preview_registration::list(app,&owner.fence,&owner.journal)}
+                        else {request.preview.as_ref().context("preview-register requires --preview-json").and_then(|value|
+                            crate::preview_registration::register(app,&owner.fence,&mut owner.journal,value))};
+                    match result {
+                        Ok(value)=>status[if request.op=="previews" {"previews"}else{"preview"}]=value,
+                        Err(error)=>{let _=event.response.send(serde_json::json!({"ok":false,"error":format!("{error:#}")}));continue;}
+                    }
+                }
+                if request.op=="await" {
+                    let result=request.command_id.as_deref().context("await requires --command").and_then(|id|
+                        self.observations.begin(&owner.journal,&owner.fence,id,request.timeout_ms.unwrap_or(2000),event.response.clone(),status));
+                    if let Err(error)=result {let _=event.response.send(serde_json::json!({"ok":false,"error":format!("{error:#}")}));}
+                    continue;
+                }
+                if request.op=="results" {
+                    match owner.journal.surface_receipts(&owner.fence,"command-history-v1",8) {
+                        Ok(results)=>status["command_results"]=serde_json::json!(results),
+                        Err(error)=>{let _=event.response.send(serde_json::json!({"ok":false,"error":format!("{error:#}")}));continue;}
+                    }
+                }
+                if request.op == "files" {
+                    status["file_grants"] = app.fabric_runtime.file_grants(app, &owner.fence);
+                }
+                if request.op == "screen" {
+                    // Historical mirrors remain readable only after this exact
+                    // owner confirms that the run has no live terminal. A
+                    // partial live parser must never fall back to old bytes.
+                    let historical = request.run_id.as_deref().and_then(|id|
+                        app.agents.iter().find(|run| run.id == id))
+                        .is_some_and(|run| run.terminal.is_none() && run.status != AgentStatus::Running);
+                    if historical {
+                        status["terminal_screen"] = serde_json::json!({"version":1,
+                            "type":"terminal-history", "runId":request.run_id});
+                        let _ = event.response.send(serde_json::json!({"ok":true,"status":status}));
+                        continue;
+                    }
+                    let result = request.run_id.as_deref().and_then(|id|
+                        app.agents.iter_mut().find(|run|run.id == id))
+                        .and_then(|run|run.terminal.as_mut())
+                        .context("current terminal is unavailable").and_then(TerminalPane::canonical_screen);
+                    match result {
+                        Ok(screen) => status["terminal_screen"] = screen,
+                        Err(_) => { let _ = event.response.send(serde_json::json!({"ok":false,"error":"current complete terminal screen is unavailable"})); continue; }
+                    }
+                }
                 status["agent_count"] = serde_json::json!(app.agents.len());
                 status["live_ptys"] = serde_json::json!(app
                     .agents
@@ -1055,6 +1134,12 @@ fn read_control(stream: &UnixStream) -> Result<ControlRequest> {
 }
 
 fn request_control(record: &OwnerRecord, op: &str) -> Result<serde_json::Value> {
+    request_control_for_run(record, op, None)
+}
+fn request_control_for_run(record: &OwnerRecord, op: &str, run_id: Option<String>) -> Result<serde_json::Value> {
+    request_control_observation(record,op,run_id,None,None,None)
+}
+fn request_control_observation(record:&OwnerRecord,op:&str,run_id:Option<String>,command_id:Option<String>,timeout_ms:Option<u64>,preview:Option<serde_json::Value>) -> Result<serde_json::Value> {
     let socket = record
         .control_socket
         .as_ref()
@@ -1066,6 +1151,8 @@ fn request_control(record: &OwnerRecord, op: &str) -> Result<serde_json::Value> 
     let request = ControlRequest {
         format_version: ENGINE_FORMAT,
         op: op.into(),
+        run_id,
+        command_id, timeout_ms, preview,
         instance_id: record.instance_id.clone(),
         epoch: record.owner.epoch,
         nonce: record
@@ -1077,10 +1164,10 @@ fn request_control(record: &OwnerRecord, op: &str) -> Result<serde_json::Value> 
     stream.write_all(b"\n")?;
     let mut bytes = Vec::new();
     BufReader::new(stream)
-        .take((CONTROL_LIMIT + 1) as u64)
+        .take((128 * 1024 + 1) as u64)
         .read_until(b'\n', &mut bytes)?;
     anyhow::ensure!(
-        bytes.len() <= CONTROL_LIMIT,
+        bytes.len() <= 128 * 1024,
         "oversized engine control response"
     );
     let value: serde_json::Value = serde_json::from_slice(&bytes)?;
@@ -1209,10 +1296,18 @@ pub(crate) fn engine_status(repo: &Path, shutdown: bool) -> Result<serde_json::V
 pub(crate) fn run_engine_command(args: &[String]) -> Result<()> {
     let mut operation = "serve";
     let mut repo = None;
+    let mut run_id = None;
+    let mut command_id=None;
+    let mut timeout_ms=None;
+    let mut preview=None;
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
         match arg.as_str() {
-            "serve" | "status" | "shutdown" => operation = arg,
+            "serve" | "status" | "shutdown" | "files" | "screen" | "migration" | "results" | "await" | "previews" | "preview-register" | "adopt-migration" => operation = arg,
+            "--run" => { run_id = Some(iter.next().context("missing run identity")?.clone()); }
+            "--command"=>command_id=Some(iter.next().context("missing command identity")?.clone()),
+            "--timeout-ms"=>timeout_ms=Some(iter.next().context("missing wait timeout")?.parse::<u64>()?),
+            "--preview-json"=>{let value=iter.next().context("missing preview request")?;anyhow::ensure!(value.len()<=4096,"preview request exceeds bound");preview=Some(serde_json::from_str(value)?);}
             "--repo" | "--cwd" => {
                 repo = Some(PathBuf::from(
                     iter.next().context("missing engine checkout")?,
@@ -1224,7 +1319,7 @@ pub(crate) fn run_engine_command(args: &[String]) -> Result<()> {
             }
             "-h" | "--help" => {
                 println!(
-                    "rudder-native engine [serve|status|shutdown] [--repo <checkout>] [--json]"
+                    "rudder-native engine [serve|status|shutdown|results|await|files|screen|previews|preview-register|migration|adopt-migration] [--repo <checkout>] [--run <id>] [--command <id>] [--timeout-ms <0..2000>] [--json]"
                 );
                 return Ok(());
             }
@@ -1235,10 +1330,29 @@ pub(crate) fn run_engine_command(args: &[String]) -> Result<()> {
     let repo = dashboard_root(&selected)
         .canonicalize()
         .context("engine checkout")?;
+    if operation == "migration" {
+        return crate::v4_migration_driver::run(&repo);
+    }
+    if operation == "adopt-migration" {
+        let request=crate::v4_migration_driver::read_adoption_request()?;
+        let ownership=EngineOwnership::acquire_migrated(&repo,&request)?;
+        env::set_current_dir(&repo)?;
+        return run_app_loop(None,ownership);
+    }
     if operation == "serve" {
         env::set_current_dir(&repo)?;
         let ownership = EngineOwnership::acquire(&repo, NativeAuthority::Fabric)?;
         run_app_loop(None, ownership)
+    } else if matches!(operation, "files" | "screen" | "results" | "await" | "previews" | "preview-register") {
+        anyhow::ensure!(ownership_lock_held(&repo)?, "project file authority is unavailable");
+        let record: OwnerRecord = serde_json::from_slice(&fs::read(repo.join(".rudder/engine/owner.json"))?)?;
+        anyhow::ensure!(record.repo == repo && record.authority == "fabric", "project file authority differs");
+        if operation == "screen" {
+            let id = run_id.as_ref().context("screen requires --run")?;
+            anyhow::ensure!(!id.is_empty() && id.len() <= 256 && !id.chars().any(char::is_control), "invalid run identity");
+        }
+        println!("{}", request_control_observation(&record, operation, run_id,command_id,timeout_ms,preview)?);
+        Ok(())
     } else {
         println!(
             "{}",

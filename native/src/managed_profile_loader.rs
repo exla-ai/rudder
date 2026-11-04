@@ -67,9 +67,28 @@ pub(crate) fn load_selected_managed_model_profile(runtime: &ManagedProfileLoader
     }
     // The inner load re-inspects before handoff; verify metadata again against
     // this original snapshot to reject profile type/provider races as well.
-    let profile = load_profile_matching(runtime, selected, cancelled, budget, Some(&metadata))?;
+    let mut profile = load_profile_matching(runtime, selected, cancelled, budget, Some(&metadata))?;
+    profile.retain_model_selection(selection.clone()).map_err(|_|ManagedProfileLoadError::Selection)?;
     check(budget, cancelled)?;
     Ok(SelectedManagedModelProfile { profile, selection: selection.clone() })
+}
+/// Discover capabilities through the actual protected installed program, then
+/// load only the explicitly selected credential. No backend turn is started.
+pub(crate) fn discover_and_load_selected_model(runtime:&ManagedProfileLoaderRuntime,
+    selected:&ManagedTaskOptIn, model:&str, program:&Path, cancelled:&AtomicBool,
+    budget:&FinalizationBudget)->Result<SelectedTaskProfile> {
+    if selected.backend()!=Backend::Codex || !exact(program) || model.is_empty() || model.len()>256 || model.chars().any(char::is_control) {
+        return Err(ManagedProfileLoadError::Selection);
+    }
+    let program=program.to_str().ok_or(ManagedProfileLoadError::Runtime)?;
+    let collected=run_verb_args(runtime,selected.profile_id(),selected.backend(),"discover-model",&[model,program],cancelled,budget)?;
+    #[derive(Deserialize)] #[serde(deny_unknown_fields)]
+    struct Reply {ok:bool, selection:serde_json::Value}
+    if !collected.status.success() || !collected.error.0.is_empty() || !collected.key.0.is_empty() {return Err(ManagedProfileLoadError::Rejected);}
+    let reply:Reply=serde_json::from_slice(&collected.output.0).map_err(|_|ManagedProfileLoadError::Protocol)?;
+    if !reply.ok || reply.selection["requested_model"]!=model {return Err(ManagedProfileLoadError::Selection);}
+    let loaded=load_selected_managed_model_profile(runtime,selected,&reply.selection,cancelled,budget)?;
+    Ok(loaded.into_parts().0)
 }
 fn check(budget: &FinalizationBudget, cancelled: &AtomicBool) -> Result<()> {
     if cancelled.load(Ordering::Acquire) { return Err(ManagedProfileLoadError::Cancelled); }
@@ -157,7 +176,10 @@ impl ReapedChild {
 impl Drop for ReapedChild {
     fn drop(&mut self) {
         if self.status.is_some() { return; }
-        let _ = self.child.kill(); // Only the actual unreaped direct child; never a saved/reused PID.
+        // The live unreaped child owns this process group. Discovery may own
+        // an app-server child; cancellation must terminate that child too.
+        unsafe { libc::kill(-(self.child.id() as i32),libc::SIGKILL); }
+        let _ = self.child.kill();
         loop { match self.child.wait() {
             Ok(status) => { self.status = Some(status); return; }
             Err(_) => std::thread::sleep(Duration::from_millis(10)),
@@ -193,11 +215,14 @@ fn run(runtime: &ManagedProfileLoaderRuntime, profile_id: &str, backend: Backend
     run_verb(runtime,profile_id,backend,if handoff {"handoff-api-key"} else {"inspect"},cancelled,budget)
 }
 fn run_verb(runtime:&ManagedProfileLoaderRuntime,profile_id:&str,backend:Backend,verb:&str,cancelled:&AtomicBool,budget:&FinalizationBudget)->Result<Collected> {
-    let handoff=verb!="inspect";
+    run_verb_args(runtime,profile_id,backend,verb,&[],cancelled,budget)
+}
+fn run_verb_args(runtime:&ManagedProfileLoaderRuntime,profile_id:&str,backend:Backend,verb:&str,args:&[&str],cancelled:&AtomicBool,budget:&FinalizationBudget)->Result<Collected> {
+    let handoff=verb.starts_with("handoff-");
     check(budget, cancelled)?; validate_selection(profile_id, backend)?; validate_runtime(runtime)?; check(budget, cancelled)?;
     let pipes = if handoff { Some(pipe()?) } else { None };
     let mut command = Command::new(&runtime.node);
-    command.arg(&runtime.helper).arg(verb).arg(profile_id).arg(backend_name(backend)?)
+    command.arg(&runtime.helper).arg(verb).arg(profile_id).arg(backend_name(backend)?).args(args).process_group(0)
         .env_clear().env("RUDDER_HOME", &runtime.rudder_home).current_dir(&runtime.rudder_home)
         .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     if let Some((reader, writer)) = &pipes {

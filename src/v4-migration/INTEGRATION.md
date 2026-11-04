@@ -126,3 +126,53 @@ without promising that linked old workspace metadata is immediately resumable.
 - n13 must run the integrated native/CLI/App lifecycle gates after registering
   these modules/call sites. This worker does not claim that those unowned call sites
   or real Mac hardware, Fly, staging, fleet rollout, packaging or release gates pass.
+
+
+## Integrated explicit product entry points
+
+`rudder engine migration --repo <checkout>` reads a bounded version-1 request
+from stdin. Its `upgrade` action retains the actual native checkout lock while
+calling `__migrate-v4` to capture source, history, records, workspaces and explicitly
+selected transcript files, then advances the existing journal migration receipt.
+`advance` and `status` recover or inspect the same receipt.
+
+After `committed`, `rudder engine adopt-migration --repo <checkout>` accepts an
+`AdoptionRequest` on stdin. Supply the migration ID, exact current journal
+`expected_owner`, full `run_epochs` map, format version 1 and all four explicit
+quiescence assertions. The real engine constructor retains its checkout lock,
+checks the original receipt-pinned archive, exact current owner and complete
+inventory before recovering/transferring ownership. It then returns compatibility
+records to the App loop. Current records take precedence over retained originals;
+both preserve backend session identity. Interrupted work is Paused without a
+process or PTY, and recovered plans require fresh approval. Legacy startup
+continues to refuse every migration marker. Normal Fabric restart requires the
+journal-bound adoption receipt described below; explicit re-adoption requires
+the fresh inactive owner and complete run epochs.
+
+For rollback, use `rollback_pause` with the exact current `expected_owner` and
+complete `run_epochs`. Then `rollback_export` takes `recovery_bundle`, `sessions`
+and a new `destination`. While retaining the same actual checkout lock it seals
+post-pause deltas with the paused receipt's opaque checkpoint, marks `rolled_back`
+and exports a separate recovery checkout. `recovery_export` takes a new
+`destination` and boolean `rollback` to select the original archive or sealed
+rollback archive later. Export verifies the exact receipt-pinned manifest hash
+and all raw object hashes. It never overwrites the original checkout or archive.
+
+The TS helper's explicit export operation verifies project, migration and optional
+rollback checkpoint, reassembles ordinary integration history in the new checkout,
+and writes only paused compatibility records under its `.rudder/runs`. Workspace
+and transcript paths are mapped to the selected verified exported roots. Raw
+original records remain beside that checkout. No scheduler or session is started.
+A linked historical workspace's source is retained; provider-specific backend
+resume and Mac lifecycle behavior still need their separate platform gates.
+
+Successful adoption now records `v4-migration-adoption-v1` in the actual local
+journal before native owner publication. Normal Fabric startup may recognize
+that receipt under its retained checkout lock, bound to the committed migration,
+canonical checkout, original archive hash and exact current Fabric owner. A
+normal released owner permits only its immediately prior adopted epoch and same
+owner identity. Each new owner records its own adoption receipt before starting
+App. A crash between transfer and that receipt requires explicit adoption again.
+No file flag grants this admission, and legacy startup still refuses the original
+migration marker. Runtime restart reconciliation and uncertain-custody refusal
+remain mandatory. Recovered records remain paused and plans unapproved.

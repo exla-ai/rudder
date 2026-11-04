@@ -9,6 +9,7 @@ use std::sync::mpsc::{self, Receiver};
 pub(crate) enum Target {
     Project,
     Usage,
+    Files,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -21,6 +22,31 @@ static OPENING: AtomicBool = AtomicBool::new(false);
 
 /// At most one bounded callback is in flight, including repeated hotkeys.
 pub(crate) fn begin_open(repo: PathBuf, target: Target) -> Receiver<OpenResult> {
+    begin(move || host_home().and_then(|home| open_at(&repo, &home, target).ok()).is_some())
+}
+
+/// The TS helper resolves the selected workspace through the authenticated
+/// engine socket, then keeps the private browser ticket inside its process.
+pub(crate) fn begin_file_open(repo: PathBuf, workspace: String) -> Receiver<OpenResult> {
+    begin(move || {
+        let Some(program) = crate::cloudio::locate_rudder_cli() else { return false; };
+        let Ok(mut child) = std::process::Command::new(program)
+            .arg("__open-project-files").arg(&repo).arg(workspace).current_dir(repo)
+            .stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null()).spawn() else { return false; };
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(8);
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) => return status.success(),
+                Ok(None) if std::time::Instant::now() < until =>
+                    std::thread::sleep(std::time::Duration::from_millis(10)),
+                _ => { let _ = child.kill(); let _ = child.wait(); return false; }
+            }
+        }
+    })
+}
+
+fn begin(open: impl FnOnce() -> bool + Send + 'static) -> Receiver<OpenResult> {
     let (sender, receiver) = mpsc::sync_channel(1);
     if OPENING
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -41,9 +67,7 @@ pub(crate) fn begin_open(repo: PathBuf, target: Target) -> Receiver<OpenResult> 
         .name("board-browser".into())
         .spawn(move || {
             let _release = release;
-            let opened = host_home()
-                .and_then(|home| open_at(&repo, &home, target).ok())
-                .is_some();
+            let opened = open();
             let _ = sender.try_send(if opened {
                 OpenResult::Opened
             } else {
@@ -246,7 +270,7 @@ mod unix {
             .set_write_timeout(Some(remaining(until)?))
             .map_err(|_| ())?;
         let request = serde_json::json!({ "format_version": 1, "instance_id": descriptor.instance_id,
-            "action": "open", "target": match target { Target::Project => "project", Target::Usage => "usage" } });
+            "action": "open", "target": match target { Target::Project => "project", Target::Usage => "usage", Target::Files => return Err(()) } });
         stream
             .write_all(format!("{request}\n").as_bytes())
             .map_err(|_| ())?;

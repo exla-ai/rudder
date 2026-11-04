@@ -112,6 +112,33 @@ impl Harness {
         .unwrap()
     }
 
+    fn screen(&mut self, run_id: &str) -> serde_json::Value {
+        let owner = self.projection();
+        let request = serde_json::json!({"format_version":1,"op":"screen","run_id":run_id,
+            "instance_id":owner["instance_id"],"epoch":owner["owner"]["epoch"],
+            "nonce":owner["control_nonce"]});
+        let socket = PathBuf::from(owner["control_socket"].as_str().unwrap());
+        let (tx, rx) = std::sync::mpsc::channel();
+        let thread = thread::spawn(move || {
+            use std::io::{BufRead, BufReader};
+            let mut stream = UnixStream::connect(socket).unwrap();
+            stream.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+            writeln!(stream, "{request}").unwrap();
+            let mut line = String::new();
+            BufReader::new(stream).read_line(&mut line).unwrap();
+            tx.send(serde_json::from_str::<serde_json::Value>(&line).unwrap()).unwrap();
+        });
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let result = loop {
+            assert!(!self.lifecycle.as_mut().unwrap().poll(&mut self.app, &mut self.owner).unwrap());
+            if let Ok(value) = rx.try_recv() { break value; }
+            assert!(Instant::now() < deadline, "screen request did not settle");
+            thread::sleep(Duration::from_millis(5));
+        };
+        thread.join().unwrap();
+        result
+    }
+
     fn projection(&self) -> serde_json::Value {
         serde_json::from_slice(&fs::read(self.app.cwd.join(".rudder/engine/owner.json")).unwrap())
             .unwrap()
@@ -132,6 +159,27 @@ impl Drop for Harness {
         self.lifecycle.take();
         let _ = fs::remove_dir_all(&self.root);
     }
+}
+
+#[test]
+fn owner_screen_control_distinguishes_live_history_and_unknown_runs() {
+    let mut h = Harness::new();
+    h.start();
+    h.fake_backend();
+    let live = h.screen("run-1");
+    assert_eq!(live["ok"], true);
+    assert_eq!(live["status"]["terminal_screen"]["type"], "terminal-screen");
+    assert_eq!(live["status"]["terminal_screen"]["screen"]["format"], "vt100-ansi-v1");
+    assert_eq!(h.screen("unknown")["ok"], false);
+    h.app.agents[0].status = AgentStatus::Paused;
+    // A status flag alone cannot authorize an old mirror over a live PTY.
+    assert_eq!(h.screen("run-1")["status"]["terminal_screen"]["type"], "terminal-screen");
+    shutdown_app(&mut h.app, "test pause").unwrap();
+    let history = h.screen("run-1");
+    assert_eq!(history["ok"], true);
+    assert_eq!(history["status"]["terminal_screen"]["type"], "terminal-history");
+    assert_eq!(history["status"]["terminal_screen"]["runId"], "run-1");
+    h.finish(Ok(())).unwrap();
 }
 
 #[test]

@@ -6,6 +6,9 @@
 //! intended turn stopped. An ambiguous write fences subsequent controls until
 //! evidence resolves it; nothing retries steering as a new turn.
 
+#[cfg(target_os="linux")]
+#[path="managed_model_session.rs"]
+pub(crate) mod model_session;
 use super::{Backend, TerminalCommand};
 use anyhow::{bail, ensure, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -777,7 +780,7 @@ pub(crate) fn spawn_link(
     expected_thread_id: Option<String>,
     events: Sender<AgentLinkEvent>,
 ) -> Result<AgentLinkHandle> {
-    spawn_link_with_process(launch, cwd.canonicalize()?, expected_thread_id, events, None)
+    spawn_link_with_process(launch, cwd.canonicalize()?, expected_thread_id, events, None, None)
 }
 
 trait OwnedPeerProcess: Send + Sync {
@@ -795,17 +798,24 @@ impl OwnedPeerProcess for rudder_engine::execution::handoff::BackendProcessWitne
 #[cfg(target_os = "linux")]
 pub(crate) fn spawn_managed_link(launch: AgentLinkLaunch, guest_cwd: PathBuf,
     expected_thread_id: Option<String>, events: Sender<AgentLinkEvent>,
-    process: Arc<rudder_engine::execution::handoff::BackendProcessWitness>) -> Result<AgentLinkHandle> {
+    process: Arc<rudder_engine::execution::handoff::BackendProcessWitness>,
+    model_session:Option<model_session::ModelSessionPlan>) -> Result<AgentLinkHandle> {
     ensure!(guest_cwd == Path::new("/workspace"), "managed backend cwd differs from its guest projection");
     let profile = if launch.backend == "codex" { "codex-app-server" } else { launch.backend.as_str() };
     ensure!(process.matches_attempt(&launch.run_id, &launch.attempt_id, profile),
         "backend kernel identity belongs to another run/attempt/profile");
-    spawn_link_with_process(launch, guest_cwd, expected_thread_id, events, Some(process))
+    spawn_link_with_process(launch, guest_cwd, expected_thread_id, events, Some(process), model_session)
 }
+
+#[cfg(target_os="linux")]
+type ManagedModelSessionPlan=model_session::ModelSessionPlan;
+#[cfg(not(target_os="linux"))]
+struct ManagedModelSessionPlan;
 
 fn spawn_link_with_process(launch: AgentLinkLaunch, cwd: PathBuf,
     expected_thread_id: Option<String>, events: Sender<AgentLinkEvent>,
-    process: Option<Arc<dyn OwnedPeerProcess>>) -> Result<AgentLinkHandle> {
+    process: Option<Arc<dyn OwnedPeerProcess>>,
+    model_session:Option<ManagedModelSessionPlan>) -> Result<AgentLinkHandle> {
     ensure!(
         launch.format_version == 1 && matches!(launch.backend.as_str(), "codex" | "claude-sdk"),
         "unsupported live adapter launch"
@@ -849,6 +859,7 @@ fn spawn_link_with_process(launch: AgentLinkLaunch, cwd: PathBuf,
                 &rx,
                 &worker_stop,
                 process.as_deref(),
+                model_session.as_ref(),
             );
             worker_stop.store(true, Ordering::Release);
             while let Ok(queued) = rx.try_recv() {
@@ -1709,6 +1720,7 @@ fn codex_loop(
     commands: &Receiver<QueuedCommand>,
     stopped: &AtomicBool,
     process: Option<&dyn OwnedPeerProcess>,
+    model_session:Option<&ManagedModelSessionPlan>,
 ) -> Result<()> {
     let mut rpc = connect(&launch.socket_path, stopped, process)?;
     let mut early = Vec::new();
@@ -1720,6 +1732,8 @@ fn codex_loop(
             &mut early,
         )?
         .map_err(|error| anyhow::anyhow!("Codex initialize rejected: {error}"))?;
+    #[cfg(target_os="linux")]
+    if let Some(model_session)=model_session {model_session.validate_installed_version(&initialized)?;}
     let codex_qualified = initialized
         .get("userAgent")
         .and_then(Value::as_str)
@@ -1746,6 +1760,11 @@ fn codex_loop(
         &mut early,
         launch.backend == "claude-sdk",
     )?;
+    #[cfg(target_os="linux")]
+    if let Some(model_session)=model_session {
+        process.context("managed model receipt requires actual backend custody")?.check_current()?;
+        model_session.validate_resume(&thread)?;
+    }
     // Subscription reopens ONLY the positively identified TUI-owned thread;
     // it never starts or forks a conversation, overrides a model, or retries a
     // turn. Explicit transient read rejection can be retried during startup.
@@ -1771,6 +1790,11 @@ fn codex_loop(
         resumed.pointer("/thread/id").and_then(Value::as_str) == Some(thread.as_str()),
         "Codex subscription returned a different thread"
     );
+    #[cfg(target_os="linux")]
+    if let Some(model_session)=model_session {
+        process.context("managed model receipt requires actual backend custody")?.check_current()?;
+        model_session.observe(&thread,&resumed)?;
+    }
     let mut turns = resumed
         .pointer("/thread/turns")
         .and_then(Value::as_array)

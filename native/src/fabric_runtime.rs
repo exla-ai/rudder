@@ -318,6 +318,25 @@ impl RuntimeLink {
 }
 
 impl RuntimeState {
+    /// Snapshot only actual App custody. Browser input never supplies a root.
+    /// Managed views need their namespace reader and are not ordinary host paths.
+    pub(crate) fn file_grants(&self, app: &App, owner: &OwnerFence) -> serde_json::Value {
+        let grants: Vec<_> = app.agents.iter().filter_map(|agent| {
+            let slot = self.links.get(&agent.id)?;
+            let terminal = agent.terminal.as_ref()?;
+            if slot.uncertain || slot.transport_uncertain || slot.draining || slot.closed
+                || slot.workspace.is_some() || agent.managed_local.is_some() || agent.managed_store.is_some()
+                || terminal.instance_id() != slot.attempt || agent.cwd.as_os_str().len() > 4096 {
+                return None;
+            }
+            Some(serde_json::json!({"scope": {
+                "projectId": owner.project_id, "workspaceId": agent.id,
+                "attemptId": slot.attempt, "ownerEpoch": owner.epoch
+            }, "root": agent.cwd}))
+        }).take(16).collect();
+        serde_json::json!(grants)
+    }
+
     /// App-pure extraction. No IO/join/wait or path/PID lookup; a mismatch leaves
     /// every actual owner in this state. The caller keeps this carrier OFF App.
     #[cfg(target_os = "linux")]
@@ -423,7 +442,8 @@ impl RuntimeState {
     pub(crate) fn attach_managed_backend(&mut self, owner: &OwnerFence,
         assignment: &crate::managed_launch::WorkspaceAssignment, terminal: &mut TerminalPane,
         launch: AgentLinkLaunch, guest_cwd: PathBuf, expected_thread: Option<String>,
-        process: Arc<rudder_engine::execution::handoff::BackendProcessWitness>) -> Result<()> {
+        process: Arc<rudder_engine::execution::handoff::BackendProcessWitness>,
+        model_session: Option<crate::agent_link::model_session::ModelSessionPlan>) -> Result<()> {
         assignment.validate(&assignment.fence)?;
         let fence = &assignment.fence;
         anyhow::ensure!(*owner == fence.owner && terminal.instance_id() == fence.attempt_id,
@@ -438,7 +458,7 @@ impl RuntimeState {
             anyhow::ensure!(Arc::ptr_eq(owned, &process), "managed backend identity cannot be replaced");
             return Ok(());
         }
-        let handle = agent_link::spawn_managed_link(launch, guest_cwd, expected_thread, self.events_tx.clone(), process.clone())?;
+        let handle = agent_link::spawn_managed_link(launch, guest_cwd, expected_thread, self.events_tx.clone(), process.clone(), model_session)?;
         slot.owned_backend = Some(process); slot.link = Some(handle);
         terminal.set_before_terminate(slot.close_callback());
         Ok(())

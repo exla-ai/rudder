@@ -136,3 +136,15 @@ fn missing_objects_are_not_found_and_trees_round_trip() {
     let link = backend.write_symlink(RepoPath::root(), "../target").block_on().unwrap();
     assert_eq!(backend.read_symlink(RepoPath::root(), &link).block_on().unwrap(), "../target");
 }
+
+#[test]
+fn store_gc_refuses_to_sweep_jj_history() {
+    let dir = temp();
+    let ws_root = dir.path().join("ws");
+    let store_root = dir.path().join("cas");
+    std::fs::create_dir(&ws_root).unwrap();
+    let (_ws, _repo) = init_workspace(&settings(), &ws_root, &store_root).unwrap();
+    let store = LocalStore::open(&store_root).unwrap();
+    let err = store.gc(std::time::Duration::ZERO).unwrap_err();
+    assert!(err.to_string().contains("jj history"), "{err}");
+}

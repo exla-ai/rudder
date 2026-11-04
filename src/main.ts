@@ -30,7 +30,7 @@ import {
 import { graphPath, mirrorPlanIntoGraph, updateGraph } from "./graph.js";
 import { adoptMovedAgents } from "./move-home.js";
 import type { MirrorPayload } from "./graph.js";
-import { backfillLlmTaskSummaries, listRuns, loadConfig, popUndoEntry, projectStateDir, registerProject, runsDir } from "./state.js";
+import { backfillLlmTaskSummaries, listRuns, loadConfig, loadRunRecord, popUndoEntry, projectStateDir, registerProject, runsDir } from "./state.js";
 import { discoverModelOptions } from "./models.js";
 import { resolveNativeBinaryPath } from "./native-binary.js";
 import { toolCacheEnv } from "./tool-cache.js";
@@ -41,6 +41,7 @@ import {
   listProjectRuns,
   mergeRun,
   printLogs,
+  runProjectCheck,
   startRun,
   statusRuns,
   stopRun,
@@ -70,6 +71,7 @@ type Parsed = {
     queue?: boolean;
     allowDirty?: boolean;
     abortOnConflict?: boolean;
+    skipChecks?: boolean;
     dryRun?: boolean;
     force?: boolean;
     nonInteractive?: boolean;
@@ -426,6 +428,14 @@ export async function main(): Promise<void> {
       if (!run) {
         throw new Error("Missing run id.");
       }
+      if (!parsed.flags.skipChecks) {
+        const repoRoot = findRepoRoot();
+        const record = await loadRunRecord(repoRoot, run);
+        const failed = record ? runProjectCheck(repoRoot, record) : undefined;
+        if (failed !== undefined) {
+          throw new Error(`checks failed, nothing was merged (rudder merge ${run} --skip-checks merges anyway)\n${failed}`);
+        }
+      }
       await mergeRun(run, Boolean(parsed.flags.allowDirty), {
         abortOnConflict: Boolean(parsed.flags.abortOnConflict),
       });
@@ -590,6 +600,10 @@ function parseArgs(argv: string[]): Parsed {
     }
     if (arg === "--allow-dirty") {
       parsed.flags.allowDirty = true;
+      continue;
+    }
+    if (arg === "--skip-checks") {
+      parsed.flags.skipChecks = true;
       continue;
     }
     if (arg === "--abort-on-conflict") {

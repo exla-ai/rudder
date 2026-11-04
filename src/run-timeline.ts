@@ -22,6 +22,8 @@ export type RunTimeline = {
   cached: number;
   /** Headless runs know only the input total, not how much was cached. */
   cacheUnknown?: boolean;
+  /** No per-phase summary was recorded (headless runs): show only what is known. */
+  phasesUnknown?: boolean;
   output: number;
 };
 
@@ -68,6 +70,7 @@ export function parseTimeline(content: string, run?: Pick<RunRecord, "tokens">):
     output: num(summary?.output),
   };
   if (startMs !== undefined) timeline.startMs = startMs;
+  if (!summary) timeline.phasesUnknown = true;
   // Headless runs record only run.tokens (input includes cache reads).
   if (!summary && run?.tokens) {
     timeline.input = run.tokens.input;
@@ -113,9 +116,11 @@ function formatTokens(n: number): string {
 export function formatTimeline(t: RunTimeline): string {
   const parts: string[] = [];
   if (t.startMs !== undefined) parts.push(`start ${formatDuration(t.startMs)}`);
-  parts.push(`install ${formatDuration(t.installMs)}`, `build ${formatDuration(t.buildMs)}`, `test ${formatDuration(t.testMs)}`);
-  if (t.toolMs > 0) parts.push(`tools ${formatDuration(t.toolMs)}`);
-  parts.push(`model ${formatDuration(t.modelMs)}`);
+  if (!t.phasesUnknown) {
+    parts.push(`install ${formatDuration(t.installMs)}`, `build ${formatDuration(t.buildMs)}`, `test ${formatDuration(t.testMs)}`);
+    if (t.toolMs > 0) parts.push(`tools ${formatDuration(t.toolMs)}`);
+    parts.push(`model ${formatDuration(t.modelMs)}`);
+  }
   if (t.waitMs > 0) parts.push(`wait ${formatDuration(t.waitMs)}`);
   const totalIn = t.input + t.cached;
   const total = totalIn + t.output;

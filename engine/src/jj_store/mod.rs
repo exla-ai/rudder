@@ -21,8 +21,9 @@
 //! - [`RudderBackend`] is the `jj_lib::backend::Backend` implementation.
 //!
 //! Limits: copy tracking is unsupported (like jj's simple backend). Objects
-//! are not pinned, so `LocalStore::gc` would sweep them; do not run store GC on
-//! a store holding a jj repo until retention for jj heads is added. Git interop
+//! are reachable only through jj's op log, not store pins, so opening a backend
+//! writes [`crate::store::JJ_OBJECTS_MARKER`] and `LocalStore::gc` refuses to
+//! sweep that store. Git interop
 //! stays at the edges: export through jj's git backend, not here.
 
 use crate::protocol::{ObjectKind, ObjectRef};
@@ -75,6 +76,7 @@ pub struct RudderBackend {
 impl RudderBackend {
     /// Opens a backend on `store`, writing the empty tree if it is missing.
     pub fn new(store: LocalStore) -> anyhow::Result<Self> {
+        std::fs::write(store.root().join(crate::store::JJ_OBJECTS_MARKER), b"")?;
         let empty = tree_bytes(&Tree::default())?;
         let empty_ref = store.put_blob(&empty)?;
         Ok(Self {

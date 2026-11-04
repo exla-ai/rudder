@@ -1688,23 +1688,32 @@ async function autoIntegrateFinishedWorker(repoRoot: string, run: RunRecord): Pr
     // Planned nodes integrate through the scheduler's trunk, not here.
     const graph = await readGraph(repoRoot).catch(() => undefined);
     if (graph && Object.values(graph.nodes ?? {}).some((node) => node.runId === run.id)) return;
-    const command = projectCheckCommand(repoRoot);
-    if (command) {
-      const check = inFork(run.workspace.path, "sh", ["-c", `${command} 2>&1`]);
-      const result = spawnSync(check.command, check.args, {
-        cwd: run.workspace.path, encoding: "utf8", timeout: 15 * 60_000, maxBuffer: 16 * 1024 * 1024,
-      });
-      if (result.status !== 0) {
-        const tail = String(result.stdout ?? "").trim().split("\n").slice(-40).join("\n");
-        await emit(run, { ts: nowIso(), runId: run.id, type: "merge.result", message: `needs you: checks failed\n${tail}` });
-        return;
-      }
+    const failed = runProjectCheck(repoRoot, run);
+    if (failed !== undefined) {
+      await emit(run, { ts: nowIso(), runId: run.id, type: "merge.result", message: `needs you: checks failed\n${failed}` });
+      return;
     }
     await mergeRun(run.id, true, { silent: true, abortOnConflict: true, repoRoot });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     await emit(run, { ts: nowIso(), runId: run.id, type: "merge.result", message: `needs you: ${message}` }).catch(() => undefined);
   }
+}
+
+/**
+ * Runs the project's quick check (rudder.toml [verification] command) inside
+ * the run's workspace. Returns undefined when it passes or there is none, else
+ * the last lines of its output.
+ */
+export function runProjectCheck(repoRoot: string, run: RunRecord): string | undefined {
+  const command = projectCheckCommand(repoRoot);
+  if (!command || !run.workspace?.path || !fs.existsSync(run.workspace.path)) return undefined;
+  const check = inFork(run.workspace.path, "sh", ["-c", `${command} 2>&1`]);
+  const result = spawnSync(check.command, check.args, {
+    cwd: run.workspace.path, encoding: "utf8", timeout: 15 * 60_000, maxBuffer: 16 * 1024 * 1024,
+  });
+  if (result.status === 0) return undefined;
+  return String(result.stdout ?? result.error?.message ?? "").trim().split("\n").slice(-40).join("\n");
 }
 
 function projectCheckCommand(repoRoot: string): string | undefined {

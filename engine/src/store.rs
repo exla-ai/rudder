@@ -243,6 +243,10 @@ pub struct GcReport {
     pub blocked_by_staging: bool,
 }
 
+/// Marker file in a store root that holds jj objects; `LocalStore::gc` refuses
+/// to run on such a store.
+pub const JJ_OBJECTS_MARKER: &str = "holds-jj-objects";
+
 #[derive(Debug, Clone)]
 pub struct LocalStore {
     root: PathBuf,
@@ -688,6 +692,12 @@ impl LocalStore {
     /// abort BEFORE any deletion. Grace is based on local object mtime; a clock
     /// rollback retains objects. Stale tmp files are retained for later recovery.
     pub fn gc(&self, grace: Duration) -> Result<GcReport> {
+        // jj objects (crate::jj_store) are reachable only through jj's op log,
+        // which the pin set cannot see, so a sweep would delete live history.
+        ensure!(
+            !self.root().join(JJ_OBJECTS_MARKER).exists(),
+            "store holds jj history objects; gc would delete them"
+        );
         let _lock = self.lock()?;
         let state = self.read_state()?;
         ensure!(state.backed_retention.is_none()&&state.environment_dependencies.is_none()&&state.source_dependencies.is_none(),

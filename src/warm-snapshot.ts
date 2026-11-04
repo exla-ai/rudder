@@ -281,6 +281,7 @@ jj diff --ignore-working-copy --from "$1" --to "$2" --name-only | while IFS= rea
   if jj file show --ignore-working-copy -r "$2" -- "root-file:\\"$f\\"" > /dev/null 2>&1; then
     mkdir -p "$(dirname "$f")"; rm -rf "$f"
     jj file show --ignore-working-copy -r "$2" -- "root-file:\\"$f\\"" > "$f"
+    if [ "$(jj file list --ignore-working-copy -r "$2" -T 'executable' -- "root-file:\\"$f\\"")" = true ]; then chmod +x "$f"; fi
   else
     rm -rf "$f"
   fi

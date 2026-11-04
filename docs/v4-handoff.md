@@ -46,10 +46,12 @@ PLAN.md section 0 steps 0-8 are merged. Step 9 results:
   stale commit; headless backends ran outside the fork mount; login shells
   inside forks picked stock jj; auto-integration raced the plan scheduler.
 
-Known follow-ups (after 4.0.0): fork repos still store commits in Git, not the
-content store; jj_store objects are not pinned against GC; the manual merge `m`
-skips checks; files moved into a fork lose the executable bit; `rudder ls`
-shows "model 0s" for headless runs.
+After 4.0.0 (2026-11-04): files moved into a fork keep the executable bit;
+`rudder merge` (and the dashboard `m`) runs the rudder.toml check inside the
+workspace first (`--skip-checks` overrides); `rudder ls` no longer shows zero
+phase times for headless runs; `LocalStore::gc` refuses stores that hold jj
+objects. Fork commits stay in Git on purpose: a fork is a workspace of the
+user's colocated repo, so it shares that repo's backend.
 
 ## 3. Status of every agent
 
@@ -140,16 +142,9 @@ Branch `origin/cloud-capacity-build-pool` (1 commit, 2026-11-03, unbuilt) is
 4.1 Cloud capacity work: cleanup job, swap, telemetry/observability, burst
 builders, Codex trust. Keep it; rebase after 4.0.0 (PLAN.md section 0).
 
-## 8. Disk and leftovers (ask before deleting)
+## 8. Disk
 
-`/workspace` is 89% full (17G free).
-
-- `/workspace/rudder-build` 15G (shared cargo target + coordinator scripts).
-- `/workspace/rudder-one-capture-*` about 11 x 900M, plus
-  `rudder-one-capture-controller-context-*` 6 x 255M (Fly qualification
-  evidence).
-- `/workspace/rudder-genuine-*`, `rudder-runtime-qualification-*`,
-  `rudder-alpha34-delivery-20261103` (500M), about 77 loose `*.py`
-  qualification scripts in `/workspace` root.
-- `/workspace/rudder-scratch/{coordinator,harden-11,harden-12,n13,n13-model-receipts,n14}`.
-- 33 jj workspaces, almost all for merged runs (`jj workspace list`).
+Cleaned 2026-11-04: Fly qualification captures, old scratch dirs and stale jj
+workspaces are gone (`/workspace` 85%, 22G free). Old qualification `*.py`
+scripts moved to `/workspace/rudder-scratch/old-py/`. The shared cargo target
+`/workspace/rudder-build/target` (16G) is kept as the build cache.

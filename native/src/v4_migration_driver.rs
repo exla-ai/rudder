@@ -212,7 +212,7 @@ mod tests {
     fn migration_driver_initializes_private_journal_without_enrolling_an_owner() {
         struct Scratch(PathBuf);
         impl Drop for Scratch {fn drop(&mut self){let _=fs::remove_dir_all(&self.0);}}
-        let storage=if cfg!(target_os="linux") {PathBuf::from("/workspace/rudder-scratch/harden-3")} else {std::env::temp_dir()};
+        let storage=if cfg!(target_os="linux") {PathBuf::from("/workspace/rudder-scratch/harden-3")} else {std::env::temp_dir().canonicalize().unwrap()};
         let root=Scratch(storage.join(format!("migration-driver-{}",uuid::Uuid::new_v4().simple())));
         fs::create_dir_all(&root.0).unwrap();
         let journal=open_migration_journal(&root.0).unwrap();

@@ -84,7 +84,7 @@ mod tests {
     impl Drop for Fixture {fn drop(&mut self){let _=fs::remove_dir_all(&self.root);}}
     impl Fixture {
         fn new()->Self {
-            let root=PathBuf::from("/workspace/rudder-scratch/n13").join(format!("engine-observations-{}",uuid::Uuid::new_v4()));
+            let root=(if std::path::Path::new("/workspace").is_dir(){PathBuf::from("/workspace/rudder-scratch/n13")}else{std::env::temp_dir().canonicalize().unwrap().join("rudder-n13")}).join(format!("engine-observations-{}",uuid::Uuid::new_v4()));
             fs::create_dir_all(&root).unwrap();let path=root.join("journal.sqlite");
             let mut journal=Journal::open(&path).unwrap();let owner=journal.create_project("observations","app-owner","accepted-head",1).unwrap();
             journal.register_run(&owner,"sender",1).unwrap();journal.register_run(&owner,"target",1).unwrap();

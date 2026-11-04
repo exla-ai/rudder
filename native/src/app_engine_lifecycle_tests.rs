@@ -20,9 +20,10 @@ impl Harness {
         let storage = if cfg!(target_os = "linux") {
             PathBuf::from("/workspace/rudder-tmp")
         } else {
-            std::env::temp_dir()
+            // macOS temp dirs are deep; Unix socket paths must stay under SUN_LEN.
+            PathBuf::from("/tmp").canonicalize().unwrap()
         };
-        let root = storage.join(format!("app-engine-{}", uuid::Uuid::new_v4().simple()));
+        let root = storage.join(format!("ae-{}", &uuid::Uuid::new_v4().simple().to_string()[..8]));
         fs::create_dir_all(&root).unwrap();
         let repository = root.join("repo");
         let home = root.join("home");

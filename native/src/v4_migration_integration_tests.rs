@@ -11,7 +11,7 @@ impl Drop for Fixture { fn drop(&mut self) { let _ = fs::remove_dir_all(&self.ro
 impl Fixture {
     fn new() -> Self {
         let storage = if cfg!(target_os="linux") { PathBuf::from("/workspace/rudder-scratch/harden-3") }
-            else { env::temp_dir() };
+            else { env::temp_dir().canonicalize().unwrap() };
         let root = storage.join(format!("migration-{}", uuid::Uuid::new_v4().simple()));
         let repo = root.join("repo"); let home = root.join("home");
         fs::create_dir_all(&repo).unwrap(); fs::create_dir(&home).unwrap();

@@ -74,6 +74,8 @@ impl Fixture {
         let dir = TempDir::new().unwrap();
         let repo = dir.path().join("repo");
         fs::create_dir(&repo).unwrap();
+        // The session canonicalizes (macOS temp dirs sit behind /var -> /private/var).
+        let repo = fs::canonicalize(&repo).unwrap();
         let database = dir.path().join("journal.sqlite");
         let mut journal = Journal::open(&database).unwrap();
         let owner = journal

@@ -9,7 +9,7 @@ fn quiet() -> Quiescence {
 }
 #[test]
 fn migration_adoption_requires_exact_committed_inventory_and_keeps_recovery_paused() {
-    let root=PathBuf::from("/workspace/rudder-scratch/n13").join(format!("migration-adoption-{}",uuid::Uuid::new_v4()));
+    let root=(if std::path::Path::new("/workspace").is_dir(){PathBuf::from("/workspace/rudder-scratch/n13")}else{std::env::temp_dir().canonicalize().unwrap().join("rudder-n13")}).join(format!("migration-adoption-{}",uuid::Uuid::new_v4()));
     fs::create_dir_all(&root).unwrap(); let _scratch=Scratch(root.clone());
     let repository=root.join("repo");fs::create_dir(&repository).unwrap();
     let repository=repository.canonicalize().unwrap();

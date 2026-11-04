@@ -90,7 +90,7 @@ impl BuildState {
         self.phase="publish-semantic-data";let environment=self.store.put_blob(&canonical_json(sdk)?)?;self.sdk_environment=Some(environment);
         let key=semantic_action_data(self.input.source_root(),self.input.hardlinks(),sdk,&self.profile)?;
         let mut references=vec![self.input.source_root().clone(),self.sdk_environment.as_ref().unwrap().clone()];if let Some(topology)=self.input.hardlinks(){references.push(topology.clone());}references.sort();references.dedup();
-        self.key=Some(self.store.put_metadata(ObjectKind::ActionKey,&ReferencedMetadata{format_version:1,references,payload:serde_json::json!({"schema":"compiler-sdk-selected-action-v2","value":key})})?);self.live()?;
+        self.key=Some(self.store.put_metadata(ObjectKind::ActionKey,&ReferencedMetadata{format_version:1,references,payload:serde_json::json!({"schema":"compiler-sdk-selected-action-v3","value":key})})?);self.live()?;
         // Pin the actual local selected source before private materialization.
         // The intended name lives in this owner before any commit attempt.
         Ok(())}
@@ -98,9 +98,10 @@ impl BuildState {
         let raw=self.store.read_object(self.input.source_root())?;let source=rudder_engine::snapshot::decode_source(&raw)?;
         let hardlinks=if let Some(actual)=self.input.hardlinks(){actual.clone()}else{self.store.put_blob(&canonical_json(&rudder_engine::tree::HardlinkTopology{format_version:1,groups:vec![]})?)?};
         rudder_engine::tree::export_quiesced(&self.store,&rudder_engine::tree::TreeSnapshot{format_version:1,directory:source.directory.clone(),hardlinks},&self.work.join("source"),&source_budget())?;
-        verify_source(&self.store,&source.directory,&self.work.join("source"),&self.original)?;
+        self.source=Some(open_dir(&self.work.join("source"))?);
+        verify_source(&self.store,&source.directory,self.source.as_ref().unwrap(),&self.profile,&self.original)?;
         fs::DirBuilder::new().mode(0o700).create(self.work.join("output"))?;
-        self.source=Some(open_dir(&self.work.join("source"))?);self.output=Some(open_dir(&self.work.join("output"))?);self.cancel=Some(cancel_fd()?);
+        self.output=Some(open_dir(&self.work.join("output"))?);self.cancel=Some(cancel_fd()?);
         let(local,remote)=wire::runtime_socket_pair()?;self.reply=Some(RuntimeEndpoint::capture(local)?);self.remote_reply=Some(remote);
         let registration=self.sdk.client.registration.data();let request=super::super::compiler_sdk::jobs::BuildRequest{version:2,kind:"compiler_sdk_build_v2".into(),serial:0,nonce:self.nonce.clone(),
             engine_instance_id:registration.engine_instance_id.clone(),epoch:registration.binding.epoch.clone(),config_sha256:registration.binding.config_sha256.clone(),constraint:self.original.constraint(),
@@ -138,7 +139,7 @@ impl BuildState {
         let directory=rudder_engine::snapshot::decode_source(&self.store.read_object(self.input.source_root())?)?.directory;
         // Actual input revalidation catches a changed private source, without
         // deriving success from directory permissions or original report DATA.
-        verify_source(&self.store,&directory,&self.work.join("source"),&self.original)?;
+        verify_source(&self.store,&directory,self.source.as_ref().unwrap(),&self.profile,&self.original)?;
         validate_output_tree(&self.work.join("output"),&self.original)?;self.live()?;
         let tree=rudder_engine::tree::import_quiesced(&self.store,&self.stage.as_ref().unwrap().id,&self.work.join("output"),&Default::default(),&rudder_engine::tree::ImportBudget{max_logical_bytes:MAX_OUTPUT_BYTES,..source_budget()})?;
         ensure!(serde_json::from_slice::<rudder_engine::tree::HardlinkTopology>(&self.store.read_object(&tree.hardlinks)?)?.groups.is_empty(),"SDK outputs contain unmodeled hardlinks");self.artifacts=Some(tree.directory);self.live()?;
@@ -166,6 +167,19 @@ fn validate_ordinary_profile(profile:&BuildProfile)->Result<()> {
     ensure!(profile.policy.cacheable()&&profile.buck2.remote_cache.is_none()
         &&profile.policy.environment.keys().all(|k|matches!(k.as_str(),"LANG"|"LC_ALL"|"TZ")),
         "direct SDK compiler refuses unsupported effects/environment/remote cache");
+    for target in &profile.targets {
+        ensure!(target.name.len()<=128,"SDK target name exceeds runner bound");
+        for path in &target.sources {
+            ensure!(path.len()<=1024&&path.split('/').all(|part|!matches!(part,""|"."|"..")),
+                "SDK source path is not a bounded normalized runner path");
+        }
+        // Both rustc and tsc expand @response files and parse leading options.
+        // The fixed runner inserts the entrypoint directly into argv. Its
+        // second placeholder substitution must not rewrite the input either.
+        ensure!(!target.entrypoint.starts_with(['-','@'])
+            &&!target.entrypoint.contains("{output}")&&!target.entrypoint.contains("{entrypoint}"),
+            "SDK entrypoint could change the fixed compiler invocation");
+    }
     Ok(())
 }
 // A retained artifact receipt is deliberately not action-cache provenance.
@@ -180,8 +194,14 @@ fn semantic_action_data(source:&ObjectRef,topology:Option<&ObjectRef>,sdk:&Prepa
     semantic_action_with_rules_data(source,topology,sdk,profile,&sdk_execution_rules_data()?)
 }
 fn semantic_action_with_rules_data(source:&ObjectRef,topology:Option<&ObjectRef>,sdk:&PreparationSpec,profile:&BuildProfile,rules:&serde_json::Value)->Result<serde_json::Value>{
-    Ok(serde_json::json!({"format_version":2,"kind":"compiler-sdk-selected-action-v2","source_root":source,"input_topology":topology,"sdk":sdk,
-        "platform":profile.platform,"policy":profile.policy,"targets":profile.targets,"execution_rules":rules}))
+    semantic_action_with_policies_data(source,topology,sdk,profile,rules,
+        &serde_json::from_str(include_str!("sdk_compiler_isolation/policy.json"))?)
+}
+fn semantic_action_with_policies_data(source:&ObjectRef,topology:Option<&ObjectRef>,sdk:&PreparationSpec,profile:&BuildProfile,rules:&serde_json::Value,isolation:&serde_json::Value)->Result<serde_json::Value>{
+    // Key the mechanism's semantic policy, not a hash of observer source code
+    // or an observation supplied by a previous execution.
+    Ok(serde_json::json!({"format_version":3,"kind":"compiler-sdk-selected-action-v3","source_root":source,"input_topology":topology,"sdk":sdk,
+        "platform":profile.platform,"policy":profile.policy,"targets":profile.targets,"execution_rules":rules,"compiler_isolation":isolation}))
 }
 fn sdk_execution_rules_data()->Result<serde_json::Value>{Ok(serde_json::from_str(include_str!("compiler_sdk_rules.json"))?)}
 fn open_dir(path:&Path)->Result<OwnedFd>{Ok(OpenOptions::new().read(true).custom_flags(libc::O_DIRECTORY|libc::O_NOFOLLOW|libc::O_CLOEXEC).open(path)?.into())}
@@ -191,25 +211,47 @@ fn validate_output_tree(path:&Path,original:&FinalizationBudget)->Result<()>{fn 
     if m.is_dir()&&!m.file_type().is_symlink(){for entry in fs::read_dir(path)?{walk(&entry?.path(),original,count,bytes,depth+1)?;}}
     else{ensure!(m.is_file()&&!m.file_type().is_symlink()&&m.nlink()==1,"SDK output symlink/special/hardlink refused");*bytes=bytes.checked_add(m.len()).context("SDK output bytes overflow")?;ensure!(*bytes<=MAX_OUTPUT_BYTES,"SDK output byte bound exceeded");}original.remaining()?;Ok(())}
     walk(path,original,&mut 0,&mut 0,0)}
-fn verify_source(store:&LocalStore,root:&ObjectRef,path:&Path,original:&FinalizationBudget)->Result<()>{
-    fn walk(store:&LocalStore,root:&ObjectRef,path:&Path,original:&FinalizationBudget,depth:usize,count:&mut u64,bytes:&mut u64)->Result<()>{
+fn verify_source(store:&LocalStore,root:&ObjectRef,source:&OwnedFd,profile:&BuildProfile,original:&FinalizationBudget)->Result<()>{
+    validate_ordinary_profile(profile)?;
+    let mut declared:std::collections::BTreeSet<String>=profile.targets.iter().flat_map(|target|target.sources.iter().cloned()).collect();
+    ensure!(declared.len()<=MAX_SOURCE_FILES,"SDK declared source count exceeds bound");
+    // Anchor every lookup to the same source descriptor sent to Root. A final
+    // O_NOFOLLOW alone does not stop a replaced ancestor from redirecting reads.
+    fn child(parent:&File,name:&std::ffi::OsStr,directory:bool)->Result<File>{
+        let name=std::ffi::CString::new(name.as_encoded_bytes())?;
+        let raw=unsafe{libc::openat(parent.as_raw_fd(),name.as_ptr(),libc::O_RDONLY|libc::O_NOFOLLOW|libc::O_CLOEXEC|libc::O_NONBLOCK|if directory{libc::O_DIRECTORY}else{0})};
+        ensure!(raw>=0,"SDK source descriptor open failed: {}",io::Error::last_os_error());
+        Ok(unsafe{File::from_raw_fd(raw)})
+    }
+    fn unchanged(before:&fs::Metadata,after:&fs::Metadata)->Result<()>{
+        ensure!((before.dev(),before.ino(),before.mode(),before.uid(),before.gid(),before.nlink(),before.len(),before.mtime(),before.mtime_nsec(),before.ctime(),before.ctime_nsec())
+            ==(after.dev(),after.ino(),after.mode(),after.uid(),after.gid(),after.nlink(),after.len(),after.mtime(),after.mtime_nsec(),after.ctime(),after.ctime_nsec()),
+            "SDK selected source changed during verification");Ok(())
+    }
+    fn walk(store:&LocalStore,root:&ObjectRef,directory:&File,prefix:&str,declared:&mut std::collections::BTreeSet<String>,original:&FinalizationBudget,depth:usize,count:&mut u64,bytes:&mut u64)->Result<()>{
         original.remaining()?;ensure!(depth<=256,"SDK source depth exceeds bound");let manifest=rudder_engine::tree::root_info(store,root)?;
         *count=count.checked_add(manifest.entry_count).context("SDK source entries overflow")?;ensure!(*count<=MAX_SOURCE_FILES as u64,"SDK source count exceeds bound");
-        let m=fs::symlink_metadata(path)?;ensure!(m.is_dir()&&!m.file_type().is_symlink()&&m.mode()&0o7777==manifest.mode,"SDK source directory type/mode differs");
-        let mut actual=std::collections::BTreeSet::new();for entry in fs::read_dir(path)?{ensure!(actual.len()<MAX_SOURCE_FILES,"SDK source directory count exceeds bound");actual.insert(entry?.file_name());}
+        let m=directory.metadata()?;ensure!(m.is_dir()&&m.mode()&0o7777==manifest.mode,"SDK source directory type/mode differs");
+        let mut actual=std::collections::BTreeSet::new();for entry in fs::read_dir(format!("/proc/self/fd/{}",directory.as_raw_fd()))?{original.remaining()?;ensure!(actual.len()<MAX_SOURCE_FILES,"SDK source directory count exceeds bound");actual.insert(entry?.file_name());}
         let mut expected=std::collections::BTreeSet::new();let mut after=None;
         loop{original.remaining()?;let page=rudder_engine::tree::scan(store,root,after.as_deref(),1024)?;
-            for entry in page.entries{let name=std::ffi::OsString::from_vec(entry.name()?);expected.insert(name.clone());let child=path.join(name);
-                match entry.node{rudder_engine::directory::EntryNode::Directory{object}=>walk(store,&object,&child,original,depth+1,count,bytes)?,
+            for entry in page.entries{let name=std::ffi::OsString::from_vec(entry.name()?);expected.insert(name.clone());let path=format!("{prefix}{}",name.to_str().context("SDK source name is not UTF-8")?);
+                match entry.node{rudder_engine::directory::EntryNode::Directory{object}=>walk(store,&object,&child(directory,&name,true)?,&format!("{path}/"),declared,original,depth+1,count,bytes)?,
                     rudder_engine::directory::EntryNode::File{object,logical_size,mode}=>{*bytes=bytes.checked_add(logical_size).context("SDK source byte overflow")?;ensure!(*bytes<=MAX_SOURCE_BYTES,"SDK source byte bound exceeded");
-                        let m=fs::symlink_metadata(&child)?;ensure!(m.is_file()&&!m.file_type().is_symlink()&&m.nlink()==1&&m.len()==logical_size&&m.mode()&0o7777==mode,"SDK source file/type/mode differs");
-                        let mut actual=OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW|libc::O_CLOEXEC).open(&child)?;
+                        ensure!(declared.remove(&path),"SDK source file is outside the declared input closure: {path}");
+                        let mut actual=child(directory,&name,false)?;let m=actual.metadata()?;
+                        ensure!(m.is_file()&&m.nlink()==1&&m.len()==logical_size&&m.mode()&0o7777==mode,"SDK source file/type/mode differs");
                         let mut compare=SourceComparison{actual:&mut actual,original};ensure!(rudder_engine::content::export_file(store,&object,&mut compare)?.logical_size==logical_size,"SDK source logical length differs");
                         ensure!(actual.read(&mut[0u8;1])?==0,"SDK source trailing bytes differ");
+                        unchanged(&m,&actual.metadata()?)?;
+                        unchanged(&m,&child(directory,&name,false)?.metadata()?)?;
                     },rudder_engine::directory::EntryNode::Symlink{..}=>anyhow::bail!("managed SDK compiler refuses symlink source inputs"),}
             }after=page.next_after;if after.is_none(){break}
-        }ensure!(actual==expected,"SDK source namespace differs");original.remaining()?;Ok(())
-    }walk(store,root,path,original,0,&mut 0,&mut 0)}
+        }ensure!(actual==expected,"SDK source namespace differs");unchanged(&m,&directory.metadata()?)?;original.remaining()?;Ok(())
+    }
+    walk(store,root,&File::from(source.try_clone()?),"",&mut declared,original,0,&mut 0,&mut 0)?;
+    ensure!(declared.is_empty(),"SDK declared source files are absent from the selected input closure");Ok(())
+}
 struct SourceComparison<'a>{actual:&'a mut File,original:&'a FinalizationBudget}
 impl Write for SourceComparison<'_>{fn write(&mut self,expected:&[u8])->io::Result<usize>{let mut buffer=[0u8;65536];for chunk in expected.chunks(buffer.len()){
     self.original.remaining().map_err(io::Error::other)?;self.actual.read_exact(&mut buffer[..chunk.len()])?;if buffer[..chunk.len()]!=*chunk{return Err(io::Error::other("SDK selected source bytes changed"));}}
@@ -241,6 +283,20 @@ impl Write for SourceComparison<'_>{fn write(&mut self,expected:&[u8])->io::Resu
         let mut changed=sdk.clone();changed.toolchains.get_mut("rustc").unwrap().configuration.insert("compiler_entrypoint".into(),"new/path".into());assert_ne!(actual,semantic_action_data(&source,None,&changed,&profile).unwrap());
         let text=canonical_json(&actual).unwrap();let text=String::from_utf8(text).unwrap();for field in ["isolation_sha256","rules_sha256","artifact_manifest_sha256","source_binding_sha256","cas_image","qualification_workload"]{assert!(!text.contains(field));}
     }
+    #[test]fn actual_isolation_policy_is_keyed_independently_of_observer_reports(){
+        let(source,sdk,profile)=data();let rules=sdk_execution_rules_data().unwrap();
+        let isolation:serde_json::Value=serde_json::from_str(include_str!("sdk_compiler_isolation/policy.json")).unwrap();
+        let base=semantic_action_data(&source,None,&sdk,&profile).unwrap();
+        assert_eq!(base["format_version"],3);assert_eq!(base["compiler_isolation"],isolation);
+        for (field,value) in [("source_declarations",serde_json::json!("unchecked")),
+            ("native_writable_exec",serde_json::json!("allowed")),("syscall_additions",serde_json::json!({})),
+            ("mounts",serde_json::json!([])),("cache_reuse",serde_json::json!(true))] {
+            let mut changed=isolation.clone();changed[field]=value;
+            assert_ne!(base,semantic_action_with_policies_data(&source,None,&sdk,&profile,&rules,&changed).unwrap(),"{field}");
+        }
+        let topology=ObjectRef::from_bytes(ObjectKind::Blob,b"topology");
+        assert_ne!(base,semantic_action_data(&source,Some(&topology),&sdk,&profile).unwrap());
+    }
     #[test]fn ordinary_sdk_admission_refuses_every_declared_effect_and_ambient_input(){
         use rudder_engine::build::{BuildEffect,RemoteCacheConfig};
         let(_,_,profile)=data();validate_ordinary_profile(&profile).unwrap();
@@ -268,6 +324,20 @@ impl Write for SourceComparison<'_>{fn write(&mut self,expected:&[u8])->io::Resu
         let mut changed=original;changed["targets"][0]["language"]="shell".into();
         assert!(serde_json::from_value::<BuildProfile>(changed).is_err());
     }
+    #[test]fn ordinary_sdk_entrypoint_cannot_inject_options_response_files_or_placeholders(){
+        let(_,_,profile)=data();
+        for language in [rudder_engine::build::CompileLanguage::Rust,rudder_engine::build::CompileLanguage::TypeScript] {
+            for entrypoint in ["--version","--cfg=unmodeled","@compiler-options","{output}","src/{output}.rs","{entrypoint}","src//lib.rs","src/./lib.rs","lib.rs/"] {
+                let mut changed=profile.clone();changed.targets[0].language=language;
+                changed.targets[0].entrypoint=entrypoint.into();changed.targets[0].sources=std::collections::BTreeSet::from([entrypoint.into()]);
+                assert!(validate_ordinary_profile(&changed).is_err(),"{language:?}: {entrypoint}");
+            }
+        }
+        let mut changed=profile.clone();changed.targets[0].name="x".repeat(129);assert!(validate_ordinary_profile(&changed).is_err());
+        let mut changed=profile.clone();changed.targets[0].sources.insert(format!("{}.rs","x".repeat(1024)));assert!(validate_ordinary_profile(&changed).is_err());
+        let mut changed=profile;changed.targets[0].entrypoint="src/@ordinary.rs".into();changed.targets[0].sources=std::collections::BTreeSet::from(["src/@ordinary.rs".into()]);
+        validate_ordinary_profile(&changed).unwrap();
+    }
     #[test]fn ordinary_sdk_identical_semantics_and_preparation_evidence_never_publish_cache_provenance(){
         let(source,sdk,profile)=data();let semantic=semantic_action_data(&source,None,&sdk,&profile).unwrap();
         let key=ObjectRef::from_bytes(ObjectKind::ActionKey,&canonical_json(&semantic).unwrap());
@@ -287,16 +357,50 @@ impl Write for SourceComparison<'_>{fn write(&mut self,expected:&[u8])->io::Resu
         }
         assert_ne!(canonical_json(&first).unwrap(),canonical_json(&second).unwrap());
     }
+    struct Scratch(PathBuf);
+    impl Scratch {fn new()->Self{let path=PathBuf::from("/workspace/rudder-scratch/harden-9").join(uuid::Uuid::new_v4().to_string());fs::create_dir_all(&path).unwrap();Self(path)}}
+    impl Drop for Scratch {fn drop(&mut self){fs::remove_dir_all(&self.0).unwrap();}}
+    struct SourceFixture {scratch:Scratch,store:LocalStore,tree:rudder_engine::tree::TreeSnapshot,source:OwnedFd,profile:BuildProfile,original:FinalizationBudget}
+    impl SourceFixture {
+        fn new(files:&[(&str,&[u8])])->Self {
+            let scratch=Scratch::new();let store=LocalStore::open(scratch.0.join("cas")).unwrap();let input=scratch.0.join("input");fs::create_dir(&input).unwrap();
+            for (name,bytes) in files {let path=input.join(name);fs::create_dir_all(path.parent().unwrap()).unwrap();fs::write(path,bytes).unwrap();}
+            let stage=store.begin_staging(Duration::from_secs(30)).unwrap();let tree=rudder_engine::tree::import_quiesced(&store,&stage.id,&input,&Default::default(),&source_budget()).unwrap();store.publish(&stage.id,"sdk-source-test",&tree.directory).unwrap();
+            let exported=scratch.0.join("exported");rudder_engine::tree::export_quiesced(&store,&tree,&exported,&source_budget()).unwrap();let source=open_dir(&exported).unwrap();
+            let(_,_,mut profile)=data();profile.targets[0].entrypoint=files[0].0.into();profile.targets[0].sources=files.iter().map(|(name,_)|(*name).into()).collect();
+            Self{scratch,store,tree,source,profile,original:FinalizationBudget::begin(Duration::from_secs(30)).unwrap()}
+        }
+        fn path(&self)->PathBuf{self.scratch.0.join("exported")}
+        fn verify(&self)->Result<()>{verify_source(&self.store,&self.tree.directory,&self.source,&self.profile,&self.original)}
+    }
     #[test]fn actual_paged_chunked_source_export_verifies_then_detects_changed_tail(){
-        let path=PathBuf::from(format!("/workspace/rudder-sdk-source-negative-{}",uuid::Uuid::new_v4()));fs::create_dir(&path).unwrap();
-        let store=LocalStore::open(path.join("cas")).unwrap();let input=path.join("input");fs::create_dir(&input).unwrap();fs::write(input.join("lib.rs"),vec![b'x';rudder_engine::content::CHUNK_BYTES+31]).unwrap();
-        let stage=store.begin_staging(Duration::from_secs(30)).unwrap();let tree=rudder_engine::tree::import_quiesced(&store,&stage.id,&input,&Default::default(),&source_budget()).unwrap();store.publish(&stage.id,"sdk-source-test",&tree.directory).unwrap();
-        let exported=path.join("exported");rudder_engine::tree::export_quiesced(&store,&tree,&exported,&source_budget()).unwrap();let original=FinalizationBudget::begin(Duration::from_secs(30)).unwrap();
-        verify_source(&store,&tree.directory,&exported,&original).unwrap();OpenOptions::new().write(true).open(exported.join("lib.rs")).unwrap().write_at(b"z",rudder_engine::content::CHUNK_BYTES as u64+30).unwrap();
-        assert!(verify_source(&store,&tree.directory,&exported,&original).is_err());fs::remove_dir_all(path).unwrap();
+        let bytes=vec![b'x';rudder_engine::content::CHUNK_BYTES+31];let fixture=SourceFixture::new(&[("lib.rs",&bytes)]);
+        fixture.verify().unwrap();OpenOptions::new().write(true).open(fixture.path().join("lib.rs")).unwrap().write_at(b"z",rudder_engine::content::CHUNK_BYTES as u64+30).unwrap();
+        assert!(fixture.verify().is_err());
+    }
+    #[test]fn actual_selected_source_requires_exact_declared_job_union(){
+        let mut fixture=SourceFixture::new(&[("lib.rs",b"mod dependency;"),("dependency.rs",b"pub fn value() {}")]);
+        fixture.profile.targets[0].sources.remove("dependency.rs");assert!(fixture.verify().is_err());
+        let mut second=fixture.profile.targets[0].clone();second.name="second".into();second.entrypoint="dependency.rs".into();second.sources=std::collections::BTreeSet::from(["dependency.rs".into()]);fixture.profile.targets.push(second);
+        fixture.verify().unwrap();fixture.profile.targets[0].sources.insert("missing.rs".into());assert!(fixture.verify().is_err());
+    }
+    #[test]fn actual_selected_source_refuses_extra_files_and_ancestor_symlinks(){
+        let fixture=SourceFixture::new(&[("src/lib.rs",b"pub fn value() {}")]);fixture.verify().unwrap();
+        fs::write(fixture.path().join("undeclared"),b"ambient").unwrap();assert!(fixture.verify().is_err());fs::remove_file(fixture.path().join("undeclared")).unwrap();
+        fs::rename(fixture.path().join("src"),fixture.scratch.0.join("elsewhere")).unwrap();
+        std::os::unix::fs::symlink(fixture.scratch.0.join("elsewhere"),fixture.path().join("src")).unwrap();assert!(fixture.verify().is_err());
+    }
+    #[test]fn actual_selected_source_verifies_the_held_root_and_rejects_hardlinks_and_fifos(){
+        let fixture=SourceFixture::new(&[("lib.rs",b"pub fn value() {}")]);fixture.verify().unwrap();
+        fs::hard_link(fixture.path().join("lib.rs"),fixture.scratch.0.join("alias")).unwrap();assert!(fixture.verify().is_err());fs::remove_file(fixture.scratch.0.join("alias")).unwrap();
+        fs::rename(fixture.path(),fixture.scratch.0.join("original")).unwrap();fs::create_dir(fixture.path()).unwrap();fs::write(fixture.path().join("lib.rs"),b"different").unwrap();
+        fixture.verify().unwrap(); // Root receives this descriptor, not the new pathname.
+        let path=fixture.scratch.0.join("original/lib.rs");fs::remove_file(&path).unwrap();
+        let path=std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).unwrap();assert_eq!(unsafe{libc::mkfifo(path.as_ptr(),0o600)},0);
+        assert!(fixture.verify().is_err()); // Nonblocking open must refuse, never hang.
     }
     #[test]fn actual_output_validation_refuses_symlink_without_root_or_compiler_authority(){
-        let path=PathBuf::from(format!("/workspace/rudder-sdk-output-negative-{}",uuid::Uuid::new_v4()));fs::create_dir(&path).unwrap();std::os::unix::fs::symlink("/etc/passwd",path.join("artifact")).unwrap();
-        let original=FinalizationBudget::begin(Duration::from_secs(30)).unwrap();assert!(validate_output_tree(&path,&original).is_err());fs::remove_file(path.join("artifact")).unwrap();fs::remove_dir(path).unwrap();
+        let scratch=Scratch::new();std::os::unix::fs::symlink("/etc/passwd",scratch.0.join("artifact")).unwrap();
+        let original=FinalizationBudget::begin(Duration::from_secs(30)).unwrap();assert!(validate_output_tree(&scratch.0,&original).is_err());
     }
 }

@@ -19,6 +19,8 @@ registerHooks({resolve(specifier, context, next) {
 }});
 const {runMigrationCaptureCommand}=await import('../src/v4-migration/cli.ts');
 const {verifyRecoveryBundle}=await import('../src/v4-migration/recovery.ts');
+const {assertLegacyWriterAllowed}=await import('../src/engine-authority.ts');
+const {assertNoPendingV4Migration}=await import('../src/v4-migration/capture.ts');
 
 async function helper(request) {
   let output='';
@@ -56,6 +58,12 @@ test('production migration helper captures and exports a checkpoint into an expl
   const destination=path.join(f.root,'recovered');
   const result=await helper({operation:'export',bundle:delta,destination,projectId:'project',migrationId:'migration',rollbackCheckpoint:checkpoint});
   assert.equal(result.exported,true);
+  const recovery=JSON.parse(await fs.readFile(path.join(result.integrationPath,'.rudder/engine/v4-recovery.json'),'utf8'));
+  assert.equal(recovery.ready,true); assert.equal(recovery.repository,await fs.realpath(result.integrationPath));
+  assert.equal(recovery.rollback_checkpoint,checkpoint); assert.deepEqual(recovery.run_ids,['retained']);
+  assert.throws(()=>assertLegacyWriterAllowed(result.integrationPath),/explicit recovery/);
+  await assert.rejects(assertNoPendingV4Migration(result.integrationPath),/explicit recovery/);
+  assert.equal(existsSync(path.join(result.integrationPath,'.rudder/engine/owner.json')),false);
   const restored=JSON.parse(await fs.readFile(path.join(result.integrationPath,'.rudder/runs/retained/run.json'),'utf8'));
   assert.equal(restored.status,'paused');assert.equal(restored.process,undefined);assert.equal(restored.terminal,undefined);
   assert.equal(restored.session.nativeSessionId,'retained-session');assert.equal(restored.model,'account-model');

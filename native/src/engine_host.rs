@@ -274,6 +274,11 @@ impl EngineOwnership {
     pub(crate) fn acquire_migrated(repo:&Path,request:&crate::v4_migration::AdoptionRequest)->Result<Self> {
         Self::acquire_inner(repo,NativeAuthority::Fabric,None,None,Some(request))
     }
+    #[cfg(test)]
+    pub(crate) fn acquire_migrated_in_home(repo: &Path, home: &Path,
+        request: &crate::v4_migration::AdoptionRequest) -> Result<Self> {
+        Self::acquire_inner(repo, NativeAuthority::Fabric, Some(home), None, Some(request))
+    }
     pub(crate) fn take_migration_records(&mut self)->Option<Vec<serde_json::Value>> {self.migration_records.take()}
 
     pub(crate) fn acquire_in_home(repo: &Path, mode: NativeAuthority, home: &Path) -> Result<Self> {
@@ -304,6 +309,11 @@ impl EngineOwnership {
         match fs::symlink_metadata(repo.join(".rudder/engine/fresh-project.json")){Ok(_)=>bail!("fresh logical managed checkout requires its original assigned owner; legacy/default acquisition refused"),Err(error) if error.kind()==std::io::ErrorKind::NotFound=>{},Err(error)=>return Err(error.into())}
         let directory = repo.join(".rudder/engine");
         let lock = acquire_checkout_lock(&repo)?;
+        // A migration can finish between the preflight and this acquisition.
+        // Recheck under the actual fence before any journal/owner mutation.
+        if mode == NativeAuthority::Legacy {
+            crate::v4_migration::refuse_implicit_startup(&repo)?;
+        }
         let attach = repo.join(".rudder").join(ATTACH_SOCKET_NAME);
         // Old native versions do not hold our lock. Never take over one that
         // still answers its established attach socket.
@@ -371,6 +381,11 @@ impl EngineOwnership {
         }
         let migration_records=if let Some(request)=adoption {Some(crate::v4_migration::prepare_adoption(&repo,&journal,request)?)}
             else {crate::v4_migration::prepare_fabric_restart(&repo,&journal)?};
+        let recovery_records=crate::v4_recovery_adoption::prepare(&repo,&journal)?;
+        anyhow::ensure!(migration_records.is_none() || recovery_records.is_none(),"checkout has conflicting migration and recovery identities");
+        if mode==NativeAuthority::Fabric && migration_records.is_none() && recovery_records.is_none() {
+            crate::v4_migration::refuse_unmigrated_fabric_startup(&repo,&journal)?;
+        }
         let instance_id = uuid::Uuid::new_v4().to_string();
         let owner_id = format!("{}:{instance_id}", mode.name());
         // The lock plus refusal above establishes local quiescence. A transfer
@@ -401,6 +416,8 @@ impl EngineOwnership {
         };
         journal.recover_runtime_restart(&fence, epoch_ms())?;
         if migration_records.is_some() {crate::v4_migration::record_adoption(&repo,&mut journal,&fence)?;}
+        if let Some(records)=&recovery_records {crate::v4_recovery_adoption::import(&mut journal,&fence,records,epoch_ms())?;}
+        let migration_records=migration_records.or(recovery_records);
         let record = OwnerRecord {
             format_version: ENGINE_FORMAT,
             repo,

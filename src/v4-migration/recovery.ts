@@ -145,6 +145,8 @@ export function legacyRecoveryRecord(value: unknown): Record<string, unknown> {
   delete result.process;
   delete result.terminal;
   if (["created", "running", "steering", "verifying", "orphaned"].includes(raw.status)) result.status = "paused";
-  result.migrationRecovery = { format_version: 1, original_status: raw.status, automatic_resume: false };
+  const previous = raw.migrationRecovery && typeof raw.migrationRecovery === "object" && !Array.isArray(raw.migrationRecovery)
+    ? raw.migrationRecovery as Record<string, unknown> : {};
+  result.migrationRecovery = { ...previous, format_version: 1, original_status: previous.original_status ?? raw.status, automatic_resume: false };
   return result;
 }

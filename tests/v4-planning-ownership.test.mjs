@@ -5,6 +5,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { Readable, Writable } from "node:stream";
+import { v4ScratchPrefix } from './helpers/v4-scratch.mjs';
 import { deterministicTaskRoute, classifyTaskRoute, runTaskRoutingCommand } from "../dist/task-routing.js";
 import { routeTaskIngress } from "../dist/planning-ownership/ingress.js";
 import { admitOwnedPlan, approveOwnedPlan, replanOwnedTask, reservePlanningLaunch, reserveOwnedPlanningLaunch, recordPlanningLaunch, ownedWorkerPrompt } from "../dist/planning-ownership/index.js";
@@ -25,7 +26,7 @@ async function admission(nodes = [node("ui"), node("api")], extra = {}) {
 const fence = (extra = {}) => ({ taskId: "task", owner, expectedVersion: 1, expectedApprovalVersion: 3, acceptedContractVersions: { api: 4, cache: 2 }, idempotencyKey: "approve-1", ...extra });
 const replan = (operations, extra = {}) => ({ ...fence({ idempotencyKey: "replan-1" }), reason: "API contract changed; preserve completed work", operations, ...extra });
 async function scratch(fn) {
-  const root = await mkdtemp("/workspace/planning-ownership-");
+  const root = await mkdtemp(v4ScratchPrefix('planning-ownership'));
   try { await fn(root); } finally { await rm(root, { recursive: true, force: true }); }
 }
 async function helper(request) {
